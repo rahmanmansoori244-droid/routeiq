@@ -177,6 +177,24 @@ After the modules shipped you asked me to "run a deep deep test … deploy as ma
 | HIGH | API | Audit endpoint's date filters silently matched all rows on `?from=invalid` (NaN). Added `parseFilterDate` that 400s. Also added `DRIVER_LOGIN` + `DELIVERY_PROOF_CREATED` to ALLOWED_ACTIONS. |
 | HIGH | UX | Missing `loading.tsx` skeletons for `/t/[slug]/upload/[batchId]` and `/t/[slug]/customers/import`. Added. |
 
+### Round 3 — 6 more fixes in `98b043f`
+
+| Severity | Area | Fix |
+|---|---|---|
+| HIGH | Run state | `/api/runs/[id]/dispatch` had a TOCTOU between the status check and the update — two concurrent dispatches both succeeded, both wrote DISPATCH audit rows, and the second stomped `finalizedAt`. Now wraps the flip in a conditional `updateMany` ({status:READY,tenantId}) and 409s if zero rows match. |
+| HIGH | Run state | `/api/runs/[id]/unlock` had the same TOCTOU. Same fix pattern (conditional updateMany on status=DISPATCHED). |
+| HIGH | Cron auth | Janitor's token check used `===` — vulnerable to response-time extraction at scale. Switched to `constantTimeEqual`. |
+| HIGH | Janitor race | `reapStuckJobs` skips RunJobs that are still in the in-process `inflight` map (single-replica deploy means the success path is racing). Also uses conditional `updateMany` on status=RUNNING so a job that succeeded between SELECT and UPDATE isn't wrongly failed. |
+| HIGH | Driver state | Janitor now closes `DriverShift` rows in ACTIVE state older than 18h (new `lib/jobs/shift-janitor.ts`). Without this, a driver who never explicitly ends their shift leaves the row dangling until they next hit any endpoint. |
+| MED | User mgmt | `/api/users/[id]` PATCH did `prisma.user.update({where:{id}})` without re-asserting tenantId on the where. The findFirst above had already validated the tenant, but defense-in-depth was warranted: switched to `updateMany` with `{id, tenantId}` so a future refactor can't accidentally allow cross-tenant role escalation. |
+
+**Round-3 false alarms verified and discarded:**
+- `/api/runs/[id]/status` already tenant-scopes via `tenantDb()` (auto-injects `where.tenantId` on every findUnique).
+- `/api/runs/[id]/baseline` already uses tenantDb at line 25 — agent misread.
+- Signup slug race is caught by DB unique constraint + `P2002` handler.
+- Password reset delete is atomic within its $transaction; agent missed the deletion path.
+- NextAuth's default credential-provider cookies are already HttpOnly + Secure + SameSite=Lax.
+
 ### Round 2 — 4 more fixes in `cf7bbdb`
 
 | Severity | Area | Fix |
