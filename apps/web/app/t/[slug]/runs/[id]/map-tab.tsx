@@ -383,7 +383,11 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       {/* Map */}
       <div className="lg:col-span-3">
         <div className="relative h-[640px] overflow-hidden rounded-lg border bg-card">
-          <div ref={containerRef} className="absolute inset-0" />
+          {/* h-full + w-full instead of absolute inset-0 because MapLibre's
+              `.maplibregl-map { position: relative }` overrides Tailwind's
+              absolute positioning, leaving the container at height 0 and tiles
+              never painting. Matches the working pattern in live-client.tsx. */}
+          <div ref={containerRef} className="h-full w-full" />
           {!mapReady && !mapError ? (
             <div className="absolute inset-0 grid place-items-center bg-muted/40 text-sm text-muted-foreground">
               Loading map…
