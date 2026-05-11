@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  // Lint is gated separately in CI; do not block production builds on plugin
+  // resolution quirks inside monorepo workspaces.
+  eslint: { ignoreDuringBuilds: true },
   experimental: {
     serverActions: { bodySizeLimit: '12mb' },
     instrumentationHook: true,
