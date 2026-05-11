@@ -1,0 +1,136 @@
+import { z } from 'zod';
+import {
+  CapacityUnit,
+  DistanceProvider,
+  PaymentType,
+  Role,
+} from '@prisma/client';
+
+const codeSchema = z
+  .string()
+  .trim()
+  .min(1, 'Required')
+  .max(32, 'Max 32 chars')
+  .regex(/^[A-Za-z0-9._-]+$/, 'Letters, digits, dot, dash, underscore only');
+
+const nameSchema = z.string().trim().min(1, 'Required').max(120);
+
+const latSchema = z.coerce.number().min(-90).max(90);
+const lngSchema = z.coerce.number().min(-180).max(180);
+
+export const depotSchema = z.object({
+  code: codeSchema,
+  name: nameSchema,
+  lat: latSchema,
+  lng: lngSchema,
+  address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+  active: z.boolean().optional(),
+});
+export type DepotInput = z.infer<typeof depotSchema>;
+
+export const truckSchema = z.object({
+  code: codeSchema,
+  description: z.string().trim().max(200).optional().or(z.literal('').transform(() => undefined)),
+  depotId: z.string().min(1, 'Depot is required'),
+  capacityCases: z.coerce.number().int().min(0).max(100_000),
+  capacityWeightKg: z.coerce.number().min(0).max(100_000),
+  capacityVolumeL: z.coerce.number().min(0).max(100_000),
+  fixedCostPerDay: z.coerce.number().min(0).max(100_000),
+  costPerKm: z.coerce.number().min(0).max(1_000),
+  active: z.boolean().optional(),
+});
+export type TruckInput = z.infer<typeof truckSchema>;
+
+export const driverSchema = z.object({
+  code: codeSchema,
+  name: nameSchema,
+  phone: z
+    .string()
+    .trim()
+    .max(40)
+    .regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only')
+    .optional()
+    .or(z.literal('').transform(() => undefined)),
+  active: z.boolean().optional(),
+});
+export type DriverInput = z.infer<typeof driverSchema>;
+
+export const regionSchema = z.object({
+  code: codeSchema,
+  name: nameSchema,
+  depotId: z.string().optional().or(z.literal('').transform(() => undefined)),
+});
+export type RegionInput = z.infer<typeof regionSchema>;
+
+export const productSchema = z.object({
+  code: codeSchema,
+  name: nameSchema,
+  weightPerCaseKg: z.coerce.number().min(0).max(10_000),
+  volumePerCaseL: z.coerce.number().min(0).max(10_000),
+  active: z.boolean().optional(),
+});
+export type ProductInput = z.infer<typeof productSchema>;
+
+export const customerSchema = z.object({
+  code: codeSchema,
+  name: nameSchema,
+  branchCode: z.string().trim().max(32).optional().or(z.literal('').transform(() => undefined)),
+  regionId: z.string().optional().or(z.literal('').transform(() => undefined)),
+  address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+  lat: latSchema.optional().or(z.literal('').transform(() => undefined)),
+  lng: lngSchema.optional().or(z.literal('').transform(() => undefined)),
+  priority: z.coerce.number().int().min(1).max(5),
+  avgServiceTimeMin: z.coerce.number().int().min(0).max(600),
+  paymentType: z.nativeEnum(PaymentType),
+  accessNotes: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+  active: z.boolean().optional(),
+});
+export type CustomerInput = z.infer<typeof customerSchema>;
+
+export const customerPatchSchema = customerSchema.partial();
+export type CustomerPatchInput = z.infer<typeof customerPatchSchema>;
+
+/**
+ * Map blank/null branchCode to the magic `__MAIN__` branchKey for the
+ * uniqueness constraint. See CLAUDE.md §6.
+ */
+export function normalizeBranchKey(branchCode: string | null | undefined): string {
+  const trimmed = (branchCode ?? '').trim();
+  return trimmed === '' ? '__MAIN__' : trimmed;
+}
+
+export const tenantConfigSchema = z.object({
+  avgSpeedKmh: z.coerce.number().min(5).max(120),
+  distanceProvider: z.nativeEnum(DistanceProvider),
+  distanceMultiplier: z.coerce.number().min(1).max(3),
+  labelEstimatedDistances: z.boolean(),
+  driverShiftMaxMinutes: z.coerce.number().int().min(60).max(1440),
+  returnToDepot: z.boolean(),
+  defaultServiceTimeMin: z.coerce.number().int().min(0).max(600),
+  costPerKmDefault: z.coerce.number().min(0).max(10),
+  fixedTruckCostPerDayDefault: z.coerce.number().min(0).max(10_000),
+  latePenaltyPerMin: z.coerce.number().min(0).max(100),
+  underutilizationPenalty: z.coerce.number().min(0).max(1_000_000),
+  solverTimeLimitSeconds: z.coerce.number().int().min(5).max(300),
+  weightObjectiveTrucks: z.coerce.number().min(0).max(1_000_000),
+  weightObjectiveDistance: z.coerce.number().min(0).max(1_000_000),
+  weightObjectiveCost: z.coerce.number().min(0).max(1_000_000),
+  weightObjectiveBalance: z.coerce.number().min(0).max(1_000_000),
+  weightObjectiveUtilization: z.coerce.number().min(0).max(1_000_000),
+});
+export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
+
+export const tenantSettingsSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  country: z.string().trim().min(2).max(64),
+  currency: z.string().trim().min(3).max(8),
+  primaryUnit: z.nativeEnum(CapacityUnit),
+});
+export type TenantSettingsInput = z.infer<typeof tenantSettingsSchema>;
+
+export const userInviteSchema = z.object({
+  email: z.string().email().max(254),
+  name: z.string().trim().min(2).max(120),
+  role: z.nativeEnum(Role),
+});
+export type UserInviteInput = z.infer<typeof userInviteSchema>;

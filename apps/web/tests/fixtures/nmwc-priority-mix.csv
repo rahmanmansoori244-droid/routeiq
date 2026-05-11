@@ -1,0 +1,11 @@
+customer_code,branch_code,delivery_date,product_code,cases,priority,payment_collection_amount,notes
+NMWC-AME-001,,__TOMORROW__,NMW-500,40,1,,Must serve (P1)
+NMWC-AME-002,,__TOMORROW__,NMW-1L,40,1,,Must serve (P1)
+NMWC-BAW-001,,__TOMORROW__,NMW-500,40,2,,High priority
+NMWC-BAW-002,,__TOMORROW__,NMW-1L,40,2,,High priority
+NMWC-MUT-001,,__TOMORROW__,NMW-500,40,3,,Medium
+NMWC-MUT-002,,__TOMORROW__,NMW-1L,40,3,,Medium
+NMWC-RUW-001,,__TOMORROW__,NMW-500,40,4,,Low
+NMWC-RUW-002,,__TOMORROW__,NMW-1L,40,4,,Low
+NMWC-SEE-001,,__TOMORROW__,NMW-500,40,5,,Drop first (P5)
+NMWC-SEE-002,,__TOMORROW__,NMW-1L,40,5,,Drop first (P5)

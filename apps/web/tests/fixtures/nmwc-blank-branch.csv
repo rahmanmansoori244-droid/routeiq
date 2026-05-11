@@ -1,0 +1,7 @@
+customer_code,branch_code,delivery_date,product_code,cases,priority,payment_collection_amount,notes
+NMWC-AME-001,,__TOMORROW__,NMW-500,3,2,,Blank branch_code
+NMWC-AME-001, ,__TOMORROW__,NMW-1L,2,3,,Whitespace-only branch
+NMWC-AME-002,,__TOMORROW__,NMW-1L,4,3,,
+NMWC-BAW-001,B1,__TOMORROW__,NMW-500,3,2,,Explicit branch B1
+NMWC-BAW-001,B2,__TOMORROW__,NMW-1L,2,3,,Explicit branch B2
+NMWC-MUT-001,,__TOMORROW__,NMW-500,6,2,,

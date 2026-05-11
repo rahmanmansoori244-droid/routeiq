@@ -1,0 +1,27 @@
+{
+  "name": "routeiq",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RouteIQ — Multi-Tenant Route Optimization Platform",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "lint": "turbo lint",
+    "typecheck": "turbo typecheck",
+    "test": "turbo test",
+    "db:migrate": "pnpm --filter @routeiq/web db:migrate",
+    "db:migrate:deploy": "pnpm --filter @routeiq/web db:migrate:deploy",
+    "db:seed:nmwc": "pnpm --filter @routeiq/web db:seed:nmwc",
+    "db:studio": "pnpm --filter @routeiq/web db:studio"
+  },
+  "devDependencies": {
+    "turbo": "^2.0.0",
+    "typescript": "^5.4.0",
+    "prettier": "^3.2.0"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=9.0.0"
+  }
+}

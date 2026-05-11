@@ -1,0 +1,14 @@
+customer_code,branch_code,delivery_date,product_code,cases,priority,payment_collection_amount,notes
+NMWC-AME-001,,__TOMORROW__,NMW-500,4,2,,
+,,__TOMORROW__,NMW-1L,3,3,,Missing customer_code
+NMWC-AME-003,,__TOMORROW__,,2,1,,Missing product_code
+NMWC-AME-004,,__TOMORROW__,NMW-S330,0,3,,Zero cases
+NMWC-AME-005,,__TOMORROW__,NMW-FL-O,-2,4,,Negative cases
+NMWC-BAW-001,,__TOMORROW__,NMW-500,3,8,,Invalid priority (>5)
+NMWC-BAW-002,,__TOMORROW__,UNKNOWN-PRODUCT,4,3,,Unknown product
+NMWC-XXX-999,,__TOMORROW__,NMW-500,2,2,,Unknown customer
+NMWC-BAW-004,,not-a-date,NMW-5L,2,2,,Malformed date
+NMWC-MUT-001,,2099-01-01,NMW-500,6,2,,Date too far in future
+NMWC-MUT-002,,2020-01-01,NMW-S500,3,3,,Date in the past
+NMWC-MUT-003,,__TOMORROW__,NMW-ION,2,99,,Priority way out of range
+NMWC-MUT-004,,__TOMORROW__,NMW-VIT,4,2,not-a-number,Invalid payment

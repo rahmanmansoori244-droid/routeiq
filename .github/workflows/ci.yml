@@ -1,0 +1,130 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  web:
+    name: Web (lint + typecheck + unit + integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: routeiq
+          POSTGRES_PASSWORD: routeiq
+          POSTGRES_DB: routeiq
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U routeiq"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://routeiq:routeiq@localhost:5432/routeiq?schema=public
+      NEXTAUTH_SECRET: ci-only-secret-must-be-set-but-not-real
+      NEXTAUTH_URL: http://localhost:3000
+      SOLVER_URL: http://localhost:8000
+      SOLVER_TOKEN: ci-only-solver-token-must-match
+      RATE_LIMITS_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install JS deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @routeiq/web exec prisma generate
+
+      - name: Apply migrations
+        run: pnpm --filter @routeiq/web exec prisma migrate deploy
+
+      - name: TypeScript check
+        run: pnpm --filter @routeiq/web exec tsc --noEmit
+
+      - name: Lint
+        run: pnpm --filter @routeiq/web exec next lint --max-warnings 0
+
+      - name: Vitest unit + tenant-isolation suite
+        run: pnpm --filter @routeiq/web exec vitest run tests/lib tests/tenant-isolation.spec.ts
+
+      - name: Install solver deps
+        working-directory: apps/solver
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -r requirements.txt
+
+      - name: Start solver in background
+        working-directory: apps/solver
+        run: |
+          nohup .venv/bin/python -m uvicorn main:app --host 127.0.0.1 --port 8000 > solver.log 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8000/health
+
+      - name: Build Next.js
+        run: pnpm --filter @routeiq/web build
+
+      - name: Start Next.js in background
+        working-directory: apps/web
+        run: |
+          nohup pnpm start > web.log 2>&1 &
+          for i in {1..60}; do
+            if curl -fsS http://localhost:3000/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:3000/api/health
+
+      - name: Integration tests (web + solver up)
+        run: pnpm --filter @routeiq/web exec vitest run tests/integration
+
+      - name: Dump web log on failure
+        if: failure()
+        working-directory: apps/web
+        run: tail -200 web.log || true
+
+      - name: Dump solver log on failure
+        if: failure()
+        working-directory: apps/solver
+        run: tail -200 solver.log || true
+
+  solver:
+    name: Solver (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install solver deps
+        working-directory: apps/solver
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run pytest
+        working-directory: apps/solver
+        run: pytest tests -v

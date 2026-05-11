@@ -1,0 +1,35 @@
+# Local dev only. Production runs on Railway.
+# Spin up Postgres (with PostGIS) and the solver service for local development.
+services:
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: routeiq-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: routeiq
+      POSTGRES_PASSWORD: routeiq
+      POSTGRES_DB: routeiq
+    ports:
+      - '5432:5432'
+    volumes:
+      - routeiq-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U routeiq']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  solver:
+    build:
+      context: ./apps/solver
+      dockerfile: Dockerfile
+    container_name: routeiq-solver
+    restart: unless-stopped
+    environment:
+      SOLVER_TOKEN: dev-solver-token
+      PORT: 8000
+    ports:
+      - '8000:8000'
+
+volumes:
+  routeiq-db:

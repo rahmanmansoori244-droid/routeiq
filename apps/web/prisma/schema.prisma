@@ -1,0 +1,509 @@
+// RouteIQ v1.3 schema — see CLAUDE.md section 5
+// Every business table has tenantId. All reads/writes go through tenantDb() wrapper.
+
+// NOTE: postgis extension declaration is intentionally omitted here for the
+// local smoke-test. Production Railway uses the postgis/postgis Docker image,
+// and the CREATE EXTENSION runs via the init migration. When developing
+// locally with a PostGIS-equipped DB, re-add:
+//   extensions = [postgis(map: "postgis")]
+// to the datasource and:
+//   previewFeatures = ["postgresqlExtensions"]
+// to the generator.
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  SUPER_ADMIN
+  TENANT_ADMIN
+  PLANNER
+  SUPERVISOR
+  VIEWER
+}
+
+enum CapacityUnit {
+  CASES
+  CARTONS
+  PALLETS
+  KG
+}
+
+enum OptimizationMode {
+  MIN_TRUCKS
+  MIN_DISTANCE
+  MIN_COST
+  BALANCED
+  MAX_UTILIZATION
+}
+
+enum OrderStatus {
+  UPLOADED
+  VALIDATED
+  ASSIGNED
+  DISPATCHED
+  DELIVERED
+  FAILED
+  UNSERVED
+}
+
+enum RunStatus {
+  DRAFT
+  OPTIMIZING
+  READY
+  FAILED
+  DISPATCHED
+  ARCHIVED
+}
+
+enum PaymentType {
+  CASH
+  CREDIT
+  PREPAID
+}
+
+enum UploadBatchStatus {
+  PARSED
+  VALIDATED
+  CONFIRMED
+  REJECTED
+  DELETED
+}
+
+enum RunJobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum UnservedReasonCode {
+  MISSING_COORDINATES
+  EXCEEDS_TRUCK_CAPACITY
+  NO_AVAILABLE_TRUCK
+  SHIFT_TIME_LIMIT
+  INVALID_CUSTOMER
+  SOLVER_DROPPED_LOW_PRIORITY
+  INFEASIBLE_ROUTE
+  UNKNOWN
+}
+
+enum DistanceProvider {
+  HAVERSINE
+  MAPBOX_MATRIX
+}
+
+model Tenant {
+  id          String       @id @default(cuid())
+  slug        String       @unique
+  name        String
+  country     String
+  currency    String       @default("OMR")
+  primaryUnit CapacityUnit @default(CASES)
+  active      Boolean      @default(true)
+  createdAt   DateTime     @default(now())
+  config      TenantConfig?
+
+  users           User[]
+  depots          Depot[]
+  trucks          Truck[]
+  drivers         Driver[]
+  regions         Region[]
+  customers       Customer[]
+  products        Product[]
+  uploadBatches   UploadBatch[]
+  orders          Order[]
+  runs            RunPlan[]
+  runJobs         RunJob[]
+  manualBaselines ManualBaseline[]
+  audits          AuditLog[]
+  passwordResets  PasswordResetToken[]
+}
+
+model TenantConfig {
+  id                          String           @id @default(cuid())
+  tenantId                    String           @unique
+  tenant                      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  avgSpeedKmh                 Float            @default(40)
+  distanceProvider            DistanceProvider @default(HAVERSINE)
+  distanceMultiplier          Float            @default(1.30)
+  // TODO v2: replace single tenant-wide multiplier with per-region overrides (RegionDistanceConfig).
+  // City centers (Muscat) typically need ~1.4-1.5, highway regions (Duqm) ~1.1-1.2.
+  // v2 should auto-calibrate from ManualBaseline.manual_distance_km vs Haversine-estimated distance.
+  labelEstimatedDistances     Boolean          @default(true)
+  driverShiftMaxMinutes       Int              @default(540)
+  returnToDepot               Boolean          @default(true)
+  defaultServiceTimeMin       Int              @default(10)
+  costPerKmDefault            Float            @default(0.15)
+  fixedTruckCostPerDayDefault Float            @default(20)
+  latePenaltyPerMin           Float            @default(0.5)
+  underutilizationPenalty     Float            @default(0)
+  solverTimeLimitSeconds      Int              @default(30)
+  weightObjectiveTrucks       Float            @default(1000)
+  weightObjectiveDistance     Float            @default(1)
+  weightObjectiveCost         Float            @default(0)
+  weightObjectiveBalance      Float            @default(0)
+  weightObjectiveUtilization  Float            @default(0)
+}
+
+model User {
+  id                   String              @id @default(cuid())
+  tenantId             String?
+  tenant               Tenant?             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email                String              @unique
+  passwordHash         String
+  name                 String
+  role                 Role                @default(VIEWER)
+  active               Boolean             @default(true)
+  createdAt            DateTime            @default(now())
+  uploadBatches        UploadBatch[]
+  runJobs              RunJob[]
+  manualBaselines      ManualBaseline[]
+  audits               AuditLog[]
+  routeAssignmentLocks RouteAssignment[]   @relation("RouteAssignmentLockedBy")
+  passwordResets       PasswordResetToken[]
+
+  @@index([tenantId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  tenantId  String?
+  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model Depot {
+  id       String    @id @default(cuid())
+  tenantId String
+  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code     String
+  name     String
+  lat      Float
+  lng      Float
+  address  String?
+  active   Boolean   @default(true)
+  trucks   Truck[]
+  regions  Region[]
+  runs     RunPlan[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Truck {
+  id               String            @id @default(cuid())
+  tenantId         String
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId          String
+  depot            Depot             @relation(fields: [depotId], references: [id])
+  code             String
+  description      String?
+  capacityCases    Int               @default(0)
+  capacityWeightKg Float             @default(0)
+  capacityVolumeL  Float             @default(0)
+  fixedCostPerDay  Float             @default(0)
+  costPerKm        Float             @default(0)
+  active           Boolean           @default(true)
+  routes           RouteAssignment[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId, depotId])
+}
+
+model Driver {
+  id       String  @id @default(cuid())
+  tenantId String
+  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code     String
+  name     String
+  phone    String?
+  active   Boolean @default(true)
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Region {
+  id        String     @id @default(cuid())
+  tenantId  String
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId   String?
+  depot     Depot?     @relation(fields: [depotId], references: [id])
+  code      String
+  name      String
+  customers Customer[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model Customer {
+  id                String      @id @default(cuid())
+  tenantId          String
+  tenant            Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  regionId          String?
+  region            Region?     @relation(fields: [regionId], references: [id])
+  code              String
+  name              String
+  branchCode        String?
+  branchKey         String      @default("__MAIN__")
+  address           String?
+  lat               Float?
+  lng               Float?
+  geocodeConfidence String?
+  priority          Int         @default(3)
+  avgServiceTimeMin Int         @default(10)
+  paymentType       PaymentType @default(CREDIT)
+  accessNotes       String?
+  active            Boolean     @default(true)
+  orders            Order[]
+
+  @@unique([tenantId, code, branchKey])
+  @@index([tenantId, regionId])
+}
+
+model Product {
+  id              String      @id @default(cuid())
+  tenantId        String
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code            String
+  name            String
+  weightPerCaseKg Float       @default(0)
+  volumePerCaseL  Float       @default(0)
+  active          Boolean     @default(true)
+  orderLines      OrderLine[]
+
+  @@unique([tenantId, code])
+  @@index([tenantId])
+}
+
+model UploadBatch {
+  id             String            @id @default(cuid())
+  tenantId       String
+  tenant         Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  fileName       String
+  fileType       String
+  uploadedById   String
+  uploadedBy     User              @relation(fields: [uploadedById], references: [id])
+  uploadedAt     DateTime          @default(now())
+  deliveryDate   DateTime?         @db.Date
+  status         UploadBatchStatus @default(PARSED)
+  totalRows      Int               @default(0)
+  validRows      Int               @default(0)
+  errorRows      Int               @default(0)
+  warningRows    Int               @default(0)
+  validationJson Json?
+  orders         Order[]
+
+  @@index([tenantId, uploadedAt])
+}
+
+model Order {
+  id                        String                     @id @default(cuid())
+  tenantId                  String
+  tenant                    Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerId                String
+  customer                  Customer                   @relation(fields: [customerId], references: [id])
+  deliveryDate              DateTime                   @db.Date
+  totalCases                Int                        @default(0)
+  totalWeightKg             Float                      @default(0)
+  totalVolumeL              Float                      @default(0)
+  totalServiceTimeMin       Int                        @default(10)
+  priority                  Int                        @default(3)
+  paymentCollectionAmount   Float                      @default(0)
+  notes                     String?
+  status                    OrderStatus                @default(UPLOADED)
+  uploadBatchId             String?
+  uploadBatch               UploadBatch?               @relation(fields: [uploadBatchId], references: [id], onDelete: SetNull)
+  uploadedAt                DateTime                   @default(now())
+  lines                     OrderLine[]
+  assignments               RouteAssignment[]
+  unservedRecords           UnservedOrder[]
+  manualBaselineAssignments ManualBaselineAssignment[]
+
+  @@index([tenantId, deliveryDate])
+  @@index([tenantId, customerId])
+}
+
+model OrderLine {
+  id        String  @id @default(cuid())
+  orderId   String
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id])
+  cases     Int
+
+  @@index([orderId])
+}
+
+model RunPlan {
+  id               String            @id @default(cuid())
+  tenantId         String
+  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId          String
+  depot            Depot             @relation(fields: [depotId], references: [id])
+  runDate          DateTime          @db.Date
+  status           RunStatus         @default(DRAFT)
+  optimizationMode OptimizationMode  @default(BALANCED)
+  chosenScenarioId String?
+  totalOrders      Int               @default(0)
+  unservedCount    Int               @default(0)
+  createdById      String
+  createdAt        DateTime          @default(now())
+  finalizedAt      DateTime?
+  scenarios        ScenarioResult[]
+  routes           RouteAssignment[]
+  currentJobId     String?
+  jobs             RunJob[]
+  manualBaselines  ManualBaseline[]
+
+  @@index([tenantId, runDate])
+  @@index([tenantId, currentJobId])
+}
+
+model ScenarioResult {
+  id                String          @id @default(cuid())
+  runId             String
+  run               RunPlan         @relation(fields: [runId], references: [id], onDelete: Cascade)
+  name              String
+  trucksUsed        Int
+  totalDistanceKm   Float
+  totalTimeMin      Int
+  totalCost         Float
+  avgUtilizationPct Float
+  unservedCount     Int
+  detailsJson       Json
+  unservedOrders    UnservedOrder[]
+  createdAt         DateTime        @default(now())
+
+  @@index([runId])
+}
+
+model RouteAssignment {
+  id                        String  @id @default(cuid())
+  runId                     String
+  run                       RunPlan @relation(fields: [runId], references: [id], onDelete: Cascade)
+  truckId                   String
+  truck                     Truck   @relation(fields: [truckId], references: [id])
+  orderId                   String
+  order                     Order   @relation(fields: [orderId], references: [id])
+  sequenceInTruck           Int
+  plannedArrivalMin         Int
+  plannedDistanceFromPrevKm Float
+  plannedLoadCases          Int
+  lockedByUserId            String?
+  lockedBy                  User?   @relation("RouteAssignmentLockedBy", fields: [lockedByUserId], references: [id], onDelete: SetNull)
+  manualOverrideReason      String?
+
+  @@unique([runId, truckId, sequenceInTruck])
+  @@index([runId, truckId])
+}
+
+model RunJob {
+  id           String       @id @default(cuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runId        String
+  run          RunPlan      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  attemptNo    Int          @default(1)
+  status       RunJobStatus @default(QUEUED)
+  progressPct  Int          @default(0)
+  message      String?
+  requestJson  Json?
+  responseJson Json?
+  createdById  String
+  createdBy    User         @relation(fields: [createdById], references: [id])
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  startedAt    DateTime?    @db.Timestamptz(3)
+  finishedAt   DateTime?    @db.Timestamptz(3)
+  errorJson    Json?
+
+  @@unique([runId, attemptNo])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@index([runId])
+}
+
+model ManualBaseline {
+  id              String                     @id @default(cuid())
+  tenantId        String
+  tenant          Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runId           String?
+  run             RunPlan?                   @relation(fields: [runId], references: [id], onDelete: Cascade)
+  fileName        String?
+  uploadedById    String
+  uploadedBy      User                       @relation(fields: [uploadedById], references: [id])
+  createdAt       DateTime                   @default(now())
+  totalTrucks     Int                        @default(0)
+  totalDistanceKm Float?
+  totalTimeMin    Int?
+  totalCost       Float?
+  notes           String?
+  assignments     ManualBaselineAssignment[]
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, runId])
+}
+
+model ManualBaselineAssignment {
+  id                  String         @id @default(cuid())
+  baselineId          String
+  baseline            ManualBaseline @relation(fields: [baselineId], references: [id], onDelete: Cascade)
+  orderId             String?
+  order               Order?         @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  truckCode           String
+  sequence            Int?
+  customerCode        String
+  branchKey           String         @default("__MAIN__")
+  cases               Int            @default(0)
+  estimatedDistanceKm Float?
+  estimatedTimeMin    Int?
+
+  @@index([baselineId, truckCode])
+}
+
+model UnservedOrder {
+  id            String             @id @default(cuid())
+  scenarioId    String
+  scenario      ScenarioResult     @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  orderId       String
+  order         Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reasonCode    UnservedReasonCode
+  reasonMessage String?
+  createdAt     DateTime           @default(now())
+
+  @@index([scenarioId])
+  @@index([orderId])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String
+  entity     String
+  entityId   String?
+  beforeJson Json?
+  afterJson  Json?
+  ip         String?
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([tenantId, entity, entityId])
+}

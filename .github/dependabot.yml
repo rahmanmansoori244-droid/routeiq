@@ -1,0 +1,40 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    versioning-strategy: increase
+    groups:
+      radix-ui:
+        patterns:
+          - '@radix-ui/*'
+      next-stack:
+        patterns:
+          - 'next'
+          - 'next-auth'
+          - '@auth/*'
+      react:
+        patterns:
+          - 'react'
+          - 'react-dom'
+          - '@types/react*'
+      prisma:
+        patterns:
+          - 'prisma'
+          - '@prisma/*'
+      types:
+        patterns:
+          - '@types/*'
+
+  - package-ecosystem: pip
+    directory: /apps/solver
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
