@@ -1,5 +1,11 @@
 'use client';
 
+// MapLibre styles must be loaded as a static side-effect import — dynamic
+// `await import('maplibre-gl/dist/maplibre-gl.css')` inside the effect doesn't
+// reliably inject the stylesheet under Next.js's RSC payload + bundler split,
+// which leaves canvas-container at position:static and tiles never render.
+import 'maplibre-gl/dist/maplibre-gl.css';
+
 import { useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { Lock, MapPinOff, MoreVertical, Move, Unlock, Eye, EyeOff, Locate } from 'lucide-react';
@@ -98,7 +104,6 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
     (async () => {
       try {
         const mb = await import('maplibre-gl');
-        await import('maplibre-gl/dist/maplibre-gl.css');
         const { defaultMapStyle } = await import('@/lib/maps');
         if (cancelled || !containerRef.current) return;
         const style = defaultMapStyle(mapboxToken);
