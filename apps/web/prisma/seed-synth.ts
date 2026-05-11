@@ -179,6 +179,31 @@ async function main() {
   }
   console.log(`  Trucks: ${truckRows.length} upserted`);
 
+  // ---------- Drivers ----------
+  // One driver per truck so the driver PWA has someone to log in as. PINs are
+  // NOT seeded — operators rotate them from the Drivers admin UI before the
+  // driver actually signs in.
+  const driverNames = [
+    'Ahmed Al-Hinai',
+    'Khalid Al-Balushi',
+    'Salim Al-Lawati',
+    'Faisal Al-Maamari',
+    'Yousef Al-Saadi',
+    'Hamad Al-Mahrouqi',
+    'Mohammed Al-Kindi',
+    'Omar Al-Battashi',
+  ];
+  for (let i = 0; i < truckRows.length; i++) {
+    const code = `DR-${(i + 1).toString().padStart(3, '0')}`;
+    const name = driverNames[i] ?? `Driver ${i + 1}`;
+    await prisma.driver.upsert({
+      where: { tenantId_code: { tenantId, code } },
+      update: { name, active: true },
+      create: { tenantId, code, name, active: true },
+    });
+  }
+  console.log(`  Drivers: ${truckRows.length} upserted (PINs not set — rotate them from /t/${cli.tenantSlug}/drivers).`);
+
   // ---------- Customers ----------
   interface CustomerRow {
     code: string; name: string; branch_code: string; region_code: string; address: string;
