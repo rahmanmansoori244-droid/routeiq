@@ -79,9 +79,13 @@ export const customerSchema = z.object({
   address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
   lat: latSchema.optional().or(z.literal('').transform(() => undefined)),
   lng: lngSchema.optional().or(z.literal('').transform(() => undefined)),
-  priority: z.coerce.number().int().min(1).max(5),
-  avgServiceTimeMin: z.coerce.number().int().min(0).max(600),
-  paymentType: z.nativeEnum(PaymentType),
+  // Customer.priority and Customer.avgServiceTimeMin both have DB defaults
+  // (3 and 10 respectively). Treat them as optional in the API so a form that
+  // omits them — or a fuzz payload — falls back to defaults instead of 400ing
+  // on "Expected number, received nan" from z.coerce against undefined.
+  priority: z.coerce.number().int().min(1).max(5).optional().default(3),
+  avgServiceTimeMin: z.coerce.number().int().min(0).max(600).optional().default(10),
+  paymentType: z.nativeEnum(PaymentType).optional().default(PaymentType.CREDIT),
   accessNotes: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
   active: z.boolean().optional(),
 });
