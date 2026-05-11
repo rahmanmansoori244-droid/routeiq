@@ -1,0 +1,151 @@
+code,name,branch_code,region_code,address,lat,lng,priority,avg_service_time_min,payment_type
+C1001,Star Grocery Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.59327,58.421882,3,5,credit
+C1002,Golden Grocery Al Amerat,,ALAM,"Al Amerat, Muscat, Oman",23.531103,58.487629,3,7,cash
+C1003,Elite Building Project,,QURM,"Qurum, Muscat, Oman",23.626094,58.457419,4,13,credit
+C1004,Lulu Hypermarket Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.578617,58.453241,1,28,credit
+C1005,Crown Cafe Azaiba,,AZBA,"Azaiba, Muscat, Oman",23.60307,58.396068,3,10,credit
+C1006,Family Market Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.587296,58.55118,3,8,cash
+C1007,Sultan Industries,,QURM,"Qurum, Muscat, Oman",23.607976,58.464895,5,12,credit
+C1008,Hotel Anwar Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.6016,58.451827,3,18,prepaid
+C1009,Salam Mini Market,B01,MABL,"Mabela, Muscat, Oman",23.661844,58.22031,2,7,cash
+C1010,Star Hotel Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.6037,58.453792,2,17,credit
+C1011,Anwar Suites,,ALAM,"Al Amerat, Muscat, Oman",23.548122,58.499406,4,19,credit
+C1012,Salam Suites,,MABL,"Mabela, Muscat, Oman",23.665679,58.234693,3,23,credit
+C1013,Lulu Hypermarket Ghala,,GHLA,"Ghala, Muscat, Oman",23.567977,58.376917,2,21,credit
+C1014,Indian School Seeb,,SEEB,"Seeb, Muscat, Oman",23.678403,58.19707,1,18,credit
+C1015,Grand Hotel Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.581674,58.466012,3,21,prepaid
+C1016,Fahad Mini Market,,WADI,"Wadi Adai, Muscat, Oman",23.555252,58.581009,3,10,cash
+C1017,Hotel Khaleej Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.599629,58.448079,3,18,credit
+C1018,Hotel Jabal Seeb,,SEEB,"Seeb, Muscat, Oman",23.679577,58.190846,1,24,credit
+C1019,Health Center Mabela,,MABL,"Mabela, Muscat, Oman",23.679585,58.239428,2,12,credit
+C1020,Hotel Salam Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.587441,58.453738,2,16,credit
+C1021,Burj Construction Site,,KHWR,"Al Khuwair, Muscat, Oman",23.580049,58.44901,4,12,credit
+C1022,British School Ghala,,GHLA,"Ghala, Muscat, Oman",23.575254,58.384614,5,17,credit
+C1023,Al Mouj Shati Phase 2,,GHBR,"Ghubra, Muscat, Oman",23.607177,58.410412,2,12,cash
+C1024,Royal Hotel Qurum,,QURM,"Qurum, Muscat, Oman",23.620821,58.457281,3,15,prepaid
+C1025,Star Industries,,SEEB,"Seeb, Muscat, Oman",23.673669,58.199043,4,16,credit
+C1026,Lulu Hypermarket Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.595618,58.549224,2,25,credit
+C1027,Pearl Building Project,,KHWR,"Al Khuwair, Muscat, Oman",23.587565,58.473636,4,10,credit
+C1028,Burj Mini Market,,WADI,"Wadi Adai, Muscat, Oman",23.563111,58.585437,4,10,cash
+C1029,Premium Industries,,KHWR,"Al Khuwair, Muscat, Oman",23.583819,58.473472,2,17,credit
+C1030,Nakheel Construction Site,,HAIL,"Al Hail, Muscat, Oman",23.619079,58.329085,3,13,prepaid
+C1031,Sahara Construction Site,,RUWI,"Ruwi, Muscat, Oman",23.601186,58.553078,3,11,credit
+C1032,Bustan Mini Market,,RUWI,"Ruwi, Muscat, Oman",23.585454,58.568773,3,7,cash
+C1033,Health Center Azaiba,,AZBA,"Azaiba, Muscat, Oman",,,3,12,credit
+C1034,Hotel Bustan Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.587975,58.551517,1,24,credit
+C1035,Daily Needs Ghala,,GHLA,"Ghala, Muscat, Oman",23.575988,58.387568,4,6,cash
+C1036,Quick Stop Ghala,,GHLA,"Ghala, Muscat, Oman",23.57274,58.384627,4,5,credit
+C1037,British School Azaiba,,AZBA,"Azaiba, Muscat, Oman",23.619932,58.388007,5,17,credit
+C1038,British School Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.594833,58.421417,4,16,prepaid
+C1039,Hotel Jabal Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.594301,58.449021,2,17,credit
+C1040,Wadi Suites,,GHLA,"Ghala, Muscat, Oman",23.589546,58.373564,3,18,prepaid
+C1041,Mansour Construction Site,,RUWI,"Ruwi, Muscat, Oman",23.577602,58.548786,3,13,credit
+C1042,Marwa School Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.596449,58.456232,3,16,credit
+C1043,Hotel Marwa Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",,,2,23,credit
+C1044,Qurum Site Camp,,QURM,"Qurum, Muscat, Oman",23.612371,58.457755,3,13,prepaid
+C1045,Lulu Hypermarket Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.603356,58.409696,2,26,credit
+C1046,Jabal School Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.593923,58.557587,5,23,credit
+C1047,Pearl Restaurant Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.579399,58.568853,3,8,cash
+C1048,Golden Grocery Qurum,,QURM,"Qurum, Muscat, Oman",23.609475,58.465283,3,6,cash
+C1049,Daily Needs Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.608659,58.423796,3,5,cash
+C1050,Bahr Mini Market,,QURM,"Qurum, Muscat, Oman",23.619284,58.482454,4,10,cash
+C1051,Nakheel Trading Co,,WADI,"Wadi Adai, Muscat, Oman",23.552413,58.571666,5,12,credit
+C1052,City Cafe Qurum,,QURM,"Qurum, Muscat, Oman",23.614432,58.457355,4,12,cash
+C1053,Al Mouj Nakheel Phase 2,,SEEB,"Seeb, Muscat, Oman",23.676112,58.176814,5,13,credit
+C1054,Golden Hotel Ansab,,ANSB,"Ansab, Muscat, Oman",23.553577,58.500472,3,19,prepaid
+C1055,Turkish Sahara Cafe,,RUWI,"Ruwi, Muscat, Oman",23.582882,58.566257,3,14,credit
+C1056,Lulu Hypermarket Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.601253,58.465942,3,23,prepaid
+C1057,Sultan Center Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.607147,58.430419,2,29,prepaid
+C1058,Turkish Anwar Cafe,,SEEB,"Seeb, Muscat, Oman",23.695032,58.204684,3,8,credit
+C1059,Indian School Mabela,,MABL,"Mabela, Muscat, Oman",23.666985,58.2163,3,15,credit
+C1060,Family Market Ansab,B01,ANSB,"Ansab, Muscat, Oman",23.571208,58.489158,4,7,cash
+C1061,Al Nakheel Group,,ALAM,"Al Amerat, Muscat, Oman",23.551274,58.487501,3,16,credit
+C1062,Indian School Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.596256,58.560943,3,17,credit
+C1063,Sahara Grill,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.575845,58.4343,2,11,cash
+C1064,Mansour Trading Co,,BOSH,"Bousher, Muscat, Oman",23.586869,58.458749,3,12,credit
+C1065,Hotel Noor Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.618946,58.420729,3,25,credit
+C1066,Al Khuwair Site Camp,,KHWR,"Al Khuwair, Muscat, Oman",23.590802,58.448906,3,12,credit
+C1067,Sultan Center Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.583801,58.565712,3,30,credit
+C1068,Grand Medical Center Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.591264,58.567386,3,13,credit
+C1069,Bait Al Salam Restaurant,,QURM,"Qurum, Muscat, Oman",23.619777,58.480533,3,11,credit
+C1070,Oman Salam Co,,RUWI,"Ruwi, Muscat, Oman",23.580081,58.542738,5,20,credit
+C1071,Health Center Ghala,,GHLA,"Ghala, Muscat, Oman",23.587101,58.381236,2,15,credit
+C1072,Yasmin Suites,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",,,2,15,credit
+C1073,Family Market Ghala,,GHLA,"Ghala, Muscat, Oman",,,3,5,credit
+C1074,Al Mouj Hadeeqa Phase 2,,RUWI,"Ruwi, Muscat, Oman",23.598839,58.568133,4,10,credit
+C1075,Al Jabal Group,,AZBA,"Azaiba, Muscat, Oman",23.622146,58.394289,3,12,credit
+C1076,Burj School Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.609441,58.411021,3,21,credit
+C1077,Hadara Clinic,,AZBA,"Azaiba, Muscat, Oman",23.602124,58.408872,2,13,credit
+C1078,Oman Jabal Co,,RUWI,"Ruwi, Muscat, Oman",23.59876,58.55403,3,19,credit
+C1079,Imperial Industries,,QURM,"Qurum, Muscat, Oman",23.602265,58.466395,3,14,credit
+C1080,Al Sahwa School Seeb,,SEEB,"Seeb, Muscat, Oman",23.680357,58.176724,3,21,credit
+C1081,Al Fair Supermarket Wattayah,,WATY,"Wattayah, Muscat, Oman",23.609072,58.508595,2,30,credit
+C1082,Health Center Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.582842,58.568496,3,13,credit
+C1083,Family Market Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.577476,58.453687,3,5,cash
+C1084,Al Maya Azaiba,B02,AZBA,"Azaiba, Muscat, Oman",23.626935,58.406261,2,21,credit
+C1085,Al Sahwa School Mabela,,MABL,"Mabela, Muscat, Oman",23.658505,58.213486,3,16,credit
+C1086,Daily Needs Qurum,,QURM,"Qurum, Muscat, Oman",23.605212,58.472041,3,8,cash
+C1087,Al Hail Site Camp,,HAIL,"Al Hail, Muscat, Oman",23.630742,58.331988,3,15,credit
+C1088,Hadeeqa Suites,,RUWI,"Ruwi, Muscat, Oman",23.594943,58.566888,2,22,prepaid
+C1089,Bustan Suites,,MABL,"Mabela, Muscat, Oman",23.672986,58.217255,3,19,credit
+C1090,Falaj Construction Site,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.591779,58.444323,4,15,credit
+C1091,Pearl Industries,,KHWR,"Al Khuwair, Muscat, Oman",23.581187,58.450515,4,14,credit
+C1092,Burj School Seeb,,SEEB,"Seeb, Muscat, Oman",23.66881,58.179171,3,19,credit
+C1093,Salam Clinic,,GHBR,"Ghubra, Muscat, Oman",23.610661,58.435754,3,11,credit
+C1094,Al Maya Ansab,,ANSB,"Ansab, Muscat, Oman",23.574691,58.505709,1,28,prepaid
+C1095,Fahad Suites,,ANSB,"Ansab, Muscat, Oman",23.555481,58.486854,2,20,credit
+C1096,British School Qurum,,QURM,"Qurum, Muscat, Oman",23.606129,58.457336,2,19,credit
+C1097,City Hotel Bousher,,BOSH,"Bousher, Muscat, Oman",23.561749,58.470148,3,17,credit
+C1098,Al Mouj Fahad Phase 2,,KHWR,"Al Khuwair, Muscat, Oman",23.582717,58.449278,3,13,cash
+C1099,British School Mabela,,MABL,"Mabela, Muscat, Oman",23.677141,58.224849,1,23,credit
+C1100,Seeb Site Camp,,SEEB,"Seeb, Muscat, Oman",23.666699,58.179127,4,12,cash
+C1101,Royal Restaurant Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.596733,58.552612,5,11,credit
+C1102,British School Ansab,,ANSB,"Ansab, Muscat, Oman",23.550845,58.488461,3,23,credit
+C1103,Bait Al Bahr Restaurant,,QURM,"Qurum, Muscat, Oman",23.626524,58.468471,2,11,credit
+C1104,Al Sahwa School Ruwi,,RUWI,"Ruwi, Muscat, Oman",23.59717,58.543647,2,16,credit
+C1105,Marwa Clinic,,KHWR,"Al Khuwair, Muscat, Oman",23.597895,58.465051,2,11,credit
+C1106,Quick Stop Ruwi,,RUWI,"Ruwi, Muscat, Oman",,,3,9,cash
+C1107,Anwar Construction Site,,RUWI,"Ruwi, Muscat, Oman",23.582676,58.554937,3,13,credit
+C1108,Al Marwa Group,,RUWI,"Ruwi, Muscat, Oman",23.584781,58.553707,4,12,credit
+C1109,Marina Grocery Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.598533,58.438267,3,7,cash
+C1110,Marina Cafe Al Hail,,HAIL,"Al Hail, Muscat, Oman",23.641069,58.332284,5,11,cash
+C1111,Nakheel Holdings LLC,,GHBR,"Ghubra, Muscat, Oman",,,2,15,credit
+C1112,Hotel Burj Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.605391,58.461968,3,16,credit
+C1113,Hotel Wadi Seeb,,SEEB,"Seeb, Muscat, Oman",23.676036,58.1766,2,23,prepaid
+C1114,Turkish Bustan Cafe,,BOSH,"Bousher, Muscat, Oman",23.586616,58.462295,3,13,credit
+C1115,Al Hadara Group,,HAIL,"Al Hail, Muscat, Oman",23.630131,58.324752,3,13,credit
+C1116,Salam Construction Site,,BOSH,"Bousher, Muscat, Oman",23.566491,58.465312,4,10,credit
+C1117,Sayh Trading Co,,QURM,"Qurum, Muscat, Oman",23.606258,58.47113,3,13,credit
+C1118,Crown Hotel Seeb,,SEEB,"Seeb, Muscat, Oman",23.691404,58.196038,3,23,credit
+C1119,Bait Al Tariq Restaurant,,GHLA,"Ghala, Muscat, Oman",23.575755,58.391695,3,9,credit
+C1120,Marina Medical Center Azaiba,,AZBA,"Azaiba, Muscat, Oman",23.616612,58.392689,2,12,credit
+C1121,Al Maya Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.590833,58.416408,2,29,prepaid
+C1122,Indian School Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.588788,58.445645,1,23,credit
+C1123,Burj Suites,,GHBR,"Ghubra, Muscat, Oman",23.59373,58.414146,2,23,credit
+C1124,Indian School Qurum,,QURM,"Qurum, Muscat, Oman",23.614422,58.459976,2,24,credit
+C1125,Ruwi Site Camp,,RUWI,"Ruwi, Muscat, Oman",23.587272,58.543969,4,11,prepaid
+C1126,Health Center Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.584582,58.453493,3,14,credit
+C1127,Yasmin Clinic,,AZBA,"Azaiba, Muscat, Oman",,,3,14,credit
+C1128,Al Mouj Marwa Phase 2,,BOSH,"Bousher, Muscat, Oman",23.578684,58.445514,3,12,credit
+C1129,Khaleej Mini Market,,RUWI,"Ruwi, Muscat, Oman",23.58512,58.544346,4,6,cash
+C1130,Sultan Center Ansab,,ANSB,"Ansab, Muscat, Oman",23.560641,58.495223,1,26,prepaid
+C1131,Al Khaleej Group,,GHBR,"Ghubra, Muscat, Oman",23.592856,58.409013,3,14,cash
+C1132,Al Sahwa School Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.58898,58.473289,3,22,credit
+C1133,Imperial Building Project,,RUWI,"Ruwi, Muscat, Oman",23.601707,58.56939,3,12,credit
+C1134,British School Madinat Sultan Qaboos,,MSQ,"Madinat Sultan Qaboos, Muscat, Oman",23.577931,58.428347,3,25,credit
+C1135,Salam Grill,,AZBA,"Azaiba, Muscat, Oman",23.617871,58.401249,3,12,cash
+C1136,Imperial Restaurant Bousher,,BOSH,"Bousher, Muscat, Oman",23.576124,58.451847,1,11,credit
+C1137,Oman Sahara Co,,AZBA,"Azaiba, Muscat, Oman",23.611441,58.415497,4,12,credit
+C1138,Royal Building Project,,HAIL,"Al Hail, Muscat, Oman",23.632939,58.324557,4,10,prepaid
+C1139,Bahr Clinic,,RUWI,"Ruwi, Muscat, Oman",23.599132,58.557041,3,10,credit
+C1140,Turkish Wadi Cafe,,GHBR,"Ghubra, Muscat, Oman",23.60661,58.4292,3,8,credit
+C1141,Golden Grocery Ghubra,,GHBR,"Ghubra, Muscat, Oman",23.591878,58.422863,3,9,cash
+C1142,Bait Al Falaj Restaurant,,HAIL,"Al Hail, Muscat, Oman",23.623542,58.316048,3,9,credit
+C1143,Al Mouj Yasmin Phase 2,,HAIL,"Al Hail, Muscat, Oman",23.643125,58.315818,4,12,credit
+C1144,Bait Al Hadeeqa Restaurant,,KHWR,"Al Khuwair, Muscat, Oman",23.583992,58.454904,3,13,cash
+C1145,Al Fahad Group,,RUWI,"Ruwi, Muscat, Oman",23.587898,58.552889,4,16,credit
+C1146,Grand Medical Center Ghala,,GHLA,"Ghala, Muscat, Oman",23.591415,58.384752,3,12,cash
+C1147,Imperial Medical Center Bousher,,BOSH,"Bousher, Muscat, Oman",23.579917,58.457743,2,14,cash
+C1148,British School Al Khuwair,,KHWR,"Al Khuwair, Muscat, Oman",23.585012,58.46146,2,24,credit
+C1149,Indian School Wadi Adai,,WADI,"Wadi Adai, Muscat, Oman",23.552295,58.574614,1,20,credit
+C1150,Shati Construction Site,,WADI,"Wadi Adai, Muscat, Oman",23.565842,58.580041,4,10,prepaid

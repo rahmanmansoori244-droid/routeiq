@@ -15,7 +15,8 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
-    "db:seed:nmwc": "tsx prisma/seed-nmwc.ts"
+    "db:seed:nmwc": "tsx prisma/seed-nmwc.ts",
+    "db:seed:synth": "tsx prisma/seed-synth.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.7.0",

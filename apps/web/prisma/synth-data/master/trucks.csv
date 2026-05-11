@@ -1,0 +1,9 @@
+code,description,capacity_cases,capacity_weight_kg,fixed_cost_per_day,cost_per_km,depot_code
+MCT-T01,Toyota Dyna (Small),120,1500,18,0.12,MCT-DEPOT
+MCT-T02,Toyota Dyna (Small),120,1500,18,0.12,MCT-DEPOT
+MCT-T03,Isuzu NPR (Medium),240,3000,25,0.18,MCT-DEPOT
+MCT-T04,Isuzu NPR (Medium),240,3000,25,0.18,MCT-DEPOT
+MCT-T05,Isuzu NPR (Medium),240,3000,25,0.18,MCT-DEPOT
+MCT-T06,Isuzu NPR (Medium),240,3000,25,0.18,MCT-DEPOT
+MCT-T07,Hino 500 (Large),450,6000,35,0.25,MCT-DEPOT
+MCT-T08,Hino 500 (Large),450,6000,35,0.25,MCT-DEPOT
