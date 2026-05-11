@@ -9,6 +9,8 @@ import { RunDetail } from './run-detail';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = { title: 'Run detail — RouteIQ' };
+
 export default async function RunDetailPage({
   params,
 }: {

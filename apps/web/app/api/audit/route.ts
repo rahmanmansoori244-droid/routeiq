@@ -25,7 +25,10 @@ export const GET = withTenantApi(async (req, { db }) => {
   const fromRaw = url.searchParams.get('from');
   const toRaw = url.searchParams.get('to');
   const userId = url.searchParams.get('userId') || undefined;
-  const limit = Math.min(Number(url.searchParams.get('limit') ?? 200), 1000);
+  // NaN-safe limit clamp: ?limit=abc used to crash Prisma's `take: NaN`
+  // with a 500. Now: non-numeric falls back to default; negatives clamp to 1.
+  const rawLimit = Number(url.searchParams.get('limit') ?? 200);
+  const limit = Number.isFinite(rawLimit) ? Math.min(Math.max(1, Math.trunc(rawLimit)), 1000) : 200;
 
   const from = parseFilterDate(fromRaw);
   const to = parseFilterDate(toRaw);

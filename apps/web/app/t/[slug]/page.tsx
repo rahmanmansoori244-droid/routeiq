@@ -13,6 +13,8 @@ import { TrendChart } from './trend-chart';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = { title: 'Dashboard — RouteIQ' };
+
 const STATUS_VARIANT: Record<RunStatus, 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline'> = {
   DRAFT: 'outline',
   OPTIMIZING: 'warning',

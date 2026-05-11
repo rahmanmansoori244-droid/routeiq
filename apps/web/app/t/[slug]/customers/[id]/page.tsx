@@ -11,6 +11,8 @@ import { CustomerEditor } from './customer-editor';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = { title: 'Customer — RouteIQ' };
+
 export default async function CustomerDetailPage({
   params,
 }: {
