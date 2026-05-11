@@ -209,23 +209,32 @@ export async function reapStuckJobs(thresholdMs = 5 * 60 * 1000): Promise<{ reap
   );
   if (stuck.length === 0) return { reaped: 0 };
 
+  let reaped = 0;
   for (const job of stuck) {
+    // Skip jobs whose background promise is still tracked in-process. The
+    // janitor is conservative: only DB rows with no live promise (i.e. the
+    // process restarted and lost the inflight map) need cleanup. Failing a
+    // job that's still running would race the success path and corrupt
+    // RunPlan.status.
+    if (inflight.has(job.runId)) continue;
     try {
-      await prisma.$transaction(async (tx) => {
-        await tx.runJob.update({
-          where: { id: job.id },
-          data: {
-            status: 'FAILED',
-            finishedAt: new Date(),
-            message: 'Stuck > 5 minutes — janitor failed it.',
-            errorJson: { reason: 'STUCK', message: 'Job exceeded the 5-minute running threshold.' } as never,
-          },
-        });
-        await tx.runPlan.update({
-          where: { id: job.runId },
-          data: { status: 'FAILED' },
-        });
+      // Conditional update so we don't FAIL a job that just succeeded
+      // between the SELECT and the UPDATE.
+      const flipped = await prisma.runJob.updateMany({
+        where: { id: job.id, status: 'RUNNING' },
+        data: {
+          status: 'FAILED',
+          finishedAt: new Date(),
+          message: 'Stuck > 5 minutes — janitor failed it.',
+          errorJson: { reason: 'STUCK', message: 'Job exceeded the 5-minute running threshold.' } as never,
+        },
       });
+      if (flipped.count === 0) continue;
+      await prisma.runPlan.updateMany({
+        where: { id: job.runId, status: 'OPTIMIZING' },
+        data: { status: 'FAILED' },
+      });
+      reaped++;
       await audit({
         tenantId: job.tenantId,
         userId: job.createdById,
@@ -237,10 +246,8 @@ export async function reapStuckJobs(thresholdMs = 5 * 60 * 1000): Promise<{ reap
     } catch (err) {
       console.error('reapStuckJobs: failed to reap', job.id, err);
     }
-    // Clear inflight tracking so a retry can spawn a fresh promise.
-    inflight.delete(job.runId);
   }
-  return { reaped: stuck.length };
+  return { reaped };
 }
 
 export interface LockedAssignment {

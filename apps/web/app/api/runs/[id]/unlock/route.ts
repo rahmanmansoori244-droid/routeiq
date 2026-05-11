@@ -14,9 +14,17 @@ export const POST = (req: Request, { params }: Params) =>
       const run = notFoundIfNull(await db.runPlan.findUnique({ where: { id: params.id } }));
       if (run.status !== 'DISPATCHED') return fail(`Run is ${run.status}, not DISPATCHED.`, 409);
 
-      const updated = await db.runPlan.update({
-        where: { id: params.id },
+      // Atomic transition: a concurrent unlock can't double-fire the audit
+      // log because updateMany sees the row in READY on the second pass and
+      // matches zero. tenantId stays in the predicate as defense-in-depth.
+      const flipped = await db.runPlan.updateMany({
+        where: { id: params.id, status: 'DISPATCHED' },
         data: { status: 'READY', finalizedAt: null },
+      });
+      if (flipped.count !== 1) return fail('Run already unlocked by another request.', 409);
+      const updated = await db.runPlan.findUniqueOrThrow({
+        where: { id: params.id },
+        select: { status: true },
       });
       await audit({
         tenantId: user.tenantId,

@@ -4,6 +4,8 @@ import { audit } from '@/lib/audit';
 
 interface Params { params: { id: string } }
 
+class DispatchRaceError extends Error {}
+
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
@@ -20,6 +22,17 @@ export const POST = (req: Request, { params }: Params) =>
       if (run._count.routes === 0) return fail('No routes to dispatch.', 400);
 
       const dispatched = await prisma.$transaction(async (tx) => {
+        // Atomic status transition: a concurrent dispatch races to here and
+        // either both updateMany'ed 1 row or both 0. The first wins; the
+        // second sees count=0 and we bail. Without this, two dispatches both
+        // succeed and we get a duplicate audit + a stomped finalizedAt.
+        const flipped = await tx.runPlan.updateMany({
+          where: { id: params.id, status: 'READY', tenantId: user.tenantId },
+          data: { status: 'DISPATCHED', finalizedAt: new Date() },
+        });
+        if (flipped.count !== 1) {
+          throw new DispatchRaceError();
+        }
         // Mark every assigned order as DISPATCHED.
         await tx.order.updateMany({
           where: {
@@ -28,11 +41,16 @@ export const POST = (req: Request, { params }: Params) =>
           },
           data: { status: 'DISPATCHED' },
         });
-        return tx.runPlan.update({
+        return tx.runPlan.findUniqueOrThrow({
           where: { id: params.id },
-          data: { status: 'DISPATCHED', finalizedAt: new Date() },
+          select: { id: true, status: true, finalizedAt: true, runDate: true },
         });
+      }).catch((e) => {
+        if (e instanceof DispatchRaceError) return null;
+        throw e;
       });
+
+      if (!dispatched) return fail('Run already dispatched by another request.', 409);
 
       await audit({
         tenantId: user.tenantId,

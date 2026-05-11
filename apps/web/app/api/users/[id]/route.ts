@@ -43,9 +43,16 @@ export const PATCH = (req: Request, { params }: Params) =>
         }
       }
 
-      const updated = await prisma.user.update({
-        where: { id: params.id },
+      // Defense in depth: findFirst above already validated tenant ownership,
+      // but a future refactor could remove that guard. Re-scope the update
+      // itself via updateMany so a cross-tenant `id` can never escalate roles.
+      const result = await prisma.user.updateMany({
+        where: { id: params.id, tenantId: user.tenantId },
         data: input,
+      });
+      if (result.count !== 1) return fail('User not found in this tenant.', 404);
+      const updated = await prisma.user.findUniqueOrThrow({
+        where: { id: params.id },
         select: { id: true, email: true, name: true, role: true, active: true },
       });
 
