@@ -35,6 +35,33 @@ export async function GET(req: Request) {
     return NextResponse.json({ data: null, error: 'Too many requests.' }, { status: 429 });
   }
 
+  // If the shift wasn't bound to a runId at login time (because the planner
+  // hadn't dispatched yet, or the login flow didn't know which run), resolve
+  // it now: pick the most recent DISPATCHED/READY run that has assignments on
+  // this truck. Persist it back to the shift so subsequent endpoints (ping,
+  // stop, end) and the live dispatcher all stay aligned on the same run.
+  let resolvedRunId = ctx.runId;
+  if (!resolvedRunId) {
+    const latest = await prisma.routeAssignment.findFirst({
+      where: {
+        truckId: ctx.truckId,
+        run: {
+          tenantId: ctx.tenantId,
+          status: { in: ['DISPATCHED', 'READY'] },
+        },
+      },
+      orderBy: [{ run: { runDate: 'desc' } }, { run: { createdAt: 'desc' } }],
+      select: { runId: true },
+    });
+    if (latest) {
+      resolvedRunId = latest.runId;
+      await prisma.driverShift.update({
+        where: { id: ctx.shiftId },
+        data: { runId: resolvedRunId },
+      });
+    }
+  }
+
   const [driver, truck, run, assignments] = await Promise.all([
     prisma.driver.findUnique({
       where: { id: ctx.driverId },
@@ -44,9 +71,9 @@ export async function GET(req: Request) {
       where: { id: ctx.truckId },
       select: { id: true, code: true, description: true },
     }),
-    ctx.runId
+    resolvedRunId
       ? prisma.runPlan.findUnique({
-          where: { id: ctx.runId },
+          where: { id: resolvedRunId },
           select: {
             id: true,
             runDate: true,
@@ -54,9 +81,9 @@ export async function GET(req: Request) {
           },
         })
       : Promise.resolve(null),
-    ctx.runId
+    resolvedRunId
       ? prisma.routeAssignment.findMany({
-          where: { runId: ctx.runId, truckId: ctx.truckId },
+          where: { runId: resolvedRunId, truckId: ctx.truckId },
           orderBy: { sequenceInTruck: 'asc' },
           select: {
             id: true,
