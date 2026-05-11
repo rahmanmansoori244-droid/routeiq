@@ -28,6 +28,14 @@ const TENANT_SCOPED_MODELS = new Set([
   'RunJob',
   'ManualBaseline',
   'AuditLog',
+  // Module C driver-tracking models. These have explicit tenantId columns;
+  // adding them here means the live-dispatcher endpoint can do
+  // `db.truckLocation.findFirst({ where: { truckId } })` without manually
+  // tacking on tenantId, and a future bug elsewhere can't accidentally read
+  // pings from another tenant.
+  'DriverShift',
+  'TruckLocation',
+  'DeliveryProof',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

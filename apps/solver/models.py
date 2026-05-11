@@ -26,8 +26,8 @@ UnservedReasonCode = Literal[
 
 class Depot(BaseModel):
     id: str
-    lat: float
-    lng: float
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
 
 
 class Truck(BaseModel):
@@ -41,11 +41,14 @@ class Truck(BaseModel):
 class Stop(BaseModel):
     order_id: str
     customer_id: str
-    lat: float
-    lng: float
-    demand_cases: int
-    demand_weight_kg: float = 0.0
-    service_time_min: int = 10
+    lat: float = Field(ge=-90, le=90)
+    lng: float = Field(ge=-180, le=180)
+    demand_cases: int = Field(ge=0)
+    demand_weight_kg: float = Field(default=0.0, ge=0)
+    # Cap service time at 8 hours so a typo (e.g. 9999) can't accidentally
+    # blow out the shift dimension. Anything over 480 min on a single stop is
+    # almost certainly a data-entry error and should fail validation upstream.
+    service_time_min: int = Field(default=10, ge=0, le=480)
     priority: int = Field(default=3, ge=1, le=5)
 
 
@@ -65,6 +68,11 @@ class SolverConfig(BaseModel):
     weight_objective_utilization: float | None = None
     # When true, re-weight BALANCED to maximize utilization (see CLAUDE.md §7).
     max_utilization_mode: bool = False
+    # Optional per-tenant Mapbox access token. When provided, the solver uses
+    # this for Mapbox Matrix API calls; otherwise falls back to MAPBOX_TOKEN
+    # env var, then to Haversine. Web layer reads it from TenantConfig and
+    # passes it in the request payload so tokens stay out of the solver image.
+    mapbox_token: str | None = None
 
 
 class OptimizeRequest(BaseModel):

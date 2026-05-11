@@ -15,7 +15,10 @@ import { audit } from '@/lib/audit';
 const bodySchema = z.object({
   tenantSlug: z.string().trim().min(1).max(64),
   driverCode: z.string().trim().min(1).max(64),
-  pin: z.string().trim().min(4).max(12),
+  // Minimum 6 digits — generatePin() always returns 6, so any shorter PIN is
+  // legacy/manual and should be rotated. 4-digit PINs (10k combos) are
+  // brute-forceable in ~2 hours even with cost-12 bcrypt at 100ms/attempt.
+  pin: z.string().trim().min(6).max(12),
   truckId: z.string().trim().min(1).optional(),
   runId: z.string().trim().min(1).optional(),
 });
@@ -66,11 +69,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ data: result, error: null }, { status: 200 });
   } catch (err) {
     // Never reveal which field was wrong — auth-style errors look identical.
+    // TRUCK_REQUIRED is a real configuration issue (driver has no truck and
+    // none was provided), so it gets a distinct response but only AFTER auth
+    // succeeded. We surface it to the client so the operator knows to assign.
     const msg = err instanceof Error ? err.message : 'UNKNOWN';
     if (msg === 'TRUCK_REQUIRED') {
       return NextResponse.json(
-        { data: null, error: 'No truck assigned for this driver — pick one in the next step.' },
-        { status: 400 },
+        { data: null, error: 'No truck assigned for this driver — ask your dispatcher.' },
+        { status: 409 },
       );
     }
     return NextResponse.json(

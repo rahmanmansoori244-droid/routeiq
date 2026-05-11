@@ -133,9 +133,18 @@ export async function loginDriver(input: DriverLoginInput): Promise<DriverLoginR
   });
   if (!truck) throw new Error('UNKNOWN_TRUCK');
 
-  // End any prior ACTIVE shift for this driver in this tenant.
+  // End any prior ACTIVE shift for this driver OR this truck in this tenant.
+  // The driver clause prevents one human from being "on" two trucks at once;
+  // the truck clause prevents two drivers from racing pings/PODs on the same
+  // truck (which would let either driver mark deliveries done out from under
+  // the other). Both run in one updateMany so the close-and-create transition
+  // looks atomic from the API perspective.
   await prisma.driverShift.updateMany({
-    where: { tenantId: tenant.id, driverId: driver.id, status: 'ACTIVE' },
+    where: {
+      tenantId: tenant.id,
+      status: 'ACTIVE',
+      OR: [{ driverId: driver.id }, { truckId: truck.id }],
+    },
     data: { status: 'COMPLETED', endedAt: new Date() },
   });
 

@@ -81,6 +81,11 @@ export function LiveDispatcher({
       .setPopup(new maplibregl.Popup().setText(`Depot: ${depot.name}`))
       .addTo(mapRef.current);
     return () => {
+      // Clear truck markers explicitly — map.remove() does NOT detach
+      // externally-added Markers, so without this they'd linger as detached
+      // DOM nodes if the component remounted (e.g. route switch + back).
+      for (const m of markersRef.current.values()) m.remove();
+      markersRef.current.clear();
       mapRef.current?.remove();
       mapRef.current = null;
     };

@@ -8,6 +8,7 @@
  */
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '@/lib/db';
 import { requireDriverShift } from '@/lib/driver-auth';
 import { audit } from '@/lib/audit';
@@ -41,12 +42,16 @@ export async function POST(req: Request) {
   }
   const p = parsed.data;
 
-  // Verify the assignment is on this driver's truck + tenant.
+  // Verify the assignment is on this driver's truck + tenant. The truckId
+  // filter is the defence-in-depth check the API auditor flagged: even with a
+  // valid shift token, a driver cannot mark stops on a different truck.
   const assignment = await prisma.routeAssignment.findFirst({
     where: { id: p.assignmentId, truckId: ctx.truckId, run: { tenantId: ctx.tenantId } },
-    select: { id: true, deliveryProof: { select: { id: true } } },
+    select: { id: true, truckId: true, deliveryProof: { select: { id: true } } },
   });
-  if (!assignment) {
+  if (!assignment || assignment.truckId !== ctx.truckId) {
+    // Both the WHERE and the post-fetch check map to a 404 (per spec §3:
+    // cross-tenant / cross-truck access leaks nothing about resource existence).
     return NextResponse.json({ data: null, error: 'Stop not found on your truck.' }, { status: 404 });
   }
   if (assignment.deliveryProof) {
@@ -56,18 +61,33 @@ export async function POST(req: Request) {
     );
   }
 
-  const proof = await prisma.deliveryProof.create({
-    data: {
-      tenantId: ctx.tenantId,
-      shiftId: ctx.shiftId,
-      assignmentId: assignment.id,
-      notes: p.notes ?? null,
-      signaturePngB64: p.signaturePngB64 ?? null,
-      lat: p.lat ?? null,
-      lng: p.lng ?? null,
-    },
-    select: { id: true, completedAt: true },
-  });
+  let proof: { id: string; completedAt: Date };
+  try {
+    proof = await prisma.deliveryProof.create({
+      data: {
+        tenantId: ctx.tenantId,
+        shiftId: ctx.shiftId,
+        assignmentId: assignment.id,
+        notes: p.notes ?? null,
+        signaturePngB64: p.signaturePngB64 ?? null,
+        lat: p.lat ?? null,
+        lng: p.lng ?? null,
+      },
+      select: { id: true, completedAt: true },
+    });
+  } catch (err) {
+    // Race condition: another shift on the same truck (or a retry from this
+    // driver) marked the stop done between our check and our create. The
+    // assignmentId UNIQUE constraint trips and Prisma raises P2002. Map it
+    // to 200 + alreadyDone so the PWA doesn't show a misleading error toast.
+    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+      return NextResponse.json(
+        { data: { assignmentId: assignment.id, alreadyDone: true }, error: null },
+        { status: 200 },
+      );
+    }
+    throw err;
+  }
 
   await audit({
     tenantId: ctx.tenantId,

@@ -130,7 +130,13 @@ export const GET = (req: Request, { params }: Params) =>
       // Deviation indicator: truck is online but >2 km from next planned stop
       // and ping has been received recently enough to be confident the driver
       // is actually moving (or stopped) elsewhere.
+      //
+      // Suppress at shift start (no deliveries yet) because the driver is at
+      // the depot and the first planned stop is naturally several km away —
+      // marking that as BEHIND immediately is a false alarm that conditions
+      // dispatchers to ignore the signal.
       if (
+        done > 0 &&
         status === 'ON_PLAN' &&
         distanceToNextKm != null &&
         distanceToNextKm > DEVIATION_DISTANCE_KM &&

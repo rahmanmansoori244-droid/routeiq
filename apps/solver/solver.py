@@ -216,12 +216,19 @@ def _build_matrices(
     coords: list[tuple[float, float]] = [(req.depot.lat, req.depot.lng)] + [
         (s.lat, s.lng) for s in solvable
     ]
+    # Mapbox returns ACTUAL road distance; the Haversine multiplier (default
+    # 1.30) is an estimation correction and must NOT be applied to real-road
+    # results, otherwise distances get inflated by ~30%. The Haversine path —
+    # AND the per-cell Haversine fallback for unreachable Mapbox pairs — still
+    # uses the configured multiplier so estimates stay calibrated.
+    haversine_multiplier = req.config.distance_multiplier
     return build_matrices(
         provider=req.config.distance_provider,
         tenant_id=req.tenant_id,
         coords=coords,
-        haversine_multiplier=req.config.distance_multiplier,
+        haversine_multiplier=haversine_multiplier,
         avg_speed_kmh=req.config.avg_speed_kmh,
+        mapbox_token=getattr(req.config, "mapbox_token", None),
         mapbox_profile="driving",
     )
 

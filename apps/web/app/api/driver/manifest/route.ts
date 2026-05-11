@@ -17,6 +17,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { requireDriverShift } from '@/lib/driver-auth';
+import { rateLimit } from '@/lib/rate-limit';
 
 export async function GET(req: Request) {
   const token = req.headers.get('x-driver-token') ?? '';
@@ -25,6 +26,13 @@ export async function GET(req: Request) {
     ctx = await requireDriverShift(token);
   } catch {
     return NextResponse.json({ data: null, error: 'Unauthorized.' }, { status: 401 });
+  }
+
+  // Per-shift rate limit. The PWA only refreshes manifest on user action
+  // (pull-to-refresh / after marking done) so 60/min/shift is generous.
+  const rl = rateLimit(`driver:manifest:${ctx.shiftId}`, 60, 60_000);
+  if (!rl.ok) {
+    return NextResponse.json({ data: null, error: 'Too many requests.' }, { status: 429 });
   }
 
   const [driver, truck, run, assignments] = await Promise.all([

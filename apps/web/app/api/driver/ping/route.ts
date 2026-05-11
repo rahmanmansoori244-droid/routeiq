@@ -26,17 +26,23 @@ const bodySchema = z.object({
 
 export async function POST(req: Request) {
   const token = req.headers.get('x-driver-token') ?? '';
-  // Per-shift rate limit: max 4 pings/second (way above normal 1 ping/30s).
-  const rl = rateLimit(`driver:ping:${token.slice(0, 16)}`, 240, 60_000);
-  if (!rl.ok) {
-    return NextResponse.json({ data: null, error: 'Too many pings.' }, { status: 429 });
-  }
 
+  // Validate the shift BEFORE rate limiting so unauthenticated requests don't
+  // pollute the per-token bucket (the previous slice(0,16) key meant empty
+  // tokens shared one bucket — an attacker could exhaust it for everyone).
   let ctx;
   try {
     ctx = await requireDriverShift(token);
   } catch {
     return NextResponse.json({ data: null, error: 'Unauthorized.' }, { status: 401 });
+  }
+
+  // Per-shift rate limit: max ~4 pings/second (normal is 1 ping/30s = 0.03/s).
+  // Key by the SHIFT id (not the token) so it's safe to log and shows up in
+  // metrics correctly.
+  const rl = rateLimit(`driver:ping:${ctx.shiftId}`, 240, 60_000);
+  if (!rl.ok) {
+    return NextResponse.json({ data: null, error: 'Too many pings.' }, { status: 429 });
   }
 
   let body: unknown;

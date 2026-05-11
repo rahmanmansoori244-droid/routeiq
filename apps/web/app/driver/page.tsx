@@ -45,6 +45,10 @@ export default function DriverLoginPage() {
       const json = await res.json();
       if (!res.ok || !json.data) {
         toast.error(typeof json.error === 'string' ? json.error : 'Sign-in failed.');
+        // Clear PIN so the next attempt starts fresh (avoids retrying with a
+        // half-typed PIN and leaking the partial value in screen recordings /
+        // shoulder-surfing scenarios).
+        setPin('');
         return;
       }
       window.localStorage.setItem('riq.driver.token', json.data.sessionToken);
