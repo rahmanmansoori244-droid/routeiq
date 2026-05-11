@@ -37,6 +37,7 @@ from typing import Iterable
 from pyvrp import Model, PenaltyParams, SolveParams
 from pyvrp.stop import MaxRuntime
 
+from distance import build_matrices, haversine_km as _haversine_km  # noqa: F401 — re-exported below
 from models import (
     OptimizeRequest,
     OptimizeResponse,
@@ -81,12 +82,9 @@ _PYVRP_PARAMS = SolveParams(
 )
 
 
-def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    rlat1, rlat2 = math.radians(lat1), math.radians(lat2)
-    dlat = math.radians(lat2 - lat1)
-    dlng = math.radians(lng2 - lng1)
-    a = math.sin(dlat / 2) ** 2 + math.cos(rlat1) * math.cos(rlat2) * math.sin(dlng / 2) ** 2
-    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(a))
+# Re-export haversine_km from distance.py so existing imports (tests, callers)
+# keep working unchanged.
+haversine_km = _haversine_km
 
 
 def effective_time_limit(base: int, stop_count: int) -> int:
@@ -206,37 +204,26 @@ def adjusted_weights(name: ScenarioName, req: OptimizeRequest) -> ScenarioWeight
 # ---------------------------------------------------------------------------
 
 
-def _build_distance_matrix(req: OptimizeRequest, solvable: list[Stop]) -> list[list[int]]:
-    """Distance matrix in centimeters (int). Depot at index 0, then stops 1..N."""
-    nodes = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
-    mult = req.config.distance_multiplier
-    size = len(nodes)
-    mat = [[0] * size for _ in range(size)]
-    for i in range(size):
-        for j in range(size):
-            if i == j:
-                continue
-            km = haversine_km(nodes[i][0], nodes[i][1], nodes[j][0], nodes[j][1]) * mult
-            mat[i][j] = int(round(km * 100_000))  # km → cm
-    return mat
+def _build_matrices(
+    req: OptimizeRequest, solvable: list[Stop]
+) -> tuple[list[list[int]], list[list[int]], dict]:
+    """Build (distance_cm, travel_time_secs, meta) using the configured provider.
 
-
-def _build_time_matrix(
-    distance_cm: list[list[int]],
-    solvable: list[Stop],
-    avg_speed_kmh: float,
-) -> list[list[int]]:
-    """Travel-time matrix in SECONDS (excluding service time — that's per-client)."""
-    speed = max(avg_speed_kmh, 1.0)
-    size = len(distance_cm)
-    out = [[0] * size for _ in range(size)]
-    for i in range(size):
-        for j in range(size):
-            if i == j:
-                continue
-            travel_secs = int(round((distance_cm[i][j] / 100_000) / speed * 3600))
-            out[i][j] = travel_secs
-    return out
+    Dispatches to ``distance.build_matrices`` which picks HAVERSINE or
+    MAPBOX_MATRIX based on ``req.config.distance_provider``. Meta tells us
+    whether Mapbox actually answered or we fell back to Haversine.
+    """
+    coords: list[tuple[float, float]] = [(req.depot.lat, req.depot.lng)] + [
+        (s.lat, s.lng) for s in solvable
+    ]
+    return build_matrices(
+        provider=req.config.distance_provider,
+        tenant_id=req.tenant_id,
+        coords=coords,
+        haversine_multiplier=req.config.distance_multiplier,
+        avg_speed_kmh=req.config.avg_speed_kmh,
+        mapbox_profile="driving",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -526,8 +513,22 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
             warnings=pre.warnings + ["No solvable stops — all were pre-dropped."],
         )
 
-    distance_cm = _build_distance_matrix(req, pre.solvable)
-    time_secs = _build_time_matrix(distance_cm, pre.solvable, req.config.avg_speed_kmh)
+    distance_cm, time_secs, matrix_meta = _build_matrices(req, pre.solvable)
+    provider_used = matrix_meta.get("provider_used", req.config.distance_provider)
+    distance_is_estimated = provider_used == "HAVERSINE"
+    log.info(
+        "matrix provider=%s used=%s cached=%s",
+        req.config.distance_provider,
+        provider_used,
+        matrix_meta.get("cached", False),
+    )
+
+    warnings_out = list(pre.warnings)
+    if "fallback_reason" in matrix_meta:
+        warnings_out.append(
+            f"Mapbox Matrix unavailable ({matrix_meta['fallback_reason']}); "
+            "served Haversine-estimated distances instead."
+        )
 
     def _runner(name: ScenarioName) -> Scenario:
         scenario, _ = _solve_one_scenario(
@@ -538,6 +539,9 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
             time_secs=time_secs,
             time_limit_sec=time_limit,
         )
+        # Stamp the actual provider used (Mapbox may have fallen back to Haversine).
+        scenario.distance_provider = provider_used  # type: ignore[assignment]
+        scenario.distance_is_estimated = distance_is_estimated
         scenario.unserved_orders = _merge_unserved(pre.drops, scenario.unserved_orders)
         return scenario
 
@@ -545,4 +549,4 @@ def optimize(req: OptimizeRequest) -> OptimizeResponse:
     with ThreadPoolExecutor(max_workers=n_threads) as pool:
         scenarios = list(pool.map(_runner, req.config.scenarios_requested))
 
-    return OptimizeResponse(run_id=req.run_id, scenarios=scenarios, warnings=pre.warnings)
+    return OptimizeResponse(run_id=req.run_id, scenarios=scenarios, warnings=warnings_out)

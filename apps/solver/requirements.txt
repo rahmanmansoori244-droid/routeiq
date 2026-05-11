@@ -6,6 +6,8 @@ uvicorn[standard]==0.30.1
 # zero runtime cost when unused.
 pyvrp>=0.13.0
 ortools>=9.10
+# Module B: Mapbox Directions Matrix HTTP client.
+httpx>=0.27,<0.30
 
 # Dev / CI
 pytest>=8.0

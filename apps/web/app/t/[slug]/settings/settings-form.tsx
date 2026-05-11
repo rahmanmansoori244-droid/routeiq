@@ -155,8 +155,8 @@ export function SettingsForm({ initial }: { initial: Initial }) {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="HAVERSINE">Haversine (free, straight-line)</SelectItem>
-                <SelectItem value="MAPBOX_MATRIX" disabled>
-                  Mapbox Matrix (v2)
+                <SelectItem value="MAPBOX_MATRIX">
+                  Mapbox Matrix (real road distance — requires MAPBOX_TOKEN on solver)
                 </SelectItem>
               </SelectContent>
             </Select>
