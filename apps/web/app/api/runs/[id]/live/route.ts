@@ -8,6 +8,12 @@
 import { withTenantApi, ok, notFoundIfNull } from '@/lib/api';
 
 const OFFLINE_AFTER_MIN = 10;
+// If the truck is this far (km) from its NEXT planned stop and it has been
+// at least DEVIATION_MIN_LINGER_MIN minutes since the last ping, flag BEHIND.
+// Conservative bounds — meant to catch real deviations (driver took a wrong
+// turn, customer not at address) rather than transient noise.
+const DEVIATION_DISTANCE_KM = 2.0;
+const DEVIATION_MIN_LINGER_MIN = 2;
 
 interface Params { params: { id: string } }
 
@@ -119,6 +125,18 @@ export const GET = (req: Request, { params }: Params) =>
       const nextLng = nextStop?.order.customer.lng ?? null;
       if (nextLat != null && nextLng != null) {
         distanceToNextKm = haversineKm(loc.lat, loc.lng, nextLat, nextLng);
+      }
+
+      // Deviation indicator: truck is online but >2 km from next planned stop
+      // and ping has been received recently enough to be confident the driver
+      // is actually moving (or stopped) elsewhere.
+      if (
+        status === 'ON_PLAN' &&
+        distanceToNextKm != null &&
+        distanceToNextKm > DEVIATION_DISTANCE_KM &&
+        offlineMin >= DEVIATION_MIN_LINGER_MIN
+      ) {
+        status = 'BEHIND';
       }
 
       return {

@@ -90,24 +90,21 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
     return map;
   }, [trucks]);
 
-  // Initialize map once.
+  // Initialize map once. Uses MapLibre + OSM tiles by default (no token needed);
+  // upgrades to Mapbox vector tiles when NEXT_PUBLIC_MAPBOX_TOKEN is set.
   useEffect(() => {
-    if (!mapboxToken) {
-      setMapError('MAPBOX_TOKEN not set in env — set it in apps/web/.env to enable the map view.');
-      return;
-    }
     if (!containerRef.current) return;
     let cancelled = false;
     (async () => {
       try {
-        const mb = await import('mapbox-gl');
-        await import('mapbox-gl/dist/mapbox-gl.css');
+        const mb = await import('maplibre-gl');
+        await import('maplibre-gl/dist/maplibre-gl.css');
+        const { defaultMapStyle } = await import('@/lib/maps');
         if (cancelled || !containerRef.current) return;
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (mb as any).default.accessToken = mapboxToken;
+        const style = defaultMapStyle(mapboxToken);
         const map = new mb.Map({
           container: containerRef.current,
-          style: 'mapbox://styles/mapbox/light-v11',
+          style: style as never,
           center: [depot.lng, depot.lat],
           zoom: 10,
         });
@@ -148,7 +145,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
     }
 
     (async () => {
-      const mb = await import('mapbox-gl');
+      const mb = await import('maplibre-gl');
 
       // Depot marker (large + brand color).
       const depotEl = document.createElement('div');

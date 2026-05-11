@@ -18,6 +18,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { CheckCircle2, ChevronRight, Loader2, LogOut, MapPin, Navigation, Phone, Truck } from 'lucide-react';
 import { toast } from 'sonner';
+import { SignaturePad, type SignaturePadHandle } from '../signature-pad';
 
 const PING_INTERVAL_MS = 30_000;
 
@@ -58,6 +59,7 @@ export default function DriverManifestPage() {
   const [doneNote, setDoneNote] = useState('');
   const [submittingDone, setSubmittingDone] = useState(false);
   const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const signatureRef = useRef<SignaturePadHandle>(null);
 
   const getToken = useCallback(() => {
     if (typeof window === 'undefined') return null;
@@ -156,12 +158,20 @@ export default function DriverManifestPage() {
           { enableHighAccuracy: true, timeout: 8_000, maximumAge: 5_000 },
         );
       });
+      // Capture signature (if any) as base64 PNG. Strip the "data:image/png;base64,"
+      // prefix so server only stores the raw payload — keeps the column smaller.
+      let signaturePngB64: string | undefined;
+      const dataUrl = signatureRef.current?.getDataURL?.();
+      if (dataUrl && dataUrl.startsWith('data:image/png;base64,')) {
+        signaturePngB64 = dataUrl.slice('data:image/png;base64,'.length);
+      }
       const res = await fetch('/api/driver/stop', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Driver-Token': token },
         body: JSON.stringify({
           assignmentId: stopBeingDone.assignmentId,
           notes: doneNote.trim() || undefined,
+          signaturePngB64,
           lat: pos?.coords.latitude,
           lng: pos?.coords.longitude,
         }),
@@ -179,6 +189,7 @@ export default function DriverManifestPage() {
       toast.success(`${stopBeingDone.customerName} marked delivered.`);
       setStopBeingDone(null);
       setDoneNote('');
+      signatureRef.current?.clear?.();
       loadManifest();
     } catch {
       toast.error('Network error.');
@@ -320,8 +331,11 @@ export default function DriverManifestPage() {
               value={doneNote}
               onChange={(e) => setDoneNote(e.target.value)}
               placeholder="Optional note (e.g., left with security, partial delivery, customer absent)"
-              className="mt-3 h-24 w-full resize-none rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
+              className="mt-3 h-20 w-full resize-none rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-blue-600 focus:outline-none"
             />
+            <div className="mt-3">
+              <SignaturePad ref={signatureRef} height={140} />
+            </div>
             <div className="mt-3 flex gap-2">
               <button
                 disabled={submittingDone}

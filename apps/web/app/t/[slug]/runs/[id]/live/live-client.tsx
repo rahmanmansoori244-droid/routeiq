@@ -11,12 +11,14 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import mapboxgl from 'mapbox-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
-import { CheckCircle2, MapPin, Truck, Wifi, WifiOff } from 'lucide-react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
+import { CheckCircle2, MapPin, Wifi, WifiOff } from 'lucide-react';
+import { defaultMapStyle, TRUCK_COLORS } from '@/lib/maps';
 
 const POLL_MS = 5_000;
 const OFFLINE_AFTER_MIN = 10;
+// Color picks come from lib/maps to stay consistent with the run detail map.
 
 interface TruckLive {
   truckId: string;
@@ -47,8 +49,6 @@ interface LiveResponse {
   trucks: TruckLive[];
 }
 
-const TRUCK_COLORS = ['#2563eb', '#dc2626', '#16a34a', '#ea580c', '#9333ea', '#0891b2', '#db2777', '#65a30d'];
-
 export function LiveDispatcher({
   runId,
   depot,
@@ -59,26 +59,26 @@ export function LiveDispatcher({
   mapboxToken: string;
 }) {
   const mapContainer = useRef<HTMLDivElement | null>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
-  const markersRef = useRef<Map<string, mapboxgl.Marker>>(new Map());
+  const mapRef = useRef<maplibregl.Map | null>(null);
+  const markersRef = useRef<Map<string, maplibregl.Marker>>(new Map());
   const [data, setData] = useState<LiveResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [lastFetchedAt, setLastFetchedAt] = useState<Date | null>(null);
 
-  // Init map once.
+  // Init map once. MapLibre + OSM tiles when no Mapbox token; upgrades to
+  // Mapbox vector tiles automatically if one is set.
   useEffect(() => {
-    if (!mapboxToken || !mapContainer.current || mapRef.current) return;
-    mapboxgl.accessToken = mapboxToken;
-    mapRef.current = new mapboxgl.Map({
+    if (!mapContainer.current || mapRef.current) return;
+    const style = defaultMapStyle(mapboxToken);
+    mapRef.current = new maplibregl.Map({
       container: mapContainer.current,
-      style: 'mapbox://styles/mapbox/light-v11',
+      style: style as never,
       center: [depot.lng, depot.lat],
       zoom: 11,
     });
-    // Depot marker.
-    new mapboxgl.Marker({ color: '#0f172a' })
+    new maplibregl.Marker({ color: '#0f172a' })
       .setLngLat([depot.lng, depot.lat])
-      .setPopup(new mapboxgl.Popup().setText(`Depot: ${depot.name}`))
+      .setPopup(new maplibregl.Popup().setText(`Depot: ${depot.name}`))
       .addTo(mapRef.current);
     return () => {
       mapRef.current?.remove();
@@ -128,9 +128,9 @@ export function LiveDispatcher({
         el.className = 'truck-marker';
         el.style.cssText = `width:28px;height:28px;border-radius:50%;border:2px solid white;display:flex;align-items:center;justify-content:center;font:600 11px sans-serif;color:white;background:${color};box-shadow:0 1px 4px rgba(0,0,0,.3);`;
         el.textContent = t.truckCode.slice(-3);
-        m = new mapboxgl.Marker(el).setLngLat([t.lng, t.lat]).addTo(map);
+        m = new maplibregl.Marker({ element: el }).setLngLat([t.lng, t.lat]).addTo(map);
         m.setPopup(
-          new mapboxgl.Popup({ offset: 18 }).setText(
+          new maplibregl.Popup({ offset: 18 }).setText(
             `${t.truckCode} · ${t.doneStops}/${t.totalStops} delivered`,
           ),
         );
@@ -217,19 +217,9 @@ export function LiveDispatcher({
         })}
       </aside>
 
-      {/* Map / map-fallback */}
+      {/* Map: MapLibre + OSM tiles by default; upgrades to Mapbox if a token is set. */}
       <div className="overflow-hidden rounded-lg border bg-card lg:order-1 lg:col-span-2">
-        {mapboxToken ? (
-          <div ref={mapContainer} className="h-full w-full" />
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
-            <Truck className="h-8 w-8 text-muted-foreground" />
-            <div className="text-sm text-muted-foreground">
-              <code>NEXT_PUBLIC_MAPBOX_TOKEN</code> not set on the web service. Live positions are
-              still listed on the right — set the token to enable the map.
-            </div>
-          </div>
-        )}
+        <div ref={mapContainer} className="h-full w-full" />
       </div>
     </div>
   );
@@ -239,7 +229,7 @@ function colorFor(status: TruckLive['status'], idx: number): string {
   if (status === 'OFFLINE') return '#94a3b8';
   if (status === 'BEHIND') return '#d97706';
   if (status === 'AHEAD') return '#2563eb';
-  return TRUCK_COLORS[idx % TRUCK_COLORS.length]!;
+  return TRUCK_COLORS[idx % TRUCK_COLORS.length] ?? '#2563eb';
 }
 
 function secondsAgo(d: Date) {
