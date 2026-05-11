@@ -5,6 +5,14 @@ import type { ValidatedOrderRow } from '@/lib/order-validate';
 
 interface Params { params: { batchId: string } }
 
+class BatchRaceError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
@@ -12,6 +20,8 @@ export const POST = (req: Request, { params }: Params) =>
         await db.uploadBatch.findUnique({ where: { id: params.batchId } }),
       );
 
+      // Fast-path UX checks (cheap, no tx). Inside the tx we re-check under
+      // row lock so two concurrent confirms can't both succeed.
       if (batch.status === 'CONFIRMED') return fail('Batch already confirmed.', 409);
       if (batch.status === 'REJECTED' || batch.status === 'DELETED') return fail(`Batch is ${batch.status}.`, 409);
       if (batch.errorRows > 0) return fail('Cannot confirm a batch with errors.', 400);
@@ -49,7 +59,24 @@ export const POST = (req: Request, { params }: Params) =>
       let linesCreated = 0;
 
       // Run as one big transaction so partial failures don't leave orphans.
-      await prisma.$transaction(async (tx) => {
+      try {
+        await prisma.$transaction(async (tx) => {
+        // Lock the batch row so a concurrent confirm waits here and then
+        // sees CONFIRMED below. Without this, two requests can both pass the
+        // outer status check and double-insert orders.
+        const locked = await tx.$queryRaw<Array<{ status: string; tenant_id: string }>>`
+          SELECT "status", "tenantId" AS tenant_id FROM "UploadBatch" WHERE id = ${batch.id} FOR UPDATE
+        `;
+        if (locked.length === 0) throw new BatchRaceError('Batch not found.', 404);
+        const lockedStatus = locked[0].status;
+        // Defense in depth: tenant scope was checked by `db.uploadBatch.findUnique`
+        // through withTenantApi, but re-verify here to defeat any future regressions.
+        if (locked[0].tenant_id !== user.tenantId) throw new BatchRaceError('Batch not found.', 404);
+        if (lockedStatus === 'CONFIRMED') throw new BatchRaceError('Batch already confirmed.', 409);
+        if (lockedStatus === 'REJECTED' || lockedStatus === 'DELETED') {
+          throw new BatchRaceError(`Batch is ${lockedStatus}.`, 409);
+        }
+
         for (const [, rows] of grouped) {
           const first = rows[0];
           const cust = custById.get(first.customerId);
@@ -102,7 +129,11 @@ export const POST = (req: Request, { params }: Params) =>
           where: { id: batch.id },
           data: { status: 'CONFIRMED' },
         });
-      });
+        });
+      } catch (e) {
+        if (e instanceof BatchRaceError) return fail(e.message, e.status);
+        throw e;
+      }
 
       await audit({
         tenantId: user.tenantId,

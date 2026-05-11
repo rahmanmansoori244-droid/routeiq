@@ -66,6 +66,17 @@ async function runOptimizeJob(args: ScheduleArgs): Promise<void> {
     data: { progressPct: 75, message: 'Persisting scenarios', responseJson: response as never },
   });
 
+  // Guard: a solver response with zero scenarios would leave the run in a
+  // READY-but-empty state where the planner has nothing to pick. Treat as
+  // failure so the UI shows the retry banner instead of silently stalling.
+  if (!response.scenarios || response.scenarios.length === 0) {
+    throw new SolverError(
+      'Solver returned no scenarios. Check that orders have valid coordinates and trucks have non-zero capacity.',
+      200,
+      response as never,
+    );
+  }
+
   // Persist scenarios in a transaction with the parent run status flip.
   await prisma.$transaction(async (tx) => {
     // Wipe any prior scenarios for this run (retries replace earlier results).

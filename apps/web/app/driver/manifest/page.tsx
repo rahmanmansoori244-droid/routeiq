@@ -75,6 +75,24 @@ export default function DriverManifestPage() {
     router.replace('/driver');
   }, [router]);
 
+  const endShiftAndExit = useCallback(async () => {
+    if (typeof window === 'undefined') return logout();
+    const token = window.localStorage.getItem('riq.driver.token');
+    if (!token) return logout();
+    try {
+      // Best-effort end-of-shift. Even if it fails, still clear local state so
+      // the driver isn't stuck on a glitched manifest screen.
+      await fetch('/api/driver/shift/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Driver-Token': token },
+        body: JSON.stringify({}),
+      });
+    } catch {
+      /* swallow — logout proceeds regardless */
+    }
+    logout();
+  }, [logout]);
+
   const loadManifest = useCallback(async () => {
     const token = getToken();
     if (!token) {
@@ -254,6 +272,25 @@ export default function DriverManifestPage() {
           />
         </div>
       </header>
+
+      {/* Shift-complete banner — appears once every stop is delivered. */}
+      {manifest.stops.length > 0 && remainingStops.length === 0 && (
+        <div className="mx-3 mt-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4">
+          <div className="flex items-center gap-2 text-emerald-800">
+            <CheckCircle2 className="h-5 w-5" />
+            <span className="text-base font-semibold">All deliveries complete</span>
+          </div>
+          <p className="mt-1 text-sm text-emerald-700">
+            You've delivered all {manifest.stops.length} stops. Tap below to end your shift.
+          </p>
+          <button
+            onClick={endShiftAndExit}
+            className="mt-3 w-full rounded-md bg-emerald-600 px-4 py-3 text-base font-semibold text-white hover:bg-emerald-700"
+          >
+            End shift &amp; sign out
+          </button>
+        </div>
+      )}
 
       {/* Stop list */}
       <ul className="space-y-2 px-3 py-3">

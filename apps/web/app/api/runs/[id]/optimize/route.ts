@@ -96,9 +96,15 @@ export async function POST(_req: Request, { params }: Params) {
         requestJson: payload as never,
       },
     });
+    // Clear stale chosenScenarioId on re-optimize. The previous scenarios get
+    // wiped by the optimize-job's transaction; without this, the UI's
+    // "selected scenario" state points at a now-deleted row.
+    // RouteAssignment rows are left in place — the locked ones are still
+    // meaningful to the next attempt (buildSolverPayload respects them); the
+    // unlocked ones are replaced wholesale by choose-scenario after success.
     await tx.runPlan.update({
       where: { id: params.id },
-      data: { status: 'OPTIMIZING', currentJobId: created.id },
+      data: { status: 'OPTIMIZING', currentJobId: created.id, chosenScenarioId: null },
     });
     return created;
   });
