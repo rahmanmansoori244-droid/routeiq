@@ -1,4 +1,4 @@
-fastapi==0.111.0
+fastapi==0.136.1
 uvicorn[standard]==0.30.1
 # Solver: PyVRP (Hybrid Genetic Search) — state-of-the-art for CVRP, replaces
 # the v1 OR-Tools solver. Still keep ortools as a pinned fallback dependency
