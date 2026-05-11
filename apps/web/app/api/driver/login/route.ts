@@ -10,6 +10,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { loginDriver } from '@/lib/driver-auth';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { audit } from '@/lib/audit';
 
 const bodySchema = z.object({
   tenantSlug: z.string().trim().min(1).max(64),
@@ -43,6 +44,25 @@ export async function POST(req: Request) {
 
   try {
     const result = await loginDriver(parsed.data);
+    // Audit on success only. Driver login uses tenantSlug, so we don't know
+    // tenantId until after loginDriver runs — that's fine because login is
+    // the boundary that creates a per-tenant DriverShift anyway.
+    const tenantId = await (async () => {
+      const { prisma } = await import('@/lib/db');
+      const t = await prisma.tenant.findUnique({ where: { slug: parsed.data.tenantSlug }, select: { id: true } });
+      return t?.id ?? null;
+    })();
+    if (tenantId) {
+      await audit({
+        tenantId,
+        userId: null,
+        action: 'DRIVER_LOGIN',
+        entity: 'DriverShift',
+        entityId: result.shiftId,
+        afterJson: { driverCode: parsed.data.driverCode, truckCode: result.truckCode, runId: result.runId },
+        ip,
+      });
+    }
     return NextResponse.json({ data: result, error: null }, { status: 200 });
   } catch (err) {
     // Never reveal which field was wrong — auth-style errors look identical.

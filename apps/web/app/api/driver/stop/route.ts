@@ -10,6 +10,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 import { prisma } from '@/lib/db';
 import { requireDriverShift } from '@/lib/driver-auth';
+import { audit } from '@/lib/audit';
 
 const bodySchema = z.object({
   assignmentId: z.string().trim().min(1),
@@ -66,6 +67,22 @@ export async function POST(req: Request) {
       lng: p.lng ?? null,
     },
     select: { id: true, completedAt: true },
+  });
+
+  await audit({
+    tenantId: ctx.tenantId,
+    userId: null,
+    action: 'DELIVERY_PROOF_CREATED',
+    entity: 'RouteAssignment',
+    entityId: assignment.id,
+    afterJson: {
+      shiftId: ctx.shiftId,
+      notesLen: p.notes?.length ?? 0,
+      signatureCaptured: !!p.signaturePngB64,
+      lat: p.lat ?? null,
+      lng: p.lng ?? null,
+    },
+    ip: req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null,
   });
 
   return NextResponse.json(

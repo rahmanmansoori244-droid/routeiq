@@ -16,7 +16,9 @@ export type AuditAction =
   | 'OPTIMIZE_FAILED'
   | 'SCENARIO_CHOSEN'
   | 'BASELINE_UPLOADED'
-  | 'ROUTE_MANUALLY_CHANGED';
+  | 'ROUTE_MANUALLY_CHANGED'
+  | 'DRIVER_LOGIN'
+  | 'DELIVERY_PROOF_CREATED';
 
 export interface AuditInput {
   tenantId: string;
