@@ -70,6 +70,17 @@ interface Props {
   unserved: MapUnserved[];
 }
 
+// Real road-route geometry as returned by /api/runs/[id]/route-geometries.
+// Keyed by truckId. We draw the straight-line tour first so the map isn't
+// blank while the routing API replies, then swap to the real polyline as
+// soon as we have it.
+interface TruckGeometry {
+  coordinates: [number, number][];
+  provider: 'osrm' | 'mapbox' | 'fallback';
+  distanceKm: number;
+  durationMin: number;
+}
+
 // 12 visually-distinct colors for truck routes.
 const TRUCK_COLORS = [
   '#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2',
@@ -86,6 +97,8 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
   const [showLabels, setShowLabels] = useState<'numbers' | 'names' | 'none'>('numbers');
   const [hiddenTrucks, setHiddenTrucks] = useState<Set<string>>(new Set());
   const [contextStop, setContextStop] = useState<MapStop | null>(null);
+  const [geometries, setGeometries] = useState<Map<string, TruckGeometry>>(new Map());
+  const [geometryProvider, setGeometryProvider] = useState<string | null>(null);
   const [confirmUnassign, setConfirmUnassign] = useState<MapStop | null>(null);
   const [moveDialog, setMoveDialog] = useState<MapStop | null>(null);
   const [pending, startTransition] = useTransition();
@@ -127,6 +140,52 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       mapRef.current = null;
     };
   }, [mapboxToken, depot.lat, depot.lng]);
+
+  // Fetch real road geometry once per (runId, stop assignment set). We key
+  // the dependency on the stop ids + sequences so the geometry refreshes
+  // after a manual move/unassign or re-optimize. Until the API responds the
+  // map renders straight-line tours so the planner sees something immediately.
+  const geomKey = stops
+    .map((s) => `${s.assignmentId}:${s.truckId}:${s.sequence}`)
+    .join('|');
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/runs/${runId}/route-geometries`, { cache: 'no-store' });
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          data?: {
+            trucks: Array<{
+              truckId: string;
+              coordinates: [number, number][];
+              provider: TruckGeometry['provider'];
+              distanceKm: number;
+              durationMin: number;
+            }>;
+            provider?: string;
+          };
+        };
+        if (cancelled || !json.data) return;
+        const next = new Map<string, TruckGeometry>();
+        for (const t of json.data.trucks) {
+          next.set(t.truckId, {
+            coordinates: t.coordinates,
+            provider: t.provider,
+            distanceKm: t.distanceKm,
+            durationMin: t.durationMin,
+          });
+        }
+        setGeometries(next);
+        setGeometryProvider(json.data.provider ?? null);
+      } catch {
+        /* keep straight-line fallback */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [runId, geomKey]);
 
   // Re-render markers + routes whenever data changes.
   useEffect(() => {
@@ -178,12 +237,22 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
         list.sort((a, b) => a.sequence - b.sequence);
       }
 
-      // Render polylines per truck (depot → stops → depot).
+      // Render polylines per truck. Prefer real road geometry from the
+      // /api/runs/[id]/route-geometries cache; fall back to the depot→stops
+      // straight-line tour while the routing API is still resolving. The
+      // straight-line shape only ever appears for the first ~600ms after
+      // page load before the geometry effect updates the map.
       for (const [truckId, list] of groupedByTruck) {
         const color = truckColor.get(truckId) ?? '#2563EB';
-        const coords: [number, number][] = [[depot.lng, depot.lat]];
-        for (const s of list) coords.push([s.lng as number, s.lat as number]);
-        coords.push([depot.lng, depot.lat]);
+        const realGeom = geometries.get(truckId);
+        const coords: [number, number][] = realGeom
+          ? realGeom.coordinates
+          : (() => {
+              const c: [number, number][] = [[depot.lng, depot.lat]];
+              for (const s of list) c.push([s.lng as number, s.lat as number]);
+              c.push([depot.lng, depot.lat]);
+              return c;
+            })();
         const sourceId = `route-${truckId}`;
         map.addSource(sourceId, {
           type: 'geojson',
@@ -200,7 +269,11 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
           paint: {
             'line-color': color,
             'line-width': 3,
-            'line-opacity': 0.75,
+            // Real road geometry is solid; provisional straight-line tour
+            // renders dashed so the planner can tell the difference at a
+            // glance while the routing API is still resolving.
+            'line-opacity': 0.85,
+            ...(realGeom ? {} : { 'line-dasharray': [2, 2] as never }),
           },
         });
 
@@ -230,7 +303,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
         markersRef.current.push(m);
       }
     })();
-  }, [mapReady, stops, unserved, hiddenTrucks, truckColor, depot, trucks, showLabels, canEdit]);
+  }, [mapReady, stops, unserved, hiddenTrucks, truckColor, depot, trucks, showLabels, canEdit, geometries]);
 
   function resetZoom() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -326,6 +399,20 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
           <CardTitle className="text-base">Map controls</CardTitle>
         </CardHeader>
         <CardContent className="space-y-3 text-sm">
+          {geometryProvider && (
+            <div className="flex items-center justify-between rounded-md border border-dashed border-muted-foreground/30 px-2 py-1.5 text-[11px]">
+              <span className="text-muted-foreground">Road geometry</span>
+              <Badge variant={geometryProvider === 'fallback' ? 'outline' : 'secondary'}>
+                {geometryProvider === 'mapbox'
+                  ? 'Mapbox Directions'
+                  : geometryProvider === 'osrm'
+                    ? 'OSRM (OSM road network)'
+                    : geometryProvider === 'mixed'
+                      ? 'Mixed providers'
+                      : 'Straight-line fallback'}
+              </Badge>
+            </div>
+          )}
           <div className="space-y-2">
             <Label className="text-xs uppercase tracking-wide text-muted-foreground">Show on stops</Label>
             <Select value={showLabels} onValueChange={(v) => setShowLabels(v as typeof showLabels)}>
