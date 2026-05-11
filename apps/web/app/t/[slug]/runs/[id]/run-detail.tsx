@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, Download, FileSpreadsheet, FileText, Loader2, Lock, Play, RotateCcw, Send, Unlock } from 'lucide-react';
+import { AlertCircle, Download, FileSpreadsheet, FileText, Loader2, Lock, MapPin, Play, RotateCcw, Send, Unlock } from 'lucide-react';
+import Link from 'next/link';
 import { toast } from 'sonner';
 import type { RunJobStatus, RunStatus } from '@prisma/client';
 import { Button } from '@/components/ui/button';
@@ -256,6 +257,17 @@ export function RunDetail({
                   </a>
                 </Button>
               </>
+            ) : null}
+
+            {/* Live tracking — only meaningful once the run has been dispatched
+                or stops are populated (drivers may sign in early to test). */}
+            {routes.length > 0 ? (
+              <Button asChild size="sm" variant="outline">
+                <Link href={`/t/${slug}/runs/${run.id}/live`}>
+                  <MapPin className="me-2 h-4 w-4" />
+                  Live
+                </Link>
+              </Button>
             ) : null}
 
             {/* Dispatch */}

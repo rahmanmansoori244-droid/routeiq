@@ -123,6 +123,9 @@ model Tenant {
   manualBaselines ManualBaseline[]
   audits          AuditLog[]
   passwordResets  PasswordResetToken[]
+  driverShifts    DriverShift[]
+  truckLocations  TruckLocation[]
+  deliveryProofs  DeliveryProof[]
 }
 
 model TenantConfig {
@@ -219,22 +222,109 @@ model Truck {
   costPerKm        Float             @default(0)
   active           Boolean           @default(true)
   routes           RouteAssignment[]
+  shifts           DriverShift[]
+  locations        TruckLocation[]
 
   @@unique([tenantId, code])
   @@index([tenantId, depotId])
 }
 
 model Driver {
-  id       String  @id @default(cuid())
-  tenantId String
-  tenant   Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  code     String
-  name     String
-  phone    String?
-  active   Boolean @default(true)
+  id            String  @id @default(cuid())
+  tenantId      String
+  tenant        Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  phone         String?
+  // Module C: drivers sign into the PWA with tenant slug + driver code + 6-char PIN.
+  // PIN is stored hashed (bcrypt cost 12, same as User passwords). Null until set.
+  accessPinHash String?
+  active        Boolean @default(true)
+
+  shifts   DriverShift[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
+}
+
+// Module C — driver tracking.
+//
+// A DriverShift is one driver's work session on one truck for one RunPlan. It
+// scopes GPS pings, deliveries, and proof-of-delivery records. Status moves
+// ACTIVE → COMPLETED on shift end (or ABANDONED if the janitor closes a stale one).
+enum DriverShiftStatus {
+  ACTIVE
+  COMPLETED
+  ABANDONED
+}
+
+model DriverShift {
+  id          String              @id @default(cuid())
+  tenantId    String
+  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  driverId    String
+  driver      Driver              @relation(fields: [driverId], references: [id])
+  truckId     String
+  truck       Truck               @relation(fields: [truckId], references: [id])
+  runId       String?
+  run         RunPlan?            @relation(fields: [runId], references: [id], onDelete: SetNull)
+  // Opaque token the driver PWA holds; required on every GPS-ping call.
+  sessionToken String             @unique
+  status      DriverShiftStatus   @default(ACTIVE)
+  startedAt   DateTime            @default(now()) @db.Timestamptz(3)
+  endedAt     DateTime?           @db.Timestamptz(3)
+  notes       String?
+  locations   TruckLocation[]
+  proofs      DeliveryProof[]
+
+  @@index([tenantId, status])
+  @@index([truckId, status])
+  @@index([driverId, status])
+  @@index([runId])
+}
+
+// One GPS sample. Pings flow ~every 30s from the PWA. We persist all of them so
+// the dispatcher view can replay actuals vs planned, and so route-deviation
+// analytics works retroactively. A daily janitor archives rows older than 30 days.
+model TruckLocation {
+  id          String       @id @default(cuid())
+  tenantId    String
+  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shiftId     String
+  shift       DriverShift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  truckId     String
+  truck       Truck        @relation(fields: [truckId], references: [id])
+  ts          DateTime     @db.Timestamptz(3)
+  lat         Float
+  lng         Float
+  speedKmh    Float?
+  headingDeg  Float?
+  accuracyM   Float?
+  batteryPct  Int?
+
+  @@index([tenantId, truckId, ts])
+  @@index([shiftId, ts])
+}
+
+// Per-stop completion record. POD = proof of delivery. v1 stores notes + a
+// signature blob (base64 PNG, max ~50 KB). Photo upload is deferred to v2 when
+// an object store (R2) is wired.
+model DeliveryProof {
+  id              String           @id @default(cuid())
+  tenantId        String
+  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shiftId         String
+  shift           DriverShift      @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  assignmentId    String           @unique
+  assignment      RouteAssignment  @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  completedAt     DateTime         @default(now()) @db.Timestamptz(3)
+  notes           String?
+  signaturePngB64 String?
+  lat             Float?
+  lng             Float?
+
+  @@index([tenantId, completedAt])
+  @@index([shiftId])
 }
 
 model Region {
@@ -370,6 +460,7 @@ model RunPlan {
   currentJobId     String?
   jobs             RunJob[]
   manualBaselines  ManualBaseline[]
+  driverShifts     DriverShift[]
 
   @@index([tenantId, runDate])
   @@index([tenantId, currentJobId])
@@ -408,6 +499,7 @@ model RouteAssignment {
   lockedByUserId            String?
   lockedBy                  User?   @relation("RouteAssignmentLockedBy", fields: [lockedByUserId], references: [id], onDelete: SetNull)
   manualOverrideReason      String?
+  deliveryProof             DeliveryProof?
 
   @@unique([runId, truckId, sequenceInTruck])
   @@index([runId, truckId])

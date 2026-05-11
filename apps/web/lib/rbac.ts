@@ -19,3 +19,11 @@ export function canPlan(role: Role): boolean {
 export function canApproveOverride(role: Role): boolean {
   return RANK[role] >= RANK.SUPERVISOR;
 }
+
+export function canView(role: Role): boolean {
+  return RANK[role] >= RANK.VIEWER;
+}
+
+export function requireRole(role: Role, min: Role): boolean {
+  return RANK[role] >= RANK[min];
+}
