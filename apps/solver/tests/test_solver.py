@@ -122,7 +122,7 @@ class TestDropPenalty:
 
 
 class TestEffectiveTimeLimit:
-    """Spec §7: min(max(base, stops * 0.05), 120)."""
+    """Spec §7 (Module A bump): min(max(base, stops * 0.05), 300)."""
 
     def test_small_run_uses_base(self):
         # 100 stops at base=30: max(30, 5) = 30
@@ -132,10 +132,10 @@ class TestEffectiveTimeLimit:
         # 1000 stops at base=30: max(30, 50) = 50
         assert effective_time_limit(30, 1000) == 50
 
-    def test_cap_at_120(self):
-        # 2400+ stops should hit the 120s ceiling
-        assert effective_time_limit(30, 2400) == 120
-        assert effective_time_limit(30, 100_000) == 120
+    def test_cap_at_300(self):
+        # Module A raised the ceiling to 300s to let PyVRP run more HGS generations.
+        assert effective_time_limit(30, 6000) == 300
+        assert effective_time_limit(30, 100_000) == 300
 
     def test_higher_base_overrides_scaling(self):
         # Tenant override of base=60 keeps 60 for 100 stops
