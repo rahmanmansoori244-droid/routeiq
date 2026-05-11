@@ -9,6 +9,8 @@ import { ValidationReport } from './validation-report';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = { title: 'Upload batch — RouteIQ' };
+
 export default async function BatchDetailPage({
   params,
 }: {
