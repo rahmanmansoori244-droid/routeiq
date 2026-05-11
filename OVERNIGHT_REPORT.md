@@ -150,3 +150,68 @@ Tomorrow:
 1. Check the dispatcher live view — http://web-production-a9d04.up.railway.app/t/nmwc/runs/cmp1mkqk50001vipyapgzjruf/live (Day-2 run, 102 stops, 7 trucks).
 2. Generate a real PIN for DR-001 from /t/nmwc/drivers and do a phone-side driver PWA dry run.
 3. Tell me what to build next — Mapbox Matrix activation, photo POD upload, customer ETAs, predictive ETA recompute, deviation alert thresholds, or something else.
+
+---
+
+## 🔍 Deep-audit pass (post-Modules A/B/C)
+
+After the modules shipped you asked me to "run a deep deep test … deploy as many agents needed … only stop when the whole project is ready as per a company you hire to audit all the work." I ran two waves of audit subagents across solver, web, driver flow, DB, and full E2E paths, then iteratively fixed every real finding.
+
+### Round 1 — 14 fixes landed in `97cd261`
+
+| Severity | Area | Fix |
+|---|---|---|
+| CRITICAL | Solver | Mapbox token wasn't reaching `build_matrices`; threaded `mapbox_token` through `_build_matrices` → `models.SolverConfig`. |
+| CRITICAL | Solver | Distance multiplier was being applied twice when Mapbox provider returned. Fixed so the multiplier is only applied for Haversine. |
+| CRITICAL | Driver | Two drivers could log into the same truck and race deliveries. `loginDriver()` now also closes any prior ACTIVE shift on the same truck (not just the same driver). |
+| CRITICAL | Driver | `Mark done` returned 500 instead of 200+`alreadyDone:true` when two concurrent marks raced — caught `P2002` and surfaced as already-done. |
+| CRITICAL | Driver | PIN minimum was 4 (too weak for a numeric PIN). Bumped to 6, matching the generator. |
+| HIGH | Driver | `TRUCK_REQUIRED` was returning 400 leaking auth state. Now 409 after auth passes. |
+| HIGH | Driver | `/api/driver/ping` rate-limited keyed on `token.slice(0,16)` — empty token = shared bucket. Reordered: auth first, then rate-limit keyed by `shiftId`. |
+| HIGH | Driver | `/api/driver/manifest` had no rate limit. Added 60/min per shift. |
+| HIGH | Driver | PIN field wasn't cleared after a failed login (shoulder-surfing). Now resets. |
+| HIGH | Tenant scope | `TruckLocation`, `DriverShift`, `DeliveryProof` weren't in `TENANT_SCOPED_MODELS`. Added. |
+| HIGH | Live map | BEHIND deviation false-positive at shift start (truck at depot is naturally >2km from first stop). Now requires `done > 0`. |
+| HIGH | Live map | MapLibre markers leaked across unmount. Explicit cleanup loop before `map.remove()`. |
+| HIGH | Pydantic | `lat`/`lng`/`demand_cases`/`service_time_min`/`priority` had no bounds. Added Field constraints to catch garbage payloads at the solver edge. |
+| HIGH | API | Audit endpoint's date filters silently matched all rows on `?from=invalid` (NaN). Added `parseFilterDate` that 400s. Also added `DRIVER_LOGIN` + `DELIVERY_PROOF_CREATED` to ALLOWED_ACTIONS. |
+| HIGH | UX | Missing `loading.tsx` skeletons for `/t/[slug]/upload/[batchId]` and `/t/[slug]/customers/import`. Added. |
+
+### Round 2 — 4 more fixes in `cf7bbdb`
+
+| Severity | Area | Fix |
+|---|---|---|
+| HIGH | Order ingest | Batch-confirm had a race: status check at `route.ts:15` was outside the transaction, so two concurrent confirms could both pass and double-insert orders. Moved the check inside the tx with `SELECT … FOR UPDATE` so tx2 blocks then sees CONFIRMED and 409s cleanly. |
+| MED | Run state | Re-optimize wasn't clearing `RunPlan.chosenScenarioId` — old scenarios get wiped by the optimize-job tx, leaving the UI pointing at a deleted scenario id. Now reset to null at optimize start. |
+| MED | Solver edge | If the solver ever returned 0 scenarios, the run flipped to READY-but-empty (planner had nothing to pick). Now treated as `SolverError` → run fails with retry banner. |
+| HIGH | Driver UX | Driver hitting "all stops delivered" had no clear end-of-shift action; the `DriverShift` row stayed `ACTIVE` until the 18h janitor closed it. Added `/api/driver/shift/end` endpoint + green "All deliveries complete · End shift & sign out" CTA on the manifest. |
+
+### False alarms verified and discarded
+- `RouteAssignment` capacity-breach pre-validation **already exists** in `route-adjust.ts:240-266` (throws `RouteAdjustError(400)` before any DB write).
+- `RunStatus` enum **does** include `OPTIMIZING` (DB-integrity agent was reading a stale snapshot).
+- Solver **already** flags `(0,0)` coordinates as `MISSING_COORDINATES` (`solver.py:134`); no need to filter in `buildSolverPayload`.
+
+### Test posture after round-2
+- **79/79** web unit + tenant-isolation tests pass.
+- **27/27** solver tests pass (including the priority-inverted drop-penalty regression).
+- `pnpm typecheck` clean across the monorepo.
+- Live prod probes confirm: unauth endpoints return 401, malformed payloads 400, health 200.
+
+### Net commits since you slept
+
+```
+cf7bbdb fix: round-2 audit pass — batch race, stale scenario, 0-scenario stall, shift-end UX
+97cd261 fix: deep-audit pass — driver concurrency, rate-limit order, tenant scope, model bounds, deviation false-positive
+09015e7 docs: visual verification of optimal-path map on day-2 NMWC run
+6a134eb docs: overnight report — A/B/C live, smoke test passed, day-2 PyVRP verified
+4eaf6b1 fix(map-tab): h-full w-full container
+319bcae fix(map-tab): static import maplibre-gl CSS
+333d210 feat(seed): seed 8 drivers in synth data
+34ee66f feat(audit): DRIVER_LOGIN + DELIVERY_PROOF_CREATED audit actions + smoke-driver-flow script
+d882b4e feat(map): MapLibre+OSM by default + signature pad + deviation alert
+ebc9aaa feat(driver): Module C — driver PWA + GPS tracking + live dispatcher
+bdd1f1b feat(solver): Module B — Mapbox Directions Matrix provider + tenant toggle
+4c40e12 feat(solver): Module A — swap OR-Tools for PyVRP
+```
+
+All on `main`, all on Railway prod.
