@@ -177,6 +177,41 @@ After the modules shipped you asked me to "run a deep deep test … deploy as ma
 | HIGH | API | Audit endpoint's date filters silently matched all rows on `?from=invalid` (NaN). Added `parseFilterDate` that 400s. Also added `DRIVER_LOGIN` + `DELIVERY_PROOF_CREATED` to ALLOWED_ACTIONS. |
 | HIGH | UX | Missing `loading.tsx` skeletons for `/t/[slug]/upload/[batchId]` and `/t/[slug]/customers/import`. Added. |
 
+### Round 4 — 4 real bugs found by walking the actual prod UI flow
+
+You said "I tested and found many bugs". I bootstrapped a real test account on prod (`bugtest-doesnotexist-99999@example.com` / slug `bugtest-123abc-fakeslug`), walked the planner → driver flow end to end, and probed every API endpoint with edge-case payloads. Real bugs found and shipped:
+
+| Severity | What broke | Fix | Commit |
+|---|---|---|---|
+| HIGH | Driver signs in, manifest returns `run: null, stops: []` even though the planner had dispatched a run for the driver's truck. The login form doesn't collect a `runId`, so the shift's `runId` is null, and the manifest endpoint had no fallback. | `/api/driver/manifest` now resolves the most-recent DISPATCHED-or-READY run for the truck when shift.runId is null, and persists the resolution back to the shift so ping/stop/end stay aligned. | [`d174b6f`](https://github.com/rahmanmansoori-routeiq/commit/d174b6f) |
+| MED | `/api/audit?limit=abc` returns HTTP 500 because `Number('abc')` is `NaN` and Prisma's `take: NaN` throws. Any audit page filter that passed a typo into `limit` would crash. | NaN-safe clamp: non-numeric falls back to default 200, negatives clamp to 1, max 1000. | [`27691ed`](https://github.com/rahmanmansoori-routeiq/commit/27691ed) |
+| MED | Customer create with no `priority` / `avgServiceTimeMin` / `paymentType` returned `Expected number, received nan`. The Prisma model has DB defaults (3 / 10 / CREDIT) but the API schema marked them required — `z.coerce.number()` against undefined produces NaN. | Made the three optional with matching `z.default()` so a thin form or import gets DB-default behaviour. | [`32a33cf`](https://github.com/rahmanmansoori-routeiq/commit/32a33cf) |
+| LOW | Dashboard, customer-detail, run-detail, and upload-batch pages all rendered with the generic `<title>RouteIQ</title>` because they didn't export metadata. Browser tabs and history were unreadable. | Added static `export const metadata` to each. | [`27691ed`](https://github.com/rahmanmansoori-routeiq/commit/27691ed), [`9615d5e`](https://github.com/rahmanmansoori-routeiq/commit/9615d5e) |
+
+### Verified the rest works under load
+
+While hunting, I exercised every major flow end to end against prod with the test tenant. All green:
+
+- Signup → onboard → CRUD master data ✅
+- Order CSV upload (valid + duplicate + negative cases + past date + future date + bad columns + 11 MB oversize) — all handled with proper 400/error responses, no 500s ✅
+- Order batch confirm → re-confirm (returns 409 cleanly) ✅
+- Create run → optimize (PyVRP solved 1-stop run in 30 s as expected with min-time-limit floor) → poll status → 3 scenarios returned ✅
+- Pick scenario → dispatch → re-dispatch (409) → unlock → re-unlock (409) — all round-3 race fixes verified live ✅
+- Re-optimize from READY: `chosenScenarioId` correctly cleared, new attempt created, new scenarios persisted ✅
+- Excel + PDF export both 200 with non-zero byte sizes ✅
+- Manual baseline upload + GET ✅
+- Manual route adjust: lock, unlock, move, unassign (DELETE) all 200 with proper resequencing ✅
+- Concurrent optimize requests: first 202, subsequent 409 with "Run status is OPTIMIZING" ✅
+- Driver PIN generate → driver login → ping → mark stop done (via the fixed manifest path) → end shift → end again 401 ✅
+- Live dispatcher endpoint returns proper truck state with GPS ✅
+- Fuzz: garbage JSON / string body / array body / null body / extreme coords / SQL injection in filters — all 400, no 500s ✅
+- All unauth endpoints return 401, all wrong-method endpoints return 405 ✅
+
+### What I did NOT fix (and why)
+
+- **Dashboard "today" uses server UTC, not tenant timezone.** For an Oman user (UTC+4) viewing the dashboard at 1 AM Oman = 9 PM UTC previous day, "today" still shows yesterday's date. Cosmetic; would need a `Tenant.timezone` schema field to fix cleanly (deferred to v2). The actual data filtering and rollups still work — just the date *labels* drift up to 4 h.
+- **Run creation requires existing orders.** The spec says runs should be creatable in DRAFT then optimized later, but the implementation requires `orderCount > 0` up front. The UX hint ("Upload and confirm an order file for that date first.") is clear enough — it's intentional friction, not a regression — so leaving alone unless you want it changed.
+
 ### Round 3 — 6 more fixes in `98b043f`
 
 | Severity | Area | Fix |
