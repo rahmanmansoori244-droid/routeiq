@@ -43,7 +43,27 @@ export function ScenarioCards({ scenarios, chosenScenarioId, canPick, onPick, cu
   const bestCost = Math.min(...scenarios.map((s) => s.totalCost));
   const bestUtil = Math.max(...scenarios.map((s) => s.avgUtilizationPct));
 
+  // Detect when all returned scenarios converged to the same plan — usually
+  // means capacity is the binding constraint and the objective tradeoffs
+  // don't matter. Without this hint, three identical cards look like a bug.
+  const converged =
+    scenarios.length > 1 &&
+    scenarios.every(
+      (s) =>
+        s.trucksUsed === scenarios[0].trucksUsed &&
+        Math.abs(s.totalDistanceKm - scenarios[0].totalDistanceKm) < 0.01 &&
+        s.unservedCount === scenarios[0].unservedCount,
+    );
+
   return (
+    <div className="space-y-3">
+    {converged && (
+      <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        <strong>All three scenarios converged to the same plan.</strong> This usually means demand is at or above
+        your effective fleet capacity — the solver has no slack to trade trucks-used against distance. Free up
+        capacity (more trucks, larger trucks, or fewer/smaller orders) to see the objectives diverge.
+      </div>
+    )}
     <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
       {scenarios.map((s) => {
         const isChosen = s.id === chosenScenarioId;
@@ -88,6 +108,7 @@ export function ScenarioCards({ scenarios, chosenScenarioId, canPick, onPick, cu
           </Card>
         );
       })}
+    </div>
     </div>
   );
 }

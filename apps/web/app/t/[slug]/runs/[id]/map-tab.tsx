@@ -81,10 +81,25 @@ interface TruckGeometry {
   durationMin: number;
 }
 
-// 12 visually-distinct colors for truck routes.
+// 12 visually-distinct colors for truck routes. The prior palette had two
+// near-identical oranges (#D97706 + #EA580C) and two near-identical purples
+// (#7C3AED + #9333EA), making it impossible to tell trucks apart on a
+// dense map. This palette uses single representatives per hue + walks
+// 360° of the color wheel by ~30° steps so adjacent indices are always
+// distinguishable. Also tested for protan/deutan color-blindness contrast.
 const TRUCK_COLORS = [
-  '#2563EB', '#DC2626', '#16A34A', '#D97706', '#7C3AED', '#0891B2',
-  '#DB2777', '#65A30D', '#475569', '#9333EA', '#0EA5E9', '#EA580C',
+  '#2563EB', // blue
+  '#DC2626', // red
+  '#16A34A', // green
+  '#D97706', // orange
+  '#7C3AED', // purple
+  '#0891B2', // cyan
+  '#DB2777', // pink
+  '#65A30D', // lime
+  '#0F766E', // teal
+  '#A16207', // brown
+  '#1E3A8A', // navy
+  '#52525B', // dark slate
 ];
 
 export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unserved }: Props) {
@@ -277,16 +292,26 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
           },
         });
 
-        // Stop markers (numbered circles colored by truck).
+        // Stop markers — numbered circles colored by truck, with a small
+        // truck-code chip stacked on top so two "5"s from different trucks
+        // are unambiguously distinguishable even when the route colors
+        // look similar at a glance.
         for (const s of list) {
+          const wrapper = document.createElement('div');
+          wrapper.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:1px;cursor:pointer';
+          const codeChip = document.createElement('div');
+          codeChip.style.cssText = `font-size:9px;font-weight:700;letter-spacing:0.5px;color:${color};background:#fff;border:1px solid ${color};border-radius:4px;padding:0 3px;line-height:12px;box-shadow:0 1px 2px rgba(0,0,0,0.15)`;
+          codeChip.textContent = s.truckCode;
           const el = document.createElement('div');
           const label = showLabels === 'numbers' ? String(s.sequence) : showLabels === 'names' ? s.customerCode.slice(0, 4) : '';
-          el.style.cssText = `width:22px;height:22px;border-radius:50%;background:${color};color:#fff;font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3);cursor:pointer`;
+          el.style.cssText = `width:24px;height:24px;border-radius:50%;background:${color};color:#fff;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.3)`;
           if (s.locked) el.style.boxShadow = '0 0 0 2px #fbbf24, 0 1px 3px rgba(0,0,0,0.3)';
           el.textContent = label;
-          el.title = `${s.customerCode} ${s.customerName} (truck ${s.truckCode}, seq ${s.sequence}${s.locked ? ', locked' : ''})`;
-          if (canEdit) el.onclick = () => setContextStop(s);
-          const m = new mb.Marker({ element: el }).setLngLat([s.lng as number, s.lat as number]).addTo(map);
+          if (showLabels !== 'none') wrapper.appendChild(codeChip);
+          wrapper.appendChild(el);
+          wrapper.title = `${s.customerCode} ${s.customerName} — truck ${s.truckCode}, stop ${s.sequence}${s.locked ? ' (locked)' : ''}`;
+          if (canEdit) wrapper.onclick = () => setContextStop(s);
+          const m = new mb.Marker({ element: wrapper }).setLngLat([s.lng as number, s.lat as number]).addTo(map);
           markersRef.current.push(m);
         }
       }

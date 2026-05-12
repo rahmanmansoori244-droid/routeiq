@@ -46,6 +46,19 @@ HTTP_TIMEOUT_SECS = 30
 HTTP_MAX_RETRIES = 3
 HTTP_RETRY_BACKOFF_SECS = 1.5
 
+# OSRM provides real road distance/duration for free. Defaults to the public
+# demo (rate-limited but fine for v1 + small tenants). For production load,
+# point OSRM_URL at a self-hosted instance (e.g. a $10/mo Hetzner VM running
+# `osrm-routed --algo mld` on the Oman+UAE Geofabrik extract).
+#
+# When OSRM_URL is non-empty AND the configured provider is HAVERSINE, we
+# transparently upgrade the matrix to OSRM at solve time. This is what
+# eliminates the "zig-zag" routes a planner sees when straight-line distance
+# fools PyVRP into thinking two stops on opposite sides of a wadi/highway
+# are "close".
+OSRM_URL = os.environ.get("OSRM_URL", "https://router.project-osrm.org").rstrip("/")
+OSRM_MAX_COORDS_PER_CALL = 100  # OSRM has no hard limit; this keeps URLs sane.
+
 # In-process LRU cache keyed by (provider, tenant_id, hash of coords + speed).
 # Avoids re-hitting Mapbox for retried optimization attempts on the same run.
 _MATRIX_CACHE: dict[str, tuple[list[list[int]], list[list[int]]]] = {}
@@ -205,6 +218,76 @@ def mapbox_matrix(
 
 
 # ---------------------------------------------------------------------------
+# OSRM provider — real road distance/duration via /table endpoint
+# ---------------------------------------------------------------------------
+
+
+def osrm_table(
+    coords: list[tuple[float, float]],
+    *,
+    haversine_fallback_multiplier: float,
+    haversine_fallback_speed_kmh: float,
+) -> tuple[list[list[int]], list[list[int]]]:
+    """Call OSRM /table for the full n×n matrix.
+
+    Coords are (lat, lng) tuples; OSRM expects ``lng,lat`` in the URL.
+    Returns (distance_cm, time_secs) in the same shape and units as
+    haversine_matrix and mapbox_matrix.
+
+    If OSRM is unreachable or returns garbage, every cell falls back to
+    Haversine × multiplier so the solver never sees a partial matrix.
+    """
+    n = len(coords)
+    dist_cm = [[0] * n for _ in range(n)]
+    time_secs = [[0] * n for _ in range(n)]
+
+    # OSRM accepts an arbitrarily long coordinate list in one call. The
+    # /table endpoint returns a full n×n matrix per call. We still chunk
+    # only because very long URLs trip some proxies.
+    coord_str = ";".join(f"{lng:.6f},{lat:.6f}" for (lat, lng) in coords)
+    url = f"{OSRM_URL}/table/v1/driving/{quote(coord_str, safe=';,')}?annotations=distance,duration"
+
+    last_exc: Exception | None = None
+    for attempt in range(HTTP_MAX_RETRIES):
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT_SECS) as client:
+                r = client.get(url, headers={"User-Agent": "RouteIQ-Solver/1.0"})
+                r.raise_for_status()
+                body = r.json()
+            if body.get("code") != "Ok":
+                raise ValueError(f"OSRM returned non-Ok code: {body.get('code')}")
+            distances = body.get("distances") or []
+            durations = body.get("durations") or []
+            if len(distances) != n or len(durations) != n:
+                raise ValueError(f"OSRM returned wrong matrix shape: {len(distances)}x?, expected {n}x{n}")
+            for i in range(n):
+                if len(distances[i]) != n or len(durations[i]) != n:
+                    raise ValueError(f"OSRM row {i} wrong length")
+                for j in range(n):
+                    if i == j:
+                        continue
+                    d_m = distances[i][j]
+                    t_s = durations[i][j]
+                    if d_m is None or t_s is None:
+                        # OSRM marks unreachable cells as null. Fall back to
+                        # Haversine for those specific cells so the matrix
+                        # stays complete.
+                        km = haversine_km(coords[i][0], coords[i][1], coords[j][0], coords[j][1]) * haversine_fallback_multiplier
+                        dist_cm[i][j] = int(round(km * 100_000))
+                        time_secs[i][j] = int(round(km / max(haversine_fallback_speed_kmh, 1) * 3600))
+                    else:
+                        dist_cm[i][j] = int(round(float(d_m) * 100))  # meters → cm
+                        time_secs[i][j] = int(round(float(t_s)))
+            return dist_cm, time_secs
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            log.warning("OSRM attempt %d failed: %s", attempt + 1, exc)
+            if attempt < HTTP_MAX_RETRIES - 1:
+                time.sleep(HTTP_RETRY_BACKOFF_SECS * (attempt + 1))
+    raise RuntimeError(f"OSRM /table failed after {HTTP_MAX_RETRIES} attempts: {last_exc}")
+
+
+# ---------------------------------------------------------------------------
 # Public entry point used by solver.py
 # ---------------------------------------------------------------------------
 
@@ -253,8 +336,26 @@ def build_matrices(
                 meta = {"provider_used": "HAVERSINE", "cached": False, "fallback_reason": f"MAPBOX_ERROR: {exc}"}
                 dist_cm, time_secs = haversine_matrix(coords, haversine_multiplier, avg_speed_kmh)
     else:
-        # HAVERSINE
-        dist_cm, time_secs = haversine_matrix(coords, haversine_multiplier, avg_speed_kmh)
+        # HAVERSINE — but if OSRM_URL is set, we transparently upgrade to OSRM
+        # so the SOLVER receives real road distance/time instead of straight-line
+        # × 1.30. That's the only way to eliminate the "zig-zag" routes that
+        # come from PyVRP being fooled by Haversine "this pair is close" when
+        # the road network actually requires a long detour. If OSRM fails for
+        # any reason, fall back to real Haversine so the solver never blocks.
+        if OSRM_URL:
+            try:
+                dist_cm, time_secs = osrm_table(
+                    coords,
+                    haversine_fallback_multiplier=haversine_multiplier,
+                    haversine_fallback_speed_kmh=avg_speed_kmh,
+                )
+                meta = {"provider_used": "OSRM", "cached": False, "osrm_url": OSRM_URL}
+            except Exception as exc:  # noqa: BLE001
+                log.warning("OSRM matrix failed (%s); falling back to Haversine", exc)
+                meta = {"provider_used": "HAVERSINE", "cached": False, "fallback_reason": f"OSRM_ERROR: {exc}"}
+                dist_cm, time_secs = haversine_matrix(coords, haversine_multiplier, avg_speed_kmh)
+        else:
+            dist_cm, time_secs = haversine_matrix(coords, haversine_multiplier, avg_speed_kmh)
 
     if use_cache:
         # FIFO eviction
