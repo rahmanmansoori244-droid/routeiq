@@ -6,16 +6,37 @@ Railway project **`routeiq`**, environment **`production`**, region **EU West (A
 |---|---|---|---|
 | `solver` | GitHub `main`, `apps/solver` Dockerfile | **Online**. Redeployed 2026-09-24 with `OSRM_URL` set | private only: `solver.railway.internal` |
 | `routeiq-osrm` | GitHub `nmwc-dispatch-mvp` → switch to `main` after PR #25 merges; root `/infra/osrm` | **Online** since 2026-09-24. Health check (a Muscat `/nearest` query) passes | private only: `routeiq-osrm.railway.internal:5000` |
-| `Postgres` | image `ghcr.io/railwayapp-templates/postgres-ssl:18`, volume `postgres-volume` | **Crashed 2026-05-11**. Railway then removed the deployment; the logs have expired | volume still attached |
+| `Postgres` | image `ghcr.io/railwayapp-templates/postgres-ssl:18`, volume `postgres-volume` (4.6 GB) | **Online again since 2026-09-24**. It had been down since 2026-05-12; see below. A manual volume backup was taken first (2026-09-24 16:21, 220 MB) | private: `postgres.railway.internal`; **also a public TCP proxy** `viaduct.proxy.rlwy.net:22270` |
 | `web` | GitHub `main`, Nixpacks | **Crashed 2026-05-11**. Deployment removed; the old URL answers 502 | public |
 
 OSRM setup and verification: see [OSRM_SETUP.md](OSRM_SETUP.md).
 
-## Bringing web + database back (not done yet — owner decision)
+## Postgres outage 2026-05-12 → 2026-09-24
 
-1. **Postgres:** open the service and click **Deploy the image…**. Watch the deploy logs; the crash cause is unknown because the logs expired.
-   - The volume is still attached, so the data should be there.
-   - Take a backup (**Postgres → Backups**) before anything else touches it.
+The logs from May had expired, so the cause is reconstructed from the restart logs on 2026-09-24.
+
+- **Killed, not shut down.** Postgres logged "database system was interrupted; last known up at 2026-05-12 05:38:42 UTC" and "not properly shut down; automatic recovery in progress". Something stopped the container abruptly at or after that time.
+- **Why it couldn't restart (most likely).** The kill left a stale lock file, `pgdata/postmaster.pid`, which was still there four months later.
+  - In containers, Postgres commonly refuses to start over a stale lock file. Restarts then keep failing until Railway gives up ("crashed for too long") and removes the deployment.
+  - Today's image has a wrapper that deletes a stale lock file at start ("wrapper: removing stale … postmaster.pid"). That is why the redeploy worked.
+  - This is an inference: the May crash logs are gone.
+- **Ruled out:**
+  - Disk full: the volume is 4.6 GB and holds about 220 MB.
+  - Postgres major-version mismatch: the data directory opened fine under PostgreSQL 18.6.
+  - Data corruption: WAL recovery replayed about 200 bytes and finished in milliseconds.
+- **Unknown:** what killed the container on 2026-05-12, e.g. a host event, memory, or billing. `web` crashed at the same time, because it cannot start without the database.
+- **Recovery (2026-09-24):**
+  1. A manual volume backup was taken first.
+  2. The image `postgres-ssl:18` was redeployed.
+  3. Postgres was ready in under a second and stayed up.
+
+Follow-ups:
+- Turn on a **backup schedule** (Postgres → Backups). There were no backups before today.
+- Decide whether the public TCP proxy is needed; remove it if nothing outside Railway connects.
+
+## Bringing web back (not done yet — owner decision)
+
+1. **Postgres:** done (see above).
 2. **Merge PR #25**, then **web** redeploys from `main`.
    - Its start command runs `prisma migrate deploy`, which applies the two dispatch-MVP migrations.
    - Web variables (names only; values live in Railway): `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `SOLVER_URL`, `SOLVER_TOKEN`. Optional ones are listed in `.env.example`.
