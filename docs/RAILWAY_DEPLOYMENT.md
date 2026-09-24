@@ -4,10 +4,10 @@ Railway project **`routeiq`**, environment **`production`**, region **EU West (A
 
 | Service | Source | State (2026-09-24) | Network |
 |---|---|---|---|
-| `solver` | GitHub `main`, `apps/solver` Dockerfile | **Online**. Redeployed 2026-09-24 with `OSRM_URL` set | private only: `solver.railway.internal` |
-| `routeiq-osrm` | GitHub `nmwc-dispatch-mvp` → switch to `main` after PR #25 merges; root `/infra/osrm` | **Online** since 2026-09-24. Health check (a Muscat `/nearest` query) passes | private only: `routeiq-osrm.railway.internal:5000` |
-| `Postgres` | image `ghcr.io/railwayapp-templates/postgres-ssl:18`, volume `postgres-volume` (4.6 GB) | **Online again since 2026-09-24**. It had been down since 2026-05-12; see below. A manual volume backup was taken first (2026-09-24 16:21, 220 MB) | private: `postgres.railway.internal`; **also a public TCP proxy** `viaduct.proxy.rlwy.net:22270` |
-| `web` | GitHub `main`, Nixpacks | **Crashed 2026-05-11**. Deployment removed; the old URL answers 502 | public |
+| `solver` | GitHub `main`, root `/apps/solver`, Dockerfile | **Online**: the OR-Tools dispatch planner since PR #25 (2026-09-24); `OSRM_URL` set | private only: `solver.railway.internal` |
+| `routeiq-osrm` | GitHub `main`, root `/infra/osrm`, watch path `/infra/osrm/**` | **Online** since 2026-09-24. Health check (a Muscat `/nearest` query) passes | private only: `routeiq-osrm.railway.internal:5000` |
+| `Postgres` | image `ghcr.io/railwayapp-templates/postgres-ssl:18`, volume `postgres-volume` (4.6 GB) | **Online again since 2026-09-24**. It had been down since 2026-05-12; see below. Backups: daily + weekly schedule, plus manual ones before the restart and before the PR #25 merge | private: `postgres.railway.internal`; **also a public TCP proxy** `viaduct.proxy.rlwy.net:22270` |
+| `web` | GitHub `main`, repo root, Nixpacks | **Online** since the PR #25 merge (2026-09-24, `675f3fc`); `/api/health` reports db, solver and OSRM routing up | public: `web-production-a9d04.up.railway.app` |
 
 OSRM setup and verification: see [OSRM_SETUP.md](OSRM_SETUP.md).
 
@@ -34,11 +34,11 @@ Follow-ups:
 - Backup schedule: **done 2026-09-24**, daily (kept 6 days) + weekly (kept 27 days). There were no backups before that.
 - Decide whether the public TCP proxy is needed; remove it if nothing outside Railway connects.
 
-## Bringing web back (not done yet — owner decision)
+## Production cut-over (done 2026-09-24)
 
 1. **Postgres:** done (see above). Take a fresh manual backup right before merging (Postgres → Backups → New backup): it is the rollback point.
 2. **Merge PR #25**, then **web** redeploys from `main`.
-   - Its **pre-deploy step** (`deploy.preDeployCommand` in `apps/web/railway.json`) runs `prisma migrate deploy`. That applies three migrations:
+   - Its **pre-deploy step** (Railway dashboard, see below) runs `prisma migrate deploy`. That applies three migrations:
      - the dispatch MVP schema;
      - `Order.priorityFromFile`;
      - OSRM as the default distance provider. Tenants in **Oman / the UAE** on HAVERSINE move to OSRM; the old solver was already silently using the public OSRM demo for them, except on days too big for it. Tenants elsewhere keep HAVERSINE: the shared OSRM map covers Oman + UAE only, so the app plans them on straight-line estimates unless they configure their own OSRM URL.
@@ -65,40 +65,39 @@ Follow-ups:
 - The only way back is to restore the pre-merge backup, then redeploy the previous commit. Never redeploy old code on top of the migrated database.
 - If the new web fails its health check, fix forward, or restore promptly.
 
-## Deadline: Railway stops reading `railway.json` on 2026-12-01
+## Service settings live in the Railway dashboard (done 2026-09-24)
 
-Railway deprecated "Config as Code".
+Railway stops reading `railway.json` files on 2026-12-01 ("Config as Code" is deprecated; <https://docs.railway.com/config-as-code>), and file values were never copied into the dashboard. The settings were therefore re-entered in the dashboard and both files deleted, well before the cutoff. **No service reads a config file any more.** If a service is ever recreated, set these by hand.
 
-- Existing `railway.json` files **stop being read on 2026-12-01**. Source: <https://docs.railway.com/config-as-code>
-- File values never get copied into the dashboard. After the cutoff, anything that only exists in the file is lost. Source: <https://docs.railway.com/config-as-code/reference>
-- For `web` that means the build command, the pre-deploy **database migration step**, the start command, the health check and the restart policy.
-- `routeiq-osrm` does not depend on a file: all its settings live in the dashboard.
+| Service | Setting | Value |
+|---|---|---|
+| web | Root directory | repo root |
+| web | Builder | Nixpacks (deprecated, but still working; moving to Railpack is a separate change, see below) |
+| web | Build command | `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @routeiq/web build` |
+| web | Pre-deploy command | `pnpm --filter @routeiq/web db:migrate:deploy` (a failed migration stops the deploy; the previous version keeps serving) |
+| web | Start command | `pnpm --filter @routeiq/web start` |
+| web | Healthcheck | `/api/health`, timeout 300 s (Railway default) |
+| web | Restart policy | On Failure (Railway default: 10 retries) |
+| solver | Root directory | `/apps/solver` |
+| solver | Builder | Dockerfile (`/apps/solver/Dockerfile`) |
+| solver | Healthcheck | `/health` |
+| routeiq-osrm | all | see [OSRM_SETUP.md](OSRM_SETUP.md) |
 
-**Recommended route: re-enter the settings in the dashboard, then delete the files.**
+How it was done, and what to know if it is ever needed again:
+- **web** had an explicit config path (`/apps/web/railway.json`). Settings that come from a file are **read-only** in the dashboard until a deploy without the file is live.
+  - So: clear **Settings → Config-as-code → Railway Config File** and deploy.
+  - That build had no commands and failed its health check. **The previous version kept serving.**
+  - Then enter the values above and deploy again.
+- **solver** had no config path: Railway **auto-reads a `railway.json` in the service's root directory**, so only deleting the file switches it off.
+- Avoid `railway config migrate` / Infrastructure as Code (`.railway/railway.ts`) for now:
+  - The CLI drops builder, restart policy, pre-deploy and health-check settings: <https://github.com/railwayapp/cli/issues/1199>.
+  - An IaC file must list *every* resource, or Railway plans to delete what is missing, including the database.
 
-Avoid `railway config migrate` / Infrastructure as Code (`.railway/railway.ts`) for now:
-- The CLI currently drops builder, restart policy, pre-deploy and health-check settings: <https://github.com/railwayapp/cli/issues/1199>.
-- An IaC file must list *every* resource, or Railway plans to delete what's missing, including the database.
-
-Before 2026-12-01, per service:
-
-1. Open the latest successful deployment's **Details**. Settings that came from the file carry a file icon; note them.
-2. **web** → Settings:
-   - Build Command `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @routeiq/web build`.
-   - **Pre-deploy Command** `pnpm --filter @routeiq/web db:migrate:deploy` (already the pre-deploy step in `railway.json`). If migrations fail, the deploy stops and the previous version keeps serving.
-   - Start Command `pnpm --filter @routeiq/web start`.
-   - Healthcheck `/api/health`, timeout 30.
-   - Restart On Failure, 3 retries.
-3. **solver** → Settings:
-   - Builder Dockerfile (`/apps/solver/Dockerfile`).
-   - Healthcheck `/health`, timeout 15.
-   - Restart On Failure, 3 retries.
-4. On each service, clear **Config-as-code → Railway Config File**. Never set it to a new path; Railway rejects new file paths.
-5. Delete `apps/web/railway.json` and `apps/solver/railway.json` in a commit. Deploy, and confirm no settings show the file icon.
-6. Later, as a separate change: move `web` from Nixpacks (deprecated) to Railpack.
-   - Build command `pnpm --filter @routeiq/web build`.
-   - Pin Node with `engines.node` or `RAILPACK_NODE_VERSION`.
-   - Source: <https://railpack.com/languages/node>.
+Later, as a separate change, move `web` from Nixpacks to Railpack:
+- Build command `pnpm --filter @routeiq/web build`.
+- Pin Node with `engines.node` or `RAILPACK_NODE_VERSION`.
+- Fix the root `packageManager` (`pnpm@9.0.0`, while the lockfile is built with pnpm 9.15).
+- Source: <https://railpack.com/languages/node>.
 
 ## Private networking notes
 

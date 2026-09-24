@@ -109,7 +109,7 @@ Every 90 days per CLAUDE.md §14.
 If you need to scale beyond one web instance, swap the inflight map for Redis-backed locks (BullMQ recommended) before scaling — that's a v2 prerequisite.
 
 ### Migrations
-- `pnpm db:migrate:deploy` runs on Railway as the web service's **pre-deploy** step (`deploy.preDeployCommand` in `apps/web/railway.json`). A failed migration stops the deploy before the new version starts.
+- `pnpm db:migrate:deploy` runs on Railway as the web service's **pre-deploy** step (web → Settings → Deploy; see docs/RAILWAY_DEPLOYMENT.md). A failed migration stops the deploy before the new version starts.
 - Never edit a historical migration. Always create a new one.
 - Zero-downtime pattern for destructive changes: expand → migrate code → contract over two deploys.
 
