@@ -27,6 +27,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /data
+# Cache-buster for the monthly map refresh. The download step below never changes, so Docker
+# (and Railway's build cache) would otherwise reuse last month's map forever. Bump this value,
+# e.g. as a Railway service variable (Railway passes declared ARGs), to rebuild with fresh OSM data.
+ARG MAP_REFRESH=2026-09
 RUN curl -fsSL --retry 3 --retry-delay 10 -o source.osm.pbf "${PBF_URL}" \
  && osmium fileinfo -e source.osm.pbf | grep -m1 -i "timestamp" > SOURCE_TIMESTAMP || true \
  && osmium extract --strategy smart --bbox "${BBOX}" --overwrite -o region.osm.pbf source.osm.pbf \
@@ -35,7 +39,7 @@ RUN curl -fsSL --retry 3 --retry-delay 10 -o source.osm.pbf "${PBF_URL}" \
  && osrm-partition region.osrm \
  && osrm-customize region.osrm \
  && rm region.osm.pbf \
- && printf 'source=%s\nbbox=%s\nprofile=%s\nbuilt_at=%s\n' "${PBF_URL}" "${BBOX}" "${PROFILE}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > BUILD_INFO
+ && printf 'source=%s\nbbox=%s\nprofile=%s\nmap_refresh=%s\nbuilt_at=%s\n' "${PBF_URL}" "${BBOX}" "${PROFILE}" "${MAP_REFRESH}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > BUILD_INFO
 
 FROM ${OSRM_IMAGE}
 COPY --from=build /data /data

@@ -13,7 +13,6 @@ There is no silent default:
 | File | Purpose |
 |---|---|
 | `infra/osrm/Dockerfile` | Pinned OSRM `v26.9.0`. Downloads the Geofabrik GCC extract, clips it to **Oman + UAE** (the UAE is needed for Musandam/Buraimi routes), and builds the routing graph (`car` profile, MLD) **at image build time**. The container needs no volume and starts in seconds. |
-| `infra/osrm/railway.json` | Railway service config: Dockerfile builder, health check on a Muscat `/nearest` query, 1 replica. |
 | `infra/osrm/docker-compose.yml` | Same image on a VM or the NMWC on-prem server, bound to `127.0.0.1:5000`. |
 | `infra/osrm/smoke-test.sh` | Proves real road routes: Ghala → Ruwi / Seeb / Barka / Nizwa within expected km, Ghala → Khasab via the UAE, and a 100×100 table. |
 | `.github/workflows/osrm.yml` | Builds the image and runs the smoke test on every PR that touches `infra/osrm`. Validation only; nothing is published. |
@@ -22,30 +21,32 @@ Build needs ~4 GB RAM and ~10 min. Running needs ~0.5–1 GB RAM and <1 vCPU. Tr
 
 **Security.** OSRM has **no authentication**. It must only be reachable on a private network (Railway private networking, the VM's localhost or LAN, the NMWC network). Never attach a public domain or open port 5000 to the internet.
 
-## Option A — Railway (same project as the web app and solver)
+## Option A — Railway (same project as the web app and solver) — **deployed**
 
-Railway is where RouteIQ was deployed before. The CLI must be logged in by you (`railway login` opens a browser).
+`routeiq-osrm` runs in the `routeiq` project, `production` environment, EU West, next to `solver`. Railway no longer lets new services opt into config files (`railway.json`) after 2026-08-28, so every setting below lives in the **dashboard**. If the service is ever recreated, set them by hand.
 
-```bash
-railway login
-cd C:/Users/abdulr/routeiq
-railway link                                   # pick the RouteIQ project + production environment
-railway add --service routeiq-osrm             # new empty service
-```
+1. **+ Add → Empty Service**, renamed to `routeiq-osrm`. Starting empty means nothing deploys before the settings are right.
+2. **Settings → Source**
+   - Repo `rahmanmansoori244-droid/routeiq`.
+   - **Root Directory** `/infra/osrm`.
+   - **Branch** `main`. Until PR #25 is merged it is `nmwc-dispatch-mvp`; switch it to `main` after the merge.
+3. **Settings → Build**
+   - **Builder** `Dockerfile`, **Dockerfile Path** `/infra/osrm/Dockerfile`.
+   - **Watch Paths** `/infra/osrm/**`, so pushes to other code don't rebuild the map (~10 min each).
+4. **Settings → Deploy**
+   - **Healthcheck Path** `/nearest/v1/driving/58.3920,23.5680`, a real Muscat road lookup.
+   - Timeout 300 s (default). Restart policy On Failure (default).
+5. **Variables**
+   - `OSRM_BIND=::`. `::` listens on IPv6 and IPv4, which covers Railway's private network.
+   - `PORT=5000`. It is pinned so the private URL below never changes.
+6. **Networking:** **no public domain**. The service shows as "Unexposed service". The private address is `routeiq-osrm.railway.internal`.
 
-In the Railway dashboard, `routeiq-osrm` service:
-
-1. **Settings → Source:** connect the GitHub repo `rahmanmansoori244-droid/routeiq`, branch `main`.
-2. **Root directory:** `infra/osrm` (Railway then uses `infra/osrm/railway.json` and the Dockerfile).
-3. **Variables:** `OSRM_BIND=::`. Railway's private network is IPv6; `::` also accepts IPv4.
-4. **Networking:** do **not** generate a public domain. The private address is `routeiq-osrm.railway.internal`.
-5. **Resources:** 1 GB RAM is enough at runtime. The build uses Railway's builder.
-
-On the **solver** service, set:
+On the **solver** service, set the variable below, then deploy the staged change:
 ```
 OSRM_URL=http://routeiq-osrm.railway.internal:5000
 ```
-Then redeploy the solver.
+
+> The solver on `main` before PR #25 already reads `OSRM_URL`, but it **defaults to the public demo server** when the variable is unset. Setting it therefore also stops customer coordinates from going to `router.project-osrm.org`.
 
 Costs are usage-based: roughly 1 GB RAM running continuously plus a monthly rebuild. Check the Railway dashboard; it's usually well under 10 USD/month.
 
@@ -73,7 +74,9 @@ Monitoring: alert when `/api/health` → `routing.status` is not `up` for more t
 
 ## Monthly map refresh
 OpenStreetMap changes (new roads, closures). Rebuild the image about monthly:
-- **Railway:** service → Deployments → **Redeploy** (with build cache off), or push any change under `infra/osrm/`.
+- **Railway:** on `routeiq-osrm`, set or update the variable `MAP_REFRESH` to the current month (e.g. `2026-10`) and deploy the change.
+  - Railway passes it to the Dockerfile's `ARG MAP_REFRESH`, which forces a fresh map download.
+  - A plain **Redeploy**, or a push under `infra/osrm/`, can reuse cached Docker layers and ship last month's map.
 - **Docker host:**
   ```bash
   docker compose -f infra/osrm/docker-compose.yml build --pull --no-cache && docker compose -f infra/osrm/docker-compose.yml up -d
@@ -89,4 +92,6 @@ OpenStreetMap changes (new roads, closures). Rebuild the image about monthly:
 3. If a single factor is not enough (e.g. highway vs city), switch the image to a custom truck Lua profile via the `PROFILE` build argument.
 
 ## Rollback
-Remove or blank `OSRM_URL` on the solver and redeploy. Plans immediately fall back to estimated distances, with warnings. The OSRM service can be deleted without any data loss; it holds no RouteIQ data.
+Set `OSRM_URL` on the solver to an **empty value** and redeploy. Plans immediately fall back to estimated distances, with warnings.
+
+Blank the variable rather than deleting it: the pre-PR-#25 solver on `main` falls back to the public demo server when the variable is missing. The OSRM service can be deleted without any data loss; it holds no RouteIQ data.

@@ -6,7 +6,7 @@ Route optimization for NMWC (National Mineral Water Company, Oman): the **daily 
 - [`docs/DISPATCHER_GUIDE.md`](./docs/DISPATCHER_GUIDE.md): the daily workflow (upload → resolve → optimize → review → lock/export/dispatch → late orders)
 - [`docs/OPTIMIZER_DESIGN.md`](./docs/OPTIMIZER_DESIGN.md): how the optimizer decides (capacity, P1–P5, windows, multi-load trucks, cost)
 - [`docs/NMWC_DISPATCH_RESTART_AUDIT.md`](./docs/NMWC_DISPATCH_RESTART_AUDIT.md): what the recovered code did and what changed
-- [`docs/OPTIMIZER_BENCHMARK.md`](./docs/OPTIMIZER_BENCHMARK.md), [`docs/OSRM_SETUP.md`](./docs/OSRM_SETUP.md), [`docs/OPERATION_PROJECT_HANDOFF.md`](./docs/OPERATION_PROJECT_HANDOFF.md), [`docs/LOCAL_DEV.md`](./docs/LOCAL_DEV.md)
+- [`docs/OPTIMIZER_BENCHMARK.md`](./docs/OPTIMIZER_BENCHMARK.md), [`docs/OSRM_SETUP.md`](./docs/OSRM_SETUP.md), [`docs/RAILWAY_DEPLOYMENT.md`](./docs/RAILWAY_DEPLOYMENT.md), [`docs/OPERATION_PROJECT_HANDOFF.md`](./docs/OPERATION_PROJECT_HANDOFF.md), [`docs/LOCAL_DEV.md`](./docs/LOCAL_DEV.md)
 
 [`CLAUDE.md`](./CLAUDE.md) is the original v1.3 SaaS specification (May 2026). Where it disagrees with the docs above, the docs above and the code win.
 
