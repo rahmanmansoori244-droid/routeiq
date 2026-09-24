@@ -1,33 +1,21 @@
 # RouteIQ Solver
 
-FastAPI + OR-Tools route optimization service. Deployed as a separate Railway service.
+FastAPI service, deployed separately from the web app. Every endpoint except `/health` requires the `X-Solver-Token` shared secret.
 
-## Phase 0
+| Path | Engine | Purpose |
+|---|---|---|
+| `GET /health` | — | Railway health check |
+| `POST /optimize-dispatch` | **OR-Tools** (`dispatch_solver.py`) | NMWC daily dispatch planner: cases+kg capacity, hard + preferred windows, P1–P5 drop penalties, multi-load trucks (depot reload visits), frozen locked/dispatched loads, RECOMMENDED + MIN_TRUCKS + MIN_DISTANCE |
+| `POST /route-geometry` | OSRM | road polyline for a load (straight lines when unavailable) |
+| `POST /optimize` | PyVRP (`solver.py`) | legacy v1 three-scenario solver, kept for comparison only |
 
-Only `/health` is wired. `/optimize` returns 501 with a token check shim. Full implementation lands in Phase 3 per [`CLAUDE.md`](../../CLAUDE.md) section 7.
+Road distance comes from `providers.py`: OSRM when `OSRM_URL` (or the request's `osrm_url`) is set, and otherwise Haversine × multiplier labelled as estimated. There is no silent public default; see `../../docs/OSRM_SETUP.md`.
 
 ## Local dev
-
 ```bash
-python -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-export SOLVER_TOKEN=dev-token       # PowerShell: $env:SOLVER_TOKEN = "dev-token"
-uvicorn main:app --reload --port 8000
+python -m venv .venv && .venv/Scripts/pip install -r requirements.txt   # bin/ on Linux/macOS
+SOLVER_TOKEN=dev-token OSRM_URL=http://localhost:5000 .venv/Scripts/python -m uvicorn main:app --port 8000
+.venv/Scripts/python -m pytest tests -q
 ```
 
-## Endpoints
-
-| Path | Auth | Description |
-|---|---|---|
-| `GET /health` | public | Returns `{"ok": true}`. Used by Railway healthchecks. |
-| `POST /optimize` | `X-Solver-Token` shared secret | 501 in Phase 0; routing engine in Phase 3. |
-
-## Railway
-
-Both `routeiq-web` and `routeiq-solver` deploy from the monorepo. Railway uses the Dockerfile in this directory. The web service reaches us via `http://routeiq-solver.railway.internal:8000`.
-
-Required env vars:
-
-- `SOLVER_TOKEN` — shared secret with the web service. Rotate every 90 days per the runbook.
-- `PORT` — Railway sets this. Default 8000.
+`SOLVER_PARALLEL=0` solves the plan alternatives sequentially instead of in worker processes. Design notes: `../../docs/OPTIMIZER_DESIGN.md`.

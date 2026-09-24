@@ -31,7 +31,14 @@ export const PATCH = (req: Request, { params }: Params) =>
       }
       if (input.lat !== undefined && input.lng !== undefined) {
         data.geocodeConfidence = 'HIGH';
+        data.locationSource = 'MANUAL_LATLNG';
+        data.locationVerified = true;
+        data.locationVerifiedById = user.id;
+        data.locationVerifiedAt = new Date();
       }
+      // A dispatcher setting these explicitly confirms them (no more "default" warnings).
+      if (input.priority !== undefined) data.priorityConfirmed = true;
+      if (input.avgServiceTimeMin !== undefined) data.serviceTimeConfirmed = true;
 
       const after = await db.customer.update({ where: { id: params.id }, data: data as never });
       await audit({

@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * A4 PDF route sheets via @react-pdf/renderer. One Page per truck + one
  * summary + one unserved + optional baseline.
@@ -321,7 +320,6 @@ export async function buildRouteSheetPdf(sheet: RouteSheet, truckFilter?: string
     pages.push(<UnservedPage key="unserved" sheet={sheet} />);
   }
   // Use renderToBuffer (server-side stream → Buffer). Bound to Node runtime.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const buf = await renderToBuffer(<Document>{pages}</Document> as any);
   return buf as Buffer;
 }

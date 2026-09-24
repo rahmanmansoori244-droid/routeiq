@@ -1,15 +1,21 @@
 # RouteIQ
 
-Multi-tenant route-optimization SaaS. First customer: NMWC (National Mineral Water Company, Oman).
+Route optimization for NMWC (National Mineral Water Company, Oman): the **daily dispatch planner** turns tomorrow's sales orders into truck loading plans and delivery routes.
 
-**Source of truth:** [`CLAUDE.md`](./CLAUDE.md) — the v1.3 build specification. Read it before contributing.
+**Start here (Sep 2026 restart):**
+- [`docs/DISPATCHER_GUIDE.md`](./docs/DISPATCHER_GUIDE.md): the daily workflow (upload → resolve → optimize → review → lock/export/dispatch → late orders)
+- [`docs/OPTIMIZER_DESIGN.md`](./docs/OPTIMIZER_DESIGN.md): how the optimizer decides (capacity, P1–P5, windows, multi-load trucks, cost)
+- [`docs/NMWC_DISPATCH_RESTART_AUDIT.md`](./docs/NMWC_DISPATCH_RESTART_AUDIT.md): what the recovered code did and what changed
+- [`docs/OPTIMIZER_BENCHMARK.md`](./docs/OPTIMIZER_BENCHMARK.md), [`docs/OSRM_SETUP.md`](./docs/OSRM_SETUP.md), [`docs/OPERATION_PROJECT_HANDOFF.md`](./docs/OPERATION_PROJECT_HANDOFF.md), [`docs/LOCAL_DEV.md`](./docs/LOCAL_DEV.md)
+
+[`CLAUDE.md`](./CLAUDE.md) is the original v1.3 SaaS specification (May 2026). Where it disagrees with the docs above, the docs above and the code win.
 
 ## Repository layout
 
 ```
 /apps
   /web                Next.js 14 App Router app
-  /solver             Python FastAPI + OR-Tools optimization service
+  /solver             Python FastAPI: OR-Tools dispatch planner (/optimize-dispatch) + legacy PyVRP (/optimize)
 /packages
   /shared-types       TS types shared between web and (eventually) clients
 ```

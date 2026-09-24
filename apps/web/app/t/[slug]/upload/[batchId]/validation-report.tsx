@@ -19,8 +19,8 @@ interface BatchSummary {
   warningRows: number;
   deliveryDate: string | null;
   orderCount: number;
-  // Validation payload as written by the upload route. Loose typing because the
-  // shape lives in lib/order-validate.ts and we just project a few fields here.
+  // Validation payload as written by the upload route (lib/dispatch/intake-server.ts).
+  // Loose typing: we only project errors and warnings here.
   validationJson: unknown;
 }
 
@@ -29,11 +29,10 @@ interface WarningRow { row?: number; message: string }
 
 function readValidation(json: unknown): { errors: ErrorRow[]; warnings: WarningRow[] } {
   if (!json || typeof json !== 'object') return { errors: [], warnings: [] };
-  const j = json as { errors?: ErrorRow[]; warnings?: WarningRow[] };
-  return {
-    errors: Array.isArray(j.errors) ? j.errors : [],
-    warnings: Array.isArray(j.warnings) ? j.warnings : [],
-  };
+  const j = json as { errors?: ErrorRow[]; warnings?: (WarningRow | string)[]; duplicates?: ErrorRow[] };
+  const warnings = (Array.isArray(j.warnings) ? j.warnings : []).map((w) => (typeof w === 'string' ? { message: w } : w));
+  for (const d of Array.isArray(j.duplicates) ? j.duplicates : []) warnings.push({ row: d.row, message: d.message });
+  return { errors: Array.isArray(j.errors) ? j.errors : [], warnings };
 }
 
 const STATUS_VARIANT: Record<UploadBatchStatus, 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline'> = {

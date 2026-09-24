@@ -41,3 +41,6 @@ coverage/
 # Prisma
 apps/web/prisma/*.db
 apps/web/prisma/*.db-journal
+
+# Local dev environment (portable Postgres, logs, setup scripts)
+.dev/

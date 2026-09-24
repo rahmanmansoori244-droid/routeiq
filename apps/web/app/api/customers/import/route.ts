@@ -180,10 +180,23 @@ export async function POST(req: Request) {
   }
 
   // Commit
+  // Existing locations are never wiped by a file without coordinates, and a location a
+  // dispatcher confirmed on the map is never overwritten by an import.
+  const existingLoc = new Map(
+    (await db.customer.findMany({ select: { code: true, branchKey: true, locationVerified: true } })).map((c) => [
+      `${c.code}::${c.branchKey}`,
+      c.locationVerified,
+    ]),
+  );
   let upserted = 0;
+  let keptVerified = 0;
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
     const geocodeConfidence = v.lat !== null && v.lng !== null ? 'HIGH' : 'MISSING';
+    const verified = existingLoc.get(`${v.code}::${v.branchKey}`) === true;
+    const fileHasLoc = v.lat !== null && v.lng !== null;
+    if (verified && fileHasLoc) keptVerified++;
+    const locUpdate = fileHasLoc && !verified ? { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const } : {};
     await db.customer.upsert({
       where: {
         tenantId_code_branchKey: {
@@ -203,7 +216,9 @@ export async function POST(req: Request) {
         lat: v.lat,
         lng: v.lng,
         geocodeConfidence,
+        locationSource: fileHasLoc ? 'IMPORT' : undefined,
         priority: v.priority,
+        priorityConfirmed: true,
         avgServiceTimeMin: v.avgServiceTimeMin,
         paymentType: v.paymentType,
       },
@@ -211,10 +226,9 @@ export async function POST(req: Request) {
         name: v.name,
         regionId,
         address: v.address,
-        lat: v.lat,
-        lng: v.lng,
-        geocodeConfidence,
+        ...locUpdate,
         priority: v.priority,
+        priorityConfirmed: true,
         avgServiceTimeMin: v.avgServiceTimeMin,
         paymentType: v.paymentType,
       },
@@ -245,7 +259,10 @@ export async function POST(req: Request) {
       errorRows: 0,
       warningRows: warnings.length,
       upserted,
-      warnings,
+      keptVerifiedLocations: keptVerified,
+      warnings: keptVerified
+        ? [...warnings, { message: `${keptVerified} customer location(s) confirmed by a dispatcher were kept (file coordinates ignored).` }]
+        : warnings,
     },
     error: null,
   });

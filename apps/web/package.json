@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run tests/lib tests/tenant-isolation.spec.ts",
+    "test:unit": "vitest run tests/lib tests/tenant-isolation.spec.ts",
+    "test:integration": "vitest run tests/integration",
     "test:watch": "vitest",
     "postinstall": "prisma generate",
     "db:migrate": "prisma migrate dev",
@@ -16,7 +18,9 @@
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
     "db:seed:nmwc": "tsx prisma/seed-nmwc.ts",
-    "db:seed:synth": "tsx prisma/seed-synth.ts"
+    "db:seed:synth": "tsx prisma/seed-synth.ts",
+    "db:seed:dispatch": "tsx prisma/seed-nmwc-dispatch.ts",
+    "fixtures:dispatch": "tsx prisma/nmwc-dispatch-fixtures.ts"
   },
   "dependencies": {
     "@auth/prisma-adapter": "^2.7.0",

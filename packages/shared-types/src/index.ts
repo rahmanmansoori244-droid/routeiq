@@ -4,7 +4,7 @@
  * payload contract per CLAUDE.md section 7.
  */
 
-export type DistanceProvider = 'HAVERSINE' | 'MAPBOX_MATRIX';
+export type DistanceProvider = 'HAVERSINE' | 'MAPBOX_MATRIX' | 'OSRM';
 
 export type OptimizationScenarioName = 'MIN_TRUCKS' | 'MIN_DISTANCE' | 'BALANCED';
 
@@ -108,3 +108,5 @@ export interface OptimizeResponse {
   scenarios: SolverScenario[];
   warnings: string[];
 }
+
+export * from './dispatch';

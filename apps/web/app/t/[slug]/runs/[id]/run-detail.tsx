@@ -77,6 +77,7 @@ const RUN_STATUS_VARIANT: Record<RunStatus, 'default' | 'success' | 'warning' | 
   FAILED: 'destructive',
   DISPATCHED: 'success',
   ARCHIVED: 'secondary',
+  SUPERSEDED: 'secondary',
 };
 
 export function RunDetail({

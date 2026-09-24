@@ -45,6 +45,17 @@ export function isOptimizing(runId: string): boolean {
   return inflight.has(runId);
 }
 
+/** Register any background optimize promise (legacy or dispatch) in the shared in-flight map,
+ * so duplicate starts are refused and the stuck-job janitor never reaps a live job. */
+export function trackInflight(runId: string, start: () => Promise<void>): boolean {
+  if (inflight.has(runId)) return false;
+  const p = start().finally(() => {
+    inflight.delete(runId);
+  });
+  inflight.set(runId, p);
+  return true;
+}
+
 async function runOptimizeJob(args: ScheduleArgs): Promise<void> {
   const { runId, runJobId } = args;
   await prisma.runJob.update({

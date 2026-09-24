@@ -56,8 +56,8 @@ describe('orphan janitor', () => {
       headers: { 'X-Janitor-Token': tok! },
     });
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { reaped: number } };
-    expect(body.data.reaped).toBeGreaterThanOrEqual(1);
+    const body = (await res.json()) as { data: { jobs: { reaped: number } } };
+    expect(body.data.jobs.reaped).toBeGreaterThanOrEqual(1);
 
     const afterJob = await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(afterJob.status).toBe('FAILED');

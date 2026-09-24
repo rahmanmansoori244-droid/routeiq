@@ -30,6 +30,9 @@ const patchSchema = z.discriminatedUnion('action', [
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {
+      if ((await prisma.planLoad.count({ where: { runId: params.id, tenantId: user.tenantId } })) > 0) {
+        return fail('Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.', 409);
+      }
       const input = await parseBody(r, patchSchema);
       try {
         const result = await prisma.$transaction(async (tx) => {
@@ -66,6 +69,9 @@ export const PATCH = (req: Request, { params }: Params) =>
 export const DELETE = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { user, ip }) => {
+      if ((await prisma.planLoad.count({ where: { runId: params.id, tenantId: user.tenantId } })) > 0) {
+        return fail('Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.', 409);
+      }
       try {
         const result = await prisma.$transaction(async (tx) => {
           const run = await tx.runPlan.findFirst({

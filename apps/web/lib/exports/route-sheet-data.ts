@@ -59,7 +59,7 @@ export interface RouteSheet {
     status: string;
     finalizedAt: string | null;
     chosenScenarioName: string | null;
-    distanceProvider: 'HAVERSINE' | 'MAPBOX_MATRIX';
+    distanceProvider: 'HAVERSINE' | 'MAPBOX_MATRIX' | 'OSRM';
     distanceIsEstimated: boolean;
   };
   routes: TruckRoute[];

@@ -108,9 +108,23 @@ export async function login(jar: CookieJar, email: string, password: string): Pr
 }
 
 export async function cleanupTenant(slug: string): Promise<void> {
-  // Cascading delete via Tenant — onDelete:Cascade handles every business table.
+  // Tenant -> business tables cascade, but plan rows reference trucks/products/customers with
+  // ON DELETE RESTRICT (deliberate: history must not vanish when master data is deleted), and
+  // Postgres checks RESTRICT during the cascade. Delete plan data first, then the tenant.
   try {
-    await prisma.tenant.deleteMany({ where: { slug } });
+    const t = await prisma.tenant.findUnique({ where: { slug }, select: { id: true } });
+    if (!t) return;
+    await prisma.$transaction([
+      prisma.$executeRaw`DELETE FROM "DeliveryProof" WHERE "tenantId" = ${t.id}`,
+      prisma.$executeRaw`DELETE FROM "RouteAssignment" WHERE "runId" IN (SELECT id FROM "RunPlan" WHERE "tenantId" = ${t.id})`,
+      prisma.$executeRaw`DELETE FROM "PlanLoad" WHERE "tenantId" = ${t.id}`,
+      prisma.$executeRaw`DELETE FROM "ManualBaselineAssignment" WHERE "baselineId" IN (SELECT id FROM "ManualBaseline" WHERE "tenantId" = ${t.id})`,
+      prisma.$executeRaw`DELETE FROM "OrderLine" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "tenantId" = ${t.id})`,
+      prisma.$executeRaw`DELETE FROM "UnservedOrder" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "tenantId" = ${t.id})`,
+      prisma.$executeRaw`DELETE FROM "Order" WHERE "tenantId" = ${t.id}`,
+      prisma.$executeRaw`DELETE FROM "RunPlan" WHERE "tenantId" = ${t.id}`,
+      prisma.tenant.deleteMany({ where: { id: t.id } }),
+    ]);
   } catch (err) {
     console.error('cleanup failed', err);
   }

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   CapacityUnit,
+  CustomerType,
   DistanceProvider,
   PaymentType,
   Role,
@@ -17,6 +18,9 @@ const nameSchema = z.string().trim().min(1, 'Required').max(120);
 
 const latSchema = z.coerce.number().min(-90).max(90);
 const lngSchema = z.coerce.number().min(-180).max(180);
+// z.coerce turns '' and null into 0 - a real-looking 0,0 location. For customers a blank
+// coordinate means "not set", so try the blank branch before coercing.
+const blankCoord = z.union([z.literal(''), z.null()]).transform(() => undefined);
 
 export const depotSchema = z.object({
   code: codeSchema,
@@ -77,8 +81,8 @@ export const customerSchema = z.object({
   branchCode: z.string().trim().max(32).optional().or(z.literal('').transform(() => undefined)),
   regionId: z.string().optional().or(z.literal('').transform(() => undefined)),
   address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
-  lat: latSchema.optional().or(z.literal('').transform(() => undefined)),
-  lng: lngSchema.optional().or(z.literal('').transform(() => undefined)),
+  lat: blankCoord.or(latSchema).optional(),
+  lng: blankCoord.or(lngSchema).optional(),
   // Customer.priority and Customer.avgServiceTimeMin both have DB defaults
   // (3 and 10 respectively). Treat them as optional in the API so a form that
   // omits them — or a fuzz payload — falls back to defaults instead of 400ing
@@ -91,7 +95,32 @@ export const customerSchema = z.object({
 });
 export type CustomerInput = z.infer<typeof customerSchema>;
 
-export const customerPatchSchema = customerSchema.partial();
+/** Minutes from local midnight (06:30 = 390). 1440 = end of day. */
+const minuteOfDay = z.coerce.number().int().min(0).max(1440);
+
+export const customerPatchSchema = customerSchema
+  .partial()
+  .extend({
+    // NMWC dispatch MVP - null clears the customer's own value (type default applies again).
+    customerType: z.nativeEnum(CustomerType).nullable().optional(),
+    hardWindowStartMin: minuteOfDay.nullable().optional(),
+    hardWindowEndMin: minuteOfDay.nullable().optional(),
+    prefWindowStartMin: minuteOfDay.nullable().optional(),
+    prefWindowEndMin: minuteOfDay.nullable().optional(),
+  })
+  .superRefine((v, ctx) => {
+    const pairs: [keyof typeof v, keyof typeof v, string][] = [
+      ['hardWindowStartMin', 'hardWindowEndMin', 'Hard window'],
+      ['prefWindowStartMin', 'prefWindowEndMin', 'Preferred window'],
+    ];
+    for (const [a, b, label] of pairs) {
+      const s = v[a] as number | null | undefined;
+      const e = v[b] as number | null | undefined;
+      if (typeof s === 'number' && typeof e === 'number' && e <= s) {
+        ctx.addIssue({ code: 'custom', path: [b as string], message: `${label}: end must be after start.` });
+      }
+    }
+  });
 export type CustomerPatchInput = z.infer<typeof customerPatchSchema>;
 
 /**

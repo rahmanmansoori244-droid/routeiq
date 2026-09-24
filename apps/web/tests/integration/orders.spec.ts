@@ -35,13 +35,17 @@ describe('order upload + confirm', () => {
       ['C-001', '', tomorrow, 'P-WATER', '5', '3', '', ''],
       ['', '', tomorrow, 'P-WATER', '3', '3', '', ''], // missing customer_code
       ['C-002', '', tomorrow, 'P-WATER', '-1', '3', '', ''], // negative cases
-      ['C-XXX', '', tomorrow, 'P-WATER', '2', '3', '', ''], // unknown customer
+      ['C-XXX', '', tomorrow, 'P-WATER', '2', '3', '', ''], // unknown customer: NOT an error (new, LOCATION REQUIRED)
     ]);
 
     const res = await uploadCsv(h.cookieJar, csv);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { batchId: string; validation: { errorRows: number; errors: { row: number }[] } } };
-    expect(body.data.validation.errorRows).toBeGreaterThanOrEqual(3);
+    const body = (await res.json()) as {
+      data: { batchId: string; validation: { errorRows: number; errors: { row: number }[]; issues: { newCustomers: { code: string }[] } } };
+    };
+    expect(body.data.validation.errorRows).toBe(2);
+    expect(body.data.validation.errors.map((e) => e.row).sort()).toEqual([3, 4]);
+    expect(body.data.validation.issues.newCustomers.map((c) => c.code)).toEqual(['C-XXX']);
 
     // Try to confirm — must refuse.
     const confirm = await fetchWith(h.cookieJar, `${BASE}/api/orders/${body.data.batchId}/confirm`, {
