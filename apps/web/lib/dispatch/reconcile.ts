@@ -9,11 +9,15 @@
  */
 
 export interface ReconLine {
+  id?: string; // needed when portions (split deliveries) refer to lines
   productCode: string;
   productName: string;
   salesOrderNo: string | null;
   cases: number;
 }
+
+/** Part of an order (split delivery): exact cases per order line. Absent = the whole order. */
+export type ReconPortion = { lineId: string; cases: number }[] | null | undefined;
 
 export interface ReconOrder {
   id: string;
@@ -27,11 +31,13 @@ export interface ReconPlanned {
   customerId: string; // the customer the stop was planned for
   truckId: string;
   loadNo: number;
+  lines?: ReconPortion;
 }
 
 export interface ReconUnserved {
   orderId: string;
   reasonCode: string;
+  lines?: ReconPortion;
 }
 
 export interface ReconRow {
@@ -49,8 +55,9 @@ export interface Reconciliation {
   plannedCases: number;
   unservedCases: number;
   orders: number;
-  plannedOrders: number;
-  unservedOrders: number;
+  plannedOrders: number; // orders with at least one planned case
+  unservedOrders: number; // orders with at least one unserved case
+  partialOrders: number; // split deliveries: some cases planned, the rest unserved
   problems: string[];
   bySku: ReconRow[];
   bySalesOrder: ReconRow[];
@@ -59,18 +66,47 @@ export interface Reconciliation {
 export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserved: ReconUnserved[]): Reconciliation {
   const problems: string[] = [];
   const byId = new Map(orders.map((o) => [o.id, o]));
+  const lineIdOf = (o: ReconOrder, idx: number) => o.lines[idx].id ?? `${o.id}#${idx}`;
+  // An order is either on the plan whole (once), or in portions whose cases add up per line.
+  const whole = new Map<string, number>();
+  const portions = new Map<string, number>();
   const seen = new Map<string, number>();
-  for (const p of planned) seen.set(p.orderId, (seen.get(p.orderId) ?? 0) + 1);
-  for (const u of unserved) seen.set(u.orderId, (seen.get(u.orderId) ?? 0) + 1);
+  for (const e of [...planned, ...unserved]) {
+    seen.set(e.orderId, (seen.get(e.orderId) ?? 0) + 1);
+    const m = e.lines ? portions : whole;
+    m.set(e.orderId, (m.get(e.orderId) ?? 0) + 1);
+  }
 
   for (const o of orders) {
     const n = seen.get(o.id) ?? 0;
+    const w = whole.get(o.id) ?? 0;
     if (n === 0) problems.push(`Order ${o.id} (${o.customerKey}) is neither planned nor unserved.`);
-    if (n > 1) problems.push(`Order ${o.id} (${o.customerKey}) appears ${n} times.`);
+    if (w > 1 || (w === 1 && n > 1)) problems.push(`Order ${o.id} (${o.customerKey}) appears ${n} times.`);
   }
   for (const id of seen.keys()) {
     if (!byId.has(id)) problems.push(`Order ${id} is in the plan but was never uploaded for this day.`);
   }
+  // Cases per order line, planned and unserved. A whole-order entry counts every line in full.
+  const plannedByLine = new Map<string, number>();
+  const unservedByLine = new Map<string, number>();
+  const add = (target: Map<string, number>, e: { orderId: string; lines?: ReconPortion }) => {
+    const o = byId.get(e.orderId);
+    if (!o) return;
+    if (!e.lines) {
+      o.lines.forEach((l, i) => target.set(lineIdOf(o, i), (target.get(lineIdOf(o, i)) ?? 0) + l.cases));
+      return;
+    }
+    const known = new Set(o.lines.map((_, i) => lineIdOf(o, i)));
+    for (const pl of e.lines) {
+      if (!known.has(pl.lineId)) {
+        problems.push(`Order ${o.id} (${o.customerKey}): a split portion refers to line ${pl.lineId}, which is not on the order.`);
+        continue;
+      }
+      target.set(pl.lineId, (target.get(pl.lineId) ?? 0) + pl.cases);
+    }
+  };
+  for (const p of planned) add(plannedByLine, p);
+  for (const u of unserved) add(unservedByLine, u);
   for (const p of planned) {
     const o = byId.get(p.orderId);
     if (o && o.customerId !== p.customerId) {
@@ -81,8 +117,6 @@ export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserve
     if (!u.reasonCode) problems.push(`Unserved order ${u.orderId} has no reason.`);
   }
 
-  const plannedIds = new Set(planned.map((p) => p.orderId));
-  const unservedIds = new Set(unserved.map((u) => u.orderId));
   const sku = new Map<string, ReconRow>();
   const so = new Map<string, ReconRow>();
   let uploadedCases = 0;
@@ -93,27 +127,37 @@ export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserve
     r[kind] += v;
     m.set(key, r);
   };
+  let plannedOrders = 0;
+  let unservedOrders = 0;
+  let partialOrders = 0;
   for (const o of orders) {
-    const isPlanned = plannedIds.has(o.id);
-    const isUnserved = unservedIds.has(o.id);
-    for (const l of o.lines) {
-      uploadedCases += l.cases;
-      bump(sku, l.productCode, l.productName, 'uploaded', l.cases);
-      const soKey = l.salesOrderNo ?? `(no SO) ${o.customerKey}`;
-      bump(so, soKey, soKey, 'uploaded', l.cases);
-      // An order that is (wrongly) both planned and unserved counts twice on purpose, so the
+    let orderPlanned = 0;
+    let orderUnserved = 0;
+    o.lines.forEach((l, i) => {
+      const id = lineIdOf(o, i);
+      // An order (wrongly) both planned and unserved counts twice on purpose, so the
       // arithmetic check fails loudly instead of hiding the duplicate.
-      if (isPlanned) {
-        plannedCases += l.cases;
-        bump(sku, l.productCode, l.productName, 'planned', l.cases);
-        bump(so, soKey, soKey, 'planned', l.cases);
+      const p = plannedByLine.get(id) ?? 0;
+      const u = unservedByLine.get(id) ?? 0;
+      orderPlanned += p;
+      orderUnserved += u;
+      uploadedCases += l.cases;
+      plannedCases += p;
+      unservedCases += u;
+      const soKey = l.salesOrderNo ?? `(no SO) ${o.customerKey}`;
+      bump(sku, l.productCode, l.productName, 'uploaded', l.cases);
+      bump(so, soKey, soKey, 'uploaded', l.cases);
+      bump(sku, l.productCode, l.productName, 'planned', p);
+      bump(so, soKey, soKey, 'planned', p);
+      bump(sku, l.productCode, l.productName, 'unserved', u);
+      bump(so, soKey, soKey, 'unserved', u);
+      if ((portions.get(o.id) ?? 0) > 0 && p + u !== l.cases) {
+        problems.push(`Order ${o.id} (${o.customerKey}) ${l.productCode}: uploaded ${l.cases} != planned ${p} + unserved ${u} across its split portions.`);
       }
-      if (isUnserved) {
-        unservedCases += l.cases;
-        bump(sku, l.productCode, l.productName, 'unserved', l.cases);
-        bump(so, soKey, soKey, 'unserved', l.cases);
-      }
-    }
+    });
+    if (orderPlanned > 0) plannedOrders++;
+    if (orderUnserved > 0) unservedOrders++;
+    if (orderPlanned > 0 && orderUnserved > 0 && (portions.get(o.id) ?? 0) > 0) partialOrders++;
   }
   const finish = (m: Map<string, ReconRow>) =>
     [...m.values()]
@@ -132,8 +176,9 @@ export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserve
     plannedCases,
     unservedCases,
     orders: orders.length,
-    plannedOrders: plannedIds.size,
-    unservedOrders: unservedIds.size,
+    plannedOrders,
+    unservedOrders,
+    partialOrders,
     problems,
     bySku,
     bySalesOrder,

@@ -8,6 +8,7 @@ import { effectiveAttrs, describeWindows, type TypeProfileLike } from './custome
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, type ScenarioDetails } from './plan-service';
+import { rowLines, splitPartLabels } from './split';
 import { fmtWindow, isoOf } from './time';
 
 export interface DetailStop {
@@ -38,6 +39,9 @@ export interface DetailStop {
   salesOrders: string[];
   skus: { productCode: string; productName: string; cases: number; weightKg: number }[];
   mapsUrl: string | null;
+  /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
+   * `restUnserved` = more of the customer's cases are on the unserved list. */
+  split: { part: number; parts: number; restUnserved: boolean } | null;
 }
 
 export interface DetailLoad {
@@ -79,6 +83,8 @@ export interface DetailUnserved {
   reasonMessage: string | null;
   late: boolean;
   salesOrders: string[];
+  /** Split delivery: only these cases of the order are unserved; the rest is on a truck. */
+  partial: boolean;
 }
 
 export interface PlanDetail {
@@ -155,19 +161,28 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     },
   });
   const priorityOf = (orderId: string, fallback: number) => chosenDetails?.scope.orderPriority[orderId] ?? fallback;
+  // Stops that carry split portions, for the "Part k of n" labels across the whole plan.
+  const portionStops: { stop: DetailStop; customerId: string; portion: boolean; departMin: number; truckCode: string; sequence: number }[] = [];
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
+    const withPortion = new Set<number>();
     for (const a of l.assignments) {
       const o = a.order;
       const c = o.customer;
       const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10 });
-      const skus = o.lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
+      // A split portion carries only some cases of some lines of the order.
+      const lines = rowLines(o.lines, a.portionLinesJson);
+      if (a.portionLinesJson !== null) withPortion.add(a.sequenceInTruck);
+      const cases = a.portionCases ?? o.totalCases;
+      const weightKg = a.portionWeightKg ?? o.totalWeightKg;
+      const skus = lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
+      const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const s = stops.get(a.sequenceInTruck);
       if (s) {
-        s.cases += o.totalCases;
-        s.weightKg += o.totalWeightKg;
+        s.cases += cases;
+        s.weightKg += weightKg;
         s.orderIds.push(o.id);
-        s.salesOrders = [...new Set([...s.salesOrders, ...o.lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x)])];
+        s.salesOrders = [...new Set([...s.salesOrders, ...salesOrders])];
         s.skus = aggregateSkus([...s.skus, ...skus]);
         s.late = s.late || o.isLate;
         s.priority = Math.min(s.priority, priorityOf(o.id, o.priority));
@@ -189,21 +204,27 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         waitMin: a.waitMin,
         window: describeWindows(eff),
         hardWindow: eff.hardStart !== null || eff.hardEnd !== null ? fmtWindow(eff.hardStart, eff.hardEnd) : null,
-        serviceMin: eff.serviceMin,
-        cases: o.totalCases,
-        weightKg: o.totalWeightKg,
+        // A split part unloads only its share: show the time the optimizer scheduled for it.
+        serviceMin: a.portionLinesJson !== null && a.departureMin !== null && a.serviceStartMin !== null ? a.departureMin - a.serviceStartMin : eff.serviceMin,
+        cases,
+        weightKg,
         legKm: a.plannedDistanceFromPrevKm,
         cumulativeKm: a.cumulativeKm,
         hardWindowOk: a.hardWindowOk,
         prefWindowOk: a.prefWindowOk,
         late: o.isLate,
         orderIds: [o.id],
-        salesOrders: [...new Set(o.lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x))],
+        salesOrders: [...new Set(salesOrders)],
         skus: aggregateSkus(skus),
         mapsUrl: c.lat !== null && c.lng !== null ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}` : null,
+        split: null,
       });
     }
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
+    for (const s of stopList) {
+      s.weightKg = Math.round(s.weightKg * 10) / 10;
+      portionStops.push({ stop: s, customerId: s.customerId, portion: withPortion.has(s.sequence), departMin: l.departMin, truckCode: l.truck.code, sequence: s.sequence });
+    }
     return {
       id: l.id,
       truckId: l.truckId,
@@ -232,10 +253,19 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   });
 
   const unservedRows = chosen?.unservedOrders ?? [];
+  const restUnserved = new Set<string>();
+  const onTruck = new Set(loads.flatMap((l) => l.assignments.map((a) => a.orderId)));
+  const customerOfOrder = new Map(loads.flatMap((l) => l.assignments.map((a) => [a.orderId, a.order.customerId] as const)));
+  for (const u of unservedRows) {
+    const cust = customerOfOrder.get(u.orderId);
+    if (u.portionLinesJson !== null && cust) restUnserved.add(cust);
+  }
+  for (const [p, label] of splitPartLabels(portionStops)) p.stop.split = { ...label, restUnserved: restUnserved.has(p.customerId) };
+
   const unservedOrders = unservedRows.length
     ? await prisma.order.findMany({
         where: { tenantId, id: { in: unservedRows.map((u) => u.orderId) } },
-        include: { customer: true, lines: { select: { salesOrderNo: true } } },
+        include: { customer: true, lines: { select: { id: true, cases: true, weightKg: true, salesOrderNo: true } } },
       })
     : [];
   const uo = new Map(unservedOrders.map((o) => [o.id, o]));
@@ -243,19 +273,21 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     .map((u): DetailUnserved | null => {
       const o = uo.get(u.orderId);
       if (!o) return null;
+      const cases = u.portionCases ?? o.totalCases;
       return {
         orderId: o.id,
         customerId: o.customerId,
         customerCode: o.customer.code,
         branchCode: o.customer.branchCode,
         customerName: o.customer.name,
-        cases: o.totalCases,
-        weightKg: o.totalWeightKg,
+        cases,
+        weightKg: u.portionWeightKg ?? o.totalWeightKg,
         priority: priorityOf(o.id, o.priority),
         reasonCode: u.reasonCode,
         reasonMessage: u.reasonMessage,
         late: o.isLate,
-        salesOrders: [...new Set(o.lines.map((l) => l.salesOrderNo).filter((x): x is string => !!x))],
+        salesOrders: [...new Set(rowLines(o.lines, u.portionLinesJson).map((l) => l.salesOrderNo).filter((x): x is string => !!x))],
+        partial: u.portionLinesJson !== null && onTruck.has(o.id), // some of this order is on a truck
       };
     })
     .filter((x): x is DetailUnserved => x !== null)

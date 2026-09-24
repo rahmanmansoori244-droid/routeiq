@@ -7,7 +7,7 @@
  * DISPATCHED / COMPLETED) are copied verbatim, the parent is marked SUPERSEDED (kept, never
  * overwritten) and only the remaining orders are optimized again.
  */
-import type { LoadStatus, OrderStatus, Prisma, UnservedReasonCode } from '@prisma/client';
+import { Prisma, type LoadStatus, type OrderStatus, type UnservedReasonCode } from '@prisma/client';
 import type {
   DispatchRequest,
   DispatchResponse,
@@ -30,6 +30,21 @@ import {
 } from './customer-attrs';
 import { checkTransition, isFrozen, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
+import {
+  choosePartCapacity,
+  fitsCapacity,
+  mergePortions,
+  orderIdOf,
+  portionId,
+  portionMoney,
+  portionsOfPart,
+  readPortionLines,
+  splitIntoParts,
+  type FleetTruck,
+  type OpenLine,
+  type PartCapacity,
+  type PortionRecord,
+} from './split';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dateOnly, isoOf } from './time';
 
@@ -47,6 +62,7 @@ export interface OrderDrop {
   orderId: string;
   reasonCode: UnservedReasonCode;
   message: string;
+  portion?: PortionRecord; // only the open (not frozen) part of the order is dropped
 }
 
 export interface BlockingIssue {
@@ -64,6 +80,17 @@ export interface PlanScope {
   orderIds: string[]; // orders sent to (or pre-dropped before) the optimizer
   frozenOrderIds: string[]; // orders sitting in frozen loads, kept as-is
   orderPriority: Record<string, number>;
+  /** Optimizer ids ("<orderId>~<part>") that stand for part of an order (split deliveries). */
+  portions?: Record<string, PortionRecord>;
+  /** Every order on a frozen load, fully or in part. */
+  frozenLoadOrderIds?: string[];
+  /** The frozen loads the optimization was computed around (for the "loads changed" check). */
+  frozenLoadIds?: string[];
+}
+
+/** The order an optimizer order-id stands for, and the portion when it is only part of it. */
+export function resolveOrderRef(scope: Pick<PlanScope, 'portions'>, id: string): { orderId: string; portion: PortionRecord | null } {
+  return { orderId: orderIdOf(id), portion: scope.portions?.[id] ?? null };
 }
 
 export interface BuiltRequest {
@@ -123,94 +150,226 @@ export async function buildDispatchRequest(
   const orders = await prisma.order.findMany({ where, include: ORDER_INCLUDE, orderBy: { uploadedAt: 'asc' } });
   const frozenLoads = await db.planLoad.findMany({
     where: { runId, status: { not: 'PLANNED' } },
-    include: { assignments: { select: { orderId: true } } },
+    include: { assignments: { select: { orderId: true, portionLinesJson: true } } },
     orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }],
   });
-  const frozenOrderIds = new Set(frozenLoads.flatMap((l) => l.assignments.map((a) => a.orderId)));
-  const trucks = await db.truck.findMany({ where: { depotId: run.depotId, active: true }, orderBy: { code: 'asc' } });
-  // Plan continuity: on a re-plan, tell the optimizer which truck each order was on in the
-  // previous version so one late order does not reshuffle every unlocked load.
-  const previousTruck = new Map<string, string>();
-  if (run.parentRunId) {
-    const prev = await prisma.routeAssignment.findMany({ where: { runId: run.parentRunId }, select: { orderId: true, truckId: true } });
-    for (const a of prev) previousTruck.set(a.orderId, a.truckId);
+  // What frozen (locked / loading / dispatched) loads already carry. A split order can be only
+  // partly on frozen loads: its remaining cases are planned again, never twice.
+  const frozenWhole = new Set<string>();
+  const frozenLineCases = new Map<string, number>();
+  for (const l of frozenLoads) {
+    for (const a of l.assignments) {
+      const pl = readPortionLines(a.portionLinesJson);
+      if (!pl) frozenWhole.add(a.orderId);
+      else for (const x of pl) frozenLineCases.set(x.lineId, (frozenLineCases.get(x.lineId) ?? 0) + x.cases);
+    }
   }
+  const frozenLoadOrderIds = [...new Set(frozenLoads.flatMap((l) => l.assignments.map((a) => a.orderId)))];
+  const trucks = await db.truck.findMany({ where: { depotId: run.depotId, active: true }, orderBy: { code: 'asc' } });
+  const frozenByTruck = new Map<string, typeof frozenLoads>();
+  for (const l of frozenLoads) frozenByTruck.set(l.truckId, [...(frozenByTruck.get(l.truckId) ?? []), l]);
+  // Plan continuity: on a re-plan, tell the optimizer which truck carried each order line in the
+  // previous version so one late order does not reshuffle every unlocked load. Per line (not per
+  // order) so each part of a split delivery is steered to the truck it was on.
+  const prevLineTruck = new Map<string, Map<string, number>>(); // lineId -> truckId -> cases
+  if (run.parentRunId) {
+    const prev = await prisma.routeAssignment.findMany({
+      where: { runId: run.parentRunId },
+      select: { orderId: true, truckId: true, portionLinesJson: true },
+      orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }, { sequenceInTruck: 'asc' }],
+    });
+    const linesOf = new Map(orders.map((o) => [o.id, o.lines]));
+    for (const a of prev) {
+      const pl = readPortionLines(a.portionLinesJson) ?? (linesOf.get(a.orderId) ?? []).map((l) => ({ lineId: l.id, cases: l.cases }));
+      for (const x of pl) {
+        const m = prevLineTruck.get(x.lineId) ?? new Map<string, number>();
+        m.set(a.truckId, (m.get(a.truckId) ?? 0) + x.cases);
+        prevLineTruck.set(x.lineId, m);
+      }
+    }
+  }
+  const previousTruckOf = (lineIds: string[]): string | null => {
+    const votes = new Map<string, number>();
+    for (const id of lineIds) for (const [t, n] of prevLineTruck.get(id) ?? []) votes.set(t, (votes.get(t) ?? 0) + n);
+    return [...votes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
+  };
+
+  // Each order with the lines (cases) still to plan.
+  type OpenOrder = { o: (typeof orders)[number]; lines: OpenLine[]; cases: number; kg: number; partial: boolean };
+  const frozenOrderIds: string[] = [];
+  const openByCustomer = new Map<string, OpenOrder[]>();
+  for (const o of orders) {
+    if (frozenWhole.has(o.id)) {
+      frozenOrderIds.push(o.id);
+      continue;
+    }
+    // Line kg is what the order total is summed from, so a part's kg matches the order's. Old
+    // orders may have no line weights: then the order's own kg is spread per case.
+    const linesKg = o.lines.reduce((a, l) => a + l.weightKg, 0);
+    const lineKgOk = linesKg > 0 && Math.abs(linesKg - o.totalWeightKg) <= 0.5 + 0.001 * o.totalWeightKg;
+    const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
+    const lines: OpenLine[] = o.lines.map((l) => ({
+      lineId: l.id,
+      orderId: o.id,
+      cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
+      kgPerCase: lineKgOk ? (l.cases > 0 ? l.weightKg / l.cases : 0) : orderKgPerCase,
+    }));
+    const partial = lines.some((l, i) => l.cases !== o.lines[i].cases);
+    const cases = lines.reduce((a, l) => a + l.cases, 0);
+    if (partial && cases === 0) {
+      frozenOrderIds.push(o.id); // every case is already on frozen loads
+      continue;
+    }
+    const open: OpenOrder = partial
+      ? { o, lines: lines.filter((l) => l.cases > 0), cases, kg: Math.round(lines.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10, partial }
+      : { o, lines, cases: o.totalCases, kg: o.totalWeightKg, partial };
+    openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
+  }
+  // Orders on frozen loads that today's order query no longer returns (e.g. a legacy order
+  // without a depot once a second depot exists) stay in scope, so the plan still reconciles.
+  const inScope = new Set([...frozenOrderIds, ...[...openByCustomer.values()].flat().map((x) => x.o.id)]);
+  for (const id of frozenLoadOrderIds) if (!inScope.has(id)) frozenOrderIds.push(id);
+
+  // Split deliveries: a customer that fits no truck (cases or kg) is planned as several stops at
+  // the same place. Only trucks with a load left today count, and parts are sized so that
+  // several of them can carry the parts (see choosePartCapacity).
+  const fleet: FleetTruck[] = trucks.map((t) => ({
+    code: t.code,
+    cases: t.capacityCases,
+    kg: t.capacityWeightKg > 0 ? t.capacityWeightKg : null,
+    tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
+  }));
+  const available = fleet.filter((t) => t.cases > 0 && t.tripsLeft > 0);
+  const partCapFor = (cases: number, kg: number): { cap: PartCapacity; truckCode: string } | null => {
+    const pool = available.length ? available : fleet;
+    if (!cfg.splitDeliveries || !pool.some((t) => t.cases > 0)) return null;
+    if (pool.some((t) => t.cases > 0 && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg }))) return null;
+    return choosePartCapacity(cases, kg, pool);
+  };
 
   const preDrops: OrderDrop[] = [];
   const blockingByCustomer = new Map<string, BlockingIssue>();
   const orderPriority: Record<string, number> = {};
-  const stops = new Map<string, DispatchStop & { _margins: (number | null)[]; _revenues: (number | null)[] }>();
+  const portions: Record<string, PortionRecord> = {};
+  const stopList: DispatchStop[] = [];
   const scopeIds: string[] = [];
   const badWindows: string[] = [];
+  const splitNotes: string[] = [];
+  const wholePortion = (x: OpenOrder): PortionRecord => ({
+    orderId: x.o.id,
+    lines: x.lines.map((l) => ({ lineId: l.lineId, cases: l.cases })),
+    cases: x.cases,
+    weightKg: x.kg,
+    part: null,
+    parts: null,
+  });
+  // Id the optimizer sees for (the open part of) an order: plain when the whole order is open.
+  const orderRef = (x: OpenOrder) => {
+    if (!x.partial) return x.o.id;
+    const id = portionId(x.o.id, 'open');
+    portions[id] = wholePortion(x);
+    return id;
+  };
+  // Revenue / margin of (part of) an order: from its own lines when they carry values.
+  const money = (o: OpenOrder['o'], field: 'salesValue' | 'marginValue', lines: { lineId: string; cases: number }[] | null) =>
+    lines === null
+      ? o[field]
+      : portionMoney(o[field], o.totalCases, o.lines.map((l) => ({ id: l.id, cases: l.cases, value: l[field] })), lines);
+  const openMoney = (x: OpenOrder, field: 'salesValue' | 'marginValue') => money(x.o, field, x.partial ? x.lines : null);
 
-  for (const o of orders) {
-    if (frozenOrderIds.has(o.id)) continue;
-    scopeIds.push(o.id);
-    const c = toPlanningCustomer(o.customer);
+  for (const group of openByCustomer.values()) {
+    const c = toPlanningCustomer(group[0].o.customer);
     const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
-    const pr = o.priorityFromFile ? Math.min(o.priority, eff.priority) : eff.priority;
+    const prOf = (o: OpenOrder['o']) => (o.priorityFromFile ? Math.min(o.priority, eff.priority) : eff.priority);
+    const pr = Math.min(...group.map((x) => prOf(x.o)));
+    for (const x of group) scopeIds.push(x.o.id);
     const cs = coordStatus(c.lat, c.lng, area);
     const locBad = cs === 'MISSING' || cs === 'INVALID' || (cs === 'OUTSIDE_AREA' && !c.locationVerified);
     if (locBad) {
       const code: UnservedReasonCode = cs === 'MISSING' ? 'MISSING_COORDINATES' : 'INVALID_LOCATION';
       const issue = customerIssues(c, eff, area).find((i) => i.blocking);
-      preDrops.push({ orderId: o.id, reasonCode: code, message: issue?.message ?? 'Location missing.' });
-      orderPriority[o.id] = pr;
       const b = blockingByCustomer.get(c.id) ?? {
         customerId: c.id, customerCode: c.code, branchCode: c.branchCode, customerName: c.name,
         code: cs === 'MISSING' ? 'LOCATION_REQUIRED' : 'INVALID_LOCATION', message: issue?.message ?? '', orderIds: [], cases: 0,
       };
-      b.orderIds.push(o.id);
-      b.cases += o.totalCases;
+      for (const x of group) {
+        preDrops.push({ orderId: x.o.id, reasonCode: code, message: issue?.message ?? 'Location missing.', portion: x.partial ? wholePortion(x) : undefined });
+        orderPriority[x.o.id] = prOf(x.o);
+        b.orderIds.push(x.o.id);
+        b.cases += x.cases;
+      }
       blockingByCustomer.set(c.id, b);
       continue;
     }
-    const s = stops.get(c.id);
-    if (s) {
-      s.order_ids.push(o.id);
-      s.demand_cases += o.totalCases;
-      s.demand_kg = (s.demand_kg ?? 0) + o.totalWeightKg;
-      s.priority = Math.min(s.priority ?? 5, pr);
-      s.late = s.late || o.isLate;
-      s._margins.push(o.marginValue);
-      s._revenues.push(o.salesValue);
-    } else {
-      const hard = usableWindow(eff.hardStart, eff.hardEnd);
-      const pref = usableWindow(eff.prefStart, eff.prefEnd);
-      if (!hard.ok || !pref.ok) badWindows.push(c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
-      stops.set(c.id, {
+    const hard = usableWindow(eff.hardStart, eff.hardEnd);
+    const pref = usableWindow(eff.prefStart, eff.prefEnd);
+    if (!hard.ok || !pref.ok) badWindows.push(c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
+    const totalCases = group.reduce((a, x) => a + x.cases, 0);
+    const totalKg = group.reduce((a, x) => a + x.kg, 0);
+    const late = group.some((x) => x.o.isLate);
+    const serviceMin = Math.max(0, Math.min(480, eff.serviceMin));
+    const base = {
+      customer_id: c.id,
+      lat: c.lat as number,
+      lng: c.lng as number,
+      priority: pr,
+      hard_start_min: hard.start,
+      hard_end_min: hard.end,
+      pref_start_min: pref.start,
+      pref_end_min: pref.end,
+      late,
+    };
+    const sumMoney = (vals: (number | null)[]) => (vals.every((v) => v !== null) ? vals.reduce<number>((a, v) => a + (v ?? 0), 0) : null);
+
+    const split = partCapFor(totalCases, totalKg);
+    if (!split) {
+      const ids = group.map(orderRef);
+      stopList.push({
+        ...base,
         stop_id: c.id,
-        order_ids: [o.id],
-        customer_id: c.id,
-        lat: c.lat as number,
-        lng: c.lng as number,
-        demand_cases: o.totalCases,
-        demand_kg: o.totalWeightKg,
-        service_min: Math.max(0, Math.min(480, eff.serviceMin)),
-        priority: pr,
-        hard_start_min: hard.start,
-        hard_end_min: hard.end,
-        pref_start_min: pref.start,
-        pref_end_min: pref.end,
-        late: o.isLate,
-        _margins: [o.marginValue],
-        _revenues: [o.salesValue],
+        order_ids: ids,
+        demand_cases: totalCases,
+        demand_kg: totalKg,
+        service_min: serviceMin,
+        previous_truck_id: previousTruckOf(group.flatMap((x) => x.lines.map((l) => l.lineId))),
+        margin: sumMoney(group.map((x) => openMoney(x, 'marginValue'))),
+        revenue: sumMoney(group.map((x) => openMoney(x, 'salesValue'))),
       });
+    } else {
+      const parts = splitIntoParts(group.flatMap((x) => x.lines), split.cap);
+      const byOrder = new Map(group.map((x) => [x.o.id, x.o]));
+      const kgPerCase = new Map(group.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
+      parts.forEach((part, k) => {
+        const recs = portionsOfPart(part, k + 1, parts.length);
+        const ids = recs.map((r) => {
+          const id = portionId(r.orderId, k + 1);
+          portions[id] = r;
+          return id;
+        });
+        const cases = recs.reduce((a, r) => a + r.cases, 0);
+        // From the exact weights, never above the payload the part was sized for (display
+        // rounding of each line must not push a full part over its truck).
+        const exactKg = part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0);
+        stopList.push({
+          ...base,
+          stop_id: `${c.id}#${k + 1}`,
+          order_ids: ids,
+          demand_cases: cases,
+          demand_kg: Math.min(split.cap.kg ?? Number.POSITIVE_INFINITY, Math.round(exactKg * 10) / 10),
+          // Unloading time follows the part's share of the delivery (at least a few minutes).
+          service_min: totalCases > 0 ? Math.max(5, Math.min(480, Math.round((serviceMin * cases) / totalCases))) : serviceMin,
+          previous_truck_id: previousTruckOf(part.map((x) => x.lineId)),
+          margin: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'marginValue', r.lines))),
+          revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
+        });
+      });
+      splitNotes.push(
+        `${c.branchCode ? `${c.code}/${c.branchCode}` : c.code} (${totalCases} cases, ${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`,
+      );
     }
-  }
-  const stopList: DispatchStop[] = [];
-  for (const s of stops.values()) {
-    const { _margins, _revenues, ...rest } = s;
-    const prevTrucks = rest.order_ids.map((id) => previousTruck.get(id)).filter((t): t is string => !!t);
-    rest.previous_truck_id = prevTrucks[0] ?? null;
-    rest.margin = _margins.every((m) => m !== null) ? _margins.reduce<number>((a, m) => a + (m ?? 0), 0) : null;
-    rest.revenue = _revenues.every((m) => m !== null) ? _revenues.reduce<number>((a, m) => a + (m ?? 0), 0) : null;
-    for (const id of rest.order_ids) orderPriority[id] = rest.priority ?? 3;
-    stopList.push(rest);
+    for (const x of group) orderPriority[x.o.id] = pr;
   }
 
-  const frozenByTruck = new Map<string, typeof frozenLoads>();
-  for (const l of frozenLoads) frozenByTruck.set(l.truckId, [...(frozenByTruck.get(l.truckId) ?? []), l]);
   const truckList: DispatchTruck[] = trucks.map((t) => ({
     id: t.id,
     code: t.code,
@@ -232,6 +391,9 @@ export async function buildDispatchRequest(
   }));
 
   const warnings: string[] = [];
+  if (splitNotes.length) {
+    warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
+  }
   if (cfg.distanceProvider === 'MAPBOX_MATRIX') warnings.push('Mapbox matrix is not used by the dispatch planner; OSRM/Haversine is used instead.');
   if (badWindows.length) {
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
@@ -276,7 +438,7 @@ export async function buildDispatchRequest(
   return {
     request,
     preDrops,
-    scope: { orderIds: scopeIds, frozenOrderIds: [...frozenOrderIds], orderPriority },
+    scope: { orderIds: scopeIds, frozenOrderIds, orderPriority, portions, frozenLoadOrderIds, frozenLoadIds: frozenLoads.map((l) => l.id).sort() },
     blocking: [...blockingByCustomer.values()],
     warnings,
   };
@@ -285,6 +447,13 @@ export async function buildDispatchRequest(
 // ---------------------------------------------------------------------------------------
 // Persist the solver response and apply a scenario as the plan
 // ---------------------------------------------------------------------------------------
+
+/** Portion columns of a RouteAssignment / UnservedOrder row (all null = the whole order). */
+function portionFields(p: PortionRecord | null) {
+  return p
+    ? { portionCases: p.cases, portionWeightKg: p.weightKg, portionLinesJson: p.lines as unknown as Prisma.InputJsonValue }
+    : { portionCases: null, portionWeightKg: null, portionLinesJson: Prisma.DbNull };
+}
 
 export interface ScenarioDetails extends DispatchScenario {
   engine: string;
@@ -304,15 +473,34 @@ export async function persistDispatchResult(
   await tx.scenarioResult.deleteMany({ where: { runId } });
   const ids = new Map<string, string>();
   for (const sc of resp.scenarios) {
-    const unserved: { orderId: string; reasonCode: UnservedReasonCode; reasonMessage: string }[] = built.preDrops.map((d) => ({
+    const unserved: Prisma.UnservedOrderUncheckedCreateWithoutScenarioInput[] = built.preDrops.map((d) => ({
       orderId: d.orderId,
       reasonCode: d.reasonCode,
       reasonMessage: d.message,
+      ...portionFields(d.portion ?? null),
     }));
+    // Split parts left off the plan: one row per order and reason, the parts' lines merged.
+    const parts = new Map<string, { orderId: string; reasonCode: string; reasonMessage: string; list: PortionRecord[] }>();
     for (const u of sc.unserved) {
-      for (const orderId of u.order_ids) {
-        unserved.push({ orderId, reasonCode: u.reason_code as UnservedReasonCode, reasonMessage: u.reason_message });
+      for (const id of u.order_ids) {
+        const { orderId, portion } = resolveOrderRef(built.scope, id);
+        if (!portion) {
+          unserved.push({ orderId, reasonCode: u.reason_code as UnservedReasonCode, reasonMessage: u.reason_message });
+          continue;
+        }
+        const key = `${orderId}|${u.reason_code}`;
+        const g = parts.get(key) ?? { orderId, reasonCode: u.reason_code, reasonMessage: u.reason_message, list: [] };
+        g.list.push(portion);
+        parts.set(key, g);
       }
+    }
+    for (const g of parts.values()) {
+      unserved.push({
+        orderId: g.orderId,
+        reasonCode: g.reasonCode as UnservedReasonCode,
+        reasonMessage: g.reasonMessage,
+        ...portionFields(mergePortions(g.list)),
+      });
     }
     const details: ScenarioDetails = {
       ...sc,
@@ -331,7 +519,7 @@ export async function persistDispatchResult(
         totalTimeMin: sc.total_duration_min,
         totalCost: sc.operating_cost,
         avgUtilizationPct: sc.avg_utilization_pct,
-        unservedCount: unserved.length,
+        unservedCount: new Set(unserved.map((u) => u.orderId)).size,
         detailsJson: details as never,
         unservedOrders: { create: unserved },
       },
@@ -354,9 +542,15 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
 
   // Frozen loads must be exactly the ones the scenario was computed around.
   const frozenNow = await tx.planLoad.findMany({ where: { runId, status: { not: 'PLANNED' } }, include: { assignments: true } });
+  // Compared by load: one split order can sit on several loads, so unlocking one of them does
+  // not change the set of orders. (Plans optimized before split deliveries compare orders.)
   const frozenIdsNow = new Set(frozenNow.flatMap((l) => l.assignments.map((a) => a.orderId)));
-  const scopeFrozen = new Set(d.scope.frozenOrderIds);
-  if (frozenIdsNow.size !== scopeFrozen.size || [...frozenIdsNow].some((id) => !scopeFrozen.has(id))) {
+  const sameSet = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((id) => b.has(id));
+  const unchanged = d.scope.frozenLoadIds
+    ? sameSet(new Set(frozenNow.map((l) => l.id)), new Set(d.scope.frozenLoadIds)) &&
+      sameSet(frozenIdsNow, new Set(d.scope.frozenLoadOrderIds ?? []))
+    : sameSet(frozenIdsNow, new Set(d.scope.frozenOrderIds));
+  if (!unchanged) {
     throw new PlanError('Loads were locked/unlocked after this optimization. Optimize again before applying.', 409);
   }
 
@@ -397,9 +591,11 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     let running = 0;
     const rows: Prisma.RouteAssignmentCreateManyInput[] = [];
     for (const st of ld.stops) {
-      st.order_ids.forEach((orderId, k) => {
-        running += casesOf.get(orderId) ?? 0;
+      st.order_ids.forEach((ref, k) => {
+        const { orderId, portion } = resolveOrderRef(d.scope, ref);
+        running += portion ? portion.cases : (casesOf.get(orderId) ?? 0);
         rows.push({
+          ...portionFields(portion),
           runId,
           truckId: ld.truck_id,
           orderId,
@@ -423,8 +619,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     if (rows.length) await tx.routeAssignment.createMany({ data: rows });
   }
 
-  const plannedNew = new Set(d.loads.flatMap((l) => l.stops.flatMap((s) => s.order_ids)));
-  const unservedIds = sc.unservedOrders.map((u) => u.orderId);
+  const plannedNew = new Set(d.loads.flatMap((l) => l.stops.flatMap((s) => s.order_ids.map(orderIdOf))));
+  // A split order with any part on a truck counts as assigned; the summary reports it as partial.
+  const unservedIds = [...new Set(sc.unservedOrders.map((u) => u.orderId))].filter((id) => !plannedNew.has(id) && !frozenIdsNow.has(id));
   // Never move an order backwards: one already out for delivery (or delivered) keeps its status.
   const movable = { notIn: ['DISPATCHED', 'DELIVERED'] as OrderStatus[] };
   if (plannedNew.size) {
@@ -459,24 +656,52 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
     where: { tenantId, id: { in: scopeIds } },
     include: { customer: { select: { id: true, code: true, branchKey: true } }, lines: { include: { product: { select: { code: true, name: true } } } } },
   });
-  const loads = await tx.planLoad.findMany({ where: { runId }, include: { assignments: { include: { order: { select: { customerId: true } } } } } });
+  const loads = await tx.planLoad.findMany({ where: { runId }, include: { assignments: { include: { order: { select: { customerId: true, totalCases: true } } } } } });
   const planned = loads.flatMap((l) =>
-    l.assignments.map((a) => ({ orderId: a.orderId, customerId: a.order.customerId, truckId: l.truckId, loadNo: l.loadNo })),
+    l.assignments.map((a) => ({
+      orderId: a.orderId,
+      customerId: a.order.customerId,
+      truckId: l.truckId,
+      loadNo: l.loadNo,
+      lines: readPortionLines(a.portionLinesJson),
+      cases: a.portionCases ?? a.order.totalCases,
+    })),
   );
   // Planned-for customer on NEW loads comes from the solver stop - checks branches never merge.
   const stopCustomer = new Map<string, string>();
-  for (const ld of d.loads) for (const st of ld.stops) for (const oid of st.order_ids) stopCustomer.set(oid, st.customer_id);
+  const where = (truckId: string, loadNo: number, orderId: string) => `${truckId}:${loadNo}:${orderId}`;
+  for (const ld of d.loads) {
+    for (const st of ld.stops) for (const oid of st.order_ids) stopCustomer.set(where(ld.truck_id, ld.load_no, orderIdOf(oid)), st.customer_id);
+  }
   const recon: Reconciliation = reconcile(
     orders.map((o) => ({
       id: o.id,
       customerId: o.customerId,
       customerKey: `${o.customer.code}::${o.customer.branchKey}`,
-      lines: o.lines.map((l) => ({ productCode: l.product.code, productName: l.product.name, salesOrderNo: l.salesOrderNo, cases: l.cases })),
+      lines: o.lines.map((l) => ({ id: l.id, productCode: l.product.code, productName: l.product.name, salesOrderNo: l.salesOrderNo, cases: l.cases })),
     })),
-    planned.map((p) => ({ ...p, customerId: stopCustomer.get(p.orderId) ?? p.customerId })),
-    sc.unservedOrders.map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode })),
+    planned.map(({ cases: _c, ...p }) => ({ ...p, customerId: stopCustomer.get(where(p.truckId, p.loadNo, p.orderId)) ?? p.customerId })),
+    sc.unservedOrders.map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode, lines: readPortionLines(u.portionLinesJson) })),
   );
   const plannedIds = new Set(planned.map((p) => p.orderId));
+  const plannedCasesByOrder = new Map<string, number>();
+  for (const p of planned) plannedCasesByOrder.set(p.orderId, (plannedCasesByOrder.get(p.orderId) ?? 0) + p.cases);
+  // Money of what is actually planned: a split part is valued from its own lines.
+  const orderById = new Map(orders.map((o) => [o.id, o]));
+  const plannedMoneyByOrder = new Map<string, { revenue: number | null; margin: number | null }>();
+  for (const p of planned) {
+    const o = orderById.get(p.orderId);
+    if (!o) continue;
+    const val = (field: 'salesValue' | 'marginValue') =>
+      p.lines ? portionMoney(o[field], o.totalCases, o.lines.map((l) => ({ id: l.id, cases: l.cases, value: l[field] })), p.lines) : o[field];
+    const cur = plannedMoneyByOrder.get(p.orderId) ?? { revenue: 0, margin: 0 };
+    const r = val('salesValue');
+    const m = val('marginValue');
+    plannedMoneyByOrder.set(p.orderId, {
+      revenue: cur.revenue === null || r === null ? null : cur.revenue + r,
+      margin: cur.margin === null || m === null ? null : cur.margin + m,
+    });
+  }
   const summary = computeSummary({
     orders: orders.map((o) => ({
       id: o.id,
@@ -489,6 +714,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
       isLate: o.isLate,
     })),
     plannedOrderIds: plannedIds,
+    plannedCasesByOrder,
+    plannedMoneyByOrder,
     unserved: sc.unservedOrders.map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode })),
     loads: loads.map((l) => ({
       truckId: l.truckId,
@@ -534,7 +761,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
       summaryJson: summary as never,
       changeSummaryJson: (change ?? undefined) as never,
       totalOrders: orders.length,
-      unservedCount: sc.unservedOrders.length,
+      unservedCount: new Set(sc.unservedOrders.map((u) => u.orderId)).size,
     },
   });
   return { recon, summary, change };
@@ -626,11 +853,11 @@ export async function createNextVersion(
       const copy = await tx.planLoad.create({ data: { ...rest, runId: child.id, carriedFromLoadId: oldId } });
       if (assignments.length) {
         await tx.routeAssignment.createMany({
-          data: assignments.map(({ id: _id, runId: _rr, loadId: _l, ...a }) => {
+          data: assignments.map(({ id: _id, runId: _rr, loadId: _l, portionLinesJson, ...a }) => {
             void _id;
             void _rr;
             void _l;
-            return { ...a, runId: child.id, loadId: copy.id };
+            return { ...a, portionLinesJson: portionLinesJson ?? Prisma.DbNull, runId: child.id, loadId: copy.id };
           }),
         });
       }
@@ -682,9 +909,17 @@ export async function changeLoadStatus(
       where: { id: loadId },
       data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
     });
-    const orderIds = (await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId);
+    const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
     if (to === 'DISPATCHED' && orderIds.length) {
-      await tx.order.updateMany({ where: { tenantId, id: { in: orderIds } }, data: { status: 'DISPATCHED' } });
+      // A split order is DISPATCHED only once every part is out (and none is unserved).
+      const parts = await tx.routeAssignment.findMany({ where: { runId, orderId: { in: orderIds } }, select: { orderId: true, load: { select: { status: true } } } });
+      const unserved = run.chosenScenarioId
+        ? new Set((await tx.unservedOrder.findMany({ where: { scenarioId: run.chosenScenarioId, orderId: { in: orderIds } }, select: { orderId: true } })).map((u) => u.orderId))
+        : new Set<string>();
+      const out = orderIds.filter(
+        (id) => !unserved.has(id) && parts.filter((p) => p.orderId === id).every((p) => p.load?.status === 'DISPATCHED' || p.load?.status === 'COMPLETED'),
+      );
+      if (out.length) await tx.order.updateMany({ where: { tenantId, id: { in: out } }, data: { status: 'DISPATCHED' } });
     }
     const all = await tx.planLoad.findMany({ where: { runId }, select: { status: true } });
     const allOut = all.length > 0 && all.every((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');

@@ -83,6 +83,7 @@ function stop(orderId: string, sequence: number, legKm: number, cumulativeKm: nu
     salesOrders: [...new Set(o.lines.map((l) => l.so))],
     skus: skusOf(o),
     mapsUrl: `https://www.google.com/maps/search/?api=1&query=23.6,58.3`,
+    split: null,
   };
 }
 
@@ -166,6 +167,7 @@ function fixture(opts: { estimated?: boolean; revenue?: boolean; noUnserved?: bo
     reasonMessage: 'Customer C005 has no delivery location - capture it on the Locations screen.',
     late: o5.late,
     salesOrders: ['SO-1005'],
+    partial: false,
   }));
   return {
     run: {

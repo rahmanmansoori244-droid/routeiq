@@ -30,7 +30,8 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Truck loads:** one row per truck and load (T01 · L1, T01 · L2 …) with departure/return, cases vs capacity and km. Click a row to see:
   - the **Loading manifest**: exact cases per product for the warehouse;
   - the **Delivery route**: DEPOT → customer 1 → customer 2 … → DEPOT, with ETA, receiving hours, cases, products and km.
-- **Unserved orders:** every order that could not be planned, with the reason.
+- **Unserved orders:** every order that could not be planned, with the reason. *Rest of split* means the other part of that order is on a truck.
+- **Split deliveries:** a customer whose day does not fit on any truck (cases or kg) is delivered in parts — each stop shows *Part 1 of 2*, *Part 2 of 2* and exactly which products and cases it carries. Parts can go on different trucks or loads. Turn this off in **Settings → Operations** if you prefer such customers to be left unserved.
 - **Plan options:** MIN TRUCKS and MIN DISTANCE are shown for comparison only. Click **Use instead** only if you really want one of them.
 
 ## 5. Lock, export, dispatch
