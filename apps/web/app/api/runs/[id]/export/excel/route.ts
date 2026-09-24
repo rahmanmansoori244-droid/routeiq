@@ -5,6 +5,7 @@ import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetExcel } from '@/lib/exports/excel';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, tenantAssumptions } from '@/lib/dispatch/workbook';
+import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -29,7 +30,7 @@ function xlsxResponse(buf: Buffer, filename: string) {
 async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
   const detail = await getPlanDetail(user.tenantId, runId);
   if (!detail) return fail('Not found', 404);
-  const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { name: true, currency: true } });
+  const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { name: true, currency: true, country: true } });
   const cfg = await db.tenantConfig.findUnique({ where: { tenantId: user.tenantId } });
   const currency = tenant?.currency ?? 'OMR';
   const buf = await buildDispatchWorkbook(detail, {
@@ -43,6 +44,7 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       providerUsed: detail.summary?.distanceProvider ?? detail.scenarios.find((s) => s.chosen)?.provider ?? null,
       distanceIsEstimated: detail.summary?.distanceIsEstimated ?? detail.loads.some((l) => l.distanceIsEstimated),
       osrmEnvConfigured: !!process.env.OSRM_URL,
+      outsideCoverage: cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
     }),
   });
   // Depot codes are free text - keep the download filename header-safe.

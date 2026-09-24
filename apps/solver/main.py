@@ -17,7 +17,7 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException
 
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
-from dispatch_solver import optimize_dispatch
+from dispatch_solver import SolveAborted, optimize_dispatch
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
 from solver import optimize
@@ -79,7 +79,11 @@ def optimize_dispatch_endpoint(
     started = time.time()
     log.info("optimize-dispatch run=%s tenant=%s stops=%d trucks=%d scenarios=%s",
              req.run_id, req.tenant_id, len(req.stops), len(req.trucks), req.config.scenarios)
-    resp = optimize_dispatch(req)
+    try:
+        resp = optimize_dispatch(req)
+    except SolveAborted as exc:
+        log.error("optimize-dispatch run=%s aborted: %s", req.run_id, exc)
+        raise HTTPException(status_code=504, detail=str(exc)) from None
     log.info("optimize-dispatch run=%s done in %.1fs provider=%s", req.run_id, time.time() - started,
              resp.matrix_provider)
     return resp

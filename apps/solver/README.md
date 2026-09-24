@@ -18,4 +18,4 @@ SOLVER_TOKEN=dev-token OSRM_URL=http://localhost:5000 .venv/Scripts/python -m uv
 .venv/Scripts/python -m pytest tests -q
 ```
 
-`SOLVER_PARALLEL=0` solves the plan alternatives sequentially instead of in worker processes. Design notes: `../../docs/OPTIMIZER_DESIGN.md`.
+Every plan scenario runs in a worker process (OR-Tools holds the GIL, so an in-process search would freeze `/health` and every other request). `SOLVER_PARALLEL=0` runs every scenario inside the API process with no deadline, for tests and debugging only. The solver falls back to it automatically when worker processes cannot start. Design notes: `../../docs/OPTIMIZER_DESIGN.md`.

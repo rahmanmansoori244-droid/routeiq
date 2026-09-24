@@ -27,6 +27,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { errorMessage } from '@/lib/error-message';
 
 export interface MapStop {
   assignmentId: string;
@@ -365,7 +366,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Move failed.');
+        toast.error(errorMessage(body, 'Move failed.'));
         return;
       }
       toast.success(
@@ -387,7 +388,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Lock failed.');
+        toast.error(errorMessage(body, 'Lock failed.'));
         return;
       }
       toast.success(lock ? `${contextStop.customerCode} locked.` : `${contextStop.customerCode} unlocked.`);
@@ -402,7 +403,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       const res = await fetch(`/api/runs/${runId}/routes/${confirmUnassign.assignmentId}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Unassign failed.');
+        toast.error(errorMessage(body, 'Unassign failed.'));
         return;
       }
       toast.success(`${confirmUnassign.customerCode} unassigned.`);

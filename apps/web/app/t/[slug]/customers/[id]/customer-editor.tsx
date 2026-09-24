@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { MapPicker } from '@/components/map-picker';
+import { errorMessage } from '@/lib/error-message';
 
 interface Props {
   customer: { id: string; lat: number | null; lng: number | null; geocodeConfidence: string | null };
@@ -42,7 +43,7 @@ export function CustomerEditor({ customer, mapboxToken, canEdit }: Props) {
       });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
-        toast.error(typeof body.error === 'string' ? body.error : 'Save failed.');
+        toast.error(errorMessage(body, 'Save failed.'));
         return;
       }
       toast.success('Coordinates updated.');

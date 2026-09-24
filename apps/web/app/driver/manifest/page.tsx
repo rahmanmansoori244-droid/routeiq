@@ -19,6 +19,7 @@ import { useRouter } from 'next/navigation';
 import { CheckCircle2, ChevronRight, Loader2, LogOut, MapPin, Navigation, Phone, Truck } from 'lucide-react';
 import { toast } from 'sonner';
 import { SignaturePad, type SignaturePadHandle } from '../signature-pad';
+import { errorMessage } from '@/lib/error-message';
 
 const PING_INTERVAL_MS = 30_000;
 
@@ -201,7 +202,7 @@ export default function DriverManifestPage() {
         return;
       }
       if (!res.ok) {
-        toast.error(typeof json.error === 'string' ? json.error : 'Could not mark done.');
+        toast.error(errorMessage(json, 'Could not mark done.'));
         return;
       }
       toast.success(`${stopBeingDone.customerName} marked delivered.`);

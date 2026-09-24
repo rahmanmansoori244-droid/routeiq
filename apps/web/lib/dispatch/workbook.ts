@@ -628,7 +628,14 @@ export interface AssumptionConfig {
 
 export function tenantAssumptions(
   cfg: AssumptionConfig | null,
-  opts: { currency: string; providerUsed: string | null; distanceIsEstimated: boolean | null; osrmEnvConfigured: boolean },
+  opts: {
+    currency: string;
+    providerUsed: string | null;
+    distanceIsEstimated: boolean | null;
+    osrmEnvConfigured: boolean;
+    /** Tenant outside the shared OSRM map (Oman + UAE) without its own OSRM: planned on straight lines. */
+    outsideCoverage?: boolean;
+  },
 ): Record<string, string> {
   if (!cfg) return { 'Tenant configuration': 'not set - system defaults were used' };
   const cur = opts.currency;
@@ -647,7 +654,12 @@ export function tenantAssumptions(
     'Road time factor (truck vs car)': `x${cfg.roadTimeFactor}`,
     'Default service time': `${cfg.defaultServiceTimeMin} min per stop (customer / customer-type values override)`,
     'Priority weights': [1, 2, 3, 4, 5].map((p) => `P${p} ${w[p]}`).join(' > '),
-    'Distance provider (configured)': cfg.distanceProvider === 'HAVERSINE' ? 'HAVERSINE (estimated distances)' : `${cfg.distanceProvider} (the dispatch planner uses OSRM road distances)`,
+    'Distance provider (configured)':
+      cfg.distanceProvider === 'HAVERSINE'
+        ? 'HAVERSINE (estimated distances)'
+        : opts.outsideCoverage
+          ? `${cfg.distanceProvider} configured - straight-line estimates used (outside the Oman + UAE routing map)`
+          : `${cfg.distanceProvider} (the dispatch planner uses OSRM road distances)`,
     'Distance provider (this plan)': `${opts.providerUsed ?? 'unknown'}${opts.distanceIsEstimated ? ' - ESTIMATED distances' : ''}`,
     'OSRM server configured': cfg.osrmUrl ? 'yes (tenant setting)' : opts.osrmEnvConfigured ? 'yes (OSRM_URL environment)' : 'no tenant setting (the solver uses its own OSRM_URL if set)',
   };

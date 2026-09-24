@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail, notFoundIfNull } from '@/lib/api';
 import { audit } from '@/lib/audit';
+import { prisma } from '@/lib/db';
 import { resolveLocationInput } from '@/lib/dispatch/location-input';
 import { coordStatus, parseServiceArea } from '@/lib/dispatch/customer-attrs';
 
@@ -25,7 +26,8 @@ export const PUT = (req: Request, { params }: Params) =>
       const before = notFoundIfNull(await db.customer.findUnique({ where: { id: params.id } }));
       const body = await parseBody(r, schema);
       const cfg = await db.tenantConfig.findUnique({ where: { tenantId: user.tenantId } });
-      const area = parseServiceArea(cfg?.serviceAreaJson);
+      const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { country: true } });
+      const area = parseServiceArea(cfg?.serviceAreaJson, tenant?.country);
       let lat = body.lat;
       let lng = body.lng;
       let source = body.source;

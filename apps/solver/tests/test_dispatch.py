@@ -407,7 +407,8 @@ def test_scenarios_min_trucks_not_more_trucks_than_min_distance():
 # ROAD DISTANCE PROVIDER
 # --------------------------------------------------------------------------------------
 
-def _osrm_ok_transport(calls: list):
+def _osrm_ok_transport(calls: list, snap_m: dict[int, float] | None = None):
+    """Fake OSRM table. ``snap_m`` = {coordinate index in the request: metres it was moved to reach a road}."""
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         path = request.url.path
@@ -418,8 +419,76 @@ def _osrm_ok_transport(calls: list):
         # synthetic "road" = 2 km per index step, 3 min per index step
         dist = [[abs(i - j) * 2000.0 for j in dst] for i in src]
         dur = [[abs(i - j) * 180.0 for j in dst] for i in src]
-        return httpx.Response(200, json={"code": "Ok", "distances": dist, "durations": dur})
+        wp = lambda k: {"distance": (snap_m or {}).get(k, 12.0), "location": [0, 0]}  # noqa: E731
+        return httpx.Response(200, json={"code": "Ok", "distances": dist, "durations": dur,
+                                         "sources": [wp(k) for k in src], "destinations": [wp(k) for k in dst]})
     return httpx.MockTransport(handler)
+
+
+def test_osrm_point_far_from_any_road_uses_estimated_legs():
+    """A stop OSRM had to move 250 km to reach a road (outside the map, or a wrong pin) must not
+    get a fake 'road' distance: its legs fall back to the estimate, with a warning."""
+    from providers import OSRMProvider
+
+    calls: list = []
+    # 0 = depot (Ghala), 1 = Muscat customer, 2 = Riyadh customer (outside the Oman+UAE map).
+    coords = [(23.568, 58.392), (23.600, 58.450), (24.710, 46.680)]
+    osrm = OSRMProvider("http://osrm.local:5000", client=httpx.Client(transport=_osrm_ok_transport(calls, snap_m={2: 250_000.0})))
+    mx = osrm.get_matrix(coords)
+    assert mx.distance_m[0][1] == 2000 and mx.distance_m[1][0] == 2000  # road legs kept
+    # Riyadh legs: the ~1,200 km estimate, not the fake 2-4 km "road" OSRM returned after snapping.
+    for i, j in [(0, 2), (2, 0), (1, 2), (2, 1)]:
+        assert mx.distance_m[i][j] > 1_000_000
+    assert mx.patched_cells == 4
+    assert any("from any road in the routing map" in w for w in mx.warnings)
+
+    # End to end: the response carries the warning.
+    r = req([stop("A", 23.60, 58.45), stop("B", 24.71, 46.68)], [truck("T01")],
+            distance_provider="OSRM", osrm_url="http://osrm.local:5000")
+    resp = optimize_dispatch(r, osrm_client=httpx.Client(transport=_osrm_ok_transport([], snap_m={2: 250_000.0})))
+    assert any("from any road in the routing map" in w for w in resp.warnings)
+
+
+def test_failing_alternative_is_skipped_not_resolved_in_process(monkeypatch):
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    monkeypatch.setenv("ROUTEIQ_TEST_FAIL_SCENARIO", "MIN_TRUCKS")
+    stops = [stop(f"S{i}", 23.55 + i * 0.01, 58.40, cases=20) for i in range(6)]
+    r = req(stops, [truck("T01"), truck("T02")], time_limit_sec=2, scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+    resp = optimize_dispatch(r)
+    assert [s.name for s in resp.scenarios] == ["RECOMMENDED", "MIN_DISTANCE"]
+    assert any("MIN_TRUCKS" in w and "skipped" in w for w in rec(resp).warnings)
+
+
+def test_killed_recommended_worker_fails_fast(monkeypatch):
+    """A worker killed mid-solve (e.g. out of memory) must fail the request within seconds,
+    not hang until the backstop deadline (2 x time limit + 60 s)."""
+    from dispatch_solver import SolveAborted
+
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    monkeypatch.setenv("ROUTEIQ_TEST_KILL_SCENARIO", "RECOMMENDED")
+    stops = [stop(f"S{i}", 23.55 + i * 0.01, 58.40, cases=20) for i in range(6)]
+    r = req(stops, [truck("T01")], time_limit_sec=30, scenarios=["RECOMMENDED", "MIN_DISTANCE"])
+    t0 = time.perf_counter()
+    with pytest.raises(SolveAborted, match="stopped unexpectedly"):
+        optimize_dispatch(r)
+    assert time.perf_counter() - t0 < 20
+
+
+def test_alternatives_skipped_when_the_time_budget_is_used(monkeypatch):
+    """The whole request must answer before the web gives up: alternatives are skipped, with a
+    warning, when the recommended plan used the budget."""
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    # Room for the recommended plan (3 s search + worker start-up), not for the alternatives
+    # (they need their search time + a 20 s grace on top).
+    monkeypatch.setenv("SOLVER_BUDGET_SEC", "12")
+    stops, trucks = nmwc_day(60)
+    r = req(stops, trucks, time_limit_sec=3, scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+    t0 = time.perf_counter()
+    resp = optimize_dispatch(r)
+    assert time.perf_counter() - t0 < 25
+    assert [s.name for s in resp.scenarios] == ["RECOMMENDED"]
+    assert any("skipped" in w for w in rec(resp).warnings)
+    assert_reconciled(r, rec(resp))
 
 
 def test_osrm_road_matrix_used_when_configured():
@@ -545,6 +614,29 @@ def test_alternative_deadline_never_loses_the_recommended_plan(monkeypatch):
     assert any("skipped" in w for w in rec_sc.warnings)
     assert_reconciled(r, rec_sc)
     assert elapsed < 30, elapsed
+
+
+def test_api_process_stays_responsive_during_a_solve(monkeypatch):
+    """OR-Tools holds the GIL for its whole search. Every scenario therefore runs in a worker
+    process, so the API process (health checks, route geometry, other tenants) keeps answering."""
+    import threading
+
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    stops, trucks = nmwc_day(60)  # realistic: the search runs its full time limit
+    r = req(stops, trucks, time_limit_sec=4, scenarios=["RECOMMENDED"])
+    out: dict = {}
+    th = threading.Thread(target=lambda: out.setdefault("resp", optimize_dispatch(r)))
+    th.start()
+    worst, ticks = 0.0, 0
+    while th.is_alive():
+        t0 = time.perf_counter()
+        time.sleep(0.2)
+        worst = max(worst, time.perf_counter() - t0 - 0.2)
+        ticks += 1
+    assert_reconciled(r, rec(out["resp"]))
+    assert ticks >= 15  # the solve really ran for seconds
+    # With the search in-process, one 0.2 s sleep here lasted the whole 4 s search.
+    assert worst < 0.5, worst
 
 
 def test_replan_continuity_keeps_stops_on_their_previous_truck():

@@ -32,16 +32,19 @@ v1: set `Tenant.active = false` directly in DB. Users will hit 404 on tenant rou
 3. Common reasons:
    - `SOLVER_ERROR` with HTTP 5xx → solver crashed; check Railway logs for `routeiq-solver`
    - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS
-   - `STUCK` → job ran >5 min and the janitor reaped it; usually means the solver is unhealthy
+   - `STUCK` → the job had no result after 15 min and the janitor reaped it. Usually the web service restarted (a deploy) during the optimization; optimize again.
+   - `Solver returned HTTP 404` / "The route optimizer is being updated" → web was deployed before the solver finished deploying; retry in a minute.
 4. Once the solver is healthy, click "Retry optimization" on the run — it spawns attempt #N+1 with the same input.
 
 ### When a run is stuck "Optimizing"
-1. The orphan janitor (CLAUDE.md §7) runs every 60s and fails any `RunJob` in `RUNNING` >5 min, flipping the parent run to `FAILED`.
+1. The orphan janitor runs **inside the web process every 60 s** (`lib/jobs/janitor-loop.ts`, started from `instrumentation.ts`).
+   - It fails any `RunJob` RUNNING or still QUEUED for more than 15 min (`STUCK_JOB_MS`), which is longer than any real optimization (the solver call is capped at 10 min).
+   - It flips the parent plan to `FAILED`, so it can be optimized again. No cron service is needed.
+   - `ROUTEIQ_DISABLE_JANITOR=1` turns it off.
 2. To run the janitor manually:
    ```bash
    curl -X POST $BASE/api/cron/janitor -H "X-Janitor-Token: $JANITOR_TOKEN"
    ```
-3. In production, configure a Railway Cron service to hit that endpoint on a 60s cadence.
 
 ### When users say "I can't see the tenant"
 - Check the URL: it must be `/t/{their-tenant-slug}`. Cross-tenant access returns **404** (not 403) to avoid leaking tenant existence.
@@ -85,10 +88,16 @@ Every 90 days per CLAUDE.md §14.
 5. Done. Document the rotation date in the audit log of your infra system.
 
 ### Tuning solver time limits
-- `TenantConfig.solverTimeLimitSeconds` is the base per-scenario time limit.
-- Auto-scaling: `min(max(base, stops × 0.05), 120)` per scenario.
-- Scenarios run in parallel in the Python solver (ThreadPoolExecutor, GIL released by OR-Tools) so wall-clock ≈ longest single scenario, not sum.
-- For NMWC-scale runs (150 stops): `solverTimeLimitSeconds: 5` finishes in ~8s wall-clock for all three scenarios.
+- **Dispatch planner (OR-Tools, Daily dispatch):** ignores `TenantConfig.solverTimeLimitSeconds`.
+  - The RECOMMENDED time limit scales with the stop count: 3 s (≤25), 8 s (≤80), 20 s (≤200), 150 s (≤350), 240 s (>350). The alternatives get half.
+  - The whole solve stays within a 540 s budget. Alternatives that would overrun it are skipped with a warning.
+  - The web waits up to 600 s.
+- `TenantConfig.solverTimeLimitSeconds` currently has **no effect**. It belonged to the previous (PyVRP) planner, which can no longer be started: old plans are read-only (`409 LEGACY_PLAN`).
+- Dispatch planner: every scenario runs in a worker process.
+  - OR-Tools holds the GIL during its search. So neither the API process nor threads may run it, or `/health` and every other request freeze until the search ends.
+  - RECOMMENDED runs first; the two alternatives then run in parallel, warm-started from it.
+  - If the worker computing the recommended plan dies (e.g. out of memory), the optimization fails within seconds with a clear message. If an alternative's worker dies, only that alternative is skipped (with a warning) after its deadline.
+  - `SOLVER_PARALLEL=0` runs everything in-process (tests / debugging only).
 
 ---
 
@@ -100,7 +109,7 @@ Every 90 days per CLAUDE.md §14.
 If you need to scale beyond one web instance, swap the inflight map for Redis-backed locks (BullMQ recommended) before scaling — that's a v2 prerequisite.
 
 ### Migrations
-- `pnpm db:migrate:deploy` runs on Railway via the `routeiq-web` start command.
+- `pnpm db:migrate:deploy` runs on Railway as the web service's **pre-deploy** step (`deploy.preDeployCommand` in `apps/web/railway.json`). A failed migration stops the deploy before the new version starts.
 - Never edit a historical migration. Always create a new one.
 - Zero-downtime pattern for destructive changes: expand → migrate code → contract over two deploys.
 
@@ -110,7 +119,7 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 - The first migration is tolerant of missing PostGIS (wraps `CREATE EXTENSION` in a `DO $$ ... EXCEPTION` block) so local dev DBs without PostGIS still migrate.
 
 ### Backups
-- Railway has nightly Postgres snapshots — verify 7-day retention.
+- Railway volume backups of `postgres-volume` are scheduled daily (kept 6 days) and weekly (kept 27 days) since 2026-09-24 (Postgres → Backups). Take a manual backup before every migration-bearing deploy.
 - Once NMWC is live, add a daily `pg_dump` to Cloudflare R2 or similar; 30-day retention; quarterly restore drill.
 
 ---

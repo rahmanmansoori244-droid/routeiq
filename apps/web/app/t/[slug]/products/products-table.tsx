@@ -18,6 +18,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { ProductFormDialog, type ProductRow } from './product-form';
+import { errorMessage } from '@/lib/error-message';
 
 export function ProductsTable({ initial, canManage }: { initial: ProductRow[]; canManage: boolean }) {
   const router = useRouter();
@@ -30,7 +31,7 @@ export function ProductsTable({ initial, canManage }: { initial: ProductRow[]; c
       const res = await fetch(`/api/products/${p.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       if (body.data?.softDeleted) {

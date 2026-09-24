@@ -10,6 +10,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { fmtKm } from '@/lib/format';
 import type { ScenarioCardData } from './scenario-cards';
+import { errorMessage } from '@/lib/error-message';
 
 export interface BaselineRow {
   id: string;
@@ -46,7 +47,7 @@ export function BaselineTab({ slug, runId, baselines, canUpload, chosenScenario 
       const res = await fetch(`/api/runs/${runId}/baseline`, { method: 'POST', body: fd });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Upload failed.');
+        toast.error(errorMessage(body, 'Upload failed.'));
         return;
       }
       toast.success(`Baseline uploaded — ${body.data.totalTrucks} trucks, ${body.data.assignments} stops.`);

@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
+import { errorMessage } from '@/lib/error-message';
 
 export interface DriverRow {
   id: string;
@@ -58,7 +59,7 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof data.error === 'string' ? data.error : 'Save failed.');
+        toast.error(errorMessage(data, 'Save failed.'));
         return;
       }
       toast.success(mode === 'create' ? 'Driver created' : 'Driver updated');

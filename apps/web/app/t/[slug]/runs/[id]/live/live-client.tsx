@@ -15,6 +15,7 @@ import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { CheckCircle2, MapPin, Wifi, WifiOff } from 'lucide-react';
 import { defaultMapStyle, TRUCK_COLORS } from '@/lib/maps';
+import { errorMessage } from '@/lib/error-message';
 
 const POLL_MS = 5_000;
 const OFFLINE_AFTER_MIN = 10;
@@ -101,7 +102,7 @@ export function LiveDispatcher({
         const json = await res.json();
         if (cancelled) return;
         if (!res.ok || !json.data) {
-          setError(typeof json.error === 'string' ? json.error : 'Could not load live data.');
+          setError(errorMessage(json, 'Could not load live data.'));
         } else {
           setData(json.data);
           setError(null);

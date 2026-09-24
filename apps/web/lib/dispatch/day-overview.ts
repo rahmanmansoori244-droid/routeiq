@@ -58,7 +58,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [], plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
-  const area = parseServiceArea(cfg.serviceAreaJson);
+  const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
+  const area = parseServiceArea(cfg.serviceAreaJson, tenant?.country);
   const where = await ordersInScopeWhere(tenantId, depot.id, dateOnly(date));
   const orders = await prisma.order.findMany({
     where,

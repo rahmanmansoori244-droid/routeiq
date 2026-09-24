@@ -137,8 +137,6 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
     where: { id: tenantId },
     select: { currency: true, config: { select: { distanceProvider: true, labelEstimatedDistances: true } } },
   });
-  const distanceIsEstimated =
-    tenant.config?.distanceProvider === 'HAVERSINE' && (tenant.config?.labelEstimatedDistances ?? true);
 
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -154,6 +152,19 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
   const weekFromIso = isoDate(weekFrom);
   const previousWeekFromIso = isoDate(previousWeekFrom);
   const previousWeekToIso = isoDate(previousWeekTo);
+
+  // "Estimated km" follows how the plans shown were computed (stored per plan), falling back to
+  // the current setting only when there is no plan in the range.
+  const est = await prisma.$queryRaw<{ anyEstimated: boolean | null }[]>`
+    SELECT bool_or(COALESCE((sr."detailsJson"->>'distance_is_estimated')::boolean, true)) AS "anyEstimated"
+    FROM "RunPlan" rp
+    JOIN "ScenarioResult" sr ON sr.id = rp."chosenScenarioId"
+    WHERE rp."tenantId" = ${tenantId}
+      AND rp."runDate" BETWEEN ${last30FromIso}::date AND ${todayIso}::date
+      AND rp.status IN ('READY', 'DISPATCHED')
+  `;
+  const distanceIsEstimated =
+    (est[0]?.anyEstimated ?? tenant.config?.distanceProvider === 'HAVERSINE') && (tenant.config?.labelEstimatedDistances ?? true);
 
   // Pull 30-day raw rows for the trend; derive today/yesterday/week/previous from the same set.
   const rangeRows = await fetchRangeRows(tenantId, previousWeekFromIso, todayIso);

@@ -149,10 +149,43 @@ export function describeWindows(eff: EffectiveAttrs): string {
   return [hard, pref].filter(Boolean).join(', ') || 'Any time';
 }
 
-export function parseServiceArea(json: unknown): ServiceArea {
+// Tenant.country is free text ("Oman", "Sultanate of Oman", "OM", "UAE", "Émirats arabes unis",
+// "عمان", "الامارات", ...). Keep in sync with migration 20260924093000_osrm_default_provider.
+const OMAN_UAE = /(^|[^a-z])(oman|om|omn|uae|u\.a\.e|ae|are|muscat|dubai|abu dhabi|sharjah)([^a-z]|$)|[eé]mira[td]|عمان|عُمان|ال[اإ]مارات/i;
+
+/** Tenant based in Oman or the UAE (blank / unknown counts as Oman, the NMWC default). */
+export function isOmanUae(country: string | null | undefined): boolean {
+  const c = (country ?? '').trim();
+  return !c || OMAN_UAE.test(c);
+}
+
+/** No area check: every valid coordinate is inside. */
+export const WHOLE_WORLD: ServiceArea = { minLat: -90, maxLat: 90, minLng: -180, maxLng: 180 };
+
+/**
+ * Tenant service area. A configured box wins. Otherwise Oman + UAE for tenants based there,
+ * or no area check for tenants in other countries, whose customers would all look "outside".
+ * `country` omitted = Oman + UAE (the NMWC default).
+ */
+export function parseServiceArea(json: unknown, country?: string | null): ServiceArea {
   const j = json as Partial<ServiceArea> | null;
   if (j && [j.minLat, j.maxLat, j.minLng, j.maxLng].every((v) => typeof v === 'number')) return j as ServiceArea;
+  if (country != null && !isOmanUae(country)) return WHOLE_WORLD;
   return DEFAULT_SERVICE_AREA;
+}
+
+/**
+ * Distance provider actually used. The shared routing server (OSRM_URL) holds Oman + UAE roads
+ * only: a tenant elsewhere plans on straight-line estimates unless it configured its own OSRM,
+ * otherwise its stops would be snapped onto Omani roads and reported as road km.
+ */
+export function routingProviderFor(
+  cfg: { distanceProvider: string; osrmUrl?: string | null },
+  country: string | null | undefined,
+): { provider: 'HAVERSINE' | 'OSRM'; outsideCoverage: boolean } {
+  if (cfg.distanceProvider === 'HAVERSINE') return { provider: 'HAVERSINE', outsideCoverage: false };
+  if (!cfg.osrmUrl && !isOmanUae(country)) return { provider: 'HAVERSINE', outsideCoverage: true };
+  return { provider: 'OSRM', outsideCoverage: false };
 }
 
 export const DEFAULT_PRIORITY_WEIGHTS: Record<number, number> = { 1: 10000, 2: 1000, 3: 100, 4: 10, 5: 1 };

@@ -7,7 +7,7 @@
  * DISPATCHED / COMPLETED) are copied verbatim, the parent is marked SUPERSEDED (kept, never
  * overwritten) and only the remaining orders are optimized again.
  */
-import type { LoadStatus, Prisma, UnservedReasonCode } from '@prisma/client';
+import type { LoadStatus, OrderStatus, Prisma, UnservedReasonCode } from '@prisma/client';
 import type {
   DispatchRequest,
   DispatchResponse,
@@ -24,6 +24,7 @@ import {
   effectiveAttrs,
   parsePriorityWeights,
   parseServiceArea,
+  routingProviderFor,
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
@@ -89,6 +90,13 @@ export async function ordersInScopeWhere(tenantId: string, depotId: string, runD
   };
 }
 
+/** A window ending before it starts cannot be planned (the solver would reject the whole day):
+ * it is dropped for this plan and reported as a warning instead. */
+function usableWindow(start: number | null, end: number | null): { start: number | null; end: number | null; ok: boolean } {
+  if (start != null && end != null && end < start) return { start: null, end: null, ok: false };
+  return { start, end, ok: true };
+}
+
 function toPlanningCustomer(c: {
   id: string; code: string; branchCode: string | null; name: string; lat: number | null; lng: number | null;
   priority: number; priorityConfirmed: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean;
@@ -109,7 +117,8 @@ export async function buildDispatchRequest(
   const profiles = new Map<string, TypeProfileLike>(
     (await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]),
   );
-  const area = parseServiceArea(cfg.serviceAreaJson);
+  const tenant = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { country: true } });
+  const area = parseServiceArea(cfg.serviceAreaJson, tenant.country);
   const where = await ordersInScopeWhere(tenantId, run.depotId, run.runDate);
   const orders = await prisma.order.findMany({ where, include: ORDER_INCLUDE, orderBy: { uploadedAt: 'asc' } });
   const frozenLoads = await db.planLoad.findMany({
@@ -132,6 +141,7 @@ export async function buildDispatchRequest(
   const orderPriority: Record<string, number> = {};
   const stops = new Map<string, DispatchStop & { _margins: (number | null)[]; _revenues: (number | null)[] }>();
   const scopeIds: string[] = [];
+  const badWindows: string[] = [];
 
   for (const o of orders) {
     if (frozenOrderIds.has(o.id)) continue;
@@ -165,6 +175,9 @@ export async function buildDispatchRequest(
       s._margins.push(o.marginValue);
       s._revenues.push(o.salesValue);
     } else {
+      const hard = usableWindow(eff.hardStart, eff.hardEnd);
+      const pref = usableWindow(eff.prefStart, eff.prefEnd);
+      if (!hard.ok || !pref.ok) badWindows.push(c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
       stops.set(c.id, {
         stop_id: c.id,
         order_ids: [o.id],
@@ -175,10 +188,10 @@ export async function buildDispatchRequest(
         demand_kg: o.totalWeightKg,
         service_min: Math.max(0, Math.min(480, eff.serviceMin)),
         priority: pr,
-        hard_start_min: eff.hardStart,
-        hard_end_min: eff.hardEnd,
-        pref_start_min: eff.prefStart,
-        pref_end_min: eff.prefEnd,
+        hard_start_min: hard.start,
+        hard_end_min: hard.end,
+        pref_start_min: pref.start,
+        pref_end_min: pref.end,
         late: o.isLate,
         _margins: [o.marginValue],
         _revenues: [o.salesValue],
@@ -220,6 +233,13 @@ export async function buildDispatchRequest(
 
   const warnings: string[] = [];
   if (cfg.distanceProvider === 'MAPBOX_MATRIX') warnings.push('Mapbox matrix is not used by the dispatch planner; OSRM/Haversine is used instead.');
+  if (badWindows.length) {
+    warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
+  }
+  const routing = routingProviderFor(cfg, tenant.country);
+  if (routing.outsideCoverage) {
+    warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
+  }
   const request: DispatchRequest = {
     run_id: runId,
     tenant_id: tenantId,
@@ -244,7 +264,7 @@ export async function buildDispatchRequest(
       priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
       pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
       use_margin: true,
-      distance_provider: cfg.distanceProvider === 'HAVERSINE' ? 'HAVERSINE' : 'OSRM',
+      distance_provider: routing.provider,
       osrm_url: cfg.osrmUrl ?? null,
       haversine_multiplier: cfg.distanceMultiplier,
       avg_speed_kmh: cfg.avgSpeedKmh,
@@ -327,8 +347,10 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
   if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded by a newer version.', 409);
   const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: scenarioId, runId }, include: { unservedOrders: true } });
-  const d = sc.detailsJson as unknown as ScenarioDetails;
-  if (!d || !Array.isArray(d.loads) || !d.scope) throw new PlanError('This scenario was produced by the legacy optimizer; re-optimize.', 409);
+  if (!isDispatchDetails(sc.detailsJson)) {
+    throw new PlanError('This option was made by the previous optimizer and cannot be applied. Plan the day from Daily dispatch.', 409);
+  }
+  const d = sc.detailsJson;
 
   // Frozen loads must be exactly the ones the scenario was computed around.
   const frozenNow = await tx.planLoad.findMany({ where: { runId, status: { not: 'PLANNED' } }, include: { assignments: true } });
@@ -403,8 +425,14 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
 
   const plannedNew = new Set(d.loads.flatMap((l) => l.stops.flatMap((s) => s.order_ids)));
   const unservedIds = sc.unservedOrders.map((u) => u.orderId);
-  if (plannedNew.size) await tx.order.updateMany({ where: { tenantId, id: { in: [...plannedNew] } }, data: { status: 'ASSIGNED' } });
-  if (unservedIds.length) await tx.order.updateMany({ where: { tenantId, id: { in: unservedIds } }, data: { status: 'UNSERVED' } });
+  // Never move an order backwards: one already out for delivery (or delivered) keeps its status.
+  const movable = { notIn: ['DISPATCHED', 'DELIVERED'] as OrderStatus[] };
+  if (plannedNew.size) {
+    await tx.order.updateMany({ where: { tenantId, id: { in: [...plannedNew] }, status: movable }, data: { status: 'ASSIGNED' } });
+  }
+  if (unservedIds.length) {
+    await tx.order.updateMany({ where: { tenantId, id: { in: unservedIds }, status: movable }, data: { status: 'UNSERVED' } });
+  }
 
   await tx.runPlan.update({ where: { id: runId }, data: { chosenScenarioId: scenarioId, status: 'READY' } });
   await refreshPlanFacts(tx, tenantId, runId);
@@ -485,7 +513,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
     const parent = await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId } });
     if (parent?.chosenScenarioId) {
       const psc = await tx.scenarioResult.findFirst({ where: { id: parent.chosenScenarioId } });
-      const pd = psc?.detailsJson as unknown as ScenarioDetails | undefined;
+      const pdRaw = psc?.detailsJson;
+      const pd = isDispatchDetails(pdRaw) ? pdRaw : undefined;
       const pLoads = await tx.planLoad.findMany({ where: { runId: parent.id }, include: { assignments: { select: { orderId: true } } } });
       const parentPlanned: AssignmentKey[] = pLoads.flatMap((l) => l.assignments.map((a) => ({ orderId: a.orderId, truckId: l.truckId, loadNo: l.loadNo })));
       change = computeChangeSummary({
@@ -515,11 +544,32 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
 // Plan versions
 // ---------------------------------------------------------------------------------------
 
+/**
+ * The live plan for a depot and day. Plans created by the previous optimizer are all version 1,
+ * and a day can hold several of them, so ties go to the plan that was actually applied and
+ * then to the newest: the answer must never flip between requests.
+ */
 export async function currentPlan(tenantId: string, depotId: string, dateIso: string) {
   return prisma.runPlan.findFirst({
-    where: { tenantId, depotId, runDate: dateOnly(dateIso), status: { not: 'SUPERSEDED' } },
-    orderBy: { version: 'desc' },
+    where: { tenantId, depotId, runDate: dateOnly(dateIso), status: { notIn: ['SUPERSEDED', 'ARCHIVED'] } },
+    orderBy: [{ version: 'desc' }, { chosenScenarioId: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }],
   });
+}
+
+/** Chosen scenario stored by this planner (not the previous PyVRP optimizer, whose details have no scope/loads). */
+export function isDispatchDetails(json: unknown): json is ScenarioDetails {
+  const d = json as Partial<ScenarioDetails> | null;
+  return !!d && typeof d === 'object' && !!d.scope && Array.isArray(d.loads);
+}
+
+/** Plans made by the previous optimizer (before the dispatch planner) cannot be re-optimized or re-planned in place. */
+export async function isLegacyPlan(tenantId: string, runId: string): Promise<boolean> {
+  const legacyRows = await prisma.routeAssignment.count({ where: { runId, loadId: null, run: { tenantId } } });
+  if (legacyRows > 0) return true;
+  const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { chosenScenarioId: true } });
+  if (!run?.chosenScenarioId) return false;
+  const sc = await prisma.scenarioResult.findFirst({ where: { id: run.chosenScenarioId }, select: { detailsJson: true } });
+  return !isDispatchDetails(sc?.detailsJson);
 }
 
 export async function getOrCreatePlan(tenantId: string, depotId: string, dateIso: string, userId: string) {

@@ -19,6 +19,10 @@ There is no silent default:
 
 Build needs ~4 GB RAM and ~10 min. Running needs ~0.5–1 GB RAM and <1 vCPU. Truck speeds: OSRM durations come from the car profile and are multiplied by the solver's `roadTimeFactor` (1.25).
 
+**Coverage.** The map holds **Oman + UAE** roads only.
+- Tenants whose country is elsewhere plan on straight-line estimates unless they set their own OSRM URL (`TenantConfig.osrmUrl`).
+- If OSRM has to move a point more than 5 km to reach a road (outside the map, or a wrong pin), that point's legs fall back to the estimate, with a warning on the plan (`OSRM_MAX_SNAP_M` on the solver).
+
 **Security.** OSRM has **no authentication**. It must only be reachable on a private network (Railway private networking, the VM's localhost or LAN, the NMWC network). Never attach a public domain or open port 5000 to the internet.
 
 ## Option A — Railway (same project as the web app and solver) — **deployed**

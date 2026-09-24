@@ -17,6 +17,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { RegionFormDialog, type RegionRow } from './region-form';
+import { errorMessage } from '@/lib/error-message';
 
 interface DepotOption {
   id: string;
@@ -41,7 +42,7 @@ export function RegionsTable({ initial, depots, canManage }: Props) {
       const res = await fetch(`/api/regions/${r.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       const detached = body.data?.detachedCustomers ?? 0;

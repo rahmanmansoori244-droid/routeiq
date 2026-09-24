@@ -24,6 +24,7 @@ import { ScenarioCards, type ScenarioCardData } from './scenario-cards';
 import { RoutesTab, type RouteRow as RoutesTabRow } from './routes-tab';
 import { BaselineTab, type BaselineRow } from './baseline-tab';
 import { MapTab, type MapStop, type MapTruck } from './map-tab';
+import { errorMessage } from '@/lib/error-message';
 
 interface RunSummary {
   id: string;
@@ -127,10 +128,10 @@ export function RunDetail({
       const res = await fetch(`/api/runs/${run.id}/optimize`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok && res.status !== 202) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Optimize failed to start.');
+        toast.error(errorMessage(body, 'Optimize failed to start.'));
         return;
       }
-      toast.success(retry ? `Retry queued (attempt #${body.data?.attemptNo})` : 'Optimization queued.');
+      toast.success(retry ? 'Retry queued.' : 'Optimization queued.');
       router.refresh();
     });
   }
@@ -144,7 +145,7 @@ export function RunDetail({
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Pick failed.');
+        toast.error(errorMessage(body, 'Pick failed.'));
         return;
       }
       toast.success(`${body.data.assignmentsCreated} route assignments created.`);
@@ -162,7 +163,7 @@ export function RunDetail({
       const res = await fetch(`/api/runs/${run.id}/dispatch`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Dispatch failed.');
+        toast.error(errorMessage(body, 'Dispatch failed.'));
         return;
       }
       toast.success('Run dispatched. Exports are now the final version.');
@@ -177,7 +178,7 @@ export function RunDetail({
       const res = await fetch(`/api/runs/${run.id}/unlock`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Unlock failed.');
+        toast.error(errorMessage(body, 'Unlock failed.'));
         return;
       }
       toast.success('Run unlocked for further edits.');

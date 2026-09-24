@@ -8,6 +8,7 @@ import type { UploadBatchStatus } from '@prisma/client';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { errorMessage } from '@/lib/error-message';
 
 interface BatchSummary {
   id: string;
@@ -58,12 +59,23 @@ export function ValidationReport({
 
   const canConfirm = canEdit && batch.status === 'VALIDATED' && batch.errorRows === 0;
 
-  function confirm() {
+  function confirm(lateReason?: string) {
     startConfirm(async () => {
-      const res = await fetch(`/api/orders/${batch.id}/confirm`, { method: 'POST' });
+      const res = await fetch(
+        `/api/orders/${batch.id}/confirm`,
+        lateReason
+          ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lateReason }) }
+          : { method: 'POST' },
+      );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Confirm failed.');
+        // Orders after the planning cutoff (or for a day already planned) need a reason.
+        if (!lateReason && body?.error?.code === 'LATE_REASON_REQUIRED') {
+          const reason = window.prompt(`${errorMessage(body, 'These orders are late.')}\n\nReason for accepting them:`)?.trim();
+          if (reason) confirm(reason);
+          return;
+        }
+        toast.error(errorMessage(body, 'Confirm failed.'));
         return;
       }
       toast.success(`Created ${body.data.ordersCreated} orders (${body.data.linesCreated} lines).`);
@@ -155,7 +167,7 @@ export function ValidationReport({
 
       <div className="flex justify-end gap-2">
         {canConfirm ? (
-          <Button onClick={confirm} disabled={pending}>
+          <Button onClick={() => confirm()} disabled={pending}>
             {pending ? 'Persisting…' : `Confirm & create ${batch.validRows} orders`}
           </Button>
         ) : batch.status === 'VALIDATED' && batch.errorRows === 0 ? (

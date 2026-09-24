@@ -6,6 +6,7 @@ import { Upload, FileSpreadsheet, Download } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { errorMessage } from '@/lib/error-message';
 
 interface Props {
   slug: string;
@@ -30,7 +31,7 @@ export function UploadDropzone({ slug, canEdit, onUploaded }: Props) {
       const res = await fetch('/api/orders/upload', { method: 'POST', body: fd });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Upload failed.');
+        toast.error(errorMessage(body, 'Upload failed.'));
         return;
       }
       toast.success(`Uploaded ${file.name}. Review validation.`);

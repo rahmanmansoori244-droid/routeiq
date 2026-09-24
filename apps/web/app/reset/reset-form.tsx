@@ -6,6 +6,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { errorMessage } from '@/lib/error-message';
 
 export function ResetForm() {
   const router = useRouter();
@@ -41,7 +42,7 @@ export function ResetForm() {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Reset failed.');
+        toast.error(errorMessage(body, 'Reset failed.'));
         return;
       }
       toast.success('Password updated. Sign in with your new password.');

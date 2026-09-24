@@ -38,7 +38,6 @@ import logging
 import math
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -68,6 +67,14 @@ MARGIN_CAP = int(SERVICE_UNIT * 0.4)  # ... but can never outweigh one service u
 HORIZON_S = 2 * DAY_MIN * 60
 # Worker start-up + matrix pickling + extraction on top of an alternative's solver time limit.
 ALT_GRACE_SEC = int(os.environ.get("SOLVER_ALT_GRACE_SEC", "20"))
+# RECOMMENDED may never be skipped, so its worker only gets a generous backstop deadline
+# (2 x its time limit + this) against a search that never returns.
+REC_GRACE_SEC = 60
+# Worker start-up + model build + extraction around RECOMMENDED's search, kept free in the budget.
+REC_OVERHEAD_SEC = 20
+# Whole request (matrix + all scenarios) must answer before the web gives up (600 s): the
+# alternatives are skipped rather than overrun it. Env SOLVER_BUDGET_SEC overrides.
+SOLVER_BUDGET_SEC = 540
 ENGINE = "ortools-routing"
 
 
@@ -679,6 +686,7 @@ def _assert_reconciled(req: DispatchRequest, sc: DispatchScenario) -> None:
 
 
 def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResponse:
+    started = time.monotonic()
     cfg = req.config
     tds = _truck_days(req)
     solvable, drops, warnings = _prefilter(req, tds)
@@ -699,7 +707,8 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResp
         solvable, mx = _submatrix(solvable, keep, mx)
 
     time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
-    scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops)
+    budget = int(os.environ.get("SOLVER_BUDGET_SEC", SOLVER_BUDGET_SEC))
+    scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget)
     for sc in scenarios:
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
@@ -741,63 +750,123 @@ def _initial_assignment(routing, m: _Model, stops: list[DispatchStop], loads: li
 
 
 def _scenario_worker(args) -> DispatchScenario:
-    # Test hook: simulate an OR-Tools call that never returns (see test_alternative_deadline).
+    # Test hooks: an OR-Tools call that never returns, one that raises, and a worker process
+    # killed mid-solve (out of memory). See the deadline / failure tests.
     if os.environ.get("ROUTEIQ_TEST_HANG_SCENARIO") == args[0]:
         time.sleep(3600)
+    if os.environ.get("ROUTEIQ_TEST_FAIL_SCENARIO") == args[0]:
+        raise RuntimeError("test hook: scenario failed")
+    if os.environ.get("ROUTEIQ_TEST_KILL_SCENARIO") == args[0]:
+        os._exit(137)
     return _solve_scenario(*args)
 
 
-def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops) -> list[DispatchScenario]:
+class SolveAborted(RuntimeError):
+    """The recommended plan could not be computed (worker died or ran out of time)."""
+
+
+def _await_worker(pool, fut, deadline: float, what: str):
+    """Wait for a pool task, failing fast when its worker process dies (e.g. out of memory):
+    multiprocessing.Pool silently replaces a dead worker and would leave the task pending forever."""
+    pids = {p.pid for p in pool._pool}
+    while not fut.ready():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SolveAborted(f"The optimizer did not finish the {what} in time. Try again, or plan fewer stops at once.")
+        fut.wait(min(2.0, remaining))
+        if not fut.ready() and {p.pid for p in pool._pool} != pids:
+            raise SolveAborted(f"The optimizer process stopped unexpectedly while computing the {what} (out of memory?). Try again.")
+    return fut.get()
+
+
+def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it (so MIN_DISTANCE never drives more km and MIN_TRUCKS never uses more trucks than the
-    recommendation) with half the budget, in worker processes - OR-Tools holds the GIL, so
-    threads would not run them concurrently.
+    recommendation) with half the budget.
+
+    Every scenario runs in a worker process. OR-Tools holds the GIL for the whole search, so a
+    solve inside the API process froze it completely - /health, /route-geometry and every other
+    request - for up to four minutes; threads would not run scenarios concurrently either.
 
     Safety net: alternatives are optional. Each worker gets a hard wall-clock deadline; a worker
-    that overruns (OR-Tools occasionally ignores its own time limit inside internal restores) is
-    terminated and the alternative is skipped with a warning. The RECOMMENDED plan is never lost
-    because of an alternative. SOLVER_PARALLEL=0 solves alternatives sequentially (no deadline).
+    that overruns (OR-Tools occasionally ignores its own time limit inside internal restores),
+    fails, or would run past the request's time budget is terminated / not started and the
+    alternative is skipped with a warning. The RECOMMENDED plan is never lost because of an
+    alternative. SOLVER_PARALLEL=0 solves everything in-process (no deadline).
     """
-    results: dict[str, DispatchScenario] = {}
-    warm = None
-    if "RECOMMENDED" in names:
-        results["RECOMMENDED"] = _solve_scenario("RECOMMENDED", req, solvable, tds, mx, time_limit, drops)
-        warm = results["RECOMMENDED"].loads or None
-    alt_limit = max(2, time_limit // 2) if warm else time_limit
-    jobs = [(n, req, solvable, tds, mx, alt_limit, drops, warm) for n in names if n not in results]
-    skipped: list[str] = []
-    if jobs and solvable and os.environ.get("SOLVER_PARALLEL", "1") != "0":
-        import multiprocessing as mp
+    import multiprocessing as mp
 
-        grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
-        deadline = time.monotonic() + alt_limit + grace
+    if budget_end is None:
+        budget_end = time.monotonic() + SOLVER_BUDGET_SEC
+    results: dict[str, DispatchScenario] = {}
+    alt_names = [n for n in names if n != "RECOMMENDED"]
+    pool = None
+    if solvable and os.environ.get("SOLVER_PARALLEL", "1") != "0":
         try:
             # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
             # worker a stuck alternative starved the next one, which then hit the same deadline
             # without ever starting. OR-Tools limits are wall-clock, so sharing a core only
-            # lowers quality, never the deadline.
-            with mp.get_context("spawn").Pool(processes=len(jobs)) as pool:
-                pending = [(j[0], pool.apply_async(_scenario_worker, (j,))) for j in jobs]
-                for name, fut in pending:
-                    try:
-                        sc = fut.get(timeout=max(1.0, deadline - time.monotonic()))
-                        results[sc.name] = sc
-                    except mp.TimeoutError:
-                        skipped.append(name)
-                        log.warning("alternative %s exceeded %ss; skipped", name, alt_limit + grace)
-                # leaving the with-block terminates any worker still running
+            # lowers quality, never the deadline. RECOMMENDED runs first in one of them, so the
+            # alternatives' workers have finished starting by the time they are needed.
+            pool = mp.get_context("spawn").Pool(processes=max(1, len(alt_names)))
         except Exception as exc:  # noqa: BLE001 - e.g. restricted environments without processes
-            log.warning("parallel scenario solve failed (%s); solving sequentially", exc)
+            log.warning("worker processes unavailable (%s); solving in-process", exc)
+    skipped: list[str] = []
+    try:
+        warm = None
+        if "RECOMMENDED" in names:
+            # A slow road matrix eats into the budget: shorten the search rather than overrun it.
+            rec_limit = max(1, min(time_limit, int(budget_end - time.monotonic()) - REC_OVERHEAD_SEC))
+            job = ("RECOMMENDED", req, solvable, tds, mx, rec_limit, drops)
+            if pool is None:
+                results["RECOMMENDED"] = _scenario_worker(job)
+            else:
+                deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
+                fut = pool.apply_async(_scenario_worker, (job,))
+                results["RECOMMENDED"] = _await_worker(pool, fut, deadline, "recommended plan")
+            warm = results["RECOMMENDED"].loads or None
+        alt_limit = max(2, time_limit // 2) if warm else time_limit
+        grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
+        if alt_names:
+            # Never run past the request budget: shorten the alternatives, or skip them.
+            room = int(budget_end - time.monotonic()) - grace
+            if room < 2:
+                skipped.extend(alt_names)
+                alt_names = []
+                log.warning("time budget used up by the recommended plan; alternatives skipped")
+            else:
+                alt_limit = min(alt_limit, room)
+        jobs = [(n, req, solvable, tds, mx, alt_limit, drops, warm) for n in alt_names]
+        if jobs and pool is not None:
+            deadline = time.monotonic() + alt_limit + grace
+            pending = [(j[0], pool.apply_async(_scenario_worker, (j,))) for j in jobs]
+            for name, fut in pending:
+                # A dead worker shows up as a timeout here; a failing one as its exception.
+                # Either way only this alternative is lost - never solved again in-process.
+                try:
+                    sc = fut.get(timeout=max(1.0, deadline - time.monotonic()))
+                    results[sc.name] = sc
+                except mp.TimeoutError:
+                    skipped.append(name)
+                    log.warning("alternative %s exceeded %ss; skipped", name, alt_limit + grace)
+                except Exception as exc:  # noqa: BLE001
+                    skipped.append(name)
+                    log.warning("alternative %s failed (%s); skipped", name, exc)
+        else:
             for j in jobs:
-                if j[0] not in results and j[0] not in skipped:
+                try:
                     results[j[0]] = _scenario_worker(j)
-    else:
-        for j in jobs:
-            results[j[0]] = _scenario_worker(j)
+                except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
+                    skipped.append(j[0])
+                    log.warning("alternative %s failed (%s); skipped", j[0], exc)
+    finally:
+        if pool is not None:
+            pool.terminate()  # stops any alternative still running past its deadline
+            pool.join()
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
-            f"Alternative plan(s) {', '.join(skipped)} were skipped (took too long); the recommended plan is complete."
+            f"Alternative plan(s) {', '.join(skipped)} were skipped (out of time, or they failed); the recommended plan is complete."
         )
     if rec:
         # Service comes first. If the (time-limited) recommendation left out stops that an

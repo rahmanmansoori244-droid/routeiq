@@ -7,7 +7,7 @@ import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type TypeProfileLike } from './customer-attrs';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
-import type { ScenarioDetails } from './plan-service';
+import { isDispatchDetails, type ScenarioDetails } from './plan-service';
 import { fmtWindow, isoOf } from './time';
 
 export interface DetailStop {
@@ -131,7 +131,10 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const scenarios = await prisma.scenarioResult.findMany({ where: { runId }, orderBy: { createdAt: 'asc' }, include: { unservedOrders: true } });
   const chosen = scenarios.find((s) => s.id === run.chosenScenarioId) ?? null;
-  const chosenDetails = chosen?.detailsJson as unknown as ScenarioDetails | undefined;
+  // Plans from the previous optimizer (before May 2026) stored another shape: shown without dispatch details.
+  const chosenRaw = chosen?.detailsJson;
+  const chosenDetails = isDispatchDetails(chosenRaw) ? chosenRaw : undefined;
+  const legacyChosen = !!chosen && !chosenDetails;
   const loads = await db.planLoad.findMany({
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
@@ -282,7 +285,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     reconciliation: (run.reconciliationJson as unknown as Reconciliation) ?? null,
     change: (run.changeSummaryJson as unknown as ChangeSummary) ?? null,
     scenarios: scenarios.map((s) => {
-      const d = s.detailsJson as unknown as Partial<ScenarioDetails>;
+      const d = (s.detailsJson ?? {}) as unknown as Partial<ScenarioDetails>;
       return {
         id: s.id,
         name: s.name,
@@ -316,6 +319,10 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     job: job
       ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct, startedAt: job.startedAt?.toISOString() ?? null, finishedAt: job.finishedAt?.toISOString() ?? null }
       : null,
-    warnings: chosenDetails ? [...new Set([...chosenDetails.response_warnings, ...chosenDetails.warnings])] : [],
+    warnings: legacyChosen
+      ? ['This plan was made by the previous optimizer (before May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
+      : chosenDetails
+        ? [...new Set([...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
+        : [],
   };
 }

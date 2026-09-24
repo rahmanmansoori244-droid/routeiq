@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { TruckFormDialog, type TruckRow, type DepotOption } from './truck-form';
 import { unitShort, fmtMoney } from '@/lib/format';
+import { errorMessage } from '@/lib/error-message';
 
 interface Props {
   initial: TruckRow[];
@@ -40,7 +41,7 @@ export function TrucksTable({ initial, depots, canManage, primaryUnit, currency 
       const res = await fetch(`/api/trucks/${t.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       if (body.data?.softDeleted) {

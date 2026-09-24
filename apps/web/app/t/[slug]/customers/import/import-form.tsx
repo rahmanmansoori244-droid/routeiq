@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { errorMessage } from '@/lib/error-message';
 
 interface ImportError { row: number; message: string }
 interface ImportResult {
@@ -45,7 +46,7 @@ export function CustomerImportForm({ slug }: { slug: string }) {
       const res = await fetch('/api/customers/import', { method: 'POST', body: fd });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Import failed.');
+        toast.error(errorMessage(body, 'Import failed.'));
         return;
       }
       setResult(body.data as ImportResult);

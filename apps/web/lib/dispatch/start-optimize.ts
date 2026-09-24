@@ -2,12 +2,22 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { isOptimizing } from '../jobs/optimize-job';
 import { scheduleDispatchOptimize } from '../jobs/dispatch-job';
-import { buildDispatchRequest, createNextVersion, PlanError, type BuiltRequest } from './plan-service';
+import { buildDispatchRequest, createNextVersion, isLegacyPlan, PlanError, type BuiltRequest } from './plan-service';
 
 export interface StartResult {
   status: number;
   body: Record<string, unknown>;
 }
+
+/** Plans from the previous optimizer keep their routes as they were: re-optimizing them in
+ * place would delete their assignments (including locked stops and delivery proofs). */
+const LEGACY_PLAN: StartResult = {
+  status: 409,
+  body: {
+    error: 'This plan was made by the previous optimizer (before May 2026) and is kept exactly as it was. It cannot be re-optimized or re-planned.',
+    code: 'LEGACY_PLAN',
+  },
+};
 
 /**
  * Start an optimization for a plan version that has not been applied yet (DRAFT / FAILED /
@@ -24,6 +34,7 @@ export async function startDispatchOptimize(
   const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
   if (run.status === 'SUPERSEDED') return { status: 409, body: { error: 'This plan version was superseded. Open the latest version.' } };
+  if (await isLegacyPlan(tenantId, runId)) return LEGACY_PLAN;
   if (run.chosenScenarioId && run.status !== 'FAILED') {
     return { status: 409, body: { error: 'This plan is already in use. Re-plan to create a new version.', code: 'NEW_VERSION_REQUIRED' } };
   }
@@ -95,6 +106,8 @@ export async function replan(
 ): Promise<StartResult> {
   const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
+  // Checked before anything is superseded: a legacy parent must stay the live plan.
+  if (await isLegacyPlan(tenantId, runId)) return LEGACY_PLAN;
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
     return startDispatchOptimize(tenantId, runId, user, ip, { allowMissingLocations });

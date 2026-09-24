@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
+import { errorMessage } from '@/lib/error-message';
 
 export interface ProductRow {
   id: string;
@@ -72,7 +73,7 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof data.error === 'string' ? data.error : 'Save failed.');
+        toast.error(errorMessage(data, 'Save failed.'));
         return;
       }
       toast.success(mode === 'create' ? 'Product created' : 'Product updated');

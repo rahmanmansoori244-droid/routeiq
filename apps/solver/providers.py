@@ -34,6 +34,10 @@ HTTP_RETRY_BACKOFF_SECS = 1.0
 # OSRM's default --max-table-size is 100; self-hosted instances can raise it. We tile the
 # table call so both the demo server and a stock self-hosted server work.
 OSRM_TABLE_TILE = 90
+# OSRM snaps every point to its nearest road, however far. A point further than this from any
+# road in the routing map (outside the map's area, or a wrong pin) is not routed on roads: its
+# legs use the estimated distance instead of a meaningless "road" distance.
+OSRM_MAX_SNAP_M = float(os.environ.get("OSRM_MAX_SNAP_M", "5000"))
 
 
 def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -119,7 +123,7 @@ class OSRMProvider:
                     time.sleep(HTTP_RETRY_BACKOFF_SECS * (attempt + 1))
         raise RuntimeError(f"OSRM unavailable: {last}")
 
-    def _table(self, coords: list[tuple[float, float]], src: list[int], dst: list[int]) -> tuple[list, list]:
+    def _table(self, coords: list[tuple[float, float]], src: list[int], dst: list[int]) -> tuple[list, list, dict[int, float]]:
         idx = sorted(set(src) | set(dst))
         pos = {orig: p for p, orig in enumerate(idx)}
         coord_str = ";".join(f"{coords[i][1]:.6f},{coords[i][0]:.6f}" for i in idx)
@@ -130,19 +134,29 @@ class OSRMProvider:
             f"&destinations={';'.join(str(pos[i]) for i in dst)}"
         )
         body = self._get(url)
-        return body.get("distances") or [], body.get("durations") or []
+        # Snap distance (metres from the input point to the road it was moved onto) per coordinate.
+        snaps: dict[int, float] = {}
+        for key, order in (("sources", src), ("destinations", dst)):
+            for k, w in enumerate(body.get(key) or []):
+                d = w.get("distance") if isinstance(w, dict) else None
+                if k < len(order) and isinstance(d, (int, float)):
+                    snaps[order[k]] = max(snaps.get(order[k], 0.0), float(d))
+        return body.get("distances") or [], body.get("durations") or [], snaps
 
     def get_matrix(self, coords: list[tuple[float, float]]) -> MatrixResult:
         n = len(coords)
         dist = [[0] * n for _ in range(n)]
         dur = [[0] * n for _ in range(n)]
-        patched = 0
+        patched_set: set[tuple[int, int]] = set()
+        snap: dict[int, float] = {}
         half = max(1, OSRM_TABLE_TILE // 2)
         for s0 in range(0, n, half):
             src = list(range(s0, min(n, s0 + half)))
             for d0 in range(0, n, half):
                 dst = list(range(d0, min(n, d0 + half)))
-                distances, durations = self._table(coords, src, dst)
+                distances, durations, snaps = self._table(coords, src, dst)
+                for i, d in snaps.items():
+                    snap[i] = max(snap.get(i, 0.0), d)
                 if len(distances) != len(src) or len(durations) != len(src):
                     raise RuntimeError("OSRM returned a matrix of the wrong shape")
                 for si, i in enumerate(src):
@@ -154,16 +168,26 @@ class OSRMProvider:
                         d_m, t_s = distances[si][di], durations[si][di]
                         if d_m is None or t_s is None:
                             dist[i][j], dur[i][j] = self.fallback.leg(coords[i], coords[j])
-                            patched += 1
+                            patched_set.add((i, j))
                         else:
                             dist[i][j] = int(round(float(d_m)))
                             dur[i][j] = int(round(float(t_s)))
         warnings = []
-        if patched:
+        if patched_set:
             warnings.append(
-                f"OSRM could not route {patched} of {n * (n - 1)} legs; those legs use estimated distance."
+                f"OSRM could not route {len(patched_set)} of {n * (n - 1)} legs; those legs use estimated distance."
             )
-        return MatrixResult(dist, dur, self.name, False, warnings, patched)
+        far = sorted(i for i, d in snap.items() if d > OSRM_MAX_SNAP_M)
+        if far:
+            cells = {(i, j) for i in far for j in range(n) if j != i} | {(j, i) for i in far for j in range(n) if j != i}
+            for i, j in cells:
+                dist[i][j], dur[i][j] = self.fallback.leg(coords[i], coords[j])
+            patched_set |= cells
+            warnings.append(
+                f"{len(far)} point(s) are more than {OSRM_MAX_SNAP_M / 1000:g} km from any road in the routing map "
+                "(outside its area, or a wrong location pin); their legs use estimated distance."
+            )
+        return MatrixResult(dist, dur, self.name, False, warnings, len(patched_set))
 
     def get_route_geometry(self, coords: list[tuple[float, float]]) -> list[list[float]]:
         coord_str = ";".join(f"{lng:.6f},{lat:.6f}" for lat, lng in coords)

@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { errorMessage } from '@/lib/error-message';
 
 export interface RegionRow {
   id: string;
@@ -71,7 +72,7 @@ export function RegionFormDialog({ open, onOpenChange, mode, region, depots, onS
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof data.error === 'string' ? data.error : 'Save failed.');
+        toast.error(errorMessage(data, 'Save failed.'));
         return;
       }
       toast.success(mode === 'create' ? 'Region created' : 'Region updated');

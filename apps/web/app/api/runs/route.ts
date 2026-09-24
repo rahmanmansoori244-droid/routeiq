@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { OptimizationMode } from '@prisma/client';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { audit } from '@/lib/audit';
+import { currentPlan } from '@/lib/dispatch/plan-service';
 
 const createRunSchema = z.object({
   depotId: z.string().min(1),
@@ -28,6 +29,13 @@ export const POST = withTenantApi(
     const depot = await db.depot.findUnique({ where: { id: input.depotId } });
     if (!depot) return fail('Depot not found in this tenant', 400);
     if (!depot.active) return fail('Depot is inactive', 400);
+
+    // One live plan per depot and day: "New run" opens the existing plan instead of forking the
+    // day (a second plan would re-plan the same orders onto the same trucks).
+    const existing = await currentPlan(user.tenantId, depot.id, input.runDate);
+    if (existing) {
+      return ok({ ...existing, depot: { id: depot.id, code: depot.code, name: depot.name }, existing: true }, 200);
+    }
 
     const runDate = new Date(input.runDate);
     const trucks = await db.truck.count({ where: { depotId: depot.id, active: true } });

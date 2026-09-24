@@ -12,6 +12,7 @@ import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Truck } from 'lucide-react';
 import { toast } from 'sonner';
+import { errorMessage } from '@/lib/error-message';
 
 export default function DriverLoginPage() {
   const router = useRouter();
@@ -44,7 +45,7 @@ export default function DriverLoginPage() {
       });
       const json = await res.json();
       if (!res.ok || !json.data) {
-        toast.error(typeof json.error === 'string' ? json.error : 'Sign-in failed.');
+        toast.error(errorMessage(json, 'Sign-in failed.'));
         // Clear PIN so the next attempt starts fresh (avoids retrying with a
         // half-typed PIN and leaking the partial value in screen recordings /
         // shoulder-surfing scenarios).

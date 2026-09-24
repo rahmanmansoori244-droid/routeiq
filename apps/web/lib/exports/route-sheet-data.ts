@@ -104,6 +104,7 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
         select: {
           id: true,
           name: true,
+          detailsJson: true,
           unservedOrders: {
             include: {
               order: {
@@ -121,7 +122,14 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
   });
 
   const chosen = run.scenarios.find((s) => s.id === run.chosenScenarioId) ?? null;
-  const isEstimated = tenant.config?.distanceProvider === 'HAVERSINE' && (tenant.config?.labelEstimatedDistances ?? true);
+  // Label from how THIS plan was computed (stored with its scenario), not from today's setting.
+  const stored = (chosen?.detailsJson ?? null) as { distance_is_estimated?: unknown; matrix_provider?: unknown; distance_provider?: unknown } | null;
+  const storedProvider = [stored?.matrix_provider, stored?.distance_provider].find(
+    (p): p is 'HAVERSINE' | 'MAPBOX_MATRIX' | 'OSRM' => p === 'HAVERSINE' || p === 'MAPBOX_MATRIX' || p === 'OSRM',
+  );
+  const computedEstimated =
+    typeof stored?.distance_is_estimated === 'boolean' ? stored.distance_is_estimated : tenant.config?.distanceProvider === 'HAVERSINE';
+  const isEstimated = computedEstimated && (tenant.config?.labelEstimatedDistances ?? true);
 
   // Group assignments by truck.
   const byTruck = new Map<string, TruckRoute>();
@@ -217,7 +225,7 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
       status: run.status,
       finalizedAt: run.finalizedAt?.toISOString() ?? null,
       chosenScenarioName: chosen?.name ?? null,
-      distanceProvider: tenant.config?.distanceProvider ?? 'HAVERSINE',
+      distanceProvider: storedProvider ?? tenant.config?.distanceProvider ?? 'HAVERSINE',
       distanceIsEstimated: isEstimated,
     },
     routes,

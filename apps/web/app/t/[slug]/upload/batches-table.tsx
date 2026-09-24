@@ -19,6 +19,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { errorMessage } from '@/lib/error-message';
 
 export interface BatchRow {
   id: string;
@@ -59,7 +60,7 @@ export function BatchesTable({ slug, initial, canEdit }: Props) {
       const res = await fetch(`/api/orders/${b.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       toast.success(

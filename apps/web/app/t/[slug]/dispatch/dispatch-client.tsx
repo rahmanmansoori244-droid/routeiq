@@ -13,6 +13,7 @@ import { api } from './client-api';
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
+import { errorMessage } from '@/lib/error-message';
 
 interface Issue {
   code: string;
@@ -129,7 +130,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
     const body = await res.json().catch(() => ({}));
     setUploading(false);
     if (!res.ok) {
-      toast.error(typeof body.error === 'string' ? body.error : 'Upload failed.');
+      toast.error(errorMessage(body, 'Upload failed.'));
       return;
     }
     setBatch({ id: body.data.batchId, v: body.data.validation });

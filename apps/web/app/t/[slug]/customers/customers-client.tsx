@@ -11,6 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import { errorMessage } from '@/lib/error-message';
 
 interface CustomerRow {
   id: string;
@@ -89,7 +90,7 @@ export function CustomersClient({
         // Rollback
         setRows((rs) => rs.map((r) => (r.id === id ? before : r)));
         const body = await res.json().catch(() => ({}));
-        toast.error(typeof body.error === 'string' ? body.error : 'Update failed.');
+        toast.error(errorMessage(body, 'Update failed.'));
         return;
       }
       toast.success('Customer updated');

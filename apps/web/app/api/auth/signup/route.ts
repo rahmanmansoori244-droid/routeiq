@@ -6,6 +6,7 @@ import { hashPassword, isSuperAdmin } from '@/lib/auth';
 import { audit } from '@/lib/audit';
 import { validateSlug } from '@/lib/tenant';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { isOmanUae } from '@/lib/dispatch/customer-attrs';
 
 const signupSchema = z.object({
   companyName: z.string().trim().min(2).max(120),
@@ -68,7 +69,8 @@ export async function POST(req: Request) {
           country: input.country,
           currency: input.currency,
           primaryUnit: input.primaryUnit,
-          config: { create: {} },
+          // Road distances need map coverage: the shared OSRM holds Oman + UAE roads only.
+          config: { create: { distanceProvider: isOmanUae(input.country) ? 'OSRM' : 'HAVERSINE' } },
         },
       });
 

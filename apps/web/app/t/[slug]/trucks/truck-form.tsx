@@ -16,6 +16,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { unitLong } from '@/lib/format';
+import { errorMessage } from '@/lib/error-message';
 
 export interface TruckRow {
   id: string;
@@ -126,7 +127,7 @@ export function TruckFormDialog({
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof data.error === 'string' ? data.error : 'Save failed.');
+        toast.error(errorMessage(data, 'Save failed.'));
         return;
       }
       toast.success(mode === 'create' ? 'Truck created' : 'Truck updated');
