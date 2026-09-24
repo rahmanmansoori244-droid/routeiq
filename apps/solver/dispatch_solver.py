@@ -772,7 +772,11 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops) -> list[Dis
         grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
         deadline = time.monotonic() + alt_limit + grace
         try:
-            with mp.get_context("spawn").Pool(processes=min(len(jobs), max(1, (os.cpu_count() or 2) - 1))) as pool:
+            # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
+            # worker a stuck alternative starved the next one, which then hit the same deadline
+            # without ever starting. OR-Tools limits are wall-clock, so sharing a core only
+            # lowers quality, never the deadline.
+            with mp.get_context("spawn").Pool(processes=len(jobs)) as pool:
                 pending = [(j[0], pool.apply_async(_scenario_worker, (j,))) for j in jobs]
                 for name, fut in pending:
                     try:

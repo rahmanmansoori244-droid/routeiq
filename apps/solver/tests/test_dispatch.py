@@ -530,6 +530,9 @@ def test_alternative_deadline_never_loses_the_recommended_plan(monkeypatch):
     monkeypatch.setenv("ROUTEIQ_TEST_HANG_SCENARIO", "MIN_TRUCKS")
     monkeypatch.setenv("SOLVER_ALT_GRACE_SEC", "3")
     monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    # Small servers (and GitHub's 2-vCPU runners) must not let one stuck alternative starve the
+    # other: each alternative needs its own worker process.
+    monkeypatch.setattr("os.cpu_count", lambda: 2)
     stops = [stop(f"S{i}", 23.55 + i * 0.01, 58.40, cases=20) for i in range(6)]
     r = req(stops, [truck("T01"), truck("T02")], time_limit_sec=2, scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
     t0 = time.perf_counter()
