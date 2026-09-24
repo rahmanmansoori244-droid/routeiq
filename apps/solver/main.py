@@ -13,6 +13,7 @@ import os
 import time
 from typing import Annotated
 
+import httpx
 from fastapi import FastAPI, Header, HTTPException
 
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
@@ -32,10 +33,33 @@ app = FastAPI(title="RouteIQ Solver", version="0.4.0")
 SOLVER_TOKEN = os.environ.get("SOLVER_TOKEN", "")
 
 
+_ROUTING_CACHE: dict = {"at": 0.0, "value": None}
+_ROUTING_TTL_S = 60
+
+
+def routing_status() -> dict:
+    """Is road routing available? OSRM down never fails the solver (plans fall back to
+    estimated distances with a warning) - this is for monitoring. Cached 60 s; no URL leaked."""
+    url = configured_osrm_url()
+    if not url:
+        return {"provider": "HAVERSINE", "status": "not_configured"}
+    now = time.time()
+    if _ROUTING_CACHE["value"] and now - _ROUTING_CACHE["at"] < _ROUTING_TTL_S:
+        return _ROUTING_CACHE["value"]
+    try:
+        r = httpx.get(f"{url.rstrip('/')}/nearest/v1/driving/58.3920,23.5680", timeout=2.0)
+        status = "up" if r.status_code == 200 and r.json().get("code") == "Ok" else "down"
+    except Exception:  # noqa: BLE001
+        status = "down"
+    value = {"provider": "OSRM", "status": status}
+    _ROUTING_CACHE.update(at=now, value=value)
+    return value
+
+
 @app.get("/health")
-def health() -> dict[str, bool]:
+def health() -> dict:
     """Public health probe used by Railway and the web service /api/health."""
-    return {"ok": True}
+    return {"ok": True, "routing": routing_status()}
 
 
 def _check_token(token: str | None) -> None:

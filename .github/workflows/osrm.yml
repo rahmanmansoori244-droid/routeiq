@@ -1,0 +1,53 @@
+name: OSRM image
+
+# Builds the RouteIQ road-routing image (Oman + UAE graph baked in) and smoke-tests real Muscat
+# routes against it. Validation only: nothing is published or deployed from here.
+on:
+  pull_request:
+    paths:
+      - 'infra/osrm/**'
+      - '.github/workflows/osrm.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke-test:
+    name: Build OSRM image + smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t routeiq-osrm:ci infra/osrm
+
+      - name: Image size
+        run: docker image ls routeiq-osrm:ci
+
+      - name: Build info
+        run: docker run --rm --entrypoint cat routeiq-osrm:ci /data/BUILD_INFO
+
+      - name: Start server
+        run: |
+          docker run -d --name osrm -p 5000:5000 routeiq-osrm:ci
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:5000/nearest/v1/driving/58.3920,23.5680" >/dev/null; then echo "up after ${i}s"; break; fi
+            sleep 1
+          done
+          docker stats --no-stream osrm
+
+      - name: Smoke test
+        run: OSRM_URL=http://localhost:5000 sh infra/osrm/smoke-test.sh
+
+      - name: IPv6 bind (Railway private networking uses OSRM_BIND=::)
+        run: |
+          docker run -d --name osrm6 -e OSRM_BIND=:: -p 5001:5000 routeiq-osrm:ci
+          for i in $(seq 1 60); do
+            if curl -fsS "http://localhost:5001/nearest/v1/driving/58.3920,23.5680" >/dev/null; then echo "IPv6-bound server reachable after ${i}s"; exit 0; fi
+            sleep 1
+          done
+          docker logs osrm6 | tail -50
+          exit 1
+
+      - name: Server log on failure
+        if: failure()
+        run: docker logs osrm | tail -100

@@ -565,3 +565,19 @@ def test_replan_continuity_keeps_stops_on_their_previous_truck():
     assert "LATE" in now
     assert len(moved) <= 3, moved
     assert_reconciled(r2, sc2)
+
+
+def test_health_reports_routing_status(monkeypatch):
+    import main
+    from fastapi.testclient import TestClient
+
+    monkeypatch.delenv("OSRM_URL", raising=False)
+    main._ROUTING_CACHE.update(at=0.0, value=None)
+    body = TestClient(main.app).get("/health").json()
+    assert body == {"ok": True, "routing": {"provider": "HAVERSINE", "status": "not_configured"}}
+
+    monkeypatch.setenv("OSRM_URL", "http://127.0.0.1:9")  # nothing listens there
+    main._ROUTING_CACHE.update(at=0.0, value=None)
+    body = TestClient(main.app).get("/health").json()
+    assert body["ok"] is True  # OSRM down never fails the solver
+    assert body["routing"] == {"provider": "OSRM", "status": "down"}
