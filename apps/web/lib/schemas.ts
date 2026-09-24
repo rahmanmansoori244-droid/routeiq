@@ -139,6 +139,7 @@ export const tenantConfigSchema = z.object({
   labelEstimatedDistances: z.boolean(),
   driverShiftMaxMinutes: z.coerce.number().int().min(60).max(1440),
   returnToDepot: z.boolean(),
+  splitDeliveries: z.boolean(),
   defaultServiceTimeMin: z.coerce.number().int().min(0).max(600),
   costPerKmDefault: z.coerce.number().min(0).max(10),
   fixedTruckCostPerDayDefault: z.coerce.number().min(0).max(10_000),

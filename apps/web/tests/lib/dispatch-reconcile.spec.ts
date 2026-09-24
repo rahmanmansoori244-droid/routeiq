@@ -163,3 +163,65 @@ describe('aggregateSkus', () => {
     expect(lines[0].cases).toBe(1);
   });
 });
+
+describe('reconcile - split deliveries (portions)', () => {
+  // O9: one customer, two lines (ids given so portions can refer to them).
+  const BIG: ReconOrder[] = [
+    {
+      id: 'O9',
+      customerId: 'C9',
+      customerKey: 'C9::__MAIN__',
+      lines: [
+        { id: 'l1', productCode: 'W500', productName: 'Water 500ml', salesOrderNo: 'SO9', cases: 150 },
+        { id: 'l2', productCode: 'G5', productName: 'Gallon 5L', salesOrderNo: 'SO9', cases: 40 },
+      ],
+    },
+  ];
+  const part = (truckId: string, lines: { lineId: string; cases: number }[]): ReconPlanned => ({ orderId: 'O9', customerId: 'C9', truckId, loadNo: 1, lines });
+
+  it('an order planned in parts reconciles when the parts add up per line', () => {
+    const r = reconcile(BIG, [part('T1', [{ lineId: 'l1', cases: 100 }]), part('T2', [{ lineId: 'l1', cases: 50 }, { lineId: 'l2', cases: 40 }])], []);
+    expect(r.problems).toEqual([]);
+    expect(r.ok).toBe(true);
+    expect(r.plannedCases).toBe(190);
+    expect(r.plannedOrders).toBe(1);
+    expect(r.partialOrders).toBe(0);
+  });
+
+  it('part planned + rest unserved reconciles and counts as a partial order', () => {
+    const r = reconcile(BIG, [part('T1', [{ lineId: 'l1', cases: 100 }])], [
+      { orderId: 'O9', reasonCode: 'CAPACITY', lines: [{ lineId: 'l1', cases: 50 }, { lineId: 'l2', cases: 40 }] },
+    ]);
+    expect(r.ok).toBe(true);
+    expect([r.plannedCases, r.unservedCases]).toEqual([100, 90]);
+    expect([r.plannedOrders, r.unservedOrders, r.partialOrders]).toEqual([1, 1, 1]);
+  });
+
+  it('flags a lost case in the parts', () => {
+    const r = reconcile(BIG, [part('T1', [{ lineId: 'l1', cases: 100 }]), part('T2', [{ lineId: 'l1', cases: 49 }, { lineId: 'l2', cases: 40 }])], []);
+    expect(r.ok).toBe(false);
+    expect(r.problems.join('\n')).toContain('W500: uploaded 150 != planned 149 + unserved 0 across its split portions');
+    expect(r.problems.join('\n')).toContain('Cases do not reconcile');
+  });
+
+  it('flags a duplicated case (parts overlapping)', () => {
+    const r = reconcile(BIG, [part('T1', [{ lineId: 'l1', cases: 150 }, { lineId: 'l2', cases: 40 }]), part('T2', [{ lineId: 'l2', cases: 1 }])], []);
+    expect(r.ok).toBe(false);
+    expect(r.problems.join('\n')).toContain('G5: uploaded 40 != planned 41');
+  });
+
+  it('flags a whole-order entry mixed with portions', () => {
+    const r = reconcile(BIG, [{ orderId: 'O9', customerId: 'C9', truckId: 'T1', loadNo: 1 }, part('T2', [{ lineId: 'l1', cases: 1 }])], []);
+    expect(r.problems.join('\n')).toContain('Order O9 (C9::__MAIN__) appears 2 times.');
+  });
+
+  it('flags a portion that refers to a line not on the order', () => {
+    const r = reconcile(BIG, [part('T1', [{ lineId: 'l1', cases: 150 }, { lineId: 'l2', cases: 40 }, { lineId: 'zz', cases: 3 }])], []);
+    expect(r.problems.join('\n')).toContain('refers to line zz');
+  });
+
+  it('flags a part planned for another customer', () => {
+    const r = reconcile(BIG, [{ ...part('T1', [{ lineId: 'l1', cases: 150 }, { lineId: 'l2', cases: 40 }]), customerId: 'C1' }], []);
+    expect(r.problems.join('\n')).toContain('planned for another customer/branch');
+  });
+});

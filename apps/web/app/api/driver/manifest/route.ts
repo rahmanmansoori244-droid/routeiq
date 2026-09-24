@@ -91,6 +91,7 @@ export async function GET(req: Request) {
             plannedArrivalMin: true,
             plannedDistanceFromPrevKm: true,
             plannedLoadCases: true,
+            portionCases: true,
             order: {
               select: {
                 id: true,
@@ -138,7 +139,7 @@ export async function GET(req: Request) {
         lng: a.order.customer.lng,
         plannedArrivalMin: a.plannedArrivalMin,
         plannedLoadCases: a.plannedLoadCases,
-        cases: a.order.totalCases,
+        cases: a.portionCases ?? a.order.totalCases, // a split delivery carries only its part
         doneAt: a.deliveryProof?.completedAt?.toISOString() ?? null,
       })),
     },

@@ -197,7 +197,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
 
       {s ? (
         <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-8" data-testid="kpis">
-          <Kpi label="Orders served" value={`${s.ordersServed} / ${s.totalOrders}`} />
+          <Kpi label="Orders served" value={`${s.ordersServed} / ${s.totalOrders}${s.ordersPartial ? ` (+${s.ordersPartial} part)` : ''}`} />
           <Kpi label="Cases planned" value={`${s.casesServed.toLocaleString()} / ${s.totalCases.toLocaleString()}`} />
           <Kpi label="Trucks · loads" value={`${s.trucksUsed} · ${s.trips}`} />
           <Kpi label={kmLabel} value={s.totalKm.toLocaleString()} />
@@ -364,7 +364,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
 
       <Card>
         <CardHeader className="py-3">
-          <CardTitle className="text-sm">Unserved orders ({d.unserved.length})</CardTitle>
+          <CardTitle className="text-sm">Unserved orders ({new Set(d.unserved.map((u) => u.orderId)).size})</CardTitle>
         </CardHeader>
         <CardContent className="overflow-x-auto p-0">
           {d.unserved.length === 0 ? (
@@ -382,10 +382,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               </thead>
               <tbody>
                 {d.unserved.map((u) => (
-                  <tr key={u.orderId} className="border-t">
+                  <tr key={`${u.orderId}-${u.reasonCode}`} className="border-t">
                     <td className="p-2">
                       {u.customerName} <span className="text-xs text-muted-foreground">{u.customerCode}{u.branchCode ? ` / ${u.branchCode}` : ''}</span>
                       {u.late ? <Badge variant="warning" className="ml-1">LATE</Badge> : null}
+                      {u.partial ? <Badge variant="secondary" className="ml-1" title="The rest of this order is on a truck">REST OF SPLIT</Badge> : null}
                     </td>
                     <td className="p-2">P{u.priority}</td>
                     <td className="p-2">{u.cases}</td>
@@ -412,7 +413,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
             truckCode: l.truckCode,
             loadNo: l.loadNo,
             colorIdx: colorIdx.get(l.truckId) ?? 0,
-            stops: l.stops.map((st) => ({ sequence: st.sequence, lat: st.lat, lng: st.lng, label: `${st.customerName} (${st.cases} cs)` })),
+            stops: l.stops.map((st) => ({ sequence: st.sequence, lat: st.lat, lng: st.lng, label: `${st.customerName} (${st.cases} cs${st.split ? `, part ${st.split.part}/${st.split.parts}` : ''})` })),
           }))}
           unserved={[]}
         />
@@ -548,6 +549,12 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                     {st.branchCode ? ` / ${st.branchCode}` : ''} {st.customerType ? `· ${st.customerType}` : ''}
                     {st.late ? ' · LATE' : ''}
                   </span>
+                  {st.split ? (
+                    <Badge variant="secondary" className="mt-0.5" data-testid="split-part" title="Customer bigger than one truck: delivered in parts">
+                      Part {st.split.part} of {st.split.parts}
+                      {st.split.restUnserved ? ' · rest unserved' : ''}
+                    </Badge>
+                  ) : null}
                 </td>
                 <td>P{st.priority}</td>
                 <td className={st.hardWindowOk === false ? 'text-red-600' : ''}>

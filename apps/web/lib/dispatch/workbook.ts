@@ -250,7 +250,8 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     kv('Total cases', s.totalCases, FMT_INT);
     kv('Total weight (kg)', s.totalWeightKg, FMT_KG);
     kv('Orders served', s.ordersServed, FMT_INT, `${s.casesServed} cases`);
-    kv('Orders unserved', s.ordersUnserved, FMT_INT, `${s.casesUnserved} cases${reasons ? ` - ${reasons}` : ''}`);
+    if (s.ordersPartial) kv('Orders part served (split)', s.ordersPartial, FMT_INT, 'bigger than one truck: some parts planned, the rest unserved');
+    kv('Orders unserved', s.ordersUnserved, FMT_INT, `${s.casesUnserved} cases${s.ordersPartial ? ' (incl. rest of split orders)' : ''}${reasons ? ` - ${reasons}` : ''}`);
     for (let p = 1; p <= 5; p++) {
       const x = s.serviceByPriority[`P${p}`];
       if (!x || x.orders === 0) kv(`P${p} service %`, '—', undefined, 'no orders');
@@ -441,6 +442,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     running += s.legKm;
     const notes = [
       s.late ? 'LATE ORDER' : null,
+      s.split ? `SPLIT DELIVERY part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' (rest unserved)' : ''}` : null,
       s.hardWindowOk === false ? 'HARD WINDOW MISSED' : null,
       s.prefWindowOk === false ? 'Outside preferred window' : null,
       s.waitMin ? `Wait ${Math.round(s.waitMin)} min` : null,
@@ -518,7 +520,8 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
 function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {
   const ws = wb.addWorksheet(SHEETS.unserved, { views: [{ state: 'frozen', ySplit: 4 }], pageSetup: LANDSCAPE });
   ws.columns = [14, 10, 30, 8, 8, 10, 22, 8, 28, 60].map((width) => ({ width }));
-  titleRows(ws, `UNSERVED - EXCEPTIONS (${d.unserved.length})`, 'Orders NOT on any truck, with the reason. These cases are not loaded.');
+  const orders = new Set(d.unserved.map((u) => u.orderId)).size;
+  titleRows(ws, `UNSERVED - EXCEPTIONS (${orders})`, 'Orders (or parts of split orders) NOT on any truck, with the reason. These cases are not loaded.');
   headRow(ws, 4, ['Customer code', 'Branch', 'Customer name', 'Priority', 'Cases', 'Kg', 'Sales orders', 'Late order', 'Reason code', 'Reason']);
   ws.pageSetup.printTitlesRow = '4:4';
   if (!d.unserved.length) {
@@ -531,11 +534,11 @@ function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     tableRow(
       ws,
       r++,
-      [u.customerCode, u.branchCode ?? '', u.customerName, `P${u.priority}`, u.cases, u.weightKg, uniq(u.salesOrders).join(', '), u.late ? 'LATE' : '', u.reasonCode, u.reasonMessage ?? ''],
+      [u.customerCode, u.branchCode ?? '', u.customerName, `P${u.priority}`, u.cases, u.weightKg, uniq(u.salesOrders).join(', '), u.late ? 'LATE' : '', u.reasonCode, `${u.partial ? 'Rest of a split delivery (the other part is on a truck). ' : ''}${u.reasonMessage ?? ''}`],
       fmts,
     );
   }
-  totalRow(ws, r, ['TOTAL', '', `${d.unserved.length} order${d.unserved.length === 1 ? '' : 's'}`, '', sum(d.unserved.map((u) => u.cases)), sum(d.unserved.map((u) => u.weightKg)), '', '', '', ''], fmts);
+  totalRow(ws, r, ['TOTAL', '', `${orders} order${orders === 1 ? '' : 's'}`, '', sum(d.unserved.map((u) => u.cases)), sum(d.unserved.map((u) => u.weightKg)), '', '', '', ''], fmts);
 }
 
 function addReconciliationSheet(wb: ExcelJS.Workbook, d: PlanDetail, recon: ReconView) {
@@ -553,8 +556,10 @@ function addReconciliationSheet(wb: ExcelJS.Workbook, d: PlanDetail, recon: Reco
   headRow(ws, 3, ['', '', 'Uploaded', 'Planned', 'Unserved', 'Status']);
   tableRow(ws, 4, ['Cases', `${rc.uploadedCases} = ${rc.plannedCases} + ${rc.unservedCases}`, rc.uploadedCases, rc.plannedCases, rc.unservedCases,
     rc.uploadedCases === rc.plannedCases + rc.unservedCases ? 'OK' : 'MISMATCH'], f);
-  tableRow(ws, 5, ['Orders', `${rc.orders} = ${rc.plannedOrders} + ${rc.unservedOrders}`, rc.orders, rc.plannedOrders, rc.unservedOrders,
-    rc.orders === rc.plannedOrders + rc.unservedOrders ? 'OK' : 'MISMATCH'], f);
+  // A split order with some parts planned and the rest unserved is counted in both columns.
+  const partial = rc.partialOrders ?? 0;
+  tableRow(ws, 5, ['Orders', `${rc.orders} = ${rc.plannedOrders} + ${rc.unservedOrders}${partial ? ` - ${partial} split (in both)` : ''}`, rc.orders, rc.plannedOrders, rc.unservedOrders,
+    rc.orders === rc.plannedOrders + rc.unservedOrders - partial ? 'OK' : 'MISMATCH'], f);
   put(ws, 6, 1, 'Overall').font = { bold: true };
   put(ws, 6, 2, recon.status).font = { bold: true };
 

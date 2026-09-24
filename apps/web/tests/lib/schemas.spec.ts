@@ -166,6 +166,7 @@ describe('tenantConfigSchema', () => {
       labelEstimatedDistances: true,
       driverShiftMaxMinutes: 540,
       returnToDepot: true,
+      splitDeliveries: true,
       defaultServiceTimeMin: 10,
       costPerKmDefault: 0.15,
       fixedTruckCostPerDayDefault: 20,

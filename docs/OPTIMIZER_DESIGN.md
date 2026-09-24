@@ -33,6 +33,9 @@ Each physical truck is one "vehicle" with optional depot **reload** visits (up t
 
 A reload empties the truck (the capacity counter resets) and takes the reload time. Because all of a truck's loads sit on one timeline, loads can never overlap. The export shows them as **T01 – Load 1, T01 – Load 2, …**.
 
+### Split deliveries
+A customer whose open cases or kilograms fit **no** truck is cut into parts before the optimizer runs (setting *Split deliveries*, on by default). Parts are sized for the truck that needs the fewest of them; each part is filled up to one full truck, product line by product line, and a line is cut only when it does not fit. The last part is the remainder, which can share a load with other customers. Every part is an ordinary stop at the customer's location, so parts can go on different trucks or on different loads of one truck, and the optimizer can leave a part unserved (with a reason) like any other stop. Unloading time is shared between parts in proportion to cases. When a part is locked or dispatched and the day is re-planned, only the cases not yet on a frozen load are planned again.
+
 ## 4. Distances
 - **Road distance and time come from OSRM.** The OSRM address is configuration (`OSRM_URL` or tenant `osrmUrl`). Production should run its own OSRM with the Oman map (`docs/OSRM_SETUP.md`); RouteIQ does not depend on the public demo server.
 - OSRM times are for cars. Trucks are assumed 25% slower (`roadTimeFactor` = 1.25).
@@ -72,4 +75,4 @@ If the search reaches its time limit with capacity to spare, any stop still left
 Measured on this PC for a synthetic 150-stop Muscat day: recommended plan in 20 s, all three options in about 31 s.
 
 ## 8. Every order is accounted for
-After every optimization the system checks that **uploaded cases = planned cases + unserved cases**, in total, per SKU and per sales order, and that each order appears exactly once. A plan that does not reconcile cannot be dispatched.
+After every optimization the system checks that **uploaded cases = planned cases + unserved cases**, in total, per SKU and per sales order, and that each order appears exactly once. A split order may appear in several parts: then every product line must add up exactly (*planned parts + unserved parts = uploaded*). A plan that does not reconcile cannot be dispatched.

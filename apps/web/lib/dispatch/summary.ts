@@ -36,8 +36,9 @@ export interface DailySummary {
   totalCustomers: number;
   totalCases: number;
   totalWeightKg: number;
-  ordersServed: number;
-  ordersUnserved: number;
+  ordersServed: number; // every case planned
+  ordersPartial: number; // split delivery: some cases planned, the rest unserved
+  ordersUnserved: number; // nothing planned
   casesServed: number;
   casesUnserved: number;
   serviceByPriority: Record<string, { orders: number; served: number; pct: number | null }>;
@@ -67,6 +68,10 @@ const r3 = (v: number) => Math.round(v * 1000) / 1000;
 export function computeSummary(input: {
   orders: SummaryOrder[];
   plannedOrderIds: Set<string>;
+  /** Split deliveries: cases actually planned per order. Absent = planned orders are planned in full. */
+  plannedCasesByOrder?: Map<string, number>;
+  /** Split deliveries: revenue / margin of the planned parts (valued from their own lines). */
+  plannedMoneyByOrder?: Map<string, { revenue: number | null; margin: number | null }>;
   unserved: { orderId: string; reasonCode: string }[];
   loads: SummaryLoad[];
   warnings: string[];
@@ -75,15 +80,23 @@ export function computeSummary(input: {
   solver: DailySummary['solver'];
 }): DailySummary {
   const { orders, plannedOrderIds, unserved, loads } = input;
-  const served = orders.filter((o) => plannedOrderIds.has(o.id));
+  const plannedCases = (o: SummaryOrder) =>
+    Math.min(o.cases, input.plannedCasesByOrder?.get(o.id) ?? (plannedOrderIds.has(o.id) ? o.cases : 0));
+  const isServed = (o: SummaryOrder) => plannedOrderIds.has(o.id) && plannedCases(o) >= o.cases;
+  const served = orders.filter(isServed);
+  const partial = orders.filter((o) => !isServed(o) && plannedCases(o) > 0);
+  // Money follows the cases actually delivered (a split order half delivered earns half).
+  const share = (o: SummaryOrder) => (o.cases > 0 ? plannedCases(o) / o.cases : plannedOrderIds.has(o.id) ? 1 : 0);
   const byP: DailySummary['serviceByPriority'] = {};
   for (let p = 1; p <= 5; p++) {
     const all = orders.filter((o) => o.priority === p);
-    const ok = all.filter((o) => plannedOrderIds.has(o.id));
+    const ok = all.filter(isServed);
     byP[`P${p}`] = { orders: all.length, served: ok.length, pct: all.length ? r1((100 * ok.length) / all.length) : null };
   }
-  const unservedByReason: Record<string, number> = {};
-  for (const u of unserved) unservedByReason[u.reasonCode] = (unservedByReason[u.reasonCode] ?? 0) + 1;
+  // Orders per reason (a split order with two parts left for one reason counts once).
+  const byReason = new Map<string, Set<string>>();
+  for (const u of unserved) byReason.set(u.reasonCode, (byReason.get(u.reasonCode) ?? new Set()).add(u.orderId));
+  const unservedByReason: Record<string, number> = Object.fromEntries([...byReason].map(([k, v]) => [k, v.size]));
   const loadsByStatus: Record<string, number> = {};
   for (const l of loads) loadsByStatus[l.status] = (loadsByStatus[l.status] ?? 0) + 1;
   const allRevenue = orders.length > 0 && orders.every((o) => o.salesValue !== null);
@@ -97,9 +110,10 @@ export function computeSummary(input: {
     totalCases: orders.reduce((a, o) => a + o.cases, 0),
     totalWeightKg: r1(orders.reduce((a, o) => a + o.weightKg, 0)),
     ordersServed: served.length,
-    ordersUnserved: orders.length - served.length,
-    casesServed: served.reduce((a, o) => a + o.cases, 0),
-    casesUnserved: orders.filter((o) => !plannedOrderIds.has(o.id)).reduce((a, o) => a + o.cases, 0),
+    ordersPartial: partial.length,
+    ordersUnserved: orders.length - served.length - partial.length,
+    casesServed: orders.reduce((a, o) => a + plannedCases(o), 0),
+    casesUnserved: orders.reduce((a, o) => a + o.cases - plannedCases(o), 0),
     serviceByPriority: byP,
     trucksUsed: new Set(loads.map((l) => l.truckId)).size,
     trips: loads.length,
@@ -109,8 +123,8 @@ export function computeSummary(input: {
     fuelLitres: fuelKnown ? r1(loads.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null,
     fuelCost: r3(loads.reduce((a, l) => a + l.fuelCost, 0)),
     operatingCost: r3(loads.reduce((a, l) => a + l.operatingCost, 0)),
-    revenueServed: allRevenue ? r3(served.reduce((a, o) => a + (o.salesValue ?? 0), 0)) : null,
-    marginServed: allMargin ? r3(served.reduce((a, o) => a + (o.marginValue ?? 0), 0)) : null,
+    revenueServed: allRevenue ? r3(orders.reduce((a, o) => a + (input.plannedMoneyByOrder?.get(o.id)?.revenue ?? (o.salesValue ?? 0) * share(o)), 0)) : null,
+    marginServed: allMargin ? r3(orders.reduce((a, o) => a + (input.plannedMoneyByOrder?.get(o.id)?.margin ?? (o.marginValue ?? 0) * share(o)), 0)) : null,
     lateOrders: orders.filter((o) => o.isLate).length,
     lateOrdersServed: served.filter((o) => o.isLate).length,
     unservedByReason,
@@ -151,8 +165,14 @@ export function computeChangeSummary(input: {
   lockedLoadsPreserved: number;
 }): ChangeSummary {
   const parentScope = new Set(input.parentScope);
-  const parentBy = new Map(input.parentPlanned.map((a) => [a.orderId, a]));
-  const childBy = new Map(input.childPlanned.map((a) => [a.orderId, a]));
+  // A split order sits on several loads: compare the set of (truck, load) it is on.
+  const where = (list: AssignmentKey[]) => {
+    const m = new Map<string, Set<string>>();
+    for (const a of list) m.set(a.orderId, (m.get(a.orderId) ?? new Set()).add(`${a.truckId}:${a.loadNo}`));
+    return new Map([...m].map(([id, s]) => [id, [...s].sort().join('|')]));
+  };
+  const parentBy = where(input.parentPlanned);
+  const childBy = where(input.childPlanned);
   const ordersAdded = input.childScope.filter((id) => !parentScope.has(id)).length;
   let changed = 0;
   let unchanged = 0;
@@ -162,7 +182,7 @@ export function computeChangeSummary(input: {
     const p = parentBy.get(id);
     const c = childBy.get(id);
     if (p && c) {
-      if (p.truckId === c.truckId && p.loadNo === c.loadNo) unchanged++;
+      if (p === c) unchanged++;
       else changed++;
     } else if (!p && c && parentScope.has(id)) newlyPlanned++;
     else if (p && !c) newlyUnserved++;

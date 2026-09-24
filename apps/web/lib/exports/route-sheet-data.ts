@@ -156,15 +156,15 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
       customerName: r.order.customer.name,
       branchKey: r.order.customer.branchKey,
       address: r.order.customer.address,
-      cases: r.order.totalCases,
-      weightKg: r.order.totalWeightKg,
+      cases: r.portionCases ?? r.order.totalCases,
+      weightKg: r.portionWeightKg ?? r.order.totalWeightKg,
       plannedArrivalMin: r.plannedArrivalMin,
       plannedDistanceFromPrevKm: r.plannedDistanceFromPrevKm,
       notes: r.order.notes,
       locked: r.lockedByUserId !== null,
     });
-    truck.totalCases += r.order.totalCases;
-    truck.totalWeightKg += r.order.totalWeightKg;
+    truck.totalCases += r.portionCases ?? r.order.totalCases;
+    truck.totalWeightKg += r.portionWeightKg ?? r.order.totalWeightKg;
     truck.totalDistanceKm += r.plannedDistanceFromPrevKm;
     truck.finalArrivalMin = Math.max(truck.finalArrivalMin, r.plannedArrivalMin);
   }
@@ -178,7 +178,7 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
     customerCode: u.order.customer.code,
     customerName: u.order.customer.name,
     branchKey: u.order.customer.branchKey,
-    cases: u.order.totalCases,
+    cases: u.portionCases ?? u.order.totalCases,
     reasonCode: u.reasonCode,
     reasonMessage: u.reasonMessage,
   }));

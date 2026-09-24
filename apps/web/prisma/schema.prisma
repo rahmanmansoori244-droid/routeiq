@@ -221,6 +221,7 @@ model TenantConfig {
   overtimeCostPerHour     Float   @default(0)
   prefWindowPenaltyPerMin Float   @default(0.05)
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
+  splitDeliveries         Boolean @default(true) // customers bigger than the largest truck are delivered in parts
   osrmUrl                 String? // overrides the OSRM_URL env var; there is no silent public default
   priorityWeightsJson     Json? // {"1":10000,...,"5":1}; must be strictly decreasing
   orderColumnMapJson      Json? // extra header aliases for the NMWC order export
@@ -715,6 +716,11 @@ model RouteAssignment {
   cumulativeKm              Float?
   hardWindowOk              Boolean?
   prefWindowOk              Boolean?
+  // --- split deliveries: a customer bigger than one truck is delivered in parts. A row with
+  // portion fields carries only part of its order; null = the whole order. ---
+  portionCases              Int?
+  portionWeightKg           Float?
+  portionLinesJson          Json? // [{ lineId, cases }] - exact SKU lines of this portion
 
   @@unique([runId, truckId, loadNo, sequenceInTruck, orderInStop])
   @@index([runId, truckId])
@@ -792,6 +798,10 @@ model UnservedOrder {
   order         Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
   reasonCode    UnservedReasonCode
   reasonMessage String?
+  // Split deliveries: only part of the order is unserved (null = the whole order).
+  portionCases     Int?
+  portionWeightKg  Float?
+  portionLinesJson Json? // [{ lineId, cases }]
   createdAt     DateTime           @default(now())
 
   @@index([scenarioId])

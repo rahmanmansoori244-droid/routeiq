@@ -37,6 +37,7 @@ export function SettingsForm({ initial }: { initial: Initial }) {
             labelEstimatedDistances: c.labelEstimatedDistances,
             driverShiftMaxMinutes: c.driverShiftMaxMinutes,
             returnToDepot: c.returnToDepot,
+            splitDeliveries: c.splitDeliveries,
             defaultServiceTimeMin: c.defaultServiceTimeMin,
             costPerKmDefault: c.costPerKmDefault,
             fixedTruckCostPerDayDefault: c.fixedTruckCostPerDayDefault,
@@ -132,6 +133,11 @@ export function SettingsForm({ initial }: { initial: Initial }) {
             label="Return to depot at end of day"
             value={c.returnToDepot}
             onChange={(v) => setC({ ...c, returnToDepot: v })}
+          />
+          <ToggleField
+            label="Split deliveries: a customer bigger than the largest truck is delivered in parts"
+            value={c.splitDeliveries}
+            onChange={(v) => setC({ ...c, splitDeliveries: v })}
           />
         </CardContent>
       </Card>

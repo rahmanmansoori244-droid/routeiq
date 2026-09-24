@@ -239,3 +239,93 @@ describe('computeChangeSummary', () => {
     expect(r.text).toBe('0 orders added, 0 assignments changed, 2 trucks unchanged, 0 locked/dispatched loads preserved');
   });
 });
+
+describe('computeSummary - split deliveries', () => {
+  it('counts an order with only some cases planned as partial, with money pro rata', () => {
+    const orders = [O('A', { cases: 300, salesValue: 600, marginValue: 90, priority: 1 }), O('B'), O('C')];
+    const s = computeSummary({
+      orders,
+      plannedOrderIds: new Set(['A', 'B']),
+      plannedCasesByOrder: new Map([
+        ['A', 200],
+        ['B', 10],
+      ]),
+      unserved: [
+        { orderId: 'A', reasonCode: 'CAPACITY' },
+        { orderId: 'C', reasonCode: 'TIME_WINDOW' },
+      ],
+      loads: [LD('T1', 1), LD('T2', 1)],
+      warnings: [],
+      distanceIsEstimated: false,
+      distanceProvider: 'OSRM',
+      solver: null,
+    });
+    expect([s.ordersServed, s.ordersPartial, s.ordersUnserved]).toEqual([1, 1, 1]);
+    expect([s.casesServed, s.casesUnserved, s.totalCases]).toEqual([210, 110, 320]); // 100 of A + all 10 of C
+    expect(s.revenueServed).toBe(400 + 50); // 2/3 of A + all of B
+    expect(s.marginServed).toBe(60 + 10);
+    expect(s.serviceByPriority.P1).toEqual({ orders: 1, served: 0, pct: 0 }); // partial is not "served"
+  });
+
+  it('a split order fully planned across two trucks is served', () => {
+    const s = computeSummary({
+      orders: [O('A', { cases: 300 })],
+      plannedOrderIds: new Set(['A']),
+      plannedCasesByOrder: new Map([['A', 300]]),
+      unserved: [],
+      loads: [LD('T1', 1), LD('T2', 1)],
+      warnings: [],
+      distanceIsEstimated: false,
+      distanceProvider: 'OSRM',
+      solver: null,
+    });
+    expect([s.ordersServed, s.ordersPartial, s.ordersUnserved, s.casesServed]).toEqual([1, 0, 0, 300]);
+  });
+});
+
+describe('computeChangeSummary - split orders', () => {
+  it('compares the set of loads a split order is on', () => {
+    const K = (orderId: string, truckId: string, loadNo = 1): AssignmentKey => ({ orderId, truckId, loadNo });
+    const same = computeChangeSummary({
+      parentVersion: 1,
+      parentScope: ['A'],
+      parentPlanned: [K('A', 'T1'), K('A', 'T2')],
+      childScope: ['A'],
+      childPlanned: [K('A', 'T2'), K('A', 'T1')],
+      lockedLoadsPreserved: 0,
+    });
+    expect([same.assignmentsUnchanged, same.assignmentsChanged]).toEqual([1, 0]);
+    const moved = computeChangeSummary({
+      parentVersion: 1,
+      parentScope: ['A'],
+      parentPlanned: [K('A', 'T1'), K('A', 'T2')],
+      childScope: ['A'],
+      childPlanned: [K('A', 'T1'), K('A', 'T3')],
+      lockedLoadsPreserved: 0,
+    });
+    expect([moved.assignmentsUnchanged, moved.assignmentsChanged]).toEqual([0, 1]);
+  });
+});
+
+describe('computeSummary - split money and reasons', () => {
+  it('uses the planned parts\' own value and counts each order once per reason', () => {
+    const s = computeSummary({
+      orders: [O('A', { cases: 200, salesValue: 1100, marginValue: 110 })],
+      plannedOrderIds: new Set(['A']),
+      plannedCasesByOrder: new Map([['A', 100]]),
+      plannedMoneyByOrder: new Map([['A', { revenue: 1000, margin: 100 }]]),
+      unserved: [
+        { orderId: 'A', reasonCode: 'SHIFT_LIMIT' },
+        { orderId: 'A', reasonCode: 'SHIFT_LIMIT' },
+      ],
+      loads: [LD('T1', 1)],
+      warnings: [],
+      distanceIsEstimated: false,
+      distanceProvider: 'OSRM',
+      solver: null,
+    });
+    expect(s.revenueServed).toBe(1000);
+    expect(s.marginServed).toBe(100);
+    expect(s.unservedByReason).toEqual({ SHIFT_LIMIT: 1 });
+  });
+});
