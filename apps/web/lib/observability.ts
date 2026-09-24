@@ -25,9 +25,7 @@ async function initLazy(): Promise<void> {
   try {
     // Optional dep — only resolved when DSN is set AND package is installed.
     // Dynamic specifier prevents TS from trying to resolve the type at build time.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const spec = '@sentry/nextjs';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const mod: any = await import(/* webpackIgnore: true */ spec).catch(() => null);
     if (!mod) return;
     mod.init({

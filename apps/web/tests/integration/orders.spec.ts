@@ -24,6 +24,14 @@ async function uploadCsv(jar: import('./helpers').CookieJar, csv: string, dryRun
   return fetchWith(jar, `${BASE}/api/orders/upload`, { method: 'POST', body: fd });
 }
 
+/** A delivery date never past the 18:00 (Asia/Muscat) planning cutoff, whatever time the suite
+ * runs: a confirm for tomorrow after 18:00 needs a late reason. */
+function beforeCutoffIso(): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 3);
+  return d.toISOString().slice(0, 10);
+}
+
 describe('order upload + confirm', () => {
   it('rejects upload with errors; commit attempt also fails', async () => {
     const h = await freshTenant('ord-bad');
@@ -35,13 +43,17 @@ describe('order upload + confirm', () => {
       ['C-001', '', tomorrow, 'P-WATER', '5', '3', '', ''],
       ['', '', tomorrow, 'P-WATER', '3', '3', '', ''], // missing customer_code
       ['C-002', '', tomorrow, 'P-WATER', '-1', '3', '', ''], // negative cases
-      ['C-XXX', '', tomorrow, 'P-WATER', '2', '3', '', ''], // unknown customer
+      ['C-XXX', '', tomorrow, 'P-WATER', '2', '3', '', ''], // unknown customer: NOT an error (new, LOCATION REQUIRED)
     ]);
 
     const res = await uploadCsv(h.cookieJar, csv);
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { data: { batchId: string; validation: { errorRows: number; errors: { row: number }[] } } };
-    expect(body.data.validation.errorRows).toBeGreaterThanOrEqual(3);
+    const body = (await res.json()) as {
+      data: { batchId: string; validation: { errorRows: number; errors: { row: number }[]; issues: { newCustomers: { code: string }[] } } };
+    };
+    expect(body.data.validation.errorRows).toBe(2);
+    expect(body.data.validation.errors.map((e) => e.row).sort()).toEqual([3, 4]);
+    expect(body.data.validation.issues.newCustomers.map((c) => c.code)).toEqual(['C-XXX']);
 
     // Try to confirm — must refuse.
     const confirm = await fetchWith(h.cookieJar, `${BASE}/api/orders/${body.data.batchId}/confirm`, {
@@ -55,7 +67,7 @@ describe('order upload + confirm', () => {
     createdSlugs.add(h.slug);
     await seedMinimal(h.tenantId);
 
-    const tomorrow = tomorrowIso();
+    const tomorrow = beforeCutoffIso();
     const csv = csvFromRows([
       ['C-001', '', tomorrow, 'P-WATER', '5', '3', '', ''],
       ['C-002', '', tomorrow, 'P-WATER', '3', '3', '', ''],
@@ -88,7 +100,7 @@ describe('order upload + confirm', () => {
     createdSlugs.add(h.slug);
     await seedMinimal(h.tenantId);
 
-    const tomorrow = tomorrowIso();
+    const tomorrow = beforeCutoffIso();
     const csv = csvFromRows([
       ['C-001', '', tomorrow, 'P-WATER', '2', '3', '', ''],
       ['C-002', '', tomorrow, 'P-WATER', '3', '3', '', ''],
@@ -106,7 +118,7 @@ describe('order upload + confirm', () => {
     createdSlugs.add(h.slug);
     await seedMinimal(h.tenantId);
 
-    const tomorrow = tomorrowIso();
+    const tomorrow = beforeCutoffIso();
     const csv = csvFromRows([['C-001', '', tomorrow, 'P-WATER', '2', '3', '', '']]);
     const res = await uploadCsv(h.cookieJar, csv);
     const body = (await res.json()) as { data: { batchId: string } };

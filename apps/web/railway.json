@@ -5,7 +5,8 @@
     "buildCommand": "corepack enable && pnpm install --frozen-lockfile && pnpm --filter @routeiq/web build"
   },
   "deploy": {
-    "startCommand": "pnpm --filter @routeiq/web db:migrate:deploy && pnpm --filter @routeiq/web start",
+    "preDeployCommand": "pnpm --filter @routeiq/web db:migrate:deploy",
+    "startCommand": "pnpm --filter @routeiq/web start",
     "healthcheckPath": "/api/health",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",

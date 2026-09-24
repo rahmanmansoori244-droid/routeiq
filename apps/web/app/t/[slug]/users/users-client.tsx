@@ -14,6 +14,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { errorMessage } from '@/lib/error-message';
 
 interface UserRow {
   id: string;
@@ -49,7 +50,7 @@ export function UsersClient({ initial, currentUserId }: { initial: UserRow[]; cu
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Update failed.');
+        toast.error(errorMessage(body, 'Update failed.'));
         return;
       }
       toast.success(`${u.email} is now ${role.replace('_', ' ')}.`);
@@ -66,7 +67,7 @@ export function UsersClient({ initial, currentUserId }: { initial: UserRow[]; cu
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Update failed.');
+        toast.error(errorMessage(body, 'Update failed.'));
         return;
       }
       toast.success(active ? `${u.email} reactivated.` : `${u.email} deactivated.`);
@@ -176,7 +177,7 @@ function InviteDialog({
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Invite failed.');
+        toast.error(errorMessage(body, 'Invite failed.'));
         return;
       }
       onCreated({ email: body.data.user.email, password: body.data.tempPassword });

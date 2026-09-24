@@ -13,24 +13,28 @@ async function checkDb(): Promise<'up' | 'down'> {
   }
 }
 
-async function checkSolver(): Promise<'up' | 'down'> {
+type Routing = { provider: string; status: 'up' | 'down' | 'not_configured' } | null;
+
+async function checkSolver(): Promise<{ solver: 'up' | 'down'; routing: Routing }> {
   const url = process.env.SOLVER_URL;
-  if (!url) return 'down';
+  if (!url) return { solver: 'down', routing: null };
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2000);
+    const t = setTimeout(() => ctrl.abort(), 4000);
     const r = await fetch(`${url}/health`, { signal: ctrl.signal, cache: 'no-store' });
     clearTimeout(t);
-    if (!r.ok) return 'down';
-    const body = (await r.json().catch(() => null)) as { ok?: boolean } | null;
-    return body?.ok ? 'up' : 'down';
+    if (!r.ok) return { solver: 'down', routing: null };
+    const body = (await r.json().catch(() => null)) as { ok?: boolean; routing?: Routing } | null;
+    return { solver: body?.ok ? 'up' : 'down', routing: body?.routing ?? null };
   } catch {
-    return 'down';
+    return { solver: 'down', routing: null };
   }
 }
 
+// `routing` is informational: without OSRM plans still work (distances labelled estimated), so
+// it never makes the app unhealthy - alert on routing.status !== 'up' in monitoring instead.
 export async function GET() {
-  const [db, solver] = await Promise.all([checkDb(), checkSolver()]);
+  const [db, { solver, routing }] = await Promise.all([checkDb(), checkSolver()]);
   const ok = db === 'up' && solver === 'up';
-  return NextResponse.json({ ok, db, solver }, { status: ok ? 200 : 503 });
+  return NextResponse.json({ ok, db, solver, routing }, { status: ok ? 200 : 503 });
 }

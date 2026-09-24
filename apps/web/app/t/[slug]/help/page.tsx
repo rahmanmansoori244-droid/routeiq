@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { LifeBuoy, Truck, Upload, ListChecks, Map as MapIcon, FileSpreadsheet, Send, Lock } from 'lucide-react';
+import { LifeBuoy, Upload, MapPin, Wand2, ListChecks, Lock, FileSpreadsheet, Clock } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
 import { PageShell } from '@/components/page-shell';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -8,86 +8,68 @@ export const metadata = { title: 'Help — RouteIQ' };
 
 export default async function HelpPage({ params }: { params: { slug: string } }) {
   const { tenant } = await getCurrentTenant(params.slug);
+  const dispatch = `/t/${tenant.slug}/dispatch`;
   return (
-    <PageShell title="Help" description="Quick reference for the daily route-planning flow.">
+    <PageShell title="Help" description="Quick reference for the nightly dispatch planning flow.">
       <div className="space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
               <LifeBuoy className="h-5 w-5 text-primary" />
-              The daily flow (target: 5 minutes)
+              Tomorrow&apos;s dispatch plan, step by step
             </CardTitle>
-            <CardDescription>One pass from order upload to dispatch.</CardDescription>
+            <CardDescription>
+              Everything happens on{' '}
+              <Link href={dispatch} className="font-mono text-primary hover:underline">
+                Daily dispatch
+              </Link>
+              .
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            <Step n={1} icon={Upload} title="Upload today's orders">
-              <Link href={`/t/${tenant.slug}/upload`} className="font-mono text-primary hover:underline">/upload</Link> →
-              drag your CSV/XLSX, validate, fix any errors with row numbers, confirm. Orders are stored against an
-              UploadBatch you can delete later.
+            <Step n={1} icon={Upload} title="Upload orders">
+              Choose the sales order Excel/CSV and click Check file. NMWC column names are recognised automatically. Row errors are listed with their row
+              number and nothing is saved until you confirm. New customers are created and marked LOCATION REQUIRED.
             </Step>
-            <Step n={2} icon={Truck} title="Create a run">
-              <Link href={`/t/${tenant.slug}/runs/new`} className="font-mono text-primary hover:underline">/runs/new</Link>
-              — pick depot + delivery date + optimization mode (Balanced is the default).
+            <Step n={2} icon={MapPin} title="Resolve issues">
+              ADD LOCATION: paste the Google Maps link (short links work) or &quot;latitude, longitude&quot;, check the pin and save. Locations are saved
+              permanently. Optionally confirm priority (P1 = highest), customer type and receiving hours.
             </Step>
-            <Step n={3} icon={ListChecks} title="Optimize → pick a scenario">
-              The run page shows three scenarios side-by-side (Min Trucks / Min Distance / Balanced) with trucks used,
-              estimated distance, cost, utilization, and unserved breakdown. Click "Pick this scenario" to commit.
+            <Step n={3} icon={Wand2} title="OPTIMIZE">
+              Builds the recommended plan on road distances: capacity, receiving hours and priorities are respected, and trucks can make several loads.
+              About half a minute for a normal day.
             </Step>
-            <Step n={4} icon={MapIcon} title="Tweak on the map">
-              Map tab → click any stop → Move / Lock / Unassign. Moves respect target-truck capacity and shift time.
-              Locked stops survive re-optimization.
+            <Step n={4} icon={ListChecks} title="Review">
+              Per truck load: loading manifest (cases per product), delivery sequence with ETAs, km, utilisation and cost. Every order is either planned
+              or listed as unserved with a reason, and cases always reconcile.
             </Step>
-            <Step n={5} icon={FileSpreadsheet} title="Export route sheets">
-              Excel (one sheet per truck + summary + unserved + baseline) or PDF (A4) — buttons on the run header.
+            <Step n={5} icon={Lock} title="Lock, export, dispatch">
+              Lock loads in order (Load 1 before Load 2), then Loading, then Dispatch. Dispatched loads can never be changed. Export Excel gives the
+              warehouse and drivers their sheets.
             </Step>
-            <Step n={6} icon={Send} title="Dispatch">
-              Supervisor types the depot code to confirm. Status → DISPATCHED, assignments lock, orders flip to
-              DISPATCHED. To edit further, click <span className="font-mono">Unlock to edit</span> (audited).
+            <Step n={6} icon={Clock} title="Late orders">
+              Add the late order (with the reason) and click Re-plan. A new plan version keeps locked and dispatched loads exactly as they were and
+              shows what changed.
             </Step>
           </CardContent>
         </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Common conventions</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm">
-            <p>
-              <strong>Estimated km</strong> appears everywhere a kilometer value is shown when the distance provider is
-              Haversine (v1 default). It means "straight-line distance × tenant multiplier" — close but not road-true.
-              Mapbox Matrix support lands in v2.
-            </p>
-            <p>
-              <strong>Priority 1–5</strong> on customers: 1 is "must serve", 5 is "drop first if capacity is tight". The
-              solver inverts the disjunction penalty (5,000,000 for priority 1 vs 1,000,000 for priority 5) so
-              high-priority stops are always served unless physically impossible.
-            </p>
-            <p>
-              <strong>Cross-tenant access</strong> returns 404 (not 403) so we don't leak which other tenants exist.
-            </p>
-          </CardContent>
-        </Card>
-
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <Lock className="h-5 w-5 text-primary" />
-              When something goes wrong
+              <FileSpreadsheet className="h-5 w-5 text-primary" />
+              Words used on screen
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-2 text-sm">
+          <CardContent className="space-y-1 text-sm">
             <p>
-              <strong>Optimization failed</strong>: the run detail page shows the error message + a "Download debug
-              JSON" button containing the exact solver request/response. Send that to support. Click "Retry
-              optimization" to spawn a new attempt — the failed job's data is preserved on the run.
+              <b>Hard hours</b>: the customer cannot receive outside them; the plan never delivers outside. <b>Preferred hours</b>: soft; used when
+              possible.
             </p>
             <p>
-              <strong>Move rejected</strong>: usually capacity or shift-time. The toast tells you which limit hit and
-              by how much.
+              <b>Estimated km</b>: road routing was unavailable, so straight-line distances were used; the plan is still valid.
             </p>
             <p>
-              <strong>Stuck "optimizing"</strong>: the orphan janitor auto-fails any job stuck &gt;5 minutes. Refreshing
-              the page is safe — polling resumes against the run's current job id.
+              <b>Optimized plan</b>: a good plan found within a time limit. It is not claimed to be the single perfect answer.
             </p>
           </CardContent>
         </Card>
@@ -96,28 +78,15 @@ export default async function HelpPage({ params }: { params: { slug: string } })
   );
 }
 
-function Step({
-  n,
-  title,
-  icon: Icon,
-  children,
-}: {
-  n: number;
-  title: string;
-  icon: typeof LifeBuoy;
-  children: React.ReactNode;
-}) {
+function Step({ n, icon: Icon, title, children }: { n: number; icon: typeof LifeBuoy; title: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-        {n}
-      </div>
-      <div className="flex-1 space-y-1">
-        <div className="flex items-center gap-2 font-medium">
-          <Icon className="h-4 w-4 text-muted-foreground" />
-          {title}
-        </div>
-        <p className="text-sm text-muted-foreground">{children}</p>
+      <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">{n}</div>
+      <div>
+        <p className="flex items-center gap-1 font-medium">
+          <Icon className="h-4 w-4" /> {title}
+        </p>
+        <p className="text-muted-foreground">{children}</p>
       </div>
     </div>
   );

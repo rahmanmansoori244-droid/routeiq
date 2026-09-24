@@ -1,18 +1,19 @@
 /**
  * Orphan janitor — CLAUDE.md §7 plus driver-shift cleanup.
  *
- * Marks any RunJob stuck in RUNNING > 5 minutes as FAILED with reason STUCK
- * and rolls its parent RunPlan to FAILED. This is the safety net for jobs
- * orphaned by container restarts (the in-memory `inflight` map disappears
- * with the process; the DB row is left dangling).
+ * Marks any RunJob RUNNING (or still QUEUED) longer than any real
+ * optimization (STUCK_JOB_MS, 15 min) as FAILED with reason STUCK and rolls
+ * its parent RunPlan to FAILED. This is the safety net for jobs orphaned by
+ * container restarts (the in-memory `inflight` map disappears with the
+ * process; the DB row is left dangling).
  *
  * Also closes any DriverShift in ACTIVE state older than 18h — without this
  * a driver who never explicitly ends their shift leaves the row hanging,
  * polluting the live dispatcher view forever.
  *
  * Triggered by:
- *   - Railway Cron service (recommended in production) hitting POST every 60s
- *   - Self-poll from in-process setInterval (Phase 5 polish)
+ *   - the web process itself every 60 s (lib/jobs/janitor-loop.ts, started from instrumentation.ts)
+ *   - this route, for manual runs or an external cron
  *
  * Auth: requires header `X-Janitor-Token` matching env `JANITOR_TOKEN`.
  * In dev, `JANITOR_TOKEN` defaults to the SOLVER_TOKEN to keep config minimal.

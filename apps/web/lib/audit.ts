@@ -18,7 +18,16 @@ export type AuditAction =
   | 'BASELINE_UPLOADED'
   | 'ROUTE_MANUALLY_CHANGED'
   | 'DRIVER_LOGIN'
-  | 'DELIVERY_PROOF_CREATED';
+  | 'DELIVERY_PROOF_CREATED'
+  // NMWC dispatch MVP
+  | 'CUSTOMER_LOCATION_SET'
+  | 'LATE_ORDER_RECORDED'
+  | 'PLAN_VERSION_CREATED'
+  | 'LOAD_LOCKED'
+  | 'LOAD_PLANNED'
+  | 'LOAD_LOADING'
+  | 'LOAD_DISPATCHED'
+  | 'LOAD_COMPLETED';
 
 export interface AuditInput {
   tenantId: string;

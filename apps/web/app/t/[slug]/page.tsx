@@ -22,6 +22,7 @@ const STATUS_VARIANT: Record<RunStatus, 'default' | 'success' | 'warning' | 'sec
   FAILED: 'destructive',
   DISPATCHED: 'success',
   ARCHIVED: 'secondary',
+  SUPERSEDED: 'secondary',
 };
 
 export default async function DashboardPage({ params }: { params: { slug: string } }) {

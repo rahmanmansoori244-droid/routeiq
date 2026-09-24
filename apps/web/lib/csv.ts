@@ -62,11 +62,15 @@ export async function parseUpload(file: File): Promise<ParsedFile> {
 
 function parseExcel(buffer: Uint8Array): Record<string, string>[] {
   const wb = XLSX.read(buffer, { type: 'array', cellDates: false, cellNF: false });
-  const sheetName = wb.SheetNames[0];
-  if (!sheetName) return [];
-  const sheet = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
-  return rows.map((r) => normalizeKeys(r));
+  // First sheet that actually has rows (exports often start with a cover/filter sheet).
+  for (const sheetName of wb.SheetNames) {
+    const sheet = wb.Sheets[sheetName];
+    // raw: true keeps real numbers (no "1,234" display strings) and returns date cells as
+    // Excel serials, which the order intake converts; display text would depend on locale.
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true });
+    if (rows.length) return rows.map((r) => normalizeKeys(r));
+  }
+  return [];
 }
 
 function parseCsv(text: string): Promise<{ rows: Record<string, string>[]; errors: Papa.ParseError[] }> {

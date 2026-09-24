@@ -37,7 +37,7 @@ export function rateLimit(
 
 export const LIMITS = {
   auth: { limit: 5, windowMs: 60_000 },
-  ordersUpload: { limit: 10, windowMs: 60 * 60_000 },
+  ordersUpload: { limit: 60, windowMs: 60 * 60_000 }, // daily loop: upload -> fix -> re-upload
   optimize: { limit: 30, windowMs: 60 * 60_000 },
   defaultAuthed: { limit: 300, windowMs: 60_000 },
 } as const;

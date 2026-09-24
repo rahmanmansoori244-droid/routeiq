@@ -20,6 +20,17 @@ export const PATCH = (req: Request, { params }: Params) =>
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.customer.findUnique({ where: { id: params.id } }));
       const input = await parseBody(r, customerPatchSchema);
+      // The schema checks a window only when both ends are in the request: validate the
+      // merged record, so patching one end cannot leave an end before its start.
+      const windows = [
+        ['hardWindowStartMin', 'hardWindowEndMin', 'Hard window'],
+        ['prefWindowStartMin', 'prefWindowEndMin', 'Preferred window'],
+      ] as const;
+      for (const [a, b, label] of windows) {
+        const s = input[a] !== undefined ? input[a] : before[a];
+        const e = input[b] !== undefined ? input[b] : before[b];
+        if (typeof s === 'number' && typeof e === 'number' && e <= s) return fail(`${label}: end must be after start.`, 400);
+      }
       if (input.regionId) {
         const region = await db.region.findUnique({ where: { id: input.regionId } });
         if (!region) return fail('Region not found in this tenant', 400);
@@ -31,7 +42,14 @@ export const PATCH = (req: Request, { params }: Params) =>
       }
       if (input.lat !== undefined && input.lng !== undefined) {
         data.geocodeConfidence = 'HIGH';
+        data.locationSource = 'MANUAL_LATLNG';
+        data.locationVerified = true;
+        data.locationVerifiedById = user.id;
+        data.locationVerifiedAt = new Date();
       }
+      // A dispatcher setting these explicitly confirms them (no more "default" warnings).
+      if (input.priority !== undefined) data.priorityConfirmed = true;
+      if (input.avgServiceTimeMin !== undefined) data.serviceTimeConfirmed = true;
 
       const after = await db.customer.update({ where: { id: params.id }, data: data as never });
       await audit({

@@ -11,6 +11,9 @@ interface Params { params: { id: string } }
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
+      if ((await db.planLoad.count({ where: { runId: params.id } })) > 0) {
+        return fail('This plan uses truck loads: lock and dispatch each load from the Daily Dispatch screen (dispatched loads cannot be unlocked).', 409);
+      }
       const run = notFoundIfNull(await db.runPlan.findUnique({ where: { id: params.id } }));
       if (run.status !== 'DISPATCHED') return fail(`Run is ${run.status}, not DISPATCHED.`, 409);
 

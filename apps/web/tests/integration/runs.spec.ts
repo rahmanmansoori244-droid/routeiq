@@ -79,8 +79,8 @@ async function createRun(jar: CookieJar, depotId: string, runDate: string): Prom
   return body.data.id;
 }
 
-describe('runs: full lifecycle', () => {
-  it('optimizes a small tenant in under 30s and returns 3 scenarios', async () => {
+describe('runs: full lifecycle (NMWC dispatch planner)', () => {
+  it('optimizes a small tenant and applies the RECOMMENDED plan (3 options)', async () => {
     const h = await freshTenant('runs-opt');
     createdSlugs.add(h.slug);
     const seeded = await seedMinimal(h.tenantId);
@@ -96,25 +96,18 @@ describe('runs: full lifecycle', () => {
     expect(final.runStatus).toBe('READY');
     expect(final.jobStatus).toBe('SUCCEEDED');
 
-    const detail = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}`);
-    const detailBody = (await detail.json()) as { data: { scenarios: { id: string; name: string }[] } };
-    expect(detailBody.data.scenarios.length).toBe(3);
-    const names = detailBody.data.scenarios.map((s) => s.name).sort();
-    expect(names).toEqual(['BALANCED', 'MIN_DISTANCE', 'MIN_TRUCKS']);
+    const scenarios = await prisma.scenarioResult.findMany({ where: { runId } });
+    expect(scenarios.map((s) => s.name).sort()).toEqual(['MIN_DISTANCE', 'MIN_TRUCKS', 'RECOMMENDED']);
+    const run = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
+    expect(scenarios.find((s) => s.id === run.chosenScenarioId)?.name).toBe('RECOMMENDED');
+    expect(await prisma.planLoad.count({ where: { runId } })).toBeGreaterThan(0);
   }, 120_000);
 
-  it('preserves the first attempt when retrying a failed run', async () => {
+  it('never re-optimizes an applied plan in place; re-plan creates version 2', async () => {
     const h = await freshTenant('runs-retry');
     createdSlugs.add(h.slug);
     const seeded = await seedMinimal(h.tenantId);
     await seedOrders(h.tenantId, seeded, 4);
-
-    // Force a failure by setting an invalid SOLVER_URL — actually the dev
-    // server has the real solver up, so instead we force failure by setting
-    // the run's currentJobId to a fake completed state. For a real failure path
-    // see janitor.spec.ts (which uses the orphan reaper path).
-    // This test verifies that consecutive optimize calls increment attemptNo.
-
     await setFastSolver(h.tenantId);
     const runId = await createRun(h.cookieJar, seeded.depotId, tomorrowIso());
 
@@ -122,19 +115,30 @@ describe('runs: full lifecycle', () => {
     expect(first.status).toBe(202);
     await pollUntilDone(h.cookieJar, runId);
 
-    // Re-optimize from READY state — should create attempt #2.
     const second = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/optimize`, { method: 'POST' });
-    expect(second.status).toBe(202);
-    const body = (await second.json()) as { data: { attemptNo: number } };
-    expect(body.data.attemptNo).toBe(2);
+    expect(second.status).toBe(409);
+    const secondBody = (await second.json()) as { error: { code: string } };
+    expect(secondBody.error.code).toBe('NEW_VERSION_REQUIRED');
 
-    await pollUntilDone(h.cookieJar, runId);
-    const jobs = await prisma.runJob.findMany({ where: { runId }, orderBy: { attemptNo: 'asc' } });
-    expect(jobs.length).toBe(2);
+    const rp = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/replan`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reason: 'REOPTIMIZE' }),
+    });
+    expect(rp.status).toBe(202);
+    const v2 = ((await rp.json()) as { data: { runId: string; version: number } }).data;
+    expect(v2.version).toBe(2);
+    await pollUntilDone(h.cookieJar, v2.runId);
+
+    const parent = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
+    expect(parent.status).toBe('SUPERSEDED');
+    expect(await prisma.runJob.count({ where: { runId } })).toBe(1);
+    const jobs = await prisma.runJob.findMany({ where: { runId: v2.runId } });
+    expect(jobs.length).toBe(1);
     expect(jobs[0].requestJson).not.toBeNull();
   }, 120_000);
 
-  it('pick scenario populates RouteAssignments and routes are 1..N per truck', async () => {
+  it('applied plans have stops numbered 1..N per truck load; an alternative can be chosen explicitly', async () => {
     const h = await freshTenant('runs-pick');
     createdSlugs.add(h.slug);
     const seeded = await seedMinimal(h.tenantId);
@@ -145,37 +149,34 @@ describe('runs: full lifecycle', () => {
     await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/optimize`, { method: 'POST' });
     await pollUntilDone(h.cookieJar, runId);
 
-    const detail = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}`);
-    const detailBody = (await detail.json()) as { data: { scenarios: { id: string; name: string }[] } };
-    const balanced = detailBody.data.scenarios.find((s) => s.name === 'BALANCED')!;
+    const checkSequences = async () => {
+      const assignments = await prisma.routeAssignment.findMany({
+        where: { runId },
+        orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }, { sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
+      });
+      expect(assignments.length).toBeGreaterThan(0);
+      const byLoad = new Map<string, number[]>();
+      for (const a of assignments) {
+        if (a.orderInStop > 0) continue; // extra orders for the same stop share its sequence
+        const k = `${a.truckId}:${a.loadNo}`;
+        byLoad.set(k, [...(byLoad.get(k) ?? []), a.sequenceInTruck]);
+      }
+      for (const [, seq] of byLoad) expect(seq).toEqual(Array.from({ length: seq.length }, (_, i) => i + 1));
+    };
+    await checkSequences();
 
+    const alt = await prisma.scenarioResult.findFirstOrThrow({ where: { runId, name: 'MIN_DISTANCE' } });
     const pick = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/choose-scenario`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scenarioId: balanced.id }),
+      body: JSON.stringify({ scenarioId: alt.id }),
     });
     expect(pick.status).toBe(200);
-    const pickBody = (await pick.json()) as { data: { assignmentsCreated: number } };
-    expect(pickBody.data.assignmentsCreated).toBeGreaterThan(0);
-
-    // Sequences must be 1..N per truck.
-    const assignments = await prisma.routeAssignment.findMany({
-      where: { runId },
-      orderBy: [{ truckId: 'asc' }, { sequenceInTruck: 'asc' }],
-    });
-    const byTruck = new Map<string, number[]>();
-    for (const a of assignments) {
-      const list = byTruck.get(a.truckId) ?? [];
-      list.push(a.sequenceInTruck);
-      byTruck.set(a.truckId, list);
-    }
-    for (const [, seq] of byTruck) {
-      const expected = Array.from({ length: seq.length }, (_, i) => i + 1);
-      expect(seq).toEqual(expected);
-    }
+    expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } })).chosenScenarioId).toBe(alt.id);
+    await checkSequences();
   }, 120_000);
 
-  it('dispatch then unlock writes DISPATCH + OVERRIDE audit', async () => {
+  it('dispatch is per load; the legacy whole-run dispatch/unlock are refused on load plans', async () => {
     const h = await freshTenant('runs-disp');
     createdSlugs.add(h.slug);
     const seeded = await seedMinimal(h.tenantId);
@@ -186,32 +187,24 @@ describe('runs: full lifecycle', () => {
     await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/optimize`, { method: 'POST' });
     await pollUntilDone(h.cookieJar, runId);
 
-    const detail = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}`);
-    const detailBody = (await detail.json()) as { data: { scenarios: { id: string; name: string }[] } };
-    const balanced = detailBody.data.scenarios.find((s) => s.name === 'BALANCED')!;
-    await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/choose-scenario`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ scenarioId: balanced.id }),
-    });
+    expect((await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/dispatch`, { method: 'POST' })).status).toBe(409);
+    expect((await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/unlock`, { method: 'POST' })).status).toBe(409);
 
-    const disp = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/dispatch`, { method: 'POST' });
-    expect(disp.status).toBe(200);
+    const loads = await prisma.planLoad.findMany({ where: { runId }, orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }] });
+    const first = loads[0];
+    const patch = (status: string) =>
+      fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/loads/${first.id}`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ status }),
+      });
+    expect((await patch('DISPATCHED')).status).toBe(409); // must be locked first
+    expect((await patch('LOCKED')).status).toBe(200);
+    expect((await patch('DISPATCHED')).status).toBe(200);
+    expect((await patch('PLANNED')).status).toBe(409); // dispatched is immutable
 
-    const run = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
-    expect(run.status).toBe('DISPATCHED');
-    expect(run.finalizedAt).not.toBeNull();
-
-    const unlock = await fetchWith(h.cookieJar, `${BASE}/api/runs/${runId}/unlock`, { method: 'POST' });
-    expect(unlock.status).toBe(200);
-
-    const audits = await prisma.auditLog.findMany({
-      where: { tenantId: h.tenantId, entity: 'RunPlan', entityId: runId },
-      orderBy: { createdAt: 'asc' },
-    });
-    const actions = audits.map((a) => a.action);
-    expect(actions).toContain('DISPATCH');
-    expect(actions).toContain('OVERRIDE');
+    const audits = await prisma.auditLog.findMany({ where: { tenantId: h.tenantId, entity: 'PlanLoad', entityId: first.id } });
+    expect(audits.map((a) => a.action)).toEqual(expect.arrayContaining(['LOAD_LOCKED', 'LOAD_DISPATCHED']));
   }, 120_000);
 });
 

@@ -8,6 +8,7 @@ import type { UploadBatchStatus } from '@prisma/client';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { errorMessage } from '@/lib/error-message';
 
 interface BatchSummary {
   id: string;
@@ -19,8 +20,8 @@ interface BatchSummary {
   warningRows: number;
   deliveryDate: string | null;
   orderCount: number;
-  // Validation payload as written by the upload route. Loose typing because the
-  // shape lives in lib/order-validate.ts and we just project a few fields here.
+  // Validation payload as written by the upload route (lib/dispatch/intake-server.ts).
+  // Loose typing: we only project errors and warnings here.
   validationJson: unknown;
 }
 
@@ -29,11 +30,10 @@ interface WarningRow { row?: number; message: string }
 
 function readValidation(json: unknown): { errors: ErrorRow[]; warnings: WarningRow[] } {
   if (!json || typeof json !== 'object') return { errors: [], warnings: [] };
-  const j = json as { errors?: ErrorRow[]; warnings?: WarningRow[] };
-  return {
-    errors: Array.isArray(j.errors) ? j.errors : [],
-    warnings: Array.isArray(j.warnings) ? j.warnings : [],
-  };
+  const j = json as { errors?: ErrorRow[]; warnings?: (WarningRow | string)[]; duplicates?: ErrorRow[] };
+  const warnings = (Array.isArray(j.warnings) ? j.warnings : []).map((w) => (typeof w === 'string' ? { message: w } : w));
+  for (const d of Array.isArray(j.duplicates) ? j.duplicates : []) warnings.push({ row: d.row, message: d.message });
+  return { errors: Array.isArray(j.errors) ? j.errors : [], warnings };
 }
 
 const STATUS_VARIANT: Record<UploadBatchStatus, 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline'> = {
@@ -59,12 +59,23 @@ export function ValidationReport({
 
   const canConfirm = canEdit && batch.status === 'VALIDATED' && batch.errorRows === 0;
 
-  function confirm() {
+  function confirm(lateReason?: string) {
     startConfirm(async () => {
-      const res = await fetch(`/api/orders/${batch.id}/confirm`, { method: 'POST' });
+      const res = await fetch(
+        `/api/orders/${batch.id}/confirm`,
+        lateReason
+          ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ lateReason }) }
+          : { method: 'POST' },
+      );
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Confirm failed.');
+        // Orders after the planning cutoff (or for a day already planned) need a reason.
+        if (!lateReason && body?.error?.code === 'LATE_REASON_REQUIRED') {
+          const reason = window.prompt(`${errorMessage(body, 'These orders are late.')}\n\nReason for accepting them:`)?.trim();
+          if (reason) confirm(reason);
+          return;
+        }
+        toast.error(errorMessage(body, 'Confirm failed.'));
         return;
       }
       toast.success(`Created ${body.data.ordersCreated} orders (${body.data.linesCreated} lines).`);
@@ -156,7 +167,7 @@ export function ValidationReport({
 
       <div className="flex justify-end gap-2">
         {canConfirm ? (
-          <Button onClick={confirm} disabled={pending}>
+          <Button onClick={() => confirm()} disabled={pending}>
             {pending ? 'Persisting…' : `Confirm & create ${batch.validRows} orders`}
           </Button>
         ) : batch.status === 'VALIDATED' && batch.errorRows === 0 ? (

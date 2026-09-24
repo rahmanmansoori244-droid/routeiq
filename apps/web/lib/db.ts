@@ -11,6 +11,6 @@ export const prisma =
     log: process.env.NODE_ENV === 'development' ? ['warn', 'error'] : ['error'],
   });
 
-if (process.env.NODE_ENV !== 'production') {
-  global.__prisma = prisma;
-}
+// Always shared: dev hot reload, and in production the instrumentation bundle (in-process
+// janitor) gets its own copy of this module - one connection pool, not two.
+global.__prisma = prisma;

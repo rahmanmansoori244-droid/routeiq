@@ -1,11 +1,10 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
-# Solver: PyVRP (Hybrid Genetic Search) — state-of-the-art for CVRP, replaces
-# the v1 OR-Tools solver. Still keep ortools as a pinned fallback dependency
-# in case we need to A/B test or roll back; it adds ~30 MB to the image but
-# zero runtime cost when unused.
-pyvrp>=0.13.0
-ortools>=9.10
+# NMWC dispatch planning (/optimize-dispatch) runs on OR-Tools: hard + preferred time
+# windows, priority drop penalties, multi-load trucks via depot reloads, frozen loads.
+# PyVRP stays only for the legacy 3-scenario /optimize endpoint (kept for comparison).
+pyvrp>=0.13.0,<0.14  # 0.14 changed Model.add_depot(); legacy /optimize only
+ortools>=9.10,<10  # NMWC dispatch engine (/optimize-dispatch)
 # Module B: Mapbox Directions Matrix HTTP client.
 httpx>=0.27,<0.30
 

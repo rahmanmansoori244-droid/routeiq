@@ -58,6 +58,47 @@ enum RunStatus {
   FAILED
   DISPATCHED
   ARCHIVED
+  // A newer plan version (late order / re-plan) replaced this one. Kept for traceability.
+  SUPERSEDED
+}
+
+// NMWC dispatch MVP ----------------------------------------------------------------------
+// One physical load of one truck. Lifecycle: PLANNED -> LOCKED -> LOADING -> DISPATCHED ->
+// COMPLETED. PLANNED loads may be re-optimized; LOCKED/LOADING loads are kept verbatim by a
+// re-plan unless explicitly unlocked; DISPATCHED/COMPLETED loads are immutable.
+enum LoadStatus {
+  PLANNED
+  LOCKED
+  LOADING
+  DISPATCHED
+  COMPLETED
+}
+
+enum PlanReason {
+  INITIAL
+  LATE_ORDER
+  MANUAL_ADJUSTMENT
+  REOPTIMIZE
+}
+
+enum CustomerType {
+  HYPERMARKET
+  SUPERMARKET
+  TRADING
+  CATERING
+  HORECA
+  GROCERY
+  WHOLESALE
+  OTHER
+}
+
+enum LocationSource {
+  IMPORT
+  MANUAL_LATLNG
+  GOOGLE_MAPS_URL
+  MAP_PIN
+  GEOCODER
+  CRM
 }
 
 enum PaymentType {
@@ -91,41 +132,56 @@ enum UnservedReasonCode {
   SOLVER_DROPPED_LOW_PRIORITY
   INFEASIBLE_ROUTE
   UNKNOWN
+  // dispatch MVP
+  INVALID_LOCATION
+  UNKNOWN_CUSTOMER
+  UNKNOWN_PRODUCT
+  EXCEEDS_ANY_TRUCK_CAPACITY
+  HARD_WINDOW_INFEASIBLE
+  SHIFT_LIMIT
+  TRIP_LIMIT
+  LOCKED_PLAN_CONFLICT
+  LATE_ORDER_NO_CAPACITY
+  ROUTING_PROVIDER_FAILURE
+  INFEASIBLE
 }
 
 enum DistanceProvider {
   HAVERSINE
   MAPBOX_MATRIX
+  OSRM
 }
 
 model Tenant {
-  id          String       @id @default(cuid())
-  slug        String       @unique
+  id          String        @id @default(cuid())
+  slug        String        @unique
   name        String
   country     String
-  currency    String       @default("OMR")
-  primaryUnit CapacityUnit @default(CASES)
-  active      Boolean      @default(true)
-  createdAt   DateTime     @default(now())
+  currency    String        @default("OMR")
+  primaryUnit CapacityUnit  @default(CASES)
+  active      Boolean       @default(true)
+  createdAt   DateTime      @default(now())
   config      TenantConfig?
 
-  users           User[]
-  depots          Depot[]
-  trucks          Truck[]
-  drivers         Driver[]
-  regions         Region[]
-  customers       Customer[]
-  products        Product[]
-  uploadBatches   UploadBatch[]
-  orders          Order[]
-  runs            RunPlan[]
-  runJobs         RunJob[]
-  manualBaselines ManualBaseline[]
-  audits          AuditLog[]
-  passwordResets  PasswordResetToken[]
-  driverShifts    DriverShift[]
-  truckLocations  TruckLocation[]
-  deliveryProofs  DeliveryProof[]
+  users                User[]
+  depots               Depot[]
+  trucks               Truck[]
+  drivers              Driver[]
+  regions              Region[]
+  customers            Customer[]
+  products             Product[]
+  uploadBatches        UploadBatch[]
+  orders               Order[]
+  runs                 RunPlan[]
+  runJobs              RunJob[]
+  manualBaselines      ManualBaseline[]
+  audits               AuditLog[]
+  passwordResets       PasswordResetToken[]
+  driverShifts         DriverShift[]
+  truckLocations       TruckLocation[]
+  deliveryProofs       DeliveryProof[]
+  customerTypeProfiles CustomerTypeProfile[]
+  planLoads            PlanLoad[]
 }
 
 model TenantConfig {
@@ -133,7 +189,7 @@ model TenantConfig {
   tenantId                    String           @unique
   tenant                      Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   avgSpeedKmh                 Float            @default(40)
-  distanceProvider            DistanceProvider @default(HAVERSINE)
+  distanceProvider            DistanceProvider @default(OSRM)
   distanceMultiplier          Float            @default(1.30)
   // TODO v2: replace single tenant-wide multiplier with per-region overrides (RegionDistanceConfig).
   // City centers (Muscat) typically need ~1.4-1.5, highway regions (Duqm) ~1.1-1.2.
@@ -152,56 +208,97 @@ model TenantConfig {
   weightObjectiveCost         Float            @default(0)
   weightObjectiveBalance      Float            @default(0)
   weightObjectiveUtilization  Float            @default(0)
+
+  // --- NMWC dispatch MVP (all times are minutes from local midnight) ---
+  timezone                String  @default("Asia/Muscat")
+  planningCutoffMin       Int     @default(1080) // orders after 18:00 the day before = LATE
+  shiftStartMin           Int     @default(360) // earliest first departure 06:00
+  reloadMinutes           Int     @default(30) // depot turnaround between loads
+  maxTripsPerTruck        Int     @default(3)
+  fuelPricePerLitre       Float   @default(0) // OMR; 0 = fuel not costed separately
+  driverCostPerHour       Float   @default(0)
+  overtimeAfterMin        Int     @default(540)
+  overtimeCostPerHour     Float   @default(0)
+  prefWindowPenaltyPerMin Float   @default(0.05)
+  roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
+  osrmUrl                 String? // overrides the OSRM_URL env var; there is no silent public default
+  priorityWeightsJson     Json? // {"1":10000,...,"5":1}; must be strictly decreasing
+  orderColumnMapJson      Json? // extra header aliases for the NMWC order export
+  dateOrder               String  @default("DMY") // how to read 03/04/2026
+  serviceAreaJson         Json? // {"minLat":..,"maxLat":..,"minLng":..,"maxLng":..} location sanity box
+}
+
+// Defaults per customer type; a customer's own values always win.
+model CustomerTypeProfile {
+  id                 String       @id @default(cuid())
+  tenantId           String
+  tenant             Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customerType       CustomerType
+  defaultPriority    Int?
+  serviceTimeMin     Int?
+  hardWindowStartMin Int?
+  hardWindowEndMin   Int?
+  prefWindowStartMin Int?
+  prefWindowEndMin   Int?
+
+  @@unique([tenantId, customerType])
 }
 
 model User {
-  id                   String              @id @default(cuid())
+  id                   String               @id @default(cuid())
   tenantId             String?
-  tenant               Tenant?             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  email                String              @unique
+  tenant               Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email                String               @unique
   passwordHash         String
   name                 String
-  role                 Role                @default(VIEWER)
-  active               Boolean             @default(true)
-  createdAt            DateTime            @default(now())
+  role                 Role                 @default(VIEWER)
+  active               Boolean              @default(true)
+  createdAt            DateTime             @default(now())
   uploadBatches        UploadBatch[]
   runJobs              RunJob[]
   manualBaselines      ManualBaseline[]
   audits               AuditLog[]
-  routeAssignmentLocks RouteAssignment[]   @relation("RouteAssignmentLockedBy")
+  routeAssignmentLocks RouteAssignment[]    @relation("RouteAssignmentLockedBy")
   passwordResets       PasswordResetToken[]
+  verifiedLocations    Customer[]           @relation("CustomerLocationVerifiedBy")
+  lateOrders           Order[]              @relation("OrderLateRecordedBy")
+  loadStatusChanges    PlanLoad[]           @relation("PlanLoadStatusBy")
 
   @@index([tenantId])
 }
 
 model PasswordResetToken {
-  id        String   @id @default(cuid())
+  id        String    @id @default(cuid())
   tenantId  String?
-  tenant    Tenant?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant    Tenant?   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash String   @unique
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
   expiresAt DateTime
   usedAt    DateTime?
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
 
   @@index([userId])
   @@index([expiresAt])
 }
 
 model Depot {
-  id       String    @id @default(cuid())
-  tenantId String
-  tenant   Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  code     String
-  name     String
-  lat      Float
-  lng      Float
-  address  String?
-  active   Boolean   @default(true)
-  trucks   Truck[]
-  regions  Region[]
-  runs     RunPlan[]
+  id            String        @id @default(cuid())
+  tenantId      String
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code          String
+  name          String
+  lat           Float
+  lng           Float
+  address       String?
+  active        Boolean       @default(true)
+  openMin       Int? // depot opening, minutes from midnight; null = 00:00
+  closeMin      Int? // depot closing; null = 24:00
+  trucks        Truck[]
+  regions       Region[]
+  runs          RunPlan[]
+  orders        Order[]
+  uploadBatches UploadBatch[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
@@ -218,12 +315,21 @@ model Truck {
   capacityCases    Int               @default(0)
   capacityWeightKg Float             @default(0)
   capacityVolumeL  Float             @default(0)
-  fixedCostPerDay  Float             @default(0)
-  costPerKm        Float             @default(0)
+  fixedCostPerDay  Float             @default(0) // fixed operating cost per day the truck is used
+  costPerKm        Float             @default(0) // variable cost/km EXCLUDING fuel when kmPerLitre is set
+  kmPerLitre       Float? // fuel economy: fuel cost = km / kmPerLitre x fuel price
+  palletCapacity   Int?
+  tripCost         Float             @default(0) // per load (loading labour etc.)
+  maxTripsPerDay   Int? // overrides TenantConfig.maxTripsPerTruck
+  availableFromMin Int?
+  availableToMin   Int?
+  defaultDriverId  String?
+  defaultDriver    Driver?           @relation("TruckDefaultDriver", fields: [defaultDriverId], references: [id], onDelete: SetNull)
   active           Boolean           @default(true)
   routes           RouteAssignment[]
   shifts           DriverShift[]
   locations        TruckLocation[]
+  loads            PlanLoad[]
 
   @@unique([tenantId, code])
   @@index([tenantId, depotId])
@@ -241,7 +347,9 @@ model Driver {
   accessPinHash String?
   active        Boolean @default(true)
 
-  shifts   DriverShift[]
+  shifts        DriverShift[]
+  defaultTrucks Truck[]       @relation("TruckDefaultDriver")
+  loads         PlanLoad[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
@@ -259,23 +367,23 @@ enum DriverShiftStatus {
 }
 
 model DriverShift {
-  id          String              @id @default(cuid())
-  tenantId    String
-  tenant      Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  driverId    String
-  driver      Driver              @relation(fields: [driverId], references: [id])
-  truckId     String
-  truck       Truck               @relation(fields: [truckId], references: [id])
-  runId       String?
-  run         RunPlan?            @relation(fields: [runId], references: [id], onDelete: SetNull)
+  id           String            @id @default(cuid())
+  tenantId     String
+  tenant       Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  driverId     String
+  driver       Driver            @relation(fields: [driverId], references: [id])
+  truckId      String
+  truck        Truck             @relation(fields: [truckId], references: [id])
+  runId        String?
+  run          RunPlan?          @relation(fields: [runId], references: [id], onDelete: SetNull)
   // Opaque token the driver PWA holds; required on every GPS-ping call.
-  sessionToken String             @unique
-  status      DriverShiftStatus   @default(ACTIVE)
-  startedAt   DateTime            @default(now()) @db.Timestamptz(3)
-  endedAt     DateTime?           @db.Timestamptz(3)
-  notes       String?
-  locations   TruckLocation[]
-  proofs      DeliveryProof[]
+  sessionToken String            @unique
+  status       DriverShiftStatus @default(ACTIVE)
+  startedAt    DateTime          @default(now()) @db.Timestamptz(3)
+  endedAt      DateTime?         @db.Timestamptz(3)
+  notes        String?
+  locations    TruckLocation[]
+  proofs       DeliveryProof[]
 
   @@index([tenantId, status])
   @@index([truckId, status])
@@ -287,20 +395,20 @@ model DriverShift {
 // the dispatcher view can replay actuals vs planned, and so route-deviation
 // analytics works retroactively. A daily janitor archives rows older than 30 days.
 model TruckLocation {
-  id          String       @id @default(cuid())
-  tenantId    String
-  tenant      Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  shiftId     String
-  shift       DriverShift  @relation(fields: [shiftId], references: [id], onDelete: Cascade)
-  truckId     String
-  truck       Truck        @relation(fields: [truckId], references: [id])
-  ts          DateTime     @db.Timestamptz(3)
-  lat         Float
-  lng         Float
-  speedKmh    Float?
-  headingDeg  Float?
-  accuracyM   Float?
-  batteryPct  Int?
+  id         String      @id @default(cuid())
+  tenantId   String
+  tenant     Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  shiftId    String
+  shift      DriverShift @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  truckId    String
+  truck      Truck       @relation(fields: [truckId], references: [id])
+  ts         DateTime    @db.Timestamptz(3)
+  lat        Float
+  lng        Float
+  speedKmh   Float?
+  headingDeg Float?
+  accuracyM  Float?
+  batteryPct Int?
 
   @@index([tenantId, truckId, ts])
   @@index([shiftId, ts])
@@ -310,14 +418,14 @@ model TruckLocation {
 // signature blob (base64 PNG, max ~50 KB). Photo upload is deferred to v2 when
 // an object store (R2) is wired.
 model DeliveryProof {
-  id              String           @id @default(cuid())
+  id              String          @id @default(cuid())
   tenantId        String
-  tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   shiftId         String
-  shift           DriverShift      @relation(fields: [shiftId], references: [id], onDelete: Cascade)
-  assignmentId    String           @unique
-  assignment      RouteAssignment  @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
-  completedAt     DateTime         @default(now()) @db.Timestamptz(3)
+  shift           DriverShift     @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  assignmentId    String          @unique
+  assignment      RouteAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  completedAt     DateTime        @default(now()) @db.Timestamptz(3)
   notes           String?
   signaturePngB64 String?
   lat             Float?
@@ -355,27 +463,46 @@ model Customer {
   lat               Float?
   lng               Float?
   geocodeConfidence String?
-  priority          Int         @default(3)
+  priority          Int         @default(3) // 1 = HIGHEST ... 5 = LOWEST
   avgServiceTimeMin Int         @default(10)
   paymentType       PaymentType @default(CREDIT)
   accessNotes       String?
   active            Boolean     @default(true)
   orders            Order[]
 
+  // --- NMWC dispatch MVP ---
+  customerType         CustomerType?
+  priorityConfirmed    Boolean         @default(false) // false = default/type priority; ask the dispatcher
+  serviceTimeConfirmed Boolean         @default(false)
+  hardWindowStartMin   Int? // delivery outside the hard window is infeasible
+  hardWindowEndMin     Int?
+  prefWindowStartMin   Int? // outside the preferred window is allowed but penalised
+  prefWindowEndMin     Int?
+  locationInput        String? // what the dispatcher pasted (link / "lat,lng")
+  locationSource       LocationSource?
+  locationVerified     Boolean         @default(false)
+  locationVerifiedById String?
+  locationVerifiedBy   User?           @relation("CustomerLocationVerifiedBy", fields: [locationVerifiedById], references: [id], onDelete: SetNull)
+  locationVerifiedAt   DateTime?
+  createdFromUpload    Boolean         @default(false) // stub created from an order file
+
   @@unique([tenantId, code, branchKey])
   @@index([tenantId, regionId])
 }
 
 model Product {
-  id              String      @id @default(cuid())
-  tenantId        String
-  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  code            String
-  name            String
-  weightPerCaseKg Float       @default(0)
-  volumePerCaseL  Float       @default(0)
-  active          Boolean     @default(true)
-  orderLines      OrderLine[]
+  id                String      @id @default(cuid())
+  tenantId          String
+  tenant            Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code              String
+  name              String
+  weightPerCaseKg   Float       @default(0) // 0 = unknown
+  volumePerCaseL    Float       @default(0)
+  unitsPerCase      Int?
+  casesPerPallet    Float?
+  createdFromUpload Boolean     @default(false)
+  active            Boolean     @default(true)
+  orderLines        OrderLine[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
@@ -398,8 +525,15 @@ model UploadBatch {
   warningRows    Int               @default(0)
   validationJson Json?
   orders         Order[]
+  // --- dispatch MVP ---
+  depotId        String?
+  depot          Depot?            @relation(fields: [depotId], references: [id], onDelete: SetNull)
+  fileHash       String?
+  isLate         Boolean           @default(false)
+  lateReason     String?
 
   @@index([tenantId, uploadedAt])
+  @@index([tenantId, fileHash])
 }
 
 model Order {
@@ -424,46 +558,115 @@ model Order {
   assignments               RouteAssignment[]
   unservedRecords           UnservedOrder[]
   manualBaselineAssignments ManualBaselineAssignment[]
+  // --- dispatch MVP (uploadedAt = received time) ---
+  depotId                   String?
+  depot                     Depot?                     @relation(fields: [depotId], references: [id], onDelete: SetNull)
+  isLate                    Boolean                    @default(false)
+  lateReason                String?
+  lateRecordedById          String?
+  lateRecordedBy            User?                      @relation("OrderLateRecordedBy", fields: [lateRecordedById], references: [id], onDelete: SetNull)
+  salesValue                Float?
+  marginValue               Float?
+  priorityFromFile          Boolean                    @default(false) // true = `priority` came from the order file
 
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])
+  @@index([tenantId, depotId, deliveryDate])
 }
 
 model OrderLine {
-  id        String  @id @default(cuid())
-  orderId   String
-  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  productId String
-  product   Product @relation(fields: [productId], references: [id])
-  cases     Int
+  id                 String    @id @default(cuid())
+  orderId            String
+  order              Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId          String
+  product            Product   @relation(fields: [productId], references: [id])
+  cases              Int
+  // --- dispatch MVP: keep sales-order / SKU detail so manifests reconcile exactly ---
+  salesOrderNo       String?
+  orderDate          DateTime? @db.Date
+  productDescription String?
+  weightKg           Float     @default(0)
+  salesValue         Float?
+  marginValue        Float?
+  sourceRow          Int?
+  notes              String?
 
   @@index([orderId])
+  @@index([salesOrderNo])
 }
 
 model RunPlan {
-  id               String            @id @default(cuid())
-  tenantId         String
-  tenant           Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
-  depotId          String
-  depot            Depot             @relation(fields: [depotId], references: [id])
-  runDate          DateTime          @db.Date
-  status           RunStatus         @default(DRAFT)
-  optimizationMode OptimizationMode  @default(BALANCED)
-  chosenScenarioId String?
-  totalOrders      Int               @default(0)
-  unservedCount    Int               @default(0)
-  createdById      String
-  createdAt        DateTime          @default(now())
-  finalizedAt      DateTime?
-  scenarios        ScenarioResult[]
-  routes           RouteAssignment[]
-  currentJobId     String?
-  jobs             RunJob[]
-  manualBaselines  ManualBaseline[]
-  driverShifts     DriverShift[]
+  id                 String            @id @default(cuid())
+  tenantId           String
+  tenant             Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId            String
+  depot              Depot             @relation(fields: [depotId], references: [id])
+  runDate            DateTime          @db.Date
+  status             RunStatus         @default(DRAFT)
+  optimizationMode   OptimizationMode  @default(BALANCED)
+  chosenScenarioId   String?
+  totalOrders        Int               @default(0)
+  unservedCount      Int               @default(0)
+  createdById        String
+  createdAt          DateTime          @default(now())
+  finalizedAt        DateTime?
+  scenarios          ScenarioResult[]
+  routes             RouteAssignment[]
+  currentJobId       String?
+  jobs               RunJob[]
+  manualBaselines    ManualBaseline[]
+  driverShifts       DriverShift[]
+  // --- dispatch MVP: plan versions (a plan is never overwritten invisibly) ---
+  version            Int               @default(1)
+  parentRunId        String?
+  parentRun          RunPlan?          @relation("PlanVersions", fields: [parentRunId], references: [id], onDelete: SetNull)
+  childRuns          RunPlan[]         @relation("PlanVersions")
+  reason             PlanReason        @default(INITIAL)
+  reasonNote         String?
+  supersededAt       DateTime?
+  changeSummaryJson  Json?
+  reconciliationJson Json?
+  summaryJson        Json?
+  loads              PlanLoad[]
 
   @@index([tenantId, runDate])
   @@index([tenantId, currentJobId])
+  @@index([tenantId, depotId, runDate, version])
+}
+
+model PlanLoad {
+  id                  String            @id @default(cuid())
+  tenantId            String
+  tenant              Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runId               String
+  run                 RunPlan           @relation(fields: [runId], references: [id], onDelete: Cascade)
+  truckId             String
+  truck               Truck             @relation(fields: [truckId], references: [id])
+  loadNo              Int
+  status              LoadStatus        @default(PLANNED)
+  driverId            String?
+  driver              Driver?           @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  departMin           Int
+  returnMin           Int
+  distanceKm          Float
+  durationMin         Int
+  cases               Int
+  weightKg            Float
+  utilizationPct      Float
+  fuelLitres          Float?
+  fuelCost            Float             @default(0)
+  operatingCost       Float             @default(0)
+  returnLegKm         Float             @default(0)
+  distanceIsEstimated Boolean           @default(true)
+  carriedFromLoadId   String? // the same physical load in the parent plan version
+  statusChangedAt     DateTime?
+  statusChangedById   String?
+  statusChangedBy     User?             @relation("PlanLoadStatusBy", fields: [statusChangedById], references: [id], onDelete: SetNull)
+  createdAt           DateTime          @default(now())
+  assignments         RouteAssignment[]
+
+  @@unique([runId, truckId, loadNo])
+  @@index([tenantId, runId])
 }
 
 model ScenarioResult {
@@ -485,24 +688,37 @@ model ScenarioResult {
 }
 
 model RouteAssignment {
-  id                        String  @id @default(cuid())
+  id                        String         @id @default(cuid())
   runId                     String
-  run                       RunPlan @relation(fields: [runId], references: [id], onDelete: Cascade)
+  run                       RunPlan        @relation(fields: [runId], references: [id], onDelete: Cascade)
   truckId                   String
-  truck                     Truck   @relation(fields: [truckId], references: [id])
+  truck                     Truck          @relation(fields: [truckId], references: [id])
   orderId                   String
-  order                     Order   @relation(fields: [orderId], references: [id])
+  order                     Order          @relation(fields: [orderId], references: [id])
   sequenceInTruck           Int
   plannedArrivalMin         Int
   plannedDistanceFromPrevKm Float
   plannedLoadCases          Int
   lockedByUserId            String?
-  lockedBy                  User?   @relation("RouteAssignmentLockedBy", fields: [lockedByUserId], references: [id], onDelete: SetNull)
+  lockedBy                  User?          @relation("RouteAssignmentLockedBy", fields: [lockedByUserId], references: [id], onDelete: SetNull)
   manualOverrideReason      String?
   deliveryProof             DeliveryProof?
+  // --- dispatch MVP ---
+  loadId                    String?
+  load                      PlanLoad?      @relation(fields: [loadId], references: [id], onDelete: Cascade)
+  loadNo                    Int            @default(1)
+  orderInStop               Int            @default(0) // several orders for one customer = one stop
+  etaMin                    Int? // clock minutes from midnight
+  serviceStartMin           Int?
+  departureMin              Int?
+  waitMin                   Int?
+  cumulativeKm              Float?
+  hardWindowOk              Boolean?
+  prefWindowOk              Boolean?
 
-  @@unique([runId, truckId, sequenceInTruck])
+  @@unique([runId, truckId, loadNo, sequenceInTruck, orderInStop])
   @@index([runId, truckId])
+  @@index([loadId])
 }
 
 model RunJob {

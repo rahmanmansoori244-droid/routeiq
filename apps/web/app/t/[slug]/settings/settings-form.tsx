@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { errorMessage } from '@/lib/error-message';
 
 interface Initial {
   tenant: { name: string; country: string; currency: string; primaryUnit: CapacityUnit };
@@ -52,7 +53,7 @@ export function SettingsForm({ initial }: { initial: Initial }) {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Save failed.');
+        toast.error(errorMessage(body, 'Save failed.'));
         return;
       }
       toast.success('Settings saved');
@@ -139,8 +140,9 @@ export function SettingsForm({ initial }: { initial: Initial }) {
         <CardHeader>
           <CardTitle className="text-base">Distance estimation</CardTitle>
           <CardDescription>
-            v1 uses Haversine with a multiplier. Mapbox Matrix lands in v2. When Haversine is active, every km
-            display reads <strong>Estimated km</strong>.
+            OSRM plans on real road distances from the self-hosted routing server (Oman + UAE map). With
+            Haversine, outside that map, or when the routing server is unreachable, distances are straight-line × multiplier and every km display reads{' '}
+            <strong>Estimated km</strong>.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -154,9 +156,10 @@ export function SettingsForm({ initial }: { initial: Initial }) {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="HAVERSINE">Haversine (free, straight-line)</SelectItem>
+                <SelectItem value="OSRM">OSRM (real road distance, self-hosted)</SelectItem>
+                <SelectItem value="HAVERSINE">Haversine (straight-line estimate)</SelectItem>
                 <SelectItem value="MAPBOX_MATRIX">
-                  Mapbox Matrix (real road distance — requires MAPBOX_TOKEN on solver)
+                  Mapbox Matrix (old planner only — the dispatch planner uses OSRM instead)
                 </SelectItem>
               </SelectContent>
             </Select>

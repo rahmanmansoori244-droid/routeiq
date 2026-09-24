@@ -20,7 +20,10 @@ import type {
   OptimizationScenarioName,
 } from '@routeiq/shared-types';
 
-const inflight = new Map<string, Promise<void>>();
+// On globalThis: Next compiles instrumentation.ts (the in-process janitor) into its own bundle
+// layer with a separate copy of this module, and the janitor must see the same live jobs.
+const g = globalThis as unknown as { __routeiqInflight?: Map<string, Promise<void>> };
+const inflight = (g.__routeiqInflight ??= new Map<string, Promise<void>>());
 
 export interface ScheduleArgs {
   runId: string;
@@ -43,6 +46,17 @@ export function scheduleOptimize(args: ScheduleArgs): void {
 
 export function isOptimizing(runId: string): boolean {
   return inflight.has(runId);
+}
+
+/** Register any background optimize promise (legacy or dispatch) in the shared in-flight map,
+ * so duplicate starts are refused and the stuck-job janitor never reaps a live job. */
+export function trackInflight(runId: string, start: () => Promise<void>): boolean {
+  if (inflight.has(runId)) return false;
+  const p = start().finally(() => {
+    inflight.delete(runId);
+  });
+  inflight.set(runId, p);
+  return true;
 }
 
 async function runOptimizeJob(args: ScheduleArgs): Promise<void> {
@@ -177,11 +191,15 @@ async function failJob(args: ScheduleArgs, err: unknown): Promise<void> {
   }
 }
 
+/** Longer than any job can legitimately run: the dispatch solver call (10 min max) plus saving the plan. */
+export const STUCK_JOB_MS = 15 * 60 * 1000;
+
 /**
- * Orphan janitor — mark RUNNING jobs older than 5 minutes as FAILED with
- * reason STUCK. Called from the cron route every 60s.
+ * Orphan janitor — mark jobs RUNNING (or never started) for longer than any real optimization
+ * as FAILED with reason STUCK, and put their plan back to FAILED so it can be optimized again.
+ * Runs every 60 s inside the web process (instrumentation.ts) and from the cron route.
  */
-export async function reapStuckJobs(thresholdMs = 5 * 60 * 1000): Promise<{ reaped: number }> {
+export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reaped: number }> {
   // We use a Postgres-side NOW() comparison instead of passing a JS Date,
   // because RunJob.startedAt is a TIMESTAMP (no time zone) column — comparing
   // it against a JS Date via Prisma's serialized ISO string would mis-match
@@ -194,17 +212,19 @@ export async function reapStuckJobs(thresholdMs = 5 * 60 * 1000): Promise<{ reap
       tenantId: string;
       createdById: string;
       attemptNo: number;
+      status: 'RUNNING' | 'QUEUED';
     }>
   >(
     // Both sides are computed Postgres-side so the comparison stays in the
     // server's session timezone. (Prisma converts JS Dates to local-time
     // TIMESTAMPs when writing, so NOW() — also local — matches them. See
     // feedback_db_gotchas memory for context.)
-    `SELECT id, "runId", "tenantId", "createdById", "attemptNo"
+    // A QUEUED row normally turns RUNNING within milliseconds; one that stays QUEUED lost its
+    // process between creating the job and starting it.
+    `SELECT id, "runId", "tenantId", "createdById", "attemptNo", status::text AS status
      FROM "RunJob"
-     WHERE status = 'RUNNING'
-       AND "startedAt" IS NOT NULL
-       AND "startedAt" < NOW() - ($1::int || ' minutes')::interval`,
+     WHERE (status = 'RUNNING' AND "startedAt" IS NOT NULL AND "startedAt" < NOW() - ($1::int || ' minutes')::interval)
+        OR (status = 'QUEUED' AND "createdAt" < NOW() - ($1::int || ' minutes')::interval)`,
     minutes,
   );
   if (stuck.length === 0) return { reaped: 0 };
@@ -221,12 +241,12 @@ export async function reapStuckJobs(thresholdMs = 5 * 60 * 1000): Promise<{ reap
       // Conditional update so we don't FAIL a job that just succeeded
       // between the SELECT and the UPDATE.
       const flipped = await prisma.runJob.updateMany({
-        where: { id: job.id, status: 'RUNNING' },
+        where: { id: job.id, status: job.status },
         data: {
           status: 'FAILED',
           finishedAt: new Date(),
-          message: 'Stuck > 5 minutes — janitor failed it.',
-          errorJson: { reason: 'STUCK', message: 'Job exceeded the 5-minute running threshold.' } as never,
+          message: `No result after ${minutes} minutes (the server restarted during the optimization). Optimize again.`,
+          errorJson: { reason: 'STUCK', message: `Job ${job.status} for more than ${minutes} minutes.` } as never,
         },
       });
       if (flipped.count === 0) continue;

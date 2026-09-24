@@ -11,6 +11,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { MapPicker } from '@/components/map-picker';
+import { errorMessage } from '@/lib/error-message';
 
 interface Completion {
   depots: number;
@@ -121,7 +122,7 @@ function DepotStep({ mapboxToken, onSaved }: { mapboxToken: string; onSaved: () 
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Depot creation failed.');
+        toast.error(errorMessage(body, 'Depot creation failed.'));
         return;
       }
       toast.success('Depot created');
@@ -207,7 +208,7 @@ function TruckStep({ slug, onSaved }: { slug: string; onSaved: () => void }) {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Truck creation failed.');
+        toast.error(errorMessage(body, 'Truck creation failed.'));
         return;
       }
       toast.success('Truck created');

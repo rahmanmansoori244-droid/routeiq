@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { errorMessage } from '@/lib/error-message';
 
 interface DepotOption {
   id: string;
@@ -60,7 +61,7 @@ export function NewRunForm({ slug, depots, orderCounts }: Props) {
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Create failed.');
+        toast.error(errorMessage(body, 'Create failed.'));
         return;
       }
       router.push(`/t/${slug}/runs/${body.data.id}`);

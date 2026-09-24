@@ -15,6 +15,7 @@ import {
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { MapPicker } from '@/components/map-picker';
+import { errorMessage } from '@/lib/error-message';
 
 export interface DepotRow {
   id: string;
@@ -92,7 +93,7 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof data.error === 'string' ? data.error : 'Save failed.');
+        toast.error(errorMessage(data, 'Save failed.'));
         return;
       }
       toast.success(mode === 'create' ? 'Depot created' : 'Depot updated');

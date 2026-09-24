@@ -18,6 +18,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { DepotFormDialog, type DepotRow } from './depot-form';
+import { errorMessage } from '@/lib/error-message';
 
 interface Props {
   initial: DepotRow[];
@@ -41,7 +42,7 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
       const res = await fetch(`/api/depots/${d.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       if (body.data?.softDeleted) {

@@ -7,6 +7,7 @@ import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { errorMessage } from '@/lib/error-message';
 
 interface FormState {
   companyName: string;
@@ -58,7 +59,7 @@ export function SignupForm() {
       });
       const body = (await res.json()) as { data?: { tenantSlug: string }; error?: unknown };
       if (!res.ok || !body.data) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Signup failed.');
+        toast.error(errorMessage(body, 'Signup failed.'));
         return;
       }
       const signinRes = await signIn('credentials', {

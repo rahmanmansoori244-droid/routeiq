@@ -18,6 +18,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { DriverFormDialog, type DriverRow } from './driver-form';
+import { errorMessage } from '@/lib/error-message';
 
 export function DriversTable({ initial, canManage }: { initial: DriverRow[]; canManage: boolean }) {
   const router = useRouter();
@@ -32,7 +33,7 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
       const res = await fetch(`/api/drivers/${d.id}/pin`, { method: 'POST' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok || !body.data) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Could not set PIN.');
+        toast.error(errorMessage(body, 'Could not set PIN.'));
         return;
       }
       setPinResult({ driverCode: body.data.driverCode, pin: body.data.pin });
@@ -44,7 +45,7 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
       const res = await fetch(`/api/drivers/${d.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Delete failed.');
+        toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
       toast.success(`Driver ${d.code} deleted.`);

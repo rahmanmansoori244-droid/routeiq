@@ -36,6 +36,9 @@ const TENANT_SCOPED_MODELS = new Set([
   'DriverShift',
   'TruckLocation',
   'DeliveryProof',
+  // NMWC dispatch MVP
+  'PlanLoad',
+  'CustomerTypeProfile',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

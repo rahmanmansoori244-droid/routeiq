@@ -27,6 +27,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
+import { errorMessage } from '@/lib/error-message';
 
 export interface MapStop {
   assignmentId: string;
@@ -149,7 +150,6 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
     })();
     return () => {
       cancelled = true;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const m = mapRef.current as any;
       if (m?.remove) m.remove();
       mapRef.current = null;
@@ -205,13 +205,11 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
   // Re-render markers + routes whenever data changes.
   useEffect(() => {
     if (!mapReady) return;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const map = mapRef.current as any;
     if (!map) return;
 
     // Clear prior markers.
     for (const m of markersRef.current) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (m as any).remove?.();
     }
     markersRef.current = [];
@@ -331,7 +329,6 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
   }, [mapReady, stops, unserved, hiddenTrucks, truckColor, depot, trucks, showLabels, canEdit, geometries]);
 
   function resetZoom() {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const map = mapRef.current as any;
     if (!map) return;
     const allCoords: [number, number][] = [[depot.lng, depot.lat]];
@@ -369,7 +366,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Move failed.');
+        toast.error(errorMessage(body, 'Move failed.'));
         return;
       }
       toast.success(
@@ -391,7 +388,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Lock failed.');
+        toast.error(errorMessage(body, 'Lock failed.'));
         return;
       }
       toast.success(lock ? `${contextStop.customerCode} locked.` : `${contextStop.customerCode} unlocked.`);
@@ -406,7 +403,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       const res = await fetch(`/api/runs/${runId}/routes/${confirmUnassign.assignmentId}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(typeof body.error === 'string' ? body.error : 'Unassign failed.');
+        toast.error(errorMessage(body, 'Unassign failed.'));
         return;
       }
       toast.success(`${confirmUnassign.customerCode} unassigned.`);
