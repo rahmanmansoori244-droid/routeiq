@@ -10,7 +10,9 @@
  *  - ten concurrent getOrCreatePlan calls for one day create exactly one plan (day lock);
  *  - two concurrent re-plans of one version create exactly one child;
  *  - review fixes: a re-plan never re-uses an untouched copy's driver without the time-clash check,
- *    and a failed re-plan saves no weight (its copied loads keep matching their orders).
+ *    and a failed re-plan saves no weight (its copied loads keep matching their orders);
+ *  - fourth review: a driver the dispatcher set by hand stays on its trip (marked, the overlap shown
+ *    as a warning); one RouteIQ filled in does not, and the change is listed on the plan.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -98,6 +100,7 @@ vi.mock('@/lib/solver-client', () => {
 import { prisma as libPrisma } from '@/lib/db';
 import { chooseScenario, getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
+import { driverClashes } from '@/lib/dispatch/load-state';
 import { PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
@@ -395,11 +398,18 @@ describe('plan row locks (F07)', () => {
 // Review of PR3 (fixes): copy-forward drivers, and weights saved only with an applied plan.
 // ---------------------------------------------------------------------------------------------
 
-describe('copy-forward re-plan keeps drivers clash-free (review: untouched copies are not this version\'s choice)', () => {
-  it('a PLANNED trip re-timed onto a kept LOCKED load of the same driver does not get that driver', async () => {
-    const day = isoPlus(10);
+describe('copy-forward re-plan and drivers (review: untouched copies are not this version\'s choice; fourth review: hand-set drivers)', () => {
+  /**
+   * Ali drives the first truck's load 1 (08:30-10:00, then LOCKED) and the second truck's load 2
+   * (11:00-12:30), both set by hand. The re-plan moves the second truck's loads 150 min earlier:
+   * its load 2 now leaves 08:30, onto Ali's kept load. `handSet` false clears the second load's
+   * hand-set marker first, as if RouteIQ had filled Ali in.
+   */
+  async function retimeOntoKeptLoad(day: string, handSet: boolean) {
     // Five customers, one order each: five stops (the fake solver gives the first truck three loads).
-    await prisma.customer.create({ data: { tenantId, code: 'C5', name: 'C5', branchKey: '__MAIN__', lat: 23.59, lng: 58.43, geocodeConfidence: 'HIGH', locationVerified: true, priority: 3, priorityConfirmed: true } });
+    if (!(await prisma.customer.findFirst({ where: { tenantId, code: 'C5' } }))) {
+      await prisma.customer.create({ data: { tenantId, code: 'C5', name: 'C5', branchKey: '__MAIN__', lat: 23.59, lng: 58.43, geocodeConfidence: 'HIGH', locationVerified: true, priority: 3, priorityConfirmed: true } });
+    }
     await seedOrders(day, 5);
     const ali = await prisma.driver.create({ data: { tenantId, code: `ALI-${uniqueSuffix()}`.slice(0, 20), name: 'Ali', active: true } });
     solverMode.mode = 'plan';
@@ -415,11 +425,13 @@ describe('copy-forward re-plan keeps drivers clash-free (review: untouched copie
     expect(second!.length).toBe(2);
     const firstL1 = first!.find((l) => l.loadNo === 1)!;
     const secondL2 = second!.find((l) => l.loadNo === 2)!;
-    // Ali drives the first truck's load 1 (08:30-10:00) and the second truck's load 2 (11:00-12:30).
     await updateLoad(tenantId, v1.id, firstL1.id, { driverId: ali.id, status: 'LOCKED' }, user(), everyRole);
     await updateLoad(tenantId, v1.id, secondL2.id, { driverId: ali.id }, user(), everyRole);
+    const marked = await prisma.planLoad.findUniqueOrThrow({ where: { id: secondL2.id } });
+    expect(marked.driverSetById).toBe(userId); // the dispatcher's driver change is marked
+    expect(marked.driverSetAt).toBeInstanceOf(Date);
+    if (!handSet) await prisma.planLoad.update({ where: { id: secondL2.id }, data: { driverSetById: null, driverSetAt: null } });
 
-    // The re-plan moves the second truck's loads 150 min earlier: its load 2 now leaves 08:30.
     solverMode.mode = 'earlySecondTruck';
     const rp = await replan(tenantId, v1.id, 'REOPTIMIZE', null, user(), null);
     expect(rp.status).toBe(202);
@@ -430,15 +442,23 @@ describe('copy-forward re-plan keeps drivers clash-free (review: untouched copie
     expect(kept).toMatchObject({ status: 'LOCKED', driverId: ali.id });
     const retimed = v2Loads.find((l) => l.truckId === secondL2.truckId && l.loadNo === 2)!;
     expect(retimed.departMin).toBe(kept.departMin); // same time as the kept load
+    const clashes = driverClashes(v2Loads.map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })));
+    return { ali, kept, retimed, clashes, detail: (await getPlanDetail(tenantId, v2.id))! };
+  }
+
+  it('a PLANNED trip re-timed onto a kept LOCKED load of the same driver does not keep a driver RouteIQ filled in; the change is shown', async () => {
+    const { ali, retimed, clashes, detail } = await retimeOntoKeptLoad(isoPlus(10), false);
     expect(retimed.driverId).not.toBe(ali.id); // not a second sheet for Ali
-    // No driver on two trucks at overlapping times anywhere in the new version.
-    const withDriver = v2Loads.filter((l) => l.driverId);
-    for (const a of withDriver) {
-      for (const b of withDriver) {
-        if (a.id >= b.id || a.truckId === b.truckId || a.driverId !== b.driverId) continue;
-        expect(a.departMin < b.returnMin && b.departMin < a.returnMin, `${a.truckId} L${a.loadNo} and ${b.truckId} L${b.loadNo}`).toBe(false);
-      }
-    }
+    expect(clashes).toEqual([]); // no driver on two trucks at overlapping times anywhere in the new version
+    expect(detail.warnings.some((w) => w.startsWith('Driver changed by this plan:') && w.includes('Ali →') && w.includes('locked, loading or dispatched'))).toBe(true);
+  });
+
+  it('a driver the dispatcher set by hand stays on the re-timed trip, with its marker, and the overlap is the yellow warning (fourth review of PR3)', async () => {
+    const { ali, kept, retimed, clashes, detail } = await retimeOntoKeptLoad(isoPlus(12), true);
+    expect(retimed).toMatchObject({ driverId: ali.id, driverSetById: userId });
+    expect(retimed.driverSetAt).toBeInstanceOf(Date);
+    expect(clashes.map((c) => [c.a.id, c.b.id].sort())).toEqual([[kept.id, retimed.id].sort()]);
+    expect(detail.warnings.some((w) => w.startsWith('Driver changed by this plan:'))).toBe(false);
   });
 });
 

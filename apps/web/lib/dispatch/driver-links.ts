@@ -6,6 +6,7 @@
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
 import { isSupersededRun } from './plan-status';
+import type { DriverChangeNote } from './summary';
 import { fmtHhmm } from './time';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
@@ -186,6 +187,33 @@ export function driverClashNotes(
     loadIds: [a.id, b.id],
     text: `${a.driverName ?? b.driverName ?? 'One driver'} is on ${at(a)} and ${at(b)} at the same time.`,
   }));
+}
+
+/** A trip whose driver the applied plan changed, in words ("Ali -> Sam, because ..."). */
+export function driverChangeText(c: DriverChangeNote): string {
+  const trip = `${c.truckCode} · L${c.loadNo} (${fmtHhmm(c.departMin)}–${fmtHhmm(c.returnMin)})`;
+  const to = c.to?.name ?? 'no driver';
+  if (c.reason === 'FILLED' || !c.from) return `Driver added by this plan: ${trip} now has ${to} (the trip had no driver).`;
+  const from = c.from.name;
+  const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : null;
+  const why =
+    c.reason === 'INACTIVE'
+      ? `${from} is no longer active`
+      : c.reason === 'KEPT_LOAD'
+        ? `${from} is on ${other ?? 'a kept load'} (locked, loading or dispatched) at that time`
+        : `${from} is on ${other ?? 'another trip'} at that time`;
+  return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
+}
+
+/**
+ * The plan warnings for the drivers the applied plan changed (summary `driverChanges`): one per trip
+ * that still has the driver the plan gave it - once the dispatcher picks another one, the note
+ * has done its job.
+ */
+export function driverChangeWarnings(changes: readonly DriverChangeNote[], loads: readonly { truckId: string; loadNo: number; driverId: string | null }[]): string[] {
+  return changes
+    .filter((c) => loads.some((l) => l.truckId === c.truckId && l.loadNo === c.loadNo && l.driverId === (c.to?.id ?? null)))
+    .map(driverChangeText);
 }
 
 /** Order notes as separate, de-duplicated remarks: upload joins every line's note with " | ", so

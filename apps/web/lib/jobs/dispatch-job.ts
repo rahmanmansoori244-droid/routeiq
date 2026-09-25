@@ -97,14 +97,15 @@ async function runJob(args: DispatchJobArgs) {
         // old weight" warning stays until a plan with the new weight is applied.
         await applyWeightChanges(tx, tenantId, runId, built.weightChanges, userId);
         const ids = await persistDispatchResult(tx, tenantId, runId, built, resp);
-        await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
+        const { driverChanges } = await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
+        const drivers = driverChanges.length ? `, ${driverChanges.length} trip(s) with another driver (see the plan)` : '';
         const done = await tx.runJob.updateMany({
           where: { id: runJobId, status: 'RUNNING' },
           data: {
             status: 'SUCCEEDED',
             progressPct: 100,
             finishedAt: new Date(),
-            message: `${recommended.trips} loads on ${recommended.trucks_used} trucks, ${recommended.unserved.length + built.preDrops.length} stop(s) unserved`,
+            message: `${recommended.trips} loads on ${recommended.trucks_used} trucks, ${recommended.unserved.length + built.preDrops.length} stop(s) unserved${drivers}`,
           },
         });
         if (done.count !== 1) throw new StaleJobError('the job changed while its plan was being saved');

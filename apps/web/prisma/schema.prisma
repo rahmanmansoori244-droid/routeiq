@@ -267,6 +267,7 @@ model User {
   verifiedLocations    Customer[]           @relation("CustomerLocationVerifiedBy")
   lateOrders           Order[]              @relation("OrderLateRecordedBy")
   loadStatusChanges    PlanLoad[]           @relation("PlanLoadStatusBy")
+  loadDriversSet       PlanLoad[]           @relation("PlanLoadDriverSetBy")
 
   @@index([tenantId])
 }
@@ -692,6 +693,11 @@ model PlanLoad {
   statusChangedAt     DateTime?
   statusChangedById   String?
   statusChangedBy     User?             @relation("PlanLoadStatusBy", fields: [statusChangedById], references: [id], onDelete: SetNull)
+  // Who chose the driver by hand, and when (setDriverTx; cleared with the driver). Carried by a
+  // re-plan's copies and by applyScenario to the same truck and trip. Null: RouteIQ filled it in.
+  driverSetById       String?
+  driverSetBy         User?             @relation("PlanLoadDriverSetBy", fields: [driverSetById], references: [id], onDelete: SetNull)
+  driverSetAt         DateTime?
   createdAt           DateTime          @default(now())
   assignments         RouteAssignment[]
 

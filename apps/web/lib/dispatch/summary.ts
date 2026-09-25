@@ -5,6 +5,7 @@
  * Money honesty: revenue is only reported when every order carries a sales value, contribution
  * margin only when every order carries a margin. Otherwise they are null ("not supplied").
  */
+import type { DriverChangeReason } from './load-state';
 
 export interface SummaryOrder {
   id: string;
@@ -60,6 +61,28 @@ export interface DailySummary {
   distanceProvider: string;
   warnings: string[];
   solver: { engine: string; scenario: string; status: string; timeSec: number } | null;
+  /**
+   * The trips whose driver the applied plan changed versus the same truck and trip before it
+   * (applyScenario; absent when none). Kept through load changes, replaced by the next applied
+   * plan; the plan screen shows them as warnings (driverChangeWarnings in driver-links.ts).
+   */
+  driverChanges?: DriverChangeNote[];
+}
+
+/** A trip whose driver an applied plan changed (planReplanDrivers), with the names at that time. */
+export interface DriverChangeNote {
+  truckId: string;
+  truckCode: string;
+  loadNo: number;
+  departMin: number;
+  returnMin: number;
+  /** The driver the truck and trip had before the plan (null: no driver). */
+  from: { id: string; name: string } | null;
+  /** The driver the plan gave it (null: none, for the dispatcher to fill). */
+  to: { id: string; name: string } | null;
+  reason: DriverChangeReason;
+  /** The load of `from` at the same time (KEPT_LOAD, OTHER_TRIP). */
+  other: { truckCode: string; loadNo: number | null } | null;
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;

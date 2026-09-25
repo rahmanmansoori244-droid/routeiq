@@ -50,6 +50,7 @@ import {
   updateLoad,
 } from '@/lib/dispatch/plan-service';
 import { driverClashes } from '@/lib/dispatch/load-state';
+import { driverChangeWarnings } from '@/lib/dispatch/driver-links';
 import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { failJob, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
@@ -708,6 +709,175 @@ describe('copy-forward re-plan: drivers are not double-booked (review: step 1 ev
     const sel = /const driverSel = \{([^}]*)\} as const;/.exec(src)?.[1] ?? '';
     expect(sel).toContain('departMin: true');
     expect(sel).toContain('returnMin: true');
+  });
+});
+
+describe('hand-set drivers across a re-plan and "Use instead" (fourth review of PR3)', () => {
+  /**
+   * T2's default driver is Ali, T3's is Sam. `version(id, t2, t3)` adds an applied READY version:
+   * T2 L1 with Ali and T3 L1 with `t3Driver`, both filled in by RouteIQ (no hand-set marker), and
+   * its RECOMMENDED option with those times; `alt` adds a MIN_COST option with other times.
+   * Minutes: 570 = 09:30, 600 = 10:00, 660 = 11:00, 720 = 12:00, 840 = 14:00.
+   */
+  const sc = () => scope({ orderIds: ['O2', 'O3'], frozenOrderIds: [], frozenLoadIds: [], frozenLoadOrderIds: [] });
+  const both = ['T2 listed first', 'T3 listed first'] as const;
+  const inOrder = (order: (typeof both)[number], loads: ReturnType<typeof solverLoad>[]) => (order === 'T2 listed first' ? loads : [...loads].reverse());
+  function seedDay() {
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
+    tables.truck = [
+      { id: 'T2', tenantId: T, code: 'T2', defaultDriverId: 'ALI' },
+      { id: 'T3', tenantId: T, code: 'T3', defaultDriverId: 'SAM' },
+    ];
+    tables.driver = [
+      { id: 'ALI', tenantId: T, active: true, name: 'Ali' },
+      { id: 'SAM', tenantId: T, active: true, name: 'Sam' },
+    ];
+    tables.order = ['O2', 'O3'].map((id) => ({ id, tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'ASSIGNED' }));
+    tables.runPlan = [];
+    tables.planLoad = [];
+    tables.routeAssignment = [];
+    tables.scenarioResult = [];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+    tables.runJob = [];
+  }
+  function version(id: string, t2: [number, number], t3: [number, number], t3Driver: string, alt?: { t2: [number, number]; t3: [number, number]; order: (typeof both)[number] }) {
+    const base = { tenantId: T, depotId: 'D1', runDate: DAY, optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 2, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null, createdById: 'u1', createdAt: new Date() };
+    tables.runPlan.push({ ...base, id, status: 'READY', supersededAt: null, version: 1, reason: 'INITIAL', chosenScenarioId: `${id}-rec`, parentRunId: null, currentJobId: null });
+    tables.planLoad.push(
+      load(`${id}-T2`, id, 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: t2[0], returnMin: t2[1] }),
+      load(`${id}-T3`, id, 1, 'PLANNED', { truckId: 'T3', driverId: t3Driver, departMin: t3[0], returnMin: t3[1] }),
+    );
+    tables.routeAssignment.push({ ...assignment(`${id}-A2`, id, `${id}-T2`, 'O2', 1), truckId: 'T2' }, { ...assignment(`${id}-A3`, id, `${id}-T3`, 'O3', 1), truckId: 'T3' });
+    const loads = (a: [number, number], b: [number, number]) => [solverLoad('T2', 1, a[0], a[1], ['O2']), solverLoad('T3', 1, b[0], b[1], ['O3'])];
+    tables.scenarioResult.push({ id: `${id}-rec`, runId: id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(), loads: loads(t2, t3) }) });
+    if (alt) {
+      tables.scenarioResult.push({ id: `${id}-alt`, runId: id, name: 'MIN_COST', unservedCount: 0, detailsJson: scenarioDetails({ name: 'MIN_COST', scope: sc(), loads: inOrder(alt.order, loads(alt.t2, alt.t3)) }) });
+    }
+  }
+  /** Late order: the copy-forward version of `parentId`, optimizing, with the job's RECOMMENDED plan. */
+  async function replanTo(parentId: string, t2: [number, number], t3: [number, number], order: (typeof both)[number]) {
+    const { child } = await createNextVersion(T, parentId, 'LATE_ORDER', null, 'u1');
+    Object.assign(row('runPlan', child.id), { status: 'OPTIMIZING', currentJobId: 'J1' });
+    tables.runJob.push({ id: 'J1', runId: child.id, tenantId: T, attemptNo: 1, status: 'RUNNING' });
+    const loads = [solverLoad('T2', 1, t2[0], t2[1], ['O2']), solverLoad('T3', 1, t3[0], t3[1], ['O3'])];
+    tables.scenarioResult.push({ id: 'job-rec', runId: child.id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(), loads: inOrder(order, loads) }) });
+    const res = await applyScenario(fakePrisma as never, T, child.id, 'job-rec', 'u1', { jobId: 'J1' });
+    return { childId: child.id, res };
+  }
+  const loadOf = (runId: string, truckId: string) => tables.planLoad.find((l) => l.runId === runId && l.truckId === truckId)!;
+  const driversOf = (runId: string) => tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ truckId: l.truckId as string, loadNo: l.loadNo as number, driverId: l.driverId as string | null }));
+  const clashesOf = (runId: string) =>
+    driverClashes(tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })));
+
+  it("the dispatcher's driver change marks the load (who, when); \"No driver\" clears the marker; a re-plan's copies keep it", async () => {
+    seedDay();
+    version('P', [720, 840], [570, 660], 'SAM');
+    await updateLoad(T, 'P', 'P-T3', { driverId: 'ALI' }, user, allow);
+    expect(row('planLoad', 'P-T3')).toMatchObject({ driverId: 'ALI', driverSetById: 'u1' });
+    expect(row('planLoad', 'P-T3').driverSetAt).toBeInstanceOf(Date);
+    const { child } = await createNextVersion(T, 'P', 'LATE_ORDER', null, 'u1');
+    const copy = loadOf(child.id, 'T3');
+    expect(copy).toMatchObject({ driverId: 'ALI', driverSetById: 'u1', carriedFromLoadId: 'P-T3' });
+    expect(copy.driverSetAt).toEqual(row('planLoad', 'P-T3').driverSetAt);
+    expect(loadOf(child.id, 'T2').driverSetAt ?? null).toBeNull(); // filled in by RouteIQ: no marker
+    await updateLoad(T, child.id, copy.id, { driverId: null }, user, allow);
+    expect(row('planLoad', copy.id)).toMatchObject({ driverId: null, driverSetById: null, driverSetAt: null });
+  });
+
+  for (const order of both) {
+    it(`D1, re-plan job (${order}): a trip moved onto the hours of a trip the dispatcher gave Ali by hand - Ali stays on the hand-set trip, the overlap is the yellow warning`, async () => {
+      seedDay();
+      version('P', [720, 840], [570, 660], 'SAM'); // T2 L1 Ali (default) 12:00-14:00, T3 L1 Sam 09:30-11:00
+      await updateLoad(T, 'P', 'P-T3', { driverId: 'ALI' }, user, allow); // Ali on T3 by hand (no clash then)
+      const { childId, res } = await replanTo('P', [600, 720], [570, 660], order); // T2 L1 moves to 10:00-12:00
+      expect(loadOf(childId, 'T3')).toMatchObject({ departMin: 570, driverId: 'ALI', driverSetById: 'u1' });
+      expect(loadOf(childId, 'T3').driverSetAt).toEqual(row('planLoad', 'P-T3').driverSetAt);
+      expect(loadOf(childId, 'T2')).toMatchObject({ departMin: 600, driverId: 'ALI', driverSetById: null, driverSetAt: null });
+      expect(clashesOf(childId)).toHaveLength(1);
+      expect(res.driverChanges).toEqual([]);
+    });
+
+    it(`D1, "Use instead" (${order}): the same trips and evidence give the same drivers as the re-plan job`, async () => {
+      seedDay();
+      version('R', [720, 840], [570, 660], 'SAM', { t2: [600, 720], t3: [570, 660], order });
+      await updateLoad(T, 'R', 'R-T3', { driverId: 'ALI' }, user, allow);
+      await chooseScenario(T, 'R', 'R-alt', 'u1');
+      expect(loadOf('R', 'T3')).toMatchObject({ departMin: 570, driverId: 'ALI', driverSetById: 'u1' });
+      expect(loadOf('R', 'T2')).toMatchObject({ departMin: 600, driverId: 'ALI', driverSetById: null });
+      expect(clashesOf('R')).toHaveLength(1);
+    });
+
+    it(`D2, "Use instead" (${order}): re-timing the hand-set trip onto another trip of Ali keeps Ali on both (yellow warning); switching back restores the plan`, async () => {
+      seedDay();
+      // R: T2 L1 Ali (default) 09:30-11:00; T3 L1 Sam 12:00-14:00, then Ali by hand. MIN_COST moves T3 L1 to 10:00-12:00.
+      version('R', [570, 660], [720, 840], 'SAM', { t2: [570, 660], t3: [600, 720], order });
+      await updateLoad(T, 'R', 'R-T3', { driverId: 'ALI' }, user, allow);
+      const setAt = row('planLoad', 'R-T3').driverSetAt;
+      const res = await chooseScenario(T, 'R', 'R-alt', 'u1');
+      expect(loadOf('R', 'T3')).toMatchObject({ departMin: 600, driverId: 'ALI', driverSetById: 'u1', driverSetAt: setAt });
+      expect(loadOf('R', 'T2')).toMatchObject({ departMin: 570, driverId: 'ALI' });
+      expect(clashesOf('R')).toHaveLength(1); // shown, never silently dropped
+      expect(res.driverChanges).toEqual([]);
+      await chooseScenario(T, 'R', 'R-rec', 'u1');
+      expect(loadOf('R', 'T3')).toMatchObject({ departMin: 720, driverId: 'ALI', driverSetById: 'u1', driverSetAt: setAt });
+      expect(loadOf('R', 'T2')).toMatchObject({ departMin: 570, driverId: 'ALI' });
+      expect(clashesOf('R')).toHaveLength(0);
+    });
+
+    it(`drivers RouteIQ filled in (${order}): the trip that moved loses Ali, in the re-plan job and in "Use instead", and the change is reported`, async () => {
+      seedDay();
+      version('P', [720, 840], [570, 660], 'ALI'); // Ali on both, filled in (no marker), no clash
+      const { childId, res } = await replanTo('P', [600, 720], [570, 660], order);
+      expect(loadOf(childId, 'T3')).toMatchObject({ departMin: 570, driverId: 'ALI', driverSetById: null });
+      expect(loadOf(childId, 'T2')).toMatchObject({ departMin: 600, driverId: null }); // Ali (also its default) is on T3
+      expect(clashesOf(childId)).toHaveLength(0);
+      const change = { truckId: 'T2', truckCode: 'T2', loadNo: 1, departMin: 600, returnMin: 720, from: { id: 'ALI', name: 'Ali' }, to: null, reason: 'OTHER_TRIP', other: { truckCode: 'T3', loadNo: 1 } };
+      expect(res.driverChanges).toEqual([change]);
+      // Kept with the plan (summary) and audited; a load change keeps it; the plan shows it until the dispatcher picks a driver.
+      expect(row('runPlan', childId).summaryJson.driverChanges).toEqual([change]);
+      expect(tables.auditLog.find((a) => a.action === 'SCENARIO_CHOSEN' && a.entityId === childId)!.afterJson.driverChanges).toEqual([
+        { truckId: 'T2', loadNo: 1, from: 'ALI', to: null, reason: 'OTHER_TRIP' },
+      ]);
+      Object.assign(row('runPlan', childId), { status: 'READY', currentJobId: null });
+      await updateLoad(T, childId, loadOf(childId, 'T3').id, { status: 'LOCKED' }, user, allow);
+      const notes = row('runPlan', childId).summaryJson.driverChanges;
+      expect(notes).toEqual([change]);
+      expect(driverChangeWarnings(notes, driversOf(childId))).toEqual([
+        'Driver changed by this plan: T2 · L1 (10:00–12:00) Ali → no driver, because Ali is on T3 · L1 at that time.',
+      ]);
+      await updateLoad(T, childId, loadOf(childId, 'T2').id, { driverId: 'SAM' }, user, allow);
+      expect(driverChangeWarnings(notes, driversOf(childId))).toEqual([]);
+
+      // "Use instead" with the same trips and evidence: the same answer.
+      seedDay();
+      version('R', [720, 840], [570, 660], 'ALI', { t2: [600, 720], t3: [570, 660], order });
+      const chosen = await chooseScenario(T, 'R', 'R-alt', 'u1');
+      expect(loadOf('R', 'T3')).toMatchObject({ departMin: 570, driverId: 'ALI' });
+      expect(loadOf('R', 'T2')).toMatchObject({ departMin: 600, driverId: null });
+      expect(chosen.driverChanges).toEqual([change]);
+    });
+  }
+
+  it('the first optimization of a day is unaffected: default drivers, no marker, no driver change', async () => {
+    seedDay();
+    version('R', [570, 660], [600, 720], 'SAM');
+    Object.assign(row('runPlan', 'R'), { status: 'DRAFT', chosenScenarioId: null });
+    tables.planLoad = [];
+    tables.routeAssignment = [];
+    const res = await chooseScenario(T, 'R', 'R-rec', 'u1');
+    expect(loadOf('R', 'T2')).toMatchObject({ driverId: 'ALI', driverSetById: null, driverSetAt: null });
+    expect(loadOf('R', 'T3')).toMatchObject({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
+    expect(res.driverChanges).toEqual([]);
+    expect(row('runPlan', 'R').summaryJson.driverChanges).toBeUndefined();
+    expect(tables.auditLog.find((a) => a.action === 'SCENARIO_CHOSEN')!.afterJson.driverChanges).toBeUndefined();
+  });
+
+  it('applyScenario reads the hand-set marker with the drivers (the fake database ignores `select`)', () => {
+    const src = readFileSync(path.resolve(__dirname, '../../lib/dispatch/plan-service.ts'), 'utf8');
+    const sel = /const driverSel = \{([^}]*)\} as const;/.exec(src)?.[1] ?? '';
+    expect(sel).toContain('driverSetById: true');
+    expect(sel).toContain('driverSetAt: true');
   });
 });
 

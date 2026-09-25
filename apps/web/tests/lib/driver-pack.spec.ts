@@ -8,6 +8,8 @@ import type { DetailStop, PlanDetail } from '@/lib/dispatch/plan-detail';
 import { driverPackModel, qrPath, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
 import {
   coordText,
+  driverChangeText,
+  driverChangeWarnings,
   driverClashNotes,
   MAX_WAYPOINTS,
   noteParts,
@@ -20,6 +22,7 @@ import {
   whatsappUrl,
 } from '@/lib/dispatch/driver-links';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
+import type { DriverChangeNote } from '@/lib/dispatch/summary';
 import { pdfSafe, UNPRINTABLE } from '@/lib/dispatch/pdf-text';
 import { fixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
 
@@ -445,5 +448,25 @@ describe('WhatsApp safeguards and driver clashes', () => {
     // Trips of one truck never clash.
     d.loads[1] = { ...d.loads[1], driverId: 'drv1', driverName: 'Salim Al Harthy' };
     expect(driverClashNotes(d.loads)).toEqual([]);
+  });
+
+  it('says which driver an applied plan changed and why, while the trip still has that driver (fourth review of PR3)', () => {
+    const ali = { id: 'ALI', name: 'Ali' };
+    const sam = { id: 'SAM', name: 'Sam' };
+    const note = (over: Partial<DriverChangeNote>): DriverChangeNote => ({
+      truckId: 'T2', truckCode: 'T02', loadNo: 1, departMin: 600, returnMin: 720, from: ali, to: sam, reason: 'OTHER_TRIP', other: { truckCode: 'T03', loadNo: 1 }, ...over,
+    });
+    expect(driverChangeText(note({}))).toBe('Driver changed by this plan: T02 · L1 (10:00–12:00) Ali → Sam, because Ali is on T03 · L1 at that time.');
+    expect(driverChangeText(note({ to: null, reason: 'KEPT_LOAD', other: { truckCode: 'T01', loadNo: 1 } }))).toBe(
+      'Driver changed by this plan: T02 · L1 (10:00–12:00) Ali → no driver, because Ali is on T01 · L1 (locked, loading or dispatched) at that time.',
+    );
+    expect(driverChangeText(note({ reason: 'INACTIVE', other: null }))).toBe('Driver changed by this plan: T02 · L1 (10:00–12:00) Ali → Sam, because Ali is no longer active.');
+    expect(driverChangeText(note({ from: null, reason: 'FILLED', other: null }))).toBe('Driver added by this plan: T02 · L1 (10:00–12:00) now has Sam (the trip had no driver).');
+    // Shown only while the trip has the driver the plan gave it.
+    const loads = [{ truckId: 'T2', loadNo: 1, driverId: 'SAM' }];
+    expect(driverChangeWarnings([note({})], loads)).toHaveLength(1);
+    expect(driverChangeWarnings([note({})], [{ ...loads[0], driverId: 'ALI' }])).toEqual([]);
+    expect(driverChangeWarnings([note({ to: null })], [{ ...loads[0], driverId: null }])).toHaveLength(1);
+    expect(driverChangeWarnings([note({})], [])).toEqual([]);
   });
 });

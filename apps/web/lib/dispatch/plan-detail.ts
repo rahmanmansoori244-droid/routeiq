@@ -10,7 +10,7 @@ import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { isSupersededRun } from './plan-status';
 import { isCarriedFrozen } from './load-state';
-import { noteParts } from './driver-links';
+import { driverChangeWarnings, noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
 import { fmtWindow, isoOf } from './time';
@@ -388,7 +388,15 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     warnings: legacyChosen
       ? ['This plan was made by the previous optimizer (before May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
       : chosenDetails
-        ? [...new Set([...outdated, ...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
+        ? [
+            ...new Set([
+              ...outdated,
+              // A driver the applied plan changed is never silent (fourth review of PR3).
+              ...driverChangeWarnings((run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [], loads),
+              ...(chosenDetails.response_warnings ?? []),
+              ...(chosenDetails.warnings ?? []),
+            ]),
+          ]
         : [],
     pendingOrders,
   };
