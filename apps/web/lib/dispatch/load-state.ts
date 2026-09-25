@@ -71,6 +71,16 @@ export function checkTransition(load: LoadRef, sameTruckLoads: LoadRef[], to: Lo
   return { ok: true, role };
 }
 
+/**
+ * Load changes allowed on a plan version that has no applied plan (no chosen option): only the
+ * way back - unlock (LOCKED -> PLANNED) and back to locked (LOADING -> LOCKED) - so the day can
+ * be optimized again. Such a version has no summary or reconciliation, so it can never be locked,
+ * loaded or dispatched from. Review F03.
+ */
+export function scenariolessTransitionAllowed(from: LoadStatusName, to: LoadStatusName): boolean {
+  return (from === 'LOCKED' && to === 'PLANNED') || (from === 'LOADING' && to === 'LOCKED');
+}
+
 export interface DriverOnLoad {
   truckId: string;
   loadNo: number;

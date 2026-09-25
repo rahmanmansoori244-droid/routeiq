@@ -7,7 +7,7 @@
  * DISPATCHED / COMPLETED) are copied verbatim, the parent is marked SUPERSEDED (kept, never
  * overwritten) and only the remaining orders are optimized again.
  */
-import { Prisma, type LoadStatus, type OrderStatus, type PlanReason, type UnservedReasonCode } from '@prisma/client';
+import { Prisma, type LoadStatus, type OptimizationMode, type OrderStatus, type PlanReason, type RunStatus, type UnservedReasonCode } from '@prisma/client';
 import type {
   DispatchRequest,
   DispatchResponse,
@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { assignReplanDrivers, checkDriverChange, checkTransition, isFrozen, type LoadStatusName } from './load-state';
+import { assignReplanDrivers, checkDriverChange, checkTransition, isFrozen, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -57,14 +57,16 @@ import {
 } from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dateOnly, isoOf } from './time';
+import { PlanError } from './plan-errors';
+import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
+import { appliedPlanStatus } from './plan-status';
+import { copyRowData } from './prisma-copy';
+
+export { PlanError, planErrorBody } from './plan-errors';
 
 type Tx = Prisma.TransactionClient;
-
-export class PlanError extends Error {
-  constructor(message: string, public status = 400, public details?: unknown) {
-    super(message);
-  }
-}
+/** The Prisma client or a transaction client (read helpers that also run inside a transaction). */
+type Db = Prisma.TransactionClient | typeof prisma;
 
 export const ALL_SCENARIOS: DispatchScenarioName[] = ['RECOMMENDED', 'MIN_TRUCKS', 'MIN_DISTANCE'];
 
@@ -666,6 +668,9 @@ export async function persistDispatchResult(
   built: BuiltRequest,
   resp: DispatchResponse,
 ): Promise<Map<string, string>> {
+  // Every earlier option of this version goes, including the plan a re-plan copied from its
+  // parent (createNextVersion): the new RECOMMENDED plan is applied right after, in the same
+  // transaction, and replaces the copied PLANNED loads.
   await tx.scenarioResult.deleteMany({ where: { runId } });
   const ids = new Map<string, string>();
   for (const sc of resp.scenarios) {
@@ -726,15 +731,41 @@ export async function persistDispatchResult(
   return ids;
 }
 
-/** Materialize a scenario into PlanLoads + RouteAssignments, keeping frozen loads intact. */
-export async function applyScenario(tx: Tx, tenantId: string, runId: string, scenarioId: string, userId: string) {
-  const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
-  if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded by a newer version.', 409);
-  const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: scenarioId, runId }, include: { unservedOrders: true } });
+/** Versions a dispatcher may apply an option to (not superseded, optimizing or archived). */
+const APPLY_STATUSES = ['DRAFT', 'READY', 'FAILED', 'DISPATCHED'] as const;
+
+export interface ApplyOptions {
+  /** The background job applying its own result: the version must be OPTIMIZING with this job current. */
+  jobId?: string;
+  /** A dispatcher's choice ("Use instead"): only an OPTIMIZED option can be applied. */
+  requireOptimized?: boolean;
+}
+
+/**
+ * Materialize a scenario into PlanLoads + RouteAssignments, keeping frozen loads intact.
+ *
+ * The plan row is locked FIRST (lockRunForWrite), before anything is read: a version superseded
+ * or optimizing meanwhile is refused (the job may apply to its own OPTIMIZING version), so a
+ * superseded version is never written READY again (review F07). The final status follows the
+ * loads: DISPATCHED (with finalizedAt) when every load is out, otherwise READY.
+ */
+export async function applyScenario(tx: Tx, tenantId: string, runId: string, scenarioId: string, userId: string, opts: ApplyOptions = {}) {
+  const run = await lockRunForWrite(tx, tenantId, runId, { jobId: opts.jobId, allow: opts.jobId ? undefined : APPLY_STATUSES });
+  const sc = await tx.scenarioResult.findFirst({ where: { id: scenarioId, runId }, include: { unservedOrders: true } });
+  if (!sc) throw new PlanError('This plan option no longer exists. Reload the plan.', 409, { code: 'SCENARIO_GONE' });
   if (!isDispatchDetails(sc.detailsJson)) {
     throw new PlanError('This option was made by the previous optimizer and cannot be applied. Plan the day from Daily dispatch.', 409);
   }
   const d = sc.detailsJson;
+  if (opts.requireOptimized && d.status !== 'OPTIMIZED') {
+    throw new PlanError(
+      d.status === 'NO_SOLUTION'
+        ? `The ${sc.name.replace('_', ' ')} option found no plan (every order would be unserved). It cannot be used.`
+        : `The ${sc.name.replace('_', ' ')} option has no loads to use.`,
+      409,
+      { code: 'SCENARIO_NOT_USABLE' },
+    );
+  }
 
   // Frozen loads must be exactly the ones the scenario was computed around.
   const frozenNow = await tx.planLoad.findMany({ where: { runId, status: { not: 'PLANNED' } }, include: { assignments: true } });
@@ -857,7 +888,14 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     await tx.order.updateMany({ where: { tenantId, id: { in: unservedIds }, status: movable }, data: { status: 'UNSERVED' } });
   }
 
-  await tx.runPlan.update({ where: { id: runId }, data: { chosenScenarioId: scenarioId, status: 'READY' } });
+  // READY, or DISPATCHED when every load of the version is already out (e.g. a late order left
+  // unserved while every carried load is dispatched). Conditional: never over a superseded row.
+  const next = appliedPlanStatus((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
+  const wrote = await tx.runPlan.updateMany({
+    where: { id: runId, tenantId, status: { not: 'SUPERSEDED' }, supersededAt: null },
+    data: { chosenScenarioId: scenarioId, status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
+  });
+  if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
   await refreshPlanFacts(tx, tenantId, runId);
   await tx.auditLog.create({
     data: {
@@ -870,6 +908,31 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     },
   });
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
+}
+
+/**
+ * "Use instead": apply another option of the same version (choose-scenario). One transaction; the
+ * plan row is locked before anything is checked, so a re-plan or a Lock that commits first is
+ * seen (409), never overwritten. Refused while optimizing or superseded, once a load of this
+ * version was locked (unlock or re-plan first), and for an option that found no plan.
+ */
+export async function chooseScenario(tenantId: string, runId: string, scenarioId: string, userId: string) {
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        await setLockTimeout(tx);
+        await lockRunForWrite(tx, tenantId, runId, { allow: APPLY_STATUSES, optimizingMessage: 'Wait for the optimization to finish.' });
+        const frozenNew = await tx.planLoad.count({ where: { runId, status: { not: 'PLANNED' }, carriedFromLoadId: null } });
+        if (frozenNew > 0) {
+          throw new PlanError('Loads of this version are already locked. Unlock them (or re-plan) before switching scenario.', 409, { code: 'LOADS_LOCKED' });
+        }
+        await applyScenario(tx, tenantId, runId, scenarioId, userId, { requireOptimized: true });
+      },
+      { timeout: 60_000, maxWait: 10_000 },
+    );
+  } catch (e) {
+    throw asPlanBusy(e);
+  }
 }
 
 /**
@@ -1018,9 +1081,11 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
  * and a day can hold several of them, so ties go to the plan that was actually applied and
  * then to the newest: the answer must never flip between requests.
  */
-export async function currentPlan(tenantId: string, depotId: string, dateIso: string) {
-  return prisma.runPlan.findFirst({
-    where: { tenantId, depotId, runDate: dateOnly(dateIso), status: { notIn: ['SUPERSEDED', 'ARCHIVED'] } },
+export async function currentPlan(tenantId: string, depotId: string, dateIso: string, client: Db = prisma) {
+  return client.runPlan.findFirst({
+    // supersededAt too: a version written READY over its supersede (before the stabilization
+    // release) is never the live plan again.
+    where: { tenantId, depotId, runDate: dateOnly(dateIso), status: { notIn: ['SUPERSEDED', 'ARCHIVED'] }, supersededAt: null },
     orderBy: [{ version: 'desc' }, { chosenScenarioId: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }, { id: 'desc' }],
   });
 }
@@ -1057,24 +1122,85 @@ export async function isLegacyPlan(tenantId: string, runId: string): Promise<boo
   return !isDispatchDetails(sc?.detailsJson);
 }
 
-export async function getOrCreatePlan(tenantId: string, depotId: string, dateIso: string, userId: string) {
-  const existing = await currentPlan(tenantId, depotId, dateIso);
-  if (existing) return { run: existing, created: false };
-  const depot = await prisma.depot.findFirst({ where: { id: depotId, tenantId, active: true } });
-  if (!depot) throw new PlanError('Depot not found or inactive.', 400);
-  const run = await prisma.runPlan.create({
-    data: { tenantId, depotId, runDate: dateOnly(dateIso), createdById: userId, version: 1, reason: 'INITIAL' },
-  });
-  await prisma.auditLog.create({
-    data: { tenantId, userId, action: 'CREATE', entity: 'RunPlan', entityId: run.id, afterJson: { depotId, runDate: dateIso, version: 1 } as never },
-  });
-  return { run, created: true };
+/**
+ * The live plan of a depot and day, or version 1 created now (review F06). One transaction under
+ * the day lock: the check and the create cannot interleave with another request for the same
+ * day, in this web process or another one (Railway deploy overlap), so a day never gets two
+ * live plans. `created` is false when a live plan already existed.
+ */
+export async function createInitialPlan(
+  tenantId: string,
+  depotId: string,
+  dateIso: string,
+  userId: string,
+  extra: { optimizationMode?: OptimizationMode; totalOrders?: number; audit?: Record<string, unknown>; ip?: string | null } = {},
+) {
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await setLockTimeout(tx);
+        await lockPlanDay(tx, tenantId, depotId, dateIso);
+        const existing = await currentPlan(tenantId, depotId, dateIso, tx);
+        if (existing) return { run: existing, created: false };
+        const depot = await tx.depot.findFirst({ where: { id: depotId, tenantId, active: true } });
+        if (!depot) throw new PlanError('Depot not found or inactive.', 400);
+        const run = await tx.runPlan.create({
+          data: {
+            tenantId,
+            depotId,
+            runDate: dateOnly(dateIso),
+            createdById: userId,
+            version: 1,
+            reason: 'INITIAL',
+            ...(extra.optimizationMode ? { optimizationMode: extra.optimizationMode } : {}),
+            ...(extra.totalOrders !== undefined ? { totalOrders: extra.totalOrders } : {}),
+          },
+        });
+        await tx.auditLog.create({
+          data: {
+            tenantId,
+            userId,
+            action: 'CREATE',
+            entity: 'RunPlan',
+            entityId: run.id,
+            afterJson: { depotId, runDate: dateIso, version: 1, ...(extra.audit ?? {}) } as never,
+            ...(extra.ip ? { ip: extra.ip } : {}),
+          },
+        });
+        return { run, created: true };
+      },
+      { timeout: 15_000, maxWait: 10_000 },
+    );
+  } catch (e) {
+    throw asPlanBusy(e);
+  }
 }
 
+export async function getOrCreatePlan(tenantId: string, depotId: string, dateIso: string, userId: string) {
+  // Fast path without a transaction; the create itself re-checks under the day lock.
+  const existing = await currentPlan(tenantId, depotId, dateIso);
+  if (existing) return { run: existing, created: false };
+  return createInitialPlan(tenantId, depotId, dateIso, userId);
+}
+
+/** Versions a re-plan can start from (a superseded or optimizing one is refused). */
+const REPLAN_FROM: readonly RunStatus[] = ['DRAFT', 'READY', 'FAILED', 'DISPATCHED'];
+
 /**
- * New plan version for a late order / re-plan. Frozen loads (and their assignments) are
- * copied verbatim; PLANNED loads are left behind for the optimizer to rebuild. The parent is
- * kept as SUPERSEDED for traceability.
+ * New plan version for a late order / re-plan (copy-forward, review F03). One transaction, under
+ * the day lock and then the parent's row lock:
+ *
+ * - the child copies EVERY load of the parent (PLANNED ones too; carriedFromLoadId = the parent
+ *   load) with its assignments, the parent's CHOSEN option with its unserved orders (not the
+ *   alternatives: they were computed around the parent's loads), and the plan facts (summary,
+ *   reconciliation, order counts). Its status follows its loads (READY, or DISPATCHED when every
+ *   load is out);
+ * - the parent becomes SUPERSEDED (kept read-only for traceability).
+ *
+ * So the new version is a usable copy of the previous plan from the start: if its optimization
+ * then fails (solver error, timeout, a deploy during the solve), the day keeps a plan that can be
+ * locked and dispatched. A successful optimization replaces the copied PLANNED loads and the
+ * copied option (persistDispatchResult + applyScenario); frozen loads are never touched.
  */
 export async function createNextVersion(
   tenantId: string,
@@ -1083,72 +1209,155 @@ export async function createNextVersion(
   note: string | null,
   userId: string,
 ) {
-  return prisma.$transaction(async (tx) => {
-    const locked = await tx.$queryRaw<Array<{ status: string }>>`
-      SELECT "status" FROM "RunPlan" WHERE id = ${parentRunId} AND "tenantId" = ${tenantId} FOR UPDATE`;
-    if (!locked.length) throw new PlanError('Plan not found.', 404);
-    const parent = await tx.runPlan.findFirstOrThrow({ where: { id: parentRunId, tenantId } });
-    if (parent.status === 'SUPERSEDED') throw new PlanError('This version was already superseded; open the latest version.', 409);
-    if (parent.status === 'OPTIMIZING') throw new PlanError('An optimization is running for this plan.', 409);
-    const child = await tx.runPlan.create({
-      data: {
-        tenantId,
-        depotId: parent.depotId,
-        runDate: parent.runDate,
-        createdById: userId,
-        version: parent.version + 1,
-        parentRunId: parent.id,
-        reason,
-        reasonNote: note,
-        optimizationMode: parent.optimizationMode,
-      },
-    });
-    const frozen = await tx.planLoad.findMany({ where: { runId: parent.id, status: { not: 'PLANNED' } }, include: { assignments: true } });
-    for (const l of frozen) {
-      const { id: oldId, runId: _r, createdAt: _c, assignments, ...rest } = l;
-      void _r;
-      void _c;
-      const copy = await tx.planLoad.create({ data: { ...rest, runId: child.id, carriedFromLoadId: oldId } });
-      if (assignments.length) {
-        await tx.routeAssignment.createMany({
-          data: assignments.map(({ id: _id, runId: _rr, loadId: _l, portionLinesJson, ...a }) => {
-            void _id;
-            void _rr;
-            void _l;
-            return { ...a, portionLinesJson: portionLinesJson ?? Prisma.DbNull, runId: child.id, loadId: copy.id };
-          }),
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await setLockTimeout(tx);
+        const head = await tx.runPlan.findFirst({ where: { id: parentRunId, tenantId }, select: { depotId: true, runDate: true } });
+        if (!head) throw new PlanError('Plan not found.', 404);
+        await lockPlanDay(tx, tenantId, head.depotId, head.runDate);
+        const parent = await lockRunForWrite(tx, tenantId, parentRunId, { allow: REPLAN_FROM, optimizingMessage: 'An optimization is running for this plan.' });
+        const activeJob = await tx.runJob.count({ where: { runId: parent.id, status: { in: ['QUEUED', 'RUNNING'] } } });
+        if (activeJob) throw new PlanError('An optimization is running for this plan.', 409, { code: 'OPTIMIZING' });
+
+        const loads = await tx.planLoad.findMany({
+          where: { runId: parent.id },
+          include: { assignments: true },
+          orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }],
         });
-      }
-    }
-    await tx.runPlan.update({ where: { id: parent.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } });
-    await tx.auditLog.create({
-      data: {
-        tenantId,
-        userId,
-        action: 'PLAN_VERSION_CREATED',
-        entity: 'RunPlan',
-        entityId: child.id,
-        afterJson: { parentRunId: parent.id, version: child.version, reason, note, frozenLoadsCarried: frozen.length } as never,
+        const chosen = parent.chosenScenarioId
+          ? await tx.scenarioResult.findFirst({ where: { id: parent.chosenScenarioId, runId: parent.id }, include: { unservedOrders: true } })
+          : null;
+        const status = chosen ? appliedPlanStatus(loads.map((l) => l.status)) : 'DRAFT';
+        const child = await tx.runPlan.create({
+          data: {
+            tenantId,
+            depotId: parent.depotId,
+            runDate: parent.runDate,
+            createdById: userId,
+            version: parent.version + 1,
+            parentRunId: parent.id,
+            reason,
+            reasonNote: note,
+            optimizationMode: parent.optimizationMode,
+            status,
+            finalizedAt: status === 'DISPATCHED' ? (parent.finalizedAt ?? new Date()) : null,
+            ...(chosen
+              ? {
+                  totalOrders: parent.totalOrders,
+                  unservedCount: parent.unservedCount,
+                  summaryJson: parent.summaryJson ?? Prisma.DbNull,
+                  reconciliationJson: parent.reconciliationJson ?? Prisma.DbNull,
+                }
+              : {}),
+          },
+        });
+
+        // Loads and their stops. The copy keeps status, driver, times and costs.
+        const newLoadId = new Map<string, string>();
+        const assignmentRows: Prisma.RouteAssignmentCreateManyInput[] = [];
+        for (const l of loads) {
+          const { assignments, ...row } = l;
+          const copy = await tx.planLoad.create({
+            data: copyRowData('PlanLoad', row, ['id', 'runId', 'createdAt', 'carriedFromLoadId'], { runId: child.id, carriedFromLoadId: l.id }) as Prisma.PlanLoadUncheckedCreateInput,
+          });
+          newLoadId.set(l.id, copy.id);
+          for (const a of assignments) {
+            assignmentRows.push(copyRowData('RouteAssignment', a, ['id', 'runId', 'loadId'], { runId: child.id, loadId: copy.id }) as Prisma.RouteAssignmentCreateManyInput);
+          }
+        }
+        if (assignmentRows.length) await tx.routeAssignment.createMany({ data: assignmentRows });
+
+        // The option in use, so the copy reconciles and can be dispatched. Its scope names the
+        // frozen loads it was computed around: renamed to the copies (the "loads changed" check).
+        let chosenCopyId: string | null = null;
+        if (chosen) {
+          const { unservedOrders, ...row } = chosen;
+          const raw: unknown = chosen.detailsJson;
+          const details = isDispatchDetails(raw)
+            ? {
+                ...raw,
+                scope: {
+                  ...raw.scope,
+                  ...(raw.scope.frozenLoadIds ? { frozenLoadIds: raw.scope.frozenLoadIds.map((id) => newLoadId.get(id) ?? id).sort() } : {}),
+                },
+              }
+            : raw;
+          const copy = await tx.scenarioResult.create({
+            data: copyRowData('ScenarioResult', row, ['id', 'runId', 'createdAt', 'detailsJson'], {
+              runId: child.id,
+              detailsJson: details as Prisma.InputJsonValue,
+            }) as Prisma.ScenarioResultUncheckedCreateInput,
+          });
+          if (unservedOrders.length) {
+            await tx.unservedOrder.createMany({
+              data: unservedOrders.map((u) => copyRowData('UnservedOrder', u, ['id', 'scenarioId', 'createdAt'], { scenarioId: copy.id }) as Prisma.UnservedOrderCreateManyInput),
+            });
+          }
+          chosenCopyId = copy.id;
+        }
+        const saved = chosenCopyId ? await tx.runPlan.update({ where: { id: child.id }, data: { chosenScenarioId: chosenCopyId } }) : child;
+
+        await tx.runPlan.update({ where: { id: parent.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } });
+        const frozenLoadsCarried = loads.filter((l) => l.status !== 'PLANNED').length;
+        await tx.auditLog.create({
+          data: {
+            tenantId,
+            userId,
+            action: 'PLAN_VERSION_CREATED',
+            entity: 'RunPlan',
+            entityId: child.id,
+            afterJson: {
+              parentRunId: parent.id,
+              version: child.version,
+              reason,
+              note,
+              frozenLoadsCarried,
+              loadsCopied: loads.length,
+              planCopied: !!chosenCopyId,
+            } as never,
+          },
+        });
+        return { child: saved, frozenLoadsCarried };
       },
-    });
-    return { child, frozenLoadsCarried: frozen.length };
-  });
+      { timeout: 60_000, maxWait: 10_000 },
+    );
+  } catch (e) {
+    throw asPlanBusy(e);
+  }
 }
 
 // ---------------------------------------------------------------------------------------
 // Load changes: status and driver
 // ---------------------------------------------------------------------------------------
 
+/** Versions whose loads can change (not superseded, optimizing or archived). */
+const LOAD_CHANGE_FROM: readonly RunStatus[] = ['DRAFT', 'READY', 'FAILED', 'DISPATCHED'];
+
 /** Lock a plan version for a load change (row lock until the transaction ends); it must be open for changes. */
 async function lockOpenRun(tx: Tx, tenantId: string, runId: string) {
-  await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
-  const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId } });
-  if (!run) throw new PlanError('Plan not found.', 404);
-  if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded. Open the latest version.', 409);
-  if (run.status === 'OPTIMIZING') throw new PlanError('Wait for the running optimization to finish.', 409);
-  return run;
+  return lockRunForWrite(tx, tenantId, runId, { allow: LOAD_CHANGE_FROM });
 }
 type OpenRun = Awaited<ReturnType<typeof lockOpenRun>>;
+
+/**
+ * A load change runs in one screen-facing transaction under the plan's row lock. Waiting more
+ * than 5 s for that lock (a plan being saved holds it) or for the transaction answers
+ * 409 "Plan is being saved - retry" instead of a 500 (review F07).
+ */
+async function inLoadTx<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await setLockTimeout(tx);
+        return fn(tx);
+      },
+      { timeout: 30_000, maxWait: 5_000 },
+    );
+  } catch (e) {
+    throw asPlanBusy(e);
+  }
+}
 type RoleCheck = (role: 'PLANNER' | 'SUPERVISOR') => boolean;
 
 export interface LoadChange {
@@ -1170,7 +1379,7 @@ export async function updateLoad(
   user: { id: string; role: string },
   hasRole: RoleCheck,
 ) {
-  return prisma.$transaction(async (tx) => {
+  return inLoadTx(async (tx) => {
     const run = await lockOpenRun(tx, tenantId, runId);
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
@@ -1187,7 +1396,7 @@ export async function changeLoadStatus(
   user: { id: string; role: string },
   hasRole: RoleCheck,
 ) {
-  return prisma.$transaction(async (tx) => changeStatusTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, to, user, hasRole));
+  return inLoadTx(async (tx) => changeStatusTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, to, user, hasRole));
 }
 
 /**
@@ -1195,13 +1404,23 @@ export async function changeLoadStatus(
  * does not touch the plan facts. It can change until the load leaves the depot.
  */
 export async function setLoadDriver(tenantId: string, runId: string, loadId: string, driverId: string | null, user: { id: string }) {
-  return prisma.$transaction(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
+  return inLoadTx(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
 }
 
 async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
+  // A version without an applied plan (for example one left behind by a failed re-plan before
+  // the stabilization release) has no summary or reconciliation: only the way back is open
+  // (unlock, back to locked), so the day can be optimized again. Review F03.
+  if (!run.chosenScenarioId && !scenariolessTransitionAllowed(load.status, to)) {
+    throw new PlanError(
+      'This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. Unlock a load, then OPTIMIZE the day.',
+      409,
+      { code: 'NO_PLAN_APPLIED' },
+    );
+  }
   const siblings = await tx.planLoad.findMany({ where: { runId, truckId: load.truckId } });
   const check = checkTransition(load, siblings, to);
   if (!check.ok) throw new PlanError(check.reason, 409);
@@ -1226,12 +1445,15 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
     );
     if (out.length) await tx.order.updateMany({ where: { tenantId, id: { in: out } }, data: { status: 'DISPATCHED' } });
   }
-  const all = await tx.planLoad.findMany({ where: { runId }, select: { status: true } });
-  const allOut = all.length > 0 && all.every((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');
-  await tx.runPlan.update({
-    where: { id: runId },
-    data: { status: allOut ? 'DISPATCHED' : 'READY', finalizedAt: allOut ? new Date() : null },
-  });
+  // The version's status follows its loads only when it has an applied plan: a DRAFT or FAILED
+  // version without one never becomes READY from a load change (review F03 / L14).
+  if (run.chosenScenarioId) {
+    const next = appliedPlanStatus((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
+    await tx.runPlan.update({
+      where: { id: runId },
+      data: { status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
+    });
+  }
   await tx.auditLog.create({
     data: {
       tenantId,

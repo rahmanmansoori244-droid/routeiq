@@ -20,6 +20,8 @@ export const POST = (req: Request, { params }: Params) =>
       );
 
       if (run.status === 'DISPATCHED') return fail('Run already dispatched.', 409);
+      // A version written READY over its supersede (before the stabilization release) stays replaced.
+      if (run.supersededAt) return fail('This plan version was superseded. Open the latest version.', 409);
       if (run.status !== 'READY') return fail(`Run status is ${run.status}, must be READY.`, 409);
       if (!run.chosenScenarioId) return fail('Pick a scenario before dispatching.', 400);
       if (run._count.routes === 0) return fail('No routes to dispatch.', 400);
@@ -30,7 +32,7 @@ export const POST = (req: Request, { params }: Params) =>
         // second sees count=0 and we bail. Without this, two dispatches both
         // succeed and we get a duplicate audit + a stomped finalizedAt.
         const flipped = await tx.runPlan.updateMany({
-          where: { id: params.id, status: 'READY', tenantId: user.tenantId },
+          where: { id: params.id, status: 'READY', supersededAt: null, tenantId: user.tenantId },
           data: { status: 'DISPATCHED', finalizedAt: new Date() },
         });
         if (flipped.count !== 1) {
