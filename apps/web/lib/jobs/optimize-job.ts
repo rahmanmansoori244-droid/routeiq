@@ -1,48 +1,23 @@
 /**
- * RunJob orchestration — CLAUDE.md §7 mandates this exact pattern.
+ * The in-process registry of background optimizations, and the stuck-job janitor.
  *
- * One in-process inflight map keyed by runId prevents duplicate concurrent
- * solver calls. The optimize API route writes the RunJob row, calls
- * `scheduleOptimize(runId, runJobId)`, and returns 202 immediately. The
- * actual solver call runs in the background and updates the row when done.
+ * One in-process in-flight map keyed by plan version (runId): the dispatch job
+ * (lib/jobs/dispatch-job.ts, scheduleDispatchOptimize) registers its promise here, so duplicate
+ * starts do no double work and the janitor never reaps a live job. Plan correctness does not
+ * depend on it: every plan mutator takes database locks (stabilization PR3). The web must still
+ * run as exactly one replica (the map, the rate limits and the solve admission are in memory).
  *
- * **Hard rule (CLAUDE.md §7):** the web Node process is the only place that
- * calls the solver, and the deployment MUST be exactly one Railway replica.
- * Horizontal scaling without Redis-backed locking is forbidden in v1.
+ * The legacy PyVRP path (scheduleOptimize / buildSolverPayload / callSolver to the solver's
+ * /optimize) had no caller since the dispatch planner replaced it and was removed in stabilization
+ * PR5; the solver's /optimize endpoint stays until the owner retires it.
  */
 import { prisma } from '../db';
-import { tenantDb } from '../tenant';
 import { audit } from '../audit';
-import { callSolver, SolverError } from '../solver-client';
-import type {
-  OptimizeRequest,
-  OptimizeResponse,
-  OptimizationScenarioName,
-} from '@routeiq/shared-types';
 
 // On globalThis: Next compiles instrumentation.ts (the in-process janitor) into its own bundle
 // layer with a separate copy of this module, and the janitor must see the same live jobs.
 const g = globalThis as unknown as { __routeiqInflight?: Map<string, Promise<void>> };
 const inflight = (g.__routeiqInflight ??= new Map<string, Promise<void>>());
-
-export interface ScheduleArgs {
-  runId: string;
-  runJobId: string;
-  tenantId: string;
-  userId: string;
-  ip: string | null;
-  solverPayload: OptimizeRequest;
-}
-
-export function scheduleOptimize(args: ScheduleArgs): void {
-  if (inflight.has(args.runId)) return;
-  const p = runOptimizeJob(args)
-    .catch((err) => failJob(args, err))
-    .finally(() => {
-      inflight.delete(args.runId);
-    });
-  inflight.set(args.runId, p);
-}
 
 export function isOptimizing(runId: string): boolean {
   return inflight.has(runId);
@@ -63,140 +38,6 @@ export function trackInflight(runId: string, start: () => Promise<void>): boolea
 export async function whenIdle(runId: string): Promise<void> {
   // Each tracked promise removes itself from the map in its own finally, before it settles.
   for (let p = inflight.get(runId); p; p = inflight.get(runId)) await p.catch(() => undefined);
-}
-
-async function runOptimizeJob(args: ScheduleArgs): Promise<void> {
-  const { runId, runJobId } = args;
-  await prisma.runJob.update({
-    where: { id: runJobId },
-    data: { status: 'RUNNING', startedAt: new Date(), progressPct: 25, message: 'Calling solver' },
-  });
-
-  let response: OptimizeResponse;
-  try {
-    response = await callSolver(args.solverPayload);
-  } catch (err) {
-    throw err instanceof SolverError
-      ? err
-      : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);
-  }
-
-  await prisma.runJob.update({
-    where: { id: runJobId },
-    data: { progressPct: 75, message: 'Persisting scenarios', responseJson: response as never },
-  });
-
-  // Guard: a solver response with zero scenarios would leave the run in a
-  // READY-but-empty state where the planner has nothing to pick. Treat as
-  // failure so the UI shows the retry banner instead of silently stalling.
-  if (!response.scenarios || response.scenarios.length === 0) {
-    throw new SolverError(
-      'Solver returned no scenarios. Check that orders have valid coordinates and trucks have non-zero capacity.',
-      200,
-      response as never,
-    );
-  }
-
-  // Persist scenarios in a transaction with the parent run status flip.
-  await prisma.$transaction(async (tx) => {
-    // Wipe any prior scenarios for this run (retries replace earlier results).
-    await tx.scenarioResult.deleteMany({ where: { runId } });
-
-    for (const s of response.scenarios) {
-      const totalCount = s.unserved_orders.length;
-      await tx.scenarioResult.create({
-        data: {
-          runId,
-          name: s.name,
-          trucksUsed: s.trucks_used,
-          totalDistanceKm: s.total_distance_km,
-          totalTimeMin: s.total_time_min,
-          totalCost: s.total_cost,
-          avgUtilizationPct: s.avg_utilization_pct,
-          unservedCount: totalCount,
-          detailsJson: s as never,
-          unservedOrders: {
-            create: s.unserved_orders.map((u) => ({
-              orderId: u.order_id,
-              reasonCode: u.reason_code,
-              reasonMessage: u.reason_message ?? null,
-            })),
-          },
-        },
-      });
-    }
-
-    await tx.runPlan.update({
-      where: { id: runId },
-      data: { status: 'READY' },
-    });
-
-    await tx.runJob.update({
-      where: { id: runJobId },
-      data: {
-        status: 'SUCCEEDED',
-        progressPct: 100,
-        message: `Returned ${response.scenarios.length} scenarios`,
-        finishedAt: new Date(),
-      },
-    });
-  });
-
-  await audit({
-    tenantId: args.tenantId,
-    userId: args.userId,
-    action: 'OPTIMIZE_SUCCEEDED',
-    entity: 'RunPlan',
-    entityId: runId,
-    afterJson: {
-      runJobId,
-      scenarios: response.scenarios.map((s: { name: OptimizationScenarioName; trucks_used: number; total_distance_km: number; unserved_orders: unknown[] }) => ({
-        name: s.name,
-        trucksUsed: s.trucks_used,
-        distanceKm: s.total_distance_km,
-        unservedCount: s.unserved_orders.length,
-      })),
-      warnings: response.warnings,
-    } as never,
-    ip: args.ip,
-  });
-}
-
-async function failJob(args: ScheduleArgs, err: unknown): Promise<void> {
-  const errorJson =
-    err instanceof SolverError
-      ? { reason: 'SOLVER_ERROR', message: err.message, status: err.status, responseBody: err.responseBody }
-      : { reason: 'UNKNOWN', message: (err as Error)?.message ?? String(err) };
-  try {
-    // Conditional, like the dispatch job's failJob: never over a finished job or a plan that
-    // is no longer optimizing (READY, SUPERSEDED).
-    await prisma.$transaction(async (tx) => {
-      await tx.runJob.updateMany({
-        where: { id: args.runJobId, status: { in: ['QUEUED', 'RUNNING'] } },
-        data: {
-          status: 'FAILED',
-          message: typeof errorJson.message === 'string' ? errorJson.message : 'Solver call failed',
-          errorJson: errorJson as never,
-          finishedAt: new Date(),
-        },
-      });
-      await tx.runPlan.updateMany({
-        where: { id: args.runId, status: 'OPTIMIZING', OR: [{ currentJobId: args.runJobId }, { currentJobId: null }] },
-        data: { status: 'FAILED' },
-      });
-    });
-    await audit({
-      tenantId: args.tenantId,
-      userId: args.userId,
-      action: 'OPTIMIZE_FAILED',
-      entity: 'RunPlan',
-      entityId: args.runId,
-      afterJson: { runJobId: args.runJobId, errorJson } as never,
-      ip: args.ip,
-    });
-  } catch (writeErr) {
-    console.error('failJob: failed to record failure', writeErr);
-  }
 }
 
 /** Longer than any job can legitimately run: the dispatch solver call (10 min max) plus saving the plan. */
@@ -278,130 +119,4 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
     }
   }
   return { reaped };
-}
-
-export interface LockedAssignment {
-  assignmentId: string;
-  orderId: string;
-  truckId: string;
-  sequenceInTruck: number;
-  cases: number;
-  lockedByUserId: string;
-  manualOverrideReason: string | null;
-  // Captured so the merger in choose-scenario can preserve the planner's intent.
-  plannedArrivalMin: number;
-  plannedDistanceFromPrevKm: number;
-  plannedLoadCases: number;
-}
-
-export interface BuiltPayload {
-  payload: OptimizeRequest;
-  lockedAssignments: LockedAssignment[];
-}
-
-/**
- * Build the solver payload, optionally respecting locked stops.
- *
- * When `respectLocks` is true:
- *  - Locked stops are EXCLUDED from `stops` (solver doesn't know about them)
- *  - Each truck's `capacity_cases` is reduced by the sum of locked cases on it
- *  - Locked stops are returned alongside so `choose-scenario` can re-merge
- *
- * v1 limitation: locked stop geography doesn't influence routing of the
- * remaining stops — the solver routes around an empty depot-stops-depot tour.
- * v2 should pre-seed initial routes via ReadAssignmentFromRoutes for true
- * lock-aware optimization.
- */
-export async function buildSolverPayload(
-  tenantId: string,
-  runId: string,
-  scenarioRequests: OptimizationScenarioName[] = ['MIN_TRUCKS', 'MIN_DISTANCE', 'BALANCED'],
-  options: { respectLocks?: boolean } = {},
-): Promise<BuiltPayload> {
-  const db = tenantDb(tenantId);
-  const run = await db.runPlan.findUniqueOrThrow({
-    where: { id: runId },
-    include: { depot: true },
-  });
-
-  const config = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
-  const trucks = await db.truck.findMany({
-    where: { active: true, depotId: run.depotId },
-    select: {
-      id: true,
-      code: true,
-      capacityCases: true,
-      capacityWeightKg: true,
-      fixedCostPerDay: true,
-      costPerKm: true,
-    },
-  });
-  const orders = await db.order.findMany({
-    where: { deliveryDate: run.runDate },
-    include: { customer: true },
-  });
-
-  // Optional: pull locked assignments and trim payload accordingly.
-  let lockedAssignments: LockedAssignment[] = [];
-  let excludedOrderIds = new Set<string>();
-  const lockedLoadByTruck = new Map<string, number>();
-  if (options.respectLocks) {
-    const locked = await db.routeAssignment.findMany({
-      where: { runId, lockedByUserId: { not: null } },
-      include: { order: { select: { id: true, totalCases: true } } },
-    });
-    for (const l of locked) {
-      lockedAssignments.push({
-        assignmentId: l.id,
-        orderId: l.orderId,
-        truckId: l.truckId,
-        sequenceInTruck: l.sequenceInTruck,
-        cases: l.order.totalCases,
-        lockedByUserId: l.lockedByUserId!,
-        manualOverrideReason: l.manualOverrideReason,
-        plannedArrivalMin: l.plannedArrivalMin,
-        plannedDistanceFromPrevKm: l.plannedDistanceFromPrevKm,
-        plannedLoadCases: l.plannedLoadCases,
-      });
-      excludedOrderIds.add(l.orderId);
-      lockedLoadByTruck.set(l.truckId, (lockedLoadByTruck.get(l.truckId) ?? 0) + l.order.totalCases);
-    }
-  }
-
-  const payload: OptimizeRequest = {
-    run_id: runId,
-    tenant_id: tenantId,
-    depot: { id: run.depot.id, lat: run.depot.lat, lng: run.depot.lng },
-    trucks: trucks.map((t) => ({
-      id: t.id,
-      capacity_cases: Math.max(0, t.capacityCases - (lockedLoadByTruck.get(t.id) ?? 0)),
-      capacity_weight_kg: t.capacityWeightKg,
-      fixed_cost_per_day: t.fixedCostPerDay,
-      cost_per_km: t.costPerKm,
-    })),
-    stops: orders
-      .filter((o) => !excludedOrderIds.has(o.id))
-      .map((o) => ({
-        order_id: o.id,
-        customer_id: o.customerId,
-        lat: o.customer.lat ?? 0,
-        lng: o.customer.lng ?? 0,
-        demand_cases: o.totalCases,
-        demand_weight_kg: o.totalWeightKg,
-        service_time_min: o.totalServiceTimeMin,
-        priority: o.priority,
-      })),
-    config: {
-      avg_speed_kmh: config.avgSpeedKmh,
-      distance_provider: config.distanceProvider,
-      distance_multiplier: config.distanceMultiplier,
-      driver_shift_max_min: config.driverShiftMaxMinutes,
-      return_to_depot: config.returnToDepot,
-      solver_time_limit_sec: config.solverTimeLimitSeconds,
-      scenarios_requested: scenarioRequests,
-      max_utilization_mode: run.optimizationMode === 'MAX_UTILIZATION',
-    },
-  };
-
-  return { payload, lockedAssignments };
 }

@@ -36,13 +36,13 @@ export default async function RunsPage({ params }: { params: { slug: string } })
   return (
     <PageShell
       title="Runs"
-      description="Daily optimization runs. Create one for a date + depot, optimize, pick a scenario, dispatch."
+      description="Plans by delivery date and depot. New plans are made on Daily dispatch; runs from before September 2026 stay here read-only."
       actions={
         canStart ? (
           <Button asChild size="sm">
-            <Link href={`/t/${params.slug}/runs/new`}>
+            <Link href={`/t/${params.slug}/dispatch`}>
               <Plus className="me-2 h-4 w-4" />
-              New run
+              Plan a day
             </Link>
           </Button>
         ) : null
@@ -52,11 +52,11 @@ export default async function RunsPage({ params }: { params: { slug: string } })
         <EmptyState
           icon={ListChecks}
           title="No runs yet"
-          description="Upload daily orders, then create a run to optimize them into truck assignments."
+          description="Upload the day's orders on Daily dispatch and optimize them into truck loads."
           action={
             canStart ? (
               <Button asChild>
-                <Link href={`/t/${params.slug}/runs/new`}>Create first run</Link>
+                <Link href={`/t/${params.slug}/dispatch`}>Open Daily dispatch</Link>
               </Button>
             ) : null
           }

@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Upload, ListChecks, Plus, ArrowRight } from 'lucide-react';
+import { ListChecks, ArrowRight, Truck } from 'lucide-react';
 import type { RunStatus } from '@prisma/client';
 import { getCurrentTenant } from '@/lib/tenant';
 import { getDashboardData } from '@/lib/dashboard';
@@ -45,16 +45,10 @@ export default async function DashboardPage({ params }: { params: { slug: string
         </div>
         {isPlanner ? (
           <div className="flex gap-2">
-            <Button asChild variant="outline" size="sm">
-              <Link href={`/t/${tenant.slug}/upload`}>
-                <Upload className="me-2 h-4 w-4" />
-                Upload orders
-              </Link>
-            </Button>
             <Button asChild size="sm">
-              <Link href={`/t/${tenant.slug}/runs/new`}>
-                <Plus className="me-2 h-4 w-4" />
-                New run
+              <Link href={`/t/${tenant.slug}/dispatch`}>
+                <Truck className="me-2 h-4 w-4" />
+                Daily dispatch
               </Link>
             </Button>
           </div>
@@ -172,8 +166,8 @@ export default async function DashboardPage({ params }: { params: { slug: string
               <ListChecks className="mx-auto mb-2 h-8 w-8" />
               No runs yet.{' '}
               {isPlanner ? (
-                <Link href={`/t/${tenant.slug}/runs/new`} className="text-primary hover:underline">
-                  Create your first run.
+                <Link href={`/t/${tenant.slug}/dispatch`} className="text-primary hover:underline">
+                  Plan a day on Daily dispatch.
                 </Link>
               ) : null}
             </div>

@@ -1,5 +1,9 @@
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
+# `uvicorn main:app --env-file .env` reads apps/solver/.env for local development (review L29).
+# Pinned explicitly (uvicorn[standard] also brings it). Deployed solvers get real environment
+# variables; the image never contains a .env file (.dockerignore).
+python-dotenv>=1.0,<2
 # NMWC dispatch planning (/optimize-dispatch) runs on OR-Tools: hard + preferred time
 # windows, priority drop penalties, multi-load trucks via depot reloads, frozen loads.
 # PyVRP stays only for the legacy 3-scenario /optimize endpoint (kept for comparison).

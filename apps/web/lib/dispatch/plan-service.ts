@@ -1847,25 +1847,6 @@ export async function updateLoad(
   });
 }
 
-export async function changeLoadStatus(
-  tenantId: string,
-  runId: string,
-  loadId: string,
-  to: LoadStatusName,
-  user: { id: string; role: string },
-  hasRole: RoleCheck,
-) {
-  return inLoadTx(async (tx) => changeStatusTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, to, user, hasRole));
-}
-
-/**
- * Assign (or clear) the driver of one load. A driver is who drives, not what is planned: it
- * does not touch the plan facts. It can change until the load leaves the depot.
- */
-export async function setLoadDriver(tenantId: string, runId: string, loadId: string, driverId: string | null, user: { id: string }) {
-  return inLoadTx(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
-}
-
 /**
  * 409 NO_PLAN_APPLIED for a load change a version without an applied plan does not allow. The
  * advice is one the dispatcher can follow on this version: OPTIMIZE when a load is still PLANNED
@@ -2019,10 +2000,6 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
     tx,
   );
   return updated;
-}
-
-export function frozenStatuses(): LoadStatus[] {
-  return ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
 }
 
 export { isFrozen, isoOf };

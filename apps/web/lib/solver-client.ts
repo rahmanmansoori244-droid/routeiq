@@ -1,8 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
-import type { DispatchRequest, DispatchResponse, OptimizeRequest, OptimizeResponse } from '@routeiq/shared-types';
-
-const SOLVER_TIMEOUT_MS = 240_000; // 4 min — hard ceiling > solver auto-scaling cap of 120s
+import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 
 export class SolverError extends Error {
   readonly status: number;
@@ -14,36 +12,9 @@ export class SolverError extends Error {
   }
 }
 
-export async function callSolver(req: OptimizeRequest): Promise<OptimizeResponse> {
-  const url = process.env.SOLVER_URL;
-  const token = process.env.SOLVER_TOKEN;
-  if (!url) throw new SolverError('SOLVER_URL not set', 0, null);
-  if (!token) throw new SolverError('SOLVER_TOKEN not set', 0, null);
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), SOLVER_TIMEOUT_MS);
-  try {
-    const res = await fetch(`${url}/optimize`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'X-Solver-Token': token,
-      },
-      body: JSON.stringify(req),
-      signal: ctrl.signal,
-      cache: 'no-store',
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new SolverError(`Solver returned HTTP ${res.status}`, res.status, body);
-    }
-    return (await res.json()) as OptimizeResponse;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-export const DISPATCH_TIMEOUT_MS = 600_000; // big days: RECOMMENDED <= 240 s + alternatives <= 120 s + 20 s grace + OSRM matrix
+// The solver answers within its SOLVER_BUDGET_SEC (540 s, road routing at most 90 s of it); 600 s
+// leaves the margin (budget 540 s < this wait < the janitor 15 min).
+export const DISPATCH_TIMEOUT_MS = 600_000;
 
 /**
  * POST JSON and wait up to `timeoutMs` for the answer. Plain `fetch` cannot be used for long

@@ -6,10 +6,11 @@
  * Drivers do not have User accounts in v1 — they sign into the PWA with
  * { tenantSlug, driverCode, pin }. On success we create a DriverShift row
  * holding a random session token (32 bytes, base64url). The PWA stores that
- * token in localStorage and sends it with every GPS-ping / stop-done call.
+ * token in localStorage and sent it with every GPS-ping / stop-done call.
  *
- * The token is HMAC-prefixed with the tenantId so a stolen token can't be
- * replayed against a different tenant.
+ * The token is a plain random value (no HMAC, no tenant prefix), stored as-is in DriverShift and
+ * looked up by value: it only ever resolved to its own shift and tenant (review L10: the old comment
+ * here described an HMAC scheme the code never had).
  */
 import { randomBytes, createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';

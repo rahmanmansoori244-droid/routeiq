@@ -1,4 +1,7 @@
-"""Unit tests for the OR-Tools solver — CLAUDE.md §13 requirements.
+"""Unit tests for the LEGACY PyVRP solver behind POST /optimize (solver.py) - CLAUDE.md §13 requirements.
+
+The daily dispatch planner (OR-Tools, dispatch_solver.py) is tested in test_dispatch.py,
+test_repack.py, test_feasibility.py and test_costing.py; the web app no longer calls /optimize.
 
 These tests are pure-Python (no FastAPI) and verify the math + behaviors that
 the spec calls out explicitly:
