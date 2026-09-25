@@ -3,6 +3,8 @@ import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData } from '@/lib/rbac';
 import { prisma } from '@/lib/db';
 import { PageShell } from '@/components/page-shell';
+import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
+import { SETTINGS_FIELDS, type EditableConfig } from '@/lib/settings-fields';
 import { SettingsForm } from './settings-form';
 
 export const metadata = { title: 'Settings — RouteIQ' };
@@ -17,11 +19,16 @@ export default async function SettingsPage({ params }: { params: { slug: string 
     include: { config: true },
   });
   if (!tenant || !tenant.config) redirect(`/t/${params.slug}`);
+  const profiles = await prisma.customerTypeProfile.findMany({ where: { tenantId: t.id }, orderBy: { customerType: 'asc' } });
+
+  // Only the settings the dispatch planner uses are sent to the page (review F21).
+  const cfg = tenant.config;
+  const editable = Object.fromEntries(SETTINGS_FIELDS.map((k) => [k, cfg[k]])) as unknown as EditableConfig;
 
   return (
     <PageShell
       title="Tenant settings"
-      description="Tenant-wide configuration. Changes apply immediately to new optimization runs."
+      description="What the daily dispatch planner plans with. Changes apply to the next optimization; plans already made keep the settings they were made with."
     >
       <SettingsForm
         initial={{
@@ -31,8 +38,18 @@ export default async function SettingsPage({ params }: { params: { slug: string 
             currency: tenant.currency,
             primaryUnit: tenant.primaryUnit,
           },
-          config: tenant.config,
+          config: editable,
         }}
+        effective={effectivePlannerValues(cfg, tenant.country, tenant.currency)}
+        profiles={profiles.map((p) => ({
+          customerType: p.customerType,
+          defaultPriority: p.defaultPriority,
+          serviceTimeMin: p.serviceTimeMin,
+          hardWindowStartMin: p.hardWindowStartMin,
+          hardWindowEndMin: p.hardWindowEndMin,
+          prefWindowStartMin: p.prefWindowStartMin,
+          prefWindowEndMin: p.prefWindowEndMin,
+        }))}
       />
     </PageShell>
   );

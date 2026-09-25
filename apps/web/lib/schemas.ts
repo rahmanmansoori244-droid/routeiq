@@ -7,6 +7,19 @@ import {
   Role,
 } from '@prisma/client';
 import { MAX_SERVICE_MIN } from './dispatch/service-time';
+import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
+import { COUNTRY_NAMES } from './countries';
+
+/** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
+function bounded(b: Bound) {
+  const n = z.coerce.number({ invalid_type_error: 'Enter a number' });
+  return (b.int ? n.int('Enter a whole number') : n).min(b.min).max(b.max);
+}
+
+/** An optional bounded number: '' or null clears it (the truck / depot then has no own value). */
+function optionalBounded(b: Bound): z.ZodOptional<z.ZodType<number | null, z.ZodTypeDef, unknown>> {
+  return z.preprocess((v) => (v === '' ? null : v), bounded(b).nullable()).optional() as never;
+}
 
 const codeSchema = z
   .string()
@@ -36,29 +49,63 @@ export const isoDateSchema = z.string().refine(isRealIsoDate, 'Use a real date a
 /** Longest unloading time one stop can have: the optimizer's limit (lib/dispatch/service-time). */
 export { MAX_SERVICE_MIN };
 
-export const depotSchema = z.object({
-  code: codeSchema,
-  name: nameSchema,
-  lat: latSchema,
-  lng: lngSchema,
-  address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
-  active: z.boolean().optional(),
-});
+const depotFields = z.object({
+    code: codeSchema,
+    name: nameSchema,
+    lat: latSchema,
+    lng: lngSchema,
+    address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+    active: z.boolean().optional(),
+    // Depot hours (minutes from midnight; null = 00:00 / 24:00): no truck leaves before it opens or
+    // returns after it closes (review F21: these were planner inputs no screen could set).
+    openMin: optionalBounded(DEPOT_BOUNDS.openMin),
+    closeMin: optionalBounded(DEPOT_BOUNDS.closeMin),
+  });
+
+/** "closes before it opens" for a depot (the merged row on a PATCH), or null. */
+export function depotHoursProblem(v: { openMin?: number | null; closeMin?: number | null }): string | null {
+  return typeof v.openMin === 'number' && typeof v.closeMin === 'number' && v.closeMin <= v.openMin ? 'The depot must close after it opens.' : null;
+}
+const depotHoursRefine = (v: { openMin?: number | null; closeMin?: number | null }, ctx: z.RefinementCtx) => {
+  const p = depotHoursProblem(v);
+  if (p) ctx.addIssue({ code: 'custom', path: ['closeMin'], message: p });
+};
+export const depotSchema = depotFields.superRefine(depotHoursRefine);
+export const depotPatchSchema = depotFields.partial().superRefine(depotHoursRefine);
 export type DepotInput = z.infer<typeof depotSchema>;
 
-export const truckSchema = z.object({
-  code: codeSchema,
-  description: z.string().trim().max(200).optional().or(z.literal('').transform(() => undefined)),
-  depotId: z.string().min(1, 'Depot is required'),
-  capacityCases: z.coerce.number().int().min(0).max(100_000),
-  capacityWeightKg: z.coerce.number().min(0).max(100_000),
-  capacityVolumeL: z.coerce.number().min(0).max(100_000),
-  fixedCostPerDay: z.coerce.number().min(0).max(100_000),
-  costPerKm: z.coerce.number().min(0).max(1_000),
-  // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
-  defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
-  active: z.boolean().optional(),
-});
+const truckFields = z.object({
+    code: codeSchema,
+    description: z.string().trim().max(200).optional().or(z.literal('').transform(() => undefined)),
+    depotId: z.string().min(1, 'Depot is required'),
+    capacityCases: bounded(TRUCK_BOUNDS.capacityCases),
+    capacityWeightKg: bounded(TRUCK_BOUNDS.capacityWeightKg),
+    capacityVolumeL: z.coerce.number().min(0).max(100_000),
+    fixedCostPerDay: bounded(TRUCK_BOUNDS.fixedCostPerDay),
+    costPerKm: bounded(TRUCK_BOUNDS.costPerKm),
+    // Review F21: planner inputs that used to be database-only.
+    tripCost: bounded(TRUCK_BOUNDS.tripCost).optional(),
+    kmPerLitre: optionalBounded(TRUCK_BOUNDS.kmPerLitre),
+    maxTripsPerDay: optionalBounded(TRUCK_BOUNDS.maxTripsPerDay),
+    availableFromMin: optionalBounded(TRUCK_BOUNDS.availableFromMin),
+    availableToMin: optionalBounded(TRUCK_BOUNDS.availableToMin),
+    // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
+    defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
+    active: z.boolean().optional(),
+  });
+
+/** "available until before available from" for a truck (the merged row on a PATCH), or null. */
+export function truckHoursProblem(v: { availableFromMin?: number | null; availableToMin?: number | null }): string | null {
+  return typeof v.availableFromMin === 'number' && typeof v.availableToMin === 'number' && v.availableToMin <= v.availableFromMin
+    ? 'Available until must be after available from.'
+    : null;
+}
+const truckHoursRefine = (v: { availableFromMin?: number | null; availableToMin?: number | null }, ctx: z.RefinementCtx) => {
+  const p = truckHoursProblem(v);
+  if (p) ctx.addIssue({ code: 'custom', path: ['availableToMin'], message: p });
+};
+export const truckSchema = truckFields.superRefine(truckHoursRefine);
+export const truckPatchSchema = truckFields.partial().superRefine(truckHoursRefine);
 export type TruckInput = z.infer<typeof truckSchema>;
 
 export const driverSchema = z.object({
@@ -148,37 +195,52 @@ export function normalizeBranchKey(branchCode: string | null | undefined): strin
   return trimmed === '' ? '__MAIN__' : trimmed;
 }
 
-export const tenantConfigSchema = z.object({
-  avgSpeedKmh: z.coerce.number().min(5).max(120),
-  distanceProvider: z.nativeEnum(DistanceProvider),
-  distanceMultiplier: z.coerce.number().min(1).max(3),
-  labelEstimatedDistances: z.boolean(),
-  driverShiftMaxMinutes: z.coerce.number().int().min(60).max(1440),
-  // Dispatch timing (NMWC planner). First departure 00:00-23:59 as minutes from midnight.
-  shiftStartMin: z.coerce.number().int().min(0).max(1439),
-  reloadMinutes: z.coerce.number().int().min(0).max(240),
-  loadingMinPerCase: z.coerce.number().min(0).max(1),
-  serviceMinPerCase: z.coerce.number().min(0).max(1),
-  maxTripsPerTruck: z.coerce.number().int().min(1).max(10),
-  returnToDepot: z.boolean(),
-  splitDeliveries: z.boolean(),
-  defaultServiceTimeMin: z.coerce.number().int().min(0).max(MAX_SERVICE_MIN),
-  costPerKmDefault: z.coerce.number().min(0).max(10),
-  fixedTruckCostPerDayDefault: z.coerce.number().min(0).max(10_000),
-  latePenaltyPerMin: z.coerce.number().min(0).max(100),
-  underutilizationPenalty: z.coerce.number().min(0).max(1_000_000),
-  solverTimeLimitSeconds: z.coerce.number().int().min(5).max(300),
-  weightObjectiveTrucks: z.coerce.number().min(0).max(1_000_000),
-  weightObjectiveDistance: z.coerce.number().min(0).max(1_000_000),
-  weightObjectiveCost: z.coerce.number().min(0).max(1_000_000),
-  weightObjectiveBalance: z.coerce.number().min(0).max(1_000_000),
-  weightObjectiveUtilization: z.coerce.number().min(0).max(1_000_000),
-});
+/**
+ * The tenant settings Settings can change: exactly the ones the daily dispatch planner uses
+ * (review F21), each within the optimizer's own bounds (lib/planner-bounds.ts). Strict: the old
+ * controls that changed nothing (solver time limit, objective weights, cost defaults, "return to
+ * depot", "label estimated distances", Mapbox) are refused with 400 instead of being stored.
+ * Timezone, the routing server, the service area and priority weights stay operations settings.
+ */
+export const tenantConfigSchema = z
+  .object({
+    // Timing
+    shiftStartMin: bounded(CONFIG_BOUNDS.shiftStartMin),
+    driverShiftMaxMinutes: bounded(CONFIG_BOUNDS.driverShiftMaxMinutes),
+    overtimeAfterMin: bounded(CONFIG_BOUNDS.overtimeAfterMin),
+    reloadMinutes: bounded(CONFIG_BOUNDS.reloadMinutes),
+    loadingMinPerCase: bounded(CONFIG_BOUNDS.loadingMinPerCase),
+    serviceMinPerCase: bounded(CONFIG_BOUNDS.serviceMinPerCase),
+    defaultServiceTimeMin: bounded(CONFIG_BOUNDS.defaultServiceTimeMin),
+    maxTripsPerTruck: bounded(CONFIG_BOUNDS.maxTripsPerTruck),
+    splitDeliveries: z.boolean(),
+    planningCutoffMin: bounded(CONFIG_BOUNDS.planningCutoffMin),
+    dateOrder: z.enum(['DMY', 'MDY']),
+    // Money (OMR)
+    fuelPricePerLitre: bounded(CONFIG_BOUNDS.fuelPricePerLitre),
+    driverCostPerHour: bounded(CONFIG_BOUNDS.driverCostPerHour),
+    overtimeCostPerHour: bounded(CONFIG_BOUNDS.overtimeCostPerHour),
+    prefWindowPenaltyPerMin: bounded(CONFIG_BOUNDS.prefWindowPenaltyPerMin),
+    // Distances
+    distanceProvider: z.enum([DistanceProvider.OSRM, DistanceProvider.HAVERSINE]),
+    roadTimeFactor: bounded(CONFIG_BOUNDS.roadTimeFactor),
+    distanceMultiplier: bounded(CONFIG_BOUNDS.distanceMultiplier),
+    avgSpeedKmh: bounded(CONFIG_BOUNDS.avgSpeedKmh),
+  })
+  .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
+
+/** Overtime cannot start after the shift ends (checked on the merged settings, not only the patch). */
+export function overtimeProblem(v: { overtimeAfterMin: number; driverShiftMaxMinutes: number }): string | null {
+  return v.overtimeAfterMin > v.driverShiftMaxMinutes
+    ? `Overtime after (${v.overtimeAfterMin} min) must be at most the driver shift maximum (${v.driverShiftMaxMinutes} min).`
+    : null;
+}
 
 export const tenantSettingsSchema = z.object({
   name: z.string().trim().min(2).max(120),
-  country: z.string().trim().min(2).max(64),
+  // A pick-list (review F21): the country decides road routing, so a typo cannot switch it silently.
+  country: z.enum(COUNTRY_NAMES, { errorMap: () => ({ message: `Choose one of: ${COUNTRY_NAMES.join(', ')}` }) }),
   currency: z.string().trim().min(3).max(8),
   primaryUnit: z.nativeEnum(CapacityUnit),
 });

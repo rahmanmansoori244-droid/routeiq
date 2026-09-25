@@ -1,5 +1,5 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
-import { truckSchema } from '@/lib/schemas';
+import { truckHoursProblem, truckPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 
 interface Params { params: { id: string } }
@@ -14,7 +14,9 @@ export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.truck.findUnique({ where: { id: params.id } }));
-      const input = await parseBody(r, truckSchema.partial());
+      const input = await parseBody(r, truckPatchSchema);
+      const hours = truckHoursProblem({ ...before, ...input });
+      if (hours) return fail(hours, 400);
       if (input.depotId) {
         const depot = await db.depot.findUnique({ where: { id: input.depotId } });
         if (!depot) return fail('Depot not found in this tenant', 400);

@@ -8,6 +8,8 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { errorMessage } from '@/lib/error-message';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { COUNTRY_NAMES, countryRoutingNote } from '@/lib/countries';
 
 interface FormState {
   companyName: string;
@@ -108,13 +110,19 @@ export function SignupForm() {
         </div>
         <div className="space-y-2">
           <Label htmlFor="country">Country</Label>
-          <Input
-            id="country"
-            required
-            value={form.country}
-            onChange={(e) => update('country', e.target.value)}
-            disabled={pending}
-          />
+          <Select value={form.country} onValueChange={(v) => update('country', v)} disabled={pending}>
+            <SelectTrigger id="country">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {COUNTRY_NAMES.map((n) => (
+                <SelectItem key={n} value={n}>
+                  {n}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">{countryRoutingNote(form.country)}</p>
         </div>
         <div className="space-y-2">
           <Label htmlFor="currency">Currency</Label>

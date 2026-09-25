@@ -1,5 +1,5 @@
 import { withTenantApi, ok, fail, parseBody, notFoundIfNull } from '@/lib/api';
-import { depotSchema } from '@/lib/schemas';
+import { depotHoursProblem, depotPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 
 interface Params { params: { id: string } }
@@ -14,7 +14,9 @@ export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.depot.findUnique({ where: { id: params.id } }));
-      const input = await parseBody(r, depotSchema.partial());
+      const input = await parseBody(r, depotPatchSchema);
+      const hours = depotHoursProblem({ ...before, ...input });
+      if (hours) return fail(hours, 400);
       const after = await db.depot.update({ where: { id: params.id }, data: input });
       await audit({
         tenantId: user.tenantId,

@@ -95,8 +95,10 @@ describe('effectiveAttrs - service time', () => {
     expect(effectiveAttrs(C({ avgServiceTimeMin: 20 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 40, serviceSource: 'TYPE' });
   });
 
-  it('without a profile, a positive customer value is kept, else the tenant default', () => {
-    expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 25 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 25, serviceSource: 'DEFAULT' });
+  it('without a profile, an unconfirmed customer takes the tenant default (Settings), whatever its stored value (review F21)', () => {
+    expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 25 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 15, serviceSource: 'DEFAULT' });
+    expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 10 }), PROFILES, { serviceTimeMin: 30 })).toMatchObject({ serviceMin: 30, serviceSource: 'DEFAULT' });
+    expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 25, serviceTimeConfirmed: true }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 25, serviceSource: 'CUSTOMER' });
     expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 0 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 15, serviceSource: 'DEFAULT' });
     expect(effectiveAttrs(C({ customerType: 'GROCERY', avgServiceTimeMin: 0 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 15, serviceSource: 'DEFAULT' });
   });
