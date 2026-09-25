@@ -1,36 +1,31 @@
 /**
- * Real road-route geometry for the legacy run-detail Map tab.
+ * Road-route geometry for the legacy run-detail Map tab (May-2026 runs, read-only).
  *
- * Returns, per truck, the full polyline of road shape-nodes that connects
- * depot → ordered stops → depot. The client uses these to draw curved,
- * road-snapped lines instead of straight `[depot,stop1,stop2,...,depot]`
- * Haversine guesses.
+ * Returns, per truck, the polyline depot -> ordered stops -> depot. Since stabilization PR5
+ * (review F22) it goes through the solver's private /route-geometry (lib/solver-client.ts
+ * callRouteGeometry) with the tenant's routing server, like /load-geometry for dispatch plans: the
+ * web never calls a routing service itself (no Mapbox, no OSRM, no public server). When the solver
+ * or routing is unavailable the stops are joined by straight lines (provider 'fallback').
  *
- * Geometries are resolved via Mapbox Directions (MAPBOX_TOKEN) → the self-hosted
- * OSRM (OSRM_URL; no public default) → straight lines. See `lib/road-routing.ts`.
+ * Dispatch plans (loads, a RECOMMENDED option, or a later version) answer 409: their map uses
+ * GET /api/runs/[id]/load-geometry, one polyline per LOAD (grouping by truck would merge loads).
  *
  * GET /api/runs/[id]/route-geometries
  *
  * Response:
- *   {
- *     data: {
- *       trucks: [{
- *         truckId, truckCode,
- *         coordinates: [[lng,lat], ...],   // GeoJSON LineString shape
- *         distanceKm, durationMin, provider,
- *         waypointCount,
- *       }],
- *       provider: 'osrm' | 'mapbox' | 'fallback' | 'mixed',
- *     }
- *   }
+ *   { data: { trucks: [{ truckId, truckCode, coordinates: [[lng,lat], ...], distanceKm, durationMin, provider, waypointCount }],
+ *             provider: 'osrm' | 'fallback' | 'mixed' } }
+ * distanceKm / durationMin: 0 (the geometry service returns the shape only; the run's own figures
+ * are on its route sheets).
  */
-import { withTenantApi, ok, notFoundIfNull } from '@/lib/api';
-import { getRouteGeometry, type LngLat } from '@/lib/road-routing';
+import { withTenantApi, ok, fail, notFoundIfNull } from '@/lib/api';
+import { callRouteGeometry } from '@/lib/solver-client';
+import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
 interface Params { params: { id: string } }
 
 export const GET = (req: Request, { params }: Params) =>
-  withTenantApi(async (_r, { db }) => {
+  withTenantApi(async (_r, { db, user }) => {
     const run = notFoundIfNull(
       await db.runPlan.findUnique({
         where: { id: params.id },
@@ -46,10 +41,13 @@ export const GET = (req: Request, { params }: Params) =>
         },
       }),
     );
+    if (await isDispatchPlan(user.tenantId, run.id)) {
+      return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'This is a daily dispatch plan: its map is drawn per load (GET /api/runs/[id]/load-geometry).', code: 'USE_LOAD_GEOMETRY' }, 409);
+    }
+    const cfg = await db.tenantConfig.findUnique({ where: { tenantId: user.tenantId }, select: { osrmUrl: true } });
 
-    // Group stops by truck.
-    interface Stop { lat: number; lng: number; sequence: number }
-    const byTruck = new Map<string, { code: string; stops: Stop[] }>();
+    // Stops per truck, in visit order (a legacy run has one route per truck).
+    const byTruck = new Map<string, { code: string; stops: { lat: number; lng: number; sequence: number }[] }>();
     for (const r of run.routes) {
       const c = r.order.customer;
       if (c.lat == null || c.lng == null) continue;
@@ -58,31 +56,26 @@ export const GET = (req: Request, { params }: Params) =>
       byTruck.set(r.truckId, entry);
     }
 
-    const depot: LngLat = [run.depot.lng, run.depot.lat];
-
-    // Resolve geometry per truck. Run in parallel — providers handle their own
-    // rate limits and cache; this is the right tradeoff for ~8 trucks per run.
-    const trucks = await Promise.all(
-      [...byTruck.entries()].map(async ([truckId, entry]) => {
-        const ordered = [...entry.stops].sort((a, b) => a.sequence - b.sequence);
-        const waypoints: LngLat[] = [depot];
-        for (const s of ordered) waypoints.push([s.lng, s.lat]);
-        waypoints.push(depot);
-        const geom = await getRouteGeometry(waypoints);
-        return {
-          truckId,
-          truckCode: entry.code,
-          coordinates: geom.coordinates,
-          distanceKm: Math.round(geom.distanceKm * 100) / 100,
-          durationMin: geom.durationMin,
-          provider: geom.provider,
-          waypointCount: waypoints.length,
-        };
-      }),
-    );
-
+    const depot: [number, number] = [run.depot.lat, run.depot.lng];
+    let useSolver = true;
+    const trucks = [];
+    // One truck at a time: a legacy run has a handful, and a down solver is noticed once.
+    for (const [truckId, entry] of byTruck) {
+      const pts: [number, number][] = [depot, ...[...entry.stops].sort((a, b) => a.sequence - b.sequence).map((s) => [s.lat, s.lng] as [number, number]), depot];
+      const geo = useSolver ? await callRouteGeometry(pts, cfg?.osrmUrl) : null;
+      if (!geo) useSolver = false;
+      const roads = !!geo && !geo.is_estimated;
+      trucks.push({
+        truckId,
+        truckCode: entry.code,
+        coordinates: roads ? geo!.coordinates : pts.map(([lat, lng]) => [lng, lat] as [number, number]),
+        distanceKm: 0,
+        durationMin: 0,
+        provider: roads ? ('osrm' as const) : ('fallback' as const),
+        waypointCount: pts.length,
+      });
+    }
     const providers = new Set(trucks.map((t) => t.provider));
-    const aggregate = providers.size === 1 ? [...providers][0]! : 'mixed';
-
+    const aggregate = providers.size === 1 ? [...providers][0]! : providers.size === 0 ? 'fallback' : 'mixed';
     return ok({ trucks, provider: aggregate });
   })(req);

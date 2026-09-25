@@ -1,5 +1,6 @@
 import { withTenantApi, ok, notFoundIfNull, fail } from '@/lib/api';
 import { prisma } from '@/lib/db';
+import { audit } from '@/lib/audit';
 import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { isoOf } from '@/lib/dispatch/time';
@@ -94,8 +95,8 @@ export const DELETE = (req: Request, { params }: Params) =>
             }
             const deleted = ids.length ? await tx.order.deleteMany({ where: { tenantId, id: { in: ids } } }) : { count: 0 };
             await tx.uploadBatch.update({ where: { id: before.id }, data: { status: 'DELETED' } });
-            await tx.auditLog.create({
-              data: {
+            await audit(
+              {
                 tenantId,
                 userId: user.id,
                 action: 'DELETE',
@@ -105,7 +106,8 @@ export const DELETE = (req: Request, { params }: Params) =>
                 afterJson: { status: 'DELETED', ordersDeleted: deleted.count } as never,
                 ip,
               },
-            });
+              tx,
+            );
             return { deleted: true, ordersDeleted: deleted.count };
           },
           { timeout: 30_000, maxWait: 10_000 },

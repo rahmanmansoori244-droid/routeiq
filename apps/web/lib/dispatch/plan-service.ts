@@ -17,6 +17,8 @@ import type {
   DispatchTruck,
 } from '@routeiq/shared-types';
 import { prisma } from '../db';
+import { audit } from '../audit';
+import { loadStatusAction } from '../audit-catalog';
 import { tenantDb } from '../tenant';
 import {
   coordStatus,
@@ -752,8 +754,8 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
       WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
   }
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId,
       action: 'ORDER_WEIGHTS_RESOLVED',
@@ -761,7 +763,8 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
       entityId: runId,
       afterJson: { runDate: isoOf(run.runDate), version: run.version, lines: changes.lines, orders: changes.orders } as never,
     },
-  });
+    tx,
+  );
   return changes.lines.length;
 }
 
@@ -1065,8 +1068,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
   await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId,
       action: 'SCENARIO_CHOSEN',
@@ -1082,7 +1085,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
           : {}),
       } as never,
     },
-  });
+    tx,
+  );
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
   return { driverChanges };
 }
@@ -1632,8 +1636,8 @@ export async function createInitialPlan(
             ...(extra.totalOrders !== undefined ? { totalOrders: extra.totalOrders } : {}),
           },
         });
-        await tx.auditLog.create({
-          data: {
+        await audit(
+          {
             tenantId,
             userId,
             action: 'CREATE',
@@ -1642,7 +1646,8 @@ export async function createInitialPlan(
             afterJson: { depotId, runDate: dateIso, version: 1, ...(extra.audit ?? {}) } as never,
             ...(extra.ip ? { ip: extra.ip } : {}),
           },
-        });
+          tx,
+        );
         return { run, created: true };
       },
       { timeout: 15_000, maxWait: 10_000 },
@@ -1782,8 +1787,8 @@ export async function createNextVersion(
 
         await tx.runPlan.update({ where: { id: parent.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } });
         const frozenLoadsCarried = loads.filter((l) => l.status !== 'PLANNED').length;
-        await tx.auditLog.create({
-          data: {
+        await audit(
+          {
             tenantId,
             userId,
             action: 'PLAN_VERSION_CREATED',
@@ -1799,7 +1804,8 @@ export async function createNextVersion(
               planCopied: !!chosenCopyId,
             } as never,
           },
-        });
+          tx,
+        );
         return { child: saved, frozenLoadsCarried };
       },
       { timeout: 60_000, maxWait: 10_000 },
@@ -1951,17 +1957,18 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
       data: { status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
     });
   }
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId: user.id,
-      action: `LOAD_${to}`,
+      action: loadStatusAction(to),
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { status: load.status } as never,
       afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}) } as never,
     },
-  });
+    tx,
+  );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
 }
@@ -2040,8 +2047,8 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
     where: { id: loadId },
     data: { driverId, driverSetById: user.id, driverSetAt: new Date() },
   });
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId: user.id,
       action: 'LOAD_DRIVER_SET',
@@ -2050,7 +2057,8 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
       beforeJson: { driverId: load.driverId, driverName: before?.name ?? null, ...(keep ? { byHand: false } : {}) } as never,
       afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo, ...(keep ? { kept: true } : {}) } as never,
     },
-  });
+    tx,
+  );
   return updated;
 }
 

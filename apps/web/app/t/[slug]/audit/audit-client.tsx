@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useTransition } from 'react';
+import { toast } from 'sonner';
 import { Search, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -8,6 +9,8 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { auditActionTone } from '@/lib/audit-catalog';
+import { errorMessage } from '@/lib/error-message';
 
 export interface AuditRow {
   id: string;
@@ -21,31 +24,24 @@ export interface AuditRow {
   user: { id: string; name: string; email: string } | null;
 }
 
+interface Option {
+  value: string;
+  label: string;
+}
+
 interface Props {
   initial: AuditRow[];
-  actions: string[];
-  entities: string[];
+  actions: Option[];
+  entities: Option[];
   users: Array<{ id: string; name: string; email: string }>;
 }
+
+/** Rows asked for per filter (the API allows up to 1000). */
+const LIMIT = 500;
 
 const ALL = '__all__';
 const NO_USER = '__no_user__';
 
-const ACTION_VARIANT: Record<string, 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline'> = {
-  CREATE: 'success',
-  UPDATE: 'outline',
-  DELETE: 'destructive',
-  OVERRIDE: 'warning',
-  DISPATCH: 'success',
-  LOGIN: 'secondary',
-  SIGNUP: 'secondary',
-  OPTIMIZE_STARTED: 'outline',
-  OPTIMIZE_SUCCEEDED: 'success',
-  OPTIMIZE_FAILED: 'destructive',
-  SCENARIO_CHOSEN: 'outline',
-  BASELINE_UPLOADED: 'outline',
-  ROUTE_MANUALLY_CHANGED: 'warning',
-};
 
 export function AuditClient({ initial, actions, entities, users }: Props) {
   const [rows, setRows] = useState(initial);
@@ -57,6 +53,8 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
   const [search, setSearch] = useState('');
   const [pending, startSearch] = useTransition();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [serverFiltered, setFilteredOnServer] = useState(false);
 
   function applyFilters() {
     startSearch(async () => {
@@ -66,13 +64,29 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
       if (userFilter !== ALL && userFilter !== NO_USER) params.set('userId', userFilter);
       if (from) params.set('from', from);
       if (to) params.set('to', to);
-      const r = await fetch(`/api/audit?${params}`, { cache: 'no-store' });
-      const body = await r.json();
-      const fetched: AuditRow[] = (body?.data ?? []).map((row: AuditRow & { createdAt: string }) => ({
-        ...row,
-        createdAt: typeof row.createdAt === 'string' ? row.createdAt : new Date(row.createdAt as unknown as string).toISOString(),
-      }));
-      setRows(fetched);
+      params.set('limit', String(LIMIT));
+      try {
+        const r = await fetch(`/api/audit?${params}`, { cache: 'no-store' });
+        const body = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          // Never show "0 rows" for a refused or failed query (review F23).
+          const msg = errorMessage(body, `Could not load the audit log (HTTP ${r.status}).`);
+          setLoadError(msg);
+          toast.error(msg);
+          return;
+        }
+        const fetched: AuditRow[] = (body?.data ?? []).map((row: AuditRow & { createdAt: string }) => ({
+          ...row,
+          createdAt: typeof row.createdAt === 'string' ? row.createdAt : new Date(row.createdAt as unknown as string).toISOString(),
+        }));
+        setLoadError(null);
+        setFilteredOnServer(true);
+        setRows(fetched);
+      } catch {
+        const msg = 'Could not reach the server. Check the connection and apply the filters again.';
+        setLoadError(msg);
+        toast.error(msg);
+      }
     });
   }
 
@@ -83,6 +97,8 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
     setFrom('');
     setTo('');
     setSearch('');
+    setLoadError(null);
+    setFilteredOnServer(false);
     setRows(initial);
   }
 
@@ -123,7 +139,7 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
             <SelectContent>
               <SelectItem value={ALL}>All actions</SelectItem>
               {actions.map((a) => (
-                <SelectItem key={a} value={a}>{a}</SelectItem>
+                <SelectItem key={a.value} value={a.value}>{a.label}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -134,7 +150,7 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
             <SelectContent>
               <SelectItem value={ALL}>All entities</SelectItem>
               {entities.map((e) => (
-                <SelectItem key={e} value={e}>{e}</SelectItem>
+                <SelectItem key={e.value} value={e.value}>{e.label}</SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -149,9 +165,9 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
               ))}
             </SelectContent>
           </Select>
-          <div className="flex gap-2">
-            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="From" />
-            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} placeholder="To" />
+          <div className="flex gap-2" title="Days in the company timezone (Muscat)">
+            <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} placeholder="From" aria-label="From day" />
+            <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} placeholder="To" aria-label="To day" />
           </div>
           <div className="flex gap-2 md:col-span-6">
             <Button size="sm" onClick={applyFilters} disabled={pending}>
@@ -161,10 +177,16 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
             <Button size="sm" variant="outline" onClick={reset} disabled={pending}>
               Reset
             </Button>
-            <span className="ms-auto self-center text-xs text-muted-foreground">
+            <span className="ms-auto self-center text-xs text-muted-foreground" data-testid="audit-count">
               Showing {filtered.length} of {rows.length} rows
+              {rows.length >= (serverFiltered ? LIMIT : 200) ? ' (newest only: narrow the filters to see older rows)' : ''}
             </span>
           </div>
+          {loadError ? (
+            <div className="rounded-md border border-red-300 bg-red-50 p-2 text-sm text-red-800 md:col-span-6" role="alert" data-testid="audit-error">
+              {loadError} The rows below are from the previous query.
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 
@@ -211,7 +233,7 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
                       {new Date(r.createdAt).toLocaleString()}
                     </TableCell>
                     <TableCell>
-                      <Badge variant={ACTION_VARIANT[r.action] ?? 'outline'} className="font-mono text-[10px]">
+                      <Badge variant={auditActionTone(r.action)} className="font-mono text-[10px]">
                         {r.action}
                       </Badge>
                     </TableCell>

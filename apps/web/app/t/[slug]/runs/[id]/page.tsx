@@ -5,6 +5,7 @@ import { getCurrentTenant } from '@/lib/tenant';
 import { canPlan, canApproveOverride, canManageMasterData } from '@/lib/rbac';
 import { notFoundIfNull } from '@/lib/api';
 import { PageShell } from '@/components/page-shell';
+import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 import { Button } from '@/components/ui/button';
 import { RunDetail } from './run-detail';
 
@@ -19,11 +20,7 @@ export default async function RunDetailPage({
 }) {
   const { db, tenant, user } = await getCurrentTenant(params.slug);
   // Dispatch-planner plans (truck loads, versions) have their own review screen.
-  const dispatchPlan = await db.runPlan.findFirst({
-    where: { id: params.id, OR: [{ loads: { some: {} } }, { scenarios: { some: { name: 'RECOMMENDED' } } }, { version: { gt: 1 } }] },
-    select: { id: true },
-  });
-  if (dispatchPlan) redirect(`/t/${params.slug}/dispatch/plan/${params.id}`);
+  if (await isDispatchPlan(tenant.id, params.id)) redirect(`/t/${params.slug}/dispatch/plan/${params.id}`);
   const run = notFoundIfNull(
     await db.runPlan.findUnique({
       where: { id: params.id },

@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation';
 import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData } from '@/lib/rbac';
 import { redactForAudit } from '@/lib/audit';
+import { AUDIT_ACTIONS, AUDIT_ENTITIES } from '@/lib/audit-catalog';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { AuditClient } from './audit-client';
@@ -10,21 +11,10 @@ import { AuditClient } from './audit-client';
 export const metadata = { title: 'Audit log — RouteIQ' };
 export const dynamic = 'force-dynamic';
 
-const ACTIONS = [
-  'CREATE', 'UPDATE', 'DELETE', 'OVERRIDE', 'DISPATCH',
-  'LOGIN', 'SIGNUP',
-  'OPTIMIZE_STARTED', 'OPTIMIZE_SUCCEEDED', 'OPTIMIZE_FAILED',
-  'SCENARIO_CHOSEN', 'BASELINE_UPLOADED', 'ROUTE_MANUALLY_CHANGED',
-  'LOGIN_THROTTLED', 'CROSS_TENANT_VIEW', 'PLATFORM_ADMIN_GRANTED', 'PLATFORM_ADMIN_REVOKED',
-  'PASSWORD_RESET_BY_ADMIN',
-  'SECURITY_CLEANUP',
-];
-
-const ENTITIES = [
-  'Tenant', 'TenantConfig', 'Depot', 'Truck', 'Driver', 'Region', 'Customer',
-  'Product', 'UploadBatch', 'Order', 'RunPlan', 'RunJob', 'RouteAssignment',
-  'ManualBaseline', 'User',
-];
+// The one audit catalog (review F23): the filters offer exactly what the writers can write and
+// the API accepts; events no longer written are marked as such.
+const ACTIONS = Object.entries(AUDIT_ACTIONS).map(([value, a]) => ({ value, label: 'legacy' in a && a.legacy ? `${a.label} - old` : a.label }));
+const ENTITIES = Object.entries(AUDIT_ENTITIES).map(([value, e]) => ({ value, label: 'legacy' in e && e.legacy ? `${e.label} - old` : e.label }));
 
 export default async function AuditPage({ params }: { params: { slug: string } }) {
   const { db, user } = await getCurrentTenant(params.slug);
