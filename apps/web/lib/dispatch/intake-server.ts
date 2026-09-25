@@ -23,6 +23,7 @@ import {
   type ResolvedLine,
 } from './order-intake';
 import { currentPlan } from './plan-service';
+import { intakeLineWeight } from './weights';
 import { dateOnly, isAfterCutoff, isoOf, tomorrowIso } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -36,6 +37,12 @@ export interface IntakeValidation extends ResolveResult {
   late: { isLate: boolean; reasons: string[] };
   /** SHA-256 of the file's normalized content (contentFingerprint): stored as UploadBatch.fileHash. */
   contentHash?: string;
+  /**
+   * SHA-256 of the raw rows as read (legacyRowsHash): the file hash that batches confirmed before
+   * the stabilization release stored. Checked too, so a file confirmed before that deploy cannot
+   * be confirmed again after it (rows without a sales order have no IntakeLineKey to stop them).
+   */
+  legacyHash?: string;
 }
 
 /** A checked file older than this must be uploaded again before it can be confirmed. */
@@ -64,6 +71,20 @@ export async function lockIntake(tx: Tx, tenantId: string): Promise<void> {
   await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`intake:${tenantId}`}, 0))`;
 }
 
+/**
+ * True for Prisma's interactive-transaction timeout (P2028: could not start within maxWait, or
+ * ran past timeout) - e.g. waiting for the intake lock while a large file is being confirmed.
+ */
+export function isTransactionTimeout(e: unknown): boolean {
+  return (e as { code?: string } | null)?.code === 'P2028';
+}
+
+/** The 409 answer when the intake lock (or the transaction) timed out: nothing was saved. */
+export const INTAKE_BUSY = {
+  error: 'Another order file or late order is being added for this company right now. Nothing was saved: try again in a moment.',
+  code: 'INTAKE_BUSY',
+} as const;
+
 export async function defaultDepot(tenantId: string, depotId?: string | null) {
   if (depotId) return prisma.depot.findFirst({ where: { tenantId, id: depotId, active: true } });
   return prisma.depot.findFirst({ where: { tenantId, active: true }, orderBy: { code: 'asc' } });
@@ -72,6 +93,31 @@ export async function defaultDepot(tenantId: string, depotId?: string | null) {
 /** SHA-256 of an order-insensitive text (see contentFingerprint). */
 export function sha256(text: string) {
   return createHash('sha256').update(text).digest('hex');
+}
+
+/** The raw-row file hash used before the stabilization release (see IntakeValidation.legacyHash). */
+export function legacyRowsHash(rows: Record<string, string>[]): string {
+  return sha256(JSON.stringify(rows));
+}
+
+/**
+ * A CONFIRMED batch of this depot with the same orders: the same normalized content (this
+ * release's fileHash), or - for batches confirmed before it - the same raw rows for one of the
+ * same delivery dates.
+ */
+export async function findSameConfirmedFile(
+  db: Tx | typeof prisma,
+  tenantId: string,
+  q: { depotId: string | null; contentHash: string | null; legacyHash: string | null; deliveryDates: string[]; excludeBatchId?: string },
+): Promise<{ fileName: string; uploadedAt: Date } | null> {
+  const or: Prisma.UploadBatchWhereInput[] = [];
+  if (q.contentHash) or.push({ fileHash: q.contentHash });
+  if (q.legacyHash && q.deliveryDates.length) or.push({ fileHash: q.legacyHash, deliveryDate: { in: q.deliveryDates.map(dateOnly) } });
+  if (!or.length) return null;
+  return db.uploadBatch.findFirst({
+    where: { tenantId, status: 'CONFIRMED', depotId: q.depotId, OR: or, ...(q.excludeBatchId ? { id: { not: q.excludeBatchId } } : {}) },
+    select: { fileName: true, uploadedAt: true },
+  });
 }
 
 /** Confirmed sales-order lines for these delivery dates, keyed by lineDupKey -> case quantities. */
@@ -183,10 +229,13 @@ export async function revalidateIntake(
       `This file was checked more than ${VALIDATED_BATCH_MAX_AGE_HOURS} hours ago. Upload it again so it is checked against today's orders and master data.`,
     );
   }
-  if (batch.fileHash) {
-    const same = await tx.uploadBatch.findFirst({
-      where: { tenantId, fileHash: batch.fileHash, status: 'CONFIRMED', depotId: batch.depotId, id: { not: batch.id } },
-      select: { fileName: true, uploadedAt: true },
+  {
+    const same = await findSameConfirmedFile(tx, tenantId, {
+      depotId: batch.depotId,
+      contentHash: batch.fileHash,
+      legacyHash: v.legacyHash ?? null,
+      deliveryDates: v.totals.deliveryDates,
+      excludeBatchId: batch.id,
     });
     if (same) {
       throw new IntakeConflict('DUPLICATE_FILE', `The same orders were already confirmed from ${same.fileName} (${same.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC). Nothing was added.`);
@@ -308,12 +357,10 @@ export async function confirmIntake(
     const cust = custById.get(first.cid)!;
     const lineData = rows.map((r) => {
       const p = prodById.get(r.pid);
-      const master = p ? p.weightPerCaseKg : 0;
-      // File kg where the file had one; the product's case weight for the cases without (a
-      // merged line can have both). 0 = unknown: resolved at optimize once the product has a weight.
-      const missing = r.weightMissingCases ?? (r.weightKg === null ? r.cases : 0);
-      const weightKg = (r.weightKg ?? 0) + missing * master;
-      return { r, weightKg, volume: p ? p.volumePerCaseL * r.cases : 0 };
+      // The file kg when every row of the line had one; else weighed from the product master
+      // (0 kg = unknown until it has a case weight), following later corrections of it.
+      const w = intakeLineWeight(r, p ? p.weightPerCaseKg : 0);
+      return { r, weightKg: w.weightKg, fromMaster: w.fromMaster, volume: p ? p.volumePerCaseL * r.cases : 0 };
     });
     const filePriorities = rows.map((r) => r.priority).filter((p): p is number => p !== null);
     const allValue = rows.every((r) => r.salesValue !== null);
@@ -343,7 +390,7 @@ export async function confirmIntake(
       },
     });
     await tx.orderLine.createMany({
-      data: lineData.map(({ r, weightKg }) => ({
+      data: lineData.map(({ r, weightKg, fromMaster }) => ({
         orderId: order.id,
         productId: r.pid,
         cases: r.cases,
@@ -351,6 +398,7 @@ export async function confirmIntake(
         orderDate: r.orderDate ? dateOnly(r.orderDate) : null,
         productDescription: r.productDescription,
         weightKg,
+        weightFromMaster: fromMaster,
         salesValue: r.salesValue,
         marginValue: r.margin,
         sourceRow: r.row,

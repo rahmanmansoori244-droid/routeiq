@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
-import { api, askOverride, durH, hhmm, REASON_TEXT, type OptimizeOverrides } from './client-api';
+import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
@@ -33,6 +33,8 @@ interface Props {
   runId: string;
   canPlan: boolean;
   canDispatch: boolean;
+  /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
+  canEditProducts?: boolean;
   /** called after anything that changes the day (late order, replan, status) */
   onChanged?: (newRunId?: string) => void;
   showVersionLink?: boolean;
@@ -40,7 +42,7 @@ interface Props {
   phoneCountryCode?: string | null;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
   const [d, setD] = useState<PlanDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -152,7 +154,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     setBusy(null);
     if (!r.ok || !r.data) {
       // No location, or no weight: the same questions as OPTIMIZE on the day screen.
-      const more = askOverride(r.errorBody, 'Re-plan');
+      const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
       if (more) return replan(reason, { ...overrides, ...more });
       if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
       toast.error(r.error ?? 'Re-plan failed.');
@@ -529,7 +531,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
         onSaved={(res) => {
           onChanged?.();
           if (res.productsWithoutWeight?.length) {
-            toast.warning(`No case weight for ${res.productsWithoutWeight.join(', ')}: add it under Products, or the re-plan will ask before counting it as 0 kg.`);
+            toast.warning(`No case weight for ${res.productsWithoutWeight.join(', ')}: ${weightFixText(canEditProducts)}, or the re-plan will ask before counting it as 0 kg.`);
           }
           if (res.locationRequired) {
             toast.warning('New customer has no location yet — add it in step 2 before re-planning.');

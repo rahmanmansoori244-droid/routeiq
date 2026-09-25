@@ -28,7 +28,8 @@ class DeleteRefused extends Error {
 
 // DELETE /api/orders/:batchId - remove a confirmed file's orders. Allowed only while none of its
 // orders was ever optimized: a plan (any version, any option, including unserved rows) must
-// never lose orders it was made for. Corrections to planned orders go through a re-plan.
+// never lose orders it was made for. Planned orders cannot be removed in the app yet (the
+// "cancel orders" flow is deferred); a late order or a re-plan only adds or re-plans orders.
 // Everything happens in one transaction under the batch row lock and the tenant intake lock.
 export const DELETE = (req: Request, { params }: Params) =>
   withTenantApi(
@@ -85,7 +86,7 @@ export const DELETE = (req: Request, { params }: Params) =>
                 for (const u of used.values()) byDate.set(u.date, [...(byDate.get(u.date) ?? []), u.version]);
                 const where = [...byDate].map(([d, vs]) => `${d} (version ${[...new Set(vs)].sort((a, b) => a - b).join(', ')})`).join('; ');
                 throw new DeleteRefused(
-                  `Orders from this file are in the plan for ${where}. A file whose orders were optimized cannot be deleted, so the plan keeps every order it was made for. Change planned orders with a late order or a re-plan instead.`,
+                  `Orders from this file are in the plan for ${where}, so the file cannot be deleted: a plan keeps every order it was made for. Removing planned orders is not possible in the app yet (a cancel function is not built yet). Nothing was changed; ask your RouteIQ administrator.`,
                   409,
                   'BATCH_IN_PLAN',
                 );

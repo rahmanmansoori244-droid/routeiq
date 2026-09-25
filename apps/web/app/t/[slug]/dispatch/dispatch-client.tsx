@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api, askOverride, type OptimizeOverrides } from './client-api';
+import { api, askOverride, weightFixText, type OptimizeOverrides } from './client-api';
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
@@ -51,8 +51,10 @@ interface Day {
   inactiveCustomers?: number;
   /** Lines with no weight at all: counted as 0 kg until the product gets a case weight. */
   productsWithoutWeight: WeightGap[];
-  /** Lines at 0 kg whose product has a case weight now: applied at the next optimize. */
+  /** Lines whose product's case weight was entered or corrected since: applied at the next optimize. */
   weightsToApply?: WeightGap[];
+  /** The plan in use is out of date without a new order: weights changed, customers deactivated. */
+  outdated?: { weightCases: number; inactiveOrders: number };
   plan: null | { id: string; version: number; status: string; chosen: boolean; job: { status: string; message: string | null; progressPct: number } | null };
   pending: { count: number; cases: number; late: number };
   trucks: { active: number; capacityCases: number };
@@ -77,13 +79,15 @@ interface Props {
   slug: string;
   canPlan: boolean;
   canDispatch: boolean;
+  /** Company admin: can enter case weights under Products. */
+  canEditProducts: boolean;
   initialDate: string | null;
   initialDepot: string | null;
   /** Calling code for drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode: string | null;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initialDepot, phoneCountryCode }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, initialDate, initialDepot, phoneCountryCode }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -193,7 +197,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
     }
     setOptimizing(false);
     if (!r.ok) {
-      const more = askOverride(r.errorBody, 'Optimize');
+      const more = askOverride(r.errorBody, day.plan?.chosen ? 'Re-plan' : 'Optimize', { canEditProducts });
       if (more) return optimize({ ...overrides, ...more });
       if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
       toast.error(r.error ?? 'Could not start optimization.');
@@ -217,7 +221,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const needsPlan = day.orders.count > 0 && (!day.plan?.chosen || day.pending.count > 0);
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0 };
+  const planOutdated = !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0);
+  const needsPlan = day.orders.count > 0 && (!day.plan?.chosen || day.pending.count > 0 || planOutdated);
+  const fixWeight = weightFixText(canEditProducts);
 
   return (
     <div className="space-y-5">
@@ -256,7 +263,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
             </Button>
           </div>
         ) : null}
-        {batch ? <ValidationPanel v={batch.v} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} /> : null}
+        {batch ? <ValidationPanel v={batch.v} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} /> : null}
         {day.batches.length ? (
           <p className="text-xs text-muted-foreground">
             Files for this day: {day.batches.map((b) => `${b.fileName} (${b.status.toLowerCase()}${b.isLate ? ', late' : ''})`).join(' · ')}
@@ -297,12 +304,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
         {day.productsWithoutWeight.length ? (
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
             No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (
-            {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). Add the case weight under Products: until then OPTIMIZE asks before planning them as 0 kg.
+            {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). To check truck payloads, {fixWeight}: until then OPTIMIZE asks before planning them as 0 kg.
           </p>
         ) : null}
         {toApply.length ? (
           <p className="text-xs text-muted-foreground" data-testid="weights-to-apply">
-            Case weight now known for {casesOf(toApply).toLocaleString()} cases confirmed without one ({toApply.map((p) => `${p.code}: ${p.kgPerCase ?? '?'} kg per case`).join(', ')}): applied at the next OPTIMIZE or RE-PLAN.
+            Case weight entered or corrected under Products after these orders were added, for {casesOf(toApply).toLocaleString()} cases ({toApply.map((p) => `${p.code}: ${p.kgPerCase ?? '?'} kg per case`).join(', ')}): applied at the next OPTIMIZE or RE-PLAN.
           </p>
         ) : null}
       </Step>
@@ -331,6 +338,18 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
             {day.plan?.chosen ? 'RE-PLAN' : 'OPTIMIZE'}
           </Button>
         ) : null}
+        {planOutdated && !running ? (
+          <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="plan-outdated">
+            The plan in use was made before{' '}
+            {[
+              outdated.weightCases ? `case weights were entered or corrected for ${outdated.weightCases.toLocaleString()} of its cases` : '',
+              outdated.inactiveOrders ? `${outdated.inactiveOrders} of its order(s) on planned loads had their customer deactivated` : '',
+            ]
+              .filter(Boolean)
+              .join(', and ')}
+            . RE-PLAN to apply this — locked and dispatched loads are kept exactly as they are.
+          </div>
+        ) : null}
         {!needsPlan && day.plan?.chosen ? <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p> : null}
       </Step>
 
@@ -343,6 +362,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
             runId={day.plan.id}
             canPlan={canPlan}
             canDispatch={canDispatch}
+            canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
             onChanged={() => {
               setPlanKey((k) => k + 1);
@@ -420,7 +440,7 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
   );
 }
 
-function ValidationPanel({ v, lateReason, setLateReason, onConfirm, onCancel }: { v: Validation; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void }) {
+function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, onCancel }: { v: Validation; fixWeight: string; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void }) {
   const ok = v.errorRows === 0;
   return (
     <div className={`space-y-2 rounded-md border p-3 text-sm ${ok ? 'border-green-300' : 'border-red-300'}`} data-testid="validation-panel">
@@ -434,10 +454,10 @@ function ValidationPanel({ v, lateReason, setLateReason, onConfirm, onCancel }: 
           {v.issues.newCustomers.length > 6 ? '…' : ''}
         </p>
       ) : null}
-      {v.issues.newProducts.length ? <p className="text-amber-800">{v.issues.newProducts.length} new product(s) will be created: {v.issues.newProducts.map((p) => p.code).join(', ')} (add their case weight)</p> : null}
+      {v.issues.newProducts.length ? <p className="text-amber-800">{v.issues.newProducts.length} new product(s) will be created, without a case weight: {v.issues.newProducts.map((p) => p.code).join(', ')}</p> : null}
       {v.issues.productsWithoutWeight?.length ? (
         <p className="text-amber-800">
-          No weight in the file or on the product for: {v.issues.productsWithoutWeight.join(', ')}. Add the case weight under Products before optimizing, or those lines count as 0 kg.
+          No weight in the file or on the product for: {v.issues.productsWithoutWeight.join(', ')}. Before optimizing, {fixWeight}, or those lines count as 0 kg.
         </p>
       ) : null}
       {v.duplicates.length ? <p className="text-amber-800">{v.duplicates.length} line(s) were already uploaded and will be skipped.</p> : null}

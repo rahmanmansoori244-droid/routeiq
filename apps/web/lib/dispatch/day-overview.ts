@@ -18,6 +18,7 @@ import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-se
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
+import { readPortionLines } from './split';
 
 export interface IssueCustomer {
   customerId: string;
@@ -68,7 +69,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, outdated: { weightCases: 0, inactiveOrders: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -79,34 +80,71 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     include: { customer: true, lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } } },
   });
   const byCustomer = new Map<string, IssueCustomer>();
-  // Weights per order LINE (0 kg on a line = unknown), not per product: a product that got its
-  // case weight after the orders were confirmed still leaves those lines at 0 kg until the next
-  // optimize applies it. Lines on frozen loads keep what they were loaded with and are not listed.
-  const frozenIds = new Set(
-    orders.length
-      ? (
-          await prisma.routeAssignment.findMany({
-            where: { orderId: { in: orders.map((o) => o.id) }, load: { status: { not: 'PLANNED' } }, run: { tenantId, status: { not: 'SUPERSEDED' } } },
-            select: { orderId: true },
-          })
-        ).map((a) => a.orderId)
-      : [],
-  );
+  const plan = await currentPlan(tenantId, depot.id, date);
+  // Loads of the plan in use: what frozen loads carry (per line, as buildDispatchRequest counts
+  // it: a split order can be partly on a frozen load) and which orders sit on PLANNED loads.
+  const onPlan = plan && orders.length
+    ? await prisma.routeAssignment.findMany({
+        where: { runId: plan.id, orderId: { in: orders.map((o) => o.id) } },
+        select: { orderId: true, portionLinesJson: true, load: { select: { status: true } } },
+      })
+    : [];
+  const frozenWhole = new Set<string>();
+  const frozenLineCases = new Map<string, number>();
+  const onPlannedLoad = new Set<string>();
+  for (const a of onPlan) {
+    if (!a.load) continue;
+    if (a.load.status === 'PLANNED') {
+      onPlannedLoad.add(a.orderId);
+      continue;
+    }
+    const pl = readPortionLines(a.portionLinesJson);
+    if (!pl) frozenWhole.add(a.orderId);
+    else for (const x of pl) frozenLineCases.set(x.lineId, (frozenLineCases.get(x.lineId) ?? 0) + x.cases);
+  }
+  const chosen = plan?.chosenScenarioId ? await prisma.scenarioResult.findUnique({ where: { id: plan.chosenScenarioId } }) : null;
+  const d = chosen?.detailsJson as unknown as ScenarioDetails | undefined;
+  const inScope = new Set(d?.scope ? [...d.scope.orderIds, ...d.scope.frozenOrderIds] : []);
+  // Weights per order LINE (0 kg on a line = unknown), not per product: a product whose case
+  // weight was entered or corrected after the orders were confirmed leaves those lines as they
+  // are until the next optimize applies it. Only the open cases count: what frozen loads carry
+  // keeps the kg it was loaded with (the same rule as the OPTIMIZE / RE-PLAN weight check).
   const noWeight = new Map<string, WeightGap & { kgPerCase: number }>();
   const toApply = new Map<string, WeightGap & { kgPerCase: number }>();
+  // Why the plan in use is out of date although no new order is waiting (RE-PLAN enabled).
+  const outdated = { weightCases: 0, inactiveOrders: 0 };
+  const openCasesOf = new Map<string, number>();
   for (const o of orders) {
-    if (!frozenIds.has(o.id) && o.status !== 'DISPATCHED' && o.status !== 'DELIVERED') {
-      const orderLevel = !orderUsesLineWeights(o);
-      for (const l of o.lines) {
-        const st = lineWeightStatus(l, l.product.weightPerCaseKg, orderLevel);
-        if (st === 'KNOWN') continue;
-        const m = st === 'UNKNOWN' ? noWeight : toApply;
-        const g = m.get(l.product.code) ?? { code: l.product.code, name: l.product.name, lines: 0, cases: 0, kgPerCase: l.product.weightPerCaseKg };
-        g.lines++;
-        g.cases += l.cases;
-        m.set(l.product.code, g);
-      }
+    if (frozenWhole.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
+    const orderLevel = !orderUsesLineWeights(o);
+    let open = 0;
+    for (const l of o.lines) {
+      const cases = Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0));
+      if (cases <= 0) continue;
+      open += cases;
+      const st = lineWeightStatus({ cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster }, l.product.weightPerCaseKg, orderLevel);
+      if (st === 'KNOWN') continue;
+      const m = st === 'UNKNOWN' ? noWeight : toApply;
+      const g = m.get(l.product.code) ?? { code: l.product.code, name: l.product.name, lines: 0, cases: 0, kgPerCase: l.product.weightPerCaseKg };
+      g.lines++;
+      g.cases += cases;
+      m.set(l.product.code, g);
+      if (st === 'MASTER' && inScope.has(o.id)) outdated.weightCases += cases;
     }
+    if (open > 0) openCasesOf.set(o.id, open);
+  }
+  // A deactivated customer matters only while it has open orders (frozen and dispatched loads
+  // keep theirs). Orders of it still on PLANNED loads were planned before it was deactivated.
+  const inactiveOpen = new Map<string, { orders: number; onPlannedLoads: number }>();
+  for (const o of orders) {
+    if (o.customer.active || !openCasesOf.has(o.id)) continue;
+    const g = inactiveOpen.get(o.customerId) ?? { orders: 0, onPlannedLoads: 0 };
+    g.orders++;
+    if (onPlannedLoad.has(o.id)) g.onPlannedLoads++;
+    inactiveOpen.set(o.customerId, g);
+  }
+  for (const g of inactiveOpen.values()) outdated.inactiveOrders += g.onPlannedLoads;
+  for (const o of orders) {
     const c = o.customer;
     const cur = byCustomer.get(c.id);
     if (cur) {
@@ -117,7 +155,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
     // A deactivated customer's open orders are left unserved at optimize (not delivered): that is
     // the only thing to show for it; its location no longer matters.
-    const issues = c.active ? customerIssues(c, eff, area) : [inactiveCustomerIssue()];
+    const inactive = !c.active ? inactiveOpen.get(c.id) : undefined;
+    const issues = c.active ? customerIssues(c, eff, area) : inactive ? [inactiveCustomerIssue(inactive.onPlannedLoads > 0)] : [];
     byCustomer.set(c.id, {
       customerId: c.id,
       code: c.code,
@@ -146,16 +185,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     (a, b) => Number(b.blocking) - Number(a.blocking) || b.issues.length - a.issues.length || a.priority - b.priority || b.cases - a.cases,
   );
 
-  const plan = await currentPlan(tenantId, depot.id, date);
   let pending = { orderIds: [] as string[], count: 0, cases: 0, late: 0 };
   let planInfo = null;
   if (plan) {
     const job = await db.runJob.findFirst({ where: { runId: plan.id }, orderBy: { attemptNo: 'desc' } });
-    const chosen = plan.chosenScenarioId ? await prisma.scenarioResult.findUnique({ where: { id: plan.chosenScenarioId } }) : null;
-    const d = chosen?.detailsJson as unknown as ScenarioDetails | undefined;
     if (d?.scope) {
-      const inPlan = new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds]);
-      const p = orders.filter((o) => !inPlan.has(o.id));
+      const p = orders.filter((o) => !inScope.has(o.id));
       pending = { orderIds: p.map((o) => o.id), count: p.length, cases: p.reduce((a, o) => a + o.totalCases, 0), late: p.filter((o) => o.isLate).length };
     }
     const loads = await db.planLoad.groupBy({ by: ['status'], where: { runId: plan.id }, _count: { _all: true } });
@@ -190,13 +225,20 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     customers,
     blockingCount: customers.filter((c) => c.blocking).length,
     missingLocation: customers.filter((c) => !c.inactive && coordStatus(c.lat, c.lng, area) === 'MISSING').length,
-    inactiveCustomers: customers.filter((c) => c.inactive).length,
+    /** Deactivated customers that still have open orders (not on a frozen load). */
+    inactiveCustomers: customers.filter((c) => c.inactive && c.blocking).length,
     /** Lines with no weight at all (no case weight on the product either): counted as 0 kg. */
     productsWithoutWeight: [...noWeight.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)),
-    /** Lines still at 0 kg whose product now has a case weight: applied at the next optimize. */
+    /** Lines whose product's case weight (entered or corrected since) gives them another kg: applied at the next optimize. */
     weightsToApply: [...toApply.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)),
     plan: planInfo,
     pending,
+    /**
+     * The plan in use is out of date without a new order waiting: open cases on it whose case
+     * weight was entered or corrected since, and orders of customers deactivated since that are
+     * still on planned loads. RE-PLAN applies both.
+     */
+    outdated: plan?.chosenScenarioId ? outdated : { weightCases: 0, inactiveOrders: 0 },
     trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,

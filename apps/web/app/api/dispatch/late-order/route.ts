@@ -4,9 +4,10 @@ import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import { isoDateSchema, normalizeBranchKey } from '@/lib/schemas';
 import { currentPlan } from '@/lib/dispatch/plan-service';
-import { createIntakeKeys, isIntakeKeyConflict, lockIntake } from '@/lib/dispatch/intake-server';
+import { createIntakeKeys, INTAKE_BUSY, isIntakeKeyConflict, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
 import { normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
 import { dateOnly, isAfterCutoff } from '@/lib/dispatch/time';
+import { intakeLineWeight } from '@/lib/dispatch/weights';
 
 const schema = z.object({
   date: isoDateSchema,
@@ -94,36 +95,44 @@ export const POST = withTenantApi(
           );
         }
         const products: { id: string; code: string; weightPerCaseKg: number }[] = [];
+        // Every case-variant twin of each product: a line keyed under another twin is the same line.
+        const productTwinIds: string[][] = [];
         const newWithoutWeight: string[] = [];
         for (const l of input.lines) {
-          const found = preferredProduct(await tx.product.findMany({ where: { tenantId, code: { equals: l.productCode, mode: 'insensitive' } } }));
+          const ptwins = await tx.product.findMany({ where: { tenantId, code: { equals: l.productCode, mode: 'insensitive' } } });
+          const found = preferredProduct(ptwins);
           if (found && !found.active) {
             throw new LateOrderRefused(`Product ${found.code} is inactive. Reactivate it in Products or use another code.`, 409, 'PRODUCT_INACTIVE');
           }
           const p = found ?? (await tx.product.create({ data: { tenantId, code: l.productCode, name: l.productDescription || l.productCode, createdFromUpload: true } }));
           if (!(p.weightPerCaseKg > 0)) newWithoutWeight.push(p.code);
           products.push(p);
+          productTwinIds.push([...new Set([p.id, ...ptwins.map((x) => x.id)])]);
         }
-        // The same sales-order line may already be confirmed (from the file or an earlier late order).
+        // The same sales-order line may already be confirmed (from the file or an earlier late
+        // order). Matched by code like the file intake (confirmedLineMap): over every twin id of
+        // the customer and the product, since which twin is preferred can change over time.
+        const customerTwinIds = [...new Set([customer.id, ...twins.map((x) => x.id)])];
         const dupes: string[] = [];
         for (const [i, l] of input.lines.entries()) {
           const so = normSalesOrder(l.salesOrderNo);
           if (!so) continue;
-          const k = await tx.intakeLineKey.findUnique({
-            where: { tenantId_deliveryDate_salesOrderNorm_customerId_productId: { tenantId, deliveryDate, salesOrderNorm: so, customerId: customer.id, productId: products[i].id } },
+          const k = await tx.intakeLineKey.findFirst({
+            where: { tenantId, deliveryDate, salesOrderNorm: so, customerId: { in: customerTwinIds }, productId: { in: productTwinIds[i] } },
             select: { orderLine: { select: { cases: true } } },
           });
           if (k) dupes.push(`${l.salesOrderNo} / ${products[i].code} (${k.orderLine.cases} cases)`);
         }
         if (dupes.length) {
           throw new LateOrderRefused(
-            `Already confirmed for ${input.date}: sales order ${dupes.join(', ')}. Record only new lines; changing a confirmed line is not supported yet.`,
+            `Already confirmed for ${input.date}: sales order ${dupes.join(', ')}. Record only new lines: for extra cases of a confirmed line, leave the sales-order number empty or use a new one (changing a confirmed line is not supported yet).`,
             409,
             'DUPLICATE_LINES',
           );
         }
-        // 0 kg per case = unknown weight: the next optimize asks for it (WEIGHT_REQUIRED), or
-        // applies the product's case weight once it is entered.
+        // Weighed from the product master (0 kg per case = unknown): the next optimize asks for it
+        // (WEIGHT_REQUIRED), or applies the product's case weight once entered or corrected.
+        const lineKg = input.lines.map((l, i) => intakeLineWeight({ cases: l.cases, weightKg: null }, products[i].weightPerCaseKg).weightKg);
         const order = await tx.order.create({
           data: {
             tenantId,
@@ -131,7 +140,7 @@ export const POST = withTenantApi(
             depotId: depot.id,
             deliveryDate,
             totalCases: input.lines.reduce((a, l) => a + l.cases, 0),
-            totalWeightKg: input.lines.reduce((a, l, i) => a + products[i].weightPerCaseKg * l.cases, 0),
+            totalWeightKg: lineKg.reduce((a, kg) => a + kg, 0),
             totalServiceTimeMin: Math.max(customer.avgServiceTimeMin, 1),
             priority: input.priority ?? customer.priority,
             priorityFromFile: input.priority !== undefined,
@@ -148,16 +157,18 @@ export const POST = withTenantApi(
                 cases: l.cases,
                 salesOrderNo: l.salesOrderNo || null,
                 productDescription: l.productDescription ?? null,
-                weightKg: products[i].weightPerCaseKg * l.cases,
+                weightKg: lineKg[i],
+                weightFromMaster: true,
               })),
             },
           },
         });
         await createIntakeKeys(tx, tenantId, order.id, customer.id, order.deliveryDate, null);
         return { order, customer, customerCreated, productsWithoutWeight: [...new Set(newWithoutWeight)] };
-      });
+      }, { timeout: 30_000, maxWait: 10_000 });
     } catch (e) {
       if (e instanceof LateOrderRefused) return fail({ code: e.code, message: e.message }, e.status);
+      if (isTransactionTimeout(e)) return fail({ code: INTAKE_BUSY.code, message: INTAKE_BUSY.error }, 409);
       if (isIntakeKeyConflict(e)) {
         return fail({ code: 'DUPLICATE_LINES', message: 'This sales-order line was confirmed at the same time from a file or another late order. Check the day before recording it again.' }, 409);
       }

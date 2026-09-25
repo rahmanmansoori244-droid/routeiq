@@ -4,7 +4,8 @@ import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { hasRole } from '@/lib/api';
 import { parseUpload } from '@/lib/csv';
-import { validateIntake } from '@/lib/dispatch/intake-server';
+import { prisma } from '@/lib/db';
+import { findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
 import { dateOnly } from '@/lib/dispatch/time';
 import { isRealIsoDate } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
@@ -52,8 +53,16 @@ export async function POST(req: Request) {
   const db = tenantDb(tenantId);
   // The hash is of the normalized lines including their delivery dates, in any row or column
   // order (contentFingerprint): the same orders for the same depot and dates, not the same bytes.
+  // Batches confirmed before this release stored a hash of the raw rows: that one is checked too
+  // (for the same dates), so a file confirmed before the deploy is not added a second time.
   const hash = v.contentHash ?? null;
-  const sameFile = hash ? await db.uploadBatch.findFirst({ where: { fileHash: hash, status: 'CONFIRMED', depotId: v.depotId } }) : null;
+  v.legacyHash = legacyRowsHash(parsed.rows);
+  const sameFile = await findSameConfirmedFile(prisma, tenantId, {
+    depotId: v.depotId,
+    contentHash: hash,
+    legacyHash: v.legacyHash,
+    deliveryDates: v.totals.deliveryDates,
+  });
   if (sameFile) {
     v.errors.unshift({
       row: 1,

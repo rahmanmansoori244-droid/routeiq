@@ -508,7 +508,7 @@ export function resolveOrderLines(
       } else {
         errors.push({
           row: l.row,
-          message: `Sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate} was already confirmed with ${confirmed.join(' + ')} cases; this file has ${l.cases}${rows}. Changing a confirmed line is not supported yet: remove the row, or send the extra cases under a new sales-order number.`,
+          message: `Sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate} was already confirmed with ${confirmed.join(' + ')} cases; this file has ${l.cases}${rows}. Changing a confirmed line is not supported yet: remove the row. For extra cases, record a late order with no sales-order number (or a new one), or send them under a new sales-order number.`,
           cases: l.cases,
         });
       }

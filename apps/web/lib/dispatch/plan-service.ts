@@ -47,7 +47,14 @@ import {
   type PortionRecord,
 } from './split';
 import { MAX_SERVICE_MIN, stopService } from './service-time';
-import { groupUnknownWeights, orderUsesLineWeights, resolveOrderLineWeights, type UnknownWeight } from './weights';
+import {
+  groupUnknownWeights,
+  orderUsesLineWeights,
+  resolveOrderLineWeights,
+  type LineWeightChange,
+  type OrderWeightChange,
+  type UnknownWeight,
+} from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dateOnly, isoOf } from './time';
 
@@ -104,6 +111,18 @@ export interface BuiltRequest {
   warnings: string[];
   /** Open lines sent with 0 kg because neither the line nor its product has a weight. */
   unknownWeights: UnknownWeight[];
+  /**
+   * Line weights this request takes from the product master (0 kg lines whose product has a
+   * case weight now, lines weighed from the master whose case weight was corrected), for orders
+   * with no part on a frozen load. They are saved with the optimize (applyWeightChanges) - never
+   * by a probe - so the lines, orders and loads of the plan all use the kg the solver was sent.
+   */
+  weightChanges: WeightChanges;
+}
+
+export interface WeightChanges {
+  lines: (LineWeightChange & { product: string })[];
+  orders: OrderWeightChange[];
 }
 
 const ORDER_INCLUDE = {
@@ -214,6 +233,7 @@ export async function buildDispatchRequest(
   const openByCustomer = new Map<string, OpenOrder[]>();
   const lineInfo = new Map<string, { productCode: string; productName: string; productActive: boolean }>();
   const unknownWeightLines: { productCode: string; productName: string; cases: number }[] = [];
+  const weightChanges: WeightChanges = { lines: [], orders: [] };
   for (const o of orders) {
     if (frozenWhole.has(o.id)) {
       frozenOrderIds.push(o.id);
@@ -221,27 +241,32 @@ export async function buildDispatchRequest(
     }
     for (const l of o.lines) lineInfo.set(l.id, { productCode: l.product.code, productName: l.product.name, productActive: l.product.active });
     // Line kg is what the order total is summed from, so a part's kg matches the order's. Old
-    // orders may have no line weights: then the order's own kg is spread per case. A 0-kg line
-    // is an unknown weight (see weights.ts): open lines were given the product's case weight by
-    // resolveOrderWeights before this request was built; the open rest of a partly frozen order
-    // (not resolved, its lines are on frozen loads) gets it here, in memory.
+    // orders may have no line weights: then the order's own kg is spread per case. A line at 0 kg
+    // (unknown) or weighed from the product master is planned with the product's case weight now
+    // (see weights.ts). Here that is in memory only: the optimize saves it (applyWeightChanges)
+    // for orders with no part on a frozen load, so a probe never changes a live plan's orders.
     const lineLevel = orderUsesLineWeights(o);
     const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
     const frozenPart = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
-    const lines: OpenLine[] = o.lines.map((l) => ({
-      lineId: l.id,
-      orderId: o.id,
-      cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
-      kgPerCase: !lineLevel
-        ? orderKgPerCase
-        : l.weightKg > 0
-          ? l.cases > 0
-            ? l.weightKg / l.cases
-            : 0
-          : frozenPart
-            ? Math.max(0, l.product.weightPerCaseKg)
-            : 0,
-    }));
+    const resolved = resolveOrderLineWeights(
+      [{ id: o.id, totalWeightKg: o.totalWeightKg, lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })) }],
+      new Set(),
+    );
+    const lineKg = new Map(resolved.lines.map((c) => [c.lineId, c.afterKg]));
+    const orderKg = resolved.orders[0]?.afterKg ?? o.totalWeightKg;
+    if (resolved.lines.length && !frozenPart && o.status !== 'DISPATCHED' && o.status !== 'DELIVERED') {
+      weightChanges.lines.push(...resolved.lines.map((c) => ({ ...c, product: lineInfo.get(c.lineId)?.productCode ?? '?' })));
+      weightChanges.orders.push(...resolved.orders);
+    }
+    const lines: OpenLine[] = o.lines.map((l) => {
+      const kg = lineKg.get(l.id) ?? l.weightKg;
+      return {
+        lineId: l.id,
+        orderId: o.id,
+        cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
+        kgPerCase: !lineLevel ? orderKgPerCase : kg > 0 && l.cases > 0 ? kg / l.cases : 0,
+      };
+    });
     const partial = lines.some((l, i) => l.cases !== o.lines[i].cases);
     const cases = lines.reduce((a, l) => a + l.cases, 0);
     if (partial && cases === 0) {
@@ -250,7 +275,7 @@ export async function buildDispatchRequest(
     }
     const open: OpenOrder = partial
       ? { o, lines: lines.filter((l) => l.cases > 0), cases, kg: Math.round(lines.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10, partial }
-      : { o, lines, cases: o.totalCases, kg: o.totalWeightKg, partial };
+      : { o, lines, cases: o.totalCases, kg: orderKg, partial };
     openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
   }
   // Orders on frozen loads that today's order query no longer returns (e.g. a legacy order
@@ -559,42 +584,49 @@ export async function buildDispatchRequest(
     blocking: [...blockingByCustomer.values()],
     warnings,
     unknownWeights,
+    weightChanges,
   };
 }
 
+/** Refused because the day changed between building the request and saving the optimize. */
+export class OrdersChangedError extends PlanError {
+  constructor(message = 'The orders of this day changed while the plan was being prepared (a file was deleted, or weights were applied by another optimize). Optimize again.') {
+    super(message, 409);
+  }
+}
+
 /**
- * Give open order lines of this plan's day the product's case weight when the line was
- * confirmed at 0 kg (unknown) and the product has a weight now - e.g. a new SKU whose weight was
- * entered after the file was confirmed. Run before every optimize and re-plan. Orders with any
- * part on a frozen load of a live plan version, and orders already out for delivery, are left
- * exactly as they are (what was loaded does not change). One ORDER_WEIGHTS_RESOLVED audit row
- * lists every line and order total before and after. Returns the number of lines changed.
+ * Save the line weights a request took from the product master (BuiltRequest.weightChanges):
+ * 0-kg lines whose product has a case weight now, and lines weighed from the master whose case
+ * weight was corrected. Run inside the transaction that starts the optimize, after the location
+ * and weight checks passed - never for a probe - so a refused re-plan leaves the live plan's
+ * orders and loads as they were. Set-based (a whole NMWC day in a few statements). Each row is
+ * changed only if it still has the kg the request was built from; otherwise OrdersChangedError.
+ * One ORDER_WEIGHTS_RESOLVED audit row lists every line and order total before and after.
  */
-export async function resolveOrderWeights(tx: Tx, tenantId: string, runId: string, userId: string | null): Promise<number> {
-  const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId }, select: { depotId: true, runDate: true, version: true } });
-  if (!run) return 0;
-  const where = await ordersInScopeWhere(tenantId, run.depotId, run.runDate);
-  const orders = await tx.order.findMany({
-    where: { ...where, status: { notIn: ['DISPATCHED', 'DELIVERED'] }, lines: { some: { weightKg: { lte: 0 }, product: { weightPerCaseKg: { gt: 0 } } } } },
-    select: {
-      id: true,
-      totalWeightKg: true,
-      lines: { select: { id: true, cases: true, weightKg: true, product: { select: { code: true, weightPerCaseKg: true } } } },
-    },
-  });
-  if (!orders.length) return 0;
-  const frozen = await tx.routeAssignment.findMany({
-    where: { orderId: { in: orders.map((o) => o.id) }, load: { status: { not: 'PLANNED' } }, run: { tenantId, status: { not: 'SUPERSEDED' } } },
-    select: { orderId: true },
-  });
-  const res = resolveOrderLineWeights(
-    orders.map((o) => ({ id: o.id, totalWeightKg: o.totalWeightKg, lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, productKgPerCase: l.product.weightPerCaseKg })) })),
-    new Set(frozen.map((f) => f.orderId)),
-  );
-  if (!res.lines.length) return 0;
-  for (const l of res.lines) await tx.orderLine.update({ where: { id: l.lineId }, data: { weightKg: l.afterKg } });
-  for (const o of res.orders) await tx.order.update({ where: { id: o.orderId }, data: { totalWeightKg: o.afterKg } });
-  const productOf = new Map(orders.flatMap((o) => o.lines.map((l) => [l.id, l.product.code] as const)));
+export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string, changes: WeightChanges, userId: string | null): Promise<number> {
+  if (!changes.lines.length) return 0;
+  const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId }, select: { runDate: true, version: true } });
+  const CHUNK = 1000;
+  for (let i = 0; i < changes.lines.length; i += CHUNK) {
+    const part = changes.lines.slice(i, i + CHUNK);
+    const n = await tx.$executeRaw`
+      UPDATE "OrderLine" AS l
+      SET "weightKg" = v.after_kg, "weightFromMaster" = true
+      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg),
+           "Order" AS o
+      WHERE l.id = v.id AND o.id = l."orderId" AND o."tenantId" = ${tenantId} AND abs(l."weightKg" - v.before_kg) < 0.0005`;
+    if (n !== part.length) throw new OrdersChangedError();
+  }
+  for (let i = 0; i < changes.orders.length; i += CHUNK) {
+    const part = changes.orders.slice(i, i + CHUNK);
+    const n = await tx.$executeRaw`
+      UPDATE "Order" AS o
+      SET "totalWeightKg" = v.after_kg
+      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg)
+      WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
+    if (n !== part.length) throw new OrdersChangedError();
+  }
   await tx.auditLog.create({
     data: {
       tenantId,
@@ -602,15 +634,10 @@ export async function resolveOrderWeights(tx: Tx, tenantId: string, runId: strin
       action: 'ORDER_WEIGHTS_RESOLVED',
       entity: 'RunPlan',
       entityId: runId,
-      afterJson: {
-        runDate: isoOf(run.runDate),
-        version: run.version,
-        lines: res.lines.map((l) => ({ ...l, product: productOf.get(l.lineId) ?? null })),
-        orders: res.orders,
-      } as never,
+      afterJson: { runDate: isoOf(run.runDate), version: run.version, lines: changes.lines, orders: changes.orders } as never,
     },
   });
-  return res.lines.length;
+  return changes.lines.length;
 }
 
 // ---------------------------------------------------------------------------------------

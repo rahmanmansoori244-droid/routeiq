@@ -16,6 +16,8 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
+import { parseUpload } from '@/lib/csv';
+import { legacyRowsHash } from '@/lib/dispatch/intake-server';
 
 let t: TenantHandle;
 let depotId = '';
@@ -36,13 +38,17 @@ async function json<T = any>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Upload rows [so, customer, item, cases] for `day`; returns the batch id. */
-async function upload(rows: string[][], opts: { withSo?: boolean; name?: string } = {}) {
-  const withSo = opts.withSo ?? true;
+/** The CSV text of rows [so, customer, item, cases] for `day`. */
+function csvText(rows: string[][], withSo = true) {
   const head = withSo ? ['SO No', 'Req. Delivery Date', 'Customer Code', 'Item Code', 'Qty (Cases)'] : ['Req. Delivery Date', 'Customer Code', 'Item Code', 'Qty (Cases)'];
   const body = rows.map(([so, cust, item, qty]) => (withSo ? [so, dmy(day), cust, item, qty] : [dmy(day), cust, item, qty]));
+  return [head, ...body].map((r) => r.join(',')).join('\n');
+}
+
+/** Upload rows [so, customer, item, cases] for `day`; returns the batch id. */
+async function upload(rows: string[][], opts: { withSo?: boolean; name?: string } = {}) {
   const fd = new FormData();
-  fd.set('file', new Blob([[head, ...body].map((r) => r.join(',')).join('\n')], { type: 'text/csv' }), opts.name ?? 'orders.csv');
+  fd.set('file', new Blob([csvText(rows, opts.withSo ?? true)], { type: 'text/csv' }), opts.name ?? 'orders.csv');
   fd.set('depotId', depotId);
   fd.set('deliveryDate', day);
   const r = await fetchWith(t.cookieJar, `${BASE}/api/orders/upload`, { method: 'POST', body: fd });
@@ -164,6 +170,24 @@ describe('idempotent confirm (F05)', () => {
     await prisma.customer.updateMany({ where: { tenantId: t.tenantId, code: 'C5' }, data: { active: true } });
   });
 
+  it('a file without sales orders confirmed before the stabilization deploy (raw-row hash) is not added again', async () => {
+    const rows = [['', 'C3', 'TAN-500-24', '9']];
+    const pending = await upload(rows, { withSo: false, name: 'old-export.csv' }); // checked before the old batch is seen
+    const parsed = await parseUpload(new File([csvText(rows, false)], 'old-export.csv', { type: 'text/csv' }));
+    // How a batch confirmed by the previous release looks: fileHash = SHA-256 of the raw rows.
+    await prisma.uploadBatch.create({
+      data: { tenantId: t.tenantId, fileName: 'old-export.csv', fileType: 'csv', uploadedById: t.userId, status: 'CONFIRMED', depotId, deliveryDate: new Date(`${day}T00:00:00Z`), fileHash: legacyRowsHash(parsed.rows) },
+    });
+    const before = await orderCount();
+    const r = await confirm(pending.batchId);
+    expect(r.status).toBe(409);
+    expect((await json(r)).error.code).toBe('DUPLICATE_FILE');
+    expect(await orderCount()).toBe(before);
+    const again = await upload(rows, { withSo: false, name: 'old-export.csv' });
+    expect(again.validation.errorRows).toBeGreaterThan(0);
+    expect(again.validation.errors[0].message).toMatch(/already confirmed/);
+  });
+
   it('the same sales-order line with another quantity is an error at the check', async () => {
     const a = await upload([['SO-1', 'C1', 'TAN-500-24', '12']]); // SO-1 was confirmed with 10
     expect(a.validation.errorRows).toBe(1);
@@ -208,7 +232,12 @@ describe('batch delete (F20)', () => {
     const { run } = await planWith({ unservedOrderIds: [], loadOrderId: order.id });
     const r = await del(a.batchId);
     expect(r.status).toBe(409);
-    expect((await json(r)).error.code).toBe('BATCH_IN_PLAN');
+    const body = await json(r);
+    expect(body.error.code).toBe('BATCH_IN_PLAN');
+    // No remedy that cannot remove orders (a late order only adds, a re-plan re-plans the same).
+    expect(body.error.message).toMatch(/cannot be deleted/);
+    expect(body.error.message).toMatch(/not possible in the app yet/);
+    expect(body.error.message).not.toMatch(/late order|re-plan/);
     await prisma.runPlan.update({ where: { id: run.id }, data: { status: 'SUPERSEDED' } });
   });
 

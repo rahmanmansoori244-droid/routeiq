@@ -127,11 +127,17 @@ export interface CustomerIssue {
  * A customer deactivated after its orders were confirmed: its open orders are left unserved at
  * optimize (reason "customer deactivated") until it is reactivated. Shown first on the day.
  */
-export function inactiveCustomerIssue(): CustomerIssue {
+/**
+ * A deactivated customer that still has open orders (not on a frozen load). `onPlannedLoads`: the
+ * plan in use was made before it was deactivated and still has them on trucks.
+ */
+export function inactiveCustomerIssue(onPlannedLoads = false): CustomerIssue {
   return {
     code: 'CUSTOMER_INACTIVE',
     blocking: true,
-    message: 'Customer is deactivated: its orders will be left unserved. Reactivate it in Customers to deliver them.',
+    message: onPlannedLoads
+      ? 'Customer was deactivated after this plan was made: its orders are still on planned loads. RE-PLAN to leave them unserved, or reactivate it in Customers to deliver them.'
+      : 'Customer is deactivated: its open orders are left unserved (not delivered). Reactivate it in Customers and re-plan to deliver them.',
   };
 }
 

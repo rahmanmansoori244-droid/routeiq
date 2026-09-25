@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 import { getCurrentTenant } from '@/lib/tenant';
-import { canApproveOverride, canPlan } from '@/lib/rbac';
+import { canApproveOverride, canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { PageShell } from '@/components/page-shell';
 import { PlanVersionClient } from './plan-version-client';
@@ -19,6 +19,7 @@ export default async function PlanVersionPage({ params }: { params: { slug: stri
         runId={run.id}
         canPlan={canPlan(user.role)}
         canDispatch={canApproveOverride(user.role)}
+        canEditProducts={canManageMasterData(user.role)}
         phoneCountryCode={phoneCountryCode(tenant.country)}
         dayHref={`/t/${params.slug}/dispatch?date=${run.runDate.toISOString().slice(0, 10)}&depot=${run.depotId}`}
       />

@@ -9,6 +9,7 @@ export function PlanVersionClient({
   runId,
   canPlan,
   canDispatch,
+  canEditProducts,
   phoneCountryCode,
   dayHref,
 }: {
@@ -16,6 +17,7 @@ export function PlanVersionClient({
   runId: string;
   canPlan: boolean;
   canDispatch: boolean;
+  canEditProducts: boolean;
   phoneCountryCode: string | null;
   dayHref: string;
 }) {
@@ -30,6 +32,7 @@ export function PlanVersionClient({
         runId={runId}
         canPlan={canPlan}
         canDispatch={canDispatch}
+        canEditProducts={canEditProducts}
         phoneCountryCode={phoneCountryCode}
         onChanged={(newRunId) => {
           if (newRunId && newRunId !== runId) router.push(`/t/${slug}/dispatch/plan/${newRunId}`);

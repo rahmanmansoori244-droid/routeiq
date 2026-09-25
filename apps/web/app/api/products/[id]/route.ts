@@ -1,7 +1,7 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { productSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
-import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
+import { caseWeightChangedNote, deactivateWarning, openMasterWeighedLines, openOrders } from '@/lib/dispatch/open-orders';
 
 interface Params { params: { id: string } }
 
@@ -26,7 +26,12 @@ export const PATCH = (req: Request, { params }: Params) =>
         ip,
       });
       // A deactivated product's open orders are still delivered as ordered (warned here).
-      const warning = before.active && !after.active ? deactivateWarning('product', await openOrders(user.tenantId, { productId: after.id })) : null;
+      const deactivated = before.active && !after.active ? deactivateWarning('product', await openOrders(user.tenantId, { productId: after.id })) : null;
+      // A new or corrected case weight reaches the open lines weighed from it at the next
+      // optimize or re-plan (say how many, so a correction is not expected to show at once).
+      const weightNote =
+        after.weightPerCaseKg > 0 && after.weightPerCaseKg !== before.weightPerCaseKg ? caseWeightChangedNote(await openMasterWeighedLines(user.tenantId, after.id)) : null;
+      const warning = [deactivated, weightNote].filter(Boolean).join(' ') || null;
       return ok(warning ? { ...after, warning } : after);
     },
     { role: 'TENANT_ADMIN' },

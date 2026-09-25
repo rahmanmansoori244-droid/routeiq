@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { redirect } from 'next/navigation';
 import { ChevronLeft } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
-import { canPlan, canApproveOverride } from '@/lib/rbac';
+import { canPlan, canApproveOverride, canManageMasterData } from '@/lib/rbac';
 import { notFoundIfNull } from '@/lib/api';
 import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
@@ -122,6 +122,7 @@ export default async function RunDetailPage({
         slug={params.slug}
         canEdit={canPlan(user.role)}
         canDispatch={canApproveOverride(user.role)}
+        canEditProducts={canManageMasterData(user.role)}
         currency={tenant.currency}
         mapboxToken={process.env.MAPBOX_TOKEN ?? ''}
         run={{

@@ -41,10 +41,18 @@ export interface OptimizeOverrides {
 }
 
 /**
+ * Where a missing case weight gets fixed, for the user's role: only company admins can edit
+ * products, so planners and supervisors are told to ask one.
+ */
+export function weightFixText(canEditProducts: boolean): string {
+  return canEditProducts ? 'add the case weight under Products' : 'ask a company admin to add the case weight under Products';
+}
+
+/**
  * Optimize / re-plan answers that need the dispatcher's go-ahead (409 LOCATION_REQUIRED or
  * WEIGHT_REQUIRED): asks, and returns the override to send again, or null (not asked or declined).
  */
-export function askOverride(errorBody: Record<string, unknown> | null, verb: 'Optimize' | 'Re-plan'): OptimizeOverrides | null {
+export function askOverride(errorBody: Record<string, unknown> | null, verb: 'Optimize' | 'Re-plan', opts: { canEditProducts?: boolean } = {}): OptimizeOverrides | null {
   if (errorBody?.code === 'LOCATION_REQUIRED') {
     const n = (errorBody.blocking as unknown[] | undefined)?.length ?? 0;
     const ok = window.confirm(`${n} customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". ${verb} anyway?`);
@@ -55,7 +63,7 @@ export function askOverride(errorBody: Record<string, unknown> | null, verb: 'Op
     const lines = list.reduce((a, u) => a + u.lines, 0);
     const skus = list.slice(0, 8).map((u) => `${u.productCode} (${u.cases} cases)`).join(', ') + (list.length > 8 ? ', ...' : '');
     const ok = window.confirm(
-      `${lines} order line(s) have no weight: ${skus}.\nTruck payloads cannot be checked for them, so a load may be heavier than shown.\n\nCancel, and add the case weight under Products - or ${verb.toLowerCase()} anyway (treated as 0 kg)?`,
+      `${lines} order line(s) have no weight: ${skus}.\nTruck payloads cannot be checked for them, so a load may be heavier than shown.\n\nCancel, and ${weightFixText(!!opts.canEditProducts)} - or ${verb.toLowerCase()} anyway (treated as 0 kg)?`,
     );
     return ok ? { allowMissingWeights: true } : null;
   }

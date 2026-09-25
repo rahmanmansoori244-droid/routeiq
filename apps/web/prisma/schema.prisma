@@ -589,7 +589,11 @@ model OrderLine {
   salesOrderNo       String?
   orderDate          DateTime?      @db.Date
   productDescription String?
-  weightKg           Float          @default(0)
+  weightKg           Float          @default(0) // 0 = unknown
+  /// The line's kg is (to be) cases x the product's case weight: the file gave no weight for it.
+  /// Such a line follows the product master: a case weight entered or corrected later is applied
+  /// at the next optimize / re-plan (unless the line is on a frozen load). File weights are kept.
+  weightFromMaster   Boolean        @default(false)
   salesValue         Float?
   marginValue        Float?
   sourceRow          Int?

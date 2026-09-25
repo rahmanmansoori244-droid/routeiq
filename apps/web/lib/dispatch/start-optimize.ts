@@ -2,7 +2,8 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { isOptimizing } from '../jobs/optimize-job';
 import { scheduleDispatchOptimize } from '../jobs/dispatch-job';
-import { buildDispatchRequest, createNextVersion, isLegacyPlan, pendingLateOrderIds, PlanError, resolveOrderWeights, type BuiltRequest } from './plan-service';
+import { applyWeightChanges, buildDispatchRequest, createNextVersion, isLegacyPlan, pendingLateOrderIds, PlanError, type BuiltRequest } from './plan-service';
+import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from './intake-server';
 import { describeUnknownWeights } from './weights';
 
 export interface StartResult {
@@ -48,7 +49,7 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
       return {
         status: 409,
         body: {
-          error: `${lines} order line(s) (${cases} cases) have no weight: ${describeUnknownWeights(built.unknownWeights)}. Truck payloads cannot be checked for them. Add the case weight under Products, or optimize anyway (treated as 0 kg).`,
+          error: `${lines} order line(s) (${cases} cases) have no weight: ${describeUnknownWeights(built.unknownWeights)}. Truck payloads cannot be checked for them. Have the case weight entered under Products (company admins can edit products), or ${verb === 're-planning' ? 're-plan' : 'optimize'} anyway (treated as 0 kg).`,
           code: 'WEIGHT_REQUIRED',
           unknownWeights: built.unknownWeights,
         },
@@ -83,8 +84,8 @@ export async function startDispatchOptimize(
   if (active || isOptimizing(runId)) {
     return { status: 202, body: { runJobId: active?.id ?? null, status: active?.status ?? 'RUNNING', runId } };
   }
-  // Weights entered after the orders were confirmed reach the open orders now (audited).
-  if (!opts.prebuilt) await prisma.$transaction((tx) => resolveOrderWeights(tx, tenantId, runId, user.id));
+  // Weights entered or corrected under Products after the orders were confirmed are planned
+  // with (in memory); they are saved on the orders below, only once the checks passed.
   const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId));
   const refused = gate(built, opts, 'optimizing');
   if (refused) return refused;
@@ -93,21 +94,40 @@ export async function startDispatchOptimize(
   if (built.request.trucks.length === 0) return { status: 400, body: { error: 'No active trucks at this depot.' } };
 
   const last = await prisma.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' }, select: { attemptNo: true } });
-  const job = await prisma.$transaction(async (tx) => {
-    const created = await tx.runJob.create({
-      data: {
-        tenantId,
-        runId,
-        attemptNo: (last?.attemptNo ?? 0) + 1,
-        status: 'QUEUED',
-        message: 'Queued',
-        createdById: user.id,
-        requestJson: built.request as never,
+  let job;
+  try {
+    job = await prisma.$transaction(
+      async (tx) => {
+        // Under the intake lock (confirm, late order and batch delete take it too): a batch
+        // delete that committed after the request was built must not leave the job planning
+        // orders that no longer exist. Once OPTIMIZING is committed, a delete is refused.
+        await lockIntake(tx, tenantId);
+        const ids = [...new Set([...built.scope.orderIds, ...built.scope.frozenOrderIds])];
+        const found = ids.length ? await tx.order.count({ where: { tenantId, id: { in: ids } } }) : 0;
+        if (found !== ids.length) throw new PlanError('Orders of this day were removed while the plan was being prepared (a file was deleted). Optimize again.', 409);
+        // Weights the request took from the product master are saved on the orders now (audited).
+        await applyWeightChanges(tx, tenantId, runId, built.weightChanges, user.id);
+        const created = await tx.runJob.create({
+          data: {
+            tenantId,
+            runId,
+            attemptNo: (last?.attemptNo ?? 0) + 1,
+            status: 'QUEUED',
+            message: 'Queued',
+            createdById: user.id,
+            requestJson: built.request as never,
+          },
+        });
+        await tx.runPlan.update({ where: { id: runId }, data: { status: 'OPTIMIZING', currentJobId: created.id } });
+        return created;
       },
-    });
-    await tx.runPlan.update({ where: { id: runId }, data: { status: 'OPTIMIZING', currentJobId: created.id } });
-    return created;
-  });
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+  } catch (e) {
+    if (e instanceof PlanError) return { status: e.status, body: { error: e.message, code: 'ORDERS_CHANGED' } };
+    if (isTransactionTimeout(e)) return { status: 409, body: INTAKE_BUSY };
+    throw e;
+  }
   await audit({
     tenantId,
     userId: user.id,
@@ -150,8 +170,9 @@ export async function replan(
     return startDispatchOptimize(tenantId, runId, user, ip, overrides);
   }
   // Check location and weight blockers BEFORE creating a version (scope is the same minus
-  // frozen loads). Weights entered since the last optimize are applied first.
-  await prisma.$transaction((tx) => resolveOrderWeights(tx, tenantId, runId, user.id));
+  // frozen loads). The probe plans weights entered since the last optimize in memory only: the
+  // parent stays the live plan if this is refused, so its orders and loads must not change.
+  // They are saved by startDispatchOptimize(child), after the parent was superseded.
   const probe = await buildDispatchRequest(tenantId, runId);
   const refused = gate(probe, overrides, 're-planning');
   if (refused) return refused;

@@ -1,12 +1,13 @@
 /**
- * Order line weights. Pure functions - plan-service, the day overview and the tests use them.
+ * Order line weights. Pure functions - plan-service, the day overview, intake and the tests use them.
  *
  * Convention (the same as Product.weightPerCaseKg): a line weight of 0 means UNKNOWN, never
- * "weighs nothing". A line is weighed at intake from the file or the product master. When the
- * master had no weight yet, the line stays at 0 kg; once a case weight is entered under
- * Products, the next optimize or re-plan applies it to every open line (resolveOrderWeights in
- * plan-service, audited as ORDER_WEIGHTS_RESOLVED). Lines on frozen loads (locked, loading,
- * dispatched, completed) are never changed: what was loaded stays as it was.
+ * "weighs nothing". A line is weighed at intake from the file or, when the file has no weight
+ * for it, from the product master (`OrderLine.weightFromMaster`). A line weighed from the master
+ * follows it: when the case weight is entered or corrected under Products (e.g. 1500 typed for
+ * 1.5), the next optimize or re-plan plans every open line with the product's weight now and
+ * saves it on the line (ORDER_WEIGHTS_RESOLVED audit). Weights from the file are never changed.
+ * Lines on frozen loads (locked, loading, dispatched, completed) keep what they were loaded with.
  *
  * Orders from before line weights existed carry their kg on the order only (every line 0 kg,
  * order total above 0). Their order kg is spread per case, as before.
@@ -16,6 +17,8 @@ export interface WeightLineIn {
   id: string;
   cases: number;
   weightKg: number;
+  /** The line was weighed from the product master (no file weight): it follows the master. */
+  fromMaster: boolean;
   /** The product's case weight now (0 = unknown). */
   productKgPerCase: number;
 }
@@ -57,24 +60,58 @@ export function orderUsesLineWeights(o: { totalWeightKg: number; lines: { weight
   return linesKg > 0 && Math.abs(linesKg - o.totalWeightKg) <= kgTolerance(o.totalWeightKg);
 }
 
+/**
+ * The kg a line gets from the product's case weight now, or null when it keeps its own kg:
+ * a line at 0 kg (unknown) or weighed from the master, whose product has a case weight that
+ * gives another kg than the line has. A line with a file weight is never re-weighed.
+ */
+export function masterLineKg(line: { cases: number; weightKg: number; fromMaster: boolean }, productKgPerCase: number): number | null {
+  if (!(productKgPerCase > 0) || !(line.cases > 0)) return null;
+  if (line.weightKg > 0 && !line.fromMaster) return null;
+  const kg = r3(line.cases * productKgPerCase);
+  return Math.abs(kg - line.weightKg) > 0.0005 ? kg : null;
+}
+
+/**
+ * How intake weighs one confirmed line (a line can merge several file rows of the same sales
+ * order and product). Every row with a file weight: the file kg. Otherwise the line is weighed
+ * from the product master and follows it - cases x the case weight, or 0 kg (unknown) when the
+ * product has none yet. A partly weighed merged line is not kept at the kg of only some of its
+ * cases: that figure would count as known and be too low for good.
+ */
+export function intakeLineWeight(
+  line: { cases: number; weightKg: number | null; weightMissingCases?: number },
+  productKgPerCase: number,
+): { weightKg: number; fromMaster: boolean } {
+  const missing = line.weightMissingCases ?? (line.weightKg === null ? line.cases : 0);
+  if (missing <= 0 && line.weightKg !== null && line.weightKg > 0) return { weightKg: line.weightKg, fromMaster: false };
+  return { weightKg: productKgPerCase > 0 ? r3(line.cases * productKgPerCase) : 0, fromMaster: true };
+}
+
 export type LineWeightStatus = 'KNOWN' | 'MASTER' | 'UNKNOWN';
 
 /**
  * Weight status of one order line (line-based, never product-based):
  * - KNOWN: the line (or, for an old order, the order) carries its kg;
- * - MASTER: 0 kg on the line, but the product master now has a case weight - it is applied at
- *   the next optimize or re-plan;
+ * - MASTER: the product's case weight gives the line another kg than it has - 0 kg and the
+ *   weight was entered since, or weighed from the master and the weight was corrected since.
+ *   It is applied at the next optimize or re-plan;
  * - UNKNOWN: 0 kg and no case weight on the product: payload checks count it as 0 kg.
  */
-export function lineWeightStatus(line: { weightKg: number }, productKgPerCase: number, orderLevelKg: boolean): LineWeightStatus {
-  if (orderLevelKg || line.weightKg > 0) return 'KNOWN';
-  return productKgPerCase > 0 ? 'MASTER' : 'UNKNOWN';
+export function lineWeightStatus(
+  line: { cases: number; weightKg: number; fromMaster: boolean },
+  productKgPerCase: number,
+  orderLevelKg: boolean,
+): LineWeightStatus {
+  if (orderLevelKg) return 'KNOWN';
+  if (masterLineKg(line, productKgPerCase) !== null) return 'MASTER';
+  return line.weightKg > 0 ? 'KNOWN' : 'UNKNOWN';
 }
 
 /**
- * Lines whose unknown (0 kg) weight can now be taken from the product master, and the new order
+ * Lines whose kg now comes from the product master (see masterLineKg), and the new order
  * totals. Orders in `frozenOrderIds` (any part on a frozen load) and orders whose kg lives on
- * the order only are left as they are; lines that already carry kg are never changed.
+ * the order only are left as they are; lines with a file weight are never changed.
  */
 export function resolveOrderLineWeights(
   orders: WeightOrderIn[],
@@ -87,8 +124,8 @@ export function resolveOrderLineWeights(
     let total = 0;
     let changed = false;
     for (const l of o.lines) {
-      if (!(l.weightKg > 0) && l.productKgPerCase > 0 && l.cases > 0) {
-        const afterKg = r3(l.cases * l.productKgPerCase);
+      const afterKg = masterLineKg(l, l.productKgPerCase);
+      if (afterKg !== null) {
         lineChanges.push({ orderId: o.id, lineId: l.id, cases: l.cases, beforeKg: l.weightKg, afterKg });
         total += afterKg;
         changed = true;

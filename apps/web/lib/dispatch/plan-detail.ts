@@ -9,7 +9,8 @@ import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, type ScenarioDetails } from './plan-service';
 import { noteParts } from './driver-links';
-import { rowLines, splitPartLabels } from './split';
+import { readPortionLines, rowLines, splitPartLabels } from './split';
+import { lineWeightStatus, orderUsesLineWeights } from './weights';
 import { fmtWindow, isoOf } from './time';
 
 export interface DetailStop {
@@ -162,7 +163,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
           order: {
             include: {
               customer: true,
-              lines: { include: { product: { select: { code: true, name: true } } } },
+              lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
             },
           },
         },
@@ -315,6 +316,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     select: { id: true, version: true, status: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
   });
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
+  const outdated = run.status !== 'SUPERSEDED' && chosenDetails ? outdatedNotes(loads) : [];
   return {
     run: {
       id: run.id,
@@ -370,7 +372,65 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     warnings: legacyChosen
       ? ['This plan was made by the previous optimizer (before May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
       : chosenDetails
-        ? [...new Set([...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
+        ? [...new Set([...outdated, ...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
         : [],
   };
+}
+
+type OutdatedLoad = {
+  status: string;
+  loadNo: number;
+  truck: { code: string };
+  assignments: {
+    portionLinesJson: unknown;
+    order: {
+      status: string;
+      totalWeightKg: number;
+      customer: { code: string; branchCode: string | null; active: boolean };
+      lines: { id: string; cases: number; weightKg: number; weightFromMaster: boolean; product: { code: string; weightPerCaseKg: number } }[];
+    };
+  }[];
+};
+
+/**
+ * What changed since the plan in use was made that a RE-PLAN would change on its PLANNED loads
+ * (frozen loads keep what they were loaded with): customers deactivated since, whose orders are
+ * still on trucks, and case weights entered or corrected under Products since.
+ */
+export function outdatedNotes(loads: OutdatedLoad[]): string[] {
+  const inactive = new Map<string, Set<string>>();
+  const weights = new Map<string, number>();
+  for (const l of loads) {
+    if (l.status !== 'PLANNED') continue;
+    for (const a of l.assignments) {
+      const o = a.order;
+      if (o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
+      if (!o.customer.active) {
+        const label = o.customer.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : o.customer.code;
+        inactive.set(label, (inactive.get(label) ?? new Set()).add(`${l.truck.code} L${l.loadNo}`));
+      }
+      const orderLevel = !orderUsesLineWeights(o);
+      const portion = readPortionLines(a.portionLinesJson);
+      const casesOf = new Map((portion ?? o.lines.map((x) => ({ lineId: x.id, cases: x.cases }))).map((x) => [x.lineId, x.cases]));
+      for (const ln of o.lines) {
+        const cases = casesOf.get(ln.id) ?? 0;
+        if (cases <= 0) continue;
+        if (lineWeightStatus({ cases: ln.cases, weightKg: ln.weightKg, fromMaster: ln.weightFromMaster }, ln.product.weightPerCaseKg, orderLevel) === 'MASTER') {
+          weights.set(ln.product.code, (weights.get(ln.product.code) ?? 0) + cases);
+        }
+      }
+    }
+  }
+  const out: string[] = [];
+  if (inactive.size) {
+    out.push(
+      `Deactivated after this plan was made, but still on planned loads: ${[...inactive].map(([c, ls]) => `${c} (${[...ls].join(', ')})`).join('; ')}. Re-plan to leave their orders unserved, or reactivate them in Customers.`,
+    );
+  }
+  if (weights.size) {
+    out.push(
+      `Case weight entered or corrected under Products after this plan was made: ${[...weights].map(([code, n]) => `${code} (${n} cases on planned loads)`).join(', ')}. These loads were planned with the old weight: re-plan to use the new one.`,
+    );
+  }
+  return out;
 }
