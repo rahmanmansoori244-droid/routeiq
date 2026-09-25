@@ -264,9 +264,12 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div className="space-y-1.5">
             <Label htmlFor="dprov">Distances</Label>
-            <Select value={c.distanceProvider} onValueChange={(v) => setC({ ...c, distanceProvider: v as EditableConfig['distanceProvider'] })}>
+            <Select
+              value={c.distanceProvider === 'MAPBOX_MATRIX' ? undefined : c.distanceProvider}
+              onValueChange={(v) => setC({ ...c, distanceProvider: v as EditableConfig['distanceProvider'] })}
+            >
               <SelectTrigger id="dprov">
-                <SelectValue placeholder={c.distanceProvider === 'MAPBOX_MATRIX' ? 'Mapbox (not used: planned on road distances) - choose' : undefined} />
+                <SelectValue placeholder="Mapbox (not used by the planner: it plans on road distances) - choose one" />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="OSRM">Road distances (OSRM)</SelectItem>

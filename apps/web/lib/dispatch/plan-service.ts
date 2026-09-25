@@ -60,7 +60,7 @@ import {
   type UnknownWeight,
 } from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
-import { dispatchConfigFromTenant, plannerSettingProblems } from './planner-config';
+import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { LARGE_DAY_STOPS, MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
@@ -539,6 +539,15 @@ export async function buildDispatchRequest(
     for (const x of live) orderPriority[x.o.id] = pr;
   }
 
+  // Truck / depot values the optimizer would refuse (a direct database edit): named, not a 422.
+  const masterProblems = masterDataProblems(trucks, run.depot);
+  if (masterProblems.length) {
+    throw new PlanError(
+      `Truck or depot data out of range: ${masterProblems.join('; ')}. A company admin can correct it under Trucks or Depots.`,
+      409,
+      { code: 'MASTER_DATA_OUT_OF_RANGE', problems: masterProblems },
+    );
+  }
   const truckList: DispatchTruck[] = trucks.map((t) => ({
     id: t.id,
     code: t.code,

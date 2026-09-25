@@ -813,8 +813,8 @@ export interface AssumptionConfig {
 /**
  * The ASSUMPTIONS rows. Everything comes from `cfg` (the settings stored with the plan, or today's
  * for a plan from before they were stored) and from the plan itself (`providerUsed`,
- * `distanceIsEstimated`) - never from the web server's environment: the web's OSRM_URL only draws
- * the legacy Map tab and says nothing about how a plan was routed (the solver has its own).
+ * `distanceIsEstimated`) - never from the web server's environment: the web does no routing (since
+ * stabilization PR5 even the legacy Map tab goes through the solver, which has its own OSRM_URL).
  */
 export function tenantAssumptions(
   cfg: AssumptionConfig | null,
@@ -840,11 +840,14 @@ export function tenantAssumptions(
     'Unloading time per case': cfg.serviceMinPerCase ? `${cfg.serviceMinPerCase} min per case delivered, on top of the service time` : 'not set (0)',
     'Max trips per truck per day': String(cfg.maxTripsPerTruck),
     'Fuel price': cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${cur} per litre` : '0 - fuel not costed separately',
-    'Driver cost': `${cfg.driverCostPerHour} ${cur} per hour`,
-    Overtime: cfg.overtimeCostPerHour > 0 ? `after ${fmtDuration(cfg.overtimeAfterMin)} at ${cfg.overtimeCostPerHour} ${cur} per hour` : 'not costed',
+    'Driver cost': `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)`,
+    Overtime:
+      cfg.overtimeCostPerHour > 0
+        ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour on top of the driver cost${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}`
+        : 'not costed',
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} per minute outside the preferred window (soft)`,
-    'Road time factor (truck vs car)': `x${cfg.roadTimeFactor}`,
-    'Default service time': `${cfg.defaultServiceTimeMin} min per stop (customer / customer-type values override)`,
+    'Road time factor (truck vs car)': `x${cfg.roadTimeFactor} on road travel times (not on estimated legs)`,
+    'Default service time': `${cfg.defaultServiceTimeMin} min per stop for customers whose own time was never confirmed (a confirmed customer time, then the customer type's, wins)`,
     Priorities: 'strict - one higher-priority order always wins over any number of lower ones (P1 > P2 > P3 > P4 > P5)',
     'Distance provider (configured)':
       cfg.distanceProvider === 'HAVERSINE'
