@@ -53,6 +53,7 @@ describe('buildDispatchWorkbook', () => {
     expect(names).toEqual([
       'SUMMARY',
       'LOAD PLAN',
+      'TRUCK DAYS',
       'T01 - L1',
       'T01 - L2',
       loadSheetName(LONG_TRUCK, 1, new Set()),
@@ -71,7 +72,7 @@ describe('buildDispatchWorkbook', () => {
       expect(n).not.toMatch(/[[\]:*?/\\]/);
     }
     expect(new Set(names.map((n) => n.toLowerCase())).size).toBe(names.length);
-    const long = names[4];
+    const long = names[5];
     expect(long).toBe('MCT-TRUCK-02-EXTRA-LONG-FL - L1');
     expect(long.endsWith(' - L1')).toBe(true);
 
@@ -413,5 +414,52 @@ describe('stabilization PR4 review fixes in the workbook', () => {
       if (prev === undefined) delete process.env.OSRM_URL;
       else process.env.OSRM_URL = prev;
     }
+  });
+});
+
+describe('buildDispatchWorkbook - costs (review F17)', () => {
+  it('the workbook total equals the summary, and the label names every part of the cost', async () => {
+    const d = fixture();
+    const wb = await render(d);
+    const s = sheet(wb, SHEETS.summary);
+    const op = find(s, (t) => t.startsWith('Operating cost'), 1)!;
+    expect(s.getCell(op.row, 2).value).toBe(d.summary!.operatingCost);
+    expect(text(s.getCell(op.row, 3))).toMatch(/fixed \+ trip \+ distance \+ fuel \+ driver \(whole truck day\) \+ overtime/);
+    const driver = find(s, (t) => t.trim() === 'of which driver (whole truck day)', 1)!;
+    expect(s.getCell(driver.row, 2).value).toBe(d.summary!.costs!.driver);
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const col = find(lp, (t) => t.startsWith('Operating cost'))!.col;
+    const total = find(lp, (t) => t === 'TOTAL', 1)!;
+    expect(lp.getCell(total.row, col).value).toBeCloseTo(d.summary!.operatingCost, 6);
+  });
+
+  it('TRUCK DAYS: one row per truck, the paid time is first departure to last return, rows add up to the plan', async () => {
+    const d = fixture();
+    const ws = sheet(await render(d), SHEETS.truckDays);
+    const t01 = find(ws, (t) => t === 'T01', 1)!;
+    // T01: 06:00 -> 13:25 (L2 returns 600 + 205 = 805 min), the turnaround between its loads is paid.
+    expect(text(ws.getCell(t01.row, 3))).toBe('06:00');
+    expect(text(ws.getCell(t01.row, 4))).toBe('13:25');
+    expect(text(ws.getCell(t01.row, 5))).toBe('7:25');
+    expect(text(ws.getCell(t01.row, 6))).toBe('7:25');
+    const totalCol = find(ws, (t) => t.startsWith('Total ('))!.col;
+    const total = find(ws, (t) => t === 'TOTAL', 1)!;
+    expect(ws.getCell(total.row, totalCol).value).toBeCloseTo(d.summary!.operatingCost, 6);
+  });
+
+  it('a plan with loads costed the earlier way says so on SUMMARY and TRUCK DAYS', async () => {
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0]!, cost: null, operatingCost: 30 };
+    d.summary = { ...d.summary!, costBasis: 'MIXED_LEGACY', costs: undefined };
+    const wb = await render(d);
+    expect(find(sheet(wb, SHEETS.summary), (t) => t.includes('costed the earlier way'))).toBeTruthy();
+    expect(find(sheet(wb, SHEETS.truckDays), (t) => t.includes('costed the earlier way'))).toBeTruthy();
+  });
+
+  it('road km with some estimated legs is labelled so (review F18)', async () => {
+    const d = fixture();
+    d.summary = { ...d.summary!, estimatedLegs: 3 };
+    const s = sheet(await render(d), SHEETS.summary);
+    expect(find(s, (t) => t === 'Total road km (3 legs estimated)', 1)).toBeTruthy();
   });
 });

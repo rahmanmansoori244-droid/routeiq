@@ -99,9 +99,33 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
   };
 }
 
+/** Driver rate of the fixture (OMR per hour of the whole truck day). */
+export const DRIVER_RATE = 2.5;
+
 export function load(id: string, truckId: string, truckCode: string, loadNo: number, stops: DetailStop[], estimated: boolean): DetailLoad {
   const cases = stops.reduce((a, s) => a + s.cases, 0);
   const km = (stops.at(-1)?.cumulativeKm ?? 0) + 8.4;
+  // The one cost model (review F17): load 1 is paid from its departure, later loads from the
+  // previous return (load n-1 returns at 360 + (n-2) x 240 + 205), so the turnaround is paid.
+  const depart = 360 + (loadNo - 1) * 240;
+  const paidFrom = loadNo === 1 ? depart : 360 + (loadNo - 2) * 240 + 205;
+  const paidMin = depart + 205 - paidFrom;
+  const cost = {
+    v: 2 as const,
+    policy: 'TRUCK_DAY_SPAN' as const,
+    fixed: loadNo === 1 ? 20 : 0,
+    trip: 0,
+    distance: Math.round(km * 0.15 * 1000) / 1000,
+    fuel: Math.round((km / 4) * 0.25 * 1000) / 1000,
+    driver: Math.round((paidMin / 60) * DRIVER_RATE * 1000) / 1000,
+    overtime: 0,
+    total: 0,
+    driverPaidMin: paidMin,
+    paidFromMin: paidFrom,
+    overtimeMin: 0,
+    estimatedLegs: estimated ? stops.length + 1 : 0,
+  };
+  cost.total = Math.round((cost.fixed + cost.trip + cost.distance + cost.fuel + cost.driver + cost.overtime) * 1000) / 1000;
   return {
     id,
     truckId,
@@ -122,8 +146,9 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     weightKg: stops.reduce((a, s) => a + s.weightKg, 0),
     utilizationPct: Math.round((1000 * cases) / 600) / 10,
     fuelLitres: km / 4,
-    fuelCost: (km / 4) * 0.25,
-    operatingCost: 20 + km * 0.15 + (km / 4) * 0.25,
+    fuelCost: cost.fuel,
+    operatingCost: cost.total,
+    cost,
     returnLegKm: 8.4,
     distanceIsEstimated: estimated,
     stops,

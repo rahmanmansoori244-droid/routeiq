@@ -58,6 +58,9 @@ import {
   type UnknownWeight,
 } from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
+import { dispatchConfigFromTenant, plannerSettingProblems } from './planner-config';
+import { LARGE_DAY_STOPS, MAX_DISPATCH_STOPS } from '../planner-bounds';
+import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
@@ -199,6 +202,16 @@ export async function buildDispatchRequest(
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUniqueOrThrow({ where: { id: runId }, include: { depot: true } });
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
+  // Settings the optimizer would refuse (a direct database edit): a clear answer now, not a
+  // failed optimization later (review F21).
+  const settingProblems = plannerSettingProblems(cfg);
+  if (settingProblems.blocking.length) {
+    throw new PlanError(
+      `Planner settings out of range: ${settingProblems.blocking.join('; ')}. A company admin can correct them under Settings.`,
+      409,
+      { code: 'SETTINGS_OUT_OF_RANGE', problems: settingProblems.blocking },
+    );
+  }
   const profiles = new Map<string, TypeProfileLike>(
     (await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]),
   );
@@ -544,7 +557,19 @@ export async function buildDispatchRequest(
     })),
   }));
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...settingProblems.warnings];
+  // Review F19: the most stops one optimization supports; more is refused here with a clear
+  // message rather than by the optimizer (422).
+  if (stopList.length > MAX_DISPATCH_STOPS) {
+    throw new PlanError(
+      `This day has ${stopList.length} delivery stops; one optimization supports at most ${MAX_DISPATCH_STOPS}. Plan it in parts (per depot), or ask for the limit to be raised.`,
+      422,
+      { code: 'TOO_MANY_STOPS', stops: stopList.length, max: MAX_DISPATCH_STOPS },
+    );
+  }
+  if (stopList.length > LARGE_DAY_STOPS) {
+    warnings.push(`Large day: ${stopList.length} stops in one optimization. The search is time-limited: check the unserved orders.`);
+  }
   if (splitNotes.length) {
     warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
   }
@@ -552,7 +577,7 @@ export async function buildDispatchRequest(
   if (badWindows.length) {
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
   }
-  const routing = routingProviderFor(cfg, tenant.country);
+  const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
   if (routing.outsideCoverage) {
     warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
   }
@@ -581,29 +606,8 @@ export async function buildDispatchRequest(
     },
     trucks: truckList,
     stops: stopList,
-    config: {
-      shift_start_min: cfg.shiftStartMin,
-      shift_max_min: cfg.driverShiftMaxMinutes,
-      overtime_after_min: cfg.overtimeAfterMin,
-      overtime_cost_per_hour: cfg.overtimeCostPerHour,
-      reload_min: cfg.reloadMinutes,
-      loading_min_per_case: cfg.loadingMinPerCase,
-      max_trips_per_truck: cfg.maxTripsPerTruck,
-      fuel_price_per_litre: cfg.fuelPricePerLitre,
-      driver_cost_per_hour: cfg.driverCostPerHour,
-      // A higher priority always wins over any number of lower ones (weights kept for reference).
-      strict_priorities: true,
-      priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
-      pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
-      use_margin: true,
-      distance_provider: routing.provider,
-      osrm_url: cfg.osrmUrl ?? null,
-      haversine_multiplier: cfg.distanceMultiplier,
-      avg_speed_kmh: cfg.avgSpeedKmh,
-      road_time_factor: cfg.roadTimeFactor,
-      time_limit_sec: null,
-      scenarios,
-    },
+    // The one mapping from tenant settings to the optimizer (also behind Settings' effective values).
+    config: plannerConfig,
   };
   return {
     request,
@@ -763,6 +767,12 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
 // ---------------------------------------------------------------------------------------
 // Persist the solver response and apply a scenario as the plan
 // ---------------------------------------------------------------------------------------
+
+/** PlanLoad.costJson of a new load: its breakdown under the one cost model, or NULL from an older solver. */
+function loadCostJson(ld: DispatchScenario['loads'][number], costVersion: number | null | undefined) {
+  const c = loadCostFromSolver(ld, costVersion);
+  return c ? (c as unknown as Prisma.InputJsonValue) : Prisma.DbNull;
+}
 
 /** Portion columns of a RouteAssignment / UnservedOrder row (all null = the whole order). */
 function portionFields(p: PortionRecord | null) {
@@ -970,9 +980,13 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         utilizationPct: ld.utilization_pct,
         fuelLitres: ld.fuel_litres,
         fuelCost: ld.fuel_cost,
+        // The load's share of the day under the one cost model (review F17): whole-day driver
+        // pay and overtime included. An older solver sends no breakdown: costed the earlier way.
         operatingCost: ld.total_cost,
+        costJson: loadCostJson(ld, d.cost_version),
         returnLegKm: ld.return_leg_km,
-        distanceIsEstimated: d.distance_is_estimated,
+        // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
+        distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
         truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
       },
     });
@@ -1261,6 +1275,10 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
       fuelCost: l.fuelCost,
       operatingCost: l.operatingCost,
       status: l.status,
+      departMin: l.departMin,
+      returnMin: l.returnMin,
+      cost: readLoadCost(l.costJson),
+      distanceIsEstimated: l.distanceIsEstimated,
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,

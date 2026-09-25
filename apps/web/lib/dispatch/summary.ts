@@ -4,7 +4,13 @@
  *
  * Money honesty: revenue is only reported when every order carries a sales value, contribution
  * margin only when every order carries a margin. Otherwise they are null ("not supplied").
+ *
+ * Operating cost (review F17): the sum of the version's loads - carried locked loads and new
+ * loads alike - each costed by the optimizer under the one cost model (lib/dispatch/costs.ts: the
+ * driver is paid for the whole truck day, overtime on top). Loads costed the earlier way (saved
+ * before that model) keep their stored cost and label the day MIXED_LEGACY.
  */
+import { costBasisOf, costTotals, type CostBasis, type CostTotals, type LoadCostBreakdown } from './costs';
 
 export interface SummaryOrder {
   id: string;
@@ -29,6 +35,11 @@ export interface SummaryLoad {
   fuelCost: number;
   operatingCost: number;
   status: string;
+  /** Absent (older callers) = costed the earlier way. */
+  departMin?: number;
+  returnMin?: number;
+  cost?: LoadCostBreakdown | null;
+  distanceIsEstimated?: boolean;
 }
 
 export interface DailySummary {
@@ -45,11 +56,22 @@ export interface DailySummary {
   trucksUsed: number;
   trips: number;
   totalKm: number;
+  /** On the road: departure to return of each load, added up (= onRoadHours). */
   totalHours: number;
   avgUtilizationPct: number;
   fuelLitres: number | null;
   fuelCost: number;
   operatingCost: number;
+  /** Review F17 (absent on summaries saved before it). */
+  costBasis?: CostBasis;
+  costs?: CostTotals;
+  onRoadHours?: number;
+  /** Paid driver hours: the whole truck days (loads costed the earlier way: their time on the road). */
+  driverPaidHours?: number;
+  overtimeCost?: number;
+  /** Review F18: legs planned on estimated distance, and loads with any. */
+  estimatedLegs?: number;
+  estimatedLoads?: number;
   revenueServed: number | null;
   marginServed: number | null;
   lateOrders: number;
@@ -104,6 +126,17 @@ export function computeSummary(input: {
   // Like revenue/margin: a partial fuel sum would understate the day, so report it only when
   // every load's truck has a fuel economy.
   const fuelKnown = loads.length > 0 && loads.every((l) => l.fuelLitres !== null);
+  const costLoads = loads.map((l) => ({
+    truckId: l.truckId,
+    loadNo: l.loadNo,
+    departMin: l.departMin ?? 0,
+    returnMin: l.returnMin ?? (l.departMin ?? 0) + l.durationMin,
+    durationMin: l.durationMin,
+    operatingCost: l.operatingCost,
+    cost: l.cost ?? null,
+  }));
+  const costs = costTotals(costLoads);
+  const paidMin = costLoads.reduce((a, l) => a + (l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
   return {
     totalOrders: orders.length,
     totalCustomers: new Set(orders.map((o) => o.customerId)).size,
@@ -123,6 +156,13 @@ export function computeSummary(input: {
     fuelLitres: fuelKnown ? r1(loads.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null,
     fuelCost: r3(loads.reduce((a, l) => a + l.fuelCost, 0)),
     operatingCost: r3(loads.reduce((a, l) => a + l.operatingCost, 0)),
+    costBasis: costBasisOf(costLoads),
+    costs,
+    onRoadHours: r1(loads.reduce((a, l) => a + l.durationMin, 0) / 60),
+    driverPaidHours: r1(paidMin / 60),
+    overtimeCost: costs.overtime,
+    estimatedLegs: loads.reduce((a, l) => a + (l.cost?.estimatedLegs ?? 0), 0),
+    estimatedLoads: loads.filter((l) => l.distanceIsEstimated || (l.cost?.estimatedLegs ?? 0) > 0).length,
     revenueServed: allRevenue ? r3(orders.reduce((a, o) => a + (input.plannedMoneyByOrder?.get(o.id)?.revenue ?? (o.salesValue ?? 0) * share(o)), 0)) : null,
     marginServed: allMargin ? r3(orders.reduce((a, o) => a + (input.plannedMoneyByOrder?.get(o.id)?.margin ?? (o.marginValue ?? 0) * share(o)), 0)) : null,
     lateOrders: orders.filter((o) => o.isLate).length,

@@ -195,19 +195,32 @@ model TenantConfig {
   // TODO v2: replace single tenant-wide multiplier with per-region overrides (RegionDistanceConfig).
   // City centers (Muscat) typically need ~1.4-1.5, highway regions (Duqm) ~1.1-1.2.
   // v2 should auto-calibrate from ManualBaseline.manual_distance_km vs Haversine-estimated distance.
+  /// @deprecated Not read by the dispatch planner (estimated distances are always labelled). Hidden
+  /// from Settings since stabilization PR5; dropped in a later expand-then-contract release.
   labelEstimatedDistances     Boolean          @default(true)
   driverShiftMaxMinutes       Int              @default(540)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   returnToDepot               Boolean          @default(true)
   defaultServiceTimeMin       Int              @default(10)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   costPerKmDefault            Float            @default(0.15)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   fixedTruckCostPerDayDefault Float            @default(20)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   latePenaltyPerMin           Float            @default(0.5)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   underutilizationPenalty     Float            @default(0)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   solverTimeLimitSeconds      Int              @default(30)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   weightObjectiveTrucks       Float            @default(1000)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   weightObjectiveDistance     Float            @default(1)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   weightObjectiveCost         Float            @default(0)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   weightObjectiveBalance      Float            @default(0)
+  /// @deprecated Not read by the dispatch planner; hidden from Settings (stabilization PR5).
   weightObjectiveUtilization  Float            @default(0)
 
   // --- NMWC dispatch MVP (all times are minutes from local midnight) ---
@@ -696,6 +709,11 @@ model PlanLoad {
   /// turnaround / shift / depot hours): lib/dispatch/snapshots.ts. Null on loads planned before
   /// snapshots existed (the live truck is shown, labelled as such).
   truckSnapshotJson   Json?
+  /// The load's cost breakdown under the one cost model (review F17, apps/solver/costing.py: the
+  /// driver is paid for the whole truck day): fixed, trip, distance, fuel, driver share, overtime,
+  /// paid minutes, estimated legs (lib/dispatch/costs.ts). Null on loads costed the earlier way
+  /// (operatingCost then excludes depot turnaround, waiting and overtime).
+  costJson            Json?
   carriedFromLoadId   String? // the same physical load in the parent plan version
   statusChangedAt     DateTime?
   statusChangedById   String?

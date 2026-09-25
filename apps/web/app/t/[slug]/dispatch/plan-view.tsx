@@ -13,6 +13,7 @@ import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { TIMING_TEXT, timingRemedy } from '@/lib/dispatch/feasibility-view';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
+import { COST_BASIS_TEXT, kmLabelFor } from '@/lib/dispatch/costs';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 
@@ -212,7 +213,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
   // Replaced by a newer version: status SUPERSEDED, or supersededAt set (review F07).
   const superseded = isSupersededRun(d.run);
-  const kmLabel = s?.distanceIsEstimated ? 'Estimated km' : 'Road km';
+  // "Road km (3 legs estimated)" when some legs could not be routed on roads (review F18).
+  const kmLabel = kmLabelFor({ distanceIsEstimated: !!s?.distanceIsEstimated, estimatedLegs: s?.estimatedLegs, estimatedLoads: s?.estimatedLoads });
+  const kmShort = s?.distanceIsEstimated ? 'Estimated km' : 'Road km';
   // Every order is on a locked, loading or dispatched load: a re-plan would have nothing to plan.
   const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
@@ -372,10 +375,23 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <Kpi label="Cases planned" value={`${s.casesServed.toLocaleString()} / ${s.totalCases.toLocaleString()}`} />
           <Kpi label="Trucks · loads" value={`${s.trucksUsed} · ${s.trips}`} />
           <Kpi label={kmLabel} value={s.totalKm.toLocaleString()} />
-          <Kpi label="Planned hours" value={String(s.totalHours)} />
+          <Kpi
+            label="Hours on road · paid"
+            value={`${s.onRoadHours ?? s.totalHours} · ${s.driverPaidHours ?? '—'}`}
+            title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on."
+          />
           <Kpi label="Avg utilization" value={`${s.avgUtilizationPct}%`} />
           <Kpi label="Fuel (l · OMR)" value={`${s.fuelLitres ?? '—'} · ${s.fuelCost.toFixed(1)}`} />
-          <Kpi label="Operating cost OMR" value={s.operatingCost.toFixed(1)} />
+          <Kpi
+            label="Operating cost OMR"
+            value={`${s.operatingCost.toFixed(1)}${s.costBasis === 'MIXED_LEGACY' ? ' *' : ''}`}
+            title={
+              s.costs
+                ? `Fixed ${s.costs.fixed.toFixed(1)} + trip ${s.costs.trip.toFixed(1)} + distance ${s.costs.distance.toFixed(1)} + fuel ${s.costs.fuel.toFixed(1)} + driver ${s.costs.driver.toFixed(1)} + overtime ${s.costs.overtime.toFixed(1)}${s.costs.earlier ? ` + ${s.costs.earlier.toFixed(1)} costed the earlier way` : ''}. ${s.costBasis === 'MIXED_LEGACY' ? `* ${COST_BASIS_TEXT.MIXED_LEGACY}` : `Driver ${COST_BASIS_TEXT.TRUCK_DAY_SPAN}.`}`
+                : `* ${COST_BASIS_TEXT.MIXED_LEGACY}`
+            }
+            testId="kpi-operating-cost"
+          />
           {Object.entries(s.serviceByPriority).map(([p, v]) => (
             <Kpi key={p} label={`${p} service`} value={v.pct === null ? '—' : `${v.pct}% (${v.served}/${v.orders})`} warn={v.pct !== null && v.pct < 100 && (p === 'P1' || p === 'P2')} />
           ))}
@@ -412,8 +428,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2">Option</th>
                   <th className="p-2">Trucks</th>
                   <th className="p-2">Loads</th>
-                  <th className="p-2">{kmLabel}</th>
-                  <th className="p-2">Cost OMR</th>
+                  <th className="p-2">{kmShort}</th>
+                  <th className="p-2" title="The whole day with this option: the locked, loading and dispatched loads kept as they are, plus this option's new loads. Driver paid for the whole truck day, overtime included.">
+                    Day cost OMR
+                  </th>
                   <th className="p-2" title="Minutes outside customers' preferred hours, valued in OMR. Only the recommended plan tries to keep them low.">
                     Preferred-hours miss
                   </th>
@@ -431,8 +449,23 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2 font-medium">{sc.name === 'RECOMMENDED' ? 'RECOMMENDED' : sc.name.replace('_', ' ')}</td>
                     <td className="p-2">{sc.trucksUsed}</td>
                     <td className="p-2">{sc.trips}</td>
-                    <td className="p-2">{sc.totalKm}</td>
-                    <td className="p-2">{sc.operatingCost.toFixed(1)}</td>
+                    <td className="p-2">
+                      {sc.totalKm}
+                      {sc.estimatedLegs ? <span className="ml-1 text-xs text-amber-700" title="Legs that could not be routed on roads use straight-line estimates">({sc.estimatedLegs} est.)</span> : null}
+                    </td>
+                    <td className="p-2" data-testid={`day-cost-${sc.name}`}>
+                      {sc.dayOperatingCost.toFixed(1)}
+                      {Math.abs(sc.dayOperatingCost - sc.operatingCost) >= 0.05 ? (
+                        <span className="ml-1 text-xs text-muted-foreground" title="Cost of the new loads this option planned">
+                          (new {sc.operatingCost.toFixed(1)})
+                        </span>
+                      ) : null}
+                      {sc.costVersion ? null : (
+                        <span className="ml-1 text-xs text-muted-foreground" title={COST_BASIS_TEXT.MIXED_LEGACY}>
+                          *
+                        </span>
+                      )}
+                    </td>
                     <td className="p-2">{sc.objective ? sc.objective.window_penalty.toFixed(1) : '—'}</td>
                     <td className="p-2">{sc.unservedOrders}</td>
                     <td className="p-2 text-xs" data-testid={`timing-checked-${sc.name}`}>
@@ -504,7 +537,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <th className="p-2">Stops</th>
                 <th className="p-2">Cases / capacity</th>
                 <th className="p-2">Util.</th>
-                <th className="p-2">{kmLabel}</th>
+                <th className="p-2">{kmShort}</th>
                 <th className="p-2">Time</th>
                 <th className="p-2">Fuel l</th>
                 <th className="p-2">Cost</th>
@@ -581,7 +614,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.distanceKm}</td>
                     <td className="p-2">{durH(l.durationMin)}</td>
                     <td className="p-2">{l.fuelLitres ?? '—'}</td>
-                    <td className="p-2">{l.operatingCost.toFixed(1)}</td>
+                    <td
+                      className="p-2"
+                      title={
+                        l.cost
+                          ? `Fixed ${l.cost.fixed.toFixed(2)} + trip ${l.cost.trip.toFixed(2)} + distance ${l.cost.distance.toFixed(2)} + fuel ${l.cost.fuel.toFixed(2)} + driver ${l.cost.driver.toFixed(2)} (${durH(l.cost.driverPaidMin)} paid, from the truck's previous return) + overtime ${l.cost.overtime.toFixed(2)}`
+                          : COST_BASIS_TEXT.MIXED_LEGACY
+                      }
+                    >
+                      {l.operatingCost.toFixed(1)}
+                      {l.cost ? null : ' *'}
+                      {l.distanceIsEstimated && !s?.distanceIsEstimated ? (
+                        <span className="ml-1 text-xs text-amber-700" title="Some legs of this load use straight-line estimates">
+                          est. km
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
                       {!superseded ? (
                         <LoadActions
@@ -717,9 +765,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   );
 }
 
-function Kpi({ label, value, warn }: { label: string; value: string; warn?: boolean }) {
+function Kpi({ label, value, warn, title, testId }: { label: string; value: string; warn?: boolean; title?: string; testId?: string }) {
   return (
-    <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`}>
+    <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`} title={title} data-testid={testId}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-sm font-semibold">{value}</p>
     </div>

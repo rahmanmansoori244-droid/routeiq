@@ -24,6 +24,7 @@ import { noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
 import { fmtWindow, isoOf } from './time';
+import { readLoadCost, type LoadCostBreakdown } from './costs';
 
 export interface DetailStop {
   sequence: number;
@@ -96,6 +97,8 @@ export interface DetailLoad {
   fuelLitres: number | null;
   fuelCost: number;
   operatingCost: number;
+  /** The load's cost breakdown under the one cost model (review F17); null = costed the earlier way. */
+  cost: LoadCostBreakdown | null;
   returnLegKm: number;
   distanceIsEstimated: boolean;
   stops: DetailStop[];
@@ -152,7 +155,17 @@ export interface PlanDetail {
     trips: number;
     totalKm: number;
     totalDurationMin: number;
+    /** This option's NEW loads (what the optimizer planned). */
     operatingCost: number;
+    /**
+     * The whole day with this option: the locked, loading and dispatched loads it was planned around
+     * (their stored cost) + its new loads. What the plan in use's KPI shows (review F17).
+     */
+    dayOperatingCost: number;
+    /** The option was costed with the whole-day driver pay (cost_version 2). */
+    costVersion: number | null;
+    /** Legs planned on estimated distance (review F18); null from an older solver. */
+    estimatedLegs: number | null;
     avgUtilizationPct: number;
     unservedOrders: number;
     distanceIsEstimated: boolean;
@@ -334,6 +347,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       fuelLitres: l.fuelLitres,
       fuelCost: l.fuelCost,
       operatingCost: l.operatingCost,
+      cost: readLoadCost(l.costJson),
       returnLegKm: l.returnLegKm,
       distanceIsEstimated: l.distanceIsEstimated,
       stops: stopList,
@@ -430,6 +444,10 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     change: (run.changeSummaryJson as unknown as ChangeSummary) ?? null,
     scenarios: scenarios.map((s) => {
       const d = (s.detailsJson ?? {}) as unknown as Partial<ScenarioDetails>;
+      // The loads this option was planned around (frozen when it was optimized): the same for
+      // every option of the version, so each option's day total adds them to its new loads.
+      const frozenIds = new Set(d.scope?.frozenLoadIds ?? loads.filter((l) => isCarriedFrozen(l)).map((l) => l.id));
+      const frozenCost = loads.filter((l) => frozenIds.has(l.id)).reduce((a, l) => a + l.operatingCost, 0);
       return {
         id: s.id,
         name: s.name,
@@ -441,6 +459,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         totalKm: s.totalDistanceKm,
         totalDurationMin: s.totalTimeMin,
         operatingCost: s.totalCost,
+        dayOperatingCost: Math.round((frozenCost + s.totalCost) * 1000) / 1000,
+        costVersion: d.cost_version ?? null,
+        estimatedLegs: d.estimated_legs ?? null,
         avgUtilizationPct: s.avgUtilizationPct,
         unservedOrders: s.unservedCount,
         distanceIsEstimated: d.distance_is_estimated ?? true,

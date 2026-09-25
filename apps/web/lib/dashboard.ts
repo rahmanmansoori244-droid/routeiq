@@ -1,15 +1,19 @@
 /**
- * Dashboard KPIs and trend timeseries — CLAUDE.md §12 Phase 5.
+ * Dashboard KPIs and trend timeseries.
  *
- * KPIs use the "chosen scenario" of the plan in use for each date (LIVE_PLAN_IN_USE): READY or
- * DISPATCHED, or FAILED while it still holds an applied plan (a failed re-plan keeps the previous
- * plan, the one being dispatched), never a superseded version. Runs with no chosen scenario are
- * excluded from cost/trucks-used totals because the planner hasn't committed to a result yet.
+ * KPIs use the plan in use for each date (LIVE_PLAN_IN_USE): READY or DISPATCHED, or FAILED while
+ * it still holds an applied plan (a failed re-plan keeps the previous plan, the one being
+ * dispatched), never a superseded version. Runs with no applied plan are excluded from the totals.
  *
- * Late deliveries are a v2 placeholder — v1 doesn't enforce time windows.
+ * The figures come from the version's plan summary (RunPlan.summaryJson), which covers EVERY load
+ * of the version - the locked and dispatched loads a re-plan carried, not only the new loads of
+ * the option it chose (review: the dashboard understated re-planned days). Plans without a summary
+ * (made by the previous optimizer) fall back to their chosen option. Days are Asia/Muscat days
+ * (the tenant's timezone).
  */
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
+import { addDaysIso, DEFAULT_TZ, localDateIso } from './dispatch/time';
 
 /**
  * The plan versions the dashboard counts, as a SQL condition on "RunPlan" rp: the plan in use of
@@ -69,16 +73,6 @@ interface RawRunRow {
   cases_total: number | null;
 }
 
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
-function addDays(d: Date, days: number): Date {
-  const r = new Date(d);
-  r.setDate(r.getDate() + days);
-  return r;
-}
-
 function emptyStats(date: string): DayStats {
   return {
     date,
@@ -114,27 +108,28 @@ function rollupRows(rows: RawRunRow[], date: string): DayStats {
 }
 
 /**
- * Pull aggregated per-date stats over a window. Uses raw SQL so we don't have
- * to handle bigint conversions for COUNT(*) values from Prisma.
+ * Per-date stats over a window, one row per date summed over the depots' plans in use. Each plan
+ * contributes its summary (every load of the version); a plan without one (previous optimizer)
+ * its chosen option and the day's orders. Raw SQL so COUNT(*) bigints need no Prisma handling.
  */
 async function fetchRangeRows(tenantId: string, from: string, to: string): Promise<RawRunRow[]> {
   return prisma.$queryRaw<RawRunRow[]>`
     SELECT
       rp."runDate"::date::text AS date,
       COUNT(DISTINCT rp.id)::bigint AS run_count,
-      COALESCE(SUM(sr."trucksUsed"), 0)::bigint AS trucks_used,
-      COALESCE(SUM(sr."totalDistanceKm"), 0) AS distance_km,
-      COALESCE(SUM(sr."totalCost"), 0) AS cost,
-      AVG(sr."avgUtilizationPct") AS avg_util,
+      COALESCE(SUM(COALESCE((rp."summaryJson"->>'trucksUsed')::int, sr."trucksUsed")), 0)::bigint AS trucks_used,
+      COALESCE(SUM(COALESCE((rp."summaryJson"->>'totalKm')::float8, sr."totalDistanceKm")), 0) AS distance_km,
+      COALESCE(SUM(COALESCE((rp."summaryJson"->>'operatingCost')::float8, sr."totalCost")), 0) AS cost,
+      AVG(COALESCE((rp."summaryJson"->>'avgUtilizationPct')::float8, sr."avgUtilizationPct")) AS avg_util,
       COALESCE(SUM(rp."totalOrders"), 0)::bigint AS orders_total,
       COALESCE(SUM(rp."unservedCount"), 0)::bigint AS orders_unserved,
-      COALESCE(SUM(case_totals.total_cases), 0) AS cases_total
+      COALESCE(SUM(COALESCE((rp."summaryJson"->>'totalCases')::float8, case_totals.total_cases)), 0) AS cases_total
     FROM "RunPlan" rp
     LEFT JOIN "ScenarioResult" sr ON sr.id = rp."chosenScenarioId"
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(o."totalCases"), 0) AS total_cases
       FROM "Order" o
-      WHERE o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate"
+      WHERE o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate" AND (o."depotId" = rp."depotId" OR o."depotId" IS NULL)
     ) AS case_totals ON TRUE
     WHERE rp."tenantId" = ${tenantId}
       AND rp."runDate" BETWEEN ${from}::date AND ${to}::date
@@ -147,23 +142,16 @@ async function fetchRangeRows(tenantId: string, from: string, to: string): Promi
 export async function getDashboardData(tenantId: string): Promise<DashboardData> {
   const tenant = await prisma.tenant.findUniqueOrThrow({
     where: { id: tenantId },
-    select: { currency: true, config: { select: { distanceProvider: true, labelEstimatedDistances: true } } },
+    select: { currency: true, config: { select: { distanceProvider: true, timezone: true } } },
   });
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const yesterday = addDays(today, -1);
-  const last30From = addDays(today, -29);
-  const weekFrom = addDays(today, -6);
-  const previousWeekTo = addDays(weekFrom, -1);
-  const previousWeekFrom = addDays(previousWeekTo, -6);
-
-  const todayIso = isoDate(today);
-  const yesterdayIso = isoDate(yesterday);
-  const last30FromIso = isoDate(last30From);
-  const weekFromIso = isoDate(weekFrom);
-  const previousWeekFromIso = isoDate(previousWeekFrom);
-  const previousWeekToIso = isoDate(previousWeekTo);
+  // Delivery days are the tenant's local days (Asia/Muscat), never the server's.
+  const todayIso = localDateIso(new Date(), tenant.config?.timezone || DEFAULT_TZ);
+  const yesterdayIso = addDaysIso(todayIso, -1);
+  const last30FromIso = addDaysIso(todayIso, -29);
+  const weekFromIso = addDaysIso(todayIso, -6);
+  const previousWeekToIso = addDaysIso(weekFromIso, -1);
+  const previousWeekFromIso = addDaysIso(previousWeekToIso, -6);
 
   // "Estimated km" follows how the plans shown were computed (stored per plan), falling back to
   // the current setting only when there is no plan in the range.
@@ -175,8 +163,8 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
       AND rp."runDate" BETWEEN ${last30FromIso}::date AND ${todayIso}::date
       AND ${LIVE_PLAN_IN_USE}
   `;
-  const distanceIsEstimated =
-    (est[0]?.anyEstimated ?? tenant.config?.distanceProvider === 'HAVERSINE') && (tenant.config?.labelEstimatedDistances ?? true);
+  // Estimated distances are always labelled (the old "label estimated distances" switch is gone).
+  const distanceIsEstimated = est[0]?.anyEstimated ?? tenant.config?.distanceProvider === 'HAVERSINE';
 
   // Pull 30-day raw rows for the trend; derive today/yesterday/week/previous from the same set.
   const rangeRows = await fetchRangeRows(tenantId, previousWeekFromIso, todayIso);
@@ -193,7 +181,7 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
   const trendByDate = new Map(trendRows.map((r) => [r.date, r]));
   const trend: DashboardData['trend'] = [];
   for (let i = 29; i >= 0; i--) {
-    const d = isoDate(addDays(today, -i));
+    const d = addDaysIso(todayIso, -i);
     const row = trendByDate.get(d);
     if (row) {
       trend.push({
@@ -221,14 +209,16 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
   });
   const recentRuns: RecentRun[] = recentRunRows.map((r) => {
     const chosen = r.chosenScenarioId ? r.scenarios.find((s) => s.id === r.chosenScenarioId) : null;
+    // The whole version (carried loads included), else the chosen option.
+    const sum = r.summaryJson as { trucksUsed?: number; totalKm?: number } | null;
     return {
       id: r.id,
       runDate: r.runDate.toISOString().slice(0, 10),
       depotCode: r.depot.code,
       depotName: r.depot.name,
       status: r.status,
-      trucksUsed: chosen?.trucksUsed ?? null,
-      distanceKm: chosen?.totalDistanceKm ?? null,
+      trucksUsed: typeof sum?.trucksUsed === 'number' ? sum.trucksUsed : (chosen?.trucksUsed ?? null),
+      distanceKm: typeof sum?.totalKm === 'number' ? sum.totalKm : (chosen?.totalDistanceKm ?? null),
       unservedCount: r.unservedCount,
       totalOrders: r.totalOrders,
       createdAt: r.createdAt.toISOString(),
