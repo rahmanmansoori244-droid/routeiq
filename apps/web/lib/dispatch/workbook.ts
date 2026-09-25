@@ -12,6 +12,7 @@ import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
+import { KG_ROUNDING_TOL } from './weights';
 
 export interface WorkbookMeta {
   tenantName: string;
@@ -37,13 +38,22 @@ function timesNotVerified(d: PlanDetail, l?: DetailLoad): boolean {
   return !!d.feasibility && !d.feasibility.ok;
 }
 
-/** "OK" / "OVER PAYLOAD" / "MISMATCH ..." for a load's kg: its stops add up to it and it fits the payload. */
+/**
+ * "OK" / "OVER PAYLOAD" / "MISMATCH ..." for a load's kg: its stops add up to it and it fits the
+ * payload - with the same rounding tolerance as the dispatch check (KG_ROUNDING_TOL), so a load the
+ * optimizer filled to its payload never reads "OVER PAYLOAD by 0 kg". Cases planned at 0 kg whose
+ * product has a case weight now can make the load over its payload (the check's CAPACITY_KG_NEW_WEIGHT).
+ */
 export function kgCheck(d: PlanDetail, l: DetailLoad): string {
   const stopsKg = Math.round(sum(l.stops.map((s) => s.weightKg)) * 10) / 10;
   const out: string[] = [];
-  if (Math.abs(stopsKg - l.weightKg) > 0.5) out.push(`MISMATCH: stops add up to ${stopsKg} kg`);
-  if (l.truckPayloadKg > 0 && l.weightKg > l.truckPayloadKg + 0.05) out.push(`OVER PAYLOAD by ${Math.round(l.weightKg - l.truckPayloadKg)} kg`);
-  if (d.feasibility?.violations.some((v) => v.loadId === l.id && v.code === 'KG_UNKNOWN')) out.push('SOME CASES HAVE NO WEIGHT');
+  const mine = d.feasibility?.violations.filter((v) => v.loadId === l.id) ?? [];
+  if (Math.abs(stopsKg - l.weightKg) > KG_ROUNDING_TOL) out.push(`MISMATCH: stops add up to ${stopsKg} kg`);
+  const over = l.truckPayloadKg > 0 && l.weightKg > l.truckPayloadKg + KG_ROUNDING_TOL;
+  if (over) out.push(`OVER PAYLOAD by ${Math.round(l.weightKg - l.truckPayloadKg)} kg`);
+  const later = mine.find((v) => v.code === 'CAPACITY_KG_NEW_WEIGHT');
+  if (!over && later) out.push(`OVER PAYLOAD at the case weights entered since planning${later.shortBy ? ` (by about ${Math.round(later.shortBy)} kg)` : ''}`);
+  if (mine.some((v) => v.code === 'KG_UNKNOWN') || later) out.push('SOME CASES HAVE NO WEIGHT');
   if (out.length) return out.join('; ');
   return l.truckPayloadKg > 0 ? 'OK' : 'OK (no payload set)';
 }
@@ -708,22 +718,31 @@ export interface AssumptionConfig {
   osrmUrl?: string | null;
   /** Whether the tenant set its own OSRM server (the address itself is not kept with plans). */
   osrmConfigured?: boolean;
+  /** Stored with a plan (PlanSettings): the routing decision made when it was built. */
+  outsideCoverage?: boolean;
   priorityWeightsJson?: unknown;
 }
 
+/**
+ * The ASSUMPTIONS rows. Everything comes from `cfg` (the settings stored with the plan, or today's
+ * for a plan from before they were stored) and from the plan itself (`providerUsed`,
+ * `distanceIsEstimated`) - never from the web server's environment: the web's OSRM_URL only draws
+ * the legacy Map tab and says nothing about how a plan was routed (the solver has its own).
+ */
 export function tenantAssumptions(
   cfg: AssumptionConfig | null,
   opts: {
     currency: string;
     providerUsed: string | null;
     distanceIsEstimated: boolean | null;
-    osrmEnvConfigured: boolean;
-    /** Tenant outside the shared OSRM map (Oman + UAE) without its own OSRM: planned on straight lines. */
+    /** Tenant outside the shared OSRM map (Oman + UAE) without its own OSRM: planned on straight
+     * lines. Used only when `cfg` does not carry it (today's settings, or settings stored before it was kept). */
     outsideCoverage?: boolean;
   },
 ): Record<string, string> {
   if (!cfg) return { 'Tenant configuration': 'not set - system defaults were used' };
   const cur = opts.currency;
+  const outsideCoverage = cfg.outsideCoverage ?? opts.outsideCoverage ?? false;
   const out: Record<string, string> = {
     Timezone: cfg.timezone,
     'Planning cutoff (day before delivery)': `${fmtHhmm(cfg.planningCutoffMin)} - orders received later are LATE`,
@@ -743,15 +762,11 @@ export function tenantAssumptions(
     'Distance provider (configured)':
       cfg.distanceProvider === 'HAVERSINE'
         ? 'HAVERSINE (estimated distances)'
-        : opts.outsideCoverage
+        : outsideCoverage
           ? `${cfg.distanceProvider} configured - straight-line estimates used (outside the Oman + UAE routing map)`
           : `${cfg.distanceProvider} (the dispatch planner uses OSRM road distances)`,
     'Distance provider (this plan)': `${opts.providerUsed ?? 'unknown'}${opts.distanceIsEstimated ? ' - ESTIMATED distances' : ''}`,
-    'OSRM server configured': (cfg.osrmConfigured ?? !!cfg.osrmUrl)
-      ? 'yes (tenant setting)'
-      : opts.osrmEnvConfigured
-        ? 'yes (OSRM_URL environment)'
-        : 'no tenant setting (the solver uses its own OSRM_URL if set)',
+    'OSRM server configured': (cfg.osrmConfigured ?? !!cfg.osrmUrl) ? 'yes (tenant setting)' : 'no tenant setting (the solver uses its own OSRM_URL if set)',
   };
   if (cfg.distanceProvider === 'HAVERSINE' || opts.distanceIsEstimated) {
     out['Estimated-distance multiplier'] = `x${cfg.distanceMultiplier} on straight-line distance`;

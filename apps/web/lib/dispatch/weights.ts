@@ -45,6 +45,14 @@ export interface OrderWeightChange {
 
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
+/**
+ * The one tolerance for comparing a load's stored kg (a sum of order and portion kg, each kept to
+ * 0.1 kg) with a payload or with the optimizer's own kg: applyScenario's kg cross-check, the
+ * dispatch check's CAPACITY_KG (feasibility.ts) and the workbook's Kg check. Rounding can never
+ * block a load the optimizer filled to its payload; a real overload is always far above it.
+ */
+export const KG_ROUNDING_TOL = 0.5;
+
 /** Tolerance used when comparing an order's kg with the sum of its lines' kg (float sums). */
 export function kgTolerance(totalKg: number): number {
   return 0.5 + 0.001 * Math.abs(totalKg);

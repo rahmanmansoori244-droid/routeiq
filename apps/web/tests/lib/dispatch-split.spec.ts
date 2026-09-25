@@ -12,6 +12,7 @@ import {
   portionId,
   portionMoney,
   portionsOfPart,
+  readPortionLineKg,
   readPortionLines,
   rowLines,
   splitIntoParts,
@@ -205,6 +206,59 @@ describe('partDemandKg', () => {
         expect(partDemandKg(part, kgPerCase)).toBeLessThanOrEqual(capKg);
       }
     }
+  });
+});
+
+describe('stored part kg add up to the kg the optimizer was sent (stabilization PR4 review)', () => {
+  const sumKg = (xs: { weightKg: number }[]) => Math.round(xs.reduce((a, x) => a + x.weightKg, 0) * 10) / 10;
+
+  it('12.35 kg cases on a 9880 kg payload (800 cases): every 2-line and 2-order split stores exactly 9880.0 kg', () => {
+    let checked = 0;
+    for (let a = 1; a < 800; a++) {
+      for (const orderB of ['O1', 'O2']) {
+        const lines = [L('la', 'O1', a, 12.35), L('lb', orderB, 800 - a + 50, 12.35)];
+        const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase]));
+        const [part] = splitIntoParts(lines, { cases: 2000, kg: 9880 });
+        expect(casesIn(part)).toBe(800);
+        const demand = partDemandKg(part, kgPerCase);
+        expect(demand).toBe(9880);
+        expect(sumKg(part)).toBe(demand); // the allocations
+        expect(sumKg(portionsOfPart(part, 1, 2))).toBe(demand); // what RouteAssignment.portionWeightKg holds
+        checked++;
+      }
+    }
+    expect(checked).toBe(1598);
+  });
+
+  it('each allocation is its exact kg rounded down or up to 0.1 kg, never negative (property)', () => {
+    let seed = 11;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    for (let run = 0; run < 300; run++) {
+      const lines: OpenLine[] = Array.from({ length: 1 + Math.floor(rnd() * 6) }, (_, i) =>
+        L(`l${i}`, `O${i % 3}`, 1 + Math.floor(rnd() * 300), Math.round(rnd() * 30 * 1000) / 1000),
+      );
+      const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase]));
+      for (const part of splitIntoParts(lines, { cases: 400, kg: Math.floor(500 + rnd() * 4000) })) {
+        expect(sumKg(part)).toBe(partDemandKg(part, kgPerCase));
+        expect(sumKg(portionsOfPart(part, 1, 1))).toBe(partDemandKg(part, kgPerCase));
+        for (const x of part) {
+          const exact = x.cases * kgPerCase.get(x.lineId)!;
+          expect(x.weightKg).toBeGreaterThanOrEqual(0);
+          expect(Math.abs(x.weightKg - exact)).toBeLessThan(0.1 + 1e-9);
+        }
+      }
+    }
+  });
+
+  it('portion lines keep the case weight they were planned with (0 = no weight)', () => {
+    const lines = [L('a', 'O1', 150, 0), L('b', 'O1', 30, 12)];
+    const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase]));
+    const [p1] = splitIntoParts(lines, { cases: 100, kg: null });
+    expect(portionsOfPart(p1, 1, 2, kgPerCase)[0].lines).toEqual([{ lineId: 'a', cases: 100, kgPerCase: 0 }]);
+    expect(readPortionLineKg([{ lineId: 'a', cases: 100, kgPerCase: 0 }, { lineId: 'b', cases: 5, kgPerCase: 12 }])).toEqual(new Map([['a', 0], ['b', 12]]));
+    // Stored before the case weight was kept: unknown, never guessed.
+    expect(readPortionLineKg([{ lineId: 'a', cases: 100 }])).toBeNull();
+    expect(readPortionLines([{ lineId: 'a', cases: 100, kgPerCase: 0 }])).toEqual([{ lineId: 'a', cases: 100 }]);
   });
 });
 

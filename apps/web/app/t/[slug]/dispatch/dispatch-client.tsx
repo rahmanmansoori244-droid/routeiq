@@ -54,7 +54,7 @@ interface Day {
   /** Lines whose product's case weight was entered or corrected since: applied at the next optimize. */
   weightsToApply?: WeightGap[];
   /** The plan in use is out of date without a new order: weights changed, customers deactivated. */
-  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number };
+  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number };
   plan: null | {
     id: string;
     version: number;
@@ -287,8 +287,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0 };
-  const planOutdated = !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0 || (outdated.masterChanged ?? 0) > 0);
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
+  const planOutdated =
+    !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0 || (outdated.masterChanged ?? 0) > 0 || (outdated.trucksChanged ?? 0) > 0);
   // Every order is already on a locked, loading or dispatched load: OPTIMIZE / RE-PLAN would have
   // nothing to plan (the server answers 409 NOTHING_TO_PLAN), so the button is off (review F03).
   const nothingLeft = day.orders.count > 0 && day.openOrders === 0 && day.pending.count === 0;
@@ -448,6 +449,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               outdated.weightCases ? `case weights were entered or corrected for ${outdated.weightCases.toLocaleString()} of its cases` : '',
               outdated.inactiveOrders ? `${outdated.inactiveOrders} of its order(s) on planned loads had their customer deactivated` : '',
               outdated.masterChanged ? `the location or receiving hours of ${outdated.masterChanged} customer(s) on planned loads were changed (master data changed since optimization)` : '',
+              outdated.trucksChanged ? `the capacity or payload of ${outdated.trucksChanged} truck(s) with planned loads was changed` : '',
             ]
               .filter(Boolean)
               .join(', and ')}

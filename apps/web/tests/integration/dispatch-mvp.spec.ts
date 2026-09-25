@@ -465,6 +465,28 @@ describe('frozen plan facts (review F08)', () => {
     expect(day.outdated.masterChanged).toBeGreaterThanOrEqual(1);
   });
 
+  it('27d (PR4 review) a payload corrected on a truck with PLANNED loads asks for a re-plan; access notes print as they are now', async () => {
+    const p = await plan(runV2);
+    const plannedLoad = p.loads.find((l: any) => l.status === 'PLANNED' && l.truckSnapshot);
+    if (plannedLoad) {
+      // Raised, so the rest of the suite still fits: any capacity or payload change counts.
+      const truck = await prisma.truck.findUniqueOrThrow({ where: { id: plannedLoad.truckId } });
+      expect((await patch(`${BASE}/api/trucks/${plannedLoad.truckId}`, { capacityWeightKg: truck.capacityWeightKg + 100 })).status).toBe(200);
+      const day = (await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/day?date=${deliveryDate}&depotId=${depotId}`))).data;
+      expect(day.outdated.trucksChanged).toBeGreaterThanOrEqual(1);
+    }
+    // Access notes are contact details: a correction reaches the locked load's stop (and its sheet) at once.
+    const locked = p.loads.find((l: any) => l.id === lockedId);
+    const s = locked.stops[0];
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { accessNotes: 'Rear gate after 14:00 - call 9123 4567' })).status).toBe(200);
+    const after = await plan(runV2);
+    const st = after.loads.find((l: any) => l.id === lockedId).stops.find((x: any) => x.customerId === s.customerId);
+    expect(st.accessNotes).toBe('Rear gate after 14:00 - call 9123 4567');
+    expect(st.masterChanged.some((c: any) => c.kind !== 'LOCATION' && c.kind !== 'HOURS')).toBe(false);
+    const sheet = driverPackModel(after, { tenantName: 'NMWC', loadIds: [lockedId] }).sheets[0].stops.find((x) => x.customerCode === st.customerCode)!;
+    expect(sheet.accessNotes).toBe('Rear gate after 14:00 - call 9123 4567');
+  });
+
   it('28 a re-plan keeps identical snapshots on the carried assignments and loads', async () => {
     const before = await prisma.routeAssignment.findMany({ where: { loadId: lockedId }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
     const beforeLoad = await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedId } });

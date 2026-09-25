@@ -7,9 +7,11 @@
  * plan's own facts - the load and stop snapshots and the optimizer inputs - never from today's
  * master data:
  * - cases per load (from its stops) vs the truck's capacity;
- * - physical kg per load (a split portion's own kg, else the order's) vs the payload; lines
- *   with no weight (0 kg) are reported as KG_UNKNOWN (a warning: the dispatcher accepted them
- *   explicitly at optimize, review F02);
+ * - physical kg per load (a split portion's own kg, else the order's) vs the payload, with one
+ *   rounding tolerance (KG_ROUNDING_TOL); cases PLANNED at 0 kg (no weight when the plan was
+ *   made, read from the plan's rows) are reported as KG_UNKNOWN (a warning: the dispatcher
+ *   accepted them explicitly at optimize, review F02) - unless a case weight entered since shows
+ *   the load is over its payload, which blocks like any overload (CAPACITY_KG_NEW_WEIGHT);
  * - service starts inside the hard receiving window, and the stored "within hours" flag;
  * - turnaround: each load leaves after the previous load's return + reload + loading time per
  *   case x its cases (the rules the later load was planned with);
@@ -25,21 +27,27 @@
  * A problem on a load that has already left (DISPATCHED / COMPLETED) is history: it is reported
  * as a warning, never blocks, so it can never lock the truck's later loads for good. A turnaround
  * problem belongs to the LATER load (the one that leaves too early), which a re-plan can move.
+ * A problem on a LOCKED or LOADING load is flagged `frozen`: a re-plan carries that load over
+ * unchanged, so the remedy is to put it back to Planned first (timingRemedy, feasibility-view.ts).
+ * A truck whose capacity or payload was lowered since planning, below what a load not yet out
+ * carries, is a warning (CAPACITY_CHANGED): the load keeps the truck it was planned with.
  *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
  */
 import { createHash } from 'node:crypto';
 import type { FeasibilityReport } from '@routeiq/shared-types';
-import type { PlanRules } from './snapshots';
+import { usableWindow, type PlanRules } from './snapshots';
+import { KG_ROUNDING_TOL } from './weights';
 
 export const FEASIBILITY_VERSION = 1;
 export const TOL_MIN = 1;
-const KG_TOL = 0.05;
+const KG_TOL = KG_ROUNDING_TOL;
 
 export type WebViolationCode =
   | 'CAPACITY_CASES'
   | 'CAPACITY_KG'
+  | 'CAPACITY_KG_NEW_WEIGHT'
   | 'KG_UNKNOWN'
   | 'HARD_WINDOW'
   | 'STOP_TIMES'
@@ -49,6 +57,7 @@ export type WebViolationCode =
   | 'TRUCK_AVAILABILITY'
   | 'SHIFT_LIMIT'
   | 'TRIPS'
+  | 'CAPACITY_CHANGED'
   | 'SOLVER';
 
 export interface PlanViolation {
@@ -62,6 +71,8 @@ export interface PlanViolation {
   loadNo: number | null;
   message: string;
   shortBy?: number | null;
+  /** On a LOCKED or LOADING load: a re-plan keeps it as it is, so it must be put back to Planned first. */
+  frozen?: boolean;
 }
 
 export type TruckTiming = 'VERIFIED' | 'VIOLATED' | 'UNVERIFIED' | 'STRUCTURAL_ONLY';
@@ -88,8 +99,10 @@ export interface FeasStop {
   label: string;
   cases: number;
   kg: number;
-  /** Some of these cases have no weight (0 kg). */
+  /** Some of these cases were planned with no weight (counted as 0 kg in `kg`). */
   kgUnknown: boolean;
+  /** What the cases planned at 0 kg weigh at the product's case weight now (0 / absent: still no weight). */
+  unknownKgNow?: number;
   etaMin: number | null;
   serviceStartMin: number | null;
   departureMin: number | null;
@@ -106,12 +119,16 @@ export interface FeasLoad {
   loadNo: number;
   /** DISPATCHED / COMPLETED: its problems are history (warnings, never blocking). */
   onRoad: boolean;
+  /** LOCKED / LOADING: a re-plan carries it over unchanged (its violations are flagged `frozen`). */
+  frozen?: boolean;
   departMin: number;
   returnMin: number;
   cases: number;
   weightKg: number;
   /** The truck the load was planned on (snapshot, else the optimizer request); null = not known. */
   capacity: { cases: number; kg: number } | null;
+  /** The truck's capacity in the master now (only for the CAPACITY_CHANGED warning); absent = not known. */
+  capacityNow?: { cases: number; kg: number } | null;
   /** The rules the load was timed with; null = not known (no turnaround / shift check). */
   rules: PlanRules | null;
   stops: FeasStop[];
@@ -135,10 +152,11 @@ export function inputHash(input: FeasibilityInput): string {
     .sort((a, b) => a.id.localeCompare(b.id))
     .map((l) => [
       l.id, l.truckId, l.loadNo, l.onRoad, l.departMin, l.returnMin, l.cases, r1(l.weightKg), l.capacity?.cases ?? null, l.capacity?.kg ?? null,
+      l.capacityNow?.cases ?? null, l.capacityNow?.kg ?? null,
       l.rules ? [l.rules.shiftStartMin, l.rules.shiftMaxMin, l.rules.reloadMin, l.rules.loadingMinPerCase, l.rules.maxTrips, l.rules.depotOpenMin, l.rules.depotCloseMin, l.rules.availableFromMin, l.rules.availableToMin] : null,
       [...l.stops]
         .sort((a, b) => a.sequence - b.sequence || a.orderId.localeCompare(b.orderId))
-        .map((s) => [s.orderId, s.sequence, s.cases, r1(s.kg), s.kgUnknown, s.etaMin, s.serviceStartMin, s.departureMin, s.hardWindowOk, s.hardStartMin ?? null, s.hardEndMin ?? null]),
+        .map((s) => [s.orderId, s.sequence, s.cases, r1(s.kg), s.kgUnknown, r1(s.unknownKgNow ?? 0), s.etaMin, s.serviceStartMin, s.departureMin, s.hardWindowOk, s.hardStartMin ?? null, s.hardEndMin ?? null]),
     ]);
   const solver = input.solver ? [input.solver.status, input.solver.timing, input.solver.violations.map((v) => [v.code, v.truck_id ?? null, v.load_no ?? null])] : null;
   return createHash('sha256').update(JSON.stringify({ v: FEASIBILITY_VERSION, s: input.scenarioId, solver, loads })).digest('hex');
@@ -151,12 +169,14 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
   for (const l of input.loads) byTruck.set(l.truckId, [...(byTruck.get(l.truckId) ?? []), l]);
   const codeOf = new Map(input.loads.map((l) => [l.truckId, l.truckCode]));
   const onRoad = new Set(input.loads.filter((l) => l.onRoad).map((l) => l.id));
+  const frozen = new Set(input.loads.filter((l) => l.frozen && !l.onRoad).map((l) => l.id));
   const history = ' (the load has already left: shown for the record, it does not block)';
+  const frozenMark = (loadId: string | null) => (loadId && frozen.has(loadId) ? { frozen: true } : {});
   const v = (x: Omit<PlanViolation, 'source' | 'severity'> & { severity?: PlanViolation['severity'] }) =>
     out.push(
       x.loadId && onRoad.has(x.loadId) && (x.severity ?? 'BLOCK') === 'BLOCK'
         ? { source: 'WEB', ...x, severity: 'WARN', message: x.message + history }
-        : { severity: 'BLOCK', source: 'WEB', ...x },
+        : { severity: 'BLOCK', source: 'WEB', ...x, ...frozenMark(x.loadId) },
     );
 
   for (const [truckId, list] of byTruck) {
@@ -170,23 +190,58 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         if (cases > l.capacity.cases) {
           v({ ...at(l), code: 'CAPACITY_CASES', message: `${code} load ${l.loadNo} carries ${cases} cases; the truck takes ${l.capacity.cases}.`, shortBy: cases - l.capacity.cases });
         }
-        if (l.capacity.kg > 0 && kg > l.capacity.kg + KG_TOL) {
+        const overPlanned = l.capacity.kg > 0 && kg > l.capacity.kg + KG_TOL;
+        if (overPlanned) {
           v({ ...at(l), code: 'CAPACITY_KG', message: `${code} load ${l.loadNo} weighs ${Math.round(kg)} kg; the truck's payload is ${Math.round(l.capacity.kg)} kg.`, shortBy: r1(kg - l.capacity.kg) });
         }
         const unknown = l.stops.filter((s) => s.kgUnknown);
         if (l.capacity.kg > 0 && unknown.length) {
+          // Cases planned at 0 kg whose product has a case weight now: what the load really weighs.
+          const laterKg = r1(unknown.reduce((a, s) => a + (s.unknownKgNow ?? 0), 0));
+          const withLater = r1(kg + laterKg);
+          const names = `${unknown.map((s) => s.label).slice(0, 3).join(', ')}${unknown.length > 3 ? ', ...' : ''}`;
+          if (laterKg > 0 && !overPlanned && withLater > l.capacity.kg + KG_TOL) {
+            v({
+              ...at(l),
+              code: 'CAPACITY_KG_NEW_WEIGHT',
+              message: `${code} load ${l.loadNo} was planned with cases that had no weight (counted as 0 kg: ${names}); with the case weight entered under Products since, it weighs about ${Math.round(withLater)} kg - over the truck's payload of ${Math.round(l.capacity.kg)} kg.`,
+              shortBy: r1(withLater - l.capacity.kg),
+            });
+          } else {
+            v({
+              ...at(l),
+              severity: 'WARN',
+              code: 'KG_UNKNOWN',
+              message:
+                `${code} load ${l.loadNo}: ${unknown.length} stop(s) have cases planned with no weight (counted as 0 kg: ${names}), so the payload of ${Math.round(l.capacity.kg)} kg is not fully checked.` +
+                (laterKg > 0 ? ` With the case weight entered under Products since, the load weighs about ${Math.round(withLater)} kg.` : ''),
+            });
+          }
+        }
+      }
+      // The truck was corrected in the master after planning and the load (not out yet) no longer
+      // fits it: the load keeps the truck it was planned with, so this is shown, not blocked.
+      const now = l.capacityNow;
+      if (now && !l.onRoad && l.capacity && (now.cases !== l.capacity.cases || Math.abs(now.kg - l.capacity.kg) > 0.05)) {
+        const overCases = now.cases > 0 && cases > now.cases;
+        const overKg = now.kg > 0 && kg > now.kg + KG_TOL;
+        if (overCases || overKg) {
           v({
             ...at(l),
             severity: 'WARN',
-            code: 'KG_UNKNOWN',
-            message: `${code} load ${l.loadNo}: ${unknown.length} stop(s) have cases with no weight (counted as 0 kg: ${unknown.map((s) => s.label).slice(0, 3).join(', ')}${unknown.length > 3 ? ', ...' : ''}), so the payload of ${Math.round(l.capacity.kg)} kg is not fully checked.`,
+            code: 'CAPACITY_CHANGED',
+            message:
+              `${code} load ${l.loadNo} carries ${cases} cases / ${Math.round(kg)} kg, but the truck was changed to ${now.cases} cases / ${now.kg > 0 ? `${Math.round(now.kg)} kg` : 'no payload set'} after planning (planned with ${l.capacity.cases} cases / ${l.capacity.kg > 0 ? `${Math.round(l.capacity.kg)} kg` : 'no payload set'}). ` +
+              (l.frozen ? 'Put the load back to Planned and re-plan to use the new capacity.' : 'Re-plan to use the new capacity.'),
           });
         }
       }
       for (const s of l.stops) {
         const start = s.serviceStartMin;
-        const hs = s.hardStartMin;
-        const he = s.hardEndMin;
+        // A window planned inverted (end before start) was sent as "any time" (usableWindow).
+        const planned = s.hardStartMin === undefined && s.hardEndMin === undefined ? null : usableWindow(s.hardStartMin ?? null, s.hardEndMin ?? null);
+        const hs = planned ? planned.start : undefined;
+        const he = planned ? planned.end : undefined;
         const outside =
           s.hardWindowOk === false ||
           (start !== null && ((hs !== undefined && hs !== null && start < hs) || (he !== undefined && he !== null && start > he)));
@@ -278,6 +333,7 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       loadNo: sv.load_no ?? null,
       message: past ? sv.message + history : sv.message,
       shortBy: sv.short_by_min ?? null,
+      ...(past ? {} : frozenMark(load?.id ?? null)),
     });
   }
 
@@ -329,4 +385,4 @@ export function feasibilityGateMode(env: Record<string, string | undefined> = pr
   return (env.FEASIBILITY_GATE ?? '').trim().toLowerCase() === 'warn' ? 'warn' : 'enforce';
 }
 
-export { truckDayOk, truckViolations, TIMING_TEXT } from './feasibility-view';
+export { truckDayOk, truckViolations, timingRemedy, REPLAN_REMEDY, TIMING_TEXT } from './feasibility-view';

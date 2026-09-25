@@ -13,6 +13,10 @@
  *   with (turnaround, shift, depot hours, trips).
  * Rows made before the snapshots existed hold null: the live master data is shown, labelled as
  * such (snapshot: false), and nothing can be said about changes since.
+ *
+ * Contact details stay live, like the driver's name and phone: the customer's access notes (gate,
+ * forklift, receiver phone) are printed as they are now - they do not change the timetable, and a
+ * correction must reach the driver. The snapshot keeps the notes the plan was made with, for the record.
  */
 import type { DispatchConfig } from '@routeiq/shared-types';
 
@@ -82,6 +86,9 @@ export interface PlanSettings {
   avgSpeedKmh: number;
   defaultServiceTimeMin: number;
   osrmConfigured: boolean;
+  /** The tenant is outside the shared OSRM map (Oman + UAE) and has no OSRM of its own, so the plan
+   * was built on straight-line estimates. Absent on settings stored before it was kept. */
+  outsideCoverage?: boolean;
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */
@@ -188,6 +195,17 @@ const hhmm = (m: number | null) => (m === null ? '--:--' : `${String(Math.floor(
 const win = (s: number | null, e: number | null) => (s === null && e === null ? 'any time' : `${hhmm(s)}–${hhmm(e)}`);
 const norm = (s: string | null | undefined) => (s ?? '').trim().replace(/\s+/g, ' ');
 
+/**
+ * A window ending before it starts cannot be planned (the solver would reject the whole day):
+ * buildDispatchRequest drops it for the plan (null / null, with a "Time window ignored" warning).
+ * The same rule is applied wherever a window is compared with what was planned, so such legacy
+ * data never reads as "changed after planning" or as a missed window.
+ */
+export function usableWindow(start: number | null, end: number | null): { start: number | null; end: number | null; ok: boolean } {
+  if (start != null && end != null && end < start) return { start: null, end: null, ok: false };
+  return { start, end, ok: true };
+}
+
 /** The customer as it is now (effective receiving hours: own, else type, else default). */
 export interface LiveStopFacts {
   name: string;
@@ -200,9 +218,20 @@ export interface LiveStopFacts {
   prefEndMin: number | null;
 }
 
-/** What changed in the customer master since the stop was planned (empty = nothing that matters). */
-export function stopMasterChanges(snap: StopSnapshot, live: LiveStopFacts): MasterChange[] {
+/**
+ * What changed in the customer master since the stop was planned (empty = nothing that matters).
+ * Both sides' windows go through usableWindow first: an inverted window was planned as "any time",
+ * so the same inverted window today is no change (it would otherwise keep the day out of date
+ * after every re-plan).
+ */
+export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): MasterChange[] {
   const out: MasterChange[] = [];
+  const hardThenW = usableWindow(snapIn.hardStartMin, snapIn.hardEndMin);
+  const prefThenW = usableWindow(snapIn.prefStartMin, snapIn.prefEndMin);
+  const hardNowW = usableWindow(liveIn.hardStartMin, liveIn.hardEndMin);
+  const prefNowW = usableWindow(liveIn.prefStartMin, liveIn.prefEndMin);
+  const snap = { ...snapIn, hardStartMin: hardThenW.start, hardEndMin: hardThenW.end, prefStartMin: prefThenW.start, prefEndMin: prefThenW.end };
+  const live = { ...liveIn, hardStartMin: hardNowW.start, hardEndMin: hardNowW.end, prefStartMin: prefNowW.start, prefEndMin: prefNowW.end };
   if (live.lat !== null && live.lng !== null) {
     if (snap.lat === null || snap.lng === null) {
       out.push({ kind: 'LOCATION', text: `Location added after planning: pin ${live.lat.toFixed(5)}, ${live.lng.toFixed(5)}`, newLat: live.lat, newLng: live.lng, movedM: null });
@@ -234,6 +263,30 @@ export function stopMasterChanges(snap: StopSnapshot, live: LiveStopFacts): Mast
     out.push({ kind: 'ADDRESS', text: live.address ? `Address changed after planning: now "${norm(live.address)}"` : 'Address removed after planning.' });
   }
   return out;
+}
+
+/**
+ * Why the plan in use is out of date on its PLANNED loads because master data was corrected since
+ * it was made (the day screen's "out of date, RE-PLAN", review F08): customers whose pin or
+ * receiving hours changed, and trucks whose capacity or payload changed. Rows without a snapshot
+ * (planned before snapshots existed) say nothing.
+ */
+export function plannedLoadsMasterChanged(
+  stops: { customerId: string; stopSnapshotJson: unknown; live: LiveStopFacts }[],
+  loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number } | null }[],
+): { customers: number; trucks: number } {
+  const customers = new Set<string>();
+  for (const s of stops) {
+    const snap = readStopSnapshot(s.stopSnapshotJson);
+    if (!snap || customers.has(s.customerId)) continue;
+    if (stopMasterChanges(snap, s.live).some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) customers.add(s.customerId);
+  }
+  const trucks = new Set<string>();
+  for (const l of loads) {
+    const snap = readTruckSnapshot(l.truckSnapshotJson);
+    if (snap && l.live && truckMasterChanges(snap, l.live).length) trucks.add(l.truckId);
+  }
+  return { customers: customers.size, trucks: trucks.size };
 }
 
 /** What changed on the truck since the load was planned (capacity / payload only). */

@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
-import { TIMING_TEXT } from '@/lib/dispatch/feasibility-view';
+import { TIMING_TEXT, timingRemedy } from '@/lib/dispatch/feasibility-view';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
@@ -217,11 +217,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
-  // rule cannot be locked, loaded or dispatched; the remedy is Re-plan.
+  // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
+  // LOCKED or LOADING load, which a re-plan carries over unchanged: that load goes back to Planned first.
   const feas = d.feasibility ?? null;
   const gateOn = (d.feasibilityGate ?? 'enforce') === 'enforce';
   const blockingViolations = feas ? feas.violations.filter((v) => v.severity === 'BLOCK') : [];
   const timingWarnings = feas ? feas.violations.filter((v) => v.severity === 'WARN') : [];
+  const remedy = timingRemedy(blockingViolations);
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -300,19 +302,31 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             <AlertTriangle className="h-4 w-4 shrink-0" />
             Times not verified:{' '}
             {gateOn
-              ? 'the trucks below cannot be locked, loaded or dispatched until the day is re-planned.'
+              ? 'the trucks below cannot be locked, loaded or dispatched until this is fixed.'
               : 'the check is switched to warn only (FEASIBILITY_GATE=warn), so these trucks can still be dispatched - check each time with the drivers.'}
           </p>
           {blockingViolations.slice(0, 8).map((v, i) => (
             <p key={`${v.code}-${v.loadId ?? v.truckId ?? ''}-${i}`} className="text-red-800">
               <b>{v.truckCode ?? 'Plan'}{v.loadNo ? ` L${v.loadNo}` : ''}:</b> {v.message}
+              {v.frozen ? <i> (locked or loading: a re-plan keeps it as it is)</i> : null}
             </p>
           ))}
           {blockingViolations.length > 8 ? <p className="text-red-800">… and {blockingViolations.length - 8} more (all listed in the Excel export).</p> : null}
+          <p className="font-medium text-red-800" data-testid="timing-remedy">
+            {remedy.text}
+          </p>
           {canPlan && d.run.chosenScenario ? (
-            <Button size="sm" variant="destructive" className="mt-1" disabled={!!busy || nothingToPlan} onClick={() => replan('REOPTIMIZE')} data-testid="timing-replan-btn">
-              <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
-            </Button>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="destructive" disabled={!!busy || nothingToPlan} onClick={() => replan('REOPTIMIZE')} data-testid="timing-replan-btn">
+                <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
+              </Button>
+              {nothingToPlan ? (
+                <span className="text-xs text-red-800" data-testid="timing-replan-off">
+                  Re-plan is off while every order is on a locked, loading or dispatched load
+                  {remedy.unlockFirst.length ? `: put ${remedy.unlockFirst.join(', ')} back to Planned first.` : '.'}
+                </span>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
@@ -532,7 +546,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       </Badge>
                       {l.carried ? <span className="ml-1 text-xs text-muted-foreground">kept</span> : null}
                       {l.timing && !l.timing.ok ? (
-                        <Badge variant="destructive" className="ml-1" data-testid={`load-timing-${l.truckCode}-${l.loadNo}`} title={TIMING_TEXT[l.timing.status]}>
+                        <Badge
+                          variant="destructive"
+                          className="ml-1"
+                          data-testid={`load-timing-${l.truckCode}-${l.loadNo}`}
+                          title={
+                            blockingViolations.some((v) => v.loadId === l.id && v.frozen)
+                              ? `${TIMING_TEXT[l.timing.status]}: this load breaks a rule and a re-plan keeps it as it is - put it back to Planned first, then re-plan.`
+                              : TIMING_TEXT[l.timing.status]
+                          }
+                        >
                           Times not verified
                         </Badge>
                       ) : null}
@@ -789,11 +812,15 @@ function LoadActions({
   canPlan: boolean;
   canDispatch: boolean;
   reconOk: boolean;
-  /** Review F04: this truck's times break a rule - Lock, Loading and Dispatch wait for a re-plan. */
+  /** Review F04: this truck's times break a rule - Lock, Loading and Dispatch wait until it is fixed. */
   timingBlocked: boolean;
   onStatus: (s: string) => void;
 }) {
-  const timingTitle = !reconOk ? 'Cases must reconcile first' : timingBlocked ? "This truck's times break a planning rule (see the red box above): re-plan first" : undefined;
+  const timingTitle = !reconOk
+    ? 'Cases must reconcile first'
+    : timingBlocked
+      ? "This truck's times break a planning rule: the red box above says what to do (re-plan, or first put a locked load back to Planned)"
+      : undefined;
   const canFreeze = reconOk && !timingBlocked;
   const b = (label: string, to: string, icon: React.ReactNode, enabled = true, title?: string) => (
     <Button key={to} size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !enabled} title={title} onClick={() => onStatus(to)} data-testid={`act-${to}-${l.truckCode}-${l.loadNo}`}>

@@ -39,6 +39,7 @@ import {
   portionId,
   portionMoney,
   portionsOfPart,
+  readPortionLineKg,
   readPortionLines,
   splitIntoParts,
   type FleetTruck,
@@ -49,6 +50,7 @@ import {
 import { MAX_SERVICE_MIN, stopService } from './service-time';
 import {
   groupUnknownWeights,
+  KG_ROUNDING_TOL,
   orderUsesLineWeights,
   resolveOrderLineWeights,
   type LineWeightChange,
@@ -67,6 +69,7 @@ import {
   readTruckSnapshot,
   rulesFrom,
   SNAPSHOT_VERSION,
+  usableWindow,
   type PlanInputs,
   type PlanRules,
   type PlanSettings,
@@ -74,7 +77,17 @@ import {
   type TruckFacts,
   type TruckSnapshot,
 } from './snapshots';
-import { checkPlanFeasibility, feasibilityGateMode, readFeasibility, truckDayOk, truckViolations, type FeasibilityInput, type FeasLoad, type PlanFeasibility } from './feasibility';
+import {
+  checkPlanFeasibility,
+  feasibilityGateMode,
+  readFeasibility,
+  timingRemedy,
+  truckDayOk,
+  truckViolations,
+  type FeasibilityInput,
+  type FeasLoad,
+  type PlanFeasibility,
+} from './feasibility';
 
 export { PlanError, planErrorBody } from './plan-errors';
 
@@ -158,13 +171,6 @@ export async function ordersInScopeWhere(tenantId: string, depotId: string, runD
     deliveryDate: runDate,
     OR: depots <= 1 ? [{ depotId }, { depotId: null }] : [{ depotId }],
   };
-}
-
-/** A window ending before it starts cannot be planned (the solver would reject the whole day):
- * it is dropped for this plan and reported as a warning instead. */
-function usableWindow(start: number | null, end: number | null): { start: number | null; end: number | null; ok: boolean } {
-  if (start != null && end != null && end < start) return { start: null, end: null, ok: false };
-  return { start, end, ok: true };
 }
 
 /**
@@ -340,9 +346,12 @@ export async function buildDispatchRequest(
   const inactiveProducts = new Set<string>();
   const tooHeavyNotes: string[] = [];
   const longStops: string[] = [];
+  // Portion lines keep the case weight they are planned with (0 = no weight): what the dispatch
+  // check reads later, never today's product master (the open rest of a partly frozen order is
+  // planned with the product's weight in memory and never saved on its lines).
   const wholePortion = (x: OpenOrder): PortionRecord => ({
     orderId: x.o.id,
-    lines: x.lines.map((l) => ({ lineId: l.lineId, cases: l.cases })),
+    lines: x.lines.map((l) => ({ lineId: l.lineId, cases: l.cases, kgPerCase: l.kgPerCase })),
     cases: x.cases,
     weightKg: x.kg,
     part: null,
@@ -489,7 +498,7 @@ export async function buildDispatchRequest(
       const byOrder = new Map(live.map((x) => [x.o.id, x.o]));
       const kgPerCase = new Map(live.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
       parts.forEach((part, k) => {
-        const recs = portionsOfPart(part, k + 1, parts.length);
+        const recs = portionsOfPart(part, k + 1, parts.length, kgPerCase);
         const ids = recs.map((r) => {
           const id = portionId(r.orderId, k + 1);
           portions[id] = r;
@@ -604,17 +613,24 @@ export async function buildDispatchRequest(
     warnings,
     unknownWeights,
     weightChanges,
-    settings: planSettingsOf(cfg),
+    settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }),
   };
 }
 
-/** The tenant settings a plan is built with, as the workbook's ASSUMPTIONS sheet reports them. */
-export function planSettingsOf(cfg: {
-  timezone: string; planningCutoffMin: number; shiftStartMin: number; driverShiftMaxMinutes: number; reloadMinutes: number;
-  loadingMinPerCase: number; serviceMinPerCase: number; maxTripsPerTruck: number; fuelPricePerLitre: number; driverCostPerHour: number;
-  overtimeAfterMin: number; overtimeCostPerHour: number; prefWindowPenaltyPerMin: number; roadTimeFactor: number; distanceProvider: string;
-  distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
-}): PlanSettings {
+/**
+ * The tenant settings a plan is built with, as the workbook's ASSUMPTIONS sheet reports them.
+ * `outsideCoverage`: the routing decision made for this plan (routingProviderFor, from the tenant's
+ * country when it was built), so the sheet never re-derives it from today's settings.
+ */
+export function planSettingsOf(
+  cfg: {
+    timezone: string; planningCutoffMin: number; shiftStartMin: number; driverShiftMaxMinutes: number; reloadMinutes: number;
+    loadingMinPerCase: number; serviceMinPerCase: number; maxTripsPerTruck: number; fuelPricePerLitre: number; driverCostPerHour: number;
+    overtimeAfterMin: number; overtimeCostPerHour: number; prefWindowPenaltyPerMin: number; roadTimeFactor: number; distanceProvider: string;
+    distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
+  },
+  routing: { outsideCoverage: boolean } = { outsideCoverage: false },
+): PlanSettings {
   return {
     timezone: cfg.timezone,
     planningCutoffMin: cfg.planningCutoffMin,
@@ -635,6 +651,7 @@ export function planSettingsOf(cfg: {
     avgSpeedKmh: cfg.avgSpeedKmh,
     defaultServiceTimeMin: cfg.defaultServiceTimeMin,
     osrmConfigured: !!cfg.osrmUrl,
+    outsideCoverage: routing.outsideCoverage,
   };
 }
 
@@ -935,7 +952,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     // manifests and driver sheets show. The optimizer's own sum must agree (F01: a capped part
     // weight once made a load look lighter than it was); a difference is kept in the audit.
     const ordersKg = loadKgFromRefs(ld.stops.flatMap((st) => st.order_ids), d.scope, kgOf);
-    if (Math.abs(ordersKg - ld.kg) > 0.5) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
+    if (Math.abs(ordersKg - ld.kg) > KG_ROUNDING_TOL) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
     const load = await tx.planLoad.create({
       data: {
         tenantId,
@@ -1138,14 +1155,17 @@ async function snapshotSource(
       };
     }
     const eff = c && legacy ? effectiveAttrs(toPlanningCustomer(c), legacy.profiles, { serviceTimeMin: legacy.cfg?.defaultServiceTimeMin ?? 10 }) : null;
+    // As buildDispatchRequest sent them: an inverted window was planned as "any time".
+    const hard = usableWindow(eff?.hardStart ?? null, eff?.hardEnd ?? null);
+    const pref = usableWindow(eff?.prefStart ?? null, eff?.prefEnd ?? null);
     return {
       ...base,
       lat: c?.lat ?? null,
       lng: c?.lng ?? null,
-      hardStartMin: eff?.hardStart ?? null,
-      hardEndMin: eff?.hardEnd ?? null,
-      prefStartMin: eff?.prefStart ?? null,
-      prefEndMin: eff?.prefEnd ?? null,
+      hardStartMin: hard.start,
+      hardEndMin: hard.end,
+      prefStartMin: pref.start,
+      prefEndMin: pref.end,
       serviceMin: st.departure_min - st.service_start_min,
       priority: eff?.priority ?? null,
       source: 'MASTER',
@@ -1288,7 +1308,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
 
 /** What the timetable check reads of a plan version's loads (the plan detail's rows satisfy it too). */
 export const FEASIBILITY_LOAD_INCLUDE = {
-  truck: { select: { code: true } },
+  truck: { select: { code: true, capacityCases: true, capacityWeightKg: true } },
   assignments: {
     orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
     include: {
@@ -1315,7 +1335,8 @@ export interface FeasibilityRow {
   weightKg: number;
   carriedFromLoadId: string | null;
   truckSnapshotJson: unknown;
-  truck: { code: string };
+  /** The truck now: its code, and its capacity for the CAPACITY_CHANGED warning (absent = not read). */
+  truck: { code: string; capacityCases?: number; capacityWeightKg?: number };
   assignments: {
     orderId: string;
     sequenceInTruck: number;
@@ -1345,20 +1366,47 @@ export interface LegacyPlanFacts {
   rules: (truckId: string) => PlanRules | null;
 }
 
-/** Cases on this stop row counted as 0 kg on the plan (no weight on the line; for a split part, none on the product either). */
-function rowKgUnknown(a: FeasibilityRow['assignments'][number]): boolean {
+/**
+ * The cases of one stop row that were PLANNED at 0 kg (no weight when the plan was made), decided
+ * from the plan's own rows - never from today's product master, so the warning cannot vanish once
+ * a weight is entered after planning (stabilization PR4 review). `kgNow`: what those cases weigh
+ * at the product's case weight now (0 while it is still unknown), for the payload check.
+ * - A split part keeps the case weight each line was planned with (PortionLine.kgPerCase).
+ * - A part planned before that was kept: a line with no kg on the order counts as planned at 0 kg
+ *   when the part's own kg shows it (the part weighs no more than its lines that have a kg).
+ * - A whole order: its lines are saved with the weights it was planned with (applyWeightChanges),
+ *   so a line at 0 kg was planned at 0 kg. An order weighed on the order only (older orders) is known.
+ */
+export function rowUnknownKg(a: FeasibilityRow['assignments'][number]): { unknown: boolean; kgNow: number } {
   const o = a.order;
+  const byId = new Map(o.lines.map((l) => [l.id, l]));
   const pl = readPortionLines(a.portionLinesJson);
+  let zero: { cases: number; productKg: number }[] = [];
   if (pl) {
-    // A part was planned with the product's case weight when the line had none (buildDispatchRequest).
-    const byId = new Map(o.lines.map((l) => [l.id, l]));
-    return pl.some((x) => {
-      const l = byId.get(x.lineId);
-      return !!l && x.cases > 0 && !(l.weightKg > 0) && !(l.product.weightPerCaseKg > 0);
-    });
+    const planned = readPortionLineKg(a.portionLinesJson);
+    const orderLevel = !orderUsesLineWeights(o);
+    if (planned) {
+      zero = pl.flatMap((x) => {
+        const l = byId.get(x.lineId);
+        return x.cases > 0 && !((planned.get(x.lineId) ?? 0) > 0) ? [{ cases: x.cases, productKg: l?.product.weightPerCaseKg ?? 0 }] : [];
+      });
+    } else if (!orderLevel) {
+      const zeroLines = pl.flatMap((x) => {
+        const l = byId.get(x.lineId);
+        return l && x.cases > 0 && !(l.weightKg > 0) ? [{ cases: x.cases, productKg: l.product.weightPerCaseKg }] : [];
+      });
+      const knownKg = pl.reduce((s, x) => {
+        const l = byId.get(x.lineId);
+        return s + (l && l.weightKg > 0 && l.cases > 0 ? (l.weightKg * x.cases) / l.cases : 0);
+      }, 0);
+      // Each stored kg is rounded to 0.1 kg: a part planned at the product's weight weighs more.
+      if (zeroLines.length && (a.portionWeightKg ?? 0) <= knownKg + 0.05 * (pl.length + 1)) zero = zeroLines;
+    }
+  } else if (orderUsesLineWeights(o)) {
+    zero = o.lines.filter((l) => l.cases > 0 && !(l.weightKg > 0)).map((l) => ({ cases: l.cases, productKg: l.product.weightPerCaseKg }));
   }
-  if (!orderUsesLineWeights(o)) return false; // an order weighed on the order only (older orders)
-  return o.lines.some((l) => l.cases > 0 && !(l.weightKg > 0));
+  const kgNow = zero.reduce((s, z) => s + (z.productKg > 0 ? z.cases * z.productKg : 0), 0);
+  return { unknown: zero.length > 0, kgNow: Math.round(kgNow * 10) / 10 };
 }
 
 export function feasibilityInputFromRows(
@@ -1370,28 +1418,33 @@ export function feasibilityInputFromRows(
   const loads: FeasLoad[] = rows.map((l) => {
     const ts = readTruckSnapshot(l.truckSnapshotJson);
     const own = l.carriedFromLoadId === null; // planned by this version (a carried copy keeps its own snapshot, or nothing)
+    const t = l.truck;
     return {
       id: l.id,
       truckId: l.truckId,
       truckCode: ts?.code ?? l.truck.code,
       loadNo: l.loadNo,
       onRoad: l.status === 'DISPATCHED' || l.status === 'COMPLETED',
+      frozen: l.status === 'LOCKED' || l.status === 'LOADING',
       departMin: l.departMin,
       returnMin: l.returnMin,
       cases: l.cases,
       weightKg: l.weightKg,
       capacity: ts ? { cases: ts.capacityCases, kg: ts.capacityWeightKg } : own && legacy ? legacy.capacity(l.truckId) : null,
+      capacityNow: typeof t.capacityCases === 'number' && typeof t.capacityWeightKg === 'number' ? { cases: t.capacityCases, kg: t.capacityWeightKg } : null,
       rules: ts ? ts.rules : own && legacy ? legacy.rules(l.truckId) : null,
       stops: l.assignments.map((a) => {
         const snap = readStopSnapshot(a.stopSnapshotJson);
         const c = a.order.customer;
+        const unknownKg = rowUnknownKg(a);
         return {
           orderId: a.orderId,
           sequence: a.sequenceInTruck,
           label: snap ? snap.name || snap.code : c.name || c.code,
           cases: a.portionCases ?? a.order.totalCases,
           kg: a.portionWeightKg ?? a.order.totalWeightKg,
-          kgUnknown: rowKgUnknown(a),
+          kgUnknown: unknownKg.unknown,
+          ...(unknownKg.kgNow > 0 ? { unknownKgNow: unknownKg.kgNow } : {}),
           etaMin: a.etaMin,
           serviceStartMin: a.serviceStartMin,
           departureMin: a.departureMin,
@@ -1870,7 +1923,9 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
  * The feasibility gate (review F04), under the plan's row lock: LOCK, LOADING and DISPATCH of a
  * load need its truck-day's timetable to pass the check, recomputed now from the plan's own facts
  * (the stored report is only compared: a different inputHash means the plan changed since it was
- * last checked). Refused with 409 TIMES_NOT_VERIFIED and the violations; the remedy is Re-plan.
+ * last checked). Refused with 409 TIMES_NOT_VERIFIED and the violations; the remedy is Re-plan, or,
+ * for a problem on a LOCKED / LOADING load (which a re-plan carries over unchanged), putting that
+ * load back to Planned first (timingRemedy).
  * FEASIBILITY_GATE=warn (operator switch) lets the change through; the violations then go into
  * the load's audit row. Returns what the audit row records.
  */
@@ -1888,16 +1943,20 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     const first =
       blocking[0]?.message ??
       (t?.status === 'UNVERIFIED' ? 'The optimizer could not check this timetable.' : 'The timetable could not be checked.');
+    // A problem on a LOCKED / LOADING load comes back unchanged after a re-plan: say to unlock it first.
+    const remedy = timingRemedy(blocking);
     throw new PlanError(
       `Truck ${code}: the timetable is not verified, so its loads cannot be locked, loaded or dispatched. ${first}` +
-        `${blocking.length > 1 ? ` (+${blocking.length - 1} more)` : ''} Re-plan to get a timetable that keeps every rule.`,
+        `${blocking.length > 1 ? ` (+${blocking.length - 1} more)` : ''} ${remedy.text}`,
       409,
       {
         code: 'TIMES_NOT_VERIFIED',
         truckId: load.truckId,
         truckCode: code,
         status: t?.status ?? fresh.status,
-        violations: blocking.slice(0, 20).map((v) => ({ code: v.code, loadNo: v.loadNo, message: v.message, source: v.source })),
+        remedy: remedy.text,
+        unlockFirst: remedy.unlockFirst,
+        violations: blocking.slice(0, 20).map((v) => ({ code: v.code, loadNo: v.loadNo, message: v.message, source: v.source, ...(v.frozen ? { frozen: true } : {}) })),
       },
     );
   }

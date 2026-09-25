@@ -57,15 +57,16 @@ export interface DetailStop {
   address: string | null;
   /** Notes on the orders of this stop (from the order file / late-order entry). */
   notes: string[];
-  /** Customer master access / receiving notes (gate, forklift, contact...). */
+  /** Customer master access / receiving notes (gate, forklift, contact...), as they are NOW: contact
+   * details stay live like the driver's phone, so a correction reaches the driver sheet (review of PR4). */
   accessNotes: string | null;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
   /**
-   * Review F08: true = the pin, hours, name, address and access notes above are the ones the stop
-   * was PLANNED with (its snapshot); false = a stop planned before snapshots existed, shown with
-   * today's customer data.
+   * Review F08: true = the pin, hours, name and address above are the ones the stop was PLANNED
+   * with (its snapshot); false = a stop planned before snapshots existed, shown with today's
+   * customer data. Access notes are always today's.
    */
   snapshot: boolean;
   /** What changed in the customer master since planning (never applied silently: re-plan to adopt it). */
@@ -286,7 +287,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         mapsUrl: lat !== null && lng !== null ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}` : null,
         address: snap ? snap.address : c.address,
         notes: noteParts(o.notes),
-        accessNotes: snap ? snap.accessNotes : c.accessNotes,
+        // Live, never the snapshot: gate / receiver details do not change the timetable, and a
+        // correction must reach the driver sheet (the snapshot keeps the planned notes for the record).
+        accessNotes: c.accessNotes,
         split: null,
         snapshot: !!snap,
         masterChanged: snap

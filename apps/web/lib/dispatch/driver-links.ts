@@ -113,18 +113,30 @@ export interface MessagePlan {
 export const REPLACED_LINE = '*REPLACED BY A NEWER PLAN - DO NOT USE. Ask the dispatcher for the new trip.*';
 
 export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' | 'returnMin' | 'cases'> & {
-  stops: Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'>[];
+  /** The truck-day's timetable check (review F04); not ok = the message says TIMES NOT VERIFIED. */
+  timing?: DetailLoad['timing'];
+  stops: (Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'> & {
+    /** Customer data corrected after planning (review F08): printed under the stop, like the PDF sheet. */
+    masterChanged?: DetailStop['masterChanged'];
+  })[];
 };
+
+/** Line of a message whose truck-day did not pass the timetable check (the PDF sheet's banner). */
+export const TIMES_NOT_VERIFIED_LINE = '*TIMES NOT VERIFIED - check with the dispatcher before leaving*';
 
 /**
  * WhatsApp text for one load: the trip header, then each stop in delivery order with its pin,
- * then the route link(s). Kept short - it is read on a phone in the truck.
+ * then the route link(s). Kept short - it is read on a phone in the truck. It carries the same
+ * warnings as the driver sheet (driverPackModel): TIMES NOT VERIFIED when the truck-day fails the
+ * timetable check, and under a stop each change made after planning, with the corrected pin (the
+ * pin and route links stay the planned ones, never switched silently).
  */
 export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number, opts: { tenantName?: string } = {}): string {
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
   const route = routeLinks(plan.depot, stops);
   const lines = [
     ...(isSupersededRun({ status: plan.status ?? '', supersededAt: plan.supersededAt }) ? [REPLACED_LINE] : []),
+    ...(load.timing && !load.timing.ok ? [TIMES_NOT_VERIFIED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
@@ -134,6 +146,11 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     const part = s.split ? ` · part ${s.split.part}/${s.split.parts}` : '';
     lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)} ${stopTitle(s)} · ${s.cases} cs${part}`);
     lines.push(pinUrl(s) ?? 'No location - call dispatcher');
+    for (const c of s.masterChanged ?? []) {
+      lines.push(`! ${c.text}`);
+      const moved = c.kind === 'LOCATION' ? pinUrl({ lat: c.newLat ?? null, lng: c.newLng ?? null }) : null;
+      if (moved) lines.push(`New pin - ask the dispatcher which one to use: ${moved}`);
+    }
   }
   lines.push('');
   for (const r of route.links) lines.push(`${route.links.length === 1 ? 'Route' : `Route ${r.part}/${r.parts}`}: ${r.url}`);

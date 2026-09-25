@@ -28,7 +28,9 @@ function xlsxResponse(buf: Buffer, filename: string) {
 
 // NMWC dispatch plan version (has physical loads) -> the master dispatch workbook.
 // Review F08: the ASSUMPTIONS sheet shows the settings stored with the plan in use (what it was
-// built with); only a plan from before settings were stored shows today's, labelled as such.
+// built with, including whether it was outside the routing map); only a plan from before settings
+// were stored shows today's, labelled as such. Never the web server's environment (OSRM_URL here
+// only draws the legacy Map tab; the solver routes with its own).
 async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
   const detail = await getPlanDetail(user.tenantId, runId);
   if (!detail) return fail('Not found', 404);
@@ -46,8 +48,8 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       currency,
       providerUsed: detail.summary?.distanceProvider ?? detail.scenarios.find((s) => s.chosen)?.provider ?? null,
       distanceIsEstimated: detail.summary?.distanceIsEstimated ?? detail.loads.some((l) => l.distanceIsEstimated),
-      osrmEnvConfigured: !!process.env.OSRM_URL,
-      outsideCoverage: cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
+      // Stored with the plan (PlanSettings.outsideCoverage); today's only for a plan without settings.
+      outsideCoverage: planned ? undefined : cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
     }),
     assumptionsSource: planned ? 'PLAN' : 'CURRENT',
   });
