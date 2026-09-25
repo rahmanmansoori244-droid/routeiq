@@ -99,6 +99,14 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
 - Older versions stay under **Plan versions** (read-only).
 - A late-order re-plan keeps the other orders on their trucks where it can, so drivers and loading are not reshuffled for one order.
 - **Re-plan** (on the plan, or **RE-PLAN** in step 3) with no late order waiting is a full re-optimize: RouteIQ looks for the best plan for everything not locked, even if that moves orders to other trucks. Lock the loads the warehouse has started first, and send new driver sheets for the loads that changed.
+- **Nothing to plan:** when every order is already on a locked, loading or dispatched load (and nothing is unserved or waiting), **Re-plan** is greyed out and step 3 says *nothing left to plan*. To change a load, unlock it first.
+- **If the optimization fails** (optimizer down, out of time, a system update during the solve), the new version shows *Optimization failed - previous plan kept*: its loads are the previous plan, and you can lock, load and dispatch them as they are. Click **Re-plan** to try again.
+- While an action runs (a lock, **Use instead**, **Re-plan**), the other buttons wait for it. If two people change the same plan at once, one of them may see *Plan is being saved - retry in a moment*: nothing was changed, just click again.
+- An option that found no plan shows *No plan* instead of **Use instead**.
+- **Busy optimizer:** a company can run two optimizations at once; a third waits (*Queued: other optimizations are running*) and starts on its own. After many optimizations in one hour RouteIQ asks you to wait a few minutes.
+
+## Changing date or depot
+While the new day loads, the screen shows *Loading ...* and its buttons are off; if it cannot be loaded, you see the error and **Try again** instead of the previous day. Everything you do (upload, confirm, optimize) is always for the day on the screen.
 
 ## Dispatch timing settings (Settings → Dispatch timing, admins)
 Set these to what the depot and drivers really do; every load is timed with them.

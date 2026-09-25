@@ -64,6 +64,7 @@ The complete matrix is checked in and enforced by `apps/web/tests/lib/api-role-m
 - **Solver token:** one constant-time check (`hmac.compare_digest` on bytes) for every solver endpoint except `/health`.
 - **Janitor token:** in production `/api/cron/janitor` accepts only `JANITOR_TOKEN`, never `SOLVER_TOKEN`. The in-process janitor runs regardless.
 - **Rate limiter** (`lib/rate-limit.ts`): expired buckets are swept and the map is capped. `RATE_LIMITS_DISABLED=1` (test servers) is ignored on Railway and logged as an error on any other production server.
+- **Solve admission** (PR3, review F16; `lib/dispatch/solve-admission.ts`): every way to start an optimization (`POST /api/dispatch/plan` with optimize, `POST /api/runs/:id/replan`, `POST /api/runs/:id/optimize`) goes through one gate - 15 starts per user and 30 per company in any rolling hour (429 with `Retry-After`; refused and no-op requests use no quota), at most 2 solves per company and `SOLVER_MAX_CONCURRENT` (default 2) in total at once, further starts wait in a first-come-first-served queue (10 at most, then 503). One company, including a public sign-up one, can no longer saturate the shared solver. The solver itself refuses more than `MAX_CONCURRENT_DISPATCH` concurrent solves with 503 "solver busy" (`apps/solver/main.py`). The quotas follow `RATE_LIMITS_DISABLED` (off in tests); the concurrency caps always apply.
 - **Startup warnings** (web log, `[config] ...`): missing `RESEND_API_KEY`, `AUTH_URL`/`NEXTAUTH_URL`, `JANITOR_TOKEN`, or `RATE_LIMITS_DISABLED` set.
 - **No public OSRM default:** with `OSRM_URL` unset the legacy Map tab draws straight lines and the legacy solver matrix stays Haversine; customer coordinates never go to a third-party demo server.
 
@@ -127,7 +128,7 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
 | /login <-> / loop; `Tenant.active` not enforced | Section 1 (`end-session`), section 3 |
 | F10 open sign-up, SUPER_ADMIN at sign-up | Section 3 (sign-up open by owner decision, never SUPER_ADMIN; owner script) |
 | F11 `callbackUrl` open redirect / script sink; query string lost; no CSP | Section 2 |
-| F16 (part) credential guessing, account enumeration, spoofable client IP, limiter memory, `RATE_LIMITS_DISABLED` | Sections 2, 5. Solve admission quotas are PR3 |
+| F16 (part) credential guessing, account enumeration, spoofable client IP, limiter memory, `RATE_LIMITS_DISABLED` | Sections 2, 5. The solve admission (quotas, concurrency queue, solver 503 cap) is done in PR3, section 5 |
 | TENANT_ADMIN could change a SUPER_ADMIN; cross-tenant views unaudited | Section 3 |
 | L7 solver token compare; janitor accepting `SOLVER_TOKEN` | Section 5 |
 | L8 reset links in logs; reset not transactional; other links not revoked | Section 5 |
