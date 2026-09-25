@@ -7,7 +7,8 @@
  * - users, audit and tenant-config READS are TENANT_ADMIN, like their pages;
  * - the job debug JSON (full solver request: revenue, margins, coordinates) is SUPERVISOR+;
  * - plan detail and the exports stay readable by VIEWER (the dispatch team reads plans);
- * - the legacy driver app routes are GONE (410).
+ * - the legacy driver app routes are GONE (410);
+ * - an admin password reset (a new one-time password for a user) is TENANT_ADMIN, like invites.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -99,6 +100,7 @@ const EXPECTED: Record<string, string> = {
   'GET /api/users': 'TENANT_ADMIN',
   'POST /api/users': 'TENANT_ADMIN',
   'PATCH /api/users/[id]': 'TENANT_ADMIN',
+  'POST /api/users/[id]/reset-password': 'TENANT_ADMIN',
 };
 
 describe('API role matrix', () => {
@@ -113,6 +115,7 @@ describe('API role matrix', () => {
     expect(actual['GET /api/audit']).toBe('TENANT_ADMIN');
     expect(actual['GET /api/tenant/config']).toBe('TENANT_ADMIN');
     expect(actual['GET /api/runs/[id]/jobs/[jobId]/debug']).toBe('SUPERVISOR');
+    expect(actual['POST /api/users/[id]/reset-password']).toBe('TENANT_ADMIN');
   });
 
   it('no write handler is open to every role', () => {

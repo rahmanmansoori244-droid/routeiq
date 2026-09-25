@@ -19,7 +19,7 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
     out.push({
       level: 'warn',
       message:
-        'Password-reset email is not configured (RESEND_API_KEY): reset links are not sent. Admins reset passwords with the invite / temporary-password flow.',
+        'Password-reset email is not configured (RESEND_API_KEY): reset links are not sent and /forgot says so. Tenant admins reset passwords on the Users screen ("Reset password").',
     });
   }
   if (!env.AUTH_URL?.trim() && !env.NEXTAUTH_URL?.trim()) {

@@ -3,7 +3,10 @@
  * - F13: every Driver read or write under app/ projects its columns (`select`), so the legacy
  *   PIN hash can never reach a response, a page prop or an audit row;
  * - F22: no code under apps/ points at the public OSRM demo server;
- * - the retired driver app leaves no caller behind and its smoke script is gone.
+ * - the retired driver app leaves no caller behind and its smoke script is gone;
+ * - client IPs (rate limits, audit rows) come only from lib/client-ip.ts, never from the
+ *   client-controlled left end of X-Forwarded-For;
+ * - docs and messages do not send admins to a password-reset path that does not exist.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -93,5 +96,43 @@ describe('the legacy driver app is retired (owner decision)', () => {
       expect(src, r).toContain('return driverAppGone();');
       expect(src, r).not.toMatch(/prisma|tenantDb|withTenantApi|requireDriverShift/);
     }
+  });
+});
+
+describe('client IP only through lib/client-ip.ts (spoofable X-Forwarded-For)', () => {
+  it('no other file under app/, lib/ or middleware.ts reads a forwarding header itself', () => {
+    const files = [
+      ...walk(path.join(WEB, 'app'), /\.(ts|tsx)$/),
+      ...walk(path.join(WEB, 'lib'), /\.(ts|tsx)$/),
+      path.join(WEB, 'middleware.ts'),
+    ];
+    const offenders = files
+      .map((f) => path.relative(WEB, f).split(path.sep).join('/'))
+      .filter((rel) => rel !== 'lib/client-ip.ts')
+      .filter((rel) => /x-forwarded-for|x-real-ip/i.test(readFileSync(path.join(WEB, rel), 'utf8')));
+    expect(offenders).toEqual([]);
+  });
+});
+
+describe('password reset without email points to the real admin reset', () => {
+  it('no doc, env example or server message describes the old non-existent fallbacks', () => {
+    const REPO = path.resolve(APPS, '..');
+    const files = [
+      ...walk(path.join(REPO, 'docs'), /\.md$/),
+      path.join(REPO, '.env.example'),
+      ...walk(path.join(WEB, 'app'), /\.(ts|tsx)$/),
+      ...walk(path.join(WEB, 'lib'), /\.(ts|tsx)$/),
+    ];
+    // "Deactivate and invite again" fails (the email already exists: 409), and there was no
+    // "temporary-password flow" for an existing user before POST /api/users/:id/reset-password.
+    const STALE = /invite \/ temporary-password flow|invite and temporary-password flow|deactivates? the user and invites? them again/i;
+    const offenders = files.filter((f) => STALE.test(readFileSync(f, 'utf8'))).map((f) => path.relative(REPO, f).split(path.sep).join('/'));
+    expect(offenders).toEqual([]);
+  });
+
+  it('the Users screen offers "Reset password" through the admin reset route', () => {
+    const src = readFileSync(path.join(WEB, 'app/t/[slug]/users/users-client.tsx'), 'utf8');
+    expect(src).toContain('/reset-password`');
+    expect(src).toContain('Reset password');
   });
 });

@@ -35,6 +35,7 @@ export type AuditAction =
   | 'CROSS_TENANT_VIEW'
   | 'PLATFORM_ADMIN_GRANTED'
   | 'PLATFORM_ADMIN_REVOKED'
+  | 'PASSWORD_RESET_BY_ADMIN'
   // Written only by migration 20260926090000_retire_driver_app_scrub_secrets.
   | 'SECURITY_CLEANUP';
 

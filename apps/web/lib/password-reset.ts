@@ -11,9 +11,11 @@
  *
  * Email delivery uses Resend when RESEND_API_KEY is set. In production without it, NOTHING is
  * sent and nothing about the link is logged (a logged link is a working account-takeover token):
- * admins then reset passwords with the invite / temporary-password flow. Outside production the
- * link is logged for local testing. The handler never leaks whether an email exists — same 200
- * response either way, and delivery runs after the response (fire-and-forget).
+ * /forgot then says reset by email is unavailable, and a tenant admin resets the password from the
+ * Users screen ("Reset password", POST /api/users/:id/reset-password, a new one-time password).
+ * Outside production the link is logged for local testing. The handler never leaks whether an
+ * email exists — same 200 response either way, and delivery runs after the response
+ * (fire-and-forget).
  */
 import { createHash, randomBytes } from 'crypto';
 import { prisma } from './db';
@@ -158,6 +160,15 @@ export function resetUrlFor(rawToken: string, env: NodeJS.ProcessEnv = process.e
 
 export function emailDeliveryConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
   return !!env.RESEND_API_KEY?.trim();
+}
+
+/**
+ * Can /forgot actually deliver a reset link? In production that needs Resend and a public base
+ * URL; elsewhere the link is logged for local testing.
+ */
+export function resetByEmailAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  if (env.NODE_ENV !== 'production') return true;
+  return emailDeliveryConfigured(env) && resetBaseUrl(env) !== null;
 }
 
 /**

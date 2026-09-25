@@ -5,6 +5,8 @@
  * - L16: a job of another run is 404, not 500;
  * - F13: Driver reads/writes project their columns; audit rows are redacted on read;
  * - new issue: a TENANT_ADMIN cannot change a SUPER_ADMIN; user changes invalidate the session cache;
+ * - admin password reset (the reset path without email): TENANT_ADMIN only, never a platform admin
+ *   or yourself, one transaction (hash, reset links retired, audit row without a hash), sessions end;
  * - new issue: deleting a driver used on a load deactivates it instead (PlanLoad.driverId kept);
  * - DISABLE: the retired driver-app routes answer 410 without touching the database.
  */
@@ -142,6 +144,67 @@ describe('users: platform admins are protected; changes reach open sessions', ()
     const route = await import('@/app/api/users/[id]/route');
     const res = await route.PATCH(send('/api/users/u2', 'PATCH', { role: 'VIEWER' }), { params: { id: 'u2' } });
     expect(res.status).toBe(200);
+    expect(invalidatePrincipal).toHaveBeenCalledWith('u2');
+  });
+});
+
+describe('admin password reset (POST /api/users/[id]/reset-password)', () => {
+  const ctx = (id: string) => ({ params: { id } });
+  function fakeTx() {
+    const tx = {
+      user: { updateMany: vi.fn(async (_args: unknown) => ({ count: 1 })) },
+      passwordResetToken: { updateMany: vi.fn(async (_args: unknown) => ({ count: 2 })) },
+      auditLog: { create: vi.fn(async (_args: unknown) => ({})) },
+    };
+    prismaFake.$transaction = vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx));
+    return tx;
+  }
+  const target = (over: Record<string, unknown> = {}) => ({ id: 'u2', email: 'planner@a.example', role: 'PLANNER', ...over });
+
+  it('403 below TENANT_ADMIN, before any database read', async () => {
+    const route = await import('@/app/api/users/[id]/reset-password/route');
+    for (const role of ['SUPERVISOR', 'PLANNER', 'VIEWER'] as const) {
+      sessionRole = role;
+      expect((await route.POST(send('/api/users/u2/reset-password', 'POST'), ctx('u2'))).status, role).toBe(403);
+    }
+  });
+
+  it('a TENANT_ADMIN cannot reset a platform admin; nobody resets their own password here', async () => {
+    const tx = fakeTx();
+    const route = await import('@/app/api/users/[id]/reset-password/route');
+    prismaFake.user = { findFirst: vi.fn(async () => target({ id: 'boss', role: 'SUPER_ADMIN' })) };
+    expect((await route.POST(send('/x', 'POST'), ctx('boss'))).status).toBe(403);
+    prismaFake.user = { findFirst: vi.fn(async () => target({ id: 'me', role: 'TENANT_ADMIN' })) };
+    expect((await route.POST(send('/x', 'POST'), ctx('me'))).status).toBe(400);
+    expect(tx.user.updateMany).not.toHaveBeenCalled();
+    expect(invalidatePrincipal).not.toHaveBeenCalled();
+  });
+
+  it('a user of another tenant (or none) is 404', async () => {
+    fakeTx();
+    const findFirst = vi.fn(async (_args: unknown) => null);
+    prismaFake.user = { findFirst };
+    const route = await import('@/app/api/users/[id]/reset-password/route');
+    expect((await route.POST(send('/x', 'POST'), ctx('other-tenant-user'))).status).toBe(404);
+    expect(findFirst.mock.calls[0]?.[0]).toMatchObject({ where: { id: 'other-tenant-user', tenantId: 'tA' } });
+  });
+
+  it('sets a new one-time password in one transaction, retires reset links, audits without a hash, ends sessions', async () => {
+    const tx = fakeTx();
+    prismaFake.user = { findFirst: vi.fn(async () => target()) };
+    const route = await import('@/app/api/users/[id]/reset-password/route');
+    const res = await route.POST(send('/api/users/u2/reset-password', 'POST'), ctx('u2'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    const body = (await res.json()) as { data: { user: { id: string; email: string }; tempPassword: string } };
+    expect(body.data.user).toEqual({ id: 'u2', email: 'planner@a.example' });
+    expect(body.data.tempPassword).toMatch(/^[A-Za-z0-9]{18}$/);
+    expect(tx.user.updateMany).toHaveBeenCalledWith({ where: { id: 'u2', tenantId: 'tA' }, data: { passwordHash: 'h' } });
+    expect(tx.passwordResetToken.updateMany.mock.calls[0]?.[0]).toMatchObject({ where: { userId: 'u2', usedAt: null } });
+    const row = (tx.auditLog.create.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
+    expect(row).toMatchObject({ tenantId: 'tA', userId: 'me', action: 'PASSWORD_RESET_BY_ADMIN', entity: 'User', entityId: 'u2' });
+    expect(JSON.stringify(row)).not.toMatch(/passwordHash|"h"|tempPassword/);
+    expect(JSON.stringify(row)).not.toContain(body.data.tempPassword);
     expect(invalidatePrincipal).toHaveBeenCalledWith('u2');
   });
 });

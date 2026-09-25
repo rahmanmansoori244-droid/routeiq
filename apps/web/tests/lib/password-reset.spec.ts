@@ -17,6 +17,7 @@ import {
   generateRawToken,
   hashToken,
   resetBaseUrl,
+  resetByEmailAvailable,
   resetPasswordWithToken,
   resetTokenUsable,
 } from '@/lib/password-reset';
@@ -251,6 +252,13 @@ describe('reset link delivery never leaks the link in production (review L8)', (
     await deliverResetEmail('dev@local.test', TOKEN, 'user-1', env({ NODE_ENV: 'development' }));
     c.restore();
     expect(c.lines.join('\n')).toContain(`/reset?token=${TOKEN}`);
+  });
+
+  it('/forgot offers the email form only when a link can really be delivered', () => {
+    expect(resetByEmailAvailable(env({ NODE_ENV: 'production', AUTH_URL: 'https://r.example' }))).toBe(false);
+    expect(resetByEmailAvailable(env({ NODE_ENV: 'production', RESEND_API_KEY: 're_x' }))).toBe(false);
+    expect(resetByEmailAvailable(env({ NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example' }))).toBe(true);
+    expect(resetByEmailAvailable(env({ NODE_ENV: 'development' }))).toBe(true); // the link is logged locally
   });
 
   it('a Resend rejection logs the status only', async () => {

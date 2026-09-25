@@ -34,8 +34,8 @@ async function checkSolver(): Promise<{ solver: 'up' | 'down'; routing: Routing 
 
 // `routing` is informational: without OSRM plans still work (distances labelled estimated), so
 // it never makes the app unhealthy - alert on routing.status !== 'up' in monitoring instead.
-// `email` is informational too: without it password-reset emails are not sent (admins reset
-// passwords through the invite / temporary-password flow instead).
+// `email` is informational too: without it password-reset emails are not sent (tenant admins
+// reset passwords on the Users screen instead: "Reset password", POST /api/users/:id/reset-password).
 export async function GET() {
   const [db, { solver, routing }] = await Promise.all([checkDb(), checkSolver()]);
   const ok = db === 'up' && solver === 'up';

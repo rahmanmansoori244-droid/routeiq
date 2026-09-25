@@ -1,10 +1,10 @@
-import { randomBytes } from 'crypto';
 import { Role } from '@prisma/client';
 import { withTenantApi, ok, fail, parseBody } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { hashPassword } from '@/lib/auth';
 import { audit } from '@/lib/audit';
 import { userInviteSchema } from '@/lib/schemas';
+import { generateTempPassword } from '@/lib/temp-password';
 
 // TENANT_ADMIN, like the Users page (review F15): staff emails and roles are admin data.
 export const GET = withTenantApi(
@@ -21,11 +21,6 @@ export const GET = withTenantApi(
   { role: 'TENANT_ADMIN' },
 );
 
-function generateTempPassword(): string {
-  // 16-byte base64url ≈ 22 chars — strong enough for a one-shot temp pwd.
-  return randomBytes(16).toString('base64').replace(/[+/=]/g, '').slice(0, 18);
-}
-
 export const POST = withTenantApi(
   async (req, { user, ip }) => {
     const input = await parseBody(req, userInviteSchema);
@@ -33,7 +28,9 @@ export const POST = withTenantApi(
 
     const email = input.email.toLowerCase();
     const exists = await prisma.user.findUnique({ where: { email } });
-    if (exists) return fail('A user with this email already exists.', 409);
+    // An existing user who lost their password gets a new one with "Reset password"
+    // (POST /api/users/:id/reset-password), not a second invite.
+    if (exists) return fail('A user with this email already exists. If they are in your company and lost their password, use "Reset password" on their row.', 409);
 
     const tempPwd = generateTempPassword();
     const hash = await hashPassword(tempPwd);

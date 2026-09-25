@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, Copy, Check } from 'lucide-react';
+import { Plus, Copy, Check, KeyRound } from 'lucide-react';
 import { toast } from 'sonner';
 import type { Role } from '@prisma/client';
 import { Button } from '@/components/ui/button';
@@ -27,6 +27,13 @@ interface UserRow {
 
 const ASSIGNABLE_ROLES: Role[] = ['TENANT_ADMIN', 'SUPERVISOR', 'PLANNER', 'VIEWER'];
 
+interface TempPasswordInfo {
+  email: string;
+  password: string;
+  /** true after "Reset password" (an existing user), false after an invite. */
+  reset: boolean;
+}
+
 const ROLE_VARIANT: Record<Role, 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline'> = {
   SUPER_ADMIN: 'destructive',
   TENANT_ADMIN: 'default',
@@ -47,7 +54,8 @@ export function UsersClient({
   const router = useRouter();
   const [inviting, setInviting] = useState(false);
   const [pending, startTransition] = useTransition();
-  const [tempPwd, setTempPwd] = useState<{ email: string; password: string } | null>(null);
+  const [tempPwd, setTempPwd] = useState<TempPasswordInfo | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
 
   function setRole(u: UserRow, role: Role) {
     startTransition(async () => {
@@ -83,6 +91,19 @@ export function UsersClient({
     });
   }
 
+  function resetPassword(u: UserRow) {
+    startTransition(async () => {
+      const res = await fetch(`/api/users/${u.id}/reset-password`, { method: 'POST' });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(errorMessage(body, 'Password reset failed.'));
+        return;
+      }
+      setResetTarget(null);
+      setTempPwd({ email: body.data.user.email, password: body.data.tempPassword, reset: true });
+    });
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex justify-end">
@@ -101,6 +122,7 @@ export function UsersClient({
               <TableHead>Role</TableHead>
               <TableHead className="text-center">Active</TableHead>
               <TableHead>Created</TableHead>
+              <TableHead className="text-right">Password</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -142,6 +164,25 @@ export function UsersClient({
                     />
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{new Date(u.createdAt).toLocaleDateString()}</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 px-2 text-xs"
+                      onClick={() => setResetTarget(u)}
+                      disabled={pending || isMe || lockedPlatformAdmin}
+                      title={
+                        isMe
+                          ? 'Ask another admin to reset your password, or use "Forgot your password?" on the sign-in page'
+                          : lockedPlatformAdmin
+                            ? 'Platform admin: managed by the RouteIQ owner'
+                            : 'Give this user a new temporary password'
+                      }
+                    >
+                      <KeyRound className="me-1 h-3.5 w-3.5" />
+                      Reset password
+                    </Button>
+                  </TableCell>
                 </TableRow>
               );
             })}
@@ -152,12 +193,32 @@ export function UsersClient({
       <InviteDialog
         open={inviting}
         onOpenChange={(o) => !o && setInviting(false)}
-        onCreated={(tempPwd) => {
+        onCreated={(info) => {
           setInviting(false);
-          setTempPwd(tempPwd);
+          setTempPwd({ ...info, reset: false });
           router.refresh();
         }}
       />
+
+      <Dialog open={!!resetTarget} onOpenChange={(o) => !o && !pending && setResetTarget(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Reset password</DialogTitle>
+            <DialogDescription>
+              Give {resetTarget?.email} a new temporary password? Their current password stops working now and they are
+              signed out on every device. You will see the new password once, to give to them.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setResetTarget(null)} disabled={pending}>
+              Cancel
+            </Button>
+            <Button type="button" onClick={() => resetTarget && resetPassword(resetTarget)} disabled={pending}>
+              {pending ? 'Resetting…' : 'Reset password'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <TempPasswordDialog
         open={!!tempPwd}
@@ -256,7 +317,7 @@ function TempPasswordDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  info: { email: string; password: string } | null;
+  info: TempPasswordInfo | null;
 }) {
   const [copied, setCopied] = useState(false);
   function copy() {
@@ -269,9 +330,11 @@ function TempPasswordDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Temporary password</DialogTitle>
+          <DialogTitle>{info?.reset ? 'New temporary password' : 'Temporary password'}</DialogTitle>
           <DialogDescription>
-            Share this password with {info?.email} now. It's not stored in plaintext anywhere — once you close this dialog, you'll need to reset their password to issue another.
+            {info?.reset ? 'Their old password no longer works. ' : ''}
+            Give this password to {info?.email} over a secure channel (in person or by phone). It is not stored anywhere
+            readable: once you close this dialog, use &quot;Reset password&quot; to issue another.
           </DialogDescription>
         </DialogHeader>
         <Card>

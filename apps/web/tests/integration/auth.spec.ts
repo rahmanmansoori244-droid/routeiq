@@ -2,8 +2,9 @@
  * Integration: auth flows — signup, login, password reset (forgot + reset),
  * user invite + login as invited user, and (stabilization PR1) session
  * revalidation, the /login redirect loop, Tenant.active, the callbackUrl query
- * string, security headers, platform-admin protection and the cross-tenant
- * view audit.
+ * string, security headers, platform-admin protection, the cross-tenant
+ * view audit, the admin password reset and end-session (no forced logout; the
+ * page to come back to survives sign-in).
  *
  * Requires the dev server (`pnpm dev`) running at TEST_BASE_URL (default
  * http://localhost:3000) and a Postgres reachable via DATABASE_URL.
@@ -294,15 +295,105 @@ describe('sessions are re-checked on every request (review F09)', () => {
     }
   });
 
-  it('/api/auth/end-session clears the cookie and lands on /login?reason=session', async () => {
+  it('/api/auth/end-session never signs out a session the server still accepts (no forced logout)', async () => {
     const h = await freshTenant('auth-endsess');
     createdSlugs.add(h.slug);
-    const res = await fetchWith(h.cookieJar, `${BASE}/api/auth/end-session`);
+    // What a link or redirect from another site would do: a plain GET with the cookie.
+    const res = await fetchWith(h.cookieJar, `${BASE}/api/auth/end-session?next=${encodeURIComponent(`/t/${h.slug}/dispatch`)}`);
+    expect([302, 303, 307]).toContain(res.status);
+    expect(new URL(res.headers.get('location')!, BASE).pathname).toBe('/');
+    expect((await fetchWith(h.cookieJar, `${BASE}/api/depots`)).status).toBe(200);
+  });
+
+  it('/api/auth/end-session clears a rejected session and keeps the dispatch page as callbackUrl', async () => {
+    const h = await freshTenant('auth-endnext');
+    createdSlugs.add(h.slug);
+    const planner = await inviteUser(h, 'PLANNER');
+    expect((await fetchWith(h.cookieJar, `${BASE}/api/users/${planner.id}`, j({ active: false }, 'PATCH'))).status).toBe(200);
+    // The dispatch screen got a 401 and sends the browser here with the page it was on.
+    const page = `/t/${h.slug}/dispatch?date=2026-09-26&depot=dep-1`;
+    expect((await fetchWith(planner.jar, `${BASE}/api/dispatch/day?date=2026-09-26`)).status).toBe(401);
+    const res = await fetchWith(planner.jar, `${BASE}/api/auth/end-session?next=${encodeURIComponent(page)}`);
     expect([302, 303, 307]).toContain(res.status);
     const loc = new URL(res.headers.get('location')!, BASE);
     expect(loc.pathname).toBe('/login');
     expect(loc.searchParams.get('reason')).toBe('session');
-    expect((await fetchWith(h.cookieJar, `${BASE}/api/depots`)).status).toBe(401);
+    expect(loc.searchParams.get('callbackUrl')).toBe(page);
+    // The cookie is gone, so /login renders instead of bouncing back to '/'.
+    const login = await fetchWith(planner.jar, loc.toString());
+    expect(login.status).toBe(200);
+    // A hostile next never becomes the callbackUrl.
+    const other = await inviteUser(h, 'VIEWER');
+    await fetchWith(h.cookieJar, `${BASE}/api/users/${other.id}`, j({ active: false }, 'PATCH'));
+    const hostile = await fetchWith(other.jar, `${BASE}/api/auth/end-session?next=${encodeURIComponent('//evil.example/x')}`);
+    expect(new URL(hostile.headers.get('location')!, BASE).searchParams.get('callbackUrl')).toBeNull();
+  });
+});
+
+describe('admin password reset (works without reset email)', () => {
+  it('a tenant admin gives a user a new one-time password: old password and open sessions end', async () => {
+    const h = await freshTenant('auth-adminreset');
+    createdSlugs.add(h.slug);
+    const planner = await inviteUser(h, 'PLANNER');
+    expect((await fetchWith(planner.jar, `${BASE}/api/depots`)).status).toBe(200);
+    const raw = 'z'.repeat(43);
+    await prisma.passwordResetToken.create({
+      data: { userId: planner.id, tenantId: h.tenantId, tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + 3600_000) },
+    });
+
+    const res = await fetchWith(h.cookieJar, `${BASE}/api/users/${planner.id}/reset-password`, { method: 'POST' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toContain('no-store');
+    const body = (await res.json()) as { data: { tempPassword: string; user: { id: string; email: string } } };
+    expect(body.data.user.email).toBe(planner.email);
+    expect(body.data.tempPassword).toMatch(/^[A-Za-z0-9]{18}$/);
+
+    // The open session ends; the old password no longer signs in; the new one does.
+    expect((await fetchWith(planner.jar, `${BASE}/api/depots`)).status).toBe(401);
+    const old = new CookieJar();
+    await login(old, planner.email, planner.password);
+    expect((await fetchWith(old, `${BASE}/api/depots`)).status).toBe(401);
+    const fresh = new CookieJar();
+    await login(fresh, planner.email, body.data.tempPassword);
+    expect((await fetchWith(fresh, `${BASE}/api/depots`)).status).toBe(200);
+
+    // The outstanding reset link is retired; the audit row names the user and holds no hash.
+    expect((await fetch(`${BASE}/api/auth/reset`, j({ token: raw, newPassword: 'Yet-Another-Password-1' }))).status).toBe(400);
+    const row = await prisma.auditLog.findFirst({ where: { tenantId: h.tenantId, action: 'PASSWORD_RESET_BY_ADMIN', entityId: planner.id } });
+    expect(row?.userId).toBe(h.userId);
+    const text = JSON.stringify(row);
+    expect(text).not.toMatch(/\$2[aby]\$\d\d\$/);
+    expect(text).not.toContain(body.data.tempPassword);
+  });
+
+  it('refuses below TENANT_ADMIN, for a platform admin, for yourself and across tenants', async () => {
+    const h = await freshTenant('auth-resetguard');
+    createdSlugs.add(h.slug);
+    const other = await freshTenant('auth-resetother');
+    createdSlugs.add(other.slug);
+    const planner = await inviteUser(h, 'PLANNER');
+    const supervisor = await inviteUser(h, 'SUPERVISOR');
+    const boss = await inviteUser(h, 'TENANT_ADMIN');
+    await prisma.user.update({ where: { id: boss.id }, data: { role: 'SUPER_ADMIN' } });
+    const reset = (jar: CookieJar, id: string) => fetchWith(jar, `${BASE}/api/users/${id}/reset-password`, { method: 'POST' });
+
+    expect((await reset(supervisor.jar, planner.id)).status).toBe(403);
+    expect((await reset(h.cookieJar, boss.id)).status).toBe(403);
+    expect((await reset(h.cookieJar, h.userId)).status).toBe(400);
+    expect((await reset(other.cookieJar, planner.id)).status).toBe(404);
+    // Nothing changed: the planner still signs in with the invite password.
+    const jar = new CookieJar();
+    await login(jar, planner.email, planner.password);
+    expect((await fetchWith(jar, `${BASE}/api/depots`)).status).toBe(200);
+  });
+
+  it('inviting an existing email is still refused (reset is the way back in)', async () => {
+    const h = await freshTenant('auth-reinvite');
+    createdSlugs.add(h.slug);
+    const planner = await inviteUser(h, 'PLANNER');
+    const again = await fetchWith(h.cookieJar, `${BASE}/api/users`, j({ email: planner.email, name: 'Again', role: 'PLANNER' }));
+    expect(again.status).toBe(409);
+    expect(((await again.json()) as { error: string }).error).toMatch(/Reset password/);
   });
 });
 
