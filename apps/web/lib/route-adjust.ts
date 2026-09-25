@@ -9,6 +9,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { audit } from './audit';
+import { HttpError } from './http-error';
 
 export type InsertionMode = 'after' | 'end' | 'auto';
 
@@ -479,11 +480,11 @@ export async function unassignAssignment(
   return { unassignedAssignmentId: assignmentId, resequencedTrucks: [a.truckId] };
 }
 
-export class RouteAdjustError extends Error {
-  status: number;
+/** An expected refusal of a manual route edit (legacy runs): an HttpError, so it maps to its status (review L16). */
+export class RouteAdjustError extends HttpError {
   constructor(message: string, status = 400) {
-    super(message);
-    this.status = status;
+    super(message, status);
+    this.name = 'RouteAdjustError';
   }
 }
 
