@@ -15,24 +15,22 @@
  *   - the web process itself every 60 s (lib/jobs/janitor-loop.ts, started from instrumentation.ts)
  *   - this route, for manual runs or an external cron
  *
- * Auth: requires header `X-Janitor-Token` matching env `JANITOR_TOKEN`.
- * In dev, `JANITOR_TOKEN` defaults to the SOLVER_TOKEN to keep config minimal.
+ * Auth: requires header `X-Janitor-Token` (or `Authorization: Bearer`) matching env
+ * `JANITOR_TOKEN`. In production there is no fallback: without JANITOR_TOKEN every call is
+ * refused, so this public endpoint never accepts the solver's service secret. Outside
+ * production (local dev) it falls back to SOLVER_TOKEN to keep config minimal.
  * Uses timing-safe comparison so a malicious caller can't byte-extract the
  * token via response-time deltas.
  */
 import { NextResponse } from 'next/server';
 import { reapStuckJobs } from '@/lib/jobs/optimize-job';
 import { reapStaleShifts } from '@/lib/jobs/shift-janitor';
-import { constantTimeEqual } from '@/lib/driver-auth';
+import { janitorAuthorized } from '@/lib/janitor-auth';
 
 export const dynamic = 'force-dynamic';
 
 function authorize(req: Request): boolean {
-  const expected = process.env.JANITOR_TOKEN ?? process.env.SOLVER_TOKEN ?? '';
-  if (!expected) return false;
-  const got = req.headers.get('x-janitor-token') ?? req.headers.get('authorization')?.replace(/^Bearer /i, '') ?? '';
-  if (!got) return false;
-  return constantTimeEqual(got, expected);
+  return janitorAuthorized(req);
 }
 
 async function runJanitor() {

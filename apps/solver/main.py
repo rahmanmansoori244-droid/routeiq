@@ -8,6 +8,7 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
 * ``POST /optimize``          - legacy v1 three-scenario PyVRP solver (kept for comparison).
 """
 
+import hmac
 import logging
 import os
 import time
@@ -63,10 +64,12 @@ def health() -> dict:
 
 
 def _check_token(token: str | None) -> None:
+    """Shared-secret check for every endpoint except /health. Constant-time, on bytes:
+    hmac.compare_digest on str raises TypeError for non-ASCII input (a 500), bytes never do."""
     if not SOLVER_TOKEN:
         log.error("SOLVER_TOKEN env var is not set; refusing request")
         raise HTTPException(status_code=500, detail="Solver not configured")
-    if token != SOLVER_TOKEN:
+    if not hmac.compare_digest((token or "").encode("utf-8"), SOLVER_TOKEN.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid solver token")
 
 
@@ -114,11 +117,7 @@ def optimize_endpoint(
     req: OptimizeRequest,
     x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
 ) -> OptimizeResponse:
-    if not SOLVER_TOKEN:
-        log.error("SOLVER_TOKEN env var is not set; refusing /optimize")
-        raise HTTPException(status_code=500, detail="Solver not configured")
-    if x_solver_token != SOLVER_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid solver token")
+    _check_token(x_solver_token)
 
     started = time.time()
     log.info(

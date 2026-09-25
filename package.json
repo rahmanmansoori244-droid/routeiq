@@ -12,7 +12,6 @@
     "test": "turbo test",
     "db:migrate": "pnpm --filter @routeiq/web db:migrate",
     "db:migrate:deploy": "pnpm --filter @routeiq/web db:migrate:deploy",
-    "db:seed:nmwc": "pnpm --filter @routeiq/web db:seed:nmwc",
     "db:studio": "pnpm --filter @routeiq/web db:studio"
   },
   "devDependencies": {
