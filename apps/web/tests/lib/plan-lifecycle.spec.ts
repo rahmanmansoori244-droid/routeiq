@@ -1104,7 +1104,12 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     Object.assign(row('runPlan', childId), { status: 'OPTIMIZING', currentJobId: 'J9' });
     tables.runJob.push({ id: 'J9', runId: childId, tenantId: T, attemptNo: 1, status: 'QUEUED' });
     const t2only: Trip[] = [{ truck: 'T2', at: [480, 600], order: 'O2' }, { truck: 'T2', loadNo: 2, at: [620, 740], order: 'O3' }];
-    const plan = { ...scenarioDetails({ scope: undefined, loads: solverOf(t2only), trips: 2, trucks_used: 1 }), unserved: [] };
+    // The optimizer checked its own timetable (PR4), so the message carries no timing note.
+    const plan = {
+      ...scenarioDetails({ scope: undefined, loads: solverOf(t2only), trips: 2, trucks_used: 1 }),
+      unserved: [],
+      feasibility: { status: 'VERIFIED', timing: 'EXACT', violations: [] },
+    };
     solver.impl = async () => ({ engine: 'OR-Tools', matrix_provider: 'HAVERSINE', distance_is_estimated: true, warnings: [], scenarios: [plan] });
     const built = { request: { stops: [{ stop_id: 's' }], trucks: [{ id: 'T2' }] }, preDrops: [], scope: sc(t2only), blocking: [], warnings: [], unknownWeights: [], weightChanges: { lines: [], orders: [] } };
     scheduleDispatchOptimize({ runId: childId, runJobId: 'J9', tenantId: T, userId: 'u1', ip: null, built: built as never });

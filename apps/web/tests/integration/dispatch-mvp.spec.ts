@@ -15,6 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
+import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
@@ -372,5 +373,135 @@ describe('NMWC dispatch MVP workflow', () => {
     }
     const orders = await prisma.order.count({ where: { tenantId: t.tenantId } });
     expect(p.reconciliation.orders).toBe(orders);
+  });
+});
+
+/**
+ * Stabilization PR4 (review F08): the facts a plan was made with are frozen with it. A pin, hours
+ * or truck corrected after locking never changes what the plan, the driver sheets or the workbook
+ * show for that load; the change is shown next to it ("changed after planning") and adopted only
+ * by a re-plan. Re-plans copy the snapshots, including rows planned before snapshots existed.
+ */
+describe('frozen plan facts (review F08)', () => {
+  const put = (url: string, body: unknown) => fetchWith(t.cookieJar, url, { ...j(body), method: 'PUT' });
+  const patch = (url: string, body: unknown) => fetchWith(t.cookieJar, url, { ...j(body), method: 'PATCH' });
+  const mapsUrl = (lat: number, lng: number) =>
+    `https://www.google.com/maps/place/Moved/@${lat},${lng},17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d${lat}!4d${lng}`;
+  let lockedId = '';
+  let planned: { customerId: string; lat: number; lng: number; window: string; capacity: number } | null = null;
+
+  it('27 after locking, a corrected pin, hours and truck capacity are shown as changes - the plan keeps what it was planned with', async () => {
+    const p = await plan(runV2);
+    expect(p.feasibility.ok).toBe(true);
+    // The first PLANNED load whose earlier loads are all frozen can be locked.
+    const target = p.loads
+      .filter((l: any) => l.status === 'PLANNED')
+      .sort((a: any, b: any) => a.loadNo - b.loadNo)
+      .find((l: any) => p.loads.filter((x: any) => x.truckId === l.truckId && x.loadNo < l.loadNo).every((x: any) => x.status !== 'PLANNED'));
+    expect(target, 'a PLANNED load to lock').toBeTruthy();
+    const lock = await patch(`${BASE}/api/runs/${runV2}/loads/${target.id}`, { status: 'LOCKED' });
+    expect(lock.status).toBe(200);
+    lockedId = target.id;
+    const s = target.stops[0];
+    expect(s.snapshot).toBe(true);
+    planned = { customerId: s.customerId, lat: s.lat, lng: s.lng, window: s.window, capacity: target.truckCapacityCases };
+
+    // Corrections after planning: pin moved ~1.1 km, new receiving hours, truck capacity edited.
+    const loc = await put(`${BASE}/api/customers/${s.customerId}/location`, { input: mapsUrl(s.lat + 0.01, s.lng) });
+    expect(loc.status).toBe(200);
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { hardWindowStartMin: 420, hardWindowEndMin: 660 })).status).toBe(200);
+    expect((await patch(`${BASE}/api/trucks/${target.truckId}`, { capacityCases: 110 })).status).toBe(200);
+
+    const after = await plan(runV2);
+    const l = after.loads.find((x: any) => x.id === lockedId);
+    const st = l.stops.find((x: any) => x.customerId === s.customerId);
+    expect([st.lat, st.lng]).toEqual([planned.lat, planned.lng]); // the planned destination
+    expect(st.window).toBe(planned.window);
+    expect(st.mapsUrl).toContain(`${planned.lat},${planned.lng}`);
+    const kinds = st.masterChanged.map((c: any) => c.kind);
+    expect(kinds).toContain('LOCATION');
+    expect(kinds).toContain('HOURS');
+    expect(st.masterChanged.find((c: any) => c.kind === 'LOCATION').text).toMatch(/^Location updated after planning: new pin /);
+    expect(l.truckCapacityCases).toBe(planned.capacity);
+    expect(l.masterChanged[0].text).toMatch(/^Truck capacity changed after planning: now 110 cases/);
+    expect(after.warnings.some((w: string) => w.includes('changed after these locked or dispatched loads were planned'))).toBe(true);
+
+    // The driver sheet model and the workbook say the same.
+    const sheetModel = driverPackModel(after, { tenantName: 'NMWC', loadIds: [lockedId] });
+    const sheetStop = sheetModel.sheets[0].stops.find((x) => x.customerCode === st.customerCode)!;
+    expect(sheetStop.changeNotes.some((n) => n.startsWith('Location updated after planning: new pin'))).toBe(true);
+    expect(sheetStop.newPinUrl).toBeTruthy();
+    const x = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/excel`);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await x.arrayBuffer());
+    const sheetName = wb.worksheets.map((w) => w.name).find((n) => n.startsWith(`${l.truckCode} - L${l.loadNo}`))!;
+    const cellsText: string[] = [];
+    wb.getWorksheet(sheetName)!.eachRow((r) => r.eachCell((c) => cellsText.push(c.text)));
+    expect(cellsText.some((c) => c.startsWith('Location updated after planning'))).toBe(true);
+    expect(cellsText).toContain(`${l.cases} / ${planned.capacity}`);
+  });
+
+  it('27b a settings change after planning: the ASSUMPTIONS sheet still shows the settings the plan was built with', async () => {
+    const r = await patch(`${BASE}/api/tenant/config`, { config: { reloadMinutes: 45 } });
+    expect(r.status).toBe(200);
+    const x = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/excel`);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(await x.arrayBuffer());
+    const a = wb.getWorksheet('ASSUMPTIONS')!;
+    expect(a.getCell(2, 1).text).toMatch(/^Settings this plan \(v\d+\) was built and costed with\.$/);
+    let reload = '';
+    a.eachRow((row) => {
+      if (row.getCell(1).text === 'Depot reload time between loads') reload = row.getCell(2).text;
+    });
+    expect(reload).toBe('30 min');
+  });
+
+  it('27c a pin corrected for a customer on a PLANNED load: the day screen asks for a re-plan', async () => {
+    const p = await plan(runV2);
+    const other = p.loads.filter((l: any) => l.status === 'PLANNED').flatMap((l: any) => l.stops).find((s: any) => s.customerId !== planned!.customerId && s.snapshot);
+    if (!other) return; // every other load is frozen on this day: nothing to adopt
+    expect((await put(`${BASE}/api/customers/${other.customerId}/location`, { input: mapsUrl(other.lat - 0.01, other.lng) })).status).toBe(200);
+    const day = (await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/day?date=${deliveryDate}&depotId=${depotId}`))).data;
+    expect(day.outdated.masterChanged).toBeGreaterThanOrEqual(1);
+  });
+
+  it('28 a re-plan keeps identical snapshots on the carried assignments and loads', async () => {
+    const before = await prisma.routeAssignment.findMany({ where: { loadId: lockedId }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
+    const beforeLoad = await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedId } });
+    expect(before.every((a) => a.stopSnapshotJson !== null)).toBe(true);
+    const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/replan`, j({ reason: 'REOPTIMIZE' }));
+    expect(rp.status).toBe(202);
+    const next = (await json(rp)).data.runId;
+    await waitForPlan(next);
+    const copy = await prisma.planLoad.findFirstOrThrow({ where: { runId: next, carriedFromLoadId: lockedId } });
+    expect(copy.truckSnapshotJson).toEqual(beforeLoad.truckSnapshotJson);
+    const after = await prisma.routeAssignment.findMany({ where: { loadId: copy.id }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
+    expect(after.map((a) => a.stopSnapshotJson)).toEqual(before.map((a) => a.stopSnapshotJson));
+    const p = await plan(next);
+    const st = p.loads.find((l: any) => l.id === copy.id).stops.find((s: any) => s.customerId === planned!.customerId);
+    expect([st.lat, st.lng]).toEqual([planned!.lat, planned!.lng]); // still the planned destination
+    // The re-planned PLANNED loads use the corrected master data (their own new snapshots).
+    for (const l of p.loads.filter((x: any) => x.status === 'PLANNED')) expect(l.truckSnapshot).toBe(true);
+    runV2 = next;
+  });
+
+  it('29 a re-plan of a version whose rows have no snapshots (made before they existed) succeeds: SQL NULL is copied', async () => {
+    await prisma.$executeRaw`UPDATE "RouteAssignment" SET "stopSnapshotJson" = NULL WHERE "runId" = ${runV2}`;
+    await prisma.$executeRaw`UPDATE "PlanLoad" SET "truckSnapshotJson" = NULL WHERE "runId" = ${runV2}`;
+    await prisma.$executeRaw`UPDATE "RunPlan" SET "feasibilityJson" = NULL WHERE id = ${runV2}`;
+    const old = await plan(runV2);
+    expect(old.loads.every((l: any) => l.truckSnapshot === false && l.stops.every((s: any) => s.snapshot === false))).toBe(true);
+    const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/replan`, j({ reason: 'REOPTIMIZE' }));
+    expect(rp.status).toBe(202);
+    const next = (await json(rp)).data.runId;
+    const st = await waitForPlan(next);
+    expect(st.run.status).toBe('READY');
+    const carried = await prisma.planLoad.findMany({ where: { runId: next, carriedFromLoadId: { not: null } } });
+    expect(carried.length).toBeGreaterThan(0);
+    expect(carried.every((l) => l.truckSnapshotJson === null)).toBe(true);
+    const p = await plan(next);
+    expect(p.reconciliation.ok).toBe(true);
+    expect(p.feasibility).toBeTruthy();
+    runV2 = next;
   });
 });

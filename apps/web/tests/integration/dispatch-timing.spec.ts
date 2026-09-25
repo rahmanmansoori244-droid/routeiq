@@ -13,6 +13,7 @@ import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle 
 let t: TenantHandle;
 let depotId = '';
 let day = '';
+let runId = '';
 
 const TIMING = { shiftStartMin: 7 * 60 + 30, reloadMinutes: 20, loadingMinPerCase: 0.04, serviceMinPerCase: 0.05, maxTripsPerTruck: 3 };
 
@@ -86,7 +87,7 @@ describe('dispatch timing settings', () => {
 
     const r = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/plan`, j({ date: day, depotId, optimize: true }));
     expect(r.status).toBe(202);
-    const runId = (await json(r)).data.runId;
+    runId = (await json(r)).data.runId;
     let status: any = null;
     for (let i = 0; i < 120 && !status; i++) {
       await new Promise((res) => setTimeout(res, 1500));
@@ -113,5 +114,101 @@ describe('dispatch timing settings', () => {
       expect(loads[i].departMin).toBeGreaterThanOrEqual(loads[i - 1].returnMin + 20 + 0.04 * loads[i].cases - 1);
     }
     expect(plan.reconciliation.ok).toBe(true);
+  });
+});
+
+/**
+ * Stabilization PR4 (review F04): the dispatch feasibility gate on the running app. The plan above
+ * was timed with a real loading time per case (0.04 min), so a solver that skipped or failed its
+ * exact re-check would have returned second and third loads that leave too early. Every option now
+ * carries the optimizer's own check; the web re-checks each truck-day and refuses LOCK, LOADING and
+ * DISPATCH while one breaks a rule. (A forced solver stage failure is covered by the solver tests,
+ * apps/solver/tests/test_feasibility.py: the plan is re-timed exactly, or reported VIOLATED.)
+ */
+describe('dispatch feasibility gate (review F04)', () => {
+  const patch = (loadId: string, status: string) =>
+    fetchWith(t.cookieJar, `${BASE}/api/runs/${runId}/loads/${loadId}`, j({ status }, 'PATCH'));
+  async function planNow() {
+    return (await json(await fetchWith(t.cookieJar, `${BASE}/api/runs/${runId}/plan`))).data;
+  }
+
+  it('the optimizer checked the recommended timetable; the plan stores its own check per truck-day', async () => {
+    const plan = await planNow();
+    const rec = plan.scenarios.find((s: any) => s.name === 'RECOMMENDED');
+    expect(rec.feasibility).toMatchObject({ status: 'VERIFIED', violations: 0 });
+    expect(plan.feasibility).toMatchObject({ ok: true, status: 'VERIFIED', source: 'SOLVER_AND_WEB' });
+    const stored = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
+    expect((stored.feasibilityJson as any)?.ok).toBe(true);
+    const audit = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, action: 'OPTIMIZE_SUCCEEDED', entityId: runId } });
+    const recAudit = (audit.afterJson as any).scenarios.find((s: any) => s.name === 'RECOMMENDED');
+    expect(recAudit.feasibility).toMatchObject({ status: 'VERIFIED', violations: 0 });
+    const job = await prisma.runJob.findFirstOrThrow({ where: { runId }, orderBy: { createdAt: 'desc' } });
+    expect(job.message).not.toMatch(/NOT verified/);
+  });
+
+  it('a missed receiving window blocks LOCK for that truck, with the violations; unlock-free, nothing changes', async () => {
+    const plan = await planNow();
+    const loads = plan.loads.filter((l: any) => l.truckCode === 'T01').sort((a: any, b: any) => a.loadNo - b.loadNo);
+    const stop = await prisma.routeAssignment.findFirstOrThrow({ where: { loadId: loads[1].id } });
+    await prisma.routeAssignment.update({ where: { id: stop.id }, data: { hardWindowOk: false } });
+    try {
+      const r = await patch(loads[0].id, 'LOCKED');
+      expect(r.status).toBe(409);
+      const body = await json(r);
+      expect(body.error.code).toBe('TIMES_NOT_VERIFIED');
+      expect(body.error.truckCode).toBe('T01');
+      expect(body.error.violations[0]).toMatchObject({ code: 'HARD_WINDOW', loadNo: 2 });
+      expect(body.error.error).toMatch(/Re-plan/);
+      expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: loads[0].id } })).status).toBe('PLANNED');
+      const shown = await planNow();
+      expect(shown.feasibility.ok).toBe(false);
+      expect(shown.loads.find((l: any) => l.id === loads[0].id).timing).toMatchObject({ status: 'VIOLATED', ok: false });
+    } finally {
+      await prisma.routeAssignment.update({ where: { id: stop.id }, data: { hardWindowOk: true } });
+    }
+  });
+
+  it("an option the optimizer reported VIOLATED cannot be locked (unless the operator switch FEASIBILITY_GATE=warn is on)", async () => {
+    const run = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
+    const sc = await prisma.scenarioResult.findUniqueOrThrow({ where: { id: run.chosenScenarioId! } });
+    const original = sc.detailsJson as any;
+    const t01 = await prisma.truck.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'T01' } });
+    const violated = {
+      ...original,
+      feasibility: {
+        status: 'VIOLATED',
+        timing: 'ESTIMATED',
+        violations: [{ code: 'TURNAROUND', truck_id: t01.id, load_no: 2, message: 'T01 load 2 leaves 20 min before the truck is reloaded.', short_by_min: 20 }],
+      },
+    };
+    await prisma.scenarioResult.update({ where: { id: sc.id }, data: { detailsJson: violated } });
+    try {
+      const plan = await planNow();
+      const l1 = plan.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
+      const r = await patch(l1.id, 'LOCKED');
+      if (process.env.FEASIBILITY_GATE === 'warn') {
+        // The server runs with the switch: allowed, and the violation is in the load's audit row.
+        expect(r.status).toBe(200);
+        const a = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, action: 'LOAD_LOCKED', entityId: l1.id }, orderBy: { createdAt: 'desc' } });
+        expect((a.afterJson as any).timing).toMatchObject({ ok: false, gate: 'warn', overridden: 'FEASIBILITY_GATE=warn' });
+        await patch(l1.id, 'PLANNED');
+      } else {
+        expect(r.status).toBe(409);
+        expect((await json(r)).error.violations[0]).toMatchObject({ code: 'TURNAROUND', source: 'SOLVER' });
+      }
+    } finally {
+      await prisma.scenarioResult.update({ where: { id: sc.id }, data: { detailsJson: original } });
+    }
+  });
+
+  it('a verified plan still locks, loads and dispatches', async () => {
+    const plan = await planNow();
+    const l1 = plan.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
+    for (const to of ['LOCKED', 'LOADING', 'DISPATCHED']) {
+      const r = await patch(l1.id, to);
+      expect(r.status, `${to}: ${JSON.stringify(await r.clone().json())}`).toBe(200);
+    }
+    const a = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, action: 'LOAD_DISPATCHED', entityId: l1.id } });
+    expect((a.afterJson as any).timing).toMatchObject({ status: 'VERIFIED', ok: true, gate: process.env.FEASIBILITY_GATE === 'warn' ? 'warn' : 'enforce' });
   });
 });

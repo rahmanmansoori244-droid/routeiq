@@ -61,7 +61,10 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
 
 function orderOf(id: string) {
   const o = (tables.order ?? []).find((x) => x.id === id);
-  return o ? { ...o, customerId: o.customerId ?? 'c' } : { id, customerId: 'c', totalCases: 0 };
+  const customer = { id: 'c', code: 'C', branchKey: '__MAIN__', branchCode: null, name: 'Customer C' };
+  return o
+    ? { lines: [], customer: { ...customer, id: o.customerId ?? 'c' }, ...o, customerId: o.customerId ?? 'c' }
+    : { id, customerId: 'c', totalCases: 0, totalWeightKg: 0, lines: [], customer };
 }
 
 function withInclude(model: string, r: Row, include?: Row) {
@@ -146,7 +149,7 @@ function delegate(model: string) {
 
 const MODELS = [
   'runPlan', 'planLoad', 'routeAssignment', 'runJob', 'auditLog', 'scenarioResult', 'unservedOrder', 'order', 'orderLine',
-  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant',
+  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer',
 ];
 
 export const fakePrisma: Row = {};

@@ -95,7 +95,10 @@ describe('isCarriedFrozen (review: PLANNED copies of a re-plan are not "kept")',
 
 describe('copyRowData', () => {
   it('finds the Json columns of a model from the Prisma schema', () => {
-    expect([...jsonFieldsOf('RouteAssignment')]).toEqual(['portionLinesJson']);
+    // PR4 (review F08) added the plan snapshots: found with no change to the copy code.
+    expect([...jsonFieldsOf('RouteAssignment')].sort()).toEqual(['portionLinesJson', 'stopSnapshotJson']);
+    expect([...jsonFieldsOf('PlanLoad')]).toEqual(['truckSnapshotJson']);
+    expect(jsonFieldsOf('RunPlan').has('feasibilityJson')).toBe(true);
     expect(jsonFieldsOf('ScenarioResult').has('detailsJson')).toBe(true);
     expect(jsonFieldsOf('PlanLoad').has('driverId')).toBe(false);
   });
