@@ -5,6 +5,7 @@
  */
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
+import { isSupersededRun } from './plan-status';
 import { fmtHhmm } from './time';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
@@ -101,8 +102,10 @@ export function stopTitle(s: Pick<DetailStop, 'customerName' | 'customerCode' | 
 export interface MessagePlan {
   runDate: string;
   version: number;
-  /** Plan version status: a SUPERSEDED version's message says it must not be used. */
+  /** Plan version status: a superseded version's message says it must not be used. */
   status?: string;
+  /** Set when a newer version replaced this one (superseded even if the status says otherwise). */
+  supersededAt?: string | null;
   depot: { lat: number; lng: number };
 }
 
@@ -121,7 +124,7 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
   const route = routeLinks(plan.depot, stops);
   const lines = [
-    ...(plan.status === 'SUPERSEDED' ? [REPLACED_LINE] : []),
+    ...(isSupersededRun({ status: plan.status ?? '', supersededAt: plan.supersededAt }) ? [REPLACED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,

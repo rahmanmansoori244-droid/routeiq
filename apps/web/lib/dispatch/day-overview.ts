@@ -69,7 +69,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, outdated: { weightCases: 0, inactiveOrders: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { weightCases: 0, inactiveOrders: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -236,6 +236,11 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     weightsToApply: [...toApply.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)),
     plan: planInfo,
     pending,
+    /**
+     * Orders of the day with cases not yet on a locked, loading or dispatched load of the plan in
+     * use. 0 while orders exist = nothing left to plan (OPTIMIZE / RE-PLAN answer NOTHING_TO_PLAN).
+     */
+    openOrders: openCasesOf.size,
     /**
      * The plan in use is out of date without a new order waiting: open cases on it whose case
      * weight was entered or corrected since, and orders of customers deactivated since that are

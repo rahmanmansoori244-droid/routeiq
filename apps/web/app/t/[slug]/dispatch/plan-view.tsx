@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
+import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 
@@ -91,12 +92,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
 
+  // One action at a time: while any request of this plan runs (a load change, Lock all, Use
+  // instead, Re-plan), every other action is disabled, so one user cannot race themselves (F07).
   async function setStatus(l: DetailLoad, status: string) {
+    if (busy) return;
     setBusy(l.id);
     const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
     setBusy(null);
     if (!r.ok) {
       toast.error(r.error ?? 'Could not change the load.');
+      await load(); // show the plan as it is now (it may have changed meanwhile)
       return;
     }
     toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
@@ -105,6 +110,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   async function setDriver(l: DetailLoad, driverId: string | null) {
+    if (busy) return;
     setBusy(l.id);
     const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
     setBusy(null);
@@ -121,26 +127,32 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   async function lockAll() {
-    if (!d) return;
+    if (!d || busy) return;
     setBusy('all');
     const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
     let n = 0;
+    let firstError: string | null = null;
     for (const l of planned) {
       const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
       if (r.ok) n++;
+      else firstError ??= r.error;
     }
     setBusy(null);
-    toast.success(`${n} load(s) locked.`);
+    if (firstError && n < planned.length) toast.warning(`${n} of ${planned.length} load(s) locked. ${firstError}`);
+    else toast.success(`${n} load(s) locked.`);
     await load();
     onChanged?.();
   }
 
   async function chooseScenario(id: string, name: string) {
+    if (busy) return;
     setBusy(id);
     const r = await api(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
     setBusy(null);
     if (!r.ok) {
       toast.error(r.error ?? 'Could not switch.');
+      await load();
+      onChanged?.();
       return;
     }
     toast.success(`Now using the ${name} plan.`);
@@ -149,22 +161,31 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', overrides: OptimizeOverrides = {}) {
+    if (busy && busy !== 'replan') return;
     setBusy('replan');
-    const r = await api<{ runId: string; version?: number; reason?: string }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, ...overrides } });
-    setBusy(null);
+    const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
+    const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } });
     if (!r.ok || !r.data) {
       // No location, or no weight: the same questions as OPTIMIZE on the day screen.
       const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
       if (more) return replan(reason, { ...overrides, ...more });
+      setBusy(null);
       if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
       toast.error(r.error ?? 'Re-plan failed.');
+      // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
+      // after a refused start): reload it and the day instead of keeping stale buttons.
+      await load();
+      onChanged?.();
       return;
     }
+    setBusy(null);
     const how =
       r.data.reason === 'LATE_ORDER'
         ? 'Late order added; the other orders stay on their trucks where possible.'
         : 'Full re-optimize: orders may move to other trucks.';
-    toast.success(`Plan version ${r.data.version ?? ''} is being optimized. ${how} Locked and dispatched loads are kept.`);
+    toast.success(
+      `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+    );
     onChanged?.(r.data.runId);
   }
 
@@ -174,8 +195,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const s = d.summary;
   const rec = d.reconciliation;
   const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
-  const superseded = d.run.status === 'SUPERSEDED';
+  // Replaced by a newer version: status SUPERSEDED, or supersededAt set (review F07).
+  const superseded = isSupersededRun(d.run);
   const kmLabel = s?.distanceIsEstimated ? 'Estimated km' : 'Road km';
+  // Every order is on a locked, loading or dispatched load: a re-plan would have nothing to plan.
+  const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
+  const applied = !!d.run.chosenScenario;
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -184,7 +209,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <h2 className="text-lg font-semibold">
             Plan v{d.run.version} · {d.run.depot.code} · {d.run.runDate}
           </h2>
-          <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{d.run.status}</Badge>
+          <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{superseded ? 'SUPERSEDED' : d.run.status}</Badge>
           {d.run.reason !== 'INITIAL' ? <Badge variant="warning">{d.run.reason.replace('_', ' ')}</Badge> : null}
           {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}</Badge> : null}
         </div>
@@ -205,15 +230,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>
-              <Button variant="outline" size="sm" onClick={() => setLateOpen(true)}>
+              <Button variant="outline" size="sm" disabled={!!busy} onClick={() => setLateOpen(true)}>
                 <Plus className="mr-1 h-4 w-4" /> Late order
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy === 'replan' || running}
+                disabled={!!busy || running || nothingToPlan}
                 onClick={() => replan('REOPTIMIZE')}
-                title="With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change."
+                data-testid="replan-btn"
+                title={
+                  nothingToPlan
+                    ? 'Nothing to plan: every order is on a locked, loading or dispatched load. Unlock a load (or add a late order) first.'
+                    : 'With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change.'
+                }
               >
                 <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
               </Button>
@@ -228,9 +258,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       {running ? (
         <div className="rounded-md border bg-muted/40 p-3 text-sm" data-testid="optimizing">
           Optimizing… {d.job?.message ?? ''} ({d.job?.progressPct ?? 0}%)
+          {applied ? ' Until the new plan is saved, the loads below are the previous plan (kept if the optimization fails).' : ''}
         </div>
       ) : null}
-      {d.run.status === 'FAILED' ? <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div> : null}
+      {d.run.status === 'FAILED' && !superseded ? (
+        applied ? (
+          // A failed re-plan: the version holds a copy of the previous plan (copy-forward, F03).
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="failed-plan-kept">
+            <b>Optimization failed - previous plan kept.</b> {d.job?.message ?? ''} The loads below are the previous plan: they can be locked and dispatched as they are. Re-plan to try again.
+          </div>
+        ) : (
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div>
+        )
+      ) : null}
       {d.change ? (
         <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm" data-testid="change-summary">
           <b>Changes vs version {d.change.parentVersion}:</b> {d.change.text}.
@@ -329,8 +369,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2 text-right">
                       {sc.chosen ? (
                         <Badge variant="success">In use</Badge>
+                      ) : sc.status !== 'OPTIMIZED' ? (
+                        // NO_SOLUTION (or nothing to plan): this option has no plan to use.
+                        <span className="text-xs text-muted-foreground" title="This option found no plan; it cannot be used.">
+                          No plan
+                        </span>
                       ) : canPlan && !superseded ? (
-                        <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => chooseScenario(sc.id, sc.name)}>
+                        <Button size="sm" variant="ghost" disabled={!!busy || running} onClick={() => chooseScenario(sc.id, sc.name)}>
                           Use instead
                         </Button>
                       ) : null}
@@ -348,8 +393,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <CardTitle className="flex items-center gap-2 text-sm">
             <Truck className="h-4 w-4" /> Truck loads ({d.loads.length})
           </CardTitle>
-          {canPlan && !superseded && d.loads.some((l) => l.status === 'PLANNED') ? (
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={lockAll}>
+          {canPlan && !superseded && applied && d.loads.some((l) => l.status === 'PLANNED') ? (
+            <Button size="sm" variant="outline" disabled={!!busy || running} onClick={lockAll}>
               <Lock className="mr-1 h-4 w-4" /> Lock all loads
             </Button>
           ) : null}
@@ -386,7 +431,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         l={l}
                         drivers={drivers}
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
-                        busy={busy === l.id}
+                        busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
@@ -421,7 +466,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.fuelLitres ?? '—'}</td>
                     <td className="p-2">{l.operatingCost.toFixed(1)}</td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
-                      {!superseded ? <LoadActions l={l} busy={busy === l.id} canPlan={canPlan} canDispatch={canDispatch} reconOk={!!rec?.ok} onStatus={(st) => setStatus(l, st)} /> : null}
+                      {!superseded ? <LoadActions l={l} busy={!!busy || running} applied={applied} canPlan={canPlan} canDispatch={canDispatch} reconOk={!!rec?.ok} onStatus={(st) => setStatus(l, st)} /> : null}
                     </td>
                   </tr>
                   {open[l.id] ? (
@@ -622,7 +667,24 @@ function LoadDriver({
   );
 }
 
-function LoadActions({ l, busy, canPlan, canDispatch, reconOk, onStatus }: { l: DetailLoad; busy: boolean; canPlan: boolean; canDispatch: boolean; reconOk: boolean; onStatus: (s: string) => void }) {
+function LoadActions({
+  l,
+  busy,
+  applied,
+  canPlan,
+  canDispatch,
+  reconOk,
+  onStatus,
+}: {
+  l: DetailLoad;
+  busy: boolean;
+  /** The version has an optimized plan; without one only Unlock and Back to locked are offered. */
+  applied: boolean;
+  canPlan: boolean;
+  canDispatch: boolean;
+  reconOk: boolean;
+  onStatus: (s: string) => void;
+}) {
   const b = (label: string, to: string, icon: React.ReactNode, enabled = true, title?: string) => (
     <Button key={to} size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !enabled} title={title} onClick={() => onStatus(to)} data-testid={`act-${to}-${l.truckCode}-${l.loadNo}`}>
       {icon}
@@ -630,6 +692,13 @@ function LoadActions({ l, busy, canPlan, canDispatch, reconOk, onStatus }: { l: 
     </Button>
   );
   const out: React.ReactNode[] = [];
+  if (!applied) {
+    // No optimized plan on this version (left by a failed re-plan before the stabilization
+    // release): only the way back, so the day can be optimized again.
+    if (l.status === 'LOCKED' && canPlan) out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));
+    if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
+    return <div className="flex flex-wrap gap-1">{out}</div>;
+  }
   if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
   if (l.status === 'LOCKED' && canPlan) {
     out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));

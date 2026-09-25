@@ -7,7 +7,8 @@ import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type TypeProfileLike } from './customer-attrs';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
-import { isDispatchDetails, type ScenarioDetails } from './plan-service';
+import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
+import { isSupersededRun } from './plan-status';
 import { noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
@@ -137,6 +138,12 @@ export interface PlanDetail {
   versions: { id: string; version: number; status: string; reason: string; reasonNote: string | null; createdAt: string; changeText: string | null }[];
   job: { id: string; status: string; message: string | null; progressPct: number; startedAt: string | null; finishedAt: string | null } | null;
   warnings: string[];
+  /**
+   * Orders of the day that the applied plan does not contain yet (uploaded or recorded after it).
+   * With no PLANNED load and nothing unserved, 0 here means a re-plan has nothing to plan.
+   * Always 0 for a superseded version or one without an applied plan.
+   */
+  pendingOrders?: number;
 }
 
 export async function getPlanDetail(tenantId: string, runId: string): Promise<PlanDetail | null> {
@@ -313,10 +320,16 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   const versions = await db.runPlan.findMany({
     where: { depotId: run.depotId, runDate: run.runDate },
     orderBy: { version: 'desc' },
-    select: { id: true, version: true, status: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
+    select: { id: true, version: true, status: true, supersededAt: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
   });
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
-  const outdated = run.status !== 'SUPERSEDED' && chosenDetails ? outdatedNotes(loads) : [];
+  const live = !isSupersededRun(run);
+  const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
+  let pendingOrders = 0;
+  if (live && chosenDetails) {
+    const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
+    pendingOrders = await prisma.order.count({ where: { ...(await ordersInScopeWhere(tenantId, run.depotId, run.runDate)), id: { notIn: inPlan } } });
+  }
   return {
     run: {
       id: run.id,
@@ -360,7 +373,8 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     versions: versions.map((v) => ({
       id: v.id,
       version: v.version,
-      status: v.status,
+      // A version written READY over its supersede (before the stabilization release) is listed as replaced.
+      status: isSupersededRun(v) ? 'SUPERSEDED' : v.status,
       reason: v.reason,
       reasonNote: v.reasonNote,
       createdAt: v.createdAt.toISOString(),
@@ -374,6 +388,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       : chosenDetails
         ? [...new Set([...outdated, ...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
         : [],
+    pendingOrders,
   };
 }
 
