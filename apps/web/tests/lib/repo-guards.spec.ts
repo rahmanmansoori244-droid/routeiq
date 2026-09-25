@@ -171,6 +171,11 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/whatever order the optimizer lists/i, 'drivers independent of the optimizer\'s trip order'],
       [/whichever truck is listed first/i, 'the same drivers whichever truck is listed first'],
       [/"No driver" clears (both|the marker)/i, '"No driver" clears the marker'],
+      // Second review of the simplified rules: "No driver" cannot end a note on a trip that has no
+      // driver (nothing is sent, nothing is marked), and no dispatch screen shows a finished job's message.
+      [/or \*\*No driver\*\*\); after that it is not listed again/i, '"No driver" ends a note on a trip without a driver'],
+      [/\*\*Keep\*\*, or "No driver"(;| -) (it does not come back|and never again)/i, '"No driver" ends a note on a trip without a driver'],
+      [/The re-plan's message and \*\*Use instead\*\* also say/i, 'a re-plan message with the note count (never shown)'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
