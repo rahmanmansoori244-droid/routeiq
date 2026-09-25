@@ -16,6 +16,13 @@
  *   that never loaded shows its error with Try again; the day's Try again reloads the plan too;
  * - a file check or a confirmed file that answers after another day was picked never takes the
  *   screen back to the previous day (dayAfterConfirm).
+ * Fourth review of PR3:
+ * - the day back after a failed load reloads the plan in place (reloadSignal), never remounting it
+ *   (a remount closed a late order being typed and every opened load);
+ * - only the newest plan load changes the screen (createLoadOrder), and Try again waits while a
+ *   reload or an action runs;
+ * - a failed driver change reloads the plan (the old driver and WhatsApp link are never shown as
+ *   current), and the reload banner punctuates the server's message (planReloadErrorText).
  * The screens themselves were driven in a DOM harness outside the repository (jsdom is not a
  * dependency here); these guards keep them on the tested rules.
  */
@@ -46,8 +53,12 @@ describe('day screen (dispatch-client.tsx)', () => {
     expect(dayScreen).toMatch(/onChanged=\{async \(\) => \{[^}]*if \(await refresh\(\)\) setPlanKey\(\(k\) => k \+ 1\);\s*\}\}/);
   });
 
-  it("the day shown after a failed load reloads the plan too (the day's Try again brings Step 4 back)", () => {
-    expect(dayScreen).toMatch(/show: \(d, \{ afterError \}\) => \{[^}]*if \(afterError\) setPlanKey\(\(k\) => k \+ 1\);/);
+  it("the day shown after a failed load reloads the plan too (the day's Try again brings Step 4 back) - in place, never a remount", () => {
+    expect(dayScreen).toMatch(/show: \(d, \{ afterError \}\) => \{[^}]*if \(afterError\) setPlanReload\(\(k\) => k \+ 1\);/);
+    const show = dayScreen.slice(dayScreen.indexOf('show: (d, { afterError }) => {'), dayScreen.indexOf('showError:'));
+    expect(show).not.toContain('setPlanKey'); // a new key would remount the plan (fourth review of PR3)
+    expect(dayScreen).toContain('reloadSignal={planReload}');
+    expect(dayScreen).toContain('key={`${day.plan.id}-${planKey}`}'); // a new plan id still remounts
   });
 
   it('OPTIMIZE / RE-PLAN that never reached the server keeps the plan below as it is', () => {
@@ -107,6 +118,31 @@ describe('plan screen (plan-view.tsx)', () => {
     // The whole panel is the error only while no plan was ever loaded.
     expect(planScreen).not.toMatch(/if \(err\) return/);
     expect(planScreen).toMatch(/if \(!d\) \{[^]*?return err \?/);
+  });
+
+  it('the screen around the plan reloads it in place (reloadSignal): the same load, no remount (fourth review of PR3)', () => {
+    expect(planScreen).toMatch(/if \(reloadSignal === seenReload\.current\) return;\s*seenReload\.current = reloadSignal;\s*void load\(\);/);
+  });
+
+  it('only the newest load changes the plan on screen, and Try again waits for a reload or an action (fourth review of PR3)', () => {
+    const body = planScreen.slice(planScreen.indexOf('const load = useCallback('), planScreen.indexOf('}, [runId]);'));
+    expect(body).toContain('const ticket = loadOrder.current.begin();');
+    const accept = body.indexOf('if (!loadOrder.current.accept(ticket)) return null;');
+    expect(accept).toBeGreaterThan(body.indexOf('await api<PlanDetail>'));
+    expect(accept).toBeLessThan(body.indexOf('setPanel('));
+    expect(planScreen).toContain('const retryOff = !!busy || reloading;');
+    expect(count(planScreen, /onClick=\{retry\} disabled=\{retryOff\}/g)).toBe(2);
+  });
+
+  it('a driver change that failed reloads the plan, like a status change (fourth review of PR3)', () => {
+    const body = planScreen.slice(planScreen.indexOf('function setDriver('), planScreen.indexOf('function lockAll('));
+    const failed = body.slice(body.indexOf('if (!r.ok) {'), body.indexOf('return;', body.indexOf('if (!r.ok) {')));
+    expect(failed).toContain('await load();');
+  });
+
+  it('the reload banner punctuates the server message (planReloadErrorText; fourth review of PR3)', () => {
+    expect(planScreen).toContain('{planReloadErrorText(err)}');
+    expect(planScreen).not.toContain('Could not reload the plan: {err}');
   });
 
   it('both error states offer Try again (the plan, and the driver list when it did not load)', () => {

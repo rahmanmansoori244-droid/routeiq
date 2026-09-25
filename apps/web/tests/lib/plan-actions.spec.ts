@@ -11,7 +11,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
-import { afterLateOrderSaved, planAfterLoad, runPlanAction, type ActionLock } from '@/app/t/[slug]/dispatch/plan-actions';
+import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock } from '@/app/t/[slug]/dispatch/plan-actions';
 
 describe('api(): a request that does not reach the server never rejects', () => {
   afterEach(() => {
@@ -156,5 +156,46 @@ describe('a failed reload keeps the plan on screen (third review of PR3: the pla
   it('a plan that never loaded: the error alone (with Try again), and a refusal says why', () => {
     expect(planAfterLoad({ plan: null, error: null }, unreachable)).toEqual({ plan: null, error: unreachable.error });
     expect(planAfterLoad({ plan: null, error: null }, { ok: false, data: null, error: null })).toEqual({ plan: null, error: 'Could not load the plan.' });
+  });
+});
+
+describe('the plan screen shows the newest answer only (fourth review of PR3)', () => {
+  it('a slow Try again read before a Lock, landing after the Lock\'s own reload, is dropped', () => {
+    const order = createLoadOrder();
+    const tryAgain = order.begin(); // slow
+    const afterLock = order.begin();
+    expect(order.pending()).toBe(true);
+    expect(order.accept(afterLock)).toBe(true); // LOCKED shown
+    expect(order.pending()).toBe(false);
+    expect(order.accept(tryAgain)).toBe(false); // the PLANNED read before the lock never comes back
+  });
+
+  it('two Try again clicks: the second worked, the first fails later - the fresh plan stays without the banner', () => {
+    const order = createLoadOrder();
+    const first = order.begin();
+    const second = order.begin();
+    expect(order.accept(second)).toBe(true);
+    expect(order.accept(first)).toBe(false);
+  });
+
+  it('answers slower than the polling still land in order (the screen never freezes)', () => {
+    const order = createLoadOrder();
+    const a = order.begin();
+    const b = order.begin();
+    expect(order.accept(a)).toBe(true); // older, but newer than the one on screen
+    expect(order.pending()).toBe(true); // b is still on its way: Try again waits
+    expect(order.accept(b)).toBe(true);
+    expect(order.pending()).toBe(false);
+  });
+});
+
+describe('the reload banner reads as sentences (fourth review of PR3)', () => {
+  it('ends the server message with a period before "The plan below may be out of date."', () => {
+    expect(planReloadErrorText('Not found')).toBe('Could not reload the plan: Not found. The plan below may be out of date.');
+    expect(planReloadErrorText('HTTP 502')).toBe('Could not reload the plan: HTTP 502. The plan below may be out of date.');
+    expect(planReloadErrorText('Too many requests ')).toBe('Could not reload the plan: Too many requests. The plan below may be out of date.');
+    expect(planReloadErrorText('The server could not be reached (Failed to fetch). Check the connection and try again.')).toBe(
+      'Could not reload the plan: The server could not be reached (Failed to fetch). Check the connection and try again. The plan below may be out of date.',
+    );
   });
 });

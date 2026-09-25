@@ -117,6 +117,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   // waits for it, and the plan's actions wait for Step 3's request (one action at a time, F07).
   const [planBusy, setPlanBusy] = useState(false);
   const [planKey, setPlanKey] = useState(0);
+  // Bumped to load the plan below again in place (PlanView reloadSignal), without a remount.
+  const [planReload, setPlanReload] = useState(0);
   const [showAllCustomers, setShowAllCustomers] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   // Every load is for the day selected NOW (day-loader.ts), also the reload after an action that
@@ -137,8 +139,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         setDay(d);
         setLoadError(null);
         // The day is back after a failed load: load the plan below again too (its own load most
-        // likely failed as well; third review of PR3).
-        if (afterError) setPlanKey((k) => k + 1);
+        // likely failed as well; third review of PR3) - in place, never a remount: a late order
+        // being typed, opened loads and a running action stay (fourth review of PR3: one failed
+        // day poll during an optimization closed the late-order dialog).
+        if (afterError) setPlanReload((k) => k + 1);
       },
       showError: setLoadError,
       selected: (sel) => {
@@ -517,6 +521,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
+            reloadSignal={planReload}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the

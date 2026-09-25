@@ -55,6 +55,47 @@ export function planAfterLoad<D>(shown: PlanPanel<D>, r: { ok: boolean; data: D 
   return { plan: shown.plan, error: r.error ?? 'Could not load the plan.' };
 }
 
+/**
+ * The order of the plan screen's loads (fourth review of PR3): a load's answer is shown only when
+ * it is newer than the answer on screen, so a slow answer never overwrites a newer one - a Try
+ * again read before a Lock, landing after the Lock's own reload, showed the plan PLANNED again
+ * while the server had it LOCKED; a failed first Try again landing after a second one that worked
+ * put "may be out of date" back over a fresh plan. An older answer that arrives first is still
+ * shown (then replaced by the newer one), so answers slower than the polling never freeze the
+ * screen. `pending()`: a newer load than the answer on screen is on its way (Try again waits).
+ */
+export interface LoadOrder {
+  /** A load starts: its ticket. */
+  begin(): number;
+  /** The answer to `ticket` arrived: true when it may be shown (newer than the one on screen). */
+  accept(ticket: number): boolean;
+  pending(): boolean;
+}
+
+export function createLoadOrder(): LoadOrder {
+  let started = 0;
+  let shown = 0;
+  return {
+    begin: () => ++started,
+    accept(ticket) {
+      if (ticket <= shown) return false;
+      shown = ticket;
+      return true;
+    },
+    pending: () => shown < started,
+  };
+}
+
+/**
+ * The banner over a plan whose reload failed. The server's messages have no final period ("Not
+ * found", "HTTP 502"): one is added, so the message never runs into the next sentence (fourth
+ * review of PR3: "Not found The plan below may be out of date.").
+ */
+export function planReloadErrorText(error: string): string {
+  const why = error.trim();
+  return `Could not reload the plan: ${/[.!?]$/.test(why) ? why : `${why || 'unknown error'}.`} The plan below may be out of date.`;
+}
+
 export interface LateOrderSaved {
   locationRequired: boolean;
   productsWithoutWeight?: string[];

@@ -14,7 +14,7 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
-import { afterLateOrderSaved, planAfterLoad, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
+import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -50,9 +50,15 @@ interface Props {
   externalBusy?: boolean;
   /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
   onBusyChange?: (busy: boolean) => void;
+  /**
+   * Bumped by the screen around the plan to load it again in place - the day back after a failed
+   * load. Never a remount: an open late order, opened loads and a running action stay (fourth
+   * review of PR3: a remount after one failed day poll closed the late order being typed).
+   */
+  reloadSignal?: number;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange, reloadSignal = 0 }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -77,8 +83,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
+  // Newest answer wins (createLoadOrder): an answer older than the one on screen is dropped (null).
+  const loadOrder = useRef(createLoadOrder());
+  // A load newer than the answer on screen is on its way: Try again waits for it.
+  const [reloading, setReloading] = useState(false);
   const load = useCallback(async () => {
+    const ticket = loadOrder.current.begin();
+    setReloading(true);
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
+    if (!loadOrder.current.accept(ticket)) return null;
+    setReloading(loadOrder.current.pending());
     setPanel((shown) => planAfterLoad(shown, r));
     return r.ok ? r.data : null;
   }, [runId]);
@@ -107,6 +121,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     void load();
     if (!drivers.length) void loadDrivers();
   };
+  // Off while a reload is on its way or an action runs (its own reload shows the plan).
+  const retryOff = !!busy || reloading;
+
+  // The screen around the plan asks for a reload (reloadSignal): the same, in place.
+  const seenReload = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === seenReload.current) return;
+    seenReload.current = reloadSignal;
+    void load();
+    if (!drivers.length) void loadDrivers();
+  }, [reloadSignal, load, loadDrivers, drivers.length]);
 
   useEffect(() => {
     if (!d) return;
@@ -157,6 +182,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
         if (!r.ok) {
           toast.error(r.error ?? 'Could not set the driver.');
+          // Show the driver the server has (the change may have been saved before the answer was
+          // lost), or the out-of-date banner with Try again - never the old driver and its
+          // WhatsApp link as if current (fourth review of PR3).
+          await load();
           return;
         }
         const name = drivers.find((x) => x.id === driverId)?.name;
@@ -198,8 +227,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       lock,
       id,
       async () => {
-        const r = await api(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
+        const r = await api<{ driversChanged?: number }>(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
+        const changed = r.data?.driversChanged ?? 0;
         if (!r.ok) toast.error(r.error ?? 'Could not switch.');
+        else if (changed) toast.warning(`Now using the ${name} plan. ${changed} trip(s) have another driver: see the notes on the plan.`);
         else toast.success(`Now using the ${name} plan.`);
         await load();
         await onChanged?.();
@@ -256,7 +287,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-load-error">
         <AlertTriangle className="h-4 w-4 text-red-700" />
         <span>Could not load the plan: {err}</span>
-        <Button size="sm" variant="outline" onClick={retry}>
+        <Button size="sm" variant="outline" onClick={retry} disabled={retryOff}>
           <RefreshCw className="mr-1 h-3 w-3" /> Try again
         </Button>
       </div>
@@ -330,8 +361,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       {err ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-reload-error">
           <AlertTriangle className="h-4 w-4 text-red-700" />
-          <span>Could not reload the plan: {err} The plan below may be out of date.</span>
-          <Button size="sm" variant="outline" onClick={retry}>
+          <span>{planReloadErrorText(err)}</span>
+          <Button size="sm" variant="outline" onClick={retry} disabled={retryOff}>
             <RefreshCw className="mr-1 h-3 w-3" /> Try again
           </Button>
         </div>
