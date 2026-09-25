@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -14,6 +14,7 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
+import { afterLateOrderSaved, runPlanAction, type ActionLock } from './plan-actions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -37,8 +38,11 @@ interface Props {
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
   canEditProducts?: boolean;
-  /** called after anything that changes the day (late order, replan, status) */
-  onChanged?: (newRunId?: string) => void;
+  /**
+   * Called after anything that changes the day (late order, replan, status). May return the day's
+   * reload: the action keeps its busy state until it resolves.
+   */
+  onChanged?: (newRunId?: string) => void | Promise<void>;
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
@@ -56,6 +60,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // One action at a time across the whole day screen (F07): this plan's own request, or the day
   // screen's OPTIMIZE / RE-PLAN request around it.
   const busy = ownBusy ?? (externalBusy ? 'external' : null);
+  // Read synchronously, so two quick clicks cannot both start (plan-actions.ts).
+  const busyRef = useRef<string | null>(null);
+  const lock: ActionLock = {
+    current: () => busyRef.current ?? (externalBusy ? 'external' : null),
+    set: (key) => {
+      busyRef.current = key;
+      setBusy(key);
+    },
+  };
+  const failed = (message: string) => toast.error(message);
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
@@ -107,100 +121,126 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
 
   // One action at a time: while any request of this plan runs (a load change, Lock all, Use
-  // instead, Re-plan), every other action is disabled, so one user cannot race themselves (F07).
-  async function setStatus(l: DetailLoad, status: string) {
-    if (busy) return;
-    setBusy(l.id);
-    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not change the load.');
-      await load(); // show the plan as it is now (it may have changed meanwhile)
-      return;
-    }
-    toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
-    await load();
-    onChanged?.();
-  }
-
-  async function setDriver(l: DetailLoad, driverId: string | null) {
-    if (busy) return;
-    setBusy(l.id);
-    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not set the driver.');
-      return;
-    }
-    const name = drivers.find((x) => x.id === driverId)?.name;
-    toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
-    const fresh = await load();
-    // Allowed, but a driver cannot be on two trucks at once: say so right away.
-    const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
-    if (clash) toast.warning(clash.text);
-  }
-
-  async function lockAll() {
-    if (!d || busy) return;
-    setBusy('all');
-    const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
-    let n = 0;
-    let firstError: string | null = null;
-    for (const l of planned) {
-      const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
-      if (r.ok) n++;
-      else firstError ??= r.error;
-    }
-    setBusy(null);
-    if (firstError && n < planned.length) toast.warning(`${n} of ${planned.length} load(s) locked. ${firstError}`);
-    else toast.success(`${n} load(s) locked.`);
-    await load();
-    onChanged?.();
-  }
-
-  async function chooseScenario(id: string, name: string) {
-    if (busy) return;
-    setBusy(id);
-    const r = await api(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not switch.');
-      await load();
-      onChanged?.();
-      return;
-    }
-    toast.success(`Now using the ${name} plan.`);
-    await load();
-    onChanged?.();
-  }
-
-  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', overrides: OptimizeOverrides = {}) {
-    if (busy && busy !== 'replan') return;
-    setBusy('replan');
-    const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
-    const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } });
-    if (!r.ok || !r.data) {
-      // No location, or no weight: the same questions as OPTIMIZE on the day screen.
-      const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
-      if (more) return replan(reason, { ...overrides, ...more });
-      setBusy(null);
-      if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
-      toast.error(r.error ?? 'Re-plan failed.');
-      // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
-      // after a refused start): reload it and the day instead of keeping stale buttons.
-      await load();
-      onChanged?.();
-      return;
-    }
-    setBusy(null);
-    const how =
-      r.data.reason === 'LATE_ORDER'
-        ? 'Late order added; the other orders stay on their trucks where possible.'
-        : 'Full re-optimize: orders may move to other trucks.';
-    toast.success(
-      `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+  // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
+  // user cannot race themselves (F07; plan-actions.ts).
+  function setStatus(l: DetailLoad, status: string) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not change the load.');
+          await load(); // show the plan as it is now (it may have changed meanwhile)
+          return;
+        }
+        toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
     );
-    onChanged?.(r.data.runId);
+  }
+
+  function setDriver(l: DetailLoad, driverId: string | null) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not set the driver.');
+          return;
+        }
+        const name = drivers.find((x) => x.id === driverId)?.name;
+        toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
+        const fresh = await load();
+        // Allowed, but a driver cannot be on two trucks at once: say so right away.
+        const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
+        if (clash) toast.warning(clash.text);
+      },
+      failed,
+    );
+  }
+
+  function lockAll() {
+    if (!d) return;
+    const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
+    return runPlanAction(
+      lock,
+      'all',
+      async () => {
+        let n = 0;
+        let firstError: string | null = null;
+        for (const l of planned) {
+          const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
+          if (r.ok) n++;
+          else firstError ??= r.error;
+        }
+        if (firstError && n < planned.length) toast.warning(`${n} of ${planned.length} load(s) locked. ${firstError}`);
+        else toast.success(`${n} load(s) locked.`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
+  }
+
+  function chooseScenario(id: string, name: string) {
+    return runPlanAction(
+      lock,
+      id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
+        if (!r.ok) toast.error(r.error ?? 'Could not switch.');
+        else toast.success(`Now using the ${name} plan.`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
+  }
+
+  function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE') {
+    const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
+    return runPlanAction(
+      lock,
+      'replan',
+      async () => {
+        let overrides: OptimizeOverrides = {};
+        for (;;) {
+          const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } });
+          if (r.ok && r.data) {
+            const how =
+              r.data.reason === 'LATE_ORDER'
+                ? 'Late order added; the other orders stay on their trucks where possible.'
+                : 'Full re-optimize: orders may move to other trucks.';
+            toast.success(
+              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+            );
+            await onChanged?.(r.data.runId);
+            return;
+          }
+          // No location, or no weight: the same questions as OPTIMIZE on the day screen.
+          const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
+          if (more) {
+            overrides = { ...overrides, ...more };
+            continue;
+          }
+          if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
+            toast.error(r.error ?? 'Re-plan failed.');
+            // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
+            // after a refused start): reload it and the day instead of keeping stale buttons.
+            await load();
+          }
+          // Not re-planned (also when a question was declined): the day as it is now - after a
+          // late order, with the order waiting.
+          await onChanged?.();
+          return;
+        }
+      },
+      failed,
+    );
   }
 
   if (err) return <p className="text-sm text-destructive">{err}</p>;
@@ -589,17 +629,29 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         onOpenChange={setLateOpen}
         date={d.run.runDate}
         depotId={d.run.depot.id}
-        onSaved={(res) => {
-          onChanged?.();
-          if (res.productsWithoutWeight?.length) {
-            toast.warning(`No case weight for ${res.productsWithoutWeight.join(', ')}: ${weightFixText(canEditProducts)}, or the re-plan will ask before counting it as 0 kg.`);
-          }
-          if (res.locationRequired) {
-            toast.warning('New customer has no location yet — add it in step 2 before re-planning.');
-            return;
-          }
-          if (window.confirm('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.')) void replan('LATE_ORDER');
-        }}
+        onSaved={(res) =>
+          // Re-plan now, or reload the day - never the day first: that replaced this plan screen
+          // before the re-plan took the busy state (plan-actions.ts).
+          void afterLateOrderSaved(res, {
+            warn: (m) => toast.warning(m),
+            weightFix: weightFixText(canEditProducts),
+            confirmReplan: () => window.confirm('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.'),
+            replan: async () => {
+              await replan('LATE_ORDER');
+            },
+            refresh: async () => {
+              await runPlanAction(
+                lock,
+                'late-order',
+                async () => {
+                  await load();
+                  await onChanged?.();
+                },
+                failed,
+              );
+            },
+          })
+        }
       />
     </div>
   );

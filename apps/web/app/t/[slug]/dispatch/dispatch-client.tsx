@@ -13,7 +13,8 @@ import { api, askOverride, weightFixText, type OptimizeOverrides } from './clien
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
-import { createRequestGate, dayKey } from './request-gate';
+import { createDayLoader, type DayLoader } from './day-loader';
+import { dayKey } from './request-gate';
 
 interface Issue {
   code: string;
@@ -117,40 +118,39 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const [planBusy, setPlanBusy] = useState(false);
   const [planKey, setPlanKey] = useState(0);
   const [showAllCustomers, setShowAllCustomers] = useState(false);
-  // Only answers for the day being loaded may reach the screen, newest first (review
-  // ADD-STALE-DAY-CLIENT): a slow answer for a date or depot already left is dropped, and a failed
-  // load shows an error instead of the previous day.
-  const gate = useRef(createRequestGate());
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Every load is for the day selected NOW (day-loader.ts), also the reload after an action that
+  // ends after another day was picked; only answers for the day being loaded reach the screen,
+  // newest first (review ADD-STALE-DAY-CLIENT), and a failed load shows an error instead of the
+  // previous day.
+  const loaderRef = useRef<DayLoader | null>(null);
+  loaderRef.current ??= createDayLoader<Day>(
+    { date: initialDate, depotId: initialDepot },
+    {
+      fetchDay: (sel) => {
+        const q = new URLSearchParams();
+        if (sel.date) q.set('date', sel.date);
+        if (sel.depotId) q.set('depotId', sel.depotId);
+        return api<Day>(`/api/dispatch/day?${q}`);
+      },
+      show: (d) => {
+        setDay(d);
+        setLoadError(null);
+      },
+      showError: setLoadError,
+      selected: (sel) => {
+        setDate(sel.date);
+        setDepotId(sel.depotId);
+      },
+    },
+  );
+  const loader = loaderRef.current;
+  const refresh = useCallback(() => loader.refresh(), [loader]);
 
-  const refresh = useCallback(async () => {
-    const ticket = gate.current.begin(dayKey(date, depotId));
-    const q = new URLSearchParams();
-    if (date) q.set('date', date);
-    if (depotId) q.set('depotId', depotId);
-    const r = await api<Day>(`/api/dispatch/day?${q}`).catch((e: unknown) => ({
-      ok: false as const,
-      data: null,
-      error: `the server could not be reached (${e instanceof Error ? e.message : 'network error'})`,
-    }));
-    // Dropped when another day was picked meanwhile, or a newer answer for this day is already shown.
-    if (!gate.current.isCurrent(ticket)) return;
-    gate.current.finish(ticket);
-    if (r.ok && r.data) {
-      setDay(r.data);
-      setLoadError(null);
-      // The server may answer another day than asked (no date yet, an invalid date, an inactive
-      // depot): the selection follows the day actually loaded, so the screen never stays "loading".
-      if (r.data.date !== date) setDate(r.data.date);
-      if (r.data.depot && r.data.depot.id !== depotId) setDepotId(r.data.depot.id);
-    } else {
-      setLoadError(r.error ?? 'Could not load the day.');
-    }
-  }, [date, depotId]);
-
+  // A new selection (or the first render) loads it.
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [date, depotId, refresh]);
 
   // Poll while an optimization runs. A tick is skipped while the previous load of the same day is
   // still on its way (a slow link or a busy server), so requests do not pile up - but never more
@@ -160,7 +160,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     const running = day?.plan?.status === 'OPTIMIZING' || day?.plan?.job?.status === 'RUNNING' || day?.plan?.job?.status === 'QUEUED';
     if (!running) return;
     const t = setInterval(() => {
-      if (gate.current.pendingKey() === dayKey(date, depotId) && skippedTicks.current < 5) {
+      if (loader.pendingKey() === dayKey(date, depotId) && skippedTicks.current < 5) {
         skippedTicks.current++;
         return;
       }
@@ -168,9 +168,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       void refresh();
     }, 3000);
     return () => clearInterval(t);
-  }, [day, refresh, date, depotId]);
+  }, [day, refresh, loader, date, depotId]);
 
   function changeDay(nextDate: string, nextDepot: string | null) {
+    loader.select({ date: nextDate, depotId: nextDepot });
     setDate(nextDate);
     setDepotId(nextDepot);
     setBatch(null);
@@ -231,36 +232,47 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     setBatch(null);
     setFile(null);
     const d0 = r.data.deliveryDates[0];
-    if (d0 && d0 !== date) changeDay(d0, depotId);
+    const now = loader.selection();
+    if (d0 && d0 !== now.date) changeDay(d0, now.depotId);
     else await refresh();
   }
 
-  async function optimize(overrides: OptimizeOverrides = {}) {
-    if (!day?.depot || !dayReady || planBusy) return;
+  async function optimize() {
+    if (!day?.depot || !dayReady || planBusy || optimizing) return;
     // Everything from the loaded day (never the date or depot selection); the server refuses a
     // plan of another day (409 DAY_MISMATCH).
     const expect = { date: day.date, depotId: day.depot.id };
+    const replanning = !!day.plan?.chosen;
+    const planId = day.plan?.id;
+    const reason = day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE';
+    // Busy until the day shows the result (the job, or the day as it is after a refusal), and
+    // never stuck: api() never rejects, and the flag is cleared in finally (review of PR3).
     setOptimizing(true);
-    let r;
-    if (day.plan?.chosen) {
-      r = await api<{ runId: string; queued?: boolean }>(`/api/runs/${day.plan.id}/replan`, { method: 'POST', json: { reason: day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE', expect, ...overrides } });
-    } else {
-      r = await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', { method: 'POST', json: { date: day.date, depotId: day.depot.id, optimize: true, expect, ...overrides } });
-    }
-    setOptimizing(false);
-    if (!r.ok) {
-      const more = askOverride(r.errorBody, day.plan?.chosen ? 'Re-plan' : 'Optimize', { canEditProducts });
-      if (more) return optimize({ ...overrides, ...more });
-      if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
-      toast.error(r.error ?? 'Could not start optimization.');
-      // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
+    try {
+      let overrides: OptimizeOverrides = {};
+      for (;;) {
+        const r = replanning
+          ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } })
+          : await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', { method: 'POST', json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, ...overrides } });
+        if (r.ok) {
+          toast.success(r.data?.queued ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.' : 'Optimizing… this takes up to a minute for a normal day.');
+          break;
+        }
+        const more = askOverride(r.errorBody, replanning ? 'Re-plan' : 'Optimize', { canEditProducts });
+        if (more) {
+          overrides = { ...overrides, ...more };
+          continue;
+        }
+        if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
+        // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
+        toast.error(r.error ?? 'Could not start optimization.');
+        break;
+      }
       setPlanKey((k) => k + 1);
       await refresh();
-      return;
+    } finally {
+      setOptimizing(false);
     }
-    toast.success(r.data?.queued ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.' : 'Optimizing… this takes up to a minute for a normal day.');
-    setPlanKey((k) => k + 1);
-    await refresh();
   }
 
   const loadFailed = loadError ? (
@@ -480,9 +492,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
-            onChanged={() => {
+            onChanged={async () => {
+              // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
+              // result; then the plan screen is loaded fresh.
+              await refresh();
               setPlanKey((k) => k + 1);
-              void refresh();
             }}
           />
         </Step>
