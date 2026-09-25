@@ -117,13 +117,16 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   for (const o of orders) {
     if (frozenWhole.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
     const orderLevel = !orderUsesLineWeights(o);
+    // The open rest of an order partly on a frozen load is planned with the product's weight at
+    // every optimize but never saved (the frozen part shares the line): nothing to apply for it.
+    const partlyFrozen = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
     let open = 0;
     for (const l of o.lines) {
       const cases = Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0));
       if (cases <= 0) continue;
       open += cases;
       const st = lineWeightStatus({ cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster }, l.product.weightPerCaseKg, orderLevel);
-      if (st === 'KNOWN') continue;
+      if (st === 'KNOWN' || (st === 'MASTER' && partlyFrozen)) continue;
       const m = st === 'UNKNOWN' ? noWeight : toApply;
       const g = m.get(l.product.code) ?? { code: l.product.code, name: l.product.name, lines: 0, cases: 0, kgPerCase: l.product.weightPerCaseKg };
       g.lines++;

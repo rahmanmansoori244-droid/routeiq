@@ -318,12 +318,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       <Step
         n={3}
         title="Optimize"
-        done={!!day.plan?.chosen && day.pending.count === 0 && !running}
+        done={!!day.plan?.chosen && day.pending.count === 0 && !planOutdated && !running}
         summary={
           running
             ? `Optimizing… ${day.plan?.job?.message ?? ''}`
             : day.plan?.chosen
-              ? `Plan version ${day.plan.version} ready${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}`
+              ? `Plan version ${day.plan.version} ready${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
               : 'Not optimized yet'
         }
       >

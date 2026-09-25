@@ -170,7 +170,7 @@ describe('outdatedNotes (plan view: what a re-plan would change on planned loads
     lines: [{ id: 'l1', cases: 10, weightKg: 150, weightFromMaster: true, product: { code: 'P1', weightPerCaseKg: 15 } }],
     ...over,
   });
-  const load = (status: string, o: ReturnType<typeof order>, portionLinesJson: unknown = null) => ({ status, loadNo: 1, truck: { code: 'T01' }, assignments: [{ portionLinesJson, order: o }] });
+  const load = (status: string, o: ReturnType<typeof order>, portionLinesJson: unknown = null, orderId = 'O1') => ({ status, loadNo: 1, truck: { code: 'T01' }, assignments: [{ orderId, portionLinesJson, order: o }] });
 
   it('is empty when nothing changed', () => {
     expect(outdatedNotes([load('PLANNED', order())])).toEqual([]);
@@ -178,11 +178,16 @@ describe('outdatedNotes (plan view: what a re-plan would change on planned loads
 
   it('names customers deactivated since and corrected case weights, on planned loads only', () => {
     const o = order({ customer: { code: 'C2', branchCode: null, active: false }, totalWeightKg: 15000, lines: [{ id: 'l1', cases: 10, weightKg: 15000, weightFromMaster: true, product: { code: 'P1', weightPerCaseKg: 1.5 } }] });
-    const notes = outdatedNotes([load('PLANNED', o), load('LOCKED', order({ customer: { code: 'C9', branchCode: null, active: false } }))]);
+    const notes = outdatedNotes([load('PLANNED', o), load('LOCKED', order({ customer: { code: 'C9', branchCode: null, active: false } }), null, 'O9')]);
     expect(notes).toHaveLength(2);
     expect(notes[0]).toMatch(/Deactivated after this plan was made, but still on planned loads: C2 \(T01 L1\)\. Re-plan/);
     expect(notes[0]).not.toMatch(/C9/);
     expect(notes[1]).toMatch(/P1 \(10 cases on planned loads\)/);
+  });
+
+  it('does not report the open rest of an order partly on a frozen load (planned with the new weight every time)', () => {
+    const o = order({ totalWeightKg: 0, lines: [{ id: 'l1', cases: 10, weightKg: 0, weightFromMaster: true, product: { code: 'P1', weightPerCaseKg: 15 } }] });
+    expect(outdatedNotes([load('LOCKED', o, [{ lineId: 'l1', cases: 6 }]), load('PLANNED', o, [{ lineId: 'l1', cases: 4 }])])).toEqual([]);
   });
 
   it('counts only the cases of a split portion', () => {

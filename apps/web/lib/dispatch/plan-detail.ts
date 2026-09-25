@@ -382,6 +382,7 @@ type OutdatedLoad = {
   loadNo: number;
   truck: { code: string };
   assignments: {
+    orderId: string;
     portionLinesJson: unknown;
     order: {
       status: string;
@@ -395,11 +396,14 @@ type OutdatedLoad = {
 /**
  * What changed since the plan in use was made that a RE-PLAN would change on its PLANNED loads
  * (frozen loads keep what they were loaded with): customers deactivated since, whose orders are
- * still on trucks, and case weights entered or corrected under Products since.
+ * still on trucks, and case weights entered or corrected under Products since. The open rest of
+ * an order partly on a frozen load is planned with the product's weight at every optimize (it is
+ * never saved on the line, which the frozen part shares), so it is not reported as out of date.
  */
 export function outdatedNotes(loads: OutdatedLoad[]): string[] {
   const inactive = new Map<string, Set<string>>();
   const weights = new Map<string, number>();
+  const partlyFrozen = new Set(loads.filter((l) => l.status !== 'PLANNED').flatMap((l) => l.assignments.map((a) => a.orderId)));
   for (const l of loads) {
     if (l.status !== 'PLANNED') continue;
     for (const a of l.assignments) {
@@ -409,6 +413,7 @@ export function outdatedNotes(loads: OutdatedLoad[]): string[] {
         const label = o.customer.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : o.customer.code;
         inactive.set(label, (inactive.get(label) ?? new Set()).add(`${l.truck.code} L${l.loadNo}`));
       }
+      if (partlyFrozen.has(a.orderId)) continue;
       const orderLevel = !orderUsesLineWeights(o);
       const portion = readPortionLines(a.portionLinesJson);
       const casesOf = new Map((portion ?? o.lines.map((x) => ({ lineId: x.id, cases: x.cases }))).map((x) => [x.lineId, x.cases]));
