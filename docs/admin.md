@@ -89,13 +89,15 @@ Every 90 days per CLAUDE.md §14.
 
 ### Tuning solver time limits
 - **Dispatch planner (OR-Tools, Daily dispatch):** ignores `TenantConfig.solverTimeLimitSeconds`.
-  - The RECOMMENDED time limit scales with the stop count: 3 s (≤25), 8 s (≤80), 20 s (≤200), 150 s (≤350), 240 s (>350). The alternatives get half.
+  - The RECOMMENDED time limit scales with the stop count: 5 s (≤25), 20 s (≤200), 150 s (≤350), 240 s (>350). The alternatives get half.
+  - After the searches, a **post-solve load re-check** (`apps/solver/load_repack.py`, CP-SAT) re-assigns whole loads to trucks and departure times, times every plan exactly (including the loading time per case between loads) and picks each option's plan. Each CP-SAT solve is capped at min(15 s, max(3 s, time limit / 2)). On the real 80-stop NMWC day it adds about 15-20 s; a normal day takes about half a minute to a minute in total.
+  - The re-check runs in the worker pool with its own deadline inside the request budget. If an alternative overran its deadline, the pool is replaced first so the re-check never waits behind a stuck search. If the re-check fails or runs out of time, the plans are the search results as found, with the note *"Loads were not re-checked for fewer trucks ..."*.
   - The whole solve stays within a 540 s budget. Alternatives that would overrun it are skipped with a warning.
   - The web waits up to 600 s.
 - `TenantConfig.solverTimeLimitSeconds` currently has **no effect**. It belonged to the previous (PyVRP) planner, which can no longer be started: old plans are read-only (`409 LEGACY_PLAN`).
 - Dispatch planner: every scenario runs in a worker process.
   - OR-Tools holds the GIL during its search. So neither the API process nor threads may run it, or `/health` and every other request freeze until the search ends.
-  - RECOMMENDED runs first; the two alternatives then run in parallel, warm-started from it.
+  - RECOMMENDED runs first; the two alternatives then run in parallel, warm-started from it; then the load re-check (one worker per job, at most two).
   - If the worker computing the recommended plan dies (e.g. out of memory), the optimization fails within seconds with a clear message. If an alternative's worker dies, only that alternative is skipped (with a warning) after its deadline.
   - `SOLVER_PARALLEL=0` runs everything in-process (tests / debugging only).
 

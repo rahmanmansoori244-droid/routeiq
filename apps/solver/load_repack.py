@@ -22,6 +22,11 @@ What it does
   arrival, driver time and overtime are minimised as in RECOMMENDED. Every plan the engine
   returns is timed here, so times and costs are computed one way.
 * ``score()``: the one RECOMMENDED objective every candidate plan is compared on.
+* Fit fallback (``build_candidates`` with ``fit_weights``): the route search only estimates the
+  loading time between loads (80% of a full truck). On a day without slack a plan of fuller loads
+  then breaks the exact turnaround, and no re-assignment keeping all its stops exists. It is
+  repacked once more with every stop optional (whole loads, each load minus one stop, one-stop
+  loads), so phase 1 keeps the most strict-priority value that fits.
 
 dispatch_solver decides WHICH plans are candidates (each raw scenario plan and its repacks),
 picks the best per scenario and turns it into loads. This module knows nothing about scenarios:
@@ -735,31 +740,74 @@ class Source:
     plan: TimedPlan  # timetable as the search reported it (used as the repack hint)
 
 
+def fit_pool(loads: list[Load], extra: Iterable[int] = ()) -> list[Load]:
+    """The loads a plan can fall back to when it does not fit the day once timed exactly: each
+    load as it is, each load without one of its stops (dropping one stop shortens the load and its
+    loading time), and one-stop loads for the ``extra`` stops."""
+    pool: list[Load] = []
+    seen: set[Load] = set()
+
+    def put(load: Load) -> None:
+        if load and load not in seen:
+            seen.add(load)
+            pool.append(load)
+
+    for load in loads:
+        put(load)
+    for load in loads:
+        if len(load) > 1:
+            for i in range(len(load)):
+                put(load[:i] + load[i + 1:])
+    for k in sorted(extra):
+        put((k,))
+    return pool
+
+
 def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: Pricing,
                      sources: list[Source], optional: dict[int, int] | None, cap_s: float,
-                     budget_s: float, time_raw: bool) -> tuple[list[Candidate], list[str]]:
+                     budget_s: float, time_raw: bool,
+                     fit_weights: dict[int, int] | None = None) -> tuple[list[Candidate], list[str]]:
     """Repack every distinct raw plan with ``goal_pricing``; time every result (and the raw
     plans when ``time_raw``) exactly; score everything on ``score_pricing`` (RECOMMENDED).
 
     optional: stop -> phase-1 weight of the stops that may be added as one-stop loads (drop
       repair), or None. Only stops a plan does not already carry are optional for it.
+    fit_weights: stop -> phase-1 weight of EVERY stop, ranked like the strict service values.
+      When a raw plan breaks the exact timing (the route search only estimates the loading time
+      between loads) and no re-assignment of its loads carries all its stops, it is repacked once
+      more with every stop optional ("+fit" candidates): whole loads or single stops are left out,
+      lowest priorities first, until the rest fits. None: no such fallback.
     Returns (candidates, log lines)."""
     t0 = time.perf_counter()
     out: list[Candidate] = []
     notes: list[str] = []
     seen: set[tuple] = set()
+    timed_of: dict[tuple, TimedPlan | None] = {}
     done_pools: set[frozenset] = set()
 
-    def add(source: str, plan: Plan) -> None:
+    def timed(plan: Plan) -> TimedPlan | None:
         sig = plan_signature(plan)
+        if sig not in timed_of:
+            timed_of[sig] = time_plan(day, plan, score_pricing)
+        return timed_of[sig]
+
+    def add(source: str, plan: Plan) -> bool:
+        """Add a candidate; True when the plan is (or already was) a valid candidate."""
+        sig = plan_signature(plan)
+        tp = timed(plan)
         if sig in seen:
-            return
+            return tp is not None
         seen.add(sig)
-        timed = time_plan(day, plan, score_pricing)
-        if timed is None:
+        if tp is None:
             notes.append(f"{source}: infeasible when timed exactly; discarded")
-            return
-        out.append(Candidate(source, timed, score(day, score_pricing, timed)))
+            return False
+        out.append(Candidate(source, tp, score(day, score_pricing, tp)))
+        return True
+
+    def share(n: int) -> float:
+        # Share what is left fairly with the plans still to come.
+        left = budget_s - (time.perf_counter() - t0)
+        return min(cap_s, left / max(1, len(order) - n))
 
     if time_raw:
         for src in sources:
@@ -776,19 +824,34 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
         if key in done_pools:
             continue
         done_pools.add(key)
-        left = budget_s - (time.perf_counter() - t0)
-        # Share what is left fairly with the plans still to come.
-        limit = min(cap_s, left / max(1, len(order) - n))
+        limit = share(n)
         if limit < 0.5:
             notes.append(f"{src.name}: no time left for the {goal} repack")
             continue
+        ok = False
         try:
             res = repack(day, goal_pricing, pool, carried, opt, src.plan, limit)
+            notes.append(f"{src.name}: {goal} repack {res.status} in {res.seconds:.1f}s")
+            ok = res.plan is not None and add(f"{src.name}+repack:{goal}", res.plan)
         except Exception as exc:  # noqa: BLE001 - a failed repack only loses this candidate
             log.warning("repack %s/%s failed: %s", src.name, goal, exc)
             notes.append(f"{src.name}: {goal} repack failed ({exc})")
+        if ok or not fit_weights or timed(plan_of(src.plan)) is not None:
             continue
-        notes.append(f"{src.name}: {goal} repack {res.status} in {res.seconds:.1f}s")
-        if res.plan is not None:
-            add(f"{src.name}+repack:{goal}", res.plan)
+        # The search's plan breaks the exact turnaround and keeping all its stops is impossible
+        # (typically: loads over 80% full on a day without slack). Keep the most priority value
+        # that fits instead of returning departure times no truck can make.
+        limit = share(n)
+        if limit < 0.5:
+            notes.append(f"{src.name}: no time left for the {goal} fit repack")
+            continue
+        fp = fit_pool(loads, opt)
+        try:
+            res = repack(day, goal_pricing, fp, set(), {k: fit_weights[k] for l in fp for k in l}, src.plan, limit)
+            notes.append(f"{src.name}: {goal} fit repack {res.status} in {res.seconds:.1f}s")
+            if res.plan is not None:
+                add(f"{src.name}+fit:{goal}", res.plan)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("fit repack %s/%s failed: %s", src.name, goal, exc)
+            notes.append(f"{src.name}: {goal} fit repack failed ({exc})")
     return out, notes

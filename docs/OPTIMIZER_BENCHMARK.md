@@ -34,10 +34,10 @@ self-hosted, next to the Next.js/Prisma app, and calls the solver over HTTP.
 | Capacity | Two dimensions, `Cases` and `Kg` (kg is only active when a truck has a payload), each with a per-truck capacity. |
 | Hard windows | `CumulVar(stop).SetRange(start, end)`: service must **start** inside the window. Depot hours and truck availability limit the start and end cumuls. |
 | Soft windows | Preferred windows use `SetCumulVarSoftLowerBound` / `SetCumulVarSoftUpperBound` at `pref_window_penalty_per_min` OMR per minute. An early-arrival preference for P1/P2 and overtime after 9 h are also soft upper bounds. |
-| Priorities / droppable orders | Each stop is an `AddDisjunction`. **Strict (default since 25 Sep 2026):** penalty = `SERVICE_BASE (1,000 OMR) × w(P)`, w(P5) = 1, w(P) = 1 + Σ over lower priorities q of n_q × w(q) (n_q = stops of priority q in the model), so one stop outweighs all lower-priority stops together. The int64 total is guarded (base scaled down, then weights capped with a warning, only for days of thousands of stops). **Weighted (`strict_priorities: false`)**: `SERVICE_UNIT × weight(P) / weight(P5)` with 10,000 / 1,000 / 100 / 10 / 1, where 11 P3 outweigh one P2. Margin, when every stop has one, is capped below 0.4 service unit and only breaks ties within the same priority. |
+| Priorities / droppable orders | Each stop is an `AddDisjunction`. **Strict (default since 25 Sep 2026):** penalty = `SERVICE_BASE (1,000 OMR) × w(P)`, w(P5) = 1, w(P) = 1 + Σ over lower priorities q of n_q × w(q) (n_q = stops of priority q in the model), so one stop outweighs all lower-priority stops together. The int64 total is guarded (base scaled down, then weights capped with a warning, only for days of thousands of stops). **Weighted (`strict_priorities: false`)**: `SERVICE_UNIT × weight(P) / weight(P5)` with 10,000 / 1,000 / 100 / 10 / 1, where 11 P3 outweigh one P2. Margin, when every stop has one, adds a bonus that saturates smoothly below 0.4 service unit (10x cost for small margins) and only breaks ties within the same priority. The MIN_TRUCKS search multiplies the penalties by its largest cost multiplier (x20), so it never drops a stop to save a truck. |
 | Costs | Each truck has its own arc cost (`cost_per_km + fuel_price / km_per_litre`, so fuel is counted once). The trip cost sits on arcs into reload nodes, and there is a fixed cost per truck-day. Driver time is a span cost, and overtime is a soft bound on the route end. |
 | Frozen work | LOCKED / LOADING / DISPATCHED loads come in as `frozen_trips`. They stay out of the model and only change the truck's earliest departure (return + reload), its remaining trips and its shift anchor. |
-| Reasons | Pre-filters return `EXCEEDS_ANY_TRUCK_CAPACITY`, `HARD_WINDOW_INFEASIBLE`, `SHIFT_LIMIT`, `NO_AVAILABLE_TRUCK` and `TRIP_LIMIT`. After the solve, dropped stops get `LATE_ORDER_NO_CAPACITY`, the fleet-shortage text, or *"Not planned: the optimizer found no truck, trip or time slot ... within its time limit"* (`SOLVER_DROPPED_LOW_PRIORITY`). Guided local search always ends on its time limit and reports `ROUTING_SUCCESS`, so the status is no proof: the engine never claims a stop impossible unless a pre-filter proved it. `_assert_reconciled` raises if any stop or case is missing or duplicated. |
+| Reasons | Pre-filters return `EXCEEDS_ANY_TRUCK_CAPACITY`, `HARD_WINDOW_INFEASIBLE`, `SHIFT_LIMIT`, `NO_AVAILABLE_TRUCK` and `TRIP_LIMIT`. After the solve, dropped stops get `LATE_ORDER_NO_CAPACITY`, the fleet-shortage text, *"Not planned: the optimizer found no truck, trip or time slot ... within its time limit"*, or, for stops the search planned but the exact loading time did not leave room for, *"Not planned: once every load was timed with the loading time between loads ..."* (the last three as `SOLVER_DROPPED_LOW_PRIORITY`, labelled *"Not planned by the optimizer - see reason"* on the plan screen). Guided local search always ends on its time limit and reports `ROUTING_SUCCESS`, so the status is no proof: the engine never claims a stop impossible unless a pre-filter proved it. `_assert_reconciled` raises if any stop or case is missing or duplicated. |
 | Search | `PARALLEL_CHEAPEST_INSERTION` followed by `GUIDED_LOCAL_SEARCH`. The automatic time limit is 5 / 20 / 150 / 240 s for ≤25 / ≤200 / ≤350 / >350 stops (was 3 / 8 / 20 for ≤25 / ≤80 / ≤200; alternatives get half), within a 540 s budget per request. |
 | Scenarios | RECOMMENDED runs first with the full time budget. MIN_TRUCKS and MIN_DISTANCE are **warm-started** from it with half the budget: `CloseModelWithParameters` + `RoutesToAssignment` (Next variables only) + `SolveFromAssignmentWithParameters`, falling back to a cold solve when the plan cannot be loaded or the warm solve returns nothing. (`ReadAssignmentFromRoutes`, used before, restores cumul values and could stall > 100 s under time-dimension costs.) Every scenario, RECOMMENDED included, runs in a spawn worker process. OR-Tools holds the GIL for its whole search, so threads would not run scenarios in parallel, and an in-process search froze the API (health checks, route geometry) until it ended. If the pool fails the scenarios run one after another in-process, and `SOLVER_PARALLEL=0` forces that. |
 | Post-solve load repack + selection | `load_repack.py`. For each raw scenario plan, CP-SAT keeps every load (stops and order) and re-assigns loads to trucks and departure times: no-wait offsets and a departure interval per load from hard windows; per truck earliest departure (after frozen loads + turnaround), latest return, depot hours, loads left, the shift span (unless anchored by frozen loads), cases / kg per load; loads of a truck do not overlap and are separated by the exact turnaround; identical trucks are symmetry-broken. Objective = the scenario's own prices (RECOMMENDED: fixed per used non-frozen truck + trip + km × truck rate + driver cost on the truck span + overtime + preferred-window / early-arrival hinges + plan continuity; MIN_TRUCKS: fixed × 20, trip × 5, km). Stops a plan left out (no shortage) enter as optional one-stop loads, lexicographically served first. Each solve: min(15 s, max(3 s, limit / 2)), 2 workers, stops when no better plan came for a quarter of that. Every candidate (raw plans re-timed + repacks) is timed by one LP per truck and scored on one RECOMMENDED objective (overtime from the first actual departure, as reported); RECOMMENDED takes the best objective, MIN_TRUCKS fewest trucks → loads → operating cost, MIN_DISTANCE fewest km → RECOMMENDED objective, none serving less than its raw plan. Runs in the worker pool with a deadline; on failure the raw plans are returned with a warning. |
@@ -290,6 +290,60 @@ loads over 7-8 trucks and the repack reaches the 6-truck floor (with and without
 exact turnaround, frozen loads and reconciliation checked on every option), exact repack of six one-load trucks onto two,
 drop repair, exact loading gap per case (and after a frozen load), repack / stage failure and a stuck stage worker fall back
 to the search's plans, the warm start with time costs does not stall and falls back cold, honest reason text, int64 guard.
+
+### 8.4 Review fixes (25 Sep 2026, same branch)
+
+An adversarial review of the branch confirmed eleven defects. Fixed:
+
+| Defect | Fix |
+|---|---|
+| Tight day, loads over 80% full, loading time per case set: every plan came back with the search's loads departing up to ~25 min before the truck could be loaded (the repack had to keep every stop the search carried) | When a search plan breaks the exact turnaround and no re-assignment keeps all its stops, it is repacked once more with every stop optional (whole loads, each load minus one stop, one-stop loads); phase 1 keeps the most strict-priority value that fits. The stops it loses get their own reason (*"Not planned: once every load was timed with the loading time between loads ..."*) and the plan a note. The search plan is kept (with a warning) only if even that fails (`load_repack.build_candidates`, `dispatch_solver._post_solve`) |
+| RECOMMENDED said *"The MIN TRUCKS option serves 1 more stop(s) ... Use instead"* about an option whose times broke the loading time | Only options whose times passed the exact check are compared; `_post_solve` returns the ones that did not |
+| A timed-out alternative kept its worker, so the load re-check queued behind it and RECOMMENDED lost it (review probe: 30.8 s, search plan returned as found) | Fresh workers for the re-check when an alternative overran (same probe: 9.2 s, re-check done: 5 -> 4 trucks) |
+| Plan screen showed a 25-min unload as 24 or 26 min when service started at hh:mm:30 (`round()` rounds halves to even) | Minutes rounded once: departure = start + the service time sent |
+| MIN_TRUCKS search (fixed cost x20) dropped a P5 stop that needed its own truck once the fixed cost reached ~50 OMR (20 x 60 > 1,000 OMR) | Drop penalties are multiplied by the scenario's largest cost multiplier (x20 for MIN_TRUCKS), within the int64 guard |
+| Margin tie-break flat above 40 OMR of margin (was 4,000 OMR before strict priorities) | Smooth saturating bonus: 10x cost for small margins, never flat (50 -> ~222 OMR, 300 -> ~353 OMR of objective) |
+| Drop repair skipped on fleet-shortage days: stops labelled "shortage" while loads stood free | Drop repair on every day (phase 1 is the strict ladder); a plan warns when far more cases are unserved than the shortage |
+| Unserved label *"Left out (capacity/time) - lower priority"* over the honest message | *"Not planned by the optimizer - see reason"* |
+| "Loads were re-assigned" note did not say that orders the search left out were added | *"...; this also plans N stop(s) the route search had left out."* |
+| admin.md and in-app help had the old limits / durations; guide said "fleet capacity shortage" proves an order cannot fit | Updated |
+| Tests could not fail on some of these defects | 10 new and 3 strengthened tests in `test_repack.py` (104 solver tests in all). Run against the branch before the fixes, every test aimed at one of these defects fails; the three that pass there cover paths that already worked but were untested (one failed CP-SAT solve only loses its candidate; a warm start that returns no solution solves cold; the alternatives' warm start from RECOMMENDED loads) |
+
+**Stress days with loading time per case** (the reviewer's harness: 20 random days of 25-60 stops, 3-8 trucks of 200-400
+cases, windows on ~35% of stops, frozen loads on ~35% of trucks, turnaround 20 min + 0.1-0.3 min per case; each returned
+plan checked independently: capacity, windows, trips, turnaround exactly, shift, reconciliation):
+
+| | before the fixes | after |
+|---|---|---|
+| days with a plan that breaks the loading time | 10 of 20 (every option on most of them) | **0 of 20** (0 of 60 options) |
+| plans that had to leave out stops the search planned (lowest priority first, with the reason) | - | 6 days (1-4 stops each) |
+| unserved stops, RECOMMENDED, all 20 days | 165, some of them "served" only by plans no truck could run | 176 |
+| wall time per day, in-process (SOLVER_PARALLEL=0, 2 s limit) | 6-15 s | 9-19 s (the fit repacks; in production they run in parallel workers) |
+
+*80% or 100% of a full truck for the search's turnaround estimate?* The review suggested pricing the search's reload visit at
+100% (it then never under-reserves, and no plan needs the fit step). Measured on the same 20 days (RECOMMENDED; the searches
+are time-limited, so single days are noisy): 100% left 166 stops / 17,410 cases unserved against 176 / 17,970 at 80%, but
+more strict priority value (3.66 against 3.54 million OMR of penalty; 80% better on 5 days, 100% on 4, equal on 11), with 0
+violations either way and 14% less wall time at 100%. No clear winner, so the spec's 80% stays; revisit with real NMWC days
+that set a loading time.
+
+**Validation after the fixes** (production mode, two runs, same harness and machine as §8.3; another process kept the CPU at
+~65% throughout):
+
+| instance | old engine: trucks / loads / op. cost / objective | branch before the fixes | after the fixes, run 1 / run 2 | objective after vs old |
+|---|---|---|---|---|
+| real80 | 12 / 19 / 719.9 / 738.7 | 5 / 14 / 492.4-494.9 / 531.0-534.2 | 6 / 16 / 521.4 / 560.1 *; 5 / 14 / 492.6 / 532.2 | -24.2% / -27.9% |
+| real80_prod | 12 / 21 / 467.2 / 477.5 | 7 / 21 / 310.9 / 330.8 | 7 / 21 / 311.1 / 330.5 (both) | -30.8% |
+| syn60_s1..s3 | as §8.3 | as §8.3 | identical to before (both runs) | 0.0% / -0.3% / 0.0% |
+| syn150_s1..s3 | as §8.3 | as §8.3 | identical to before (both runs) | 0.0% / -9.6% / -6.7% |
+| syn300_s1 | 12 / 24 / 953.5 / 1,022.2 | 12 / 24 / 950.1 / 1,018.7 | identical (both runs) | -0.3% |
+| real80_realism | 10 / 19 / 678.7 / 701.8 | 6 / 14 / 574.0-575.3 / 594.5-596.0 | 6 / 14 / 574.2 / 593.9; 6 / 14 / 571.2 / 592.5 | -15.4% / -15.6% |
+
+\* Search noise, not the fixes: in that run the MIN_DISTANCE search (code unchanged by the fixes on this day: no loading
+time, no margins, no shortage) found a 1,080 km plan instead of ~979 km, so no 14-load candidate existed. An interleaved A/B
+right after (3 runs each, same load): before the fixes 529.8-532.7, after 530.6-532.1, 5 trucks / 14 loads every time. Even
+that run meets the targets: 6 trucks (≤ 9) and 521 OMR, -31% against 754 OMR. Checks: 60 options, 0 evaluator violations,
+0 exact-turnaround violations, all reconciled. Wall time: 46-54 s for the ≤ 200-stop days, 239-244 s at 300 stops.
 
 ## Sources
 
