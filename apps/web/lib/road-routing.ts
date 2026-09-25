@@ -1,19 +1,15 @@
 /**
- * Road-network route geometry — replaces the straight-line polylines that
- * were being drawn between consecutive stops on the run-detail Map tab and
- * the live dispatcher.
+ * Road-network route geometry for the LEGACY run-detail Map tab (pre-Sep 2026 runs). The dispatch
+ * plan screen does not use this: it draws loads through the solver's private /route-geometry.
  *
- * Two providers in priority order:
+ * Two providers in priority order, then straight lines:
  *
- *   1. **Mapbox Directions** (`MAPBOX_TOKEN` set) — best for paying tenants;
- *      our map basemap is already on Mapbox so we're sharing the same
- *      vendor relationship + token. Returns lossless GeoJSON LineString.
+ *   1. **Mapbox Directions** (`MAPBOX_TOKEN` set).
  *
- *   2. **OSRM** (`OSRM_URL` set, e.g. `http://routeiq-osrm.railway.internal:5000`
- *      for self-hosted, or the public demo `https://router.project-osrm.org`
- *      while we don't yet have a Railway OSRM service) — free, sub-second
- *      latency, OSM-quality. Public demo has soft rate limits and is fine
- *      for dev/smoke-testing; production tenants should run their own.
+ *   2. **OSRM** (`OSRM_URL` set, e.g. `http://routeiq-osrm.railway.internal:5000`, the
+ *      self-hosted server). There is deliberately NO default: with `OSRM_URL` unset or empty the
+ *      map draws straight lines, so customer coordinates never go to a third-party demo server
+ *      (review F22).
  *
  * Both providers return polyline6 encoded geometry which we decode into
  * an array of `[lng, lat]` pairs ready to plug into MapLibre GL JS as a
@@ -22,7 +18,7 @@
  * stops around, re-renders the map repeatedly with the same waypoints).
  */
 
-const OSRM_URL = process.env.OSRM_URL ?? 'https://router.project-osrm.org';
+const OSRM_URL = (process.env.OSRM_URL ?? '').trim().replace(/\/+$/, '');
 const MAPBOX_TOKEN = process.env.MAPBOX_TOKEN ?? '';
 const FETCH_TIMEOUT_MS = 8_000;
 const CACHE_MAX = 200;
@@ -103,6 +99,7 @@ async function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 async function fetchOSRM(waypoints: LngLat[]): Promise<RouteGeometry | null> {
+  if (!OSRM_URL) return null; // not configured: straight lines, nothing leaves the server
   // OSRM expects lng,lat;lng,lat;... — same order as our LngLat tuple.
   const coords = waypoints.map(([lng, lat]) => `${lng},${lat}`).join(';');
   // geometries=geojson returns ready-to-render coords; overview=full keeps
