@@ -12,10 +12,15 @@
  *   slot: another company's OPTIMIZE gets the next free one. A start beyond the caps is not
  *   refused: its job is created and waits in the queue until a slot frees.
  * - Fair queue: a company may have at most 2 solves waiting. One more is refused with 429 and
- *   Retry-After, for that company only, so one company can never fill the shared queue (at most
- *   10 waiting; a full queue answers 503 "optimizer busy"). A freed slot goes to the waiting solve
- *   of the company with the fewest solves running; on a tie, to the company whose latest solve
- *   started longest ago (companies take turns); oldest first within a company.
+ *   Retry-After, for that company only. The shared queue holds 10: once it is full, a company that
+ *   already has a solve waiting is refused with 503 "optimizer busy" until there is room, but a
+ *   company with nothing waiting is always queued - other companies filling the queue never lock it
+ *   out (review of PR3: five sign-up companies with 2 waiting each got NMWC a 503). Only an
+ *   absolute cap of 200 waiting (process memory) refuses every start that would wait.
+ * - Slot order: a freed slot goes to the waiting solve of the company with the fewest solves
+ *   running; among those, first come first served - the solve queued first, whether or not its
+ *   company ever ran one (a new company never jumps ahead of one already waiting); so FIFO within
+ *   a company. A company at its own concurrency cap keeps waiting.
  * - The slot is held from the reservation until the job ends (success, failure or stale result).
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy
@@ -34,8 +39,13 @@ export interface AdmissionLimits {
   tenantConcurrent: number;
   /** Solves running at the same time over all companies. */
   globalConcurrent: number;
-  /** Solves waiting for a slot over all companies. */
+  /**
+   * The shared queue: once this many solves wait (over all companies), a company that already has
+   * one waiting is refused (503). A company with nothing waiting is still queued.
+   */
   maxQueue: number;
+  /** Absolute cap on waiting solves (process memory): past it every start that would wait gets 503. */
+  queueHardCap: number;
   /** Solves of one company waiting for a slot. */
   tenantQueue: number;
   windowMs: number;
@@ -59,6 +69,7 @@ export function defaultAdmissionLimits(env: NodeJS.ProcessEnv = process.env): Ad
     tenantConcurrent: Math.max(1, globalConcurrent - 1),
     globalConcurrent,
     maxQueue: 10,
+    queueHardCap: 200,
     tenantQueue: 2,
     windowMs: 60 * 60_000,
   };
@@ -81,7 +92,10 @@ export interface SolveTicket {
   readonly waiting: boolean;
   /** Resolves when the ticket holds a solver slot (immediately when one was free). */
   ready(): Promise<void>;
-  /** Place in the queue: 1 = starts next (an estimate across companies); 0 when it holds a slot. */
+  /**
+   * Place in the queue: 1 = starts next; 0 when it holds a slot. An estimate: it assumes the
+   * running solves end in the order they started.
+   */
   position(): number;
   /** The job was created: the start counts against the hourly quotas. Idempotent. */
   commit(): void;
@@ -97,6 +111,8 @@ interface TicketState {
   committed: boolean;
   released: boolean;
   running: boolean;
+  /** Order of reservation (first come, first served). */
+  seq: number;
   resolve: () => void;
   promise: Promise<void>;
 }
@@ -104,11 +120,11 @@ interface TicketState {
 export class SolveAdmission {
   private readonly starts = new Map<string, number[]>(); // quota key -> start times in the window
   private readonly pending = new Map<string, number>(); // quota key -> reserved, not yet committed
+  /** Solves holding a slot, in the order they started. */
   private readonly running = new Set<TicketState>();
+  /** Solves waiting for a slot, in the order they were queued. */
   private readonly queue: TicketState[] = [];
-  /** Company -> sequence number of its latest solve start (companies take turns on a tie). */
-  private readonly lastStart = new Map<string, number>();
-  private startSeq = 0;
+  private seq = 0;
 
   constructor(
     private readonly limits: AdmissionLimits = defaultAdmissionLimits(),
@@ -142,13 +158,16 @@ export class SolveAdmission {
           120,
         );
       }
-      if (this.queue.length >= this.limits.maxQueue) {
+      // A full shared queue refuses only a company that already has a solve waiting: one with
+      // nothing waiting is queued, so other companies filling the queue never lock it out. The
+      // queue grows by at most one solve per company past maxQueue; queueHardCap bounds memory.
+      if ((mineWaiting > 0 && this.queue.length >= this.limits.maxQueue) || this.queue.length >= this.limits.queueHardCap) {
         return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans. Try again in a few minutes.', 120);
       }
     }
     let resolve!: () => void;
     const promise = new Promise<void>((r) => (resolve = r));
-    const st: TicketState = { tenantId, userId, committed: false, released: false, running: false, resolve, promise };
+    const st: TicketState = { tenantId, userId, committed: false, released: false, running: false, seq: ++this.seq, resolve, promise };
     if (!this.quotasOff()) {
       this.pending.set(userKey, (this.pending.get(userKey) ?? 0) + 1);
       this.pending.set(tenantKey, (this.pending.get(tenantKey) ?? 0) + 1);
@@ -246,40 +265,55 @@ export class SolveAdmission {
 
   /**
    * Index in `queue` of the ticket that gets the next free slot: the company with the fewest solves
-   * running (`counts`); on a tie the company whose latest solve started longest ago (`last`; never
-   * started = first), so companies take turns; then the oldest ticket - first come, first served
+   * running (`counts`), then the ticket queued first - first come, first served, whether or not
+   * its company ever ran a solve (a new company never jumps ahead of one already waiting), so FIFO
    * within a company. With `capped`, companies at their own concurrency cap are skipped (-1 when
    * every waiting company is).
    */
-  private nextIndex(queue: readonly TicketState[], counts: ReadonlyMap<string, number>, last: ReadonlyMap<string, number>, capped: boolean): number {
+  private nextIndex(queue: readonly TicketState[], counts: ReadonlyMap<string, number>, capped: boolean): number {
     let best = -1;
     let bestRunning = Number.POSITIVE_INFINITY;
-    let bestLast = Number.POSITIVE_INFINITY;
+    let bestSeq = Number.POSITIVE_INFINITY;
     queue.forEach((st, i) => {
       const n = counts.get(st.tenantId) ?? 0;
       if (capped && n >= this.limits.tenantConcurrent) return;
-      const l = last.get(st.tenantId) ?? -1;
-      if (n < bestRunning || (n === bestRunning && l < bestLast)) {
+      if (n < bestRunning || (n === bestRunning && st.seq < bestSeq)) {
         best = i;
         bestRunning = n;
-        bestLast = l;
+        bestSeq = st.seq;
       }
     });
     return best;
   }
 
-  /** The waiting tickets in the order they would start if slots freed one at a time (for position()). */
+  /**
+   * The waiting tickets in the order they would start (for position()): the running solves are
+   * assumed to end in the order they started, and each freed slot is given as pump() gives it.
+   */
   private startOrder(): TicketState[] {
+    const running = [...this.running];
     const counts = this.runningCounts();
-    const last = new Map(this.lastStart);
-    let seq = this.startSeq;
     const rest = [...this.queue];
     const order: TicketState[] = [];
+    const fill = () => {
+      while (running.length < this.limits.globalConcurrent && rest.length) {
+        const i = this.nextIndex(rest, counts, true);
+        if (i < 0) return;
+        const [st] = rest.splice(i, 1);
+        order.push(st!);
+        running.push(st!);
+        counts.set(st!.tenantId, (counts.get(st!.tenantId) ?? 0) + 1);
+      }
+    };
+    fill();
     while (rest.length) {
-      const [st] = rest.splice(Math.max(0, this.nextIndex(rest, counts, last, false)), 1);
-      order.push(st!);
-      counts.set(st!.tenantId, (counts.get(st!.tenantId) ?? 0) + 1);
-      last.set(st!.tenantId, ++seq);
+      const ended = running.shift();
+      if (!ended) {
+        order.push(...rest); // cannot happen (with nothing running every company fits); FIFO as a fallback
+        break;
+      }
+      counts.set(ended.tenantId, (counts.get(ended.tenantId) ?? 1) - 1);
+      fill();
     }
     return order;
   }
@@ -287,18 +321,16 @@ export class SolveAdmission {
   private start(st: TicketState) {
     st.running = true;
     this.running.add(st);
-    this.lastStart.set(st.tenantId, ++this.startSeq);
     st.resolve();
   }
 
   /**
    * Give free slots to waiting tickets: each to the company with the fewest solves running, then
-   * to the one served longest ago (companies at their own cap keep waiting), oldest first within a
-   * company (review F16).
+   * to the solve queued first (companies at their own cap keep waiting) - review F16.
    */
   private pump() {
     while (this.running.size < this.limits.globalConcurrent && this.queue.length) {
-      const i = this.nextIndex(this.queue, this.runningCounts(), this.lastStart, true);
+      const i = this.nextIndex(this.queue, this.runningCounts(), true);
       if (i < 0) break;
       const [st] = this.queue.splice(i, 1);
       this.start(st!);

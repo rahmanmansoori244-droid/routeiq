@@ -716,7 +716,7 @@ describe('solve admission wired into the job (F16): queued solves start, every e
 
   /** One solve per company at a time (the shipped default with SOLVER_MAX_CONCURRENT=2), quotas off. */
   function admission() {
-    return new SolveAdmission({ userPerHour: 100, tenantPerHour: 100, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, tenantQueue: 2, windowMs: 3_600_000 }, Date.now, () => true);
+    return new SolveAdmission({ userPerHour: 100, tenantPerHour: 100, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, queueHardCap: 200, tenantQueue: 2, windowMs: 3_600_000 }, Date.now, () => true);
   }
   function ticketOf(a: SolveAdmission): SolveTicket {
     const r = a.reserve(T, 'u1');

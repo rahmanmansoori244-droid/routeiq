@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { defaultAdmissionLimits, SolveAdmission, type AdmissionLimits, type SolveTicket } from '@/lib/dispatch/solve-admission';
 
-const LIMITS: AdmissionLimits = { userPerHour: 3, tenantPerHour: 5, tenantConcurrent: 2, globalConcurrent: 3, maxQueue: 2, tenantQueue: 2, windowMs: 60 * 60_000 };
+const LIMITS: AdmissionLimits = { userPerHour: 3, tenantPerHour: 5, tenantConcurrent: 2, globalConcurrent: 3, maxQueue: 2, queueHardCap: 200, tenantQueue: 2, windowMs: 60 * 60_000 };
 
 function gate(limits: Partial<AdmissionLimits> = {}, opts: { quotasOff?: boolean } = {}) {
   let now = 1_000_000;
@@ -27,8 +27,8 @@ function solve(a: SolveAdmission, tenant: string, user: string) {
 }
 
 describe('defaults', () => {
-  it('15 per user and 30 per company per hour; SOLVER_MAX_CONCURRENT in total and one less per company; 10 waiting, 2 per company', () => {
-    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, tenantQueue: 2, windowMs: 3_600_000 });
+  it('15 per user and 30 per company per hour; SOLVER_MAX_CONCURRENT in total and one less per company; a shared queue of 10 (200 at most), 2 per company', () => {
+    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, queueHardCap: 200, tenantQueue: 2, windowMs: 3_600_000 });
     const env = (v: string) => ({ SOLVER_MAX_CONCURRENT: v }) as unknown as NodeJS.ProcessEnv;
     expect(defaultAdmissionLimits(env('3'))).toMatchObject({ globalConcurrent: 3, tenantConcurrent: 2 });
     expect(defaultAdmissionLimits(env('1'))).toMatchObject({ globalConcurrent: 1, tenantConcurrent: 1 });
@@ -132,18 +132,28 @@ describe('concurrency: 2 per company, a global cap, a FIFO queue', () => {
     expect(t3.waiting).toBe(true);
   });
 
-  it('a full queue answers 503 SOLVER_BUSY', () => {
+  it('a full shared queue answers 503 SOLVER_BUSY to a company that already has a solve waiting', () => {
     const { a } = gate({ globalConcurrent: 1, maxQueue: 2 });
     ok(a.reserve('tA', 'u1'));
     ok(a.reserve('tB', 'u1'));
     ok(a.reserve('tC', 'u1'));
-    const r = a.reserve('tD', 'u1');
+    const r = a.reserve('tB', 'u2'); // tB has one waiting already
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.status).toBe(503);
       expect(r.code).toBe('SOLVER_BUSY');
       expect(r.retryAfterSec).toBeGreaterThan(0);
     }
+    // A company with nothing waiting is still queued (review of PR3: others must not lock it out).
+    expect(ok(a.reserve('tD', 'u1')).waiting).toBe(true);
+  });
+
+  it('only the absolute cap (process memory) refuses a company with nothing waiting', () => {
+    const { a } = gate({ globalConcurrent: 1, maxQueue: 2, queueHardCap: 3 });
+    ok(a.reserve('tA', 'u1'));
+    for (const t of ['tB', 'tC', 'tD']) expect(ok(a.reserve(t, 'u1')).waiting).toBe(true);
+    expect(a.reserve('tE', 'u1')).toMatchObject({ ok: false, status: 503, code: 'SOLVER_BUSY' });
+    expect(a.snapshot()).toMatchObject({ running: 1, waiting: 3 });
   });
 
   it('releasing a waiting ticket removes it from the queue; release is idempotent', () => {
@@ -186,16 +196,22 @@ describe('fairness across companies (review: one company must not take every slo
     expect(a.snapshot().runningByTenant).toEqual({ signup: 1, nmwc: 1 });
   });
 
-  it('1 in total: NMWC is first in the queue ahead of the other company, and gets the next free slot', () => {
+  it('1 in total: NMWC waits only for the solves queued before it, first come first served', () => {
     const { a, other } = flood('1');
     expect(other.map(state).slice(0, 4)).toEqual(['running', 'queued', 'queued', 'SOLVE_QUEUE_TENANT']);
     const nmwc = ok(a.reserve('nmwc', 'd1'));
     expect(nmwc.waiting).toBe(true);
-    expect(nmwc.position()).toBe(1);
-    // The other company's running solve ends: the slot goes to NMWC, not to its older waiting solves.
-    (other[0] as { ticket: SolveTicket }).ticket.release();
+    expect(nmwc.position()).toBe(3); // behind the other company's 2 solves that were waiting already
+    const tickets = other.filter((r) => r.ok).map((r) => (r as { ticket: SolveTicket }).ticket);
+    tickets[0]!.release(); // its running solve ends: its oldest waiting solve (queued before NMWC) starts
+    expect([tickets[1]!.waiting, nmwc.waiting]).toEqual([false, true]);
+    // It presses again: that solve is queued after NMWC, so it starts after NMWC.
+    const again = ok(a.reserve('signup', 'u1'));
+    expect([nmwc.position(), again.position()]).toEqual([2, 3]);
+    tickets[1]!.release();
+    tickets[2]!.release();
     expect(nmwc.waiting).toBe(false);
-    expect(a.snapshot()).toMatchObject({ runningByTenant: { nmwc: 1 }, waitingByTenant: { signup: 2 } });
+    expect(again.waiting).toBe(true);
   });
 
   it('a freed slot goes to the company with the fewest solves running, first come first served within a company', () => {
@@ -214,6 +230,71 @@ describe('fairness across companies (review: one company must not take every slo
     expect(a3.waiting).toBe(false);
     expect(a4.waiting).toBe(true);
     expect(a4.position()).toBe(1);
+  });
+
+  describe('several companies fill the shared queue (review of PR3: NMWC got 503 SOLVER_BUSY)', () => {
+    /** Five sign-up companies press OPTIMIZE 3 times each on the shipped defaults, quotas on. */
+    function attack() {
+      const a = new SolveAdmission(defaultAdmissionLimits({} as NodeJS.ProcessEnv), () => 1_000_000, () => false);
+      const presses: Record<string, ReturnType<SolveAdmission['reserve']>[]> = {};
+      for (const s of ['S1', 'S2', 'S3', 'S4', 'S5']) {
+        presses[s] = Array.from({ length: 3 }, () => a.reserve(s, 'u1'));
+        for (const r of presses[s]!) if (r.ok) r.ticket.commit();
+      }
+      const ticket = (s: string, i: number) => (presses[s]![i] as { ticket: SolveTicket }).ticket;
+      return { a, presses, ticket };
+    }
+
+    it('5 companies x 2 waiting fill the queue of 10; NMWC, with nothing waiting, is queued - not refused', () => {
+      const { a, presses } = attack();
+      expect(presses.S1!.map(state)).toEqual(['running', 'queued', 'queued']);
+      expect(presses.S2!.map(state)).toEqual(['running', 'queued', 'queued']);
+      for (const s of ['S3', 'S4', 'S5']) expect(presses[s]!.map(state)).toEqual(['queued', 'queued', 'SOLVE_QUEUE_TENANT']);
+      expect(a.snapshot()).toMatchObject({ running: 2, waiting: 10 });
+      const nmwc = a.reserve('nmwc', 'd1');
+      expect(state(nmwc)).toBe('queued');
+      // The queue is full: a company that already has a solve waiting gets 503 until there is room.
+      expect(state(a.reserve('nmwc', 'd2'))).toBe('SOLVER_BUSY');
+      expect(a.snapshot()).toMatchObject({ waiting: 11, waitingByTenant: { nmwc: 1 } });
+    });
+
+    it('NMWC starts before every solve queued after it; fresh sign-ups arriving later do not jump ahead', () => {
+      const { a, presses, ticket } = attack();
+      const nmwc = ok(a.reserve('nmwc', 'd1'));
+      // A stream of brand-new companies (none of them ever ran a solve) after NMWC.
+      const fresh = ['F1', 'F2', 'F3'].map((f) => ok(a.reserve(f, 'u1')));
+      expect(fresh.every((t) => t.waiting)).toBe(true);
+      // 9 of the 10 solves waiting before it; the tenth (S5's second) belongs to a company that is
+      // running one by then, so NMWC (nothing running) goes first.
+      expect(nmwc.position()).toBe(10);
+      expect(fresh.map((t) => t.position())).toEqual([12, 13, 14]);
+
+      // Drive the queue: the running solves end oldest first, and each attacker presses again at once.
+      const label = new Map<SolveTicket, string>();
+      for (const s of ['S1', 'S2', 'S3', 'S4', 'S5']) {
+        for (const r of presses[s]!) if (r.ok && r.ticket.waiting) label.set(r.ticket, 'queued before');
+      }
+      expect(label.size).toBe(10);
+      label.set(nmwc, 'nmwc');
+      for (const t of fresh) label.set(t, 'fresh sign-up');
+      const running = [ticket('S1', 0), ticket('S2', 0)];
+      const started = new Set<SolveTicket>();
+      const kinds: string[] = [];
+      for (let i = 0; i < 50 && nmwc.waiting; i++) {
+        const ended = running.shift()!;
+        ended.release();
+        for (const [t, what] of label) {
+          if (t.waiting || started.has(t)) continue;
+          started.add(t);
+          running.push(t);
+          kinds.push(what);
+        }
+        const again = a.reserve(ended.tenantId, 'u1');
+        if (again.ok) label.set(again.ticket, 'queued after');
+      }
+      expect(kinds).toEqual([...Array(9).fill('queued before'), 'nmwc']); // as position() said
+      expect(fresh.every((t) => t.waiting)).toBe(true);
+    });
   });
 
   it('the per-company queue cap is counted per company, and frees up when a waiting solve starts or is released', () => {
