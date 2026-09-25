@@ -148,7 +148,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
 
   async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', allowMissing = false) {
     setBusy('replan');
-    const r = await api<{ runId: string; version?: number }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, allowMissingLocations: allowMissing } });
+    const r = await api<{ runId: string; version?: number; reason?: string }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, allowMissingLocations: allowMissing } });
     setBusy(null);
     if (!r.ok || !r.data) {
       if (r.errorBody?.code === 'LOCATION_REQUIRED') {
@@ -161,7 +161,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
       toast.error(r.error ?? 'Re-plan failed.');
       return;
     }
-    toast.success(`Plan version ${r.data.version ?? ''} is being optimized. Locked and dispatched loads are kept.`);
+    const how =
+      r.data.reason === 'LATE_ORDER'
+        ? 'Late order added; the other orders stay on their trucks where possible.'
+        : 'Full re-optimize: orders may move to other trucks.';
+    toast.success(`Plan version ${r.data.version ?? ''} is being optimized. ${how} Locked and dispatched loads are kept.`);
     onChanged?.(r.data.runId);
   }
 
@@ -205,7 +209,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               <Button variant="outline" size="sm" onClick={() => setLateOpen(true)}>
                 <Plus className="mr-1 h-4 w-4" /> Late order
               </Button>
-              <Button variant="outline" size="sm" disabled={busy === 'replan' || running} onClick={() => replan('REOPTIMIZE')}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy === 'replan' || running}
+                onClick={() => replan('REOPTIMIZE')}
+                title="With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change."
+              >
                 <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
               </Button>
             </>
