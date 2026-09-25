@@ -550,10 +550,10 @@ Each step names the page or component, the API route, the library functions and 
 |---|---|---|---|---|---|
 | 1 | Pick delivery date and depot | `DispatchClient` | `GET /api/dispatch/day` | `getDayOverview` | none |
 | 2 | "Check file" | Step 1 card | `POST /api/orders/upload` | `parseUpload`, `validateIntake` (`normalizeOrderRows`, `resolveOrderLines`) | `UploadBatch`, `AuditLog` |
-| 3 | "Add N lines to the day" | `ValidationPanel` | `POST /api/orders/:batchId/confirm` | `confirmIntake` | `Customer` and `Product` stubs, `Order`, `OrderLine`, `UploadBatch`, `AuditLog` |
+| 3 | "Add N lines to the day" | `ValidationPanel` | `POST /api/orders/:batchId/confirm` | `revalidateIntake`, `confirmIntake` | `Customer` and `Product` stubs, `Order`, `OrderLine`, `IntakeLineKey`, `UploadBatch`, `AuditLog` |
 | 4 | ADD LOCATION | `LocationDialog` | `POST /api/locations/parse`, `PUT /api/customers/:id/location` | `resolveLocationInput`, `coordStatus` | `Customer`, `AuditLog` |
 | 5 | Details (priority, type, hours) | `CustomerDialog` | `PATCH /api/customers/:id` | none beyond the route | `Customer`, `AuditLog` |
-| 6 | OPTIMIZE | Step 3 button | `POST /api/dispatch/plan` (no applied plan yet) or `POST /api/runs/:id/replan` | `getOrCreatePlan`, `startDispatchOptimize`, `buildDispatchRequest`, `scheduleDispatchOptimize`, then `persistDispatchResult`, `applyScenario`, `refreshPlanFacts` | `RunPlan`, `RunJob`, `ScenarioResult`, `UnservedOrder`, `PlanLoad`, `RouteAssignment`, `Order.status`, `AuditLog` |
+| 6 | OPTIMIZE | Step 3 button | `POST /api/dispatch/plan` (no applied plan yet) or `POST /api/runs/:id/replan` | `getOrCreatePlan`, `startDispatchOptimize`, `resolveOrderWeights`, `buildDispatchRequest`, `scheduleDispatchOptimize`, then `persistDispatchResult`, `applyScenario`, `refreshPlanFacts` | `OrderLine.weightKg` / `Order.totalWeightKg` (0-kg lines), `RunPlan`, `RunJob`, `ScenarioResult`, `UnservedOrder`, `PlanLoad`, `RouteAssignment`, `Order.status`, `AuditLog` |
 | 7 | Review | `PlanView` | `GET /api/runs/:id/plan`, `GET /api/runs/:id/load-geometry`, `GET /api/drivers` | `getPlanDetail` | none |
 | 8 | "Use instead" | Plan options table | `POST /api/runs/:id/choose-scenario` | `applyScenario` | same as 6, same version |
 | 9 | Driver, Lock, Loading, Dispatch, Completed | Load row | `PATCH /api/runs/:id/loads/:loadId` | `updateLoad`, `checkTransition`, `checkDriverChange` | `PlanLoad`, `Order.status`, `RunPlan.status`, `AuditLog` |
