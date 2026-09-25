@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, isHandSetDriver, ownDriverEvidence, planReplanDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -55,7 +55,7 @@ import {
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
-import { computeChangeSummary, computeSummary, parkedEvidence, toParkedDrivers, type AssignmentKey, type DailySummary, type DriverChangeNote, type ParkedDriver } from './summary';
+import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
 import { dateOnly, isoOf } from './time';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
@@ -784,49 +784,26 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     throw new PlanError('Loads were locked/unlocked after this optimization. Optimize again before applying.', 409);
   }
 
-  // The trucks of the new loads, and of the kept loads (named in the driver notes).
-  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...d.loads.map((l) => l.truck_id), ...frozenNow.map((l) => l.truckId)])] } } });
+  // Drivers (rules: planDrivers in load-state.ts). The evidence is this version's loads as they are
+  // now, read before its PLANNED loads are deleted: for the re-plan job, the copies createNextVersion
+  // made of the previous version's loads; for "Use instead", the loads of the option in use - so both
+  // read the same kind of evidence. Frozen loads keep their drivers. A hand-set driver (the row's
+  // marker) stays on its truck and trip with the marker, even over an overlap (the yellow clash
+  // warning shows it). Every other trip, the one that moved least first, gets its own driver, the
+  // driver of the truck's nearest trip or the truck's default driver - whichever is active and free
+  // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
+  // plan does not have) are kept in the plan summary (driverChanges, shown as plan warnings),
+  // audited and returned. driverSetById comes from the evidence row: its foreign key keeps it valid.
+  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true } as const;
+  const evidence = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
+  // The trucks of the new loads and of the evidence loads (named in the driver notes).
+  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...d.loads.map((l) => l.truck_id), ...evidence.map((l) => l.truckId)])] } } });
   const truckById = new Map(trucks.map((t) => [t.id, t]));
   for (const ld of d.loads) if (!truckById.has(ld.truck_id)) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
-
-  // Drivers stay with their truck and trip across re-plans (rules: planReplanDrivers). A driver the
-  // dispatcher chose by hand for the trip (driverSetAt) stays on it, with its marker, whatever it
-  // now overlaps: the clash shows as the plan warning (driverClashes). Every other driver is
-  // RouteIQ's pick - this version's trips (its loads, read before its PLANNED loads are deleted,
-  // and the trips parked with it), then the parent version's, then the truck's nearest trip, then
-  // its default driver - and never overlaps one of that driver's kept loads or another trip
-  // RouteIQ gave them; of two such trips the one that moved loses the driver. The PLANNED copies a
-  // re-plan carried from the parent untouched are the parent's evidence, not this version's
-  // (ownDriverEvidence), and so are the parked trips its summary copied from the parent
-  // (parkedEvidence), so the re-plan job and "Use instead" decide the same trips the same way.
-  // Each trip this version had that the plan does not have - its driver, "No driver", its marker -
-  // and each hand-set choice of the parent's without a trip is parked with the version (summary
-  // parkedDrivers), so the plan that has the trip again reads this version's state of it: a
-  // hand-set driver comes back, a trip set to "No driver" never gets the parent's older choice back
-  // as the dispatcher's. The trips whose driver changed, and the parked hand-set choices
-  // (TRIP_GONE), are returned, kept in the plan summary (driverChanges, shown as plan warnings)
-  // and audited.
   const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
-  const usableDrivers = new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id));
   const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
-  const driverSel = {
-    id: true,
-    truckId: true,
-    loadNo: true,
-    driverId: true,
-    status: true,
-    carriedFromLoadId: true,
-    departMin: true,
-    returnMin: true,
-    driverSetById: true,
-    driverSetAt: true,
-  } as const;
-  const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
-  const driversNow = ownDriverEvidence(await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel }), driversParent);
-  const parentRun = run.parentRunId ? await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId }, select: { summaryJson: true } }) : null;
-  const parkedBefore = parkedEvidence(runId, run.summaryJson, parentRun?.summaryJson ?? null);
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
-  const { drivers: driverOf, changes, parked } = planReplanDrivers(
+  const { drivers: driverOf, notes } = planDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
       truckId: ld.truck_id,
@@ -835,45 +812,22 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
       returnMin: ld.return_min,
       defaultDriverId: truckById.get(ld.truck_id)!.defaultDriverId,
     })),
-    driversNow,
-    driversParent,
-    frozenNow,
-    usableDrivers,
-    parkedBefore.own,
-    parkedBefore.parent,
+    evidence,
+    new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
   );
-  // The parked hand-set choices are driver notes; a parked trip RouteIQ filled in, or set to "No driver", is not.
-  const parkedByHand = parked.filter((p) => isHandSetDriver(p));
-  // The trucks of parked choices that are in neither plan (named in their notes).
-  const parkedTruckIds = [...new Set(parkedByHand.map((p) => p.truckId))].filter((id) => !truckById.has(id));
-  if (parkedTruckIds.length) for (const t of await tx.truck.findMany({ where: { tenantId, id: { in: parkedTruckIds } } })) truckById.set(t.id, t);
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
-  const person = (id: string | null) => (id ? { id, name: driverName.get(id) ?? 'Unknown driver' } : null);
-  const solverLoad = new Map(d.loads.map((ld) => [loadKey(ld.truck_id, ld.load_no), ld]));
-  const driverChanges: DriverChangeNote[] = changes.map((c) => ({
-    truckId: c.truckId,
-    truckCode: truckCode(c.truckId),
-    loadNo: c.loadNo,
-    departMin: solverLoad.get(c.key)!.depart_min,
-    returnMin: solverLoad.get(c.key)!.return_min,
-    from: person(c.fromDriverId),
-    to: person(c.toDriverId),
-    reason: c.reason,
-    other: c.other ? { truckCode: truckCode(c.other.truckId), loadNo: c.other.loadNo } : null,
+  const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
+  const driverChanges: DriverChangeNote[] = notes.map((n) => ({
+    truckId: n.truckId,
+    truckCode: truckCode(n.truckId),
+    loadNo: n.loadNo,
+    departMin: n.departMin,
+    returnMin: n.returnMin,
+    from: person(n.fromDriverId),
+    to: n.toDriverId ? person(n.toDriverId) : null,
+    reason: n.reason,
+    other: n.other ? { truckCode: truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
   }));
-  for (const p of parkedByHand) {
-    driverChanges.push({
-      truckId: p.truckId,
-      truckCode: truckCode(p.truckId),
-      loadNo: p.loadNo,
-      departMin: p.departMin ?? null,
-      returnMin: p.returnMin ?? null,
-      from: person(p.driverId),
-      to: null,
-      reason: 'TRIP_GONE',
-      other: null,
-    });
-  }
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
@@ -967,7 +921,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     data: { chosenScenarioId: scenarioId, status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
-  await refreshPlanFacts(tx, tenantId, runId, { driverChanges, parkedDrivers: toParkedDrivers(parked, runId) });
+  await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
   await tx.auditLog.create({
     data: {
       tenantId,
@@ -1029,17 +983,15 @@ export function loadKgFromRefs(refs: string[], scope: Pick<PlanScope, 'portions'
 
 /**
  * Recompute reconciliation, daily summary and (for versions > 1) the change summary.
- * `driverChanges`: the trips whose driver the plan just applied changed (applyScenario), kept in
- * the summary (`summaryJson.driverChanges`, shown as plan warnings); `parkedDrivers`: its hand-set
- * choices without a trip in the plan (`summaryJson.parkedDrivers`). A refresh without them (a load
- * change) keeps the ones already there.
+ * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
+ * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
+ * keeps the ones already there. Anything else an older summary held (`parkedDrivers`) is dropped.
  */
-export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[]; parkedDrivers?: ParkedDriver[] } = {}) {
+export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[] } = {}) {
   const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
   if (!run.chosenScenarioId) return;
-  const stored = run.summaryJson as { driverChanges?: unknown; parkedDrivers?: unknown } | null;
+  const stored = run.summaryJson as { driverChanges?: unknown } | null;
   const driverChanges = opts.driverChanges ?? (Array.isArray(stored?.driverChanges) ? (stored.driverChanges as DriverChangeNote[]) : []);
-  const parkedDrivers = opts.parkedDrivers ?? (Array.isArray(stored?.parkedDrivers) ? (stored.parkedDrivers as ParkedDriver[]) : []);
   const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: run.chosenScenarioId }, include: { unservedOrders: true } });
   const d = sc.detailsJson as unknown as ScenarioDetails;
   const scopeIds = [...new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds])];
@@ -1129,7 +1081,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
     distanceProvider: d.matrix_provider,
     solver: { engine: d.engine, scenario: d.name, status: d.solver_status, timeSec: d.solver_time_sec },
   });
-  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}), ...(parkedDrivers.length ? { parkedDrivers } : {}) };
+  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}) };
   let change = null;
   if (run.parentRunId) {
     const parent = await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId } });
@@ -1346,7 +1298,9 @@ export async function createNextVersion(
         });
 
         // Loads and their stops. The copy keeps status, driver (with its hand-set marker, driverSetById /
-        // driverSetAt), times and costs.
+        // driverSetAt), times and costs: the evidence the new version's optimization reads for its
+        // drivers (planDrivers). The summary copied above keeps the parent's driver notes for the copy;
+        // they are never read as evidence.
         const newLoadId = new Map<string, string>();
         const assignmentRows: Prisma.RouteAssignmentCreateManyInput[] = [];
         for (const l of loads) {
@@ -1588,7 +1542,7 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
   const before = load.driverId ? await tx.driver.findFirst({ where: { id: load.driverId, tenantId }, select: { name: true } }) : null;
   // The dispatcher's own choice: marked, so a re-plan or "Use instead" keeps it on this truck and
-  // trip (planReplanDrivers). "No driver" clears the marker with the driver.
+  // trip (planDrivers, pass 1) and a driver note on this trip ends. "No driver" clears the marker.
   const updated = await tx.planLoad.update({
     where: { id: loadId },
     data: { driverId, driverSetById: driverId ? user.id : null, driverSetAt: driverId ? new Date() : null },

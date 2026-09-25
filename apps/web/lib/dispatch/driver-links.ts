@@ -189,40 +189,34 @@ export function driverClashNotes(
   }));
 }
 
-/** A trip whose driver the applied plan changed, in words ("Ali -> Sam, because ..."). */
+/** A driver note of the applied plan, in words ("Ali -> Sam, because ..."). */
 export function driverChangeText(c: DriverChangeNote): string {
   const hours = c.departMin !== null && c.returnMin !== null ? ` (${fmtHhmm(c.departMin)}–${fmtHhmm(c.returnMin)})` : '';
   const trip = `${c.truckCode} · L${c.loadNo}${hours}`;
+  const from = c.from.name;
   if (c.reason === 'TRIP_GONE') {
-    const who = c.from?.name ?? 'the driver';
-    return `Driver picked by hand, not in this plan: you picked ${who} for ${trip}, and this plan has no such trip. ${who} goes back on it when a re-plan or Use instead has that trip again.`;
+    return `Driver picked by hand, not in this plan: you picked ${from} for ${trip}, and this plan has no such trip. If a later plan has that trip again, pick the driver again.`;
   }
   const to = c.to?.name ?? 'no driver';
-  if (c.reason === 'FILLED' || !c.from) return `Driver added by this plan: ${trip} now has ${to} (the trip had no driver).`;
-  const from = c.from.name;
-  const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : null;
-  const why =
-    c.reason === 'INACTIVE'
-      ? `${from} is no longer active`
-      : c.reason === 'KEPT_LOAD'
-        ? `${from} is on ${other ?? 'a kept load'} (locked, loading or dispatched) at that time`
-        : `${from} is on ${other ?? 'another trip'} at that time`;
+  const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : 'another trip';
+  const why = c.reason === 'INACTIVE' ? `${from} is no longer active` : `${from} is on ${other} at that time`;
   return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
 }
 
 /**
- * The plan warnings for the drivers the applied plan changed (summary `driverChanges`): one per trip
- * that still has the driver the plan gave it, filled in by RouteIQ - once the dispatcher picks a
- * driver for that trip (another one, or the same one with Keep: `driverHandSet`), the note has done
- * its job. A hand-set driver whose trip the plan does not have (TRIP_GONE) is listed while the plan
- * has no load for that truck and trip.
+ * The plan warnings for the applied plan's driver notes (summary `driverChanges`). A note on a trip
+ * of the plan is listed until the dispatcher sets that trip's driver: any driver, or the same one
+ * with Keep (`driverHandSet`, which the plan detail reads from the load rows). A TRIP_GONE note is
+ * listed while the plan has no load for that truck and trip. A note without a driver it lost (only
+ * written before the simplified driver rules, when filling an empty trip was a note) is left out.
  */
 export function driverChangeWarnings(
   changes: readonly DriverChangeNote[],
-  loads: readonly { truckId: string; loadNo: number; driverId: string | null; driverHandSet?: boolean }[],
+  loads: readonly { truckId: string; loadNo: number; driverId: string | null; driverHandSet: boolean }[],
 ): string[] {
   return changes
     .filter((c) => {
+      if (!c.from) return false;
       const trip = loads.filter((l) => l.truckId === c.truckId && l.loadNo === c.loadNo);
       if (c.reason === 'TRIP_GONE') return trip.length === 0;
       return trip.some((l) => l.driverId === (c.to?.id ?? null) && !l.driverHandSet);

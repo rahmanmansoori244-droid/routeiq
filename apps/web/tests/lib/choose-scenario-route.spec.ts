@@ -1,8 +1,8 @@
 /**
  * POST /api/runs/:id/choose-scenario ("Use instead") answers `driversChanged`: how many driver notes
- * the option just applied left on the plan (trips whose driver changed, and drivers the dispatcher
- * picked by hand whose trip the option does not have). The screen names that count in its toast,
- * so a changed or parked driver is never silent (fourth and fifth reviews of PR3).
+ * the option just applied left on the plan (trips that lost or changed their driver, and drivers the
+ * dispatcher picked by hand whose trip the option does not have). The screen names that count in its
+ * toast, so a changed or dropped driver is never silent.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetDb, row, tables } from './fake-plan-db';
@@ -102,17 +102,18 @@ beforeEach(() => {
 });
 
 describe('choose-scenario answers driversChanged', () => {
-  it('counts the parked hand-set driver of an option without its trip; switching back gives him back with no note', async () => {
+  it('counts the hand-set driver of an option without its trip (TRIP_GONE); switching back does not bring him back and is no note', async () => {
     const set = await loadPatch(req('PATCH', 'http://t/api/runs/R/loads/R3', { driverId: 'BOB' }), { params: { id: 'R', loadId: 'R3' } });
     expect(set.status).toBe(200);
     expect(await choose('min')).toEqual({ runId: 'R', scenarioId: 'min', driversChanged: 1 });
     expect(row('runPlan', 'R').summaryJson.driverChanges.map((c: { reason: string }) => c.reason)).toEqual(['TRIP_GONE']);
+    // T03 L1 comes back as a new trip: its default driver Sam, filled in - not a note.
     expect(await choose('rec')).toEqual({ runId: 'R', scenarioId: 'rec', driversChanged: 0 });
-    expect(tables.planLoad.find((l) => l.runId === 'R' && l.truckId === 'T3')).toMatchObject({ driverId: 'BOB', driverSetById: 'u1' });
+    expect(tables.planLoad.find((l) => l.runId === 'R' && l.truckId === 'T3')).toMatchObject({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
   });
 
   it('counts a trip whose driver the option changed (the trip that moved onto another trip of its driver)', async () => {
-    // Ali filled in on both trucks; the option moves T03 L1 onto T02 L1's hours: T03 gets Sam.
+    // Ali filled in on both trucks; the option moves T03 L1 onto T02 L1's hours: T03 gets Sam (CLASH).
     Object.assign(row('planLoad', 'R3'), { driverId: 'ALI', departMin: 720, returnMin: 840 });
     tables.scenarioResult[0]!.detailsJson.loads[1] = solverLoad('T3', 1, 720, 840, 'O3');
     tables.scenarioResult.push(option('cost', 'MIN_COST', [solverLoad('T2', 1, 480, 600, 'O2'), solverLoad('T3', 1, 540, 660, 'O3')]));

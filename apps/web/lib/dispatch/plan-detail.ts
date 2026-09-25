@@ -64,8 +64,9 @@ export interface DetailLoad {
   driverName: string | null;
   driverPhone: string | null;
   /**
-   * The dispatcher chose this driver by hand (PlanLoad.driverSetAt; set by the Driver list and by
-   * Keep): a re-plan or "Use instead" keeps it on this truck and trip. False: RouteIQ filled it in.
+   * The dispatcher chose this driver by hand (the row's marker, isHandSetDriver; set by the Driver
+   * list and by Keep): a re-plan or "Use instead" keeps it on this truck and trip, and a driver note
+   * on this trip ends. False: RouteIQ filled it in.
    */
   driverHandSet: boolean;
   loadNo: number;
@@ -397,8 +398,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         ? [
             ...new Set([
               ...outdated,
-              // A driver the applied plan changed is never silent (fourth review of PR3).
-              ...driverChangeWarnings((run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [], loads),
+              // A driver the applied plan changed is never silent. The loads carry driverHandSet (read
+              // from each row's marker), so a note ends once the dispatcher sets that trip's driver.
+              ...driverChangeWarnings((run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [], detailLoads),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),
             ]),
