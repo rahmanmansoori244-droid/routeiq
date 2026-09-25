@@ -355,7 +355,7 @@ describe('normalizeOrderRows', () => {
 describe('resolveOrderLines', () => {
   const D = '25/09/2026';
 
-  function resolve(rows: Record<string, string>[], customers: KnownCustomer[], products: KnownProduct[], confirmed = NONE) {
+  function resolve(rows: Record<string, string>[], customers: KnownCustomer[], products: KnownProduct[], confirmed: Set<string> | Map<string, number[]> = NONE) {
     const norm: NormalizeResult = normalizeOrderRows(rows);
     return resolveOrderLines(norm, customers, products, confirmed);
   }

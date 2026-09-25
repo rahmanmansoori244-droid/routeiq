@@ -333,6 +333,28 @@ def test_order_bigger_than_any_truck():
     assert unserved_map(sc) == {"BIG": "EXCEEDS_ANY_TRUCK_CAPACITY"}
 
 
+def test_single_case_heavier_than_every_payload_is_reported():
+    # Review F01: a split part holding one 120 kg case is now sent with its true weight. With
+    # 100 kg trucks it must come back EXCEEDS_ANY_TRUCK_CAPACITY, not be planned over payload.
+    heavy = stop("HEAVY", 23.60, 58.45, cases=1, demand_kg=120)
+    r = req([heavy], [truck("T01", cap=100, capacity_kg=100), truck("T02", cap=100, capacity_kg=100)])
+    sc = rec(optimize_dispatch(r))
+    assert unserved_map(sc) == {"HEAVY": "EXCEEDS_ANY_TRUCK_CAPACITY"}
+    assert "120 kg vs largest payload 100 kg" in sc.unserved[0].reason_message
+
+
+def test_heavy_cases_go_only_on_the_truck_that_can_carry_them():
+    # SMALL has trips to spare but a 100 kg payload; only BIG may carry a 120 kg case.
+    stops = [stop(f"H{i}", 23.60 + i * 0.001, 58.45, cases=1, demand_kg=120) for i in range(3)]
+    r = req(stops, [truck("SMALL", cap=100, capacity_kg=100, max_trips=5), truck("BIG", cap=100, capacity_kg=1000, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert sc.loads, "BIG can carry all three"
+    for ld in sc.loads:
+        assert ld.truck_id == "BIG"
+        assert ld.kg <= 1000
+    assert_reconciled(r, sc)
+
+
 def test_fleet_capacity_shortage_reason():
     stops = [stop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=100, priority=3) for i in range(5)]
     r = req(stops, [truck("T01", cap=100, max_trips=2)])
