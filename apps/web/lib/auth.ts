@@ -1,9 +1,9 @@
 import NextAuth, { type DefaultSession } from 'next-auth';
 import Credentials from 'next-auth/providers/credentials';
 import bcrypt from 'bcryptjs';
-import { z } from 'zod';
-import { prisma } from './db';
 import { audit } from './audit';
+import { verifyCredentials } from './auth-credentials';
+import { isSuperAdminEmail, refreshSessionClaims, withinAbsoluteLifetime, type SessionClaims } from './session-principal';
 import type { Role } from '@prisma/client';
 
 declare module 'next-auth' {
@@ -22,20 +22,21 @@ declare module 'next-auth' {
   interface User {
     tenantId?: string | null;
     role?: Role;
+    /** Password fingerprint (lib/session-principal.ts), present at sign-in only. */
+    pwf?: string;
   }
 }
 
 // NextAuth.js v5 (beta) JWT type augmentation is fragile across beta versions
 // — instead of using module augmentation, we cast the token in the callbacks.
-// The fields we add to the JWT are: userId, tenantId, role.
+// The fields we add to the JWT are: userId, tenantId, role, pwf (password fingerprint) and
+// authTime (sign-in time, ms). See lib/session-principal.ts.
 
-const credentialsSchema = z.object({
-  email: z.string().email().max(254),
-  password: z.string().min(8).max(200),
-});
+/** Idle timeout: the cookie slides forward on use, but never past SESSION_ABSOLUTE_MS (12 h). */
+const SESSION_IDLE_SEC = 60 * 60 * 8;
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  session: { strategy: 'jwt', maxAge: 60 * 60 * 8 }, // 8h
+  session: { strategy: 'jwt', maxAge: SESSION_IDLE_SEC },
   pages: { signIn: '/login' },
   trustHost: true,
   providers: [
@@ -44,37 +45,27 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' },
       },
-      async authorize(raw) {
-        const parsed = credentialsSchema.safeParse(raw);
-        if (!parsed.success) return null;
-
-        const user = await prisma.user.findUnique({
-          where: { email: parsed.data.email.toLowerCase() },
-        });
-        if (!user || !user.active) return null;
-
-        const ok = await bcrypt.compare(parsed.data.password, user.passwordHash);
-        if (!ok) return null;
-
-        return {
-          id: user.id,
-          tenantId: user.tenantId,
-          role: user.role,
-          name: user.name,
-          email: user.email,
-        };
-      },
+      // Throttling, dummy compare and the tenant/active checks live in lib/auth-credentials.ts.
+      authorize: (raw, request) => verifyCredentials(raw, request),
     }),
   ],
   callbacks: {
     async jwt({ token, user }) {
+      const t = token as SessionClaims;
       if (user) {
-        const t = token as Record<string, unknown>;
         t.userId = user.id;
-        t.tenantId = (user as { tenantId?: string | null }).tenantId ?? null;
-        t.role = (user as { role?: Role }).role ?? 'VIEWER';
+        t.tenantId = user.tenantId ?? null;
+        t.role = user.role ?? 'VIEWER';
+        t.pwf = user.pwf;
+        t.authTime = Date.now();
+        return token;
       }
-      return token;
+      // Absolute lifetime: DB-free, so it is enforced in the edge middleware too.
+      if (!withinAbsoluteLifetime(t)) return null;
+      // The edge runtime cannot reach Postgres; the Node runtime re-checks the user below. Next
+      // replaces NEXT_RUNTIME at build time, so the edge bundle never contains that branch.
+      if (process.env.NEXT_RUNTIME === 'edge') return token;
+      return (await refreshSessionClaims(t)) as typeof token | null;
     },
     async session({ session, token }) {
       const t = token as { userId: string; tenantId: string | null; role: Role };
@@ -91,7 +82,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       if (!user?.id) return;
       // SUPER_ADMIN users with no tenantId — log against the user's null tenant
       // is illegal (AuditLog.tenantId is non-null). Skip; super-admin actions
-      // are covered separately when they cross into a tenant.
+      // are covered separately when they cross into a tenant (CROSS_TENANT_VIEW).
       if (!user.tenantId) return;
       try {
         await audit({
@@ -112,10 +103,7 @@ export async function hashPassword(plain: string) {
   return bcrypt.hash(plain, 12);
 }
 
+/** True when the email is in SUPER_ADMIN_EMAILS. On its own this grants nothing: see scripts/grant-platform-admin.ts. */
 export function isSuperAdmin(email: string): boolean {
-  const list = (process.env.SUPER_ADMIN_EMAILS ?? '')
-    .split(',')
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  return list.includes(email.toLowerCase());
+  return isSuperAdminEmail(email);
 }

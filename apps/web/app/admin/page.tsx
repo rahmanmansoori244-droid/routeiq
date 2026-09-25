@@ -1,13 +1,15 @@
 import { notFound } from 'next/navigation';
 import { auth } from '@/lib/auth';
 import { prisma } from '@/lib/db';
+import { redirectToSignIn } from '@/lib/session-redirect';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
 export const metadata = { title: 'Platform admin — RouteIQ' };
 
 export default async function AdminPage() {
   const session = await auth();
-  if (!session?.user || session.user.role !== 'SUPER_ADMIN') notFound();
+  if (!session?.user) redirectToSignIn();
+  if (session.user.role !== 'SUPER_ADMIN') notFound();
 
   const tenants = await prisma.tenant.findMany({
     orderBy: { createdAt: 'desc' },

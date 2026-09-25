@@ -35,7 +35,15 @@ const ROLE_VARIANT: Record<Role, 'default' | 'success' | 'warning' | 'secondary'
   VIEWER: 'outline',
 };
 
-export function UsersClient({ initial, currentUserId }: { initial: UserRow[]; currentUserId: string }) {
+export function UsersClient({
+  initial,
+  currentUserId,
+  currentUserRole,
+}: {
+  initial: UserRow[];
+  currentUserId: string;
+  currentUserRole: Role;
+}) {
   const router = useRouter();
   const [inviting, setInviting] = useState(false);
   const [pending, startTransition] = useTransition();
@@ -98,6 +106,8 @@ export function UsersClient({ initial, currentUserId }: { initial: UserRow[]; cu
           <TableBody>
             {initial.map((u) => {
               const isMe = u.id === currentUserId;
+              // A platform admin's account is changed by the owner-run script only (the API refuses).
+              const lockedPlatformAdmin = u.role === 'SUPER_ADMIN' && currentUserRole !== 'SUPER_ADMIN';
               return (
                 <TableRow key={u.id}>
                   <TableCell className="font-mono text-xs">
@@ -124,7 +134,12 @@ export function UsersClient({ initial, currentUserId }: { initial: UserRow[]; cu
                     )}
                   </TableCell>
                   <TableCell className="text-center">
-                    <Switch checked={u.active} onCheckedChange={(v) => setActive(u, v)} disabled={pending || isMe} />
+                    <Switch
+                      checked={u.active}
+                      onCheckedChange={(v) => setActive(u, v)}
+                      disabled={pending || isMe || lockedPlatformAdmin}
+                      title={lockedPlatformAdmin ? 'Platform admin: managed by the RouteIQ owner' : undefined}
+                    />
                   </TableCell>
                   <TableCell className="text-xs text-muted-foreground">{new Date(u.createdAt).toLocaleDateString()}</TableCell>
                 </TableRow>

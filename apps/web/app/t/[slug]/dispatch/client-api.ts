@@ -17,6 +17,11 @@ export async function api<T>(url: string, init?: RequestInit & { json?: unknown 
     body: json !== undefined ? JSON.stringify(json) : rest.body,
     cache: 'no-store',
   });
+  if (res.status === 401 && typeof window !== 'undefined') {
+    // The server no longer accepts this session (signed out elsewhere, deactivated, password
+    // reset, or the 12 h limit). Clear the cookie and go to sign-in instead of failing silently.
+    window.location.assign('/api/auth/end-session');
+  }
   const body = await res.json().catch(() => ({}));
   const err = body?.error ?? null;
   let message: string | null = null;

@@ -3,6 +3,7 @@ import { Role } from '@prisma/client';
 import { withTenantApi, ok, fail, notFoundIfNull, parseBody } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
+import { invalidatePrincipal } from '@/lib/session-principal';
 
 interface Params { params: { id: string } }
 
@@ -23,6 +24,11 @@ export const PATCH = (req: Request, { params }: Params) =>
           select: { id: true, email: true, name: true, role: true, active: true },
         }),
       );
+
+      // A platform admin's account is managed by the owner-run script, not by a tenant admin.
+      if (before.role === Role.SUPER_ADMIN && user.role !== Role.SUPER_ADMIN) {
+        return fail('This user is a platform admin; only a platform admin can change it.', 403);
+      }
 
       // Guard: don't let the only admin demote/deactivate themselves.
       if ((input.role && input.role !== before.role) || input.active === false) {
@@ -51,6 +57,9 @@ export const PATCH = (req: Request, { params }: Params) =>
         data: input,
       });
       if (result.count !== 1) return fail('User not found in this tenant.', 404);
+      // Role and active are re-read on every request (lib/session-principal.ts); drop the cached
+      // copy so the change applies to the user's open sessions now, not after the 30 s cache.
+      invalidatePrincipal(params.id);
       const updated = await prisma.user.findUniqueOrThrow({
         where: { id: params.id },
         select: { id: true, email: true, name: true, role: true, active: true },
