@@ -8,6 +8,17 @@
  * the app's page areas, or the fallback.
  */
 
+/**
+ * A placeholder origin for checks made on the server, where the browser origin is unknown: only
+ * relative values resolve to it, anything absolute for a real host falls back.
+ */
+export const RELATIVE_ONLY_ORIGIN = 'http://routeiq.internal';
+
+/** Clears a session the server no longer accepts, then shows the sign-in page (app/api/auth/end-session). */
+export const END_SESSION_PATH = '/api/auth/end-session';
+
+const SESSION_ENDED_LOGIN = '/login?reason=session';
+
 const MAX_LENGTH = 2048;
 const BACKSLASH = String.fromCharCode(92);
 
@@ -42,4 +53,21 @@ export function safeCallbackUrl(raw: string | null | undefined, origin: string, 
   if (url.username || url.password) return fallback;
   if (!allowedPath(url.pathname)) return fallback;
   return url.pathname + url.search + url.hash;
+}
+
+/**
+ * The end-session URL for a browser on `here` (path + query string): after signing in again the
+ * user comes back to that page, e.g. the dispatch screen with its ?date=&depot=.
+ */
+export function endSessionUrl(here: string): string {
+  return `${END_SESSION_PATH}?next=${encodeURIComponent(here)}`;
+}
+
+/**
+ * The sign-in page after the server ended a session ("Your session has ended"), with `next` as its
+ * callbackUrl when `next` is a safe same-origin page path (safeCallbackUrl); otherwise without one.
+ */
+export function sessionEndedLoginUrl(next: string | null | undefined): string {
+  const back = safeCallbackUrl(next, RELATIVE_ONLY_ORIGIN);
+  return back === '/' ? SESSION_ENDED_LOGIN : `${SESSION_ENDED_LOGIN}&callbackUrl=${encodeURIComponent(back)}`;
 }

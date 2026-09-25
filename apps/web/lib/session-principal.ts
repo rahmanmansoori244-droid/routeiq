@@ -201,6 +201,20 @@ export function invalidatePrincipal(userId: string): void {
   cache.delete(userId);
 }
 
+/**
+ * Re-read one user's state now, ignoring the 30 s cache (used by /api/auth/end-session before it
+ * decides whether a session is still accepted). If the database fails, the cached reading is kept,
+ * so loadPrincipal's stale-if-error grace still applies. Never throws.
+ */
+export async function refreshPrincipal(userId: string, opts: { now?: number; db?: PrincipalDb } = {}): Promise<void> {
+  try {
+    const principal = await readPrincipal(userId, opts.db ?? prisma);
+    remember(userId, { principal, at: opts.now ?? Date.now() });
+  } catch (err) {
+    console.error('[session] could not re-read the signed-in user', (err as Error)?.message ?? err);
+  }
+}
+
 /** Forget every cached user of a tenant (after the tenant is suspended or restored). */
 export function invalidateTenant(tenantId: string): void {
   for (const [k, v] of cache) if (v.principal?.tenantId === tenantId) cache.delete(k);

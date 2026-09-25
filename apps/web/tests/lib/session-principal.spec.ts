@@ -14,6 +14,7 @@ import {
   invalidateTenant,
   loadPrincipal,
   passwordFingerprint,
+  refreshPrincipal,
   refreshSessionClaims,
   withinAbsoluteLifetime,
   type Principal,
@@ -162,6 +163,24 @@ describe('loadPrincipal cache', () => {
     findUnique.mockRejectedValue(new Error('db down'));
     expect(await load('a1', NOW + PRINCIPAL_TTL_MS + 1)).toEqual(first);
     await expect(load('a1', NOW + PRINCIPAL_STALE_IF_ERROR_MS + 1)).rejects.toThrow('db down');
+  });
+
+  it('refreshPrincipal re-reads inside the TTL (end-session decides on fresh data)', async () => {
+    await load('a1', NOW);
+    findUnique.mockImplementation(async ({ where }) => ({ ...row(where.id), active: false }));
+    await refreshPrincipal('a1', { now: NOW + 1, db: db as never });
+    expect(findUnique).toHaveBeenCalledTimes(2);
+    expect((await load('a1', NOW + 2))?.active).toBe(false);
+    expect(findUnique).toHaveBeenCalledTimes(2); // the fresh reading is cached
+  });
+
+  it('refreshPrincipal keeps the cached reading when the database fails (no forced sign-out in an outage)', async () => {
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const first = await load('a1', NOW);
+    findUnique.mockRejectedValue(new Error('db down'));
+    await expect(refreshPrincipal('a1', { now: NOW + 1, db: db as never })).resolves.toBeUndefined();
+    expect(await load('a1', NOW + PRINCIPAL_TTL_MS + 1)).toEqual(first);
+    err.mockRestore();
   });
 });
 

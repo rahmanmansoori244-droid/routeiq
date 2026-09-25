@@ -6,7 +6,7 @@
  */
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import { safeCallbackUrl } from '@/lib/safe-redirect';
+import { endSessionUrl, safeCallbackUrl, sessionEndedLoginUrl } from '@/lib/safe-redirect';
 
 const req = createRequire(import.meta.url);
 const { addBasePath } = req('next/dist/client/add-base-path') as { addBasePath: (p: string) => string };
@@ -82,5 +82,28 @@ describe('safeCallbackUrl', () => {
   it('keeps the dispatch deep-link query string that the middleware now preserves', () => {
     const fromMiddleware = '/t/nmwc/dispatch?date=2026-09-26&depot=MCT';
     expect(safeCallbackUrl(fromMiddleware, 'http://routeiq.internal')).toBe(fromMiddleware);
+  });
+});
+
+describe('after the server ends a session (end-session keeps the page to come back to)', () => {
+  it('the dispatch screen sends its page, and sign-in gets it back as callbackUrl', () => {
+    const here = '/t/nmwc/dispatch?date=2026-09-26&depot=MCT';
+    const endSession = new URL(endSessionUrl(here), ORIGIN);
+    expect(endSession.pathname).toBe('/api/auth/end-session');
+    const login = new URL(sessionEndedLoginUrl(endSession.searchParams.get('next')), ORIGIN);
+    expect(login.pathname).toBe('/login');
+    expect(login.searchParams.get('reason')).toBe('session');
+    expect(login.searchParams.get('callbackUrl')).toBe(here);
+    // ... and the login page's own check keeps it.
+    expect(safeCallbackUrl(login.searchParams.get('callbackUrl'), ORIGIN)).toBe(here);
+  });
+
+  it.each(HOSTILE)('drops hostile next %j', (input) => {
+    expect(sessionEndedLoginUrl(input)).toBe('/login?reason=session');
+  });
+
+  it('no next, or next "/", gives the plain sign-in page', () => {
+    expect(sessionEndedLoginUrl(null)).toBe('/login?reason=session');
+    expect(sessionEndedLoginUrl('/')).toBe('/login?reason=session');
   });
 });

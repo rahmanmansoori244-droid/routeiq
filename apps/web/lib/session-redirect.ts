@@ -8,8 +8,9 @@
  */
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
+import { END_SESSION_PATH } from './safe-redirect';
 
-export const END_SESSION_PATH = '/api/auth/end-session';
+export { END_SESSION_PATH };
 
 const SESSION_COOKIE = /^(__Secure-)?authjs\.session-token(\.\d+)?$/;
 
