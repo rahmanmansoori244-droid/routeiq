@@ -99,6 +99,29 @@ export function effectiveAttrs(
   return { priority, prioritySource, serviceMin, serviceSource, hardStart, hardEnd, prefStart, prefEnd, windowSource };
 }
 
+const SERVICE_SOURCE_TEXT: Record<AttrSource, string> = {
+  CUSTOMER: "this customer's confirmed time",
+  TYPE: 'customer type default',
+  DEFAULT: 'Settings default service time',
+};
+
+/**
+ * The unloading time the planner uses for a customer and where it comes from, for the customer
+ * page (which used to show only the stored value, even when the planner used another). A stored
+ * time that was never confirmed is not used: the note says so.
+ */
+export function describeServiceTime(
+  c: Pick<CustomerForPlanning, 'avgServiceTimeMin' | 'serviceTimeConfirmed' | 'customerType'>,
+  eff: Pick<EffectiveAttrs, 'serviceMin' | 'serviceSource'>,
+): { minutes: number; source: string; note: string | null } {
+  const source = eff.serviceSource === 'TYPE' && c.customerType ? `${SERVICE_SOURCE_TEXT.TYPE} (${c.customerType})` : SERVICE_SOURCE_TEXT[eff.serviceSource];
+  const note =
+    !c.serviceTimeConfirmed && c.avgServiceTimeMin !== eff.serviceMin
+      ? `The stored ${c.avgServiceTimeMin} min was never confirmed, so the planner does not use it. To use a time of this customer's own, set it in the customer details on Daily dispatch or in a customer import.`
+      : null;
+  return { minutes: eff.serviceMin, source, note };
+}
+
 export type CoordStatus = 'OK' | 'MISSING' | 'INVALID' | 'OUTSIDE_AREA';
 
 export function coordStatus(lat: number | null, lng: number | null, area: ServiceArea = DEFAULT_SERVICE_AREA): CoordStatus {
