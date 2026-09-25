@@ -1,13 +1,13 @@
 /**
- * Real road-route geometry for the run-detail Map tab and live dispatcher.
+ * Real road-route geometry for the legacy run-detail Map tab.
  *
  * Returns, per truck, the full polyline of road shape-nodes that connects
  * depot → ordered stops → depot. The client uses these to draw curved,
  * road-snapped lines instead of straight `[depot,stop1,stop2,...,depot]`
  * Haversine guesses.
  *
- * Geometries are resolved via Mapbox Directions (paying tenants) → OSRM
- * (default) → Haversine fallback. See `lib/road-routing.ts`.
+ * Geometries are resolved via Mapbox Directions (MAPBOX_TOKEN) → the self-hosted
+ * OSRM (OSRM_URL; no public default) → straight lines. See `lib/road-routing.ts`.
  *
  * GET /api/runs/[id]/route-geometries
  *

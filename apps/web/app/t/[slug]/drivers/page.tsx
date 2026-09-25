@@ -1,6 +1,7 @@
 import { Users } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData } from '@/lib/rbac';
+import { DRIVER_PUBLIC_SELECT } from '@/lib/driver-fields';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { DriversTable } from './drivers-table';
@@ -12,7 +13,9 @@ export const dynamic = 'force-dynamic';
 export default async function DriversPage({ params }: { params: { slug: string } }) {
   const { db, user } = await getCurrentTenant(params.slug);
   const canManage = canManageMasterData(user.role);
-  const drivers = await db.driver.findMany({ orderBy: [{ active: 'desc' }, { code: 'asc' }] });
+  // DRIVER_PUBLIC_SELECT: every prop of a client component is serialized into the page, so a
+  // whole Driver row would hand the PIN hash to every role (review F13).
+  const drivers = await db.driver.findMany({ orderBy: [{ active: 'desc' }, { code: 'asc' }], select: DRIVER_PUBLIC_SELECT });
 
   return (
     <PageShell

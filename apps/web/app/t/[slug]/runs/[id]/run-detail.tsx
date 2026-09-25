@@ -2,8 +2,7 @@
 
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, Download, FileSpreadsheet, FileText, Loader2, Lock, MapPin, Play, RotateCcw, Send, Unlock } from 'lucide-react';
-import Link from 'next/link';
+import { AlertCircle, Download, FileSpreadsheet, FileText, Loader2, Lock, Play, RotateCcw, Send, Unlock } from 'lucide-react';
 import { toast } from 'sonner';
 import type { RunJobStatus, RunStatus } from '@prisma/client';
 import { Button } from '@/components/ui/button';
@@ -278,17 +277,6 @@ export function RunDetail({
               </>
             ) : null}
 
-            {/* Live tracking — only meaningful once the run has been dispatched
-                or stops are populated (drivers may sign in early to test). */}
-            {routes.length > 0 ? (
-              <Button asChild size="sm" variant="outline">
-                <Link href={`/t/${slug}/runs/${run.id}/live`}>
-                  <MapPin className="me-2 h-4 w-4" />
-                  Live
-                </Link>
-              </Button>
-            ) : null}
-
             {/* Dispatch */}
             {canDispatch && run.status === 'READY' && routes.length > 0 ? (
               <Button size="sm" onClick={() => setDispatchOpen(true)} disabled={pending}>
@@ -325,7 +313,9 @@ export function RunDetail({
       ) : null}
 
       {/* Failure banner */}
-      {run.status === 'FAILED' && currentJob ? <FailureBanner runId={run.id} job={currentJob} /> : null}
+      {run.status === 'FAILED' && currentJob ? (
+        <FailureBanner runId={run.id} job={currentJob} canDownloadDebug={canDispatch} />
+      ) : null}
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>
         <TabsList>
@@ -445,7 +435,9 @@ export function RunDetail({
   );
 }
 
-function FailureBanner({ runId, job }: { runId: string; job: JobRow }) {
+// The debug JSON holds the full solver request (revenue, margins, coordinates): SUPERVISOR and
+// above only, matching the API (review F15).
+function FailureBanner({ runId, job, canDownloadDebug }: { runId: string; job: JobRow; canDownloadDebug: boolean }) {
   return (
     <Card className="border-destructive/40">
       <CardContent className="space-y-2 pt-6">
@@ -454,14 +446,16 @@ function FailureBanner({ runId, job }: { runId: string; job: JobRow }) {
           <h3 className="font-semibold">Optimization failed (attempt #{job.attemptNo})</h3>
         </div>
         <p className="text-sm text-muted-foreground">{job.message ?? 'Solver returned an error.'}</p>
-        <div className="flex gap-2">
-          <Button asChild variant="outline" size="sm">
-            <a href={`/api/runs/${runId}/jobs/${job.id}/debug`} download={`runjob-${job.attemptNo}.json`}>
-              <Download className="me-2 h-4 w-4" />
-              Download debug JSON
-            </a>
-          </Button>
-        </div>
+        {canDownloadDebug ? (
+          <div className="flex gap-2">
+            <Button asChild variant="outline" size="sm">
+              <a href={`/api/runs/${runId}/jobs/${job.id}/debug`} download={`runjob-${job.attemptNo}.json`}>
+                <Download className="me-2 h-4 w-4" />
+                Download debug JSON
+              </a>
+            </Button>
+          </div>
+        ) : null}
       </CardContent>
     </Card>
   );

@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { Prisma, Role, CapacityUnit } from '@prisma/client';
+import { Prisma, CapacityUnit } from '@prisma/client';
 import { prisma } from '@/lib/db';
-import { hashPassword, isSuperAdmin } from '@/lib/auth';
+import { hashPassword } from '@/lib/auth';
 import { audit } from '@/lib/audit';
 import { validateSlug } from '@/lib/tenant';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/client-ip';
+import { signupOpen } from '@/lib/signup-policy';
 import { isOmanUae } from '@/lib/dispatch/customer-attrs';
 
 const signupSchema = z.object({
@@ -19,8 +21,17 @@ const signupSchema = z.object({
   name: z.string().trim().min(2).max(120),
 });
 
+/**
+ * POST /api/auth/signup - public self-service sign-up (open unless SIGNUP_MODE=closed; see
+ * lib/signup-policy.ts). Creates a Tenant, its TenantConfig and the first user, who is ALWAYS
+ * that tenant's TENANT_ADMIN: sign-up never grants platform admin (SUPER_ADMIN), whatever
+ * SUPER_ADMIN_EMAILS says. Platform admins come only from prisma/grant-platform-admin.ts.
+ */
 export async function POST(req: Request) {
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
+  if (!signupOpen()) {
+    return NextResponse.json({ data: null, error: 'Not found' }, { status: 404 });
+  }
+  const ip = clientIp(req) ?? 'unknown';
   const limit = rateLimit(`auth:signup:${ip}`, LIMITS.auth.limit, LIMITS.auth.windowMs);
   if (!limit.ok) {
     return NextResponse.json(
@@ -74,15 +85,13 @@ export async function POST(req: Request) {
         },
       });
 
-      const role: Role = isSuperAdmin(email) ? 'SUPER_ADMIN' : 'TENANT_ADMIN';
-
       const user = await tx.user.create({
         data: {
           tenantId: tenant.id,
           email,
           passwordHash,
           name: input.name,
-          role,
+          role: 'TENANT_ADMIN',
         },
       });
 
@@ -94,7 +103,7 @@ export async function POST(req: Request) {
           entity: 'Tenant',
           entityId: tenant.id,
           afterJson: { slug: tenant.slug, name: tenant.name, country: tenant.country },
-          ip,
+          ip: ip === 'unknown' ? null : ip,
         },
         tx,
       );

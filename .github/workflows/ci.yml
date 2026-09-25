@@ -31,7 +31,14 @@ jobs:
       NEXTAUTH_URL: http://localhost:3000
       SOLVER_URL: http://localhost:8000
       SOLVER_TOKEN: ci-only-solver-token-must-match
+      # Production mode (`pnpm start`) accepts only its own janitor token, never SOLVER_TOKEN.
+      JANITOR_TOKEN: ci-only-janitor-token
       RATE_LIMITS_DISABLED: '1'
+      # The integration helper signs up a tenant per suite. Open is the default; set explicitly
+      # so a future default change cannot break CI silently.
+      SIGNUP_MODE: open
+      # Lets tests/integration/auth.spec.ts check that sign-up never grants SUPER_ADMIN.
+      SUPER_ADMIN_EMAILS: platform-admin@routeiq-ci.test
     steps:
       - uses: actions/checkout@v4
 

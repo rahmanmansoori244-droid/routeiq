@@ -17,6 +17,13 @@ const nextConfig = {
           { key: 'X-Content-Type-Options', value: 'nosniff' },
           { key: 'X-Frame-Options', value: 'DENY' },
           { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+          // Baseline CSP (review F11 follow-up): no framing, no <base> hijack, no plugins, forms
+          // post only to this origin. A full script-src policy needs nonces and waits for the
+          // Next.js upgrade.
+          {
+            key: 'Content-Security-Policy',
+            value: "frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'",
+          },
         ],
       },
     ];

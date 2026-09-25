@@ -13,7 +13,6 @@ import { api, askOverride, weightFixText, type OptimizeOverrides } from './clien
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
-import { errorMessage } from '@/lib/error-message';
 
 interface Issue {
   code: string;
@@ -144,14 +143,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     fd.set('file', file);
     fd.set('depotId', day.depot.id);
     fd.set('deliveryDate', day.date);
-    const res = await fetch('/api/orders/upload', { method: 'POST', body: fd });
-    const body = await res.json().catch(() => ({}));
+    // Through api(), so an ended session goes to sign-in like every other dispatch call.
+    const r = await api<{ batchId: string; validation: Validation }>('/api/orders/upload', { method: 'POST', body: fd });
     setUploading(false);
-    if (!res.ok) {
-      toast.error(errorMessage(body, 'Upload failed.'));
+    if (!r.ok || !r.data) {
+      toast.error(r.error ?? 'Upload failed.');
       return;
     }
-    setBatch({ id: body.data.batchId, v: body.data.validation });
+    setBatch({ id: r.data.batchId, v: r.data.validation });
     setLateReason('');
   }
 

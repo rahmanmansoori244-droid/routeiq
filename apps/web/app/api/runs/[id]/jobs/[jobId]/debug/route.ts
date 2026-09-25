@@ -5,37 +5,39 @@ interface Params { params: { id: string; jobId: string } }
 
 /**
  * Support endpoint: downloads the full requestJson/responseJson/errorJson of
- * a RunJob so a planner can attach it to a support ticket without copying.
+ * a RunJob so a supervisor can attach it to a support ticket without copying.
+ * SUPERVISOR and above (review F15): the solver request carries per-stop revenue
+ * and margin and every customer coordinate.
  */
 export const GET = (req: Request, { params }: Params) =>
-  withTenantApi(async (_r, { db }) => {
-    const job = notFoundIfNull(
-      await db.runJob.findUnique({
-        where: { id: params.jobId },
-        select: {
-          id: true,
-          runId: true,
-          attemptNo: true,
-          status: true,
-          message: true,
-          createdAt: true,
-          startedAt: true,
-          finishedAt: true,
-          requestJson: true,
-          responseJson: true,
-          errorJson: true,
+  withTenantApi(
+    async (_r, { db }) => {
+      // A job of another run is "not found" (404), never a 500 (review L16).
+      const job = notFoundIfNull(
+        await db.runJob.findFirst({
+          where: { id: params.jobId, runId: params.id },
+          select: {
+            id: true,
+            runId: true,
+            attemptNo: true,
+            status: true,
+            message: true,
+            createdAt: true,
+            startedAt: true,
+            finishedAt: true,
+            requestJson: true,
+            responseJson: true,
+            errorJson: true,
+          },
+        }),
+      );
+      return new NextResponse(JSON.stringify(job, null, 2), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Disposition': `attachment; filename="runjob-${job.attemptNo}.json"`,
         },
-      }),
-    );
-    if (job.runId !== params.id) {
-      // Mismatched path — treat as not found (don't leak that jobId exists).
-      throw new Error('Not found');
-    }
-    return new NextResponse(JSON.stringify(job, null, 2), {
-      status: 200,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Disposition': `attachment; filename="runjob-${job.attemptNo}.json"`,
-      },
-    });
-  })(req);
+      });
+    },
+    { role: 'SUPERVISOR' },
+  )(req);

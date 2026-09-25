@@ -9,20 +9,22 @@ import { findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dis
 import { dateOnly } from '@/lib/dispatch/time';
 import { isRealIsoDate } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/client-ip';
 
 // 10 MB / 50k rows / content-type guard (lib/csv). Unknown customers and products are NOT
 // errors here: they are listed and created on confirm, then completed by the dispatcher.
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session?.user || !session.user.tenantId) {
-    return NextResponse.json({ data: null, error: 'Unauthorized' }, { status: 401 });
-  }
+  // 401 only for "no session" (the dispatch screen then sends the browser to sign in again), like
+  // withTenantApi; a session without a tenant (platform admin) is 403.
+  if (!session?.user) return NextResponse.json({ data: null, error: 'Unauthorized' }, { status: 401 });
+  if (!session.user.tenantId) return NextResponse.json({ data: null, error: 'No tenant on session' }, { status: 403 });
   if (!hasRole(session.user.role, 'PLANNER')) {
     return NextResponse.json({ data: null, error: 'Forbidden' }, { status: 403 });
   }
   const tenantId = session.user.tenantId;
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const ip = clientIp(req);
   const r = rateLimit(`orders-upload:${tenantId}:${session.user.id}`, LIMITS.ordersUpload.limit, LIMITS.ordersUpload.windowMs);
   if (!r.ok) return NextResponse.json({ data: null, error: 'Too many uploads. Try again later.' }, { status: 429 });
 

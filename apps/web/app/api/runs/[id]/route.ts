@@ -21,7 +21,21 @@ export const GET = (req: Request, { params }: Params) =>
               },
             },
           },
-          jobs: { orderBy: { attemptNo: 'desc' } },
+          // Job status only: the solver request/response JSON (per-stop revenue, margin,
+          // coordinates) is served by the SUPERVISOR-only debug route (review F15).
+          jobs: {
+            orderBy: { attemptNo: 'desc' },
+            select: {
+              id: true,
+              status: true,
+              attemptNo: true,
+              progressPct: true,
+              message: true,
+              createdAt: true,
+              startedAt: true,
+              finishedAt: true,
+            },
+          },
           routes: {
             include: {
               truck: { select: { id: true, code: true, capacityCases: true } },

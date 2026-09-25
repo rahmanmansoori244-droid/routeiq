@@ -17,7 +17,6 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
-    "db:seed:nmwc": "tsx prisma/seed-nmwc.ts",
     "db:seed:synth": "tsx prisma/seed-synth.ts",
     "db:seed:dispatch": "tsx prisma/seed-nmwc-dispatch.ts",
     "fixtures:dispatch": "tsx prisma/nmwc-dispatch-fixtures.ts"
