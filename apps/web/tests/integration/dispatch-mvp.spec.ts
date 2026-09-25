@@ -278,11 +278,14 @@ describe('NMWC dispatch MVP workflow', () => {
     const day = (await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/day?date=${deliveryDate}&depotId=${depotId}`))).data;
     expect(day.pending.count).toBe(1);
 
-    const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/replan`, j({ reason: 'LATE_ORDER', note: 'P1 top-up at 22:15' }));
+    // Sent as REOPTIMIZE, like the plan screen's Re-plan button: with a late order waiting it is
+    // still a late-order re-plan (the other orders keep their trucks).
+    const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/replan`, j({ reason: 'REOPTIMIZE', note: 'P1 top-up at 22:15' }));
     expect(rp.status).toBe(202);
     const body = (await json(rp)).data;
     runV2 = body.runId;
     expect(body.version).toBe(2);
+    expect(body.reason).toBe('LATE_ORDER');
     await waitForPlan(runV2);
     const v1 = await prisma.runPlan.findUniqueOrThrow({ where: { id: runV1 } });
     expect(v1.status).toBe('SUPERSEDED');
@@ -321,7 +324,11 @@ describe('NMWC dispatch MVP workflow', () => {
     const re = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/optimize`, j({}));
     expect(re.status).toBe(409); // an applied plan is never re-optimized in place
 
-    // The late-order version (v2) steers orders to the trucks they had in v1 ...
+    // The late-order version (v2) steers orders to the trucks they had in v1 (checked on the request
+    // the solver actually received, and on a rebuild) ...
+    const sentStops = async (runId: string) =>
+      ((await prisma.runJob.findFirstOrThrow({ where: { runId }, orderBy: { attemptNo: 'desc' } })).requestJson as { stops: { previous_truck_id?: string | null }[] }).stops;
+    expect((await sentStops(runV2)).some((s) => !!s.previous_truck_id)).toBe(true);
     const lateReq = await buildDispatchRequest(t.tenantId, runV2);
     expect(lateReq.request.stops.some((s) => !!s.previous_truck_id)).toBe(true);
 
@@ -336,8 +343,11 @@ describe('NMWC dispatch MVP workflow', () => {
     expect(p3.reconciliation.ok).toBe(true);
     expect(p3.versions.map((v: any) => v.version)).toEqual([3, 2, 1]);
     // ... while a re-optimize has no moving charge: no stop carries its previous truck.
+    expect(p3.run.reason).toBe('REOPTIMIZE');
+    const sent3 = await sentStops(runV3);
+    expect(sent3.length).toBeGreaterThan(0);
+    expect(sent3.every((s) => !s.previous_truck_id)).toBe(true);
     const reReq = await buildDispatchRequest(t.tenantId, runV3);
-    expect(reReq.request.stops.length).toBeGreaterThan(0);
     expect(reReq.request.stops.every((s) => !s.previous_truck_id)).toBe(true);
     runV2 = runV3;
   });

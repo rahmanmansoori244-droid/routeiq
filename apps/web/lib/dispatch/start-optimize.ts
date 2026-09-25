@@ -2,7 +2,7 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { isOptimizing } from '../jobs/optimize-job';
 import { scheduleDispatchOptimize } from '../jobs/dispatch-job';
-import { buildDispatchRequest, createNextVersion, isLegacyPlan, PlanError, type BuiltRequest } from './plan-service';
+import { buildDispatchRequest, createNextVersion, isLegacyPlan, pendingLateOrderIds, PlanError, type BuiltRequest } from './plan-service';
 
 export interface StartResult {
   status: number;
@@ -120,13 +120,16 @@ export async function replan(
       body: { error: `${probe.blocking.length} customer(s) need a location before re-planning.`, code: 'LOCATION_REQUIRED', blocking: probe.blocking },
     };
   }
+  // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
+  // trucks) whichever button started it; only with nothing late waiting is it a full re-optimize.
+  const effectiveReason = reason === 'REOPTIMIZE' && (await pendingLateOrderIds(tenantId, run)).length ? 'LATE_ORDER' : reason;
   let child;
   try {
-    child = (await createNextVersion(tenantId, runId, reason, note, user.id)).child;
+    child = (await createNextVersion(tenantId, runId, effectiveReason, note, user.id)).child;
   } catch (e) {
     if (e instanceof PlanError) return { status: e.status, body: { error: e.message } };
     throw e;
   }
   const res = await startDispatchOptimize(tenantId, child.id, user, ip, { allowMissingLocations });
-  return { status: res.status, body: { ...res.body, runId: child.id, version: child.version, parentRunId: runId } };
+  return { status: res.status, body: { ...res.body, runId: child.id, version: child.version, parentRunId: runId, reason: effectiveReason } };
 }

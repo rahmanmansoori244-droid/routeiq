@@ -825,6 +825,22 @@ export function isDispatchDetails(json: unknown): json is ScenarioDetails {
   return !!d && typeof d === 'object' && !!d.scope && Array.isArray(d.loads);
 }
 
+/** Late orders for this plan's day that its applied scenario does not contain yet (the day
+ * screen's "late orders waiting"). */
+export async function pendingLateOrderIds(
+  tenantId: string,
+  run: { depotId: string; runDate: Date; chosenScenarioId: string | null },
+): Promise<string[]> {
+  if (!run.chosenScenarioId) return [];
+  const sc = await prisma.scenarioResult.findFirst({ where: { id: run.chosenScenarioId, run: { tenantId } }, select: { detailsJson: true } });
+  const d = sc?.detailsJson;
+  if (!isDispatchDetails(d)) return [];
+  const inPlan = new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds, ...(d.scope.frozenLoadOrderIds ?? [])]);
+  const where = await ordersInScopeWhere(tenantId, run.depotId, run.runDate);
+  const late = await prisma.order.findMany({ where: { ...where, isLate: true }, select: { id: true } });
+  return late.map((o) => o.id).filter((id) => !inPlan.has(id));
+}
+
 /** Plans made by the previous optimizer (before the dispatch planner) cannot be re-optimized or re-planned in place. */
 export async function isLegacyPlan(tenantId: string, runId: string): Promise<boolean> {
   const legacyRows = await prisma.routeAssignment.count({ where: { runId, loadId: null, run: { tenantId } } });

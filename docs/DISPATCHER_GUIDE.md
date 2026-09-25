@@ -80,7 +80,7 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
   - the blue bar tells you what changed.
 - Older versions stay under **Plan versions** (read-only).
 - A late-order re-plan keeps the other orders on their trucks where it can, so drivers and loading are not reshuffled for one order.
-- **Re-plan** (or **OPTIMIZE** again) with no late order waiting is a full re-optimize: RouteIQ looks for the best plan for everything not locked, even if that moves orders to other trucks. Lock the loads the warehouse has started first, and send new driver sheets for the loads that changed.
+- **Re-plan** (on the plan, or **RE-PLAN** in step 3) with no late order waiting is a full re-optimize: RouteIQ looks for the best plan for everything not locked, even if that moves orders to other trucks. Lock the loads the warehouse has started first, and send new driver sheets for the loads that changed.
 
 ## Dispatch timing settings (Settings → Dispatch timing, admins)
 Set these to what the depot and drivers really do; every load is timed with them.
