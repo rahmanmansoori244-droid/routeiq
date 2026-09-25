@@ -14,7 +14,7 @@
  */
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
-import { COST_BASIS_TEXT, costTotals, truckDayRows } from './costs';
+import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './costs';
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 import { KG_ROUNDING_TOL } from './weights';
@@ -73,15 +73,52 @@ export const SHEETS = {
   assumptions: 'ASSUMPTIONS',
 } as const;
 
-export const FIXED_NOTES = [
-  'Distances are road distances from OSRM unless a column or figure is labelled "Estimated km" (straight-line distance x multiplier).',
-  'This is an OPTIMIZED plan from a heuristic, time-limited solver - a good plan, not a proven optimum.',
-  'Priorities: P1 = HIGHEST, P5 = LOWEST.',
-  'Hard delivery windows are enforced. Preferred windows are soft: they carry a penalty and may be missed.',
-  'Fuel litres = km / truck km-per-litre; fuel cost = litres x fuel price. Fuel is counted once in operating cost (not also inside the per-km cost).',
-  "Driver cost: the driver is paid for the whole truck day - first departure (or first locked departure) to last return, depot turnaround and waiting included - with overtime after the configured hours on top. Each load carries the paid time from its truck's previous return to its own return; the fixed truck cost is on the truck's first load (see TRUCK DAYS).",
-  'Every uploaded order is either on a load or listed as unserved with a reason; cases reconcile exactly (uploaded = planned + unserved) per SKU and per sales order.',
-];
+/**
+ * The cost and routing rules a plan version was made with (stabilization PR5):
+ * - CURRENT: the whole-truck-day costs (cost version 2), the road time factor on road legs only,
+ *   and the Settings default service time for customers whose own time was never confirmed;
+ * - EARLIER: made before that release. Each load's driver cost is its own time on the road (no
+ *   depot turnaround, waiting or overtime), the road time factor was applied to every leg the
+ *   routing server returned (estimated ones too), and an unconfirmed customer time won over the
+ *   Settings default;
+ * - MIXED: made with the current rules around locked / dispatched loads kept from an earlier plan,
+ *   which keep the cost they were planned with.
+ * The ASSUMPTIONS sheet words its rows and NOTES by these, so an older plan's export does not
+ * describe rules it was not costed with.
+ */
+export type PlanRules = 'CURRENT' | 'EARLIER' | 'MIXED';
+
+export function planRules(d: Pick<PlanDetail, 'summary' | 'loads' | 'scenarios'>): PlanRules {
+  const chosen = d.scenarios.find((s) => s.chosen);
+  const costed = d.loads.filter((l) => l.cost !== null).length;
+  // The option in use says which optimizer made it; without one, a load with a cost breakdown does.
+  const current = chosen ? (chosen.costVersion ?? 0) >= 2 : costed > 0 || summaryCostBasis(d.summary) === 'TRUCK_DAY_SPAN';
+  if (!current) return 'EARLIER';
+  return costed === d.loads.length && summaryCostBasis(d.summary) === 'TRUCK_DAY_SPAN' ? 'CURRENT' : 'MIXED';
+}
+
+const WHOLE_DAY_NOTE =
+  "Driver cost: the driver is paid for the whole truck day - first departure (or first locked departure) to last return, depot turnaround and waiting included - with overtime after the configured hours on top. Each load carries the paid time from its truck's previous return to its own return; the fixed truck cost is on the truck's first load (see TRUCK DAYS).";
+
+const DRIVER_NOTE: Record<PlanRules, string> = {
+  CURRENT: WHOLE_DAY_NOTE,
+  MIXED: `${WHOLE_DAY_NOTE} Loads kept from an earlier plan (locked, loading or dispatched) keep the cost they were planned with: their own time on the road only, no depot time or overtime (marked on SUMMARY and TRUCK DAYS).`,
+  EARLIER:
+    "Driver cost: this plan was costed the earlier way (before the whole-truck-day costs). Each load's driver cost is its own time on the road, departure to return; depot turnaround, waiting between loads and overtime are not in the load costs or the operating cost. Plans made since are costed for the whole truck day.",
+};
+
+/** The NOTES of the ASSUMPTIONS sheet, worded by the rules the plan was made with. */
+export function workbookNotes(rules: PlanRules = 'CURRENT'): string[] {
+  return [
+    'Distances are road distances from OSRM unless a column or figure is labelled "Estimated km" (straight-line distance x multiplier).',
+    'This is an OPTIMIZED plan from a heuristic, time-limited solver - a good plan, not a proven optimum.',
+    'Priorities: P1 = HIGHEST, P5 = LOWEST.',
+    'Hard delivery windows are enforced. Preferred windows are soft: they carry a penalty and may be missed.',
+    'Fuel litres = km / truck km-per-litre; fuel cost = litres x fuel price. Fuel is counted once in operating cost (not also inside the per-km cost).',
+    DRIVER_NOTE[rules],
+    'Every uploaded order is either on a load or listed as unserved with a reason; cases reconcile exactly (uploaded = planned + unserved) per SKU and per sales order.',
+  ];
+}
 
 // ----------------------------------------------------------------------------------------
 // Formatting
@@ -325,7 +362,7 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     kv('Average utilization %', s.avgUtilizationPct, FMT_PCT);
     kv('Estimated fuel (litres)', s.fuelLitres ?? 'not calculated', FMT_KM, s.fuelLitres === null ? 'trucks have no km-per-litre' : undefined);
     kv(`Fuel cost (${cur})`, s.fuelCost, FMT_MONEY);
-    const basis = s.costBasis ?? 'MIXED_LEGACY';
+    const basis = summaryCostBasis(s);
     kv(
       `Operating cost (${cur})`,
       s.operatingCost,
@@ -459,7 +496,11 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
   titleRows(
     ws,
     'TRUCK DAYS',
-    `Cost per truck day · Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} · driver paid from first departure to last return (turnaround and waiting included), overtime on top`,
+    `Cost per truck day · Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} · ${
+      planRules(d) === 'EARLIER'
+        ? "costed the earlier way: driver cost is each load's time on the road (no depot time or overtime)"
+        : 'driver paid from first departure to last return (turnaround and waiting included), overtime on top'
+    }`,
   );
   watermark(ws, d);
   headRow(ws, 4, [
@@ -758,7 +799,7 @@ function addAssumptionsSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMet
   for (const [k, v] of entries) tableRow(ws, r++, [k, v]);
   r++;
   section(ws, r++, 'NOTES');
-  FIXED_NOTES.forEach((n, i) => {
+  workbookNotes(planRules(d)).forEach((n, i) => {
     // Merged + wrapped so long notes stay inside the printed page.
     put(ws, r, 1, `${i + 1}. ${n}`).alignment = { wrapText: true, vertical: 'top' };
     ws.mergeCells(r, 1, r, 2);
@@ -825,10 +866,14 @@ export function tenantAssumptions(
     /** Tenant outside the shared OSRM map (Oman + UAE) without its own OSRM: planned on straight
      * lines. Used only when `cfg` does not carry it (today's settings, or settings stored before it was kept). */
     outsideCoverage?: boolean;
+    /** The rules the plan was made with (planRules); default CURRENT. */
+    rules?: PlanRules;
   },
 ): Record<string, string> {
   if (!cfg) return { 'Tenant configuration': 'not set - system defaults were used' };
   const cur = opts.currency;
+  const rules = opts.rules ?? 'CURRENT';
+  const earlier = rules === 'EARLIER';
   const outsideCoverage = cfg.outsideCoverage ?? opts.outsideCoverage ?? false;
   const out: Record<string, string> = {
     Timezone: cfg.timezone,
@@ -840,14 +885,24 @@ export function tenantAssumptions(
     'Unloading time per case': cfg.serviceMinPerCase ? `${cfg.serviceMinPerCase} min per case delivered, on top of the service time` : 'not set (0)',
     'Max trips per truck per day': String(cfg.maxTripsPerTruck),
     'Fuel price': cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${cur} per litre` : '0 - fuel not costed separately',
-    'Driver cost': `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)`,
+    'Driver cost': earlier
+      ? `${cfg.driverCostPerHour} ${cur} per hour of each load's time on the road, departure to return (costed the earlier way: depot turnaround and waiting not included)`
+      : `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)${
+          rules === 'MIXED' ? '; loads kept from an earlier plan keep their earlier cost (time on the road only)' : ''
+        }`,
     Overtime:
       cfg.overtimeCostPerHour > 0
-        ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour on top of the driver cost${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}`
+        ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour${
+            earlier ? " (priced in the optimizer's search only; not included in this plan's load costs or operating cost)" : ' on top of the driver cost'
+          }${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}`
         : 'not costed',
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} per minute outside the preferred window (soft)`,
-    'Road time factor (truck vs car)': `x${cfg.roadTimeFactor} on road travel times (not on estimated legs)`,
-    'Default service time': `${cfg.defaultServiceTimeMin} min per stop for customers whose own time was never confirmed (a confirmed customer time, then the customer type's, wins)`,
+    'Road time factor (truck vs car)': earlier
+      ? `x${cfg.roadTimeFactor} on every travel time from the routing server, including legs it could not route (earlier rule)`
+      : `x${cfg.roadTimeFactor} on road travel times (not on estimated legs)`,
+    'Default service time': earlier
+      ? `${cfg.defaultServiceTimeMin} min per stop for customers with no service time of their own (earlier rule: a confirmed customer time, then the customer type's, then the customer's stored time won)`
+      : `${cfg.defaultServiceTimeMin} min per stop for customers whose own time was never confirmed (a confirmed customer time, then the customer type's, wins)`,
     Priorities: 'strict - one higher-priority order always wins over any number of lower ones (P1 > P2 > P3 > P4 > P5)',
     'Distance provider (configured)':
       cfg.distanceProvider === 'HAVERSINE'

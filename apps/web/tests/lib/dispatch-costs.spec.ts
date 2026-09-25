@@ -11,6 +11,7 @@ import {
   kmLabelFor,
   loadCostFromSolver,
   readLoadCost,
+  summaryCostBasis,
   truckDayRows,
   type CostLoad,
   type LoadCostBreakdown,
@@ -121,6 +122,14 @@ describe('computeSummary - costs (review F17)', () => {
     expect(s.costBasis).toBe('MIXED_LEGACY');
     expect(s.costs!.earlier).toBe(11.5);
     expect(s.operatingCost).toBe(Math.round((11.5 + l2.total) * 1000) / 1000);
+  });
+
+  it('a summary saved before the whole-day costs (no costBasis) reads as costed the earlier way, as the workbook flags it', () => {
+    // The plan screen's Operating cost KPI marks it with "*" through the same helper (PR5 review).
+    expect(summaryCostBasis({})).toBe('MIXED_LEGACY');
+    expect(summaryCostBasis(null)).toBe('MIXED_LEGACY');
+    expect(summaryCostBasis({ costBasis: 'TRUCK_DAY_SPAN' })).toBe('TRUCK_DAY_SPAN');
+    expect(summaryCostBasis({ costBasis: 'MIXED_LEGACY' })).toBe('MIXED_LEGACY');
   });
 
   it('counts estimated legs and the loads that have them (review F18)', () => {

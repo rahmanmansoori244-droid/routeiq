@@ -102,6 +102,15 @@ export function costBasisOf(loads: { cost: LoadCostBreakdown | null }[]): CostBa
   return loads.every((l) => l.cost !== null) ? 'TRUCK_DAY_SPAN' : 'MIXED_LEGACY';
 }
 
+/**
+ * The cost basis of a stored plan summary. Summaries saved before the whole-truck-day costs have
+ * no `costBasis`: they were costed the earlier way. Every screen and export reads it through here,
+ * so an old plan is flagged alike on the plan screen and in the workbook.
+ */
+export function summaryCostBasis(s: { costBasis?: CostBasis | null } | null | undefined): CostBasis {
+  return s?.costBasis ?? 'MIXED_LEGACY';
+}
+
 export interface CostTotals {
   fixed: number;
   trip: number;
