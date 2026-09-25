@@ -11,6 +11,7 @@ import { Switch } from '@/components/ui/switch';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { errorMessage } from '@/lib/error-message';
+import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 
 interface Initial {
   tenant: { name: string; country: string; currency: string; primaryUnit: CapacityUnit };
@@ -36,6 +37,11 @@ export function SettingsForm({ initial }: { initial: Initial }) {
             distanceMultiplier: c.distanceMultiplier,
             labelEstimatedDistances: c.labelEstimatedDistances,
             driverShiftMaxMinutes: c.driverShiftMaxMinutes,
+            shiftStartMin: c.shiftStartMin,
+            reloadMinutes: c.reloadMinutes,
+            loadingMinPerCase: c.loadingMinPerCase,
+            serviceMinPerCase: c.serviceMinPerCase,
+            maxTripsPerTruck: c.maxTripsPerTruck,
             returnToDepot: c.returnToDepot,
             splitDeliveries: c.splitDeliveries,
             defaultServiceTimeMin: c.defaultServiceTimeMin,
@@ -138,6 +144,63 @@ export function SettingsForm({ initial }: { initial: Initial }) {
             label="Split deliveries: a customer bigger than the largest truck is delivered in parts"
             value={c.splitDeliveries}
             onChange={(v) => setC({ ...c, splitDeliveries: v })}
+          />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Dispatch timing</CardTitle>
+          <CardDescription>
+            How long loading, turnaround and unloading take. The planner times every load with these, so set them
+            to what the depot and drivers really do.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="space-y-1.5">
+            <Label htmlFor="shiftstart">First departure</Label>
+            <Input
+              id="shiftstart"
+              type="time"
+              value={fmtHhmm(c.shiftStartMin)}
+              onChange={(e) => {
+                try {
+                  const v = parseHhmm(e.target.value);
+                  if (v !== null && v < 1440) setC({ ...c, shiftStartMin: v });
+                } catch {
+                  // keep the last valid time while the field is being edited
+                }
+              }}
+            />
+            <p className="text-xs text-muted-foreground">No truck leaves the depot before this time.</p>
+          </div>
+          <NumField
+            label="Turnaround between loads (minutes)"
+            value={c.reloadMinutes}
+            onChange={(v) => setC({ ...c, reloadMinutes: Math.round(v) })}
+            step={5}
+            hint="Fixed time at the depot between two loads of a truck (paperwork, queue). 0-240."
+          />
+          <NumField
+            label="Loading minutes per case"
+            value={c.loadingMinPerCase}
+            onChange={(v) => setC({ ...c, loadingMinPerCase: v })}
+            step={0.01}
+            hint="Added to the turnaround for every case of the next load: 0.04 = 44 min for 1,100 cases. 0-1."
+          />
+          <NumField
+            label="Unloading minutes per case"
+            value={c.serviceMinPerCase}
+            onChange={(v) => setC({ ...c, serviceMinPerCase: v })}
+            step={0.01}
+            hint="Added to each customer's service time for every case delivered: 0.05 = 55 min for 1,100 cases. 0-1."
+          />
+          <NumField
+            label="Max loads per truck per day"
+            value={c.maxTripsPerTruck}
+            onChange={(v) => setC({ ...c, maxTripsPerTruck: Math.round(v) })}
+            step={1}
+            hint="A truck's own limit wins when it has one. 1-10."
           />
         </CardContent>
       </Card>

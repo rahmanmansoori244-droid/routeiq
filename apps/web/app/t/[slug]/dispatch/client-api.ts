@@ -70,7 +70,9 @@ export const REASON_TEXT: Record<string, string> = {
   TRIP_LIMIT: 'Trucks out of loads',
   LOCKED_PLAN_CONFLICT: 'Conflicts with locked loads',
   LATE_ORDER_NO_CAPACITY: 'Late order - no capacity left',
-  SOLVER_DROPPED_LOW_PRIORITY: 'Left out (capacity/time) - lower priority',
+  // One code for fleet shortage, not placed by the time-limited search and left out for loading
+  // time: the message under the label says which (the label must be true for all three).
+  SOLVER_DROPPED_LOW_PRIORITY: 'Not planned by the optimizer - see reason',
   ROUTING_PROVIDER_FAILURE: 'Road routing failed',
   INFEASIBLE: 'No feasible plan',
   INFEASIBLE_ROUTE: 'No feasible plan',

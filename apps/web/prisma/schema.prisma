@@ -214,6 +214,8 @@ model TenantConfig {
   planningCutoffMin       Int     @default(1080) // orders after 18:00 the day before = LATE
   shiftStartMin           Int     @default(360) // earliest first departure 06:00
   reloadMinutes           Int     @default(30) // depot turnaround between loads
+  loadingMinPerCase       Float   @default(0) // + loading time per case of the next load (0.04 -> 1,100 cases = 44 min)
+  serviceMinPerCase       Float   @default(0) // + unloading time per case at the customer, on top of its service time
   maxTripsPerTruck        Int     @default(3)
   fuelPricePerLitre       Float   @default(0) // OMR; 0 = fuel not costed separately
   driverCostPerHour       Float   @default(0)

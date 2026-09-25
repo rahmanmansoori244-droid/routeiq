@@ -103,10 +103,16 @@ class DispatchConfig(BaseModel):
     overtime_after_min: int | None = Field(default=9 * 60, ge=0, le=DAY_MIN)  # soft, per truck day
     overtime_cost_per_hour: float = Field(default=4.0, ge=0)
     reload_min: int = Field(default=30, ge=0, le=240)  # depot turnaround between loads
+    # Loading time on top of reload_min, per case of the NEXT load (0.04 -> 1,100 cases = 44 min).
+    loading_min_per_case: float = Field(default=0.0, ge=0, le=1)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     driver_cost_per_hour: float = Field(default=0.0, ge=0)  # OMR/h of on-road time
-    # Priority -> relative value of serving one stop. Must be strictly decreasing (P1 highest).
+    # Strict priorities (default): one higher-priority stop always wins over ANY number of
+    # lower-priority stops. False = the weighted scheme below (e.g. 11 P3 outweigh one P2).
+    strict_priorities: bool = True
+    # Priority -> relative value of serving one stop when strict_priorities is off. Must be
+    # strictly decreasing (P1 highest); validated either way.
     priority_weights: dict[int, float] = Field(
         default_factory=lambda: {1: 10000.0, 2: 1000.0, 3: 100.0, 4: 10.0, 5: 1.0}
     )

@@ -10,7 +10,6 @@
  */
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
-import { parsePriorityWeights } from './customer-attrs';
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 
 export interface WorkbookMeta {
@@ -616,6 +615,8 @@ export interface AssumptionConfig {
   shiftStartMin: number;
   driverShiftMaxMinutes: number;
   reloadMinutes: number;
+  loadingMinPerCase?: number;
+  serviceMinPerCase?: number;
   maxTripsPerTruck: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
@@ -644,13 +645,14 @@ export function tenantAssumptions(
 ): Record<string, string> {
   if (!cfg) return { 'Tenant configuration': 'not set - system defaults were used' };
   const cur = opts.currency;
-  const w = parsePriorityWeights(cfg.priorityWeightsJson);
   const out: Record<string, string> = {
     Timezone: cfg.timezone,
     'Planning cutoff (day before delivery)': `${fmtHhmm(cfg.planningCutoffMin)} - orders received later are LATE`,
     'Shift start (earliest departure)': fmtHhmm(cfg.shiftStartMin),
     'Driver shift maximum (h:mm)': fmtDuration(cfg.driverShiftMaxMinutes),
     'Depot reload time between loads': `${cfg.reloadMinutes} min`,
+    'Loading time per case': cfg.loadingMinPerCase ? `${cfg.loadingMinPerCase} min per case of the next load, on top of the reload time` : 'not set (0)',
+    'Unloading time per case': cfg.serviceMinPerCase ? `${cfg.serviceMinPerCase} min per case delivered, on top of the service time` : 'not set (0)',
     'Max trips per truck per day': String(cfg.maxTripsPerTruck),
     'Fuel price': cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${cur} per litre` : '0 - fuel not costed separately',
     'Driver cost': `${cfg.driverCostPerHour} ${cur} per hour`,
@@ -658,7 +660,7 @@ export function tenantAssumptions(
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} per minute outside the preferred window (soft)`,
     'Road time factor (truck vs car)': `x${cfg.roadTimeFactor}`,
     'Default service time': `${cfg.defaultServiceTimeMin} min per stop (customer / customer-type values override)`,
-    'Priority weights': [1, 2, 3, 4, 5].map((p) => `P${p} ${w[p]}`).join(' > '),
+    Priorities: 'strict - one higher-priority order always wins over any number of lower ones (P1 > P2 > P3 > P4 > P5)',
     'Distance provider (configured)':
       cfg.distanceProvider === 'HAVERSINE'
         ? 'HAVERSINE (estimated distances)'

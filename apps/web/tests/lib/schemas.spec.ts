@@ -160,32 +160,61 @@ describe('customerSchema', () => {
 });
 
 describe('tenantConfigSchema', () => {
+  const valid = {
+    avgSpeedKmh: 40,
+    distanceProvider: 'HAVERSINE' as const,
+    distanceMultiplier: 1.3,
+    labelEstimatedDistances: true,
+    driverShiftMaxMinutes: 540,
+    shiftStartMin: 450,
+    reloadMinutes: 20,
+    loadingMinPerCase: 0.04,
+    serviceMinPerCase: 0.05,
+    maxTripsPerTruck: 3,
+    returnToDepot: true,
+    splitDeliveries: true,
+    defaultServiceTimeMin: 10,
+    costPerKmDefault: 0.15,
+    fixedTruckCostPerDayDefault: 20,
+    latePenaltyPerMin: 0.5,
+    underutilizationPenalty: 0,
+    solverTimeLimitSeconds: 30,
+    weightObjectiveTrucks: 1000,
+    weightObjectiveDistance: 1,
+    weightObjectiveCost: 0,
+    weightObjectiveBalance: 0,
+    weightObjectiveUtilization: 0,
+  };
   it('rejects negative avg speed', () => {
     const result = tenantConfigSchema.safeParse({ avgSpeedKmh: -5 } as never);
     expect(result.success).toBe(false);
   });
   it('accepts a complete valid config', () => {
-    const valid = {
-      avgSpeedKmh: 40,
-      distanceProvider: 'HAVERSINE' as const,
-      distanceMultiplier: 1.3,
-      labelEstimatedDistances: true,
-      driverShiftMaxMinutes: 540,
-      returnToDepot: true,
-      splitDeliveries: true,
-      defaultServiceTimeMin: 10,
-      costPerKmDefault: 0.15,
-      fixedTruckCostPerDayDefault: 20,
-      latePenaltyPerMin: 0.5,
-      underutilizationPenalty: 0,
-      solverTimeLimitSeconds: 30,
-      weightObjectiveTrucks: 1000,
-      weightObjectiveDistance: 1,
-      weightObjectiveCost: 0,
-      weightObjectiveBalance: 0,
-      weightObjectiveUtilization: 0,
-    };
     expect(tenantConfigSchema.safeParse(valid).success).toBe(true);
+  });
+  it('dispatch timing: accepts sensible values, rejects out-of-range ones', () => {
+    const p = tenantConfigSchema.partial();
+    expect(p.safeParse({ shiftStartMin: 0, reloadMinutes: 0, loadingMinPerCase: 0, serviceMinPerCase: 0, maxTripsPerTruck: 1 }).success).toBe(true);
+    expect(p.safeParse({ shiftStartMin: 1439, reloadMinutes: 240, loadingMinPerCase: 1, serviceMinPerCase: 1, maxTripsPerTruck: 10 }).success).toBe(true);
+    expect(p.safeParse({ shiftStartMin: 1440 }).success).toBe(false);
+    expect(p.safeParse({ shiftStartMin: -1 }).success).toBe(false);
+    expect(p.safeParse({ shiftStartMin: 450.5 }).success).toBe(false);
+    expect(p.safeParse({ reloadMinutes: 241 }).success).toBe(false);
+    expect(p.safeParse({ loadingMinPerCase: 1.5 }).success).toBe(false);
+    expect(p.safeParse({ serviceMinPerCase: -0.1 }).success).toBe(false);
+    expect(p.safeParse({ maxTripsPerTruck: 0 }).success).toBe(false);
+    expect(p.safeParse({ maxTripsPerTruck: 11 }).success).toBe(false);
+  });
+  it('coerces form strings for the timing fields', () => {
+    const r = tenantConfigSchema.partial().safeParse({ loadingMinPerCase: '0.04', maxTripsPerTruck: '3' } as never);
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual({ loadingMinPerCase: 0.04, maxTripsPerTruck: 3 });
+  });
+  it('a complete config needs the timing fields too', () => {
+    const { shiftStartMin: _s, ...withoutStart } = valid;
+    expect(tenantConfigSchema.safeParse(withoutStart).success).toBe(false);
+    // ... while a PATCH (partial) without them still validates.
+    expect(tenantConfigSchema.partial().safeParse(withoutStart).success).toBe(true);
   });
 });
 
