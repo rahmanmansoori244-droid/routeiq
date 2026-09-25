@@ -77,7 +77,7 @@ export interface RouteSheet {
 export async function buildRouteSheet(tenantId: string, runId: string): Promise<RouteSheet> {
   const tenant = await prisma.tenant.findUniqueOrThrow({
     where: { id: tenantId },
-    select: { name: true, currency: true, config: { select: { distanceProvider: true, labelEstimatedDistances: true } } },
+    select: { name: true, currency: true, config: { select: { distanceProvider: true } } },
   });
 
   const run = await prisma.runPlan.findFirstOrThrow({
@@ -129,7 +129,8 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
   );
   const computedEstimated =
     typeof stored?.distance_is_estimated === 'boolean' ? stored.distance_is_estimated : tenant.config?.distanceProvider === 'HAVERSINE';
-  const isEstimated = computedEstimated && (tenant.config?.labelEstimatedDistances ?? true);
+  // Estimated distances are always labelled (the old "label estimated distances" switch is gone, review F21).
+  const isEstimated = computedEstimated;
 
   // Group assignments by truck.
   const byTruck = new Map<string, TruckRoute>();

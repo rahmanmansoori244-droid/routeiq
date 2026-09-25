@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { ZodError, type ZodSchema } from 'zod';
+import { ZodError, type ZodTypeAny, type z } from 'zod';
 import { Prisma, type Role } from '@prisma/client';
 import { auth } from './auth';
 import { prisma } from './db';
@@ -116,7 +116,8 @@ export function handleError(err: unknown) {
   return fail('Internal server error', 500);
 }
 
-export async function parseBody<T>(req: Request, schema: ZodSchema<T>): Promise<T> {
+/** The parsed body: the schema's OUTPUT type (a field that preprocesses '' to null is typed as its output). */
+export async function parseBody<S extends ZodTypeAny>(req: Request, schema: S): Promise<z.output<S>> {
   let raw: unknown;
   try {
     raw = await req.json();

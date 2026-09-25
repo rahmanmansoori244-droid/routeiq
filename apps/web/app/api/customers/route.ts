@@ -30,6 +30,13 @@ export const GET = withTenantApi(async (req, { db }) => {
 
 export const POST = withTenantApi(
   async (req, { db, user, ip }) => {
+    // An unloading time the planner typed is confirmed; the schema's default of 10 min is not
+    // (the company default from Settings then applies, review F21).
+    const raw = (await req
+      .clone()
+      .json()
+      .catch(() => ({}))) as { avgServiceTimeMin?: unknown };
+    const serviceTimeGiven = raw?.avgServiceTimeMin !== undefined && raw?.avgServiceTimeMin !== null && raw?.avgServiceTimeMin !== '';
     const input = await parseBody(req, customerSchema);
     if (input.regionId) {
       const region = await db.region.findUnique({ where: { id: input.regionId } });
@@ -60,6 +67,7 @@ export const POST = withTenantApi(
         geocodeConfidence,
         priority: input.priority,
         avgServiceTimeMin: input.avgServiceTimeMin,
+        serviceTimeConfirmed: serviceTimeGiven,
         paymentType: input.paymentType,
         accessNotes: input.accessNotes,
         active: input.active ?? true,

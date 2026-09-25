@@ -68,14 +68,16 @@ export function effectiveAttrs(
       prioritySource = 'DEFAULT';
     }
   }
+  // Unloading time: a confirmed customer value (entered by a planner, or an imported column)
+  // wins; else the customer type's; else the company default from Settings. An unconfirmed stored
+  // value is only the column default (10 min) - it used to win over the Settings default, which
+  // then changed nothing for normal customers (review F21).
   let serviceMin = c.avgServiceTimeMin;
   let serviceSource: AttrSource = 'CUSTOMER';
   if (!c.serviceTimeConfirmed) {
     if (p?.serviceTimeMin != null) {
       serviceMin = p.serviceTimeMin;
       serviceSource = 'TYPE';
-    } else if (c.avgServiceTimeMin > 0) {
-      serviceSource = 'DEFAULT';
     } else {
       serviceMin = defaults.serviceTimeMin;
       serviceSource = 'DEFAULT';
