@@ -130,7 +130,8 @@ While the new day loads, the screen shows *Loading ...* and its buttons are off;
 Settings shows only what the planner uses, each with its unit and allowed range, and an **Effective planner values** table that says what the next optimization uses and where each value comes from. Saving sends only what you changed; if another admin changed the same setting since you opened the page, nothing is saved and you are asked to reload.
 - **Costs:** driver cost per hour (paid for the whole truck day), overtime after (at most the shift maximum) and per hour (on top), fuel price per litre, preferred-window penalty. Truck costs (fixed per day, per load, per km, km per litre), max loads and availability are set per truck under **Trucks**; depot opening hours under **Depots**.
 - **Country** is chosen from a list: it decides whether plans use road distances (Oman and the UAE) or straight-line estimates.
-- **Default service time** is used for customers whose own unloading time was never confirmed (and whose customer type has none).
+- **Default service time** is used for customers whose own unloading time was never confirmed (and whose customer type has none). A customer's page shows the unloading time the planner uses and where it comes from; to give a customer its own time, set it in the customer details on Daily dispatch.
+- **Overtime after** must be at most the shift maximum when you change either of them. If an older setting breaks this, the page shows a note, and other settings still save.
 
 ### Dispatch timing (Settings → Daily dispatch: timing)
 Set these to what the depot and drivers really do; every load is timed with them.
