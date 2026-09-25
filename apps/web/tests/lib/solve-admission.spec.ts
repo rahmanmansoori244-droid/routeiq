@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import { defaultAdmissionLimits, SolveAdmission, type AdmissionLimits, type SolveTicket } from '@/lib/dispatch/solve-admission';
 
-const LIMITS: AdmissionLimits = { userPerHour: 3, tenantPerHour: 5, tenantConcurrent: 2, globalConcurrent: 3, maxQueue: 2, windowMs: 60 * 60_000 };
+const LIMITS: AdmissionLimits = { userPerHour: 3, tenantPerHour: 5, tenantConcurrent: 2, globalConcurrent: 3, maxQueue: 2, tenantQueue: 2, windowMs: 60 * 60_000 };
 
 function gate(limits: Partial<AdmissionLimits> = {}, opts: { quotasOff?: boolean } = {}) {
   let now = 1_000_000;
@@ -27,10 +27,12 @@ function solve(a: SolveAdmission, tenant: string, user: string) {
 }
 
 describe('defaults', () => {
-  it('15 per user and 30 per company per hour, 2 per company at once, SOLVER_MAX_CONCURRENT in total, 10 waiting', () => {
-    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 2, globalConcurrent: 2, maxQueue: 10, windowMs: 3_600_000 });
-    expect(defaultAdmissionLimits({ SOLVER_MAX_CONCURRENT: '3' } as unknown as NodeJS.ProcessEnv).globalConcurrent).toBe(3);
-    expect(defaultAdmissionLimits({ SOLVER_MAX_CONCURRENT: 'zero' } as unknown as NodeJS.ProcessEnv).globalConcurrent).toBe(2);
+  it('15 per user and 30 per company per hour; SOLVER_MAX_CONCURRENT in total and one less per company; 10 waiting, 2 per company', () => {
+    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, tenantQueue: 2, windowMs: 3_600_000 });
+    const env = (v: string) => ({ SOLVER_MAX_CONCURRENT: v }) as unknown as NodeJS.ProcessEnv;
+    expect(defaultAdmissionLimits(env('3'))).toMatchObject({ globalConcurrent: 3, tenantConcurrent: 2 });
+    expect(defaultAdmissionLimits(env('1'))).toMatchObject({ globalConcurrent: 1, tenantConcurrent: 1 });
+    expect(defaultAdmissionLimits(env('zero'))).toMatchObject({ globalConcurrent: 2, tenantConcurrent: 1 });
   });
 });
 
@@ -154,5 +156,75 @@ describe('concurrency: 2 per company, a global cap, a FIFO queue', () => {
     t1.release();
     t1.release();
     expect(a.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  });
+});
+
+describe('fairness across companies (review: one company must not take every slot and the whole queue)', () => {
+  /** The reviewer's case on the shipped defaults, quotas on: 12 starts by one sign-up company. */
+  function flood(globalEnv?: string) {
+    let now = 1_000_000;
+    const limits = defaultAdmissionLimits((globalEnv ? { SOLVER_MAX_CONCURRENT: globalEnv } : {}) as unknown as NodeJS.ProcessEnv);
+    const a = new SolveAdmission(limits, () => now, () => false);
+    const other = Array.from({ length: 12 }, () => a.reserve('signup', 'u1'));
+    for (const r of other) if (r.ok) r.ticket.commit();
+    return { a, other, advance: (ms: number) => (now += ms) };
+  }
+  const state = (r: ReturnType<SolveAdmission['reserve']>) => (r.ok ? (r.ticket.waiting ? 'queued' : 'running') : r.code);
+
+  it('defaults (2 in total): the other company runs 1 and queues 2, the rest get 429 for that company only; NMWC runs at once', () => {
+    const { a, other } = flood();
+    expect(other.map(state)).toEqual(['running', 'queued', 'queued', ...Array(9).fill('SOLVE_QUEUE_TENANT')]);
+    const refused = other[3]!;
+    expect(refused.ok).toBe(false);
+    if (!refused.ok) {
+      expect(refused.status).toBe(429);
+      expect(refused.retryAfterSec).toBeGreaterThan(0);
+    }
+    expect(a.snapshot()).toMatchObject({ running: 1, waiting: 2, runningByTenant: { signup: 1 }, waitingByTenant: { signup: 2 } });
+    const nmwc = a.reserve('nmwc', 'd1');
+    expect(state(nmwc)).toBe('running');
+    expect(a.snapshot().runningByTenant).toEqual({ signup: 1, nmwc: 1 });
+  });
+
+  it('1 in total: NMWC is first in the queue ahead of the other company, and gets the next free slot', () => {
+    const { a, other } = flood('1');
+    expect(other.map(state).slice(0, 4)).toEqual(['running', 'queued', 'queued', 'SOLVE_QUEUE_TENANT']);
+    const nmwc = ok(a.reserve('nmwc', 'd1'));
+    expect(nmwc.waiting).toBe(true);
+    expect(nmwc.position()).toBe(1);
+    // The other company's running solve ends: the slot goes to NMWC, not to its older waiting solves.
+    (other[0] as { ticket: SolveTicket }).ticket.release();
+    expect(nmwc.waiting).toBe(false);
+    expect(a.snapshot()).toMatchObject({ runningByTenant: { nmwc: 1 }, waitingByTenant: { signup: 2 } });
+  });
+
+  it('a freed slot goes to the company with the fewest solves running, first come first served within a company', () => {
+    const { a } = gate({ globalConcurrent: 2, tenantConcurrent: 2, maxQueue: 10 });
+    const a1 = ok(a.reserve('tA', 'u1'));
+    const a2 = ok(a.reserve('tA', 'u1'));
+    const a3 = ok(a.reserve('tA', 'u2'));
+    const b1 = ok(a.reserve('tB', 'v1'));
+    const a4 = ok(a.reserve('tA', 'u3'));
+    expect([a3.waiting, b1.waiting, a4.waiting]).toEqual([true, true, true]);
+    expect([b1.position(), a3.position(), a4.position()]).toEqual([1, 2, 3]);
+    a1.release(); // tA 1 running, tB 0: B goes first although A's waiting solve is older
+    expect(b1.waiting).toBe(false);
+    expect([a3.waiting, a4.waiting]).toEqual([true, true]);
+    a2.release(); // tA 0, tB 1: A's oldest waiting solve
+    expect(a3.waiting).toBe(false);
+    expect(a4.waiting).toBe(true);
+    expect(a4.position()).toBe(1);
+  });
+
+  it('the per-company queue cap is counted per company, and frees up when a waiting solve starts or is released', () => {
+    const { a } = gate({ globalConcurrent: 1, tenantConcurrent: 1, maxQueue: 10, tenantQueue: 1 });
+    const t1 = ok(a.reserve('tA', 'u1'));
+    const w1 = ok(a.reserve('tA', 'u1'));
+    expect(a.reserve('tA', 'u2')).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT' });
+    expect(ok(a.reserve('tB', 'v1')).waiting).toBe(true); // another company still queues
+    w1.release();
+    expect(ok(a.reserve('tA', 'u2')).waiting).toBe(true);
+    t1.release();
+    expect(a.snapshot()).toMatchObject({ running: 1, runningByTenant: { tB: 1 }, waitingByTenant: { tA: 1 } });
   });
 });

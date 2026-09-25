@@ -7,10 +7,15 @@
  *   Over quota the start is refused with 429 and Retry-After. Only starts that really began a
  *   job count: a refused or no-op start (location or weight question, nothing to plan, already
  *   running, ...) releases its reservation without using quota.
- * - Concurrency: at most 2 solves per company and SOLVER_MAX_CONCURRENT (default 2, sized to the
- *   solver's CPUs) in total run at the same time. A start beyond that is not refused: its job is
- *   created and waits in a first-in-first-out queue (at most 10 waiting) until a slot frees; only
- *   a full queue answers 503 "optimizer busy".
+ * - Concurrency: SOLVER_MAX_CONCURRENT (default 2, sized to the solver's CPUs) solves in total,
+ *   and per company one less than that (at least 1). So one company can never hold every solver
+ *   slot: another company's OPTIMIZE gets the next free one. A start beyond the caps is not
+ *   refused: its job is created and waits in the queue until a slot frees.
+ * - Fair queue: a company may have at most 2 solves waiting. One more is refused with 429 and
+ *   Retry-After, for that company only, so one company can never fill the shared queue (at most
+ *   10 waiting; a full queue answers 503 "optimizer busy"). A freed slot goes to the waiting solve
+ *   of the company with the fewest solves running; on a tie, to the company whose latest solve
+ *   started longest ago (companies take turns); oldest first within a company.
  * - The slot is held from the reservation until the job ends (success, failure or stale result).
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy
@@ -18,16 +23,21 @@
  * MAX_CONCURRENT_DISPATCH concurrent solves itself (503, apps/solver/main.py).
  *
  * The quotas are off where every rate limit is off (NODE_ENV=test, or RATE_LIMITS_DISABLED=1 off
- * Railway - see rateLimitBypass); the concurrency caps always apply.
+ * Railway - see rateLimitBypass); the concurrency caps and the queue caps always apply.
  */
 import { rateLimitBypass } from '../rate-limit';
 
 export interface AdmissionLimits {
   userPerHour: number;
   tenantPerHour: number;
+  /** Solves of one company running at the same time. */
   tenantConcurrent: number;
+  /** Solves running at the same time over all companies. */
   globalConcurrent: number;
+  /** Solves waiting for a slot over all companies. */
   maxQueue: number;
+  /** Solves of one company waiting for a slot. */
+  tenantQueue: number;
   windowMs: number;
 }
 
@@ -36,18 +46,25 @@ function envInt(name: string, fallback: number, env: NodeJS.ProcessEnv = process
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Per company one slot less than in total (at least 1), so a company can never hold every slot:
+ * with the default SOLVER_MAX_CONCURRENT=2 one solve per company runs at a time and a second one
+ * waits; SOLVER_MAX_CONCURRENT=3 (with the solver's MAX_CONCURRENT_DISPATCH=3) allows 2.
+ */
 export function defaultAdmissionLimits(env: NodeJS.ProcessEnv = process.env): AdmissionLimits {
+  const globalConcurrent = envInt('SOLVER_MAX_CONCURRENT', 2, env);
   return {
     userPerHour: 15,
     tenantPerHour: 30,
-    tenantConcurrent: 2,
-    globalConcurrent: envInt('SOLVER_MAX_CONCURRENT', 2, env),
+    tenantConcurrent: Math.max(1, globalConcurrent - 1),
+    globalConcurrent,
     maxQueue: 10,
+    tenantQueue: 2,
     windowMs: 60 * 60_000,
   };
 }
 
-export type AdmissionCode = 'SOLVE_QUOTA_USER' | 'SOLVE_QUOTA_TENANT' | 'SOLVER_BUSY';
+export type AdmissionCode = 'SOLVE_QUOTA_USER' | 'SOLVE_QUOTA_TENANT' | 'SOLVE_QUEUE_TENANT' | 'SOLVER_BUSY';
 
 export interface AdmissionDenied {
   ok: false;
@@ -64,7 +81,7 @@ export interface SolveTicket {
   readonly waiting: boolean;
   /** Resolves when the ticket holds a solver slot (immediately when one was free). */
   ready(): Promise<void>;
-  /** Solves ahead of this one in the queue (0 when it holds a slot). */
+  /** Place in the queue: 1 = starts next (an estimate across companies); 0 when it holds a slot. */
   position(): number;
   /** The job was created: the start counts against the hourly quotas. Idempotent. */
   commit(): void;
@@ -89,6 +106,9 @@ export class SolveAdmission {
   private readonly pending = new Map<string, number>(); // quota key -> reserved, not yet committed
   private readonly running = new Set<TicketState>();
   private readonly queue: TicketState[] = [];
+  /** Company -> sequence number of its latest solve start (companies take turns on a tie). */
+  private readonly lastStart = new Map<string, number>();
+  private startSeq = 0;
 
   constructor(
     private readonly limits: AdmissionLimits = defaultAdmissionLimits(),
@@ -111,8 +131,20 @@ export class SolveAdmission {
       }
     }
     const fits = this.fits(tenantId);
-    if (!fits && this.queue.length >= this.limits.maxQueue) {
-      return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans. Try again in a few minutes.', 120);
+    if (!fits) {
+      // Past its own queue cap a company is refused alone: the shared queue stays open to others.
+      const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId).length;
+      if (mineWaiting >= this.limits.tenantQueue) {
+        return this.deny(
+          429,
+          'SOLVE_QUEUE_TENANT',
+          `Your company already has ${mineWaiting} optimization(s) waiting for the route optimizer. Try again once one of them has started.`,
+          120,
+        );
+      }
+      if (this.queue.length >= this.limits.maxQueue) {
+        return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans. Try again in a few minutes.', 120);
+      }
     }
     let resolve!: () => void;
     const promise = new Promise<void>((r) => (resolve = r));
@@ -127,10 +159,13 @@ export class SolveAdmission {
   }
 
   /** For tests and diagnostics. */
-  snapshot(): { running: number; waiting: number; runningByTenant: Record<string, number> } {
-    const byTenant: Record<string, number> = {};
-    for (const s of this.running) byTenant[s.tenantId] = (byTenant[s.tenantId] ?? 0) + 1;
-    return { running: this.running.size, waiting: this.queue.length, runningByTenant: byTenant };
+  snapshot(): { running: number; waiting: number; runningByTenant: Record<string, number>; waitingByTenant: Record<string, number> } {
+    const count = (list: Iterable<TicketState>) => {
+      const out: Record<string, number> = {};
+      for (const s of list) out[s.tenantId] = (out[s.tenantId] ?? 0) + 1;
+      return out;
+    };
+    return { running: this.running.size, waiting: this.queue.length, runningByTenant: count(this.running), waitingByTenant: count(this.queue) };
   }
 
   private ticketOf(st: TicketState, userKey: string, tenantKey: string): SolveTicket {
@@ -151,7 +186,7 @@ export class SolveAdmission {
         return !st.running && !st.released;
       },
       ready: () => st.promise,
-      position: () => (st.running ? 0 : Math.max(0, self.queue.indexOf(st)) + 1),
+      position: () => (st.running || st.released ? 0 : self.startOrder().indexOf(st) + 1),
       commit: () => {
         if (st.committed || st.released) return;
         st.committed = true;
@@ -197,30 +232,76 @@ export class SolveAdmission {
     return oldest === undefined ? 60 : Math.max(1, Math.ceil((oldest + this.limits.windowMs - this.now()) / 1000));
   }
 
+  /** Solves running per company. */
+  private runningCounts(): Map<string, number> {
+    const n = new Map<string, number>();
+    for (const s of this.running) n.set(s.tenantId, (n.get(s.tenantId) ?? 0) + 1);
+    return n;
+  }
+
   private fits(tenantId: string): boolean {
     if (this.running.size >= this.limits.globalConcurrent) return false;
-    let mine = 0;
-    for (const s of this.running) if (s.tenantId === tenantId) mine++;
-    return mine < this.limits.tenantConcurrent;
+    return (this.runningCounts().get(tenantId) ?? 0) < this.limits.tenantConcurrent;
+  }
+
+  /**
+   * Index in `queue` of the ticket that gets the next free slot: the company with the fewest solves
+   * running (`counts`); on a tie the company whose latest solve started longest ago (`last`; never
+   * started = first), so companies take turns; then the oldest ticket - first come, first served
+   * within a company. With `capped`, companies at their own concurrency cap are skipped (-1 when
+   * every waiting company is).
+   */
+  private nextIndex(queue: readonly TicketState[], counts: ReadonlyMap<string, number>, last: ReadonlyMap<string, number>, capped: boolean): number {
+    let best = -1;
+    let bestRunning = Number.POSITIVE_INFINITY;
+    let bestLast = Number.POSITIVE_INFINITY;
+    queue.forEach((st, i) => {
+      const n = counts.get(st.tenantId) ?? 0;
+      if (capped && n >= this.limits.tenantConcurrent) return;
+      const l = last.get(st.tenantId) ?? -1;
+      if (n < bestRunning || (n === bestRunning && l < bestLast)) {
+        best = i;
+        bestRunning = n;
+        bestLast = l;
+      }
+    });
+    return best;
+  }
+
+  /** The waiting tickets in the order they would start if slots freed one at a time (for position()). */
+  private startOrder(): TicketState[] {
+    const counts = this.runningCounts();
+    const last = new Map(this.lastStart);
+    let seq = this.startSeq;
+    const rest = [...this.queue];
+    const order: TicketState[] = [];
+    while (rest.length) {
+      const [st] = rest.splice(Math.max(0, this.nextIndex(rest, counts, last, false)), 1);
+      order.push(st!);
+      counts.set(st!.tenantId, (counts.get(st!.tenantId) ?? 0) + 1);
+      last.set(st!.tenantId, ++seq);
+    }
+    return order;
   }
 
   private start(st: TicketState) {
     st.running = true;
     this.running.add(st);
+    this.lastStart.set(st.tenantId, ++this.startSeq);
     st.resolve();
   }
 
-  /** Give free slots to waiting tickets, oldest first (skipping companies at their own cap). */
+  /**
+   * Give free slots to waiting tickets: each to the company with the fewest solves running, then
+   * to the one served longest ago (companies at their own cap keep waiting), oldest first within a
+   * company (review F16).
+   */
   private pump() {
-    for (let i = 0; i < this.queue.length; ) {
-      const st = this.queue[i]!;
-      if (this.fits(st.tenantId)) {
-        this.queue.splice(i, 1);
-        this.start(st);
-      } else {
-        i++;
-      }
-      if (this.running.size >= this.limits.globalConcurrent) break;
+    while (this.running.size < this.limits.globalConcurrent && this.queue.length) {
+      const i = this.nextIndex(this.queue, this.runningCounts(), this.lastStart, true);
+      if (i < 0) break;
+      const [st] = this.queue.splice(i, 1);
+      this.start(st!);
     }
   }
 
