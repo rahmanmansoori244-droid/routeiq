@@ -9,12 +9,19 @@ FastAPI service, deployed separately from the web app. Every endpoint except `/h
 | `POST /route-geometry` | OSRM | road polyline for a load (straight lines when unavailable) |
 | `POST /optimize` | PyVRP (`solver.py`) | legacy v1 three-scenario solver, kept for comparison only |
 
-Road distance comes from `providers.py`: OSRM when `OSRM_URL` (or the request's `osrm_url`) is set, and otherwise Haversine × multiplier labelled as estimated. There is no silent public default; see `../../docs/OSRM_SETUP.md`.
+Road distance comes from `providers.py`: OSRM when `OSRM_URL` (or the request's `osrm_url`) is set, and otherwise Haversine × multiplier labelled as estimated. There is no silent public default; see `../../docs/OSRM_SETUP.md`. Each matrix cell knows whether it is a road or an estimated leg (a pair OSRM could not route, a point more than `OSRM_MAX_SNAP_M` from any road); the truck factor `road_time_factor` applies to road cells only, and the response says `distance_quality` ROAD / MIXED / ESTIMATED with `estimated_legs` per load. Road routing has a deadline: `MATRIX_BUDGET_SEC` (default min(90 s, 20% of `SOLVER_BUDGET_SEC`)); after it the whole matrix is estimated, with a "road routing too slow" warning. `OSRM_TABLE_TILE` (default 90 coordinates per `/table` call; production can raise it up to the OSRM server's `--max-table-size`, 1000 in `infra/osrm`, so a day needs one call) and `OSRM_PARALLEL` (default 2, max 4 calls at once) tune the calls. At most 600 stops per request (422 above).
+
+Costs (`costing.py`, one model for the score and the report): the driver is paid for the WHOLE truck day, from the first departure (or first frozen departure) to the last return, turnarounds and waiting included; overtime after `overtime_after_min` from that first departure is added on top. Each load carries its share (the paid time from the truck's previous return to its own return), so frozen loads + new loads = the day.
 
 ## Local dev
 ```bash
 python -m venv .venv && .venv/Scripts/pip install -r requirements.txt   # bin/ on Linux/macOS
-SOLVER_TOKEN=dev-token OSRM_URL=http://localhost:5000 .venv/Scripts/python -m uvicorn main:app --port 8000
+# apps/solver/.env holds SOLVER_TOKEN (and OSRM_URL for a local OSRM); --env-file loads it.
+# Inline variables still win: SOLVER_TOKEN=... .venv/Scripts/python -m uvicorn main:app --port 8000
+.venv/Scripts/python -m uvicorn main:app --env-file .env --port 8000
+# Smoke test: a wrong token answers 401 (a 500 "Solver not configured" means SOLVER_TOKEN was not loaded)
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/route-geometry -H "X-Solver-Token: wrong" \
+  -H "content-type: application/json" -d '{"coords":[[23.6,58.4],[23.61,58.41]]}'
 .venv/Scripts/python -m pytest tests -q
 ```
 

@@ -1,9 +1,9 @@
 // RouteIQ v1.3 schema — see CLAUDE.md section 5
 // Every business table has tenantId. All reads/writes go through tenantDb() wrapper.
 
-// NOTE: postgis extension declaration is intentionally omitted here for the
-// local smoke-test. Production Railway uses the postgis/postgis Docker image,
-// and the CREATE EXTENSION runs via the init migration. When developing
+// NOTE: postgis extension declaration is intentionally omitted. Production Railway runs
+// postgres-ssl:18 (PostGIS not guaranteed; nothing queries it); the init migration only tries
+// CREATE EXTENSION and tolerates its absence (its comment about a PostGIS image is outdated). When developing
 // locally with a PostGIS-equipped DB, re-add:
 //   extensions = [postgis(map: "postgis")]
 // to the datasource and:

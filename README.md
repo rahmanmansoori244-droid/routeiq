@@ -35,7 +35,7 @@ Route optimization for NMWC (National Mineral Water Company, Oman): the **daily 
 # 1. Install JS dependencies
 pnpm install
 
-# 2. Copy env file and fill in values
+# 2. Copy env file and fill in values (the solver reads its own .env through --env-file, step 5)
 cp .env.example apps/web/.env.local
 cp .env.example apps/solver/.env
 
@@ -53,7 +53,10 @@ cd apps/solver
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --env-file .env --reload --port 8000   # reads SOLVER_TOKEN, OSRM_URL from apps/solver/.env
+# Smoke test: a wrong token must answer 401 (500 means SOLVER_TOKEN was not loaded)
+#   curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8000/route-geometry \
+#     -H "X-Solver-Token: wrong" -H "content-type: application/json" -d '{"coords":[[23.6,58.4],[23.61,58.41]]}'
 
 # 6. Start the web app
 pnpm dev
@@ -71,7 +74,7 @@ Open <http://localhost:3000>.
 
 ## Deploying to Railway
 
-See [`CLAUDE.md` section 14](./CLAUDE.md). Both `routeiq-web` and `routeiq-solver` deploy from this monorepo. The web service must run **exactly one replica** in v1 — the in-memory `inflight` job map is not multi-instance safe.
+See [`docs/RAILWAY_DEPLOYMENT.md`](./docs/RAILWAY_DEPLOYMENT.md) (the current runbook; `CLAUDE.md` is the historical May 2026 spec). The `web` and `solver` services deploy from this monorepo, and the private `osrm` service from `infra/osrm`. The web service must run **exactly one replica**: the in-flight job map, the rate limits and the solve admission live in process memory. The full project handbook is [`docs/PROJECT_HANDBOOK.md`](./docs/PROJECT_HANDBOOK.md).
 
 ## License
 
