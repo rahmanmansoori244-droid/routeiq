@@ -18,4 +18,4 @@ SOLVER_TOKEN=dev-token OSRM_URL=http://localhost:5000 .venv/Scripts/python -m uv
 .venv/Scripts/python -m pytest tests -q
 ```
 
-Every plan scenario runs in a worker process (OR-Tools holds the GIL, so an in-process search would freeze `/health` and every other request). `SOLVER_PARALLEL=0` runs every scenario inside the API process with no deadline, for tests and debugging only. The solver falls back to it automatically when worker processes cannot start. Design notes: `../../docs/OPTIMIZER_DESIGN.md`.
+Every plan scenario runs in a worker process (OR-Tools holds the GIL, so an in-process search would freeze `/health` and every other request). `SOLVER_PARALLEL=0` runs every scenario inside the API process with no deadline and no time budget, for tests and debugging only (a warning is logged at startup; an error on Railway). Every returned option carries an independent timing check (`feasibility.py`, `DispatchScenario.feasibility`). The solver falls back to it automatically when worker processes cannot start. Design notes: `../../docs/OPTIMIZER_DESIGN.md`.
