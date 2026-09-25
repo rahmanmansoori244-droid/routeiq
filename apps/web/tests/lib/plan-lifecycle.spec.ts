@@ -769,6 +769,27 @@ describe('hand-set drivers across a re-plan and "Use instead" (fourth review of 
   const driversOf = (runId: string) => tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ truckId: l.truckId as string, loadNo: l.loadNo as number, driverId: l.driverId as string | null }));
   const clashesOf = (runId: string) =>
     driverClashes(tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })));
+  const withBob = () => tables.driver.push({ id: 'BOB', tenantId: T, active: true, name: 'Bob' });
+  const t2only = () => [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T2', 2, 620, 740, ['O3'])];
+  const t2t3 = (order: (typeof both)[number]) => inOrder(order, [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T3', 1, 480, 600, ['O3'])]);
+  const shown = (runId: string) =>
+    driverChangeWarnings(
+      row('runPlan', runId).summaryJson?.driverChanges ?? [],
+      tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverHandSet: isHandSetDriver(l as { driverId: string | null; driverSetAt: Date | null }) })),
+    );
+  const tripsOf = (runId: string) =>
+    Object.fromEntries(tables.planLoad.filter((l) => l.runId === runId).map((l) => [`${l.truckId}:${l.loadNo}`, `${l.driverId}${l.driverSetAt ? ' (by hand)' : ''}`]));
+  /** Late order from `parentId`: the job applies `loads`, then the version is READY with its job done. */
+  async function jobApplies(parentId: string, jobId: string, loads: ReturnType<typeof solverLoad>[]) {
+    const { child } = await createNextVersion(T, parentId, 'LATE_ORDER', null, 'u1');
+    Object.assign(row('runPlan', child.id), { status: 'OPTIMIZING', currentJobId: jobId });
+    tables.runJob.push({ id: jobId, runId: child.id, tenantId: T, attemptNo: 1, status: 'RUNNING' });
+    tables.scenarioResult.push({ id: `${jobId}-rec`, runId: child.id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(), loads }) });
+    const res = await applyScenario(fakePrisma as never, T, child.id, `${jobId}-rec`, 'u1', { jobId });
+    Object.assign(row('runJob', jobId), { status: 'SUCCEEDED' });
+    Object.assign(row('runPlan', child.id), { currentJobId: null });
+    return { childId: child.id, res };
+  }
 
   it("the dispatcher's driver change marks the load (who, when); \"No driver\" clears the marker; a re-plan's copies keep it", async () => {
     seedDay();
@@ -877,27 +898,6 @@ describe('hand-set drivers across a re-plan and "Use instead" (fourth review of 
     // Minutes: 480 = 08:00, 600 = 10:00, 620 = 10:20, 740 = 12:20.
     const bobNote = { truckId: 'T3', truckCode: 'T3', loadNo: 1, departMin: 480, returnMin: 600, from: { id: 'BOB', name: 'Bob' }, to: null, reason: 'TRIP_GONE', other: null };
     const bobText = 'Driver picked by hand, not in this plan: you picked Bob for T3 · L1 (08:00–10:00), and this plan has no such trip. Bob goes back on it when a re-plan or Use instead has that trip again.';
-    const withBob = () => tables.driver.push({ id: 'BOB', tenantId: T, active: true, name: 'Bob' });
-    const t2only = () => [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T2', 2, 620, 740, ['O3'])];
-    const t2t3 = (order: (typeof both)[number]) => inOrder(order, [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T3', 1, 480, 600, ['O3'])]);
-    const shown = (runId: string) =>
-      driverChangeWarnings(
-        row('runPlan', runId).summaryJson?.driverChanges ?? [],
-        tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverHandSet: isHandSetDriver(l as { driverId: string | null; driverSetAt: Date | null }) })),
-      );
-    const tripsOf = (runId: string) =>
-      Object.fromEntries(tables.planLoad.filter((l) => l.runId === runId).map((l) => [`${l.truckId}:${l.loadNo}`, `${l.driverId}${l.driverSetAt ? ' (by hand)' : ''}`]));
-    /** Late order from `parentId`: the job applies `loads`, then the version is READY with its job done. */
-    async function jobApplies(parentId: string, jobId: string, loads: ReturnType<typeof solverLoad>[]) {
-      const { child } = await createNextVersion(T, parentId, 'LATE_ORDER', null, 'u1');
-      Object.assign(row('runPlan', child.id), { status: 'OPTIMIZING', currentJobId: jobId });
-      tables.runJob.push({ id: jobId, runId: child.id, tenantId: T, attemptNo: 1, status: 'RUNNING' });
-      tables.scenarioResult.push({ id: `${jobId}-rec`, runId: child.id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(), loads }) });
-      const res = await applyScenario(fakePrisma as never, T, child.id, `${jobId}-rec`, 'u1', { jobId });
-      Object.assign(row('runJob', jobId), { status: 'SUCCEEDED' });
-      Object.assign(row('runPlan', child.id), { currentJobId: null });
-      return { childId: child.id, res };
-    }
 
     for (const order of both) {
       it(`"Use instead" to an option without T3 (${order}): Bob, set by hand on T3 L1, is parked and noted; switching back gives him back`, async () => {
@@ -913,7 +913,7 @@ describe('hand-set drivers across a re-plan and "Use instead" (fourth review of 
         expect(tripsOf('R')).toEqual({ 'T2:1': 'ALI', 'T2:2': 'ALI' });
         expect(res.driverChanges).toEqual([bobNote]); // counted in the answer (driversChanged)
         expect(row('runPlan', 'R').summaryJson.parkedDrivers).toEqual([
-          { truckId: 'T3', loadNo: 1, driverId: 'BOB', departMin: 480, returnMin: 600, driverSetById: 'u1', driverSetAt: setAt.toISOString() },
+          { truckId: 'T3', loadNo: 1, driverId: 'BOB', departMin: 480, returnMin: 600, driverSetById: 'u1', driverSetAt: setAt.toISOString(), runId: 'R' },
         ]);
         expect(shown('R')).toEqual([bobText]);
         expect(tables.auditLog.filter((a) => a.action === 'SCENARIO_CHOSEN').at(-1)!.afterJson.driverChanges).toEqual([
@@ -929,7 +929,10 @@ describe('hand-set drivers across a re-plan and "Use instead" (fourth review of 
         expect(tripsOf('R')).toEqual({ 'T2:1': 'ALI', 'T3:1': 'BOB (by hand)' });
         expect(loadOf('R', 'T3')).toMatchObject({ driverSetById: 'u1', driverSetAt: setAt });
         expect(back.driverChanges).toEqual([]);
-        expect(row('runPlan', 'R').summaryJson.parkedDrivers).toBeUndefined();
+        // Bob is not parked any more; T2 L2, which this option drops, is kept as this version's trip (filled in: no note).
+        expect(row('runPlan', 'R').summaryJson.parkedDrivers).toEqual([
+          { truckId: 'T2', loadNo: 2, driverId: 'ALI', departMin: 620, returnMin: 740, driverSetById: null, driverSetAt: null, runId: 'R' },
+        ]);
         expect(shown('R')).toEqual([]);
       });
 
@@ -1009,6 +1012,139 @@ describe('hand-set drivers across a re-plan and "Use instead" (fourth review of 
       await (globalThis as unknown as { __routeiqInflight: Map<string, Promise<void>> }).__routeiqInflight.get(childId);
       expect(row('runJob', 'J9')).toMatchObject({ status: 'SUCCEEDED', message: '2 loads on 1 trucks, 0 stop(s) unserved, 1 driver note(s) (see the plan)' });
       expect(shown(childId)).toEqual([bobText]);
+    });
+  });
+
+  describe('sixth review of PR3: "No driver" and the parent\'s older choice; trips an option drops', () => {
+    // G (version 1, superseded): T2 L1 Ali (filled in), T3 L1 Bob by hand. R (version 2, from G's
+    // re-plan job): the same trips, Bob's marker carried. Minutes: 480 = 08:00, 490 = 08:10,
+    // 600 = 10:00, 610 = 10:10, 620 = 10:20, 740 = 12:20.
+    const gAt = new Date('2026-09-26T05:00:00Z');
+    function seedGR(options: { id: string; name: string; loads: ReturnType<typeof solverLoad>[] }[]) {
+      seedDay();
+      withBob();
+      const base = { tenantId: T, depotId: 'D1', runDate: DAY, optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 2, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null, createdById: 'u1', createdAt: new Date() };
+      tables.runPlan.push(
+        { ...base, id: 'G', status: 'SUPERSEDED', supersededAt: new Date(), version: 1, reason: 'INITIAL', chosenScenarioId: 'G-rec', parentRunId: null, currentJobId: null },
+        { ...base, id: 'R', status: 'READY', supersededAt: null, version: 2, reason: 'LATE_ORDER', chosenScenarioId: 'R-rec', parentRunId: 'G', currentJobId: null },
+      );
+      const hand = { driverSetById: 'u1', driverSetAt: gAt };
+      const none = { driverSetById: null, driverSetAt: null };
+      for (const runId of ['G', 'R']) {
+        tables.planLoad.push(
+          load(`${runId}-T2`, runId, 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 480, returnMin: 600, ...none }),
+          load(`${runId}-T3`, runId, 1, 'PLANNED', { truckId: 'T3', driverId: 'BOB', departMin: 480, returnMin: 600, ...hand }),
+        );
+        tables.routeAssignment.push({ ...assignment(`${runId}-A2`, runId, `${runId}-T2`, 'O2', 1), truckId: 'T2' }, { ...assignment(`${runId}-A3`, runId, `${runId}-T3`, 'O3', 1), truckId: 'T3' });
+        tables.scenarioResult.push({ id: `${runId}-rec`, runId, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(), loads: t2t3('T2 listed first') }) });
+      }
+      for (const o of options) tables.scenarioResult.push({ id: o.id, runId: 'R', name: o.name, unservedCount: 0, detailsJson: scenarioDetails({ name: o.name, scope: sc(), loads: o.loads }) });
+    }
+    /** T2 L1 08:10-10:10, T3 L1 08:00-10:00. */
+    const t2moved = (order: (typeof both)[number]) => inOrder(order, [solverLoad('T2', 1, 490, 610, ['O2']), solverLoad('T3', 1, 480, 600, ['O3'])]);
+    /** T2 L1 08:00-10:00, T3 L1 08:10-10:10. */
+    const t3moved = (order: (typeof both)[number]) => inOrder(order, [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T3', 1, 490, 610, ['O3'])]);
+    const filledNote = (driver: { id: string; name: string }, departMin: number, returnMin: number) => ({ truckId: 'T3', truckCode: 'T3', loadNo: 1, departMin, returnMin, from: null, to: driver, reason: 'FILLED', other: null });
+    const sam = { id: 'SAM', name: 'Sam' };
+    const bob = { id: 'BOB', name: 'Bob' };
+
+    for (const order of both) {
+      it(`Bob moved from T3 to T2 by hand, T3 set to No driver (${order}): "Use instead" and the re-plan job both give T3 its default Sam, with no clash`, async () => {
+        seedGR([{ id: 'R-alt', name: 'MIN_COST', loads: t2moved(order) }]);
+        await updateLoad(T, 'R', 'R-T2', { driverId: 'BOB' }, user, allow);
+        await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+        expect(clashesOf('R')).toEqual([]);
+        const res = await chooseScenario(T, 'R', 'R-alt', 'u1');
+        expect(tripsOf('R')).toEqual({ 'T2:1': 'BOB (by hand)', 'T3:1': 'SAM' });
+        expect(clashesOf('R')).toEqual([]); // the parent's Bob is never put back next to the hand-set T2 trip
+        expect(res.driverChanges).toEqual([filledNote(sam, 480, 600)]);
+
+        seedGR([]);
+        await updateLoad(T, 'R', 'R-T2', { driverId: 'BOB' }, user, allow);
+        await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+        const job = await jobApplies('R', 'J1', t2moved(order));
+        expect(tripsOf(job.childId)).toEqual({ 'T2:1': 'BOB (by hand)', 'T3:1': 'SAM' });
+        expect(clashesOf(job.childId)).toEqual([]);
+        expect(job.res.driverChanges).toEqual([filledNote(sam, 480, 600)]);
+      });
+
+      it(`T3 set to No driver, then "Use instead" without T3 and back (${order}): the parent's hand-set Bob comes back filled in and noted, never as "picked by hand" - the same as going there straight`, async () => {
+        seedGR([{ id: 'R-alt', name: 'MIN_COST', loads: t3moved(order) }]);
+        await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+        const straight = await chooseScenario(T, 'R', 'R-alt', 'u1');
+        const straightTrips = tripsOf('R');
+        expect(straightTrips).toEqual({ 'T2:1': 'ALI', 'T3:1': 'BOB' });
+        expect(straight.driverChanges).toEqual([filledNote(bob, 490, 610)]);
+
+        seedGR([
+          { id: 'R-min', name: 'MIN_TRUCKS', loads: t2only() },
+          { id: 'R-alt', name: 'MIN_COST', loads: t3moved(order) },
+        ]);
+        await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+        const away = await chooseScenario(T, 'R', 'R-min', 'u1');
+        expect(away.driverChanges).toEqual([]); // "No driver" on T3 is kept with the version, not a driver note
+        expect(row('runPlan', 'R').summaryJson.parkedDrivers).toEqual([
+          { truckId: 'T3', loadNo: 1, driverId: null, departMin: 480, returnMin: 600, driverSetById: null, driverSetAt: null, runId: 'R' },
+        ]);
+        const back = await chooseScenario(T, 'R', 'R-alt', 'u1');
+        expect(tripsOf('R')).toEqual(straightTrips);
+        expect(loadOf('R', 'T3')).toMatchObject({ driverId: 'BOB', driverSetById: null, driverSetAt: null });
+        expect(back.driverChanges).toEqual([filledNote(bob, 490, 610)]);
+        expect(shown('R')).toEqual(['Driver added by this plan: T3 · L1 (08:10–10:10) now has Bob (the trip had no driver).']);
+      });
+
+      it(`Bob moved to T2 by hand, T3 cleared, then "Use instead" without T3 and back (${order}): T3 gets Sam, never a second hand-set Bob; the next re-plan job has no clash either`, async () => {
+        seedGR([
+          { id: 'R-min', name: 'MIN_TRUCKS', loads: t2only() },
+          { id: 'R-alt', name: 'MIN_COST', loads: t3moved(order) },
+        ]);
+        await updateLoad(T, 'R', 'R-T2', { driverId: 'BOB' }, user, allow);
+        await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+        await chooseScenario(T, 'R', 'R-min', 'u1');
+        const back = await chooseScenario(T, 'R', 'R-alt', 'u1');
+        expect(tripsOf('R')).toEqual({ 'T2:1': 'BOB (by hand)', 'T3:1': 'SAM' });
+        expect(clashesOf('R')).toEqual([]);
+        expect(back.driverChanges).toEqual([filledNote(sam, 490, 610)]);
+
+        const job = await jobApplies('R', 'J1', t3moved(order));
+        expect(tripsOf(job.childId)).toEqual({ 'T2:1': 'BOB (by hand)', 'T3:1': 'SAM' });
+        expect(clashesOf(job.childId)).toEqual([]);
+        expect(job.res.driverChanges).toEqual([]);
+      });
+
+      it(`a trip an option dropped is this version's evidence in "Use instead" and the parent's in the re-plan job (${order}): the same drivers`, async () => {
+        // R: T2 L1 Ali 08:00-10:00 and T3 L1 Ali 12:00-14:00, both filled in (no clash); G had no driver on
+        // T3. MIN_TRUCKS drops T3 L1 (kept with R: Ali). The next plan has T3 L1 at 08:30-10:30, onto
+        // Ali's T2 trip, which did not move: T2 keeps Ali, T3 gets its default Sam - in both.
+        const onto = inOrder(order, [solverLoad('T2', 1, 480, 600, ['O2']), solverLoad('T3', 1, 510, 630, ['O3'])]);
+        const setup = async () => {
+          seedGR([
+            { id: 'R-min', name: 'MIN_TRUCKS', loads: t2only() },
+            { id: 'R-onto', name: 'MIN_COST', loads: onto },
+          ]);
+          Object.assign(row('planLoad', 'G-T3'), { driverId: null, driverSetById: null, driverSetAt: null });
+          Object.assign(row('planLoad', 'R-T3'), { driverId: 'ALI', driverSetById: null, driverSetAt: null, departMin: 720, returnMin: 840 });
+          await chooseScenario(T, 'R', 'R-min', 'u1');
+          expect(row('runPlan', 'R').summaryJson.parkedDrivers).toEqual([
+            { truckId: 'T3', loadNo: 1, driverId: 'ALI', departMin: 720, returnMin: 840, driverSetById: null, driverSetAt: null, runId: 'R' },
+          ]);
+        };
+        await setup();
+        await chooseScenario(T, 'R', 'R-onto', 'u1');
+        expect(tripsOf('R')).toEqual({ 'T2:1': 'ALI', 'T3:1': 'SAM' });
+        await setup();
+        const job = await jobApplies('R', 'J1', onto);
+        expect(tripsOf(job.childId)).toEqual({ 'T2:1': 'ALI', 'T3:1': 'SAM' });
+        expect(clashesOf(job.childId)).toEqual([]);
+      });
+    }
+
+    it("a re-plan's version copies the parked trips with the summary; they keep the parent's id (read as the parent's)", async () => {
+      seedGR([{ id: 'R-min', name: 'MIN_TRUCKS', loads: t2only() }]);
+      await updateLoad(T, 'R', 'R-T3', { driverId: null }, user, allow);
+      await chooseScenario(T, 'R', 'R-min', 'u1');
+      const { child } = await createNextVersion(T, 'R', 'LATE_ORDER', null, 'u1');
+      expect(row('runPlan', child.id).summaryJson.parkedDrivers).toEqual([expect.objectContaining({ truckId: 'T3', loadNo: 1, driverId: null, runId: 'R' })]);
     });
   });
 

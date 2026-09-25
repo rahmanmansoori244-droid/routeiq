@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 import {
   computeChangeSummary,
   computeSummary,
+  parkedEvidence,
+  readParkedDrivers,
+  toParkedDrivers,
   type AssignmentKey,
   type SummaryLoad,
   type SummaryOrder,
@@ -327,5 +330,43 @@ describe('computeSummary - split money and reasons', () => {
     expect(s.revenueServed).toBe(1000);
     expect(s.marginServed).toBe(100);
     expect(s.unservedByReason).toEqual({ SHIFT_LIMIT: 1 });
+  });
+});
+
+describe('parked trips in the summary JSON (sixth review of PR3)', () => {
+  const at = new Date('2026-09-26T05:00:00Z');
+  const bob = { truckId: 'T3', loadNo: 1, driverId: 'BOB', departMin: 480, returnMin: 600, driverSetById: 'u1', driverSetAt: at };
+  const cleared = { truckId: 'T3', loadNo: 2, driverId: null, departMin: 620, returnMin: 740, driverSetById: null, driverSetAt: null };
+  const filled = { truckId: 'T2', loadNo: 2, driverId: 'ALI', departMin: 620, returnMin: 740 };
+
+  it('keeps a hand-set driver, "No driver" and a filled-in driver, tagged with the version that kept them; reads them back', () => {
+    const json = JSON.parse(JSON.stringify({ parkedDrivers: toParkedDrivers([bob, cleared, filled], 'R') }));
+    expect(json.parkedDrivers).toEqual([
+      { ...bob, driverSetAt: at.toISOString(), runId: 'R' },
+      { ...cleared, runId: 'R' },
+      { ...filled, driverSetById: null, driverSetAt: null, runId: 'R' },
+    ]);
+    expect(readParkedDrivers(json)).toEqual([
+      { ...bob, runId: 'R' },
+      { ...cleared, runId: 'R' },
+      { ...filled, driverSetById: null, driverSetAt: null, runId: 'R' },
+    ]);
+  });
+
+  it("reads an entry stored before the tag (a hand-set driver) as the version's own; skips malformed ones", () => {
+    const legacy = { truckId: 'T3', loadNo: 1, driverId: 'BOB', departMin: 480, returnMin: 600, driverSetById: 'u1', driverSetAt: at.toISOString() };
+    const bad = [null, { truckId: 'T3' }, { ...legacy, driverSetAt: 'not a date' }, { ...legacy, driverId: null }, { ...legacy, driverId: 7 }];
+    expect(readParkedDrivers({ parkedDrivers: [legacy, ...bad] })).toEqual([{ ...bob, runId: null }]);
+    expect(parkedEvidence('R', { parkedDrivers: [legacy] }, null)).toEqual({ own: [{ ...bob, runId: null }], parent: [] });
+  });
+
+  it("a re-plan's version: the entries its summary copied from the parent are the parent's, not its own", () => {
+    const parentSummary = { parkedDrivers: toParkedDrivers([cleared], 'R') };
+    const childSummary = JSON.parse(JSON.stringify(parentSummary)); // createNextVersion copies the summary
+    const e = parkedEvidence('C', childSummary, parentSummary);
+    expect(e.own).toEqual([]);
+    expect(e.parent).toEqual([{ ...cleared, runId: 'R' }]);
+    // Once the new version applied its own plan, its entries carry its id.
+    expect(parkedEvidence('C', { parkedDrivers: toParkedDrivers([cleared], 'C') }, parentSummary).own).toEqual([{ ...cleared, runId: 'C' }]);
   });
 });

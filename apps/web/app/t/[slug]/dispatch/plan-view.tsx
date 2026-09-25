@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
-import { canStepBack } from '@/lib/dispatch/load-state';
+import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
@@ -765,6 +765,8 @@ function LoadDriver({
   }
   const current = drivers.find((x) => x.id === l.driverId);
   const driverName = l.driverName ?? current?.name ?? 'this driver';
+  // "picked by hand", or the Keep link exactly when the server marks the re-sent driver (driverPickLink).
+  const pick = driverPickLink(l, { editable, driverActive: !!current?.active });
   let waTitle = '';
   if ('url' in whatsapp) {
     if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
@@ -804,23 +806,21 @@ function LoadDriver({
         )}
         {/* Who chose the driver: a re-plan or "Use instead" keeps a driver picked by hand on this
             truck and trip; Keep makes one RouteIQ filled in the dispatcher's pick. */}
-        {l.driverId && !ON_ROAD.has(l.status) ? (
-          l.driverHandSet ? (
-            <span className="text-muted-foreground" data-testid={`driver-handset-${tag}`} title={`Picked by hand: a re-plan or Use instead keeps ${driverName} on this truck and trip.`}>
-              picked by hand
-            </span>
-          ) : editable && current?.active ? (
-            <button
-              type="button"
-              className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={busy}
-              onClick={onKeep}
-              data-testid={`driver-keep-${tag}`}
-              title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
-            >
-              Keep
-            </button>
-          ) : null
+        {pick === 'HAND_SET' ? (
+          <span className="text-muted-foreground" data-testid={`driver-handset-${tag}`} title={`Picked by hand: a re-plan or Use instead keeps ${driverName} on this truck and trip.`}>
+            picked by hand
+          </span>
+        ) : pick === 'KEEP' ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={busy}
+            onClick={onKeep}
+            data-testid={`driver-keep-${tag}`}
+            title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
+          >
+            Keep
+          </button>
         ) : null}
       </div>
     </div>

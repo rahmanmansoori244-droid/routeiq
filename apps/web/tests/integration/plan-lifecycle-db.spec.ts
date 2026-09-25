@@ -462,7 +462,7 @@ describe('copy-forward re-plan and drivers (review: untouched copies are not thi
     expect(clashes.map((c) => [c.a.id, c.b.id].sort())).toEqual([[kept.id, retimed.id].sort()]);
     expect(detail.warnings.some((w) => w.startsWith('Driver changed by this plan:'))).toBe(false);
   });
-  it('fifth review: Keep marks a driver RouteIQ filled in; an option without a hand-set trip parks it in the summary JSON, and switching back gives it back', async () => {
+  it('fifth and sixth review: Keep marks a driver RouteIQ filled in; an option without a hand-set trip parks it in the summary JSON, and switching back gives it back; "No driver" is kept the same way', async () => {
     const day = isoPlus(14);
     await seedOrders(day, 4);
     const ali = await prisma.driver.create({ data: { tenantId, code: `ALI-${uniqueSuffix()}`.slice(0, 20), name: 'Ali', active: true } });
@@ -497,7 +497,7 @@ describe('copy-forward re-plan and drivers (review: untouched copies are not thi
     const away = await chooseScenario(tenantId, v1.id, minTrucks.id, userId);
     expect(away.driverChanges.map((c) => [c.truckId, c.loadNo, c.from?.id, c.reason])).toEqual([[b.truckId, b.loadNo, bob.id, 'TRIP_GONE']]);
     const summary = (await prisma.runPlan.findUniqueOrThrow({ where: { id: v1.id } })).summaryJson as { parkedDrivers?: unknown[] };
-    expect(summary.parkedDrivers).toEqual([expect.objectContaining({ truckId: b.truckId, loadNo: b.loadNo, driverId: bob.id, driverSetById: userId, driverSetAt: setAt.toISOString() })]);
+    expect(summary.parkedDrivers).toEqual([expect.objectContaining({ truckId: b.truckId, loadNo: b.loadNo, driverId: bob.id, driverSetById: userId, driverSetAt: setAt.toISOString(), runId: v1.id })]);
     expect((await getPlanDetail(tenantId, v1.id))!.warnings.some((w) => w.startsWith('Driver picked by hand, not in this plan: you picked Bob for'))).toBe(true);
 
     const back = await chooseScenario(tenantId, v1.id, recommended.id, userId);
@@ -507,6 +507,19 @@ describe('copy-forward re-plan and drivers (review: untouched copies are not thi
     expect(restored.driverSetAt!.getTime()).toBe(setAt.getTime());
     const kept = await prisma.planLoad.findFirstOrThrow({ where: { runId: v1.id, truckId: a.truckId, loadNo: a.loadNo } });
     expect(kept).toMatchObject({ driverId: ali.id, driverSetById: userId });
+
+    // Sixth review: "No driver" on that trip is kept with the version too (null in the JSON), is no
+    // driver note, and switching back never brings a driver back as picked by hand.
+    await updateLoad(tenantId, v1.id, restored.id, { driverId: null }, user(), everyRole);
+    const away2 = await chooseScenario(tenantId, v1.id, minTrucks.id, userId);
+    expect(away2.driverChanges.filter((c) => c.reason === 'TRIP_GONE')).toEqual([]);
+    const summary2 = (await prisma.runPlan.findUniqueOrThrow({ where: { id: v1.id } })).summaryJson as { parkedDrivers?: unknown[] };
+    expect(summary2.parkedDrivers).toEqual([
+      { truckId: b.truckId, loadNo: b.loadNo, driverId: null, departMin: restored.departMin, returnMin: restored.returnMin, driverSetById: null, driverSetAt: null, runId: v1.id },
+    ]);
+    await chooseScenario(tenantId, v1.id, recommended.id, userId);
+    const again = await prisma.planLoad.findFirstOrThrow({ where: { runId: v1.id, truckId: b.truckId, loadNo: b.loadNo } });
+    expect(again).toMatchObject({ driverSetById: null, driverSetAt: null });
   });
 });
 

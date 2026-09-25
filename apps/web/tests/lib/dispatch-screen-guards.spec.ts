@@ -23,6 +23,10 @@
  *   reload or an action runs;
  * - a failed driver change reloads the plan (the old driver and WhatsApp link are never shown as
  *   current), and the reload banner punctuates the server's message (planReloadErrorText).
+ * Sixth review of PR3:
+ * - Try again comes back after the newest plan load answered (`reloading` is reset in load());
+ * - the Keep link shows exactly when driverPickLink says KEEP (unit-tested against the server's
+ *   isDriverKeep in dispatch-load-state.spec.ts) and re-sends the load's own driver.
  * The screens themselves were driven in a DOM harness outside the repository (jsdom is not a
  * dependency here); these guards keep them on the tested rules.
  */
@@ -138,6 +142,37 @@ describe('plan screen (plan-view.tsx)', () => {
     const body = planScreen.slice(planScreen.indexOf('function setDriver('), planScreen.indexOf('function lockAll('));
     const failed = body.slice(body.indexOf('if (!r.ok) {'), body.indexOf('return;', body.indexOf('if (!r.ok) {')));
     expect(failed).toContain('await load();');
+  });
+
+  it('Try again comes back once the newest load answered: load() resets `reloading` after the answer is accepted (sixth review of PR3)', () => {
+    const body = planScreen.slice(planScreen.indexOf('const load = useCallback('), planScreen.indexOf('}, [runId]);'));
+    const accept = body.indexOf('if (!loadOrder.current.accept(ticket)) return null;');
+    const reset = body.indexOf('setReloading(loadOrder.current.pending());');
+    expect(reset).toBeGreaterThan(accept);
+    expect(reset).toBeLessThan(body.indexOf('setPanel('));
+    expect(body.indexOf('setReloading(true);')).toBeLessThan(body.indexOf('await api<PlanDetail>'));
+    // The only two places `reloading` changes: on at the start, off (unless a newer load runs) at the answer.
+    expect(count(planScreen, /\bsetReloading\(/g)).toBe(2);
+  });
+
+  it('Keep: shown by driverPickLink, re-sends the driver the load has (sixth review of PR3)', () => {
+    // The row passes the load's own driver back with keep = true (the server marks it: isDriverKeep).
+    expect(planScreen).toContain('onKeep={() => setDriver(l, l.driverId, true)}');
+    const driverCell = planScreen.slice(planScreen.indexOf('function LoadDriver('), planScreen.indexOf('function LoadActions('));
+    expect(driverCell).toContain('const pick = driverPickLink(l, { editable, driverActive: !!current?.active });');
+    // "picked by hand" for a hand-set driver; the Keep button for the KEEP answer, calling onKeep.
+    const hand = driverCell.indexOf("pick === 'HAND_SET' ? (");
+    const keep = driverCell.indexOf("pick === 'KEEP' ? (");
+    expect(hand).toBeGreaterThan(-1);
+    expect(keep).toBeGreaterThan(hand);
+    expect(driverCell.slice(hand, keep)).toContain('data-testid={`driver-handset-${tag}`}');
+    const button = driverCell.slice(keep, driverCell.indexOf('</button>', keep));
+    expect(button).toContain('<button');
+    expect(button).toContain('onClick={onKeep}');
+    expect(button).toContain('data-testid={`driver-keep-${tag}`}');
+    expect(button).toContain('disabled={busy}');
+    expect(button).toMatch(/>\s*Keep\s*$/);
+    expect(count(driverCell, /\bonKeep\b/g)).toBe(3); // the prop, its type, the button
   });
 
   it('the reload banner punctuates the server message (planReloadErrorText; fourth review of PR3)', () => {

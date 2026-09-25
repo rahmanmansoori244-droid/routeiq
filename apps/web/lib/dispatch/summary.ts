@@ -69,10 +69,12 @@ export interface DailySummary {
    */
   driverChanges?: DriverChangeNote[];
   /**
-   * The drivers the dispatcher chose by hand for a truck and trip the applied plan does not have
-   * (planReplanDrivers' `parked`; absent when none). Kept through load changes, copied to a
-   * re-plan's version with the summary, replaced by the next applied plan: an option or re-plan
-   * that has the trip again gives the driver back (readParkedDrivers).
+   * The trucks and trips the applied plan does not have that the version keeps as driver evidence
+   * (planReplanDrivers' `parked`; absent when none): each trip this version had, with its driver
+   * or "No driver" and its hand-set marker, and the parent's hand-set choices. Kept through load
+   * changes, copied to a re-plan's version with the summary (there they are the parent's: `runId`),
+   * replaced by the next applied plan: an option or re-plan that has the trip again reads it
+   * (readParkedDrivers) - a hand-set driver comes back, "No driver" stays this version's.
    */
   parkedDrivers?: ParkedDriver[];
 }
@@ -94,46 +96,77 @@ export interface DriverChangeNote {
   other: { truckCode: string; loadNo: number | null } | null;
 }
 
-/** A hand-set driver kept with a version for a truck and trip its plan does not have (summary JSON). */
+/** A truck and trip kept with a version although its plan does not have it (summary JSON; planReplanDrivers' `parked`). */
 export interface ParkedDriver {
   truckId: string;
   loadNo: number;
-  driverId: string;
+  /** The trip's driver (null: "No driver"). */
+  driverId: string | null;
   departMin: number | null;
   returnMin: number | null;
   driverSetById: string | null;
-  /** ISO time of the dispatcher's choice (the hand-set marker). */
-  driverSetAt: string;
+  /** ISO time of the dispatcher's choice (the hand-set marker); null: RouteIQ filled the driver in, or none. */
+  driverSetAt: string | null;
+  /**
+   * The version that kept it with its plan. A re-plan's version copies its parent's summary, so
+   * there the entries carry the parent's id and are read as the parent's (parkedEvidence). Absent
+   * before the sixth review of PR3 (hand-set choices only; read as the version's own).
+   */
+  runId?: string;
 }
 
-/** The summary JSON form of planReplanDrivers' `parked`. */
-export function toParkedDrivers(parked: readonly DriverOnLoad[]): ParkedDriver[] {
-  return parked.flatMap((p) =>
-    p.driverId && p.driverSetAt
-      ? [{ truckId: p.truckId, loadNo: p.loadNo, driverId: p.driverId, departMin: p.departMin ?? null, returnMin: p.returnMin ?? null, driverSetById: p.driverSetById ?? null, driverSetAt: p.driverSetAt.toISOString() }]
-      : [],
-  );
+/** The summary JSON form of planReplanDrivers' `parked`, kept by version `runId`. */
+export function toParkedDrivers(parked: readonly DriverOnLoad[], runId: string): ParkedDriver[] {
+  return parked.map((p) => ({
+    truckId: p.truckId,
+    loadNo: p.loadNo,
+    driverId: p.driverId,
+    departMin: p.departMin ?? null,
+    returnMin: p.returnMin ?? null,
+    driverSetById: p.driverId && p.driverSetAt ? (p.driverSetById ?? null) : null,
+    driverSetAt: p.driverId && p.driverSetAt ? p.driverSetAt.toISOString() : null,
+    runId,
+  }));
 }
 
-/** The parked hand-set drivers of a stored summary, as planReplanDrivers reads them (malformed entries are skipped). */
-export function readParkedDrivers(summaryJson: unknown): DriverOnLoad[] {
+/**
+ * The parked trips of a stored summary, as planReplanDrivers reads them, with the version they
+ * belong to (`runId`; null: stored before the tag, read as the version's own). Malformed entries
+ * are skipped.
+ */
+export function readParkedDrivers(summaryJson: unknown): (DriverOnLoad & { runId: string | null })[] {
   const list = (summaryJson as { parkedDrivers?: unknown } | null)?.parkedDrivers;
   if (!Array.isArray(list)) return [];
   return list.flatMap((p: Partial<ParkedDriver> | null) => {
-    const at = typeof p?.driverSetAt === 'string' ? new Date(p.driverSetAt) : null;
-    if (!p || typeof p.truckId !== 'string' || typeof p.loadNo !== 'number' || typeof p.driverId !== 'string' || !at || Number.isNaN(at.getTime())) return [];
+    if (!p || typeof p.truckId !== 'string' || typeof p.loadNo !== 'number') return [];
+    const driverId = typeof p.driverId === 'string' ? p.driverId : p.driverId === null ? null : undefined;
+    const at = typeof p.driverSetAt === 'string' ? new Date(p.driverSetAt) : p.driverSetAt == null ? null : undefined;
+    if (driverId === undefined || at === undefined || (at && (Number.isNaN(at.getTime()) || driverId === null))) return [];
     return [
       {
         truckId: p.truckId,
         loadNo: p.loadNo,
-        driverId: p.driverId,
+        driverId,
         departMin: typeof p.departMin === 'number' ? p.departMin : undefined,
         returnMin: typeof p.returnMin === 'number' ? p.returnMin : undefined,
-        driverSetById: typeof p.driverSetById === 'string' ? p.driverSetById : null,
+        driverSetById: at && typeof p.driverSetById === 'string' ? p.driverSetById : null,
         driverSetAt: at,
+        runId: typeof p.runId === 'string' ? p.runId : null,
       },
     ];
   });
+}
+
+/**
+ * A version's parked trips split by owner (see ParkedDriver.runId): its own (`own`; untagged
+ * entries count as its own) and, from the parent's summary, the parent's (`parent`, all of them).
+ * Entries the version's summary copied from the parent are left out of `own`: they are the parent's.
+ */
+export function parkedEvidence(runId: string, summaryJson: unknown, parentSummaryJson: unknown): { own: DriverOnLoad[]; parent: DriverOnLoad[] } {
+  return {
+    own: readParkedDrivers(summaryJson).filter((p) => p.runId === null || p.runId === runId),
+    parent: readParkedDrivers(parentSummaryJson),
+  };
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
