@@ -187,6 +187,15 @@ describe('bounds (review F21)', () => {
     expect(e.message).toContain('Road time factor');
   });
 
+  it('a truck value the optimizer refuses (a database edit) is named: 409 MASTER_DATA_OUT_OF_RANGE', async () => {
+    wire(BASE_CFG, { truck: { kmPerLitre: 0 } });
+    const e = await buildDispatchRequest('TEN', 'R1').catch((x) => x);
+    expect(e).toBeInstanceOf(PlanError);
+    expect(e.status).toBe(409);
+    expect(e.details.code).toBe('MASTER_DATA_OUT_OF_RANGE');
+    expect(e.message).toContain('Truck T1: km per litre 0');
+  });
+
   it('more stops than one optimization supports: 422 TOO_MANY_STOPS', async () => {
     const many = Array.from({ length: MAX_DISPATCH_STOPS + 1 }, (_, i) => order(`O${i}`, customer(`C${i}`, 23.5 + i * 0.0001, 58.3), 1));
     wire(BASE_CFG, { orders: many });
