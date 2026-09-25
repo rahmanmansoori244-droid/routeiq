@@ -121,7 +121,7 @@ describe('no driver PIN hash in any response or page (F13)', () => {
   });
 
   it('TENANT_ADMIN writes: POST and PATCH answer without the hash, and the new audit rows hold none', async () => {
-    const created = await fetchWith(jars.TENANT_ADMIN, `${BASE}/api/drivers`, j({ code: 'D2', name: 'Khalid', phone: null, active: true }));
+    const created = await fetchWith(jars.TENANT_ADMIN, `${BASE}/api/drivers`, j({ code: 'D2', name: 'Khalid', active: true }));
     expect(created.status).toBe(201);
     const patched = await fetchWith(jars.TENANT_ADMIN, `${BASE}/api/drivers/${driverId}`, j({ name: 'Salim A.' }, 'PATCH'));
     expect(patched.status).toBe(200);
