@@ -90,6 +90,42 @@ export function plannerSettingProblems(cfg: TenantPlannerConfig): { blocking: st
   return { blocking, warnings };
 }
 
+interface TruckRow {
+  code: string;
+  capacityCases: number;
+  capacityWeightKg: number;
+  fixedCostPerDay: number;
+  tripCost: number;
+  costPerKm: number;
+  kmPerLitre: number | null;
+  availableFromMin: number | null;
+  availableToMin: number | null;
+  maxTripsPerDay: number | null;
+}
+
+/**
+ * Truck and depot values the optimizer's contract refuses (apps/solver/dispatch_models.py) -
+ * possible only through a direct database edit, since the Trucks and Depots forms keep narrower
+ * bounds. Refused before the optimizer with the truck named, instead of a 422 for the whole day.
+ */
+export function masterDataProblems(trucks: TruckRow[], depot: { openMin: number | null; closeMin: number | null }): string[] {
+  const out: string[] = [];
+  const bad = (v: number | null, lo: number, hi: number, opts: { int?: boolean; open?: boolean } = {}) =>
+    v !== null && (!Number.isFinite(v) || (opts.open ? v <= lo : v < lo) || v > hi || (opts.int && !Number.isInteger(v)));
+  for (const t of trucks) {
+    const p: string[] = [];
+    if (bad(t.capacityCases, 0, Number.MAX_SAFE_INTEGER, { int: true })) p.push(`capacity ${t.capacityCases} cases`);
+    if (bad(t.capacityWeightKg, 0, Number.MAX_VALUE)) p.push(`payload ${t.capacityWeightKg} kg`);
+    if (bad(t.fixedCostPerDay, 0, Number.MAX_VALUE) || bad(t.tripCost, 0, Number.MAX_VALUE) || bad(t.costPerKm, 0, Number.MAX_VALUE)) p.push('a negative cost');
+    if (bad(t.kmPerLitre, 0, Number.MAX_VALUE, { open: true })) p.push(`km per litre ${t.kmPerLitre} (must be above 0, or empty)`);
+    if (bad(t.maxTripsPerDay, 1, 10, { int: true })) p.push(`max loads ${t.maxTripsPerDay} (1-10)`);
+    if (bad(t.availableFromMin, 0, 1440, { int: true }) || bad(t.availableToMin, 0, 2880, { int: true })) p.push('availability outside the day');
+    if (p.length) out.push(`Truck ${t.code}: ${p.join(', ')}`);
+  }
+  if (bad(depot.openMin, 0, 1440, { int: true }) || bad(depot.closeMin, 0, 1440, { int: true })) out.push('Depot hours outside 00:00-24:00');
+  return out;
+}
+
 /**
  * The request's config from the tenant settings and country (the routing decision included:
  * the shared road map covers Oman + UAE only). Everything the optimizer is told about the day
