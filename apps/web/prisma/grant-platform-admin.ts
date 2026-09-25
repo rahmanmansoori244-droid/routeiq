@@ -7,9 +7,12 @@
  * the only way, and it takes two steps on purpose:
  *
  *   1. add the email to SUPER_ADMIN_EMAILS on the web service (Railway variables), and
- *   2. run this script against the production database:
- *        railway run --service <web service> pnpm --filter @routeiq/web exec tsx prisma/grant-platform-admin.ts <email>
- *        railway run --service <web service> pnpm --filter @routeiq/web exec tsx prisma/grant-platform-admin.ts <email> --revoke
+ *   2. run this script from the owner's machine against the production database, through the
+ *      Postgres public URL (DATABASE_PUBLIC_URL; postgres.railway.internal only resolves inside
+ *      Railway), after a backup:
+ *        DATABASE_URL='<public url>' pnpm --filter @routeiq/web exec tsx prisma/grant-platform-admin.ts <email>
+ *        DATABASE_URL='<public url>' pnpm --filter @routeiq/web exec tsx prisma/grant-platform-admin.ts <email> --revoke
+ *      (SUPER_ADMIN_EMAILS in the local environment only drives the reminder it prints.)
  *
  * The session code honours SUPER_ADMIN only while BOTH hold (lib/session-principal.ts), so an env
  * edit alone or a database edit alone grants nothing. The change applies within 30 s.

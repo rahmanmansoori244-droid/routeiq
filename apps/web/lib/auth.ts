@@ -103,7 +103,7 @@ export async function hashPassword(plain: string) {
   return bcrypt.hash(plain, 12);
 }
 
-/** True when the email is in SUPER_ADMIN_EMAILS. On its own this grants nothing: see scripts/grant-platform-admin.ts. */
+/** True when the email is in SUPER_ADMIN_EMAILS. On its own this grants nothing: see prisma/grant-platform-admin.ts. */
 export function isSuperAdmin(email: string): boolean {
   return isSuperAdminEmail(email);
 }

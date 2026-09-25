@@ -18,7 +18,7 @@ The last column of each table says what this workstream did about the finding. T
 | Latest commit | `d02c44c` 2026-05-12 09:24 +04 "fix: solver uses real road distance via OSRM; …" |
 | Stack | pnpm/turbo monorepo. `apps/web`: Next.js 14.2.35 App Router, Prisma 5.22 on Postgres/PostGIS, NextAuth v5 beta, MapLibre. `apps/solver`: FastAPI + **PyVRP** (OR-Tools was replaced in `4c40e12`). `packages/shared-types` holds the wire types. |
 | Deployment | Railway config for 2 services (`apps/web/railway.json`, `apps/solver/railway.json`). The old URL `web-production-a9d04.up.railway.app` still resolves but answers **HTTP 502 "Application failed to respond"**: the service exists but is not running. Nothing was changed on Railway. |
-| Secrets in git | Full-history scan of 47 commits and all refs. **No real secrets committed.** Only placeholders and local/CI test values. `prisma/seed-nmwc.ts` holds a hard-coded demo admin password; rotate it if production was ever seeded with it. |
+| Secrets in git | Full-history scan of 47 commits and all refs. **No real secrets committed.** Only placeholders and local/CI test values. `prisma/seed-nmwc.ts` holds a hard-coded demo admin password; rotate it if production was ever seeded with it. (Deleted in stabilization PR1; see `docs/SECURITY.md`.) |
 | CI | All 30 recorded GitHub Actions runs failed at `pnpm/action-setup` ("Multiple versions of pnpm specified"). The web job (typecheck, lint, tests, build) has **never run in CI**. The solver pytest job passed. |
 
 ## Baseline test results (before any change)

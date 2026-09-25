@@ -50,7 +50,7 @@ On the **solver** service, set the variable below, then deploy the staged change
 OSRM_URL=http://routeiq-osrm.railway.internal:5000
 ```
 
-> The solver on `main` before PR #25 already reads `OSRM_URL`, but it **defaults to the public demo server** when the variable is unset. Setting it therefore also stops customer coordinates from going to `router.project-osrm.org`.
+> The solver on `main` before PR #25 already reads `OSRM_URL`, but it **defaults to the public demo server** when the variable is unset. Setting it therefore also stops customer coordinates from going to `router.project-osrm.org`. Since stabilization PR1 no RouteIQ code has a public default any more (the web's legacy Map tab and the solver's legacy `distance.py` included): unset means estimated distances or straight lines.
 
 Costs are usage-based: roughly 1 GB RAM running continuously plus a monthly rebuild. Check the Railway dashboard; it's usually well under 10 USD/month.
 

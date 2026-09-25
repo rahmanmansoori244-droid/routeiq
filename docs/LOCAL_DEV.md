@@ -25,8 +25,10 @@ Use `SEED_PASSWORD=...` to choose the demo password instead of a random one. Nev
 
 ## Run
 ```bash
-# solver (OSRM_URL: self-hosted in production; the public demo server is OK for a local demo only)
-cd apps/solver && SOLVER_TOKEN=... OSRM_URL=https://router.project-osrm.org .venv/Scripts/python -m uvicorn main:app --port 8000
+# solver: estimated (Haversine) distances without OSRM_URL; for road distances run the OSRM image
+# locally (infra/osrm, docs/OSRM_SETUP.md) and add OSRM_URL=http://127.0.0.1:5000.
+# Never use a public OSRM demo server: it would receive real customer coordinates from .dev data.
+cd apps/solver && SOLVER_TOKEN=... .venv/Scripts/python -m uvicorn main:app --port 8000
 # web
 pnpm --filter @routeiq/web dev
 ```
@@ -36,7 +38,7 @@ Open http://localhost:3000/t/nmwc/dispatch.
 ```bash
 cd apps/solver && .venv/Scripts/python -m pytest tests -q        # solver: legacy + dispatch engine
 pnpm --filter @routeiq/web test:unit                             # pure libs + tenant isolation (needs DB)
-RATE_LIMITS_DISABLED=1 pnpm --filter @routeiq/web dev            # then, in another shell:
+RATE_LIMITS_DISABLED=1 pnpm --filter @routeiq/web dev            # then, in another shell (sign-up must stay open, the default):
 pnpm --filter @routeiq/web test:integration                      # HTTP suites incl. dispatch-mvp.spec.ts
 pnpm --filter @routeiq/web exec tsc --noEmit && pnpm --filter @routeiq/web exec next lint --max-warnings 0
 ```
