@@ -464,14 +464,19 @@ describe('WhatsApp safeguards and driver clashes', () => {
     expect(driverChangeText(note({ reason: 'TRIP_GONE', to: null, other: null, departMin: 480, returnMin: 600 }))).toBe(
       'Driver picked by hand, not in this plan: you picked Ali for T02 · L1 (08:00–10:00), and this plan has no such trip. If a later plan has that trip again, pick the driver again.',
     );
-    // A note on a trip of the plan is shown while the trip has the driver the plan gave it, filled in.
-    const load = { truckId: 'T2', loadNo: 1, driverId: 'SAM', driverHandSet: false };
+    // A note on a trip of the plan is shown while the trip has the driver the plan gave it and the
+    // dispatcher has not set that trip's driver (`driverSet`: the row's marker).
+    const load = { truckId: 'T2', loadNo: 1, driverId: 'SAM', driverSet: false };
     expect(driverChangeWarnings([note({})], [load])).toHaveLength(1);
     expect(driverChangeWarnings([note({ to: null })], [{ ...load, driverId: null }])).toHaveLength(1);
     // The dispatcher set the trip's driver: another one, "No driver", or the same one with Keep.
-    expect(driverChangeWarnings([note({})], [{ ...load, driverId: 'ALI', driverHandSet: true }])).toEqual([]);
-    expect(driverChangeWarnings([note({})], [{ ...load, driverId: null }])).toEqual([]);
-    expect(driverChangeWarnings([note({})], [{ ...load, driverHandSet: true }])).toEqual([]);
+    expect(driverChangeWarnings([note({})], [{ ...load, driverId: 'ALI', driverSet: true }])).toEqual([]);
+    expect(driverChangeWarnings([note({})], [{ ...load, driverId: null, driverSet: true }])).toEqual([]);
+    expect(driverChangeWarnings([note({})], [{ ...load, driverSet: true }])).toEqual([]);
+    // A note that left the trip without a driver ends for good once the dispatcher sets that trip's
+    // driver: after Bob and then "No driver" the row has no driver again, but carries the marker.
+    expect(driverChangeWarnings([note({ to: null })], [{ ...load, driverId: 'BOB', driverSet: true }])).toEqual([]);
+    expect(driverChangeWarnings([note({ to: null })], [{ ...load, driverId: null, driverSet: true }])).toEqual([]);
     // TRIP_GONE: shown while the plan has no load for that truck and trip.
     const gone = note({ reason: 'TRIP_GONE', to: null, other: null });
     expect(driverChangeWarnings([gone], [])).toHaveLength(1);

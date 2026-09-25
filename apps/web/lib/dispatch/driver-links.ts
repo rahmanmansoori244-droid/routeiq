@@ -205,21 +205,22 @@ export function driverChangeText(c: DriverChangeNote): string {
 
 /**
  * The plan warnings for the applied plan's driver notes (summary `driverChanges`). A note on a trip
- * of the plan is listed until the dispatcher sets that trip's driver: any driver, or the same one
- * with Keep (`driverHandSet`, which the plan detail reads from the load rows). A TRIP_GONE note is
- * listed while the plan has no load for that truck and trip. A note without a driver it lost (only
- * written before the simplified driver rules, when filling an empty trip was a note) is left out.
+ * of the plan is listed until the dispatcher sets that trip's driver, and never again after: any
+ * driver, the same one with Keep, or "No driver" (`driverSet`: the load row's marker, which the plan
+ * detail reads with driverSetByDispatcher). A TRIP_GONE note is listed while the plan has no load
+ * for that truck and trip. A note without a driver it lost (only written before the simplified
+ * driver rules, when filling an empty trip was a note) is left out.
  */
 export function driverChangeWarnings(
   changes: readonly DriverChangeNote[],
-  loads: readonly { truckId: string; loadNo: number; driverId: string | null; driverHandSet: boolean }[],
+  loads: readonly { truckId: string; loadNo: number; driverId: string | null; driverSet: boolean }[],
 ): string[] {
   return changes
     .filter((c) => {
       if (!c.from) return false;
       const trip = loads.filter((l) => l.truckId === c.truckId && l.loadNo === c.loadNo);
       if (c.reason === 'TRIP_GONE') return trip.length === 0;
-      return trip.some((l) => l.driverId === (c.to?.id ?? null) && !l.driverHandSet);
+      return trip.some((l) => l.driverId === (c.to?.id ?? null) && !l.driverSet);
     })
     .map(driverChangeText);
 }

@@ -9,7 +9,7 @@ import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { isSupersededRun } from './plan-status';
-import { isCarriedFrozen, isHandSetDriver } from './load-state';
+import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
@@ -65,8 +65,8 @@ export interface DetailLoad {
   driverPhone: string | null;
   /**
    * The dispatcher chose this driver by hand (the row's marker, isHandSetDriver; set by the Driver
-   * list and by Keep): a re-plan or "Use instead" keeps it on this truck and trip, and a driver note
-   * on this trip ends. False: RouteIQ filled it in.
+   * list and by Keep): a re-plan or "Use instead" keeps it on this truck and trip ("picked by hand").
+   * False: RouteIQ filled it in, or there is no driver.
    */
   driverHandSet: boolean;
   loadNo: number;
@@ -398,9 +398,12 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         ? [
             ...new Set([
               ...outdated,
-              // A driver the applied plan changed is never silent. The loads carry driverHandSet (read
-              // from each row's marker), so a note ends once the dispatcher sets that trip's driver.
-              ...driverChangeWarnings((run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [], detailLoads),
+              // A driver the applied plan changed is never silent. Read with each row's marker, so a
+              // note ends once the dispatcher sets that trip's driver (a driver, Keep or "No driver").
+              ...driverChangeWarnings(
+                (run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [],
+                loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverSet: driverSetByDispatcher(l) })),
+              ),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),
             ]),

@@ -8,6 +8,7 @@ import {
   checkTransition,
   driverClashes,
   driverPickLink,
+  driverSetByDispatcher,
   FROZEN,
   isFrozen,
   isDriverKeep,
@@ -247,7 +248,12 @@ describe('planDrivers pass 1: a hand-set driver stays on its truck and trip', ()
     expect(isHandSetDriver({ driverId: 'ALI', driverSetById: null, driverSetAt: AT })).toBe(true);
     expect(isHandSetDriver({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: null })).toBe(true);
     expect(isHandSetDriver({ driverId: 'ALI', driverSetById: null, driverSetAt: null })).toBe(false);
-    expect(isHandSetDriver({ driverId: null, driverSetById: 'u1', driverSetAt: AT })).toBe(false);
+    expect(isHandSetDriver({ driverId: null, driverSetById: 'u1', driverSetAt: AT })).toBe(false); // "No driver": nothing to keep
+    // The dispatcher set the trip's driver (a driver, Keep or "No driver"): either column, whatever the driver.
+    expect(driverSetByDispatcher({ driverSetById: null, driverSetAt: AT })).toBe(true);
+    expect(driverSetByDispatcher({ driverSetById: 'u1', driverSetAt: null })).toBe(true);
+    expect(driverSetByDispatcher({ driverSetById: null, driverSetAt: null })).toBe(false);
+    expect(driverSetByDispatcher({})).toBe(false);
   });
 
   it('a hand-set driver who is no longer active is not kept: pass 2 fills the trip, without the marker, and an INACTIVE note says why', () => {
@@ -285,6 +291,24 @@ describe('planDrivers pass 2: drivers RouteIQ fills in', () => {
     }
   });
 
+  it("a tie keeps the optimizer's order (stable): the trip listed first goes first", () => {
+    // No evidence (the first optimization of a day): both trucks default to Ali, at overlapping times.
+    const t02 = trip('T02', 1, 570, 660, 'ALI');
+    const t03 = trip('T03', 1, 600, 720, 'ALI');
+    expect(ids(planDrivers([t02, t03], [], USABLE))).toEqual({ 'T02:1': 'ALI', 'T03:1': null });
+    expect(ids(planDrivers([t03, t02], [], USABLE))).toEqual({ 'T02:1': null, 'T03:1': 'ALI' });
+    // Ali filled in on both; the plan moves both by 60 min, onto each other's hours: the one listed first keeps Ali.
+    const evidence = [was('T02', 1, 'ALI', 480, 600), was('T03', 1, 'ALI', 660, 780)];
+    const a = trip('T02', 1, 540, 660, null);
+    const b = trip('T03', 1, 600, 720, 'SAM');
+    const t02First = planDrivers([a, b], evidence, USABLE);
+    expect(ids(t02First)).toEqual({ 'T02:1': 'ALI', 'T03:1': 'SAM' });
+    expect(t02First.notes).toEqual([note('T03:1', 600, 720, 'ALI', 'SAM', 'CLASH', { truckId: 'T02', loadNo: 1 })]);
+    const t03First = planDrivers([b, a], evidence, USABLE);
+    expect(ids(t03First)).toEqual({ 'T02:1': null, 'T03:1': 'ALI' });
+    expect(t03First.notes).toEqual([note('T02:1', 540, 660, 'ALI', null, 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+  });
+
   it("candidates in order: (a) the trip's own driver, (b) the driver of the truck's nearest trip, (c) the truck's default", () => {
     // (a) beats (b) and (c).
     const own = planDrivers([trip('T02', 1, 480, 600, 'BOB'), trip('T02', 2, 700, 800, 'BOB')], [was('T02', 1, 'SAM', 480, 600), was('T02', 2, 'ALI', 700, 800)], USABLE);
@@ -318,6 +342,11 @@ describe('planDrivers pass 2: drivers RouteIQ fills in', () => {
     const r = planDrivers([trip('T03', 1, 480, 600, 'SAM'), trip('T04', 1, 480, 600, 'BOB'), trip('T02', 1, 480, 600)], [was('T03', 1, null, 480, 600), was('T02', 1, 'ALI', 480, 600)], USABLE);
     expect(ids(r)).toEqual({ 'T03:1': 'SAM', 'T04:1': 'BOB', 'T02:1': 'ALI' });
     expect(r.notes).toEqual([]);
+    // "No driver" chosen by the dispatcher (the row carries the marker, without a driver): not a
+    // hand-set driver, so the trip is filled in like any other - without the marker, and no note.
+    const cleared = planDrivers([trip('T03', 1, 480, 600, 'SAM')], [was('T03', 1, null, 480, 600, HAND)], USABLE);
+    expect(cleared.drivers.get('T03:1')).toEqual({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
+    expect(cleared.notes).toEqual([]);
   });
 
   it('a filled-in driver who is no longer active: the next candidate, and an INACTIVE note', () => {
@@ -357,6 +386,7 @@ describe('planDrivers: frozen loads, one truck, trips gone, first optimization',
       was('T03', 1, 'BOB', 480, 600, HAND),
       was('T02', 2, 'SAM', 620, 740),
       was('T04', 1, null, 480, 600),
+      was('T06', 1, null, 480, 600, HAND), // the dispatcher's "No driver"
       was('T01', 1, 'SAM', 360, 470, { status: 'LOCKED', ...HAND }),
     ];
     for (const usable of [USABLE, new Set(['ALI', 'SAM'])]) {

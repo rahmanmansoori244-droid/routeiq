@@ -786,9 +786,10 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
 
   // Drivers (rules: planDrivers in load-state.ts). The evidence is this version's loads as they are
   // now, read before its PLANNED loads are deleted: for the re-plan job, the copies createNextVersion
-  // made of the previous version's loads; for "Use instead", the loads of the option in use - so both
-  // read the same kind of evidence. Frozen loads keep their drivers. A hand-set driver (the row's
-  // marker) stays on its truck and trip with the marker, even over an overlap (the yellow clash
+  // made of the previous version's loads (with any driver the dispatcher set on a copy before the job
+  // started), never the previous version's own loads; for "Use instead", the loads of the option in
+  // use - so both read the same kind of evidence. Frozen loads keep their drivers. A hand-set driver
+  // (the row's marker) stays on its truck and trip with the marker, even over an overlap (the yellow clash
   // warning shows it). Every other trip, the one that moved least first, gets its own driver, the
   // driver of the truck's nearest trip or the truck's default driver - whichever is active and free
   // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
@@ -1541,11 +1542,13 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   if (driverId && !driver) throw new PlanError('Driver not found.', 400);
   if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
   const before = load.driverId ? await tx.driver.findFirst({ where: { id: load.driverId, tenantId }, select: { name: true } }) : null;
-  // The dispatcher's own choice: marked, so a re-plan or "Use instead" keeps it on this truck and
-  // trip (planDrivers, pass 1) and a driver note on this trip ends. "No driver" clears the marker.
+  // The dispatcher's own choice, marked with who and when - "No driver" too - so a driver note on
+  // this trip ends for good (driverChangeWarnings). A driver so marked is hand-set: a re-plan or
+  // "Use instead" keeps it on this truck and trip (planDrivers, pass 1). "No driver" is not (there
+  // is no driver to keep): the next plan fills that trip in like any other.
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { driverId, driverSetById: driverId ? user.id : null, driverSetAt: driverId ? new Date() : null },
+    data: { driverId, driverSetById: user.id, driverSetAt: new Date() },
   });
   await tx.auditLog.create({
     data: {

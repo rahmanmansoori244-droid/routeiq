@@ -99,13 +99,22 @@ export function canStepBack(statuses: readonly string[]): boolean {
 }
 
 /**
- * The dispatcher chose this load's driver by hand: PlanLoad.driverSetById / driverSetAt, set by the
- * dispatcher's driver change and by Keep (setDriverTx), and carried by a re-plan or "Use instead" to
- * the same truck and trip (planDrivers, pass 1). Either column counts: the user id is cleared when
- * that user is deleted, the time stays. Neither: RouteIQ filled the driver in.
+ * The dispatcher set this load's driver: PlanLoad.driverSetById / driverSetAt (who, when), written
+ * by every driver change in the Driver list - "No driver" included - and by Keep (setDriverTx).
+ * Either column counts: the user id is cleared when that user is deleted, the time stays. A driver
+ * note on this trip then ends (driverChangeWarnings). Neither: RouteIQ filled the trip in.
+ */
+export function driverSetByDispatcher(l: { driverSetById?: string | null; driverSetAt?: Date | null }): boolean {
+  return l.driverSetAt != null || l.driverSetById != null;
+}
+
+/**
+ * The dispatcher chose this load's driver by hand: a driver, and the dispatcher set it
+ * (driverSetByDispatcher). A re-plan or "Use instead" carries it, with the marker, to the same
+ * truck and trip (planDrivers, pass 1). "No driver" is never hand-set: there is no driver to keep.
  */
 export function isHandSetDriver(l: { driverId: string | null; driverSetById?: string | null; driverSetAt?: Date | null }): boolean {
-  return l.driverId !== null && (l.driverSetAt != null || l.driverSetById != null);
+  return l.driverId !== null && driverSetByDispatcher(l);
 }
 
 /** A load's driver and planned time away from the depot (minutes from midnight). */
@@ -198,7 +207,8 @@ const NO_DRIVER: TripDriver = { driverId: null, driverSetById: null, driverSetAt
  *   the marker, even when the new times overlap another trip of that driver (the yellow clash
  *   warning shows it). A driver no longer active is not kept: the trip goes to pass 2, with a note.
  * Pass 2: every other trip, the one that moved least first (|new departure - evidence departure|;
- *   stable; trips without an evidence load last), gets the first of these that is active and not on
+ *   trips without an evidence load last; stable: a tie keeps the order of `trips`, which is the
+ *   optimizer's - truck code, then trip), gets the first of these that is active and not on
  *   an overlapping trip already given out (frozen, hand-set, or earlier in pass 2):
  *   (a) its evidence load's driver, (b) the driver of the truck's nearest trip in time in the plan
  *   (frozen or given a driver already), (c) the truck's default driver. None of them: no driver.

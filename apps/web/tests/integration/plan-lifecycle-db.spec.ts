@@ -462,6 +462,12 @@ describe('copy-forward re-plan and drivers (the simplified driver rules)', () =>
     const after = (await getPlanDetail(tenantId, retimed.runId))!;
     expect(after.loads.find((l) => l.id === retimed.id)!.driverHandSet).toBe(true);
     expect(after.warnings.filter(isNote)).toEqual([]);
+    // Then "No driver": marked as the dispatcher's (who, when) but not hand-set, and the note does not come back.
+    await updateLoad(tenantId, retimed.runId, retimed.id, { driverId: null }, user(), everyRole);
+    expect(await prisma.planLoad.findUniqueOrThrow({ where: { id: retimed.id } })).toMatchObject({ driverId: null, driverSetById: userId });
+    const cleared = (await getPlanDetail(tenantId, retimed.runId))!;
+    expect(cleared.loads.find((l) => l.id === retimed.id)!.driverHandSet).toBe(false);
+    expect(cleared.warnings.filter(isNote)).toEqual([]);
   });
 
   it('a driver the dispatcher set by hand stays on the re-timed trip, with its marker, and the overlap is the yellow warning', async () => {
