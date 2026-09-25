@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { checkTransition, isFrozen, type LoadStatusName } from './load-state';
+import { checkTransition, isFrozen, ON_ROAD, pickLoadDriver, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -554,6 +554,18 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     throw new PlanError('Loads were locked/unlocked after this optimization. Optimize again before applying.', 409);
   }
 
+  // Drivers stay with their truck across re-plans: the driver set on the truck's loads in this
+  // version (read before its PLANNED loads are deleted), else in the parent version, else the
+  // truck's default driver. Only active drivers of this tenant.
+  const usableDrivers = new Set((await tx.driver.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((x) => x.id));
+  const driverSel = { truckId: true, loadNo: true, driverId: true } as const;
+  const driversNow = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
+  const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
+  const driverFor = (truckId: string, loadNo: number, defaultDriverId: string | null) =>
+    pickLoadDriver(driversNow, truckId, loadNo, usableDrivers) ??
+    pickLoadDriver(driversParent, truckId, loadNo, usableDrivers) ??
+    (defaultDriverId && usableDrivers.has(defaultDriverId) ? defaultDriverId : null);
+
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
@@ -573,7 +585,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         truckId: ld.truck_id,
         loadNo: ld.load_no,
         status: 'PLANNED',
-        driverId: t.defaultDriverId,
+        driverId: driverFor(ld.truck_id, ld.load_no, t.defaultDriverId),
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -939,6 +951,40 @@ export async function changeLoadStatus(
       },
     });
     await refreshPlanFacts(tx, tenantId, runId);
+    return updated;
+  });
+}
+
+/**
+ * Assign (or clear) the driver of one load. A driver is who drives, not what is planned: it
+ * does not touch the plan facts. It can change until the load leaves the depot.
+ */
+export async function setLoadDriver(tenantId: string, runId: string, loadId: string, driverId: string | null, user: { id: string }) {
+  return prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+    const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId } });
+    if (!run) throw new PlanError('Plan not found.', 404);
+    if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded. Open the latest version.', 409);
+    if (run.status === 'OPTIMIZING') throw new PlanError('Wait for the running optimization to finish.', 409);
+    const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId }, include: { driver: { select: { name: true } } } });
+    if (!load) throw new PlanError('Load not found.', 404);
+    if (ON_ROAD.has(load.status)) throw new PlanError('Driver cannot change after dispatch.', 409);
+    const driver = driverId ? await tx.driver.findFirst({ where: { id: driverId, tenantId } }) : null;
+    if (driverId && !driver) throw new PlanError('Driver not found.', 400);
+    if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
+    if (load.driverId === driverId) return load;
+    const updated = await tx.planLoad.update({ where: { id: loadId }, data: { driverId } });
+    await tx.auditLog.create({
+      data: {
+        tenantId,
+        userId: user.id,
+        action: 'LOAD_DRIVER_SET',
+        entity: 'PlanLoad',
+        entityId: loadId,
+        beforeJson: { driverId: load.driverId, driverName: load.driver?.name ?? null } as never,
+        afterJson: { driverId, driverName: driver?.name ?? null, runId, truckId: load.truckId, loadNo: load.loadNo } as never,
+      },
+    });
     return updated;
   });
 }

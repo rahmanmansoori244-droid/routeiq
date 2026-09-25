@@ -2,7 +2,7 @@
  * Load lifecycle: allowed transitions, per-truck ordering (Load 1 before Load 2) and roles.
  */
 import { describe, expect, it } from 'vitest';
-import { checkTransition, FROZEN, isFrozen, ON_ROAD, type LoadRef, type LoadStatusName } from '@/lib/dispatch/load-state';
+import { checkTransition, FROZEN, isFrozen, ON_ROAD, pickLoadDriver, type LoadRef, type LoadStatusName } from '@/lib/dispatch/load-state';
 
 const L = (loadNo: number, status: LoadStatusName, id = `L${loadNo}`): LoadRef => ({ id, loadNo, status });
 const ALL: LoadStatusName[] = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
@@ -129,5 +129,30 @@ describe('frozen / on-road sets', () => {
 
   it('only DISPATCHED and COMPLETED are on the road', () => {
     expect([...ON_ROAD].sort()).toEqual(['COMPLETED', 'DISPATCHED']);
+  });
+});
+
+describe('pickLoadDriver - drivers stay with their truck across re-plans', () => {
+  const usable = new Set(['A', 'B', 'C']);
+  const loads = [
+    { truckId: 't1', loadNo: 1, driverId: 'A' },
+    { truckId: 't1', loadNo: 3, driverId: 'C' },
+    { truckId: 't2', loadNo: 1, driverId: 'B' },
+    { truckId: 't2', loadNo: 2, driverId: null },
+  ];
+
+  it('takes the same trip first, else the nearest trip of the same truck (earlier on a tie)', () => {
+    expect(pickLoadDriver(loads, 't1', 1, usable)).toBe('A');
+    expect(pickLoadDriver(loads, 't1', 3, usable)).toBe('C');
+    expect(pickLoadDriver(loads, 't1', 2, usable)).toBe('A'); // Load 1 and 3 equally near
+    expect(pickLoadDriver(loads, 't1', 4, usable)).toBe('C');
+    expect(pickLoadDriver(loads, 't2', 2, usable)).toBe('B'); // Load 2 had none: Load 1's driver
+  });
+
+  it('never picks another truck, an inactive driver or nobody', () => {
+    expect(pickLoadDriver(loads, 't3', 1, usable)).toBeNull();
+    expect(pickLoadDriver(loads, 't1', 1, new Set(['C']))).toBe('C');
+    expect(pickLoadDriver(loads, 't2', 1, new Set(['A']))).toBeNull();
+    expect(pickLoadDriver([], 't1', 1, usable)).toBeNull();
   });
 });

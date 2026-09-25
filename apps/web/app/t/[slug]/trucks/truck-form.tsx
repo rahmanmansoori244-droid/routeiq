@@ -28,11 +28,17 @@ export interface TruckRow {
   capacityVolumeL: number;
   fixedCostPerDay: number;
   costPerKm: number;
+  defaultDriverId: string | null;
   active: boolean;
   depot?: { id: string; code: string; name: string };
 }
 
 export interface DepotOption { id: string; code: string; name: string }
+
+export interface DriverOption { id: string; code: string; name: string; active: boolean }
+
+// Radix Select items cannot have an empty value.
+const NO_DRIVER = '__none__';
 
 interface Props {
   open: boolean;
@@ -40,6 +46,7 @@ interface Props {
   mode: 'create' | 'edit';
   truck?: TruckRow;
   depots: DepotOption[];
+  drivers: DriverOption[];
   primaryUnit?: CapacityUnit;
   currency?: string;
   onSaved: () => void;
@@ -54,6 +61,7 @@ interface FormState {
   capacityVolumeL: string;
   fixedCostPerDay: string;
   costPerKm: string;
+  defaultDriverId: string;
   active: boolean;
 }
 
@@ -67,6 +75,7 @@ function buildBlank(depots: DepotOption[]): FormState {
     capacityVolumeL: '8000',
     fixedCostPerDay: '20',
     costPerKm: '0.15',
+    defaultDriverId: NO_DRIVER,
     active: true,
   };
 }
@@ -77,12 +86,17 @@ export function TruckFormDialog({
   mode,
   truck,
   depots,
+  drivers,
   primaryUnit = 'CASES',
   currency = '',
   onSaved,
 }: Props) {
   const [form, setForm] = useState<FormState>(() => buildBlank(depots));
   const [pending, startTransition] = useTransition();
+
+  // Active drivers, plus the truck's current one if it was deactivated since (so it still shows).
+  const current = truck?.defaultDriverId ?? null;
+  const driverOptions = drivers.filter((d) => d.active || (mode === 'edit' && d.id === current));
 
   useEffect(() => {
     if (open) {
@@ -96,6 +110,7 @@ export function TruckFormDialog({
           capacityVolumeL: String(truck.capacityVolumeL),
           fixedCostPerDay: String(truck.fixedCostPerDay),
           costPerKm: String(truck.costPerKm),
+          defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
           active: truck.active,
         });
       } else {
@@ -115,6 +130,7 @@ export function TruckFormDialog({
       capacityVolumeL: Number(form.capacityVolumeL),
       fixedCostPerDay: Number(form.fixedCostPerDay),
       costPerKm: Number(form.costPerKm),
+      defaultDriverId: form.defaultDriverId === NO_DRIVER ? null : form.defaultDriverId,
       active: form.active,
     };
     startTransition(async () => {
@@ -242,6 +258,23 @@ export function TruckFormDialog({
                 required
               />
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="defaultDriver">Default driver</Label>
+            <Select value={form.defaultDriverId} onValueChange={(v) => setForm({ ...form, defaultDriverId: v })}>
+              <SelectTrigger id="defaultDriver">
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DRIVER}>None</SelectItem>
+                {driverOptions.map((d) => (
+                  <SelectItem key={d.id} value={d.id}>
+                    {d.name} ({d.code}){d.active ? '' : ' - inactive'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">New plans put this driver on the truck&apos;s loads. You can still change the driver per load on the plan.</p>
           </div>
           <div className="flex items-center justify-between rounded-md border px-3 py-2">
             <Label htmlFor="active" className="text-sm">

@@ -70,3 +70,20 @@ export function checkTransition(load: LoadRef, sameTruckLoads: LoadRef[], to: Lo
   const role = to === 'DISPATCHED' || to === 'COMPLETED' ? 'SUPERVISOR' : 'PLANNER';
   return { ok: true, role };
 }
+
+export interface DriverOnLoad {
+  truckId: string;
+  loadNo: number;
+  driverId: string | null;
+}
+
+/**
+ * Driver for a (re-)planned load of `truckId`, taken from existing loads: the same trip if it
+ * had a driver, else the nearest trip of that truck (the earlier one on a tie - the driver who
+ * did Load 1 usually takes Load 2). Only drivers in `usable` (active, this tenant) count.
+ */
+export function pickLoadDriver(loads: DriverOnLoad[], truckId: string, loadNo: number, usable: ReadonlySet<string>): string | null {
+  const withDriver = loads.filter((l) => l.truckId === truckId && l.driverId !== null && usable.has(l.driverId));
+  withDriver.sort((a, b) => Math.abs(a.loadNo - loadNo) - Math.abs(b.loadNo - loadNo) || a.loadNo - b.loadNo);
+  return withDriver[0]?.driverId ?? null;
+}

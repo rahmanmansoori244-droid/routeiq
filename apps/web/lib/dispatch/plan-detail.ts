@@ -39,6 +39,12 @@ export interface DetailStop {
   salesOrders: string[];
   skus: { productCode: string; productName: string; cases: number; weightKg: number }[];
   mapsUrl: string | null;
+  /** Customer master address (free text), for the driver sheet. */
+  address: string | null;
+  /** Notes on the orders of this stop (from the order file / late-order entry). */
+  notes: string[];
+  /** Customer master access / receiving notes (gate, forklift, contact...). */
+  accessNotes: string | null;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
@@ -50,7 +56,9 @@ export interface DetailLoad {
   truckCode: string;
   truckCapacityCases: number;
   truckPayloadKg: number;
+  driverId: string | null;
   driverName: string | null;
+  driverPhone: string | null;
   loadNo: number;
   status: string;
   carried: boolean;
@@ -146,7 +154,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
       truck: { select: { code: true, capacityCases: true, capacityWeightKg: true } },
-      driver: { select: { name: true } },
+      driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
         include: {
@@ -185,6 +193,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         s.salesOrders = [...new Set([...s.salesOrders, ...salesOrders])];
         s.skus = aggregateSkus([...s.skus, ...skus]);
         s.late = s.late || o.isLate;
+        if (o.notes && !s.notes.includes(o.notes)) s.notes.push(o.notes);
         s.priority = Math.min(s.priority, priorityOf(o.id, o.priority));
         continue;
       }
@@ -217,6 +226,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         salesOrders: [...new Set(salesOrders)],
         skus: aggregateSkus(skus),
         mapsUrl: c.lat !== null && c.lng !== null ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}` : null,
+        address: c.address,
+        notes: o.notes ? [o.notes] : [],
+        accessNotes: c.accessNotes,
         split: null,
       });
     }
@@ -231,7 +243,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       truckCode: l.truck.code,
       truckCapacityCases: l.truck.capacityCases,
       truckPayloadKg: l.truck.capacityWeightKg,
+      driverId: l.driverId,
       driverName: l.driver?.name ?? null,
+      driverPhone: l.driver?.phone ?? null,
       loadNo: l.loadNo,
       status: l.status,
       carried: !!l.carriedFromLoadId,

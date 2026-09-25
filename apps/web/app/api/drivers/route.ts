@@ -3,7 +3,11 @@ import { driverSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 
 export const GET = withTenantApi(async (_req, { db }) => {
-  const drivers = await db.driver.findMany({ orderBy: [{ active: 'desc' }, { code: 'asc' }] });
+  // Every role reads this list (the plan screen's driver picker): never send the PIN hash.
+  const drivers = await db.driver.findMany({
+    orderBy: [{ active: 'desc' }, { code: 'asc' }],
+    select: { id: true, tenantId: true, code: true, name: true, phone: true, active: true },
+  });
   return ok(drivers);
 });
 

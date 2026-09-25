@@ -3,11 +3,12 @@
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { tripsByTruck, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { api, durH, hhmm, REASON_TEXT } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
@@ -21,6 +22,11 @@ const STATUS_VARIANT: Record<string, 'outline' | 'secondary' | 'warning' | 'succ
   DISPATCHED: 'success',
   COMPLETED: 'default',
 };
+
+/** Once a load is out, who drove it is history. */
+const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
+
+interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean }
 
 interface Props {
   slug: string;
@@ -39,6 +45,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
   const [busy, setBusy] = useState<string | null>(null);
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
+  const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
   const load = useCallback(async () => {
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
@@ -52,6 +59,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void api<DriverOption[]>('/api/drivers').then((r) => {
+      if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
+    });
+  }, []);
 
   useEffect(() => {
     if (!d) return;
@@ -69,6 +82,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     return m;
   }, [d]);
 
+  const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
+
   async function setStatus(l: DetailLoad, status: string) {
     setBusy(l.id);
     const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
@@ -80,6 +95,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
     await load();
     onChanged?.();
+  }
+
+  async function setDriver(l: DetailLoad, driverId: string | null) {
+    setBusy(l.id);
+    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
+    setBusy(null);
+    if (!r.ok) {
+      toast.error(r.error ?? 'Could not set the driver.');
+      return;
+    }
+    const name = drivers.find((x) => x.id === driverId)?.name;
+    toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
+    await load();
   }
 
   async function lockAll() {
@@ -151,11 +179,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
         </div>
         <div className="flex flex-wrap gap-2">
           {d.loads.length ? (
-            <Button asChild variant="outline" size="sm">
-              <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
-                <Download className="mr-1 h-4 w-4" /> Export Excel
-              </a>
-            </Button>
+            <>
+              <Button asChild variant="outline" size="sm">
+                <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
+                  <Download className="mr-1 h-4 w-4" /> Export Excel
+                </a>
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <a href={`/api/runs/${runId}/export/pdf`} target="_blank" rel="noreferrer" data-testid="export-driver-pdf" title="One printable sheet per truck load, for the drivers">
+                  <FileText className="mr-1 h-4 w-4" /> Driver sheets (PDF)
+                </a>
+              </Button>
+            </>
           ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>
@@ -298,6 +333,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               <tr>
                 <th className="p-2" />
                 <th className="p-2">Truck · load</th>
+                <th className="p-2">Driver · sheet</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Depart → return</th>
                 <th className="p-2">Stops</th>
@@ -317,7 +353,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
                     <td className="p-2">{open[l.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
-                      {l.driverName ? <span className="block text-xs text-muted-foreground">{l.driverName}</span> : null}
+                    </td>
+                    <td className="p-2" onClick={(e) => e.stopPropagation()}>
+                      <LoadDriver
+                        l={l}
+                        drivers={drivers}
+                        editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
+                        busy={busy === l.id}
+                        onChange={(id) => setDriver(l, id)}
+                        pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
+                        waUrl={whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo))}
+                      />
                     </td>
                     <td className="p-2">
                       <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'} data-testid={`load-status-${l.truckCode}-${l.loadNo}`}>
@@ -343,7 +389,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
                   </tr>
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
-                      <td colSpan={12} className="p-3">
+                      <td colSpan={13} className="p-3">
                         <LoadDetail l={l} depotCode={d.run.depot.code} />
                       </td>
                     </tr>
@@ -352,7 +398,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               ))}
               {d.loads.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="p-4 text-center text-muted-foreground">
+                  <td colSpan={13} className="p-4 text-center text-muted-foreground">
                     No loads yet.
                   </td>
                 </tr>
@@ -463,6 +509,66 @@ function Kpi({ label, value, warn }: { label: string; value: string; warn?: bool
     <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function LoadDriver({
+  l,
+  drivers,
+  editable,
+  busy,
+  onChange,
+  pdfUrl,
+  waUrl,
+}: {
+  l: DetailLoad;
+  drivers: DriverOption[];
+  editable: boolean;
+  busy: boolean;
+  onChange: (driverId: string | null) => void;
+  pdfUrl: string;
+  waUrl: string;
+}) {
+  const tag = `${l.truckCode}-${l.loadNo}`;
+  // Active drivers, plus the one on the load if they were deactivated since.
+  const options = drivers.filter((x) => x.active || x.id === l.driverId);
+  if (l.driverId && !options.some((x) => x.id === l.driverId)) {
+    options.push({ id: l.driverId, code: '', name: l.driverName ?? 'Unknown driver', phone: l.driverPhone, active: false });
+  }
+  return (
+    <div className="space-y-1">
+      <select
+        className="h-7 w-40 rounded-md border bg-background px-1 text-xs disabled:opacity-70"
+        value={l.driverId ?? ''}
+        disabled={!editable || busy}
+        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : undefined}
+        onChange={(e) => onChange(e.target.value || null)}
+        data-testid={`driver-select-${tag}`}
+      >
+        <option value="">No driver</option>
+        {options.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.name}
+            {x.active ? '' : ' (inactive)'}
+          </option>
+        ))}
+      </select>
+      <div className="flex gap-2 text-xs">
+        <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
+          PDF
+        </a>
+        <a
+          className="text-primary underline-offset-2 hover:underline"
+          href={waUrl}
+          target="_blank"
+          rel="noreferrer"
+          data-testid={`load-whatsapp-${tag}`}
+          title={l.driverPhone ? `Send the stops to ${l.driverName ?? 'the driver'} on WhatsApp` : 'No phone for this driver: WhatsApp asks who to send it to'}
+        >
+          WhatsApp
+        </a>
+      </div>
     </div>
   );
 }

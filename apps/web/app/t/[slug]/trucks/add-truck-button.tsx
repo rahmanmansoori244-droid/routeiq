@@ -4,9 +4,9 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { TruckFormDialog, type DepotOption } from './truck-form';
+import { TruckFormDialog, type DepotOption, type DriverOption } from './truck-form';
 
-export function AddTruckButton({ depots, label = 'Add truck' }: { depots: DepotOption[]; label?: string }) {
+export function AddTruckButton({ depots, drivers, label = 'Add truck' }: { depots: DepotOption[]; drivers: DriverOption[]; label?: string }) {
   const [open, setOpen] = useState(false);
   const router = useRouter();
   return (
@@ -20,6 +20,7 @@ export function AddTruckButton({ depots, label = 'Add truck' }: { depots: DepotO
         onOpenChange={setOpen}
         mode="create"
         depots={depots}
+        drivers={drivers}
         onSaved={() => {
           setOpen(false);
           router.refresh();

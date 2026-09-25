@@ -39,6 +39,27 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Loading → Dispatch** when the truck leaves. **Dispatched loads can never be changed.**
 - **Export Excel** gives the master workbook: summary, load plan, one sheet per truck load (manifest + route, printable), SKU loading summary, unserved, reconciliation, assumptions.
 
+## Driver sheets
+Each driver gets one sheet per truck load: the stops in order with ETA and receiving hours, address and notes, cases per product, sales orders, a map link and QR code per stop, and a box for the customer to write the cases received, sign and stamp. The sheet never shows costs, fuel or margins.
+
+**Assign the drivers**
+- Set a **Default driver** for each truck once (menu **Trucks** → edit the truck). Every new plan puts that driver on the truck's loads.
+- On the plan, each load row has a **Driver** list. Pick another driver for that load if someone else drives it (or **No driver**). Only active drivers are listed (add or reactivate them under **Drivers**).
+- A re-plan (late order, **Re-plan**, **Use instead**) keeps the driver you chose for each truck.
+- Once a load is **Dispatched**, its driver can no longer be changed.
+- Save each driver's mobile number with the country code (for example `+968 9123 4567`) so WhatsApp opens the right chat.
+
+**Print or send**
+- **Driver sheets (PDF)** (next to Export Excel) gives the sheets for all loads of the plan. Each load starts on a new page: print the whole pack and hand each driver their own pages.
+- **PDF** on a load row gives only that load's sheet.
+- **WhatsApp** on a load row opens WhatsApp with a short message for that load: truck and trip, departure, each stop in order with ETA, cases and map link, then the route link. If the driver has no mobile number saved, WhatsApp asks you who to send it to. Check the message, then press send.
+- On the sheet, **Route in Google Maps** (and the QR code at the top) opens the whole trip from the depot, stop by stop, and back. Long trips are split into parts, because a Google Maps link takes at most 9 stops between its start and end.
+- A stop without a saved location says **No location - call dispatcher** and is left out of the route link.
+- **Split deliveries** show *Part 1 of 2* and where the other part goes (truck and trip).
+- A sheet is **void if a newer plan version is issued**: after a re-plan, print or send the new sheets for the loads that changed.
+
+The Excel workbook stays the dispatcher and warehouse file (loading manifests, costs, reconciliation); the driver sheets are for the drivers only.
+
 ## Late orders (e.g. a P1 customer calls at 22:15)
 - Click **Late order** on the plan (or upload a small file in step 1), enter the customer, products, priority and reason.
 - Click **Re-plan**. RouteIQ creates **plan version 2**:

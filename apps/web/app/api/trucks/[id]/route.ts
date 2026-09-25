@@ -19,6 +19,13 @@ export const PATCH = (req: Request, { params }: Params) =>
         const depot = await db.depot.findUnique({ where: { id: input.depotId } });
         if (!depot) return fail('Depot not found in this tenant', 400);
       }
+      // A new default driver must be an active driver of this tenant (keeping the current one
+      // is fine even if they were deactivated since - the form sends every field back).
+      if (input.defaultDriverId && input.defaultDriverId !== before.defaultDriverId) {
+        const driver = await db.driver.findUnique({ where: { id: input.defaultDriverId } });
+        if (!driver) return fail('Driver not found in this tenant', 400);
+        if (!driver.active) return fail(`Driver ${driver.name} is inactive`, 400);
+      }
       const after = await db.truck.update({ where: { id: params.id }, data: input });
       await audit({
         tenantId: user.tenantId,
