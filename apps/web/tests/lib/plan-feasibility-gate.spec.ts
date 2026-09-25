@@ -147,6 +147,13 @@ describe('the feasibility gate (F04)', () => {
     expect(audit.afterJson.timing).toMatchObject({ status: 'VERIFIED', ok: true, gate: 'enforce' });
   });
 
+  it('LOCK and LOADING need cases that reconcile, like DISPATCH', async () => {
+    seed();
+    row('runPlan', 'P').reconciliationJson = { ok: false };
+    await expect(updateLoad(T, 'P', 'M1', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'NOT_RECONCILED' } });
+    expect(row('planLoad', 'M1').status).toBe('PLANNED');
+  });
+
   it('never refuses the way back (unlock) or LOADING -> LOCKED', async () => {
     seed(VIOLATED_T1);
     row('planLoad', 'L1').status = 'LOADING';
