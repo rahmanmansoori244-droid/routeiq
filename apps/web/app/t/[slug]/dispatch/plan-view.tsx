@@ -3,11 +3,12 @@
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { api, durH, hhmm, REASON_TEXT } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
@@ -22,6 +23,11 @@ const STATUS_VARIANT: Record<string, 'outline' | 'secondary' | 'warning' | 'succ
   COMPLETED: 'default',
 };
 
+/** Once a load is out, who drove it is history. */
+const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
+
+interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean }
+
 interface Props {
   slug: string;
   runId: string;
@@ -30,28 +36,39 @@ interface Props {
   /** called after anything that changes the day (late order, replan, status) */
   onChanged?: (newRunId?: string) => void;
   showVersionLink?: boolean;
+  /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
+  phoneCountryCode?: string | null;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVersionLink = true }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
   const [d, setD] = useState<PlanDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
+  const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
   const load = useCallback(async () => {
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
-    if (!r.ok || !r.data) setErr(r.error ?? 'Could not load the plan');
-    else {
-      setErr(null);
-      setD(r.data);
+    if (!r.ok || !r.data) {
+      setErr(r.error ?? 'Could not load the plan');
+      return null;
     }
+    setErr(null);
+    setD(r.data);
+    return r.data;
   }, [runId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void api<DriverOption[]>('/api/drivers').then((r) => {
+      if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
+    });
+  }, []);
 
   useEffect(() => {
     if (!d) return;
@@ -69,6 +86,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     return m;
   }, [d]);
 
+  const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
+  const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
+
   async function setStatus(l: DetailLoad, status: string) {
     setBusy(l.id);
     const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
@@ -80,6 +100,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
     await load();
     onChanged?.();
+  }
+
+  async function setDriver(l: DetailLoad, driverId: string | null) {
+    setBusy(l.id);
+    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
+    setBusy(null);
+    if (!r.ok) {
+      toast.error(r.error ?? 'Could not set the driver.');
+      return;
+    }
+    const name = drivers.find((x) => x.id === driverId)?.name;
+    toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
+    const fresh = await load();
+    // Allowed, but a driver cannot be on two trucks at once: say so right away.
+    const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
+    if (clash) toast.warning(clash.text);
   }
 
   async function lockAll() {
@@ -151,11 +187,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
         </div>
         <div className="flex flex-wrap gap-2">
           {d.loads.length ? (
-            <Button asChild variant="outline" size="sm">
-              <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
-                <Download className="mr-1 h-4 w-4" /> Export Excel
-              </a>
-            </Button>
+            <>
+              <Button asChild variant="outline" size="sm">
+                <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
+                  <Download className="mr-1 h-4 w-4" /> Export Excel
+                </a>
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <a href={`/api/runs/${runId}/export/pdf`} target="_blank" rel="noreferrer" data-testid="export-driver-pdf" title="One printable sheet per truck load, for the drivers">
+                  <FileText className="mr-1 h-4 w-4" /> Driver sheets (PDF)
+                </a>
+              </Button>
+            </>
           ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>
@@ -190,6 +233,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
             <p key={w} className="flex gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
               {w}
+            </p>
+          ))}
+        </div>
+      ) : null}
+      {clashes.length && !superseded ? (
+        <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm" data-testid="driver-clashes">
+          {clashes.map((c) => (
+            <p key={c.loadIds.join()} className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              {c.text} Pick another driver for one of them.
             </p>
           ))}
         </div>
@@ -298,6 +351,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               <tr>
                 <th className="p-2" />
                 <th className="p-2">Truck · load</th>
+                <th className="p-2">Driver · sheet</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Depart → return</th>
                 <th className="p-2">Stops</th>
@@ -317,7 +371,27 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
                     <td className="p-2">{open[l.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
-                      {l.driverName ? <span className="block text-xs text-muted-foreground">{l.driverName}</span> : null}
+                    </td>
+                    <td className="p-2" onClick={(e) => e.stopPropagation()}>
+                      <LoadDriver
+                        l={l}
+                        drivers={drivers}
+                        editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
+                        busy={busy === l.id}
+                        onChange={(id) => setDriver(l, id)}
+                        pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
+                        clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
+                        whatsapp={
+                          superseded
+                            ? { off: 'This plan version was replaced: send the trip from the latest version.' }
+                            : running
+                              ? { off: 'Wait for the optimization to finish: the trips are about to change.' }
+                              : {
+                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo), phoneCountryCode),
+                                  number: whatsappNumber(l.driverPhone, phoneCountryCode),
+                                }
+                        }
+                      />
                     </td>
                     <td className="p-2">
                       <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'} data-testid={`load-status-${l.truckCode}-${l.loadNo}`}>
@@ -343,7 +417,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
                   </tr>
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
-                      <td colSpan={12} className="p-3">
+                      <td colSpan={13} className="p-3">
                         <LoadDetail l={l} depotCode={d.run.depot.code} />
                       </td>
                     </tr>
@@ -352,7 +426,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               ))}
               {d.loads.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="p-4 text-center text-muted-foreground">
+                  <td colSpan={13} className="p-4 text-center text-muted-foreground">
                     No loads yet.
                   </td>
                 </tr>
@@ -463,6 +537,75 @@ function Kpi({ label, value, warn }: { label: string; value: string; warn?: bool
     <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function LoadDriver({
+  l,
+  drivers,
+  editable,
+  busy,
+  onChange,
+  pdfUrl,
+  clash,
+  whatsapp,
+}: {
+  l: DetailLoad;
+  drivers: DriverOption[];
+  editable: boolean;
+  busy: boolean;
+  onChange: (driverId: string | null) => void;
+  pdfUrl: string;
+  /** This load's driver is also on another truck at the same time. */
+  clash: string | null;
+  /** The message link, or why there is none (replaced version, optimization running). */
+  whatsapp: { off: string } | { url: string; number: string | null };
+}) {
+  const tag = `${l.truckCode}-${l.loadNo}`;
+  // Active drivers, plus the one on the load if they were deactivated since.
+  const options = drivers.filter((x) => x.active || x.id === l.driverId);
+  if (l.driverId && !options.some((x) => x.id === l.driverId)) {
+    options.push({ id: l.driverId, code: '', name: l.driverName ?? 'Unknown driver', phone: l.driverPhone, active: false });
+  }
+  let waTitle = '';
+  if ('url' in whatsapp) {
+    if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
+    else if (!whatsapp.number) waTitle = `Phone ${l.driverPhone} has no country code: pick the chat in WhatsApp (save the phone as +<country code> <number> under Drivers)`;
+    else waTitle = `Send the stops to ${l.driverName ?? 'the driver'} on WhatsApp (+${whatsapp.number})`;
+  }
+  return (
+    <div className="space-y-1">
+      <select
+        className={`h-7 w-40 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
+        value={l.driverId ?? ''}
+        disabled={!editable || busy}
+        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
+        onChange={(e) => onChange(e.target.value || null)}
+        data-testid={`driver-select-${tag}`}
+      >
+        <option value="">No driver</option>
+        {options.map((x) => (
+          <option key={x.id} value={x.id}>
+            {x.name}
+            {x.active ? '' : ' (inactive)'}
+          </option>
+        ))}
+      </select>
+      <div className="flex gap-2 text-xs">
+        <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
+          PDF
+        </a>
+        {'url' in whatsapp ? (
+          <a className="text-primary underline-offset-2 hover:underline" href={whatsapp.url} target="_blank" rel="noreferrer" data-testid={`load-whatsapp-${tag}`} title={waTitle}>
+            WhatsApp
+          </a>
+        ) : (
+          <span className="cursor-not-allowed text-muted-foreground" aria-disabled="true" data-testid={`load-whatsapp-${tag}`} title={whatsapp.off}>
+            WhatsApp
+          </span>
+        )}
+      </div>
     </div>
   );
 }

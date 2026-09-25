@@ -41,6 +41,8 @@ export const truckSchema = z.object({
   capacityVolumeL: z.coerce.number().min(0).max(100_000),
   fixedCostPerDay: z.coerce.number().min(0).max(100_000),
   costPerKm: z.coerce.number().min(0).max(1_000),
+  // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
+  defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
   active: z.boolean().optional(),
 });
 export type TruckInput = z.infer<typeof truckSchema>;

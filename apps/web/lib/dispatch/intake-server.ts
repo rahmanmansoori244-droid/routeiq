@@ -176,7 +176,8 @@ export async function confirmIntake(
         totalServiceTimeMin: Math.max(cust.avgServiceTimeMin, 1),
         priority: filePriorities.length ? Math.min(...filePriorities) : cust.priority,
         priorityFromFile: filePriorities.length > 0,
-        notes: rows.map((r) => r.notes).filter(Boolean).join(' | ') || null,
+        // Each distinct remark once: the same note usually repeats on every line of an order.
+        notes: [...new Set(rows.map((r) => r.notes?.trim()).filter(Boolean))].join(' | ') || null,
         status: 'VALIDATED',
         uploadBatchId: batch.id,
         uploadedAt: now,

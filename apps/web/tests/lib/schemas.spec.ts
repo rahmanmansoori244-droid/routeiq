@@ -85,6 +85,12 @@ describe('truckSchema', () => {
   it('requires depotId', () => {
     expect(truckSchema.safeParse({ ...valid, depotId: '' }).success).toBe(false);
   });
+  it('takes an optional default driver; blank or null clears it', () => {
+    expect(truckSchema.parse({ ...valid, defaultDriverId: 'drv-1' }).defaultDriverId).toBe('drv-1');
+    expect(truckSchema.parse({ ...valid, defaultDriverId: '' }).defaultDriverId).toBeNull();
+    expect(truckSchema.parse({ ...valid, defaultDriverId: null }).defaultDriverId).toBeNull();
+    expect('defaultDriverId' in truckSchema.parse(valid)).toBe(false);
+  });
 });
 
 describe('driverSchema', () => {

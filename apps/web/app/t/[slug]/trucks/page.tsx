@@ -15,12 +15,13 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
   const { db, user, tenant } = await getCurrentTenant(params.slug);
   const canManage = canManageMasterData(user.role);
 
-  const [trucks, depots] = await Promise.all([
+  const [trucks, depots, drivers] = await Promise.all([
     db.truck.findMany({
       orderBy: [{ active: 'desc' }, { code: 'asc' }],
       include: { depot: { select: { id: true, code: true, name: true } } },
     }),
     db.depot.findMany({ where: { active: true }, orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),
+    db.driver.findMany({ orderBy: [{ active: 'desc' }, { name: 'asc' }], select: { id: true, code: true, name: true, active: true } }),
   ]);
 
   if (depots.length === 0) {
@@ -44,17 +45,17 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
     <PageShell
       title="Trucks"
       description="Fleet capacities and per-truck cost parameters."
-      actions={trucks.length > 0 && canManage ? <AddTruckButton depots={depots} /> : null}
+      actions={trucks.length > 0 && canManage ? <AddTruckButton depots={depots} drivers={drivers} /> : null}
     >
       {trucks.length === 0 ? (
         <EmptyState
           icon={Truck}
           title="No trucks yet"
           description="Add a truck with capacity in your primary unit, plus daily and per-km cost."
-          action={canManage ? <AddTruckButton depots={depots} label="Add your first truck" /> : null}
+          action={canManage ? <AddTruckButton depots={depots} drivers={drivers} label="Add your first truck" /> : null}
         />
       ) : (
-        <TrucksTable initial={trucks} depots={depots} canManage={canManage} primaryUnit={tenant.primaryUnit} currency={tenant.currency} />
+        <TrucksTable initial={trucks} depots={depots} drivers={drivers} canManage={canManage} primaryUnit={tenant.primaryUnit} currency={tenant.currency} />
       )}
     </PageShell>
   );

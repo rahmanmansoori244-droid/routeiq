@@ -18,19 +18,21 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
-import { TruckFormDialog, type TruckRow, type DepotOption } from './truck-form';
+import { TruckFormDialog, type TruckRow, type DepotOption, type DriverOption } from './truck-form';
 import { unitShort, fmtMoney } from '@/lib/format';
 import { errorMessage } from '@/lib/error-message';
 
 interface Props {
   initial: TruckRow[];
   depots: DepotOption[];
+  drivers: DriverOption[];
   canManage: boolean;
   primaryUnit: CapacityUnit;
   currency: string;
 }
 
-export function TrucksTable({ initial, depots, canManage, primaryUnit, currency }: Props) {
+export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, currency }: Props) {
+  const driverName = new Map(drivers.map((d) => [d.id, d.name]));
   const router = useRouter();
   const [editing, setEditing] = useState<TruckRow | null>(null);
   const [confirming, setConfirming] = useState<TruckRow | null>(null);
@@ -67,6 +69,7 @@ export function TrucksTable({ initial, depots, canManage, primaryUnit, currency 
               <TableHead className="text-right">Weight (kg)</TableHead>
               <TableHead className="text-right">Fixed/day</TableHead>
               <TableHead className="text-right">Per km</TableHead>
+              <TableHead>Default driver</TableHead>
               <TableHead>Status</TableHead>
               {canManage ? <TableHead className="w-[1%]"></TableHead> : null}
             </TableRow>
@@ -81,6 +84,7 @@ export function TrucksTable({ initial, depots, canManage, primaryUnit, currency 
                 <TableCell className="text-right tabular-nums">{t.capacityWeightKg.toLocaleString()}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.fixedCostPerDay, currency)}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.costPerKm, currency)}</TableCell>
+                <TableCell className="text-muted-foreground">{(t.defaultDriverId && driverName.get(t.defaultDriverId)) || '—'}</TableCell>
                 <TableCell>
                   {t.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
                 </TableCell>
@@ -106,6 +110,7 @@ export function TrucksTable({ initial, depots, canManage, primaryUnit, currency 
         mode="edit"
         truck={editing ?? undefined}
         depots={depots}
+        drivers={drivers}
         primaryUnit={primaryUnit}
         currency={currency}
         onSaved={() => {
