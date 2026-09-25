@@ -6,16 +6,20 @@ import { hashPassword } from '@/lib/auth';
 import { audit } from '@/lib/audit';
 import { userInviteSchema } from '@/lib/schemas';
 
-export const GET = withTenantApi(async (_req, { user }) => {
-  // Users on a tenant aren't routed through tenantDb (the User model has nullable
-  // tenantId; we filter explicitly here).
-  const users = await prisma.user.findMany({
-    where: { tenantId: user.tenantId },
-    orderBy: [{ active: 'desc' }, { createdAt: 'asc' }],
-    select: { id: true, email: true, name: true, role: true, active: true, createdAt: true },
-  });
-  return ok(users);
-});
+// TENANT_ADMIN, like the Users page (review F15): staff emails and roles are admin data.
+export const GET = withTenantApi(
+  async (_req, { user }) => {
+    // Users on a tenant aren't routed through tenantDb (the User model has nullable
+    // tenantId; we filter explicitly here).
+    const users = await prisma.user.findMany({
+      where: { tenantId: user.tenantId },
+      orderBy: [{ active: 'desc' }, { createdAt: 'asc' }],
+      select: { id: true, email: true, name: true, role: true, active: true, createdAt: true },
+    });
+    return ok(users);
+  },
+  { role: 'TENANT_ADMIN' },
+);
 
 function generateTempPassword(): string {
   // 16-byte base64url ≈ 22 chars — strong enough for a one-shot temp pwd.

@@ -2,6 +2,7 @@ import { History } from 'lucide-react';
 import { redirect } from 'next/navigation';
 import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData } from '@/lib/rbac';
+import { redactForAudit } from '@/lib/audit';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { AuditClient } from './audit-client';
@@ -14,6 +15,8 @@ const ACTIONS = [
   'LOGIN', 'SIGNUP',
   'OPTIMIZE_STARTED', 'OPTIMIZE_SUCCEEDED', 'OPTIMIZE_FAILED',
   'SCENARIO_CHOSEN', 'BASELINE_UPLOADED', 'ROUTE_MANUALLY_CHANGED',
+  'LOGIN_THROTTLED', 'CROSS_TENANT_VIEW', 'PLATFORM_ADMIN_GRANTED', 'PLATFORM_ADMIN_REVOKED',
+  'SECURITY_CLEANUP',
 ];
 
 const ENTITIES = [
@@ -70,8 +73,9 @@ export default async function AuditPage({ params }: { params: { slug: string } }
             action: r.action,
             entity: r.entity,
             entityId: r.entityId,
-            beforeJson: r.beforeJson,
-            afterJson: r.afterJson,
+            // Older rows may still hold credential hashes; never send them to the browser.
+            beforeJson: redactForAudit(r.beforeJson),
+            afterJson: redactForAudit(r.afterJson),
             ip: r.ip,
             createdAt: r.createdAt.toISOString(),
             user: r.user ? { id: r.user.id, name: r.user.name, email: r.user.email } : null,

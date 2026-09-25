@@ -4,16 +4,21 @@ import { tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
 
-export const GET = withTenantApi(async (_req, { user }) => {
-  // Tenant + TenantConfig come from a fresh prisma read (not tenantDb) so we
-  // can also project Tenant fields; tenantId is still scoped via the where clause.
-  const tenant = await prisma.tenant.findUnique({
-    where: { id: user.tenantId },
-    include: { config: true },
-  });
-  if (!tenant) return fail('Tenant not found', 404);
-  return ok(tenant);
-});
+// TENANT_ADMIN, like the Settings page (review F15): cost rates and the internal routing URL are
+// admin data. No lower-role screen reads this.
+export const GET = withTenantApi(
+  async (_req, { user }) => {
+    // Tenant + TenantConfig come from a fresh prisma read (not tenantDb) so we
+    // can also project Tenant fields; tenantId is still scoped via the where clause.
+    const tenant = await prisma.tenant.findUnique({
+      where: { id: user.tenantId },
+      include: { config: true },
+    });
+    if (!tenant) return fail('Tenant not found', 404);
+    return ok(tenant);
+  },
+  { role: 'TENANT_ADMIN' },
+);
 
 const settingsPatchSchema = z.object({
   tenant: tenantSettingsSchema.partial().optional(),

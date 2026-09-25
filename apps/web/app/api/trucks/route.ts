@@ -16,7 +16,7 @@ export const POST = withTenantApi(
     const depot = await db.depot.findUnique({ where: { id: input.depotId } });
     if (!depot) return ok({ error: 'Depot not found in this tenant' }, 400);
     if (input.defaultDriverId) {
-      const driver = await db.driver.findUnique({ where: { id: input.defaultDriverId } });
+      const driver = await db.driver.findUnique({ where: { id: input.defaultDriverId }, select: { id: true, name: true, active: true } });
       if (!driver) return fail('Driver not found in this tenant', 400);
       if (!driver.active) return fail(`Driver ${driver.name} is inactive`, 400);
     }

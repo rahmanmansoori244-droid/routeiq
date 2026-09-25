@@ -1,4 +1,5 @@
 import { withTenantApi, ok, fail } from '@/lib/api';
+import { redactForAudit } from '@/lib/audit';
 
 const ALLOWED_ACTIONS = new Set([
   'CREATE', 'UPDATE', 'DELETE', 'OVERRIDE', 'DISPATCH',
@@ -6,6 +7,8 @@ const ALLOWED_ACTIONS = new Set([
   'OPTIMIZE_STARTED', 'OPTIMIZE_SUCCEEDED', 'OPTIMIZE_FAILED',
   'SCENARIO_CHOSEN', 'BASELINE_UPLOADED', 'ROUTE_MANUALLY_CHANGED',
   'DRIVER_LOGIN', 'DELIVERY_PROOF_CREATED',
+  'LOGIN_THROTTLED', 'CROSS_TENANT_VIEW', 'PLATFORM_ADMIN_GRANTED', 'PLATFORM_ADMIN_REVOKED',
+  'SECURITY_CLEANUP',
 ]);
 
 function parseFilterDate(input: string | null | undefined): Date | undefined {
@@ -18,6 +21,8 @@ function parseFilterDate(input: string | null | undefined): Date | undefined {
   return d;
 }
 
+// TENANT_ADMIN, like the Audit log page (reviews F15, F23): rows carry emails, IPs and master-data
+// before/after values.
 export const GET = withTenantApi(async (req, { db }) => {
   const url = new URL(req.url);
   const action = url.searchParams.get('action') || undefined;
@@ -57,5 +62,6 @@ export const GET = withTenantApi(async (req, { db }) => {
     take: limit,
     include: { user: { select: { id: true, name: true, email: true } } },
   });
-  return ok(rows);
-});
+  // Older rows may still hold credential hashes (for example a driver PIN hash); never send them.
+  return ok(rows.map((r) => ({ ...r, beforeJson: redactForAudit(r.beforeJson), afterJson: redactForAudit(r.afterJson) })));
+}, { role: 'TENANT_ADMIN' });
