@@ -1,5 +1,7 @@
 /**
- * Driver-side auth (Module C).
+ * Driver-side auth (Module C). RETIRED in Sep 2026: every /api/driver/* route answers 410 (see
+ * lib/driver-app.ts) and nothing calls this module any more. It is kept, with the DriverShift /
+ * TruckLocation / DeliveryProof tables, until the owner confirms the data can be dropped.
  *
  * Drivers do not have User accounts in v1 — they sign into the PWA with
  * { tenantSlug, driverCode, pin }. On success we create a DriverShift row
@@ -9,7 +11,7 @@
  * The token is HMAC-prefixed with the tenantId so a stolen token can't be
  * replayed against a different tenant.
  */
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { DriverShiftStatus, Prisma } from '@prisma/client';
 import { prisma } from './db';
@@ -187,14 +189,6 @@ export function generatePin(): string {
   const buf = randomBytes(4);
   const n = buf.readUInt32BE(0) % 1_000_000;
   return n.toString().padStart(6, '0');
-}
-
-/** Constant-time string compare for sensitive equality checks. */
-export function constantTimeEqual(a: string, b: string): boolean {
-  const aBuf = Buffer.from(a);
-  const bBuf = Buffer.from(b);
-  if (aBuf.length !== bBuf.length) return false;
-  return timingSafeEqual(aBuf, bBuf);
 }
 
 export function hashTokenForLog(token: string): string {
