@@ -35,6 +35,7 @@ import {
   fitsCapacity,
   mergePortions,
   orderIdOf,
+  partDemandKg,
   portionId,
   portionMoney,
   portionsOfPart,
@@ -45,7 +46,15 @@ import {
   type PartCapacity,
   type PortionRecord,
 } from './split';
-import { stopServiceMin } from './service-time';
+import { MAX_SERVICE_MIN, stopService } from './service-time';
+import {
+  groupUnknownWeights,
+  orderUsesLineWeights,
+  resolveOrderLineWeights,
+  type LineWeightChange,
+  type OrderWeightChange,
+  type UnknownWeight,
+} from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dateOnly, isoOf } from './time';
 
@@ -100,11 +109,25 @@ export interface BuiltRequest {
   scope: PlanScope;
   blocking: BlockingIssue[];
   warnings: string[];
+  /** Open lines sent with 0 kg because neither the line nor its product has a weight. */
+  unknownWeights: UnknownWeight[];
+  /**
+   * Line weights this request takes from the product master (0 kg lines whose product has a
+   * case weight now, lines weighed from the master whose case weight was corrected), for orders
+   * with no part on a frozen load. They are saved with the optimize (applyWeightChanges) - never
+   * by a probe - so the lines, orders and loads of the plan all use the kg the solver was sent.
+   */
+  weightChanges: WeightChanges;
+}
+
+export interface WeightChanges {
+  lines: (LineWeightChange & { product: string })[];
+  orders: OrderWeightChange[];
 }
 
 const ORDER_INCLUDE = {
   customer: true,
-  lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
+  lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, active: true } } } },
 } as const;
 
 /** Orders belonging to a plan: same delivery date and depot. Legacy orders without a depot
@@ -208,22 +231,42 @@ export async function buildDispatchRequest(
   type OpenOrder = { o: (typeof orders)[number]; lines: OpenLine[]; cases: number; kg: number; partial: boolean };
   const frozenOrderIds: string[] = [];
   const openByCustomer = new Map<string, OpenOrder[]>();
+  const lineInfo = new Map<string, { productCode: string; productName: string; productActive: boolean }>();
+  const unknownWeightLines: { productCode: string; productName: string; cases: number }[] = [];
+  const weightChanges: WeightChanges = { lines: [], orders: [] };
   for (const o of orders) {
     if (frozenWhole.has(o.id)) {
       frozenOrderIds.push(o.id);
       continue;
     }
+    for (const l of o.lines) lineInfo.set(l.id, { productCode: l.product.code, productName: l.product.name, productActive: l.product.active });
     // Line kg is what the order total is summed from, so a part's kg matches the order's. Old
-    // orders may have no line weights: then the order's own kg is spread per case.
-    const linesKg = o.lines.reduce((a, l) => a + l.weightKg, 0);
-    const lineKgOk = linesKg > 0 && Math.abs(linesKg - o.totalWeightKg) <= 0.5 + 0.001 * o.totalWeightKg;
+    // orders may have no line weights: then the order's own kg is spread per case. A line at 0 kg
+    // (unknown) or weighed from the product master is planned with the product's case weight now
+    // (see weights.ts). Here that is in memory only: the optimize saves it (applyWeightChanges)
+    // for orders with no part on a frozen load, so a probe never changes a live plan's orders.
+    const lineLevel = orderUsesLineWeights(o);
     const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
-    const lines: OpenLine[] = o.lines.map((l) => ({
-      lineId: l.id,
-      orderId: o.id,
-      cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
-      kgPerCase: lineKgOk ? (l.cases > 0 ? l.weightKg / l.cases : 0) : orderKgPerCase,
-    }));
+    const frozenPart = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
+    const resolved = resolveOrderLineWeights(
+      [{ id: o.id, totalWeightKg: o.totalWeightKg, lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })) }],
+      new Set(),
+    );
+    const lineKg = new Map(resolved.lines.map((c) => [c.lineId, c.afterKg]));
+    const orderKg = resolved.orders[0]?.afterKg ?? o.totalWeightKg;
+    if (resolved.lines.length && !frozenPart && o.status !== 'DISPATCHED' && o.status !== 'DELIVERED') {
+      weightChanges.lines.push(...resolved.lines.map((c) => ({ ...c, product: lineInfo.get(c.lineId)?.productCode ?? '?' })));
+      weightChanges.orders.push(...resolved.orders);
+    }
+    const lines: OpenLine[] = o.lines.map((l) => {
+      const kg = lineKg.get(l.id) ?? l.weightKg;
+      return {
+        lineId: l.id,
+        orderId: o.id,
+        cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
+        kgPerCase: !lineLevel ? orderKgPerCase : kg > 0 && l.cases > 0 ? kg / l.cases : 0,
+      };
+    });
     const partial = lines.some((l, i) => l.cases !== o.lines[i].cases);
     const cases = lines.reduce((a, l) => a + l.cases, 0);
     if (partial && cases === 0) {
@@ -232,7 +275,7 @@ export async function buildDispatchRequest(
     }
     const open: OpenOrder = partial
       ? { o, lines: lines.filter((l) => l.cases > 0), cases, kg: Math.round(lines.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10, partial }
-      : { o, lines, cases: o.totalCases, kg: o.totalWeightKg, partial };
+      : { o, lines, cases: o.totalCases, kg: orderKg, partial };
     openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
   }
   // Orders on frozen loads that today's order query no longer returns (e.g. a legacy order
@@ -250,12 +293,21 @@ export async function buildDispatchRequest(
     tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
   }));
   const available = fleet.filter((t) => t.cases > 0 && t.tripsLeft > 0);
-  const partCapFor = (cases: number, kg: number): { cap: PartCapacity; truckCode: string } | null => {
-    const pool = available.length ? available : fleet;
+  const pool = available.length ? available : fleet;
+  const partCapFor = (cases: number, kg: number, maxCaseKg: number): { cap: PartCapacity; truckCode: string } | null => {
     if (!cfg.splitDeliveries || !pool.some((t) => t.cases > 0)) return null;
     if (pool.some((t) => t.cases > 0 && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg }))) return null;
-    return choosePartCapacity(cases, kg, pool);
+    return choosePartCapacity(cases, kg, pool, maxCaseKg);
   };
+  // One case heavier than every payload cannot go on any truck: almost always a wrong case weight
+  // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint.
+  const usableTrucks = pool.filter((t) => t.cases > 0);
+  const maxPayloadKg = usableTrucks.length && usableTrucks.every((t) => t.kg !== null) ? Math.max(...usableTrucks.map((t) => t.kg as number)) : null;
+  const tooHeavy = (l: OpenLine) => maxPayloadKg !== null && l.kgPerCase > maxPayloadKg + 1e-6;
+  const heavyMessage = (lines: OpenLine[]) =>
+    [...new Map(lines.map((l) => [lineInfo.get(l.lineId)?.productCode ?? '?', l.kgPerCase])).entries()]
+      .map(([code, kg]) => `One case of ${code} weighs ${Math.round(kg * 10) / 10} kg, more than any truck payload (${Math.round(maxPayloadKg ?? 0)} kg) - check the product weight.`)
+      .join(' ');
 
   const preDrops: OrderDrop[] = [];
   const blockingByCustomer = new Map<string, BlockingIssue>();
@@ -265,6 +317,10 @@ export async function buildDispatchRequest(
   const scopeIds: string[] = [];
   const badWindows: string[] = [];
   const splitNotes: string[] = [];
+  const inactiveCustomers: string[] = [];
+  const inactiveProducts = new Set<string>();
+  const tooHeavyNotes: string[] = [];
+  const longStops: string[] = [];
   const wholePortion = (x: OpenOrder): PortionRecord => ({
     orderId: x.o.id,
     lines: x.lines.map((l) => ({ lineId: l.lineId, cases: l.cases })),
@@ -288,11 +344,28 @@ export async function buildDispatchRequest(
   const openMoney = (x: OpenOrder, field: 'salesValue' | 'marginValue') => money(x.o, field, x.partial ? x.lines : null);
 
   for (const group of openByCustomer.values()) {
-    const c = toPlanningCustomer(group[0].o.customer);
+    const cust = group[0].o.customer;
+    const c = toPlanningCustomer(cust);
     const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
     const prOf = (o: OpenOrder['o']) => (o.priorityFromFile ? Math.min(o.priority, eff.priority) : eff.priority);
     const pr = Math.min(...group.map((x) => prOf(x.o)));
+    const label = c.branchCode ? `${c.code}/${c.branchCode}` : c.code;
     for (const x of group) scopeIds.push(x.o.id);
+    // A customer deactivated after its orders were confirmed: its open orders are not delivered
+    // (reactivating the customer brings them back at the next re-plan). Frozen loads keep theirs.
+    if (!cust.active) {
+      for (const x of group) {
+        preDrops.push({
+          orderId: x.o.id,
+          reasonCode: 'INVALID_CUSTOMER',
+          message: 'Customer deactivated after the order was confirmed - reactivate it in Customers to deliver it, or leave it unserved.',
+          portion: x.partial ? wholePortion(x) : undefined,
+        });
+        orderPriority[x.o.id] = prOf(x.o);
+      }
+      inactiveCustomers.push(label);
+      continue;
+    }
     const cs = coordStatus(c.lat, c.lng, area);
     const locBad = cs === 'MISSING' || cs === 'INVALID' || (cs === 'OUTSIDE_AREA' && !c.locationVerified);
     if (locBad) {
@@ -311,13 +384,59 @@ export async function buildDispatchRequest(
       blockingByCustomer.set(c.id, b);
       continue;
     }
+    // Cases heavier than every truck payload are left out (a data error), the rest is planned.
+    const live: OpenOrder[] = [];
+    for (const x of group) {
+      const heavy = x.lines.filter(tooHeavy);
+      if (!heavy.length) {
+        live.push(x);
+        continue;
+      }
+      const rest = x.lines.filter((l) => !tooHeavy(l));
+      const heavyPortion: PortionRecord = {
+        orderId: x.o.id,
+        lines: heavy.map((l) => ({ lineId: l.lineId, cases: l.cases })),
+        cases: heavy.reduce((a, l) => a + l.cases, 0),
+        weightKg: Math.round(heavy.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10,
+        part: null,
+        parts: null,
+      };
+      // The whole order when nothing else of it is open or frozen; else just those lines.
+      preDrops.push({ orderId: x.o.id, reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY', message: heavyMessage(heavy), portion: rest.length || x.partial ? heavyPortion : undefined });
+      orderPriority[x.o.id] = prOf(x.o);
+      tooHeavyNotes.push(`${label}: ${heavyMessage(heavy)}`);
+      if (rest.length) {
+        live.push({
+          o: x.o,
+          lines: rest,
+          cases: rest.reduce((a, l) => a + l.cases, 0),
+          kg: Math.round(rest.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10,
+          partial: true,
+        });
+      }
+    }
+    if (!live.length) continue;
+    for (const x of live) {
+      for (const l of x.lines) {
+        if (l.cases > 0 && !(l.kgPerCase > 0)) {
+          const info = lineInfo.get(l.lineId);
+          unknownWeightLines.push({ productCode: info?.productCode ?? '?', productName: info?.productName ?? '', cases: l.cases });
+        }
+        if (lineInfo.get(l.lineId)?.productActive === false) inactiveProducts.add(lineInfo.get(l.lineId)!.productCode);
+      }
+    }
     const hard = usableWindow(eff.hardStart, eff.hardEnd);
     const pref = usableWindow(eff.prefStart, eff.prefEnd);
-    if (!hard.ok || !pref.ok) badWindows.push(c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
-    const totalCases = group.reduce((a, x) => a + x.cases, 0);
-    const totalKg = group.reduce((a, x) => a + x.kg, 0);
-    const late = group.some((x) => x.o.isLate);
-    const serviceMin = eff.serviceMin; // + unloading time per case (stopServiceMin)
+    if (!hard.ok || !pref.ok) badWindows.push(label);
+    const totalCases = live.reduce((a, x) => a + x.cases, 0);
+    const totalKg = live.reduce((a, x) => a + x.kg, 0);
+    const late = live.some((x) => x.o.isLate);
+    const serviceMin = eff.serviceMin; // + unloading time per case (stopService)
+    const serviceOf = (cases: number, total?: number) => {
+      const s = stopService(serviceMin, cfg.serviceMinPerCase, cases, total);
+      if (s.capped) longStops.push(`${label} needs ${s.neededMin} min`);
+      return s.min;
+    };
     const base = {
       customer_id: c.id,
       lat: c.lat as number,
@@ -331,24 +450,25 @@ export async function buildDispatchRequest(
     };
     const sumMoney = (vals: (number | null)[]) => (vals.every((v) => v !== null) ? vals.reduce<number>((a, v) => a + (v ?? 0), 0) : null);
 
-    const split = partCapFor(totalCases, totalKg);
+    const maxCaseKg = Math.max(0, ...live.flatMap((x) => x.lines.map((l) => l.kgPerCase)));
+    const split = partCapFor(totalCases, totalKg, maxCaseKg);
     if (!split) {
-      const ids = group.map(orderRef);
+      const ids = live.map(orderRef);
       stopList.push({
         ...base,
         stop_id: c.id,
         order_ids: ids,
         demand_cases: totalCases,
         demand_kg: totalKg,
-        service_min: stopServiceMin(serviceMin, cfg.serviceMinPerCase, totalCases),
-        previous_truck_id: previousTruckOf(group.flatMap((x) => x.lines.map((l) => l.lineId))),
-        margin: sumMoney(group.map((x) => openMoney(x, 'marginValue'))),
-        revenue: sumMoney(group.map((x) => openMoney(x, 'salesValue'))),
+        service_min: serviceOf(totalCases),
+        previous_truck_id: previousTruckOf(live.flatMap((x) => x.lines.map((l) => l.lineId))),
+        margin: sumMoney(live.map((x) => openMoney(x, 'marginValue'))),
+        revenue: sumMoney(live.map((x) => openMoney(x, 'salesValue'))),
       });
     } else {
-      const parts = splitIntoParts(group.flatMap((x) => x.lines), split.cap);
-      const byOrder = new Map(group.map((x) => [x.o.id, x.o]));
-      const kgPerCase = new Map(group.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
+      const parts = splitIntoParts(live.flatMap((x) => x.lines), split.cap);
+      const byOrder = new Map(live.map((x) => [x.o.id, x.o]));
+      const kgPerCase = new Map(live.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
       parts.forEach((part, k) => {
         const recs = portionsOfPart(part, k + 1, parts.length);
         const ids = recs.map((r) => {
@@ -357,27 +477,23 @@ export async function buildDispatchRequest(
           return id;
         });
         const cases = recs.reduce((a, r) => a + r.cases, 0);
-        // From the exact weights, never above the payload the part was sized for (display
-        // rounding of each line must not push a full part over its truck).
-        const exactKg = part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0);
         stopList.push({
           ...base,
           stop_id: `${c.id}#${k + 1}`,
           order_ids: ids,
           demand_cases: cases,
-          demand_kg: Math.min(split.cap.kg ?? Number.POSITIVE_INFINITY, Math.round(exactKg * 10) / 10),
+          // The true kg, never capped at the payload the part was sized for (F01).
+          demand_kg: partDemandKg(part, kgPerCase),
           // Unloading time follows the part's share of the delivery (at least a few minutes).
-          service_min: stopServiceMin(serviceMin, cfg.serviceMinPerCase, cases, totalCases),
+          service_min: serviceOf(cases, totalCases),
           previous_truck_id: previousTruckOf(part.map((x) => x.lineId)),
           margin: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'marginValue', r.lines))),
           revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
         });
       });
-      splitNotes.push(
-        `${c.branchCode ? `${c.code}/${c.branchCode}` : c.code} (${totalCases} cases, ${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`,
-      );
+      splitNotes.push(`${label} (${totalCases} cases, ${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`);
     }
-    for (const x of group) orderPriority[x.o.id] = pr;
+    for (const x of live) orderPriority[x.o.id] = pr;
   }
 
   const truckList: DispatchTruck[] = trucks.map((t) => ({
@@ -412,6 +528,19 @@ export async function buildDispatchRequest(
   if (routing.outsideCoverage) {
     warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
   }
+  if (inactiveCustomers.length) {
+    warnings.push(`Deactivated customer(s) with open orders, left unserved: ${inactiveCustomers.join(', ')}. Reactivate a customer in Customers and re-plan to deliver them.`);
+  }
+  if (inactiveProducts.size) {
+    warnings.push(`Deactivated product(s) still on open orders, planned as ordered: ${[...inactiveProducts].sort().join(', ')}.`);
+  }
+  if (tooHeavyNotes.length) warnings.push(`Left unserved, heavier than any truck: ${tooHeavyNotes.join(' ')}`);
+  if (longStops.length) {
+    warnings.push(
+      `Unloading time over ${MAX_SERVICE_MIN} min (the most one stop can take): ${[...new Set(longStops)].join('; ')} - planned with ${MAX_SERVICE_MIN} min, so later arrival times may be optimistic. Check the service time or split the delivery.`,
+    );
+  }
+  const unknownWeights = groupUnknownWeights(unknownWeightLines);
   const request: DispatchRequest = {
     run_id: runId,
     tenant_id: tenantId,
@@ -454,7 +583,61 @@ export async function buildDispatchRequest(
     scope: { orderIds: scopeIds, frozenOrderIds, orderPriority, portions, frozenLoadOrderIds, frozenLoadIds: frozenLoads.map((l) => l.id).sort() },
     blocking: [...blockingByCustomer.values()],
     warnings,
+    unknownWeights,
+    weightChanges,
   };
+}
+
+/** Refused because the day changed between building the request and saving the optimize. */
+export class OrdersChangedError extends PlanError {
+  constructor(message = 'The orders of this day changed while the plan was being prepared (a file was deleted, or weights were applied by another optimize). Optimize again.') {
+    super(message, 409);
+  }
+}
+
+/**
+ * Save the line weights a request took from the product master (BuiltRequest.weightChanges):
+ * 0-kg lines whose product has a case weight now, and lines weighed from the master whose case
+ * weight was corrected. Run inside the transaction that starts the optimize, after the location
+ * and weight checks passed - never for a probe - so a refused re-plan leaves the live plan's
+ * orders and loads as they were. Set-based (a whole NMWC day in a few statements). Each row is
+ * changed only if it still has the kg the request was built from; otherwise OrdersChangedError.
+ * One ORDER_WEIGHTS_RESOLVED audit row lists every line and order total before and after.
+ */
+export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string, changes: WeightChanges, userId: string | null): Promise<number> {
+  if (!changes.lines.length) return 0;
+  const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId }, select: { runDate: true, version: true } });
+  const CHUNK = 1000;
+  for (let i = 0; i < changes.lines.length; i += CHUNK) {
+    const part = changes.lines.slice(i, i + CHUNK);
+    const n = await tx.$executeRaw`
+      UPDATE "OrderLine" AS l
+      SET "weightKg" = v.after_kg, "weightFromMaster" = true
+      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg),
+           "Order" AS o
+      WHERE l.id = v.id AND o.id = l."orderId" AND o."tenantId" = ${tenantId} AND abs(l."weightKg" - v.before_kg) < 0.0005`;
+    if (n !== part.length) throw new OrdersChangedError();
+  }
+  for (let i = 0; i < changes.orders.length; i += CHUNK) {
+    const part = changes.orders.slice(i, i + CHUNK);
+    const n = await tx.$executeRaw`
+      UPDATE "Order" AS o
+      SET "totalWeightKg" = v.after_kg
+      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg)
+      WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
+    if (n !== part.length) throw new OrdersChangedError();
+  }
+  await tx.auditLog.create({
+    data: {
+      tenantId,
+      userId,
+      action: 'ORDER_WEIGHTS_RESOLVED',
+      entity: 'RunPlan',
+      entityId: runId,
+      afterJson: { runDate: isoOf(run.runDate), version: run.version, lines: changes.lines, orders: changes.orders } as never,
+    },
+  });
+  return changes.lines.length;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -598,10 +781,17 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
   const orderIds = [...d.scope.orderIds];
-  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true } });
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true, totalWeightKg: true } });
   const casesOf = new Map(orders.map((o) => [o.id, o.totalCases]));
+  const kgOf = new Map(orders.map((o) => [o.id, o.totalWeightKg]));
+  const kgMismatches: { truckId: string; loadNo: number; solverKg: number; ordersKg: number }[] = [];
 
   for (const ld of d.loads) {
+    // A load weighs what its orders (or split portions) weigh - the same figures the stops,
+    // manifests and driver sheets show. The optimizer's own sum must agree (F01: a capped part
+    // weight once made a load look lighter than it was); a difference is kept in the audit.
+    const ordersKg = loadKgFromRefs(ld.stops.flatMap((st) => st.order_ids), d.scope, kgOf);
+    if (Math.abs(ordersKg - ld.kg) > 0.5) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
     const load = await tx.planLoad.create({
       data: {
         tenantId,
@@ -615,7 +805,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         distanceKm: ld.distance_km,
         durationMin: ld.duration_min,
         cases: ld.cases,
-        weightKg: ld.kg,
+        weightKg: ordersKg,
         utilizationPct: ld.utilization_pct,
         fuelLitres: ld.fuel_litres,
         fuelCost: ld.fuel_cost,
@@ -676,9 +866,22 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
       action: 'SCENARIO_CHOSEN',
       entity: 'RunPlan',
       entityId: runId,
-      afterJson: { scenario: sc.name, loads: d.loads.length, unserved: unservedIds.length } as never,
+      afterJson: { scenario: sc.name, loads: d.loads.length, unserved: unservedIds.length, ...(kgMismatches.length ? { loadKgMismatches: kgMismatches } : {}) } as never,
     },
   });
+  if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
+}
+
+/**
+ * Kg of a load from the orders it carries: a split portion's own kg, else the order's total.
+ * Rounded to 0.1 kg like every stored weight.
+ */
+export function loadKgFromRefs(refs: string[], scope: Pick<PlanScope, 'portions'>, orderKg: Map<string, number>): number {
+  const kg = refs.reduce((a, ref) => {
+    const { orderId, portion } = resolveOrderRef(scope, ref);
+    return a + (portion ? portion.weightKg : (orderKg.get(orderId) ?? 0));
+  }, 0);
+  return Math.round(kg * 10) / 10;
 }
 
 /** Recompute reconciliation, daily summary and (for versions > 1) the change summary. */
@@ -718,6 +921,9 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
     })),
     planned.map(({ cases: _c, ...p }) => ({ ...p, customerId: stopCustomer.get(where(p.truckId, p.loadNo, p.orderId)) ?? p.customerId })),
     sc.unservedOrders.map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode, lines: readPortionLines(u.portionLinesJson) })),
+    // Every order the plan was made for must still exist: a deleted one is a problem, so the
+    // plan cannot be dispatched until it is re-planned (F20).
+    scopeIds,
   );
   const plannedIds = new Set(planned.map((p) => p.orderId));
   const plannedCasesByOrder = new Map<string, number>();

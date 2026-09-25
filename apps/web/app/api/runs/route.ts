@@ -3,10 +3,11 @@ import { OptimizationMode } from '@prisma/client';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { audit } from '@/lib/audit';
 import { currentPlan } from '@/lib/dispatch/plan-service';
+import { isRealIsoDate } from '@/lib/schemas';
 
 const createRunSchema = z.object({
   depotId: z.string().min(1),
-  runDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'runDate must be YYYY-MM-DD'),
+  runDate: z.string().refine(isRealIsoDate, 'runDate must be a real date as YYYY-MM-DD'),
   optimizationMode: z.nativeEnum(OptimizationMode).default('BALANCED'),
 });
 

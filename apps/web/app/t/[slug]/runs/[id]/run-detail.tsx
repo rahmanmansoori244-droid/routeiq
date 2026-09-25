@@ -24,6 +24,7 @@ import { RoutesTab, type RouteRow as RoutesTabRow } from './routes-tab';
 import { BaselineTab, type BaselineRow } from './baseline-tab';
 import { MapTab, type MapStop, type MapTruck } from './map-tab';
 import { errorMessage } from '@/lib/error-message';
+import { askOverride, type OptimizeOverrides } from '../../dispatch/client-api';
 
 interface RunSummary {
   id: string;
@@ -59,6 +60,8 @@ interface Props {
   slug: string;
   canEdit: boolean;
   canDispatch: boolean;
+  /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
+  canEditProducts?: boolean;
   currency: string;
   mapboxToken: string;
   run: RunSummary;
@@ -84,6 +87,7 @@ export function RunDetail({
   slug,
   canEdit,
   canDispatch,
+  canEditProducts = false,
   currency,
   mapboxToken,
   run,
@@ -122,11 +126,24 @@ export function RunDetail({
     return () => clearInterval(interval);
   }, [isActive, run.id, router]);
 
-  function optimize(retry = false) {
+  function optimize(retry = false, overrides: OptimizeOverrides = {}) {
     startTransition(async () => {
-      const res = await fetch(`/api/runs/${run.id}/optimize`, { method: 'POST' });
+      const res = await fetch(`/api/runs/${run.id}/optimize`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(overrides),
+      });
       const body = await res.json().catch(() => ({}));
       if (!res.ok && res.status !== 202) {
+        // No location or no weight: the same questions as OPTIMIZE on the daily dispatch screen,
+        // then the same request again with the dispatcher's go-ahead.
+        const errorBody = body?.error && typeof body.error === 'object' ? (body.error as Record<string, unknown>) : null;
+        const more = askOverride(errorBody, 'Optimize', { canEditProducts });
+        if (more) {
+          optimize(retry, { ...overrides, ...more });
+          return;
+        }
+        if (errorBody?.code === 'LOCATION_REQUIRED' || errorBody?.code === 'WEIGHT_REQUIRED') return;
         toast.error(errorMessage(body, 'Optimize failed to start.'));
         return;
       }

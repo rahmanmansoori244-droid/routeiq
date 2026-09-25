@@ -114,12 +114,31 @@ export type IssueCode =
   | 'PRIORITY_UNCONFIRMED'
   | 'TYPE_MISSING'
   | 'NO_RECEIVING_WINDOW'
-  | 'NEW_CUSTOMER';
+  | 'NEW_CUSTOMER'
+  | 'CUSTOMER_INACTIVE';
 
 export interface CustomerIssue {
   code: IssueCode;
   blocking: boolean; // true = cannot be planned until fixed (or explicitly left unserved)
   message: string;
+}
+
+/**
+ * A customer deactivated after its orders were confirmed: its open orders are left unserved at
+ * optimize (reason "customer deactivated") until it is reactivated. Shown first on the day.
+ */
+/**
+ * A deactivated customer that still has open orders (not on a frozen load). `onPlannedLoads`: the
+ * plan in use was made before it was deactivated and still has them on trucks.
+ */
+export function inactiveCustomerIssue(onPlannedLoads = false): CustomerIssue {
+  return {
+    code: 'CUSTOMER_INACTIVE',
+    blocking: true,
+    message: onPlannedLoads
+      ? 'Customer was deactivated after this plan was made: its orders are still on planned loads. RE-PLAN to leave them unserved, or reactivate it in Customers to deliver them.'
+      : 'Customer is deactivated: its open orders are left unserved (not delivered). Reactivate it in Customers and re-plan to deliver them.',
+  };
 }
 
 export function customerIssues(c: CustomerForPlanning, eff: EffectiveAttrs, area: ServiceArea = DEFAULT_SERVICE_AREA): CustomerIssue[] {

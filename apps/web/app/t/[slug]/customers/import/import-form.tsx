@@ -20,6 +20,9 @@ interface ImportResult {
   errors?: ImportError[];
   warnings?: string[];
   dryRun?: boolean;
+  creates?: number;
+  updates?: number;
+  confirmedServiceChanges?: { code: string; branchCode: string | null; from: number; to: number }[];
 }
 
 export function CustomerImportForm({ slug }: { slug: string }) {
@@ -120,6 +123,9 @@ export function CustomerImportForm({ slug }: { slug: string }) {
               <Badge variant="success">{result.validRows} valid</Badge>
               {result.errorRows > 0 ? <Badge variant="destructive">{result.errorRows} errors</Badge> : null}
               {result.warningRows > 0 ? <Badge variant="warning">{result.warningRows} warnings</Badge> : null}
+              {result.creates !== undefined ? <Badge variant="outline">{result.creates} new</Badge> : null}
+              {result.updates !== undefined ? <Badge variant="outline">{result.updates} updated</Badge> : null}
+              {result.confirmedServiceChanges?.length ? <Badge variant="warning">{result.confirmedServiceChanges.length} confirmed service time(s) change</Badge> : null}
             </div>
             {result.errors && result.errors.length > 0 ? (
               <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">

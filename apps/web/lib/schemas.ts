@@ -6,6 +6,7 @@ import {
   PaymentType,
   Role,
 } from '@prisma/client';
+import { MAX_SERVICE_MIN } from './dispatch/service-time';
 
 const codeSchema = z
   .string()
@@ -21,6 +22,19 @@ const lngSchema = z.coerce.number().min(-180).max(180);
 // z.coerce turns '' and null into 0 - a real-looking 0,0 location. For customers a blank
 // coordinate means "not set", so try the blank branch before coercing.
 const blankCoord = z.union([z.literal(''), z.null()]).transform(() => undefined);
+
+/** A calendar date written YYYY-MM-DD that exists (2026-02-31 and 2026-13-01 do not). */
+export function isRealIsoDate(s: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const d = new Date(`${s}T00:00:00.000Z`);
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
+}
+
+/** Delivery / plan date in API bodies: must round-trip, so it never rolls into another day. */
+export const isoDateSchema = z.string().refine(isRealIsoDate, 'Use a real date as YYYY-MM-DD');
+
+/** Longest unloading time one stop can have: the optimizer's limit (lib/dispatch/service-time). */
+export { MAX_SERVICE_MIN };
 
 export const depotSchema = z.object({
   code: codeSchema,
@@ -90,7 +104,7 @@ export const customerSchema = z.object({
   // omits them — or a fuzz payload — falls back to defaults instead of 400ing
   // on "Expected number, received nan" from z.coerce against undefined.
   priority: z.coerce.number().int().min(1).max(5).optional().default(3),
-  avgServiceTimeMin: z.coerce.number().int().min(0).max(600).optional().default(10),
+  avgServiceTimeMin: z.coerce.number().int().min(0).max(MAX_SERVICE_MIN).optional().default(10),
   paymentType: z.nativeEnum(PaymentType).optional().default(PaymentType.CREDIT),
   accessNotes: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
   active: z.boolean().optional(),
@@ -148,7 +162,7 @@ export const tenantConfigSchema = z.object({
   maxTripsPerTruck: z.coerce.number().int().min(1).max(10),
   returnToDepot: z.boolean(),
   splitDeliveries: z.boolean(),
-  defaultServiceTimeMin: z.coerce.number().int().min(0).max(600),
+  defaultServiceTimeMin: z.coerce.number().int().min(0).max(MAX_SERVICE_MIN),
   costPerKmDefault: z.coerce.number().min(0).max(10),
   fixedTruckCostPerDayDefault: z.coerce.number().min(0).max(10_000),
   latePenaltyPerMin: z.coerce.number().min(0).max(100),

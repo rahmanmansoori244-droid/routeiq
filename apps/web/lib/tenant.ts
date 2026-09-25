@@ -41,6 +41,7 @@ const TENANT_SCOPED_MODELS = new Set([
   // NMWC dispatch MVP
   'PlanLoad',
   'CustomerTypeProfile',
+  'IntakeLineKey',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

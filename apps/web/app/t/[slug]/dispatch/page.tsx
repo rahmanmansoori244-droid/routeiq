@@ -1,5 +1,5 @@
 import { getCurrentTenant } from '@/lib/tenant';
-import { canApproveOverride, canPlan } from '@/lib/rbac';
+import { canApproveOverride, canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { PageShell } from '@/components/page-shell';
 import { DispatchClient } from './dispatch-client';
@@ -18,6 +18,7 @@ export default async function DispatchPage({ params, searchParams }: { params: {
         slug={params.slug}
         canPlan={canPlan(user.role)}
         canDispatch={canApproveOverride(user.role)}
+        canEditProducts={canManageMasterData(user.role)}
         initialDate={searchParams.date ?? null}
         initialDepot={searchParams.depot ?? null}
         phoneCountryCode={phoneCountryCode(tenant.country)}

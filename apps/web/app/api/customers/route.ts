@@ -36,6 +36,15 @@ export const POST = withTenantApi(
       if (!region) return fail('Region not found in this tenant', 400);
     }
     const branchKey = normalizeBranchKey(input.branchCode);
+    // Codes are one customer whatever their letter case (the order intake matches them that way):
+    // "c001" next to "C001" would split one customer's orders between two rows.
+    const twin = await db.customer.findFirst({
+      where: { code: { equals: input.code, mode: 'insensitive' }, branchKey: { equals: branchKey, mode: 'insensitive' } },
+      select: { code: true, branchCode: true },
+    });
+    if (twin) {
+      return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
+    }
     const geocodeConfidence = input.lat !== undefined && input.lng !== undefined ? 'HIGH' : 'MISSING';
     const created = await db.customer.create({
       data: {

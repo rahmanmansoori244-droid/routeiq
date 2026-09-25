@@ -3,7 +3,7 @@
  * "unloading minutes per case"; split-delivery parts get a proportional share of the base.
  */
 import { describe, expect, it } from 'vitest';
-import { MAX_SERVICE_MIN, stopServiceMin } from '@/lib/dispatch/service-time';
+import { MAX_SERVICE_MIN, stopService, stopServiceMin } from '@/lib/dispatch/service-time';
 
 describe('stopServiceMin', () => {
   it('is the plain service time when no per-case time is set (old behaviour)', () => {
@@ -31,5 +31,17 @@ describe('stopServiceMin', () => {
     expect(stopServiceMin(900, 0, 10)).toBe(MAX_SERVICE_MIN);
     expect(stopServiceMin(-5, -1, 100)).toBe(0);
     expect(stopServiceMin(20, 0.1, 30, 0)).toBe(23); // no total: the whole base
+  });
+});
+
+describe('stopService (cap reported)', () => {
+  it('returns the minutes sent and whether the stop needed more than the optimizer accepts', () => {
+    expect(stopService(30, 0.05, 100)).toEqual({ min: 35, capped: false, neededMin: 35 });
+    expect(stopService(60, 1, 500)).toEqual({ min: MAX_SERVICE_MIN, capped: true, neededMin: 560 });
+    expect(stopService(MAX_SERVICE_MIN, 0, 10)).toEqual({ min: MAX_SERVICE_MIN, capped: false, neededMin: MAX_SERVICE_MIN });
+  });
+
+  it('a split part gets its share of the real base time', () => {
+    expect(stopService(600, 0, 50, 100)).toEqual({ min: 300, capped: false, neededMin: 300 });
   });
 });

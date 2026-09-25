@@ -4,11 +4,14 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  contentFingerprint,
   customerKey,
   customerTypeFromText,
   excelSerialToIso,
+  lineDupKey,
   mapHeaders,
   normalizeOrderRows,
+  normSalesOrder,
   parseDateCell,
   resolveOrderLines,
   type KnownCustomer,
@@ -331,6 +334,16 @@ describe('normalizeOrderRows', () => {
     expect(res.lines[0].weightKg).toBe(12.5);
   });
 
+  it('a file weight of 0 counts as blank, so the product master weight applies (with a note)', () => {
+    const res = normalizeOrderRows([
+      { 'Customer Code': 'C001', 'Item Code': 'W500', Cases: '4', Date: '25/09/2026', Weight: '0' },
+      { 'Customer Code': 'C001', 'Item Code': 'W500', Cases: '4', Date: '25/09/2026', Weight: '51.2' },
+    ]);
+    expect(res.errors).toEqual([]);
+    expect(res.lines.map((l) => l.weightKg)).toEqual([null, 51.2]);
+    expect(res.warnings.join(' ')).toMatch(/1 row\(s\) have weight 0 \(row 2\): treated as blank/);
+  });
+
   it('an unreadable order date is only a warning', () => {
     const res = normalizeOrderRows([{ 'SO Date': 'yesterday', 'Delivery Date': '25/09/2026', 'Customer Code': 'C001', 'Item Code': 'W500', Cases: '1' }]);
     expect(res.errors).toEqual([]);
@@ -342,7 +355,7 @@ describe('normalizeOrderRows', () => {
 describe('resolveOrderLines', () => {
   const D = '25/09/2026';
 
-  function resolve(rows: Record<string, string>[], customers: KnownCustomer[], products: KnownProduct[], confirmed = NONE) {
+  function resolve(rows: Record<string, string>[], customers: KnownCustomer[], products: KnownProduct[], confirmed: Set<string> | Map<string, number[]> = NONE) {
     const norm: NormalizeResult = normalizeOrderRows(rows);
     return resolveOrderLines(norm, customers, products, confirmed);
   }
@@ -526,6 +539,91 @@ describe('resolveOrderLines', () => {
     expect(res.issues.productsWithoutWeight).toEqual(['NOWT']);
   });
 
+  it('a line confirmed with the same quantity is skipped; with another quantity it is an error (no amendments yet)', () => {
+    const k = (so: string, item: string) => lineDupKey('2026-09-25', so, customerKey('C001', '__MAIN__'), item);
+    const confirmed = new Map([
+      [k('S1', 'W500'), [5]],
+      [k('S2', 'W500'), [5]],
+    ]);
+    const res = resolve(
+      [
+        row({ so: 's1 ', date: D, cust: 'c001', item: 'W500', qty: '5' }), // same line, other case/spacing
+        row({ so: 'S2', date: D, cust: 'C001', item: 'W500', qty: '4' }),
+        row({ so: 'S2', date: D, cust: 'C001', item: 'W500', qty: '1' }), // merged: 4 + 1 = 5 = confirmed
+        row({ so: 'S3', date: D, cust: 'C001', item: 'W500', qty: '9' }),
+      ],
+      [cust('C001')],
+      [prod('W500')],
+      confirmed,
+    );
+    expect(res.duplicates.map((d) => d.row)).toEqual([2, 3]);
+    expect(res.errors).toEqual([]);
+    expect(res.lines.map((l) => l.row)).toEqual([5]);
+
+    const changed = resolve([row({ so: 'S1', date: D, cust: 'C001', item: 'W500', qty: '7' })], [cust('C001')], [prod('W500')], confirmed);
+    expect(changed.lines).toEqual([]);
+    expect(changed.errors).toHaveLength(1);
+    expect(changed.errors[0]).toMatchObject({ row: 2, cases: 7 });
+    expect(changed.errors[0].message).toMatch(/already confirmed with 5 cases; this file has 7\. Changing a confirmed line is not supported yet/);
+  });
+
+  it('the same sales order confirmed for another delivery date is a warning, not an error', () => {
+    const other = new Map([[`S1|${customerKey('C001', '__MAIN__')}`, ['2026-09-24']]]);
+    const norm = normalizeOrderRows([row({ so: 's1', date: D, cust: 'C001', item: 'W500', qty: '5' }), row({ so: 'S1', date: D, cust: 'C001', item: 'W1500', qty: '5' })]);
+    const res = resolveOrderLines(norm, [cust('C001')], [prod('W500'), prod('W1500')], NONE, { confirmedOnOtherDates: other });
+    expect(res.errors).toEqual([]);
+    expect(res.lines).toHaveLength(2);
+    expect(res.warnings.filter((w) => /already confirmed for 2026-09-24/.test(w))).toHaveLength(1);
+  });
+
+  it('case-variant twins in the master resolve to one row, always the same (active, then with a location)', () => {
+    const lower = cust('c001', '__MAIN__', { id: 'id-lower', lat: null, lng: null });
+    const upper = cust('C001', '__MAIN__', { id: 'id-upper' });
+    for (const master of [[lower, upper], [upper, lower]]) {
+      const res = resolve([row({ so: 'S1', date: D, cust: 'c001', item: 'w500', qty: '5' }), row({ so: 'S2', date: D, cust: 'C001', item: 'W500', qty: '5' })], master, [
+        prod('w500', { id: 'p-lower', weightPerCaseKg: 0 }),
+        prod('W500', { id: 'p-upper' }),
+      ]);
+      expect(res.lines.map((l) => l.customerId)).toEqual(['id-upper', 'id-upper']);
+      expect(res.lines.map((l) => l.productId)).toEqual(['p-upper', 'p-upper']);
+      expect(res.warnings.join(' ')).toMatch(/differ only in letter case/);
+    }
+    // An inactive twin loses to an active one; its rows are not refused.
+    const res = resolve([row({ so: 'S1', date: D, cust: 'C001', item: 'W500', qty: '5' })], [cust('C001', '__MAIN__', { active: false }), cust('c001', '__MAIN__', { id: 'id-active' })], [prod('W500')]);
+    expect(res.errors).toEqual([]);
+    expect(res.lines[0].customerId).toBe('id-active');
+  });
+
+  it('a merged line with a blank weight on some rows takes the master weight for those cases', () => {
+    const res = resolve(
+      [
+        { ...row({ so: 'S1', date: D, cust: 'C001', item: 'W500', qty: '5' }), Weight: '64' },
+        { ...row({ so: 'S1', date: D, cust: 'C001', item: 'W500', qty: '3' }), Weight: '' },
+      ],
+      [cust('C001')],
+      [prod('W500')],
+    );
+    expect(res.lines).toHaveLength(1);
+    expect(res.lines[0]).toMatchObject({ cases: 8, weightKg: 64, weightMissingCases: 3 });
+  });
+
+  it('flags products without any weight (new SKUs too) and file weights far from the master', () => {
+    const res = resolve(
+      [
+        { ...row({ so: 'S1', date: D, cust: 'C001', item: 'NEWSKU', qty: '5' }), Weight: '' },
+        { ...row({ so: 'S2', date: D, cust: 'C001', item: 'NEW2', qty: '5' }), Weight: '50' },
+        { ...row({ so: 'S3', date: D, cust: 'C001', item: 'W500', qty: '10' }), Weight: '12' }, // per case, not per line
+        { ...row({ so: 'S4', date: D, cust: 'C001', item: 'W1500', qty: '10' }), Weight: '118' },
+      ],
+      [cust('C001')],
+      [prod('W500'), prod('W1500')],
+    );
+    expect(res.issues.productsWithoutWeight).toEqual(['NEWSKU']);
+    const odd = res.warnings.filter((w) => /per case, but the product's case weight/.test(w));
+    expect(odd).toHaveLength(1);
+    expect(odd[0]).toMatch(/^Row 4: weight 12 kg for 10 cases of W500 is 1\.2 kg per case/);
+  });
+
   it('keeps normalize errors and sorts all errors by row', () => {
     const res = resolve(
       [
@@ -536,6 +634,44 @@ describe('resolveOrderLines', () => {
       [prod('W500')],
     );
     expect(res.errors.map((e) => e.row)).toEqual([2, 3]);
+  });
+});
+
+describe('sales-order line identity (IntakeLineKey)', () => {
+  it('normalizes the sales order: trimmed, upper-case; blank = no key', () => {
+    expect(normSalesOrder('  so-1 ')).toBe('SO-1');
+    expect(normSalesOrder('')).toBeNull();
+    expect(normSalesOrder('   ')).toBeNull();
+    expect(normSalesOrder(null)).toBeNull();
+    expect(lineDupKey('2026-09-25', ' so-1', customerKey('c001', 'b1'), 'w500 ')).toBe('2026-09-25|SO-1|C001::B1|W500');
+  });
+
+  it('a row without a sales-order number gets no key and is never matched', () => {
+    const confirmed = new Map([[lineDupKey('2026-09-25', 'X', customerKey('C001', '__MAIN__'), 'W500'), [5]]]);
+    const res = resolveOrderLines(normalizeOrderRows([row({ date: '25/09/2026', cust: 'C001', item: 'W500', qty: '5' })]), [cust('C001')], [prod('W500')], confirmed);
+    expect(res.duplicates).toEqual([]);
+    expect(res.lines).toHaveLength(1);
+    expect(res.lines[0].salesOrderNo).toBeNull();
+  });
+});
+
+describe('contentFingerprint (same-file check)', () => {
+  const rows = [
+    row({ so: 'S1', date: '25/09/2026', cust: 'C001', item: 'W500', qty: '5' }),
+    row({ so: 'S2', date: '25/09/2026', cust: 'C002', item: 'W500', qty: '3' }),
+  ];
+  it('does not depend on row or column order', () => {
+    const a = contentFingerprint(normalizeOrderRows(rows).lines);
+    const reversedColumns = rows.map((r) => Object.fromEntries(Object.entries(r).reverse()));
+    expect(contentFingerprint(normalizeOrderRows([...rows].reverse()).lines)).toBe(a);
+    expect(contentFingerprint(normalizeOrderRows(reversedColumns).lines)).toBe(a);
+  });
+  it('includes the delivery date, also when it comes from the screen', () => {
+    const noDate = rows.map(({ [H.date]: _d, ...r }) => r);
+    const day1 = contentFingerprint(normalizeOrderRows(noDate, { defaultDeliveryDate: '2026-09-25' }).lines);
+    const day2 = contentFingerprint(normalizeOrderRows(noDate, { defaultDeliveryDate: '2026-09-26' }).lines);
+    expect(day1).not.toBe(day2);
+    expect(day1).toBe(contentFingerprint(normalizeOrderRows(rows).lines));
   });
 });
 

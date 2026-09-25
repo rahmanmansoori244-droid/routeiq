@@ -8,6 +8,7 @@ import {
   fitsCapacity,
   mergePortions,
   orderIdOf,
+  partDemandKg,
   portionId,
   portionMoney,
   portionsOfPart,
@@ -156,6 +157,54 @@ describe('choosePartCapacity', () => {
   it('floors the payload to whole kg and ignores trucks without capacity', () => {
     expect(choosePartCapacity(300, 3000, [T('A', 120, 2500.7), T('Z', 0, null)])).toEqual({ cap: { cases: 120, kg: 2500 }, truckCode: 'A' });
     expect(choosePartCapacity(300, 0, [T('Z', 0, null)])).toBeNull();
+  });
+
+  it('sizes parts for a truck that can carry the heaviest case (review F01, scenario B)', () => {
+    // SMALL: 100 kg payload, 30 loads left; BIG: 1000 kg, 1 load. 20 cases of 120 kg each: SMALL
+    // could run all 24 parts, but no case of 120 kg may legally go on it.
+    const fleet = [T('SMALL', 100, 100, 30), T('BIG', 100, 1000, 1)];
+    const r = choosePartCapacity(20, 2400, fleet, 120);
+    expect(r?.truckCode).toBe('BIG');
+    expect(r?.cap).toEqual({ cases: 100, kg: 1000 });
+    // Without the heaviest case the small truck would win (enough loads for every part).
+    expect(choosePartCapacity(20, 2400, fleet)?.truckCode).toBe('SMALL');
+  });
+
+  it('uses the whole-kg payload when checking the heaviest case, and falls back when no truck can carry it', () => {
+    // 999.7 kg floors to 999: a 999.5 kg case does not fit that part size.
+    expect(choosePartCapacity(10, 5000, [T('A', 50, 999.7), T('B', 50, 1200)], 999.5)?.truckCode).toBe('B');
+    // Nothing carries a 5 t case: every truck stays a candidate (the planner pre-drops such cases).
+    expect(choosePartCapacity(10, 50_000, [T('A', 50, 1000), T('B', 50, 2000)], 5000)).not.toBeNull();
+  });
+
+  it('ranks sizes that cannot deliver everything by the share of cases AND kg they can carry', () => {
+    // 200 cases, 4000 kg. VAN: 200 cases / 500 kg, 2 loads -> 1000 kg = 25 %. LORRY: 100 cases /
+    // 2000 kg, 1 load -> 50 % of the cases, 50 % of the kg. The van moves more cases but less weight.
+    const r = choosePartCapacity(200, 4000, [T('VAN', 200, 500, 2), T('LORRY', 100, 2000, 1)]);
+    expect(r?.truckCode).toBe('LORRY');
+  });
+});
+
+describe('partDemandKg', () => {
+  it('is the true kg of a part, never capped at the payload it was sized for', () => {
+    const parts = splitIntoParts([L('a', 'O1', 1, 120)], { cases: 100, kg: 100 });
+    expect(parts).toHaveLength(1);
+    expect(partDemandKg(parts[0], new Map([['a', 120]]))).toBe(120);
+  });
+
+  it('a part of whole cases that fit rounds to at most its payload (property)', () => {
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+    for (let run = 0; run < 400; run++) {
+      const capKg = Math.floor(200 + rnd() * 3000);
+      const lines: OpenLine[] = Array.from({ length: 1 + Math.floor(rnd() * 5) }, (_, i) =>
+        L(`l${i}`, 'O1', 1 + Math.floor(rnd() * 400), Math.round((0.3 + rnd() * 25) * 1000) / 1000),
+      );
+      const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase]));
+      for (const part of splitIntoParts(lines, { cases: 5000, kg: capKg })) {
+        expect(partDemandKg(part, kgPerCase)).toBeLessThanOrEqual(capKg);
+      }
+    }
   });
 });
 

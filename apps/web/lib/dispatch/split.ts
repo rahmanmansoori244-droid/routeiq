@@ -49,8 +49,11 @@ export function fitsCapacity(cases: number, kg: number, cap: PartCapacity): bool
 
 /**
  * Cut the lines into parts that each fit `cap`. Lines keep their order; a line is split only
- * when it does not fit the current part. A single case heavier than the payload still goes
- * into a part of its own (the optimizer then reports it as bigger than any truck).
+ * when it does not fit the current part. A single case heavier than `cap.kg` still goes into a
+ * part of its own, so the loop always ends. That part is sent with its true kg (partDemandKg):
+ * the optimizer puts it on a truck that can carry it, or reports it as unserved. (Cases heavier
+ * than every truck never get here: buildDispatchRequest leaves them unserved first, with
+ * "check the product weight".)
  */
 export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAllocation[][] {
   if (!(cap.cases > 0)) return [lines.filter((l) => l.cases > 0).map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases, weightKg: l.cases * l.kgPerCase }))];
@@ -96,6 +99,16 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
   return parts;
 }
 
+/**
+ * The true kg of a part (to 0.1 kg), from the exact case weights of its lines. Never capped at
+ * the payload the part was sized for: a part that fills its truck rounds to at most that
+ * payload anyway (splitIntoParts only adds whole cases that fit), and a part holding one case
+ * heavier than the payload must show its real weight so it is not planned onto that truck.
+ */
+export function partDemandKg(part: { lineId: string; cases: number }[], kgPerCase: Map<string, number>): number {
+  return r1(part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0));
+}
+
 export interface FleetTruck {
   code: string;
   cases: number;
@@ -107,22 +120,36 @@ export interface FleetTruck {
  * Part size for a customer that fits no truck. Each truck's capacity is a candidate size; a
  * size is carried by every truck at least that big, and it is feasible when those trucks have
  * enough trips left for all parts. Feasible sizes: fewest parts wins, then more trips to
- * choose from. Otherwise the size that can deliver the most cases. Parts then fit several
- * trucks, not only the single biggest one.
+ * choose from. Otherwise the size that can deliver the largest share of the customer's cases
+ * AND kg. Parts then fit several trucks, not only the single biggest one.
+ *
+ * `maxCaseKg` is the heaviest single case of the customer: sizes whose payload cannot carry it
+ * are used only when no truck can (a part sized for a small truck would hold cases that only a
+ * bigger truck may legally carry).
  */
-export function choosePartCapacity(cases: number, kg: number, fleet: FleetTruck[]): { cap: PartCapacity; truckCode: string } | null {
+export function choosePartCapacity(
+  cases: number,
+  kg: number,
+  fleet: FleetTruck[],
+  maxCaseKg = 0,
+): { cap: PartCapacity; truckCode: string } | null {
   const usable = fleet.filter((t) => t.cases > 0);
   if (!usable.length) return null;
   const carries = (t: FleetTruck, c: FleetTruck) => t.cases >= c.cases && (t.kg === null || (c.kg !== null && t.kg >= c.kg));
-  const ranked = usable.map((c) => {
+  // Compared on the whole-kg payload the part is sized for (see the floor below).
+  const carriesHeaviestCase = (c: FleetTruck) => c.kg === null || !(c.kg > 0) || Math.floor(c.kg) + 1e-6 >= maxCaseKg;
+  const candidates = usable.some(carriesHeaviestCase) ? usable.filter(carriesHeaviestCase) : usable;
+  const ranked = candidates.map((c) => {
     const parts = Math.max(Math.ceil(cases / c.cases), c.kg !== null && c.kg > 0 ? Math.ceil(kg / c.kg) : 1);
     const trips = usable.filter((t) => carries(t, c)).reduce((a, t) => a + Math.max(0, t.tripsLeft), 0);
-    return { c, parts, trips, feasible: parts <= trips, deliverable: Math.min(parts, trips) * c.cases };
+    // Share of the demand the trips can carry: the binding one of cases and kg.
+    const share = Math.min(1, cases > 0 ? (trips * c.cases) / cases : 1, c.kg !== null && c.kg > 0 && kg > 0 ? (trips * c.kg) / kg : 1);
+    return { c, parts, trips, feasible: parts <= trips, share };
   });
   ranked.sort(
     (a, b) =>
       Number(b.feasible) - Number(a.feasible) ||
-      (a.feasible ? a.parts - b.parts || b.trips - a.trips : b.deliverable - a.deliverable || a.parts - b.parts) ||
+      (a.feasible ? a.parts - b.parts || b.trips - a.trips : b.share - a.share || a.parts - b.parts) ||
       b.c.cases - a.c.cases ||
       (b.c.kg ?? Infinity) - (a.c.kg ?? Infinity) ||
       a.c.code.localeCompare(b.c.code),

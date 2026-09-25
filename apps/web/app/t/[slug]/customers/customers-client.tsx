@@ -94,6 +94,8 @@ export function CustomersClient({
         return;
       }
       toast.success('Customer updated');
+      const body = await res.json().catch(() => ({}));
+      if (typeof body?.data?.warning === 'string') toast.warning(body.data.warning, { duration: 10_000 });
       router.refresh();
     });
   }

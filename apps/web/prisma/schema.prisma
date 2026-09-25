@@ -182,6 +182,7 @@ model Tenant {
   deliveryProofs       DeliveryProof[]
   customerTypeProfiles CustomerTypeProfile[]
   planLoads            PlanLoad[]
+  intakeLineKeys       IntakeLineKey[]
 }
 
 model TenantConfig {
@@ -578,24 +579,50 @@ model Order {
 }
 
 model OrderLine {
-  id                 String    @id @default(cuid())
+  id                 String         @id @default(cuid())
   orderId            String
-  order              Order     @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  order              Order          @relation(fields: [orderId], references: [id], onDelete: Cascade)
   productId          String
-  product            Product   @relation(fields: [productId], references: [id])
+  product            Product        @relation(fields: [productId], references: [id])
   cases              Int
   // --- dispatch MVP: keep sales-order / SKU detail so manifests reconcile exactly ---
   salesOrderNo       String?
-  orderDate          DateTime? @db.Date
+  orderDate          DateTime?      @db.Date
   productDescription String?
-  weightKg           Float     @default(0)
+  weightKg           Float          @default(0) // 0 = unknown
+  /// The line's kg is (to be) cases x the product's case weight: the file gave no weight for it.
+  /// Such a line follows the product master: a case weight entered or corrected later is applied
+  /// at the next optimize / re-plan (unless the line is on a frozen load). File weights are kept.
+  weightFromMaster   Boolean        @default(false)
   salesValue         Float?
   marginValue        Float?
   sourceRow          Int?
   notes              String?
+  intakeKey          IntakeLineKey?
 
   @@index([orderId])
   @@index([salesOrderNo])
+}
+
+/// Durable identity of a confirmed sales-order line (delivery date + sales order + customer +
+/// product), so the same line can never be confirmed twice: from two files, two tabs or a late
+/// order. Lines without a sales-order number have no key (the file hash covers them). The key
+/// goes away with its order line, so a permitted batch delete frees it for a re-upload.
+model IntakeLineKey {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveryDate   DateTime  @db.Date
+  salesOrderNorm String // sales-order number, trimmed and upper-case
+  customerId     String
+  productId      String
+  orderLineId    String    @unique
+  orderLine      OrderLine @relation(fields: [orderLineId], references: [id], onDelete: Cascade)
+  uploadBatchId  String? // null = late order recorded on the plan
+  createdAt      DateTime  @default(now())
+
+  @@unique([tenantId, deliveryDate, salesOrderNorm, customerId, productId])
+  @@index([tenantId, salesOrderNorm])
 }
 
 model RunPlan {
@@ -793,18 +820,20 @@ model ManualBaselineAssignment {
 }
 
 model UnservedOrder {
-  id            String             @id @default(cuid())
-  scenarioId    String
-  scenario      ScenarioResult     @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
-  orderId       String
-  order         Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  reasonCode    UnservedReasonCode
-  reasonMessage String?
+  id               String             @id @default(cuid())
+  scenarioId       String
+  scenario         ScenarioResult     @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+  orderId          String
+  // NoAction: an order that is in any plan option cannot be deleted from under it (like
+  // RouteAssignment.orderId). Deleting a tenant removes its plan data first.
+  order            Order              @relation(fields: [orderId], references: [id], onDelete: NoAction)
+  reasonCode       UnservedReasonCode
+  reasonMessage    String?
   // Split deliveries: only part of the order is unserved (null = the whole order).
   portionCases     Int?
   portionWeightKg  Float?
   portionLinesJson Json? // [{ lineId, cases }]
-  createdAt     DateTime           @default(now())
+  createdAt        DateTime           @default(now())
 
   @@index([scenarioId])
   @@index([orderId])

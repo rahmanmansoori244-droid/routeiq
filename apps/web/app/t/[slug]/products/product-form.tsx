@@ -77,6 +77,7 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
         return;
       }
       toast.success(mode === 'create' ? 'Product created' : 'Product updated');
+      if (typeof data?.data?.warning === 'string') toast.warning(data.data.warning, { duration: 10_000 });
       onSaved();
     });
   }

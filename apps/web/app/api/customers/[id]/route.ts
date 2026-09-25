@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
 
 interface Params { params: { id: string } }
 
@@ -40,6 +41,16 @@ export const PATCH = (req: Request, { params }: Params) =>
       if (Object.prototype.hasOwnProperty.call(input, 'branchCode')) {
         data.branchKey = normalizeBranchKey(input.branchCode);
       }
+      const code = input.code ?? before.code;
+      const branchKey = (data.branchKey as string | undefined) ?? before.branchKey;
+      if (code !== before.code || branchKey !== before.branchKey) {
+        // Codes are one customer whatever their letter case (the order intake matches them so).
+        const twin = await db.customer.findFirst({
+          where: { id: { not: before.id }, code: { equals: code, mode: 'insensitive' }, branchKey: { equals: branchKey, mode: 'insensitive' } },
+          select: { code: true, branchCode: true },
+        });
+        if (twin) return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
+      }
       if (input.lat !== undefined && input.lng !== undefined) {
         data.geocodeConfidence = 'HIGH';
         data.locationSource = 'MANUAL_LATLNG';
@@ -62,7 +73,9 @@ export const PATCH = (req: Request, { params }: Params) =>
         afterJson: after as never,
         ip,
       });
-      return ok(after);
+      // Deactivating stops delivery of its open orders (left unserved at the next optimize).
+      const warning = before.active && !after.active ? deactivateWarning('customer', await openOrders(user.tenantId, { customerId: after.id })) : null;
+      return ok(warning ? { ...after, warning } : after);
     },
     { role: 'PLANNER' },
   )(req);
@@ -84,7 +97,8 @@ export const DELETE = (req: Request, { params }: Params) =>
           afterJson: { ...(after as object), softDeleted: true } as never,
           ip,
         });
-        return ok({ softDeleted: true, customer: after });
+        const warning = before.active ? deactivateWarning('customer', await openOrders(user.tenantId, { customerId: after.id })) : null;
+        return ok({ softDeleted: true, customer: after, ...(warning ? { warning } : {}) });
       }
       await db.customer.delete({ where: { id: params.id } });
       await audit({

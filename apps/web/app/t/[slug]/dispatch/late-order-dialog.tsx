@@ -14,7 +14,7 @@ interface Props {
   onOpenChange: (v: boolean) => void;
   date: string;
   depotId: string;
-  onSaved: (res: { orderId: string; replanNeeded: boolean; locationRequired: boolean; planId: string | null }) => void;
+  onSaved: (res: { orderId: string; replanNeeded: boolean; locationRequired: boolean; planId: string | null; productsWithoutWeight?: string[] }) => void;
 }
 
 /** Record one late order (phone / WhatsApp) without a file. Planning happens on re-plan. */
@@ -39,7 +39,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
       return;
     }
     setBusy(true);
-    const r = await api<{ orderId: string; replanNeeded: boolean; locationRequired: boolean; planId: string | null }>('/api/dispatch/late-order', {
+    const r = await api<{ orderId: string; replanNeeded: boolean; locationRequired: boolean; planId: string | null; productsWithoutWeight?: string[] }>('/api/dispatch/late-order', {
       method: 'POST',
       json: { date, depotId, customerCode: code.trim(), branchCode: branch.trim() || undefined, customerName: name.trim() || undefined, priority, reason: reason.trim(), lines: parsed },
     });
