@@ -204,8 +204,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         waitMin: a.waitMin,
         window: describeWindows(eff),
         hardWindow: eff.hardStart !== null || eff.hardEnd !== null ? fmtWindow(eff.hardStart, eff.hardEnd) : null,
-        // A split part unloads only its share: show the time the optimizer scheduled for it.
-        serviceMin: a.portionLinesJson !== null && a.departureMin !== null && a.serviceStartMin !== null ? a.departureMin - a.serviceStartMin : eff.serviceMin,
+        // Show the unloading time the optimizer scheduled (a split part's share, plus the
+        // per-case time when the tenant sets one); the customer's own time when not scheduled.
+        serviceMin: a.departureMin !== null && a.serviceStartMin !== null ? a.departureMin - a.serviceStartMin : eff.serviceMin,
         cases,
         weightKg,
         legKm: a.plannedDistanceFromPrevKm,

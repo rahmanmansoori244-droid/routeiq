@@ -10,18 +10,23 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
   the truck's case/kg load and takes ``reload_min``. Because every load of a truck is on one
   route, loads can never overlap in time, load k+1 always departs after load k is back and
   reloaded, and the whole truck day (first departure -> last return) is bounded by
-  ``shift_max_min``.
+  ``shift_max_min``. The turnaround between two loads is ``reload_min + loading_min_per_case x
+  cases of the next load``; the route search cannot know the next load's size and uses 80% of a
+  full truck, the final timing (load_repack) uses the exact value.
   Loads that are LOCKED/LOADING/DISPATCHED arrive as ``frozen_trips``: they are not
   re-optimized; they only push the truck's next departure after their return.
 * Hard constraints: capacity in cases AND kg (when the truck has a payload), hard customer
   receiving windows (service must START inside the window), depot open hours, truck
   availability, trip linking, shift limit.
 * Objective (single integer, 1 unit = 0.00001 OMR) built hierarchically by magnitude:
-    1+2. Service: leaving a stop unserved costs ``priority_weight[p] x SERVICE_UNIT``.
-         SERVICE_UNIT (100,000 OMR) dwarfs any realistic operating cost, so the solver
-         always serves what it physically can, and P1 (weight 10,000) dominates P5 (1).
+    1+2. Service. Strict priorities (default): leaving a stop of priority p unserved costs
+         SERVICE_BASE (1,000 OMR) x w_p with w_5 = 1 and w_p = 1 + sum_{q>p} n_q x w_q
+         (n_q = stops of priority q in this model), so ONE stop of a higher priority
+         outweighs ALL lower-priority stops together, and even a P5 stop is worth far more
+         than the cost of serving it. strict_priorities=false keeps the older weighted
+         scheme (priority_weight[p] x SERVICE_UNIT), where e.g. 11 P3 stops outweigh one P2.
     3.   Contribution margin (only if every stop has a reliable margin): added to the
-         service value x10, capped below one service unit so it breaks ties between stops
+         service value x10, capped below 0.4 service unit so it breaks ties between stops
          of the SAME priority but can never outrank a higher priority.
     4.   Operating cost in real OMR: fixed truck cost (once per truck-day), per-load cost,
          distance cost (cost_per_km + fuel_price / km_per_litre - fuel is counted ONCE),
@@ -29,8 +34,11 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
     5.   Fewer trucks/trips/km fall out of 4 (fixed + distance costs).
     6.   Soft preferences: preferred window deviation and an early-arrival preference for
          high priorities, in OMR per minute.
-* Search: parallel cheapest insertion + guided local search with a time limit. The result
-  is an OPTIMIZED plan (good, feasible), never claimed to be a proven optimum.
+* Search: parallel cheapest insertion + guided local search with a time limit, then the
+  post-solve stage (load_repack): the loads the searches built are re-assigned to trucks and
+  departure times exactly (CP-SAT), every plan is re-timed exactly, and each scenario returns
+  the best candidate for its own goal. The result is an OPTIMIZED plan (good, feasible), never
+  claimed to be a proven optimum.
 """
 from __future__ import annotations
 
@@ -38,10 +46,12 @@ import logging
 import math
 import os
 import time
+from collections import Counter
 from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+import load_repack as LR
 from dispatch_models import (
     DAY_MIN,
     DispatchConfig,
@@ -61,9 +71,15 @@ from providers import MatrixResult, resolve_matrix
 log = logging.getLogger("routeiq.dispatch")
 
 COST_SCALE = 100_000  # 1 OMR = 100,000 objective units
-SERVICE_UNIT = 10_000_000_000  # value of serving a P5 stop (= 100,000 OMR) in objective units
+SERVICE_UNIT = 10_000_000_000  # weighted priorities: value of serving a P5 stop (= 100,000 OMR)
 MARGIN_WEIGHT = 10  # margin is weighted 10x operating cost ...
 MARGIN_CAP = int(SERVICE_UNIT * 0.4)  # ... but can never outweigh one service unit
+# Strict priorities: one "weight unit" of service = 1,000 OMR, still far above the cost of
+# serving any one stop (so every servable stop is served) but small enough that the strict
+# weights of a big day fit in 64-bit integers.
+SERVICE_BASE = 100_000_000
+# OR-Tools' objective is int64: all drop penalties together stay below this (see _service_values).
+PENALTY_LIMIT = 2**62
 HORIZON_S = 2 * DAY_MIN * 60
 # Worker start-up + matrix pickling + extraction on top of an alternative's solver time limit.
 ALT_GRACE_SEC = int(os.environ.get("SOLVER_ALT_GRACE_SEC", "20"))
@@ -75,16 +91,21 @@ REC_OVERHEAD_SEC = 20
 # Whole request (matrix + all scenarios) must answer before the web gives up (600 s): the
 # alternatives are skipped rather than overrun it. Env SOLVER_BUDGET_SEC overrides.
 SOLVER_BUDGET_SEC = 540
+# Post-solve stage (load repack): each CP-SAT solve gets min(CAP, max(MIN, search limit / 2)).
+REPACK_CAP_SEC = 15
+REPACK_MIN_SEC = 3
+# Worker start-up, exact timing of every candidate and pickling around the repack solves.
+STAGE_GRACE_SEC = 20
 ENGINE = "ortools-routing"
 
 
 def auto_time_limit(n_stops: int) -> int:
     # A normal NMWC day (~150 stops) stays fast. Big days get much more time: at 300 stops 45 s
     # left feasible P5 stops unserved (search not converged) while 150 s served all of them.
+    # Small days are cheap: 20 s instead of 8 s up to 80 stops is insurance against a search
+    # stopped before it settled (the synthetic 60-stop days were 5-15% better at 20-30 s).
     if n_stops <= 25:
-        return 3
-    if n_stops <= 80:
-        return 8
+        return 5
     if n_stops <= 200:
         return 20
     if n_stops <= 350:
@@ -99,9 +120,9 @@ class ScenarioWeights:
     distance: float  # multiplier on true per-km cost
     time: float
     pure_distance: bool = False  # MIN_DISTANCE: cost = metres, ignore money
-    # Soft time preferences (preferred windows, early arrival, overtime). Only the RECOMMENDED plan
-    # uses them: alternatives answer one question each and must be warm-startable, and OR-Tools'
-    # route restore can stall when soft cumul costs are present.
+    # Soft time preferences (preferred windows, early arrival, overtime, plan continuity). Only
+    # the RECOMMENDED search uses them: alternatives answer one question each. (Every returned
+    # plan is still TIMED with them afterwards - load_repack.time_plan.)
     soft_prefs: bool = True
 
 
@@ -124,6 +145,9 @@ class TruckDay:
     shift_anchor_s: int | None  # first frozen departure, if any
     max_cases: int
     max_kg: float  # 0 = unconstrained
+    # Last frozen return: the first new load leaves after it + reload + loading of ITS cases
+    # (earliest_depart_s holds the reload part only).
+    frozen_return_s: int | None = None
 
     @property
     def usable(self) -> bool:
@@ -137,10 +161,11 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
         max_trips = t.max_trips or cfg.max_trips_per_truck
         frozen = sorted(t.frozen_trips, key=lambda f: f.load_no)
         earliest = max(cfg.shift_start_min, req.depot.open_min, t.available_from_min or 0)
-        anchor = None
+        anchor = frozen_return = None
         if frozen:
             anchor = min(f.depart_min for f in frozen)
-            earliest = max(earliest, max(f.return_min for f in frozen) + cfg.reload_min)
+            frozen_return = max(f.return_min for f in frozen)
+            earliest = max(earliest, frozen_return + cfg.reload_min)
         latest = min(req.depot.close_min if req.depot.close_min > 0 else DAY_MIN, t.available_to_min or DAY_MIN * 2)
         if anchor is not None:
             latest = min(latest, anchor + cfg.shift_max_min)
@@ -155,9 +180,17 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
                 shift_anchor_s=anchor * 60 if anchor is not None else None,
                 max_cases=t.capacity_cases,
                 max_kg=t.capacity_kg,
+                frozen_return_s=frozen_return * 60 if frozen_return is not None else None,
             )
         )
     return out
+
+
+def _approx_gap_s(cfg: DispatchConfig, td: TruckDay) -> int:
+    """Turnaround before a truck's next load as the route search sees it: the next load's size
+    is unknown there, so loading is costed for 80% of a full truck. The final timing uses the
+    exact ``reload_min + loading_min_per_case x cases`` of each load (load_repack)."""
+    return int(round((cfg.reload_min + cfg.loading_min_per_case * td.max_cases * 0.8) * 60))
 
 
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
@@ -260,11 +293,71 @@ def _hhmm(m: int | None) -> str:
 
 
 def _stop_value(s: DispatchStop, cfg: DispatchConfig, use_margin: bool) -> int:
+    """Weighted priorities (strict_priorities=false): priority_weight[p] x SERVICE_UNIT."""
     w = cfg.priority_weights
     base = int(round(SERVICE_UNIT * (w[s.priority] / w[5])))
     if use_margin and s.margin is not None and s.margin > 0:
         base += min(MARGIN_CAP, int(round(s.margin * COST_SCALE * MARGIN_WEIGHT)))
     return base
+
+
+def _strict_weights(counts: dict[int, int], with_margin: bool = False) -> dict[int, int]:
+    """w_5 = 1, w_p = 1 + sum_{q>p} n_q x w_q: one stop of priority p is worth more than ALL
+    lower-priority stops of the day together. With margins every lower stop may carry up to 0.4
+    of a unit on top, so each counts as w_q + 1 and margins can never add up past a priority."""
+    w = {5: 1}
+    for p in (4, 3, 2, 1):
+        w[p] = 1 + sum(counts.get(q, 0) * (w[q] + (1 if with_margin else 0)) for q in range(p + 1, 6))
+    return w
+
+
+def _service_values(stops: list[DispatchStop], cfg: DispatchConfig, use_margin: bool) -> tuple[list[int], list[str]]:
+    """Objective units lost when each stop is left unserved (the drop penalty), plus warnings.
+
+    Strict: SERVICE_BASE x w_p (see _strict_weights). The weights grow like the product of the
+    per-priority counts; all penalties together must stay below PENALTY_LIMIT (int64 objective).
+    Beyond it the base is scaled down (to no less than 100 OMR per weight unit, so service still
+    dominates cost), and past that the weights are capped: priorities are then no longer strict
+    between the capped levels, which is logged and reported. Real NMWC days (a few hundred stops)
+    are orders of magnitude below the limit (400 stops with margins: ~7e17 of 4.6e18)."""
+    if not cfg.strict_priorities:
+        return [_stop_value(s, cfg, use_margin) for s in stops], []
+    counts = Counter(s.priority for s in stops)
+    w = _strict_weights(counts, use_margin)
+    total = sum(w[s.priority] for s in stops) + (len(stops) if use_margin else 0)
+    base, warnings = SERVICE_BASE, []
+    if total * base > PENALTY_LIMIT:
+        base = max(100 * COST_SCALE, PENALTY_LIMIT // max(1, total))
+        if total * base > PENALTY_LIMIT:
+            cap = max(1, PENALTY_LIMIT // (base * max(1, len(stops)) * 2))
+            w = {p: min(v, cap - (p - 1)) for p, v in w.items()}  # P1 > P2 > ... still holds
+            warnings.append(
+                "This day has too many orders to rank priorities strictly; higher priorities still weigh "
+                "much more, but a very large number of lower-priority orders can outweigh one higher."
+            )
+            log.warning("strict priority weights capped at %d (base %d, %d stops)", cap, base, len(stops))
+        else:
+            log.warning("strict priority base scaled to %d units (%d stops)", base, len(stops))
+    margin_cap = int(base * 0.4)
+    out = []
+    for s in stops:
+        v = base * w[s.priority]
+        if use_margin and s.margin is not None and s.margin > 0:
+            v += min(margin_cap, int(round(s.margin * COST_SCALE * MARGIN_WEIGHT)))
+        out.append(v)
+    return out, warnings
+
+
+def _repair_weights(stops: list[DispatchStop], ks: set[int], cfg: DispatchConfig) -> dict[int, int]:
+    """Small weights that rank the stops ``ks`` the way their service values do (the repack's
+    phase 1 maximises them; the full strict values would not fit CP-SAT's objective)."""
+    if not ks:
+        return {}
+    if cfg.strict_priorities:
+        w = _strict_weights(Counter(stops[k].priority for k in ks))
+        return {k: w[stops[k].priority] for k in ks}
+    pw = cfg.priority_weights
+    return {k: max(1, int(round(100 * pw[stops[k].priority] / pw[5]))) for k in ks}
 
 
 def _km_rate_omr(t: DispatchTruck, cfg: DispatchConfig) -> float:
@@ -273,6 +366,36 @@ def _km_rate_omr(t: DispatchTruck, cfg: DispatchConfig) -> float:
     if t.km_per_litre and cfg.fuel_price_per_litre > 0:
         rate += cfg.fuel_price_per_litre / t.km_per_litre
     return rate
+
+
+def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[DispatchStop]) -> LR.Pricing:
+    """A scenario's objective prices for the post-solve stage, in objective units and with the
+    same weights as its OR-Tools model (arc, fixed, span, soft-bound costs). One deliberate
+    difference: overtime counts from the truck's FIRST ACTUAL departure, exactly as the plan
+    reports it (the routing model can only bound the return time from the shift start)."""
+    cfg = req.config
+    w = SCENARIOS[name]
+    trucks = {
+        td.idx: LR.TruckPrice(
+            fixed=int(round(td.truck.fixed_cost * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
+            trip=int(round(td.truck.trip_cost * w.trip * COST_SCALE)),
+            per_m=_km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0,
+        )
+        for td in tds if td.usable
+    }
+    if not w.soft_prefs:
+        return LR.Pricing(trucks=trucks, span=int(round(cfg.driver_cost_per_hour * w.time * COST_SCALE / 3600.0)))
+    continuity = cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
+    return LR.Pricing(
+        trucks=trucks,
+        span=int(round(cfg.driver_cost_per_hour * w.time * COST_SCALE / 3600.0)),
+        overtime=int(round(cfg.overtime_cost_per_hour * COST_SCALE / 3600.0)) if cfg.overtime_after_min is not None else 0,
+        overtime_after_s=cfg.overtime_after_min * 60 if cfg.overtime_after_min is not None else None,
+        pref=int(round(cfg.pref_window_penalty_per_min * COST_SCALE / 60.0)),
+        early={p: int(round(v * COST_SCALE / 60.0)) for p, v in cfg.early_preference_per_min.items()},
+        shift_start_s=cfg.shift_start_min * 60,
+        change=int(round(cfg.change_penalty_per_stop * COST_SCALE)) if continuity else 0,
+    )
 
 
 @dataclass
@@ -327,7 +450,7 @@ def _solve_scenario(
     m = _Model(n_stops=len(stops), reload_owner=reload_owner, vehicles=vehicles)
     N = m.n_nodes
     nv = len(vehicles)
-    reload_s = cfg.reload_min * 60
+    values, value_warnings = _service_values(stops, cfg, use_margin)
 
     manager = pywrapcp.RoutingIndexManager(N, nv, 0)
     routing = pywrapcp.RoutingModel(manager)
@@ -336,8 +459,8 @@ def _solve_scenario(
     service_s = [0] * N
     for k, s in enumerate(stops):
         service_s[k + 1] = s.service_min * 60
-    for r in range(len(reload_owner)):
-        service_s[1 + len(stops) + r] = reload_s
+    for r, v in enumerate(reload_owner):
+        service_s[1 + len(stops) + r] = _approx_gap_s(cfg, vehicles[v])
 
     # --- arc costs: per truck (rate differs by truck; reload arcs carry the per-load cost) ---
     # Plan continuity (re-plans, RECOMMENDED only): entering a stop that sat on another truck in
@@ -419,7 +542,7 @@ def _solve_scenario(
             tdim.SetCumulVarSoftUpperBound(idx, cfg.shift_start_min * 60, early_coeff)
         if s.pref_start_min is not None and pref_coeff > 0:
             tdim.SetCumulVarSoftLowerBound(idx, s.pref_start_min * 60, pref_coeff)
-        routing.AddDisjunction([idx], _stop_value(s, cfg, use_margin))
+        routing.AddDisjunction([idx], values[k])
 
     for r, v in enumerate(reload_owner):
         idx = manager.NodeToIndex(1 + len(stops) + r)
@@ -433,7 +556,10 @@ def _solve_scenario(
     shift_s = cfg.shift_max_min * 60
     for v, td in enumerate(vehicles):
         start, end = routing.Start(v), routing.End(v)
-        tdim.CumulVar(start).SetRange(td.earliest_depart_s, td.latest_return_s)
+        first = td.earliest_depart_s
+        if td.frozen_return_s is not None:  # frozen loads: + loading of the first new load
+            first = max(first, td.frozen_return_s + _approx_gap_s(cfg, td))
+        tdim.CumulVar(start).SetRange(min(first, td.latest_return_s), td.latest_return_s)
         tdim.CumulVar(end).SetRange(td.earliest_depart_s, td.latest_return_s)
         if td.shift_anchor_s is None:
             tdim.SetSpanUpperBoundForVehicle(shift_s, v)
@@ -450,13 +576,15 @@ def _solve_scenario(
     params.log_search = False
 
     assignment = None
-    # Warm start only when the time dimension carries no cost at all (no span cost, no soft
-    # bounds): OR-Tools' route restore (ReadAssignmentFromRoutes) can stall searching cumul values
-    # under dimension costs - reproduced with a real OSRM matrix + overtime/preferred windows.
-    if warm_start and time_coeff == 0 and not w.soft_prefs:
-        initial = _initial_assignment(routing, m, stops, warm_start)
+    if warm_start:
+        initial = _initial_assignment(routing, manager, m, stops, warm_start, params)
         if initial is not None:
             assignment = routing.SolveFromAssignmentWithParameters(initial, params)
+        if assignment is None:
+            # Rare (seen once in the benchmark: ROUTING_FAIL after 0.25 s): solve cold instead,
+            # in the time that is left.
+            log.info("scenario %s: warm start gave no solution; solving cold", name)
+            params.time_limit.seconds = max(1, int(time_limit - (time.perf_counter() - started)))
     if assignment is None:
         assignment = routing.SolveWithParameters(params)
     elapsed = time.perf_counter() - started
@@ -471,54 +599,85 @@ def _solve_scenario(
         sc.solver_time_sec = round(elapsed, 2)
         return sc
 
-    return _extract(name, req, stops, tds, m, manager, routing, assignment, mx, cfg,
-                    use_margin, pre_drops, status_name, elapsed, time_limit)
+    return _extract(name, req, stops, tds, m, manager, routing, assignment, mx,
+                    values, use_margin, pre_drops, status_name, elapsed, time_limit, service_s, value_warnings)
 
 
-def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx, cfg,
-             use_margin, pre_drops, status_name, elapsed, time_limit) -> DispatchScenario:
+def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx, values, use_margin,
+             pre_drops, status_name, elapsed, time_limit, service_s, value_warnings) -> DispatchScenario:
+    return _build_scenario(
+        name, req, stops, tds, mx, _timed_from_assignment(m, manager, routing, assignment, mx, service_s),
+        values, use_margin, pre_drops, solver_status=status_name, elapsed=elapsed, time_limit=time_limit,
+        objective_value=int(assignment.ObjectiveValue()), extra_warnings=value_warnings,
+    )
+
+
+def _timed_from_assignment(m: _Model, manager, routing, assignment, mx, service_s) -> LR.TimedPlan:
+    """The search's timetable: each truck route split into loads at its reload visits."""
     tdim = routing.GetDimensionOrDie("Time")
-    reload_s = cfg.reload_min * 60
-    loads: list[PlannedLoad] = []
-    served: set[int] = set()
-    comp = dict(fixed=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0)
-
+    out: LR.TimedPlan = {}
     for v, td in enumerate(m.vehicles):
         if not routing.IsVehicleUsed(assignment, v):
             continue
-        t = td.truck
-        # Split the single route into loads at reload visits.
         trips: list[list[tuple[int, int]]] = [[]]  # (node, cumul_s) per stop
+        ready = [assignment.Value(tdim.CumulVar(routing.Start(v)))]
         idx = assignment.Value(routing.NextVar(routing.Start(v)))
-        start_cumul = assignment.Value(tdim.CumulVar(routing.Start(v)))
-        trip_starts = [start_cumul]
         while not routing.IsEnd(idx):
             node = manager.IndexToNode(idx)
             cum = assignment.Value(tdim.CumulVar(idx))
             if m.is_reload(node):
                 trips.append([])
-                trip_starts.append(cum + reload_s)
+                ready.append(cum + service_s[node])
             else:
                 trips[-1].append((node, cum))
             idx = assignment.Value(routing.NextVar(idx))
-
-        load_no = td.n_frozen
-        for trip, earliest_depart in zip(trips, trip_starts):
+        loads: list[LR.TimedLoad] = []
+        for trip, earliest in zip(trips, ready):
             if not trip:
                 continue  # empty load (consecutive reloads) - not a real load
-            load_no += 1
-            first_node = trip[0][0]
             # Leave just in time for the first delivery (no pointless waiting at stop 1), but
             # never before the truck is ready.
-            depart_s = max(earliest_depart, trip[0][1] - mx.duration_s[0][m.loc(first_node)])
+            depart = max(earliest, trip[0][1] - mx.duration_s[0][m.loc(trip[0][0])])
+            prev, t, starts = 0, depart, []
+            for node, cum in trip:
+                start = max(cum, t + mx.duration_s[prev][node])
+                starts.append(start)
+                t = start + service_s[node]
+                prev = node
+            loads.append(LR.TimedLoad(stops=tuple(node - 1 for node, _ in trip), depart_s=depart,
+                                      starts=tuple(starts), return_s=t + mx.duration_s[prev][0]))
+        if loads:
+            out[td.idx] = loads
+    return out
+
+
+def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                    timed: LR.TimedPlan, values: list[int], use_margin: bool, pre_drops: list[UnservedStop], *,
+                    solver_status: str, elapsed: float, time_limit: int, objective_value: int,
+                    extra_warnings: list[str] | None = None) -> DispatchScenario:
+    """Loads, stop times, costs, unserved reasons and totals of a timed plan. The ONE place a
+    plan becomes a scenario: the search's plans and the post-solve plans are reported alike."""
+    cfg = req.config
+    loads: list[PlannedLoad] = []
+    served: set[int] = set()
+    comp = dict(fixed=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0)
+
+    for idx in sorted(timed):
+        td = tds[idx]
+        t = td.truck
+        load_no = td.n_frozen
+        for tl in timed[idx]:
+            load_no += 1
+            depart_s = tl.depart_s
             prev_node, prev_dep = 0, depart_s
             cum_m, cases, kg, seq = 0, 0, 0.0, 0
             stops_out: list[PlannedStop] = []
-            for node, start_s in trip:
-                s = stops[node - 1]
-                served.add(node - 1)
-                leg_m = mx.distance_m[m.loc(prev_node)][node]
-                leg_s = mx.duration_s[m.loc(prev_node)][node]
+            for k, start_s in zip(tl.stops, tl.starts):
+                s = stops[k]
+                node = k + 1
+                served.add(k)
+                leg_m = mx.distance_m[prev_node][node]
+                leg_s = mx.duration_s[prev_node][node]
                 arrival_s = prev_dep + leg_s
                 start_s = max(start_s, arrival_s)
                 dep_s = start_s + s.service_min * 60
@@ -543,8 +702,8 @@ def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx,
                     hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok,
                 ))
                 prev_node, prev_dep = node, dep_s
-            back_m = mx.distance_m[m.loc(prev_node)][0]
-            back_s = mx.duration_s[m.loc(prev_node)][0]
+            back_m = mx.distance_m[prev_node][0]
+            back_s = mx.duration_s[prev_node][0]
             cum_m += back_m
             return_s = prev_dep + back_s
             km = cum_m / 1000.0
@@ -586,15 +745,11 @@ def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx,
     demand_cases = sum(s.demand_cases for s in stops)
     shortage = demand_cases > total_cap_cases
     unserved_penalty = 0.0
-    # PARTIAL_SUCCESS_LOCAL_OPTIMUM_NOT_REACHED = stopped by the time limit mid-improvement.
-    converged = status_name in ("ROUTING_SUCCESS", "ROUTING_OPTIMAL")
-    dropped_unconverged = 0
+    open_drops = 0
     for k, s in enumerate(stops):
         if k in served:
             continue
-        if not converged and not shortage and not s.late:
-            dropped_unconverged += 1
-        unserved_penalty += _stop_value(s, cfg, use_margin) / COST_SCALE
+        unserved_penalty += values[k] / COST_SCALE
         if s.late:
             unserved.append(_unserved(s, "LATE_ORDER_NO_CAPACITY",
                                       f"Late order (P{s.priority}): no unlocked truck/load had capacity or time left. "
@@ -603,28 +758,28 @@ def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx,
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
                                       f"Fleet capacity shortage: {demand_cases} cases requested vs {total_cap_cases} "
                                       f"cases across all available loads. Lower priorities are left out first (this is P{s.priority})."))
-        elif not converged:
-            unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
-                                      f"Not planned yet: the optimizer reached its {time_limit}s time limit before fitting "
-                                      f"this P{s.priority} stop (search not finished). Re-plan, or give the solver more time."))
         else:
+            # Never claimed impossible: no prefilter ruled this stop out, and the search is a
+            # time-limited heuristic (it always ends on its limit, whatever status it reports).
+            open_drops += 1
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
-                                      f"Could not be fitted with the higher-priority stops inside truck time, shift, "
-                                      f"trip and receiving-window limits (P{s.priority})."))
+                                      f"Not planned: the optimizer found no truck, trip or time slot for this P{s.priority} "
+                                      "stop within its time limit. Re-plan to search again, add a truck, or raise the "
+                                      "loads-per-truck limit."))
 
     margin_served = round(sum(stops[k].margin or 0 for k in served), 3) if use_margin else None
     code_of = {t.id: (t.code or t.id) for t in req.trucks}
     loads.sort(key=lambda l: (code_of[l.truck_id], l.load_no))
     util = [ld.utilization_pct for ld in loads]
-    warnings = list(mx.warnings)
-    if dropped_unconverged:
+    warnings = list(mx.warnings) + list(extra_warnings or [])
+    if open_drops:
         warnings.append(
-            f"The search stopped at its {time_limit}s limit before converging; {dropped_unconverged} stop(s) left unserved "
-            "might fit with more time. Re-plan to continue."
+            f"{open_drops} stop(s) could not be placed by the optimizer within its time limit; no check proves "
+            "they are impossible. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
     sc = DispatchScenario(
-        name=name, status="OPTIMIZED", solver_status=status_name, solver_time_sec=round(elapsed, 2),
-        time_limit_sec=time_limit, objective_value=int(assignment.ObjectiveValue()),
+        name=name, status="OPTIMIZED", solver_status=solver_status, solver_time_sec=round(elapsed, 2),
+        time_limit_sec=time_limit, objective_value=int(objective_value),
         objective=ObjectiveComponents(
             unserved_penalty=round(unserved_penalty, 1), fixed_cost=round(comp["fixed"], 3),
             distance_cost=round(comp["distance"], 3), fuel_cost=round(comp["fuel"], 3),
@@ -724,9 +879,14 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResp
     )
 
 
-def _initial_assignment(routing, m: _Model, stops: list[DispatchStop], loads: list[PlannedLoad]):
+def _initial_assignment(routing, manager, m: _Model, stops: list[DispatchStop], loads: list[PlannedLoad], params):
     """Rebuild a routing assignment from an existing plan (stops + reload visits per truck) so
-    an alternative scenario starts from the recommended plan and can only improve its own goal."""
+    an alternative scenario starts from the recommended plan and can only improve its own goal.
+
+    Only the Next variables are set (CloseModelWithParameters + RoutesToAssignment); the search
+    then derives times itself. ReadAssignmentFromRoutes, used before, restores the cumul values
+    too and could stall for over 100 s under time-dimension costs (preferred windows, overtime).
+    Returns None when the plan cannot be loaded (the caller solves cold)."""
     node_of = {s.stop_id: k + 1 for k, s in enumerate(stops)}
     reloads_of: dict[int, list[int]] = {}
     for r, v in enumerate(m.reload_owner):
@@ -742,9 +902,13 @@ def _initial_assignment(routing, m: _Model, stops: list[DispatchStop], loads: li
                     return None
                 route.append(spare.pop(0))
             route += [node_of[st.stop_id] for st in ld.stops if st.stop_id in node_of]
-        routes.append(route)
+        routes.append([manager.NodeToIndex(n) for n in route])
     try:
-        return routing.ReadAssignmentFromRoutes(routes, True)
+        routing.CloseModelWithParameters(params)
+        initial = routing.solver().Assignment()
+        if not routing.RoutesToAssignment(routes, True, True, initial):
+            return None
+        return initial
     except Exception:  # noqa: BLE001
         return None
 
@@ -781,8 +945,9 @@ def _await_worker(pool, fut, deadline: float, what: str):
 
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
-    from it (so MIN_DISTANCE never drives more km and MIN_TRUCKS never uses more trucks than the
-    recommendation) with half the budget.
+    from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
+    searches' loads and picks each scenario's plan from all of them, so MIN_DISTANCE never drives
+    more km and MIN_TRUCKS never uses more trucks than the recommendation.
 
     Every scenario runs in a worker process. OR-Tools holds the GIL for the whole search, so a
     solve inside the API process froze it completely - /health, /route-geometry and every other
@@ -859,6 +1024,13 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
                     skipped.append(j[0])
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
+        try:
+            _post_solve(req, solvable, tds, mx, time_limit, drops, results, pool, budget_end)
+        except Exception as exc:  # noqa: BLE001 - the search's own plans stay valid
+            log.exception("post-solve stage failed: %s", exc)
+            for sc in results.values():
+                if sc.status == "OPTIMIZED" and not any("re-checked" in w or "re-assigned" in w for w in sc.warnings):
+                    sc.warnings.append("Loads were not re-checked for fewer trucks (internal error); this is the route search result as found.")
     finally:
         if pool is not None:
             pool.terminate()  # stops any alternative still running past its deadline
@@ -882,6 +1054,142 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 )
     return [results[n] for n in names if n in results]
 
+
+# ---------------------------------------------------------------------------------------------
+# Post-solve stage: load repack + candidate selection (see load_repack)
+# ---------------------------------------------------------------------------------------------
+
+# Each scenario returns the best candidate for its OWN goal. Service comes first everywhere
+# (priority value of the unserved stops), then:
+_GOALS = {
+    # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
+    "RECOMMENDED": lambda sc: (sc.unserved, sc.cost),
+    # fewest trucks, then loads, then operating cost (like its search, it ignores preferences)
+    "MIN_TRUCKS": lambda sc: (sc.unserved, sc.trucks, sc.loads, sc.operating, sc.cost),
+    # fewest km, then the RECOMMENDED objective
+    "MIN_DISTANCE": lambda sc: (sc.unserved, sc.metres, sc.cost),
+}
+
+
+def _stage_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
+    # Test hooks: a stage that raises, and one that never returns (see the fallback tests).
+    if os.environ.get("ROUTEIQ_TEST_FAIL_REPACK"):
+        raise RuntimeError("test hook: post-solve stage failed")
+    if os.environ.get("ROUTEIQ_TEST_HANG_REPACK"):
+        time.sleep(3600)
+    return LR.build_candidates(**job)
+
+
+def _timed_from_scenario(sc: DispatchScenario, stop_idx: dict[str, int], truck_idx: dict[str, int]) -> LR.TimedPlan:
+    out: LR.TimedPlan = {}
+    for ld in sorted(sc.loads, key=lambda l: (l.truck_id, l.load_no)):
+        out.setdefault(truck_idx[ld.truck_id], []).append(LR.TimedLoad(
+            stops=tuple(stop_idx[st.stop_id] for st in ld.stops), depart_s=ld.depart_min * 60,
+            starts=tuple(st.service_start_min * 60 for st in ld.stops), return_s=ld.return_min * 60))
+    return out
+
+
+def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
+                budget_end: float) -> None:
+    """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
+
+    Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
+    re-assigned to trucks and departure times by CP-SAT, for RECOMMENDED's prices (and for
+    MIN_TRUCKS' when that scenario was asked for), with drop repair (stops a plan left out,
+    when the fleet is not short, enter as optional one-stop loads). All are scored on the one
+    RECOMMENDED objective (load_repack.score). A scenario never serves less, by priority value,
+    than its own raw plan. Runs in the worker pool (CP-SAT and the LPs hold the GIL; the API
+    must keep answering) under a deadline inside the request budget; on timeout or failure the
+    raw scenarios are returned with a warning."""
+    raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
+    if not raw or not solvable:
+        return
+    cfg = req.config
+    t0 = time.monotonic()
+    use_margin = cfg.use_margin and all(s.margin is not None for s in solvable)
+    values, value_warnings = _service_values(solvable, cfg, use_margin)
+    stop_idx = {s.stop_id: k for k, s in enumerate(solvable)}
+    truck_idx = {td.truck.id: td.idx for td in tds}
+    sources = [LR.Source(n, _timed_from_scenario(sc, stop_idx, truck_idx)) for n, sc in raw.items()]
+    carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
+    total_cap = sum(td.truck.capacity_cases * td.trips_left for td in tds if td.usable)
+    shortage = sum(s.demand_cases for s in solvable) > total_cap
+    left_out = set(range(len(solvable))) - set.intersection(*carried.values())
+    optional = None if shortage or not left_out else _repair_weights(solvable, left_out, cfg)
+    day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
+                 shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
+                 loading_s_per_case=cfg.loading_min_per_case * 60, values=values)
+    rec_pricing = _pricing("RECOMMENDED", req, tds, solvable)
+    goals = ["RECOMMENDED"] + (["MIN_TRUCKS"] if "MIN_TRUCKS" in raw else [])
+    cap = min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
+    job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
+
+    def fallback(why: str) -> None:
+        msg = f"Loads were not re-checked for fewer trucks ({why}); this is the route search result as found."
+        if cfg.loading_min_per_case > 0:
+            msg += " Departure times use an estimated loading time between loads."
+        for sc in raw.values():
+            sc.warnings.append(msg)
+
+    if job_budget < REPACK_MIN_SEC:
+        log.warning("post-solve stage skipped: request time budget used up")
+        fallback("out of time")
+        return
+    jobs = {g: dict(day=day, score_pricing=rec_pricing, goal=g,
+                    goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
+                    sources=sources, optional=optional, cap_s=cap, budget_s=job_budget, time_raw=g == "RECOMMENDED")
+            for g in goals}
+    outputs: dict[str, tuple[list[LR.Candidate], list[str]]] = {}
+    if pool is None:
+        for g, job in jobs.items():
+            try:
+                outputs[g] = _stage_worker(job)
+            except Exception as exc:  # noqa: BLE001 - the raw plans stay valid
+                log.warning("post-solve %s failed: %s", g, exc)
+    else:
+        rounds = -(-len(jobs) // max(1, pool._processes))
+        deadline = min(time.monotonic() + rounds * job_budget + STAGE_GRACE_SEC, budget_end - 2)
+        futs = {g: pool.apply_async(_stage_worker, (job,)) for g, job in jobs.items()}
+        for g, fut in futs.items():
+            try:
+                outputs[g] = _await_worker(pool, fut, deadline, "load re-check")
+            except Exception as exc:  # noqa: BLE001 - timeout (SolveAborted), dead worker or a failure
+                log.warning("post-solve %s failed or timed out: %s", g, exc)
+    stage_sec = time.monotonic() - t0
+    if "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
+        fallback("the check failed or ran out of time")
+        return
+    cands = [c for g in goals if g in outputs for c in outputs[g][0]]
+    log.info("post-solve run=%s %.1fs: %s", req.run_id, stage_sec,
+             "; ".join(n for g in goals if g in outputs for n in outputs[g][1]))
+    for name, sc in raw.items():
+        own = sum(v for k, v in enumerate(values) if k not in carried[name])
+        fits = [c for c in cands if c.score.unserved <= own]
+        if not fits:
+            sc.warnings.append(
+                f"This plan does not leave the loading time of {cfg.loading_min_per_case:g} min per case between loads "
+                "everywhere; some later loads may be timed too early. Re-plan, add a truck, or check the loading time."
+                if cfg.loading_min_per_case > 0 else
+                "The final timing check failed for this plan; check load times before dispatching."
+            )
+            continue
+        goal = _GOALS[name]
+        best = min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name))
+        new = _build_scenario(
+            name, req, solvable, tds, mx, best.plan, values, use_margin, drops, solver_status=sc.solver_status,
+            elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
+            objective_value=best.score.objective, extra_warnings=value_warnings,
+        )
+        changed = (new.trucks_used, new.trips) != (sc.trucks_used, sc.trips) or abs(new.operating_cost - sc.operating_cost) >= 0.5
+        if "+repack" in best.source and changed:
+            new.warnings.append(
+                f"Loads were re-assigned after the route search: {sc.trucks_used} -> {new.trucks_used} trucks, "
+                f"{sc.trips} -> {new.trips} loads, {sc.operating_cost:.0f} -> {new.operating_cost:.0f} OMR operating cost."
+            )
+        log.info("post-solve run=%s %s: %s -> %s trucks, %s -> %s loads, %.1f -> %.1f OMR (from %s)", req.run_id, name,
+                 sc.trucks_used, new.trucks_used, sc.trips, new.trips, sc.operating_cost, new.operating_cost, best.source)
+        results[name] = new
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:
     nodes = [0] + [k + 1 for k in keep]

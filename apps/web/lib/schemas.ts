@@ -138,6 +138,12 @@ export const tenantConfigSchema = z.object({
   distanceMultiplier: z.coerce.number().min(1).max(3),
   labelEstimatedDistances: z.boolean(),
   driverShiftMaxMinutes: z.coerce.number().int().min(60).max(1440),
+  // Dispatch timing (NMWC planner). First departure 00:00-23:59 as minutes from midnight.
+  shiftStartMin: z.coerce.number().int().min(0).max(1439),
+  reloadMinutes: z.coerce.number().int().min(0).max(240),
+  loadingMinPerCase: z.coerce.number().min(0).max(1),
+  serviceMinPerCase: z.coerce.number().min(0).max(1),
+  maxTripsPerTruck: z.coerce.number().int().min(1).max(10),
   returnToDepot: z.boolean(),
   splitDeliveries: z.boolean(),
   defaultServiceTimeMin: z.coerce.number().int().min(0).max(600),

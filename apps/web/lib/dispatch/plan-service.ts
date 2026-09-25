@@ -45,6 +45,7 @@ import {
   type PartCapacity,
   type PortionRecord,
 } from './split';
+import { stopServiceMin } from './service-time';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dateOnly, isoOf } from './time';
 
@@ -307,7 +308,7 @@ export async function buildDispatchRequest(
     const totalCases = group.reduce((a, x) => a + x.cases, 0);
     const totalKg = group.reduce((a, x) => a + x.kg, 0);
     const late = group.some((x) => x.o.isLate);
-    const serviceMin = Math.max(0, Math.min(480, eff.serviceMin));
+    const serviceMin = eff.serviceMin; // + unloading time per case (stopServiceMin)
     const base = {
       customer_id: c.id,
       lat: c.lat as number,
@@ -330,7 +331,7 @@ export async function buildDispatchRequest(
         order_ids: ids,
         demand_cases: totalCases,
         demand_kg: totalKg,
-        service_min: serviceMin,
+        service_min: stopServiceMin(serviceMin, cfg.serviceMinPerCase, totalCases),
         previous_truck_id: previousTruckOf(group.flatMap((x) => x.lines.map((l) => l.lineId))),
         margin: sumMoney(group.map((x) => openMoney(x, 'marginValue'))),
         revenue: sumMoney(group.map((x) => openMoney(x, 'salesValue'))),
@@ -357,7 +358,7 @@ export async function buildDispatchRequest(
           demand_cases: cases,
           demand_kg: Math.min(split.cap.kg ?? Number.POSITIVE_INFINITY, Math.round(exactKg * 10) / 10),
           // Unloading time follows the part's share of the delivery (at least a few minutes).
-          service_min: totalCases > 0 ? Math.max(5, Math.min(480, Math.round((serviceMin * cases) / totalCases))) : serviceMin,
+          service_min: stopServiceMin(serviceMin, cfg.serviceMinPerCase, cases, totalCases),
           previous_truck_id: previousTruckOf(part.map((x) => x.lineId)),
           margin: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'marginValue', r.lines))),
           revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
@@ -420,9 +421,12 @@ export async function buildDispatchRequest(
       overtime_after_min: cfg.overtimeAfterMin,
       overtime_cost_per_hour: cfg.overtimeCostPerHour,
       reload_min: cfg.reloadMinutes,
+      loading_min_per_case: cfg.loadingMinPerCase,
       max_trips_per_truck: cfg.maxTripsPerTruck,
       fuel_price_per_litre: cfg.fuelPricePerLitre,
       driver_cost_per_hour: cfg.driverCostPerHour,
+      // A higher priority always wins over any number of lower ones (weights kept for reference).
+      strict_priorities: true,
       priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
       pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
       use_margin: true,

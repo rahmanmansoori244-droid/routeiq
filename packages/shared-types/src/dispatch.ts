@@ -80,9 +80,14 @@ export interface DispatchConfig {
   overtime_after_min?: number | null;
   overtime_cost_per_hour?: number;
   reload_min?: number;
+  /** loading time per case of the NEXT load, on top of reload_min (0..1; default 0) */
+  loading_min_per_case?: number;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
   driver_cost_per_hour?: number;
+  /** true (default): a higher priority always wins over any number of lower-priority stops */
+  strict_priorities?: boolean;
+  /** relative stop values when strict_priorities is false; must be strictly decreasing */
   priority_weights?: Record<number, number>;
   pref_window_penalty_per_min?: number;
   early_preference_per_min?: Record<number, number>;

@@ -1,6 +1,6 @@
 # How the NMWC dispatch optimizer decides (plain language)
 
-Engine: Google **OR-Tools** vehicle routing (`apps/solver/dispatch_solver.py`, `POST /optimize-dispatch`), fed with **road** distances and driving times from **OSRM**.
+Engine: Google **OR-Tools** vehicle routing (`apps/solver/dispatch_solver.py`, `POST /optimize-dispatch`), fed with **road** distances and driving times from **OSRM**, followed by an exact **load re-assignment** step (OR-Tools CP-SAT, `apps/solver/load_repack.py`, see §7).
 
 The result is an **OPTIMIZED PLAN**: a good, feasible plan found within a time limit. It is not claimed to be the perfect or global optimum.
 
@@ -9,15 +9,16 @@ The result is an **OPTIMIZED PLAN**: a good, feasible plan found within a time l
 - **Truck capacity:** cases **and** kilograms (when a payload is set). A truck is never overloaded to save kilometres.
 - **Receiving hours (hard window):** delivery must *start* inside the customer's hard window, e.g. a hypermarket 06:00–10:00. If no truck can make it, the order is unserved with reason *receiving hours cannot be met*. It is never silently delivered late.
 - **Truck day:** first departure to last return must fit the shift limit (default 11 h). Depot opening hours apply.
-- **Trip order:** load 2 of a truck leaves only after load 1 is back **and** the reload time (default 30 min) has passed.
+- **Trip order:** load 2 of a truck leaves only after load 1 is back **and** its turnaround has passed: the reload time (default 30 min) plus the loading time per case of load 2 (default 0, see §8).
 - **Locked, loading and dispatched loads** are never re-planned.
 
 ## 2. What it tries to achieve, in this order
 1. **Serve P1 orders.** P1 is the highest priority, P5 the lowest.
-2. **Serve as much as possible, weighted by priority.** Leaving a P1 order behind costs 10,000 "points", P2 1,000, P3 100, P4 10 and P5 1. One unit is worth more than any realistic day's operating cost, so:
+2. **Serve as much as possible, strictly by priority.** One order of a higher priority always wins over **any number** of lower-priority orders: one P2 is never left out to fit eleven P3s, one P1 never to fit fifty P2-P5s. Leaving even a P5 behind costs more (1,000 OMR in the optimizer's scoring) than serving it ever could, so:
    - the optimizer will use another truck or another load before dropping an order;
    - when capacity really runs out, **P5 orders are left out first**, then P4, and so on.
-   A test (`test_priority_p1_beats_identical_p5`) fails if this is ever inverted.
+   Technically each order is worth w(P) "points": P5 = 1, and a priority is worth 1 + the points of every lower-priority order of the day together, so it outweighs all of them. Tests fail if this is ever broken (`test_priority_p1_beats_identical_p5`, `test_strict_priority_one_p2_beats_eleven_p3`).
+   *Before 25 Sep 2026* the points were fixed (P1 10,000 ... P5 1), so eleven P3s (1,100) outweighed one P2 (1,000). That weighted mode still exists for API callers (`strict_priorities: false`); the web app always plans strictly. On a day with thousands of orders the points would no longer fit the optimizer's 64-bit arithmetic; it then scales them down and, only if that is not enough, ranks the highest priorities by weight again and says so in a warning (far beyond NMWC's days).
 3. **Contribution margin**, only when the file carries a reliable margin for every order. Among orders of the **same** priority, higher margin wins. Margin can never beat a higher priority. Without margin data the plan optimizes service + cost and never claims "profit".
 4. **Operating cost** in real OMR:
    - fixed cost for each truck used that day;
@@ -31,7 +32,9 @@ The result is an **OPTIMIZED PLAN**: a good, feasible plan found within a time l
 ## 3. Multiple loads per truck
 Each physical truck is one "vehicle" with optional depot **reload** visits (up to `maxTripsPerTruck − 1`; 3 loads by default).
 
-A reload empties the truck (the capacity counter resets) and takes the reload time. Because all of a truck's loads sit on one timeline, loads can never overlap. The export shows them as **T01 – Load 1, T01 – Load 2, …**.
+A reload empties the truck (the capacity counter resets) and takes the turnaround time. Because all of a truck's loads sit on one timeline, loads can never overlap. The export shows them as **T01 – Load 1, T01 – Load 2, …**.
+
+The route search cannot move a *whole* load from one truck to another (it moves one customer at a time, and a load only moves together with its reload visit). Left alone it tends to give every truck one short morning load. §7 fixes that after the search.
 
 ### Split deliveries
 A customer whose open cases or kilograms fit **no** truck is cut into parts before the optimizer runs (setting *Split deliveries*, on by default). Parts are sized for the truck that needs the fewest of them; each part is filled up to one full truck, product line by product line, and a line is cut only when it does not fit. The last part is the remainder, which can share a load with other customers. Every part is an ordinary stop at the customer's location, so parts can go on different trucks or on different loads of one truck, and the optimizer can leave a part unserved (with a reason) like any other stop. Unloading time is shared between parts in proportion to cases. When a part is locked or dispatched and the day is re-planned, only the cases not yet on a frozen load are planned again.
@@ -54,25 +57,44 @@ A customer whose open cases or kilograms fit **no** truck is cut into parts befo
 
 ## 6. Three options, one recommendation
 - **RECOMMENDED** (applied automatically): service, priorities and customer hours first, then true cost.
-- **MIN TRUCKS**: pushes hard for fewer trucks and loads.
-- **MIN DISTANCE**: fewest road km.
+- **MIN TRUCKS**: fewest trucks, then fewest loads, then operating cost.
+- **MIN DISTANCE**: fewest road km, then cost.
 
-Both alternatives keep every hard rule and priority but ignore the soft preferences (preferred windows, early arrival, overtime); each answers one question. If an alternative takes too long, it is skipped with a note, and the recommended plan is always delivered.
+Every option keeps every hard rule and priority, and never serves less (by priority) than its own route search did. The searches for the alternatives ignore the soft preferences (preferred windows, early arrival, overtime) so each answers one question; the final timetable of every option still honours preferred hours wherever that costs nothing. If an alternative takes too long, it is skipped with a note, and the recommended plan is always delivered.
 
-The alternatives start from the recommended plan, so they are only ever shown if they are better on their own measure. The dispatcher must click **Use instead** to switch; nothing switches automatically.
+All three options are picked from the same set of candidate plans (§7), each by its own measure, so MIN TRUCKS never needs more trucks and MIN DISTANCE never drives more km than the recommendation. When one plan is best on every measure, the options show the same plan. The dispatcher must click **Use instead** to switch; nothing switches automatically.
 
-## 7. Speed
-| Day size | Time limit | Typical wall time (3 options) |
+## 7. After the search: re-assigning whole loads
+The three route searches each produce loads (which customers, in which order). A second, exact step then keeps every load as it is and decides again **which truck carries it and when it leaves**, so that trucks do two or three loads each instead of one:
+1. For the recommendation's costs (and for MIN TRUCKS' when that option is asked for), OR-Tools CP-SAT assigns the loads of each search plan to trucks and departure times, respecting capacity, customer hours, turnaround, shift length, loads per truck, depot hours, truck availability and locked/dispatched loads.
+2. An order a search left out (not ruled out by a check, and not a fleet shortage) is offered as a one-customer load; if a free truck or trip can take it, it is planned. Service comes before cost.
+3. Every candidate plan (the search plans and their re-assignments) is timed exactly (turnaround = reload + loading per case of the next load) and scored the same way: unserved orders by priority, then fixed truck cost, per-load cost, km cost, driver time over the truck day, overtime counted from the truck's first departure (as the cost report does), preferred hours, early arrival for P1/P2 and, on re-plans, moved orders.
+4. Each option takes its best candidate. When this changed a plan it carries a note, for example *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
+
+Each CP-SAT solve is capped at min(15 s, max(3 s, half the search limit)) and stops earlier once it stops improving. It runs in the solver's worker processes, so the service keeps answering. If the step fails or runs out of time, the route search's own plans are returned with a note; nothing is lost. On NMWC's real 26-Sep day the recommendation went from 13 trucks / 21 loads / 754 OMR to 5 trucks / 14 loads / about 490-500 OMR at the same 20 s search limit (OPTIMIZER_BENCHMARK.md §8).
+
+## 8. Timing settings (Settings → Dispatch timing)
+| Setting | Default | What it does |
 |---|---|---|
-| ≤ 25 stops | 3 s | ~6 s |
-| ≤ 80 stops | 8 s | ~15 s |
-| ≤ 200 stops (normal NMWC day ~150) | 20 s | ~30–40 s |
-| ≤ 350 stops | 150 s | ~4 min |
-| larger | 240 s | ~6 min |
+| First departure | 06:00 | No truck leaves before this time (NMWC's trucks actually leave 07:10-08:00). |
+| Turnaround between loads | 30 min | Fixed depot time between two loads of a truck. |
+| Loading minutes per case | 0 | Added to the turnaround for every case of the **next** load: at 0.04 min a 1,100-case load waits 44 min more. The route search does not know the next load's size yet and assumes 80% of a full truck; the final timetable uses the exact cases. |
+| Unloading minutes per case | 0 | Added to each customer's service time for every case delivered: at 0.05 min a 1,100-case drop takes 55 min more. A split part gets its share of the customer's time (at least 5 min) plus its own cases. At most 480 min per stop. |
+| Max loads per truck per day | 3 | A truck's own limit wins when it has one. |
 
-If the search reaches its time limit with capacity to spare, any stop still left out is labelled *"not planned yet: time limit reached"*, never *"could not be fitted"*. Re-plan to continue.
+With the per-case times at 0 nothing changes from the fixed times. NMWC's 24-Sep actual truck cycles were about 52% longer than the fixed defaults model, mostly loading and unloading of big drops; the per-case settings let the plan follow that.
 
-Measured on this PC for a synthetic 150-stop Muscat day: recommended plan in 20 s, all three options in about 31 s.
+## 9. Speed
+| Day size | Search limit | Typical wall time (3 options) |
+|---|---|---|
+| ≤ 25 stops | 5 s | ~10-15 s |
+| ≤ 200 stops (normal NMWC day ~80-150) | 20 s | ~30-55 s |
+| ≤ 350 stops | 150 s | ~4-5 min |
+| larger | 240 s | ~6-7 min |
 
-## 8. Every order is accounted for
+The wall time covers the recommended search, the alternatives (half the limit, in parallel) and the load re-assignment. Days of 26-80 stops now get 20 s instead of 8 s: cheap insurance against a search stopped before it settled.
+
+If a stop is still left out while the fleet has room, it is labelled *"Not planned: the optimizer found no truck, trip or time slot for this P... stop within its time limit. Re-plan to search again, add a truck, or raise the loads-per-truck limit."* The planner never claims such a stop is impossible unless a check proved it (receiving hours, shift, capacity, fleet shortage).
+
+## 10. Every order is accounted for
 After every optimization the system checks that **uploaded cases = planned cases + unserved cases**, in total, per SKU and per sales order, and that each order appears exactly once. A split order may appear in several parts: then every product line must add up exactly (*planned parts + unserved parts = uploaded*). A plan that does not reconcile cannot be dispatched.

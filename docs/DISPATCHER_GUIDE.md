@@ -21,8 +21,10 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Preferred hours:** nice to have.
 
 ## 3. Optimize
-- Click **OPTIMIZE**. A normal day (~150 customers) takes about half a minute.
+- Click **OPTIMIZE**. A normal day (80-150 customers) takes about half a minute to a minute.
 - If some customers still have no location, you are asked whether to plan without them. Their orders become *unserved: location missing*.
+- **Priorities are strict:** one order of a higher priority always wins over any number of lower-priority orders (one P2 is never left out to fit eleven P3s). When the trucks really cannot carry everything, P5 orders are left out first, then P4, and so on.
+- After the route search, RouteIQ re-checks which truck carries each load, so trucks do two or three loads each where the day allows instead of many trucks doing one short load. When this changed the plan you see a note such as *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
 
 ## 4. Review the plan
 - **Top row:** orders served, cases, trucks and loads, km, hours, utilisation, fuel, cost, service % for P1–P5.
@@ -30,9 +32,9 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Truck loads:** one row per truck and load (T01 · L1, T01 · L2 …) with departure/return, cases vs capacity and km. Click a row to see:
   - the **Loading manifest**: exact cases per product for the warehouse;
   - the **Delivery route**: DEPOT → customer 1 → customer 2 … → DEPOT, with ETA, receiving hours, cases, products and km.
-- **Unserved orders:** every order that could not be planned, with the reason. *Rest of split* means the other part of that order is on a truck.
+- **Unserved orders:** every order that could not be planned, with the reason. *Rest of split* means the other part of that order is on a truck. *"Not planned: the optimizer found no truck, trip or time slot ..."* means nothing proves the order impossible: **Re-plan** to search again, add a truck, or raise *Max loads per truck per day*. Reasons such as *receiving hours cannot be met*, *shift limit* or *fleet capacity shortage* mean a check proved it cannot fit.
 - **Split deliveries:** a customer whose day does not fit on any truck (cases or kg) is delivered in parts — each stop shows *Part 1 of 2*, *Part 2 of 2* and exactly which products and cases it carries. Parts can go on different trucks or loads. Turn this off in **Settings → Operations** if you prefer such customers to be left unserved.
-- **Plan options:** MIN TRUCKS and MIN DISTANCE are shown for comparison only. Click **Use instead** only if you really want one of them.
+- **Plan options:** MIN TRUCKS (fewest trucks, then loads, then operating cost) and MIN DISTANCE (fewest km) are shown for comparison only. They never need more trucks / km than the recommendation; when one plan is best on every measure, the options show the same plan. Click **Use instead** only if you really want one of them.
 
 ## 5. Lock, export, dispatch
 - **Lock** a load when the warehouse starts preparing it. Loads of one truck are locked in order (Load 1 before Load 2).
@@ -46,6 +48,16 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
   - the late order goes into a free future load, another truck or an extra load, or is shown as *unserved: late order – no capacity*;
   - the blue bar tells you what changed.
 - Older versions stay under **Plan versions** (read-only).
+
+## Dispatch timing settings (Settings → Dispatch timing, admins)
+Set these to what the depot and drivers really do; every load is timed with them.
+- **First departure:** no truck leaves before this time (e.g. 07:30).
+- **Turnaround between loads (minutes):** fixed depot time between two loads of one truck (paperwork, queue). Default 30.
+- **Loading minutes per case:** added to the turnaround for every case of the next load. 0.04 = 44 min extra for a 1,100-case load. Default 0.
+- **Unloading minutes per case:** added to each customer's service time for every case delivered. 0.05 = 55 min extra for a 1,100-case drop. Default 0. A split delivery part gets its share of the customer's time plus its own cases.
+- **Max loads per truck per day:** default 3; a truck's own limit wins when it has one.
+
+Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep their times.
 
 ## Good to know
 - "Estimated km" means the road-routing service was not available and straight-line distances were used. The plan is still valid, but check long trips.

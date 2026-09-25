@@ -473,7 +473,10 @@ describe('tenantAssumptions', () => {
     expect(a['Planning cutoff (day before delivery)']).toContain('18:00');
     expect(a['Shift start (earliest departure)']).toBe('06:00');
     expect(a['Fuel price']).toBe('0.25 OMR per litre');
-    expect(a['Priority weights']).toBe('P1 10000 > P2 1000 > P3 100 > P4 10 > P5 1');
+    // The planner ranks priorities strictly (the weights are no longer used): the export says so.
+    expect(a.Priorities).toMatch(/^strict - one higher-priority order always wins/);
+    expect(a['Priority weights']).toBeUndefined();
+    expect(a['Loading time per case']).toBe('not set (0)');
     expect(a['OSRM server configured']).toMatch(/^no/);
     expect(a['Estimated-distance multiplier']).toBeUndefined();
     expect(tenantAssumptions(null, { currency: 'OMR', providerUsed: null, distanceIsEstimated: null, osrmEnvConfigured: false })).toEqual({

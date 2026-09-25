@@ -5,7 +5,7 @@ FastAPI service, deployed separately from the web app. Every endpoint except `/h
 | Path | Engine | Purpose |
 |---|---|---|
 | `GET /health` | — | Railway health check |
-| `POST /optimize-dispatch` | **OR-Tools** (`dispatch_solver.py`) | NMWC daily dispatch planner: cases+kg capacity, hard + preferred windows, P1–P5 drop penalties, multi-load trucks (depot reload visits), frozen locked/dispatched loads, RECOMMENDED + MIN_TRUCKS + MIN_DISTANCE |
+| `POST /optimize-dispatch` | **OR-Tools** (`dispatch_solver.py` + `load_repack.py`) | NMWC daily dispatch planner: cases+kg capacity, hard + preferred windows, strict P1–P5 priorities, multi-load trucks (depot reload visits, turnaround per case), frozen locked/dispatched loads, RECOMMENDED + MIN_TRUCKS + MIN_DISTANCE; after the routing search a CP-SAT step re-assigns whole loads to trucks and every plan is timed exactly |
 | `POST /route-geometry` | OSRM | road polyline for a load (straight lines when unavailable) |
 | `POST /optimize` | PyVRP (`solver.py`) | legacy v1 three-scenario solver, kept for comparison only |
 

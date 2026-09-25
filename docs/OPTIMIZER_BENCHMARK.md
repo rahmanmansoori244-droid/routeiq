@@ -13,6 +13,9 @@ Date: 2026-09-24 · Branch: `nmwc-dispatch-mvp` · Related: [OPTIMIZER_DESIGN.md
 - **VROOM, Timefold, Google Route Optimization API**: not adopted. Revisit only if one of the triggers in §7 appears.
 - **Fixed after the first measurements (see §5a):** at about 300 stops the automatic time limit was too short, and a
   warm-started alternative could stall past its time limit. Both are fixed and re-measured.
+- **Fixed on 25 Sep 2026 (see §8):** on NMWC's real day the engine planned far too many trucks (13 trucks / 21 loads /
+  754 OMR where 5 trucks / 14 loads / ~490 OMR were feasible). An exact post-solve step now re-assigns whole loads to trucks
+  (CP-SAT, `load_repack.py`), priorities are strict, and loading / unloading time can follow the cases.
 
 ## 2. What the MVP must support
 
@@ -27,16 +30,17 @@ self-hosted, next to the Next.js/Prisma app, and calls the solver over HTTP.
 
 | Concern | How it is modelled |
 |---|---|
-| Multi-trip (reloads) | There is one routing vehicle per physical truck. Each truck gets `trips_left - 1` optional **reload nodes** at the depot, pinned to that truck (`VehicleVar.SetValues([-1, v])`), which it can skip at zero cost. The capacity demand of a reload node is `-capacity` and it is the only node with slack, so a visit resets the load. This is the OR-Tools `cvrp_reload` sample pattern. Because all loads of a truck sit on one route, loads cannot overlap, and load k+1 leaves after load k returns plus `reload_min`. The whole truck day is bounded by `shift_max_min`. |
+| Multi-trip (reloads) | There is one routing vehicle per physical truck. Each truck gets `trips_left - 1` optional **reload nodes** at the depot, pinned to that truck (`VehicleVar.SetValues([-1, v])`), which it can skip at zero cost. The capacity demand of a reload node is `-capacity` and it is the only node with slack, so a visit resets the load. This is the OR-Tools `cvrp_reload` sample pattern. Because all loads of a truck sit on one route, loads cannot overlap, and load k+1 leaves after load k returns plus its turnaround (`reload_min + loading_min_per_case x cases of load k+1`; the search uses 80% of a full truck for the unknown next load, the final timing the exact cases). The whole truck day is bounded by `shift_max_min`. The search's moves cannot move a whole load to another truck; the post-solve step does (row below). |
 | Capacity | Two dimensions, `Cases` and `Kg` (kg is only active when a truck has a payload), each with a per-truck capacity. |
 | Hard windows | `CumulVar(stop).SetRange(start, end)`: service must **start** inside the window. Depot hours and truck availability limit the start and end cumuls. |
 | Soft windows | Preferred windows use `SetCumulVarSoftLowerBound` / `SetCumulVarSoftUpperBound` at `pref_window_penalty_per_min` OMR per minute. An early-arrival preference for P1/P2 and overtime after 9 h are also soft upper bounds. |
-| Priorities / droppable orders | Each stop is an `AddDisjunction` whose penalty is `SERVICE_UNIT × weight(P) / weight(P5)`. With default weights 10,000 / 1,000 / 100 / 10 / 1 and 1 P5 = 100,000 OMR, the result is lexicographic in practice. Margin, when every stop has one, is capped below one service unit and so only breaks ties within the same priority. |
+| Priorities / droppable orders | Each stop is an `AddDisjunction`. **Strict (default since 25 Sep 2026):** penalty = `SERVICE_BASE (1,000 OMR) × w(P)`, w(P5) = 1, w(P) = 1 + Σ over lower priorities q of n_q × w(q) (n_q = stops of priority q in the model), so one stop outweighs all lower-priority stops together. The int64 total is guarded (base scaled down, then weights capped with a warning, only for days of thousands of stops). **Weighted (`strict_priorities: false`)**: `SERVICE_UNIT × weight(P) / weight(P5)` with 10,000 / 1,000 / 100 / 10 / 1, where 11 P3 outweigh one P2. Margin, when every stop has one, is capped below 0.4 service unit and only breaks ties within the same priority. |
 | Costs | Each truck has its own arc cost (`cost_per_km + fuel_price / km_per_litre`, so fuel is counted once). The trip cost sits on arcs into reload nodes, and there is a fixed cost per truck-day. Driver time is a span cost, and overtime is a soft bound on the route end. |
 | Frozen work | LOCKED / LOADING / DISPATCHED loads come in as `frozen_trips`. They stay out of the model and only change the truck's earliest departure (return + reload), its remaining trips and its shift anchor. |
-| Reasons | Pre-filters return `EXCEEDS_ANY_TRUCK_CAPACITY`, `HARD_WINDOW_INFEASIBLE`, `SHIFT_LIMIT`, `NO_AVAILABLE_TRUCK` and `TRIP_LIMIT`. After the solve, dropped stops get `SOLVER_DROPPED_LOW_PRIORITY` or `LATE_ORDER_NO_CAPACITY`. `_assert_reconciled` raises if any stop or case is missing or duplicated. |
-| Search | `PARALLEL_CHEAPEST_INSERTION` followed by `GUIDED_LOCAL_SEARCH`. The automatic time limit is 3 / 8 / 20 / 150 / 240 s for ≤25 / ≤80 / ≤200 / ≤350 / >350 stops (alternatives get half), within a 540 s budget per request. |
-| Scenarios | RECOMMENDED runs first with the full time budget. MIN_TRUCKS and MIN_DISTANCE are **warm-started** from it (`ReadAssignmentFromRoutes` then `SolveFromAssignmentWithParameters`) with half the budget. Every scenario, RECOMMENDED included, runs in a spawn worker process. OR-Tools holds the GIL for its whole search, so threads would not run scenarios in parallel, and an in-process search froze the API (health checks, route geometry) until it ended. If the pool fails the scenarios run one after another in-process, and `SOLVER_PARALLEL=0` forces that. |
+| Reasons | Pre-filters return `EXCEEDS_ANY_TRUCK_CAPACITY`, `HARD_WINDOW_INFEASIBLE`, `SHIFT_LIMIT`, `NO_AVAILABLE_TRUCK` and `TRIP_LIMIT`. After the solve, dropped stops get `LATE_ORDER_NO_CAPACITY`, the fleet-shortage text, or *"Not planned: the optimizer found no truck, trip or time slot ... within its time limit"* (`SOLVER_DROPPED_LOW_PRIORITY`). Guided local search always ends on its time limit and reports `ROUTING_SUCCESS`, so the status is no proof: the engine never claims a stop impossible unless a pre-filter proved it. `_assert_reconciled` raises if any stop or case is missing or duplicated. |
+| Search | `PARALLEL_CHEAPEST_INSERTION` followed by `GUIDED_LOCAL_SEARCH`. The automatic time limit is 5 / 20 / 150 / 240 s for ≤25 / ≤200 / ≤350 / >350 stops (was 3 / 8 / 20 for ≤25 / ≤80 / ≤200; alternatives get half), within a 540 s budget per request. |
+| Scenarios | RECOMMENDED runs first with the full time budget. MIN_TRUCKS and MIN_DISTANCE are **warm-started** from it with half the budget: `CloseModelWithParameters` + `RoutesToAssignment` (Next variables only) + `SolveFromAssignmentWithParameters`, falling back to a cold solve when the plan cannot be loaded or the warm solve returns nothing. (`ReadAssignmentFromRoutes`, used before, restores cumul values and could stall > 100 s under time-dimension costs.) Every scenario, RECOMMENDED included, runs in a spawn worker process. OR-Tools holds the GIL for its whole search, so threads would not run scenarios in parallel, and an in-process search froze the API (health checks, route geometry) until it ended. If the pool fails the scenarios run one after another in-process, and `SOLVER_PARALLEL=0` forces that. |
+| Post-solve load repack + selection | `load_repack.py`. For each raw scenario plan, CP-SAT keeps every load (stops and order) and re-assigns loads to trucks and departure times: no-wait offsets and a departure interval per load from hard windows; per truck earliest departure (after frozen loads + turnaround), latest return, depot hours, loads left, the shift span (unless anchored by frozen loads), cases / kg per load; loads of a truck do not overlap and are separated by the exact turnaround; identical trucks are symmetry-broken. Objective = the scenario's own prices (RECOMMENDED: fixed per used non-frozen truck + trip + km × truck rate + driver cost on the truck span + overtime + preferred-window / early-arrival hinges + plan continuity; MIN_TRUCKS: fixed × 20, trip × 5, km). Stops a plan left out (no shortage) enter as optional one-stop loads, lexicographically served first. Each solve: min(15 s, max(3 s, limit / 2)), 2 workers, stops when no better plan came for a quarter of that. Every candidate (raw plans re-timed + repacks) is timed by one LP per truck and scored on one RECOMMENDED objective (overtime from the first actual departure, as reported); RECOMMENDED takes the best objective, MIN_TRUCKS fewest trucks → loads → operating cost, MIN_DISTANCE fewest km → RECOMMENDED objective, none serving less than its raw plan. Runs in the worker pool with a deadline; on failure the raw plans are returned with a warning. |
 | Matrix | `providers.py` requests the OSRM `/table` in 90×90 tiles, because a stock server allows `--max-table-size` 100. Durations are multiplied by `road_time_factor` (1.25) to allow for slower trucks. The Haversine fallback uses ×1.3 at 40 km/h and is marked "estimated". |
 
 ## 4. Candidates compared
@@ -49,7 +53,7 @@ BSD-2-Clause (latest release v26.9.0, 2026-09-01) and self-hosts on a small VM w
 
 | Criterion | OR-Tools routing | VROOM | Timefold (Solver / FSR) | Google Route Optimization API | PyVRP |
 |---|---|---|---|---|---|
-| What it is | C++ library with Python bindings. Routing layer on a CP solver, with local search and metaheuristics | C++ engine; runs via `vroom-express` (HTTP), pyvroom or the CLI | Solver is a Java/Kotlin constraint solver. FSR is a hosted model on the Timefold Platform | Hosted Google Maps Platform API (`optimizeTours`) | Python package with a C++ core running Hybrid Genetic Search (HGS) |
+| What it is | C++ library with Python bindings. Routing layer on a CP solver, with local search and metaheuristics | C++ engine; runs via `vroom-express` (HTTP), pyvroom or the CLI | Solver is a Java/Kotlin constraint solver. FSR is a hosted model on the Timefold Platform | Hosted Google Maps Platform API (`optimizeTours`) | Python package with a C++ core. The installed 0.13.4 `solve()` runs **iterated local search** (`pyvrp.IteratedLocalSearch`), not the Hybrid Genetic Search (HGS) PyVRP's published benchmark results were made with |
 | Licence | **Apache-2.0** (v9.15, 2026-01-12) | **BSD-2-Clause** (v1.15.0, 2026-03-12) | Solver Community **Apache-2.0** (v2.6.0). Enterprise edition is **commercial**. FSR and the other Platform models are **paid SaaS, price on request** | **Proprietary, paid per shipment** | **MIT** (v0.14.0, 2026-08-20) |
 | Multi-dimensional capacity | Yes, any number of dimensions | Yes, amounts on any number of metrics | Solver: you model it. FSR documents no cargo capacity (it limits visits per shift). The Pick-up & Delivery model has capacity | Yes, `loadDemands` / `loadLimits` maps | Yes, list capacities |
 | Hard time windows | Yes | Yes, several windows per job | Yes | Yes (`startTime` / `endTime`) | Yes (`tw_early` / `tw_late`) |
@@ -76,7 +80,8 @@ separate billed request):
 OSRM and OR-Tools cost only the VM they run on.
 
 **Legacy PyVRP in this repo.** Commit `4c40e12` replaced OR-Tools with PyVRP 0.13 for `/optimize`. Its message cites better
-CVRPLIB results for HGS; that claim was not re-verified here. `solver.py` does **not** use reload depots. Its priority prizes
+CVRPLIB results for HGS; that claim was not re-verified here, and it does not apply to the installed version anyway: PyVRP
+0.13.4's `solve()` is iterated local search (`IteratedLocalSearch`), not HGS. `solver.py` does **not** use reload depots. Its priority prizes
 are linear (P1 costs only 5× P5 to drop), and it has no soft windows. `requirements.txt` pins `pyvrp<0.14` because 0.14 changed
 `Model.add_depot()`. The NMWC dispatch path no longer uses it.
 
@@ -170,7 +175,7 @@ not change, because the solver sees the same matrix size.
 ## 7. When to revisit
 
 - **More than ~300 stops per depot, or several depots sharing trucks**, and even 150 s leaves stops unserved: benchmark
-  PyVRP ≥ 0.14 (HGS with reload depots) against OR-Tools on NMWC data.
+  PyVRP ≥ 0.14 (native reload depots; its `solve()` is iterated local search) against OR-Tools + load repack on NMWC data.
 - **Interactive re-optimisation in under 5 s** (drag and drop, what-if while typing): consider VROOM as a fast
   construction engine, possibly with OR-Tools polishing the result.
 - **Time-of-day traffic matters** (Muscat peak hours break windows): evaluate the Google RO API with traffic, or add
@@ -181,6 +186,110 @@ not change, because the solver sees the same matrix size.
   Platform), which has pinning and freeze-time built in.
 - **Planners distrust the plan quality**: run an offline comparison on real days (OR-Tools long run vs PyVRP) before
   changing the engine.
+
+## 8. Follow-up 25 Sep 2026: fewer trucks, strict priorities, realistic timing (measured)
+
+Branch `optimizer-fewer-trucks`. Measured with the local benchmark harness (`.dev/bench`, not in git: the real day names
+customers; only aggregate numbers are given here).
+
+### 8.1 What the harness showed on the old engine
+
+- **Too many trucks on the real day.** NMWC's real 26-Sep day (real80: 83 stops incl. split parts, 13 trucks, no windows):
+  RECOMMENDED at the default 20 s = 13 trucks / 21 loads / ~754 OMR. Re-assigning whole loads of the engine's *own*
+  MIN_DISTANCE plan to trucks and departure times with exact CP-SAT gave 5 trucks / 14 loads / ~490 OMR (verified feasible in
+  the engine's own model; lower bound 473.9 OMR). Cause: the routing search holds every load of a truck on one route between
+  reload visits and moves one stop at a time, so it can never move a whole load to another truck; every truck kept one short
+  morning load. More time barely helped (60 s: 12 trucks); MIN_TRUCKS also returned 11-13 trucks. On windowed synthetic
+  days the engine was within ~0-15% of the best known plan.
+- **Priorities were not strict.** With weights 10,000 / 1,000 / 100 / 10 / 1, eleven P3 stops (1,100) outweigh one P2
+  (1,000); the objective's optimum drops the P2 (the search happened to keep it only because it was stuck).
+- **Unserved reasons.** Guided local search always ends on its time limit *and* reports `ROUTING_SUCCESS`, so stops left out on
+  a normal day got the false "could not be fitted" text; on small instances a feasible P5 stayed unserved where one more load
+  would have carried it.
+- **Warm start.** `ReadAssignmentFromRoutes` could stall > 100 s; `RoutesToAssignment` did not, but one warm start returned no
+  solution, so a cold fallback is needed.
+- **Timing too optimistic.** Service time was a fixed number per customer (a 1,100-case drop = 10 min), the depot turnaround a
+  fixed 30 min and the first departure 06:00; NMWC's 24-Sep actual truck cycles were ~52% longer and trucks leave 07:10-08:00.
+
+### 8.2 What changed
+
+| Change | Where |
+|---|---|
+| Strict priorities (default): drop penalty = 1,000 OMR × w(P), w(P5) = 1, w(P) = 1 + Σ lower n_q × w(q); int64 guard | `dispatch_solver._service_values`, `DispatchConfig.strict_priorities` (web always sends `true`) |
+| Post-solve load repack (CP-SAT) + exact LP timing + one scoring function + per-scenario selection + drop repair; runs in the worker pool with a deadline, falls back to the search's plans with a warning | `load_repack.py`, `dispatch_solver._post_solve` (§3 table) |
+| Warm start: `CloseModelWithParameters` + `RoutesToAssignment` + `SolveFromAssignmentWithParameters`, cold fallback | `dispatch_solver._initial_assignment` |
+| Honest unserved reasons: "Not planned: the optimizer found no truck, trip or time slot ... within its time limit" unless a pre-filter proved it | `dispatch_solver._build_scenario` (one builder for search and post-solve plans) |
+| Turnaround = reload + `loading_min_per_case` × cases of the next load (search: 80% of a full truck; final timing: exact) | `DispatchConfig.loading_min_per_case`, `TenantConfig.loadingMinPerCase` |
+| Service time = customer time + `serviceMinPerCase` × cases (split parts: proportional share, at least 5 min, + own cases; ≤ 480) | `TenantConfig.serviceMinPerCase`, `lib/dispatch/service-time.ts` |
+| Settings → Dispatch timing: first departure, turnaround, loading / unloading minutes per case, max loads per truck | `settings-form.tsx`, `tenantConfigSchema` |
+| Auto limit ≤ 25 stops 5 s (was 3), ≤ 80 stops 20 s (was 8) | `auto_time_limit` |
+
+### 8.3 Validation (production mode)
+
+`.dev/bench/opt_validate/validate.py`: the new engine exactly as production runs it (all three scenarios, automatic time
+limits, worker pool), matrices from the harness cache, every returned plan re-scored by the harness's neutral evaluator
+(`instances.evaluate`: feasibility and violations, and the RECOMMENDED objective on its own optimal timetable; its overtime is
+counted from the shift start, so it can differ slightly from the engine's own score). Two runs per instance. For a fair
+comparison the **old engine** (main, `b22a51a`) ran in the same session on the same machine (`old_engine.py`, in-process,
+same automatic limits: 8 s for the 60-stop days, 20 s up to 200 stops, 150 s at 300). Machine: AMD Ryzen 7 7445HS (6C/12T),
+other work running at the same time (~50-65% CPU load before the runs). OR-Tools 9.15. `real80_realism` = real80 with
+service = customer time + 0.05 min/case, loading 0.04 min/case, turnaround 20 min, first departure 07:30.
+
+**RECOMMENDED** (objective and costs in OMR; objective = neutral evaluator's RECOMMENDED objective, all stops served in every run):
+
+| instance | old engine (same session): trucks / loads / op. cost / objective | old engine objective, earlier harness runs (min-max, n) | new engine, run 1 and run 2: trucks / loads / km / op. cost / objective | objective vs old (same session) | wall time, 3 options: new / old |
+|---|---|---|---|---|---|
+| real80 | 12 / 19 / 719.9 / 738.7 | 772.9-777.4 (7) | 5 / 14 / 979 / 492.4 / 531.0<br>5 / 14 / 984 / 494.9 / 534.2 | -28.1% / -27.7% | 49-53 s / 40 s |
+| real80_prod | 12 / 21 / 467.2 / 477.5 | 477.5 (1) | 7 / 21 / 1,401 / 310.9 / 330.8<br>7 / 21 / 1,401 / 310.9 / 330.9 | -30.7% | 46-47 s / 40 s |
+| syn60_s1 | 4 / 5 / 241.8 / 254.1 | 278.8 (3) | 4 / 5 / 444 / 241.8 / 254.1 (both) | 0.0% | 31-32 s / 16 s |
+| syn60_s2 | 4 / 4 / 230.3 / 249.1 | 259.9-286.4 (3) | 4 / 4 / 396 / 231.1 / 248.3 (both) | -0.3% | 31 s / 16 s |
+| syn60_s3 | 3 / 3 / 198.8 / 215.6 | 239.8 (3) | 3 / 3 / 386 / 198.8 / 215.6 (both) | 0.0% | 31 s / 16 s |
+| syn150_s1 | 8 / 9 / 478.5 / 505.1 | 505.2-584.7 (5) | 8 / 9 / 805 / 478.5 / 505.1 (both) | 0.0% | 32 s / 40 s |
+| syn150_s2 | 11 / 11 / 560.3 / 587.1 | 630.9-675.3 (4) | 8 / 11 / 828 / 490.5 / 531.0 (both) | -9.6% | 31 s / 40 s |
+| syn150_s3 | 10 / 10 / 514.7 / 545.8 | 556.3-572.3 (4) | 8 / 10 / 755 / 464.7 / 509.0 (both) | -6.7% | 34 s / 40 s |
+| syn300_s1 | 12 / 24 / 953.5 / 1,022.2 | 31-45 P5 unserved (3) | 12 / 24 / 1,807 / 950.1 / 1,018.7 (both) | -0.3% | 252-253 s / 300 s |
+| real80_realism | 10 / 19 / 678.7 / 701.8 * | - | 6 / 14 / 991 / 574.0 / 596.0<br>6 / 14 / 991 / 575.3 / 594.5 | -15.1% / -15.3% | 54-57 s / 40 s |
+
+\* The old engine cannot model loading time per case: 9 of its loads leave before the truck is loaded (20 min + 0.04 min/case
+after the previous return). The new engine's plans have none.
+
+**Alternatives** (first new run vs the old engine in the same session), trucks / loads / km:
+
+| instance | MIN_TRUCKS old | MIN_TRUCKS new | MIN_DISTANCE old | MIN_DISTANCE new |
+|---|---|---|---|---|
+| real80 | 11 / 19 / 1,263 | 5 / 14 / 979 | 9 / 14 / 984 | 5 / 14 / 979 |
+| real80_prod | 11 / 17 / 1,199 | 6 / 14 / 989 | 9 / 14 / 989 | 6 / 14 / 989 |
+| syn60_s1 | 4 / 5 / 412 | 4 / 5 / 393 | 5 / 5 / 398 | 4 / 5 / 393 |
+| syn60_s2 | 4 / 4 / 362 | 4 / 4 / 363 | 4 / 4 / 362 | 4 / 4 / 363 |
+| syn60_s3 | 3 / 3 / 357 | 3 / 3 / 347 | 3 / 3 / 353 | 3 / 3 / 347 |
+| syn150_s1 | 8 / 9 / 750 | 8 / 9 / 748 | 8 / 9 / 748 | 8 / 9 / 748 |
+| syn150_s2 | 11 / 11 / 756 | 8 / 11 / 828 | 11 / 11 / 757 | 10 / 11 / 756 |
+| syn150_s3 | 10 / 10 / 692 | 8 / 10 / 696 | 10 / 10 / 696 | 10 / 10 / 692 |
+| syn300_s1 | 12 / 24 / 1,731 | 12 / 24 / 1,745 | 12 / 24 / 1,722 | 12 / 24 / 1,745 |
+| real80_realism | 7 / 14 / 1,002 | 6 / 14 / 991 | 9 / 14 / 990 | 6 / 14 / 991 |
+
+**Checks.** 60 returned scenarios (10 instances × 3 options × 2 runs): 0 evaluator violations, 0 violations of the exact
+turnaround (reload + loading per case of the next load), every one reconciled (each stop exactly once, cases add up).
+
+**Noise.** The old engine's RECOMMENDED objective varied by 5-14% between runs of the same instance at the automatic
+limit (earlier harness runs under heavier CPU load plus this session; syn300 even between 31-45 dropped P5 stops and none).
+The new engine varied by at most 0.6% between its two runs. On the 60-stop and syn150_s1 days, where the old engine
+found the same plan in this session, the new engine is equal (±0.3%); MIN_DISTANCE km differ by up to ±1.3% either way
+(the km search itself is time-limited: the stage never adds km to its plan). No instance is worse than the old engine by
+more than that noise.
+
+**Targets.** real80 RECOMMENDED: 5 trucks (target ≤ 9) and 492-495 OMR operating cost, **-34% against the old 754 OMR**
+(-31% against the old engine's 720 OMR in this session), at the same 20 s search limit; within ~1% of the best plan found
+by hours of offline search (527.6 objective, 5 trucks / 14 loads) and 4% above the 473.9 OMR lower bound. Wall time: at
+most 57 s for the ≤ 200-stop days and 253 s at 300 stops, inside the 540 s request budget (the post-solve step took 1-2 s
+on the 60-150-stop synthetic days and ~15-20 s on the real day, where CP-SAT keeps improving for longer).
+
+**Unit tests** (`apps/solver/tests/test_repack.py`): strict priority probe (one P2 of 105 cases vs eleven P3 of 10 cases on one
+110-case truck: the P2 is served), shortage ladder (strict and weighted), a crafted day where the search spreads 18 two-stop
+loads over 7-8 trucks and the repack reaches the 6-truck floor (with and without a frozen load; hard windows, no overlap,
+exact turnaround, frozen loads and reconciliation checked on every option), exact repack of six one-load trucks onto two,
+drop repair, exact loading gap per case (and after a frozen load), repack / stage failure and a stuck stage worker fall back
+to the search's plans, the warm start with time costs does not stall and falls back cold, honest reason text, int64 guard.
 
 ## Sources
 
