@@ -121,7 +121,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
             </select>
           </div>
           <div className="space-y-1">
-            <Label htmlFor="cd-svc">Unloading time (min)</Label>
+            <Label htmlFor="cd-svc">Unloading time (min, at most 480)</Label>
             <Input id="cd-svc" inputMode="numeric" value={service} onChange={(e) => setService(e.target.value)} />
           </div>
           <div />
