@@ -1,13 +1,25 @@
 /**
  * Dashboard KPIs and trend timeseries — CLAUDE.md §12 Phase 5.
  *
- * KPIs use the "chosen scenario" of READY/DISPATCHED runs for the date. Runs
- * with no chosen scenario are excluded from cost/trucks-used totals because
- * the planner hasn't committed to a result yet.
+ * KPIs use the "chosen scenario" of the plan in use for each date (LIVE_PLAN_IN_USE): READY or
+ * DISPATCHED, or FAILED while it still holds an applied plan (a failed re-plan keeps the previous
+ * plan, the one being dispatched), never a superseded version. Runs with no chosen scenario are
+ * excluded from cost/trucks-used totals because the planner hasn't committed to a result yet.
  *
  * Late deliveries are a v2 placeholder — v1 doesn't enforce time windows.
  */
+import { Prisma } from '@prisma/client';
 import { prisma } from './db';
+
+/**
+ * The plan versions the dashboard counts, as a SQL condition on "RunPlan" rp: the plan in use of
+ * each day. Never a superseded one - status SUPERSEDED or supersededAt set (a version written
+ * READY over its supersede before the stabilization release must not be summed with its live
+ * child) - and only with an applied plan: READY, DISPATCHED, or FAILED with a chosen option (a
+ * failed re-plan keeps the previous plan in use). Stabilization PR3.
+ */
+export const LIVE_PLAN_IN_USE = Prisma.sql`rp."supersededAt" IS NULL
+      AND (rp.status IN ('READY', 'DISPATCHED') OR (rp.status = 'FAILED' AND rp."chosenScenarioId" IS NOT NULL))`;
 
 export interface DayStats {
   date: string; // YYYY-MM-DD
@@ -126,7 +138,7 @@ async function fetchRangeRows(tenantId: string, from: string, to: string): Promi
     ) AS case_totals ON TRUE
     WHERE rp."tenantId" = ${tenantId}
       AND rp."runDate" BETWEEN ${from}::date AND ${to}::date
-      AND rp.status IN ('READY', 'DISPATCHED')
+      AND ${LIVE_PLAN_IN_USE}
     GROUP BY rp."runDate"
     ORDER BY rp."runDate" ASC
   `;
@@ -161,7 +173,7 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
     JOIN "ScenarioResult" sr ON sr.id = rp."chosenScenarioId"
     WHERE rp."tenantId" = ${tenantId}
       AND rp."runDate" BETWEEN ${last30FromIso}::date AND ${todayIso}::date
-      AND rp.status IN ('READY', 'DISPATCHED')
+      AND ${LIVE_PLAN_IN_USE}
   `;
   const distanceIsEstimated =
     (est[0]?.anyEstimated ?? tenant.config?.distanceProvider === 'HAVERSINE') && (tenant.config?.labelEstimatedDistances ?? true);

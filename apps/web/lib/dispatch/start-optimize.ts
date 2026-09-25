@@ -4,7 +4,6 @@ import { audit } from '../audit';
 import { isOptimizing } from '../jobs/optimize-job';
 import { scheduleDispatchOptimize } from '../jobs/dispatch-job';
 import {
-  applyWeightChanges,
   buildDispatchRequest,
   createNextVersion,
   isLegacyPlan,
@@ -53,17 +52,22 @@ const LEGACY_PLAN: StartResult = {
 
 const SUPERSEDED: StartResult = { status: 409, body: { error: 'This plan version was superseded. Open the latest version.', code: 'SUPERSEDED' } };
 
-/** Every order of the day already sits on a locked, loading or dispatched load (review F03). */
-function nothingToPlan(applied: boolean): StartResult {
-  return {
-    status: 409,
-    body: {
-      error: applied
-        ? 'Nothing to plan: every order of this day is already on a locked, loading or dispatched load. To change a load, unlock it first.'
-        : 'Nothing to plan: every order of this day is already on a locked, loading or dispatched load. This version has no optimized plan yet: unlock one load, then OPTIMIZE.',
-      code: 'NOTHING_TO_PLAN',
-    },
-  };
+/**
+ * Every order of the day already sits on a locked, loading or dispatched load (review F03). The
+ * advice to unlock is given only when a LOCKED or LOADING load exists: a dispatched load cannot
+ * be unlocked.
+ */
+export function nothingToPlan(applied: boolean, canUnlock: boolean): StartResult {
+  const what = 'Nothing to plan: every order of this day is already on a locked, loading or dispatched load.';
+  let advice: string;
+  if (canUnlock) advice = applied ? 'To change a load, unlock it first.' : 'This version has no optimized plan yet: unlock one load, then OPTIMIZE.';
+  else advice = 'Every load has left the depot; they can still be marked completed. A late order for this day can still be planned.';
+  return { status: 409, body: { error: `${what} ${advice}`, code: 'NOTHING_TO_PLAN' } };
+}
+
+/** True when the version has a LOCKED or LOADING load that could be unlocked (or put back to locked). */
+async function hasUnlockableLoad(runId: string): Promise<boolean> {
+  return (await prisma.planLoad.count({ where: { runId, status: { in: ['LOCKED', 'LOADING'] } } })) > 0;
 }
 
 const NO_TRUCKS: StartResult = { status: 400, body: { error: 'No active trucks at this depot.', code: 'NO_TRUCKS' } };
@@ -123,9 +127,9 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
  * plan (409 NOTHING_TO_PLAN when every order is on a frozen load; 400 with no orders at all) and
  * no active truck (400). Shared by the optimize start and the re-plan preflight.
  */
-function prerequisites(built: BuiltRequest, applied: boolean): StartResult | null {
+async function prerequisites(runId: string, built: BuiltRequest, applied: boolean): Promise<StartResult | null> {
   if (built.scope.orderIds.length === 0) {
-    if (built.scope.frozenOrderIds.length > 0) return nothingToPlan(applied);
+    if (built.scope.frozenOrderIds.length > 0) return nothingToPlan(applied, await hasUnlockableLoad(runId));
     return { status: 400, body: { error: 'No orders to plan for this depot and date. Upload orders first.', code: 'NO_ORDERS' } };
   }
   if (built.request.trucks.length === 0) return NO_TRUCKS;
@@ -159,9 +163,13 @@ export interface StartOptions extends OptimizeOverrides {
   expect?: ExpectedDay;
 }
 
-/** A version that was applied (and has not failed) is never re-optimized in place. */
-function inUse(run: Pick<RunPlan, 'chosenScenarioId' | 'status'>, hasJobs: boolean, freshVersion: boolean): boolean {
-  if (!run.chosenScenarioId || run.status === 'FAILED') return false;
+/**
+ * A version with an applied plan is never re-optimized in place - also when it is FAILED: after a
+ * failed re-plan it still holds the previous plan (copy-forward), which the dispatcher may already
+ * be dispatching. The one exception is the fresh copy a re-plan just created, before its first job.
+ */
+function inUse(run: Pick<RunPlan, 'chosenScenarioId'>, hasJobs: boolean, freshVersion: boolean): boolean {
+  if (!run.chosenScenarioId) return false;
   return !(freshVersion && !hasJobs);
 }
 
@@ -174,18 +182,21 @@ const NEW_VERSION_REQUIRED: StartResult = {
 };
 
 /**
- * Start an optimization for a plan version that has not been applied yet (DRAFT / FAILED /
- * READY-without-loads, or a version a re-plan just created). An applied plan is never
- * re-optimized in place: the caller must create a new version (see `replan`), so every plan the
- * dispatcher has seen stays traceable.
+ * Start an optimization for a plan version that has not been applied yet (DRAFT, or FAILED /
+ * READY without an applied plan), or for the version a re-plan just created. An applied plan -
+ * also a FAILED version still holding the copy of the previous plan - is never re-optimized in
+ * place: the caller must create a new version (see `replan`), so every plan the dispatcher has
+ * seen stays traceable.
  *
  * Order: cheap checks (404, superseded, legacy, in use, already running = 202), then the request
  * is built and gated, then admission (solve-admission.ts: quotas and the concurrency queue), then
  * ONE transaction: intake lock, the plan row lock (FOR UPDATE), every check again on the locked
  * row, the frozen loads the request was built around unchanged, the scoped orders still there,
- * weights saved, RunJob created, the plan set OPTIMIZING and the OPTIMIZE_STARTED audit row - so
- * a refused start leaves nothing behind (review F07 / ADD-JOB-AUDIT). The admission ticket is
- * given back on every return that does not start a job.
+ * RunJob created, the plan set OPTIMIZING and the OPTIMIZE_STARTED audit row - so a refused start
+ * leaves nothing behind (review F07 / ADD-JOB-AUDIT). The admission ticket is given back on every
+ * return that does not start a job. Weights the request took from the product master are saved
+ * only when the job applies its result (dispatch-job.ts), so a failed optimization changes no
+ * order kg under the plan still in use.
  */
 export async function startDispatchOptimize(
   tenantId: string,
@@ -208,9 +219,9 @@ export async function startDispatchOptimize(
     const jobs = await prisma.runJob.count({ where: { runId } });
     if (inUse(run, jobs > 0, !!opts.freshVersion)) return NEW_VERSION_REQUIRED;
     // Weights entered or corrected under Products after the orders were confirmed are planned
-    // with (in memory); they are saved on the orders below, only once the checks passed.
+    // with (in memory); the job saves them on the orders together with the plan that uses them.
     const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId));
-    const refused = gate(built, opts, 'optimizing') ?? prerequisites(built, !!run.chosenScenarioId);
+    const refused = gate(built, opts, 'optimizing') ?? (await prerequisites(runId, built, !!run.chosenScenarioId));
     if (refused) return refused;
 
     if (!ticket) {
@@ -248,8 +259,6 @@ export async function startDispatchOptimize(
           const ids = [...new Set([...built.scope.orderIds, ...built.scope.frozenOrderIds])];
           const found = ids.length ? await tx.order.count({ where: { tenantId, id: { in: ids } } }) : 0;
           if (found !== ids.length) throw new PlanError('Orders of this day were removed while the plan was being prepared (a file was deleted). Optimize again.', 409, { code: 'ORDERS_CHANGED' });
-          // Weights the request took from the product master are saved on the orders now (audited).
-          await applyWeightChanges(tx, tenantId, runId, built.weightChanges, user.id);
           const waiting = ticket!.waiting;
           const created = await tx.runJob.create({
             data: {
@@ -348,9 +357,9 @@ export async function replan(
   // Preflight on the parent: the scope is the same as the child's (buildDispatchRequest ignores
   // PLANNED loads, and the child copies the frozen ones). The probe plans weights entered since
   // the last optimize in memory only: the parent stays the live plan if this is refused, so its
-  // orders and loads must not change. They are saved by startDispatchOptimize(child).
+  // orders and loads must not change. They are saved when the child's job applies its plan.
   const probe = await buildDispatchRequest(tenantId, runId);
-  const refused = gate(probe, overrides, 're-planning') ?? prerequisites(probe, true);
+  const refused = gate(probe, overrides, 're-planning') ?? (await prerequisites(runId, probe, true));
   if (refused) return refused;
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
   // trucks) whichever button started it; only with nothing late waiting is it a full re-optimize.

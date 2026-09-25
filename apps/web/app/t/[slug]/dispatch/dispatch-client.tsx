@@ -55,7 +55,15 @@ interface Day {
   weightsToApply?: WeightGap[];
   /** The plan in use is out of date without a new order: weights changed, customers deactivated. */
   outdated?: { weightCases: number; inactiveOrders: number };
-  plan: null | { id: string; version: number; status: string; chosen: boolean; job: { status: string; message: string | null; progressPct: number } | null };
+  plan: null | {
+    id: string;
+    version: number;
+    status: string;
+    chosen: boolean;
+    job: { status: string; message: string | null; progressPct: number } | null;
+    /** Loads of the plan per status (PLANNED, LOCKED, LOADING, DISPATCHED, COMPLETED). */
+    loadsByStatus?: Record<string, number>;
+  };
   pending: { count: number; cases: number; late: number };
   /** Orders with cases not yet on a locked, loading or dispatched load (0 = nothing left to plan). */
   openOrders?: number;
@@ -104,11 +112,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const [editFor, setEditFor] = useState<IssueCustomer | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
+  // An action of the plan below (a load change, Lock all, Use instead, Re-plan) is running: Step 3
+  // waits for it, and the plan's actions wait for Step 3's request (one action at a time, F07).
+  const [planBusy, setPlanBusy] = useState(false);
   const [planKey, setPlanKey] = useState(0);
   const [showAllCustomers, setShowAllCustomers] = useState(false);
-  // Only the newest load of the day may reach the screen (review ADD-STALE-DAY-CLIENT): a slow
-  // answer for a date or depot already left is dropped, and a failed load shows an error instead
-  // of the previous day.
+  // Only answers for the day being loaded may reach the screen, newest first (review
+  // ADD-STALE-DAY-CLIENT): a slow answer for a date or depot already left is dropped, and a failed
+  // load shows an error instead of the previous day.
   const gate = useRef(createRequestGate());
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -122,7 +133,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       data: null,
       error: `the server could not be reached (${e instanceof Error ? e.message : 'network error'})`,
     }));
-    if (!gate.current.isCurrent(ticket)) return; // a newer load started: this answer is out of date
+    // Dropped when another day was picked meanwhile, or a newer answer for this day is already shown.
+    if (!gate.current.isCurrent(ticket)) return;
     gate.current.finish(ticket);
     if (r.ok && r.data) {
       setDay(r.data);
@@ -140,13 +152,23 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     void refresh();
   }, [refresh]);
 
-  // Poll while an optimization runs.
+  // Poll while an optimization runs. A tick is skipped while the previous load of the same day is
+  // still on its way (a slow link or a busy server), so requests do not pile up - but never more
+  // than a few ticks in a row, in case that request hangs.
+  const skippedTicks = useRef(0);
   useEffect(() => {
     const running = day?.plan?.status === 'OPTIMIZING' || day?.plan?.job?.status === 'RUNNING' || day?.plan?.job?.status === 'QUEUED';
     if (!running) return;
-    const t = setInterval(() => void refresh(), 3000);
+    const t = setInterval(() => {
+      if (gate.current.pendingKey() === dayKey(date, depotId) && skippedTicks.current < 5) {
+        skippedTicks.current++;
+        return;
+      }
+      skippedTicks.current = 0;
+      void refresh();
+    }, 3000);
     return () => clearInterval(t);
-  }, [day, refresh]);
+  }, [day, refresh, date, depotId]);
 
   function changeDay(nextDate: string, nextDepot: string | null) {
     setDate(nextDate);
@@ -214,7 +236,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   }
 
   async function optimize(overrides: OptimizeOverrides = {}) {
-    if (!day?.depot || !dayReady) return;
+    if (!day?.depot || !dayReady || planBusy) return;
     // Everything from the loaded day (never the date or depot selection); the server refuses a
     // plan of another day (409 DAY_MISMATCH).
     const expect = { date: day.date, depotId: day.depot.id };
@@ -271,6 +293,13 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   // nothing to plan (the server answers 409 NOTHING_TO_PLAN), so the button is off (review F03).
   const nothingLeft = day.orders.count > 0 && day.openOrders === 0 && day.pending.count === 0;
   const lastFailed = day.plan?.status === 'FAILED';
+  const byStatus = day.plan?.loadsByStatus ?? {};
+  // A LOCKED or LOADING load can be unlocked (put back to locked); a dispatched one cannot.
+  const canUnlock = (byStatus.LOCKED ?? 0) + (byStatus.LOADING ?? 0) > 0;
+  const loadCount = Object.values(byStatus).reduce((a, n) => a + n, 0);
+  // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
+  // FAILED, holding the plan that was dispatched).
+  const allOut = loadCount > 0 && (byStatus.DISPATCHED ?? 0) + (byStatus.COMPLETED ?? 0) === loadCount;
   const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || planOutdated || lastFailed);
   const fixWeight = weightFixText(canEditProducts);
   const selectedDate = date ?? day.date;
@@ -407,7 +436,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </div>
         ) : null}
         {canPlan ? (
-          <Button onClick={() => optimize()} disabled={optimizing || running || !needsPlan || !dayReady} data-testid="optimize-btn" size="lg">
+          <Button onClick={() => optimize()} disabled={optimizing || planBusy || running || !needsPlan || !dayReady} data-testid="optimize-btn" size="lg">
             {optimizing || running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
             {day.plan?.chosen ? 'RE-PLAN' : 'OPTIMIZE'}
           </Button>
@@ -427,7 +456,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         {nothingLeft && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
             Every order of this day is already on a locked, loading or dispatched load: nothing left to plan.
-            {day.plan?.chosen ? ' To change a load, unlock it first.' : ' This version has no optimized plan yet: unlock one load below, then OPTIMIZE.'}
+            {canUnlock
+              ? day.plan?.chosen
+                ? ' To change a load, unlock it first.'
+                : ' This version has no optimized plan yet: unlock one load below, then OPTIMIZE.'
+              : ' Every load has left the depot; a late order for this day can still be planned.'}
           </p>
         ) : !needsPlan && day.plan?.chosen ? (
           <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>
@@ -436,7 +469,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
 
       {/* STEPS 4-5 */}
       {day.plan ? (
-        <Step n={4} title="Review plan · 5 Lock, export, dispatch" done={day.plan.status === 'DISPATCHED'} summary={`Version ${day.plan.version} · ${day.plan.status}`}>
+        <Step n={4} title="Review plan · 5 Lock, export, dispatch" done={day.plan.status === 'DISPATCHED' || (day.plan.chosen && allOut)} summary={`Version ${day.plan.version} · ${day.plan.status}`}>
           <PlanView
             key={`${day.plan.id}-${planKey}`}
             slug={slug}
@@ -445,6 +478,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             canDispatch={canDispatch && dayReady}
             canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
+            externalBusy={optimizing}
+            onBusyChange={setPlanBusy}
             onChanged={() => {
               setPlanKey((k) => k + 1);
               void refresh();

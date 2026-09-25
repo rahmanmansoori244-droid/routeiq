@@ -299,3 +299,59 @@ describe('startDispatchOptimize: one transaction (ADD-JOB-AUDIT / F07)', () => {
     admissionIdle();
   });
 });
+
+describe('review fixes: in-place optimize, advice, weights at the start', () => {
+  it('a FAILED version that still holds the copied plan is never re-optimized in place (409 NEW_VERSION_REQUIRED)', async () => {
+    seed({ status: 'FAILED' }); // chosen 'sc1': a failed re-plan keeps the previous plan
+    tables.runJob = [{ id: 'J1', runId: 'P', tenantId: T, attemptNo: 1, status: 'FAILED' }];
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('NEW_VERSION_REQUIRED');
+    expect(tables.runJob).toHaveLength(1);
+    expect(row('runPlan', 'P').status).toBe('FAILED');
+    admissionIdle();
+  });
+
+  it('a FAILED version without an applied plan (a failed first optimize) is optimized again in place', async () => {
+    seed({ status: 'FAILED', chosen: null });
+    tables.runJob = [{ id: 'J1', runId: 'P', tenantId: T, attemptNo: 1, status: 'FAILED' }];
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(202);
+    expect(row('runPlan', 'P').status).toBe('OPTIMIZING');
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('nothing to plan with every load already out: no advice to unlock (a dispatched load cannot be)', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    for (const l of tables.planLoad) l.status = 'DISPATCHED';
+    buildState.orderIds = [];
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('NOTHING_TO_PLAN');
+    expect(String(res.body.error)).not.toMatch(/unlock/i);
+    admissionIdle();
+  });
+
+  it('weights from the product master are not saved when the optimization starts (only with the applied plan)', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    const { buildDispatchRequest } = await import('@/lib/dispatch/plan-service');
+    vi.mocked(buildDispatchRequest).mockImplementationOnce(async (_t, runId) => ({
+      ...builtFor(runId),
+      weightChanges: {
+        lines: [{ orderId: 'O2', lineId: 'LN2', cases: 10, beforeKg: 0, afterKg: 150, product: 'W-15' }],
+        orders: [{ orderId: 'O2', beforeKg: 100, afterKg: 250 }],
+      },
+    }) as never);
+    const { rawLog } = await import('./fake-plan-db');
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(202);
+    expect(rawLog.some((s) => /UPDATE "OrderLine"|UPDATE "Order"/.test(s))).toBe(false);
+    expect(tables.auditLog.some((a) => a.action === 'ORDER_WEIGHTS_RESOLVED')).toBe(false);
+    // The job gets them, to save with its plan.
+    const call = vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0];
+    expect(call.built.weightChanges.lines).toHaveLength(1);
+    call.ticket!.release();
+    admissionIdle();
+  });
+});

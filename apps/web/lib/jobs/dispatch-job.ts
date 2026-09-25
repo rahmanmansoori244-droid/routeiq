@@ -11,6 +11,8 @@
  *   over): the job is marked FAILED "stale result" and the plan is left untouched;
  * - the OPTIMIZE_SUCCEEDED audit row is written in that same transaction, so a saved plan can
  *   never be marked FAILED afterwards by an audit error;
+ * - weights taken from the product master (BuiltRequest.weightChanges) are saved on the orders in
+ *   that same transaction too, never earlier: a failed optimization leaves order kg as they were;
  * - failJob only fails a job that is still QUEUED or RUNNING, and only moves the plan to FAILED
  *   while it is OPTIMIZING with this job as current: it never overwrites READY or SUPERSEDED.
  */
@@ -18,7 +20,7 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
 import { trackInflight, whenIdle } from './optimize-job';
-import { applyScenario, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
+import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
 import { lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import type { SolveTicket } from '../dispatch/solve-admission';
 
@@ -88,6 +90,12 @@ async function runJob(args: DispatchJobArgs) {
             null,
           );
         }
+        // Weights the request took from the product master are saved on the orders now, with the
+        // plan that uses them (audited; each row only if it still has the kg the request was built
+        // from). A failed or stale optimization therefore changes no order kg under the plan still
+        // in use - a re-plan's copied loads keep matching their orders, and the "planned with the
+        // old weight" warning stays until a plan with the new weight is applied.
+        await applyWeightChanges(tx, tenantId, runId, built.weightChanges, userId);
         const ids = await persistDispatchResult(tx, tenantId, runId, built, resp);
         await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
         const done = await tx.runJob.updateMany({

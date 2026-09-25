@@ -10,6 +10,7 @@ import {
   FROZEN,
   isFrozen,
   ON_ROAD,
+  ownDriverEvidence,
   pickLoadDriver,
   timesClash,
   type LoadRef,
@@ -240,6 +241,54 @@ describe('assignReplanDrivers - drivers across re-plans', () => {
     const now = [on('A', 1, 'D'), on('B', 1, 'D')];
     const got = assignReplanDrivers([trip('A', 1), trip('B', 1)], now, [], [], usable);
     expect([got.get('A:1'), got.get('B:1')]).toEqual(['D', 'D']);
+  });
+
+  describe('copy-forward re-plans (review: untouched copies are the parent\'s evidence, checked for clashes)', () => {
+    // A re-plan copies every load of the parent into the new version (copy-forward), PLANNED ones
+    // too, with their drivers. Those copies must not count as this version's own choice.
+    const copy = (id: string, truckId: string, loadNo: number, driverId: string | null, status = 'PLANNED', from: string | null = `p-${truckId}${loadNo}`) => ({
+      id,
+      truckId,
+      loadNo,
+      driverId,
+      status,
+      carriedFromLoadId: from,
+    });
+    const parentLoad = (truckId: string, loadNo: number, driverId: string | null) => ({ id: `p-${truckId}${loadNo}`, truckId, loadNo, driverId });
+
+    it("the reviewer's case: D1 on A:1 and B:1 in v2, the late-order re-plan re-times them to overlap - D1 is not given both", () => {
+      const parent = [parentLoad('A', 1, 'D1'), parentLoad('B', 1, 'D1')];
+      const copies = [copy('c1', 'A', 1, 'D1'), copy('c2', 'B', 1, 'D1')];
+      const newLoads: ReplanLoad[] = [
+        { key: 'A:1', truckId: 'A', loadNo: 1, departMin: 360, returnMin: 580, defaultDriverId: null },
+        { key: 'B:1', truckId: 'B', loadNo: 1, departMin: 540, returnMin: 720, defaultDriverId: 'D9' },
+      ];
+      const now = ownDriverEvidence(copies, parent);
+      expect(now).toEqual([]);
+      const got = assignReplanDrivers(newLoads, now, parent, [], new Set(['D1', 'D9']));
+      expect(Object.fromEntries(got)).toEqual({ 'A:1': 'D1', 'B:1': 'D9' });
+      const clashes = driverClashes(newLoads.map((l) => ({ id: l.key, truckId: l.truckId, departMin: l.departMin, returnMin: l.returnMin, driverId: got.get(l.key) ?? null })));
+      expect(clashes).toHaveLength(0);
+    });
+
+    it('a PLANNED copy re-timed to clash with a kept LOCKED load of the same driver does not get that driver', () => {
+      // T01 L1 Ali 06:00-09:00 stays LOCKED; T02 L1 (Ali, 09:30-11:00 in v1) is re-timed 08:00-11:00.
+      const parent = [parentLoad('T01', 1, 'ALI'), parentLoad('T02', 1, 'ALI')];
+      const copies = [copy('c1', 'T01', 1, 'ALI', 'LOCKED'), copy('c2', 'T02', 1, 'ALI')];
+      const kept = [{ truckId: 'T01', driverId: 'ALI', departMin: 360, returnMin: 540 }];
+      const now = ownDriverEvidence(copies, parent);
+      expect(now.map((l) => l.id)).toEqual(['c1']); // the frozen copy still counts
+      const got = assignReplanDrivers([{ key: 'T02:1', truckId: 'T02', loadNo: 1, departMin: 480, returnMin: 660, defaultDriverId: null }], now, parent, kept, new Set(['ALI']));
+      expect(got.get('T02:1')).toBeNull(); // left for the dispatcher instead of a second sheet for Ali
+    });
+
+    it('a driver the dispatcher changed on a copy (after a failed re-plan) is this version\'s own choice', () => {
+      const parent = [parentLoad('A', 1, 'D1')];
+      const copies = [copy('c1', 'A', 1, 'D2')];
+      expect(ownDriverEvidence(copies, parent).map((l) => l.id)).toEqual(['c1']);
+      // New PLANNED loads of an applied optimization have no carriedFromLoadId: they always count.
+      expect(ownDriverEvidence([copy('n1', 'A', 1, 'D1', 'PLANNED', null)], parent).map((l) => l.id)).toEqual(['n1']);
+    });
   });
 
   it('skips inactive drivers, and "No driver" falls back to the next source', () => {

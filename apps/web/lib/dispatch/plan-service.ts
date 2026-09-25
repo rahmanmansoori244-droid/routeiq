@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { assignReplanDrivers, checkDriverChange, checkTransition, isFrozen, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { assignReplanDrivers, canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isFrozen, ownDriverEvidence, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -116,8 +116,9 @@ export interface BuiltRequest {
   /**
    * Line weights this request takes from the product master (0 kg lines whose product has a
    * case weight now, lines weighed from the master whose case weight was corrected), for orders
-   * with no part on a frozen load. They are saved with the optimize (applyWeightChanges) - never
-   * by a probe - so the lines, orders and loads of the plan all use the kg the solver was sent.
+   * with no part on a frozen load. They are saved when the job applies the result that was
+   * planned with them (applyWeightChanges in its finalization) - never by a probe, and not when the
+   * optimization fails - so the lines, orders and loads of the plan all use the kg the solver was sent.
    */
   weightChanges: WeightChanges;
 }
@@ -245,7 +246,7 @@ export async function buildDispatchRequest(
     // Line kg is what the order total is summed from, so a part's kg matches the order's. Old
     // orders may have no line weights: then the order's own kg is spread per case. A line at 0 kg
     // (unknown) or weighed from the product master is planned with the product's case weight now
-    // (see weights.ts). Here that is in memory only: the optimize saves it (applyWeightChanges)
+    // (see weights.ts). Here that is in memory only: the job saves it with its plan (applyWeightChanges)
     // for orders with no part on a frozen load, so a probe never changes a live plan's orders.
     const lineLevel = orderUsesLineWeights(o);
     const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
@@ -600,9 +601,11 @@ export class OrdersChangedError extends PlanError {
 /**
  * Save the line weights a request took from the product master (BuiltRequest.weightChanges):
  * 0-kg lines whose product has a case weight now, and lines weighed from the master whose case
- * weight was corrected. Run inside the transaction that starts the optimize, after the location
- * and weight checks passed - never for a probe - so a refused re-plan leaves the live plan's
- * orders and loads as they were. Set-based (a whole NMWC day in a few statements). Each row is
+ * weight was corrected. Run only inside the job's finalization transaction, right before the
+ * result that was planned with these weights is saved and applied (dispatch-job.ts) - never for a
+ * probe or at the start - so a refused re-plan, and a failed or stale optimization, leave the
+ * orders under the plan in use as they were (its loads keep matching them, and the "planned with
+ * the old weight" warning stays). Set-based (a whole NMWC day in a few statements). Each row is
  * changed only if it still has the kg the request was built from; otherwise OrdersChangedError.
  * One ORDER_WEIGHTS_RESOLVED audit row lists every line and order total before and after.
  */
@@ -788,10 +791,13 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   // Drivers stay with their truck and trip across re-plans: this version's loads (read before
   // its PLANNED loads are deleted), then the parent version, then the truck's default driver -
   // without guessing one driver onto two trucks at the same time. Rules: assignReplanDrivers.
+  // The PLANNED copies a re-plan carried from the parent with the parent's driver are the
+  // parent's evidence, not this version's (ownDriverEvidence): their drivers are checked for time
+  // clashes like any guess, so a re-timed trip never double-books a driver across trucks.
   const usableDrivers = new Set((await tx.driver.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((x) => x.id));
-  const driverSel = { truckId: true, loadNo: true, driverId: true } as const;
-  const driversNow = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
+  const driverSel = { id: true, truckId: true, loadNo: true, driverId: true, status: true, carriedFromLoadId: true } as const;
   const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
+  const driversNow = ownDriverEvidence(await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel }), driversParent);
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
   const driverOf = assignReplanDrivers(
     d.loads.map((ld) => ({
@@ -1055,7 +1061,9 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string) 
         parentPlanned,
         childScope: scopeIds,
         childPlanned: planned.map((p) => ({ orderId: p.orderId, truckId: p.truckId, loadNo: p.loadNo })),
-        lockedLoadsPreserved: loads.filter((l) => l.carriedFromLoadId).length,
+        // Carried AND frozen: a re-plan also copies the PLANNED loads (copy-forward), and those
+        // are the previous plan kept for now, not locked or dispatched loads preserved.
+        lockedLoadsPreserved: loads.filter((l) => isCarriedFrozen(l)).length,
       });
     }
   }
@@ -1407,23 +1415,34 @@ export async function setLoadDriver(tenantId: string, runId: string, loadId: str
   return inLoadTx(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
 }
 
+/**
+ * 409 NO_PLAN_APPLIED for a load change a version without an applied plan does not allow. The
+ * advice is one the dispatcher can follow on this version: OPTIMIZE when a load is still PLANNED
+ * (its orders are open), unlock first when only LOCKED / LOADING loads could be freed.
+ */
+export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
+  const advice = loadStatuses.includes('PLANNED')
+    ? 'OPTIMIZE the day first.'
+    : canStepBack(loadStatuses)
+      ? 'To plan the day again, unlock a load, then OPTIMIZE.'
+      : 'Loads that are out can still be marked completed.';
+  return new PlanError(`This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. ${advice}`, 409, { code: 'NO_PLAN_APPLIED' });
+}
+
 async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
-  // A version without an applied plan (for example one left behind by a failed re-plan before
-  // the stabilization release) has no summary or reconciliation: only the way back is open
-  // (unlock, back to locked), so the day can be optimized again. Review F03.
-  if (!run.chosenScenarioId && !scenariolessTransitionAllowed(load.status, to)) {
-    throw new PlanError(
-      'This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. Unlock a load, then OPTIMIZE the day.',
-      409,
-      { code: 'NO_PLAN_APPLIED' },
-    );
-  }
   const siblings = await tx.planLoad.findMany({ where: { runId, truckId: load.truckId } });
   const check = checkTransition(load, siblings, to);
   if (!check.ok) throw new PlanError(check.reason, 409);
+  // A version without an applied plan (for example one left behind by a failed re-plan before
+  // the stabilization release) has no summary or reconciliation: only the way back (unlock, back
+  // to locked) and completing a load that is already out are open, so the day can be optimized
+  // again and its dispatched loads closed. Review F03.
+  if (!run.chosenScenarioId && !scenariolessTransitionAllowed(load.status, to)) {
+    throw noPlanApplied((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
+  }
   if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
   if (to === 'DISPATCHED') {
     const recon = run.reconciliationJson as unknown as Reconciliation | null;

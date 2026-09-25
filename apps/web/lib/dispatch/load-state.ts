@@ -72,13 +72,30 @@ export function checkTransition(load: LoadRef, sameTruckLoads: LoadRef[], to: Lo
 }
 
 /**
- * Load changes allowed on a plan version that has no applied plan (no chosen option): only the
- * way back - unlock (LOCKED -> PLANNED) and back to locked (LOADING -> LOCKED) - so the day can
- * be optimized again. Such a version has no summary or reconciliation, so it can never be locked,
- * loaded or dispatched from. Review F03.
+ * Load changes allowed on a plan version that has no applied plan (no chosen option): the way
+ * back - unlock (LOCKED -> PLANNED) and back to locked (LOADING -> LOCKED) - so the day can be
+ * optimized again, and marking a load that is already out COMPLETED (DISPATCHED -> COMPLETED:
+ * it changes no plan facts and needs no reconciliation). Such a version has no summary or
+ * reconciliation, so nothing can be locked, loaded or dispatched from it. Review F03.
  */
 export function scenariolessTransitionAllowed(from: LoadStatusName, to: LoadStatusName): boolean {
-  return (from === 'LOCKED' && to === 'PLANNED') || (from === 'LOADING' && to === 'LOCKED');
+  return (from === 'LOCKED' && to === 'PLANNED') || (from === 'LOADING' && to === 'LOCKED') || (from === 'DISPATCHED' && to === 'COMPLETED');
+}
+
+/**
+ * A load kept unchanged from the previous plan version: carried over by a re-plan AND frozen
+ * (locked, loading or out). A re-plan also copies the PLANNED loads (copy-forward), so a failed
+ * or running re-plan still has a usable plan; those copies are not "kept" - the next optimization
+ * replaces them. Drives the "kept" labels (plan screen, driver sheets, workbook) and the change
+ * summary's "locked/dispatched loads preserved".
+ */
+export function isCarriedFrozen(l: { status: string; carriedFromLoadId: string | null }): boolean {
+  return l.carriedFromLoadId !== null && l.status !== 'PLANNED';
+}
+
+/** Loads that can still be unlocked (LOCKED) or put back to locked (LOADING): the way back to a re-plan. */
+export function canStepBack(statuses: readonly string[]): boolean {
+  return statuses.some((s) => s === 'LOCKED' || s === 'LOADING');
 }
 
 export interface DriverOnLoad {
@@ -107,6 +124,28 @@ export function pickLoadDriver(
   return withDriver[0]?.driverId ?? null;
 }
 
+/** A load of a version as the re-plan driver rules read it. */
+export interface VersionLoadDriver extends DriverOnLoad {
+  status: string;
+  /** The parent version's load this one was copied from by a re-plan (copy-forward), or null. */
+  carriedFromLoadId: string | null;
+}
+
+/**
+ * This version's own driver evidence for its re-plan (the `now` of assignReplanDrivers, step 1,
+ * which is never checked for time clashes): its loads, except the PLANNED copies that the re-plan
+ * carried from the parent (copy-forward) with the parent load's driver unchanged. Nobody decided
+ * those drivers on this version, so they stay parent evidence (step 2, clash-checked) - as before
+ * copy-forward, when a new version held only its frozen copies. A driver the dispatcher changed on
+ * a copy (after a failed re-plan) is this version's own choice and counts. Frozen loads always count.
+ */
+export function ownDriverEvidence<L extends VersionLoadDriver>(now: readonly L[], parent: readonly (DriverOnLoad & { id: string })[]): L[] {
+  const parentDriver = new Map(parent.map((p) => [p.id, p.driverId]));
+  return now.filter(
+    (l) => !(l.status === 'PLANNED' && l.carriedFromLoadId !== null && parentDriver.has(l.carriedFromLoadId) && parentDriver.get(l.carriedFromLoadId) === l.driverId),
+  );
+}
+
 /** A load's driver and planned time away from the depot (minutes from midnight). */
 export interface DriverTime {
   truckId: string;
@@ -128,8 +167,9 @@ export interface ReplanLoad extends Omit<DriverTime, 'driverId'> {
 }
 
 /**
- * Drivers for the new loads of a (re-)plan. `now` = every load of this version before its
- * PLANNED loads are replaced, `parent` = the loads of the version it was re-planned from,
+ * Drivers for the new loads of a (re-)plan. `now` = the loads of this version before its PLANNED
+ * loads are replaced, without untouched copy-forward copies (ownDriverEvidence), `parent` = the
+ * loads of the version it was re-planned from,
  * `kept` = the frozen loads that stay in this version (their drivers do not change).
  *
  * Evidence, strongest first:

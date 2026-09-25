@@ -11,7 +11,9 @@
  *    and the parent stays SUPERSEDED - never READY again;
  *  - two concurrent re-plans of one version: exactly one child;
  *  - an option that found no plan (NO_SOLUTION) cannot be used (409);
- *  - a re-plan for another day than the screen shows answers 409 DAY_MISMATCH.
+ *  - a re-plan for another day than the screen shows answers 409 DAY_MISMATCH;
+ *  - three OPTIMIZEs of one company on different days at once are all accepted and all end READY
+ *    (the solve admission queues the extra ones; F16).
  *
  * The failed-re-plan case (the optimizer down) is in plan-lifecycle-db.spec.ts, with the solver
  * faked. Requires: web server (RATE_LIMITS_DISABLED=1) + solver running.
@@ -153,6 +155,27 @@ describe('one live plan per day (F06)', () => {
     expect(ids.size).toBe(1);
     expect(await plansOfDay(day)).toBe(1);
     expect(res.slice(3).filter((r) => r.status === 201).length).toBeLessThanOrEqual(1);
+  });
+});
+
+describe('solve admission (F16): extra solves of one company queue, they do not fail', () => {
+  it('three OPTIMIZEs of one company on different days at once: all 202, all end READY', async () => {
+    const days = [isoPlus(20), isoPlus(21), isoPlus(22)];
+    for (const day of days) await seedOrders(day, 2);
+    // One solve per company runs at a time with the default SOLVER_MAX_CONCURRENT=2; the others
+    // wait in the queue (at most 2 per company), so all three are accepted.
+    const res = await Promise.all(days.map((day) => fetchWith(t.cookieJar, `${BASE}/api/dispatch/plan`, j({ date: day, depotId, optimize: true }))));
+    const runIds: string[] = [];
+    for (const r of res) {
+      expect(r.status).toBe(202);
+      runIds.push((await json(r)).data.runId);
+    }
+    expect(new Set(runIds).size).toBe(3);
+    for (const runId of runIds) {
+      const st = await waitForPlan(runId, 240);
+      expect(st.run.status).toBe('READY');
+      expect(st.job.status).toBe('SUCCEEDED');
+    }
   });
 });
 

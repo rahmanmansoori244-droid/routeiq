@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
+import { canStepBack } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 
@@ -41,13 +42,20 @@ interface Props {
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
+  /** A request of the screen around this plan is running (the day screen's OPTIMIZE / RE-PLAN): every action here waits. */
+  externalBusy?: boolean;
+  /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
+  onBusyChange?: (busy: boolean) => void;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange }: Props) {
   const [d, setD] = useState<PlanDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState<string | null>(null);
+  const [ownBusy, setBusy] = useState<string | null>(null);
+  // One action at a time across the whole day screen (F07): this plan's own request, or the day
+  // screen's OPTIMIZE / RE-PLAN request around it.
+  const busy = ownBusy ?? (externalBusy ? 'external' : null);
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
@@ -66,6 +74,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    onBusyChange?.(ownBusy !== null);
+  }, [ownBusy, onBusyChange]);
+  // Unmounted mid-action (the day reloads the plan): never leave the day screen waiting.
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
   useEffect(() => {
     void api<DriverOption[]>('/api/drivers').then((r) => {
@@ -241,7 +255,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 data-testid="replan-btn"
                 title={
                   nothingToPlan
-                    ? 'Nothing to plan: every order is on a locked, loading or dispatched load. Unlock a load (or add a late order) first.'
+                    ? canStepBack(d.loads.map((l) => l.status))
+                      ? 'Nothing to plan: every order is on a locked, loading or dispatched load. Unlock a load (or add a late order) first.'
+                      : 'Nothing to plan: every load has left the depot. Add a late order to plan more.'
                     : 'With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change.'
                 }
               >
@@ -678,7 +694,7 @@ function LoadActions({
 }: {
   l: DetailLoad;
   busy: boolean;
-  /** The version has an optimized plan; without one only Unlock and Back to locked are offered. */
+  /** The version has an optimized plan; without one only Unlock, Back to locked and Completed are offered. */
   applied: boolean;
   canPlan: boolean;
   canDispatch: boolean;
@@ -694,9 +710,10 @@ function LoadActions({
   const out: React.ReactNode[] = [];
   if (!applied) {
     // No optimized plan on this version (left by a failed re-plan before the stabilization
-    // release): only the way back, so the day can be optimized again.
+    // release): only the way back, so the day can be optimized again, and closing loads already out.
     if (l.status === 'LOCKED' && canPlan) out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));
     if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
+    if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
     return <div className="flex flex-wrap gap-1">{out}</div>;
   }
   if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));

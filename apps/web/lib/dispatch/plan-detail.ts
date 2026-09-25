@@ -9,6 +9,7 @@ import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { isSupersededRun } from './plan-status';
+import { isCarriedFrozen } from './load-state';
 import { noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
@@ -64,6 +65,7 @@ export interface DetailLoad {
   driverPhone: string | null;
   loadNo: number;
   status: string;
+  /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
   carried: boolean;
   departMin: number;
   returnMin: number;
@@ -258,7 +260,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       driverPhone: l.driver?.phone ?? null,
       loadNo: l.loadNo,
       status: l.status,
-      carried: !!l.carriedFromLoadId,
+      carried: isCarriedFrozen(l),
       departMin: l.departMin,
       returnMin: l.returnMin,
       distanceKm: l.distanceKm,

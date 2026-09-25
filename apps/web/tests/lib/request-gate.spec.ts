@@ -1,6 +1,7 @@
 /**
- * Stabilization PR3 - the day screen's latest-only gate (review ADD-STALE-DAY-CLIENT): an answer
- * that arrives after a newer load started is dropped, whatever order the answers come back in.
+ * Stabilization PR3 - the day screen's gate (review ADD-STALE-DAY-CLIENT): an answer for a day the
+ * dispatcher already left is dropped, whatever order the answers come back in; an answer for the
+ * day being loaded is shown when it is newer than the one on screen (slow polling never freezes it).
  */
 import { describe, expect, it } from 'vitest';
 import { createRequestGate, dayKey } from '@/app/t/[slug]/dispatch/request-gate';
@@ -51,6 +52,32 @@ describe('request gate', () => {
     expect(a.answer('x')).toBe(false);
     expect(s.shown()).toBeNull();
     expect(s.gate.pendingKey()).toBe('y|D1');
+  });
+
+  it('a same-day refresh slower than the polling interval is still shown (the screen never freezes)', () => {
+    // Polling every 3 s while the day overview takes longer: each answer arrives after the next
+    // poll began. Before the fix every one was dropped and the screen stayed on "Optimizing...".
+    const s = screen();
+    const key = dayKey('2026-09-27', 'D1');
+    const poll1 = s.start(key);
+    const poll2 = s.start(key);
+    const poll3 = s.start(key);
+    expect(poll1.answer('optimizing')).toBe(true); // older, but newer than what is on screen
+    expect(s.shown()).toBe('optimizing');
+    expect(s.gate.pendingKey()).toBe(key); // the newest poll is still on its way
+    expect(poll3.answer('ready')).toBe(true);
+    expect(poll2.answer('optimizing (older)')).toBe(false); // never replaces a newer answer
+    expect(s.shown()).toBe('ready');
+    expect(s.gate.pendingKey()).toBeNull();
+  });
+
+  it('a slow answer for the day on screen is dropped once another day was picked', () => {
+    const s = screen();
+    const slow = s.start(dayKey('2026-09-27', 'D1'));
+    const other = s.start(dayKey('2026-09-28', 'D1'));
+    expect(slow.answer('27')).toBe(false);
+    expect(other.answer('28')).toBe(true);
+    expect(s.shown()).toBe('28');
   });
 
   it('knows which day is loading until its answer arrives', () => {

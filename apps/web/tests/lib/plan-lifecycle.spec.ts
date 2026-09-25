@@ -48,7 +48,9 @@ import {
   updateLoad,
 } from '@/lib/dispatch/plan-service';
 import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
+import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { failJob, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
+import { trackInflight } from '@/lib/jobs/optimize-job';
 
 const T = 'tA';
 const user = { id: 'u1', role: 'TENANT_ADMIN' };
@@ -546,5 +548,315 @@ describe('job finalization (F07 / ADD-JOB-AUDIT)', () => {
     await runToEnd();
     expect(row('runPlan', 'R')).toMatchObject({ status: 'FAILED', chosenScenarioId: 'scCopy' });
     expect(tables.planLoad).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review of PR3 (fixes): copy-forward drivers and labels, completed loads on a version without a
+// plan, weights saved only with an applied plan, and the solve admission wired into the job.
+// ---------------------------------------------------------------------------------------------
+
+/** A solver load of truck `truckId` carrying `orderIds` (one stop). */
+function solverLoad(truckId: string, loadNo: number, departMin: number, returnMin: number, orderIds: string[]) {
+  return {
+    truck_id: truckId,
+    load_no: loadNo,
+    depart_min: departMin,
+    return_min: returnMin,
+    distance_km: 10,
+    duration_min: returnMin - departMin,
+    cases: 20,
+    kg: 200,
+    utilization_pct: 50,
+    fuel_litres: 1,
+    fuel_cost: 1,
+    total_cost: 5,
+    return_leg_km: 2,
+    stops: [
+      { sequence: 1, stop_id: `s-${orderIds[0]}`, order_ids: orderIds, customer_id: 'c', arrival_min: departMin + 20, service_start_min: departMin + 20, departure_min: departMin + 40, wait_min: 0, leg_km: 5, cum_km: 5, hard_window_ok: true, pref_window_ok: true },
+    ],
+  };
+}
+
+describe('copy-forward re-plan: drivers are not double-booked (review: step 1 evidence)', () => {
+  it('a PLANNED copy re-timed onto a kept LOCKED load of the same driver does not keep that driver', async () => {
+    // v1 (superseded): T01 L1 Ali 06:00-09:00 LOCKED; T02 L1 Ali 09:30-11:00 PLANNED.
+    // v2 holds copies of both (copy-forward); its optimization moves T02 L1 to 08:00-11:00.
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
+    tables.truck = ['T1', 'T2'].map((id) => ({ id, tenantId: T, code: id, defaultDriverId: null }));
+    tables.driver = [{ id: 'ALI', tenantId: T, active: true }];
+    tables.order = ['O1', 'O2'].map((id) => ({ id, tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'ASSIGNED' }));
+    const base = { tenantId: T, depotId: 'D1', runDate: DAY, optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 2, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null, createdById: 'u1', createdAt: new Date() };
+    tables.runPlan = [
+      { ...base, id: 'P', status: 'SUPERSEDED', supersededAt: new Date(), version: 1, reason: 'INITIAL', chosenScenarioId: 'scP', parentRunId: null, currentJobId: null },
+      { ...base, id: 'C', status: 'OPTIMIZING', supersededAt: null, version: 2, reason: 'LATE_ORDER', chosenScenarioId: 'scCopy', parentRunId: 'P', currentJobId: 'J1' },
+    ];
+    tables.planLoad = [
+      load('PL1', 'P', 1, 'LOCKED', { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540 }),
+      load('PL2', 'P', 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 570, returnMin: 660 }),
+      load('CL1', 'C', 1, 'LOCKED', { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540, carriedFromLoadId: 'PL1' }),
+      load('CL2', 'C', 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 570, returnMin: 660, carriedFromLoadId: 'PL2' }),
+    ];
+    tables.routeAssignment = [
+      { ...assignment('PA1', 'P', 'PL1', 'O1', 1), truckId: 'T1' },
+      { ...assignment('PA2', 'P', 'PL2', 'O2', 1), truckId: 'T2' },
+      { ...assignment('CA1', 'C', 'CL1', 'O1', 1), truckId: 'T1' },
+      { ...assignment('CA2', 'C', 'CL2', 'O2', 1), truckId: 'T2' },
+    ];
+    const newScope = scope({ orderIds: ['O2'], frozenOrderIds: ['O1'], frozenLoadIds: ['CL1'], frozenLoadOrderIds: ['O1'] });
+    tables.scenarioResult = [
+      { id: 'scP', runId: 'P', name: 'RECOMMENDED', detailsJson: scenarioDetails() },
+      { id: 'scCopy', runId: 'C', name: 'RECOMMENDED', detailsJson: scenarioDetails() },
+      { id: 'scNew', runId: 'C', name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: newScope, loads: [solverLoad('T2', 1, 480, 660, ['O2'])] }) },
+    ];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+    tables.runJob = [{ id: 'J1', runId: 'C', tenantId: T, attemptNo: 1, status: 'RUNNING' }];
+
+    await applyScenario(fakePrisma as never, T, 'C', 'scNew', 'u1', { jobId: 'J1' });
+    const loads = tables.planLoad.filter((l) => l.runId === 'C');
+    expect(loads.find((l) => l.id === 'CL1')).toMatchObject({ status: 'LOCKED', driverId: 'ALI' }); // kept as it is
+    const t2 = loads.find((l) => l.truckId === 'T2')!;
+    expect(t2.id).not.toBe('CL2'); // the copy was replaced by the new plan's load
+    expect(t2.driverId).toBeNull(); // not a second sheet for Ali at 08:00 while T01 is out until 09:00
+  });
+});
+
+describe('a failed copy-forward re-plan: labels and change summary (review: PLANNED copies are not "kept")', () => {
+  it('after one load change, "locked/dispatched loads preserved" counts only the frozen copies', async () => {
+    seedAppliedPlan(); // v1: L1 LOCKED, L2 PLANNED
+    const { child } = await createNextVersion(T, 'P', 'REOPTIMIZE', null, 'u1');
+    Object.assign(row('runPlan', child.id), { status: 'FAILED' }); // its optimization failed: the copy stays
+    const copies = tables.planLoad.filter((l) => l.runId === child.id);
+    expect(copies.every((l) => l.carriedFromLoadId)).toBe(true); // both copied (the driver rules need the link)
+    const l1 = copies.find((l) => l.carriedFromLoadId === 'L1')!;
+    await updateLoad(T, child.id, l1.id, { status: 'DISPATCHED' }, user, allow);
+    const summary = row('runPlan', child.id).changeSummaryJson;
+    expect(summary).toMatchObject({ parentVersion: 1, lockedLoadsPreserved: 1 }); // not 2: L2's copy is still PLANNED
+    expect(row('runPlan', child.id).status).toBe('READY');
+  });
+});
+
+describe('a version without an applied plan: loads already out can be completed (review F03 dead end)', () => {
+  it('DISPATCHED -> COMPLETED is allowed and the version keeps its status; it still needs a supervisor', async () => {
+    seedAppliedPlan('SUPERSEDED', { supersededAt: new Date() });
+    tables.runPlan.push({ ...tables.runPlan[0], id: 'C', status: 'FAILED', version: 2, parentRunId: 'P', chosenScenarioId: null, supersededAt: null, reconciliationJson: null, summaryJson: null });
+    tables.planLoad.push(load('CL1', 'C', 1, 'DISPATCHED', { carriedFromLoadId: 'L1' }), load('CL2', 'C', 2, 'DISPATCHED', { carriedFromLoadId: 'L2' }));
+    await updateLoad(T, 'C', 'CL1', { status: 'COMPLETED' }, user, allow);
+    expect(row('planLoad', 'CL1').status).toBe('COMPLETED');
+    expect(row('runPlan', 'C').status).toBe('FAILED'); // never READY / DISPATCHED without a plan
+    expect(tables.auditLog.some((a) => a.action === 'LOAD_COMPLETED' && a.entityId === 'CL1')).toBe(true);
+    const plannerOnly = (role: 'PLANNER' | 'SUPERVISOR') => role === 'PLANNER';
+    await expect(updateLoad(T, 'C', 'CL2', { status: 'COMPLETED' }, user, plannerOnly)).rejects.toMatchObject({ status: 403 });
+    expect(row('planLoad', 'CL2').status).toBe('DISPATCHED');
+  });
+
+  it('NO_PLAN_APPLIED on a version whose loads are PLANNED and LOCKED says to OPTIMIZE, not to unlock', async () => {
+    seedAppliedPlan('SUPERSEDED', { supersededAt: new Date() });
+    tables.runPlan.push({ ...tables.runPlan[0], id: 'C', status: 'DRAFT', version: 2, parentRunId: 'P', chosenScenarioId: null, supersededAt: null, reconciliationJson: null, summaryJson: null });
+    tables.planLoad.push(load('CL1', 'C', 1, 'LOCKED', { carriedFromLoadId: 'L1' }), load('CL2', 'C', 2, 'PLANNED', { carriedFromLoadId: 'L2' }));
+    const err = await updateLoad(T, 'C', 'CL2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+    expect(err).toBeInstanceOf(PlanError);
+    expect(err.details).toMatchObject({ code: 'NO_PLAN_APPLIED' });
+    expect(err.message).toMatch(/OPTIMIZE the day first/);
+    expect(row('planLoad', 'CL2').status).toBe('PLANNED');
+  });
+});
+
+describe('solve admission wired into the job (F16): queued solves start, every ending gives the slot back', () => {
+  const g = globalThis as unknown as { __routeiqInflight: Map<string, Promise<void>> };
+  const jobBuilt = {
+    request: { stops: [{ stop_id: 's' }], trucks: [{ id: 'T1' }] },
+    preDrops: [],
+    scope: scope({ frozenLoadIds: [], frozenLoadOrderIds: [], frozenOrderIds: [], orderIds: ['O1'] }),
+    blocking: [],
+    warnings: [],
+    unknownWeights: [],
+    weightChanges: { lines: [], orders: [] },
+  };
+  const jobResponse = () => ({
+    engine: 'OR-Tools',
+    matrix_provider: 'HAVERSINE',
+    distance_is_estimated: true,
+    warnings: [],
+    scenarios: [{ ...scenarioDetails({ scope: undefined }), unserved: [{ order_ids: ['O1'], reason_code: 'NO_AVAILABLE_TRUCK', reason_message: 'full' }] }],
+  });
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  /** Two versions of one company (two days), each OPTIMIZING with its own QUEUED job. */
+  function seedTwo() {
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
+    tables.truck = [{ id: 'T1', tenantId: T, code: 'T01', defaultDriverId: null }];
+    tables.order = [{ id: 'O1', tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'VALIDATED' }];
+    tables.runPlan = ['R1', 'R2'].map((id, i) => ({
+      id,
+      tenantId: T,
+      depotId: 'D1',
+      runDate: new Date(DAY.getTime() + i * 86_400_000),
+      status: 'OPTIMIZING',
+      version: 1,
+      reason: 'INITIAL',
+      chosenScenarioId: null,
+      parentRunId: null,
+      supersededAt: null,
+      currentJobId: `J${i + 1}`,
+      finalizedAt: null,
+      reconciliationJson: null,
+    }));
+    tables.runJob = ['R1', 'R2'].map((runId, i) => ({ id: `J${i + 1}`, runId, tenantId: T, attemptNo: 1, status: 'QUEUED' }));
+    tables.planLoad = [];
+    tables.routeAssignment = [];
+    tables.scenarioResult = [];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+    tables.driver = [];
+  }
+
+  /** One solve per company at a time (the shipped default with SOLVER_MAX_CONCURRENT=2), quotas off. */
+  function admission() {
+    return new SolveAdmission({ userPerHour: 100, tenantPerHour: 100, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, tenantQueue: 2, windowMs: 3_600_000 }, Date.now, () => true);
+  }
+  function ticketOf(a: SolveAdmission): SolveTicket {
+    const r = a.reserve(T, 'u1');
+    if (!r.ok) throw new Error(r.code);
+    r.ticket.commit();
+    return r.ticket;
+  }
+  const argsFor = (runId: string, runJobId: string, ticket: SolveTicket): DispatchJobArgs => ({ runId, runJobId, tenantId: T, userId: 'u1', ip: null, built: jobBuilt as never, ticket });
+
+  for (const ending of ['success', 'failure', 'stale result'] as const) {
+    it(`the second solve waits QUEUED until the first ends (${ending}), then runs; no slot is left taken`, async () => {
+      seedTwo();
+      const adm = admission();
+      const t1 = ticketOf(adm);
+      const t2 = ticketOf(adm);
+      expect([t1.waiting, t2.waiting]).toEqual([false, true]);
+      let calls = 0;
+      let releaseFirst!: () => void;
+      const firstBlocked = new Promise<void>((r) => (releaseFirst = r));
+      solver.impl = async () => {
+        calls++;
+        if (calls === 1) {
+          await firstBlocked;
+          if (ending === 'failure') throw new Error('connect ECONNREFUSED');
+        }
+        return jobResponse();
+      };
+      scheduleDispatchOptimize(argsFor('R1', 'J1', t1));
+      scheduleDispatchOptimize(argsFor('R2', 'J2', t2));
+      const p1 = g.__routeiqInflight.get('R1')!;
+      const p2 = g.__routeiqInflight.get('R2')!;
+      await settle();
+      expect(row('runJob', 'J1').status).toBe('RUNNING');
+      expect(row('runJob', 'J2').status).toBe('QUEUED'); // waiting for its slot, not failed
+      expect(calls).toBe(1);
+      expect(adm.snapshot()).toMatchObject({ running: 1, waiting: 1 });
+
+      if (ending === 'stale result') Object.assign(row('runPlan', 'R1'), { status: 'SUPERSEDED', supersededAt: new Date() });
+      releaseFirst();
+      await p1;
+      await p2;
+      expect(row('runJob', 'J1').status).toBe(ending === 'success' ? 'SUCCEEDED' : 'FAILED');
+      if (ending === 'stale result') expect(row('runJob', 'J1').errorJson).toMatchObject({ reason: 'STALE_RESULT' });
+      expect(row('runJob', 'J2').status).toBe('SUCCEEDED');
+      expect(row('runPlan', 'R2').status).toBe('READY');
+      expect(calls).toBe(2);
+      expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+    });
+  }
+
+  it('a job started right behind a finishing job of the same version (whenIdle path) still gives its slot back', async () => {
+    seedTwo();
+    const adm = admission();
+    const t1 = ticketOf(adm);
+    let finishPrevious!: () => void;
+    // The previous job of R1 is still leaving the in-flight map.
+    trackInflight('R1', () => new Promise<void>((r) => (finishPrevious = r)));
+    solver.impl = async () => jobResponse();
+    expect(scheduleDispatchOptimize(argsFor('R1', 'J1', t1))).toBe(false);
+    expect(adm.snapshot()).toMatchObject({ running: 1 });
+    finishPrevious();
+    for (let i = 0; i < 50 && row('runJob', 'J1').status !== 'SUCCEEDED'; i++) await settle();
+    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    await g.__routeiqInflight.get('R1');
+    await settle();
+    expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  });
+});
+
+describe('weights from the product master are saved with the applied plan only (review: failed re-plan kg)', () => {
+  const change = {
+    lines: [{ orderId: 'O1', lineId: 'LN1', cases: 20, beforeKg: 0, afterKg: 300, product: 'W-15' }],
+    orders: [{ orderId: 'O1', beforeKg: 200, afterKg: 500 }],
+  };
+  const weightBuilt = {
+    request: { stops: [{ stop_id: 's' }], trucks: [{ id: 'T1' }] },
+    preDrops: [],
+    scope: scope({ frozenLoadIds: [], frozenLoadOrderIds: [], frozenOrderIds: [], orderIds: ['O1'] }),
+    blocking: [],
+    warnings: [],
+    unknownWeights: [],
+    weightChanges: change,
+  };
+  function seedOne(chosen: string | null) {
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
+    tables.truck = [{ id: 'T1', tenantId: T, code: 'T01', defaultDriverId: null }];
+    tables.order = [{ id: 'O1', tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'VALIDATED' }];
+    tables.runPlan = [{ id: 'R', tenantId: T, depotId: 'D1', runDate: DAY, status: 'OPTIMIZING', version: 2, reason: 'REOPTIMIZE', chosenScenarioId: chosen, parentRunId: null, supersededAt: null, currentJobId: 'J1', finalizedAt: null, reconciliationJson: { ok: true } }];
+    tables.runJob = [{ id: 'J1', runId: 'R', tenantId: T, attemptNo: 1, status: 'QUEUED' }];
+    tables.planLoad = chosen ? [load('LC', 'R', 1, 'PLANNED', { carriedFromLoadId: 'Lp', weightKg: 200 })] : [];
+    tables.routeAssignment = [];
+    tables.scenarioResult = chosen ? [{ id: chosen, runId: 'R', name: 'RECOMMENDED', detailsJson: scenarioDetails() }] : [];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+    tables.driver = [];
+  }
+  const jobArgs = (): DispatchJobArgs => ({ runId: 'R', runJobId: 'J1', tenantId: T, userId: 'u1', ip: null, built: weightBuilt as never });
+  async function runJobToEnd() {
+    const original = fakePrisma.$executeRaw;
+    // The weight UPDATEs match every row they were given (the kg the request was built from).
+    fakePrisma.$executeRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      await original(strings, ...values);
+      return Array.isArray(values[0]) ? values[0].length : 0;
+    };
+    try {
+      scheduleDispatchOptimize(jobArgs());
+      await (globalThis as unknown as { __routeiqInflight: Map<string, Promise<void>> }).__routeiqInflight.get('R');
+    } finally {
+      fakePrisma.$executeRaw = original;
+    }
+  }
+  const weightUpdates = () => rawLog.filter((s) => /UPDATE "OrderLine"|UPDATE "Order"/.test(s));
+
+  it('success: saved in the finalization transaction, after the plan row lock, with its audit row', async () => {
+    seedOne(null);
+    solver.impl = async () => ({
+      engine: 'OR-Tools',
+      matrix_provider: 'HAVERSINE',
+      distance_is_estimated: true,
+      warnings: [],
+      scenarios: [{ ...scenarioDetails({ scope: undefined }), unserved: [{ order_ids: ['O1'], reason_code: 'NO_AVAILABLE_TRUCK', reason_message: 'full' }] }],
+    });
+    await runJobToEnd();
+    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    expect(weightUpdates()).toHaveLength(2);
+    const lock = rawLog.findIndex((s) => /FOR UPDATE/.test(s));
+    expect(lock).toBeGreaterThanOrEqual(0);
+    expect(rawLog.findIndex((s) => /UPDATE "OrderLine"/.test(s))).toBeGreaterThan(lock);
+    expect(tables.auditLog.find((a) => a.action === 'ORDER_WEIGHTS_RESOLVED')).toMatchObject({ entityId: 'R', userId: 'u1' });
+  });
+
+  it('a failed re-plan saves no weight: the copied loads keep matching their orders', async () => {
+    seedOne('scCopy');
+    solver.impl = async () => {
+      throw new Error('solver timeout');
+    };
+    await runJobToEnd();
+    expect(row('runPlan', 'R')).toMatchObject({ status: 'FAILED', chosenScenarioId: 'scCopy' });
+    expect(weightUpdates()).toHaveLength(0);
+    expect(tables.auditLog.some((a) => a.action === 'ORDER_WEIGHTS_RESOLVED')).toBe(false);
+    expect(row('planLoad', 'LC').weightKg).toBe(row('order', 'O1').totalWeightKg);
   });
 });

@@ -8,12 +8,14 @@
  *    plan (copy-forward): its loads can be locked and dispatched, reconciliation is ok, and a retry
  *    creates the next version and succeeds;
  *  - ten concurrent getOrCreatePlan calls for one day create exactly one plan (day lock);
- *  - two concurrent re-plans of one version create exactly one child.
+ *  - two concurrent re-plans of one version create exactly one child;
+ *  - review fixes: a re-plan never re-uses an untouched copy's driver without the time-clash check,
+ *    and a failed re-plan saves no weight (its copied loads keep matching their orders).
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
 
-const solverMode = vi.hoisted(() => ({ mode: 'plan' as 'plan' | 'unserved' | 'fail', calls: 0 }));
+const solverMode = vi.hoisted(() => ({ mode: 'plan' as 'plan' | 'unserved' | 'fail' | 'earlySecondTruck', calls: 0 }));
 
 vi.mock('@/lib/solver-client', () => {
   class SolverError extends Error {
@@ -21,15 +23,19 @@ vi.mock('@/lib/solver-client', () => {
       super(message);
     }
   }
-  /** A small valid plan: stop i on truck i % n, load floor(i / n) + 1 - or every stop unserved. */
-  function fakeSolve(req: DispatchRequest, unservedOnly: boolean): DispatchResponse {
+  /**
+   * A small valid plan: stop i on truck i % n, load floor(i / n) + 1 - or every stop unserved.
+   * Load k leaves at 06:00 + k x 150 min; with earlySecondTruck the second truck's loads leave
+   * 150 min earlier (a re-plan that re-times them).
+   */
+  function fakeSolve(req: DispatchRequest, unservedOnly: boolean, earlySecondTruck = false): DispatchResponse {
     const frozenNos = new Map(req.trucks.map((t) => [t.id, (t.frozen_trips ?? []).length]));
     const loads: PlannedLoad[] = [];
     if (!unservedOnly) {
       req.stops.forEach((s, i) => {
         const truck = req.trucks[i % req.trucks.length]!;
         const loadNo = (frozenNos.get(truck.id) ?? 0) + Math.floor(i / req.trucks.length) + 1;
-        const depart = 360 + loadNo * 150;
+        const depart = 360 + loadNo * 150 - (earlySecondTruck && i % req.trucks.length === 1 ? 150 : 0);
         loads.push({
           truck_id: truck.id,
           load_no: loadNo,
@@ -84,13 +90,14 @@ vi.mock('@/lib/solver-client', () => {
     callDispatchSolver: vi.fn(async (req: DispatchRequest) => {
       solverMode.calls++;
       if (solverMode.mode === 'fail') throw new SolverError('test: the route optimizer is down', 502, null);
-      return fakeSolve(req, solverMode.mode === 'unserved');
+      return fakeSolve(req, solverMode.mode === 'unserved', solverMode.mode === 'earlySecondTruck');
     }),
   };
 });
 
 import { prisma as libPrisma } from '@/lib/db';
 import { chooseScenario, getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
+import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
@@ -381,5 +388,116 @@ describe('plan row locks (F07)', () => {
       await hold.release();
     }
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: load1.id } })).status).toBe('PLANNED');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Review of PR3 (fixes): copy-forward drivers, and weights saved only with an applied plan.
+// ---------------------------------------------------------------------------------------------
+
+describe('copy-forward re-plan keeps drivers clash-free (review: untouched copies are not this version\'s choice)', () => {
+  it('a PLANNED trip re-timed onto a kept LOCKED load of the same driver does not get that driver', async () => {
+    const day = isoPlus(10);
+    // Five customers, one order each: five stops (the fake solver gives the first truck three loads).
+    await prisma.customer.create({ data: { tenantId, code: 'C5', name: 'C5', branchKey: '__MAIN__', lat: 23.59, lng: 58.43, geocodeConfidence: 'HIGH', locationVerified: true, priority: 3, priorityConfirmed: true } });
+    await seedOrders(day, 5);
+    const ali = await prisma.driver.create({ data: { tenantId, code: `ALI-${uniqueSuffix()}`.slice(0, 20), name: 'Ali', active: true } });
+    solverMode.mode = 'plan';
+    const { run: v1 } = await getOrCreatePlan(tenantId, depotId, day, userId);
+    expect((await startDispatchOptimize(tenantId, v1.id, user(), null)).status).toBe(202);
+    expect((await jobsDone(v1.id)).status).toBe('READY');
+    const v1Loads = await prisma.planLoad.findMany({ where: { runId: v1.id }, orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }] });
+    const byTruck = new Map<string, typeof v1Loads>();
+    for (const l of v1Loads) byTruck.set(l.truckId, [...(byTruck.get(l.truckId) ?? []), l]);
+    // The fake solver: the first truck gets loads 1-3, the second loads 1-2; load k leaves at 06:00 + k x 150 min.
+    const [first, second] = [...byTruck.values()].sort((a, b) => b.length - a.length);
+    expect(first!.length).toBe(3);
+    expect(second!.length).toBe(2);
+    const firstL1 = first!.find((l) => l.loadNo === 1)!;
+    const secondL2 = second!.find((l) => l.loadNo === 2)!;
+    // Ali drives the first truck's load 1 (08:30-10:00) and the second truck's load 2 (11:00-12:30).
+    await updateLoad(tenantId, v1.id, firstL1.id, { driverId: ali.id, status: 'LOCKED' }, user(), everyRole);
+    await updateLoad(tenantId, v1.id, secondL2.id, { driverId: ali.id }, user(), everyRole);
+
+    // The re-plan moves the second truck's loads 150 min earlier: its load 2 now leaves 08:30.
+    solverMode.mode = 'earlySecondTruck';
+    const rp = await replan(tenantId, v1.id, 'REOPTIMIZE', null, user(), null);
+    expect(rp.status).toBe(202);
+    const v2 = await jobsDone(String(rp.body.runId));
+    expect(v2.status).toBe('READY');
+    const v2Loads = await prisma.planLoad.findMany({ where: { runId: v2.id } });
+    const kept = v2Loads.find((l) => l.carriedFromLoadId === firstL1.id)!;
+    expect(kept).toMatchObject({ status: 'LOCKED', driverId: ali.id });
+    const retimed = v2Loads.find((l) => l.truckId === secondL2.truckId && l.loadNo === 2)!;
+    expect(retimed.departMin).toBe(kept.departMin); // same time as the kept load
+    expect(retimed.driverId).not.toBe(ali.id); // not a second sheet for Ali
+    // No driver on two trucks at overlapping times anywhere in the new version.
+    const withDriver = v2Loads.filter((l) => l.driverId);
+    for (const a of withDriver) {
+      for (const b of withDriver) {
+        if (a.id >= b.id || a.truckId === b.truckId || a.driverId !== b.driverId) continue;
+        expect(a.departMin < b.returnMin && b.departMin < a.returnMin, `${a.truckId} L${a.loadNo} and ${b.truckId} L${b.loadNo}`).toBe(false);
+      }
+    }
+  });
+});
+
+describe('a failed re-plan saves no weight (review: copied loads keep matching their orders)', () => {
+  it('a case weight corrected, then the re-plan fails: order kg unchanged, copied loads match, the warning stays; the retry saves it', async () => {
+    const day = isoPlus(11);
+    const code = `W-FIX-${uniqueSuffix()}`.slice(0, 20);
+    const product = await prisma.product.create({ data: { tenantId, code, name: 'Corrected later', weightPerCaseKg: 10 } });
+    const customers = await prisma.customer.findMany({ where: { tenantId }, orderBy: { code: 'asc' } });
+    for (let i = 0; i < 2; i++) {
+      await prisma.order.create({
+        data: {
+          tenantId,
+          customerId: customers[i]!.id,
+          depotId,
+          deliveryDate: new Date(`${day}T00:00:00.000Z`),
+          totalCases: 10,
+          totalWeightKg: 100,
+          status: 'VALIDATED',
+          priority: 3,
+          lines: { create: [{ productId: product.id, cases: 10, weightKg: 100, weightFromMaster: true, salesOrderNo: `SO-W-${day}-${i}` }] },
+        },
+      });
+    }
+    solverMode.mode = 'plan';
+    const { run: v1 } = await getOrCreatePlan(tenantId, depotId, day, userId);
+    expect((await startDispatchOptimize(tenantId, v1.id, user(), null)).status).toBe(202);
+    expect((await jobsDone(v1.id)).status).toBe('READY');
+
+    // The case weight is corrected under Products (10 -> 12 kg), then the re-plan's solve fails.
+    await prisma.product.update({ where: { id: product.id }, data: { weightPerCaseKg: 12 } });
+    solverMode.mode = 'fail';
+    const rp = await replan(tenantId, v1.id, 'REOPTIMIZE', null, user(), null);
+    expect(rp.status).toBe(202);
+    const v2 = await jobsDone(String(rp.body.runId));
+    expect(v2.status).toBe('FAILED');
+    expect(v2.chosenScenarioId).toBeTruthy();
+
+    const orders = await prisma.order.findMany({ where: { tenantId, deliveryDate: new Date(`${day}T00:00:00.000Z`) }, include: { lines: true } });
+    for (const o of orders) {
+      expect(o.totalWeightKg).toBe(100);
+      expect(o.lines.map((l) => l.weightKg)).toEqual([100]);
+    }
+    const kgOf = new Map(orders.map((o) => [o.id, o.totalWeightKg]));
+    for (const l of await prisma.planLoad.findMany({ where: { runId: v2.id }, include: { assignments: true } })) {
+      expect(l.weightKg).toBeCloseTo(l.assignments.reduce((a, x) => a + (x.portionWeightKg ?? kgOf.get(x.orderId) ?? 0), 0), 1);
+    }
+    expect(await prisma.auditLog.count({ where: { tenantId, action: 'ORDER_WEIGHTS_RESOLVED', entityId: v2.id } })).toBe(0);
+    const detail = await getPlanDetail(tenantId, v2.id);
+    expect(detail!.warnings.join(' ')).toMatch(/Case weight entered or corrected under Products after this plan was made/);
+
+    // The retry (a new version) plans and saves the new weight with its plan.
+    solverMode.mode = 'plan';
+    const retry = await replan(tenantId, v2.id, 'REOPTIMIZE', null, user(), null);
+    expect(retry.status).toBe(202);
+    const v3 = await jobsDone(String(retry.body.runId));
+    expect(v3.status).toBe('READY');
+    const after = await prisma.orderLine.findMany({ where: { productId: product.id } });
+    expect(after.map((l) => l.weightKg)).toEqual([120, 120]);
+    expect(await prisma.auditLog.count({ where: { tenantId, action: 'ORDER_WEIGHTS_RESOLVED', entityId: v3.id } })).toBe(1);
   });
 });
