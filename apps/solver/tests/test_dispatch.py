@@ -704,6 +704,41 @@ def test_submatrix_keeps_the_estimated_mask():
     assert sub.quality == mx.quality
 
 
+def test_submatrix_rederives_quality_from_the_kept_legs():
+    """PR5 review: when the only estimated legs belong to a stop the window prefilter drops, every
+    planned leg is a road leg - the kept matrix is ROAD, not the full matrix's MIXED."""
+    from dispatch_solver import _submatrix
+    from providers import resolve_matrix
+
+    stops = [stop("A", 23.60, 58.45), stop("B", 23.62, 58.47), stop("C", 24.71, 46.68)]
+    mx = resolve_matrix(COORDS4, provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), snap_m={3: 250_000.0})))
+    assert mx.quality == "MIXED"
+    kept, sub = _submatrix(stops, [0, 1], mx)  # drop C, the only point off the road map
+    assert [s.stop_id for s in kept] == ["A", "B"]
+    assert sub.quality == "ROAD" and sub.is_estimated is False and not sub.estimated and sub.patched_cells == 0
+    # Every kept leg an estimate: ESTIMATED (and is_estimated), even though the full matrix was MIXED.
+    everything = {(i, j) for i in range(3) for j in range(3) if i != j}
+    mixed = resolve_matrix(COORDS4, provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                           osrm_client=httpx.Client(transport=_osrm_null_transport([], everything)))
+    assert mixed.quality == "MIXED"
+    _, sub2 = _submatrix(stops, [0, 1], mixed)
+    assert sub2.quality == "ESTIMATED" and sub2.is_estimated is True
+
+
+def test_dropped_off_road_stop_leaves_a_road_plan():
+    """End to end: the off-road stop cannot meet its hard window and is dropped before the search;
+    the plan's legs are all road legs, so the response says ROAD (post-deploy check 11)."""
+    far = stop("FAR", 23.70, 58.55, hard_start_min=hm("06:00"), hard_end_min=hm("06:05"))
+    r = req([stop("A", 23.60, 58.45), far], [truck("T01")], distance_provider="OSRM", osrm_url="http://osrm.local")
+    resp = optimize_dispatch(r, osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), snap_m={2: 9_000.0})))
+    sc = rec(resp)
+    assert unserved_map(sc)["FAR"] == "HARD_WINDOW_INFEASIBLE"
+    assert served_ids(sc) == {"A"}
+    assert resp.distance_quality == "ROAD" and resp.distance_is_estimated is False
+    assert sc.estimated_legs == 0
+
+
 def test_impossibility_on_estimated_distance_says_so():
     """HARD_WINDOW_INFEASIBLE / SHIFT_LIMIT are the only reasons presented as proof; when the
     legs they rest on are estimates the message says so (new issue 27)."""

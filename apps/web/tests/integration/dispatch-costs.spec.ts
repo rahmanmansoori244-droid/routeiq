@@ -170,12 +170,14 @@ describe('re-planned day costs (review F17)', () => {
     const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/replan`, j({ reason: 'REOPTIMIZE' }));
     expect(rp.status).toBe(202);
     runV2 = (await json(rp)).data.runId;
-    await waitForPlan(runV2);
+    // A late-order re-plan is typically one or two new loads: its cost check used to fail it (500).
+    expect((await waitForPlan(runV2)).run.status).toBe('READY');
 
     const p2 = await plan(runV2);
     const carried = p2.loads.filter((l: any) => l.carried);
     expect(carried.length).toBeGreaterThanOrEqual(1);
     const chosen = p2.scenarios.find((s: any) => s.chosen);
+    expect(p2.warnings.some((w: string) => w.startsWith('Cost check'))).toBe(false);
     const frozenCost = carried.reduce((a: number, l: any) => a + l.operatingCost, 0);
     // The chosen option's new loads + the carried locked load = the day (KPI), and the options table says so.
     expect(Math.abs(p2.summary.operatingCost - (frozenCost + chosen.operatingCost))).toBeLessThan(0.01);
