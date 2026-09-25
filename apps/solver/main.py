@@ -53,6 +53,28 @@ MAX_CONCURRENT_DISPATCH = _env_int("MAX_CONCURRENT_DISPATCH", 2)
 _DISPATCH_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_DISPATCH)
 
 
+def _on_railway() -> bool:
+    return any(os.environ.get(k) for k in ("RAILWAY_ENVIRONMENT_ID", "RAILWAY_PROJECT_ID", "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_ENVIRONMENT"))
+
+
+def solver_parallel_warning() -> str | None:
+    """SOLVER_PARALLEL=0 solves in the API process with NO deadline and NO time budget: nothing then
+    keeps a solve under the web's 600 s limit, a hung OR-Tools call hangs the request, and /health
+    stops answering during every solve. Development and tests only (review: SOLVER_PARALLEL=0
+    disables every deadline). Returns the startup warning, or None when it is not set."""
+    if os.environ.get("SOLVER_PARALLEL", "1") != "0":
+        return None
+    where = "on Railway (production)" if _on_railway() else "outside a deployment"
+    return (f"SOLVER_PARALLEL=0 is set {where}: every solve runs inside the API process with no deadline and no time "
+            "budget, and /health does not answer while solving. Use it for local development and tests only; "
+            "remove it from any deployed solver.")
+
+
+_PARALLEL_WARNING = solver_parallel_warning()
+if _PARALLEL_WARNING:
+    (log.error if _on_railway() else log.warning)(_PARALLEL_WARNING)
+
+
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
 _ROUTING_TTL_S = 60
 

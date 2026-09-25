@@ -496,6 +496,64 @@ def test_killed_recommended_worker_fails_fast(monkeypatch):
     assert time.perf_counter() - t0 < 20
 
 
+def _die(_):
+    import os
+
+    os._exit(137)
+
+
+def _nap(sec):
+    time.sleep(sec)
+    return sec
+
+
+@pytest.mark.parametrize("internals", [True, False])
+def test_a_dead_worker_loses_only_its_own_task(internals, monkeypatch):
+    """Review L23: the pid-diff check aborted EVERY pending task when ANY worker died (a healthy
+    6 s task was aborted after 2 s because its sibling died), and the lost task itself was noticed
+    only at its deadline. Now each task reports its worker, so only the dead worker's task is lost,
+    at once. Canary (internals=False): without Pool's private worker list (an interpreter upgrade
+    could remove it) nothing fails - a death is then only noticed at the deadline."""
+    import dispatch_solver as ds
+
+    if not internals:
+        monkeypatch.setattr(ds, "_POOL_ATTR", "_not_there_any_more")
+    w = ds._Workers(2)
+    try:
+        jobs = {"dies": w.submit(_die, None, "dies"), "naps": w.submit(_nap, 4.0, "naps")}
+        t0 = time.monotonic()
+        out = ds._await_all(w, jobs, time.monotonic() + 15)
+        elapsed = time.monotonic() - t0
+        assert out["naps"] == ("ok", 4.0)  # the healthy sibling was never aborted
+        if internals:
+            assert out["dies"][0] == "lost"
+            assert elapsed < 12, elapsed
+        else:
+            assert w.pids() is None
+            assert out["dies"][0] == "timeout" and elapsed >= 14
+    finally:
+        w.close()
+
+
+def test_sibling_stage_worker_death_keeps_the_recommended_recheck(monkeypatch):
+    """Review L23 end to end: the MIN_TRUCKS post-solve job's worker is killed (out of memory).
+    RECOMMENDED's exact re-check, running next to it, is kept (no 'not re-checked' fallback), and
+    the request does not wait for the lost job until the end of its budget."""
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    monkeypatch.setenv("ROUTEIQ_TEST_KILL_REPACK", "MIN_TRUCKS")
+    monkeypatch.setenv("SOLVER_BUDGET_SEC", "300")
+    stops = [stop(f"S{i}", 23.55 + i * 0.01, 58.40, cases=45) for i in range(8)]
+    r = req(stops, [truck("T01", cap=100), truck("T02", cap=100)], time_limit_sec=2, loading_min_per_case=0.2,
+            scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+    t0 = time.perf_counter()
+    resp = optimize_dispatch(r)
+    assert time.perf_counter() - t0 < 120
+    sc = rec(resp)
+    assert not any("not re-checked" in w for w in sc.warnings), sc.warnings
+    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.timing == "EXACT"
+    assert_reconciled(r, sc)
+
+
 def test_alternatives_skipped_when_the_time_budget_is_used(monkeypatch):
     """The whole request must answer before the web gives up: alternatives are skipped, with a
     warning, when the recommended plan used the budget."""

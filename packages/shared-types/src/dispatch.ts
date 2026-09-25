@@ -167,6 +167,44 @@ export interface ObjectiveComponents {
   margin_served: number | null;
 }
 
+export type FeasibilityCode =
+  | 'UNKNOWN_TRUCK'
+  | 'UNKNOWN_STOP'
+  | 'LOAD_NUMBER'
+  | 'LOAD_TOTALS'
+  | 'CAPACITY_CASES'
+  | 'CAPACITY_KG'
+  | 'HARD_WINDOW'
+  | 'TRAVEL'
+  | 'SERVICE_TIME'
+  | 'RETURN'
+  | 'TURNAROUND'
+  | 'EARLY_DEPARTURE'
+  | 'DEPOT_CLOSE'
+  | 'TRUCK_AVAILABILITY'
+  | 'SHIFT_LIMIT'
+  | 'TRIPS'
+  | 'FROZEN_OVERLAP';
+
+export interface FeasibilityViolation {
+  code: FeasibilityCode;
+  truck_id?: string | null;
+  load_no?: number | null;
+  stop_id?: string | null;
+  message: string;
+  short_by_min?: number | null;
+}
+
+/** The solver's independent re-check of a scenario's timetable (apps/solver/feasibility.py). */
+export interface FeasibilityReport {
+  status: 'VERIFIED' | 'VIOLATED' | 'UNVERIFIED';
+  timing: 'EXACT' | 'ESTIMATED';
+  violations: FeasibilityViolation[];
+  checked_at_version?: number;
+  travel_checked?: boolean;
+  note?: string | null;
+}
+
 export interface DispatchScenario {
   name: DispatchScenarioName;
   status: 'OPTIMIZED' | 'NO_SOLUTION' | 'NOTHING_TO_PLAN';
@@ -188,6 +226,8 @@ export interface DispatchScenario {
   loads: PlannedLoad[];
   unserved: UnservedStop[];
   warnings: string[];
+  /** Optional: a solver older than the stabilization release sends none (treated as not checked). */
+  feasibility?: FeasibilityReport | null;
 }
 
 export interface DispatchResponse {

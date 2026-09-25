@@ -66,6 +66,8 @@ def assert_plan_rules(r, sc) -> None:
                 assert st.departure_min - st.service_start_min == s.service_min, st
                 assert st.wait_min == st.service_start_min - st.arrival_min
     assert_reconciled(r, sc)
+    # The engine's own independent check (feasibility.py) must agree with these rules.
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", sc.feasibility
 
 
 def spy_raw(monkeypatch) -> dict:
@@ -472,10 +474,11 @@ def test_alternative_that_breaks_the_loading_time_is_never_advertised(monkeypatc
         assert_plan_rules(r, sc)
 
 
-def test_recommended_only_points_to_exactly_timed_alternatives(monkeypatch):
-    """_run_scenarios compares service only with alternatives whose times passed the exact check:
-    not with one the stage had to keep as found (_post_solve reports it), nor with any plan when
-    the stage failed while a loading time per case is set (all times are estimates then)."""
+def test_recommended_only_points_to_verified_alternatives(monkeypatch):
+    """_run_scenarios compares service only with alternatives whose timetable passed the
+    independent check (feasibility VERIFIED): never with one that breaks a hard rule, such as the
+    loading time between loads, whichever path produced it (the stage, its fallback, a failure).
+    It used to rely on a separate 'unverified' set that never reached the response (review F04)."""
     monkeypatch.setenv("SOLVER_PARALLEL", "0")
     r = full_load_day(scenarios=["RECOMMENDED", "MIN_TRUCKS"])
     day, tds = _day_for(r)
@@ -487,16 +490,30 @@ def test_recommended_only_points_to_exactly_timed_alternatives(monkeypatch):
     monkeypatch.setattr(ds, "_solve_scenario",
                         lambda name, *a, **kw: fake.model_copy(deep=True) if name == "RECOMMENDED" else real(name, *a, **kw))
     note = "The MIN TRUCKS option serves 1 more stop(s)"
+
+    def mark(status):
+        def post(*a):
+            alt = a[6]["MIN_TRUCKS"]
+            alt.feasibility = alt.feasibility.model_copy(update={"status": status, "violations": []})
+        return post
+
     post_solve = ds._post_solve
-    monkeypatch.setattr(ds, "_post_solve", lambda *a: set())  # control: a verified alternative is offered
+    monkeypatch.setattr(ds, "_post_solve", mark("VERIFIED"))  # control: a verified alternative is offered
     assert any(note in w for w in rec(optimize_dispatch(r)).warnings)
-    monkeypatch.setattr(ds, "_post_solve", lambda *a: {"MIN_TRUCKS"})
+    monkeypatch.setattr(ds, "_post_solve", mark("VIOLATED"))
     assert not any(note in w for w in rec(optimize_dispatch(r)).warnings)
     monkeypatch.setattr(ds, "_post_solve", post_solve)
+    # The whole stage failing: RECOMMENDED keeps its (exact) plan; MIN_TRUCKS keeps the route
+    # search's three loads, which cannot be re-timed exactly - reported, never advertised.
     monkeypatch.setenv("ROUTEIQ_TEST_FAIL_REPACK", "1")
     resp = optimize_dispatch(r)
+    by = {s.name: s for s in resp.scenarios}
     assert not any(note in w for w in rec(resp).warnings)
-    assert any("estimated loading time" in w for w in rec(resp).warnings)
+    assert by["MIN_TRUCKS"].feasibility.status == "VIOLATED"
+    assert {v.code for v in by["MIN_TRUCKS"].feasibility.violations} == {"TURNAROUND"}
+    assert any("could not be re-timed" in w for w in by["MIN_TRUCKS"].warnings), by["MIN_TRUCKS"].warnings
+    assert_plan_rules(r, rec(resp))
+
 
 @pytest.mark.parametrize("per_case", [0.0, 0.1])
 def test_loading_time_per_case_sets_the_gap_between_loads_exactly(per_case):

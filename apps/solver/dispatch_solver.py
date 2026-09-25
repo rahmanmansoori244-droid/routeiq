@@ -55,6 +55,7 @@ from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+import feasibility as FZ
 import load_repack as LR
 from dispatch_models import (
     DAY_MIN,
@@ -65,6 +66,7 @@ from dispatch_models import (
     DispatchScenarioName,
     DispatchStop,
     DispatchTruck,
+    FeasibilityReport,
     ObjectiveComponents,
     PlannedLoad,
     PlannedStop,
@@ -634,7 +636,7 @@ def _extract(name, req, stops, tds, m: _Model, manager, routing, assignment, mx,
     return _build_scenario(
         name, req, stops, tds, mx, _timed_from_assignment(m, manager, routing, assignment, mx, service_s),
         values, use_margin, pre_drops, solver_status=status_name, elapsed=elapsed, time_limit=time_limit,
-        objective_value=int(assignment.ObjectiveValue()), extra_warnings=value_warnings,
+        objective_value=int(assignment.ObjectiveValue()), extra_warnings=value_warnings, exact_timing=False,
     )
 
 
@@ -686,12 +688,20 @@ def _min_of(seconds: int | float) -> int:
 def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                     timed: LR.TimedPlan, values: list[int], use_margin: bool, pre_drops: list[UnservedStop], *,
                     solver_status: str, elapsed: float, time_limit: int, objective_value: int,
-                    extra_warnings: list[str] | None = None, timing_drops: set[int] | None = None) -> DispatchScenario:
+                    extra_warnings: list[str] | None = None, timing_drops: set[int] | None = None,
+                    exact_timing: bool = True) -> DispatchScenario:
     """Loads, stop times, costs, unserved reasons and totals of a timed plan. The ONE place a
-    plan becomes a scenario: the search's plans and the post-solve plans are reported alike.
+    plan becomes a scenario: the search's plans and the post-solve plans are reported alike, and
+    every scenario gets its independent feasibility report here (feasibility.check_scenario).
 
     timing_drops: stops the route search planned that this plan leaves out because the search's
-    loads did not fit the day once timed with the exact loading time (see _post_solve)."""
+    loads did not fit the day once timed with the exact loading time (see _post_solve).
+    exact_timing: the times come from load_repack.time_plan (the exact loading time between loads);
+    False for the route search's own times (80% of a full truck per turnaround).
+
+    The times are reported as the timing gave them: a service start earlier than the drive from
+    the previous stop allows is NOT moved later here (that hid a timing error and could push the
+    return past the next load's departure unchecked); the feasibility report flags it (TRAVEL)."""
     cfg = req.config
     timing_drops = timing_drops or set()
     loads: list[PlannedLoad] = []
@@ -715,7 +725,6 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 leg_m = mx.distance_m[prev_node][node]
                 leg_s = mx.duration_s[prev_node][node]
                 arrival_s = prev_dep + leg_s
-                start_s = max(start_s, arrival_s)
                 dep_s = start_s + s.service_min * 60
                 cum_m += leg_m
                 cases += s.demand_cases
@@ -735,7 +744,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 stops_out.append(PlannedStop(
                     sequence=seq, stop_id=s.stop_id, order_ids=list(s.order_ids), customer_id=s.customer_id,
                     arrival_min=arrival_min, service_start_min=start_min,
-                    departure_min=start_min + s.service_min, wait_min=start_min - arrival_min,
+                    departure_min=start_min + s.service_min, wait_min=max(0, start_min - arrival_min),
                     leg_km=round(leg_m / 1000.0, 2), cum_km=round(cum_m / 1000.0, 2), leg_min=int(round(leg_s / 60)),
                     cases=s.demand_cases, kg=round(s.demand_kg, 1),
                     hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok,
@@ -853,6 +862,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         loads=loads, unserved=unserved, warnings=warnings,
     )
     _assert_reconciled(req, sc)
+    exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
+    sc.feasibility = FZ.safe_check(req, sc, solvable=stops, mx=mx, timing="EXACT" if exact else "ESTIMATED")
     return sc
 
 
@@ -869,6 +880,8 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult) -> Dispat
         trucks_used=0, trips=0, total_distance_km=0.0, total_duration_min=0, total_cases=0, total_kg=0.0,
         avg_utilization_pct=0.0, fuel_litres=0.0, fuel_cost=0.0, operating_cost=0.0,
         loads=[], unserved=list(drops), warnings=list(mx.warnings) if mx else [],
+        # No load, so no timetable that could break a rule.
+        feasibility=FeasibilityReport(status="VERIFIED", timing="EXACT", checked_at_version=FZ.CHECK_VERSION),
     )
 
 
@@ -986,18 +999,130 @@ class SolveAborted(RuntimeError):
     """The recommended plan could not be computed (worker died or ran out of time)."""
 
 
-def _await_worker(pool, fut, deadline: float, what: str):
-    """Wait for a pool task, failing fast when its worker process dies (e.g. out of memory):
-    multiprocessing.Pool silently replaces a dead worker and would leave the task pending forever."""
-    pids = {p.pid for p in pool._pool}
-    while not fut.ready():
+# ---------------------------------------------------------------------------------------------
+# Worker processes (review L23)
+# ---------------------------------------------------------------------------------------------
+
+# multiprocessing.Pool silently replaces a dead worker (out of memory ...) and leaves its task
+# pending forever. The only way to see a death is Pool's private list of worker processes; its
+# name lives here so a test can take it away (an interpreter upgrade could): the waits then fall
+# back to their deadlines, with one log warning, instead of failing every solve.
+_POOL_ATTR = "_pool"
+# In a worker process: where each task reports "started in process <pid>" (see _tracked).
+_BEACON = None
+
+
+def _worker_init(beacon) -> None:
+    global _BEACON
+    _BEACON = beacon
+
+
+def _tracked(token: str, fn, arg):
+    """Run ``fn(arg)`` in a pool worker after reporting which process runs it, so a dead worker
+    loses only its own task (its siblings keep running)."""
+    if _BEACON is not None:
+        try:
+            _BEACON.put((token, os.getpid()))
+        except Exception:  # noqa: BLE001 - death detection then falls back to the deadline
+            pass
+    return fn(arg)
+
+
+class _Workers:
+    """A spawn Pool with what the waits need, without Pool's private attributes where possible:
+    its size (stored here, not read from Pool._processes) and which worker process runs which task
+    (each task reports its pid when it starts). Worker pids come from Pool's private worker list;
+    when that is gone, pids() is None and deaths are only seen at the deadline."""
+
+    def __init__(self, size: int):
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        self.size = max(1, int(size))
+        self._beacon = ctx.SimpleQueue()
+        self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon,))
+        self._pid_of: dict[str, int] = {}
+        self._seq = 0
+        self._warned = False
+
+    def submit(self, fn, arg, name: str):
+        """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
+        self._seq += 1
+        token = f"{name}#{self._seq}"
+        return token, self.pool.apply_async(_tracked, (token, fn, arg))
+
+    def started(self) -> dict[str, int]:
+        """token -> pid of every task that has started so far."""
+        try:
+            while not self._beacon.empty():
+                token, pid = self._beacon.get()
+                self._pid_of[token] = pid
+        except Exception:  # noqa: BLE001
+            pass
+        return self._pid_of
+
+    def pids(self) -> frozenset[int] | None:
+        try:
+            return frozenset(p.pid for p in getattr(self.pool, _POOL_ATTR))
+        except (AttributeError, TypeError):
+            if not self._warned:
+                self._warned = True
+                log.warning("worker pool internals unavailable: a dead worker is only noticed at its deadline")
+            return None
+
+    def close(self) -> None:
+        self.pool.terminate()  # stops any task still running past its deadline
+        self.pool.join()
+
+
+def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline: float) -> dict[str, tuple[str, object]]:
+    """Wait for several pool tasks (name -> (token, AsyncResult)), in completion order, until
+    ``deadline``. Returns name -> ("ok", value) | ("error", exception) | ("lost", None) (its worker
+    process died) | ("timeout", None). A dead worker loses only the task it was running: a sibling
+    that is still computing is never aborted because another worker died (review L23). A task
+    whose worker died before it could report its start is only noticed at the deadline."""
+    out: dict[str, tuple[str, object]] = {}
+    pending = dict(jobs)
+    base = workers.pids()
+    while pending:
+        for name, (_tok, fut) in list(pending.items()):
+            if fut.ready():  # type: ignore[attr-defined]
+                try:
+                    out[name] = ("ok", fut.get())  # type: ignore[attr-defined]
+                except Exception as exc:  # noqa: BLE001
+                    out[name] = ("error", exc)
+                del pending[name]
+        if not pending:
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            raise SolveAborted(f"The optimizer did not finish the {what} in time. Try again, or plan fewer stops at once.")
-        fut.wait(min(2.0, remaining))
-        if not fut.ready() and {p.pid for p in pool._pool} != pids:
-            raise SolveAborted(f"The optimizer process stopped unexpectedly while computing the {what} (out of memory?). Try again.")
-    return fut.get()
+            for name in pending:
+                out[name] = ("timeout", None)
+            break
+        next(iter(pending.values()))[1].wait(min(0.5, remaining))  # type: ignore[attr-defined]
+        now = workers.pids()
+        if base is None or now is None or now == base:
+            continue
+        dead = base - now
+        started = workers.started()
+        for name, (tok, fut) in list(pending.items()):
+            if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
+                out[name] = ("lost", None)
+                del pending[name]
+        base = now
+    return out
+
+
+def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, what: str):
+    """Wait for one pool task; fail fast when ITS worker process dies (e.g. out of memory)."""
+    kind, value = _await_all(workers, {what: job}, deadline)[what]
+    if kind == "ok":
+        return value
+    if kind == "error":
+        raise value  # type: ignore[misc]
+    if kind == "lost":
+        raise SolveAborted(f"The optimizer process stopped unexpectedly while computing the {what} (out of memory?). Try again.")
+    raise SolveAborted(f"The optimizer did not finish the {what} in time. Try again, or plan fewer stops at once.")
 
 
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None) -> list[DispatchScenario]:
@@ -1013,17 +1138,18 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
 
     Safety net: alternatives are optional. Each worker gets a hard wall-clock deadline; a worker
     that overruns (OR-Tools occasionally ignores its own time limit inside internal restores),
-    fails, or would run past the request's time budget is terminated / not started and the
+    fails, dies or would run past the request's time budget is terminated / not started and the
     alternative is skipped with a warning. The RECOMMENDED plan is never lost because of an
-    alternative. SOLVER_PARALLEL=0 solves everything in-process (no deadline).
-    """
-    import multiprocessing as mp
+    alternative. Every returned scenario carries its feasibility report (_build_scenario).
 
+    SOLVER_PARALLEL=0 solves everything in-process WITHOUT any deadline or time budget: for local
+    development and tests only (main.py logs a warning at startup when it is set).
+    """
     if budget_end is None:
         budget_end = time.monotonic() + SOLVER_BUDGET_SEC
     results: dict[str, DispatchScenario] = {}
     alt_names = [n for n in names if n != "RECOMMENDED"]
-    pool = None
+    workers: _Workers | None = None
     if solvable and os.environ.get("SOLVER_PARALLEL", "1") != "0":
         try:
             # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
@@ -1031,22 +1157,23 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             # without ever starting. OR-Tools limits are wall-clock, so sharing a core only
             # lowers quality, never the deadline. RECOMMENDED runs first in one of them, so the
             # alternatives' workers have finished starting by the time they are needed.
-            pool = mp.get_context("spawn").Pool(processes=max(1, len(alt_names)))
+            workers = _Workers(max(1, len(alt_names)))
         except Exception as exc:  # noqa: BLE001 - e.g. restricted environments without processes
             log.warning("worker processes unavailable (%s); solving in-process", exc)
     skipped: list[str] = []
+    staged: set[str] = set()  # scenarios the post-solve stage replaced by an exactly timed plan
     try:
         warm = None
         if "RECOMMENDED" in names:
             # A slow road matrix eats into the budget: shorten the search rather than overrun it.
             rec_limit = max(1, min(time_limit, int(budget_end - time.monotonic()) - REC_OVERHEAD_SEC))
             job = ("RECOMMENDED", req, solvable, tds, mx, rec_limit, drops)
-            if pool is None:
+            if workers is None:
                 results["RECOMMENDED"] = _scenario_worker(job)
             else:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
-                fut = pool.apply_async(_scenario_worker, (job,))
-                results["RECOMMENDED"] = _await_worker(pool, fut, deadline, "recommended plan")
+                results["RECOMMENDED"] = _await_worker(workers, workers.submit(_scenario_worker, job, "RECOMMENDED"),
+                                                       deadline, "recommended plan")
             warm = results["RECOMMENDED"].loads or None
         alt_limit = max(2, time_limit // 2) if warm else time_limit
         grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
@@ -1061,22 +1188,22 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 alt_limit = min(alt_limit, room)
         jobs = [(n, req, solvable, tds, mx, alt_limit, drops, warm) for n in alt_names]
         overran = False
-        if jobs and pool is not None:
+        if jobs and workers is not None:
             deadline = time.monotonic() + alt_limit + grace
-            pending = [(j[0], pool.apply_async(_scenario_worker, (j,))) for j in jobs]
-            for name, fut in pending:
-                # A dead worker shows up as a timeout here; a failing one as its exception.
-                # Either way only this alternative is lost - never solved again in-process.
-                try:
-                    sc = fut.get(timeout=max(1.0, deadline - time.monotonic()))
-                    results[sc.name] = sc
-                except mp.TimeoutError:
-                    skipped.append(name)
+            done = _await_all(workers, {j[0]: workers.submit(_scenario_worker, j, j[0]) for j in jobs}, deadline)
+            for name in alt_names:
+                # A dead worker or a failing one only loses this alternative - it is never solved
+                # again in-process.
+                kind, value = done[name]
+                if kind == "ok":
+                    results[value.name] = value  # type: ignore[union-attr]
+                    continue
+                skipped.append(name)
+                if kind == "timeout":
                     overran = True
                     log.warning("alternative %s exceeded %ss; skipped", name, alt_limit + grace)
-                except Exception as exc:  # noqa: BLE001
-                    skipped.append(name)
-                    log.warning("alternative %s failed (%s); skipped", name, exc)
+                else:
+                    log.warning("alternative %s %s (%s); skipped", name, "lost its worker" if kind == "lost" else "failed", value)
         else:
             for j in jobs:
                 try:
@@ -1084,31 +1211,27 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
                     skipped.append(j[0])
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
-        if overran:
+        if overran and workers is not None:
             # A skipped alternative still runs in its worker (a stuck OR-Tools call does not stop
             # on request): the post-solve jobs would queue behind it and time out, and RECOMMENDED
             # would lose its load re-check. Give the stage fresh workers.
-            pool.terminate()
-            pool.join()
-            pool = None
+            workers.close()
+            workers = None
             try:
-                pool = mp.get_context("spawn").Pool(processes=len(_stage_goals(results)))
+                workers = _Workers(len(_stage_goals(results)))
             except Exception as exc:  # noqa: BLE001
                 log.warning("worker processes unavailable (%s); load re-check in-process", exc)
-        unverified: set[str] = set()
         try:
-            unverified = _post_solve(req, solvable, tds, mx, time_limit, drops, results, pool, budget_end)
+            _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged)
         except Exception as exc:  # noqa: BLE001 - the search's own plans stay valid
             log.exception("post-solve stage failed: %s", exc)
-            for sc in results.values():
-                if sc.status == "OPTIMIZED" and not any("re-checked" in w or "re-assigned" in w for w in sc.warnings):
-                    sc.warnings.append("Loads were not re-checked for fewer trucks (internal error); this is the route search result as found.")
-            if req.config.loading_min_per_case > 0:
-                unverified = set(results)
+            # Only the scenarios the stage had not replaced yet: one it already re-timed exactly
+            # keeps its plan and gets no false "not re-checked" note (the note used to be inferred
+            # from warning texts, review: exact-timing status never exposed per scenario).
+            _retime_fallback(req, solvable, tds, mx, drops, results, "internal error", skip=staged)
     finally:
-        if pool is not None:
-            pool.terminate()  # stops any alternative still running past its deadline
-            pool.join()
+        if workers is not None:
+            workers.close()
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
@@ -1117,10 +1240,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     if rec:
         # Service comes first. If the (time-limited) recommendation left out stops that an
         # alternative serves, say so - the dispatcher decides; nothing switches automatically.
-        # Only alternatives whose times passed the exact check are offered: a plan that breaks
-        # the loading time between loads serves more only on paper.
+        # Only alternatives whose timetable passed the independent check are offered: a plan that
+        # breaks the loading time between loads (or any other hard rule) serves more only on paper.
         for alt in results.values():
-            if alt is rec or alt.status != "OPTIMIZED" or alt.name in unverified:
+            if alt is rec or alt.status != "OPTIMIZED" or alt.feasibility is None or alt.feasibility.status != "VERIFIED":
                 continue
             gained = len(rec.unserved) - len(alt.unserved)
             if gained > 0:
@@ -1148,11 +1271,14 @@ _GOALS = {
 
 
 def _stage_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
-    # Test hooks: a stage that raises, and one that never returns (see the fallback tests).
+    # Test hooks: a stage that raises, one that never returns, and one goal's worker process
+    # killed mid-stage (out of memory; see the fallback and sibling-death tests).
     if os.environ.get("ROUTEIQ_TEST_FAIL_REPACK"):
         raise RuntimeError("test hook: post-solve stage failed")
     if os.environ.get("ROUTEIQ_TEST_HANG_REPACK"):
         time.sleep(3600)
+    if os.environ.get("ROUTEIQ_TEST_KILL_REPACK") == job.get("goal"):
+        os._exit(137)
     return LR.build_candidates(**job)
 
 
@@ -1171,9 +1297,91 @@ def _stage_goals(results: dict[str, DispatchScenario]) -> list[str]:
     return ["RECOMMENDED"] + (["MIN_TRUCKS"] if "MIN_TRUCKS" in results and results["MIN_TRUCKS"].status == "OPTIMIZED" else [])
 
 
+@dataclass
+class _StageCtx:
+    """What the post-solve stage and its fallback share about one request."""
+
+    req: DispatchRequest
+    solvable: list[DispatchStop]
+    tds: list[TruckDay]
+    mx: MatrixResult
+    drops: list[UnservedStop]
+    values: list[int]
+    value_warnings: list[str]
+    use_margin: bool
+    stop_idx: dict[str, int]
+    truck_idx: dict[str, int]
+    day: LR.Day
+    rec_pricing: LR.Pricing
+
+
+def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+               drops: list[UnservedStop]) -> _StageCtx:
+    cfg = req.config
+    use_margin = cfg.use_margin and all(s.margin is not None for s in solvable)
+    values, value_warnings = _service_values(solvable, cfg, use_margin)
+    day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
+                 shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
+                 loading_s_per_case=cfg.loading_min_per_case * 60, values=values)
+    return _StageCtx(req=req, solvable=solvable, tds=tds, mx=mx, drops=drops, values=values, value_warnings=value_warnings,
+                     use_margin=use_margin, stop_idx={s.stop_id: k for k, s in enumerate(solvable)},
+                     truck_idx={td.truck.id: td.idx for td in tds}, day=day,
+                     rec_pricing=_pricing("RECOMMENDED", req, tds, solvable))
+
+
+def _retime(ctx: _StageCtx, name: str, sc: DispatchScenario) -> DispatchScenario | None:
+    """The safety net when the post-solve stage did not re-check a plan (out of time, a failed or
+    lost worker, an internal error): the SAME loads, re-timed exactly with the loading time between
+    loads (load_repack.time_plan: one small LP per truck, milliseconds, in-process). None when no
+    timetable keeps every hard rule with these loads."""
+    try:
+        timed = LR.time_plan(ctx.day, LR.plan_of(_timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)), ctx.rec_pricing)
+    except Exception as exc:  # noqa: BLE001 - the raw plan stays, flagged by its feasibility report
+        log.warning("re-timing %s failed: %s", name, exc)
+        return None
+    if timed is None:
+        return None
+    return _build_scenario(
+        name, ctx.req, ctx.solvable, ctx.tds, ctx.mx, timed, ctx.values, ctx.use_margin, ctx.drops,
+        solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
+        objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
+        exact_timing=True,
+    )
+
+
+def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
+                     drops: list[UnservedStop], results: dict[str, DispatchScenario], why: str,
+                     skip: set[str] | None = None, ctx: _StageCtx | None = None) -> None:
+    """The post-solve stage did not check these plans: say so, and re-time each one exactly
+    (_retime). A plan that cannot be re-timed stays as the route search found it; its feasibility
+    report says what it breaks (VIOLATED), so the web never lets it be locked or dispatched."""
+    skip = skip or set()
+    raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED" and n not in skip}
+    if not raw or not solvable:
+        return
+    cfg = req.config
+    msg = f"Loads were not re-checked for fewer trucks ({why}); this is the route search result as found."
+    try:
+        ctx = ctx or _stage_ctx(req, solvable, tds, mx, drops)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("safety net unavailable: %s", exc)
+        ctx = None
+    for name, sc in raw.items():
+        if cfg.loading_min_per_case > 0 and ctx is not None and (sc.feasibility is None or sc.feasibility.timing != "EXACT"):
+            new = _retime(ctx, name, sc)
+            if new is not None:
+                new.warnings.append(msg + " Departure times were re-timed exactly with the loading time between loads.")
+                results[name] = new
+                continue
+            sc.warnings.append(msg + " Departure times use an estimated loading time between loads and could not be re-timed "
+                                     "exactly: check the timetable before dispatching, or re-plan.")
+            continue
+        sc.warnings.append(msg)
+
+
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
-                budget_end: float) -> set[str]:
+                budget_end: float, done: set[str] | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -1185,48 +1393,39 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     raw plan - unless that plan breaks the exact loading time between loads and nothing serving
     as much fits: then it gets the fitting candidate that keeps the most priority value, and the
     stops it loses are reported as left out for loading time. Runs in the worker pool (CP-SAT and
-    the LPs hold the GIL; the API must keep answering) under a deadline inside the request budget;
-    on timeout or failure the raw scenarios are returned with a warning.
+    the LPs hold the GIL; the API must keep answering) under a deadline inside the request budget.
+    ``pool``: a _Workers, or None to run in-process.
 
-    Returns the names of the scenarios whose returned times did NOT pass the exact check (their
-    raw plan was kept although it breaks the loading time, or the stage did not run while a
-    loading time per case is set): _run_scenarios never advertises them as serving more."""
+    When the stage cannot run or check a plan (out of time, its job failed, died or timed out),
+    the raw plans get the safety net (_retime_fallback): re-timed exactly when possible, otherwise
+    kept with a warning and a VIOLATED / VERIFIED feasibility report from the independent check.
+    Every scenario it replaces is added to ``done``."""
+    done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     if not raw or not solvable:
-        return set()
+        return
     cfg = req.config
     t0 = time.monotonic()
-    use_margin = cfg.use_margin and all(s.margin is not None for s in solvable)
-    values, value_warnings = _service_values(solvable, cfg, use_margin)
-    stop_idx = {s.stop_id: k for k, s in enumerate(solvable)}
-    truck_idx = {td.truck.id: td.idx for td in tds}
-    sources = [LR.Source(n, _timed_from_scenario(sc, stop_idx, truck_idx)) for n, sc in raw.items()]
+    ctx = _stage_ctx(req, solvable, tds, mx, drops)
+    values, value_warnings, use_margin = ctx.values, ctx.value_warnings, ctx.use_margin
+    sources = [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)) for n, sc in raw.items()]
     carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
     left_out = set(range(len(solvable))) - set.intersection(*carried.values())
     optional = _repair_weights(solvable, left_out, cfg) if left_out else None
-    day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
-                 shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
-                 loading_s_per_case=cfg.loading_min_per_case * 60, values=values)
-    rec_pricing = _pricing("RECOMMENDED", req, tds, solvable)
+    rec_pricing = ctx.rec_pricing
     goals = _stage_goals(raw)
     cap = min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
-    # Every raw plan's times are estimates while a loading time per case is set (the search
-    # prices each turnaround for 80% of a full truck), until the exact check passes.
-    untimed = set(raw) if cfg.loading_min_per_case > 0 else set()
 
-    def fallback(why: str) -> set[str]:
-        msg = f"Loads were not re-checked for fewer trucks ({why}); this is the route search result as found."
-        if cfg.loading_min_per_case > 0:
-            msg += " Departure times use an estimated loading time between loads."
-        for sc in raw.values():
-            sc.warnings.append(msg)
-        return untimed
+    def fallback(why: str) -> None:
+        before = dict(results)
+        _retime_fallback(req, solvable, tds, mx, drops, results, why, ctx=ctx)
+        done.update(n for n in raw if results[n] is not before[n])
 
     if job_budget < REPACK_MIN_SEC:
         log.warning("post-solve stage skipped: request time budget used up")
         return fallback("out of time")
-    jobs = {g: dict(day=day, score_pricing=rec_pricing, goal=g,
+    jobs = {g: dict(day=ctx.day, score_pricing=rec_pricing, goal=g,
                     goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
                     sources=sources, optional=optional, cap_s=cap, budget_s=job_budget, time_raw=g == "RECOMMENDED",
                     fit_weights=_repair_weights(solvable, set(range(len(solvable))), cfg))
@@ -1239,21 +1438,24 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             except Exception as exc:  # noqa: BLE001 - the raw plans stay valid
                 log.warning("post-solve %s failed: %s", g, exc)
     else:
-        rounds = -(-len(jobs) // max(1, pool._processes))
+        rounds = -(-len(jobs) // max(1, pool.size))
         deadline = min(time.monotonic() + rounds * job_budget + STAGE_GRACE_SEC, budget_end - 2)
-        futs = {g: pool.apply_async(_stage_worker, (job,)) for g, job in jobs.items()}
-        for g, fut in futs.items():
-            try:
-                outputs[g] = _await_worker(pool, fut, deadline, "load re-check")
-            except Exception as exc:  # noqa: BLE001 - timeout (SolveAborted), dead worker or a failure
-                log.warning("post-solve %s failed or timed out: %s", g, exc)
+        # In completion order: a MIN_TRUCKS job whose worker dies (out of memory) no longer costs
+        # RECOMMENDED its exact re-check, nor the rest of the budget (review L23).
+        got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline)
+        for g in goals:
+            kind, value = got[g]
+            if kind == "ok":
+                outputs[g] = value  # type: ignore[assignment]
+            else:
+                log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out"}.get(kind, "failed"),
+                            f": {value}" if value is not None else "")
     stage_sec = time.monotonic() - t0
     if "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
         return fallback("the check failed or ran out of time")
     cands = [c for g in goals if g in outputs for c in outputs[g][0]]
     log.info("post-solve run=%s %.1fs: %s", req.run_id, stage_sec,
              "; ".join(n for g in goals if g in outputs for n in outputs[g][1]))
-    unverified: set[str] = set()
     for name, sc in raw.items():
         own = sum(v for k, v in enumerate(values) if k not in carried[name])
         fits = [c for c in cands if c.score.unserved <= own]
@@ -1264,7 +1466,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             # keeps the most priority value, never departure times no truck can make.
             fits = cands
         if not fits:
-            unverified.add(name)
+            # No plan of this day could be timed exactly (not even this one): kept as found. Its
+            # feasibility report (built with the raw plan) lists what it breaks.
             sc.warnings.append(
                 f"This plan does not leave the loading time of {cfg.loading_min_per_case:g} min per case between loads "
                 "everywhere; some later loads may be timed too early. Re-plan, add a truck, or check the loading time."
@@ -1281,6 +1484,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             name, req, solvable, tds, mx, best.plan, values, use_margin, drops, solver_status=sc.solver_status,
             elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
             objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
+            exact_timing=True,
         )
         changed = (new.trucks_used, new.trips) != (sc.trucks_used, sc.trips) or abs(new.operating_cost - sc.operating_cost) >= 0.5
         if timing_drops:
@@ -1302,7 +1506,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                  req.run_id, name, sc.trucks_used, new.trucks_used, sc.trips, new.trips, sc.operating_cost,
                  new.operating_cost, len(added), len(timing_drops), best.source)
         results[name] = new
-    return unverified
+        done.add(name)
 
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:
