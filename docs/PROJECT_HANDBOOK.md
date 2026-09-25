@@ -869,7 +869,7 @@ stateDiagram-v2
 | LOCKED to LOADING | Loading | PLANNER | none |
 | LOADING to LOCKED | Back to locked | PLANNER | none |
 | LOCKED or LOADING to DISPATCHED | Dispatch | SUPERVISOR | every earlier load of the truck is DISPATCHED or COMPLETED, and the plan's stored reconciliation is `ok` |
-| PLANNED to LOCKED, LOCKED to LOADING, LOCKED or LOADING to DISPATCHED | as above | as above | **(PR4) the truck-day's timetable passes the feasibility check** (below) |
+| PLANNED to LOCKED, LOCKED to LOADING, LOCKED or LOADING to DISPATCHED | as above | as above | **(PR4) the truck-day's timetable passes the feasibility check** (below), and the plan's reconciliation is `ok` for LOCK and LOADING too (409 `NOT_RECONCILED`: locking freezes what later re-plans build on) |
 | DISPATCHED to COMPLETED | Completed | SUPERVISOR | none |
 | DISPATCHED or COMPLETED to anything else | none | none | refused: these loads are immutable |
 

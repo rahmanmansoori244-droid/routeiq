@@ -793,7 +793,8 @@ function LoadActions({
   timingBlocked: boolean;
   onStatus: (s: string) => void;
 }) {
-  const timingTitle = timingBlocked ? "This truck's times break a planning rule (see the red box above): re-plan first" : undefined;
+  const timingTitle = !reconOk ? 'Cases must reconcile first' : timingBlocked ? "This truck's times break a planning rule (see the red box above): re-plan first" : undefined;
+  const canFreeze = reconOk && !timingBlocked;
   const b = (label: string, to: string, icon: React.ReactNode, enabled = true, title?: string) => (
     <Button key={to} size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !enabled} title={title} onClick={() => onStatus(to)} data-testid={`act-${to}-${l.truckCode}-${l.loadNo}`}>
       {icon}
@@ -809,14 +810,14 @@ function LoadActions({
     if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
     return <div className="flex flex-wrap gap-1">{out}</div>;
   }
-  if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />, !timingBlocked, timingTitle));
+  if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   if (l.status === 'LOCKED' && canPlan) {
     out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));
-    out.push(b('Loading', 'LOADING', <PackageCheck className="mr-1 h-3 w-3" />, !timingBlocked, timingTitle));
+    out.push(b('Loading', 'LOADING', <PackageCheck className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   }
   if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
   if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) {
-    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, reconOk && !timingBlocked, !reconOk ? 'Cases must reconcile first' : timingTitle));
+    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   }
   if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
   return <div className="flex flex-wrap gap-1">{out}</div>;

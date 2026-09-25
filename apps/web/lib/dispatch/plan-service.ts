@@ -1818,9 +1818,12 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
     throw noPlanApplied((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
   }
   if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
-  if (to === 'DISPATCHED') {
-    const recon = run.reconciliationJson as unknown as Reconciliation | null;
-    if (!recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
+  const recon = run.reconciliationJson as unknown as Reconciliation | null;
+  if (to === 'DISPATCHED' && !recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
+  // PR4 (review F04): locking and loading freeze what later re-plans build on, so they need the
+  // same facts as a dispatch - cases that reconcile and a timetable that keeps every rule.
+  if (isGatedMove(load.status, to) && run.chosenScenarioId && !recon?.ok) {
+    throw new PlanError('Cases do not reconcile for this plan - re-plan before locking or loading.', 409, { code: 'NOT_RECONCILED' });
   }
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   const updated = await tx.planLoad.update({
