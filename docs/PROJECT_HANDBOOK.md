@@ -140,7 +140,7 @@ apps/web/
 | Route | Files | Purpose |
 |---|---|---|
 | `/` | `app/page.tsx` | Sends the user to `/login`, `/admin` (SUPER_ADMIN) or `/t/<slug>`. A session the server no longer accepts goes through `/api/auth/end-session` first, so there is no redirect loop |
-| `/login`, `/signup`, `/forgot`, `/reset` | `app/{login,signup,forgot,reset}/*` | Sign in (`callbackUrl` reduced to a same-origin page path, `lib/safe-redirect.ts`), self-service tenant signup (open unless `SIGNUP_MODE=closed`; always a TENANT_ADMIN), password reset |
+| `/login`, `/signup`, `/forgot`, `/reset` | `app/{login,signup,forgot,reset}/*` | Sign in (`callbackUrl` reduced to a same-origin page path, `lib/safe-redirect.ts`), self-service tenant signup (open unless `SIGNUP_MODE=closed`; always a TENANT_ADMIN), password reset (`/forgot` says "Reset by email is not available" when production has no `RESEND_API_KEY`; the admin reset on the Users screen then applies) |
 | `/admin` | `app/admin/page.tsx` | Platform page, SUPER_ADMIN only (404 for everyone else) |
 | `/driver`, `/driver/manifest` | `app/driver/*` | **Retired** in PR1: a notice that also clears the old sign-in data from the phone. Was the driver phone PWA (legacy "Module C") |
 | `/t/[slug]` | `page.tsx`, `kpi-card.tsx`, `trend-chart.tsx` | Dashboard (KPIs from `lib/dashboard.ts`) |
@@ -154,25 +154,26 @@ apps/web/
 
 There are **no Server Actions**. Nothing in the repo uses `'use server'`, although `next.config.js` sets `experimental.serverActions.bodySizeLimit`. Server Components read the database directly through `tenantDb`. Client components call `/api/*` with `fetch`; `api()` in `app/t/[slug]/dispatch/client-api.ts` unwraps the `{ data, error }` envelope.
 
-**API route handlers (`app/api/**/route.ts`).** 43 of the 60 route files use `withTenantApi()` from `lib/api.ts`. In this table, "any" means any signed-in tenant role, VIEWER included. The full matrix is checked in: `apps/web/tests/lib/api-role-matrix.spec.ts` fails CI when a handler is added, removed or re-gated without updating it.
+**API route handlers (`app/api/**/route.ts`).** 44 of the 61 route files use `withTenantApi()` from `lib/api.ts`. In this table, "any" means any signed-in tenant role, VIEWER included. The full matrix is checked in: `apps/web/tests/lib/api-role-matrix.spec.ts` fails CI when a handler is added, removed or re-gated without updating it.
 
 | Group | Endpoint | Methods → minimum role | Purpose |
 |---|---|---|---|
 | Auth / platform | `auth/[...nextauth]` | GET, POST → public | NextAuth handlers (credentials sign-in, session) |
 | | `auth/signup` | POST → public (5/min/IP); 404 when `SIGNUP_MODE=closed` | Creates Tenant + TenantConfig + first user, **always TENANT_ADMIN** (PR1: never SUPER_ADMIN) |
-| | `auth/end-session` | GET → public | Clears a session cookie the server no longer accepts and redirects to `/login?reason=session` (PR1) |
+| | `auth/end-session` | GET → public | Clears a session cookie the server no longer accepts and redirects to `/login?reason=session`, with `?next=` (the dispatch page) as `callbackUrl`. A session the server still accepts (fresh DB reading) is never signed out: it goes to `/` (PR1) |
 | | `auth/forgot`, `auth/reset` | POST → public (5/min/IP) | Password-reset token issue (delivered after the response) and consume (one transaction with the password update) (`lib/password-reset.ts`) |
 | | `health` | GET → public | DB + solver + routing + email status; 503 if the DB or solver is down ([5.8](#58-health-endpoint)) |
 | | `cron/janitor` | GET, POST → `X-Janitor-Token` or `Authorization: Bearer` = `JANITOR_TOKEN` (production: never `SOLVER_TOKEN`) | Runs `reapStuckJobs()` and `reapStaleShifts()` |
 | | `tenant/config` | GET, PATCH TENANT_ADMIN (GET was any before PR1) | Tenant settings (dispatch timing, costs, provider…) |
-| | `users`, `users/[id]` | GET, POST, PATCH TENANT_ADMIN (GET was any before PR1) | User admin. Refuses to grant SUPER_ADMIN, and (PR1) refuses to change a SUPER_ADMIN unless the caller is one |
+| | `users`, `users/[id]` | GET, POST, PATCH TENANT_ADMIN (GET was any before PR1) | User admin. Refuses to grant SUPER_ADMIN, and (PR1) refuses to change a SUPER_ADMIN unless the caller is one. Inviting an existing email is 409 |
+| | `users/[id]/reset-password` | POST TENANT_ADMIN (PR1) | Admin password reset: a new one-time password returned once; old password, open sessions and reset links end; `PASSWORD_RESET_BY_ADMIN` audit row. 403 for a SUPER_ADMIN target (non-super caller), 400 for yourself |
 | | `audit` | GET TENANT_ADMIN (no role gate before PR1) | Audit log query; credential hashes redacted from before/after JSON |
 | | `dashboard/kpis` | GET any | Dashboard numbers |
 | Master data | `depots`, `trucks`, `drivers`, `regions`, `products` (+ `/[id]`) | GET any, POST/PATCH/DELETE TENANT_ADMIN | CRUD. A truck or (PR1) a driver used on a plan is deactivated instead of deleted. Driver rows never carry the PIN hash (`DRIVER_PUBLIC_SELECT`) |
 | | `drivers/[id]/pin` | POST → **410** (retired in PR1) | Was: set or rotate a legacy driver-app PIN |
 | | `customers`, `customers/[id]` | GET any, POST/PATCH PLANNER, DELETE TENANT_ADMIN | Customer master |
 | | `customers/[id]/location`, `locations/parse` | PUT/POST PLANNER | Parse a pasted location (`lib/dispatch/location-input.ts`) and save it |
-| | `customers/import` | POST PLANNER (checked in the handler) | Bulk customer import |
+| | `customers/import` | POST PLANNER (checked in the handler; 401 only without a session, 403 without a tenant) | Bulk customer import |
 | Orders | `orders/upload` | POST PLANNER (in handler, 60/h/user) | Check a sales-order Excel/CSV and create an UploadBatch; no orders are written yet |
 | | `orders/[batchId]/confirm` | POST PLANNER | Write customers, products and orders (`lib/dispatch/intake-server.ts`) |
 | | `orders`, `orders/batches`, `orders/[batchId]` | GET any, DELETE PLANNER | List orders and batches, delete a batch |
@@ -205,8 +206,8 @@ There are **no Server Actions**. Nothing in the repo uses `'use server'`, althou
 | `auth.ts` | NextAuth config (`handlers`, `auth`, `signIn`, `signOut`), `hashPassword()`, `isSuperAdmin()`. The jwt callback stamps `authTime` and `pwf` at sign-in, enforces the 12 h absolute lifetime (edge too) and, in Node, refreshes role/tenant from the DB |
 | `session-principal.ts` | (PR1) `loadPrincipal` (30 s cache), `evaluatePrincipal`, `refreshSessionClaims`, `invalidatePrincipal` / `invalidateTenant`, `passwordFingerprint`, `effectiveRole` (SUPER_ADMIN needs `SUPER_ADMIN_EMAILS` too) |
 | `auth-credentials.ts` | (PR1) `verifyCredentials`: soft ip+email / per-IP throttle, `LOGIN_THROTTLED` alert, dummy bcrypt for unknown emails, one generic message |
-| `session-redirect.ts`, `safe-redirect.ts`, `signup-policy.ts` | (PR1) `redirectToSignIn` via `/api/auth/end-session`; `safeCallbackUrl`; `signupMode` (`SIGNUP_MODE`) |
-| `client-ip.ts`, `crypto.ts`, `janitor-auth.ts`, `startup-checks.ts` | (PR1) client IP from the proxy-appended hop (`TRUSTED_PROXY_HOPS`, `CLIENT_IP_HEADER`); `constantTimeEqual`; the janitor token rule; startup `[config]` warnings |
+| `session-redirect.ts`, `safe-redirect.ts`, `signup-policy.ts` | (PR1) `redirectToSignIn` via `/api/auth/end-session`; `safeCallbackUrl`, `endSessionUrl` / `sessionEndedLoginUrl` (the page to come back to after an ended session); `signupMode` (`SIGNUP_MODE`) |
+| `client-ip.ts`, `crypto.ts`, `janitor-auth.ts`, `startup-checks.ts`, `temp-password.ts` | (PR1) client IP from the proxy-appended hop (`TRUSTED_PROXY_HOPS`, `CLIENT_IP_HEADER`; one-time warning when it is internal or unresolved), the only reader of forwarding headers; `constantTimeEqual`; the janitor token rule; startup `[config]` warnings; the one-time password for invites and admin resets |
 | `driver-app.ts`, `driver-fields.ts` | (PR1) `driverAppGone()` (410 for the retired driver app); `DRIVER_PUBLIC_SELECT` |
 | `api.ts` | `withTenantApi()` wrapper (auth, tenant, role, rate limit, error mapping), `ok`/`fail`, `parseBody`, `hasRole`, `notFoundIfNull`, `HttpError` (PR1: an expected failure with its status) |
 | `rbac.ts` | `canManageMasterData`, `canPlan`, `canApproveOverride`, `canView`, `requireRole` (used by pages) |
@@ -251,7 +252,7 @@ There are **no Server Actions**. Nothing in the repo uses `'use server'`, althou
 
 **Tests (`apps/web/tests`).**
 
-- `tests/lib/*.spec.ts` (31 files): pure unit tests of `lib/dispatch/*`, schemas, password reset, plan continuity and (PR1) sessions, sign-in, redirects, route guards and repo guards.
+- `tests/lib/*.spec.ts` (32 files): pure unit tests of `lib/dispatch/*`, schemas, password reset, plan continuity and (PR1) sessions, sign-in, redirects, route guards and repo guards.
 - `tests/tenant-isolation.spec.ts`: runs `tenantDb` against a real Postgres.
 - `tests/integration/*.spec.ts` (12 files): HTTP tests against a running web app and solver.
 - Helpers and fixtures: `tests/integration/helpers.ts`, `tests/lib/plan-detail-fixture.ts`, `tests/fixtures/**`.
@@ -444,7 +445,7 @@ Names and purpose only. This is the complete list; `.env.example` has placeholde
 | `RESEND_API_KEY`, `RESEND_FROM` | yes (prod) for reset emails | Password-reset email via Resend. Without the key, production sends nothing and logs only the user id (PR1); development logs the link. `/api/health` reports `email` |
 | `SUPER_ADMIN_EMAILS` | optional | Comma-separated list. Since PR1 it grants nothing on its own: SUPER_ADMIN is honoured only for a user who also has the role, granted by `prisma/grant-platform-admin.ts`. Sign-up never grants it |
 | `SIGNUP_MODE` | optional | `closed` turns public sign-up off (404, notices); anything else = open (the default, owner decision) (`lib/signup-policy.ts`) |
-| `TRUSTED_PROXY_HOPS`, `CLIENT_IP_HEADER` | optional | Client IP for rate limits and audit rows: the X-Forwarded-For entry this many places from the right (default 1), or a single-value header the edge sets (`lib/client-ip.ts`). Confirm once against a LOGIN audit row |
+| `TRUSTED_PROXY_HOPS`, `CLIENT_IP_HEADER` | optional | Client IP for rate limits and audit rows: the X-Forwarded-For entry this many places from the right (default 1), or a single-value header the edge sets (`lib/client-ip.ts`). Confirm once against a LOGIN audit row. If the IP cannot be resolved (`0`, or a header the edge does not send) the log warns once, audit rows have no IP and sign-in uses per-account limits only |
 | `SENTRY_DSN`, `NEXT_PUBLIC_SENTRY_DSN`, `SENTRY_ORG`, `SENTRY_PROJECT` | optional | Error reporting and source-map upload (`sentry.*.config.ts`, `next.config.js`) |
 | `ROUTEIQ_DISABLE_JANITOR` | optional | `1` turns off the in-process janitor |
 | `RATE_LIMITS_DISABLED` | tests only | `1` bypasses the in-memory limiter (CI sets it); `NODE_ENV=test` bypasses it too. Ignored on Railway, and logged as an error on any other production server outside CI (PR1) |
@@ -503,7 +504,7 @@ Names and purpose only. This is the complete list; `.env.example` has placeholde
   - The `signIn` event writes a `LOGIN` audit row (skipped for users without a tenant).
   - Handlers are mounted at `app/api/auth/[...nextauth]/route.ts`. The middleware matcher excludes `api/auth` and `api/health`.
 - **Signup** (`app/api/auth/signup/route.ts`) is public (owner decision: stays open; `SIGNUP_MODE=closed` turns it off) and rate-limited. In one transaction it creates the Tenant, a TenantConfig (OSRM for Oman/UAE, otherwise HAVERSINE) and the first user, always a TENANT_ADMIN.
-- **Password reset:** `lib/password-reset.ts` with `app/api/auth/{forgot,reset}`.
+- **Password reset:** `lib/password-reset.ts` with `app/api/auth/{forgot,reset}` (email link), and the admin reset `app/api/users/[id]/reset-password` (Users screen, "Reset password": a one-time password shown once; works without email).
 - **Drivers** have no User accounts. The legacy driver phone app (PIN login, `DriverShift` session tokens, `lib/driver-auth.ts`) is **retired** since PR1: its routes answer 410 and the migration `20260926090000_retire_driver_app_scrub_secrets` ended the open shifts and cleared the PIN hashes. Drivers work from the PDF sheets and WhatsApp.
 - **Service to service.**
   - Solver endpoints other than `/health` require `X-Solver-Token` (`_check_token()` in `apps/solver/main.py`, `hmac.compare_digest` on bytes).
@@ -1596,7 +1597,7 @@ All from `docs/OPTIMIZER_BENCHMARK.md`.
 
 | | Web (Next.js 14 + Prisma) | Solver (FastAPI + OR-Tools) | Database | Road routing (OSRM) |
 |---|---|---|---|---|
-| **Local** | `pnpm --filter @routeiq/web dev` on :3000 | `python -m uvicorn main:app --port 8000` from `apps/solver/.venv` | PostgreSQL 16: root `docker-compose.yml` on 5432, any local PG 16, or the maintainer's portable PG on 5433 in `.dev/` | none (estimated km); the public demo server for local demos only; or `infra/osrm` in Docker on `127.0.0.1:5000` |
+| **Local** | `pnpm --filter @routeiq/web dev` on :3000 | `python -m uvicorn main:app --port 8000` from `apps/solver/.venv` | PostgreSQL 16: root `docker-compose.yml` on 5432, any local PG 16, or the maintainer's portable PG on 5433 in `.dev/` | none (estimated km), or `infra/osrm` in Docker on `127.0.0.1:5000`. Never the public demo server, not even for local demos (review F22) |
 | **CI** | built and started with `pnpm start` inside the `web` job | uvicorn in the `web` job; pytest in the `solver` job | `postgis/postgis:16-3.4` service container | not used by `ci.yml`; `osrm.yml` builds and smoke-tests the image |
 | **Production** | Railway service `web` (Nixpacks) | Railway service `solver` (Dockerfile) | Railway service `Postgres` (`ghcr.io/railwayapp-templates/postgres-ssl:18`) | Railway service `routeiq-osrm` (Dockerfile, private network only) |
 
@@ -1656,7 +1657,7 @@ pnpm --filter @routeiq/web dev
 ```
 
 - Without `OSRM_URL` the solver plans on estimated distances. For road distances run the OSRM image locally (`infra/osrm`, [`docs/OSRM_SETUP.md`](./OSRM_SETUP.md)). **Never use a public OSRM demo server**, especially with `.dev/` data: it would receive real customer coordinates (review F22).
-- The maintainer's local `.dev/start-solver.sh` (not in git) still falls back to the public demo server when `OSRM_URL` is unset: set `OSRM_URL` or change the script before using it with real data.
+- **Maintainer action:** the local `.dev/start-solver.sh` (git-ignored, so no PR can change it) still defaults `OSRM_URL` to the public demo server when it is unset. Blank that default (its line 5) before using it with real data; until then always start it with `OSRM_URL` set, or empty for estimated km.
 
 **Local gotchas** (`docs/LOCAL_DEV.md`):
 
@@ -1674,11 +1675,11 @@ pnpm --filter @routeiq/web dev
 | Solver | `cd apps/solver && .venv/Scripts/python -m pytest tests -q` (`bin/` on Linux/macOS) | Nothing external: Haversine only, with OSRM calls mocked. Some tests spawn worker processes | yes (`solver` job) |
 | OSRM image | `docker build -t routeiq-osrm infra/osrm`, run it, then `OSRM_URL=http://localhost:5000 sh infra/osrm/smoke-test.sh` | Docker, about 4 GB RAM and about 10 minutes to build; `curl` and `jq` | `osrm.yml`, only for PRs touching `infra/osrm/**` |
 
-**Expected counts at `f2f4099`** (from PR bodies): solver 104, web unit 344, integration 74. After PR1: solver 117, web unit 487 (32 files).
+**Expected counts at `f2f4099`** (from PR bodies): solver 104, web unit 344, integration 74. After PR1: solver 117, web unit 522 (33 files).
 
 **Vitest configuration** (`apps/web/vitest.config.ts`): Node environment; includes `tests/**/*.spec.ts` and `lib/**/*.spec.ts` (there are no specs under `lib/` today); `pool: 'forks'` with `singleFork: true`, so tests run serially in one process; `testTimeout` 120 s and `hookTimeout` 60 s. The setup file `tests/setup.ts` is an empty placeholder.
 
-**Web unit specs** (`apps/web/tests/lib/`, 31 files; the PR1 security specs are listed after the table):
+**Web unit specs** (`apps/web/tests/lib/`, 32 files; the PR1 security specs are listed after the table):
 
 | Spec | Module under test | Covers |
 |---|---|---|
@@ -1698,7 +1699,7 @@ pnpm --filter @routeiq/web dev
 | `premerge-fixes.spec.ts` | `lib/error-message.ts`, `lib/dispatch/customer-attrs.ts` (`parseServiceArea`, `routingProviderFor`, `isOmanUae`, `coordStatus`), `lib/dispatch/location-input.ts` (`DEFAULT_SERVICE_AREA`), `lib/solver-client.ts` | `errorMessage`, service area and routing-provider defaults, `postJsonLong` against a local HTTP server |
 | `schemas.spec.ts` | `lib/schemas.ts` | Zod schemas, `normalizeBranchKey` |
 
-PR1 security specs: `session-principal`, `auth-session` (through the real NextAuth handlers), `auth-credentials`, `client-ip`, `rate-limit`, `safe-redirect`, `signup-route`, `forgot-route`, `password-reset` (extended: no link in production logs, one transaction, one live link), `audit-redaction`, `grant-platform-admin`, `cross-tenant-view`, `ops-config` (janitor token, startup checks), `api-guards-runtime` (role gates, driver projection and soft delete, 410 routes), `api-role-matrix` (the checked-in matrix, helper `api-role-matrix.ts`), `no-hardcoded-credentials` and `repo-guards` (Driver `select`, no public OSRM host under `apps/`, the retired app has no caller).
+PR1 security specs: `session-principal` (incl. `refreshPrincipal`), `auth-session` (through the real NextAuth handlers), `auth-credentials` (incl. no shared per-IP bucket when the IP is unknown), `client-ip` (incl. the unresolved-IP warning), `rate-limit`, `safe-redirect` (incl. the end-session `next` round trip), `end-session-route` (a valid session is never signed out; `next` becomes the callbackUrl), `signup-route`, `forgot-route`, `password-reset` (extended: no link in production logs, one transaction, one live link, `/forgot` availability), `audit-redaction`, `grant-platform-admin`, `cross-tenant-view`, `ops-config` (janitor token, startup checks), `api-guards-runtime` (role gates, driver projection and soft delete, 410 routes, admin password reset), `api-role-matrix` (the checked-in matrix, helper `api-role-matrix.ts`), `no-hardcoded-credentials` and `repo-guards` (Driver `select`, no public OSRM host under `apps/`, the retired app has no caller, no forwarding-header reader outside `lib/client-ip.ts`, no stale reset-fallback wording).
 
 `tests/lib/plan-detail-fixture.ts` is a shared fixture, not a spec. `tests/tenant-isolation.spec.ts` drives tenant-scoped models through `tenantDb()` for two throwaway tenants and asserts that nothing is visible across tenants in either direction.
 
@@ -1706,7 +1707,7 @@ PR1 security specs: `session-principal`, `auth-session` (through the real NextAu
 
 | Spec | Needs solver | Covers |
 |---|---|---|
-| `auth.spec.ts` | no | signup (transactional tenant + admin + config, duplicate/reserved slug), login + LOGIN audit, forgot/reset password (no enumeration, hashed token), invite; (PR1) deactivation / demotion / password reset end or change open sessions, an inactive tenant gets 401 without a redirect loop, end-session, deep-link query string, CSP, SUPER_ADMIN protection, allowlisted sign-up is TENANT_ADMIN and a platform-admin view writes `CROSS_TENANT_VIEW` |
+| `auth.spec.ts` | no | signup (transactional tenant + admin + config, duplicate/reserved slug), login + LOGIN audit, forgot/reset password (no enumeration, hashed token), invite; (PR1) deactivation / demotion / password reset end or change open sessions, an inactive tenant gets 401 without a redirect loop, end-session (a valid session stays signed in; a rejected one lands on sign-in with its page as `callbackUrl`), deep-link query string, CSP, SUPER_ADMIN protection, admin password reset (old password and sessions end, temp password signs in, no hash in the audit row, SUPER_ADMIN/self/cross-tenant refused), allowlisted sign-up is TENANT_ADMIN and a platform-admin view writes `CROSS_TENANT_VIEW` |
 | `roles.spec.ts` | no | (PR1) VIEWER / PLANNER / SUPERVISOR / TENANT_ADMIN on users, audit, tenant config, job debug (404 for another run) and runs GET; no PIN hash in any drivers or audit body or the Drivers page |
 | `driver-app-retired.spec.ts` | no | (PR1) the driver routes, PIN and live answer 410 with no, junk or valid tokens and write nothing; `/driver` notice; the Drivers API still works; deleting a driver on a DISPATCHED load keeps `PlanLoad.driverId` |
 | `cross-tenant.spec.ts` | no | per-endpoint matrix: another tenant's IDs return **404** (not 403) and no rows change; `/t/{otherSlug}` returns 404 |
@@ -1891,13 +1892,14 @@ From `docs/admin.md` unless stated.
 - **Do not rotate `NEXTAUTH_SECRET`** except after credential exposure: rotating it logs everyone out.
 - **Calibrate truck times** after go-live (`docs/OSRM_SETUP.md`): compare planned and actual trip durations (Ayun IVMS, OPERATION-PROJECT Lane A) and set `roadTimeFactor` to the median ratio.
 - **Rate limits** are in memory (`lib/rate-limit.ts`, swept and capped) and reset on every web restart. The IP is the proxy-appended one (`lib/client-ip.ts`). Only these routes are limited, each by its own call:
-  - credential sign-in (PR1, `lib/auth-credentials.ts`): 5 failures per IP + email in 15 min (a success clears it), 30 attempts per IP in 10 min; 20 failures per account in an hour only write a `LOGIN_THROTTLED` audit row (no account lock);
+  - credential sign-in (PR1, `lib/auth-credentials.ts`): 5 failures per IP + email in 15 min (a success clears it), 30 attempts per IP in 10 min (skipped when the IP cannot be resolved, so nobody shares an "unknown" bucket); 20 failures per account in an hour only write a `LOGIN_THROTTLED` audit row (no account lock);
+  - admin password reset (`users/[id]/reset-password`): 30/h per admin (`withTenantApi` `rateLimitKey`);
   - `auth/signup`, `auth/forgot` and `auth/reset`: 5/min/IP (`LIMITS.auth`);
   - `orders/upload`, `customers/import` and `runs/[id]/baseline`: 60/h/user (`LIMITS.ordersUpload`; `docs/admin.md` still says 10/hr);
   - `POST /api/runs/[id]/optimize`: 30/h/tenant (`LIMITS.optimize`);
   - `locations/parse`: 120/min/user.
 
-  Every other route has no rate limit. `withTenantApi` applies a limit only when a route passes `rateLimitKey`, and none does (the unused `LIMITS.defaultAuthed` was removed in PR1). Solve admission quotas are a later stabilization PR.
+  Every other route has no rate limit. `withTenantApi` applies a limit only when a route passes `rateLimitKey`; only the admin password reset does (the unused `LIMITS.defaultAuthed` was removed in PR1). Solve admission quotas are a later stabilization PR.
 
 ### 5.11 Known operational gotchas
 
@@ -1980,7 +1982,7 @@ All times are Gulf Standard Time (GST, Asia/Muscat, UTC+4), the same zone git re
 | 25 Sep 10:52 | **PR #28**: driver sheets PDF per load (QR codes, WhatsApp link), a driver per load, a default driver per truck | `e225f59` | The real day renders as 23 A4 pages in ~6 s. Unit 335, integration 72. 7 review findings fixed |
 | 25 Sep 10:52 | **PR #29**: post-solve load re-assignment (`apps/solver/load_repack.py`, CP-SAT), strict priorities, per-case loading and unloading time. Migration `20260925120000_dispatch_timing_per_case` | `6267f46` | Real day: 12-13 trucks / 19-21 loads / 720-754 OMR became **5-6 trucks / 14-16 loads / 492-521 OMR**. Solver 104 tests. 11 review findings fixed |
 | 25 Sep 11:31 | **PR #30**: re-optimize has no moving charge. Late-order and manual re-plans keep it. A REOPTIMIZE while late orders wait becomes LATE_ORDER | `f2f4099` | Unit 344, integration 74 |
-| Sep 2026 | **Stabilization PR1 (security)**, answering the external review: sessions re-checked with a 12 h absolute lifetime, `/login` loop fixed, `Tenant.active` enforced, sign-up always TENANT_ADMIN, platform admins by owner script, safe `callbackUrl`, sign-in throttling, reset links never logged, API role gates, PIN hashes scrubbed, driver phone app retired, no public OSRM default. Migration `20260926090000_retire_driver_app_scrub_secrets` (data only) | branch `stab-1-security` | Unit 487, solver 117. [`docs/SECURITY.md`](./SECURITY.md) |
+| Sep 2026 | **Stabilization PR1 (security)**, answering the external review: sessions re-checked with a 12 h absolute lifetime, `/login` loop fixed, `Tenant.active` enforced, sign-up always TENANT_ADMIN, platform admins by owner script, safe `callbackUrl`, sign-in throttling, reset links never logged, API role gates, PIN hashes scrubbed, driver phone app retired, no public OSRM default, admin password reset on the Users screen (no email needed), end-session never signs out a valid session and keeps the dispatch page. Migration `20260926090000_retire_driver_app_scrub_secrets` (data only) | branch `stab-1-security` | Unit 522, solver 117. [`docs/SECURITY.md`](./SECURITY.md) |
 | After the release | Production re-plan of the `nmlj` day (per work log) | none | v4: 7 trucks / 16 loads / 1,192 km / 294 OMR. v5 (re-optimize): **4 trucks / 12 loads / 884 km / 228 OMR**, 80 / 80 served, reconciliation OK. PR #30's body confirms the post-#29 production re-plan at 7 trucks / 16 loads / 294 OMR and a 4 trucks / 12 loads / 229 OMR fewest-trucks option; it does not name the version (the "v4" label is from the work log) |
 
 **What `9426307` fixed before the first production merge:**
@@ -2097,7 +2099,7 @@ pnpm --filter @routeiq/web exec tsc --noEmit && pnpm --filter @routeiq/web exec 
 (cd apps/solver && .venv/bin/python scripts/bench_dispatch.py 300)   # release-checklist benchmark (synthetic, ~4 min)
 ```
 
-Expected counts at `f2f4099`: solver 104, web unit 344, integration 74; after stabilization PR1: solver 117, web unit 487. The real-data harness (`.dev/bench`) is local only and not in the repo.
+Expected counts at `f2f4099`: solver 104, web unit 344, integration 74; after stabilization PR1: solver 117, web unit 522. The real-data harness (`.dev/bench`) is local only and not in the repo.
 
 #### Critical invariants to check
 
@@ -2170,9 +2172,9 @@ These come from reading the code and docs. They were verified in the stabilizati
 | L3 | **Fixed in PR1** (re-checked every 30 s, 12 h absolute lifetime). Original lead: **Sessions are not re-checked.** The JWT is never re-validated against the DB, so deactivating a user or changing their role takes effect only at their next sign-in (up to 8 h later) | `lib/auth.ts` |
 | L4 | **Fixed in PR1:** sign-up stays open (owner decision) but never grants SUPER_ADMIN; `callbackUrl` is a same-origin path. Original lead: **Open signup, SUPER_ADMIN at signup, login `callbackUrl` open redirect** | backlog #3 in [7.1](#71-open-backlog-ranked) |
 | L5 | **Empty `JANITOR_TOKEN` disables the manual janitor route** (fails closed; by design, and in production since PR1 `SOLVER_TOKEN` is never accepted instead) | gotcha #10 in [5.11](#511-known-operational-gotchas) |
-| L6 | **Fixed in PR1** (no default in `road-routing.ts` or `distance.py`; the full route-geometries rework is a later PR). Original lead: **Public OSRM default** in `lib/road-routing.ts` (web, legacy Map tab) and `apps/solver/distance.py` (legacy `/optimize`). Both contradict "no silent public default" in `docs/OSRM_SETUP.md`. The dispatch planner itself (`providers.py`) has no such default | gotcha #9 |
+| L6 | **Fixed in PR1** (no default in `road-routing.ts` or `distance.py`, and no doc suggests the demo server even for local demos; the full route-geometries rework is a later PR; the git-ignored `.dev/start-solver.sh` default is a maintainer action). Original lead: **Public OSRM default** in `lib/road-routing.ts` (web, legacy Map tab) and `apps/solver/distance.py` (legacy `/optimize`). Both contradict "no silent public default" in `docs/OSRM_SETUP.md`. The dispatch planner itself (`providers.py`) has no such default | gotcha #9 |
 | L7 | **Fixed in PR1** (`hmac.compare_digest` on bytes, one check for every endpoint). Original lead: **Solver token comparison** uses `!=`, not a constant-time comparison | `_check_token` in `apps/solver/main.py` |
-| L8 | **Fixed in PR1** (production never logs the link; one transaction; older links retired). Original lead: **Reset links in logs.** Without `RESEND_API_KEY`, `deliverResetEmail()` logs the full reset URL, which contains a valid token | `lib/password-reset.ts` |
+| L8 | **Fixed in PR1** (production never logs the link; one transaction; older links retired; without email a tenant admin resets the password on the Users screen). Original lead: **Reset links in logs.** Without `RESEND_API_KEY`, `deliverResetEmail()` logs the full reset URL, which contains a valid token | `lib/password-reset.ts` |
 | L9 | **Fixed in PR1** (`seed-nmwc.ts` and `db:seed:nmwc` deleted; a test forbids hashing literals; treat the old value as compromised). Original lead: **Demo password in source.** `prisma/seed-nmwc.ts` hard-codes a demo login password (not reproduced here). The restart audit says to rotate it if production was ever seeded with it | `apps/web/prisma/seed-nmwc.ts` |
 | L10 | **Moot since PR1** (the driver app is retired; the module header says so). Original lead: **Stale security comment.** The header of `lib/driver-auth.ts` says driver tokens are "HMAC-prefixed with the tenantId"; the code stores a plain random token | `lib/driver-auth.ts` |
 | L11 | **The solver fetches supplied URLs.** It fetches whatever `osrm_url` the request (or `/route-geometry`) supplies, behind the shared token. No settings API writes `TenantConfig.osrmUrl` (`lib/schemas.ts` has no such field); it is set in the database or seed | `providers.py`, `main.py` |
@@ -2221,7 +2223,7 @@ These cannot be answered from the repository. An AI reviewer should list them as
 - Is the `web` service pinned to exactly one replica, and which commit is live?
 - Is `OSRM_URL` or `MAPBOX_TOKEN` set on `web`? Since PR1, with neither the legacy Map tab draws straight lines (no public server).
 - Does production set `NEXTAUTH_SECRET` or `AUTH_SECRET`? The code never names it; `.env.example`, CI and the Railway runbook say `NEXTAUTH_SECRET`, but next-auth v5 beta prefers `AUTH_SECRET`.
-- Is `RESEND_API_KEY` (with a verified `RESEND_FROM`) set? Since PR1, without it production sends no reset emails and logs no links; search older logs for `[password-reset] dev fallback` and treat links from the last 24 h as exposed.
+- Is `RESEND_API_KEY` (with a verified `RESEND_FROM`) set? Since PR1, without it production sends no reset emails and logs no links (`/forgot` says so; tenant admins use "Reset password" on the Users screen); search older logs for `[password-reset] dev fallback` and treat links from the last 24 h as exposed.
 - Is a separate `JANITOR_TOKEN` set on web (required in production since PR1 for the manual route)? Does any external cron call `/api/cron/janitor`?
 - Which header does Railway's edge set for the client IP (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`)? Check a LOGIN audit row after the PR1 deploy.
 - Is `SUPER_ADMIN_EMAILS` set only to addresses the owner controls? (Sign-up stays open by owner decision; it never grants SUPER_ADMIN since PR1.) Was production ever seeded with the deleted `seed-nmwc.ts` demo password? If `admin@nmwc.test` exists, deactivate it.

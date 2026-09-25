@@ -52,7 +52,8 @@ Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this bloc
 - Check the URL: it must be `/t/{their-tenant-slug}`. Cross-tenant access returns **404** (not 403) to avoid leaking tenant existence.
 - Check the user's `tenantId` matches the URL's tenant `slug` in DB.
 - Check the user and the tenant are `active = true`.
-- Sessions end after 12 h (one shift) even while in use, and at once when the user is deactivated, their password is reset or their tenant is suspended. "Your session has ended" on the sign-in page is expected then.
+- Sessions end after 12 h (one shift) even while in use, and at once when the user is deactivated, their password is reset or their tenant is suspended. "Your session has ended" on the sign-in page is expected then. After signing in again, a dispatcher who was on the dispatch screen returns to the same day and depot.
+- Only the server can end a session: opening `/api/auth/end-session` (for example from a link on another site) while the session is still valid just goes to the dashboard.
 - After 5 wrong passwords in 15 min from one place, sign-in for that email pauses for up to 15 min (same error message). It never locks the account.
 
 ---
@@ -60,10 +61,19 @@ Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this bloc
 ## Auth and password resets
 
 ### Standard reset (email)
-`/forgot` sends a reset link through Resend when `RESEND_API_KEY` (and a verified `RESEND_FROM`) is set on web. Without it production sends nothing and logs nothing about the link (`/api/health` shows `"email":"not_configured"`). Only the newest link works; a reset ends the user's open sessions.
+`/forgot` sends a reset link through Resend when `RESEND_API_KEY` (and a verified `RESEND_FROM`) is set on web. Without it production sends nothing and logs nothing about the link (`/api/health` shows `"email":"not_configured"`), and `/forgot` says "Reset by email is not available" and points the user to their company admin. Only the newest link works; a reset ends the user's open sessions.
 
-### Reset without email
-Preferred: the tenant admin deactivates the user and invites them again (Users screen), or an admin with database access runs the SQL below after a backup. Never put a real password in a file, a script or a commit.
+### Admin reset (works without email)
+A tenant admin opens `/t/{slug}/users` and clicks **Reset password** on the user's row (`POST /api/users/:id/reset-password`).
+- The old password stops working at once, the user is signed out on every device, and any outstanding reset link is retired.
+- The admin sees a new one-time password once. Share it over a secure channel (in person or by phone); it is stored only as a hash.
+- The audit log gets a `PASSWORD_RESET_BY_ADMIN` row (who reset whom; never the password).
+- A tenant admin cannot reset a platform admin's password (403) or their own (400): another admin of the company does it.
+
+Inviting the user again does **not** work for an existing account (the email already exists: 409), and neither does deactivating them first.
+
+### Last resort: SQL
+Only when no other admin can sign in (for example the company's only admin lost their password while email is not configured): an admin with database access runs the SQL below after a backup. Never put a real password in a file, a script or a commit.
 ```sql
 UPDATE "User"
    SET "passwordHash" = '<bcrypt-12 hash of new pwd>'
@@ -72,7 +82,7 @@ UPDATE "User"
 Generate the hash interactively (`node -e "..."` reading the password from a prompt), never with the password written into a script. The user's open sessions end on their next request.
 
 ### Inviting a teammate
-Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp password shown to the inviter (copy → share over a secure channel). No emails sent in v1.
+Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp password shown to the inviter (copy → share over a secure channel). No emails sent in v1. An email that already has an account is refused (409); for an existing user who lost their password use **Reset password** instead.
 
 ---
 

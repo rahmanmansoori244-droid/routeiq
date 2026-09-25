@@ -93,7 +93,8 @@ Set these to what the depot and drivers really do; every load is timed with them
 Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep their times.
 
 ## Signing in
-- A session lasts one shift: after 12 hours you sign in again, even if you kept working. If your account is changed (deactivated, password reset, role changed) the change applies within a minute, and the sign-in page says "Your session has ended".
+- A session lasts one shift: after 12 hours you sign in again, even if you kept working. If your account is changed (deactivated, password reset, role changed) the change applies within a minute, and the sign-in page says "Your session has ended". After you sign in again you are back on the dispatch screen with the same day and depot (anything typed in an open dialog is lost).
+- Forgot your password? Ask your company admin: on **Users**, **Reset password** gives you a new temporary password. ("Forgot your password?" on the sign-in page works only when reset email is set up; otherwise it says so.)
 - After several wrong passwords, sign-in pauses for a few minutes; the message is the same as for a wrong password.
 - The old driver phone app (`/driver`) is retired. Drivers get the **driver sheet** (PDF) or the **WhatsApp** message from the plan.
 - Deleting a driver who is on any load deactivates the driver instead, so past loads keep their driver.

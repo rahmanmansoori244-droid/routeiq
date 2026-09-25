@@ -11,6 +11,8 @@ This page describes how sign-in, sessions, roles and service secrets work after 
 | **Every session read on the server re-loads the user** (cached 30 s per user). The session ends when the user is inactive or deleted, the tenant is inactive, the user moved tenant, or the password changed (`pwf` differs). Role and tenant always come from the database, so a demotion applies within 30 s, at once when made through the Users screen | `loadPrincipal`, `evaluatePrincipal`, `refreshSessionClaims` |
 | If the database cannot be read, a reading from the last 10 minutes is used; otherwise the session ends (fail closed) | `PRINCIPAL_STALE_IF_ERROR_MS` |
 | The edge middleware cannot reach the database. When the server rejects a cookie the middleware still accepts, pages send the browser to `/api/auth/end-session`, which clears it and lands on `/login?reason=session` ("Your session has ended"). This removed the old `/` <-> `/login` redirect loop | `lib/session-redirect.ts`, `app/api/auth/end-session/route.ts`, `app/page.tsx`, `lib/tenant.ts` |
+| `end-session` **signs out only a session the server rejects**, decided on a fresh reading of the user (`refreshPrincipal`, not the 30 s cache). A session that is still valid is sent to `/` untouched, so a link or redirect from another site cannot sign a dispatcher out (it is a plain GET) | `app/api/auth/end-session/route.ts` |
+| The dispatch screen reacts to any `401` by going to `end-session?next=<its page>` without showing an error. `next` goes through `safeCallbackUrl` and becomes the sign-in page's `callbackUrl`, so the dispatcher comes back to the same day and depot (`?date=&depot=`). Only "no session" answers 401; a session without a tenant gets 403 | `app/t/[slug]/dispatch/client-api.ts`, `sessionEndedLoginUrl` in `lib/safe-redirect.ts` |
 | Cookies issued before this release have no `authTime` / `pwf`: **every user signs in once after the deploy** | |
 
 ## 2. Sign-in
@@ -18,8 +20,9 @@ This page describes how sign-in, sessions, roles and service secrets work after 
 - `lib/auth-credentials.ts` checks email and password.
   - **Timing:** an unknown email is still compared against a throw-away bcrypt hash of the same cost; an inactive user or tenant is refused only after the real compare.
   - **Soft throttle (no account lock):** 5 failures in 15 min for one IP + email pause that pair (a success clears it); 30 attempts in 10 min per IP; 20 failures in 1 h for one account from any IP write one `LOGIN_THROTTLED` audit row in that tenant, so an admin sees guessing, but never lock the dispatcher out.
+  - **When the client IP cannot be resolved** (`TRUSTED_PROXY_HOPS=0`, or `CLIENT_IP_HEADER` names a header the edge does not send), the per-IP cap is skipped: every caller would share one bucket, and one outsider could pause sign-in for all tenants. The IP + email and per-account counters still apply. The web log shows one `[client-ip] the client IP could not be resolved (...)` warning, and audit rows have no IP.
   - **One message** for every failure: "Invalid email or password. After several failed attempts, sign-in pauses for a few minutes."
-- **Client IP** (`lib/client-ip.ts`): the left end of `X-Forwarded-For` is client-controlled and never used. The IP is the entry `TRUSTED_PROXY_HOPS` places from the right (default 1), or the single-value header named by `CLIENT_IP_HEADER`. The same IP goes into audit rows.
+- **Client IP** (`lib/client-ip.ts`): the left end of `X-Forwarded-For` is client-controlled and never used. The IP is the entry `TRUSTED_PROXY_HOPS` places from the right (default 1), or the single-value header named by `CLIENT_IP_HEADER`. The same IP goes into audit rows: every route and `audit()` get it from `clientIp()` / `clientIpFromHeaders()`, and a repo test fails on any other file under `app/` or `lib/` that reads `X-Forwarded-For` or `X-Real-IP` (the order upload, customer import and baseline upload routes used to record the left-most entry).
 - **After sign-in** (`lib/safe-redirect.ts`): `callbackUrl` is reduced to a same-origin path under `/`, `/t/...` or `/admin...`, on the server and again in the browser. `javascript:`, `data:`, `//host` and `/\host` values become `/`. The middleware keeps the query string, so dispatch deep links (`?date=&depot=`) survive sign-in.
 - **Headers** (`next.config.js`): HSTS, `nosniff`, `X-Frame-Options: DENY`, and a baseline CSP `frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'`. A full `script-src` policy needs nonces and waits for the Next.js upgrade.
 
@@ -36,7 +39,7 @@ This page describes how sign-in, sessions, roles and service secrets work after 
      `SUPER_ADMIN_EMAILS` here only drives the script's reminder; the web service's own value is what counts. The script writes `PLATFORM_ADMIN_GRANTED` / `PLATFORM_ADMIN_REVOKED` in the user's tenant. Revoking returns the user to TENANT_ADMIN of their tenant, or deactivates a user without a tenant.
   A user with the SUPER_ADMIN role whose email is not on the list acts as TENANT_ADMIN of their own tenant (no tenant: no session). An env edit alone or a database edit alone grants nothing.
 - A platform admin may open any tenant's pages; each view writes one `CROSS_TENANT_VIEW` row in **that** tenant's audit log (at most once per admin, tenant and hour). API calls still act on the admin's own tenant only.
-- A TENANT_ADMIN cannot change a SUPER_ADMIN account (403; the Users screen locks the switch).
+- A TENANT_ADMIN cannot change a SUPER_ADMIN account (403; the Users screen locks the switch and the Reset password button).
 - Deactivating a tenant (`Tenant.active = false`) now blocks its sign-in and every API call and page. **Before deactivating a tenant, check that no platform admin account belongs to it**, or that admin loses access too.
 
 ## 4. Roles on the API
@@ -48,11 +51,13 @@ The complete matrix is checked in and enforced by `apps/web/tests/lib/api-role-m
 | Users list (`GET /api/users`), audit log (`GET /api/audit`), tenant settings (`GET /api/tenant/config`) | TENANT_ADMIN, like their pages |
 | Job debug JSON (`GET /api/runs/:id/jobs/:jobId/debug`: the full solver request with revenue, margins and coordinates) | SUPERVISOR. A job of another run is 404 |
 | `GET /api/runs/:id` | any role, job status only (no solver request/response JSON) |
+| Admin password reset (`POST /api/users/:id/reset-password`: a new one-time password for a user) | TENANT_ADMIN. Never a platform admin unless the caller is one (403), never your own account (400); another tenant's user is 404 |
 | Plan detail and the Excel / PDF exports | any role (the dispatch team reads plans) |
 
 ## 5. Secrets and credentials
 
-- **Password reset** (`lib/password-reset.ts`): in production the link is sent only through Resend (`RESEND_API_KEY`, verified `RESEND_FROM`); without it **nothing is sent and nothing about the link is logged** (only the user id). Links use `AUTH_URL`, else `NEXTAUTH_URL`; production refuses to build one without either. Issuing a link retires older ones; a reset consumes the token, sets the password and retires the user's other links in one transaction, and ends every open session of that user (`pwf`). Until Resend is configured, admins reset passwords through the invite / temporary-password flow. `/api/health` reports `email: configured | not_configured`.
+- **Password reset** (`lib/password-reset.ts`): in production the link is sent only through Resend (`RESEND_API_KEY`, verified `RESEND_FROM`); without it **nothing is sent and nothing about the link is logged** (only the user id). Links use `AUTH_URL`, else `NEXTAUTH_URL`; production refuses to build one without either. Issuing a link retires older ones; a reset consumes the token, sets the password and retires the user's other links in one transaction, and ends every open session of that user (`pwf`). `/api/health` reports `email: configured | not_configured`.
+- **Admin password reset** (works without email): a tenant admin clicks **Reset password** on the Users screen (`POST /api/users/:id/reset-password`). In one transaction the hash is replaced, the user's outstanding reset links are retired and a `PASSWORD_RESET_BY_ADMIN` audit row is written (who reset whom; no hash, no password). The cached session state is dropped, so the user's open sessions end on their next request. The new one-time password is shown once (`Cache-Control: no-store`). Until Resend is configured this is the reset path, and `/forgot` says "Reset by email is not available" instead of showing a form that would send nothing. Inviting an existing email again is refused (409).
 - **Audit JSON never holds credentials:** `accessPinHash`, `passwordHash`, `sessionToken` and `tokenHash` are removed on write and on read (`redactForAudit` in `lib/audit.ts`).
 - **Driver rows** are always read and written with `DRIVER_PUBLIC_SELECT` (`lib/driver-fields.ts`); a repo test fails on a Driver query under `app/` without a `select`.
 - **No hard-coded passwords:** the legacy `prisma/seed-nmwc.ts` (and `db:seed:nmwc`) is deleted; its value is in git history and must be treated as compromised. A test fails on any hash of a string literal.
@@ -77,9 +82,9 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
 1. Take a fresh Postgres backup (Postgres -> Backups -> New backup).
 2. Set on the **web** service (names only; values in Railway):
    - `JANITOR_TOKEN`: a new random value, different from `SOLVER_TOKEN`. Update any external cron that calls `/api/cron/janitor`.
-   - `RESEND_API_KEY` and a verified `RESEND_FROM` (or accept that reset emails are not sent; use invites).
+   - `RESEND_API_KEY` and a verified `RESEND_FROM` (or accept that reset emails are not sent: `/forgot` then says so, and tenant admins use **Reset password** on the Users screen).
    - `AUTH_URL` (or `NEXTAUTH_URL`) = the public web URL.
-   - `TRUSTED_PROXY_HOPS` (normally `1`), or `CLIENT_IP_HEADER` if Railway's edge sets a single client-IP header. Confirm with step 5 below.
+   - `TRUSTED_PROXY_HOPS` (normally `1`). Set `CLIENT_IP_HEADER` only to a header you have confirmed Railway's edge sends: a missing header leaves every IP unknown. Confirm with step 5 below.
    - `SUPER_ADMIN_EMAILS`: only addresses of real platform admins the owner controls.
    - Make sure `RATE_LIMITS_DISABLED` is **not** set.
    - Leave `SIGNUP_MODE` unset (open) unless sign-up should be closed.
@@ -91,9 +96,13 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
 2. With your own account: open `/login?callbackUrl=//evil.example`, sign in, and land on `/`.
 3. `POST /api/driver/login` returns 410. (`POST /api/auth/signup` still returns 201/400: sign-up is open by decision.)
 4. `GET /api/health` shows `"email":"configured"` (once Resend is set). The web log shows no `[config]` error and no `dev fallback` line.
-5. **Client IP check:** sign in, then look at the newest `LOGIN` row in the Audit log: its IP must be your real public address. If it shows a Railway/internal address, change `TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER` and redeploy.
+5. **Client IP check:** sign in, then look at the newest `LOGIN` row in the Audit log: its IP must be your real public address.
+   - A Railway/internal address: change `TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER` and redeploy (the web log also shows `[client-ip] ... internal address`).
+   - An **empty** IP: the address is not resolved at all (the web log shows `[client-ip] the client IP could not be resolved (...)`), and sign-in runs on per-account limits only. Unset `CLIENT_IP_HEADER` (or set it to a header the edge really sends) and make sure `TRUSTED_PROXY_HOPS` is not `0`, then redeploy.
 6. The in-process janitor still reaps stuck jobs (web log); an external cron now uses `JANITOR_TOKEN`.
-7. Read-only checks (with the Postgres public URL):
+7. **Password reset without email:** on the Users screen, **Reset password** on a test user shows a new temporary password; that user's old password stops working and the new one signs in. `/forgot` says "Reset by email is not available" until Resend is set.
+8. **No forced logout:** while signed in, open `/api/auth/end-session` in the address bar: you land on your dashboard, still signed in.
+9. Read-only checks (with the Postgres public URL):
    ```sql
    SELECT count(*) FROM "Driver" WHERE "accessPinHash" IS NOT NULL;           -- expect 0
    SELECT count(*) FROM "DriverShift" WHERE status = 'ACTIVE';               -- expect 0
@@ -103,7 +112,7 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
    SELECT s.id FROM "DriverShift" s JOIN "RunPlan" r ON r.id = s."runId" WHERE r."tenantId" <> s."tenantId";
    ```
    A driver change made through the old code in the minute of the deploy overlap could re-add a PIN hash; if the first three counts are not 0, re-run the three updates of the migration by hand after a backup.
-8. Clean-up decisions for the owner (reversible; after a backup):
+10. Clean-up decisions for the owner (reversible; after a backup):
    - deactivate `admin@nmwc.test` (the published legacy seed login) if it exists, and any other unexpected `*.test` admin;
    - demote any unexpected SUPER_ADMIN (`grant-platform-admin.ts <email> --revoke`);
    - deactivate `SMOKE-DRV` if it exists (it cannot be deleted: its legacy shift references it);
@@ -129,6 +138,11 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
 | F12, F14, driver PIN issues | Moot: the driver app is retired (section 6) |
 | Driver hard delete erased the driver on dispatched loads | Section 6 |
 | `smoke-driver-flow.ts` residue | Script deleted; clean-up in section 7 |
-| F22 public OSRM default | Section 5 (minimal); the full route-geometries rework is PR5 |
+| F22 public OSRM default | Section 5 (minimal); the full route-geometries rework is PR5. The docs no longer suggest the public demo server even for local demos |
+| Verification follow-up: the documented "invite / temporary-password" and "deactivate and invite again" reset paths did not exist (409) | Section 5 (admin password reset on the Users screen; `/forgot` says when email reset is unavailable) |
+| Verification follow-up: three upload routes still wrote the left-most `X-Forwarded-For` entry into audit rows | Section 2 (`clientIp()` everywhere; repo guard) |
+| Verification follow-up: `/api/auth/end-session` signed out any valid session on a cross-site GET | Section 1 (only a session the server rejects is signed out) |
+| Verification follow-up: an unresolved client IP put every sign-in into one shared per-IP bucket | Section 2 (per-IP cap skipped without an IP; one-time log warning) |
+| Verification follow-up: a session ended during an API call lost the dispatch day and depot, and still showed "Unauthorized" | Section 1 (`next` kept as `callbackUrl`; no error toast) |
 
-Deferred on purpose: email verification or invite codes for public sign-up, a `sessionVersion` "sign out everywhere", forcing a password change after an invite's temporary password, a nonce-based `script-src` CSP, and dropping the driver-app tables.
+Deferred on purpose: email verification or invite codes for public sign-up, a `sessionVersion` "sign out everywhere", forcing a password change after an invite's or an admin reset's temporary password, a nonce-based `script-src` CSP, and dropping the driver-app tables.
