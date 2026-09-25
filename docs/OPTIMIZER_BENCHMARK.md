@@ -163,7 +163,8 @@ not change, because the solver sees the same matrix size.
    - Priorities are exact penalties, so a P1 is never traded for km.
    - It runs in-process with no licence or per-run cost.
 2. ~~Apply the two §5 fixes before go-live~~: **done** (§5a). Keep the 300-stop benchmark in the release checklist
-   (`.venv/Scripts/python scripts/bench_dispatch.py 300`).
+   (`.venv/Scripts/python scripts/bench_dispatch.py 300`), and for any change to how locked loads are treated the re-plan
+   comparison (`scripts/bench_replan.py`, §9.2).
 3. **Configurable self-hosted OSRM** (already supported through `osrm_url` / `OSRM_URL`, see OSRM_SETUP.md). Run it with the
    GCC extract and `--max-table-size ≥ 400`. Calibrate `road_time_factor` against real Ayun GPS trip times, or build a truck
    Lua profile.
@@ -344,6 +345,68 @@ time, no margins, no shortage) found a 1,080 km plan instead of ~979 km, so no 1
 right after (3 runs each, same load): before the fixes 529.8-532.7, after 530.6-532.1, 5 trucks / 14 loads every time. Even
 that run meets the targets: 6 trucks (≤ 9) and 521 OMR, -31% against 754 OMR. Checks: 60 options, 0 evaluator violations,
 0 exact-turnaround violations, all reconciled. Wall time: 46-54 s for the ≤ 200-stop days, 239-244 s at 300 stops.
+
+## 9. Stabilization PR5 (26 Sep 2026): whole-truck-day costs, release benchmark and re-plans
+
+PR5 pays the driver for the whole truck day in the post-solve score and in every reported cost (`costing.py`), and aligns the
+search for trucks with locked loads: the routing model pays the time from the last locked return to the first new departure
+(a soft upper bound on the route start), the repack prices *last return - last locked return*, and the exact timing no longer
+rewards a later first departure after locked loads. Fresh days are priced as before. Measured on the §5 machine (AMD Ryzen 7
+7445HS, 31 GB RAM, Windows 11, Python 3.12.13, OR-Tools 9.15.6755), one run each, one version after the other. PR4 = `acb5f04`,
+PR5 = branch `stab-5-costs` with its review fixes.
+
+### 9.1 Release benchmark, 300 stops (`scripts/bench_dispatch.py 300`)
+
+| Version | Wall | Scenario | Trucks | Loads | km | Op. cost (OMR) | Unserved |
+|---|---|---|---|---|---|---|---|
+| PR4 | 243 s | RECOMMENDED | 12 | 24 | 1,806.5 | 950.1 | 0 |
+| | | MIN_TRUCKS | 12 | 24 | 1,740.1 | 932.6 | 0 |
+| | | MIN_DISTANCE | 12 | 24 | 1,740.1 | 932.6 | 0 |
+| PR5 | 251 s | RECOMMENDED | 12 | 24 | 1,806.5 | 965.2 | 0 |
+| | | MIN_TRUCKS | 12 | 24 | 1,738.9 | 947.1 | 0 |
+| | | MIN_DISTANCE | 12 | 24 | 1,738.9 | 947.1 | 0 |
+
+**No change in plan quality.** RECOMMENDED is the same plan (12 trucks, 24 loads, 1,806.5 km, all 300 stops served); the
+alternatives differ by 1.2 km (0.07%, inside the search's run-to-run variation). The reported cost rises by 15.1 OMR (+1.6%)
+only because the depot turnaround and the waiting between loads are now paid. The 150-stop day gave the same plan on both
+versions too (8 trucks, 9 loads, 805.3 km; 478.5 -> 479.8 OMR). Wall time stays inside the 540 s request budget.
+
+### 9.2 Re-plans around locked loads (`scripts/bench_replan.py`)
+
+The 300-stop day has no locked loads, so it cannot show the re-plan change. `scripts/bench_replan.py` builds two shapes of 8
+days each (60 stops with seeds 1-5 and 150 stops with seeds 1-3; the §5 fleet and rates, overtime after 8 h at 1 OMR/h; all three
+options, production worker pool). Both versions re-plan exactly the same requests, and the money of both is priced on one model
+(PR5's whole-truck-day costing of each version's new loads; the locked loads are the same for both):
+
+- **late**: the day is planned once, every truck's first load is locked, its stops leave the day; the other stops stay with the
+  truck they were on (plan continuity) and 6 or 15 late orders (P1-P3) are added. The late-order re-plan;
+- **half**: 6 of the 12 trucks have a locked first load 06:00-09:30; the whole day plus the late orders is planned around them.
+
+| Shape (8 days) | Version | Unserved | New loads | km (new loads) | Cost of new loads (OMR) |
+|---|---|---|---|---|---|
+| late | PR4 | 0 | 14 | 1,350.6 | 561.4 |
+| | PR5 | 0 | 14 | 1,359.3 | 585.4 |
+| half | PR4 | 0 | 69 | 5,365.2 | 2,594.6 |
+| | PR5 | 0 | 66 | 5,213.0 | 2,578.7 |
+
+- **late**: the same plan on 7 of 8 days. On one (150 stops, seed 2: 61 stops to re-plan) PR5 puts a new load on an unused
+  truck instead of a second load on a locked one: 143.4 against 119.4 OMR (+24.0 OMR, one truck's fixed cost). Two repeats
+  gave the same result.
+- **half**: PR5 is cheaper on 3 days (-13%, -6%, -5%) and dearer on 5 (+1%, +8%, +0.4%, +10%, +6%); in total 0.6% less money,
+  2.8% fewer km and 3 loads fewer.
+- No stop is left unserved on any day, by either version.
+- Run-to-run variation of one version on one machine is about 1% km, so a single day is not a verdict; the per-day swings
+  above are the two searches finding different plans.
+
+**Cause of the late-order day, and why the release keeps the alignment.** An experiment with PR5 minus the routing model's soft
+bound on the start of trucks with locked loads (the one change to the search model) found PR4's 119.5 OMR plan on that day and
+the same plans on the other late days, but made the *half* shape 1.6% dearer (2,618.8 against 2,578.7 OMR). Over all 16 days
+the totals are within 0.8% of each other: PR4 3,156.0, PR5 3,164.1, PR5 without the bound 3,180.3 OMR. Neither variant is
+better on both shapes, so PR5 keeps the owner's rule (the driver is paid for the whole truck day in the search as in the report).
+
+**Follow-up** (not in PR5): measure again on NMWC's real re-planned days once production has plans with locked loads. If the
+late-order case shows up there, one search without the start bound can be added as an extra candidate: the post-solve score
+already prices every candidate on the whole-day model, so it would only be chosen when it is cheaper.
 
 ## Sources
 
