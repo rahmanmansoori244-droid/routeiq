@@ -151,6 +151,10 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       // Drivers: RouteIQ no longer keeps a driver on two trips it moved onto each other's hours.
       [/two planned trips that you gave the same driver/i, 'driver kept on two trips you gave'],
       [/both keep this version's driver/i, "both keep this version's driver"],
+      // Fourth review: only a driver chosen by hand stays on overlapping trips (the marker decides,
+      // not whether the trips overlapped before), and the re-plan job orders its trips too.
+      [/Only when you had already given one driver two planned trips/i, 'a clash kept because the trips overlapped before'],
+      [/The one exception is in step 1/i, 'the step-1 exception of the third round'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
