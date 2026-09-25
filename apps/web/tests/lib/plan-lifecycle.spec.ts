@@ -47,6 +47,7 @@ import {
   PlanError,
   updateLoad,
 } from '@/lib/dispatch/plan-service';
+import { driverClashes } from '@/lib/dispatch/load-state';
 import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { failJob, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
@@ -579,9 +580,12 @@ function solverLoad(truckId: string, loadNo: number, departMin: number, returnMi
 }
 
 describe('copy-forward re-plan: drivers are not double-booked (review: step 1 evidence)', () => {
-  it('a PLANNED copy re-timed onto a kept LOCKED load of the same driver does not keep that driver', async () => {
-    // v1 (superseded): T01 L1 Ali 06:00-09:00 LOCKED; T02 L1 Ali 09:30-11:00 PLANNED.
-    // v2 holds copies of both (copy-forward); its optimization moves T02 L1 to 08:00-11:00.
+  /**
+   * v1 (superseded): T01 L1 Ali 06:00-09:00 LOCKED; T02 L1 Ali 09:30-11:00 PLANNED. v2 holds copies
+   * of both (copy-forward) while its optimization runs; the optimization's RECOMMENDED plan has
+   * T02 L1 leaving at `t2DepartMin`, its MIN_COST option at 08:00.
+   */
+  function seedCopyForward(t2DepartMin: number) {
     tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
     tables.truck = ['T1', 'T2'].map((id) => ({ id, tenantId: T, code: id, defaultDriverId: null }));
     tables.driver = [{ id: 'ALI', tenantId: T, active: true }];
@@ -607,18 +611,38 @@ describe('copy-forward re-plan: drivers are not double-booked (review: step 1 ev
     tables.scenarioResult = [
       { id: 'scP', runId: 'P', name: 'RECOMMENDED', detailsJson: scenarioDetails() },
       { id: 'scCopy', runId: 'C', name: 'RECOMMENDED', detailsJson: scenarioDetails() },
-      { id: 'scNew', runId: 'C', name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: newScope, loads: [solverLoad('T2', 1, 480, 660, ['O2'])] }) },
+      { id: 'scNew', runId: 'C', name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: newScope, loads: [solverLoad('T2', 1, t2DepartMin, 660, ['O2'])] }) },
+      // An alternative the dispatcher may pick with "Use instead": T02 L1 out at 08:00.
+      { id: 'scMinCost', runId: 'C', name: 'MIN_COST', unservedCount: 0, detailsJson: scenarioDetails({ name: 'MIN_COST', scope: newScope, loads: [solverLoad('T2', 1, 480, 660, ['O2'])] }) },
     ];
     tables.unservedOrder = [];
     tables.auditLog = [];
     tables.runJob = [{ id: 'J1', runId: 'C', tenantId: T, attemptNo: 1, status: 'RUNNING' }];
+  }
 
+  it('a PLANNED copy re-timed onto a kept LOCKED load of the same driver does not keep that driver', async () => {
+    seedCopyForward(480);
     await applyScenario(fakePrisma as never, T, 'C', 'scNew', 'u1', { jobId: 'J1' });
     const loads = tables.planLoad.filter((l) => l.runId === 'C');
     expect(loads.find((l) => l.id === 'CL1')).toMatchObject({ status: 'LOCKED', driverId: 'ALI' }); // kept as it is
     const t2 = loads.find((l) => l.truckId === 'T2')!;
     expect(t2.id).not.toBe('CL2'); // the copy was replaced by the new plan's load
     expect(t2.driverId).toBeNull(); // not a second sheet for Ali at 08:00 while T01 is out until 09:00
+  });
+
+  it('"Use instead" re-timing a trip onto a kept LOCKED load of its driver leaves it without a driver (no double booking)', async () => {
+    seedCopyForward(570); // RECOMMENDED keeps T02 L1 at 09:30: Ali stays on it
+    await applyScenario(fakePrisma as never, T, 'C', 'scNew', 'u1', { jobId: 'J1' });
+    const applied = tables.planLoad.find((l) => l.runId === 'C' && l.truckId === 'T2')!;
+    expect(applied).toMatchObject({ driverId: 'ALI', carriedFromLoadId: null, departMin: 570 });
+    Object.assign(row('runPlan', 'C'), { status: 'READY', currentJobId: null });
+    // The dispatcher picks MIN_COST: T02 L1 now leaves at 08:00, while Ali's LOCKED T01 load is out until 09:00.
+    await chooseScenario(T, 'C', 'scMinCost', 'u1');
+    const loads = tables.planLoad.filter((l) => l.runId === 'C');
+    expect(loads.find((l) => l.id === 'CL1')).toMatchObject({ status: 'LOCKED', driverId: 'ALI' });
+    const t2 = loads.find((l) => l.truckId === 'T2')!;
+    expect(t2).toMatchObject({ departMin: 480, driverId: null });
+    expect(driverClashes(loads.map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })))).toHaveLength(0);
   });
 });
 

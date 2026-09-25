@@ -282,6 +282,30 @@ describe('assignReplanDrivers - drivers across re-plans', () => {
       expect(got.get('T02:1')).toBeNull(); // left for the dispatcher instead of a second sheet for Ali
     });
 
+    it('"Use instead" after the re-plan re-times a trip onto a kept LOCKED load of its driver: that load gets no driver', () => {
+      // v1: T01 L1 Ali 06:00-09:00 LOCKED, T02 L1 Ali 09:30-11:00 PLANNED. Re-plan to v2 (copies).
+      const parent = [parentLoad('T01', 1, 'ALI'), parentLoad('T02', 1, 'ALI')];
+      const kept = [{ truckId: 'T01', driverId: 'ALI', departMin: 360, returnMin: 540 }];
+      const usableAli = new Set(['ALI']);
+      const t02 = (departMin: number): ReplanLoad => ({ key: 'T02:1', truckId: 'T02', loadNo: 1, departMin, returnMin: 660, defaultDriverId: null });
+      // 1. The job applies RECOMMENDED, which keeps T02 L1 at 09:30: Ali from the parent (no clash).
+      const job = assignReplanDrivers([t02(570)], ownDriverEvidence([copy('c1', 'T01', 1, 'ALI', 'LOCKED'), copy('c2', 'T02', 1, 'ALI')], parent), parent, kept, usableAli);
+      expect(job.get('T02:1')).toBe('ALI');
+      // 2. "Use instead" MIN_COST moves T02 L1 to 08:00, while Ali's LOCKED T01 load is out until 09:00.
+      //    The job's new load (not a copy) is this version's own evidence (step 1) - still no second sheet.
+      const versionLoads = [copy('c1', 'T01', 1, 'ALI', 'LOCKED'), copy('n1', 'T02', 1, 'ALI', 'PLANNED', null)];
+      const useInstead = assignReplanDrivers([t02(480)], ownDriverEvidence(versionLoads, parent), parent, kept, usableAli);
+      expect(useInstead.get('T02:1')).toBeNull();
+      const all = [
+        { id: 'c1', ...kept[0]! },
+        { id: 'T02:1', truckId: 'T02', departMin: 480, returnMin: 660, driverId: useInstead.get('T02:1') ?? null },
+      ];
+      expect(driverClashes(all)).toHaveLength(0);
+      // The truck's default driver still fills it when free.
+      const withDefault = assignReplanDrivers([{ ...t02(480), defaultDriverId: 'SAM' }], ownDriverEvidence(versionLoads, parent), parent, kept, new Set(['ALI', 'SAM']));
+      expect(withDefault.get('T02:1')).toBe('SAM');
+    });
+
     it('a driver the dispatcher changed on a copy (after a failed re-plan) is this version\'s own choice', () => {
       const parent = [parentLoad('A', 1, 'D1')];
       const copies = [copy('c1', 'A', 1, 'D2')];

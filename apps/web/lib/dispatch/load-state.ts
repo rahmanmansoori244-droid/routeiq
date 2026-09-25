@@ -178,11 +178,14 @@ export interface ReplanLoad extends Omit<DriverTime, 'driverId'> {
  *   3. the nearest trip of the truck in either version (this version's load wins for one trip)
  *   4. the truck's default driver
  * Each step runs over ALL new loads before the next one, so a weak guess on one truck (say its
- * default driver) never takes a driver that stronger evidence puts on another truck. Steps 2-4
- * are guesses: they never put a driver on two trucks at overlapping times (kept loads and loads
- * already given out count); such a load is left without a driver for the dispatcher to fill.
- * Step 1 is kept as it is - a clash it causes shows as a plan warning (driverClashes).
- * Only drivers in `usable` (active, this tenant) are ever picked.
+ * default driver) never takes a driver that stronger evidence puts on another truck. No step ever
+ * puts a driver on a load that overlaps one of the driver's kept loads on another truck: a kept
+ * (frozen) load cannot move, so that would always be a second sheet for the same hours - also in
+ * step 1, when "Use instead" re-times a trip onto a locked load's hours (review of PR3). Steps 2-4
+ * are guesses: they also never overlap loads already given out. Such a load is left without a
+ * driver (the next step may still find one) for the dispatcher to fill. Between two new loads,
+ * step 1 keeps this version's choice even if the trips now overlap: that clash shows as a plan
+ * warning (driverClashes). Only drivers in `usable` (active, this tenant) are ever picked.
  */
 export function assignReplanDrivers(
   newLoads: ReplanLoad[],
@@ -192,7 +195,8 @@ export function assignReplanDrivers(
   usable: ReadonlySet<string>,
 ): Map<string, string | null> {
   const out = new Map<string, string | null>(newLoads.map((l) => [l.key, null]));
-  const busy: DriverTime[] = kept.filter((k) => k.driverId !== null);
+  const frozen: DriverTime[] = kept.filter((k) => k.driverId !== null);
+  const busy: DriverTime[] = [...frozen];
   // Both versions' trips of each truck; a trip in this version replaces the parent's same trip.
   const inNow = new Set(now.map((l) => `${l.truckId}:${l.loadNo}`));
   const either = [...now, ...parent.filter((l) => !inNow.has(`${l.truckId}:${l.loadNo}`))];
@@ -207,7 +211,8 @@ export function assignReplanDrivers(
       if (out.get(l.key) !== null) continue;
       const driverId = step.pick(l);
       if (!driverId) continue;
-      if (step.guess && busy.some((b) => b.driverId === driverId && timesClash(b, l))) continue;
+      // Kept loads never move: a clash with one is a double booking, whatever the evidence.
+      if ((step.guess ? busy : frozen).some((b) => b.driverId === driverId && timesClash(b, l))) continue;
       out.set(l.key, driverId);
       busy.push({ truckId: l.truckId, driverId, departMin: l.departMin, returnMin: l.returnMin });
     }

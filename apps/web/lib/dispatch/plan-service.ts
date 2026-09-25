@@ -789,11 +789,14 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   for (const ld of d.loads) if (!truckById.has(ld.truck_id)) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
 
   // Drivers stay with their truck and trip across re-plans: this version's loads (read before
-  // its PLANNED loads are deleted), then the parent version, then the truck's default driver -
-  // without guessing one driver onto two trucks at the same time. Rules: assignReplanDrivers.
-  // The PLANNED copies a re-plan carried from the parent with the parent's driver are the
-  // parent's evidence, not this version's (ownDriverEvidence): their drivers are checked for time
-  // clashes like any guess, so a re-timed trip never double-books a driver across trucks.
+  // its PLANNED loads are deleted), then the parent version, then the truck's default driver.
+  // Rules: assignReplanDrivers. No pick ever overlaps the same driver's kept (frozen) load on
+  // another truck - also this version's own driver for the trip, when a re-plan or "Use instead"
+  // re-times it onto a locked load's hours; such a load gets the next source or no driver. The
+  // guesses (parent, nearest trip, default) also never overlap loads already given out. The
+  // PLANNED copies a re-plan carried from the parent with the parent's driver are the parent's
+  // evidence, not this version's (ownDriverEvidence), so they are checked like any guess. Only
+  // two new loads that both keep this version's driver can overlap: a plan warning (driverClashes).
   const usableDrivers = new Set((await tx.driver.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((x) => x.id));
   const driverSel = { id: true, truckId: true, loadNo: true, driverId: true, status: true, carriedFromLoadId: true } as const;
   const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
