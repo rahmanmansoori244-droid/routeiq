@@ -9,10 +9,10 @@ Menu: **Daily dispatch**. Pick the **delivery date** (tomorrow by default) and t
 - **New customers are not errors.** They are created and marked **LOCATION REQUIRED**.
 - If the orders are **late** (after 18:00 the evening before, or after a plan already exists), type the reason.
 - Click **Add … lines to the day**.
-- **A file is added only once.** Lines already added (same delivery date, sales order, customer and product) are skipped. Adding the same orders a second time — the same file again, a second browser tab, or an old checked file — is refused with a message and nothing is added. The same sales-order line with a **different number of cases** is an error: changing a confirmed line is not supported yet, so send the extra cases under a new sales-order number (or record a late order).
+- **A file is added only once.** Lines already added (same delivery date, sales order, customer and product) are skipped. Adding the same orders a second time — the same file again, a second browser tab, or an old checked file — is refused with a message and nothing is added. The same sales-order line with a **different number of cases** is an error: changing a confirmed line is not supported yet. Remove that row, and add the extra cases as a **late order without a sales-order number** (or with a new one); with the original number the late order is refused as well.
 - A checked file must be added within **24 hours**; after that, check it again. If the cutoff passes or a plan is applied between **Check file** and **Add**, you are asked for the late reason at that moment.
-- **Weights:** the weight column in a file is the kg of the whole line. A weight of 0 counts as blank, and a blank weight uses the product's case weight. New products are created without a case weight: add it under **Products** (see step 3).
-- **Deleting a file** (old *Upload orders* page) is possible only while none of its orders has been optimized. Once a plan was made with them, the delete is refused, so the plan keeps every order it was made for; correct such orders with a late order or a re-plan.
+- **Weights:** the weight column in a file is the kg of the whole line, and it is kept as it is. A weight of 0 counts as blank. A line without a weight (also a line added together from several rows when some of them have no weight) is weighed with the product's **case weight** and follows it: when a case weight is entered or corrected under **Products** (for example 1500 typed instead of 1.5), open orders get the new weight at the next **OPTIMIZE** or **RE-PLAN**. New products are created without a case weight. Only company admins can edit products: planners and supervisors ask an admin to add or correct it (see step 3).
+- **Deleting a file** (old *Upload orders* page) is possible only while none of its orders has been optimized. Once a plan was made with them, the delete is refused, so the plan keeps every order it was made for. **Orders that are in a plan cannot be removed in the app yet** (a cancel function is not built yet): a late order only adds orders and a re-plan plans the same orders again, so neither removes them. If a wrong file was planned, ask your RouteIQ administrator.
 
 ## 2. Resolve issues
 Red cards need action before optimizing:
@@ -20,11 +20,11 @@ Red cards need action before optimizing:
   - If the link only shows the map area and not a pin, or the point looks wrong, click the map to put the pin exactly on the shop.
   - The location is saved permanently. Tomorrow RouteIQ already knows this customer.
 
-A red card **Customer is deactivated** means the customer was deactivated after its orders were added: those orders are not delivered (they show as *unserved: customer deactivated*). Reactivate the customer under **Customers** and re-plan to deliver them.
+A red card **Customer is deactivated** means the customer was deactivated after its orders were added: its open orders are not delivered (they show as *unserved: customer deactivated*). Reactivate the customer under **Customers** and re-plan to deliver them. If the plan was made before the customer was deactivated, the card says its orders are **still on planned loads**: click **RE-PLAN** to take them off (or reactivate the customer). Orders already on locked, loading or dispatched loads stay there, and the card is not shown for them.
 
 Below the cards:
-- *No weight for N cases of …*: those products have no case weight, so truck payloads (kg) cannot be checked for them. Add the case weight under **Products**.
-- *Case weight now known for …*: the weight was entered after the orders were added. It is applied to them at the next **OPTIMIZE** or **RE-PLAN** (orders on locked or dispatched loads keep the weight they were loaded with).
+- *No weight for N cases of …*: those products have no case weight, so truck payloads (kg) cannot be checked for them. Add the case weight under **Products**, or ask a company admin to (only admins can edit products).
+- *Case weight entered or corrected under Products after these orders were added …*: it is applied to them at the next **OPTIMIZE** or **RE-PLAN** (orders on locked or dispatched loads keep the weight they were loaded with). If a plan is already in use, step 3 says the plan is out of date and **RE-PLAN** is enabled even with no new order.
 
 White cards are optional confirmations: priority (**P1 = highest**), customer type and receiving hours.
 - **Hard hours:** the customer cannot receive outside them, e.g. hypermarket 06:00–10:00.
@@ -33,9 +33,10 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 ## 3. Optimize
 - Click **OPTIMIZE**. A normal day (80-150 customers) takes about half a minute to a minute.
 - If some customers still have no location, you are asked whether to plan without them. Their orders become *unserved: location missing*.
-- If some order lines have **no weight** and a truck has a payload, you are asked the same way: **Cancel** and add the case weights under **Products**, or **optimize anyway** — those lines then count as **0 kg**, so a load can be heavier than shown, and the plan keeps a yellow warning that says so. **Re-plan** asks the same question.
+- If some order lines have **no weight** and a truck has a payload, you are asked the same way: **Cancel** and add the case weights under **Products** (planners and supervisors: ask a company admin, only admins can edit products), or **optimize anyway** — those lines then count as **0 kg**, so a load can be heavier than shown, and the plan keeps a yellow warning that says so. **Re-plan** asks the same question.
 - One case heavier than every truck (usually a case weight typed per pallet or in grams) is not planned: it shows as *unserved: bigger than any truck* with *check the product weight*. The rest of that order is planned.
 - A stop that would need more than 8 hours (480 min) of unloading is planned with 480 min and the plan warns about it; check the service time or split the delivery.
+- **RE-PLAN without a new order:** step 3 also enables **RE-PLAN** when the plan in use is out of date: a case weight was entered or corrected for its orders, or a customer was deactivated while its orders are still on planned (not locked) loads. The plan view shows the same notes in yellow.
 - **Priorities are strict:** one order of a higher priority always wins over any number of lower-priority orders (one P2 is never left out to fit eleven P3s). When the trucks really cannot carry everything, P5 orders are left out first, then P4, and so on.
 - After the route search, RouteIQ re-checks which truck carries each load, so trucks do two or three loads each where the day allows instead of many trucks doing one short load. When this changed the plan you see a note such as *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
   - The re-check also tries to place orders the route search left out on free trucks or loads. When it does, the note ends with *"this also plans 2 stop(s) the route search had left out"*: loads and cost can then go up, because more is delivered.
@@ -87,9 +88,10 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
 
 ## Late orders (e.g. a P1 customer calls at 22:15)
 - Click **Late order** on the plan (or upload a small file in step 1), enter the customer, products, priority and reason.
-  - A sales-order line that is already on the day (same sales order and product) is refused: enter only new lines.
+  - A sales-order line that is already on the day (same sales order and product) is refused: enter only new lines. For **extra cases** of a line already added, leave the sales-order number empty, or use a new one.
   - A deactivated customer or product is refused: reactivate it, or use another code.
-  - A new product has no case weight yet: add it under **Products** before re-planning, or the re-plan asks before counting it as 0 kg.
+  - A new product has no case weight yet: add it under **Products** (or ask a company admin) before re-planning, or the re-plan asks before counting it as 0 kg.
+  - *Another order file or late order is being added right now*: nothing was saved; try again in a moment.
 - Click **Re-plan**. RouteIQ creates **plan version 2**:
   - locked, loading and dispatched loads stay exactly the same;
   - the late order goes into a free future load, another truck or an extra load, or is shown as *unserved: late order – no capacity*;
