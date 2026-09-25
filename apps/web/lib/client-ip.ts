@@ -17,6 +17,11 @@
  *
  * Which header Railway's edge sets is an owner check (handbook 7.5): confirm it once by
  * comparing the `ip` of a new LOGIN audit row with your own public address.
+ *
+ * In production a one-time warning is logged when the address resolves to an internal range (a
+ * proxy) or cannot be resolved at all (TRUSTED_PROXY_HOPS=0, or the expected header is missing).
+ * Without an address, sign-in throttling uses the per-account counters only (lib/auth-credentials.ts)
+ * and audit rows have no IP.
  */
 
 const MAX_IP_LENGTH = 64;
@@ -39,12 +44,26 @@ function cleanIp(raw: string | null | undefined): string | null {
 const INTERNAL_IP =
   /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i;
 let warnedInternal = false;
+let warnedUnresolved = false;
 
-function checked(ip: string | null, env: NodeJS.ProcessEnv): string | null {
-  if (ip && !warnedInternal && env.NODE_ENV === 'production' && INTERNAL_IP.test(ip)) {
+/** Tests only: allow the one-time warnings to fire again. */
+export function _resetClientIpWarnings(): void {
+  warnedInternal = false;
+  warnedUnresolved = false;
+}
+
+function checked(ip: string | null, env: NodeJS.ProcessEnv, missing: string): string | null {
+  if (env.NODE_ENV !== 'production') return ip;
+  if (ip && !warnedInternal && INTERNAL_IP.test(ip)) {
     warnedInternal = true;
     console.warn(
       `[client-ip] the client IP resolved to an internal address (${ip}). Check TRUSTED_PROXY_HOPS / CLIENT_IP_HEADER: otherwise all users share one rate-limit bucket and audit rows show the proxy.`,
+    );
+  }
+  if (!ip && !warnedUnresolved) {
+    warnedUnresolved = true;
+    console.warn(
+      `[client-ip] the client IP could not be resolved (${missing}). Sign-in throttling falls back to per-account limits and audit rows have no IP. Check TRUSTED_PROXY_HOPS / CLIENT_IP_HEADER.`,
     );
   }
   return ip;
@@ -59,13 +78,13 @@ function trustedHops(env: NodeJS.ProcessEnv): number {
 
 export function clientIpFromHeaders(headers: Headers, env: NodeJS.ProcessEnv = process.env): string | null {
   const hops = trustedHops(env);
-  if (hops === 0) return null;
+  if (hops === 0) return checked(null, env, 'TRUSTED_PROXY_HOPS=0 ignores forwarding headers');
 
   const named = env.CLIENT_IP_HEADER?.trim().toLowerCase();
   if (named) {
     const v = headers.get(named);
     // A single-value header; if a proxy chain turned it into a list, the last entry is the edge's.
-    return checked(cleanIp(v?.split(',').pop()), env);
+    return checked(cleanIp(v?.split(',').pop()), env, `CLIENT_IP_HEADER ${named} is missing or not an IP address`);
   }
 
   const xff = headers.get('x-forwarded-for');
@@ -75,10 +94,10 @@ export function clientIpFromHeaders(headers: Headers, env: NodeJS.ProcessEnv = p
       // Fewer entries than trusted hops: every entry was written by a trusted proxy, so the
       // left-most one is the client.
       const idx = Math.max(0, parts.length - hops);
-      return checked(cleanIp(parts[idx]), env);
+      return checked(cleanIp(parts[idx]), env, 'the trusted X-Forwarded-For entry is not an IP address');
     }
   }
-  return checked(cleanIp(headers.get('x-real-ip')), env);
+  return checked(cleanIp(headers.get('x-real-ip')), env, 'no X-Forwarded-For or X-Real-IP header');
 }
 
 export function clientIp(req: Request, env: NodeJS.ProcessEnv = process.env): string | null {

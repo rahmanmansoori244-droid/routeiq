@@ -2,8 +2,8 @@
  * Review F16 / new issue: rate limits and audit rows must not trust the client-controlled LEFT
  * end of X-Forwarded-For. lib/client-ip.ts counts trusted proxy hops from the right.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { clientIpFromHeaders } from '@/lib/client-ip';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { _resetClientIpWarnings, clientIpFromHeaders } from '@/lib/client-ip';
 
 const h = (init: Record<string, string>) => new Headers(init);
 const env = (e: Record<string, string> = {}) => e as NodeJS.ProcessEnv;
@@ -49,6 +49,7 @@ describe('clientIpFromHeaders', () => {
 });
 
 describe('internal-address warning', () => {
+  beforeEach(() => _resetClientIpWarnings());
   it('warns once in production when the resolved client IP is internal (a proxy)', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const prod = { NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv;
@@ -56,6 +57,40 @@ describe('internal-address warning', () => {
     clientIpFromHeaders(new Headers({ 'x-forwarded-for': '172.20.0.5' }), prod);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/TRUSTED_PROXY_HOPS/);
+    warn.mockRestore();
+  });
+});
+
+describe('unresolved-address warning (the shared "unknown" sign-in bucket)', () => {
+  const prod = (e: Record<string, string> = {}) => ({ NODE_ENV: 'production', ...e }) as unknown as NodeJS.ProcessEnv;
+  beforeEach(() => _resetClientIpWarnings());
+
+  it('a CLIENT_IP_HEADER the edge does not send gives null and one production warning', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const headers = new Headers({ 'x-forwarded-for': '203.0.113.9' });
+    expect(clientIpFromHeaders(headers, prod({ CLIENT_IP_HEADER: 'cf-connecting-ip' }))).toBeNull();
+    expect(clientIpFromHeaders(headers, prod({ CLIENT_IP_HEADER: 'cf-connecting-ip' }))).toBeNull();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/could not be resolved.*cf-connecting-ip/);
+    warn.mockRestore();
+  });
+
+  it('TRUSTED_PROXY_HOPS=0 and a request without forwarding headers warn (once) in production', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(clientIpFromHeaders(new Headers({ 'x-forwarded-for': '203.0.113.9' }), prod({ TRUSTED_PROXY_HOPS: '0' }))).toBeNull();
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/TRUSTED_PROXY_HOPS=0/);
+    _resetClientIpWarnings();
+    expect(clientIpFromHeaders(new Headers({}), prod())).toBeNull();
+    expect(String(warn.mock.calls[1]?.[0])).toMatch(/no X-Forwarded-For/);
+    expect(warn).toHaveBeenCalledTimes(2);
+    warn.mockRestore();
+  });
+
+  it('no warning outside production, and none when the address resolves', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(clientIpFromHeaders(new Headers({}), env())).toBeNull();
+    expect(clientIpFromHeaders(new Headers({ 'x-forwarded-for': '203.0.113.9' }), prod())).toBe('203.0.113.9');
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
   });
 });

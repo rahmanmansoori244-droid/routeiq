@@ -6,14 +6,16 @@ import { hasRole, fail, ok } from '@/lib/api';
 import { parseUpload } from '@/lib/csv';
 import { normalizeBranchKey } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/client-ip';
 
 interface Params { params: { id: string } }
 
 export async function POST(req: Request, { params }: Params) {
   const session = await auth();
-  if (!session?.user || !session.user.tenantId) return fail('Unauthorized', 401);
+  if (!session?.user) return fail('Unauthorized', 401);
+  if (!session.user.tenantId) return fail('No tenant on session', 403);
   if (!hasRole(session.user.role, 'PLANNER')) return fail('Forbidden', 403);
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const ip = clientIp(req);
 
   const r = rateLimit(
     `baseline-upload:${session.user.tenantId}:${session.user.id}`,
@@ -152,7 +154,8 @@ export async function POST(req: Request, { params }: Params) {
 
 export async function GET(_req: Request, { params }: Params) {
   const session = await auth();
-  if (!session?.user || !session.user.tenantId) return fail('Unauthorized', 401);
+  if (!session?.user) return fail('Unauthorized', 401);
+  if (!session.user.tenantId) return fail('No tenant on session', 403);
   const db = tenantDb(session.user.tenantId);
 
   // Cross-tenant access on the runId must 404, not return an empty list.

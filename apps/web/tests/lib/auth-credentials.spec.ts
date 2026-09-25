@@ -90,6 +90,22 @@ describe('verifyCredentials', () => {
     await expect(attempt('dispatcher@nmwc.example', PASSWORD, '192.0.2.50')).rejects.toBeInstanceOf(LoginThrottled);
   });
 
+  it('with the client IP unknown there is no shared per-IP bucket: 31 sign-ins for different emails all pass', async () => {
+    const noIp = (email: string, password: string) =>
+      verifyCredentials({ email, password }, new Request('http://localhost/api/auth/callback/credentials'), {
+        db: db as never,
+        limiter,
+        audit: audit as never,
+        env,
+      });
+    for (let i = 0; i < 31; i++) add(`crew${i}@example.test`);
+    for (let i = 0; i < 31; i++) expect(await noIp(`crew${i}@example.test`, 'wrong-password')).toBeNull();
+    for (let i = 0; i < 31; i++) expect(await noIp(`crew${i}@example.test`, PASSWORD), `crew${i}`).not.toBeNull();
+    // The per-account counter still applies without an IP.
+    for (let i = 0; i < 5; i++) expect(await noIp('dispatcher@nmwc.example', 'wrong-password')).toBeNull();
+    await expect(noIp('dispatcher@nmwc.example', PASSWORD)).rejects.toBeInstanceOf(LoginThrottled);
+  });
+
   it('an unknown email still costs one bcrypt compare (no timing oracle)', async () => {
     const compare = vi.spyOn(bcrypt, 'compare');
     expect(await attempt('ghost@example.test', 'whatever-password')).toBeNull();

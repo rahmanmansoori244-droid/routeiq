@@ -8,7 +8,9 @@
  * - Throttling, soft (it pauses attempts; it never locks an account an attacker could keep
  *   locked):
  *     * per IP + email: 5 failures in 15 min pause that pair; a success clears the counter;
- *     * per IP: 30 attempts in 10 min;
+ *     * per IP: 30 attempts in 10 min. Skipped when the client IP cannot be resolved (a proxy
+ *       misconfiguration, logged once by lib/client-ip.ts): every caller would then share one
+ *       bucket, and one outsider could pause sign-in for all tenants;
  *     * per email: 20 failures in 1 h, from any IP, write one LOGIN_THROTTLED audit row in the
  *       user's tenant so an admin sees the guessing. It does not block the account.
  * - One outcome for the caller: a generic sign-in error, whatever the reason.
@@ -93,10 +95,12 @@ export async function verifyCredentials(
   const parsed = credentialsSchema.safeParse(raw);
   if (!parsed.success) return null;
   const email = parsed.data.email.trim().toLowerCase();
-  const ip = (request ? clientIp(request, env) : null) ?? 'unknown';
-  const keys = loginKeys(ip, email);
+  const ip = request ? clientIp(request, env) : null;
+  const keys = loginKeys(ip ?? 'unknown', email);
 
-  const ipOk = lim.consume(keys.ip, LIMITS.loginIpAttempts.limit, LIMITS.loginIpAttempts.windowMs).ok;
+  // No per-IP cap without a real IP: a shared 'unknown' bucket would let one caller pause sign-in
+  // for everyone. The ip+email and per-email counters still apply.
+  const ipOk = ip === null || lim.consume(keys.ip, LIMITS.loginIpAttempts.limit, LIMITS.loginIpAttempts.windowMs).ok;
   if (!ipOk || lim.isBlocked(keys.ipEmail, LIMITS.loginIpEmailFailures.limit)) throw new LoginThrottled();
 
   const user = await db.user.findUnique({
@@ -136,7 +140,7 @@ export async function verifyCredentials(
           entity: 'User',
           entityId: user.id,
           afterJson: { failedSignInsLastHour: emailFailures },
-          ip: ip === 'unknown' ? null : ip,
+          ip,
         });
       } catch (err) {
         console.error('[auth] LOGIN_THROTTLED audit failed', (err as Error)?.message ?? err);
