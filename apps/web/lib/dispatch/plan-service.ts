@@ -790,15 +790,16 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
 
   // Drivers stay with their truck and trip across re-plans: this version's loads (read before
   // its PLANNED loads are deleted), then the parent version, then the truck's default driver.
-  // Rules: assignReplanDrivers. No pick ever overlaps the same driver's kept (frozen) load on
-  // another truck - also this version's own driver for the trip, when a re-plan or "Use instead"
-  // re-times it onto a locked load's hours; such a load gets the next source or no driver. The
-  // guesses (parent, nearest trip, default) also never overlap loads already given out. The
-  // PLANNED copies a re-plan carried from the parent with the parent's driver are the parent's
-  // evidence, not this version's (ownDriverEvidence), so they are checked like any guess. Only
-  // two new loads that both keep this version's driver can overlap: a plan warning (driverClashes).
+  // Rules: assignReplanDrivers. No pick ever overlaps a load of the same driver on another truck:
+  // a kept (frozen) load, or a load already given out in this plan - also this version's own
+  // driver for the trip, when a re-plan or "Use instead" re-times it onto the hours of another of
+  // their trips; such a load gets the next source or no driver. The PLANNED copies a re-plan
+  // carried from the parent with the parent's driver are the parent's evidence, not this
+  // version's (ownDriverEvidence). The one clash kept: two planned trips that already had the
+  // same driver at overlapping hours in this version (the dispatcher's own), a plan warning
+  // (driverClashes). The trips' times in this version tell which ones overlapped before.
   const usableDrivers = new Set((await tx.driver.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((x) => x.id));
-  const driverSel = { id: true, truckId: true, loadNo: true, driverId: true, status: true, carriedFromLoadId: true } as const;
+  const driverSel = { id: true, truckId: true, loadNo: true, driverId: true, status: true, carriedFromLoadId: true, departMin: true, returnMin: true } as const;
   const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
   const driversNow = ownDriverEvidence(await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel }), driversParent);
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;

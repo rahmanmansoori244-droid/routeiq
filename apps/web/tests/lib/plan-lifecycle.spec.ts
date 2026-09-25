@@ -11,6 +11,8 @@
  * - ADD-JOB-AUDIT: the job's result and its audit row commit together; failJob never overwrites
  *   READY or SUPERSEDED; a stale result leaves the plan untouched.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 
@@ -643,6 +645,69 @@ describe('copy-forward re-plan: drivers are not double-booked (review: step 1 ev
     const t2 = loads.find((l) => l.truckId === 'T2')!;
     expect(t2).toMatchObject({ departMin: 480, driverId: null });
     expect(driverClashes(loads.map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })))).toHaveLength(0);
+  });
+
+  /**
+   * Third review of PR3: the job gave Ali T2 L1 09:30-11:00 and T3 L1 12:00-14:00 (no clash then).
+   * "Use instead" on an option that moves T3 L1 to 10:00-12:00 kept Ali on both trucks.
+   */
+  function seedTwoTrips(t3DefaultDriver: string | null) {
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
+    tables.truck = [
+      { id: 'T2', tenantId: T, code: 'T2', defaultDriverId: null },
+      { id: 'T3', tenantId: T, code: 'T3', defaultDriverId: t3DefaultDriver },
+    ];
+    tables.driver = [
+      { id: 'ALI', tenantId: T, active: true },
+      { id: 'SAM', tenantId: T, active: true },
+    ];
+    tables.order = ['O2', 'O3'].map((id) => ({ id, tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'ASSIGNED' }));
+    const base = { tenantId: T, depotId: 'D1', runDate: DAY, optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 2, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null, createdById: 'u1', createdAt: new Date() };
+    tables.runPlan = [{ ...base, id: 'R', status: 'READY', supersededAt: null, version: 1, reason: 'INITIAL', chosenScenarioId: 'scRec', parentRunId: null, currentJobId: null }];
+    tables.planLoad = [
+      load('N2', 'R', 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 570, returnMin: 660 }),
+      load('N3', 'R', 1, 'PLANNED', { truckId: 'T3', driverId: 'ALI', departMin: 720, returnMin: 840 }),
+    ];
+    tables.routeAssignment = [
+      { ...assignment('A2', 'R', 'N2', 'O2', 1), truckId: 'T2' },
+      { ...assignment('A3', 'R', 'N3', 'O3', 1), truckId: 'T3' },
+    ];
+    const sc = scope({ orderIds: ['O2', 'O3'], frozenOrderIds: [], frozenLoadIds: [], frozenLoadOrderIds: [] });
+    tables.scenarioResult = [
+      { id: 'scRec', runId: 'R', name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc, loads: [solverLoad('T2', 1, 570, 660, ['O2']), solverLoad('T3', 1, 720, 840, ['O3'])] }) },
+      // MIN_COST lists T3 first and moves it to 10:00-12:00, onto Ali's T2 trip.
+      { id: 'scMinCost', runId: 'R', name: 'MIN_COST', unservedCount: 0, detailsJson: scenarioDetails({ name: 'MIN_COST', scope: sc, loads: [solverLoad('T3', 1, 600, 720, ['O3']), solverLoad('T2', 1, 570, 660, ['O2'])] }) },
+    ];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+    tables.runJob = [];
+  }
+  const clashesOf = (runId: string) =>
+    driverClashes(tables.planLoad.filter((l) => l.runId === runId).map((l) => ({ id: l.id, truckId: l.truckId, driverId: l.driverId, departMin: l.departMin, returnMin: l.returnMin })));
+
+  it('"Use instead" moving one of two trips of a driver onto the other\'s hours: the moved trip loses the driver (no double booking)', async () => {
+    seedTwoTrips(null);
+    await chooseScenario(T, 'R', 'scMinCost', 'u1');
+    const loads = tables.planLoad.filter((l) => l.runId === 'R');
+    expect(loads.find((l) => l.truckId === 'T2')).toMatchObject({ departMin: 570, driverId: 'ALI' }); // did not move
+    expect(loads.find((l) => l.truckId === 'T3')).toMatchObject({ departMin: 600, driverId: null });
+    expect(clashesOf('R')).toHaveLength(0);
+  });
+
+  it("the moved trip gets its truck's default driver when that driver is free", async () => {
+    seedTwoTrips('SAM');
+    await chooseScenario(T, 'R', 'scMinCost', 'u1');
+    const loads = tables.planLoad.filter((l) => l.runId === 'R');
+    expect(loads.find((l) => l.truckId === 'T3')).toMatchObject({ departMin: 600, driverId: 'SAM' });
+    expect(clashesOf('R')).toHaveLength(0);
+  });
+
+  it("applyScenario reads the times of the versions' loads (which trips moved, which already overlapped)", () => {
+    // The fake database ignores `select`; on PostgreSQL a column left out of it is undefined.
+    const src = readFileSync(path.resolve(__dirname, '../../lib/dispatch/plan-service.ts'), 'utf8');
+    const sel = /const driverSel = \{([^}]*)\} as const;/.exec(src)?.[1] ?? '';
+    expect(sel).toContain('departMin: true');
+    expect(sel).toContain('returnMin: true');
   });
 });
 

@@ -237,10 +237,52 @@ describe('assignReplanDrivers - drivers across re-plans', () => {
     expect(got.get('A:2')).toBe('D'); // 11:00-14:30 does not
   });
 
-  it("keeps this version's own choice for the trip even if it now overlaps (shown as a warning instead)", () => {
-    const now = [on('A', 1, 'D'), on('B', 1, 'D')];
-    const got = assignReplanDrivers([trip('A', 1), trip('B', 1)], now, [], [], usable);
+  it("keeps a clash the dispatcher made in this version: the two trips already overlapped with the same driver (a plan warning)", () => {
+    const at = (l: ReplanLoad) => ({ departMin: l.departMin, returnMin: l.returnMin });
+    const now = [{ ...on('A', 1, 'D'), ...at(trip('A', 1)) }, { ...on('B', 1, 'D'), ...at(trip('B', 1, null, 30)) }];
+    const got = assignReplanDrivers([trip('A', 1), trip('B', 1, null, 15)], now, [], [], usable);
     expect([got.get('A:1'), got.get('B:1')]).toEqual(['D', 'D']);
+  });
+
+  describe('"Use instead" re-times a trip onto the hours of another trip of its driver (third review of PR3)', () => {
+    // The re-plan job applied RECOMMENDED: from the parent it gave Ali T02 L1 09:30-11:00 and T03 L1
+    // 12:00-14:00 (no clash at those times). Both are this version's loads now, so "Use instead"
+    // reads them as this version's drivers (step 1); MIN_COST moves T03 L1 to 10:00-12:00.
+    const load = (truckId: string, departMin: number, returnMin: number, defaultDriverId: string | null = null): ReplanLoad => ({
+      key: `${truckId}:1`,
+      truckId,
+      loadNo: 1,
+      departMin,
+      returnMin,
+      defaultDriverId,
+    });
+    const job = [
+      { truckId: 'T02', loadNo: 1, driverId: 'ALI', departMin: 570, returnMin: 660 },
+      { truckId: 'T03', loadNo: 1, driverId: 'ALI', departMin: 720, returnMin: 840 },
+    ];
+    const withDrivers = (loads: ReplanLoad[], got: Map<string, string | null>) =>
+      loads.map((l) => ({ id: l.key, truckId: l.truckId, departMin: l.departMin, returnMin: l.returnMin, driverId: got.get(l.key) ?? null }));
+
+    it('the trip that moved loses the driver, whatever the order of the loads; no driver clash', () => {
+      const useInstead = [load('T02', 570, 660), load('T03', 600, 720)];
+      for (const loads of [useInstead, [...useInstead].reverse()]) {
+        const got = assignReplanDrivers(loads, job, [], [], new Set(['ALI']));
+        expect(Object.fromEntries(got)).toEqual({ 'T02:1': 'ALI', 'T03:1': null });
+        expect(driverClashes(withDrivers(loads, got))).toHaveLength(0);
+      }
+    });
+
+    it("the moved trip gets the truck's default driver when that one is free", () => {
+      const loads = [load('T03', 600, 720, 'SAM'), load('T02', 570, 660)];
+      const got = assignReplanDrivers(loads, job, [], [], new Set(['ALI', 'SAM']));
+      expect(Object.fromEntries(got)).toEqual({ 'T02:1': 'ALI', 'T03:1': 'SAM' });
+    });
+
+    it('trips that do not overlap after the re-time keep their driver', () => {
+      const loads = [load('T02', 570, 660), load('T03', 690, 810)];
+      const got = assignReplanDrivers(loads, job, [], [], new Set(['ALI']));
+      expect(Object.fromEntries(got)).toEqual({ 'T02:1': 'ALI', 'T03:1': 'ALI' });
+    });
   });
 
   describe('copy-forward re-plans (review: untouched copies are the parent\'s evidence, checked for clashes)', () => {

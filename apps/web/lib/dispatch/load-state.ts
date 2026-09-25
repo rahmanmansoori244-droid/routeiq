@@ -102,6 +102,9 @@ export interface DriverOnLoad {
   truckId: string;
   loadNo: number;
   driverId: string | null;
+  /** The trip's planned time away in that version (minutes from midnight), when known. */
+  departMin?: number;
+  returnMin?: number;
 }
 
 /**
@@ -133,11 +136,12 @@ export interface VersionLoadDriver extends DriverOnLoad {
 
 /**
  * This version's own driver evidence for its re-plan (the `now` of assignReplanDrivers, step 1,
- * which is never checked for time clashes): its loads, except the PLANNED copies that the re-plan
- * carried from the parent (copy-forward) with the parent load's driver unchanged. Nobody decided
- * those drivers on this version, so they stay parent evidence (step 2, clash-checked) - as before
- * copy-forward, when a new version held only its frozen copies. A driver the dispatcher changed on
- * a copy (after a failed re-plan) is this version's own choice and counts. Frozen loads always count.
+ * which may keep a clash its trips already had in this version): its loads, except the PLANNED
+ * copies that the re-plan carried from the parent (copy-forward) with the parent load's driver
+ * unchanged. Nobody decided those drivers on this version, so they stay parent evidence (step 2) -
+ * as before copy-forward, when a new version held only its frozen copies. A driver the dispatcher
+ * changed on a copy (after a failed re-plan) is this version's own choice and counts. Frozen loads
+ * always count.
  */
 export function ownDriverEvidence<L extends VersionLoadDriver>(now: readonly L[], parent: readonly (DriverOnLoad & { id: string })[]): L[] {
   const parentDriver = new Map(parent.map((p) => [p.id, p.driverId]));
@@ -178,14 +182,19 @@ export interface ReplanLoad extends Omit<DriverTime, 'driverId'> {
  *   3. the nearest trip of the truck in either version (this version's load wins for one trip)
  *   4. the truck's default driver
  * Each step runs over ALL new loads before the next one, so a weak guess on one truck (say its
- * default driver) never takes a driver that stronger evidence puts on another truck. No step ever
- * puts a driver on a load that overlaps one of the driver's kept loads on another truck: a kept
- * (frozen) load cannot move, so that would always be a second sheet for the same hours - also in
- * step 1, when "Use instead" re-times a trip onto a locked load's hours (review of PR3). Steps 2-4
- * are guesses: they also never overlap loads already given out. Such a load is left without a
- * driver (the next step may still find one) for the dispatcher to fill. Between two new loads,
- * step 1 keeps this version's choice even if the trips now overlap: that clash shows as a plan
- * warning (driverClashes). Only drivers in `usable` (active, this tenant) are ever picked.
+ * default driver) never takes a driver that stronger evidence puts on another truck.
+ *
+ * No double booking: no step puts a driver on a load that overlaps a load of that driver on another
+ * truck - a kept (frozen) load, or a load already given out in this plan. The one exception is a
+ * clash the dispatcher made: in step 1, two trips of this version that already overlapped with the
+ * same driver keep that driver on both (shown as a plan warning, driverClashes). A kept load cannot
+ * move, so a clash with one is never kept, whatever the evidence (review of PR3: "Use instead"
+ * re-timed a trip onto a locked load's hours). Third review of PR3: "Use instead" re-timing one of
+ * two trips that had the same driver onto the other's hours - drivers the job itself had filled in -
+ * kept the driver on both; step 1 now keeps a driver only where the trip did not move onto the
+ * hours of another of their trips. Step 1 gives the trips that moved least first, so the trip that
+ * moved loses the driver. A load left out goes to the next step, or stays without a driver for the
+ * dispatcher to fill. Only drivers in `usable` (active, this tenant) are ever picked.
  */
 export function assignReplanDrivers(
   newLoads: ReplanLoad[],
@@ -195,26 +204,50 @@ export function assignReplanDrivers(
   usable: ReadonlySet<string>,
 ): Map<string, string | null> {
   const out = new Map<string, string | null>(newLoads.map((l) => [l.key, null]));
+  const tripKey = (l: { truckId: string; loadNo: number }) => `${l.truckId}:${l.loadNo}`;
   const frozen: DriverTime[] = kept.filter((k) => k.driverId !== null);
-  const busy: DriverTime[] = [...frozen];
+  // Loads already given a driver in this plan (step 1 first).
+  const given: (DriverTime & { loadNo: number })[] = [];
+  // This version's trips as they were before this plan (the times of step 1's evidence).
+  const before = new Map(now.map((l) => [tripKey(l), l]));
+  const timesBefore = (l: { truckId: string; loadNo: number }) => {
+    const b = before.get(tripKey(l));
+    return b && b.departMin !== undefined && b.returnMin !== undefined ? { truckId: b.truckId, departMin: b.departMin, returnMin: b.returnMin } : null;
+  };
+  // The two trips already overlapped in this version: a clash the dispatcher made (kept, warned).
+  const clashedBefore = (a: { truckId: string; loadNo: number }, b: { truckId: string; loadNo: number }) => {
+    const x = timesBefore(a);
+    const y = timesBefore(b);
+    return !!x && !!y && timesClash(x, y);
+  };
+  // How far a trip moved from its hours in this version (unknown: last).
+  const moved = (l: ReplanLoad) => {
+    const b = timesBefore(l);
+    return b ? Math.abs(l.departMin - b.departMin) + Math.abs(l.returnMin - b.returnMin) : Number.POSITIVE_INFINITY;
+  };
   // Both versions' trips of each truck; a trip in this version replaces the parent's same trip.
-  const inNow = new Set(now.map((l) => `${l.truckId}:${l.loadNo}`));
-  const either = [...now, ...parent.filter((l) => !inNow.has(`${l.truckId}:${l.loadNo}`))];
-  const steps: { guess: boolean; pick: (l: ReplanLoad) => string | null }[] = [
-    { guess: false, pick: (l) => pickLoadDriver(now, l.truckId, l.loadNo, usable, { exactOnly: true }) },
-    { guess: true, pick: (l) => pickLoadDriver(parent, l.truckId, l.loadNo, usable, { exactOnly: true }) },
-    { guess: true, pick: (l) => pickLoadDriver(either, l.truckId, l.loadNo, usable) },
-    { guess: true, pick: (l) => (l.defaultDriverId && usable.has(l.defaultDriverId) ? l.defaultDriverId : null) },
+  const inNow = new Set(now.map(tripKey));
+  const either = [...now, ...parent.filter((l) => !inNow.has(tripKey(l)))];
+  const steps: { own: boolean; pick: (l: ReplanLoad) => string | null }[] = [
+    { own: true, pick: (l) => pickLoadDriver(now, l.truckId, l.loadNo, usable, { exactOnly: true }) },
+    { own: false, pick: (l) => pickLoadDriver(parent, l.truckId, l.loadNo, usable, { exactOnly: true }) },
+    { own: false, pick: (l) => pickLoadDriver(either, l.truckId, l.loadNo, usable) },
+    { own: false, pick: (l) => (l.defaultDriverId && usable.has(l.defaultDriverId) ? l.defaultDriverId : null) },
   ];
   for (const step of steps) {
-    for (const l of newLoads) {
+    // Step 1: the trips that moved least first (a stable sort keeps the order otherwise).
+    const order = step.own ? [...newLoads].sort((a, b) => moved(a) - moved(b) || 0) : newLoads;
+    for (const l of order) {
       if (out.get(l.key) !== null) continue;
       const driverId = step.pick(l);
       if (!driverId) continue;
       // Kept loads never move: a clash with one is a double booking, whatever the evidence.
-      if ((step.guess ? busy : frozen).some((b) => b.driverId === driverId && timesClash(b, l))) continue;
+      if (frozen.some((b) => b.driverId === driverId && timesClash(b, l))) continue;
+      // Nor two loads of this plan - unless this version's driver was already on both at
+      // overlapping hours (the dispatcher's own clash, step 1 only).
+      if (given.some((b) => b.driverId === driverId && timesClash(b, l) && !(step.own && clashedBefore(b, l)))) continue;
       out.set(l.key, driverId);
-      busy.push({ truckId: l.truckId, driverId, departMin: l.departMin, returnMin: l.returnMin });
+      given.push({ truckId: l.truckId, loadNo: l.loadNo, driverId, departMin: l.departMin, returnMin: l.returnMin });
     }
   }
   return out;
