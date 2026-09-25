@@ -617,6 +617,193 @@ def test_osrm_tiles_large_matrices():
 
 
 # --------------------------------------------------------------------------------------
+# ROAD MATRIX PROVENANCE (review F18) AND DEADLINE (review F19)
+# --------------------------------------------------------------------------------------
+
+def _osrm_null_transport(calls: list, null_pairs: set[tuple[int, int]], snap_m: dict[int, float] | None = None, sleep_s: float = 0.0):
+    """Like _osrm_ok_transport (one tile: request positions = coordinate indices), with some cells
+    null (OSRM could not route them) and an optional delay per call."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if sleep_s:
+            time.sleep(sleep_s)
+        coords = request.url.path.split("/")[-1].split(";")
+        n_all = len(coords)
+        src = [int(x) for x in request.url.params.get("sources", ";".join(map(str, range(n_all)))).split(";")]
+        dst = [int(x) for x in request.url.params.get("destinations", ";".join(map(str, range(n_all)))).split(";")]
+        dist = [[None if (i, j) in null_pairs else abs(i - j) * 2000.0 for j in dst] for i in src]
+        dur = [[None if (i, j) in null_pairs else abs(i - j) * 180.0 for j in dst] for i in src]
+        wp = lambda k: {"distance": (snap_m or {}).get(k, 12.0), "location": [0, 0]}  # noqa: E731
+        return httpx.Response(200, json={"code": "Ok", "distances": dist, "durations": dur,
+                                         "sources": [wp(k) for k in src], "destinations": [wp(k) for k in dst]})
+    return httpx.MockTransport(handler)
+
+
+COORDS4 = [(23.568, 58.392), (23.600, 58.450), (23.620, 58.470), (24.710, 46.680)]
+
+
+def test_road_factor_only_on_road_cells():
+    """A null cell and the legs of a point far from any road are estimates: exactly the Haversine
+    leg (truck speed), never scaled again by road_time_factor. Road cells are scaled x1.25."""
+    from providers import HaversineProvider, resolve_matrix
+
+    client = httpx.Client(transport=_osrm_null_transport([], {(1, 2)}, snap_m={3: 250_000.0}))
+    mx = resolve_matrix(COORDS4, provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3,
+                        avg_speed_kmh=40.0, road_time_factor=1.25, osrm_client=client)
+    hv = HaversineProvider(1.3, 40.0)
+    assert mx.duration_s[0][1] == round(180 * 1.25) and mx.duration_s[2][1] == round(180 * 1.25)  # road cells
+    assert (mx.distance_m[1][2], mx.duration_s[1][2]) == hv.leg(COORDS4[1], COORDS4[2])  # null cell, unscaled
+    for i in range(3):
+        assert (mx.distance_m[i][3], mx.duration_s[i][3]) == hv.leg(COORDS4[i], COORDS4[3])  # far point, unscaled
+        assert mx.leg_estimated(i, 3) and mx.leg_estimated(3, i)
+    assert mx.leg_estimated(1, 2) and not mx.leg_estimated(0, 1)
+    assert mx.quality == "MIXED" and mx.is_estimated is False
+
+
+def test_all_cells_patched_is_estimated():
+    from providers import resolve_matrix
+
+    everything = {(i, j) for i in range(3) for j in range(3) if i != j}
+    mx = resolve_matrix(COORDS4[:3], provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        road_time_factor=1.25, osrm_client=httpx.Client(transport=_osrm_null_transport([], everything)))
+    assert mx.quality == "ESTIMATED" and mx.is_estimated is True and mx.provider_name == "OSRM"
+    ok = resolve_matrix(COORDS4[:3], provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        osrm_client=httpx.Client(transport=_osrm_null_transport([], set())))
+    assert ok.quality == "ROAD" and not ok.estimated
+
+
+def test_loads_count_their_estimated_legs():
+    """A load touching the far point reports estimated legs (stop flags too); a road-only load 0.
+    The response says MIXED: some legs are estimates, the plan is not wholly 'Road km'."""
+    # FAR: a pin 9 km from any road in the map (a wrong pin); its legs are estimates.
+    stops = [stop("A", 23.60, 58.45), stop("B", 23.62, 58.47), stop("FAR", 23.70, 58.55, cases=20)]
+    r = req(stops, [truck("T01", cap=20, max_trips=1), truck("T02", cap=20, max_trips=1)], distance_provider="OSRM",
+            osrm_url="http://osrm.local")
+    resp = optimize_dispatch(r, osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), snap_m={3: 9_000.0})))
+    assert resp.distance_quality == "MIXED" and resp.distance_is_estimated is False
+    sc = rec(resp)
+    for ld in sc.loads:
+        far = any(st.stop_id == "FAR" for st in ld.stops)
+        assert (ld.estimated_legs > 0) == far, (ld.truck_id, ld.estimated_legs)
+        for st in ld.stops:
+            if st.stop_id == "FAR":
+                assert st.leg_estimated
+    assert sc.estimated_legs == sum(ld.estimated_legs for ld in sc.loads)
+
+
+def test_submatrix_keeps_the_estimated_mask():
+    from dispatch_solver import _submatrix
+    from providers import resolve_matrix
+
+    stops = [stop("A", 23.60, 58.45), stop("B", 23.62, 58.47), stop("C", 24.71, 46.68)]
+    mx = resolve_matrix(COORDS4, provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        osrm_client=httpx.Client(transport=_osrm_null_transport([], {(1, 2)}, snap_m={3: 250_000.0})))
+    kept, sub = _submatrix(stops, [1, 2], mx)  # drop A: nodes 0, 2, 3 remain as 0, 1, 2
+    assert [s.stop_id for s in kept] == ["B", "C"]
+    assert sub.leg_estimated(1, 2) and sub.leg_estimated(0, 2) and not sub.leg_estimated(0, 1)
+    assert sub.quality == mx.quality
+
+
+def test_impossibility_on_estimated_distance_says_so():
+    """HARD_WINDOW_INFEASIBLE / SHIFT_LIMIT are the only reasons presented as proof; when the
+    legs they rest on are estimates the message says so (new issue 27)."""
+    far = stop("FAR", 24.20, 58.90, hard_start_min=hm("06:00"), hard_end_min=hm("06:05"))
+    r = req([far, stop("A", 23.60, 58.45)], [truck("T01")])  # Haversine: every leg estimated
+    sc = rec(optimize_dispatch(r))
+    msg = next(u.reason_message for u in sc.unserved if u.stop_id == "FAR")
+    assert "(based on estimated distance)" in msg
+
+
+def test_slow_osrm_respects_matrix_deadline(monkeypatch):
+    """Review F19: OSRM answering slowly (9 tiles x 1.5 s) no longer eats the solver budget: after
+    MATRIX_BUDGET_SEC the matrix is estimated with a 'too slow' warning, and the recommended plan
+    still gets its exact re-check."""
+    from providers import resolve_matrix
+
+    monkeypatch.setenv("OSRM_TABLE_TILE", "4")  # 5 coordinates -> blocks of 2 -> 9 table calls
+    monkeypatch.setenv("OSRM_PARALLEL", "1")
+    coords = [(23.568 + i * 0.01, 58.392) for i in range(5)]
+    t0 = time.monotonic()
+    mx = resolve_matrix(coords, provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), sleep_s=1.5)), deadline=time.monotonic() + 2.0)
+    assert time.monotonic() - t0 < 4.0
+    assert mx.provider_name == "HAVERSINE" and mx.is_estimated
+    assert any("road routing too slow" in w for w in mx.warnings)
+
+    monkeypatch.setenv("MATRIX_BUDGET_SEC", "2")
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    stops = [stop(f"S{i}", 23.58 + i * 0.01, 58.40, cases=20) for i in range(4)]
+    r = req(stops, [truck("T01")], distance_provider="OSRM", osrm_url="http://osrm.local", time_limit_sec=2)
+    t0 = time.monotonic()
+    resp = optimize_dispatch(r, osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), sleep_s=1.5)))
+    assert time.monotonic() - t0 < 20
+    assert resp.distance_quality == "ESTIMATED" and resp.distance_is_estimated
+    assert any("too slow" in w for w in resp.warnings)
+    assert rec(resp).feasibility.status == "VERIFIED"
+
+
+def test_hanging_osrm_attempt_is_bounded_by_the_time_left():
+    """A request that never answers is cut at the deadline, not after 30 s x 2 attempts."""
+    from providers import resolve_matrix
+
+    t0 = time.monotonic()
+    mx = resolve_matrix(COORDS4[:3], provider="OSRM", osrm_url="http://osrm.local", haversine_multiplier=1.3, avg_speed_kmh=40.0,
+                        osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), sleep_s=4.0)), deadline=time.monotonic() + 1.0)
+    assert time.monotonic() - t0 < 2.5
+    assert mx.provider_name == "HAVERSINE"
+    assert any("too slow" in w for w in mx.warnings)
+
+
+def test_tile_size_env_changes_the_call_count(monkeypatch):
+    from providers import OSRMProvider
+
+    coords = [(23.5 + i * 0.001, 58.3) for i in range(121)]
+    calls: list = []
+    monkeypatch.setenv("OSRM_TABLE_TILE", "400")
+    OSRMProvider("http://osrm.local", client=httpx.Client(transport=_osrm_ok_transport(calls))).get_matrix(coords)
+    assert len(calls) == 1
+    calls.clear()
+    monkeypatch.setenv("OSRM_TABLE_TILE", "90")
+    OSRMProvider("http://osrm.local", client=httpx.Client(transport=_osrm_ok_transport(calls))).get_matrix(coords)
+    assert len(calls) == 9  # blocks of 45: 3 x 3
+
+
+def test_parallel_and_serial_tiles_give_the_same_matrix(monkeypatch):
+    from providers import OSRMProvider
+
+    coords = [(23.5 + i * 0.001, 58.3 + (i % 3) * 0.01) for i in range(25)]
+    monkeypatch.setenv("OSRM_TABLE_TILE", "10")
+    out = []
+    for par in ("1", "4"):
+        monkeypatch.setenv("OSRM_PARALLEL", par)
+        mx = OSRMProvider("http://osrm.local", client=httpx.Client(transport=_osrm_null_transport([], {(3, 4)}))).get_matrix(coords)
+        out.append((mx.distance_m, mx.duration_s, sorted(mx.estimated)))
+    assert out[0] == out[1]
+
+
+def test_more_than_the_supported_stops_is_refused():
+    from dispatch_models import MAX_STOPS
+
+    stops = [stop(f"S{i}", 23.5 + i * 0.0001, 58.3, cases=1) for i in range(MAX_STOPS + 1)]
+    with pytest.raises(ValidationError):
+        req(stops, [truck("T01")])
+
+
+def test_more_than_the_supported_stops_is_422_over_http(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    import main
+    from dispatch_models import MAX_STOPS
+
+    monkeypatch.setattr(main, "SOLVER_TOKEN", "t0k")
+    body = {"run_id": "r", "tenant_id": "t", "depot": {"id": "d", "lat": 23.58, "lng": 58.39}, "trucks": [],
+            "stops": [{"stop_id": f"s{i}", "order_ids": [f"o{i}"], "customer_id": f"c{i}", "lat": 23.6, "lng": 58.4,
+                       "demand_cases": 1} for i in range(MAX_STOPS + 1)]}
+    r = TestClient(main.app).post("/optimize-dispatch", json=body, headers={"X-Solver-Token": "t0k"})
+    assert r.status_code == 422
+
+
+# --------------------------------------------------------------------------------------
 # REALISTIC DAY / PERFORMANCE / RECONCILIATION
 # --------------------------------------------------------------------------------------
 
@@ -753,3 +940,42 @@ def test_health_reports_routing_status(monkeypatch):
     body = TestClient(main.app).get("/health").json()
     assert body["ok"] is True  # OSRM down never fails the solver
     assert body["routing"] == {"provider": "OSRM", "status": "down"}
+
+
+# --------------------------------------------------------------------------------------
+# SETTINGS BOUNDS (review F21): every value the web accepts, the optimizer accepts
+# --------------------------------------------------------------------------------------
+
+def _planner_bounds():
+    import os
+
+    p = os.path.join(os.path.dirname(__file__), "..", "..", "..", "packages", "shared-types", "src", "planner-bounds.json")
+    if not os.path.exists(p):
+        pytest.skip("planner-bounds.json is not next to the solver (image build)")
+    with open(p, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def test_web_setting_bounds_lie_inside_the_solver_contract():
+    """Every Settings / Trucks / Depots bound of the web (packages/shared-types/src/planner-bounds.json)
+    is accepted by the Pydantic models at both ends, so a saved value never fails an optimization."""
+    from dispatch_models import MAX_STOPS
+
+    b = _planner_bounds()
+    assert b["maxStops"] == MAX_STOPS
+    for section, model in (("config", DispatchConfig), ("truck", DispatchTruck), ("depot", DispatchDepot)):
+        for key, spec in b[section].items():
+            field = spec["solver"]
+            if not field or field.startswith("stop."):
+                continue
+            for v in (spec["min"], spec["max"]):
+                v = int(v) if spec.get("int") else float(v)
+                if section == "config":
+                    DispatchConfig(**{field: v})
+                elif section == "truck":
+                    DispatchTruck(**{"id": "t", "capacity_cases": 10, field: v})
+                else:
+                    DispatchDepot(id="d", lat=23.6, lng=58.4, **{field: v})
+    svc = b["config"]["defaultServiceTimeMin"]
+    for v in (svc["min"], svc["max"]):
+        DispatchStop(stop_id="s", order_ids=["o"], customer_id="c", lat=23.6, lng=58.4, demand_cases=1, service_min=v)

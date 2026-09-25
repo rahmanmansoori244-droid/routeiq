@@ -53,6 +53,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable
 
+import costing
 from dispatch_models import DAY_MIN, DispatchStop
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -106,16 +107,36 @@ class TruckPrice:
 
 @dataclass(frozen=True)
 class Pricing:
-    """One scenario's prices in objective units (1 unit = 0.00001 OMR)."""
+    """One scenario's prices in objective units (1 unit = 0.00001 OMR).
+
+    Driver time is paid for the whole truck day (costing.py, policy TRUCK_DAY_SPAN): from the
+    first departure - for a truck with frozen loads, from its last frozen return, the frozen part
+    before it being fixed - to the last return, turnarounds and waiting included."""
 
     trucks: dict[int, TruckPrice]
-    span: int = 0  # per second from the truck's first departure to its last return (driver)
+    span: int = 0  # per second of paid truck day (driver), for the search models (integer)
     overtime: int = 0  # per second of truck day beyond overtime_after_s ...
     overtime_after_s: int | None = None  # ... counted from the first departure (frozen: first frozen one)
     pref: int = 0  # per second outside a preferred window
     early: dict[int, int] = field(default_factory=dict)  # priority -> per second after shift start
     shift_start_s: int = 0
     change: int = 0  # per stop on another truck than in the previous plan version
+    # The exact rates in OMR per hour (span / overtime above are rounded to whole units per
+    # second). score() prices money with these, so it equals the reported costs; None = derived
+    # from span / overtime.
+    driver_per_hour: float | None = None
+    overtime_per_hour: float | None = None
+
+    def day_rates(self) -> costing.DayRates:
+        drv = self.driver_per_hour if self.driver_per_hour is not None else self.span * 3600.0 / costing.COST_SCALE
+        ot = self.overtime_per_hour if self.overtime_per_hour is not None else self.overtime * 3600.0 / costing.COST_SCALE
+        return costing.DayRates(driver_per_hour=drv, overtime_per_hour=ot, overtime_after_s=self.overtime_after_s)
+
+    def truck_rates(self, idx: int) -> costing.TruckRates:
+        p = self.trucks[idx]
+        # per_m holds the whole per-metre rate (non-fuel + fuel): priced here as distance.
+        return costing.TruckRates(fixed=p.fixed / costing.COST_SCALE, trip=p.trip / costing.COST_SCALE,
+                                  per_km=p.per_m * 1000.0 / costing.COST_SCALE)
 
 
 @dataclass
@@ -319,9 +340,13 @@ def time_truck(day: Day, td: "TruckDay", loads: list[Load], pricing: Pricing) ->
         c = lp.Constraint(-inf, day.shift_max_s)
         c.SetCoefficient(last, 1)
         c.SetCoefficient(first, -1)
+    # Driver pay (whole truck day): last return - first departure. With frozen loads the day
+    # started at the first frozen departure, so the paid time added here is last return - last
+    # frozen return (a constant start): an earlier or later first new departure costs the same.
     span = pricing.span + _TIE
     obj.SetCoefficient(last, obj.GetCoefficient(last) + span)
-    obj.SetCoefficient(first, obj.GetCoefficient(first) - span + 1e-6)  # ties: earliest day
+    paid_first = pricing.span if td.shift_anchor_s is None else 0
+    obj.SetCoefficient(first, obj.GetCoefficient(first) - paid_first - _TIE + 1e-6)  # ties: earliest day
     if pricing.overtime and pricing.overtime_after_s is not None:
         u = lp.NumVar(0, inf, "ot")
         if td.shift_anchor_s is None:  # u - last + first >= -after
@@ -419,33 +444,33 @@ class Score:
 
 
 def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
-    """RECOMMENDED objective of a timed plan: unserved value + fixed + trip + km x truck rate +
-    driver cost on the truck span + overtime (from the first actual departure, as reported) +
-    preferred-window / early-arrival costs + plan-continuity changes."""
+    """RECOMMENDED objective of a timed plan: unserved value + operating cost + preferred-window /
+    early-arrival costs + plan-continuity changes. The operating cost (money) is the canonical
+    cost model, costing.truck_day_costs - fixed, trip, distance and fuel, driver pay for the whole
+    truck day and overtime - so it is exactly what the plan reports (dispatch_solver._build_scenario)."""
     served: set[int] = set()
-    op = soft = trucks = n_loads = metres = 0
+    soft = trucks = n_loads = metres = 0
+    money = 0.0
+    rates = pricing.day_rates()
     for idx, loads in plan.items():
         if not loads:
             continue
         td = day.by_idx[idx]
-        price = pricing.trucks[idx]
         trucks += 1
-        op += price.fixed
+        timings = []
         for tl in loads:
             n_loads += 1
             m = day.metres(tl.stops)
             metres += m
-            op += price.trip + int(round(price.per_m * m))
+            timings.append(costing.LoadTiming(depart_s=tl.depart_s, return_s=tl.return_s, km=m / 1000.0))
             for k, start in zip(tl.stops, tl.starts):
                 served.add(k)
                 soft += _soft_cost(day, pricing, k, start)
                 if pricing.change and _moved(day, k, td):
                     soft += pricing.change
-        first, last = loads[0].depart_s, loads[-1].return_s
-        op += pricing.span * (last - first)
-        if pricing.overtime and pricing.overtime_after_s is not None:
-            base = td.shift_anchor_s if td.shift_anchor_s is not None else first
-            op += pricing.overtime * max(0, last - base - pricing.overtime_after_s)
+        money += costing.truck_day_costs(pricing.truck_rates(idx), rates, timings, anchor_s=td.shift_anchor_s,
+                                         frozen_return_s=td.frozen_return_s).total
+    op = costing.to_units(money)
     unserved = sum(v for k, v in enumerate(day.values) if k not in served)
     return Score(unserved=unserved, cost=op + soft, trucks=trucks, loads=n_loads, metres=metres, operating=op)
 
@@ -570,9 +595,16 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
             if c:
                 cost_terms.append(c * x[j, td.idx])
         if pricing.span:
+            # Paid truck day (costing.py): first departure -> last return. A truck with frozen loads
+            # started its day earlier; the part added here runs from its last frozen return, which
+            # every new load (and its turnaround) comes after.
             sp = m.NewIntVar(0, HORIZON_S, "")
-            m.Add(sp >= en - st).OnlyEnforceIf(used)
-            m.Add(sp >= busy - gmax * used)
+            if td.shift_anchor_s is None or td.frozen_return_s is None:
+                m.Add(sp >= en - st).OnlyEnforceIf(used)
+                m.Add(sp >= busy - gmax * used)
+            else:
+                m.Add(sp >= en - td.frozen_return_s).OnlyEnforceIf(used)
+                m.Add(sp >= busy)
             cost_terms.append(pricing.span * sp)
         if pricing.overtime and pricing.overtime_after_s is not None:
             ot = m.NewIntVar(0, HORIZON_S, "")

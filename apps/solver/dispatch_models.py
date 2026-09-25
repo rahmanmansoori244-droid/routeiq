@@ -30,6 +30,9 @@ UnservedReason = Literal[
 ]
 
 DAY_MIN = 24 * 60
+# Largest day one optimization supports (review F19): the road matrix, the search and the
+# post-solve stage are sized for it. More stops answer 422; the web checks it first.
+MAX_STOPS = 600
 
 
 class DispatchDepot(BaseModel):
@@ -108,7 +111,10 @@ class DispatchConfig(BaseModel):
     loading_min_per_case: float = Field(default=0.0, ge=0, le=1)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
-    driver_cost_per_hour: float = Field(default=0.0, ge=0)  # OMR/h of on-road time
+    # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
+    # return, depot turnaround and waiting included (costing.py, policy TRUCK_DAY_SPAN). Overtime
+    # (overtime_cost_per_hour, after overtime_after_min from that first departure) is on top.
+    driver_cost_per_hour: float = Field(default=0.0, ge=0)
     # Strict priorities (default): one higher-priority stop always wins over ANY number of
     # lower-priority stops. False = the weighted scheme below (e.g. 11 P3 outweigh one P2).
     strict_priorities: bool = True
@@ -132,8 +138,9 @@ class DispatchConfig(BaseModel):
     haversine_multiplier: float = Field(default=1.3, ge=1.0, le=3.0)
     avg_speed_kmh: float = Field(default=40.0, gt=0, le=130)
     # OSRM's car profile is faster than a loaded delivery truck; road durations are scaled by
-    # this factor (1.25 = trucks take 25% longer than cars). Not applied to Haversine, which
-    # already uses the truck average speed.
+    # this factor (1.25 = trucks take 25% longer than cars). Applied to real road cells only: an
+    # estimated leg (Haversine, a leg OSRM could not route, a point far from any road) already
+    # uses the truck average speed.
     road_time_factor: float = Field(default=1.25, ge=1.0, le=3.0)
     time_limit_sec: int | None = Field(default=None, ge=1, le=600)  # None = auto by size
     scenarios: list[DispatchScenarioName] = Field(
@@ -159,7 +166,7 @@ class DispatchRequest(BaseModel):
     tenant_id: str
     depot: DispatchDepot
     trucks: list[DispatchTruck]
-    stops: list[DispatchStop]
+    stops: list[DispatchStop] = Field(max_length=MAX_STOPS)
     config: DispatchConfig = Field(default_factory=DispatchConfig)
 
     @model_validator(mode="after")
@@ -196,9 +203,19 @@ class PlannedStop(BaseModel):
     kg: float
     hard_window_ok: bool
     pref_window_ok: bool
+    # The leg into this stop is an estimate (straight line x multiplier), not a road distance.
+    leg_estimated: bool = False
 
 
 class PlannedLoad(BaseModel):
+    """One load. Costs follow costing.py (policy TRUCK_DAY_SPAN): total_cost = fixed_cost +
+    trip_cost + distance_cost + fuel_cost + driver_cost + overtime_cost, where the driver and
+    overtime costs are this load's share of the whole truck day - the paid interval from the truck's
+    previous return (its departure for load 1, its last frozen return for the first new load after
+    frozen loads) to this load's return. fixed_cost is the truck's day cost, on load 1 only.
+    The fields after return_leg_km are optional for compatibility (a solver before them sent none;
+    its fixed_cost then included the trip cost and total_cost excluded turnarounds and overtime)."""
+
     truck_id: str
     load_no: int
     depart_min: int
@@ -216,6 +233,14 @@ class PlannedLoad(BaseModel):
     total_cost: float
     return_leg_km: float
     stops: list[PlannedStop]
+    trip_cost: float | None = None
+    driver_cost: float | None = None  # = time_cost (kept as an alias)
+    overtime_cost: float | None = None
+    driver_paid_min: int | None = None  # minutes of paid truck day this load owns
+    paid_from_min: int | None = None  # where that paid interval starts
+    overtime_min: int | None = None
+    # Legs of this load (the return included) whose distance is an estimate, not a road distance.
+    estimated_legs: int | None = None
 
 
 class UnservedStop(BaseModel):
@@ -234,6 +259,39 @@ class ObjectiveComponents(BaseModel):
     overtime_cost: float
     window_penalty: float
     margin_served: float | None
+    trip_cost: float | None = None  # fixed_cost above excludes it (cost_version 2)
+
+
+class TruckDayCostOut(BaseModel):
+    """The new loads' part of one truck day (costing.py). With frozen loads, the day started at
+    day_start_min (first frozen departure) and this part is paid from paid_from_min (last frozen
+    return); the frozen loads keep the costs they were planned with. Every figure is the sum of
+    the truck's loads in this scenario."""
+
+    truck_id: str
+    loads: int
+    frozen_loads: int
+    day_start_min: int
+    paid_from_min: int
+    last_return_min: int
+    paid_min: int
+    overtime_min: int
+    fixed_cost: float
+    trip_cost: float
+    distance_cost: float
+    fuel_cost: float
+    driver_cost: float
+    overtime_cost: float
+    total_cost: float
+
+
+class PreferencePenalties(BaseModel):
+    """Soft preferences in OMR-equivalent (not money): minutes outside preferred windows, the
+    early-arrival push for high priorities, plan continuity on re-plans."""
+
+    window: float = 0.0
+    early: float = 0.0
+    continuity: float = 0.0
 
 
 FeasibilityCode = Literal[
@@ -311,13 +369,24 @@ class DispatchScenario(BaseModel):
     # Optional for compatibility: a web app older than this field ignores it, and a solver older
     # than it sends none (the web then treats the scenario as not checked by the solver).
     feasibility: FeasibilityReport | None = None
+    # Cost model (review F17). Absent: a solver from before it (costs without turnarounds / overtime).
+    cost_policy: str | None = None  # "TRUCK_DAY_SPAN"
+    cost_version: int | None = None  # 2
+    truck_days: list[TruckDayCostOut] = Field(default_factory=list)
+    paid_driver_min: int | None = None
+    preference_penalties: PreferencePenalties | None = None
+    estimated_legs: int | None = None  # legs of the planned loads whose distance is an estimate
 
 
 class DispatchResponse(BaseModel):
     run_id: str
     engine: str
     matrix_provider: str
+    # True only when every leg is an estimate (distance_quality ESTIMATED); per load see
+    # PlannedLoad.estimated_legs (review F18).
     distance_is_estimated: bool
+    # ROAD: every leg a road distance; MIXED: some legs estimated; ESTIMATED: all estimated.
+    distance_quality: Literal["ROAD", "MIXED", "ESTIMATED"] | None = None
     scenarios: list[DispatchScenario]
     warnings: list[str] = Field(default_factory=list)
 
