@@ -111,6 +111,16 @@ describe('checkPlanFeasibility', () => {
     expect(codes(checkPlanFeasibility(input([load('L1', 1, { capacity: { cases: 30, kg: 1000 } })])))).toEqual(['CAPACITY_CASES']);
   });
 
+  it('each load is checked with the rules it was planned with (settings changed between versions)', () => {
+    // L1 was locked in v1 (shift start 06:00); v2 was planned after the shift start moved to 07:00.
+    const later = { ...RULES, shiftStartMin: 420, depotCloseMin: 560 };
+    const l1 = load('L1', 1, { departMin: 380, returnMin: 520, stops: [stop({ etaMin: 400, serviceStartMin: 400, departureMin: 420 })] });
+    const l2 = load('L2', 2, { rules: later, departMin: 600, returnMin: 700, stops: [stop({ orderId: 'x', etaMin: 620, serviceStartMin: 620, departureMin: 640 })] });
+    const f = checkPlanFeasibility(input([l1, l2]));
+    expect(codes(f)).toEqual(['DEPOT_CLOSE']); // L2 against its own rules; L1 is not "early" under v2's shift start
+    expect(f.violations[0].loadNo).toBe(2);
+  });
+
   it("the optimizer's own report: VIOLATED blocks the truck it names only; UNVERIFIED blocks", () => {
     const other = load('M1', 1, { id: 'M1', truckId: 't2', truckCode: 'T02' });
     const solver: FeasibilityReport = {
