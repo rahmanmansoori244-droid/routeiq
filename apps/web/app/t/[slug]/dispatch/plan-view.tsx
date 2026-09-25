@@ -205,7 +205,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
               <Button variant="outline" size="sm" onClick={() => setLateOpen(true)}>
                 <Plus className="mr-1 h-4 w-4" /> Late order
               </Button>
-              <Button variant="outline" size="sm" disabled={busy === 'replan' || running} onClick={() => replan('REOPTIMIZE')}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={busy === 'replan' || running}
+                onClick={() => replan('REOPTIMIZE')}
+                title="Re-optimize everything that is not locked. Orders may move to other trucks; locked and dispatched loads stay as they are."
+              >
                 <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
               </Button>
             </>

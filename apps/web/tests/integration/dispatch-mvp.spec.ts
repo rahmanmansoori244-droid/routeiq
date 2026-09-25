@@ -14,6 +14,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
+import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
 import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
@@ -320,6 +321,10 @@ describe('NMWC dispatch MVP workflow', () => {
     const re = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/optimize`, j({}));
     expect(re.status).toBe(409); // an applied plan is never re-optimized in place
 
+    // The late-order version (v2) steers orders to the trucks they had in v1 ...
+    const lateReq = await buildDispatchRequest(t.tenantId, runV2);
+    expect(lateReq.request.stops.some((s) => !!s.previous_truck_id)).toBe(true);
+
     const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/replan`, j({ reason: 'REOPTIMIZE' }));
     expect(rp.status).toBe(202);
     const runV3 = (await json(rp)).data.runId;
@@ -330,6 +335,10 @@ describe('NMWC dispatch MVP workflow', () => {
     expect(k.stops.flatMap((s: any) => s.orderIds)).toEqual(lockedLoadOrders);
     expect(p3.reconciliation.ok).toBe(true);
     expect(p3.versions.map((v: any) => v.version)).toEqual([3, 2, 1]);
+    // ... while a re-optimize has no moving charge: no stop carries its previous truck.
+    const reReq = await buildDispatchRequest(t.tenantId, runV3);
+    expect(reReq.request.stops.length).toBeGreaterThan(0);
+    expect(reReq.request.stops.every((s) => !s.previous_truck_id)).toBe(true);
     runV2 = runV3;
   });
 

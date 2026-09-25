@@ -51,7 +51,8 @@ A customer whose open cases or kilograms fit **no** truck is cut into parts befo
    - their trucks become available again only after those loads return and are reloaded;
    - everything else, including the late order, is optimized again.
 3. The late order ends up in an unlocked future load, another truck, or an extra load, or it is **unserved: late order – no capacity**. Locked loads never move.
-4. **Plan continuity:** on a re-plan, moving an order to a different truck than in the previous version costs a small penalty (default 3 OMR per stop). One late order therefore does not reshuffle every unlocked load; orders move only when it clearly pays off. Service and priorities still come first. Measured on the demo day: a re-plan changed 16 assignments with 8 trucks untouched, against 116 changes without continuity.
+4. **Plan continuity:** on a late-order (or manual) re-plan, moving an order to a different truck than in the previous version costs a small penalty (default 3 OMR per stop). One late order therefore does not reshuffle every unlocked load; orders move only when it clearly pays off. Service and priorities still come first. Measured on the demo day: a re-plan changed 16 assignments with 8 trucks untouched, against 116 changes without continuity.
+   A **re-optimize** (the **Re-plan** button, or **OPTIMIZE** again with no late orders waiting) has no moving charge: it looks for the best plan for everything that is not locked, so trucks and loads may change completely. Locked, loading and dispatched loads still never move.
 5. The new version shows, for example: *"1 order added, 3 assignments changed, 5 trucks unchanged, 2 locked/dispatched loads preserved"*.
 6. The old version is kept (SUPERSEDED), never overwritten.
 

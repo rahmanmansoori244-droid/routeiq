@@ -7,7 +7,7 @@
  * DISPATCHED / COMPLETED) are copied verbatim, the parent is marked SUPERSEDED (kept, never
  * overwritten) and only the remaining orders are optimized again.
  */
-import { Prisma, type LoadStatus, type OrderStatus, type UnservedReasonCode } from '@prisma/client';
+import { Prisma, type LoadStatus, type OrderStatus, type PlanReason, type UnservedReasonCode } from '@prisma/client';
 import type {
   DispatchRequest,
   DispatchResponse,
@@ -125,6 +125,15 @@ function usableWindow(start: number | null, end: number | null): { start: number
   return { start, end, ok: true };
 }
 
+/**
+ * Whether moving an order to another truck than in the previous version costs a penalty. Late
+ * orders and manual adjustments keep the rest of the plan steady. A re-optimize asks for the best
+ * plan for everything not locked, so it starts from scratch (frozen loads never move either way).
+ */
+export function usesPlanContinuity(run: { parentRunId: string | null; reason: PlanReason }): boolean {
+  return !!run.parentRunId && run.reason !== 'REOPTIMIZE';
+}
+
 function toPlanningCustomer(c: {
   id: string; code: string; branchCode: string | null; name: string; lat: number | null; lng: number | null;
   priority: number; priorityConfirmed: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean;
@@ -173,7 +182,7 @@ export async function buildDispatchRequest(
   // previous version so one late order does not reshuffle every unlocked load. Per line (not per
   // order) so each part of a split delivery is steered to the truck it was on.
   const prevLineTruck = new Map<string, Map<string, number>>(); // lineId -> truckId -> cases
-  if (run.parentRunId) {
+  if (run.parentRunId && usesPlanContinuity(run)) {
     const prev = await prisma.routeAssignment.findMany({
       where: { runId: run.parentRunId },
       select: { orderId: true, truckId: true, portionLinesJson: true },
