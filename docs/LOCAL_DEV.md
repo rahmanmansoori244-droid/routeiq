@@ -45,4 +45,4 @@ pnpm --filter @routeiq/web exec tsc --noEmit && pnpm --filter @routeiq/web exec 
 
 ## Gotchas
 - Stop `next dev` before `prisma generate` on Windows (the query engine DLL is locked while it runs).
-- The solver solves every plan option in a worker process, so the API stays responsive during a solve. `SOLVER_PARALLEL=0` solves in-process instead (tests and debugging only: `/health` does not answer during a solve).
+- The solver solves every plan option in a worker process, so the API stays responsive during a solve. `SOLVER_PARALLEL=0` solves in-process instead (tests and debugging only: no deadline or time budget applies, and `/health` does not answer during a solve; the solver logs a warning at startup). `FEASIBILITY_GATE=warn` on the web lets trucks whose times break a planning rule be locked and dispatched (emergency switch; unset = enforced).

@@ -60,7 +60,23 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 ## 5. Lock, export, dispatch
 - **Lock** a load when the warehouse starts preparing it. Loads of one truck are locked in order (Load 1 before Load 2).
 - **Loading → Dispatch** when the truck leaves. **Dispatched loads can never be changed.**
-- **Export Excel** gives the master workbook: summary, load plan, one sheet per truck load (manifest + route, printable), SKU loading summary, unserved, reconciliation, assumptions.
+- **Export Excel** gives the master workbook: summary, load plan, one sheet per truck load (manifest + route, printable), SKU loading summary, unserved, reconciliation, assumptions. The assumptions sheet shows the settings the plan was made with, even after the settings changed.
+
+## Times not verified
+Before a load is locked, loaded or dispatched, RouteIQ checks its truck's whole day: every load leaves only after the truck is back and loaded again (turnaround + loading minutes per case), every customer is served inside its receiving hours, no load is over the truck's cases or kg, and the day fits the shift and depot hours. The optimizer checks the same when it makes the plan (column **Timing checked** under **Plan options**).
+- When a truck's day breaks a rule, the plan shows a **red box** with the reasons (for example *T01 load 2 leaves at 08:34, but the truck needs 50 min to reload and load 40 cases: ready 08:54*), the load rows say **Times not verified**, and **Lock**, **Loading** and **Dispatch** are off for that truck. Other trucks are not affected.
+- Click **Re-plan** in the red box: the new version gets times that keep every rule (locked and dispatched loads stay as they are).
+- Its driver sheets and workbook can still be printed, but they say **TIMES NOT VERIFIED**: do not hand them out before re-planning.
+- *Cases with no weight* (a yellow line) does not block: you accepted it at OPTIMIZE; add the case weight under **Products** and re-plan to check the payload.
+- A problem on a load that has already left is only shown, it never blocks the truck's next loads.
+- With **Loading minutes per case** at 0 (the default) this practically never happens; it matters once the real loading minutes are entered.
+
+## Changed after planning
+A plan keeps the customer location, receiving hours, address and truck it was planned with, also on the driver sheets and in the workbook. If you correct a customer's location or hours (or a truck's capacity) after planning:
+- the stop shows the change in orange (*Location updated after planning: new pin ...*), the load gets a **Changed after planning** badge, and the driver sheet prints the same line with a link to the new pin;
+- a **planned** load keeps the old data until you **Re-plan** (step 3 says the plan is out of date);
+- a **locked** load: unlock it and re-plan to use the new location; a **dispatched** load keeps what the driver was given;
+- driver names and phone numbers are always the current ones.
 
 ## Driver sheets
 Each driver gets one sheet per truck load: the stops in order with ETA and receiving hours, address and notes, cases per product, sales orders, a map link and QR code per stop, and a box for the customer to write the cases received, sign and stamp. The sheet never shows costs, fuel or margins.
