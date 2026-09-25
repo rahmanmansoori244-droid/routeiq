@@ -9,11 +9,13 @@ import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/client-ip';
 import { signupOpen } from '@/lib/signup-policy';
 import { isOmanUae } from '@/lib/dispatch/customer-attrs';
+import { COUNTRY_NAMES } from '@/lib/countries';
 
 const signupSchema = z.object({
   companyName: z.string().trim().min(2).max(120),
   slug: z.string().trim().min(3).max(32),
-  country: z.string().trim().min(2).max(64),
+  // A pick-list (review F21): the country decides road routing, so a typo cannot switch it.
+  country: z.enum(COUNTRY_NAMES, { errorMap: () => ({ message: `Choose one of: ${COUNTRY_NAMES.join(', ')}` }) }),
   currency: z.string().trim().min(3).max(8).default('OMR'),
   primaryUnit: z.nativeEnum(CapacityUnit).default('CASES'),
   email: z.string().email().max(254),

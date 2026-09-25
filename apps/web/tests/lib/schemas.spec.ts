@@ -163,31 +163,34 @@ describe('customerSchema', () => {
 });
 
 describe('tenantConfigSchema', () => {
+  // Review F21: exactly the settings the dispatch planner uses.
   const valid = {
     avgSpeedKmh: 40,
     distanceProvider: 'HAVERSINE' as const,
     distanceMultiplier: 1.3,
-    labelEstimatedDistances: true,
     driverShiftMaxMinutes: 540,
+    overtimeAfterMin: 480,
     shiftStartMin: 450,
     reloadMinutes: 20,
     loadingMinPerCase: 0.04,
     serviceMinPerCase: 0.05,
     maxTripsPerTruck: 3,
-    returnToDepot: true,
     splitDeliveries: true,
     defaultServiceTimeMin: 10,
-    costPerKmDefault: 0.15,
-    fixedTruckCostPerDayDefault: 20,
-    latePenaltyPerMin: 0.5,
-    underutilizationPenalty: 0,
-    solverTimeLimitSeconds: 30,
-    weightObjectiveTrucks: 1000,
-    weightObjectiveDistance: 1,
-    weightObjectiveCost: 0,
-    weightObjectiveBalance: 0,
-    weightObjectiveUtilization: 0,
+    planningCutoffMin: 1080,
+    dateOrder: 'DMY' as const,
+    fuelPricePerLitre: 0.26,
+    driverCostPerHour: 2.5,
+    overtimeCostPerHour: 4,
+    prefWindowPenaltyPerMin: 0.05,
+    roadTimeFactor: 1.25,
   };
+  it('refuses the old controls that changed nothing (strict), whole or partial', () => {
+    for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {
+      expect(tenantConfigSchema.safeParse({ ...valid, [k]: 1 }).success, k).toBe(false);
+      expect(tenantConfigSchema.partial().safeParse({ [k]: 1 }).success, k).toBe(false);
+    }
+  });
   it('rejects negative avg speed', () => {
     const result = tenantConfigSchema.safeParse({ avgSpeedKmh: -5 } as never);
     expect(result.success).toBe(false);

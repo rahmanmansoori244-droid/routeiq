@@ -17,7 +17,7 @@ vi.mock('@/lib/db', () => ({
       captured.push(Prisma.sql(strings, ...values).sql.replace(/\s+/g, ' '));
       return [];
     }),
-    tenant: { findUniqueOrThrow: vi.fn(async () => ({ currency: 'OMR', config: { distanceProvider: 'OSRM', labelEstimatedDistances: true } })) },
+    tenant: { findUniqueOrThrow: vi.fn(async () => ({ currency: 'OMR', config: { distanceProvider: 'OSRM', timezone: 'Asia/Muscat' } })) },
     runPlan: { findMany: vi.fn(async () => []) },
   },
 }));
@@ -32,6 +32,18 @@ describe('dashboard: the plan in use of each depot and day, once', () => {
     const planQueries = captured.filter((q) => q.includes('FROM "RunPlan" rp'));
     expect(planQueries.length).toBeGreaterThanOrEqual(4); // estimated-km + three range queries
     for (const q of planQueries) expect(q).toContain(flat(LIVE_PLAN_IN_USE));
+  });
+
+  it('re-planned days count every load of the plan in use (its summary), not only the new loads of the chosen option', async () => {
+    captured.length = 0;
+    await getDashboardData('t1');
+    const range = captured.filter((q) => q.includes('AS run_count'));
+    expect(range.length).toBe(3);
+    for (const q of range) {
+      expect(q).toContain(`COALESCE((rp."summaryJson"->>'operatingCost')::float8, sr."totalCost")`);
+      expect(q).toContain(`COALESCE((rp."summaryJson"->>'trucksUsed')::int, sr."trucksUsed")`);
+      expect(q).toContain(`COALESCE((rp."summaryJson"->>'totalKm')::float8, sr."totalDistanceKm")`);
+    }
   });
 
   it('the current version: newest not superseded or archived, as the day screen picks it (currentPlan)', () => {

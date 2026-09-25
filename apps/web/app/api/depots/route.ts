@@ -21,6 +21,8 @@ export const POST = withTenantApi(
         lat: input.lat,
         lng: input.lng,
         address: input.address,
+        openMin: input.openMin ?? null,
+        closeMin: input.closeMin ?? null,
         active: input.active ?? true,
       },
     });
