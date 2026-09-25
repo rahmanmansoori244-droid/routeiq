@@ -583,22 +583,34 @@ Each step names the page or component, the API route, the library functions and 
      - row errors: empty customer or product, cases not a whole number above 0, bad date, priority not 1 to 5 or P1 to P5, non-numeric weight, value or margin;
    - reads the tenant's customers and products and the already confirmed lines for the same dates, then calls `resolveOrderLines` (pure):
      - an inactive customer or product is an error;
-     - a line equal to a confirmed one (same date, sales order, customer branch and product) is a duplicate and is skipped;
+     - a line equal to a confirmed one (same date, sales order, customer branch and product; `lineDupKey`, sales order trimmed and upper-case) with the **same cases** is a duplicate and is skipped; with **other cases** it is an error ("changing a confirmed line is not supported yet"), since there is no amendment flow;
+     - the same sales order already confirmed for **another** delivery date (from `IntakeLineKey`) is a warning;
      - an unknown customer or product is not an error; it is listed as new;
      - the same sales-order line twice in one file is added together, with a warning;
-     - customer identity is `customerKey(code, branchKey)`, case-insensitive;
+     - customer identity is `customerKey(code, branchKey)`, case-insensitive. Master rows whose codes differ only in letter case ("twins") resolve to one row, always the same one (`preferredCustomer` / `preferredProduct`: active, then with a location / a case weight, then code, then id), with a warning;
+     - weights: a file weight of 0 counts as blank (the product's case weight applies); a merged line keeps the cases of its blank-weight rows in `weightMissingCases`; products (existing without weight, or new) with rows that carry no file weight are listed in `issues.productsWithoutWeight`; a file kg per case under half or over twice the product's case weight is a warning (the column must be kg per line);
    - turns rows whose depot column names another depot into errors;
-   - decides late per delivery date: late if `isAfterCutoff(now, date, planningCutoffMin, timezone)` (`apps/web/lib/dispatch/time.ts`; default cutoff 18:00 the day before), or if `currentPlan(...)` for that date already has a chosen scenario.
-3. The route adds an error when a file with the same hash (`fileHash`, SHA-256 of the parsed rows) was already CONFIRMED for this depot. It creates an `UploadBatch` with status `PARSED` (has errors) or `VALIDATED` (no errors), stores the full validation result (including every resolved line) in `validationJson`, and writes audit `CREATE UploadBatch`.
+   - decides late per delivery date: late if `isAfterCutoff(now, date, planningCutoffMin, timezone)` (`apps/web/lib/dispatch/time.ts`; default cutoff 18:00 the day before), or if `currentPlan(...)` for that date already has a chosen scenario;
+   - computes `contentHash`: SHA-256 of `contentFingerprint(lines)`, the normalized lines (delivery date, sales order, customer, product, cases, kg, value, margin, priority, depot) as text, sorted. Row order, column order and the export do not matter; the delivery date does (also when it came from the screen).
+3. The route adds an error when a batch with the same `fileHash` (= `contentHash`, so for the same dates) was already CONFIRMED for this depot. It creates an `UploadBatch` with status `PARSED` (has errors) or `VALIDATED` (no errors), stores the full validation result (including every resolved line) in `validationJson`, and writes audit `CREATE UploadBatch`. The `deliveryDate` form field must be a real date (`isRealIsoDate`).
 
 **Confirm: `POST /api/orders/:batchId/confirm`** (`apps/web/app/api/orders/[batchId]/confirm/route.ts`). Body `{ lateReason? }`.
 
-- **Refusals:** a batch that is already confirmed, rejected or deleted (409); a batch with `errorRows > 0` (400); a batch validated by an older version (409); late lines without a reason (400, code `LATE_REASON_REQUIRED`).
-- **Writes.** One transaction first takes `SELECT ... FOR UPDATE` on the batch row. Then `confirmIntake`:
-  - creates stub `Customer` rows for new customers (`createdFromUpload = true`, `geocodeConfidence = 'MISSING'`, no coordinates) and stub `Product` rows (`createdFromUpload = true`, case weight 0);
-  - creates one `Order` per customer branch and delivery date, with one `OrderLine` per SKU line (sales order number, product, cases, kg, value, margin, source row, notes). Order totals are summed from its lines;
-  - sets the order's `priority` to the lowest number found in the file for that order, else the customer's; `priorityFromFile` records which. `status = 'VALIDATED'`. `isLate`, `lateReason` and `lateRecordedById` are set for late batches. `salesValue` and `marginValue` are set only when every line carries one. Distinct line notes are joined with ` | `;
-  - marks the batch `CONFIRMED`, stores `lateReason`, and writes audit `UPDATE UploadBatch`.
+- **Refusals before the transaction:** a batch that is already confirmed, rejected or deleted (409); a batch with `errorRows > 0` (400); a batch validated by an older version (409); late lines without a reason (400, code `LATE_REASON_REQUIRED`).
+- **Re-check inside the transaction** (review F05). The transaction first takes `lockIntake` (`pg_advisory_xact_lock(hashtextextended('intake:' || tenantId, 0))`, the same lock as the late-order route and batch delete), then `SELECT ... FOR UPDATE` on the batch row, then `revalidateIntake` (`intake-server.ts`). Each conflict answers 409 with a `code`, saves nothing and leaves the batch `VALIDATED`:
+  - `STALE_VALIDATION`: the batch is older than `VALIDATED_BATCH_MAX_AGE_HOURS` (24): upload the file again;
+  - `DUPLICATE_FILE`: another batch with the same `fileHash` and depot is CONFIRMED;
+  - `DUPLICATE_LINES`: a line of the file is now confirmed (another file, tab or late order), with the rows;
+  - `MASTER_CHANGED`: a customer or product of the file was deleted or deactivated after the check;
+  - `LATE_REASON_REQUIRED`: the cutoff passed, or a plan was applied, since the check, and no reason was sent. The day screen then shows the late-reason field.
+- **Writes.** `confirmIntake`:
+  - creates stub `Customer` rows for new customers (`createdFromUpload = true`, `geocodeConfidence = 'MISSING'`, no coordinates) and stub `Product` rows (`createdFromUpload = true`, case weight 0 = unknown). An existing row whose code differs only in case is reused (a deactivated one is `MASTER_CHANGED`);
+  - creates one `Order` per customer branch and delivery date, with one `OrderLine` per SKU line (sales order number, product, cases, kg, value, margin, source row, notes). Line kg = the file kg of the rows that had one + `weightMissingCases` × the product's case weight; 0 when neither is known. Order totals are summed from its lines;
+  - writes one `IntakeLineKey` per line with a sales-order number (`createIntakeKeys`). Its unique index makes a second confirm of the same line fail; the route maps that (Prisma P2002) to 409 `DUPLICATE_LINES`;
+  - sets the order's `priority` to the lowest number found in the file for that order, else the customer's; `priorityFromFile` records which. `status = 'VALIDATED'`. `isLate`, `lateReason` and `lateRecordedById` are set for late batches (late as re-checked). `salesValue` and `marginValue` are set only when every line carries one. Distinct line notes are joined with ` | `;
+  - marks the batch `CONFIRMED`, stores `lateReason` and `isLate`, and writes audit `UPDATE UploadBatch`.
+
+**Delete: `DELETE /api/orders/:batchId`** (`apps/web/app/api/orders/[batchId]/route.ts`, legacy `/upload` page only; review F20). One transaction under `lockIntake` and the batch row lock. Refused with 409 when the batch is already `DELETED`, when a plan for its depot and date(s) is `OPTIMIZING` (`PLAN_OPTIMIZING`), and when any of its orders has a `RouteAssignment`, an `UnservedOrder` row or sits in the scope of a chosen scenario (`BATCH_IN_PLAN`, naming the dates and plan versions). Otherwise the orders (their lines and `IntakeLineKey` rows cascade), the `DELETED` status and the audit row are written together. Corrections to planned orders go through a late order or a re-plan; a "cancel orders from this file" flow is not built yet.
 
 The screen then switches to the first delivery date found in the file.
 
@@ -635,8 +647,8 @@ The screen then switches to the first delivery date found in the file.
 
 - the date (default tomorrow in the tenant timezone), the cutoff, the active depots and the selected depot;
 - the orders in scope. `ordersInScopeWhere` in `plan-service.ts` selects the same depot and delivery date, and includes orders without a depot only when the tenant has exactly one active depot. Counts, cases, kg and late count;
-- one issue card per customer branch, with effective priority, window text, issues and a `blocking` flag, blocking ones first;
-- products without a case weight (their kg counts as 0 in payload checks);
+- one issue card per customer branch, with effective priority, window text, issues and a `blocking` flag, blocking ones first. A deactivated customer shows only `CUSTOMER_INACTIVE` (blocking; its open orders are left unserved at optimize);
+- weights per order **line**, not per product (`lineWeightStatus` in `apps/web/lib/dispatch/weights.ts`), for open lines that are not on a frozen load of a live version: `productsWithoutWeight` (0 kg and no case weight on the product: counted as 0 kg) and `weightsToApply` (0 kg, but the product has a case weight now: applied at the next optimize), each with lines and cases per product;
 - the live plan from `currentPlan`: the highest version for (tenant, depot, date) that is not `SUPERSEDED` or `ARCHIVED`, with its latest `RunJob`, loads by status, summary and whether the cases reconcile;
 - `pending`: orders of the day that are not in the applied scenario's `scope.orderIds` or `scope.frozenOrderIds`, i.e. orders that arrived after the plan was made;
 - active trucks with their cases per load round, and the last 20 upload batches for the day.
@@ -650,6 +662,7 @@ The Step 3 button reads OPTIMIZE when no plan is applied yet and RE-PLAN when on
 - **No applied plan:** `POST /api/dispatch/plan { date, depotId, optimize: true, allowMissingLocations }` (`apps/web/app/api/dispatch/plan/route.ts`). It calls `getOrCreatePlan`, which returns the live plan or creates version 1 (`status DRAFT`, `reason INITIAL`, audit `CREATE RunPlan`), then `startDispatchOptimize`.
 - **Plan already applied:** `POST /api/runs/:id/replan` with reason `LATE_ORDER` when late orders are pending, else `REOPTIMIZE` ([3.11](#311-step-9-late-orders-and-plan-versions)).
 - **409 `LOCATION_REQUIRED`:** the browser asks whether to optimize anyway. If yes, it sends the request again with `allowMissingLocations: true`, and those customers' orders become unserved with reason `MISSING_COORDINATES` or `INVALID_LOCATION`.
+- **409 `WEIGHT_REQUIRED`** (review F02): open lines still have no weight and an active truck of the depot has a payload (`capacityWeightKg > 0`). The body lists `unknownWeights` (product, lines, cases). The browser asks (`askOverride` in `client-api.ts`: "Cancel, and add the case weight under Products - or optimize anyway (treated as 0 kg)?"); yes sends `allowMissingWeights: true`. The plan then carries a warning ("Planned without weights for N order line(s) ...") in its scenario warnings, and `OPTIMIZE_STARTED` records the override. The plan's Re-plan button asks the same questions.
 
 `POST /api/runs/:id/optimize` (`apps/web/app/api/runs/[id]/optimize/route.ts`) calls the same `startDispatchOptimize` behind a rate limit. The dispatch screen does not use it; the legacy run page does.
 
@@ -661,7 +674,9 @@ The Step 3 button reads OPTIMIZE when no plan is applied yet and RE-PLAN when on
 4. it is not already applied (`chosenScenarioId` set and status not `FAILED`), else 409 `NEW_VERSION_REQUIRED` (use re-plan);
 5. if a job is QUEUED or RUNNING, or the in-memory in-flight map holds the run, it answers 202 with that job.
 
-It then calls `buildDispatchRequest` and refuses missing locations (unless allowed), a day with no orders to plan (400) and a depot with no active trucks (400). Finally, in one transaction it creates the `RunJob` (`attemptNo` + 1, `QUEUED`, `requestJson`) and sets `RunPlan.status = OPTIMIZING` and `currentJobId`. It writes audit `OPTIMIZE_STARTED`, calls `scheduleDispatchOptimize` without waiting, and answers 202.
+It then runs `resolveOrderWeights` in its own transaction, calls `buildDispatchRequest`, and refuses missing locations and unknown weights (unless allowed, `gate` in `start-optimize.ts`), a day with no orders to plan (400) and a depot with no active trucks (400).
+
+**`resolveOrderWeights(tx, tenantId, runId, userId)`** (`plan-service.ts`, pure part `resolveOrderLineWeights` in `weights.ts`). A line weight of 0 means unknown. For the day's orders that are not DISPATCHED / DELIVERED and have no assignment on a frozen load of a live (not SUPERSEDED) version, every 0-kg line whose product now has a case weight gets cases × that weight, and the order total is summed again. Orders whose kg lives on the order only (older orders: lines at 0 kg, order total above 0) are left as they are. One audit row `ORDER_WEIGHTS_RESOLVED` (entity RunPlan) lists each line and order before and after. It also runs in `replan` before the probe; resolved weights may change orders on superseded PLANNED loads (their stops then show the new kg), never frozen ones. Finally, in one transaction it creates the `RunJob` (`attemptNo` + 1, `QUEUED`, `requestJson`) and sets `RunPlan.status = OPTIMIZING` and `currentJobId`. It writes audit `OPTIMIZE_STARTED`, calls `scheduleDispatchOptimize` without waiting, and answers 202.
 
 **`buildDispatchRequest(tenantId, runId)`** (`apps/web/lib/dispatch/plan-service.ts`) turns the day into a `DispatchRequest`:
 
@@ -672,16 +687,19 @@ It then calls `buildDispatchRequest` and refuses missing locations (unless allow
 | Stops | All open orders of one customer branch become one stop: `stop_id` = customer id, `order_ids` = the order ids, or `<orderId>~open` for the open part of a partly frozen order |
 | Priority | Per order (`prOf`): `priorityFromFile ? min(order.priority, effective priority) : effective priority`. The stop takes the lowest `prOf` of its orders, and every order of that stop stores that stop priority in `scope.orderPriority`, not its own `prOf`. Only orders pre-dropped for a missing or invalid location store their own `prOf`. The summary's per-priority service % uses these stored values. `strict_priorities: true` is always sent |
 | Late flag | `late` is true if any order of the group is late |
+| Weights | Per line: its own kg (`weightKg / cases`); for an order whose kg lives on the order only, the order kg per case; for the open rest of a partly frozen order, a 0-kg line takes the product's case weight in memory. Lines still at 0 kg are counted in `unknownWeights` (the `WEIGHT_REQUIRED` gate) |
+| Deactivated customers | All open orders of an inactive customer are pre-dropped as `INVALID_CUSTOMER` ("customer deactivated after the order was confirmed - reactivate it ..."), with a request warning. Not blocking. Reactivating the customer plans them again at the next re-plan. Orders on frozen loads are untouched. Deactivated products are planned as ordered, with a warning |
 | Missing locations | Pre-dropped (`preDrops`, unserved before the solver runs) and reported as a `BlockingIssue` |
+| Cases heavier than any truck | When every usable truck has a payload, a line whose case weight exceeds the largest one is pre-dropped as a portion `EXCEEDS_ANY_TRUCK_CAPACITY` ("One case of X weighs N kg, more than any truck payload (M kg) - check the product weight."), with a request warning. The rest of the order is planned (review F01) |
 | Windows | Effective hard and preferred windows. A window that ends before it starts is ignored with a warning (`usableWindow`) |
 | Split deliveries | When `TenantConfig.splitDeliveries` is on and no truck that still has a load left can carry the customer's cases or kg (`partCapFor`), `choosePartCapacity` (`apps/web/lib/dispatch/split.ts`) picks a part size and `splitIntoParts` cuts the SKU lines into parts. Each part becomes its own stop (`<customerId>#k`) with order ids `<orderId>~k`. The exact lines of every part are kept in `scope.portions` as `PortionRecord`s ([4.4](#44-how-the-web-shapes-the-request)) |
-| Service time | `stopServiceMin(base, serviceMinPerCase, cases, totalCases?)` (`apps/web/lib/dispatch/service-time.ts`): the customer's service minutes (clamped 0–480) plus unloading minutes per case. A split part gets its proportional share of the base time (at least 5 minutes) plus the per-case time of its own cases. Rounded and capped at 480, the solver's `service_min` limit |
+| Service time | `stopService(base, serviceMinPerCase, cases, totalCases?)` (`apps/web/lib/dispatch/service-time.ts`): the customer's service minutes plus unloading minutes per case. A split part gets its proportional share of the base time (at least 5 minutes) plus the per-case time of its own cases. Rounded and capped at `MAX_SERVICE_MIN` (480), the solver's `service_min` limit; a capped stop gives a request warning with the minutes it needs. Customer, tenant-default and imported service times accept at most 480 |
 | Money | `margin` and `revenue` per stop only when every order carries a value (`portionMoney` for split parts); otherwise `null` |
 | Plan continuity | Only when `usesPlanContinuity(run)` is true, i.e. the plan has a `parentRunId` and its reason is not `REOPTIMIZE` (so `LATE_ORDER` or `MANUAL_ADJUSTMENT`). Each stop then gets `previous_truck_id`: the truck that carried most of its cases in the parent version (`previousTruckOf`, a vote per order line weighted by cases). The solver charges `change_penalty_per_stop` (default 3.0 in `apps/solver/dispatch_models.py`, not sent by the web) for moving it. A `REOPTIMIZE` sends no previous trucks, so every scenario starts from scratch (commit `19831f0`) |
 | Trucks | Active trucks of the depot: cases, kg, fixed, trip and per-km cost, km per litre, availability window, `maxTripsPerDay`, and `frozen_trips` (depart, return and cases of each frozen load) |
 | Config | From `TenantConfig` (mapping in [4.4](#44-how-the-web-shapes-the-request)). `time_limit_sec: null` lets the solver choose. The provider comes from `routingProviderFor`. Scenarios: RECOMMENDED, MIN_TRUCKS, MIN_DISTANCE |
 
-It returns `{ request, preDrops, scope, blocking, warnings }`. `scope` also records `frozenLoadOrderIds` and `frozenLoadIds`, so the result can later be checked against the loads that were frozen when it was computed.
+It returns `{ request, preDrops, scope, blocking, warnings, unknownWeights }`. `scope` also records `frozenLoadOrderIds` and `frozenLoadIds`, so the result can later be checked against the loads that were frozen when it was computed.
 
 **Background job** (`apps/web/lib/jobs/dispatch-job.ts`). `scheduleDispatchOptimize` registers the promise in the shared in-flight map (`trackInflight` in `optimize-job.ts`; this assumes one web replica). `runJob` then:
 
@@ -701,7 +719,7 @@ Any error goes to `failJob`; lost jobs are reaped by the janitor ([5.9](#59-job-
 - It refuses when the frozen loads differ from `scope.frozenLoadIds` / `frozenLoadOrderIds` ("Loads were locked/unlocked after this optimization").
 - It picks a driver for every new load with `assignReplanDrivers` ([3.9](#39-step-7-a-driver-per-load)) before anything is deleted.
 - It deletes this run's PLANNED loads and any legacy `RouteAssignment` without a load.
-- It creates one `PlanLoad` per solver load: truck, `loadNo`, depart and return, km, minutes, cases, kg, utilisation, fuel, cost, return leg, estimated flag and `driverId`.
+- It creates one `PlanLoad` per solver load: truck, `loadNo`, depart and return, km, minutes, cases, kg, utilisation, fuel, cost, return leg, estimated flag and `driverId`. The load's kg is `loadKgFromRefs`: the sum of its portions' kg and its whole orders' `totalWeightKg`, the same figures its stops, manifests and driver sheets show. A solver `kg` that differs by more than 0.5 kg is recorded in the `SCENARIO_CHOSEN` audit (`loadKgMismatches`) and logged.
 - It creates one `RouteAssignment` per order (or split portion) per stop: `sequenceInTruck` (numbered from 1 within each load), `orderInStop`, `etaMin`, `serviceStartMin`, `departureMin`, `waitMin`, `cumulativeKm`, window flags and the `portionCases` / `portionWeightKg` / `portionLinesJson` columns.
 - It sets `Order.status` to `ASSIGNED` (at least one part on a truck) or `UNSERVED`. It never touches orders that are already `DISPATCHED` or `DELIVERED`.
 - It sets `chosenScenarioId` and `status READY`, calls `refreshPlanFacts`, and writes audit `SCENARIO_CHOSEN`. This happens on every optimize, not only when the dispatcher switches options.
@@ -712,7 +730,8 @@ Any error goes to `failJob`; lost jobs are reaped by the janitor ([5.9](#59-job-
   - uploaded = planned + unserved cases, in total, per SKU and per sales order;
   - every order appears exactly once (whole), or in portions that add up per line;
   - no order is planned for another customer or branch;
-  - every unserved row has a reason.
+  - every unserved row has a reason;
+  - every order of the scenario's scope (`orderIds` + `frozenOrderIds`) still exists. An order deleted after planning is a problem, so the plan cannot be DISPATCHED until it is re-planned (review F20).
 
   `ok` is false when any problem is found.
 - `summaryJson` = `computeSummary` (`apps/web/lib/dispatch/summary.ts`): orders served, partial and unserved; cases; service % per P1 to P5; trucks, loads, km, hours, utilisation, fuel, cost; revenue and margin served (null unless every order has a value); late orders; unserved by reason; loads by status; provider and solver info.
@@ -738,12 +757,17 @@ sequenceDiagram
     API->>PS: getOrCreatePlan
     PS->>DB: live RunPlan, or create version 1 as DRAFT INITIAL
     API->>SO: startDispatchOptimize
+    SO->>PS: resolveOrderWeights
+    PS->>DB: 0-kg open lines get the product case weight, AuditLog ORDER_WEIGHTS_RESOLVED
     SO->>PS: buildDispatchRequest
     PS->>DB: read orders, lines, customers, type profiles, trucks, frozen loads, TenantConfig
-    PS-->>SO: request, preDrops, scope, blocking, warnings
+    PS-->>SO: request, preDrops, scope, blocking, warnings, unknownWeights
     alt customers without a location and allowMissingLocations not set
         SO-->>UI: 409 LOCATION_REQUIRED
         UI->>D: window.confirm to plan without them, then resend
+    else lines without weight, a truck has a payload, allowMissingWeights not set
+        SO-->>UI: 409 WEIGHT_REQUIRED
+        UI->>D: window.confirm to plan them as 0 kg, then resend
     end
     SO->>DB: RunJob QUEUED with requestJson, RunPlan OPTIMIZING
     SO->>JOB: scheduleDispatchOptimize, not awaited
@@ -854,17 +878,19 @@ Both export routes first check `planLoad.count` for the run. With loads, they bu
 
 - upload a small file in Step 1 (confirm then asks for the late reason); or
 - use "Late order" on the plan (`late-order-dialog.tsx`). It calls `POST /api/dispatch/late-order` (`apps/web/app/api/dispatch/late-order/route.ts`) with customer code, optional branch and name, priority, reason (at least 3 characters) and lines (product code, cases, sales order). In one transaction the route:
-  - finds the customer case-insensitively, or creates a stub (location required);
-  - finds or creates each product;
-  - creates one `Order` with its lines: `status VALIDATED`, `isLate` = after the cutoff or a plan is already applied, `lateReason`, `lateRecordedById`. `lateReason` and `lateRecordedById` are stored even when `isLate` is false.
+  - takes `lockIntake` (the same per-tenant lock as confirm and batch delete);
+  - finds the customer case-insensitively (twins resolve like the file intake), or creates a stub (location required). An inactive customer is refused with 409 `CUSTOMER_INACTIVE` naming it ("Reactivate it in Customers or use another code");
+  - finds or creates each product; an inactive product is refused with 409 `PRODUCT_INACTIVE`. A new product starts at 0 kg per case (unknown) and is listed in the answer's `productsWithoutWeight`;
+  - refuses (409 `DUPLICATE_LINES`) a line whose sales order + product is already confirmed for that customer and date (`IntakeLineKey`), and (400) the same product twice on one sales order;
+  - creates one `Order` with its lines: `status VALIDATED`, `isLate` = after the cutoff or a plan is already applied, `lateReason`, `lateRecordedById`. `lateReason` and `lateRecordedById` are stored even when `isLate` is false. Line kg = cases × the product's case weight (0 = unknown). One `IntakeLineKey` per line with a sales order.
 
-  After the transaction commits, it writes audit `LATE_ORDER_RECORDED` through `audit()` and answers with `replanNeeded` and `locationRequired`. Nothing is planned yet. The dialog then offers "Re-plan now?", or asks for the location first.
+  `date` must be a real calendar date (`isoDateSchema`). After the transaction commits, it writes audit `LATE_ORDER_RECORDED` through `audit()` and answers with `replanNeeded`, `locationRequired` and `productsWithoutWeight`. Nothing is planned yet. The dialog then offers "Re-plan now?", or asks for the location first; it warns about products without weight.
 
 **Re-plan.** `POST /api/runs/:id/replan { reason, note?, allowMissingLocations? }` (`apps/web/app/api/runs/[id]/replan/route.ts`) runs `replan` in `start-optimize.ts`:
 
 1. a legacy plan answers 409 `LEGACY_PLAN`;
 2. a plan not applied yet is simply optimized again in the same version (`startDispatchOptimize`);
-3. otherwise it probes `buildDispatchRequest(parent)` for missing locations and answers 409 `LOCATION_REQUIRED` before any version is created;
+3. otherwise it runs `resolveOrderWeights`, then probes `buildDispatchRequest(parent)` and answers 409 `LOCATION_REQUIRED` or `WEIGHT_REQUIRED` (same `gate` as optimize, with `allowMissingLocations` / `allowMissingWeights`) before any version is created;
 4. `REOPTIMIZE` becomes `LATE_ORDER` when `pendingLateOrderIds(parent)` is not empty (late orders of the day that the applied scope does not contain);
 5. `createNextVersion` runs one transaction with `SELECT ... FOR UPDATE` on the parent and refuses a SUPERSEDED or OPTIMIZING parent. It:
    - creates a `RunPlan` with `version + 1`, `parentRunId`, `reason` and `reasonNote`;
@@ -944,7 +970,8 @@ The page is `apps/web/app/t/[slug]/audit/page.tsx` with `audit-client.tsx`, limi
 |---|---|---|
 | `CREATE` | UploadBatch | `POST /api/orders/upload` |
 | `UPDATE` | UploadBatch | confirm route |
-| `DELETE` | UploadBatch | `DELETE /api/orders/:batchId` (legacy upload page) |
+| `DELETE` | UploadBatch | `DELETE /api/orders/:batchId` (legacy upload page), in the same transaction as the delete |
+| `ORDER_WEIGHTS_RESOLVED` | RunPlan | `resolveOrderWeights` (before every optimize and re-plan probe): each line and order kg before and after |
 | `CUSTOMER_LOCATION_SET` | Customer | `PUT /api/customers/:id/location` |
 | `UPDATE` | Customer | `PATCH /api/customers/:id` |
 | `CREATE` | RunPlan | `getOrCreatePlan` |
@@ -988,7 +1015,7 @@ The page is `apps/web/app/t/[slug]/audit/page.tsx` with `audit-client.tsx`, limi
 
 `applyScenario` never moves an order that is already DISPATCHED or DELIVERED.
 
-**`UploadBatch.status`:** PARSED (uploaded with errors) or VALIDATED (no errors), then CONFIRMED, or DELETED (`DELETE /api/orders/:batchId`, which also deletes its orders). REJECTED is checked for but never written.
+**`UploadBatch.status`:** PARSED (uploaded with errors) or VALIDATED (no errors), then CONFIRMED, or DELETED (`DELETE /api/orders/:batchId`, which also deletes its orders, allowed only while none of them is in a plan option). A VALIDATED batch older than 24 h cannot be confirmed (`STALE_VALIDATION`); it stays VALIDATED. REJECTED is checked for but never written.
 
 **`RunJob.status`:** QUEUED, RUNNING, then SUCCEEDED or FAILED (`failJob`, or `reapStuckJobs` with `errorJson.reason = 'STUCK'`). CANCELLED is never written.
 
@@ -1029,7 +1056,8 @@ erDiagram
 | `Product` | SKU | unique (`tenantId`, `code`); `weightPerCaseKg` (0 = unknown), `createdFromUpload` |
 | `UploadBatch` | one uploaded file | `status`, `validationJson` (full validation including resolved lines), `fileHash`, `depotId`, `deliveryDate`, `isLate`, `lateReason` |
 | `Order` | one customer branch for one delivery date (or one late-order entry) | `customerId`, `depotId`, `deliveryDate`, `totalCases`, `totalWeightKg`, `priority`, `priorityFromFile`, `status`, `isLate`, `lateReason`, `lateRecordedById`, `salesValue`, `marginValue`, `notes`, `uploadBatchId` |
-| `OrderLine` | one SKU line | `productId`, `cases`, `salesOrderNo`, `weightKg`, `salesValue`, `marginValue`, `sourceRow`, `notes`; cascades with its order |
+| `OrderLine` | one SKU line | `productId`, `cases`, `salesOrderNo`, `weightKg` (0 = unknown, resolved at optimize once the product has a weight), `salesValue`, `marginValue`, `sourceRow`, `notes`; cascades with its order |
+| `IntakeLineKey` | identity of a confirmed sales-order line | unique (`tenantId`, `deliveryDate`, `salesOrderNorm` (trimmed, upper-case), `customerId`, `productId`); `orderLineId` unique, cascades with the line; `uploadBatchId` (null for a late order). Written by `confirmIntake` and the late-order route; backfilled for existing lines by migration `20260926090000_intake_line_keys` |
 | `RunPlan` | one version of the plan for (`depotId`, `runDate`) | `version`, `parentRunId` (self relation "PlanVersions"), `reason`, `reasonNote`, `status`, `chosenScenarioId` (plain id, no foreign key), `currentJobId`, `supersededAt`, `finalizedAt`, `summaryJson`, `reconciliationJson`, `changeSummaryJson`, `totalOrders`, `unservedCount` |
 | `RunJob` | one optimize attempt | unique (`runId`, `attemptNo`); `status`, `progressPct`, `message`, `requestJson`, `responseJson`, `errorJson`, timestamps |
 | `ScenarioResult` | one solver option | `name` (RECOMMENDED, MIN_TRUCKS, MIN_DISTANCE), totals, `detailsJson` (`ScenarioDetails` including `scope`) |
@@ -1038,7 +1066,7 @@ erDiagram
 | `RouteAssignment` | one order (or split portion) at one stop of one load | unique (`runId`, `truckId`, `loadNo`, `sequenceInTruck`, `orderInStop`); `loadId`, `etaMin`, `serviceStartMin`, `departureMin`, `waitMin`, `cumulativeKm`, `hardWindowOk`, `prefWindowOk`, `portionCases`, `portionWeightKg`, `portionLinesJson` |
 | `AuditLog` | who did what | `action`, `entity`, `entityId`, `beforeJson`, `afterJson`, `ip` |
 
-**Delete behaviour.** Deleting a `RunPlan` cascades to its jobs, scenarios, loads and assignments. `RouteAssignment.orderId` is `ON DELETE RESTRICT`, so an order that is on any plan cannot be deleted. `UnservedOrder.orderId` is `ON DELETE CASCADE`.
+**Delete behaviour.** Deleting a `RunPlan` cascades to its jobs, scenarios, loads and assignments. `RouteAssignment.orderId` is `ON DELETE RESTRICT` and `UnservedOrder.orderId` is `ON DELETE NO ACTION` (since migration `20260926090100_unserved_order_fk_no_action`; it was CASCADE), so an order that is on any plan option, planned or unserved, cannot be deleted. Deleting a tenant therefore removes its plan data first (as `cleanupTenant` in the integration helpers does).
 
 **Legacy-only models** (neither read nor written by the dispatch flow): `ManualBaseline` and `ManualBaselineAssignment` (baseline tab of the old run page); `DriverShift`, `TruckLocation` and `DeliveryProof` (driver PWA); `Region` (master-data page only; `Customer.regionId`). `User` and `PasswordResetToken` belong to authentication.
 
@@ -1048,7 +1076,7 @@ erDiagram
 - `RouteAssignment.lockedByUserId` and `manualOverrideReason`: per-stop locks of the old flow. `plannedArrivalMin`, `plannedDistanceFromPrevKm` and `plannedLoadCases` are still filled.
 - `Order.totalServiceTimeMin`, `totalVolumeL` and `paymentCollectionAmount`: written or defaulted, not read by the planner.
 - `Truck.capacityVolumeL` and `palletCapacity` (not sent to the solver); `Customer.paymentType`.
-- Enum values the dispatch flow never writes: `RunStatus.ARCHIVED`; `OrderStatus` UPLOADED, DELIVERED and FAILED; `UploadBatchStatus.REJECTED`; `RunJobStatus.CANCELLED`; the `OptimizationMode` enum; and the older `UnservedReasonCode` values (`EXCEEDS_TRUCK_CAPACITY`, `NO_AVAILABLE_TRUCK`, `SHIFT_TIME_LIMIT`, `INVALID_CUSTOMER`, `INFEASIBLE_ROUTE`). For old plans, `REASON_TEXT` in `app/t/[slug]/dispatch/client-api.ts` labels `EXCEEDS_TRUCK_CAPACITY`, `SHIFT_TIME_LIMIT`, `INFEASIBLE_ROUTE` and `NO_AVAILABLE_TRUCK`; `INVALID_CUSTOMER` has no label. (The solver does emit `NO_AVAILABLE_TRUCK`; see [4.12](#412-unserved-reason-codes-and-messages).)
+- Enum values the dispatch flow never writes: `RunStatus.ARCHIVED`; `OrderStatus` UPLOADED, DELIVERED and FAILED; `UploadBatchStatus.REJECTED`; `RunJobStatus.CANCELLED`; the `OptimizationMode` enum; and the older `UnservedReasonCode` values (`EXCEEDS_TRUCK_CAPACITY`, `NO_AVAILABLE_TRUCK`, `SHIFT_TIME_LIMIT`, `INFEASIBLE_ROUTE`). For old plans, `REASON_TEXT` in `app/t/[slug]/dispatch/client-api.ts` labels `EXCEEDS_TRUCK_CAPACITY`, `SHIFT_TIME_LIMIT`, `INFEASIBLE_ROUTE` and `NO_AVAILABLE_TRUCK`. `INVALID_CUSTOMER` is written again since the stabilization release, for open orders of a deactivated customer ("Customer deactivated"). (The solver does emit `NO_AVAILABLE_TRUCK`; see [4.12](#412-unserved-reason-codes-and-messages).)
 
 ### 3.16 API route map for the dispatch flow
 
@@ -1056,7 +1084,8 @@ erDiagram
 |---|---|---|---|---|
 | GET | `/api/dispatch/day` | any | `getDayOverview` | `DispatchClient.refresh` |
 | POST | `/api/orders/upload` | PLANNER, rate limited | `parseUpload`, `validateIntake`, `fileHash` | `DispatchClient.upload`; legacy `upload-dropzone.tsx` |
-| POST | `/api/orders/:batchId/confirm` | PLANNER | `confirmIntake` | `DispatchClient.confirmBatch`; legacy `validation-report.tsx` |
+| POST | `/api/orders/:batchId/confirm` | PLANNER | `lockIntake`, `revalidateIntake`, `confirmIntake` | `DispatchClient.confirmBatch`; legacy `validation-report.tsx` |
+| DELETE | `/api/orders/:batchId` | PLANNER | refused once any order is in a plan option | legacy `batches-table.tsx` |
 | POST | `/api/locations/parse` | PLANNER, rate limited | `resolveLocationInput` | `LocationDialog` "Read" |
 | PUT | `/api/customers/:id/location` | PLANNER | `resolveLocationInput`, `coordStatus` | `LocationDialog` "Save location" |
 | PATCH | `/api/customers/:id` | PLANNER | customer update | `CustomerDialog` |
@@ -1205,15 +1234,16 @@ What `buildDispatchRequest` puts in each stop and truck is in the table in [3.6]
 
 **Split deliveries** (`apps/web/lib/dispatch/split.ts`). Splitting runs only when `TenantConfig.splitDeliveries` is on and the customer's open cases or kg fit no truck (`partCapFor` in `plan-service.ts`). The candidate trucks are those with capacity and trips left, or the whole fleet if none.
 
-- **`choosePartCapacity(cases, kg, fleet)`** tries each truck's capacity as the part size.
+- **`choosePartCapacity(cases, kg, fleet, maxCaseKg)`** tries each truck's capacity as the part size.
+  - Only sizes whose (whole-kg) payload can carry the customer's heaviest case (`maxCaseKg`) are tried, unless no truck can carry it. A part sized for a small truck would otherwise hold cases only a bigger truck may legally carry.
   - `parts` = max(ceil(cases / size cases), ceil(kg / size kg)).
   - `trips` = the trips left on every truck at least that large.
   - A size is feasible when parts ≤ trips.
-  - Ranking: feasible sizes first, by fewer parts, then more trips. Among infeasible sizes, the most deliverable cases first, then fewer parts. Remaining ties go to more cases, more kg, then truck code.
+  - Ranking: feasible sizes first, by fewer parts, then more trips. Among infeasible sizes, the largest share of the customer's demand the trips can carry (the binding one of cases and kg) first, then fewer parts. Remaining ties go to more cases, more kg, then truck code.
   - The kg cap is floored to whole kg, because the solver compares kg as integers.
 - **`splitIntoParts(lines, cap)`** fills part 1 up to the cap, then part 2, and so on. Lines stay in order, and a line is cut only when it does not fit. A single case heavier than the payload gets a part of its own, so the split does not loop forever.
 - **Ids.** Each part becomes its own stop `"<customerId>#<k>"`, with portion order ids `"<orderId>~<k>"` (`portionId`; `orderIdOf` reverses it).
-- **Part weight.** `buildDispatchRequest` sends each part's `demand_kg` as min(`split.cap.kg`, exact kg), i.e. capped at the part size (`split.cap.kg` is the floored payload of the truck the part was sized for). A part holding one case heavier than that payload is therefore sent as within payload: the solver's `_fits_capacity` passes it and can plan it with an understated weight. It is **not** reported as `EXCEEDS_ANY_TRUCK_CAPACITY`, although the comment on `splitIntoParts` says it would be. See lead L31 in [7.4](#74-review-leads-found-while-writing-this-handbook).
+- **Part weight.** `buildDispatchRequest` sends each part's true kg, `partDemandKg(part, kgPerCase)` (exact case weights, rounded to 0.1 kg), never capped. A part of whole cases that fit rounds to at most its payload (unit-tested as a property), so the only parts above their payload are single heavy cases, which the solver then places on a truck that can carry them or reports. A case heavier than every usable truck is pre-dropped before splitting (`EXCEEDS_ANY_TRUCK_CAPACITY`, "check the product weight"). Fixed in the stabilization release (review F01, lead L31).
 
 The caller `apps/web/lib/jobs/dispatch-job.ts` stores every scenario and applies RECOMMENDED immediately ([3.6](#36-step-4-optimize)).
 
@@ -1498,6 +1528,8 @@ The time is shared fairly across sources (`share`).
 | Code | Set by | When | Message (from code) |
 |---|---|---|---|
 | `MISSING_COORDINATES` / `INVALID_LOCATION` | web `buildDispatchRequest` (pre-drop) | no or invalid location, or outside the service area and not verified | the customer issue text |
+| `INVALID_CUSTOMER` | web `buildDispatchRequest` (pre-drop) | the customer was deactivated after its orders were confirmed | "Customer deactivated after the order was confirmed - reactivate it in Customers to deliver it, or leave it unserved." |
+| `EXCEEDS_ANY_TRUCK_CAPACITY` | web `buildDispatchRequest` (pre-drop, the order's heavy lines only) | one case heavier than every usable truck payload | "One case of X weighs N kg, more than any truck payload (M kg) - check the product weight." |
 | `NO_AVAILABLE_TRUCK` | `_prefilter` | request has no trucks | "No active trucks at this depot." |
 | `TRIP_LIMIT` | `_prefilter` | no usable truck; every truck used up its trips on frozen loads | "Every truck has already used its maximum number of loads (locked/dispatched)." |
 | `SHIFT_LIMIT` | `_prefilter` / `_window_prefilter` | no truck has time left / the round trip does not fit the shift or depot hours | "No truck has shift time left …" / "A round trip to this customer does not fit inside the truck shift / depot hours." |
@@ -1758,6 +1790,35 @@ The migrations are in `apps/web/prisma/migrations/` (provider `postgresql`, `mig
 | `20260924093000_osrm_default_provider` | `9426307` | Default `TenantConfig.distanceProvider` becomes `OSRM`. A data update moves HAVERSINE tenants whose country is Oman/UAE (or blank) to OSRM. It is a separate migration because an enum value added with `ALTER TYPE` cannot be used in the same transaction |
 | `20260925090000_split_deliveries` | `961c537` (PR #27) | `portionCases/portionWeightKg/portionLinesJson` on RouteAssignment and UnservedOrder; `TenantConfig.splitDeliveries` (default true) |
 | `20260925120000_dispatch_timing_per_case` | `423750e` (PR #29) | `TenantConfig.loadingMinPerCase` and `serviceMinPerCase` (default 0) |
+| `20260926090000_intake_line_keys` | stabilization PR2 | New table `IntakeLineKey` (unique sales-order line identity, see [3.15](#315-data-model-used-by-the-dispatch-flow)), backfilled from every existing line with a sales order. Where the same line was already confirmed twice, the oldest line keeps the key (`ON CONFLICT DO NOTHING`) and the copies stay as they are. Additive; rollback is `DROP TABLE` |
+| `20260926090100_unserved_order_fk_no_action` | stabilization PR2 | `UnservedOrder.orderId` foreign key from `ON DELETE CASCADE` to `NO ACTION` (added `NOT VALID`, then validated) |
+
+**Read-only checks before deploying the stabilization PR2 migrations** (run them on production and give the results to the owner; none changes data):
+
+```sql
+-- 1. Sales-order lines confirmed twice (real double intakes already in plans; the backfill keeps the oldest)
+SELECT o."tenantId", o."deliveryDate", upper(btrim(l."salesOrderNo")) AS so, o."customerId", l."productId", count(*) AS copies, sum(l.cases) AS cases
+FROM "OrderLine" l JOIN "Order" o ON o.id = l."orderId"
+WHERE l."salesOrderNo" IS NOT NULL AND btrim(l."salesOrderNo") <> ''
+GROUP BY 1, 2, 3, 4, 5 HAVING count(*) > 1 ORDER BY 2 DESC;
+-- 2. Live chosen scenarios whose scope names orders that no longer exist (shown "not reconciled" at their next load change)
+SELECT r.id, r."runDate", r.version, s.id AS scope_order
+FROM "RunPlan" r JOIN "ScenarioResult" sc ON sc.id = r."chosenScenarioId"
+CROSS JOIN LATERAL jsonb_array_elements_text(sc."detailsJson"->'scope'->'orderIds') AS s(id)
+WHERE r.status NOT IN ('SUPERSEDED', 'ARCHIVED') AND NOT EXISTS (SELECT 1 FROM "Order" o WHERE o.id = s.id);
+-- 3. Open order lines at 0 kg (resolved at the next optimize when the product has a weight; else WEIGHT_REQUIRED)
+SELECT p.code, p."weightPerCaseKg", count(*) AS lines, sum(l.cases) AS cases
+FROM "OrderLine" l JOIN "Order" o ON o.id = l."orderId" JOIN "Product" p ON p.id = l."productId"
+WHERE l."weightKg" <= 0 AND o.status NOT IN ('DISPATCHED', 'DELIVERED') AND o."deliveryDate" >= current_date
+GROUP BY 1, 2 ORDER BY 4 DESC;
+-- 4. Customer and product codes that differ only in letter case
+SELECT "tenantId", upper(code) AS code, upper("branchKey") AS branch, array_agg(code) AS codes FROM "Customer" GROUP BY 1, 2, 3 HAVING count(*) > 1;
+SELECT "tenantId", upper(code) AS code, array_agg(code) AS codes FROM "Product" GROUP BY 1, 2 HAVING count(*) > 1;
+-- 5. Loads whose orders weigh more than the truck's payload
+SELECT pl.id, pl."runId", t.code, t."capacityWeightKg", sum(coalesce(ra."portionWeightKg", o."totalWeightKg")) AS kg
+FROM "PlanLoad" pl JOIN "Truck" t ON t.id = pl."truckId" JOIN "RouteAssignment" ra ON ra."loadId" = pl.id JOIN "Order" o ON o.id = ra."orderId"
+WHERE t."capacityWeightKg" > 0 GROUP BY 1, 2, 3, 4 HAVING sum(coalesce(ra."portionWeightKg", o."totalWeightKg")) > t."capacityWeightKg" + 0.5;
+```
 
 **Rules** (`docs/admin.md`, `CLAUDE.md` §14):
 
@@ -2002,7 +2063,7 @@ All times are Gulf Standard Time (GST, Asia/Muscat, UTC+4), the same zone git re
 
 | # | Item | Why it matters | Where |
 |---|---|---|---|
-| 1 | **NMWC master data**: real kg per case, truck payloads, receiving hours, unloading and loading minutes, the real first departure and loading schedule | Truck counts and costs stay provisional until this is entered. This is data entry, not code | Products (`weightPerCaseKg`), Trucks (`capacityWeightKg`), Customers / `CustomerTypeProfile` (windows), Settings → Dispatch timing |
+| 1 | **NMWC master data**: real kg per case, truck payloads, receiving hours, unloading and loading minutes, the real first departure and loading schedule | Truck counts and costs stay provisional until this is entered. This is data entry, not code. Until every SKU has a case weight, OPTIMIZE and RE-PLAN ask each day whether to plan the lines without weight as 0 kg (`WEIGHT_REQUIRED`, [3.6](#36-step-4-optimize)) | Products (`weightPerCaseKg`), Trucks (`capacityWeightKg`), Customers / `CustomerTypeProfile` (windows), Settings → Dispatch timing |
 | 2 | **Import NMWC's own order file as-is**: column aliases, sheet choice, files over 10 MB, HOLD / PENDING lines, half cases | Today 0 lines map (per work log). The limit is 10 MB (`MAX_FILE_BYTES`, `apps/web/lib/csv.ts`). Cases must be whole numbers (`apps/web/lib/dispatch/order-intake.ts`, check at ~line 239). There is no HOLD filter | `HEADER_ALIASES` / `normalizeOrderRows` in `order-intake.ts`; `intake-server.ts`; per-tenant `orderColumnMapJson` |
 | 3 | **Security items and legacy surfaces** | Open self-serve signup; SUPER_ADMIN granted by `SUPER_ADMIN_EMAILS` at signup; the login `callbackUrl` open redirect; sessions not re-checked after a user is deactivated. PR #25's body lists three of these as out of scope: open public sign-up, the login open redirect, and sessions not re-checked after deactivation. The SUPER_ADMIN email-allowlist item comes from `docs/NMWC_DISPATCH_RESTART_AUDIT.md` ("Remove before production") and the code (`isSuperAdmin` in the signup route). All four are still present | `apps/web/app/api/auth/signup/route.ts`, `apps/web/app/login/login-form.tsx`, `apps/web/lib/auth.ts` (JWT 8 h; `active` checked only at login) |
 | 4 | Hide or remove legacy screens | `runs/new`, the `/upload` sample generator (`/api/orders/sample`), PyVRP `/optimize`, the driver PWA, signup / onboarding, regions. They are still reachable and confuse users | `apps/web/app/t/[slug]/{runs,onboard,regions}`, `apps/web/app/driver`, `apps/solver/solver.py` |
@@ -2161,11 +2222,11 @@ These come from reading the code and docs. **None is confirmed by a failing test
 | L14 | **`changeStatusTx` sets `RunPlan.status = READY`** whenever not every load is out, including on a DRAFT or FAILED version that only holds copied loads | `plan-service.ts` |
 | L15 | **`applyScenario` does not lock the plan row.** It reads `RunPlan.status` without the `FOR UPDATE` lock that `createNextVersion` and `lockOpenRun` take, and ends by setting `status: 'READY'`. Can a concurrent re-plan leave a SUPERSEDED version flipped back to READY? | `plan-service.ts`, `choose-scenario/route.ts`, `dispatch-job.ts` |
 | L16 | **Plain `Error`s become 500s.** The late-order route throws `new Error('Customer ... is inactive.')` inside its transaction, and the job-debug route throws `new Error('Not found')` for a job of another run (its comment intends a 404). `handleError` in `lib/api.ts` turns both into "Internal server error" | `app/api/dispatch/late-order/route.ts`, `app/api/runs/[id]/jobs/[jobId]/debug/route.ts` |
-| L17 | **Batch delete after planning.** `DELETE /api/orders/:batchId` (legacy upload page) fails with a misleading 400 "Referenced record does not exist." when an order is on a plan (RESTRICT foreign key). It succeeds when its orders are only unserved, which cascades away their `UnservedOrder` rows and leaves the plan's stored summary and reconciliation out of date | `app/api/orders/[batchId]/route.ts` |
+| L17 | **Fixed (stabilization PR2, review F20):** the delete is refused with 409 `BATCH_IN_PLAN` once any order is in a plan option, runs in one transaction, and `UnservedOrder.orderId` is NO ACTION ([3.3](#33-step-1-upload-and-validate-the-order-file)). Was: **Batch delete after planning.** `DELETE /api/orders/:batchId` (legacy upload page) fails with a misleading 400 "Referenced record does not exist." when an order is on a plan (RESTRICT foreign key). It succeeds when its orders are only unserved, which cascades away their `UnservedOrder` rows and leaves the plan's stored summary and reconciliation out of date | `app/api/orders/[batchId]/route.ts` |
 | L18 | **Audit filters** do not offer the newer dispatch actions (`LOAD_*`, `LOAD_DRIVER_SET`, `PLAN_VERSION_CREATED`, `LATE_ORDER_RECORDED`, `CUSTOMER_LOCATION_SET`), and the page's entity dropdown has no `PlanLoad` (the API accepts it) ([3.13](#313-audit-log)) | `app/t/[slug]/audit/page.tsx`, `app/api/audit/route.ts` |
 | L19 | **Settings mismatch.** The Settings page shows several fields the planner ignores and has no field for several it uses ([3.12](#312-settings-that-change-the-plan)) | `settings-form.tsx`, `lib/schemas.ts` |
 | L20 | **One-replica assumption.** Duplicate-start protection and the janitor's "still running" check rely on the in-memory in-flight map, which is only correct with exactly one web instance | `lib/jobs/optimize-job.ts` |
-| L31 | **Understated weight of an over-heavy split part.** When one case is heavier than the payload the part was sized for, `splitIntoParts` puts it in a part of its own, but `buildDispatchRequest` caps the part's `demand_kg` at `split.cap.kg`. The solver then sees the part as within payload and can plan it on a truck it overloads, instead of reporting `EXCEEDS_ANY_TRUCK_CAPACITY` as the `splitIntoParts` comment claims ([4.4](#44-how-the-web-shapes-the-request)) | `lib/dispatch/plan-service.ts` (`demand_kg: Math.min(split.cap.kg …)`), `lib/dispatch/split.ts` |
+| L31 | **Fixed (stabilization PR2, review F01):** parts are sent with their true kg and a case heavier than every truck is pre-dropped ([4.4](#44-how-the-web-shapes-the-request)). Was: **Understated weight of an over-heavy split part.** When one case is heavier than the payload the part was sized for, `splitIntoParts` puts it in a part of its own, but `buildDispatchRequest` caps the part's `demand_kg` at `split.cap.kg`. The solver then sees the part as within payload and can plan it on a truck it overloads, instead of reporting `EXCEEDS_ANY_TRUCK_CAPACITY` as the `splitIntoParts` comment claims ([4.4](#44-how-the-web-shapes-the-request)) | `lib/dispatch/plan-service.ts` (`demand_kg: Math.min(split.cap.kg …)`), `lib/dispatch/split.ts` |
 
 **Optimizer (solver).**
 
@@ -2186,6 +2247,17 @@ These come from reading the code and docs. **None is confirmed by a failing test
 | L28 | **Unused npm dependencies.** Nothing in `app/`, `lib/` or `components/` imports `@auth/prisma-adapter`, `mapbox-gl`, `react-map-gl` or `@radix-ui/react-toast` | `apps/web/package.json` |
 | L29 | **Solver `.env` is never read.** The solver has no dotenv call and no `--env-file`, so the README step `cp .env.example apps/solver/.env` has no effect outside the maintainer's `.dev/` scripts | `apps/solver/main.py`, `README.md` |
 | L30 | **Doc drift.** The `init_postgis` migration comment says Railway uses the PostGIS image (production is `postgres-ssl:18`). `prisma/synth-data/README.md` refers to `generate_synthetic_data.py`, which is not in the repo. The README's "Deploying to Railway" section points to CLAUDE.md §14 instead of `docs/RAILWAY_DEPLOYMENT.md`. `OPTIMIZER_BENCHMARK.md` §3 says "90×90 tiles"; the code sends 45×45 blocks (at most 90 coordinates per call). The `SOLVER_TIMEOUT_MS` comment in `solver-client.ts` mentions a 120 s cap. The `test_solver.py` docstring says OR-Tools. `docs/admin.md` says uploads are limited to 10/hr (the code allows 60/h), lists a 300/min default limit that no route applies, and documents an older solver log format ([5.10](#510-operating-runbook-pointers)). The `LEGACY_PLAN` message in `start-optimize.ts` says legacy plans are from "before May 2026" (they are from May 2026). The `FrozenTrip` docstring in `dispatch_models.py` omits COMPLETED loads. The `splitIntoParts` comment in `split.ts` promises an `EXCEEDS_ANY_TRUCK_CAPACITY` report that does not happen (L31). See also gotchas #13, #17, #18 and #19 in [5.11](#511-known-operational-gotchas) | the files named |
+
+**Stabilization release, PR2 "Demand and intake truth"** (answers the external review `RouteIQ_Deep_Review.md`). Fixed:
+
+- **F01** (L31): true part kg, over-heavy cases pre-dropped with "check the product weight", `choosePartCapacity` aware of the heaviest case and of kg, `PlanLoad.weightKg` from its orders (solver differences audited).
+- **F02**: 0 kg = unknown; `resolveOrderWeights` before optimize / re-plan (audited `ORDER_WEIGHTS_RESOLVED`); 409 `WEIGHT_REQUIRED` with an "optimize anyway (0 kg)" override and a persistent warning; line-based weight notes on the day; intake weight fixes (file 0 kg, partial merges, new SKUs, suspicious per-case figures).
+- **F05**: `IntakeLineKey`, per-tenant intake lock and re-check at confirm (duplicate lines or file, master changes, stale late flag, 24 h expiry); an amended quantity is an error; the same SO on another date a warning; content hash with the delivery date.
+- **F20** (L17): no batch delete once planned, one transaction, `UnservedOrder` FK NO ACTION, reconciliation fails on a missing scoped order. The "cancel orders from this file" flow is deferred.
+- **Deactivated masters**: customer orders pre-dropped `INVALID_CUSTOMER` (reversible), products delivered with a warning, deactivation warns about open orders.
+- **Customer import** keeps confirmed service times, region and address; an imported time is confirmed; case-insensitive codes; dry-run change report. **Service time** over 480 min capped with a warning; inputs limited to 480.
+- **L16** (late-order part): inactive customer / product answer 409 with the name, duplicates of confirmed SO lines 409, real-date validation (`isoDateSchema`) on the late-order, plan, runs and upload routes. The job-debug part of L16 is in the security PR.
+- Case-variant customer / product twins resolve deterministically and cannot be created any more.
 
 ### 7.5 Open questions for the owner
 
