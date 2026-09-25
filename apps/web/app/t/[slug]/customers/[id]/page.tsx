@@ -7,6 +7,7 @@ import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { describeServiceTime, effectiveAttrs, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
 import { CustomerEditor } from './customer-editor';
 
 export const dynamic = 'force-dynamic';
@@ -18,7 +19,7 @@ export default async function CustomerDetailPage({
 }: {
   params: { slug: string; id: string };
 }) {
-  const { db, user } = await getCurrentTenant(params.slug);
+  const { db, user, tenant } = await getCurrentTenant(params.slug);
   const customer = notFoundIfNull(
     await db.customer.findUnique({
       where: { id: params.id },
@@ -29,6 +30,17 @@ export default async function CustomerDetailPage({
     orderBy: { code: 'asc' },
     select: { id: true, code: true, name: true },
   });
+
+  // The unloading time the planner uses (customer > customer type > Settings default), not only
+  // the stored value: an unconfirmed stored time is not used (stabilization PR5).
+  const [profiles, cfg] = await Promise.all([
+    db.customerTypeProfile.findMany(),
+    db.tenantConfig.findUnique({ where: { tenantId: tenant.id }, select: { defaultServiceTimeMin: true } }),
+  ]);
+  const eff = effectiveAttrs(customer, new Map<string, TypeProfileLike>(profiles.map((p) => [p.customerType, p])), {
+    serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10,
+  });
+  const service = describeServiceTime(customer, eff);
 
   const mapboxToken = process.env.MAPBOX_TOKEN ?? '';
   const canEdit = canPlan(user.role);
@@ -89,7 +101,13 @@ export default async function CustomerDetailPage({
               <Field label="Priority">
                 <Badge variant="outline">{customer.priority}</Badge>
               </Field>
-              <Field label="Service time">{customer.avgServiceTimeMin} min</Field>
+              <Field label="Service time">
+                <span data-testid="customer-service-time">
+                  {service.minutes} min
+                  <span className="block text-xs text-muted-foreground">{service.source}</span>
+                  {service.note ? <span className="block max-w-xs text-xs text-amber-700">{service.note}</span> : null}
+                </span>
+              </Field>
               <Field label="Payment">
                 <Badge variant="outline">{customer.paymentType.toLowerCase()}</Badge>
               </Field>

@@ -6,6 +6,7 @@ import {
   coordStatus,
   customerIssues,
   DEFAULT_PRIORITY_WEIGHTS,
+  describeServiceTime,
   describeWindows,
   effectiveAttrs,
   parsePriorityWeights,
@@ -101,6 +102,29 @@ describe('effectiveAttrs - service time', () => {
     expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 25, serviceTimeConfirmed: true }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 25, serviceSource: 'CUSTOMER' });
     expect(effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 0 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 15, serviceSource: 'DEFAULT' });
     expect(effectiveAttrs(C({ customerType: 'GROCERY', avgServiceTimeMin: 0 }), PROFILES, DEFAULTS)).toMatchObject({ serviceMin: 15, serviceSource: 'DEFAULT' });
+  });
+});
+
+describe('describeServiceTime - the customer page shows what the planner uses (PR5 review)', () => {
+  const show = (c: CustomerForPlanning) => describeServiceTime(c, effectiveAttrs(c, PROFILES, DEFAULTS));
+
+  it("a confirmed time is the customer's own", () => {
+    expect(show(C({ customerType: null, avgServiceTimeMin: 45, serviceTimeConfirmed: true }))).toEqual({
+      minutes: 45,
+      source: "this customer's confirmed time",
+      note: null,
+    });
+  });
+
+  it('the customer type default, named', () => {
+    expect(show(C({ avgServiceTimeMin: 40 }))).toMatchObject({ minutes: 40, source: 'customer type default (HYPERMARKET)', note: null });
+  });
+
+  it('an unconfirmed stored time the planner does not use is shown as such, with the Settings default in use', () => {
+    const d = show(C({ customerType: null, avgServiceTimeMin: 45 }));
+    expect(d).toMatchObject({ minutes: 15, source: 'Settings default service time' });
+    expect(d.note).toMatch(/stored 45 min was never confirmed, so the planner does not use it/);
+    expect(show(C({ customerType: null, avgServiceTimeMin: 15 })).note).toBeNull();
   });
 });
 
