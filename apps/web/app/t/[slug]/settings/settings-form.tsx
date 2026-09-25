@@ -15,7 +15,7 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { changedFields, type EditableConfig } from '@/lib/settings-fields';
+import { changedFields, overtimeSaveProblem, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 
 interface TenantFields {
@@ -66,13 +66,16 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
     (k) => k in CONFIG_BOUNDS && !inBound(CONFIG_BOUNDS[k as ConfigBoundKey], configDiff.changes[k] as number),
   ) as ConfigBoundKey[];
   const overtimeAfterShift = c.overtimeAfterMin > c.driverShiftMaxMinutes;
+  // As the API: only a save that changes the threshold or the shift maximum is held to the rule; a
+  // stored threshold after a lowered shift maximum is shown as a warning and other fields still save.
+  const overtimeBlocks = overtimeSaveProblem(configDiff.changes, c) !== null;
 
   function save() {
     if (invalid.length) {
       toast.error(invalid.map((k) => `${SETTING_LABELS[k]} must be ${boundText(CONFIG_BOUNDS[k])}.`).join(' '));
       return;
     }
-    if (overtimeAfterShift) {
+    if (overtimeBlocks) {
       toast.error('Overtime after must be at most the driver shift maximum.');
       return;
     }
@@ -243,9 +246,14 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
           {num('overtimeCostPerHour', 'Overtime cost per hour', { step: 0.1, unit: cur, hint: 'On top of the driver cost, for each hour after the overtime threshold.' })}
           {num('fuelPricePerLitre', 'Fuel price per litre', { step: 0.005, unit: cur, hint: '0 = fuel is not costed separately. Fuel use comes from each truck\'s km per litre.' })}
           {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: the planner avoids arriving outside preferred hours. Hard windows are never broken.' })}
-          {overtimeAfterShift ? (
+          {overtimeBlocks ? (
             <p className="text-sm text-destructive md:col-span-2" role="alert">
               Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h): set it at most to the shift maximum.
+            </p>
+          ) : overtimeAfterShift ? (
+            <p className="text-sm text-amber-700 md:col-span-2" data-testid="overtime-after-shift">
+              Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h), so overtime is never costed. Set it at
+              most to the shift maximum. Other settings still save.
             </p>
           ) : c.overtimeCostPerHour > 0 && c.overtimeAfterMin === c.driverShiftMaxMinutes ? (
             <p className="text-sm text-amber-700 md:col-span-2">Overtime starts at the shift maximum, so it is never reached.</p>

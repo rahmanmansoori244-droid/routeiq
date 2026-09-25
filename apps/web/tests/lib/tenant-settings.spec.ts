@@ -20,7 +20,7 @@ vi.mock('@/lib/tenant', () => ({ tenantDb: () => fake.tdb }));
 
 import { buildDispatchRequest, PlanError } from '@/lib/dispatch/plan-service';
 import { depotSchema, tenantConfigSchema, tenantSettingsSchema, truckSchema } from '@/lib/schemas';
-import { CONFIG_BOUNDS, DEPOT_BOUNDS, MAX_DISPATCH_STOPS, TRUCK_BOUNDS } from '@/lib/planner-bounds';
+import { CONFIG_BOUNDS, DEPOT_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, TRUCK_BOUNDS } from '@/lib/planner-bounds';
 import { COUNTRY_NAMES } from '@/lib/countries';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { isAfterCutoff } from '@/lib/dispatch/time';
@@ -203,6 +203,14 @@ describe('bounds (review F21)', () => {
     expect(e).toBeInstanceOf(PlanError);
     expect(e.status).toBe(422);
     expect(e.details.code).toBe('TOO_MANY_STOPS');
+  });
+
+  it('a large day gets one "Large day" warning - the optimizer\'s, not a second one from the web', async () => {
+    const many = Array.from({ length: LARGE_DAY_STOPS + 1 }, (_, i) => order(`O${i}`, customer(`C${i}`, 23.5 + i * 0.0001, 58.3), 1));
+    wire(BASE_CFG, { orders: many });
+    const b = await buildDispatchRequest('TEN', 'R1');
+    expect(b.request.stops.length).toBe(LARGE_DAY_STOPS + 1);
+    expect(b.warnings.filter((w) => /large day/i.test(w))).toEqual([]);
   });
 
   it('the effective values panel names every setting source and says when overtime can never apply', () => {

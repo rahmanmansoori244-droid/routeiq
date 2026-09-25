@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetExcel } from '@/lib/exports/excel';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, tenantAssumptions } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, planRules, tenantAssumptions } from '@/lib/dispatch/workbook';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 
 export const runtime = 'nodejs';
@@ -50,6 +50,8 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       distanceIsEstimated: detail.summary?.distanceIsEstimated ?? detail.loads.some((l) => l.distanceIsEstimated),
       // Stored with the plan (PlanSettings.outsideCoverage); today's only for a plan without settings.
       outsideCoverage: planned ? undefined : cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
+      // A plan costed before the whole-truck-day costs is described by the rules it was made with.
+      rules: planRules(detail),
     }),
     assumptionsSource: planned ? 'PLAN' : 'CURRENT',
   });

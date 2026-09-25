@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
-import { overtimeProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
+import { overtimeSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
 
@@ -64,8 +64,9 @@ export const PATCH = withTenantApi(
         ...Object.entries(input.expect?.config ?? {}).filter(([k, v]) => k in configPatch && !same(beforeConfig[k], v)).map(([k]) => k),
       ];
       if (changedMeanwhile.length) return { status: 409 as const, fields: changedMeanwhile };
-      const merged = { ...before.config, ...configPatch };
-      const overtime = overtimeProblem(merged);
+      // Only when this save changes the threshold or the shift maximum: a stored threshold after a
+      // lowered shift maximum is a planner warning and must not block saving the company name.
+      const overtime = overtimeSaveProblem(configPatch, { ...before.config, ...configPatch });
       if (overtime) return { status: 400 as const, error: overtime };
       if (Object.keys(tenantPatch).length) await tx.tenant.update({ where: { id: user.tenantId }, data: tenantPatch });
       if (Object.keys(configPatch).length) await tx.tenantConfig.update({ where: { tenantId: user.tenantId }, data: configPatch });
