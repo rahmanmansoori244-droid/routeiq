@@ -166,6 +166,11 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/RouteIQ remembers your pick/i, '"RouteIQ remembers your pick"'],
       [/Driver added by this plan/i, 'a "Driver added" note (filling an empty trip is no note)'],
       [/\b(planReplanDrivers|assignReplanDrivers|ownDriverEvidence|parkedEvidence|readParkedDrivers|toParkedDrivers|pickLoadDriver)\b/, 'a removed driver helper'],
+      // Review of the simplified rules: on a tie (the same move, or no evidence load) the trip the
+      // optimizer lists first goes first, and "No driver" is marked, so a note does not come back.
+      [/whatever order the optimizer lists/i, 'drivers independent of the optimizer\'s trip order'],
+      [/whichever truck is listed first/i, 'the same drivers whichever truck is listed first'],
+      [/"No driver" clears (both|the marker)/i, '"No driver" clears the marker'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
