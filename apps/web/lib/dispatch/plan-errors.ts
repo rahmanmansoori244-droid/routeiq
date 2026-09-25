@@ -2,10 +2,16 @@
  * The expected, user-facing failures of the plan service, with their HTTP status. Kept in their
  * own module so the lock helpers (plan-locks.ts) and the plan service can both use them without
  * a circular import. plan-service.ts re-exports PlanError.
+ *
+ * PlanError is an HttpError (review L16): thrown anywhere under withTenantApi it answers with its
+ * status and detail fields, with no try/catch in the route.
  */
-export class PlanError extends Error {
-  constructor(message: string, public status = 400, public details?: unknown) {
-    super(message);
+import { HttpError, httpErrorBody } from '../http-error';
+
+export class PlanError extends HttpError {
+  constructor(message: string, status = 400, details?: Record<string, unknown>) {
+    super(message, status, details);
+    this.name = 'PlanError';
   }
 }
 
@@ -14,7 +20,5 @@ export class PlanError extends Error {
  * detail fields) when the error carries them, e.g. { error, code: 'PLAN_BUSY' }.
  */
 export function planErrorBody(e: PlanError): string | Record<string, unknown> {
-  const d = e.details;
-  if (d && typeof d === 'object' && !Array.isArray(d)) return { error: e.message, ...(d as Record<string, unknown>) };
-  return e.message;
+  return httpErrorBody(e);
 }

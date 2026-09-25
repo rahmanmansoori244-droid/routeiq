@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { withTenantApi, ok, fail, notFoundIfNull } from '@/lib/api';
+import { withTenantApi, ok, fail, notFoundIfNull, HttpError } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import {
@@ -15,9 +15,11 @@ import {
 
 interface Params { params: { batchId: string } }
 
-class BatchRaceError extends Error {
-  constructor(message: string, public status: number) {
-    super(message);
+/** The batch changed under the lock (another tab or user): an HttpError, so it maps to its status (review L16). */
+class BatchRaceError extends HttpError {
+  constructor(message: string, status: number) {
+    super(message, status);
+    this.name = 'BatchRaceError';
   }
 }
 
@@ -77,7 +79,6 @@ export const POST = (req: Request, { params }: Params) =>
           { timeout: 60_000, maxWait: 10_000 },
         );
       } catch (e) {
-        if (e instanceof BatchRaceError) return fail(e.message, e.status);
         if (e instanceof IntakeConflict) return fail(e.body(), e.status);
         if (isTransactionTimeout(e)) return fail({ code: INTAKE_BUSY.code, message: INTAKE_BUSY.error }, 409);
         if (isIntakeKeyConflict(e)) {

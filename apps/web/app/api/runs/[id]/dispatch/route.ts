@@ -1,6 +1,7 @@
 import { withTenantApi, ok, fail, notFoundIfNull } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
+import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
 interface Params { params: { id: string } }
 
@@ -9,8 +10,10 @@ class DispatchRaceError extends Error {}
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
-      if ((await db.planLoad.count({ where: { runId: params.id } })) > 0) {
-        return fail('This plan uses truck loads: lock and dispatch each load from the Daily Dispatch screen (dispatched loads cannot be unlocked).', 409);
+      // Daily dispatch plans (loads, a RECOMMENDED option or a later version - even with no load
+      // left) are dispatched load by load on the Daily dispatch screen (review F22).
+      if (await isDispatchPlan(user.tenantId, params.id)) {
+        return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'This plan uses truck loads: lock and dispatch each load from the Daily dispatch screen (dispatched loads cannot be unlocked).' }, 409);
       }
       const run = notFoundIfNull(
         await db.runPlan.findUnique({

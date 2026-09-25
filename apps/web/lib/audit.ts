@@ -2,48 +2,19 @@ import { headers } from 'next/headers';
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { clientIpFromHeaders } from './client-ip';
+import type { AuditAction, AuditEntity } from './audit-catalog';
 
-export type AuditAction =
-  | 'CREATE'
-  | 'UPDATE'
-  | 'DELETE'
-  | 'OVERRIDE'
-  | 'DISPATCH'
-  | 'LOGIN'
-  | 'SIGNUP'
-  | 'LOGOUT'
-  | 'OPTIMIZE_STARTED'
-  | 'OPTIMIZE_SUCCEEDED'
-  | 'OPTIMIZE_FAILED'
-  | 'SCENARIO_CHOSEN'
-  | 'BASELINE_UPLOADED'
-  | 'ROUTE_MANUALLY_CHANGED'
-  // Legacy driver app (retired Sep 2026); kept so old rows stay typed.
-  | 'DRIVER_LOGIN'
-  | 'DELIVERY_PROOF_CREATED'
-  // NMWC dispatch MVP
-  | 'CUSTOMER_LOCATION_SET'
-  | 'LATE_ORDER_RECORDED'
-  | 'PLAN_VERSION_CREATED'
-  | 'LOAD_LOCKED'
-  | 'LOAD_PLANNED'
-  | 'LOAD_LOADING'
-  | 'LOAD_DISPATCHED'
-  | 'LOAD_COMPLETED'
-  // Security (stabilization PR1)
-  | 'LOGIN_THROTTLED'
-  | 'CROSS_TENANT_VIEW'
-  | 'PLATFORM_ADMIN_GRANTED'
-  | 'PLATFORM_ADMIN_REVOKED'
-  | 'PASSWORD_RESET_BY_ADMIN'
-  // Written only by migration 20260926090000_retire_driver_app_scrub_secrets.
-  | 'SECURITY_CLEANUP';
+/**
+ * Audit actions and entities come from the one catalog (lib/audit-catalog.ts, review F23): a
+ * writer cannot use a name the audit API and the Audit log page do not know.
+ */
+export type { AuditAction, AuditEntity } from './audit-catalog';
 
 export interface AuditInput {
   tenantId: string;
   userId?: string | null;
   action: AuditAction;
-  entity: string;
+  entity: AuditEntity;
   entityId?: string | null;
   beforeJson?: Prisma.InputJsonValue | null;
   afterJson?: Prisma.InputJsonValue | null;

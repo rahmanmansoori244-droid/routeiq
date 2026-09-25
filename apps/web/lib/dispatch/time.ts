@@ -32,6 +32,23 @@ export function localMinutes(date: Date, tz = DEFAULT_TZ): number {
   return p.h * 60 + p.min;
 }
 
+/**
+ * The instant local midnight starts the day `iso` (YYYY-MM-DD) in the tenant timezone:
+ * 2026-09-25 in Asia/Muscat is 2026-09-24T20:00:00Z. Used for "from / to" day filters.
+ */
+export function zonedDayStart(iso: string, tz = DEFAULT_TZ): Date {
+  const utcMidnight = Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10));
+  const offsetAt = (t: number) => {
+    const p = parts(new Date(t), tz);
+    const local = Date.UTC(+p.y, +p.m - 1, +p.d, p.h, p.min);
+    return Math.round((local - Math.floor(t / 60_000) * 60_000) / 60_000);
+  };
+  let t = utcMidnight - offsetAt(utcMidnight) * 60_000;
+  const again = offsetAt(t); // a DST change between the two instants (not in Oman)
+  if (utcMidnight - again * 60_000 !== t) t = utcMidnight - again * 60_000;
+  return new Date(t);
+}
+
 export function addDaysIso(iso: string, days: number): string {
   const [y, m, d] = iso.split('-').map(Number);
   const t = new Date(Date.UTC(y, m - 1, d + days));

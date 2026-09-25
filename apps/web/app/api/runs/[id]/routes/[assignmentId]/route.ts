@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { withTenantApi, ok, fail, parseBody } from '@/lib/api';
 import { prisma } from '@/lib/db';
+import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 import {
   RouteAdjustError,
   lockAssignment,
@@ -30,11 +31,12 @@ const patchSchema = z.discriminatedUnion('action', [
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {
-      if ((await prisma.planLoad.count({ where: { runId: params.id, tenantId: user.tenantId } })) > 0) {
-        return fail('Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.', 409);
+      if (await isDispatchPlan(user.tenantId, params.id)) {
+        return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.' }, 409);
       }
       const input = await parseBody(r, patchSchema);
-      try {
+      {
+        // A refusal is a RouteAdjustError (an HttpError): withTenantApi answers with its status (review L16).
         const result = await prisma.$transaction(async (tx) => {
           // Defense in depth: confirm the run is in this tenant before mutating.
           const run = await tx.runPlan.findFirst({
@@ -58,9 +60,6 @@ export const PATCH = (req: Request, { params }: Params) =>
           return unlockAssignment(tx, ctx, params.assignmentId);
         });
         return ok(result);
-      } catch (err) {
-        if (err instanceof RouteAdjustError) return fail(err.message, err.status);
-        throw err;
       }
     },
     { role: 'PLANNER' },
@@ -69,10 +68,11 @@ export const PATCH = (req: Request, { params }: Params) =>
 export const DELETE = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { user, ip }) => {
-      if ((await prisma.planLoad.count({ where: { runId: params.id, tenantId: user.tenantId } })) > 0) {
-        return fail('Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.', 409);
+      if (await isDispatchPlan(user.tenantId, params.id)) {
+        return fail({ ...DISPATCH_PLAN_REFUSAL, error: 'Stops cannot be moved one by one in a load-based plan yet. Lock the loads you want to keep and re-plan instead.' }, 409);
       }
-      try {
+      {
+        // A refusal is a RouteAdjustError (an HttpError): withTenantApi answers with its status (review L16).
         const result = await prisma.$transaction(async (tx) => {
           const run = await tx.runPlan.findFirst({
             where: { id: params.id, tenantId: user.tenantId },
@@ -82,9 +82,6 @@ export const DELETE = (req: Request, { params }: Params) =>
           return unassignAssignment(tx, { runId: params.id, tenantId: user.tenantId, userId: user.id, ip }, params.assignmentId);
         });
         return ok(result);
-      } catch (err) {
-        if (err instanceof RouteAdjustError) return fail(err.message, err.status);
-        throw err;
       }
     },
     { role: 'PLANNER' },

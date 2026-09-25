@@ -1,6 +1,6 @@
 import { z } from 'zod';
-import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
-import { chooseScenario, PlanError, planErrorBody } from '@/lib/dispatch/plan-service';
+import { withTenantApi, ok, parseBody } from '@/lib/api';
+import { chooseScenario } from '@/lib/dispatch/plan-service';
 
 interface Params { params: { id: string } }
 
@@ -15,12 +15,8 @@ export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user }) => {
       const { scenarioId } = await parseBody(r, bodySchema);
-      try {
-        await chooseScenario(user.tenantId, params.id, scenarioId, user.id);
-      } catch (e) {
-        if (e instanceof PlanError) return fail(planErrorBody(e), e.status);
-        throw e;
-      }
+      // A refusal is a PlanError (an HttpError): it answers with its status and code (review L16).
+      await chooseScenario(user.tenantId, params.id, scenarioId, user.id);
       return ok({ runId: params.id, scenarioId });
     },
     { role: 'PLANNER' },
