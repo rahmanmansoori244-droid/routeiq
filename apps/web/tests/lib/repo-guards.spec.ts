@@ -159,6 +159,13 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       // "Use instead" count is driver notes (parked hand-set drivers included), not trips.
       [/until you pick it again/i, '"pick it again" to mark a driver'],
       [/how many trips have another driver/i, '"Use instead" counts trips with another driver'],
+      // Simplified driver rules (owner decision after the sixth review): nothing brings a dropped
+      // hand-set driver back, filling an empty trip is no note, and the previous version is not
+      // read as separate evidence.
+      [/goes back on it when/i, 'a dropped hand-set driver coming back with its trip'],
+      [/RouteIQ remembers your pick/i, '"RouteIQ remembers your pick"'],
+      [/Driver added by this plan/i, 'a "Driver added" note (filling an empty trip is no note)'],
+      [/\b(planReplanDrivers|assignReplanDrivers|ownDriverEvidence|parkedEvidence|readParkedDrivers|toParkedDrivers|pickLoadDriver)\b/, 'a removed driver helper'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
