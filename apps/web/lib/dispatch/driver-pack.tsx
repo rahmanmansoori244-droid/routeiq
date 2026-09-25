@@ -50,6 +50,13 @@ export interface SheetStop {
   salesOrders: string[];
   pinUrl: string | null;
   coords: string | null;
+  /**
+   * Review F08: customer data corrected after planning ("Location updated after planning: new pin
+   * ..."). The sheet keeps the planned stop; these lines tell the driver what changed.
+   */
+  changeNotes: string[];
+  /** The corrected pin, when the location changed after planning. */
+  newPinUrl: string | null;
 }
 
 export interface DriverSheet {
@@ -78,6 +85,8 @@ export interface DriverSheet {
   footerText: string;
   /** Some text of this sheet could not be printed and shows as "[?]" (pdf-text.ts). */
   unprintable: boolean;
+  /** Review F04: this truck-day's times did not pass the timetable check. */
+  timesNotVerified: boolean;
 }
 
 export interface DriverPackModel {
@@ -88,6 +97,8 @@ export interface DriverPackModel {
   superseded: boolean;
   depot: { code: string; name: string };
   sheets: DriverSheet[];
+  /** At least one sheet's times are not verified. */
+  timesNotVerified: boolean;
 }
 
 export interface DriverPackOptions {
@@ -122,6 +133,7 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
       .map(({ x, y }) => `part ${y.split!.part} on ${t.text(x.truckCode)} trip ${x.loadNo}`);
     split = { part: s.split.part, parts: s.split.parts, others, restUnserved: s.split.restUnserved };
   }
+  const moved = s.masterChanged.find((c) => c.kind === 'LOCATION' && c.newLat != null && c.newLng != null);
   return {
     sequence: s.sequence,
     customerName: t.text(s.customerName),
@@ -142,6 +154,8 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     salesOrders: s.salesOrders.map((so) => t.text(so)),
     pinUrl: pinUrl(s),
     coords: s.lat !== null && s.lng !== null ? coordText(s.lat, s.lng) : null,
+    changeNotes: s.masterChanged.map((c) => t.text(c.text)),
+    newPinUrl: moved ? pinUrl({ lat: moved.newLat ?? null, lng: moved.newLng ?? null }) : null,
   };
 }
 
@@ -163,7 +177,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
       const next = d.loads.filter((x) => x.truckId === l.truckId && x.loadNo > l.loadNo).sort((a, b) => a.loadNo - b.loadNo)[0];
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
-      const sheet: Omit<DriverSheet, 'unprintable'> = {
+      const sheet: Omit<DriverSheet, 'unprintable' | 'timesNotVerified'> = {
         loadId: l.id,
         truckId: l.truckId,
         truckCode,
@@ -171,7 +185,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         trips: n,
         status: l.status,
         carried: l.carried,
-        badges: [BADGE[l.status] ?? l.status, ...(l.carried ? ['KEPT FROM PREVIOUS VERSION'] : [])],
+        badges: [BADGE[l.status] ?? l.status, ...(l.carried ? ['KEPT FROM PREVIOUS VERSION'] : []), ...(l.timing && !l.timing.ok ? ['TIMES NOT VERIFIED'] : [])],
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
         depart: fmtHhmm(l.departMin),
@@ -192,7 +206,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
           (next ? ` - load trip ${next.loadNo} (planned departure ${fmtHhmm(next.departMin)}).` : ' - last trip of the day.'),
         footerText: `${truckCode} trip ${l.loadNo} of ${n} · delivery ${d.run.runDate} · plan v${v} - this sheet is void if a newer plan version is issued`,
       };
-      return { ...sheet, unprintable: head.lost || t.lost };
+      return { ...sheet, unprintable: head.lost || t.lost, timesNotVerified: !!l.timing && !l.timing.ok };
     });
   return {
     title: `Driver sheets ${d.run.runDate} v${v}`,
@@ -202,6 +216,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
     superseded: isSupersededRun(d.run),
     depot,
     sheets,
+    timesNotVerified: sheets.some((sh) => sh.timesNotVerified),
   };
 }
 
@@ -298,6 +313,16 @@ function StopRow({ st }: { st: SheetStop }) {
         ) : null}
         {st.late ? <T style={{ fontFamily: BOLD, fontSize: 8 }}>LATE ORDER</T> : null}
         {st.accessNotes ? <T style={{ fontSize: 7.5, fontFamily: 'Helvetica-Oblique' }}>Access: {st.accessNotes}</T> : null}
+        {st.changeNotes.map((n) => (
+          <T key={n} style={{ fontFamily: BOLD, fontSize: 7.5 }}>
+            {n}
+          </T>
+        ))}
+        {st.newPinUrl ? (
+          <Link src={st.newPinUrl} style={[s.link, { fontSize: 7.5 }]}>
+            Open the new pin - ask the dispatcher which one to use
+          </Link>
+        ) : null}
         {st.notes.map((n) => (
           <T key={n} style={{ fontSize: 7.5, fontFamily: 'Helvetica-Oblique' }}>
             Note: {n}
@@ -371,10 +396,14 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
         <T style={{ width: CONTENT_WIDTH * 0.4, textAlign: 'right' }}>
           Delivery {m.runDate} · Plan v{m.version} · Depot {m.depot.code}
           {m.superseded ? ' · SUPERSEDED - DO NOT USE' : ''}
+          {sh.timesNotVerified ? ' · TIMES NOT VERIFIED' : ''}
         </T>
       </View>
 
       {m.superseded ? <T style={s.bigWarn}>This plan version was replaced. Do not use this sheet - ask the dispatcher for the new one.</T> : null}
+      {sh.timesNotVerified ? (
+        <T style={s.bigWarn}>TIMES NOT VERIFIED - the departure or delivery times of this truck break a planning rule. Check with the dispatcher before leaving.</T>
+      ) : null}
       <View style={{ flexDirection: 'row' }}>
         <View style={{ width: headWidth }}>
           {/* A block of its own so a long truck code wraps at spaces instead of running under the QR. */}

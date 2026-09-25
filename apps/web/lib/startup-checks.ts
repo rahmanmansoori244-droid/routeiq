@@ -13,6 +13,13 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   const out: ConfigProblem[] = [];
   const limits = rateLimitConfigProblem(env);
   if (limits) out.push({ level: 'error', message: limits });
+  if ((env.FEASIBILITY_GATE ?? '').trim().toLowerCase() === 'warn') {
+    out.push({
+      level: 'warn',
+      message:
+        'FEASIBILITY_GATE=warn: trucks whose times break a planning rule (loading time between loads, receiving hours, payload, shift) can be locked and dispatched. Emergency switch only - remove it to enforce the check again.',
+    });
+  }
   if (env.NODE_ENV !== 'production') return out;
 
   if (!env.RESEND_API_KEY?.trim()) {

@@ -23,6 +23,7 @@ import { trackInflight, whenIdle } from './optimize-job';
 import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
 import { lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import type { SolveTicket } from '../dispatch/solve-admission';
+import type { DispatchScenario } from '@routeiq/shared-types';
 
 export interface DispatchJobArgs {
   runId: string;
@@ -96,7 +97,7 @@ async function runJob(args: DispatchJobArgs) {
         // in use - a re-plan's copied loads keep matching their orders, and the "planned with the
         // old weight" warning stays until a plan with the new weight is applied.
         await applyWeightChanges(tx, tenantId, runId, built.weightChanges, userId);
-        const ids = await persistDispatchResult(tx, tenantId, runId, built, resp);
+        const ids = await persistDispatchResult(tx, tenantId, runId, built, resp, { jobId: runJobId });
         await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
         const done = await tx.runJob.updateMany({
           where: { id: runJobId, status: 'RUNNING' },
@@ -104,7 +105,7 @@ async function runJob(args: DispatchJobArgs) {
             status: 'SUCCEEDED',
             progressPct: 100,
             finishedAt: new Date(),
-            message: `${recommended.trips} loads on ${recommended.trucks_used} trucks, ${recommended.unserved.length + built.preDrops.length} stop(s) unserved`,
+            message: jobMessage(recommended, built.preDrops.length),
           },
         });
         if (done.count !== 1) throw new StaleJobError('the job changed while its plan was being saved');
@@ -121,7 +122,18 @@ async function runJob(args: DispatchJobArgs) {
               engine: resp.engine,
               provider: resp.matrix_provider,
               estimated: resp.distance_is_estimated,
-              scenarios: resp.scenarios.map((s) => ({ name: s.name, status: s.solver_status, loads: s.trips, km: s.total_distance_km, unserved: s.unserved.length, sec: s.solver_time_sec })),
+              scenarios: resp.scenarios.map((s) => ({
+                name: s.name,
+                status: s.solver_status,
+                loads: s.trips,
+                km: s.total_distance_km,
+                unserved: s.unserved.length,
+                sec: s.solver_time_sec,
+                // Review F04: whether the optimizer's own check passed the timetable.
+                feasibility: s.feasibility
+                  ? { status: s.feasibility.status, timing: s.feasibility.timing, violations: s.feasibility.violations.length, codes: [...new Set(s.feasibility.violations.map((v) => v.code))] }
+                  : { status: 'UNKNOWN' },
+              })),
             } as never,
             ip: args.ip,
           },
@@ -137,6 +149,22 @@ async function runJob(args: DispatchJobArgs) {
     }
     throw e;
   }
+}
+
+/**
+ * The job's closing message. It says when the recommended timetable did not pass the optimizer's
+ * own check (review F04): such a plan is shown for review but its trucks cannot be locked or
+ * dispatched until it is re-planned.
+ */
+export function jobMessage(sc: DispatchScenario, preDrops: number): string {
+  const base = `${sc.trips} loads on ${sc.trucks_used} trucks, ${sc.unserved.length + preDrops} stop(s) unserved`;
+  const f = sc.feasibility;
+  if (!f) return `${base}. Timetable not checked by the optimizer (older optimizer version).`;
+  if (f.status === 'VERIFIED') return base;
+  const n = f.violations.length;
+  return f.status === 'VIOLATED'
+    ? `${base}. Timetable NOT verified: ${n} rule(s) broken (${[...new Set(f.violations.map((v) => v.code))].join(', ')}) - re-plan before locking.`
+    : `${base}. Timetable NOT verified: the optimizer could not check it - re-plan before locking.`;
 }
 
 /** A result for a version that moved on: the job fails as "stale result", the plan is not touched. */

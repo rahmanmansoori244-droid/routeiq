@@ -294,3 +294,78 @@ describe('tenantAssumptions', () => {
     });
   });
 });
+
+describe('frozen plan facts, kg check and unverified times in the workbook (review F08 / F04)', () => {
+  it('ASSUMPTIONS says whether it shows the settings the plan was built with or the current ones', async () => {
+    const planned = sheet(await render(fixture(), { ...META, assumptionsSource: 'PLAN' }), SHEETS.assumptions);
+    expect(text(planned.getCell(2, 1))).toBe('Settings this plan (v2) was built and costed with.');
+    const current = sheet(await render(fixture(), { ...META, assumptionsSource: 'CURRENT' }), SHEETS.assumptions);
+    expect(text(current.getCell(2, 1))).toMatch(/^Current settings, at export time\. Plan v2 was made before its settings were stored with it/);
+  });
+
+  it('the settings kept with a plan feed the same assumptions (OSRM address never kept, only whether one was set)', () => {
+    const a = tenantAssumptions(
+      {
+        timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 390, driverShiftMaxMinutes: 600, reloadMinutes: 20, loadingMinPerCase: 0.04,
+        serviceMinPerCase: 0.05, maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 1.5, overtimeAfterMin: 540, overtimeCostPerHour: 0,
+        prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+        defaultServiceTimeMin: 10, osrmConfigured: true,
+      },
+      { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, osrmEnvConfigured: false },
+    );
+    expect(a['Shift start (earliest departure)']).toBe('06:30');
+    expect(a['Loading time per case']).toMatch(/^0\.04 min per case/);
+    expect(a['OSRM server configured']).toBe('yes (tenant setting)');
+  });
+
+  it('LOAD PLAN checks each load kg against its stops and the payload', async () => {
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], truckPayloadKg: 500 }; // L1 weighs 790 + 560 = 1,350 kg
+    const wb = await render(d);
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const col = find(lp, (t) => t === 'Kg check')!.col;
+    expect(text(lp.getCell(5, col))).toBe('OVER PAYLOAD by 850 kg');
+    expect(text(lp.getCell(6, col))).toBe('OK');
+    expect(text(sheet(wb, 'T01 - L1').getCell(5, 9))).toMatch(/OVER PAYLOAD/);
+    const mism = fixture();
+    mism.loads[1] = { ...mism.loads[1], weightKg: mism.loads[1].weightKg + 50 };
+    const lp2 = sheet(await render(mism), SHEETS.loadPlan);
+    expect(text(lp2.getCell(6, col))).toMatch(/^MISMATCH: stops add up to/);
+  });
+
+  it('a stop whose master data changed after planning says so in its own column', async () => {
+    const d = fixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], masterChanged: [{ kind: 'LOCATION', text: 'Location updated after planning: new pin 23.60100, 58.39000 (1.8 km from the planned one)' }] };
+    const ws = sheet(await render(d), 'T01 - L1');
+    const head = find(ws, (t) => t === 'Changed after planning')!;
+    expect(text(ws.getCell(head.row + 2, head.col))).toMatch(/^Location updated after planning/);
+    expect(text(ws.getCell(head.row + 3, head.col))).toBe('');
+    expect(text(ws.getCell(head.row, head.col + 1))).toBe('Received by (sign)');
+  });
+
+  it('prints TIMES NOT VERIFIED on the summary, the load plan and the sheets of the trucks concerned', async () => {
+    const d = fixture();
+    d.loads[1] = { ...d.loads[1], timing: { status: 'VIOLATED', ok: false } };
+    d.feasibility = {
+      v: 1, ok: false, status: 'VIOLATED', source: 'SOLVER_AND_WEB', solverStatus: 'VIOLATED', solverTiming: 'ESTIMATED',
+      trucks: { t1: { truckCode: 'T01', status: 'VIOLATED', ok: false, blocking: 1, warnings: 0 } },
+      violations: [{ code: 'TURNAROUND', severity: 'BLOCK', source: 'SOLVER', truckId: 't1', truckCode: 'T01', loadId: 'L2', loadNo: 2, message: 'T01 load 2 leaves 20 min before the truck is reloaded.' }],
+      inputHash: 'x', checkedAt: '2026-09-27T05:00:00Z',
+    };
+    const wb = await render(d);
+    const s = sheet(wb, SHEETS.summary);
+    expect(find(s, (t) => t.startsWith('TIMES NOT VERIFIED'), 1)).toBeTruthy();
+    expect(find(s, (t) => t === 'T01 load 2 leaves 20 min before the truck is reloaded.', 3)).toBeTruthy();
+    expect(s.headerFooter.oddHeader).toContain('TIMES NOT VERIFIED');
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const col = find(lp, (t) => t === 'Timing')!.col;
+    expect(text(lp.getCell(6, col))).toBe('TIMES NOT VERIFIED');
+    expect(text(lp.getCell(5, col))).toBe('Times checked');
+    expect(text(sheet(wb, 'T01 - L2').getCell(3, 1))).toMatch(/^TIMES NOT VERIFIED/);
+    expect(sheet(wb, 'T01 - L2').headerFooter.oddHeader).toContain('TIMES NOT VERIFIED');
+    expect(text(sheet(wb, 'T01 - L1').getCell(3, 1))).toBe('');
+    // A verified plan carries no mark.
+    const ok = await render(fixture());
+    expect(find(sheet(ok, SHEETS.summary), (t) => t.startsWith('TIMES NOT VERIFIED'))).toBeUndefined();
+  });
+});

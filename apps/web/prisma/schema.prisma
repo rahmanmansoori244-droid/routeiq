@@ -657,6 +657,10 @@ model RunPlan {
   changeSummaryJson  Json?
   reconciliationJson Json?
   summaryJson        Json?
+  /// Timetable check of this version's loads per truck-day (lib/dispatch/feasibility.ts): what
+  /// LOCK / LOADING / DISPATCH are gated on. Null for versions made before it existed (computed
+  /// on the next load change).
+  feasibilityJson    Json?
   loads              PlanLoad[]
 
   @@index([tenantId, runDate])
@@ -688,6 +692,10 @@ model PlanLoad {
   operatingCost       Float             @default(0)
   returnLegKm         Float             @default(0)
   distanceIsEstimated Boolean           @default(true)
+  /// The truck and planning rules this load was timed with (code, capacities, costs, availability,
+  /// turnaround / shift / depot hours): lib/dispatch/snapshots.ts. Null on loads planned before
+  /// snapshots existed (the live truck is shown, labelled as such).
+  truckSnapshotJson   Json?
   carriedFromLoadId   String? // the same physical load in the parent plan version
   statusChangedAt     DateTime?
   statusChangedById   String?
@@ -750,6 +758,10 @@ model RouteAssignment {
   portionCases              Int?
   portionWeightKg           Float?
   portionLinesJson          Json? // [{ lineId, cases }] - exact SKU lines of this portion
+  /// The customer facts this stop was planned with (pin, receiving hours, service time, name,
+  /// address, access notes): lib/dispatch/snapshots.ts. Null on rows planned before snapshots
+  /// existed (the live customer is shown, labelled as such).
+  stopSnapshotJson          Json?
 
   @@unique([runId, truckId, loadNo, sequenceInTruck, orderInStop])
   @@index([runId, truckId])

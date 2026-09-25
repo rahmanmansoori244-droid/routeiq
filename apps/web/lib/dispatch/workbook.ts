@@ -10,6 +10,7 @@
  */
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
+import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 
 export interface WorkbookMeta {
@@ -18,8 +19,33 @@ export interface WorkbookMeta {
   generatedAt: Date;
   generatedBy: string;
   assumptions: Record<string, string>;
+  /**
+   * PLAN: the settings stored with the plan in use (what it was built with). CURRENT: the plan was
+   * made before settings were stored with plans, so today's settings are shown - labelled as such.
+   */
+  assumptionsSource?: 'PLAN' | 'CURRENT';
   /** Timezone for the "generated at" stamp; defaults to Asia/Muscat. */
   timezone?: string;
+}
+
+/** Printed on every sheet of a plan whose timetable did not pass the check (review F04). */
+export const NOT_VERIFIED = 'TIMES NOT VERIFIED';
+
+/** The plan (or one truck-day of it) did not pass the timetable check. */
+function timesNotVerified(d: PlanDetail, l?: DetailLoad): boolean {
+  if (l) return !!l.timing && !l.timing.ok;
+  return !!d.feasibility && !d.feasibility.ok;
+}
+
+/** "OK" / "OVER PAYLOAD" / "MISMATCH ..." for a load's kg: its stops add up to it and it fits the payload. */
+export function kgCheck(d: PlanDetail, l: DetailLoad): string {
+  const stopsKg = Math.round(sum(l.stops.map((s) => s.weightKg)) * 10) / 10;
+  const out: string[] = [];
+  if (Math.abs(stopsKg - l.weightKg) > 0.5) out.push(`MISMATCH: stops add up to ${stopsKg} kg`);
+  if (l.truckPayloadKg > 0 && l.weightKg > l.truckPayloadKg + 0.05) out.push(`OVER PAYLOAD by ${Math.round(l.weightKg - l.truckPayloadKg)} kg`);
+  if (d.feasibility?.violations.some((v) => v.loadId === l.id && v.code === 'KG_UNKNOWN')) out.push('SOME CASES HAVE NO WEIGHT');
+  if (out.length) return out.join('; ');
+  return l.truckPayloadKg > 0 ? 'OK' : 'OK (no payload set)';
 }
 
 export const SHEETS = {
@@ -210,6 +236,11 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     put(ws, r, 1, 'SUPERSEDED - a newer plan version exists. Do not load or dispatch from this workbook.').font = { bold: true, size: 12 };
   }
   r++;
+  if (timesNotVerified(d)) {
+    put(ws, r, 1, `${NOT_VERIFIED} - some departure or delivery times of this plan break a planning rule (see TIMETABLE CHECK). Re-plan before loading.`).font = { bold: true, size: 12 };
+    r++;
+  }
+  watermark(ws, d);
   const cur = m.currency;
   const kv = (label: string, value: ExcelJS.CellValue, fmt?: string, note?: string) => {
     put(ws, r, 1, label).font = { bold: true };
@@ -284,6 +315,25 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     if (s.solver) kv('Solver', `${s.solver.engine} · ${s.solver.scenario} · ${s.solver.status}`, undefined, `${s.solver.timeSec}s`);
   }
 
+  head('TIMETABLE CHECK');
+  const f = d.feasibility;
+  if (!f) {
+    kv('Timetable', 'not checked', undefined, 'no optimized plan applied');
+  } else {
+    kv('Timetable', f.ok ? (f.status === 'STRUCTURAL_ONLY' ? 'CHECKED (without optimizer report)' : 'VERIFIED') : NOT_VERIFIED, undefined,
+      f.solverStatus === 'UNKNOWN' ? 'this plan was made before the optimizer checked its own times; the loads, windows and turnarounds were checked here' : `optimizer check: ${f.solverStatus}${f.solverTiming ? ` (${f.solverTiming.toLowerCase()} timing)` : ''}`);
+    const shown = f.violations.slice(0, 20);
+    for (const v of shown) {
+      put(ws, r, 2, v.severity === 'BLOCK' ? v.code : `${v.code} (warning)`);
+      put(ws, r, 3, v.message);
+      r++;
+    }
+    if (f.violations.length > shown.length) {
+      put(ws, r, 3, `... and ${f.violations.length - shown.length} more`);
+      r++;
+    }
+  }
+
   head('RECONCILIATION');
   const rc = d.reconciliation;
   kv('Status', recon.status, undefined, rc ? `uploaded ${rc.uploadedCases} = planned ${rc.plannedCases} + unserved ${rc.unservedCases} cases` : undefined);
@@ -312,12 +362,13 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
   const est = d.loads.some((l) => l.distanceIsEstimated) || !!d.summary?.distanceIsEstimated;
   const cur = m.currency;
   const heads = [
-    'Truck', 'Load', 'Status', 'Driver', 'Departure', 'Return', 'Stops (customers)', 'Cases', 'Capacity (cases)', 'Weight kg',
-    'Utilization %', est ? 'Estimated km' : 'Route km', 'Est. time (h:mm)', 'Est. fuel (l)', `Fuel cost (${cur})`, `Operating cost (${cur})`, 'Sheet',
+    'Truck', 'Load', 'Status', 'Driver', 'Departure', 'Return', 'Stops (customers)', 'Cases', 'Capacity (cases)', 'Weight kg', 'Payload kg', 'Kg check',
+    'Utilization %', est ? 'Estimated km' : 'Route km', 'Est. time (h:mm)', 'Est. fuel (l)', `Fuel cost (${cur})`, `Operating cost (${cur})`, 'Timing', 'Sheet',
   ];
-  const fmts = [undefined, FMT_INT, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_PCT, FMT_KM, undefined, FMT_KM, FMT_MONEY, FMT_MONEY];
-  ws.columns = [12, 6, 16, 20, 10, 10, 10, 9, 10, 11, 11, 11, 10, 10, 12, 14, 22].map((width) => ({ width }));
-  titleRows(ws, 'LOAD PLAN', `Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} (${d.run.status})${est ? ' · km are ESTIMATED' : ''}`);
+  const fmts = [undefined, FMT_INT, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_KG, undefined, FMT_PCT, FMT_KM, undefined, FMT_KM, FMT_MONEY, FMT_MONEY];
+  ws.columns = [12, 6, 16, 20, 10, 10, 10, 9, 10, 11, 11, 18, 11, 11, 10, 10, 12, 14, 18, 22].map((width) => ({ width }));
+  titleRows(ws, 'LOAD PLAN', `Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} (${d.run.status})${est ? ' · km are ESTIMATED' : ''}${timesNotVerified(d) ? ` · ${NOT_VERIFIED}` : ''}`);
+  watermark(ws, d);
   ws.pageSetup.printTitlesRow = '4:4';
   headRow(ws, 4, heads);
   let r = 5;
@@ -331,8 +382,9 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       r++,
       [
         l.truckCode, l.loadNo, l.status + (l.carried ? ' (kept from previous version)' : ''), l.driverName ?? 'Not assigned',
-        fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, l.truckCapacityCases, l.weightKg, l.utilizationPct,
-        l.distanceKm, fmtDuration(l.durationMin), l.fuelLitres, l.fuelCost, l.operatingCost, names.get(l.id) ?? '',
+        fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
+        l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), l.fuelLitres, l.fuelCost, l.operatingCost,
+        l.timing ? (l.timing.ok ? TIMING_TEXT[l.timing.status] : NOT_VERIFIED) : '—', names.get(l.id) ?? '',
       ],
       fmts,
     );
@@ -343,9 +395,9 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
     r,
     [
       'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '',
-      sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '',
+      sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '', '', '',
       sum(d.loads.map((l) => l.distanceKm)), fmtDuration(sum(d.loads.map((l) => l.durationMin))),
-      fuelKnown ? sum(d.loads.map((l) => l.fuelLitres ?? 0)) : null, sum(d.loads.map((l) => l.fuelCost)), sum(d.loads.map((l) => l.operatingCost)), '',
+      fuelKnown ? sum(d.loads.map((l) => l.fuelLitres ?? 0)) : null, sum(d.loads.map((l) => l.fuelCost)), sum(d.loads.map((l) => l.operatingCost)), '', '',
     ],
     fmts,
   );
@@ -354,9 +406,9 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
 // Delivery-route table columns (1-based), shared by the header block and the route rows.
 const ROUTE_HEADS = [
   'Seq', 'Customer code', 'Branch', 'Customer name', 'Priority', 'Type', 'ETA', 'Service start', 'Window', 'Service min',
-  'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Notes', 'Received by (sign)',
+  'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Notes', 'Changed after planning', 'Received by (sign)',
 ];
-const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 9, 24, 8, 8, 10, 44, 20, 9, 10, 8, 24, 18];
+const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 9, 24, 8, 8, 10, 44, 20, 9, 10, 8, 24, 30, 18];
 
 function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: DetailLoad, name: string) {
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 2 }], pageSetup: { ...LANDSCAPE } });
@@ -367,6 +419,11 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     `Truck ${l.truckCode} - Load ${l.loadNo}`,
     `${m.tenantName} · NMWC Daily Dispatch Plan · Depot ${d.run.depot.code} - ${d.run.depot.name} · Delivery ${d.run.runDate} · Plan v${d.run.version} (${d.run.status})`,
   );
+  const notVerified = timesNotVerified(d, l);
+  if (notVerified) {
+    put(ws, 3, 1, `${NOT_VERIFIED} - this truck's times break a planning rule (see SUMMARY, TIMETABLE CHECK). Re-plan before loading.`).font = { bold: true, size: 12 };
+  }
+  watermark(ws, d, l);
 
   // Header block: two label/value groups side by side (labels overflow into the empty cells).
   const left: [string, ExcelJS.CellValue, string?][] = [
@@ -379,7 +436,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   ];
   const right: [string, ExcelJS.CellValue, string?][] = [
     ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
-    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg}`],
+    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
     ['Utilization %', l.utilizationPct, FMT_PCT],
     [kmWord, l.distanceKm, FMT_KM],
     ['Estimated time (h:mm)', fmtDuration(l.durationMin)],
@@ -421,6 +478,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   // DELIVERY ROUTE - driver's sequence.
   section(ws, r, 'DELIVERY ROUTE');
   if (l.distanceIsEstimated) put(ws, r, 4, 'km are ESTIMATED (not road distances)').font = GREY;
+  if (l.stops.some((s) => !s.snapshot)) put(ws, r, 9, 'Stops planned before their details were kept: current customer data shown').font = GREY;
   r++;
   const heads = ROUTE_HEADS.map((h) => (h === 'Km from prev' || h === 'Cumulative km') && l.distanceIsEstimated ? `${h} (est.)` : h);
   headRow(ws, r, heads);
@@ -433,7 +491,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ws,
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (depart)`, '', '', fmtHhmm(l.departMin), '', '', null, null, null, '', '', null, 0,
-      { text: 'Map', hyperlink: depotMap }, `Departure ${fmtHhmm(l.departMin)}`, ''],
+      { text: 'Map', hyperlink: depotMap }, `Departure ${fmtHhmm(l.departMin)}`, '', ''],
     fmts,
   );
   let running = 0;
@@ -453,7 +511,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       [
         s.sequence, s.customerCode, s.branchCode ?? '', s.customerName, `P${s.priority}`, s.customerType ?? '', fmtHhmm(s.etaMin),
         fmtHhmm(s.serviceStartMin), s.window, s.serviceMin, s.cases, s.weightKg, skuText(s.skus), uniq(s.salesOrders).join(', '),
-        s.legKm, s.cumulativeKm ?? running, s.mapsUrl ? { text: 'Map', hyperlink: s.mapsUrl } : '', notes.join('; '), '',
+        s.legKm, s.cumulativeKm ?? running, s.mapsUrl ? { text: 'Map', hyperlink: s.mapsUrl } : '', notes.join('; '),
+        s.masterChanged.map((c) => c.text).join('; '), '',
       ],
       fmts,
     );
@@ -462,7 +521,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ws,
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (return)`, '', '', fmtHhmm(l.returnMin), '', '', null, null, null, '', '',
-      l.returnLegKm, l.distanceKm, { text: 'Map', hyperlink: depotMap }, `Back at depot ${fmtHhmm(l.returnMin)} · return leg ${l.returnLegKm.toFixed(1)} km`, ''],
+      l.returnLegKm, l.distanceKm, { text: 'Map', hyperlink: depotMap }, `Back at depot ${fmtHhmm(l.returnMin)} · return leg ${l.returnLegKm.toFixed(1)} km`, '', ''],
     fmts,
   );
   const stopCases = sum(l.stops.map((s) => s.cases));
@@ -470,7 +529,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ws,
     r,
     ['', 'TOTAL', '', `${l.stops.length} stops`, '', '', '', '', '', '', stopCases, sum(l.stops.map((s) => s.weightKg)), '', '', '', l.distanceKm, '',
-      stopCases !== l.cases ? `MISMATCH: load records ${l.cases} cases` : `Total time ${fmtDuration(l.durationMin)}`, ''],
+      stopCases !== l.cases ? `MISMATCH: load records ${l.cases} cases` : `Total time ${fmtDuration(l.durationMin)}`, '', ''],
     fmts,
   );
   r += 3;
@@ -587,7 +646,14 @@ function addReconciliationSheet(wb: ExcelJS.Workbook, d: PlanDetail, recon: Reco
 function addAssumptionsSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta) {
   const ws = wb.addWorksheet(SHEETS.assumptions, { views: [{ state: 'frozen', ySplit: 3 }], pageSetup: PORTRAIT });
   ws.columns = [{ width: 48 }, { width: 90 }];
-  titleRows(ws, 'ASSUMPTIONS', `Settings this plan (v${d.run.version}) was built and costed with.`);
+  // Review F08: the settings stored with the plan, never today's settings under a "built with" title.
+  titleRows(
+    ws,
+    'ASSUMPTIONS',
+    m.assumptionsSource === 'CURRENT'
+      ? `Current settings, at export time. Plan v${d.run.version} was made before its settings were stored with it: it may have been built with other values.`
+      : `Settings this plan (v${d.run.version}) was built and costed with.`,
+  );
   headRow(ws, 3, ['Setting', 'Value']);
   let r = 4;
   const entries = Object.entries(m.assumptions);
@@ -608,7 +674,18 @@ function addAssumptionsSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMet
 // Assumptions from the tenant configuration (used by the export route)
 // ----------------------------------------------------------------------------------------
 
-/** The TenantConfig fields the workbook reports; a Prisma TenantConfig row satisfies it. */
+/**
+ * The page header of a sheet whose times are not verified (review F04): printed on every page, so
+ * a page separated from the workbook still carries it.
+ */
+function watermark(ws: ExcelJS.Worksheet, d: PlanDetail, l?: DetailLoad) {
+  if (timesNotVerified(d, l)) ws.headerFooter.oddHeader = `&C&"-,Bold"&14${NOT_VERIFIED} - check with the dispatcher before loading`;
+}
+
+/**
+ * The fields the workbook reports: a Prisma TenantConfig row satisfies it, and so do the settings
+ * stored with a plan (snapshots.PlanSettings: osrmConfigured instead of the OSRM address).
+ */
 export interface AssumptionConfig {
   timezone: string;
   planningCutoffMin: number;
@@ -628,8 +705,10 @@ export interface AssumptionConfig {
   distanceMultiplier: number;
   avgSpeedKmh: number;
   defaultServiceTimeMin: number;
-  osrmUrl: string | null;
-  priorityWeightsJson: unknown;
+  osrmUrl?: string | null;
+  /** Whether the tenant set its own OSRM server (the address itself is not kept with plans). */
+  osrmConfigured?: boolean;
+  priorityWeightsJson?: unknown;
 }
 
 export function tenantAssumptions(
@@ -668,7 +747,11 @@ export function tenantAssumptions(
           ? `${cfg.distanceProvider} configured - straight-line estimates used (outside the Oman + UAE routing map)`
           : `${cfg.distanceProvider} (the dispatch planner uses OSRM road distances)`,
     'Distance provider (this plan)': `${opts.providerUsed ?? 'unknown'}${opts.distanceIsEstimated ? ' - ESTIMATED distances' : ''}`,
-    'OSRM server configured': cfg.osrmUrl ? 'yes (tenant setting)' : opts.osrmEnvConfigured ? 'yes (OSRM_URL environment)' : 'no tenant setting (the solver uses its own OSRM_URL if set)',
+    'OSRM server configured': (cfg.osrmConfigured ?? !!cfg.osrmUrl)
+      ? 'yes (tenant setting)'
+      : opts.osrmEnvConfigured
+        ? 'yes (OSRM_URL environment)'
+        : 'no tenant setting (the solver uses its own OSRM_URL if set)',
   };
   if (cfg.distanceProvider === 'HAVERSINE' || opts.distanceIsEstimated) {
     out['Estimated-distance multiplier'] = `x${cfg.distanceMultiplier} on straight-line distance`;

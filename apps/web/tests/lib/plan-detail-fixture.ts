@@ -94,6 +94,8 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     notes: o.note ? [o.note] : [],
     accessNotes: o.access ?? null,
     split: null,
+    snapshot: true,
+    masterChanged: [],
   };
 }
 
@@ -126,6 +128,9 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     distanceIsEstimated: estimated,
     stops,
     manifest: aggregateSkus(stops.flatMap((s) => s.skus)),
+    truckSnapshot: true,
+    masterChanged: [],
+    timing: { status: 'VERIFIED', ok: true },
   };
 }
 
