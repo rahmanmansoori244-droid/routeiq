@@ -2,7 +2,7 @@
  * Review F16 / new issue: rate limits and audit rows must not trust the client-controlled LEFT
  * end of X-Forwarded-For. lib/client-ip.ts counts trusted proxy hops from the right.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { clientIpFromHeaders } from '@/lib/client-ip';
 
 const h = (init: Record<string, string>) => new Headers(init);
@@ -45,5 +45,17 @@ describe('clientIpFromHeaders', () => {
     expect(clientIpFromHeaders(h({ 'x-forwarded-for': '203.0.113.9:5555' }), env())).toBe('203.0.113.9');
     expect(clientIpFromHeaders(h({ 'x-forwarded-for': 'not-an-ip<script>' }), env())).toBeNull();
     expect(clientIpFromHeaders(h({ 'x-forwarded-for': '1'.repeat(200) }), env())).toBeNull();
+  });
+});
+
+describe('internal-address warning', () => {
+  it('warns once in production when the resolved client IP is internal (a proxy)', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const prod = { NODE_ENV: 'production' } as unknown as NodeJS.ProcessEnv;
+    expect(clientIpFromHeaders(new Headers({ 'x-forwarded-for': '203.0.113.9, 10.1.2.3' }), prod)).toBe('10.1.2.3');
+    clientIpFromHeaders(new Headers({ 'x-forwarded-for': '172.20.0.5' }), prod);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/TRUSTED_PROXY_HOPS/);
+    warn.mockRestore();
   });
 });

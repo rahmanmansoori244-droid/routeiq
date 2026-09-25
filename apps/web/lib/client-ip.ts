@@ -34,6 +34,22 @@ function cleanIp(raw: string | null | undefined): string | null {
   return v;
 }
 
+// Private, loopback, link-local and carrier-grade NAT ranges: a "client" IP in these is almost
+// always a proxy, which would make every user share one rate-limit bucket.
+const INTERNAL_IP =
+  /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i;
+let warnedInternal = false;
+
+function checked(ip: string | null, env: NodeJS.ProcessEnv): string | null {
+  if (ip && !warnedInternal && env.NODE_ENV === 'production' && INTERNAL_IP.test(ip)) {
+    warnedInternal = true;
+    console.warn(
+      `[client-ip] the client IP resolved to an internal address (${ip}). Check TRUSTED_PROXY_HOPS / CLIENT_IP_HEADER: otherwise all users share one rate-limit bucket and audit rows show the proxy.`,
+    );
+  }
+  return ip;
+}
+
 function trustedHops(env: NodeJS.ProcessEnv): number {
   const raw = env.TRUSTED_PROXY_HOPS;
   if (raw === undefined || raw.trim() === '') return 1;
@@ -49,7 +65,7 @@ export function clientIpFromHeaders(headers: Headers, env: NodeJS.ProcessEnv = p
   if (named) {
     const v = headers.get(named);
     // A single-value header; if a proxy chain turned it into a list, the last entry is the edge's.
-    return cleanIp(v?.split(',').pop());
+    return checked(cleanIp(v?.split(',').pop()), env);
   }
 
   const xff = headers.get('x-forwarded-for');
@@ -59,10 +75,10 @@ export function clientIpFromHeaders(headers: Headers, env: NodeJS.ProcessEnv = p
       // Fewer entries than trusted hops: every entry was written by a trusted proxy, so the
       // left-most one is the client.
       const idx = Math.max(0, parts.length - hops);
-      return cleanIp(parts[idx]);
+      return checked(cleanIp(parts[idx]), env);
     }
   }
-  return cleanIp(headers.get('x-real-ip'));
+  return checked(cleanIp(headers.get('x-real-ip')), env);
 }
 
 export function clientIp(req: Request, env: NodeJS.ProcessEnv = process.env): string | null {
