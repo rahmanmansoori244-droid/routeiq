@@ -67,9 +67,11 @@ interface Props {
   canDispatch: boolean;
   initialDate: string | null;
   initialDepot: string | null;
+  /** Calling code for drivers' phones saved without one (WhatsApp links); null = unknown. */
+  phoneCountryCode: string | null;
 }
 
-export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initialDepot }: Props) {
+export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initialDepot, phoneCountryCode }: Props) {
   const router = useRouter();
   const [date, setDate] = useState<string | null>(initialDate);
   const [depotId, setDepotId] = useState<string | null>(initialDepot);
@@ -307,6 +309,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
             runId={day.plan.id}
             canPlan={canPlan}
             canDispatch={canDispatch}
+            phoneCountryCode={phoneCountryCode}
             onChanged={() => {
               setPlanKey((k) => k + 1);
               void refresh();

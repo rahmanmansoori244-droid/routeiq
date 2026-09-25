@@ -7,16 +7,19 @@
  * steps: driverPackModel() is pure and unit-tested; renderDriverPackPdf() only lays it out.
  * The driver sheet never shows money: no cost, fuel, revenue or margin.
  *
- * Font: the PDF built-in Helvetica (no font files to ship). It covers Latin text only (WinAnsi:
- * letters, digits, "·", "×", "–", "—"). NMWC master data is in English today; Arabic customer
- * names would print as blanks - that needs a bundled font with Arabic glyphs (e.g. Noto Naskh
- * Arabic) registered with Font.register().
+ * Font: the PDF built-in Helvetica (no font files to ship). It prints Latin text only (WinAnsi:
+ * ASCII, Latin-1 and a few extras such as "–", "—", "•"). Other characters would NOT come out
+ * blank but as wrong Latin letters (Arabic "هايبر" prints as "1(J'G"), so the model passes every
+ * text from the data through pdfSafe(): what cannot print becomes "[?]" and the sheet says so.
+ * NMWC master data is in English today; printing Arabic needs a bundled font with Arabic glyphs
+ * (e.g. Noto Sans + Noto Naskh Arabic) registered with Font.register().
  */
 import * as React from 'react';
 import { Document, Link, Page, Path, StyleSheet, Svg, Text, View, renderToBuffer } from '@react-pdf/renderer';
 import { create as createQr } from 'qrcode';
 import type { DetailLoad, DetailStop, PlanDetail } from './plan-detail';
 import { coordText, pinUrl, routeLinks, tripsByTruck, type RoutePlan } from './driver-links';
+import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
 import { fmtHhmm } from './time';
 
 // ---------------------------------------------------------------------------------------
@@ -72,6 +75,8 @@ export interface DriverSheet {
   stops: SheetStop[];
   returnText: string;
   footerText: string;
+  /** Some text of this sheet could not be printed and shows as "[?]" (pdf-text.ts). */
+  unprintable: boolean;
 }
 
 export interface DriverPackModel {
@@ -104,34 +109,36 @@ function hoursLines(window: string): string[] {
   return window.split(', ').map((w) => w.replace(/^hard /, 'Receives ').replace(/^preferred /, 'Best '));
 }
 
-function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop): SheetStop {
+type Txt = ReturnType<typeof pdfTextCollector>;
+
+function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetStop {
   let split: SheetStop['split'] = null;
   if (s.split) {
     // Where the customer's other parts are: truck + trip, in part order.
     const others = d.loads
       .flatMap((x) => x.stops.filter((y) => y.customerId === s.customerId && y.split && !(x.id === l.id && y.sequence === s.sequence)).map((y) => ({ x, y })))
       .sort((a, b) => a.y.split!.part - b.y.split!.part)
-      .map(({ x, y }) => `part ${y.split!.part} on ${x.truckCode} trip ${x.loadNo}`);
+      .map(({ x, y }) => `part ${y.split!.part} on ${t.text(x.truckCode)} trip ${x.loadNo}`);
     split = { part: s.split.part, parts: s.split.parts, others, restUnserved: s.split.restUnserved };
   }
   return {
     sequence: s.sequence,
-    customerName: s.customerName,
-    customerCode: s.customerCode,
-    branchCode: s.branchCode,
-    customerType: s.customerType,
+    customerName: t.text(s.customerName),
+    customerCode: t.text(s.customerCode),
+    branchCode: t.maybe(s.branchCode),
+    customerType: t.maybe(s.customerType),
     priority: s.priority,
-    address: s.address?.trim() || null,
-    accessNotes: s.accessNotes?.trim() || null,
-    notes: s.notes.map((n) => n.trim()).filter(Boolean),
+    address: t.maybe(s.address) || null,
+    accessNotes: t.maybe(s.accessNotes) || null,
+    notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,
     eta: fmtHhmm(s.etaMin),
     hours: hoursLines(s.window),
     outsideHours: s.hardWindowOk === false,
     cases: s.cases,
-    skus: s.skus.map((k) => ({ productCode: k.productCode, productName: k.productName, cases: k.cases })),
-    salesOrders: s.salesOrders,
+    skus: s.skus.map((k) => ({ productCode: t.text(k.productCode), productName: t.text(k.productName), cases: k.cases })),
+    salesOrders: s.salesOrders.map((so) => t.text(so)),
     pinUrl: pinUrl(s),
     coords: s.lat !== null && s.lng !== null ? coordText(s.lat, s.lng) : null,
   };
@@ -142,24 +149,30 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
   const wanted = opts.loadIds ? new Set(opts.loadIds) : null;
   const trips = tripsByTruck(d.loads);
   const v = d.run.version;
+  // Every text from the data goes through pdfSafe (see the top of this file).
+  const head = pdfTextCollector();
+  const tenantName = head.text(opts.tenantName);
+  const depot = { code: head.text(d.run.depot.code), name: head.text(d.run.depot.name) };
   const sheets = d.loads
     .filter((l) => !wanted || wanted.has(l.id))
     .map((l): DriverSheet => {
+      const t = pdfTextCollector();
+      const truckCode = t.text(l.truckCode);
       const n = trips.get(l.truckId) ?? 1;
       const next = d.loads.filter((x) => x.truckId === l.truckId && x.loadNo > l.loadNo).sort((a, b) => a.loadNo - b.loadNo)[0];
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
-      return {
+      const sheet: Omit<DriverSheet, 'unprintable'> = {
         loadId: l.id,
         truckId: l.truckId,
-        truckCode: l.truckCode,
+        truckCode,
         trip: l.loadNo,
         trips: n,
         status: l.status,
         carried: l.carried,
         badges: [BADGE[l.status] ?? l.status, ...(l.carried ? ['KEPT FROM PREVIOUS VERSION'] : [])],
-        driverName: l.driverName,
-        driverPhone: l.driverPhone,
+        driverName: t.maybe(l.driverName),
+        driverPhone: t.maybe(l.driverPhone),
         depart: fmtHhmm(l.departMin),
         back: fmtHhmm(l.returnMin),
         cases: l.cases,
@@ -167,25 +180,26 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         kmLabel: l.distanceIsEstimated ? 'Estimated km' : 'Road km',
         km: Math.round(l.distanceKm),
         loadCheck: {
-          items: l.manifest.map((m) => ({ productCode: m.productCode, productName: m.productName, cases: m.cases })),
+          items: l.manifest.map((m) => ({ productCode: t.text(m.productCode), productName: t.text(m.productName), cases: m.cases })),
           total,
           matchesLoad: total === l.cases,
         },
         route: routeLinks(d.run.depot, stops),
-        stops: stops.map((s) => sheetStop(d, l, s)),
+        stops: stops.map((s) => sheetStop(d, l, s, t)),
         returnText:
-          `Return to depot ${d.run.depot.code} ~${fmtHhmm(l.returnMin)}` +
+          `Return to depot ${depot.code} ~${fmtHhmm(l.returnMin)}` +
           (next ? ` - load trip ${next.loadNo} (planned departure ${fmtHhmm(next.departMin)}).` : ' - last trip of the day.'),
-        footerText: `${l.truckCode} trip ${l.loadNo} of ${n} · delivery ${d.run.runDate} · plan v${v} - this sheet is void if a newer plan version is issued`,
+        footerText: `${truckCode} trip ${l.loadNo} of ${n} · delivery ${d.run.runDate} · plan v${v} - this sheet is void if a newer plan version is issued`,
       };
+      return { ...sheet, unprintable: head.lost || t.lost };
     });
   return {
     title: `Driver sheets ${d.run.runDate} v${v}`,
-    tenantName: opts.tenantName,
+    tenantName,
     runDate: d.run.runDate,
     version: v,
     superseded: d.run.status === 'SUPERSEDED',
-    depot: { code: d.run.depot.code, name: d.run.depot.name },
+    depot,
     sheets,
   };
 }
@@ -411,6 +425,7 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
               : 'no stop has a location - call the dispatcher'}
             {sh.route.links.length && sh.route.skipped.length ? `  (stop ${sh.route.skipped.join(', ')} not in the link: no location)` : ''}
           </T>
+          {sh.unprintable ? <T style={[s.line, s.b]}>{`${UNPRINTABLE} = text this sheet cannot print (for example Arabic letters) - ask the dispatcher.`}</T> : null}
         </View>
         {routeQrs.length ? (
           <View style={{ flexDirection: 'row', marginLeft: 6 }}>

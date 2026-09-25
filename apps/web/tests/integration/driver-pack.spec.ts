@@ -2,8 +2,9 @@
  * DRIVER SHEETS + DRIVER PER LOAD - end-to-end against the running web app + solver: the trucks
  * API keeps a default driver per truck (same tenant, active), a new plan puts it on the truck's
  * loads, the dispatcher changes the driver per load (shown in /plan, refused after dispatch and
- * on a replaced version), a re-plan keeps each truck's driver, and the PDF export returns the
- * driver sheets (whole plan, one load, one truck; 404 for unknown ids).
+ * on a replaced version; driver + status in one request succeed or fail together), a re-plan
+ * keeps each truck's and each trip's driver, and the PDF export returns the driver sheets (whole
+ * plan, one load, one truck; 404 for unknown ids).
  *
  * Requires: dev server (RATE_LIMITS_DISABLED=1) + solver running.
  */
@@ -271,6 +272,17 @@ describe('driver sheets and drivers per load', () => {
     const locked = (await plan(runV2)).loads.find((l: any) => l.id === first.id);
     expect(locked).toMatchObject({ status: 'LOCKED', driverId: drivers.D1 });
 
+    // Driver + status in one request is one transaction: a refused status change keeps the old driver.
+    const other = (await plan(runV2)).loads.find((l: any) => l.id !== first.id && l.status === 'PLANNED');
+    expect(other).toBeTruthy();
+    const otherDriver = other.driverId === drivers.D2 ? drivers.D1 : drivers.D2;
+    const driverAudits = () => prisma.auditLog.count({ where: { tenantId: t.tenantId, action: 'LOAD_DRIVER_SET', entityId: other.id } });
+    const auditsBefore = await driverAudits();
+    const badStatus = await patchLoad(runV2, other.id, { driverId: otherDriver, status: 'LOADING' }); // PLANNED cannot go straight to LOADING
+    expect(badStatus.status).toBe(409);
+    expect((await plan(runV2)).loads.find((l: any) => l.id === other.id)).toMatchObject({ status: 'PLANNED', driverId: other.driverId });
+    expect(await driverAudits()).toBe(auditsBefore);
+
     const out = await patchLoad(runV2, first.id, { status: 'DISPATCHED' });
     expect(out.status).toBe(200);
     const refused = await patchLoad(runV2, first.id, { driverId: drivers.D2 });
@@ -281,5 +293,45 @@ describe('driver sheets and drivers per load', () => {
     const pdf = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/pdf?load=${first.id}`);
     expect(pdf.status).toBe(200);
     expect(pdf.headers.get('content-disposition')).toContain(`driver-sheets-${day}-v2-`);
+
+    // Re-sending the load's own driver along with a status change is not a driver change.
+    const done = await patchLoad(runV2, first.id, { status: 'COMPLETED', driverId: drivers.D1 });
+    expect(done.status).toBe(200);
+    expect((await plan(runV2)).loads.find((l: any) => l.id === first.id)).toMatchObject({ status: 'COMPLETED', driverId: drivers.D1 });
+  });
+
+  it('a re-plan keeps each trip its own driver: the same trip in the previous version beats the carried trip 1', async () => {
+    // One more driver, so each truck has its own and no guess is refused for a clash.
+    const r4 = await fetchWith(t.cookieJar, `${BASE}/api/drivers`, j({ code: 'D4', name: 'Khalid Al Amri', phone: '+968 9777 0104', active: true }));
+    expect(r4.status).toBe(201);
+    drivers.D4 = (await json(r4)).data.id;
+
+    const p = await plan(runV2);
+    const byTruck = new Map<string, any[]>();
+    for (const l of p.loads) byTruck.set(l.truckId, [...(byTruck.get(l.truckId) ?? []), l]);
+    // A truck with 2+ trips (285 cases do not fit in one trip of each 120-case truck).
+    const x = [...byTruck.entries()].find(([, ls]) => ls.length >= 2)?.[0];
+    expect(x).toBeTruthy();
+    const xLoads = byTruck.get(x!)!.sort((a: any, b: any) => a.loadNo - b.loadNo);
+    // Trip 1 frozen with D1 (so it is carried); the dispatcher gives the later trips to D2.
+    if (xLoads[0].status === 'PLANNED') expect((await patchLoad(runV2, xLoads[0].id, { status: 'LOCKED', driverId: drivers.D1 })).status).toBe(200);
+    for (const l of xLoads.slice(1)) expect((await patchLoad(runV2, l.id, { driverId: drivers.D2 })).status).toBe(200);
+    for (const l of p.loads) if (l.truckId !== x && l.status === 'PLANNED') expect((await patchLoad(runV2, l.id, { driverId: drivers.D4 })).status).toBe(200);
+    const v2Driver = new Map<string, string | null>((await plan(runV2)).loads.map((l: any) => [`${l.truckId}:${l.loadNo}`, l.driverId]));
+    expect(v2Driver.get(`${x}:1`)).toBe(drivers.D1);
+
+    const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/replan`, j({ reason: 'REOPTIMIZE' }));
+    expect(rp.status).toBe(202);
+    const runV3 = (await json(rp)).data.runId as string;
+    await waitForPlan(runV3);
+    const p3 = await plan(runV3);
+    expect(p3.loads.length).toBeGreaterThan(0);
+    for (const l of p3.loads) {
+      const key = `${l.truckId}:${l.loadNo}`;
+      if (l.carried) expect(l.driverId, key).toBe(v2Driver.get(key));
+      // Every new trip of X is numbered after the carried trip 1: D2 as in v2, never trip 1's D1.
+      else if (l.truckId === x) expect(l.driverId, key).toBe(drivers.D2);
+      else if (v2Driver.has(key)) expect(l.driverId, key).toBe(v2Driver.get(key));
+    }
   });
 });

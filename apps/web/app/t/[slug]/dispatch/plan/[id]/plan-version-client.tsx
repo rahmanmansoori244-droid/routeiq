@@ -4,7 +4,21 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { PlanView } from '../../plan-view';
 
-export function PlanVersionClient({ slug, runId, canPlan, canDispatch, dayHref }: { slug: string; runId: string; canPlan: boolean; canDispatch: boolean; dayHref: string }) {
+export function PlanVersionClient({
+  slug,
+  runId,
+  canPlan,
+  canDispatch,
+  phoneCountryCode,
+  dayHref,
+}: {
+  slug: string;
+  runId: string;
+  canPlan: boolean;
+  canDispatch: boolean;
+  phoneCountryCode: string | null;
+  dayHref: string;
+}) {
   const router = useRouter();
   return (
     <div className="space-y-3">
@@ -16,6 +30,7 @@ export function PlanVersionClient({ slug, runId, canPlan, canDispatch, dayHref }
         runId={runId}
         canPlan={canPlan}
         canDispatch={canDispatch}
+        phoneCountryCode={phoneCountryCode}
         onChanged={(newRunId) => {
           if (newRunId && newRunId !== runId) router.push(`/t/${slug}/dispatch/plan/${newRunId}`);
         }}

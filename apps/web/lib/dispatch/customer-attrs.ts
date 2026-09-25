@@ -159,6 +159,17 @@ export function isOmanUae(country: string | null | undefined): boolean {
   return !c || OMAN_UAE.test(c);
 }
 
+const UAE = /(^|[^a-z])(uae|u\.a\.e|ae|are|dubai|abu dhabi|sharjah)([^a-z]|$)|[eé]mira[td]|ال[اإ]مارات/i;
+
+/**
+ * Calling code for phones saved without one (WhatsApp links): 971 in the UAE, 968 in Oman (and
+ * for a blank country, the NMWC default - as isOmanUae), null elsewhere (no guess).
+ */
+export function phoneCountryCode(country: string | null | undefined): string | null {
+  if (!isOmanUae(country)) return null;
+  return UAE.test((country ?? '').trim()) ? '971' : '968';
+}
+
 /** No area check: every valid coordinate is inside. */
 export const WHOLE_WORLD: ServiceArea = { minLat: -90, maxLat: 90, minLng: -180, maxLng: 180 };
 

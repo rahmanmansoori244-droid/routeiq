@@ -88,7 +88,17 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="phone">Phone</Label>
-              <Input id="phone" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+              <Input
+                id="phone"
+                value={form.phone}
+                onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                placeholder="+968 9123 4567"
+                title="Mobile with the country code, so the WhatsApp link opens the right chat"
+                aria-describedby="phone-hint"
+              />
+              <p id="phone-hint" className="text-[11px] text-muted-foreground">
+                With the country code, e.g. +968
+              </p>
             </div>
           </div>
           <div className="space-y-1.5">

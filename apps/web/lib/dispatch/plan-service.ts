@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { checkTransition, isFrozen, ON_ROAD, pickLoadDriver, type LoadStatusName } from './load-state';
+import { assignReplanDrivers, checkDriverChange, checkTransition, isFrozen, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -554,30 +554,41 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     throw new PlanError('Loads were locked/unlocked after this optimization. Optimize again before applying.', 409);
   }
 
-  // Drivers stay with their truck across re-plans: the driver set on the truck's loads in this
-  // version (read before its PLANNED loads are deleted), else in the parent version, else the
-  // truck's default driver. Only active drivers of this tenant.
+  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: d.loads.map((l) => l.truck_id) } } });
+  const truckById = new Map(trucks.map((t) => [t.id, t]));
+  for (const ld of d.loads) if (!truckById.has(ld.truck_id)) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
+
+  // Drivers stay with their truck and trip across re-plans: this version's loads (read before
+  // its PLANNED loads are deleted), then the parent version, then the truck's default driver -
+  // without guessing one driver onto two trucks at the same time. Rules: assignReplanDrivers.
   const usableDrivers = new Set((await tx.driver.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((x) => x.id));
   const driverSel = { truckId: true, loadNo: true, driverId: true } as const;
   const driversNow = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
   const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
-  const driverFor = (truckId: string, loadNo: number, defaultDriverId: string | null) =>
-    pickLoadDriver(driversNow, truckId, loadNo, usableDrivers) ??
-    pickLoadDriver(driversParent, truckId, loadNo, usableDrivers) ??
-    (defaultDriverId && usableDrivers.has(defaultDriverId) ? defaultDriverId : null);
+  const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
+  const driverOf = assignReplanDrivers(
+    d.loads.map((ld) => ({
+      key: loadKey(ld.truck_id, ld.load_no),
+      truckId: ld.truck_id,
+      loadNo: ld.load_no,
+      departMin: ld.depart_min,
+      returnMin: ld.return_min,
+      defaultDriverId: truckById.get(ld.truck_id)!.defaultDriverId,
+    })),
+    driversNow,
+    driversParent,
+    frozenNow,
+    usableDrivers,
+  );
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
-  const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: d.loads.map((l) => l.truck_id) } } });
-  const truckById = new Map(trucks.map((t) => [t.id, t]));
   const orderIds = [...d.scope.orderIds];
   const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, totalCases: true } });
   const casesOf = new Map(orders.map((o) => [o.id, o.totalCases]));
 
   for (const ld of d.loads) {
-    const t = truckById.get(ld.truck_id);
-    if (!t) throw new PlanError(`Truck ${ld.truck_id} no longer exists.`, 409);
     const load = await tx.planLoad.create({
       data: {
         tenantId,
@@ -585,7 +596,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         truckId: ld.truck_id,
         loadNo: ld.load_no,
         status: 'PLANNED',
-        driverId: driverFor(ld.truck_id, ld.load_no, t.defaultDriverId),
+        driverId: driverOf.get(loadKey(ld.truck_id, ld.load_no)) ?? null,
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -890,8 +901,48 @@ export async function createNextVersion(
 }
 
 // ---------------------------------------------------------------------------------------
-// Load status changes
+// Load changes: status and driver
 // ---------------------------------------------------------------------------------------
+
+/** Lock a plan version for a load change (row lock until the transaction ends); it must be open for changes. */
+async function lockOpenRun(tx: Tx, tenantId: string, runId: string) {
+  await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+  const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId } });
+  if (!run) throw new PlanError('Plan not found.', 404);
+  if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded. Open the latest version.', 409);
+  if (run.status === 'OPTIMIZING') throw new PlanError('Wait for the running optimization to finish.', 409);
+  return run;
+}
+type OpenRun = Awaited<ReturnType<typeof lockOpenRun>>;
+type RoleCheck = (role: 'PLANNER' | 'SUPERVISOR') => boolean;
+
+export interface LoadChange {
+  status?: LoadStatusName;
+  /** null = no driver */
+  driverId?: string | null;
+}
+
+/**
+ * One request on one load - its driver and/or its status - in ONE transaction under the plan's
+ * row lock, so a refused status change also leaves the driver as it was. The driver goes first:
+ * a load being dispatched can get its driver in the same request.
+ */
+export async function updateLoad(
+  tenantId: string,
+  runId: string,
+  loadId: string,
+  change: LoadChange,
+  user: { id: string; role: string },
+  hasRole: RoleCheck,
+) {
+  return prisma.$transaction(async (tx) => {
+    const run = await lockOpenRun(tx, tenantId, runId);
+    let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
+    if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
+    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole);
+    return load;
+  });
+}
 
 export async function changeLoadStatus(
   tenantId: string,
@@ -899,60 +950,9 @@ export async function changeLoadStatus(
   loadId: string,
   to: LoadStatusName,
   user: { id: string; role: string },
-  hasRole: (role: 'PLANNER' | 'SUPERVISOR') => boolean,
+  hasRole: RoleCheck,
 ) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
-    const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId } });
-    if (!run) throw new PlanError('Plan not found.', 404);
-    if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded. Open the latest version.', 409);
-    if (run.status === 'OPTIMIZING') throw new PlanError('Wait for the running optimization to finish.', 409);
-    const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
-    if (!load) throw new PlanError('Load not found.', 404);
-    const siblings = await tx.planLoad.findMany({ where: { runId, truckId: load.truckId } });
-    const check = checkTransition(load, siblings, to);
-    if (!check.ok) throw new PlanError(check.reason, 409);
-    if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
-    if (to === 'DISPATCHED') {
-      const recon = run.reconciliationJson as unknown as Reconciliation | null;
-      if (!recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
-    }
-    const updated = await tx.planLoad.update({
-      where: { id: loadId },
-      data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
-    });
-    const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
-    if (to === 'DISPATCHED' && orderIds.length) {
-      // A split order is DISPATCHED only once every part is out (and none is unserved).
-      const parts = await tx.routeAssignment.findMany({ where: { runId, orderId: { in: orderIds } }, select: { orderId: true, load: { select: { status: true } } } });
-      const unserved = run.chosenScenarioId
-        ? new Set((await tx.unservedOrder.findMany({ where: { scenarioId: run.chosenScenarioId, orderId: { in: orderIds } }, select: { orderId: true } })).map((u) => u.orderId))
-        : new Set<string>();
-      const out = orderIds.filter(
-        (id) => !unserved.has(id) && parts.filter((p) => p.orderId === id).every((p) => p.load?.status === 'DISPATCHED' || p.load?.status === 'COMPLETED'),
-      );
-      if (out.length) await tx.order.updateMany({ where: { tenantId, id: { in: out } }, data: { status: 'DISPATCHED' } });
-    }
-    const all = await tx.planLoad.findMany({ where: { runId }, select: { status: true } });
-    const allOut = all.length > 0 && all.every((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');
-    await tx.runPlan.update({
-      where: { id: runId },
-      data: { status: allOut ? 'DISPATCHED' : 'READY', finalizedAt: allOut ? new Date() : null },
-    });
-    await tx.auditLog.create({
-      data: {
-        tenantId,
-        userId: user.id,
-        action: `LOAD_${to}`,
-        entity: 'PlanLoad',
-        entityId: loadId,
-        beforeJson: { status: load.status } as never,
-        afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo } as never,
-      },
-    });
-    await refreshPlanFacts(tx, tenantId, runId);
-    return updated;
-  });
+  return prisma.$transaction(async (tx) => changeStatusTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, to, user, hasRole));
 }
 
 /**
@@ -960,33 +960,82 @@ export async function changeLoadStatus(
  * does not touch the plan facts. It can change until the load leaves the depot.
  */
 export async function setLoadDriver(tenantId: string, runId: string, loadId: string, driverId: string | null, user: { id: string }) {
-  return prisma.$transaction(async (tx) => {
-    await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
-    const run = await tx.runPlan.findFirst({ where: { id: runId, tenantId } });
-    if (!run) throw new PlanError('Plan not found.', 404);
-    if (run.status === 'SUPERSEDED') throw new PlanError('This plan version was superseded. Open the latest version.', 409);
-    if (run.status === 'OPTIMIZING') throw new PlanError('Wait for the running optimization to finish.', 409);
-    const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId }, include: { driver: { select: { name: true } } } });
-    if (!load) throw new PlanError('Load not found.', 404);
-    if (ON_ROAD.has(load.status)) throw new PlanError('Driver cannot change after dispatch.', 409);
-    const driver = driverId ? await tx.driver.findFirst({ where: { id: driverId, tenantId } }) : null;
-    if (driverId && !driver) throw new PlanError('Driver not found.', 400);
-    if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
-    if (load.driverId === driverId) return load;
-    const updated = await tx.planLoad.update({ where: { id: loadId }, data: { driverId } });
-    await tx.auditLog.create({
-      data: {
-        tenantId,
-        userId: user.id,
-        action: 'LOAD_DRIVER_SET',
-        entity: 'PlanLoad',
-        entityId: loadId,
-        beforeJson: { driverId: load.driverId, driverName: load.driver?.name ?? null } as never,
-        afterJson: { driverId, driverName: driver?.name ?? null, runId, truckId: load.truckId, loadNo: load.loadNo } as never,
-      },
-    });
-    return updated;
+  return prisma.$transaction(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
+}
+
+async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck) {
+  const runId = run.id;
+  const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
+  if (!load) throw new PlanError('Load not found.', 404);
+  const siblings = await tx.planLoad.findMany({ where: { runId, truckId: load.truckId } });
+  const check = checkTransition(load, siblings, to);
+  if (!check.ok) throw new PlanError(check.reason, 409);
+  if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
+  if (to === 'DISPATCHED') {
+    const recon = run.reconciliationJson as unknown as Reconciliation | null;
+    if (!recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
+  }
+  const updated = await tx.planLoad.update({
+    where: { id: loadId },
+    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
   });
+  const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (to === 'DISPATCHED' && orderIds.length) {
+    // A split order is DISPATCHED only once every part is out (and none is unserved).
+    const parts = await tx.routeAssignment.findMany({ where: { runId, orderId: { in: orderIds } }, select: { orderId: true, load: { select: { status: true } } } });
+    const unserved = run.chosenScenarioId
+      ? new Set((await tx.unservedOrder.findMany({ where: { scenarioId: run.chosenScenarioId, orderId: { in: orderIds } }, select: { orderId: true } })).map((u) => u.orderId))
+      : new Set<string>();
+    const out = orderIds.filter(
+      (id) => !unserved.has(id) && parts.filter((p) => p.orderId === id).every((p) => p.load?.status === 'DISPATCHED' || p.load?.status === 'COMPLETED'),
+    );
+    if (out.length) await tx.order.updateMany({ where: { tenantId, id: { in: out } }, data: { status: 'DISPATCHED' } });
+  }
+  const all = await tx.planLoad.findMany({ where: { runId }, select: { status: true } });
+  const allOut = all.length > 0 && all.every((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED');
+  await tx.runPlan.update({
+    where: { id: runId },
+    data: { status: allOut ? 'DISPATCHED' : 'READY', finalizedAt: allOut ? new Date() : null },
+  });
+  await tx.auditLog.create({
+    data: {
+      tenantId,
+      userId: user.id,
+      action: `LOAD_${to}`,
+      entity: 'PlanLoad',
+      entityId: loadId,
+      beforeJson: { status: load.status } as never,
+      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo } as never,
+    },
+  });
+  await refreshPlanFacts(tx, tenantId, runId);
+  return updated;
+}
+
+async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, driverId: string | null, user: { id: string }) {
+  const load = await tx.planLoad.findFirst({ where: { id: loadId, runId: run.id, tenantId } });
+  if (!load) throw new PlanError('Load not found.', 404);
+  // Unchanged is checked before "after dispatch": re-sending the current driver is not a change.
+  const check = checkDriverChange(load, driverId);
+  if (!check.ok) throw new PlanError(check.reason, 409);
+  if (check.unchanged) return load;
+  const driver = driverId ? await tx.driver.findFirst({ where: { id: driverId, tenantId } }) : null;
+  if (driverId && !driver) throw new PlanError('Driver not found.', 400);
+  if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
+  const before = load.driverId ? await tx.driver.findFirst({ where: { id: load.driverId, tenantId }, select: { name: true } }) : null;
+  const updated = await tx.planLoad.update({ where: { id: loadId }, data: { driverId } });
+  await tx.auditLog.create({
+    data: {
+      tenantId,
+      userId: user.id,
+      action: 'LOAD_DRIVER_SET',
+      entity: 'PlanLoad',
+      entityId: loadId,
+      beforeJson: { driverId: load.driverId, driverName: before?.name ?? null } as never,
+      afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo } as never,
+    },
+  });
+  return updated;
 }
 
 export function frozenStatuses(): LoadStatus[] {

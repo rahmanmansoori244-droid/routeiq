@@ -6,7 +6,20 @@ import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { DetailStop, PlanDetail } from '@/lib/dispatch/plan-detail';
 import { driverPackModel, qrPath, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
-import { coordText, MAX_WAYPOINTS, pinUrl, routeLinks, tripsByTruck, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
+import {
+  coordText,
+  driverClashNotes,
+  MAX_WAYPOINTS,
+  pinUrl,
+  REPLACED_LINE,
+  routeLinks,
+  tripsByTruck,
+  whatsappNumber,
+  whatsappText,
+  whatsappUrl,
+} from '@/lib/dispatch/driver-links';
+import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
+import { pdfSafe, UNPRINTABLE } from '@/lib/dispatch/pdf-text';
 import { fixture, LONG_TRUCK, ORDERS, load, stop } from './plan-detail-fixture';
 
 const OPTS = { tenantName: 'NMWC Test' };
@@ -66,25 +79,28 @@ function pdfObjects(raw: string): Map<number, { dict: string; stream: Buffer | n
   return out;
 }
 
-function pageTexts(buf: Buffer): string[] {
+/** The hex strings drawn by the text operators (TJ / Tj) of every page, in page order. */
+function pageTextHex(buf: Buffer): string[][] {
   const objs = pdfObjects(buf.toString('latin1'));
   const pagesObj = [...objs.values()].find((o) => /\/Type\s*\/Pages\b/.test(o.dict))!.dict;
   const kids = [...pagesObj.match(/\/Kids\s*\[([^\]]*)\]/)![1].matchAll(/(\d+) 0 R/g)].map((k) => Number(k[1]));
   return kids.map((id) => {
     const page = objs.get(id)!.dict;
     const refs = page.match(/\/Contents\s*(\[[^\]]*\]|\d+ 0 R)/)![1];
-    return [...refs.matchAll(/(\d+) 0 R/g)]
-      .map((r) => {
-        const o = objs.get(Number(r[1]))!;
-        const content = /\/FlateDecode/.test(o.dict) ? inflateSync(o.stream!).toString('latin1') : o.stream!.toString('latin1');
-        return [...content.matchAll(/(\[(?:[^\]]*)\]\s*TJ|<[0-9a-fA-F]*>\s*Tj)/g)]
-          .map((t) => [...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map((h) => decode(h[1])).join(''))
-          .join('');
-      })
-      .join('')
-      .replace(/\s+/g, '');
+    return [...refs.matchAll(/(\d+) 0 R/g)].flatMap((r) => {
+      const o = objs.get(Number(r[1]))!;
+      const content = /\/FlateDecode/.test(o.dict) ? inflateSync(o.stream!).toString('latin1') : o.stream!.toString('latin1');
+      return [...content.matchAll(/(\[(?:[^\]]*)\]\s*TJ|<[0-9a-fA-F]*>\s*Tj)/g)].flatMap((t) => [...t[1].matchAll(/<([0-9a-fA-F]*)>/g)].map((h) => h[1]));
+    });
   });
 }
+
+function pageTexts(buf: Buffer): string[] {
+  return pageTextHex(buf).map((hex) => hex.map(decode).join('').replace(/\s+/g, ''));
+}
+
+// Byte codes Helvetica (WinAnsi) has a glyph for.
+const WIN_ANSI_OK = (b: number) => (b >= 0x20 && b <= 0x7e) || b >= 0xa0 || [0x80, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89, 0x8a, 0x8b, 0x8c, 0x8e, 0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98, 0x99, 0x9a, 0x9b, 0x9c, 0x9e, 0x9f].includes(b);
 
 // ---------------------------------------------------------------------------------------
 
@@ -320,5 +336,105 @@ describe('renderDriverPackPdf', () => {
     const q = qrPath('https://www.google.com/maps/search/?api=1&query=23.5859,58.3829');
     expect(q.size).toBeGreaterThanOrEqual(21);
     expect(q.d.startsWith('M0 0H7V1H0Z')).toBe(true); // top-left finder pattern row
+  });
+});
+
+describe('text the built-in font cannot print', () => {
+  it('keeps Latin text, swaps look-alikes and marks each unprintable run once', () => {
+    expect(pdfSafe('Café Mañana – 2×')).toEqual({ text: 'Café Mañana – 2×', lost: false });
+    expect(pdfSafe('Zeta هايبر Market')).toEqual({ text: `Zeta ${UNPRINTABLE} Market`, lost: true });
+    expect(pdfSafe('لولو هايبر ماركت Lulu')).toEqual({ text: '[?] Lulu', lost: true });
+    expect(pdfSafe('السيب، شارع 18')).toEqual({ text: '[?] 18', lost: true });
+    expect(pdfSafe('Gate 🚚 3')).toEqual({ text: 'Gate [?] 3', lost: true });
+    expect(pdfSafe('Łódź Store')).toEqual({ text: 'Lódz Store', lost: false });
+    expect(pdfSafe('Call before → gate 2 ✓')).toEqual({ text: 'Call before -> gate 2 OK', lost: false });
+    expect(pdfSafe('Bldg ٣٤')).toEqual({ text: 'Bldg 34', lost: false });
+    expect(pdfSafe('A\u200fB\u00adC')).toEqual({ text: 'ABC', lost: false }); // direction mark, soft hyphen
+    expect(pdfSafe('line 1\nline 2\tend ')).toEqual({ text: 'line 1 line 2 end', lost: false });
+    expect(pdfSafe('Cafe\u0301')).toEqual({ text: 'Café', lost: false });
+  });
+
+  it('cleans every text of the sheet and flags the sheets that lost some', () => {
+    const d = fixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], customerName: 'Zeta هايبر Market', address: 'Łódź Store, شارع 18', notes: ['Call before → gate 2 ✓'] };
+    const m = driverPackModel(d, OPTS);
+    const st = m.sheets[0].stops[0];
+    expect(st.customerName).toBe('Zeta [?] Market');
+    expect(st.address).toBe('Lódz Store, [?] 18');
+    expect(st.notes).toEqual(['Call before -> gate 2 OK']);
+    expect(m.sheets.map((s) => s.unprintable)).toEqual([true, false, false]);
+    // The tenant name is printed on every sheet.
+    const t = driverPackModel(fixture(), { tenantName: 'شركة NMWC' });
+    expect(t.tenantName).toBe('[?] NMWC');
+    expect(t.sheets.every((s) => s.unprintable)).toBe(true);
+    // Driver, truck, SKU and sales-order texts too.
+    const d2 = fixture();
+    d2.loads[0] = { ...d2.loads[0], driverName: 'سالم Salim', truckCode: 'T01', manifest: [{ ...d2.loads[0].manifest[0], productCode: 'مياه-1' }] };
+    const s2 = driverPackModel(d2, OPTS).sheets[0];
+    expect(s2.driverName).toBe('[?] Salim');
+    expect(s2.loadCheck.items[0].productCode).toBe('[?]-1');
+  });
+
+  it('draws only characters Helvetica has, and the Latin text around the rest stays intact', async () => {
+    const d = fixture();
+    d.loads = [{ ...d.loads[0], stops: [{ ...d.loads[0].stops[0], customerName: 'Zeta هايبر Market', address: 'Łódź Store 🚚' }, d.loads[0].stops[1]] }];
+    const buf = await renderDriverPackPdf(driverPackModel(d, OPTS));
+    for (const hex of pageTextHex(buf).flat()) {
+      expect(hex.length % 2, hex).toBe(0); // a character past 0xFF was written as 3+ hex digits before
+      for (const b of Buffer.from(hex, 'hex')) expect(WIN_ANSI_OK(b), `byte ${b.toString(16)} in <${hex}>`).toBe(true);
+    }
+    const text = pageTexts(buf)[0];
+    expect(text).toContain(sq('Zeta [?] Market'));
+    expect(text).toContain(sq('Lódz Store [?]'));
+    expect(text).toContain(sq('[?] = text this sheet cannot print (for example Arabic letters) - ask the dispatcher.'));
+    // A sheet without such text carries no such note.
+    expect(pageTexts(await renderDriverPackPdf(driverPackModel(fixture(), OPTS)))[0]).not.toContain(sq('cannot print'));
+  });
+});
+
+describe('WhatsApp safeguards and driver clashes', () => {
+  it('a message from a replaced plan version says so first', () => {
+    const d = fixture();
+    const replaced = whatsappText({ ...d.run, status: 'SUPERSEDED' }, d.loads[0], 2);
+    expect(replaced.split('\n')[0]).toBe(REPLACED_LINE);
+    expect(REPLACED_LINE).toContain('DO NOT USE');
+    expect(replaced.split('\n')[1]).toBe('*Truck T01 - Trip 1 of 2*');
+    expect(whatsappText(d.run, d.loads[0], 2)).not.toContain('DO NOT USE');
+  });
+
+  it('adds the country code to a local phone number, or lets the dispatcher pick the chat', () => {
+    expect(whatsappNumber('9123 4567', '968')).toBe('96891234567');
+    expect(whatsappUrl('9123 4567', 'hi', '968')).toBe('https://wa.me/96891234567?text=hi');
+    // No calling code known: never "wa.me/91234567" (= +91, India).
+    expect(whatsappNumber('9123 4567')).toBeNull();
+    expect(whatsappUrl('9123 4567', 'hi')).toBe('https://wa.me/?text=hi');
+    expect(whatsappNumber('050 123 4567', '971')).toBe('971501234567'); // UAE local, leading 0 dropped
+    expect(whatsappNumber('96891234567', '971')).toBe('96891234567'); // country code already there
+    expect(whatsappNumber('+968 9123 4567', '971')).toBe('96891234567');
+    expect(whatsappNumber('00968 9123-4567', null)).toBe('96891234567');
+    expect(whatsappNumber('', '968')).toBeNull();
+    expect(whatsappNumber(null, '968')).toBeNull();
+    expect(whatsappNumber(' - ', '968')).toBeNull();
+
+    expect(phoneCountryCode('Oman')).toBe('968');
+    expect(phoneCountryCode('Sultanate of Oman')).toBe('968');
+    expect(phoneCountryCode('')).toBe('968'); // blank = NMWC default, as isOmanUae
+    expect(phoneCountryCode('UAE')).toBe('971');
+    expect(phoneCountryCode('United Arab Emirates')).toBe('971');
+    expect(phoneCountryCode('الامارات')).toBe('971');
+    expect(phoneCountryCode('Germany')).toBeNull();
+  });
+
+  it('warns when one driver is on two trucks at the same time', () => {
+    const d = fixture(); // T01 L1 and the long truck's L1 both name Salim, 06:00-09:25
+    const notes = driverClashNotes(d.loads);
+    expect(notes).toEqual([
+      { driverId: 'drv1', loadIds: ['L1', 'L3'], text: `Salim Al Harthy is on T01 · L1 (06:00–09:25) and ${LONG_TRUCK} · L1 (06:00–09:25) at the same time.` },
+    ]);
+    d.loads[2] = { ...d.loads[2], driverId: null, driverName: null };
+    expect(driverClashNotes(d.loads)).toEqual([]);
+    // Trips of one truck never clash.
+    d.loads[1] = { ...d.loads[1], driverId: 'drv1', driverName: 'Salim Al Harthy' };
+    expect(driverClashNotes(d.loads)).toEqual([]);
   });
 });

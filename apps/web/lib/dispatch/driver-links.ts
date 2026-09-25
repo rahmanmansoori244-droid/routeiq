@@ -3,6 +3,7 @@
  * Maps directions, and the WhatsApp message a dispatcher sends per load. Pure (no react-pdf, no
  * database) so the plan screen, the driver sheets PDF and the tests share one version.
  */
+import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
 import { fmtHhmm } from './time';
 
@@ -100,8 +101,13 @@ export function stopTitle(s: Pick<DetailStop, 'customerName' | 'customerCode' | 
 export interface MessagePlan {
   runDate: string;
   version: number;
+  /** Plan version status: a SUPERSEDED version's message says it must not be used. */
+  status?: string;
   depot: { lat: number; lng: number };
 }
+
+/** First line of a message sent from a plan version that a newer version replaced. */
+export const REPLACED_LINE = '*REPLACED BY A NEWER PLAN - DO NOT USE. Ask the dispatcher for the new trip.*';
 
 export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' | 'returnMin' | 'cases'> & {
   stops: Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'>[];
@@ -115,6 +121,7 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
   const route = routeLinks(plan.depot, stops);
   const lines = [
+    ...(plan.status === 'SUPERSEDED' ? [REPLACED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
@@ -132,9 +139,48 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   return lines.join('\n');
 }
 
-/** wa.me link: opens the driver's chat when a phone is saved (with country code), else lets the
- * dispatcher pick the chat. A leading 00 (international prefix) is dropped. */
-export function whatsappUrl(phone: string | null | undefined, text: string): string {
-  const digits = (phone ?? '').replace(/\D/g, '').replace(/^00/, '');
-  return `https://wa.me/${digits}?text=${encodeURIComponent(text)}`;
+/**
+ * The number wa.me needs (country code + number, digits only), or null when it cannot be told.
+ * "+968 9123 4567", "00968 9123 4567" and "96891234567" already carry the country code. A local
+ * number ("9123 4567" in Oman, "050 123 4567" in the UAE) gets `callingCode` - the tenant's
+ * country, see phoneCountryCode() - after dropping its leading 0. Without a calling code a local
+ * number gives null: wa.me would read "91234567" as +91 (India) and open no chat at all.
+ */
+export function whatsappNumber(phone: string | null | undefined, callingCode: string | null = null): string | null {
+  const raw = (phone ?? '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (!digits) return null;
+  if (raw.startsWith('+')) return digits;
+  if (digits.startsWith('00')) return digits.slice(2) || null;
+  // Longer than any local number (Oman 8 digits, UAE 9-10 with its 0): the country code is in it.
+  if (digits.length > 10 && !digits.startsWith('0')) return digits;
+  const local = digits.replace(/^0+/, '');
+  return callingCode && local ? `${callingCode}${local}` : null;
+}
+
+/** wa.me link: opens the driver's chat when the number is known (see whatsappNumber), else lets
+ * the dispatcher pick the chat. */
+export function whatsappUrl(phone: string | null | undefined, text: string, callingCode: string | null = null): string {
+  return `https://wa.me/${whatsappNumber(phone, callingCode) ?? ''}?text=${encodeURIComponent(text)}`;
+}
+
+export interface DriverClashNote {
+  driverId: string;
+  loadIds: [string, string];
+  text: string;
+}
+
+/**
+ * One driver on loads of two trucks at overlapping planned times - set by hand, or kept from an
+ * earlier version. Shown as a warning on the plan: the dispatcher decides who drives which.
+ */
+export function driverClashNotes(
+  loads: Pick<DetailLoad, 'id' | 'truckId' | 'truckCode' | 'loadNo' | 'driverId' | 'driverName' | 'departMin' | 'returnMin'>[],
+): DriverClashNote[] {
+  const at = (l: (typeof loads)[number]) => `${l.truckCode} · L${l.loadNo} (${fmtHhmm(l.departMin)}–${fmtHhmm(l.returnMin)})`;
+  return driverClashes(loads).map(({ driverId, a, b }) => ({
+    driverId,
+    loadIds: [a.id, b.id],
+    text: `${a.driverName ?? b.driverName ?? 'One driver'} is on ${at(a)} and ${at(b)} at the same time.`,
+  }));
 }

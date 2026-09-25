@@ -45,18 +45,21 @@ Each driver gets one sheet per truck load: the stops in order with ETA and recei
 **Assign the drivers**
 - Set a **Default driver** for each truck once (menu **Trucks** → edit the truck). Every new plan puts that driver on the truck's loads.
 - On the plan, each load row has a **Driver** list. Pick another driver for that load if someone else drives it (or **No driver**). Only active drivers are listed (add or reactivate them under **Drivers**).
-- A re-plan (late order, **Re-plan**, **Use instead**) keeps the driver you chose for each truck.
+- A re-plan (late order, **Re-plan**, **Use instead**) keeps the driver you chose for each trip: the same truck and trip first, then the driver of the truck's nearest trip, then the truck's **Default driver**. RouteIQ never guesses one driver onto two trucks at the same time; such a load is left with **No driver** for you to fill. Check the drivers after every re-plan.
+- **No driver** is not kept through a re-plan: the load gets the truck's usual driver back. To stop a driver being put back (for example, on leave), clear the truck's **Default driver** or set the driver to inactive under **Drivers**.
+- If you pick a driver who is already on another truck at the same time, the plan shows a yellow warning and the driver list turns yellow. Pick another driver for one of the two loads.
 - Once a load is **Dispatched**, its driver can no longer be changed.
-- Save each driver's mobile number with the country code (for example `+968 9123 4567`) so WhatsApp opens the right chat.
+- Save each driver's mobile number with the country code (for example `+968 9123 4567`). A local number such as `9123 4567` gets your country's code (+968 in Oman, +971 in the UAE) in the WhatsApp link; in other countries WhatsApp asks you who to send it to.
 
 **Print or send**
 - **Driver sheets (PDF)** (next to Export Excel) gives the sheets for all loads of the plan. Each load starts on a new page: print the whole pack and hand each driver their own pages.
 - **PDF** on a load row gives only that load's sheet.
-- **WhatsApp** on a load row opens WhatsApp with a short message for that load: truck and trip, departure, each stop in order with ETA, cases and map link, then the route link. If the driver has no mobile number saved, WhatsApp asks you who to send it to. Check the message, then press send.
+- **WhatsApp** on a load row opens WhatsApp with a short message for that load: truck and trip, departure, each stop in order with ETA, cases and map link, then the route link. If the driver has no mobile number saved, WhatsApp asks you who to send it to. Check the message, then press send. **WhatsApp** is greyed out on a replaced plan version and while an optimization runs; a message copied from a replaced version starts with *REPLACED BY A NEWER PLAN - DO NOT USE*.
 - On the sheet, **Route in Google Maps** (and the QR code at the top) opens the whole trip from the depot, stop by stop, and back. Long trips are split into parts, because a Google Maps link takes at most 9 stops between its start and end.
 - A stop without a saved location says **No location - call dispatcher** and is left out of the route link.
 - **Split deliveries** show *Part 1 of 2* and where the other part goes (truck and trip).
 - A sheet is **void if a newer plan version is issued**: after a re-plan, print or send the new sheets for the loads that changed.
+- The sheet prints Latin letters only. Text it cannot print (for example Arabic names or notes) shows as **[?]**, and the sheet says so: tell the driver, or also send the WhatsApp message, which shows the customer names in full.
 
 The Excel workbook stays the dispatcher and warehouse file (loading manifests, costs, reconciliation); the driver sheets are for the drivers only.
 

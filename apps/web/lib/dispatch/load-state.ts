@@ -79,11 +79,113 @@ export interface DriverOnLoad {
 
 /**
  * Driver for a (re-)planned load of `truckId`, taken from existing loads: the same trip if it
- * had a driver, else the nearest trip of that truck (the earlier one on a tie - the driver who
- * did Load 1 usually takes Load 2). Only drivers in `usable` (active, this tenant) count.
+ * had a driver, else (unless `exactOnly`) the nearest trip of that truck (the earlier one on a
+ * tie - the driver who did Load 1 usually takes Load 2). Only drivers in `usable` (active, this
+ * tenant) count. A load set to "No driver" gives nothing: the next source decides.
  */
-export function pickLoadDriver(loads: DriverOnLoad[], truckId: string, loadNo: number, usable: ReadonlySet<string>): string | null {
-  const withDriver = loads.filter((l) => l.truckId === truckId && l.driverId !== null && usable.has(l.driverId));
+export function pickLoadDriver(
+  loads: DriverOnLoad[],
+  truckId: string,
+  loadNo: number,
+  usable: ReadonlySet<string>,
+  opts: { exactOnly?: boolean } = {},
+): string | null {
+  const withDriver = loads.filter(
+    (l) => l.truckId === truckId && l.driverId !== null && usable.has(l.driverId) && (!opts.exactOnly || l.loadNo === loadNo),
+  );
   withDriver.sort((a, b) => Math.abs(a.loadNo - loadNo) - Math.abs(b.loadNo - loadNo) || a.loadNo - b.loadNo);
   return withDriver[0]?.driverId ?? null;
+}
+
+/** A load's driver and planned time away from the depot (minutes from midnight). */
+export interface DriverTime {
+  truckId: string;
+  driverId: string | null;
+  departMin: number;
+  returnMin: number;
+}
+
+/** Loads of two different trucks whose planned times overlap: one driver cannot drive both. */
+export function timesClash(a: Omit<DriverTime, 'driverId'>, b: Omit<DriverTime, 'driverId'>): boolean {
+  return a.truckId !== b.truckId && a.departMin < b.returnMin && b.departMin < a.returnMin;
+}
+
+export interface ReplanLoad extends Omit<DriverTime, 'driverId'> {
+  /** Any id unique among the new loads (the result is keyed by it). */
+  key: string;
+  loadNo: number;
+  defaultDriverId: string | null;
+}
+
+/**
+ * Drivers for the new loads of a (re-)plan. `now` = every load of this version before its
+ * PLANNED loads are replaced, `parent` = the loads of the version it was re-planned from,
+ * `kept` = the frozen loads that stay in this version (their drivers do not change).
+ *
+ * Evidence, strongest first:
+ *   1. this version, same truck and trip   - the driver the dispatcher saw or set on that trip
+ *   2. parent version, same truck and trip - e.g. trip 2 given to another driver before a late order
+ *   3. the nearest trip of the truck in either version (this version's load wins for one trip)
+ *   4. the truck's default driver
+ * Each step runs over ALL new loads before the next one, so a weak guess on one truck (say its
+ * default driver) never takes a driver that stronger evidence puts on another truck. Steps 2-4
+ * are guesses: they never put a driver on two trucks at overlapping times (kept loads and loads
+ * already given out count); such a load is left without a driver for the dispatcher to fill.
+ * Step 1 is kept as it is - a clash it causes shows as a plan warning (driverClashes).
+ * Only drivers in `usable` (active, this tenant) are ever picked.
+ */
+export function assignReplanDrivers(
+  newLoads: ReplanLoad[],
+  now: DriverOnLoad[],
+  parent: DriverOnLoad[],
+  kept: DriverTime[],
+  usable: ReadonlySet<string>,
+): Map<string, string | null> {
+  const out = new Map<string, string | null>(newLoads.map((l) => [l.key, null]));
+  const busy: DriverTime[] = kept.filter((k) => k.driverId !== null);
+  // Both versions' trips of each truck; a trip in this version replaces the parent's same trip.
+  const inNow = new Set(now.map((l) => `${l.truckId}:${l.loadNo}`));
+  const either = [...now, ...parent.filter((l) => !inNow.has(`${l.truckId}:${l.loadNo}`))];
+  const steps: { guess: boolean; pick: (l: ReplanLoad) => string | null }[] = [
+    { guess: false, pick: (l) => pickLoadDriver(now, l.truckId, l.loadNo, usable, { exactOnly: true }) },
+    { guess: true, pick: (l) => pickLoadDriver(parent, l.truckId, l.loadNo, usable, { exactOnly: true }) },
+    { guess: true, pick: (l) => pickLoadDriver(either, l.truckId, l.loadNo, usable) },
+    { guess: true, pick: (l) => (l.defaultDriverId && usable.has(l.defaultDriverId) ? l.defaultDriverId : null) },
+  ];
+  for (const step of steps) {
+    for (const l of newLoads) {
+      if (out.get(l.key) !== null) continue;
+      const driverId = step.pick(l);
+      if (!driverId) continue;
+      if (step.guess && busy.some((b) => b.driverId === driverId && timesClash(b, l))) continue;
+      out.set(l.key, driverId);
+      busy.push({ truckId: l.truckId, driverId, departMin: l.departMin, returnMin: l.returnMin });
+    }
+  }
+  return out;
+}
+
+/** Pairs of loads of different trucks that name the same driver at overlapping times. */
+export function driverClashes<L extends DriverTime & { id: string }>(loads: L[]): { driverId: string; a: L; b: L }[] {
+  const out: { driverId: string; a: L; b: L }[] = [];
+  const withDriver = loads.filter((l) => l.driverId !== null);
+  withDriver.forEach((a, i) => {
+    for (const b of withDriver.slice(i + 1)) {
+      if (a.driverId === b.driverId && timesClash(a, b)) out.push({ driverId: a.driverId!, a, b });
+    }
+  });
+  return out;
+}
+
+export type DriverChangeCheck = { ok: true; unchanged: boolean } | { ok: false; reason: string };
+
+/**
+ * Can this load's driver be set to `driverId`? Re-sending the driver it already has is never an
+ * error (a client may send it along with a status change, also on a dispatched load); a real
+ * change is refused once the load has left the depot.
+ */
+export function checkDriverChange(load: { status: LoadStatusName; driverId: string | null }, driverId: string | null): DriverChangeCheck {
+  if (load.driverId === driverId) return { ok: true, unchanged: true };
+  if (ON_ROAD.has(load.status)) return { ok: false, reason: 'Driver cannot change after dispatch.' };
+  return { ok: true, unchanged: false };
 }

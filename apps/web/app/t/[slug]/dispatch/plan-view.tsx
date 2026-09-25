@@ -8,7 +8,7 @@ import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { tripsByTruck, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
+import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { api, durH, hhmm, REASON_TEXT } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
@@ -36,9 +36,11 @@ interface Props {
   /** called after anything that changes the day (late order, replan, status) */
   onChanged?: (newRunId?: string) => void;
   showVersionLink?: boolean;
+  /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
+  phoneCountryCode?: string | null;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVersionLink = true }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
   const [d, setD] = useState<PlanDetail | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -49,11 +51,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
 
   const load = useCallback(async () => {
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
-    if (!r.ok || !r.data) setErr(r.error ?? 'Could not load the plan');
-    else {
-      setErr(null);
-      setD(r.data);
+    if (!r.ok || !r.data) {
+      setErr(r.error ?? 'Could not load the plan');
+      return null;
     }
+    setErr(null);
+    setD(r.data);
+    return r.data;
   }, [runId]);
 
   useEffect(() => {
@@ -83,6 +87,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
   }, [d]);
 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
+  const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
 
   async function setStatus(l: DetailLoad, status: string) {
     setBusy(l.id);
@@ -107,7 +112,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
     }
     const name = drivers.find((x) => x.id === driverId)?.name;
     toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
-    await load();
+    const fresh = await load();
+    // Allowed, but a driver cannot be on two trucks at once: say so right away.
+    const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
+    if (clash) toast.warning(clash.text);
   }
 
   async function lockAll() {
@@ -225,6 +233,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
             <p key={w} className="flex gap-2">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
               {w}
+            </p>
+          ))}
+        </div>
+      ) : null}
+      {clashes.length && !superseded ? (
+        <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm" data-testid="driver-clashes">
+          {clashes.map((c) => (
+            <p key={c.loadIds.join()} className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              {c.text} Pick another driver for one of them.
             </p>
           ))}
         </div>
@@ -362,7 +380,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, onChanged, showVer
                         busy={busy === l.id}
                         onChange={(id) => setDriver(l, id)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
-                        waUrl={whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo))}
+                        clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
+                        whatsapp={
+                          superseded
+                            ? { off: 'This plan version was replaced: send the trip from the latest version.' }
+                            : running
+                              ? { off: 'Wait for the optimization to finish: the trips are about to change.' }
+                              : {
+                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo), phoneCountryCode),
+                                  number: whatsappNumber(l.driverPhone, phoneCountryCode),
+                                }
+                        }
                       />
                     </td>
                     <td className="p-2">
@@ -520,7 +548,8 @@ function LoadDriver({
   busy,
   onChange,
   pdfUrl,
-  waUrl,
+  clash,
+  whatsapp,
 }: {
   l: DetailLoad;
   drivers: DriverOption[];
@@ -528,7 +557,10 @@ function LoadDriver({
   busy: boolean;
   onChange: (driverId: string | null) => void;
   pdfUrl: string;
-  waUrl: string;
+  /** This load's driver is also on another truck at the same time. */
+  clash: string | null;
+  /** The message link, or why there is none (replaced version, optimization running). */
+  whatsapp: { off: string } | { url: string; number: string | null };
 }) {
   const tag = `${l.truckCode}-${l.loadNo}`;
   // Active drivers, plus the one on the load if they were deactivated since.
@@ -536,13 +568,19 @@ function LoadDriver({
   if (l.driverId && !options.some((x) => x.id === l.driverId)) {
     options.push({ id: l.driverId, code: '', name: l.driverName ?? 'Unknown driver', phone: l.driverPhone, active: false });
   }
+  let waTitle = '';
+  if ('url' in whatsapp) {
+    if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
+    else if (!whatsapp.number) waTitle = `Phone ${l.driverPhone} has no country code: pick the chat in WhatsApp (save the phone as +<country code> <number> under Drivers)`;
+    else waTitle = `Send the stops to ${l.driverName ?? 'the driver'} on WhatsApp (+${whatsapp.number})`;
+  }
   return (
     <div className="space-y-1">
       <select
-        className="h-7 w-40 rounded-md border bg-background px-1 text-xs disabled:opacity-70"
+        className={`h-7 w-40 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
         value={l.driverId ?? ''}
         disabled={!editable || busy}
-        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : undefined}
+        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
         onChange={(e) => onChange(e.target.value || null)}
         data-testid={`driver-select-${tag}`}
       >
@@ -558,16 +596,15 @@ function LoadDriver({
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
         </a>
-        <a
-          className="text-primary underline-offset-2 hover:underline"
-          href={waUrl}
-          target="_blank"
-          rel="noreferrer"
-          data-testid={`load-whatsapp-${tag}`}
-          title={l.driverPhone ? `Send the stops to ${l.driverName ?? 'the driver'} on WhatsApp` : 'No phone for this driver: WhatsApp asks who to send it to'}
-        >
-          WhatsApp
-        </a>
+        {'url' in whatsapp ? (
+          <a className="text-primary underline-offset-2 hover:underline" href={whatsapp.url} target="_blank" rel="noreferrer" data-testid={`load-whatsapp-${tag}`} title={waTitle}>
+            WhatsApp
+          </a>
+        ) : (
+          <span className="cursor-not-allowed text-muted-foreground" aria-disabled="true" data-testid={`load-whatsapp-${tag}`} title={whatsapp.off}>
+            WhatsApp
+          </span>
+        )}
       </div>
     </div>
   );
