@@ -1,6 +1,6 @@
 import { withTenantApi, ok, notFoundIfNull, fail } from '@/lib/api';
 import { prisma } from '@/lib/db';
-import { lockIntake } from '@/lib/dispatch/intake-server';
+import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { isoOf } from '@/lib/dispatch/time';
 
@@ -112,6 +112,7 @@ export const DELETE = (req: Request, { params }: Params) =>
         );
       } catch (e) {
         if (e instanceof DeleteRefused) return fail(e.code ? { code: e.code, message: e.message } : e.message, e.status);
+        if (isTransactionTimeout(e)) return fail({ code: INTAKE_BUSY.code, message: INTAKE_BUSY.error }, 409);
         throw e;
       }
       return ok(result);

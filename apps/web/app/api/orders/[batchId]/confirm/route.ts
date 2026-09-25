@@ -4,8 +4,10 @@ import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import {
   confirmIntake,
+  INTAKE_BUSY,
   IntakeConflict,
   isIntakeKeyConflict,
+  isTransactionTimeout,
   lockIntake,
   revalidateIntake,
   type IntakeValidation,
@@ -77,6 +79,7 @@ export const POST = (req: Request, { params }: Params) =>
       } catch (e) {
         if (e instanceof BatchRaceError) return fail(e.message, e.status);
         if (e instanceof IntakeConflict) return fail(e.body(), e.status);
+        if (isTransactionTimeout(e)) return fail({ code: INTAKE_BUSY.code, message: INTAKE_BUSY.error }, 409);
         if (isIntakeKeyConflict(e)) {
           return fail({ code: 'DUPLICATE_LINES', message: 'Some of these lines were confirmed from another file or a late order at the same time. Upload the file again: lines already confirmed are then skipped.' }, 409);
         }
