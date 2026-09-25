@@ -8,6 +8,7 @@ import { effectiveAttrs, describeWindows, type TypeProfileLike } from './custome
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, type ScenarioDetails } from './plan-service';
+import { noteParts } from './driver-links';
 import { rowLines, splitPartLabels } from './split';
 import { fmtWindow, isoOf } from './time';
 
@@ -193,7 +194,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         s.salesOrders = [...new Set([...s.salesOrders, ...salesOrders])];
         s.skus = aggregateSkus([...s.skus, ...skus]);
         s.late = s.late || o.isLate;
-        if (o.notes && !s.notes.includes(o.notes)) s.notes.push(o.notes);
+        for (const n of noteParts(o.notes)) if (!s.notes.includes(n)) s.notes.push(n);
         s.priority = Math.min(s.priority, priorityOf(o.id, o.priority));
         continue;
       }
@@ -227,7 +228,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         skus: aggregateSkus(skus),
         mapsUrl: c.lat !== null && c.lng !== null ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}` : null,
         address: c.address,
-        notes: o.notes ? [o.notes] : [],
+        notes: noteParts(o.notes),
         accessNotes: c.accessNotes,
         split: null,
       });

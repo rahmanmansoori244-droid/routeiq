@@ -10,6 +10,7 @@ import {
   coordText,
   driverClashNotes,
   MAX_WAYPOINTS,
+  noteParts,
   pinUrl,
   REPLACED_LINE,
   routeLinks,
@@ -195,6 +196,14 @@ describe('driverPackModel', () => {
     expect(s1.route.skipped).toEqual([2]);
     expect(s1.route.links).toHaveLength(1);
     expect(s1.route.links[0].waypoints).toBe(1); // depot -> stop 1 -> depot
+  });
+});
+
+describe('noteParts', () => {
+  it('prints each distinct remark once, in order', () => {
+    expect(noteParts('Route C7; truck R3 | Route C7; truck R3 |  Call first  | Route C7; truck R3')).toEqual(['Route C7; truck R3', 'Call first']);
+    expect(noteParts(null)).toEqual([]);
+    expect(noteParts('')).toEqual([]);
   });
 });
 

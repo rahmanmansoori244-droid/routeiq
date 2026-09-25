@@ -184,3 +184,9 @@ export function driverClashNotes(
     text: `${a.driverName ?? b.driverName ?? 'One driver'} is on ${at(a)} and ${at(b)} at the same time.`,
   }));
 }
+
+/** Order notes as separate, de-duplicated remarks: upload joins every line's note with " | ", so
+ * one remark repeated on 8 SKU lines would otherwise print 8 times on the driver sheet. */
+export function noteParts(notes: string | null | undefined): string[] {
+  return [...new Set((notes ?? '').split(' | ').map((n) => n.trim()).filter(Boolean))];
+}
