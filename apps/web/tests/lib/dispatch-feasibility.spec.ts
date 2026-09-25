@@ -10,14 +10,17 @@ import {
   feasibilityGateMode,
   inputHash,
   readFeasibility,
+  REPLAN_REMEDY,
+  timingRemedy,
   truckDayOk,
   truckViolations,
   type FeasLoad,
   type FeasibilityInput,
   type FeasStop,
 } from '@/lib/dispatch/feasibility';
-import { feasibilityInputFromRows, isGatedMove, type FeasibilityRow, type ScenarioDetails } from '@/lib/dispatch/plan-service';
+import { feasibilityInputFromRows, isGatedMove, rowUnknownKg, type FeasibilityRow, type ScenarioDetails } from '@/lib/dispatch/plan-service';
 import { rulesFrom, type PlanRules } from '@/lib/dispatch/snapshots';
+import { partDemandKg, portionsOfPart, splitIntoParts } from '@/lib/dispatch/split';
 
 const RULES: PlanRules = {
   shiftStartMin: 360, shiftMaxMin: 660, reloadMin: 30, loadingMinPerCase: 0.5, maxTrips: 3,
@@ -250,5 +253,181 @@ describe('rulesFrom', () => {
     expect(
       rulesFrom({ shift_start_min: 390, shift_max_min: 600, reload_min: 20, loading_min_per_case: 0.04, max_trips_per_truck: 3 }, { open_min: 300, close_min: 0 }, { availableFromMin: 420, maxTripsPerDay: 2 }),
     ).toEqual({ shiftStartMin: 390, shiftMaxMin: 600, reloadMin: 20, loadingMinPerCase: 0.04, maxTrips: 2, depotOpenMin: 300, depotCloseMin: 1440, availableFromMin: 420, availableToMin: null });
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Stabilization PR4 review fixes
+// ---------------------------------------------------------------------------------------
+
+type PortionIn = { orderId: string; lines: { lineId: string; cases: number; kgPerCase?: number }[]; cases: number; weightKg: number };
+
+/** One load carrying `portions` (one row each) of one customer, on a truck of `payload` kg. */
+function partRows(portions: PortionIn[], payload: number): FeasibilityRow {
+  const base = row({ truckSnapshotJson: { ...truckSnap, capacityCases: 2000, capacityWeightKg: payload } });
+  const order = (p: PortionIn) => ({
+    totalCases: 900,
+    totalWeightKg: 900 * 12.35,
+    customer: { code: 'C1', branchCode: null, name: 'Big customer' },
+    lines: p.lines.map((l) => ({ id: l.lineId, cases: 900, weightKg: 900 * 12.35, product: { weightPerCaseKg: 12.35 } })),
+  });
+  return {
+    ...base,
+    cases: portions.reduce((a, p) => a + p.cases, 0),
+    weightKg: Math.round(portions.reduce((a, p) => a + p.weightKg, 0) * 10) / 10,
+    assignments: portions.map((p) => ({
+      ...base.assignments[0],
+      orderId: p.orderId,
+      portionCases: p.cases,
+      portionWeightKg: p.weightKg,
+      portionLinesJson: p.lines,
+      order: order(p),
+    })),
+  };
+}
+
+describe('kg rounding: a split part filled to its payload is never refused (PR4 review)', () => {
+  it('the 12.35 kg x 800 case example: the parts as split now weigh exactly the payload and pass', () => {
+    const lines = [
+      { lineId: 'la', orderId: 'OA', cases: 1, kgPerCase: 12.35 },
+      { lineId: 'lb', orderId: 'OB', cases: 849, kgPerCase: 12.35 },
+    ];
+    const [part] = splitIntoParts(lines, { cases: 2000, kg: 9880 });
+    const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase]));
+    expect(partDemandKg(part, kgPerCase)).toBe(9880);
+    const f = checkPlanFeasibility(feasibilityInputFromRows([partRows(portionsOfPart(part, 1, 2, kgPerCase), 9880)], 'sc1', undefined, null));
+    expect(f.violations).toEqual([]);
+    expect(f.ok).toBe(true);
+  });
+
+  it('parts stored before the fix (12.4 + 9867.7 = 9880.1 kg on 9880 kg) are within the rounding tolerance', () => {
+    const stored: PortionIn[] = [
+      { orderId: 'OA', lines: [{ lineId: 'la', cases: 1 }], cases: 1, weightKg: 12.4 },
+      { orderId: 'OB', lines: [{ lineId: 'lb', cases: 799 }], cases: 799, weightKg: 9867.7 },
+    ];
+    const f = checkPlanFeasibility(feasibilityInputFromRows([partRows(stored, 9880)], 'sc1', undefined, null));
+    expect(codes(f)).toEqual([]);
+    expect(f.ok).toBe(true);
+    // A real overload still blocks.
+    const over = [stored[0], { ...stored[1], weightKg: 9868.3 }];
+    expect(codes(checkPlanFeasibility(feasibilityInputFromRows([partRows(over, 9880)], 'sc1', undefined, null)))).toEqual(['CAPACITY_KG']);
+  });
+});
+
+describe("cases planned with no weight are judged from the plan, not today's product master (PR4 review)", () => {
+  /** A 400-case split part planned at 0 kg, LOCKED on a 3000 kg truck; the product now weighs `productKg` per case. */
+  function zeroKgPart(productKg: number, portionLinesJson: unknown = [{ lineId: 'ln1', cases: 400, kgPerCase: 0 }]): FeasibilityRow {
+    return row(
+      { status: 'LOCKED', cases: 400, weightKg: 0, truckSnapshotJson: { ...truckSnap, capacityCases: 400, capacityWeightKg: 3000 } },
+      {
+        portionCases: 400,
+        portionWeightKg: 0,
+        portionLinesJson,
+        order: {
+          totalCases: 800,
+          totalWeightKg: 0,
+          customer: { code: 'C1', branchCode: null, name: 'Big customer' },
+          lines: [{ id: 'ln1', cases: 800, weightKg: 0, product: { weightPerCaseKg: productKg } }],
+        },
+      },
+    );
+  }
+  const check = (r: FeasibilityRow) => checkPlanFeasibility(feasibilityInputFromRows([r], 'sc1', undefined, null));
+
+  it('the product still has no weight: KG_UNKNOWN, a warning', () => {
+    const f = check(zeroKgPart(0));
+    expect(codes(f)).toEqual(['KG_UNKNOWN']);
+    expect(f.ok).toBe(true);
+  });
+
+  it('a weight entered after locking (20 kg/case = 8000 kg on a 3000 kg truck) blocks - the signal no longer vanishes', () => {
+    const inp = feasibilityInputFromRows([zeroKgPart(20)], 'sc1', undefined, null);
+    expect(inp.loads[0].stops[0]).toMatchObject({ kgUnknown: true, unknownKgNow: 8000, kg: 0 });
+    const f = checkPlanFeasibility(inp);
+    expect(codes(f)).toEqual(['CAPACITY_KG_NEW_WEIGHT']);
+    expect(f.violations[0]).toMatchObject({ severity: 'BLOCK', shortBy: 5000, frozen: true });
+    expect(f.violations[0].message).toMatch(/weighs about 8000 kg - over the truck's payload of 3000 kg\.$/);
+    expect(f.ok).toBe(false);
+  });
+
+  it('a weight entered since that still fits: KG_UNKNOWN with the weight the load has now', () => {
+    const f = check(zeroKgPart(5));
+    expect(codes(f)).toEqual(['KG_UNKNOWN']);
+    expect(f.violations[0].message).toMatch(/the load weighs about 2000 kg\.$/);
+  });
+
+  it('a part stored before the planned case weight was kept: no line weight and a 0 kg part = planned at 0 kg', () => {
+    expect(codes(check(zeroKgPart(20, [{ lineId: 'ln1', cases: 400 }])))).toEqual(['CAPACITY_KG_NEW_WEIGHT']);
+    // ... while a part whose kg shows it was planned with the product's case weight then is known.
+    const known = row({}, {
+      portionCases: 10,
+      portionWeightKg: 120,
+      portionLinesJson: [{ lineId: 'ln1', cases: 10 }],
+      order: { totalCases: 40, totalWeightKg: 0, customer: { code: 'C1', branchCode: null, name: 'x' }, lines: [{ id: 'ln1', cases: 40, weightKg: 0, product: { weightPerCaseKg: 12 } }] },
+    });
+    expect(rowUnknownKg(known.assignments[0])).toEqual({ unknown: false, kgNow: 0 });
+  });
+
+  it('a part planned with a case weight stays known whatever the product master says later', () => {
+    const r = zeroKgPart(0, [{ lineId: 'ln1', cases: 400, kgPerCase: 7.5 }]);
+    r.assignments[0].portionWeightKg = 3000;
+    expect(rowUnknownKg(r.assignments[0])).toEqual({ unknown: false, kgNow: 0 });
+  });
+});
+
+describe('a problem on a locked or loading load: put it back to Planned first (PR4 review)', () => {
+  it('flags violations on LOCKED / LOADING loads, and the remedy names them', () => {
+    const locked = load('L1', 1, { frozen: true, stops: [stop({ hardWindowOk: false })] });
+    const f = checkPlanFeasibility(input([locked, load('L2', 2)]));
+    expect(f.violations[0]).toMatchObject({ code: 'HARD_WINDOW', severity: 'BLOCK', frozen: true });
+    const r = timingRemedy(f.violations);
+    expect(r.unlockFirst).toEqual(['T01 L1']);
+    expect(r.text).toBe(
+      'A re-plan keeps locked and loading loads exactly as they are, so put load T01 L1 back to Planned first ("Back to locked" if it is loading, then "Unlock"), then re-plan.',
+    );
+    // On a PLANNED load a re-plan is enough.
+    const planned = checkPlanFeasibility(input([load('L1', 1, { stops: [stop({ hardWindowOk: false })] })]));
+    expect(planned.violations[0].frozen).toBeUndefined();
+    expect(timingRemedy(planned.violations)).toEqual({ text: REPLAN_REMEDY, unlockFirst: [] });
+  });
+
+  it("the optimizer's violation on a locked load is flagged the same way; a load already out is history", () => {
+    const solver: FeasibilityReport = { status: 'VIOLATED', timing: 'ESTIMATED', violations: [{ code: 'TURNAROUND', truck_id: 't1', load_no: 2, message: 'T01 load 2 leaves too early' }] };
+    const f = checkPlanFeasibility(input([load('L1', 1), load('L2', 2, { frozen: true })], solver));
+    expect(f.violations[0]).toMatchObject({ source: 'SOLVER', frozen: true });
+    const out = checkPlanFeasibility(input([load('L1', 1, { onRoad: true, frozen: true, stops: [stop({ hardWindowOk: false })] })]));
+    expect(out.violations[0].severity).toBe('WARN');
+    expect(out.violations[0].frozen).toBeUndefined();
+  });
+
+  it('feasibilityInputFromRows marks LOCKED and LOADING loads', () => {
+    const inp = feasibilityInputFromRows([row({ status: 'LOCKED' }), row({ id: 'L2', loadNo: 2, status: 'LOADING' }), row({ id: 'L3', loadNo: 3 })], 'sc1', undefined, null);
+    expect(inp.loads.map((l) => l.frozen)).toEqual([true, true, false]);
+  });
+});
+
+describe('inverted windows and corrected trucks (PR4 review)', () => {
+  it('a window that ends before it starts was planned as any time: no HARD_WINDOW', () => {
+    const f = checkPlanFeasibility(input([load('L1', 1, { stops: [stop({ hardStartMin: 1320, hardEndMin: 360 })] })]));
+    expect(f.violations).toEqual([]);
+  });
+
+  it('a truck whose capacity was lowered since planning, below the load it carries: a warning with the remedy', () => {
+    const f = checkPlanFeasibility(input([load('L1', 1, { capacityNow: { cases: 100, kg: 300 } })]));
+    expect(codes(f)).toEqual(['CAPACITY_CHANGED']);
+    expect(f.violations[0].severity).toBe('WARN');
+    expect(f.violations[0].message).toMatch(/was changed to 100 cases \/ 300 kg after planning \(planned with 100 cases \/ 1000 kg\)\. Re-plan to use the new capacity\.$/);
+    expect(f.ok).toBe(true);
+    // Unchanged, still fitting, or already out: nothing.
+    expect(checkPlanFeasibility(input([load('L1', 1, { capacityNow: { cases: 100, kg: 1000 } })])).violations).toEqual([]);
+    expect(checkPlanFeasibility(input([load('L1', 1, { capacityNow: { cases: 100, kg: 800 } })])).violations).toEqual([]);
+    expect(checkPlanFeasibility(input([load('L1', 1, { onRoad: true, capacityNow: { cases: 10, kg: 300 } })])).violations).toEqual([]);
+    const lockedLoad = checkPlanFeasibility(input([load('L1', 1, { frozen: true, capacityNow: { cases: 10, kg: 1000 } })]));
+    expect(lockedLoad.violations[0].message).toMatch(/Put the load back to Planned and re-plan to use the new capacity\.$/);
+  });
+
+  it('reads the truck now from the row, next to the snapshot', () => {
+    const inp = feasibilityInputFromRows([row({ truckSnapshotJson: truckSnap, truck: { code: 'T01', capacityCases: 80, capacityWeightKg: 900 } })], 'sc1', undefined, null);
+    expect(inp.loads[0]).toMatchObject({ capacity: { cases: 100, kg: 1000 }, capacityNow: { cases: 80, kg: 900 } });
   });
 });

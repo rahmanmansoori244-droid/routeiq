@@ -6,7 +6,16 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { DispatchScenario } from '@routeiq/shared-types';
-import { distanceM, PIN_MOVED_M, stopMasterChanges, truckMasterChanges, type StopSnapshot, type TruckSnapshot } from '@/lib/dispatch/snapshots';
+import {
+  distanceM,
+  PIN_MOVED_M,
+  plannedLoadsMasterChanged,
+  stopMasterChanges,
+  truckMasterChanges,
+  usableWindow,
+  type StopSnapshot,
+  type TruckSnapshot,
+} from '@/lib/dispatch/snapshots';
 import { planInputsOf, planSettingsOf, type BuiltRequest } from '@/lib/dispatch/plan-service';
 import { masterChangedNotes } from '@/lib/dispatch/plan-detail';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
@@ -41,6 +50,45 @@ describe('stopMasterChanges', () => {
   it('a pin added to a customer planned without one, or removed since', () => {
     expect(stopMasterChanges({ ...snap, lat: null, lng: null }, live)[0].text).toMatch(/^Location added after planning/);
     expect(stopMasterChanges(snap, { ...live, lat: null, lng: null })[0].text).toBe('Location removed from the customer after planning.');
+  });
+
+  it('an inverted window (22:00-06:00, legacy data) was planned as any time: not a change, re-plan after re-plan', () => {
+    // buildDispatchRequest sends it as null / null (usableWindow), so that is what the snapshot holds.
+    const planned = { ...snap, hardStartMin: null, hardEndMin: null, prefStartMin: null, prefEndMin: null };
+    const inverted = { ...live, hardStartMin: 1320, hardEndMin: 360, prefStartMin: 900, prefEndMin: 600 };
+    expect(stopMasterChanges(planned, inverted)).toEqual([]);
+    // A snapshot holding the inverted window itself (an option from before plan inputs) reads the same.
+    expect(stopMasterChanges({ ...snap, hardStartMin: 1320, hardEndMin: 360, prefStartMin: 900, prefEndMin: 600 }, inverted)).toEqual([]);
+    // Correcting it to a real window is a change.
+    expect(stopMasterChanges(planned, { ...inverted, hardStartMin: 360, hardEndMin: 720 })[0].text).toBe(
+      'Receiving hours changed after planning: now receives 06:00–12:00 (planned with any time)',
+    );
+    expect(usableWindow(1320, 360)).toEqual({ start: null, end: null, ok: false });
+    expect(usableWindow(360, 1320)).toEqual({ start: 360, end: 1320, ok: true });
+  });
+});
+
+describe('plannedLoadsMasterChanged (the day screen: out of date, RE-PLAN)', () => {
+  const truck = { v: 1, code: 'T03', capacityCases: 100, capacityWeightKg: 3000, fixedCostPerDay: 0, tripCost: 0, costPerKm: 0, kmPerLitre: null,
+    availableFromMin: null, availableToMin: null, maxTripsPerDay: null, rules: null, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z' };
+
+  it('counts customers whose pin or hours changed, and trucks whose capacity or payload changed', () => {
+    const r = plannedLoadsMasterChanged(
+      [
+        { customerId: 'c1', stopSnapshotJson: snap, live: { ...live, lat: 23.61 } }, // pin moved ~1.1 km
+        { customerId: 'c1', stopSnapshotJson: snap, live: { ...live, lat: 23.61 } }, // same customer, second order
+        { customerId: 'c2', stopSnapshotJson: snap, live: { ...live, name: 'Renamed' } }, // a name only: no re-plan needed
+        { customerId: 'c3', stopSnapshotJson: null, live }, // planned before snapshots
+      ],
+      [
+        { truckId: 'T3', truckSnapshotJson: truck, live: { capacityCases: 100, capacityWeightKg: 2500 } }, // payload corrected
+        { truckId: 'T3', truckSnapshotJson: truck, live: { capacityCases: 100, capacityWeightKg: 2500 } }, // its second load
+        { truckId: 'T4', truckSnapshotJson: truck, live: { capacityCases: 100, capacityWeightKg: 3000 } },
+        { truckId: 'T5', truckSnapshotJson: null, live: { capacityCases: 1, capacityWeightKg: 1 } },
+      ],
+    );
+    expect(r).toEqual({ customers: 1, trucks: 1 });
+    expect(plannedLoadsMasterChanged([{ customerId: 'c1', stopSnapshotJson: snap, live }], [])).toEqual({ customers: 0, trucks: 0 });
   });
 });
 
@@ -78,7 +126,18 @@ describe('planInputsOf', () => {
     expect(inputs.stops['c1#1']).toEqual({ customerId: 'c1', lat: 23.6, lng: 58.4, hardStartMin: 360, hardEndMin: 840, prefStartMin: null, prefEndMin: null, serviceMin: 22, priority: 1 });
     expect(inputs.config).toMatchObject({ reload_min: 20, loading_min_per_case: 0.04, osrm_configured: true });
     expect(JSON.stringify(inputs)).not.toContain('osrm.internal');
-    expect(inputs.settings).toMatchObject({ shiftStartMin: 390, serviceMinPerCase: 0.05, osrmConfigured: true });
+    expect(inputs.settings).toMatchObject({ shiftStartMin: 390, serviceMinPerCase: 0.05, osrmConfigured: true, outsideCoverage: false });
+  });
+
+  it('the settings keep the routing decision made when the plan was built (ASSUMPTIONS never re-derives it)', () => {
+    const cfg = {
+      timezone: 'Asia/Riyadh', planningCutoffMin: 1080, shiftStartMin: 390, driverShiftMaxMinutes: 600, reloadMinutes: 20, loadingMinPerCase: 0,
+      serviceMinPerCase: 0, maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 1.5, overtimeAfterMin: 540, overtimeCostPerHour: 0,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40, defaultServiceTimeMin: 10,
+      osrmUrl: null,
+    };
+    expect(planSettingsOf(cfg, { outsideCoverage: true })).toMatchObject({ osrmConfigured: false, outsideCoverage: true });
+    expect(planSettingsOf(cfg).outsideCoverage).toBe(false);
   });
 
   it('an incomplete request keeps no inputs', () => {

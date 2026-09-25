@@ -30,10 +30,18 @@ export interface PartCapacity {
   kg: number | null; // null = weight not constrained
 }
 
+/** One line's cases in a portion. `kgPerCase`: the case weight the part was planned with (0 = no
+ * weight, counted as 0 kg); absent on portions planned before it was kept, and on unserved rows. */
+export interface PortionLine {
+  lineId: string;
+  cases: number;
+  kgPerCase?: number;
+}
+
 /** A part of an order that is planned (or unserved) on its own. */
 export interface PortionRecord {
   orderId: string;
-  lines: { lineId: string; cases: number }[];
+  lines: PortionLine[];
   cases: number;
   weightKg: number;
   part: number | null; // 1-based part of the customer's split delivery (null = not split)
@@ -56,7 +64,10 @@ export function fitsCapacity(cases: number, kg: number, cap: PartCapacity): bool
  * "check the product weight".)
  */
 export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAllocation[][] {
-  if (!(cap.cases > 0)) return [lines.filter((l) => l.cases > 0).map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases, weightKg: l.cases * l.kgPerCase }))];
+  const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase] as const));
+  if (!(cap.cases > 0)) {
+    return [roundPart(lines.filter((l) => l.cases > 0).map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases, weightKg: 0 })), kgPerCase)];
+  }
   const parts: LineAllocation[][] = [];
   let cur: LineAllocation[] = [];
   let curCases = 0;
@@ -95,8 +106,7 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
     }
   }
   flush();
-  for (const p of parts) for (const a of p) a.weightKg = r1(a.weightKg);
-  return parts;
+  return parts.map((p) => roundPart(p, kgPerCase));
 }
 
 /**
@@ -107,6 +117,28 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
  */
 export function partDemandKg(part: { lineId: string; cases: number }[], kgPerCase: Map<string, number>): number {
   return r1(part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0));
+}
+
+/**
+ * Each allocation's kg to 0.1 kg such that they add up EXACTLY to the part's kg sent to the
+ * optimizer (partDemandKg): every value is its exact kg rounded down or up, and the tenths the
+ * part total needs go to the largest remainders. Rounding each allocation on its own could make
+ * the stored portions of a part filled to its payload weigh 0.1 kg more than the payload (12.35 kg
+ * cases: 12.4 + 9867.7 = 9880.1 on a 9880 kg truck the optimizer was right to fill), which the
+ * dispatch check would then refuse on every re-plan (stabilization PR4 review).
+ */
+function roundPart(part: LineAllocation[], kgPerCase: Map<string, number>): LineAllocation[] {
+  const exact = part.map((a) => a.cases * (kgPerCase.get(a.lineId) ?? 0) * 10); // tenths of a kg
+  const units = exact.map((e) => Math.floor(e + 1e-9));
+  const target = Math.round(partDemandKg(part, kgPerCase) * 10);
+  let left = Math.min(part.length, Math.max(0, target - units.reduce((a, u) => a + u, 0)));
+  const byRemainder = exact.map((e, i) => ({ i, rem: e - units[i] })).sort((a, b) => b.rem - a.rem || a.i - b.i);
+  for (const { i } of byRemainder) {
+    if (left <= 0) break;
+    units[i] += 1;
+    left--;
+  }
+  return part.map((a, i) => ({ ...a, weightKg: units[i] / 10 }));
 }
 
 export interface FleetTruck {
@@ -193,12 +225,17 @@ export function orderIdOf(id: string): string {
   return i < 0 ? id : id.slice(0, i);
 }
 
-/** Group a part's line allocations into one portion per order. */
-export function portionsOfPart(part: LineAllocation[], partNo: number | null, parts: number | null): PortionRecord[] {
+/**
+ * Group a part's line allocations into one portion per order. With `kgPerCase` (the planner's case
+ * weights), each portion line also keeps the case weight it was planned with, so the dispatch
+ * check can tell cases planned at 0 kg from the plan itself, not from today's product master.
+ */
+export function portionsOfPart(part: LineAllocation[], partNo: number | null, parts: number | null, kgPerCase?: Map<string, number>): PortionRecord[] {
   const byOrder = new Map<string, PortionRecord>();
   for (const a of part) {
     const p = byOrder.get(a.orderId) ?? { orderId: a.orderId, lines: [], cases: 0, weightKg: 0, part: partNo, parts };
-    p.lines.push({ lineId: a.lineId, cases: a.cases });
+    const kg = kgPerCase?.get(a.lineId);
+    p.lines.push(kg === undefined ? { lineId: a.lineId, cases: a.cases } : { lineId: a.lineId, cases: a.cases, kgPerCase: kg });
     p.cases += a.cases;
     p.weightKg = r1(p.weightKg + a.weightKg);
     byOrder.set(a.orderId, p);
@@ -248,6 +285,21 @@ export function splitPartLabels<S extends { customerId: string; portion: boolean
   for (const list of byCustomer.values()) {
     list.sort((a, b) => a.departMin - b.departMin || a.truckCode.localeCompare(b.truckCode) || a.sequence - b.sequence);
     list.forEach((s, i) => out.set(s, { part: i + 1, parts: list.length }));
+  }
+  return out;
+}
+
+/**
+ * The case weight each line of a stored portion was planned with (PortionLine.kgPerCase), or null
+ * when the portion does not say (planned before it was kept): then only the portion's kg is known.
+ */
+export function readPortionLineKg(json: unknown): Map<string, number> | null {
+  if (!Array.isArray(json) || !json.length) return null;
+  const out = new Map<string, number>();
+  for (const x of json) {
+    const l = x as { lineId?: unknown; kgPerCase?: unknown };
+    if (typeof l.lineId !== 'string' || typeof l.kgPerCase !== 'number' || !Number.isFinite(l.kgPerCase)) return null;
+    out.set(l.lineId, l.kgPerCase);
   }
   return out;
 }

@@ -19,7 +19,7 @@ import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
 import { readPortionLines } from './split';
-import { readStopSnapshot, stopMasterChanges } from './snapshots';
+import { plannedLoadsMasterChanged } from './snapshots';
 
 export interface IssueCustomer {
   customerId: string;
@@ -70,7 +70,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -113,7 +113,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const noWeight = new Map<string, WeightGap & { kgPerCase: number }>();
   const toApply = new Map<string, WeightGap & { kgPerCase: number }>();
   // Why the plan in use is out of date although no new order is waiting (RE-PLAN enabled).
-  const outdated = { weightCases: 0, inactiveOrders: 0, masterChanged: 0 };
+  const outdated = { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
   const openCasesOf = new Map<string, number>();
   for (const o of orders) {
     if (frozenWhole.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
@@ -149,22 +149,34 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   }
   for (const g of inactiveOpen.values()) outdated.inactiveOrders += g.onPlannedLoads;
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
-  // plan was made. The plan keeps what it was planned with; a re-plan adopts the new data.
+  // plan was made, and trucks with PLANNED loads whose capacity or payload was corrected since. The
+  // plan keeps what it was planned with; a re-plan adopts the new data.
   const orderById = new Map(orders.map((o) => [o.id, o]));
-  const changedCustomers = new Set<string>();
-  for (const a of onPlan) {
-    if (a.load?.status !== 'PLANNED') continue;
-    const snap = readStopSnapshot(a.stopSnapshotJson);
+  const plannedStops = onPlan.flatMap((a) => {
     const o = orderById.get(a.orderId);
-    if (!snap || !o || changedCustomers.has(o.customerId)) continue;
+    if (a.load?.status !== 'PLANNED' || !o) return [];
     const eff = effectiveAttrs(o.customer, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
-    const changes = stopMasterChanges(snap, {
-      name: o.customer.name, address: o.customer.address, lat: o.customer.lat, lng: o.customer.lng,
-      hardStartMin: eff.hardStart, hardEndMin: eff.hardEnd, prefStartMin: eff.prefStart, prefEndMin: eff.prefEnd,
-    });
-    if (changes.some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) changedCustomers.add(o.customerId);
-  }
-  outdated.masterChanged = changedCustomers.size;
+    return [{
+      customerId: o.customerId,
+      stopSnapshotJson: a.stopSnapshotJson,
+      live: {
+        name: o.customer.name, address: o.customer.address, lat: o.customer.lat, lng: o.customer.lng,
+        hardStartMin: eff.hardStart, hardEndMin: eff.hardEnd, prefStartMin: eff.prefStart, prefEndMin: eff.prefEnd,
+      },
+    }];
+  });
+  const plannedLoads = plan?.chosenScenarioId
+    ? await prisma.planLoad.findMany({
+        where: { runId: plan.id, tenantId, status: 'PLANNED' },
+        select: { truckId: true, truckSnapshotJson: true, truck: { select: { capacityCases: true, capacityWeightKg: true } } },
+      })
+    : [];
+  const changed = plannedLoadsMasterChanged(
+    plannedStops,
+    plannedLoads.map((l) => ({ truckId: l.truckId, truckSnapshotJson: l.truckSnapshotJson, live: l.truck })),
+  );
+  outdated.masterChanged = changed.customers;
+  outdated.trucksChanged = changed.trucks;
   for (const o of orders) {
     const c = o.customer;
     const cur = byCustomer.get(c.id);
@@ -261,10 +273,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     openOrders: openCasesOf.size,
     /**
      * The plan in use is out of date without a new order waiting: open cases on it whose case
-     * weight was entered or corrected since, and orders of customers deactivated since that are
-     * still on planned loads. RE-PLAN applies both.
+     * weight was entered or corrected since, orders of customers deactivated since that are still
+     * on planned loads, customers on planned loads whose pin or receiving hours were corrected
+     * (masterChanged) and trucks with planned loads whose capacity or payload was corrected
+     * (trucksChanged). RE-PLAN applies them all.
      */
-    outdated: plan?.chosenScenarioId ? outdated : { weightCases: 0, inactiveOrders: 0, masterChanged: 0 },
+    outdated: plan?.chosenScenarioId ? outdated : { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 },
     trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,

@@ -190,6 +190,23 @@ describe('the feasibility gate (F04)', () => {
     expect(audit.afterJson.timing.violations[0]).toMatch(/^TURNAROUND: /);
   });
 
+  it('a problem on a LOCKED load: the 409 says to put it back to Planned first (a re-plan carries it over unchanged)', async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    row('routeAssignment', 'A1').hardWindowOk = false; // e.g. stored by the old solver before the deploy
+    const e = await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow).catch((x) => x);
+    expect(e.status).toBe(409);
+    expect(e.details).toMatchObject({ code: 'TIMES_NOT_VERIFIED', unlockFirst: ['T01 L1'] });
+    expect(e.details.violations[0]).toMatchObject({ code: 'HARD_WINDOW', loadNo: 1, frozen: true });
+    expect(e.message).toMatch(/so put load T01 L1 back to Planned first \("Back to locked" if it is loading, then "Unlock"\), then re-plan\.$/);
+    expect(e.message).not.toMatch(/Re-plan to get a timetable/);
+    // The way back is open; once Planned, the problem is one a re-plan can fix.
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    const again = await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow).catch((x) => x);
+    expect(again.details.unlockFirst).toEqual([]);
+    expect(again.message).toMatch(/Re-plan to get a timetable that keeps every rule\.$/);
+  });
+
   it('a plan from before the check (no report, no snapshots) is blocked only on a concrete violation', async () => {
     seed(undefined);
     const d = row('scenarioResult', 'sc1').detailsJson;
@@ -283,5 +300,36 @@ describe('snapshots (F08)', () => {
     expect(d.warnings.some((w) => w.startsWith('Location or receiving hours changed after this plan was made: C1'))).toBe(true);
     expect(d.feasibility?.ok).toBe(true);
     expect(d.loads.every((l) => l.timing?.ok)).toBe(true);
+  });
+
+  it('access notes are printed as they are now (contact details stay live, like the driver phone)', async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    tables.order.find((o) => o.id === 'O1')!.customer = customer({ accessNotes: 'Front gate closed - use the rear gate' });
+    const d = (await getPlanDetail(T, 'P'))!;
+    const s1 = d.loads.find((l) => l.id === 'L1')!.stops[0];
+    expect(s1.accessNotes).toBe('Front gate closed - use the rear gate');
+    expect(s1.masterChanged).toEqual([]); // not a planned fact: nothing to re-plan
+    expect(row('routeAssignment', 'A1').stopSnapshotJson.accessNotes).toBe('Back gate'); // kept for the record
+  });
+
+  it('an inverted receiving window in legacy customer data is not "changed after planning"', async () => {
+    seed();
+    // Planned as any time (buildDispatchRequest drops a window that ends before it starts).
+    for (const a of tables.routeAssignment) a.stopSnapshotJson = { ...stopSnap, hardStartMin: null, hardEndMin: null };
+    for (const o of tables.order) o.customer = customer({ hardWindowStartMin: 1320, hardWindowEndMin: 360 });
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.loads.flatMap((l) => l.stops.flatMap((s) => s.masterChanged))).toEqual([]);
+    expect(d.warnings.some((w) => w.includes('receiving hours changed'))).toBe(false);
+  });
+
+  it('a truck corrected below what its planned load carries: shown as a warning, the load keeps its snapshot', async () => {
+    seed();
+    tables.truck[1].capacityWeightKg = 300; // T02's M1 carries 400 kg, planned on a 1000 kg payload
+    const d = (await getPlanDetail(T, 'P'))!;
+    const w = d.feasibility!.violations.find((v) => v.code === 'CAPACITY_CHANGED')!;
+    expect(w).toMatchObject({ severity: 'WARN', truckCode: 'T02', loadNo: 1 });
+    expect(d.feasibility!.ok).toBe(true);
+    expect(d.loads.find((l) => l.id === 'M1')!.truckPayloadKg).toBe(1000);
   });
 });

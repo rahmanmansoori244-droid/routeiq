@@ -201,6 +201,33 @@ describe('dispatch feasibility gate (review F04)', () => {
     }
   });
 
+  it('(PR4 review) a problem on a LOCKED load: the 409 says to put it back to Planned before re-planning', async () => {
+    const plan = await planNow();
+    const l1 = plan.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
+    expect((await patch(l1.id, 'LOCKED')).status).toBe(200);
+    // As a load locked before the deploy with a stored hardWindowOk = false (the old solver's flag).
+    const stop = await prisma.routeAssignment.findFirstOrThrow({ where: { loadId: l1.id } });
+    await prisma.routeAssignment.update({ where: { id: stop.id }, data: { hardWindowOk: false } });
+    try {
+      const r = await patch(l1.id, 'LOADING');
+      if (process.env.FEASIBILITY_GATE === 'warn') {
+        expect(r.status).toBe(200);
+        expect((await patch(l1.id, 'LOCKED')).status).toBe(200);
+      } else {
+        expect(r.status).toBe(409);
+        const body = await json(r);
+        expect(body.error).toMatchObject({ code: 'TIMES_NOT_VERIFIED', unlockFirst: ['T01 L1'] });
+        expect(body.error.violations[0]).toMatchObject({ code: 'HARD_WINDOW', loadNo: 1, frozen: true });
+        expect(body.error.error).toMatch(/put load T01 L1 back to Planned first/);
+        const shown = await planNow();
+        expect(shown.feasibility.violations.find((v: any) => v.loadId === l1.id)).toMatchObject({ frozen: true });
+      }
+    } finally {
+      await prisma.routeAssignment.update({ where: { id: stop.id }, data: { hardWindowOk: true } });
+      expect((await patch(l1.id, 'PLANNED')).status).toBe(200);
+    }
+  });
+
   it('a verified plan still locks, loads and dispatches', async () => {
     const plan = await planNow();
     const l1 = plan.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
