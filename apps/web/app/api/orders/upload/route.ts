@@ -4,8 +4,9 @@ import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { hasRole } from '@/lib/api';
 import { parseUpload } from '@/lib/csv';
-import { fileHash, validateIntake } from '@/lib/dispatch/intake-server';
+import { validateIntake } from '@/lib/dispatch/intake-server';
 import { dateOnly } from '@/lib/dispatch/time';
+import { isRealIsoDate } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 
 // 10 MB / 50k rows / content-type guard (lib/csv). Unknown customers and products are NOT
@@ -31,8 +32,8 @@ export async function POST(req: Request) {
   }
   const depotId = (form.get('depotId') as string | null) || null;
   const deliveryDate = (form.get('deliveryDate') as string | null) || null;
-  if (deliveryDate && !/^\d{4}-\d{2}-\d{2}$/.test(deliveryDate)) {
-    return NextResponse.json({ data: null, error: 'deliveryDate must be YYYY-MM-DD' }, { status: 400 });
+  if (deliveryDate && !isRealIsoDate(deliveryDate)) {
+    return NextResponse.json({ data: null, error: 'deliveryDate must be a real date as YYYY-MM-DD' }, { status: 400 });
   }
 
   let parsed;
@@ -49,10 +50,15 @@ export async function POST(req: Request) {
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
   const db = tenantDb(tenantId);
-  const hash = fileHash(parsed.rows);
-  const sameFile = await db.uploadBatch.findFirst({ where: { fileHash: hash, status: 'CONFIRMED', depotId: v.depotId } });
+  // The hash is of the normalized lines including their delivery dates, in any row or column
+  // order (contentFingerprint): the same orders for the same depot and dates, not the same bytes.
+  const hash = v.contentHash ?? null;
+  const sameFile = hash ? await db.uploadBatch.findFirst({ where: { fileHash: hash, status: 'CONFIRMED', depotId: v.depotId } }) : null;
   if (sameFile) {
-    v.errors.unshift({ row: 1, message: `This exact file was already confirmed (batch ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString()}).` });
+    v.errors.unshift({
+      row: 1,
+      message: `These orders were already confirmed for ${v.totals.deliveryDates.join(', ') || 'this date'} (file ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC).`,
+    });
   }
   const topDate = v.totals.deliveryDates[0] ?? deliveryDate;
 

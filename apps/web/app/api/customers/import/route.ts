@@ -1,15 +1,20 @@
 import { NextResponse } from 'next/server';
-import { z } from 'zod';
 import { auth } from '@/lib/auth';
-import { prisma } from '@/lib/db';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { parseUpload } from '@/lib/csv';
-import { normalizeBranchKey } from '@/lib/schemas';
+import { MAX_SERVICE_MIN, normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
+//
+// Columns: code, name and priority are required. Every other column is written only when the
+// file has it AND the cell is not blank: a re-import without a column never erases what the
+// dispatcher entered (service time, region, address, payment type, location). A service time
+// from the file counts as confirmed for that customer (it wins over the customer-type default).
+// Codes match existing customers whatever their letter case (as in the order intake).
 
 interface ImportError {
   row: number;
@@ -17,17 +22,18 @@ interface ImportError {
 }
 
 interface CustomerRow {
+  row: number;
   code: string;
   name: string;
   branchCode: string | null;
   branchKey: string;
-  regionCode: string | null;
-  address: string | null;
+  regionCode: string | null; // null = not in the file (keep)
+  address: string | null; // null = not in the file (keep)
   lat: number | null;
   lng: number | null;
   priority: number;
-  avgServiceTimeMin: number;
-  paymentType: 'CASH' | 'CREDIT' | 'PREPAID';
+  avgServiceTimeMin: number | null; // null = not in the file (keep; 10 min on create, unconfirmed)
+  paymentType: 'CASH' | 'CREDIT' | 'PREPAID' | null; // null = not in the file (keep; CREDIT on create)
 }
 
 const PAYMENT_TYPES = new Set(['CASH', 'CREDIT', 'PREPAID']);
@@ -37,6 +43,8 @@ function parsePayment(raw: string): 'CASH' | 'CREDIT' | 'PREPAID' | null {
   if (PAYMENT_TYPES.has(up)) return up as 'CASH' | 'CREDIT' | 'PREPAID';
   return null;
 }
+
+const cell = (raw: Record<string, string>, key: string) => (raw[key] ?? '').toString().trim();
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -76,8 +84,8 @@ export async function POST(req: Request) {
 
   parsed.rows.forEach((raw, idx) => {
     const row = idx + 2; // header + 1-based
-    const code = raw['code'];
-    const name = raw['name'];
+    const code = cell(raw, 'code');
+    const name = cell(raw, 'name');
     if (!code || !name) {
       errors.push({ row, message: 'Missing required column (code, name).' });
       return;
@@ -87,19 +95,19 @@ export async function POST(req: Request) {
       return;
     }
 
-    const branchCode = raw['branch_code'] ? raw['branch_code'] : null;
+    const branchCode = cell(raw, 'branch_code') || null;
     const branchKey = normalizeBranchKey(branchCode);
-    const dupKey = `${code}::${branchKey}`;
+    const dupKey = customerKey(code, branchKey);
     if (codeSeen.has(dupKey)) {
       errors.push({
         row,
-        message: `Duplicate code+branch within file (also on row ${codeSeen.get(dupKey)}).`,
+        message: `Duplicate code+branch within file (also on row ${codeSeen.get(dupKey)}; letter case does not matter).`,
       });
       return;
     }
     codeSeen.set(dupKey, row);
 
-    const regionCodeRaw = raw['region_code'] || '';
+    const regionCodeRaw = cell(raw, 'region_code');
     let regionCode: string | null = null;
     if (regionCodeRaw) {
       regionCode = regionCodeRaw;
@@ -109,36 +117,41 @@ export async function POST(req: Request) {
       }
     }
 
-    const priorityNum = Number(raw['priority']);
+    const priorityNum = Number(cell(raw, 'priority'));
     if (!Number.isInteger(priorityNum) || priorityNum < 1 || priorityNum > 5) {
-      errors.push({ row, message: `priority must be an integer 1-5 (got "${raw['priority']}").` });
+      errors.push({ row, message: `priority must be an integer 1-5 (got "${raw['priority'] ?? ''}").` });
       return;
     }
 
-    const serviceMin = Number(raw['avg_service_time_min'] || 10);
-    if (!Number.isFinite(serviceMin) || serviceMin < 0 || serviceMin > 600) {
-      errors.push({ row, message: 'avg_service_time_min must be 0-600.' });
+    const serviceRaw = cell(raw, 'avg_service_time_min');
+    let serviceMin: number | null = null;
+    if (serviceRaw) {
+      serviceMin = Number(serviceRaw);
+      if (!Number.isInteger(serviceMin) || serviceMin < 0 || serviceMin > MAX_SERVICE_MIN) {
+        errors.push({ row, message: `avg_service_time_min must be a whole number 0-${MAX_SERVICE_MIN} (got "${serviceRaw}").` });
+        return;
+      }
+    }
+
+    const paymentRaw = cell(raw, 'payment_type');
+    const payment = paymentRaw ? parsePayment(paymentRaw) : null;
+    if (paymentRaw && !payment) {
+      errors.push({ row, message: `payment_type must be cash | credit | prepaid (got "${paymentRaw}").` });
       return;
     }
 
-    const payment = parsePayment(raw['payment_type'] || 'CREDIT');
-    if (!payment) {
-      errors.push({ row, message: `payment_type must be cash | credit | prepaid (got "${raw['payment_type']}").` });
-      return;
-    }
-
-    const latRaw = raw['lat'];
-    const lngRaw = raw['lng'];
+    const latRaw = cell(raw, 'lat');
+    const lngRaw = cell(raw, 'lng');
     let lat: number | null = null;
     let lng: number | null = null;
     if (latRaw || lngRaw) {
       const latN = Number(latRaw);
       const lngN = Number(lngRaw);
-      if (!Number.isFinite(latN) || latN < -90 || latN > 90) {
+      if (!latRaw || !Number.isFinite(latN) || latN < -90 || latN > 90) {
         errors.push({ row, message: 'lat must be -90..90.' });
         return;
       }
-      if (!Number.isFinite(lngN) || lngN < -180 || lngN > 180) {
+      if (!lngRaw || !Number.isFinite(lngN) || lngN < -180 || lngN > 180) {
         errors.push({ row, message: 'lng must be -180..180.' });
         return;
       }
@@ -149,12 +162,13 @@ export async function POST(req: Request) {
     }
 
     valid.push({
+      row,
       code,
       name,
       branchCode,
       branchKey,
       regionCode,
-      address: raw['address'] || null,
+      address: cell(raw, 'address') || null,
       lat,
       lng,
       priority: priorityNum,
@@ -162,6 +176,40 @@ export async function POST(req: Request) {
       paymentType: payment,
     });
   });
+
+  // Existing customers, matched case-insensitively (twins resolve like the order intake).
+  const existingRows = await db.customer.findMany({
+    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
+  });
+  const twins = new Map<string, typeof existingRows>();
+  for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
+  const matchOf = (v: CustomerRow) => {
+    const list = twins.get(customerKey(v.code, v.branchKey));
+    return list ? preferredCustomer(list) ?? null : null;
+  };
+  let creates = 0;
+  let updates = 0;
+  const confirmedServiceChanges: { code: string; branchCode: string | null; from: number; to: number }[] = [];
+  for (const v of valid) {
+    const m = matchOf(v);
+    if (!m) {
+      creates++;
+      continue;
+    }
+    updates++;
+    if (m.code !== v.code) warnings.push(`Row ${v.row}: ${v.code} updates the existing customer ${m.code} (codes are the same whatever the letter case).`);
+    if (v.avgServiceTimeMin !== null && m.serviceTimeConfirmed && m.avgServiceTimeMin !== v.avgServiceTimeMin) {
+      confirmedServiceChanges.push({ code: m.code, branchCode: v.branchCode, from: m.avgServiceTimeMin, to: v.avgServiceTimeMin });
+    }
+  }
+  if (confirmedServiceChanges.length) {
+    warnings.push(
+      `${confirmedServiceChanges.length} confirmed service time(s) will change: ${confirmedServiceChanges
+        .slice(0, 10)
+        .map((c) => `${c.code}${c.branchCode ? ` / ${c.branchCode}` : ''} ${c.from} -> ${c.to} min`)
+        .join(', ')}${confirmedServiceChanges.length > 10 ? ', ...' : ''}.`,
+    );
+  }
 
   if (errors.length > 0 || dryRun) {
     return NextResponse.json({
@@ -174,65 +222,62 @@ export async function POST(req: Request) {
         errors,
         warnings,
         dryRun,
+        creates,
+        updates,
+        confirmedServiceChanges,
       },
       error: null,
     });
   }
 
-  // Commit
-  // Existing locations are never wiped by a file without coordinates, and a location a
+  // Commit. Existing locations are never wiped by a file without coordinates, and a location a
   // dispatcher confirmed on the map is never overwritten by an import.
-  const existingLoc = new Map(
-    (await db.customer.findMany({ select: { code: true, branchKey: true, locationVerified: true } })).map((c) => [
-      `${c.code}::${c.branchKey}`,
-      c.locationVerified,
-    ]),
-  );
   let upserted = 0;
   let keptVerified = 0;
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
-    const geocodeConfidence = v.lat !== null && v.lng !== null ? 'HIGH' : 'MISSING';
-    const verified = existingLoc.get(`${v.code}::${v.branchKey}`) === true;
     const fileHasLoc = v.lat !== null && v.lng !== null;
-    if (verified && fileHasLoc) keptVerified++;
-    const locUpdate = fileHasLoc && !verified ? { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const } : {};
-    await db.customer.upsert({
-      where: {
-        tenantId_code_branchKey: {
+    const geocodeConfidence = fileHasLoc ? 'HIGH' : 'MISSING';
+    const m = matchOf(v);
+    if (!m) {
+      await db.customer.create({
+        data: {
           tenantId: session.user.tenantId,
           code: v.code,
+          name: v.name,
+          branchCode: v.branchCode,
           branchKey: v.branchKey,
+          regionId,
+          address: v.address,
+          lat: v.lat,
+          lng: v.lng,
+          geocodeConfidence,
+          locationSource: fileHasLoc ? 'IMPORT' : undefined,
+          priority: v.priority,
+          priorityConfirmed: true,
+          // A time from the file is the customer's own; without one the default 10 min is only a
+          // placeholder (the customer-type time applies until someone confirms one).
+          ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
+          ...(v.paymentType ? { paymentType: v.paymentType } : {}),
         },
-      },
-      create: {
-        tenantId: session.user.tenantId,
-        code: v.code,
-        name: v.name,
-        branchCode: v.branchCode,
-        branchKey: v.branchKey,
-        regionId,
-        address: v.address,
-        lat: v.lat,
-        lng: v.lng,
-        geocodeConfidence,
-        locationSource: fileHasLoc ? 'IMPORT' : undefined,
-        priority: v.priority,
-        priorityConfirmed: true,
-        avgServiceTimeMin: v.avgServiceTimeMin,
-        paymentType: v.paymentType,
-      },
-      update: {
-        name: v.name,
-        regionId,
-        address: v.address,
-        ...locUpdate,
-        priority: v.priority,
-        priorityConfirmed: true,
-        avgServiceTimeMin: v.avgServiceTimeMin,
-        paymentType: v.paymentType,
-      },
-    });
+      });
+    } else {
+      if (m.locationVerified && fileHasLoc) keptVerified++;
+      const locUpdate = fileHasLoc && !m.locationVerified ? { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const } : {};
+      await db.customer.update({
+        where: { id: m.id },
+        data: {
+          name: v.name,
+          ...(v.regionCode ? { regionId } : {}),
+          ...(v.address ? { address: v.address } : {}),
+          ...locUpdate,
+          priority: v.priority,
+          priorityConfirmed: true,
+          ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
+          ...(v.paymentType ? { paymentType: v.paymentType } : {}),
+        },
+      });
+    }
     upserted++;
   }
 
@@ -242,14 +287,9 @@ export async function POST(req: Request) {
     action: 'CREATE',
     entity: 'Customer',
     entityId: null,
-    afterJson: { bulkImport: { fileName: parsed.fileName, upserted } } as never,
+    afterJson: { bulkImport: { fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges } } as never,
     ip,
   });
-
-  // unused prisma var guard
-  void prisma;
-  // satisfy zod import for future schema use
-  void z;
 
   return NextResponse.json({
     data: {
@@ -259,10 +299,11 @@ export async function POST(req: Request) {
       errorRows: 0,
       warningRows: warnings.length,
       upserted,
+      creates,
+      updates,
+      confirmedServiceChanges,
       keptVerifiedLocations: keptVerified,
-      warnings: keptVerified
-        ? [...warnings, { message: `${keptVerified} customer location(s) confirmed by a dispatcher were kept (file coordinates ignored).` }]
-        : warnings,
+      warnings: keptVerified ? [...warnings, `${keptVerified} customer location(s) confirmed by a dispatcher were kept (file coordinates ignored).`] : warnings,
     },
     error: null,
   });

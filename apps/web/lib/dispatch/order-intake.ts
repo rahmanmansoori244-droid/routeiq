@@ -93,7 +93,7 @@ export interface NormalizedLine {
   productCode: string;
   productDescription: string | null;
   cases: number;
-  weightKg: number | null; // line weight from the file, if given
+  weightKg: number | null; // line weight (kg for the whole line) from the file, if given; 0 counts as not given
   salesValue: number | null;
   margin: number | null;
   priority: number | null;
@@ -194,6 +194,7 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
   const errors: RowError[] = [];
   const warnings: string[] = [];
   const lines: NormalizedLine[] = [];
+  const zeroWeightRows: number[] = [];
   let fileCases = 0;
 
   if (rows.length === 0) {
@@ -254,6 +255,9 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
       return err('Weight / value / margin must be numbers.');
     }
     if (w !== null && w < 0) return err('Weight cannot be negative.');
+    // 0 kg is "unknown" everywhere (product and line weights): a 0 in the file must not
+    // override the product's case weight.
+    if (w === 0) zeroWeightRows.push(row);
     const branchCode = get(r, 'branch_code') || null;
     lines.push({
       row,
@@ -267,7 +271,7 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
       productCode,
       productDescription: get(r, 'product_description') || null,
       cases: casesNum,
-      weightKg: w,
+      weightKg: w === 0 ? null : w,
       salesValue: sv,
       margin: mg,
       priority: pr,
@@ -276,6 +280,11 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
       customerType: get(r, 'customer_type') || null,
     });
   });
+  if (zeroWeightRows.length) {
+    warnings.push(
+      `${zeroWeightRows.length} row(s) have weight 0 (row${zeroWeightRows.length > 1 ? 's' : ''} ${zeroWeightRows.slice(0, 10).join(', ')}${zeroWeightRows.length > 10 ? ', ...' : ''}): treated as blank, so the product's case weight is used.`,
+    );
+  }
   return { mapping, lines, errors, warnings, fileCases };
 }
 
@@ -306,6 +315,12 @@ export interface ResolvedLine extends NormalizedLine {
   customerId: string | null; // null = will be created on confirm
   productId: string | null; // null = will be created on confirm
   sourceRows: number[];
+  /**
+   * Cases whose rows had no file weight (the product master weight is used for them at confirm).
+   * `weightKg` then holds only the kg of the rows that had one. Absent in batches validated
+   * before this field existed.
+   */
+  weightMissingCases?: number;
 }
 
 export interface NewCustomer {
@@ -327,6 +342,7 @@ export interface IntakeIssueSummary {
   newCustomers: NewCustomer[];
   newProducts: NewProduct[];
   customersWithoutLocation: string[]; // existing customers lacking coordinates
+  /** Products (existing without a case weight, or new) with rows that carry no file weight. */
   productsWithoutWeight: string[];
 }
 
@@ -345,14 +361,82 @@ export function customerKey(code: string, branchKey: string) {
   return `${code.trim().toUpperCase()}::${branchKey.trim().toUpperCase()}`;
 }
 
+/** A sales-order number as it identifies a line: trimmed, upper-case; null when blank. */
+export function normSalesOrder(so: string | null | undefined): string | null {
+  const s = (so ?? '').trim().toUpperCase();
+  return s === '' ? null : s;
+}
+
+/** Identity of a sales-order line for duplicate checks: `${date}|${SO}|${customerKey}|${PRODUCT}`. */
+export function lineDupKey(deliveryDate: string, salesOrderNo: string, custKey: string, productCode: string): string {
+  return `${deliveryDate}|${normSalesOrder(salesOrderNo) ?? ''}|${custKey}|${productCode.trim().toUpperCase()}`;
+}
+
+/**
+ * Master-data rows whose codes differ only in letter case ("C001" and "c001") are the same
+ * customer or product for intake. One of them is picked, always the same one: active first,
+ * then (customers) the one with a location / (products) the one with a case weight, then the
+ * code in plain character order, then the id.
+ */
+export function preferredCustomer<C extends { id: string; code: string; active: boolean; lat: number | null; lng: number | null }>(list: C[]): C | undefined {
+  return [...list].sort(
+    (a, b) =>
+      Number(b.active) - Number(a.active) ||
+      Number(b.lat !== null && b.lng !== null) - Number(a.lat !== null && a.lng !== null) ||
+      (a.code < b.code ? -1 : a.code > b.code ? 1 : 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )[0];
+}
+
+export function preferredProduct<P extends { id: string; code: string; active: boolean; weightPerCaseKg: number }>(list: P[]): P | undefined {
+  return [...list].sort(
+    (a, b) =>
+      Number(b.active) - Number(a.active) ||
+      Number(b.weightPerCaseKg > 0) - Number(a.weightPerCaseKg > 0) ||
+      (a.code < b.code ? -1 : a.code > b.code ? 1 : 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )[0];
+}
+
+function groupBy<T>(list: T[], key: (x: T) => string): Map<string, T[]> {
+  const m = new Map<string, T[]>();
+  for (const x of list) m.set(key(x), [...(m.get(key(x)) ?? []), x]);
+  return m;
+}
+
+export interface ResolveOptions {
+  /**
+   * Sales orders already confirmed for OTHER delivery dates, keyed `${SO normalized}|${customerKey}`
+   * -> those dates. The same sales order again on another date is a warning (a re-sent order?),
+   * not an error.
+   */
+  confirmedOnOtherDates?: Map<string, string[]>;
+}
+
+/** A file line weight is "per line"; one far from cases x the master case weight is suspicious. */
+function weightLooksWrong(lineKg: number, cases: number, masterKgPerCase: number): boolean {
+  if (!(masterKgPerCase > 0) || !(cases > 0) || !(lineKg > 0)) return false;
+  const perCase = lineKg / cases;
+  return perCase < masterKgPerCase / 2 || perCase > masterKgPerCase * 2;
+}
+
 export function resolveOrderLines(
   norm: NormalizeResult,
   customers: KnownCustomer[],
   products: KnownProduct[],
-  alreadyConfirmed: Set<string>, // keys `${deliveryDate}|${salesOrderNo}|${customerKey}|${productCode}`
+  /**
+   * Lines already confirmed, keyed by lineDupKey. A Map gives the confirmed case quantities: an
+   * identical line is skipped as a duplicate, the same line with another quantity is an error
+   * (changing a confirmed line is not supported). A Set only says the key exists (skipped).
+   */
+  alreadyConfirmed: Set<string> | Map<string, number[]>,
+  opts: ResolveOptions = {},
 ): ResolveResult {
-  const custByKey = new Map(customers.map((c) => [customerKey(c.code, c.branchKey), c]));
-  const prodByCode = new Map(products.map((p) => [p.code.toUpperCase(), p]));
+  // Case-variant twins resolve to one master row, always the same one.
+  const custTwins = groupBy(customers, (c) => customerKey(c.code, c.branchKey));
+  const prodTwins = groupBy(products, (p) => p.code.trim().toUpperCase());
+  const custByKey = new Map([...custTwins].map(([k, list]) => [k, preferredCustomer(list)!]));
+  const prodByCode = new Map([...prodTwins].map(([k, list]) => [k, preferredProduct(list)!]));
   const errors: RowError[] = [...norm.errors];
   const warnings: string[] = [...norm.warnings];
   const duplicates: RowError[] = [];
@@ -361,6 +445,7 @@ export function resolveOrderLines(
   const noLoc = new Set<string>();
   const noWeight = new Set<string>();
   const merged = new Map<string, ResolvedLine>();
+  const twinWarned = new Set<string>();
 
   for (const l of norm.lines) {
     const ck = customerKey(l.customerCode, l.branchKey);
@@ -369,38 +454,32 @@ export function resolveOrderLines(
       errors.push({ row: l.row, message: `Customer ${l.customerCode}${l.branchCode ? ` / ${l.branchCode}` : ''} is inactive. Reactivate it or remove the row.`, cases: l.cases });
       continue;
     }
-    const prod = prodByCode.get(l.productCode.toUpperCase());
+    const pk = l.productCode.trim().toUpperCase();
+    const prod = prodByCode.get(pk);
     if (prod && !prod.active) {
       errors.push({ row: l.row, message: `Product ${l.productCode} is inactive.`, cases: l.cases });
       continue;
     }
-    const dupKey = `${l.deliveryDate}|${l.salesOrderNo ?? ''}|${ck}|${l.productCode.toUpperCase()}`;
-    if (l.salesOrderNo && alreadyConfirmed.has(dupKey)) {
-      duplicates.push({ row: l.row, message: `Already uploaded: sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate}. Skipped.`, cases: l.cases });
-      continue;
+    const twins = custTwins.get(ck) ?? [];
+    if (cust && twins.length > 1 && !twinWarned.has(`c:${ck}`)) {
+      twinWarned.add(`c:${ck}`);
+      warnings.push(
+        `Customer codes ${twins.map((t) => t.code).join(' and ')}${l.branchCode ? ` / ${l.branchCode}` : ''} differ only in letter case and are treated as one customer: rows use ${cust.code}${cust.lat === null ? '' : ' (the one with a location)'}. Deactivate the other code in Customers.`,
+      );
     }
-    if (!cust) {
-      const nc = newCustomers.get(ck);
-      if (nc) nc.rows.push(l.row);
-      else newCustomers.set(ck, { code: l.customerCode, branchCode: l.branchCode, branchKey: l.branchKey, name: l.customerName || l.customerCode, customerType: l.customerType, rows: [l.row] });
-    } else if (cust.lat === null || cust.lng === null) {
-      noLoc.add(`${cust.code}${l.branchCode ? ` / ${l.branchCode}` : ''} ${cust.name}`);
-    }
-    if (!prod) {
-      const code = l.productCode.toUpperCase();
-      const np = newProducts.get(code);
-      if (np) np.rows.push(l.row);
-      else newProducts.set(code, { code: l.productCode, name: l.productDescription || l.productCode, rows: [l.row] });
-    } else if (!(prod.weightPerCaseKg > 0) && l.weightKg === null) {
-      noWeight.add(prod.code);
+    const ptwins = prodTwins.get(pk) ?? [];
+    if (prod && ptwins.length > 1 && !twinWarned.has(`p:${pk}`)) {
+      twinWarned.add(`p:${pk}`);
+      warnings.push(`Product codes ${ptwins.map((t) => t.code).join(' and ')} differ only in letter case and are treated as one product: rows use ${prod.code}. Deactivate the other code in Products.`);
     }
     // Same sales order + customer branch + product + date twice in one file -> sum (warned).
     // Rows without a sales-order number are never merged (no evidence they are the same line).
-    const mk = l.salesOrderNo ? `${l.deliveryDate}|${l.salesOrderNo}|${ck}|${l.productCode.toUpperCase()}` : `row:${l.row}`;
+    const mk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
     const existing = merged.get(mk);
     if (existing) {
       existing.cases += l.cases;
       if (l.weightKg !== null) existing.weightKg = (existing.weightKg ?? 0) + l.weightKg;
+      else existing.weightMissingCases = (existing.weightMissingCases ?? 0) + l.cases;
       if (l.salesValue !== null) existing.salesValue = (existing.salesValue ?? 0) + l.salesValue;
       if (l.margin !== null) existing.margin = (existing.margin ?? 0) + l.margin;
       existing.sourceRows.push(l.row);
@@ -413,10 +492,69 @@ export function resolveOrderLines(
       customerId: cust?.id ?? null,
       productId: prod?.id ?? null,
       sourceRows: [l.row],
+      weightMissingCases: l.weightKg === null ? l.cases : 0,
     });
   }
 
-  const lines = [...merged.values()];
+  // Lines already confirmed (another file, or a late order): an identical line is skipped; the
+  // same line with another quantity would be an amendment, which is not supported yet.
+  const lines: ResolvedLine[] = [];
+  for (const [mk, l] of merged) {
+    const confirmed = l.salesOrderNo ? (alreadyConfirmed instanceof Map ? alreadyConfirmed.get(mk) : alreadyConfirmed.has(mk) ? null : undefined) : undefined;
+    if (confirmed !== undefined) {
+      const rows = l.sourceRows.length > 1 ? ` (rows ${l.sourceRows.join(', ')})` : '';
+      if (confirmed === null || confirmed.includes(l.cases)) {
+        duplicates.push({ row: l.row, message: `Already uploaded: sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate}${rows}. Skipped.`, cases: l.cases });
+      } else {
+        errors.push({
+          row: l.row,
+          message: `Sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate} was already confirmed with ${confirmed.join(' + ')} cases; this file has ${l.cases}${rows}. Changing a confirmed line is not supported yet: remove the row, or send the extra cases under a new sales-order number.`,
+          cases: l.cases,
+        });
+      }
+      continue;
+    }
+    lines.push(l);
+  }
+
+  const otherDateWarned = new Set<string>();
+  for (const l of lines) {
+    const cust = custByKey.get(l.customerKey);
+    const prod = prodByCode.get(l.productCode.trim().toUpperCase());
+    if (!cust) {
+      const nc = newCustomers.get(l.customerKey);
+      if (nc) nc.rows.push(...l.sourceRows);
+      else newCustomers.set(l.customerKey, { code: l.customerCode, branchCode: l.branchCode, branchKey: l.branchKey, name: l.customerName || l.customerCode, customerType: l.customerType, rows: [...l.sourceRows] });
+    } else if (cust.lat === null || cust.lng === null) {
+      noLoc.add(`${cust.code}${l.branchCode ? ` / ${l.branchCode}` : ''} ${cust.name}`);
+    }
+    const missingWeight = (l.weightMissingCases ?? 0) > 0;
+    if (!prod) {
+      const code = l.productCode.toUpperCase();
+      const np = newProducts.get(code);
+      if (np) np.rows.push(...l.sourceRows);
+      else newProducts.set(code, { code: l.productCode, name: l.productDescription || l.productCode, rows: [...l.sourceRows] });
+      if (missingWeight) noWeight.add(l.productCode);
+    } else if (!(prod.weightPerCaseKg > 0) && missingWeight) {
+      noWeight.add(prod.code);
+    } else if (prod && l.weightKg !== null && !missingWeight && weightLooksWrong(l.weightKg, l.cases, prod.weightPerCaseKg)) {
+      warnings.push(
+        `Row ${l.row}: weight ${l.weightKg} kg for ${l.cases} cases of ${prod.code} is ${Math.round((l.weightKg / l.cases) * 10) / 10} kg per case, but the product's case weight is ${prod.weightPerCaseKg} kg. The weight column must be the kg of the whole line - check the file.`,
+      );
+    }
+    const so = normSalesOrder(l.salesOrderNo);
+    if (so && opts.confirmedOnOtherDates) {
+      const k = `${so}|${l.customerKey}`;
+      const dates = (opts.confirmedOnOtherDates.get(k) ?? []).filter((d) => d !== l.deliveryDate);
+      if (dates.length && !otherDateWarned.has(`${k}|${l.deliveryDate}`)) {
+        otherDateWarned.add(`${k}|${l.deliveryDate}`);
+        warnings.push(
+          `Sales order ${l.salesOrderNo} for ${l.customerCode} was already confirmed for ${[...new Set(dates)].sort().join(', ')}; this file has it again for ${l.deliveryDate}. Check that it is not the same order sent twice.`,
+        );
+      }
+    }
+  }
+
   const dates = [...new Set(lines.map((l) => l.deliveryDate))].sort();
   if (dates.length > 1) warnings.push(`The file contains ${dates.length} delivery dates (${dates.join(', ')}). Each date is planned separately.`);
   return {
@@ -438,6 +576,31 @@ export function resolveOrderLines(
       deliveryDates: dates,
     },
   };
+}
+
+/**
+ * Order-insensitive fingerprint of a file's content: every normalized line (delivery date
+ * included) as text, sorted. The same data in another row or column order - or re-exported -
+ * gives the same text, and the same rows for another delivery date give a different one.
+ */
+export function contentFingerprint(lines: NormalizedLine[]): string {
+  return lines
+    .map((l) =>
+      [
+        l.deliveryDate,
+        normSalesOrder(l.salesOrderNo) ?? '',
+        customerKey(l.customerCode, l.branchKey),
+        l.productCode.trim().toUpperCase(),
+        l.cases,
+        l.weightKg ?? '',
+        l.salesValue ?? '',
+        l.margin ?? '',
+        l.priority ?? '',
+        (l.depotCode ?? '').toUpperCase(),
+      ].join('|'),
+    )
+    .sort()
+    .join('\n');
 }
 
 /** Map a free-text channel to a CustomerType enum value (null if unknown). */

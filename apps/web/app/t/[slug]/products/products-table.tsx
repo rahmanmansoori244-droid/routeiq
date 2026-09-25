@@ -36,6 +36,7 @@ export function ProductsTable({ initial, canManage }: { initial: ProductRow[]; c
       }
       if (body.data?.softDeleted) {
         toast.success(`Product ${p.code} deactivated (referenced by past orders).`);
+        if (typeof body.data?.warning === 'string') toast.warning(body.data.warning, { duration: 10_000 });
       } else {
         toast.success(`Product ${p.code} deleted.`);
       }

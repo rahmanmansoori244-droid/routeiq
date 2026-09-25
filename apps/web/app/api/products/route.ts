@@ -1,4 +1,4 @@
-import { withTenantApi, ok, parseBody } from '@/lib/api';
+import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { productSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 
@@ -10,6 +10,9 @@ export const GET = withTenantApi(async (_req, { db }) => {
 export const POST = withTenantApi(
   async (req, { db, user, ip }) => {
     const input = await parseBody(req, productSchema);
+    // One product whatever the letter case of its code (the order intake matches it that way).
+    const twin = await db.product.findFirst({ where: { code: { equals: input.code, mode: 'insensitive' } }, select: { code: true } });
+    if (twin) return fail(`Product ${twin.code} already exists (codes are the same whatever the letter case).`, 409);
     const created = await db.product.create({
       data: {
         tenantId: user.tenantId,
