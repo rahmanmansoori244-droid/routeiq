@@ -226,22 +226,30 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         });
       }
     }
-    const rules = [...loads].reverse().find((l) => l.rules)?.rules ?? null;
-    if (rules) {
-      const first = loads[0];
-      const earliest = Math.max(rules.shiftStartMin, rules.depotOpenMin, rules.availableFromMin ?? 0);
+    // Each load against the rules IT was planned with (a carried load may predate a settings
+    // change); the day as a whole (span, loads per day) against the latest load's rules, which
+    // were planned around every earlier load.
+    const first = loads[0];
+    if (first.rules) {
+      const r = first.rules;
+      const earliest = Math.max(r.shiftStartMin, r.depotOpenMin, r.availableFromMin ?? 0);
       if (first.departMin < earliest - TOL_MIN) {
-        const why = earliest === rules.shiftStartMin ? 'the shift start' : earliest === rules.depotOpenMin ? 'the depot opening' : "the truck's availability";
+        const why = earliest === r.shiftStartMin ? 'the shift start' : earliest === r.depotOpenMin ? 'the depot opening' : "the truck's availability";
         v({ ...at(first), code: 'EARLY_DEPARTURE', message: `${code} load ${first.loadNo} leaves at ${hhmm(first.departMin)}, before ${why} (${hhmm(earliest)}).`, shortBy: earliest - first.departMin });
       }
-      for (const l of loads) {
-        if (l.returnMin > rules.depotCloseMin + TOL_MIN) {
-          v({ ...at(l), code: 'DEPOT_CLOSE', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the depot closes (${hhmm(rules.depotCloseMin)}).`, shortBy: l.returnMin - rules.depotCloseMin });
-        }
-        if (rules.availableToMin !== null && l.returnMin > rules.availableToMin + TOL_MIN) {
-          v({ ...at(l), code: 'TRUCK_AVAILABILITY', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the truck's availability ends (${hhmm(rules.availableToMin)}).`, shortBy: l.returnMin - rules.availableToMin });
-        }
+    }
+    for (const l of loads) {
+      const r = l.rules;
+      if (!r) continue;
+      if (l.returnMin > r.depotCloseMin + TOL_MIN) {
+        v({ ...at(l), code: 'DEPOT_CLOSE', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the depot closes (${hhmm(r.depotCloseMin)}).`, shortBy: l.returnMin - r.depotCloseMin });
       }
+      if (r.availableToMin !== null && l.returnMin > r.availableToMin + TOL_MIN) {
+        v({ ...at(l), code: 'TRUCK_AVAILABILITY', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the truck's availability ends (${hhmm(r.availableToMin)}).`, shortBy: l.returnMin - r.availableToMin });
+      }
+    }
+    const rules = [...loads].reverse().find((l) => l.rules)?.rules ?? null;
+    if (rules) {
       const startDay = Math.min(...loads.map((l) => l.departMin));
       const endDay = Math.max(...loads.map((l) => l.returnMin));
       if (endDay - startDay > rules.shiftMaxMin + TOL_MIN) {
