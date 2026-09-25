@@ -3,6 +3,7 @@
 Route optimization for NMWC (National Mineral Water Company, Oman): the **daily dispatch planner** turns tomorrow's sales orders into truck loading plans and delivery routes.
 
 **Start here (Sep 2026 restart):**
+- [`docs/PROJECT_HANDBOOK.md`](./docs/PROJECT_HANDBOOK.md): **the whole project in one place.** It covers where every part of the code is, the architecture and process flow, the optimizer logic, running/testing/deploying, history and decisions, open work, and a guide for AI code reviewers.
 - [`docs/DISPATCHER_GUIDE.md`](./docs/DISPATCHER_GUIDE.md): the daily workflow (upload → resolve → optimize → review → lock/export/dispatch → late orders)
 - [`docs/OPTIMIZER_DESIGN.md`](./docs/OPTIMIZER_DESIGN.md): how the optimizer decides (capacity, P1–P5, windows, multi-load trucks, cost)
 - [`docs/NMWC_DISPATCH_RESTART_AUDIT.md`](./docs/NMWC_DISPATCH_RESTART_AUDIT.md): what the recovered code did and what changed
