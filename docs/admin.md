@@ -96,6 +96,11 @@ Every 90 days per CLAUDE.md §14.
 4. Verify a fresh optimize call works.
 5. Done. Document the rotation date in the audit log of your infra system.
 
+### Planner settings (Settings page, company admins)
+- Since stabilization PR5 Settings shows only what the dispatch planner uses, with bounds equal to the optimizer's own (a value out of range is refused, and a value put straight into the database out of range makes the optimize answer 409 `SETTINGS_OUT_OF_RANGE` naming it). The economics are editable: **driver cost per hour** (paid for the whole truck day, turnaround and waiting included), **overtime after / per hour** (overtime after must be at most the shift maximum; at the defaults 540 / 540 overtime never accrues), fuel price, road time factor, preferred-window penalty, planning cutoff and date order. Enter NMWC's real driver and overtime rates.
+- Operations settings stay database-only and are shown read-only on the page: `timezone`, `osrmUrl` (never editable: the solver fetches it), `serviceAreaJson`, `priorityWeightsJson`, `orderColumnMapJson`, and the customer type defaults (`CustomerTypeProfile`).
+- Two admins saving at once: each save sends only its changed fields and the values it showed; a save over a newer value answers 409 and saves nothing.
+
 ### Tuning solver time limits
 - **Dispatch planner (OR-Tools, Daily dispatch):** ignores `TenantConfig.solverTimeLimitSeconds`.
   - The RECOMMENDED time limit scales with the stop count: 5 s (≤25), 20 s (≤200), 150 s (≤350), 240 s (>350). The alternatives get half.
@@ -103,7 +108,8 @@ Every 90 days per CLAUDE.md §14.
   - The re-check runs in the worker pool with its own deadline inside the request budget. If an alternative overran its deadline, the pool is replaced first so the re-check never waits behind a stuck search. If the re-check fails or runs out of time, the plans are the search results as found, with the note *"Loads were not re-checked for fewer trucks ..."*.
   - The whole solve stays within a 540 s budget. Alternatives that would overrun it are skipped with a warning.
   - The web waits up to 600 s.
-- `TenantConfig.solverTimeLimitSeconds` currently has **no effect**. It belonged to the previous (PyVRP) planner, which can no longer be started: old plans are read-only (`409 LEGACY_PLAN`).
+- `TenantConfig.solverTimeLimitSeconds` has **no effect**. It belonged to the previous (PyVRP) planner, which can no longer be started: old plans are read-only (`409 LEGACY_PLAN`). Since stabilization PR5 it is no longer on the Settings page (the API refuses it); the column is dropped in a later release.
+- **Road routing** (stabilization PR5, review F19): the matrix gets at most `MATRIX_BUDGET_SEC` (default min(90 s, 20% of `SOLVER_BUDGET_SEC`)); a slow or hanging OSRM then gives straight-line estimates, labelled, with a "road routing too slow" warning, instead of eating the search time. Set `OSRM_TABLE_TILE` on the solver up to the OSRM server's `--max-table-size` (1000 in `infra/osrm`; first confirm production OSRM runs the image default) so a normal day needs **one** `/table` call; `OSRM_PARALLEL` (default 2, max 4) bounds the calls in flight. The solver logs `matrix provider=… quality=… seconds=…` for every request. At most 600 stops per optimization.
 - Dispatch planner: every scenario runs in a worker process.
   - OR-Tools holds the GIL during its search. So neither the API process nor threads may run it, or `/health` and every other request freeze until the search ends.
   - RECOMMENDED runs first; the two alternatives then run in parallel, warm-started from it; then the load re-check (one worker per job, at most two).
@@ -127,7 +133,7 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 - Zero-downtime pattern for destructive changes: expand → migrate code → contract over two deploys.
 
 ### PostGIS
-- Production uses the `postgis/postgis:16-3.4` Docker image (or a Postgres with PostGIS enabled).
+- Production runs Railway's `postgres-ssl:18` template (PostgreSQL 18, PostGIS not guaranteed); CI and local development use `postgis/postgis:16-3.4`. The comment in the first migration (`00000000000000_init_postgis`) and the `schema.prisma` header still say production uses the PostGIS image: they are outdated (historical migrations are never edited). Nothing queries PostGIS.
 - v1 schema doesn't query PostGIS, but the extension is reserved for v2 spatial work.
 - The first migration is tolerant of missing PostGIS (wraps `CREATE EXTENSION` in a `DO $$ ... EXCEPTION` block) so local dev DBs without PostGIS still migrate.
 

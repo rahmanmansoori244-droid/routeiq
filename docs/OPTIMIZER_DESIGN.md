@@ -24,8 +24,8 @@ The result is an **OPTIMIZED PLAN**: a good, feasible plan found within a time l
    - fixed cost for each truck used that day;
    - a small cost per load;
    - distance cost = km × (non-fuel cost per km + fuel price ÷ km per litre). **Fuel is counted once**;
-   - driver time cost per hour;
-   - overtime after the normal day (default 9 h).
+   - driver cost per hour for the **whole truck day**: from its first departure (or first locked departure) to its last return, depot turnaround and waiting included (owner decision, stabilization PR5; `apps/solver/costing.py`). The plan reports exactly this: each load carries its share, the time since its truck's previous return;
+   - overtime after the normal day (default 9 h), counted from that first departure, on top of the driver cost.
 5. Fewer trucks, fewer loads, fewer km and less time follow from (4).
 6. **Preferences:** arriving outside a *preferred* window is allowed but costs a small penalty per minute, and P1/P2 customers get a slight "earlier is better" push. Preferences never override the hard rules or priorities.
 
@@ -69,7 +69,7 @@ All three options are picked from the same set of candidate plans (§7), each by
 The three route searches each produce loads (which customers, in which order). A second, exact step then keeps every load as it is and decides again **which truck carries it and when it leaves**, so that trucks do two or three loads each instead of one:
 1. For the recommendation's costs (and for MIN TRUCKS' when that option is asked for), OR-Tools CP-SAT assigns the loads of each search plan to trucks and departure times, respecting capacity, customer hours, turnaround, shift length, loads per truck, depot hours, truck availability and locked/dispatched loads.
 2. An order a search left out (not ruled out by a check) is offered as a one-customer load; if a free truck or trip can take it, it is planned. Service comes before cost, strictly by priority, also on fleet-shortage days (the search can leave out more than the shortage). The note then says *"...; this also plans 2 stop(s) the route search had left out"*.
-3. Every candidate plan (the search plans and their re-assignments) is timed exactly (turnaround = reload + loading per case of the next load) and scored the same way: unserved orders by priority, then fixed truck cost, per-load cost, km cost, driver time over the truck day, overtime counted from the truck's first departure (as the cost report does), preferred hours, early arrival for P1/P2 and, on re-plans, moved orders.
+3. Every candidate plan (the search plans and their re-assignments) is timed exactly (turnaround = reload + loading per case of the next load) and scored the same way: unserved orders by priority, then fixed truck cost, per-load cost, km cost, driver time over the whole truck day (for a truck with locked loads, from its last locked return: the locked part is already paid), overtime counted from the truck's first departure (the money part is the same function as the cost report, `costing.py`), preferred hours, early arrival for P1/P2 and, on re-plans, moved orders.
 4. Each option takes its best candidate. When this changed a plan it carries a note, for example *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
 5. **Plans that break the exact loading time.** The route search only estimates the loading time between loads (80% of a full truck). On a tight day with loads fuller than that, its plan can need more turnaround than the day has, and no re-assignment keeps all its orders. When this step runs, such a plan is repacked once more with every order optional (whole loads, each load without one of its customers, one-customer loads), keeping the most priority value that fits. The orders it loses are unserved with *"Not planned: once every load was timed with the loading time between loads ..."* and the plan says how many. If even that fails, the search plan is kept with a warning.
 
@@ -82,7 +82,7 @@ Whatever path produced it, every option the optimizer returns is re-checked inde
 
 The web checks each truck's day again before a load is locked, loaded or dispatched, from the facts the plan was made with (the truck's capacity and payload, the customer's hours, the physical kg of each order or split part). A truck whose times break a rule cannot be locked, loaded or dispatched until the day is re-planned (when the problem is on a load that is already locked or loading, that load is first put back to Planned, because a re-plan keeps locked loads as they are); the plan screen shows the reasons and the remedy in a red box with a Re-plan button, and its driver sheets, WhatsApp messages and workbook say **TIMES NOT VERIFIED**. Stored weights are rounded to 0.1 kg; the parts of a split stop add up exactly to the kg the optimizer was sent, and the check allows 0.5 kg of rounding. With the loading time per case at 0 (the default) practically every plan passes.
 
-## 8. Timing settings (Settings → Dispatch timing)
+## 8. Timing settings (Settings → Daily dispatch: timing)
 | Setting | Default | What it does |
 |---|---|---|
 | First departure | 06:00 | No truck leaves before this time (NMWC's trucks actually leave 07:10-08:00). |

@@ -40,10 +40,11 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Priorities are strict:** one order of a higher priority always wins over any number of lower-priority orders (one P2 is never left out to fit eleven P3s). When the trucks really cannot carry everything, P5 orders are left out first, then P4, and so on.
 - After the route search, RouteIQ re-checks which truck carries each load, so trucks do two or three loads each where the day allows instead of many trucks doing one short load. When this changed the plan you see a note such as *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
   - The re-check also tries to place orders the route search left out on free trucks or loads. When it does, the note ends with *"this also plans 2 stop(s) the route search had left out"*: loads and cost can then go up, because more is delivered.
-  - Every load is then timed with the exact loading time between loads (Settings → Dispatch timing). The route search only estimates it, so on a tight day with very full loads its plan may not fit. The lowest priorities are then left out until it does, with the note *"... stop(s) the route search had planned are left out: with the loading time between loads ... its loads did not fit the truck days"*. Re-plan, add a truck, or check the loading time.
+  - Every load is then timed with the exact loading time between loads (Settings → Daily dispatch: timing). The route search only estimates it, so on a tight day with very full loads its plan may not fit. The lowest priorities are then left out until it does, with the note *"... stop(s) the route search had planned are left out: with the loading time between loads ... its loads did not fit the truck days"*. Re-plan, add a truck, or check the loading time.
 
 ## 4. Review the plan
-- **Top row:** orders served, cases, trucks and loads, km, hours, utilisation, fuel, cost, service % for P1–P5.
+- **Top row:** orders served, cases, trucks and loads, km, hours on the road and **paid** hours (each truck from its first departure to its last return), utilisation, fuel, cost, service % for P1–P5.
+- **Operating cost** is the whole day: truck fixed costs, cost per load, km, fuel, the drivers paid for the whole truck day (the wait and turnaround at the depot between loads included) and overtime after the hours set in Settings. Hover over it for the parts. After a re-plan it includes the locked and dispatched loads kept from the previous version. A `*` means some loads were saved before this cost rule and keep their old cost (without depot time and overtime). The Excel **TRUCK DAYS** sheet gives the cost per truck.
 - **Green bar:** *uploaded = planned + unserved*. If it is ever red, do not dispatch; report it.
 - **Truck loads:** one row per truck and load (T01 · L1, T01 · L2 …) with departure/return, cases vs capacity and km. Click a row to see:
   - the **Loading manifest**: exact cases per product for the warehouse;
@@ -54,8 +55,8 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
     - *"Fleet capacity shortage ..."*: the trucks cannot carry every order today (more cases than all trucks and loads together), so lower priorities are left out first. It does not prove that this order is the one that cannot fit. If far more is unserved than the shortage (the plan then says so), **Re-plan** or add a truck.
     - *"Not planned: the optimizer found no truck, trip or time slot ..."*: nothing proves the order impossible. **Re-plan** to search again, add a truck, or raise *Max loads per truck per day*.
     - *"Not planned: once every load was timed with the loading time between loads ..."*: see step 3.
-- **Split deliveries:** a customer whose day does not fit on any truck (cases or kg) is delivered in parts — each stop shows *Part 1 of 2*, *Part 2 of 2* and exactly which products and cases it carries. Parts can go on different trucks or loads. Turn this off in **Settings → Operations** if you prefer such customers to be left unserved.
-- **Plan options:** MIN TRUCKS (fewest trucks, then loads, then operating cost) and MIN DISTANCE (fewest km) are shown for comparison only. Unless they serve more orders, they never need more trucks / km than the recommendation; when one plan is best on every measure, the options show the same plan. Click **Use instead** only if you really want one of them.
+- **Split deliveries:** a customer whose day does not fit on any truck (cases or kg) is delivered in parts — each stop shows *Part 1 of 2*, *Part 2 of 2* and exactly which products and cases it carries. Parts can go on different trucks or loads. Turn this off in **Settings → Daily dispatch: timing** if you prefer such customers to be left unserved.
+- **Plan options:** MIN TRUCKS (fewest trucks, then loads, then operating cost) and MIN DISTANCE (fewest km) are shown for comparison only. **Day cost** is the whole day with that option (the kept locked loads + its new loads), so the option in use shows the same figure as the top row. Unless they serve more orders, they never need more trucks / km than the recommendation; when one plan is best on every measure, the options show the same plan. Click **Use instead** only if you really want one of them.
 
 ## 5. Lock, export, dispatch
 - **Lock** a load when the warehouse starts preparing it. Loads of one truck are locked in order (Load 1 before Load 2).
@@ -125,7 +126,13 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
 ## Changing date or depot
 While the new day loads, the screen shows *Loading ...* and its buttons are off; if it cannot be loaded, you see the error and **Try again** instead of the previous day. Everything you do (upload, confirm, optimize) is always for the day on the screen.
 
-## Dispatch timing settings (Settings → Dispatch timing, admins)
+## Settings (company admins)
+Settings shows only what the planner uses, each with its unit and allowed range, and an **Effective planner values** table that says what the next optimization uses and where each value comes from. Saving sends only what you changed; if another admin changed the same setting since you opened the page, nothing is saved and you are asked to reload.
+- **Costs:** driver cost per hour (paid for the whole truck day), overtime after (at most the shift maximum) and per hour (on top), fuel price per litre, preferred-window penalty. Truck costs (fixed per day, per load, per km, km per litre), max loads and availability are set per truck under **Trucks**; depot opening hours under **Depots**.
+- **Country** is chosen from a list: it decides whether plans use road distances (Oman and the UAE) or straight-line estimates.
+- **Default service time** is used for customers whose own unloading time was never confirmed (and whose customer type has none).
+
+### Dispatch timing (Settings → Daily dispatch: timing)
 Set these to what the depot and drivers really do; every load is timed with them.
 - **First departure:** no truck leaves before this time (e.g. 07:30).
 - **Turnaround between loads (minutes):** fixed depot time between two loads of one truck (paperwork, queue). Default 30.
@@ -143,7 +150,7 @@ Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep t
 - Deleting a driver who is on any load deactivates the driver instead, so past loads keep their driver.
 
 ## Good to know
-- "Estimated km" means the road-routing service was not available and straight-line distances were used. The plan is still valid, but check long trips.
+- "Estimated km" means straight-line distances were used: the road-routing service was not available or too slow, or (on one load) a customer pin is far from any road. "Road km (3 legs estimated)" means most of the plan is on real roads but a few legs are estimates - usually a wrong pin: check those customers' locations. The plan is still valid, but check long trips. A reason "No truck can reach this customer ... (based on estimated distance)" rests on such an estimate.
 - Receiving hours and priority for many customers come from their **customer type**. Set the type once and the defaults apply.
 - Everything you save (locations, priorities, hours) is kept on the customer master and in the audit log.
 - Customer and product codes are the same whatever their letter case: `c001` and `C001` are one customer. A second one differing only in case cannot be created.

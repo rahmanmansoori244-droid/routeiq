@@ -1,3 +1,5 @@
+> **Historical (May 2026) - not current behaviour.** This is the build report of the first PyVRP-era version, kept for history. The live system is the NMWC daily dispatch planner described in [`docs/PROJECT_HANDBOOK.md`](./docs/PROJECT_HANDBOOK.md); where this report disagrees with the handbook, the `docs/` folder or the code, **they win**. The driver phone app (Module C) was retired in September 2026 (stabilization PR1).
+
 # Overnight build report — Modules A, B, C ✅
 
 **Live URL:** https://web-production-a9d04.up.railway.app

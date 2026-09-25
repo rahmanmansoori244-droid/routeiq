@@ -28,7 +28,9 @@ Use `SEED_PASSWORD=...` to choose the demo password instead of a random one. Nev
 # solver: estimated (Haversine) distances without OSRM_URL; for road distances run the OSRM image
 # locally (infra/osrm, docs/OSRM_SETUP.md) and add OSRM_URL=http://127.0.0.1:5000.
 # Never use a public OSRM demo server: it would receive real customer coordinates from .dev data.
-cd apps/solver && SOLVER_TOKEN=... .venv/Scripts/python -m uvicorn main:app --port 8000
+# apps/solver/.env holds SOLVER_TOKEN (and OSRM_URL for a local OSRM); --env-file loads it (review L29).
+# A wrong X-Solver-Token must answer 401: a 500 "Solver not configured" means the token was not loaded.
+cd apps/solver && .venv/Scripts/python -m uvicorn main:app --env-file .env --port 8000
 # web
 pnpm --filter @routeiq/web dev
 ```
