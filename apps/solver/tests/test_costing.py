@@ -4,6 +4,8 @@ and (through the response) every figure the web shows.
 """
 from __future__ import annotations
 
+import random
+
 import pytest
 
 import costing
@@ -152,3 +154,91 @@ def test_score_prices_frozen_trucks_from_their_frozen_return():
                                return_s=hm("09:30") * 60 + mx.duration_s[0][1] + 600 + mx.duration_s[1][0])]}
     se, sl = LR.score(ctx.day, ctx.rec_pricing, early), LR.score(ctx.day, ctx.rec_pricing, late)
     assert sl.operating - se.operating == pytest.approx(costing.to_units(2 * 6.0), abs=2)
+
+
+# ---------------------------------------------------------------------------------------------
+# Rounding: the parts, the load totals and the day total agree (PR5 review: a check tighter than
+# the per-part rounding failed 1-3 load optimizations - typically late-order re-plans - with a 500)
+# ---------------------------------------------------------------------------------------------
+
+def test_round_parts_add_up_exactly_and_stay_within_a_baisa():
+    rnd = random.Random(5)
+    for _ in range(5000):
+        exact = {k: (0.0 if rnd.random() < 0.2 else rnd.uniform(0, 40)) for k in ("fixed", "trip", "distance", "fuel", "time", "overtime")}
+        parts, total = costing.round_parts(exact)
+        assert list(parts) == list(exact)
+        assert total == round(sum(exact.values()), 3)
+        assert round(sum(parts.values()), 3) == total
+        for k, v in parts.items():
+            assert abs(v - exact[k]) < 0.001 + 1e-9, (k, v, exact[k])
+            assert v >= 0
+            if exact[k] == 0.0:
+                assert v == 0.0
+
+
+def test_round_parts_review_case():
+    """The review's one-load day (19.61 km at 0.15 OMR/km, 5.603 l at 0.23 OMR, 39.4 min at 2.5
+    OMR/h): the parts rounded one by one added up to 25.873, the exact money is 25.8718."""
+    exact = dict(fixed=20.0, trip=0.0, distance=2.9415, fuel=1.2886571428571427, time=1.6416666666666666, overtime=0.0)
+    assert round(sum(round(v, 3) for v in exact.values()), 3) == 25.873  # the old way
+    parts, total = costing.round_parts(exact)
+    assert total == 25.872
+    assert round(sum(parts.values()), 3) == 25.872
+    assert parts["fixed"] == 20.0 and parts["trip"] == 0.0 and parts["overtime"] == 0.0
+
+
+def _no_cost_check(sc) -> None:
+    assert not [w for w in sc.warnings if w.startswith("Cost check")], sc.warnings
+    for ld in sc.loads:
+        parts = ld.fixed_cost + ld.trip_cost + ld.distance_cost + ld.fuel_cost + ld.driver_cost + ld.overtime_cost
+        assert round(parts, 3) == ld.total_cost, (ld.truck_id, ld.load_no, parts, ld.total_cost)
+    assert sc.operating_cost == round(sum(ld.total_cost for ld in sc.loads), 3)
+    for d in sc.truck_days:
+        assert d.total_cost == round(sum(ld.total_cost for ld in sc.loads if ld.truck_id == d.truck_id), 3)
+
+
+def test_review_one_load_day_is_costed_without_error():
+    """Reproduction from the review: this single-load day raised CostError (loads 25.873 OMR, truck
+    day 25.8718 OMR) and /optimize-dispatch answered 500."""
+    r = req([stop("A", 23.56244956432374, 58.320204284752904, cases=20)],
+            [truck("T01", cap=500, fixed_cost=20.0, cost_per_km=0.15, km_per_litre=3.5)],
+            driver_cost_per_hour=2.5, fuel_price_per_litre=0.23, time_limit_sec=1)
+    sc = rec(optimize_dispatch(r))
+    assert sc.status == "OPTIMIZED" and len(sc.loads) == 1
+    _no_cost_check(sc)
+
+
+@pytest.mark.parametrize("frozen", [False, True])
+@pytest.mark.parametrize("seed", range(8))
+def test_small_days_and_late_order_replans_never_fail_the_cost_check(seed, frozen, monkeypatch):
+    """Random 1-load and 2-load days, fresh or re-planned around a locked 06:00-09:00 load, with
+    distance, trip, fuel, driver and overtime all non-zero: every scenario comes back, its loads'
+    parts add up to their totals, and the loads to the truck days and the scenario."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    rnd = random.Random(1000 * seed + frozen)
+    n_stops = 1 + seed % 2
+    stops = [stop(f"S{k}", 23.45 + rnd.random() * 0.25, 58.10 + rnd.random() * 0.5, cases=rnd.randint(5, 60),
+                  service_min=rnd.choice([10, 15, 25])) for k in range(n_stops)]
+    frozen_trips = [FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:00"), cases=300)] if frozen else []
+    # Room for one stop per load on the 2-stop days, so they make two loads.
+    cap = 60 if n_stops == 2 and seed % 4 == 1 else 600
+    t = [truck("T01", cap=cap, max_trips=3, fixed_cost=round(rnd.uniform(5, 30), 3), trip_cost=round(rnd.uniform(0.5, 3), 3),
+               cost_per_km=round(rnd.uniform(0.03, 0.2), 4), km_per_litre=round(rnd.uniform(2.5, 5), 2), frozen_trips=frozen_trips)]
+    r = req(stops, t, driver_cost_per_hour=round(rnd.uniform(1, 7), 3), overtime_after_min=rnd.choice([60, 120, 240]),
+            overtime_cost_per_hour=round(rnd.uniform(0.5, 5), 3), fuel_price_per_litre=round(rnd.uniform(0.2, 0.3), 4),
+            reload_min=rnd.choice([20, 45]), time_limit_sec=1)
+    resp = optimize_dispatch(r)
+    assert resp.scenarios
+    for sc in resp.scenarios:
+        _no_cost_check(sc)
+    assert rec(resp).loads
+
+
+def test_a_cost_mismatch_is_reported_never_a_failed_optimization(monkeypatch):
+    """Should the loads ever disagree with the truck days again, the plan still comes back: the
+    mismatch is logged and shown as a warning, instead of an error that fails the optimization."""
+    monkeypatch.setattr(ds, "COST_TOLERANCE_PER_LOAD", -1.0)  # every scenario "mismatches"
+    r = req([stop("A", 23.60, 58.45)], [truck("T01", fixed_cost=10.0)], driver_cost_per_hour=2.0, time_limit_sec=1)
+    sc = rec(optimize_dispatch(r))
+    assert sc.status == "OPTIMIZED" and sc.loads
+    assert any(w.startswith("Cost check") for w in sc.warnings)

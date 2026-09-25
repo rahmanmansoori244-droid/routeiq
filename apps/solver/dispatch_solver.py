@@ -76,7 +76,7 @@ from dispatch_models import (
     TruckDayCostOut,
     UnservedStop,
 )
-from providers import MatrixResult, resolve_matrix
+from providers import MatrixResult, matrix_quality, resolve_matrix
 
 log = logging.getLogger("routeiq.dispatch")
 
@@ -107,6 +107,9 @@ MATRIX_BUDGET_CAP_SEC = 90
 MATRIX_BUDGET_SHARE = 0.2
 # Above this many stops the search gets its longest automatic time limit; a warning says so.
 LARGE_DAY_STOPS = 350
+# Each load's total cost is its exact money rounded to 0.001 OMR (costing.round_parts): the loads of a
+# scenario add up to its exact truck-day money within half a baisa per load.
+COST_TOLERANCE_PER_LOAD = 0.0005
 # Post-solve stage (load repack): each CP-SAT solve gets min(CAP, max(MIN, search limit / 2)).
 REPACK_CAP_SEC = 15
 REPACK_MIN_SEC = 3
@@ -804,8 +807,11 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             if t.capacity_kg > 0:
                 util_parts.append(kg / t.capacity_kg)
             depart_min, return_min = _min_of(tl.depart_s), _min_of(return_s)
-            parts = dict(fixed=round(c.fixed, 3), trip=round(c.trip, 3), distance=round(c.distance, 3), fuel=round(c.fuel, 3),
-                         time=round(c.driver, 3), overtime=round(c.overtime, 3))
+            # To the baisa, and the parts add up exactly to the load's total (= its exact money
+            # rounded once): the loads then add up to the truck days and the scenario within the
+            # rounding of one total per load (costing.round_parts).
+            parts, load_total = costing.round_parts(dict(fixed=c.fixed, trip=c.trip, distance=c.distance, fuel=c.fuel,
+                                                         time=c.driver, overtime=c.overtime))
             for key, v in parts.items():
                 comp[key] += v
             mine.append(PlannedLoad(
@@ -814,7 +820,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 cases=cases, kg=round(kg, 1), utilization_pct=round(100.0 * max(util_parts), 1),
                 fuel_litres=round(c.fuel_litres, 1) if c.fuel_litres is not None else None, fuel_cost=parts["fuel"],
                 distance_cost=parts["distance"], time_cost=parts["time"], fixed_cost=parts["fixed"],
-                total_cost=round(sum(parts.values()), 3),
+                total_cost=load_total,
                 return_leg_km=round(back_m / 1000.0, 2), stops=stops_out,
                 trip_cost=parts["trip"], driver_cost=parts["time"], overtime_cost=parts["overtime"],
                 driver_paid_min=_min_of(c.paid_s), paid_from_min=_min_of(c.paid_from_s), overtime_min=_min_of(c.overtime_s),
@@ -886,11 +892,17 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             f"The trucks are {short} cases short today, but {left_cases} cases are unserved: more than the shortage "
             "alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
-    # The day's operating cost is the sum of its loads' costs (each rounded to 0.001 OMR), so the
-    # web's sums of stored load costs equal it exactly; the exact (unrounded) money must agree.
+    # The day's operating cost is the sum of its loads' costs, so the web's sums of stored load costs
+    # equal it exactly. Each load's total is its exact money rounded once to 0.001 OMR, so the sum
+    # is within 0.0005 OMR per load of the exact truck-day money. A larger gap is a costing bug: it is
+    # logged and shown, never a failed optimization (the plan itself is sound).
     operating = round(sum(ld.total_cost for ld in loads), 3)
-    if abs(operating - money_exact) > 0.001 * max(1, len(loads)) + 1e-9:
-        raise CostError(f"scenario {name}: loads add up to {operating} OMR, the truck days to {money_exact:.4f} OMR")
+    if abs(operating - money_exact) > COST_TOLERANCE_PER_LOAD * max(1, len(loads)) + 1e-6:
+        log.error("scenario %s: loads add up to %.3f OMR, the truck days to %.4f OMR", name, operating, money_exact)
+        warnings.append(
+            f"Cost check: the loads of this option add up to {operating:.3f} OMR but its truck days to {money_exact:.3f} OMR. "
+            "The plan itself is valid; report this to the administrator."
+        )
     sc = DispatchScenario(
         name=name, status="OPTIMIZED", solver_status=solver_status, solver_time_sec=round(elapsed, 2),
         time_limit_sec=time_limit, objective_value=int(objective_value),
@@ -942,10 +954,6 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult) -> Dispat
 
 class ReconciliationError(AssertionError):
     pass
-
-
-class CostError(AssertionError):
-    """The loads of a scenario do not add up to its truck days' money (costing.py)."""
 
 
 def _assert_reconciled(req: DispatchRequest, sc: DispatchScenario) -> None:
@@ -1589,12 +1597,15 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
 
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:
-    """The matrix of the kept stops, with which of its legs are estimates (review F18)."""
+    """The matrix of the kept stops, with which of its legs are estimates (review F18). Its quality
+    is derived again from the kept legs: when the only estimated legs belonged to a stop the window
+    prefilter dropped, every planned leg is a road leg and the response says ROAD, not MIXED."""
     nodes = [0] + [k + 1 for k in keep]
     pos = {old: new for new, old in enumerate(nodes)}
     dist = [[mx.distance_m[i][j] for j in nodes] for i in nodes]
     dur = [[mx.duration_s[i][j] for j in nodes] for i in nodes]
     est = {(pos[i], pos[j]) for i, j in mx.estimated if i in pos and j in pos}
-    return [stops[k] for k in keep], MatrixResult(dist, dur, mx.provider_name, mx.is_estimated, list(mx.warnings), len(est),
-                                                  estimated=est, all_estimated=mx.all_estimated, quality=mx.quality,
+    quality = matrix_quality(len(nodes), len(est), mx.all_estimated)
+    return [stops[k] for k in keep], MatrixResult(dist, dur, mx.provider_name, quality == "ESTIMATED", list(mx.warnings), len(est),
+                                                  estimated=est, all_estimated=mx.all_estimated, quality=quality,
                                                   seconds=mx.seconds)
