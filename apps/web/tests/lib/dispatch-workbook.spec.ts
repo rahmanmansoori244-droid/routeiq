@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, kgCheck, loadSheetName, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
 import { fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
@@ -16,6 +16,23 @@ const META: WorkbookMeta = {
   generatedBy: 'Planner One',
   assumptions: { Timezone: 'Asia/Muscat', 'Max trips per truck per day': '3' },
 };
+
+/** A plan saved before the whole-truck-day costs: no load cost breakdown, a summary without costBasis. */
+function earlierPlan(): PlanDetail {
+  const d = fixture();
+  d.loads = d.loads.map((l) => ({ ...l, cost: null }));
+  const { costBasis: _basis, costs: _costs, ...summary } = d.summary!;
+  d.summary = summary;
+  return d;
+}
+
+function scenarioRow(): PlanDetail['scenarios'][number] {
+  return {
+    id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, totalKm: 10,
+    totalDurationMin: 100, operatingCost: 50, dayOperatingCost: 50, costVersion: 2, estimatedLegs: 0, avgUtilizationPct: 50, unservedOrders: 0,
+    distanceIsEstimated: false, provider: 'OSRM', objective: null, chosen: false, feasibility: null,
+  };
+}
 
 async function render(d: PlanDetail, meta: WorkbookMeta = META) {
   const buf = await buildDispatchWorkbook(d, meta);
@@ -454,6 +471,52 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     const wb = await render(d);
     expect(find(sheet(wb, SHEETS.summary), (t) => t.includes('costed the earlier way'))).toBeTruthy();
     expect(find(sheet(wb, SHEETS.truckDays), (t) => t.includes('costed the earlier way'))).toBeTruthy();
+  });
+
+  it('which rules a plan was made with: current, earlier (before the whole-day costs) or mixed', () => {
+    expect(planRules(fixture())).toBe('CURRENT');
+    expect(planRules(earlierPlan())).toBe('EARLIER');
+    const mixed = fixture();
+    mixed.loads[0] = { ...mixed.loads[0]!, cost: null, operatingCost: 30 };
+    mixed.summary = { ...mixed.summary!, costBasis: 'MIXED_LEGACY' };
+    expect(planRules(mixed)).toBe('MIXED');
+    // The option in use decides when there is one: made by the earlier optimizer (no cost version).
+    const option = { ...scenarioRow(), chosen: true, costVersion: null };
+    expect(planRules({ ...earlierPlan(), scenarios: [option] })).toBe('EARLIER');
+    expect(planRules({ ...mixed, scenarios: [{ ...option, costVersion: 2 }] })).toBe('MIXED');
+  });
+
+  it('a plan costed the earlier way: ASSUMPTIONS and TRUCK DAYS do not state the new rules as its facts (PR5 review)', async () => {
+    const d = earlierPlan();
+    const wb = await render(d, { ...META, assumptionsSource: 'PLAN' });
+    const a = sheet(wb, SHEETS.assumptions);
+    expect(find(a, (t) => /^\d+\. Driver cost: this plan was costed the earlier way/.test(t))).toBeTruthy();
+    expect(find(a, (t) => t.includes('the driver is paid for the whole truck day'))).toBeUndefined();
+    expect(text(sheet(wb, SHEETS.truckDays).getCell(2, 1))).toMatch(/costed the earlier way: driver cost is each load's time on the road/);
+    // The current plan keeps the whole-day wording.
+    const now = sheet(await render(fixture()), SHEETS.assumptions);
+    expect(find(now, (t) => t.includes('the driver is paid for the whole truck day'))).toBeTruthy();
+    expect(find(now, (t) => t.includes('costed the earlier way'))).toBeUndefined();
+  });
+
+  it("tenantAssumptions words the driver cost, overtime, road factor and service time by the plan's rules", () => {
+    const cfg = {
+      timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 360, driverShiftMaxMinutes: 600, reloadMinutes: 30,
+      maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 2.5, overtimeAfterMin: 540, overtimeCostPerHour: 4,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+      defaultServiceTimeMin: 10, osrmConfigured: false,
+    };
+    const opts = { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false };
+    const now = tenantAssumptions(cfg, opts);
+    expect(now['Driver cost']).toMatch(/per hour of the whole truck day/);
+    expect(now['Road time factor (truck vs car)']).toBe('x1.25 on road travel times (not on estimated legs)');
+    const old = tenantAssumptions(cfg, { ...opts, rules: 'EARLIER' });
+    expect(old['Driver cost']).toMatch(/^2\.5 OMR per hour of each load's time on the road/);
+    expect(old['Driver cost']).not.toMatch(/whole truck day/);
+    expect(old.Overtime).toMatch(/not included in this plan's load costs or operating cost/);
+    expect(old['Road time factor (truck vs car)']).toMatch(/including legs it could not route \(earlier rule\)/);
+    expect(old['Default service time']).toMatch(/earlier rule/);
+    expect(tenantAssumptions(cfg, { ...opts, rules: 'MIXED' })['Driver cost']).toMatch(/whole truck day.*loads kept from an earlier plan keep their earlier cost/);
   });
 
   it('road km with some estimated legs is labelled so (review F18)', async () => {

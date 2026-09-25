@@ -51,3 +51,26 @@ export function changedFields<T extends Record<string, unknown>>(baseline: T, cu
   }
   return { changes, expect };
 }
+
+/**
+ * Overtime cannot start after the shift ends (checked on the merged settings, not only the patch).
+ */
+export function overtimeProblem(v: { overtimeAfterMin: number; driverShiftMaxMinutes: number }): string | null {
+  return v.overtimeAfterMin > v.driverShiftMaxMinutes
+    ? `Overtime after (${v.overtimeAfterMin} min) must be at most the driver shift maximum (${v.driverShiftMaxMinutes} min).`
+    : null;
+}
+
+/**
+ * The overtime rule as a save applies it (the settings route and the Settings form alike): only a
+ * save that changes the overtime threshold or the shift maximum is held to it. A stored threshold
+ * after a lowered shift maximum (possible before overtime was editable) is a planner warning
+ * (planner-config.ts), never a reason to refuse saving the company name or another setting.
+ */
+export function overtimeSaveProblem(
+  changed: Record<string, unknown>,
+  merged: { overtimeAfterMin: number; driverShiftMaxMinutes: number },
+): string | null {
+  if (!('overtimeAfterMin' in changed) && !('driverShiftMaxMinutes' in changed)) return null;
+  return overtimeProblem(merged);
+}

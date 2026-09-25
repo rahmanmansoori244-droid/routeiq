@@ -230,12 +230,7 @@ export const tenantConfigSchema = z
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
 
-/** Overtime cannot start after the shift ends (checked on the merged settings, not only the patch). */
-export function overtimeProblem(v: { overtimeAfterMin: number; driverShiftMaxMinutes: number }): string | null {
-  return v.overtimeAfterMin > v.driverShiftMaxMinutes
-    ? `Overtime after (${v.overtimeAfterMin} min) must be at most the driver shift maximum (${v.driverShiftMaxMinutes} min).`
-    : null;
-}
+export { overtimeProblem, overtimeSaveProblem } from './settings-fields';
 
 export const tenantSettingsSchema = z.object({
   name: z.string().trim().min(2).max(120),

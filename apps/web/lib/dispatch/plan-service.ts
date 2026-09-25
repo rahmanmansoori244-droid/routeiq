@@ -61,7 +61,7 @@ import {
 } from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey } from './summary';
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
-import { LARGE_DAY_STOPS, MAX_DISPATCH_STOPS } from '../planner-bounds';
+import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
 import { PlanError } from './plan-errors';
@@ -578,9 +578,8 @@ export async function buildDispatchRequest(
       { code: 'TOO_MANY_STOPS', stops: stopList.length, max: MAX_DISPATCH_STOPS },
     );
   }
-  if (stopList.length > LARGE_DAY_STOPS) {
-    warnings.push(`Large day: ${stopList.length} stops in one optimization. The search is time-limited: check the unserved orders.`);
-  }
+  // Days above LARGE_DAY_STOPS get the optimizer's own "Large day" warning (it names the limit);
+  // the web adds none, so the plan does not show two near-identical ones.
   if (splitNotes.length) {
     warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
   }

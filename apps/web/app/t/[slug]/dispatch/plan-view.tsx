@@ -13,7 +13,7 @@ import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { TIMING_TEXT, timingRemedy } from '@/lib/dispatch/feasibility-view';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
-import { COST_BASIS_TEXT, kmLabelFor } from '@/lib/dispatch/costs';
+import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 
@@ -384,10 +384,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <Kpi label="Fuel (l · OMR)" value={`${s.fuelLitres ?? '—'} · ${s.fuelCost.toFixed(1)}`} />
           <Kpi
             label="Operating cost OMR"
-            value={`${s.operatingCost.toFixed(1)}${s.costBasis === 'MIXED_LEGACY' ? ' *' : ''}`}
+            value={`${s.operatingCost.toFixed(1)}${summaryCostBasis(s) === 'MIXED_LEGACY' ? ' *' : ''}`}
             title={
               s.costs
-                ? `Fixed ${s.costs.fixed.toFixed(1)} + trip ${s.costs.trip.toFixed(1)} + distance ${s.costs.distance.toFixed(1)} + fuel ${s.costs.fuel.toFixed(1)} + driver ${s.costs.driver.toFixed(1)} + overtime ${s.costs.overtime.toFixed(1)}${s.costs.earlier ? ` + ${s.costs.earlier.toFixed(1)} costed the earlier way` : ''}. ${s.costBasis === 'MIXED_LEGACY' ? `* ${COST_BASIS_TEXT.MIXED_LEGACY}` : `Driver ${COST_BASIS_TEXT.TRUCK_DAY_SPAN}.`}`
+                ? `Fixed ${s.costs.fixed.toFixed(1)} + trip ${s.costs.trip.toFixed(1)} + distance ${s.costs.distance.toFixed(1)} + fuel ${s.costs.fuel.toFixed(1)} + driver ${s.costs.driver.toFixed(1)} + overtime ${s.costs.overtime.toFixed(1)}${s.costs.earlier ? ` + ${s.costs.earlier.toFixed(1)} costed the earlier way` : ''}. ${summaryCostBasis(s) === 'MIXED_LEGACY' ? `* ${COST_BASIS_TEXT.MIXED_LEGACY}` : `Driver ${COST_BASIS_TEXT.TRUCK_DAY_SPAN}.`}`
                 : `* ${COST_BASIS_TEXT.MIXED_LEGACY}`
             }
             testId="kpi-operating-cost"

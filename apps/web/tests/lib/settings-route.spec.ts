@@ -1,7 +1,9 @@
 /**
  * Review F21 / new issue 68: PATCH /api/tenant/config saves only the fields sent, refuses a save
  * that would overwrite another admin's newer value (409 SETTINGS_CHANGED), refuses the old
- * controls (400) and checks the overtime threshold against the merged settings.
+ * controls (400) and checks the overtime threshold against the merged settings - only on a save
+ * that changes the threshold or the shift maximum (PR5 review: a stored threshold after a lowered
+ * shift maximum blocked saving even the company name).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -36,6 +38,7 @@ vi.mock('@/lib/db', () => {
 });
 
 import { PATCH } from '@/app/api/tenant/config/route';
+import { overtimeSaveProblem } from '@/lib/settings-fields';
 
 const patch = (body: unknown) => PATCH(new Request('http://localhost/api/tenant/config', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
 
@@ -85,6 +88,31 @@ describe('PATCH /api/tenant/config (review F21)', () => {
     expect(res.status).toBe(400);
     expect(JSON.stringify(await res.json())).toMatch(/Overtime after/);
     expect((await patch({ config: { overtimeAfterMin: 600 } })).status).toBe(200);
+  });
+
+  it('a stored threshold after a lowered shift maximum does not block saving other fields', async () => {
+    // Possible before overtime was editable: the shift was lowered to 8 h, overtime stayed at 9 h.
+    state.config.driverShiftMaxMinutes = 480;
+    state.config.overtimeAfterMin = 540;
+    expect((await patch({ tenant: { name: 'NMWC Muscat' }, expect: { tenant: { name: 'NMWC' } } })).status).toBe(200);
+    expect(state.tenant.name).toBe('NMWC Muscat');
+    expect((await patch({ config: { driverCostPerHour: 3 } })).status).toBe(200);
+    // A save that touches either field is held to the rule...
+    const still = await patch({ config: { driverShiftMaxMinutes: 500 } });
+    expect(still.status).toBe(400);
+    expect(JSON.stringify(await still.json())).toMatch(/Overtime after \(540 min\)/);
+    // ...and fixing the threshold in the same save works.
+    expect((await patch({ config: { overtimeAfterMin: 480 } })).status).toBe(200);
+    expect(state.config.overtimeAfterMin).toBe(480);
+  });
+
+  it('the Settings form applies the same rule (overtimeSaveProblem)', () => {
+    const stored = { overtimeAfterMin: 540, driverShiftMaxMinutes: 480 };
+    expect(overtimeSaveProblem({ driverCostPerHour: 3 }, stored)).toBeNull();
+    expect(overtimeSaveProblem({}, stored)).toBeNull();
+    expect(overtimeSaveProblem({ driverShiftMaxMinutes: 480 }, stored)).toMatch(/Overtime after/);
+    expect(overtimeSaveProblem({ overtimeAfterMin: 540 }, stored)).toMatch(/Overtime after/);
+    expect(overtimeSaveProblem({ overtimeAfterMin: 480 }, { ...stored, overtimeAfterMin: 480 })).toBeNull();
   });
 
   it('is TENANT_ADMIN only', async () => {

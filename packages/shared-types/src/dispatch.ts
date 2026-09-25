@@ -91,12 +91,12 @@ export interface DispatchConfig {
   loading_min_per_case?: number;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
-  driver_cost_per_hour?: number;
   /**
    * OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
    * return, depot turnaround and waiting included (policy TRUCK_DAY_SPAN, apps/solver/costing.py).
    * Overtime (overtime_cost_per_hour after overtime_after_min from that first departure) is on top.
    */
+  driver_cost_per_hour?: number;
   /** true (default): a higher priority always wins over any number of lower-priority stops */
   strict_priorities?: boolean;
   /** relative stop values when strict_priorities is false; must be strictly decreasing */
