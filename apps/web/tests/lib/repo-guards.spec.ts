@@ -155,6 +155,10 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       // not whether the trips overlapped before), and the re-plan job orders its trips too.
       [/Only when you had already given one driver two planned trips/i, 'a clash kept because the trips overlapped before'],
       [/The one exception is in step 1/i, 'the step-1 exception of the third round'],
+      // Fifth review: picking the selected driver again fires nothing (Keep marks it), and the
+      // "Use instead" count is driver notes (parked hand-set drivers included), not trips.
+      [/until you pick it again/i, '"pick it again" to mark a driver'],
+      [/how many trips have another driver/i, '"Use instead" counts trips with another driver'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
