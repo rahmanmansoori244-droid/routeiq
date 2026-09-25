@@ -198,9 +198,12 @@ export interface ReplanDriver {
  * - FILLED: the trip had no driver;
  * - INACTIVE: that driver is no longer active (or no longer of this tenant);
  * - KEPT_LOAD: that driver is on a kept (locked, loading or dispatched) load at the new time;
- * - OTHER_TRIP: that driver is on another trip of this plan at the new time.
+ * - OTHER_TRIP: that driver is on another trip of this plan at the new time;
+ * - TRIP_GONE: the dispatcher chose that driver by hand for a truck and trip this plan does not
+ *   have (planReplanDrivers' `parked`); the choice stays with the version and comes back with
+ *   the trip.
  */
-export type DriverChangeReason = 'FILLED' | 'INACTIVE' | 'KEPT_LOAD' | 'OTHER_TRIP';
+export type DriverChangeReason = 'FILLED' | 'INACTIVE' | 'KEPT_LOAD' | 'OTHER_TRIP' | 'TRIP_GONE';
 
 /** A new load whose driver is not the one its truck and trip had before this plan. */
 export interface ReplanDriverChange {
@@ -218,13 +221,19 @@ export interface ReplanDriverChange {
  * Drivers for the new loads of a (re-)plan, and the trips whose driver changed. `now` = the loads
  * of this version before its PLANNED loads are replaced, without untouched copy-forward copies
  * (ownDriverEvidence), `parent` = the loads of the version it was re-planned from, `kept` = the
- * frozen loads that stay in this version (their drivers do not change).
+ * frozen loads that stay in this version (their drivers do not change), `parked` = the hand-set
+ * choices kept with this version for a truck and trip its plan did not have (the `parked` this
+ * function returned when that plan was applied; a re-plan's version starts with its parent's).
  *
- * A trip's evidence is the same truck and trip before this plan: in this version, else in the
- * parent. Hand-set first: when that trip's driver was chosen by the dispatcher (isHandSetDriver) and
- * is still usable, the new load keeps it, with the marker, whatever it now overlaps - another trip
- * of that driver, or one of their kept loads; the overlap shows as the yellow plan warning
- * (driverClashes). The dispatcher decided; RouteIQ never drops that choice.
+ * A trip's evidence is the same truck and trip before this plan: in this version, else parked with
+ * it, else in the parent. Hand-set first: when that trip's driver was chosen by the dispatcher
+ * (isHandSetDriver) and is still usable, the new load keeps it, with the marker, whatever it now
+ * overlaps - another trip of that driver, or one of their kept loads; the overlap shows as the
+ * yellow plan warning (driverClashes). The dispatcher decided; RouteIQ never drops that choice:
+ * a hand-set choice whose truck and trip is in neither the new loads nor the kept loads is
+ * returned in `parked`, for the caller to keep with the version and tell the dispatcher about
+ * (TRIP_GONE); an option or re-plan that has that trip again gives it back, with the marker (or,
+ * when that driver is no longer active, RouteIQ's pick and an INACTIVE change).
  *
  * Every other driver is RouteIQ's own pick, from the strongest evidence first:
  *   1. this version, same truck and trip   - the driver the dispatcher saw on that trip
@@ -253,13 +262,18 @@ export function planReplanDrivers(
   parent: DriverOnLoad[],
   kept: (DriverTime & { loadNo?: number })[],
   usable: ReadonlySet<string>,
-): { drivers: Map<string, ReplanDriver>; changes: ReplanDriverChange[] } {
+  parked: DriverOnLoad[] = [],
+): { drivers: Map<string, ReplanDriver>; changes: ReplanDriverChange[]; parked: DriverOnLoad[] } {
   const none = (): ReplanDriver => ({ driverId: null, driverSetById: null, driverSetAt: null });
   const out = new Map<string, ReplanDriver>(newLoads.map((l) => [l.key, none()]));
   const tripKey = (l: { truckId: string; loadNo: number }) => `${l.truckId}:${l.loadNo}`;
-  const index = (list: DriverOnLoad[]) => {
+  const byTrip = (list: DriverOnLoad[]) => {
     const m = new Map<string, DriverOnLoad>();
     for (const l of list) if (!m.has(tripKey(l))) m.set(tripKey(l), l);
+    return m;
+  };
+  const index = (list: DriverOnLoad[]) => {
+    const m = byTrip(list);
     return (l: { truckId: string; loadNo: number }) => m.get(tripKey(l));
   };
   // Both versions' trips of each truck; a trip in this version replaces the parent's same trip.
@@ -267,7 +281,10 @@ export function planReplanDrivers(
   const either = [...now, ...parent.filter((l) => !inNow.has(tripKey(l)))];
   const nowTrip = index(now);
   const parentTrip = index(parent);
-  const evidence = index(either);
+  // A trip's evidence (the same truck and trip before this plan): this version, then the hand-set
+  // choices parked with it, then the parent.
+  const beforeTrips = byTrip([...now, ...parked.filter((l) => isHandSetDriver(l)), ...parent]);
+  const evidence = (l: { truckId: string; loadNo: number }) => beforeTrips.get(tripKey(l));
   // How far a trip moved from the trip `src` reads (unknown: last), and the trips by that, stable.
   const byMoved = (src: (l: ReplanLoad) => DriverOnLoad | undefined) => {
     const moved = (l: ReplanLoad) => {
@@ -335,7 +352,15 @@ export function planReplanDrivers(
     }
     changes.push({ key: l.key, truckId: l.truckId, loadNo: l.loadNo, fromDriverId: from, toDriverId: to, reason, other });
   }
-  return { drivers: out, changes };
+
+  // Hand-set choices whose truck and trip this plan does not have (a kept load is still there):
+  // parked with the version, never dropped.
+  const inPlan = new Set([...newLoads.map(tripKey), ...kept.flatMap((k) => (k.loadNo === undefined ? [] : [tripKey({ truckId: k.truckId, loadNo: k.loadNo })]))]);
+  const stillParked = [...beforeTrips.values()]
+    .filter((e) => isHandSetDriver(e) && !inPlan.has(tripKey(e)))
+    .map((e) => ({ truckId: e.truckId, loadNo: e.loadNo, driverId: e.driverId, departMin: e.departMin, returnMin: e.returnMin, driverSetById: e.driverSetById ?? null, driverSetAt: e.driverSetAt ?? null }))
+    .sort((a, b) => (a.truckId < b.truckId ? -1 : a.truckId > b.truckId ? 1 : a.loadNo - b.loadNo));
+  return { drivers: out, changes, parked: stillParked };
 }
 
 /** The drivers of planReplanDrivers only (new load key -> driver id). */
@@ -345,8 +370,9 @@ export function assignReplanDrivers(
   parent: DriverOnLoad[],
   kept: (DriverTime & { loadNo?: number })[],
   usable: ReadonlySet<string>,
+  parked: DriverOnLoad[] = [],
 ): Map<string, string | null> {
-  return new Map([...planReplanDrivers(newLoads, now, parent, kept, usable).drivers].map(([k, v]) => [k, v.driverId]));
+  return new Map([...planReplanDrivers(newLoads, now, parent, kept, usable, parked).drivers].map(([k, v]) => [k, v.driverId]));
 }
 
 /** Pairs of loads of different trucks that name the same driver at overlapping times. */
@@ -362,6 +388,17 @@ export function driverClashes<L extends DriverTime & { id: string }>(loads: L[])
 }
 
 export type DriverChangeCheck = { ok: true; unchanged: boolean } | { ok: false; reason: string };
+
+/**
+ * "Keep": the dispatcher re-sends the driver a load already has, RouteIQ filled it in (no hand-set
+ * marker) and the load has not left. setDriverTx then marks it as the dispatcher's choice, so a
+ * re-plan or "Use instead" keeps it on that truck and trip (planReplanDrivers). The plan screen's
+ * Keep button sends it (its Driver list cannot: choosing the driver already selected fires
+ * nothing). Any other re-send changes nothing.
+ */
+export function isDriverKeep(load: { status: LoadStatusName; driverId: string | null; driverSetAt?: Date | null }, driverId: string | null): boolean {
+  return driverId !== null && load.driverId === driverId && load.driverSetAt == null && !ON_ROAD.has(load.status);
+}
 
 /**
  * Can this load's driver be set to `driverId`? Re-sending the driver it already has is never an

@@ -174,7 +174,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     );
   }
 
-  function setDriver(l: DetailLoad, driverId: string | null) {
+  /**
+   * Set the load's driver (the Driver list), or `keep` the driver RouteIQ filled in: the same
+   * driver re-sent, which the server marks as the dispatcher's choice (a re-plan or "Use instead"
+   * then keeps it on this truck and trip). The Driver list cannot do that: choosing the driver
+   * already selected fires no change.
+   */
+  function setDriver(l: DetailLoad, driverId: string | null, keep = false) {
     return runPlanAction(
       lock,
       l.id,
@@ -189,7 +195,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           return;
         }
         const name = drivers.find((x) => x.id === driverId)?.name;
-        toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
+        if (keep) toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ?? 'driver'} kept as your pick. Re-plans keep this driver on this trip.`);
+        else toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
         const fresh = await load();
         // Allowed, but a driver cannot be on two trucks at once: say so right away.
         const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
@@ -230,7 +237,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         const r = await api<{ driversChanged?: number }>(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
         const changed = r.data?.driversChanged ?? 0;
         if (!r.ok) toast.error(r.error ?? 'Could not switch.');
-        else if (changed) toast.warning(`Now using the ${name} plan. ${changed} trip(s) have another driver: see the notes on the plan.`);
+        else if (changed) toast.warning(`Now using the ${name} plan. ${changed} driver note(s): see the yellow notes on the plan.`);
         else toast.success(`Now using the ${name} plan.`);
         await load();
         await onChanged?.();
@@ -548,6 +555,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
                         busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
+                        onKeep={() => setDriver(l, l.driverId, true)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
                         whatsapp={
@@ -731,6 +739,7 @@ function LoadDriver({
   editable,
   busy,
   onChange,
+  onKeep,
   pdfUrl,
   clash,
   whatsapp,
@@ -740,6 +749,8 @@ function LoadDriver({
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
+  /** Keep the driver RouteIQ filled in as the dispatcher's own pick. */
+  onKeep: () => void;
   pdfUrl: string;
   /** This load's driver is also on another truck at the same time. */
   clash: string | null;
@@ -752,6 +763,8 @@ function LoadDriver({
   if (l.driverId && !options.some((x) => x.id === l.driverId)) {
     options.push({ id: l.driverId, code: '', name: l.driverName ?? 'Unknown driver', phone: l.driverPhone, active: false });
   }
+  const current = drivers.find((x) => x.id === l.driverId);
+  const driverName = l.driverName ?? current?.name ?? 'this driver';
   let waTitle = '';
   if ('url' in whatsapp) {
     if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
@@ -789,6 +802,26 @@ function LoadDriver({
             WhatsApp
           </span>
         )}
+        {/* Who chose the driver: a re-plan or "Use instead" keeps a driver picked by hand on this
+            truck and trip; Keep makes one RouteIQ filled in the dispatcher's pick. */}
+        {l.driverId && !ON_ROAD.has(l.status) ? (
+          l.driverHandSet ? (
+            <span className="text-muted-foreground" data-testid={`driver-handset-${tag}`} title={`Picked by hand: a re-plan or Use instead keeps ${driverName} on this truck and trip.`}>
+              picked by hand
+            </span>
+          ) : editable && current?.active ? (
+            <button
+              type="button"
+              className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={busy}
+              onClick={onKeep}
+              data-testid={`driver-keep-${tag}`}
+              title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
+            >
+              Keep
+            </button>
+          ) : null
+        ) : null}
       </div>
     </div>
   );

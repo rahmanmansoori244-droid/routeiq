@@ -5,7 +5,7 @@
  * Money honesty: revenue is only reported when every order carries a sales value, contribution
  * margin only when every order carries a margin. Otherwise they are null ("not supplied").
  */
-import type { DriverChangeReason } from './load-state';
+import type { DriverChangeReason, DriverOnLoad } from './load-state';
 
 export interface SummaryOrder {
   id: string;
@@ -62,11 +62,19 @@ export interface DailySummary {
   warnings: string[];
   solver: { engine: string; scenario: string; status: string; timeSec: number } | null;
   /**
-   * The trips whose driver the applied plan changed versus the same truck and trip before it
-   * (applyScenario; absent when none). Kept through load changes, replaced by the next applied
-   * plan; the plan screen shows them as warnings (driverChangeWarnings in driver-links.ts).
+   * The trips whose driver the applied plan changed versus the same truck and trip before it,
+   * and the hand-set drivers whose trip it does not have (TRIP_GONE) (applyScenario; absent when
+   * none). Kept through load changes, replaced by the next applied plan; the plan screen shows them
+   * as warnings (driverChangeWarnings in driver-links.ts).
    */
   driverChanges?: DriverChangeNote[];
+  /**
+   * The drivers the dispatcher chose by hand for a truck and trip the applied plan does not have
+   * (planReplanDrivers' `parked`; absent when none). Kept through load changes, copied to a
+   * re-plan's version with the summary, replaced by the next applied plan: an option or re-plan
+   * that has the trip again gives the driver back (readParkedDrivers).
+   */
+  parkedDrivers?: ParkedDriver[];
 }
 
 /** A trip whose driver an applied plan changed (planReplanDrivers), with the names at that time. */
@@ -74,15 +82,58 @@ export interface DriverChangeNote {
   truckId: string;
   truckCode: string;
   loadNo: number;
-  departMin: number;
-  returnMin: number;
+  /** The trip's times in the plan (TRIP_GONE: its times before; null when unknown). */
+  departMin: number | null;
+  returnMin: number | null;
   /** The driver the truck and trip had before the plan (null: no driver). */
   from: { id: string; name: string } | null;
-  /** The driver the plan gave it (null: none, for the dispatcher to fill). */
+  /** The driver the plan gave it (null: none, for the dispatcher to fill; TRIP_GONE: no trip). */
   to: { id: string; name: string } | null;
   reason: DriverChangeReason;
   /** The load of `from` at the same time (KEPT_LOAD, OTHER_TRIP). */
   other: { truckCode: string; loadNo: number | null } | null;
+}
+
+/** A hand-set driver kept with a version for a truck and trip its plan does not have (summary JSON). */
+export interface ParkedDriver {
+  truckId: string;
+  loadNo: number;
+  driverId: string;
+  departMin: number | null;
+  returnMin: number | null;
+  driverSetById: string | null;
+  /** ISO time of the dispatcher's choice (the hand-set marker). */
+  driverSetAt: string;
+}
+
+/** The summary JSON form of planReplanDrivers' `parked`. */
+export function toParkedDrivers(parked: readonly DriverOnLoad[]): ParkedDriver[] {
+  return parked.flatMap((p) =>
+    p.driverId && p.driverSetAt
+      ? [{ truckId: p.truckId, loadNo: p.loadNo, driverId: p.driverId, departMin: p.departMin ?? null, returnMin: p.returnMin ?? null, driverSetById: p.driverSetById ?? null, driverSetAt: p.driverSetAt.toISOString() }]
+      : [],
+  );
+}
+
+/** The parked hand-set drivers of a stored summary, as planReplanDrivers reads them (malformed entries are skipped). */
+export function readParkedDrivers(summaryJson: unknown): DriverOnLoad[] {
+  const list = (summaryJson as { parkedDrivers?: unknown } | null)?.parkedDrivers;
+  if (!Array.isArray(list)) return [];
+  return list.flatMap((p: Partial<ParkedDriver> | null) => {
+    const at = typeof p?.driverSetAt === 'string' ? new Date(p.driverSetAt) : null;
+    if (!p || typeof p.truckId !== 'string' || typeof p.loadNo !== 'number' || typeof p.driverId !== 'string' || !at || Number.isNaN(at.getTime())) return [];
+    return [
+      {
+        truckId: p.truckId,
+        loadNo: p.loadNo,
+        driverId: p.driverId,
+        departMin: typeof p.departMin === 'number' ? p.departMin : undefined,
+        returnMin: typeof p.returnMin === 'number' ? p.returnMin : undefined,
+        driverSetById: typeof p.driverSetById === 'string' ? p.driverSetById : null,
+        driverSetAt: at,
+      },
+    ];
+  });
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;

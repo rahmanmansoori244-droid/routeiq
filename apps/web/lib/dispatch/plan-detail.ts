@@ -9,7 +9,7 @@ import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { isSupersededRun } from './plan-status';
-import { isCarriedFrozen } from './load-state';
+import { isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
@@ -63,6 +63,11 @@ export interface DetailLoad {
   driverId: string | null;
   driverName: string | null;
   driverPhone: string | null;
+  /**
+   * The dispatcher chose this driver by hand (PlanLoad.driverSetAt; set by the Driver list and by
+   * Keep): a re-plan or "Use instead" keeps it on this truck and trip. False: RouteIQ filled it in.
+   */
+  driverHandSet: boolean;
   loadNo: number;
   status: string;
   /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
@@ -258,6 +263,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       driverId: l.driverId,
       driverName: l.driver?.name ?? null,
       driverPhone: l.driver?.phone ?? null,
+      driverHandSet: isHandSetDriver(l),
       loadNo: l.loadNo,
       status: l.status,
       carried: isCarriedFrozen(l),

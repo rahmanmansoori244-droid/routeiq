@@ -28,7 +28,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isFrozen, ownDriverEvidence, planReplanDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, ownDriverEvidence, planReplanDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   choosePartCapacity,
@@ -55,7 +55,7 @@ import {
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
-import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
+import { computeChangeSummary, computeSummary, readParkedDrivers, toParkedDrivers, type AssignmentKey, type DailySummary, type DriverChangeNote, type ParkedDriver } from './summary';
 import { dateOnly, isoOf } from './time';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
@@ -797,8 +797,11 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   // one of that driver's kept loads or another trip RouteIQ gave them; of two such trips the one
   // that moved loses the driver. The PLANNED copies a re-plan carried from the parent untouched
   // are the parent's evidence, not this version's (ownDriverEvidence), so the re-plan job and "Use
-  // instead" decide the same trips the same way. The trips whose driver changed are returned,
-  // kept in the plan summary (driverChanges, shown as plan warnings) and audited.
+  // instead" decide the same trips the same way. A hand-set choice whose truck and trip this plan
+  // does not have is parked with the version (summary parkedDrivers, copied to a re-plan's
+  // version), so the plan that has the trip again gives it back. The trips whose driver changed,
+  // and the parked choices (TRIP_GONE), are returned, kept in the plan summary (driverChanges,
+  // shown as plan warnings) and audited.
   const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
   const usableDrivers = new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id));
   const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
@@ -817,7 +820,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const driversParent = run.parentRunId ? await tx.planLoad.findMany({ where: { runId: run.parentRunId, tenantId }, select: driverSel }) : [];
   const driversNow = ownDriverEvidence(await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel }), driversParent);
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
-  const { drivers: driverOf, changes } = planReplanDrivers(
+  const { drivers: driverOf, changes, parked } = planReplanDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
       truckId: ld.truck_id,
@@ -830,7 +833,11 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     driversParent,
     frozenNow,
     usableDrivers,
+    readParkedDrivers(run.summaryJson),
   );
+  // The trucks of parked choices that are in neither plan (named in their notes).
+  const parkedTruckIds = [...new Set(parked.map((p) => p.truckId))].filter((id) => !truckById.has(id));
+  if (parkedTruckIds.length) for (const t of await tx.truck.findMany({ where: { tenantId, id: { in: parkedTruckIds } } })) truckById.set(t.id, t);
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string | null) => (id ? { id, name: driverName.get(id) ?? 'Unknown driver' } : null);
   const solverLoad = new Map(d.loads.map((ld) => [loadKey(ld.truck_id, ld.load_no), ld]));
@@ -845,6 +852,19 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     reason: c.reason,
     other: c.other ? { truckCode: truckCode(c.other.truckId), loadNo: c.other.loadNo } : null,
   }));
+  for (const p of parked) {
+    driverChanges.push({
+      truckId: p.truckId,
+      truckCode: truckCode(p.truckId),
+      loadNo: p.loadNo,
+      departMin: p.departMin ?? null,
+      returnMin: p.returnMin ?? null,
+      from: person(p.driverId),
+      to: null,
+      reason: 'TRIP_GONE',
+      other: null,
+    });
+  }
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
@@ -938,7 +958,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     data: { chosenScenarioId: scenarioId, status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
-  await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
+  await refreshPlanFacts(tx, tenantId, runId, { driverChanges, parkedDrivers: toParkedDrivers(parked) });
   await tx.auditLog.create({
     data: {
       tenantId,
@@ -1001,14 +1021,16 @@ export function loadKgFromRefs(refs: string[], scope: Pick<PlanScope, 'portions'
 /**
  * Recompute reconciliation, daily summary and (for versions > 1) the change summary.
  * `driverChanges`: the trips whose driver the plan just applied changed (applyScenario), kept in
- * the summary (`summaryJson.driverChanges`, shown as plan warnings); a refresh without them (a load
+ * the summary (`summaryJson.driverChanges`, shown as plan warnings); `parkedDrivers`: its hand-set
+ * choices without a trip in the plan (`summaryJson.parkedDrivers`). A refresh without them (a load
  * change) keeps the ones already there.
  */
-export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[] } = {}) {
+export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[]; parkedDrivers?: ParkedDriver[] } = {}) {
   const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
   if (!run.chosenScenarioId) return;
-  const shownChanges = (run.summaryJson as { driverChanges?: unknown } | null)?.driverChanges;
-  const driverChanges = opts.driverChanges ?? (Array.isArray(shownChanges) ? (shownChanges as DriverChangeNote[]) : []);
+  const stored = run.summaryJson as { driverChanges?: unknown; parkedDrivers?: unknown } | null;
+  const driverChanges = opts.driverChanges ?? (Array.isArray(stored?.driverChanges) ? (stored.driverChanges as DriverChangeNote[]) : []);
+  const parkedDrivers = opts.parkedDrivers ?? (Array.isArray(stored?.parkedDrivers) ? (stored.parkedDrivers as ParkedDriver[]) : []);
   const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: run.chosenScenarioId }, include: { unservedOrders: true } });
   const d = sc.detailsJson as unknown as ScenarioDetails;
   const scopeIds = [...new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds])];
@@ -1098,7 +1120,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
     distanceProvider: d.matrix_provider,
     solver: { engine: d.engine, scenario: d.name, status: d.solver_status, timeSec: d.solver_time_sec },
   });
-  const summary: DailySummary = driverChanges.length ? { ...facts, driverChanges } : facts;
+  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}), ...(parkedDrivers.length ? { parkedDrivers } : {}) };
   let change = null;
   if (run.parentRunId) {
     const parent = await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId } });
@@ -1548,7 +1570,10 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   // Unchanged is checked before "after dispatch": re-sending the current driver is not a change.
   const check = checkDriverChange(load, driverId);
   if (!check.ok) throw new PlanError(check.reason, 409);
-  if (check.unchanged) return load;
+  // Keep: re-sending the driver RouteIQ filled in (no marker) on a load still at the depot makes it
+  // the dispatcher's choice (the plan screen's Keep button). Any other re-send changes nothing.
+  const keep = isDriverKeep(load, driverId);
+  if (check.unchanged && !keep) return load;
   const driver = driverId ? await tx.driver.findFirst({ where: { id: driverId, tenantId } }) : null;
   if (driverId && !driver) throw new PlanError('Driver not found.', 400);
   if (driver && !driver.active) throw new PlanError(`Driver ${driver.name} is inactive.`, 400);
@@ -1566,8 +1591,8 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
       action: 'LOAD_DRIVER_SET',
       entity: 'PlanLoad',
       entityId: loadId,
-      beforeJson: { driverId: load.driverId, driverName: before?.name ?? null } as never,
-      afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo } as never,
+      beforeJson: { driverId: load.driverId, driverName: before?.name ?? null, ...(keep ? { byHand: false } : {}) } as never,
+      afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo, ...(keep ? { kept: true } : {}) } as never,
     },
   });
   return updated;

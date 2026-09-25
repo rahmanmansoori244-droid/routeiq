@@ -98,7 +98,8 @@ async function runJob(args: DispatchJobArgs) {
         await applyWeightChanges(tx, tenantId, runId, built.weightChanges, userId);
         const ids = await persistDispatchResult(tx, tenantId, runId, built, resp);
         const { driverChanges } = await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
-        const drivers = driverChanges.length ? `, ${driverChanges.length} trip(s) with another driver (see the plan)` : '';
+        // The drivers this plan changed, and hand-set drivers whose trip it does not have: never silent.
+        const drivers = driverChanges.length ? `, ${driverChanges.length} driver note(s) (see the plan)` : '';
         const done = await tx.runJob.updateMany({
           where: { id: runJobId, status: 'RUNNING' },
           data: {

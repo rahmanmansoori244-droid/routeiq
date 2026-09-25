@@ -12,7 +12,9 @@
  *  - review fixes: a re-plan never re-uses an untouched copy's driver without the time-clash check,
  *    and a failed re-plan saves no weight (its copied loads keep matching their orders);
  *  - fourth review: a driver the dispatcher set by hand stays on its trip (marked, the overlap shown
- *    as a warning); one RouteIQ filled in does not, and the change is listed on the plan.
+ *    as a warning); one RouteIQ filled in does not, and the change is listed on the plan;
+ *  - fifth review: Keep marks a driver RouteIQ filled in; a hand-set driver whose trip an option
+ *    does not have is parked in the summary JSON and comes back with the trip.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -459,6 +461,52 @@ describe('copy-forward re-plan and drivers (review: untouched copies are not thi
     expect(retimed.driverSetAt).toBeInstanceOf(Date);
     expect(clashes.map((c) => [c.a.id, c.b.id].sort())).toEqual([[kept.id, retimed.id].sort()]);
     expect(detail.warnings.some((w) => w.startsWith('Driver changed by this plan:'))).toBe(false);
+  });
+  it('fifth review: Keep marks a driver RouteIQ filled in; an option without a hand-set trip parks it in the summary JSON, and switching back gives it back', async () => {
+    const day = isoPlus(14);
+    await seedOrders(day, 4);
+    const ali = await prisma.driver.create({ data: { tenantId, code: `ALI-${uniqueSuffix()}`.slice(0, 20), name: 'Ali', active: true } });
+    const bob = await prisma.driver.create({ data: { tenantId, code: `BOB-${uniqueSuffix()}`.slice(0, 20), name: 'Bob', active: true } });
+    solverMode.mode = 'plan';
+    const { run: v1 } = await getOrCreatePlan(tenantId, depotId, day, userId);
+    expect((await startDispatchOptimize(tenantId, v1.id, user(), null)).status).toBe(202);
+    expect((await jobsDone(v1.id)).status).toBe('READY');
+    const loads = await prisma.planLoad.findMany({ where: { runId: v1.id }, orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }] });
+    expect(loads.length).toBe(4); // two trucks, two trips each
+
+    // Keep: Ali put on a load without the marker (as before the update), then re-sent by the dispatcher.
+    const a = loads[0]!;
+    await prisma.planLoad.update({ where: { id: a.id }, data: { driverId: ali.id, driverSetById: null, driverSetAt: null } });
+    expect((await getPlanDetail(tenantId, v1.id))!.loads.find((l) => l.id === a.id)!.driverHandSet).toBe(false);
+    await updateLoad(tenantId, v1.id, a.id, { driverId: ali.id }, user(), everyRole);
+    expect(await prisma.planLoad.findUniqueOrThrow({ where: { id: a.id } })).toMatchObject({ driverId: ali.id, driverSetById: userId });
+    expect((await getPlanDetail(tenantId, v1.id))!.loads.find((l) => l.id === a.id)!.driverHandSet).toBe(true);
+
+    // Bob by hand on the last trip; the other option (MIN_TRUCKS) is made without that truck and trip.
+    const b = loads[3]!;
+    await updateLoad(tenantId, v1.id, b.id, { driverId: bob.id }, user(), everyRole);
+    const setAt = (await prisma.planLoad.findUniqueOrThrow({ where: { id: b.id } })).driverSetAt!;
+    const minTrucks = await prisma.scenarioResult.findFirstOrThrow({ where: { runId: v1.id, name: 'MIN_TRUCKS' } });
+    const details = minTrucks.detailsJson as { loads: { truck_id: string; load_no: number }[] };
+    await prisma.scenarioResult.update({
+      where: { id: minTrucks.id },
+      data: { detailsJson: { ...details, loads: details.loads.filter((l) => !(l.truck_id === b.truckId && l.load_no === b.loadNo)) } as never },
+    });
+    const recommended = await prisma.scenarioResult.findFirstOrThrow({ where: { runId: v1.id, name: 'RECOMMENDED' } });
+
+    const away = await chooseScenario(tenantId, v1.id, minTrucks.id, userId);
+    expect(away.driverChanges.map((c) => [c.truckId, c.loadNo, c.from?.id, c.reason])).toEqual([[b.truckId, b.loadNo, bob.id, 'TRIP_GONE']]);
+    const summary = (await prisma.runPlan.findUniqueOrThrow({ where: { id: v1.id } })).summaryJson as { parkedDrivers?: unknown[] };
+    expect(summary.parkedDrivers).toEqual([expect.objectContaining({ truckId: b.truckId, loadNo: b.loadNo, driverId: bob.id, driverSetById: userId, driverSetAt: setAt.toISOString() })]);
+    expect((await getPlanDetail(tenantId, v1.id))!.warnings.some((w) => w.startsWith('Driver picked by hand, not in this plan: you picked Bob for'))).toBe(true);
+
+    const back = await chooseScenario(tenantId, v1.id, recommended.id, userId);
+    expect(back.driverChanges).toEqual([]);
+    const restored = await prisma.planLoad.findFirstOrThrow({ where: { runId: v1.id, truckId: b.truckId, loadNo: b.loadNo } });
+    expect(restored).toMatchObject({ driverId: bob.id, driverSetById: userId });
+    expect(restored.driverSetAt!.getTime()).toBe(setAt.getTime());
+    const kept = await prisma.planLoad.findFirstOrThrow({ where: { runId: v1.id, truckId: a.truckId, loadNo: a.loadNo } });
+    expect(kept).toMatchObject({ driverId: ali.id, driverSetById: userId });
   });
 });
 
