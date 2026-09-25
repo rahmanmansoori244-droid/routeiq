@@ -4,7 +4,7 @@
  * day being loaded is shown when it is newer than the one on screen (slow polling never freezes it).
  */
 import { describe, expect, it } from 'vitest';
-import { createDayLoader } from '@/app/t/[slug]/dispatch/day-loader';
+import { createDayLoader, dayAfterConfirm, sameSelection } from '@/app/t/[slug]/dispatch/day-loader';
 import { createRequestGate, dayKey } from '@/app/t/[slug]/dispatch/request-gate';
 
 /** Simulates the screen: loads resolve in any order; only a current ticket may show its day. */
@@ -100,7 +100,7 @@ describe('day loader: every load is for the day selected now (review of PR3: stu
   /** A day screen around the loader: answers resolve when the test says so, in any order. */
   function screen(initial: { date: string | null; depotId: string | null }) {
     const asked: { sel: { date: string | null; depotId: string | null }; answer: (d: FakeDay | null, error?: string) => Promise<void> }[] = [];
-    const state = { shown: null as FakeDay | null, error: null as string | null, selected: { ...initial } };
+    const state = { shown: null as FakeDay | null, error: null as string | null, selected: { ...initial }, planReloads: 0 };
     const loader = createDayLoader<FakeDay>(initial, {
       fetchDay: (sel) =>
         new Promise((resolve) => {
@@ -112,8 +112,9 @@ describe('day loader: every load is for the day selected now (review of PR3: stu
             },
           });
         }),
-      show: (d) => {
+      show: (d, { afterError }) => {
         state.shown = d;
+        if (afterError) state.planReloads++;
         state.error = null;
       },
       showError: (m) => (state.error = m),
@@ -188,5 +189,59 @@ describe('day loader: every load is for the day selected now (review of PR3: stu
     await s.asked[1]!.answer(null, 'The server could not be reached (Failed to fetch). Check the connection and try again.');
     expect(s.state.error).toMatch(/could not be reached/);
     expect(s.state.selected.date).toBe('2026-09-27');
+  });
+
+  it("the day's Try again after a failed load also reloads the plan (third review of PR3: the plan stayed replaced by its error)", async () => {
+    const s = screen({ date: '2026-09-26', depotId: 'D1' });
+    const first = s.loader.refresh();
+    await s.asked[0]!.answer(s.day('2026-09-26'));
+    expect(await first).toBe(true); // shown: the plan's action reloads the plan after it
+    expect(s.state.planReloads).toBe(0);
+    // The reload after a Lock fails (connection lost): the error, and the caller keeps the plan.
+    const afterLock = s.loader.refresh();
+    await s.asked[1]!.answer(null, 'The server could not be reached (Failed to fetch). Check the connection and try again.');
+    expect(await afterLock).toBe(false);
+    expect(s.state.error).toMatch(/could not be reached/);
+    // Try again, the connection is back: the day, and the plan below it is loaded again.
+    const again = s.loader.refresh();
+    await s.asked[2]!.answer(s.day('2026-09-26'));
+    expect(await again).toBe(true);
+    expect(s.state.error).toBeNull();
+    expect(s.state.planReloads).toBe(1);
+    // An ordinary refresh afterwards does not.
+    const poll = s.loader.refresh();
+    await s.asked[3]!.answer(s.day('2026-09-26'));
+    await poll;
+    expect(s.state.planReloads).toBe(1);
+  });
+
+  it('a refresh that a newer load of the day took over answers false (the newer one shows the day)', async () => {
+    const s = screen({ date: '2026-09-26', depotId: 'D1' });
+    const older = s.loader.refresh();
+    const newer = s.loader.refresh();
+    await s.asked[1]!.answer(s.day('2026-09-26'));
+    await s.asked[0]!.answer(s.day('2026-09-26'));
+    expect([await older, await newer]).toEqual([false, true]);
+  });
+});
+
+describe('after a file is added: which day the screen shows (third review of PR3)', () => {
+  const sel = (date: string, depotId = 'D1') => ({ date, depotId });
+
+  it('the dispatcher picked another date before the answer: the screen stays on it, never jumps back to the file date', () => {
+    expect(dayAfterConfirm(sel('2026-09-26'), sel('2026-09-28'), ['2026-09-26'])).toBeNull();
+    expect(dayAfterConfirm(sel('2026-09-26'), sel('2026-09-26', 'D2'), ['2026-09-27'])).toBeNull();
+  });
+
+  it('still on the day it was added on: a file for another date moves the screen to that date (same depot)', () => {
+    expect(dayAfterConfirm(sel('2026-09-26'), sel('2026-09-26'), ['2026-09-27', '2026-09-28'])).toEqual(sel('2026-09-27'));
+    expect(dayAfterConfirm(sel('2026-09-26'), sel('2026-09-26'), ['2026-09-26'])).toBeNull(); // reload the day
+    expect(dayAfterConfirm(sel('2026-09-26'), sel('2026-09-26'), [])).toBeNull();
+  });
+
+  it('sameSelection compares date and depot', () => {
+    expect(sameSelection(sel('2026-09-26'), sel('2026-09-26'))).toBe(true);
+    expect(sameSelection(sel('2026-09-26'), sel('2026-09-26', 'D2'))).toBe(false);
+    expect(sameSelection({ date: null, depotId: null }, { date: null, depotId: null })).toBe(true);
   });
 });

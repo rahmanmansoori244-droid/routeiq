@@ -5,12 +5,13 @@
  * - runPlanAction holds the plan's busy state until the action - including the day's reload - is
  *   done, and always gives it back;
  * - after a late order, "Re-plan now?" re-plans without reloading the day first (that dropped the
- *   re-plan's busy state, so Step 3's RE-PLAN stayed clickable during it), otherwise the day reloads.
+ *   re-plan's busy state, so Step 3's RE-PLAN stayed clickable during it), otherwise the day reloads;
+ * - a failed reload of the plan keeps the plan on screen with the error (planAfterLoad).
  * The screens use these (static guards: tests/lib/dispatch-screen-guards.spec.ts).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '@/app/t/[slug]/dispatch/client-api';
-import { afterLateOrderSaved, runPlanAction, type ActionLock } from '@/app/t/[slug]/dispatch/plan-actions';
+import { afterLateOrderSaved, planAfterLoad, runPlanAction, type ActionLock } from '@/app/t/[slug]/dispatch/plan-actions';
 
 describe('api(): a request that does not reach the server never rejects', () => {
   afterEach(() => {
@@ -135,5 +136,25 @@ describe('after a late order is saved (review of PR3: Step 3 RE-PLAN clickable d
       'warn: New customer has no location yet — add it in step 2 before re-planning.',
       'reload day',
     ]);
+  });
+});
+
+describe('a failed reload keeps the plan on screen (third review of PR3: the plan was replaced by the error for good)', () => {
+  const unreachable = { ok: false, data: null, error: 'The server could not be reached (Failed to fetch). Check the connection and try again.' };
+  const plan = (v: number) => ({ version: v });
+
+  it('a network error after an action: the plan stays, with the error (the screen offers Try again)', () => {
+    const shown = { plan: plan(1), error: null };
+    expect(planAfterLoad(shown, unreachable)).toEqual({ plan: plan(1), error: unreachable.error });
+  });
+
+  it('Try again that gets an answer: the new plan, and the error is gone', () => {
+    const failed = planAfterLoad({ plan: plan(1), error: null }, unreachable);
+    expect(planAfterLoad(failed, { ok: true, data: plan(2), error: null })).toEqual({ plan: plan(2), error: null });
+  });
+
+  it('a plan that never loaded: the error alone (with Try again), and a refusal says why', () => {
+    expect(planAfterLoad({ plan: null, error: null }, unreachable)).toEqual({ plan: null, error: unreachable.error });
+    expect(planAfterLoad({ plan: null, error: null }, { ok: false, data: null, error: null })).toEqual({ plan: null, error: 'Could not load the plan.' });
   });
 });

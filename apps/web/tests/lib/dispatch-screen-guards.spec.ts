@@ -11,6 +11,13 @@
  * - every plan action runs through runPlanAction (the busy state is always given back) and awaits
  *   the day's reload; a saved late order goes through afterLateOrderSaved (no reload before the
  *   re-plan).
+ * Third review of PR3:
+ * - a failed reload of the plan keeps the plan on screen with Try again (planAfterLoad), and a plan
+ *   that never loaded shows its error with Try again; the day's Try again reloads the plan too;
+ * - a file check or a confirmed file that answers after another day was picked never takes the
+ *   screen back to the previous day (dayAfterConfirm).
+ * The screens themselves were driven in a DOM harness outside the repository (jsdom is not a
+ * dependency here); these guards keep them on the tested rules.
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -35,8 +42,40 @@ describe('day screen (dispatch-client.tsx)', () => {
     expect(dayScreen).toMatch(/await refresh\(\);\s*\} finally \{\s*setOptimizing\(false\);\s*\}/);
   });
 
-  it("the plan's onChanged returns the day's reload (the plan's action waits for it)", () => {
-    expect(dayScreen).toMatch(/onChanged=\{async \(\) => \{[^}]*await refresh\(\);\s*setPlanKey\(\(k\) => k \+ 1\);\s*\}\}/);
+  it("the plan's onChanged returns the day's reload (the plan's action waits for it); the plan is reloaded only when the day was", () => {
+    expect(dayScreen).toMatch(/onChanged=\{async \(\) => \{[^}]*if \(await refresh\(\)\) setPlanKey\(\(k\) => k \+ 1\);\s*\}\}/);
+  });
+
+  it("the day shown after a failed load reloads the plan too (the day's Try again brings Step 4 back)", () => {
+    expect(dayScreen).toMatch(/show: \(d, \{ afterError \}\) => \{[^}]*if \(afterError\) setPlanKey\(\(k\) => k \+ 1\);/);
+  });
+
+  it('OPTIMIZE / RE-PLAN that never reached the server keeps the plan below as it is', () => {
+    expect(dayScreen).toMatch(/reached = r\.status !== 0;/);
+    expect(dayScreen).toMatch(/if \(reached\) setPlanKey\(\(k\) => k \+ 1\);\s*await refresh\(\);/);
+  });
+
+  it('a confirmed file never takes the screen back to the day it was added on after another day was picked', () => {
+    const body = dayScreen.slice(dayScreen.indexOf('async function confirmBatch('), dayScreen.indexOf('async function optimize('));
+    // The day is recorded before the request, and compared when the answer comes.
+    expect(body.indexOf('const started = loader.selection();')).toBeGreaterThan(-1);
+    expect(body.indexOf('const started = loader.selection();')).toBeLessThan(body.indexOf('await api<'));
+    const moved = body.indexOf('if (!sameSelection(started, loader.selection())) {');
+    expect(moved).toBeGreaterThan(body.indexOf('await api<'));
+    // That branch only says what happened and reloads the day picked: it touches no file state.
+    const branch = body.slice(moved, body.indexOf('return;', moved));
+    expect(branch).toContain('await refresh();');
+    expect(branch).not.toMatch(/setBatch|setFile|changeDay/);
+    expect(body).toContain('dayAfterConfirm(started, loader.selection(), r.data.deliveryDates)');
+    expect(body).not.toMatch(/changeDay\(d0/);
+  });
+
+  it("a file check that answers after another day was picked is not offered on the new day", () => {
+    const body = dayScreen.slice(dayScreen.indexOf('async function upload('), dayScreen.indexOf('async function confirmBatch('));
+    expect(body.indexOf('const started = loader.selection();')).toBeLessThan(body.indexOf('await api<'));
+    const guard = body.indexOf('if (!sameSelection(started, loader.selection())) {');
+    expect(guard).toBeGreaterThan(body.indexOf('await api<'));
+    expect(guard).toBeLessThan(body.indexOf('setBatch('));
   });
 });
 
@@ -60,5 +99,23 @@ describe('plan screen (plan-view.tsx)', () => {
     const onSaved = planScreen.slice(planScreen.indexOf('onSaved={'), planScreen.indexOf('/>', planScreen.indexOf('onSaved={')));
     expect(onSaved).toContain('afterLateOrderSaved(res, {');
     expect(onSaved.indexOf('afterLateOrderSaved(')).toBeLessThan(onSaved.indexOf('onChanged'));
+  });
+
+  it('a failed reload keeps the plan on screen: every load goes through planAfterLoad, and no error replaces the plan', () => {
+    expect(planScreen).toContain('setPanel((shown) => planAfterLoad(shown, r));');
+    expect(count(planScreen, /setPanel\(/g)).toBe(1);
+    // The whole panel is the error only while no plan was ever loaded.
+    expect(planScreen).not.toMatch(/if \(err\) return/);
+    expect(planScreen).toMatch(/if \(!d\) \{[^]*?return err \?/);
+  });
+
+  it('both error states offer Try again (the plan, and the driver list when it did not load)', () => {
+    for (const id of ['plan-load-error', 'plan-reload-error']) {
+      const at = planScreen.indexOf(`data-testid="${id}"`);
+      expect(at, id).toBeGreaterThan(-1);
+      const block = planScreen.slice(at, planScreen.indexOf('</div>', at));
+      expect(block, id).toMatch(/onClick=\{retry\}[^]*Try again/);
+    }
+    expect(planScreen).toMatch(/const retry = \(\) => \{\s*void load\(\);\s*if \(!drivers\.length\) void loadDrivers\(\);/);
   });
 });

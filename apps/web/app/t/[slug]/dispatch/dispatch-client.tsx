@@ -13,7 +13,7 @@ import { api, askOverride, weightFixText, type OptimizeOverrides } from './clien
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
-import { createDayLoader, type DayLoader } from './day-loader';
+import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 
 interface Issue {
@@ -133,9 +133,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         if (sel.depotId) q.set('depotId', sel.depotId);
         return api<Day>(`/api/dispatch/day?${q}`);
       },
-      show: (d) => {
+      show: (d, { afterError }) => {
         setDay(d);
         setLoadError(null);
+        // The day is back after a failed load: load the plan below again too (its own load most
+        // likely failed as well; third review of PR3).
+        if (afterError) setPlanKey((k) => k + 1);
       },
       showError: setLoadError,
       selected: (sel) => {
@@ -190,6 +193,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   async function upload() {
     if (!file || !day?.depot || !dayReady) return;
     setUploading(true);
+    const started = loader.selection();
     const fd = new FormData();
     fd.set('file', file);
     fd.set('depotId', day.depot.id);
@@ -197,6 +201,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     // Through api(), so an ended session goes to sign-in like every other dispatch call.
     const r = await api<{ batchId: string; validation: Validation }>('/api/orders/upload', { method: 'POST', body: fd });
     setUploading(false);
+    if (!sameSelection(started, loader.selection())) {
+      // Another day was picked meanwhile: the check was for the previous day, so it is not offered
+      // on this one (its "Add ... lines" would add the file to a day not on screen).
+      if (r.ok) toast.info(`The file was checked for ${started.date ?? 'the previous day'}. Click Check file again for the day on screen.`);
+      return;
+    }
     if (!r.ok || !r.data) {
       toast.error(r.error ?? 'Upload failed.');
       return;
@@ -207,10 +217,21 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
 
   async function confirmBatch() {
     if (!batch || !dayReady) return;
+    // The day the file is added on: the dispatcher may pick another one before the answer.
+    const started = loader.selection();
     const r = await api<{ ordersCreated: number; cases: number; customersCreated: number; deliveryDates: string[] }>(`/api/orders/${batch.id}/confirm`, {
       method: 'POST',
       json: batch.v.late.isLate ? { lateReason } : {},
     });
+    if (!sameSelection(started, loader.selection())) {
+      // Another day was picked meanwhile: say what happened to the file, and stay on the day
+      // picked (never jump back to the file's date; third review of PR3). Its screen - a file
+      // being checked there included - is left as it is.
+      if (r.ok && r.data) toast.success(`${r.data.ordersCreated} orders (${r.data.cases} cases) added to ${r.data.deliveryDates.join(', ') || (started.date ?? 'the previous day')}.`);
+      else toast.error(`The file for ${started.date ?? 'the previous day'} was not added: ${r.error ?? 'Confirm failed.'}`);
+      await refresh();
+      return;
+    }
     if (!r.ok || !r.data) {
       const code = r.errorBody?.code;
       if (code === 'LATE_REASON_REQUIRED') {
@@ -231,9 +252,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     toast.success(`${r.data.ordersCreated} orders (${r.data.cases} cases) added${r.data.customersCreated ? `, ${r.data.customersCreated} new customers need a location` : ''}.`);
     setBatch(null);
     setFile(null);
-    const d0 = r.data.deliveryDates[0];
-    const now = loader.selection();
-    if (d0 && d0 !== now.date) changeDay(d0, now.depotId);
+    // A file for another date than the day on screen: show that date.
+    const next = dayAfterConfirm(started, loader.selection(), r.data.deliveryDates);
+    if (next?.date) changeDay(next.date, next.depotId);
     else await refresh();
   }
 
@@ -250,6 +271,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     setOptimizing(true);
     try {
       let overrides: OptimizeOverrides = {};
+      // False when the start never reached the server (status 0): the plan below stays as it is.
+      let reached = true;
       for (;;) {
         const r = replanning
           ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } })
@@ -266,9 +289,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
         // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
         toast.error(r.error ?? 'Could not start optimization.');
+        reached = r.status !== 0;
         break;
       }
-      setPlanKey((k) => k + 1);
+      // The plan below is loaded again: the job, or the plan as it is after a refusal.
+      if (reached) setPlanKey((k) => k + 1);
       await refresh();
     } finally {
       setOptimizing(false);
@@ -494,9 +519,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             onBusyChange={setPlanBusy}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
-              // result; then the plan screen is loaded fresh.
-              await refresh();
-              setPlanKey((k) => k + 1);
+              // result; then the plan screen is loaded fresh. When the day could not be loaded, the
+              // plan stays as it is (with its own Try again) until the day's Try again reloads both.
+              if (await refresh()) setPlanKey((k) => k + 1);
             }}
           />
         </Step>

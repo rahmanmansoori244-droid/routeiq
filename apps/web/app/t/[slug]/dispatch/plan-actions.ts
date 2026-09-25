@@ -11,6 +11,9 @@
  *   busy state and reloads the day when it ends - or reload the day. Reloading the day first
  *   replaced the plan screen before the re-plan took the busy state, so Step 3's RE-PLAN stayed
  *   clickable while that re-plan ran (a second click: "superseded").
+ * - planAfterLoad: a failed reload of the plan keeps the plan on screen, with the error and Try
+ *   again. It used to replace the whole plan (every load button) by the error, with no way back
+ *   but reloading the page - after any network error during an action (third review of PR3).
  */
 
 /** The plan screen's busy state: the running action's key, or null. */
@@ -34,6 +37,22 @@ export async function runPlanAction(lock: ActionLock, key: string, action: () =>
     lock.set(null);
   }
   return true;
+}
+
+/** What the plan screen shows: the plan last loaded, and why the last load failed (Try again). */
+export interface PlanPanel<D> {
+  plan: D | null;
+  error: string | null;
+}
+
+/**
+ * The plan screen after a load of the plan: an answer replaces the plan and clears the error; a
+ * failure keeps the plan already on screen and adds the error (the screen offers Try again). Only
+ * a plan that never loaded shows the error alone, also with Try again.
+ */
+export function planAfterLoad<D>(shown: PlanPanel<D>, r: { ok: boolean; data: D | null; error: string | null }): PlanPanel<D> {
+  if (r.ok && r.data) return { plan: r.data, error: null };
+  return { plan: shown.plan, error: r.error ?? 'Could not load the plan.' };
 }
 
 export interface LateOrderSaved {

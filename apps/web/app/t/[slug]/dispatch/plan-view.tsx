@@ -14,7 +14,7 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
-import { afterLateOrderSaved, runPlanAction, type ActionLock } from './plan-actions';
+import { afterLateOrderSaved, planAfterLoad, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -53,8 +53,11 @@ interface Props {
 }
 
 export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange }: Props) {
-  const [d, setD] = useState<PlanDetail | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
+  // with the error and Try again (planAfterLoad; third review of PR3).
+  const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
+  const d = panel.plan;
+  const err = panel.error;
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [ownBusy, setBusy] = useState<string | null>(null);
   // One action at a time across the whole day screen (F07): this plan's own request, or the day
@@ -76,13 +79,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const load = useCallback(async () => {
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
-    if (!r.ok || !r.data) {
-      setErr(r.error ?? 'Could not load the plan');
-      return null;
-    }
-    setErr(null);
-    setD(r.data);
-    return r.data;
+    setPanel((shown) => planAfterLoad(shown, r));
+    return r.ok ? r.data : null;
   }, [runId]);
 
   useEffect(() => {
@@ -95,11 +93,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Unmounted mid-action (the day reloads the plan): never leave the day screen waiting.
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
 
-  useEffect(() => {
-    void api<DriverOption[]>('/api/drivers').then((r) => {
-      if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
-    });
+  const loadDrivers = useCallback(async () => {
+    const r = await api<DriverOption[]>('/api/drivers');
+    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
   }, []);
+
+  useEffect(() => {
+    void loadDrivers();
+  }, [loadDrivers]);
+
+  // Try again after a failed load: the plan, and the driver list if it did not load either.
+  const retry = () => {
+    void load();
+    if (!drivers.length) void loadDrivers();
+  };
 
   useEffect(() => {
     if (!d) return;
@@ -243,8 +250,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     );
   }
 
-  if (err) return <p className="text-sm text-destructive">{err}</p>;
-  if (!d) return <p className="text-sm text-muted-foreground">Loading plan…</p>;
+  if (!d) {
+    // Never loaded: the error alone, with Try again (a failed reload keeps the plan, below).
+    return err ? (
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-load-error">
+        <AlertTriangle className="h-4 w-4 text-red-700" />
+        <span>Could not load the plan: {err}</span>
+        <Button size="sm" variant="outline" onClick={retry}>
+          <RefreshCw className="mr-1 h-3 w-3" /> Try again
+        </Button>
+      </div>
+    ) : (
+      <p className="text-sm text-muted-foreground">Loading plan…</p>
+    );
+  }
 
   const s = d.summary;
   const rec = d.reconciliation;
@@ -308,6 +327,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </div>
       </div>
 
+      {err ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-reload-error">
+          <AlertTriangle className="h-4 w-4 text-red-700" />
+          <span>Could not reload the plan: {err} The plan below may be out of date.</span>
+          <Button size="sm" variant="outline" onClick={retry}>
+            <RefreshCw className="mr-1 h-3 w-3" /> Try again
+          </Button>
+        </div>
+      ) : null}
       {superseded ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">This version was replaced by a newer plan version. It is kept read-only for traceability.</div>
       ) : null}
