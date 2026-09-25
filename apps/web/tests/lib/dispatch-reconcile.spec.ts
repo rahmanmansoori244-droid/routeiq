@@ -225,3 +225,20 @@ describe('reconcile - split deliveries (portions)', () => {
     expect(r.problems.join('\n')).toContain('planned for another customer/branch');
   });
 });
+
+describe('reconcile - orders the plan was made for (review F20)', () => {
+  it('an expected order that no longer exists makes the plan not reconciled', () => {
+    // O3 was deleted after planning: its unserved row is gone with it, so the case sum alone
+    // would still balance. The expected ids catch it.
+    const r = reconcile(ORDERS.slice(0, 2), GOOD_PLANNED, [], ['O1', 'O2', 'O3']);
+    expect(r.ok).toBe(false);
+    expect(r.problems).toContain('Order O3 is in this plan but no longer exists (deleted after planning).');
+    expect(reconcile(ORDERS.slice(0, 2), GOOD_PLANNED, []).ok).toBe(true);
+  });
+
+  it('every expected order present: no extra problem', () => {
+    const r = reconcile(ORDERS, GOOD_PLANNED, GOOD_UNSERVED, ['O1', 'O2', 'O3', 'O1']);
+    expect(r.problems).toEqual([]);
+    expect(r.ok).toBe(true);
+  });
+});

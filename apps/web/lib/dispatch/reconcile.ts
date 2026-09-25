@@ -63,9 +63,17 @@ export interface Reconciliation {
   bySalesOrder: ReconRow[];
 }
 
-export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserved: ReconUnserved[]): Reconciliation {
+/**
+ * `expectedOrderIds`: the orders the plan was made for (its scope). An expected order that no
+ * longer exists (deleted after planning) is a problem: its cases would otherwise silently drop
+ * out of both sides of the sum.
+ */
+export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserved: ReconUnserved[], expectedOrderIds?: string[]): Reconciliation {
   const problems: string[] = [];
   const byId = new Map(orders.map((o) => [o.id, o]));
+  for (const id of new Set(expectedOrderIds ?? [])) {
+    if (!byId.has(id)) problems.push(`Order ${id} is in this plan but no longer exists (deleted after planning).`);
+  }
   const lineIdOf = (o: ReconOrder, idx: number) => o.lines[idx].id ?? `${o.id}#${idx}`;
   // An order is either on the plan whole (once), or in portions whose cases add up per line.
   const whole = new Map<string, number>();

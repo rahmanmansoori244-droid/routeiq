@@ -14,6 +14,9 @@ import {
   tenantSettingsSchema,
   userInviteSchema,
   normalizeBranchKey,
+  isRealIsoDate,
+  isoDateSchema,
+  MAX_SERVICE_MIN,
 } from '@/lib/schemas';
 
 describe('normalizeBranchKey', () => {
@@ -232,5 +235,30 @@ describe('userInviteSchema', () => {
   });
   it('accepts valid invite', () => {
     expect(userInviteSchema.safeParse({ email: 'a@b.co', name: 'Alex', role: 'PLANNER' }).success).toBe(true);
+  });
+});
+
+describe('isoDateSchema / isRealIsoDate (review L16)', () => {
+  it('accepts real calendar dates', () => {
+    expect(isRealIsoDate('2026-09-27')).toBe(true);
+    expect(isRealIsoDate('2028-02-29')).toBe(true);
+    expect(isoDateSchema.safeParse('2026-12-31').success).toBe(true);
+  });
+  it('rejects dates that would roll into another day or are not dates', () => {
+    for (const bad of ['2026-02-31', '2026-13-01', '2026-02-29', '2026-9-27', '27/09/2026', '2026-09-27T00:00:00Z', '']) {
+      expect(isRealIsoDate(bad)).toBe(false);
+      expect(isoDateSchema.safeParse(bad).success).toBe(false);
+    }
+  });
+});
+
+describe('service time limit (480 min, the optimizer maximum)', () => {
+  it('customer and tenant default service time accept at most 480 min', () => {
+    const base = { code: 'C1', name: 'Test', priority: 3, paymentType: 'CREDIT' as const };
+    expect(MAX_SERVICE_MIN).toBe(480);
+    expect(customerSchema.safeParse({ ...base, avgServiceTimeMin: 480 }).success).toBe(true);
+    expect(customerSchema.safeParse({ ...base, avgServiceTimeMin: 481 }).success).toBe(false);
+    expect(tenantConfigSchema.partial().safeParse({ defaultServiceTimeMin: 480 }).success).toBe(true);
+    expect(tenantConfigSchema.partial().safeParse({ defaultServiceTimeMin: 600 }).success).toBe(false);
   });
 });

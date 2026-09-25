@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api } from './client-api';
+import { api, askOverride, type OptimizeOverrides } from './client-api';
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
@@ -30,6 +30,14 @@ interface IssueCustomer extends EditableCustomer {
   cases: number;
   issues: Issue[];
   blocking: boolean;
+  inactive?: boolean;
+}
+interface WeightGap {
+  code: string;
+  name: string;
+  lines: number;
+  cases: number;
+  kgPerCase?: number;
 }
 interface Day {
   date: string;
@@ -40,7 +48,11 @@ interface Day {
   orders: { count: number; cases: number; customers: number; late: number; weightKg: number };
   customers: IssueCustomer[];
   blockingCount?: number;
-  productsWithoutWeight: { code: string; name: string }[];
+  inactiveCustomers?: number;
+  /** Lines with no weight at all: counted as 0 kg until the product gets a case weight. */
+  productsWithoutWeight: WeightGap[];
+  /** Lines at 0 kg whose product has a case weight now: applied at the next optimize. */
+  weightsToApply?: WeightGap[];
   plan: null | { id: string; version: number; status: string; chosen: boolean; job: { status: string; message: string | null; progressPct: number } | null };
   pending: { count: number; cases: number; late: number };
   trucks: { active: number; capacityCases: number };
@@ -55,7 +67,7 @@ interface Validation {
   duplicates: { row: number; message: string }[];
   totals: { lines: number; cases: number; customers: number; salesOrders: number; deliveryDates: string[] };
   fileCases: number;
-  issues: { newCustomers: { code: string; name: string }[]; newProducts: { code: string; name: string }[]; customersWithoutLocation: string[] };
+  issues: { newCustomers: { code: string; name: string }[]; newProducts: { code: string; name: string }[]; customersWithoutLocation: string[]; productsWithoutWeight?: string[] };
   mapping: Record<string, string>;
   late: { isLate: boolean; reasons: string[] };
   depotCode: string;
@@ -146,7 +158,20 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
       json: batch.v.late.isLate ? { lateReason } : {},
     });
     if (!r.ok || !r.data) {
+      const code = r.errorBody?.code;
+      if (code === 'LATE_REASON_REQUIRED') {
+        // Checked before the cutoff but confirmed after it: ask for the reason now.
+        const reasons = Array.isArray(r.errorBody?.reasons) ? (r.errorBody?.reasons as string[]) : [];
+        setBatch({ ...batch, v: { ...batch.v, late: { isLate: true, reasons } } });
+        toast.error(r.error ?? 'These orders are late now. Enter the reason for accepting them.');
+        return;
+      }
       toast.error(r.error ?? 'Confirm failed.');
+      if (code === 'STALE_VALIDATION' || code === 'DUPLICATE_LINES' || code === 'DUPLICATE_FILE' || code === 'MASTER_CHANGED') {
+        // Nothing was added; the file must be checked again against the day as it is now.
+        setBatch(null);
+        await refresh();
+      }
       return;
     }
     toast.success(`${r.data.ordersCreated} orders (${r.data.cases} cases) added${r.data.customersCreated ? `, ${r.data.customersCreated} new customers need a location` : ''}.`);
@@ -157,24 +182,20 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
     else await refresh();
   }
 
-  async function optimize(allowMissing = false) {
+  async function optimize(overrides: OptimizeOverrides = {}) {
     if (!day?.depot || !date) return;
     setOptimizing(true);
     let r;
     if (day.plan?.chosen) {
-      r = await api<{ runId: string }>(`/api/runs/${day.plan.id}/replan`, { method: 'POST', json: { reason: day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE', allowMissingLocations: allowMissing } });
+      r = await api<{ runId: string }>(`/api/runs/${day.plan.id}/replan`, { method: 'POST', json: { reason: day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE', ...overrides } });
     } else {
-      r = await api<{ runId: string }>('/api/dispatch/plan', { method: 'POST', json: { date, depotId: day.depot.id, optimize: true, allowMissingLocations: allowMissing } });
+      r = await api<{ runId: string }>('/api/dispatch/plan', { method: 'POST', json: { date, depotId: day.depot.id, optimize: true, ...overrides } });
     }
     setOptimizing(false);
     if (!r.ok) {
-      if (r.errorBody?.code === 'LOCATION_REQUIRED') {
-        const n = (r.errorBody.blocking as unknown[])?.length ?? 0;
-        if (window.confirm(`${n} customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". Optimize anyway?`)) {
-          return optimize(true);
-        }
-        return;
-      }
+      const more = askOverride(r.errorBody, 'Optimize');
+      if (more) return optimize({ ...overrides, ...more });
+      if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
       toast.error(r.error ?? 'Could not start optimization.');
       return;
     }
@@ -187,7 +208,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
   if (!day.depot) return <p className="text-sm">No active depot. Create a depot and trucks first.</p>;
 
   const blocking = day.customers.filter((c) => c.blocking);
+  const noLocation = blocking.filter((c) => !c.inactive).length;
+  const inactive = blocking.length - noLocation;
+  const blockingSummary = [noLocation ? `${noLocation} customer(s) need a location` : '', inactive ? `${inactive} deactivated customer(s): orders left unserved` : '']
+    .filter(Boolean)
+    .join(' · ');
   const notes = day.customers.filter((c) => !c.blocking && c.issues.some((i) => i.code !== 'LOCATION_UNVERIFIED' && i.code !== 'NEW_CUSTOMER'));
+  const toApply = day.weightsToApply ?? [];
+  const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
   const needsPlan = day.orders.count > 0 && (!day.plan?.chosen || day.pending.count > 0);
 
@@ -242,7 +270,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
         title="Resolve issues"
         done={day.orders.count > 0 && blocking.length === 0}
         warn={blocking.length > 0}
-        summary={blocking.length ? `${blocking.length} customer(s) need a location` : day.orders.count ? 'All delivery locations known' : '—'}
+        summary={blocking.length ? blockingSummary : day.orders.count ? 'All delivery locations known' : '—'}
       >
         {blocking.length ? (
           <div className="grid gap-2 md:grid-cols-2" data-testid="blocking-issues">
@@ -267,8 +295,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
           </details>
         ) : null}
         {day.productsWithoutWeight.length ? (
-          <p className="text-xs text-amber-700">
-            {day.productsWithoutWeight.length} product(s) have no case weight ({day.productsWithoutWeight.map((p) => p.code).join(', ')}): truck payload (kg) checks treat them as 0 kg. Add weights under Products.
+          <p className="text-xs text-amber-700" data-testid="weights-unknown">
+            No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (
+            {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). Add the case weight under Products: until then OPTIMIZE asks before planning them as 0 kg.
+          </p>
+        ) : null}
+        {toApply.length ? (
+          <p className="text-xs text-muted-foreground" data-testid="weights-to-apply">
+            Case weight now known for {casesOf(toApply).toLocaleString()} cases confirmed without one ({toApply.map((p) => `${p.code}: ${p.kgPerCase ?? '?'} kg per case`).join(', ')}): applied at the next OPTIMIZE or RE-PLAN.
           </p>
         ) : null}
       </Step>
@@ -292,7 +326,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, initialDate, initia
           </div>
         ) : null}
         {canPlan ? (
-          <Button onClick={() => optimize(false)} disabled={optimizing || running || !needsPlan} data-testid="optimize-btn" size="lg">
+          <Button onClick={() => optimize()} disabled={optimizing || running || !needsPlan} data-testid="optimize-btn" size="lg">
             {optimizing || running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
             {day.plan?.chosen ? 'RE-PLAN' : 'OPTIMIZE'}
           </Button>
@@ -358,9 +392,13 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
           {c.prioritySource === 'DEFAULT' ? '?' : ''}
         </Badge>
       </div>
-      <p className="mt-1 text-xs">
-        Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
-      </p>
+      {c.inactive ? (
+        <p className="mt-1 text-xs font-medium text-red-700">{c.issues.find((i) => i.code === 'CUSTOMER_INACTIVE')?.message}</p>
+      ) : (
+        <p className="mt-1 text-xs">
+          Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
+        </p>
+      )}
       {c.issues
         .filter((i) => !i.blocking && i.code !== 'NEW_CUSTOMER')
         .map((i) => (
@@ -368,7 +406,7 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
             • {i.message}
           </p>
         ))}
-      {canPlan ? (
+      {canPlan && !c.inactive ? (
         <div className="mt-2 flex gap-2">
           <Button size="sm" variant={needsLoc ? 'default' : 'outline'} onClick={onLocation} data-testid={`add-location-${c.code}`}>
             <MapPin className="mr-1 h-3 w-3" /> {needsLoc ? 'ADD LOCATION' : 'Location'}
@@ -397,6 +435,11 @@ function ValidationPanel({ v, lateReason, setLateReason, onConfirm, onCancel }: 
         </p>
       ) : null}
       {v.issues.newProducts.length ? <p className="text-amber-800">{v.issues.newProducts.length} new product(s) will be created: {v.issues.newProducts.map((p) => p.code).join(', ')} (add their case weight)</p> : null}
+      {v.issues.productsWithoutWeight?.length ? (
+        <p className="text-amber-800">
+          No weight in the file or on the product for: {v.issues.productsWithoutWeight.join(', ')}. Add the case weight under Products before optimizing, or those lines count as 0 kg.
+        </p>
+      ) : null}
       {v.duplicates.length ? <p className="text-amber-800">{v.duplicates.length} line(s) were already uploaded and will be skipped.</p> : null}
       {v.errors.length ? (
         <div className="max-h-40 overflow-y-auto rounded border border-red-200 bg-red-50 p-2 text-xs" data-testid="validation-errors">
