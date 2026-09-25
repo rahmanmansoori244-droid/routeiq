@@ -10,15 +10,26 @@ export interface ApiResult<T> {
   errorBody: Record<string, unknown> | null;
 }
 
-/** fetch wrapper for the { data, error } envelope used by every RouteIQ API route. */
+/**
+ * fetch wrapper for the { data, error } envelope used by every RouteIQ API route. It never rejects:
+ * a request that does not reach the server (offline, a connection reset while the app is being
+ * updated) answers { ok: false, status: 0 } with a message like any refused request. A rejected
+ * promise skipped the caller's clean-up, so one network error left OPTIMIZE and every plan action
+ * disabled until the page was reloaded (review of PR3).
+ */
 export async function api<T>(url: string, init?: RequestInit & { json?: unknown }): Promise<ApiResult<T>> {
   const { json, ...rest } = init ?? {};
-  const res = await fetch(url, {
-    ...rest,
-    headers: json !== undefined ? { 'content-type': 'application/json', ...(rest.headers ?? {}) } : rest.headers,
-    body: json !== undefined ? JSON.stringify(json) : rest.body,
-    cache: 'no-store',
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...rest,
+      headers: json !== undefined ? { 'content-type': 'application/json', ...(rest.headers ?? {}) } : rest.headers,
+      body: json !== undefined ? JSON.stringify(json) : rest.body,
+      cache: 'no-store',
+    });
+  } catch (e) {
+    return { ok: false, status: 0, data: null, error: unreachable(e), errorBody: null };
+  }
   if (res.status === 401 && typeof window !== 'undefined') {
     // The server no longer accepts this session (signed out elsewhere, deactivated, password
     // reset, or the 12 h limit). Clear the cookie and sign in again, then come back to this page
@@ -42,6 +53,11 @@ export async function api<T>(url: string, init?: RequestInit & { json?: unknown 
       'Request failed';
   }
   return { ok: res.ok, status: res.status, data: res.ok ? (body?.data as T) : null, error: res.ok ? null : message ?? `HTTP ${res.status}`, errorBody };
+}
+
+/** The message for a request that never got an answer (status 0). */
+function unreachable(e: unknown): string {
+  return `The server could not be reached (${e instanceof Error && e.message ? e.message : 'network error'}). Check the connection and try again.`;
 }
 
 /** What the dispatcher explicitly accepted when optimizing or re-planning. */

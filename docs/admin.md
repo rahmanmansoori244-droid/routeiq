@@ -109,13 +109,14 @@ Every 90 days per CLAUDE.md §14.
   - RECOMMENDED runs first; the two alternatives then run in parallel, warm-started from it; then the load re-check (one worker per job, at most two).
   - If the worker computing the recommended plan dies (e.g. out of memory), the optimization fails within seconds with a clear message. If an alternative's worker dies, only that alternative is skipped (with a warning) after its deadline.
   - `SOLVER_PARALLEL=0` runs everything in-process (tests / debugging only).
+- **Concurrent solves** (stabilization PR3): the solver runs at most `MAX_CONCURRENT_DISPATCH` (default 2) dispatch solves at once and answers 503 "Solver busy" to another one. The web's solve admission queues before that: at most `SOLVER_MAX_CONCURRENT` (default 2) solves in total and one less per company (at least 1), at most 2 waiting per company, a shared queue of 10 that refuses (503) only a company that already has one waiting - a company with nothing waiting is always queued, up to 200 waiting - and a freed slot goes to the company with the fewest solves running, then first come first served; plus 15 starts per user and 30 per company per hour. To let one company run 2 solves at once, set both `SOLVER_MAX_CONCURRENT` and `MAX_CONCURRENT_DISPATCH` to 3 (if the solver has the CPUs). Size both to the solver's CPUs (each solve uses up to 3 OR-Tools processes) and keep `SOLVER_MAX_CONCURRENT` at or below `MAX_CONCURRENT_DISPATCH`.
 
 ---
 
 ## Deployment
 
 ### Single-replica enforcement
-**v1 deployment MUST run exactly one `routeiq-web` Railway replica.** The in-memory `inflight` map in `lib/jobs/optimize-job.ts` prevents duplicate solver calls within one process but is **NOT** safe under horizontal scaling. Adding a second replica WILL produce duplicate solver runs and unpredictable RunJob state.
+**v1 deployment MUST run exactly one `routeiq-web` Railway replica.** The in-memory `inflight` map in `lib/jobs/optimize-job.ts`, the rate limits and the solve admission live in one process and are **NOT** shared under horizontal scaling. Since stabilization PR3 plan correctness no longer depends on it: every plan change takes database locks (a second process can at worst start a duplicate solve, whose stale result is not applied), but quotas and concurrency caps would count per process.
 
 If you need to scale beyond one web instance, swap the inflight map for Redis-backed locks (BullMQ recommended) before scaling — that's a v2 prerequisite.
 
@@ -155,7 +156,7 @@ If you add a new tenant-scoped model:
 | `/api/orders/upload` | 60/hr/user | `LIMITS.ordersUpload` |
 | `/api/customers/import` | 60/hr/user | `LIMITS.ordersUpload` |
 | `/api/runs/{id}/baseline` | 60/hr/user | `LIMITS.ordersUpload` |
-| `/api/runs/{id}/optimize` | 30/hr/tenant | `LIMITS.optimize` |
+| Every optimization start: `/api/dispatch/plan` (optimize), `/api/runs/{id}/replan`, `/api/runs/{id}/optimize` | 15/hr/user and 30/hr/company (429); `SOLVER_MAX_CONCURRENT` (2) at once in total and one less per company; at most 2 waiting per company (then 429 for that company); a full shared queue of 10 answers 503 only to a company that already has one waiting; 200 waiting at most (503) | Solve admission, `lib/dispatch/solve-admission.ts` (stabilization PR3; replaces `LIMITS.optimize`) |
 | Other authenticated endpoints | none | |
 
 The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `lib/client-ip.ts`). Buckets live in memory (one web replica), are swept when they expire and capped in number. `RATE_LIMITS_DISABLED=1` is for test servers only: it is ignored on Railway. Moving to a shared store (Redis) is needed before running more than one web replica.

@@ -1,13 +1,47 @@
 /**
  * Dashboard KPIs and trend timeseries — CLAUDE.md §12 Phase 5.
  *
- * KPIs use the "chosen scenario" of READY/DISPATCHED runs for the date. Runs
- * with no chosen scenario are excluded from cost/trucks-used totals because
- * the planner hasn't committed to a result yet.
+ * KPIs use the "chosen scenario" of the plan in use of each depot and day (LIVE_PLAN_IN_USE):
+ * exactly one version per depot and day - the current one - in every state of its lifecycle, never
+ * a superseded one. Runs with no chosen scenario are excluded from cost/trucks-used totals because
+ * the planner hasn't committed to a result yet. Cases (cost per case) are the orders of each plan's
+ * own depot and day (PLAN_ORDERS_IN_SCOPE), so every case is counted once.
  *
  * Late deliveries are a v2 placeholder — v1 doesn't enforce time windows.
  */
+import { Prisma } from '@prisma/client';
 import { prisma } from './db';
+
+/**
+ * The plan versions the dashboard counts, as a SQL condition on "RunPlan" rp: exactly one per depot
+ * and day, the current version - the one the day screen shows (`currentPlan` in plan-service.ts:
+ * the newest version not superseded or archived; supersededAt too, so a version written READY over
+ * its supersede before the stabilization release is never counted) - and only while it holds a
+ * plan in use: READY or DISPATCHED, or any other state with an applied plan (a chosen option).
+ * During a re-plan that is the new version: it holds the copy of the previous plan while it is
+ * DRAFT, waits or runs (OPTIMIZING), and keeps it when its optimization fails (FAILED) - the plan
+ * being dispatched (copy-forward). The superseded parent is never counted, so a depot's day counts
+ * once in every state. A first optimization (no plan applied yet) is not counted. Stabilization PR3.
+ */
+export const LIVE_PLAN_IN_USE = Prisma.sql`rp.id = (
+        SELECT cur.id FROM "RunPlan" cur
+        WHERE cur."tenantId" = rp."tenantId" AND cur."depotId" = rp."depotId" AND cur."runDate" = rp."runDate"
+          AND cur.status NOT IN ('SUPERSEDED', 'ARCHIVED') AND cur."supersededAt" IS NULL
+        ORDER BY cur.version DESC, cur."chosenScenarioId" DESC NULLS LAST, cur."createdAt" DESC, cur.id DESC
+        LIMIT 1
+      )
+      AND (rp.status IN ('READY', 'DISPATCHED') OR rp."chosenScenarioId" IS NOT NULL)`;
+
+/**
+ * The orders of plan rp, as a SQL condition on "Order" o - the same scope as `ordersInScopeWhere`
+ * (plan-service.ts), the orders the plan's reconciliation checks: same tenant and delivery date,
+ * the plan's depot, and orders without a depot (legacy) only when the tenant has one active depot.
+ * One plan per depot and day, so every case is counted once (review of PR3: the whole day of the
+ * tenant was counted once per depot plan, so cost per case was 1/N of the truth with N depots).
+ */
+export const PLAN_ORDERS_IN_SCOPE = Prisma.sql`o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate"
+        AND (o."depotId" = rp."depotId"
+          OR (o."depotId" IS NULL AND (SELECT COUNT(*) FROM "Depot" d WHERE d."tenantId" = rp."tenantId" AND d.active) <= 1))`;
 
 export interface DayStats {
   date: string; // YYYY-MM-DD
@@ -45,7 +79,7 @@ export interface RecentRun {
   createdAt: string;
 }
 
-interface RawRunRow {
+export interface RawRunRow {
   date: string; // ISO date
   run_count: bigint;
   trucks_used: bigint | null;
@@ -81,7 +115,7 @@ function emptyStats(date: string): DayStats {
   };
 }
 
-function rollupRows(rows: RawRunRow[], date: string): DayStats {
+export function rollupRows(rows: RawRunRow[], date: string): DayStats {
   const totals = emptyStats(date);
   if (rows.length === 0) return totals;
   for (const r of rows) {
@@ -105,7 +139,7 @@ function rollupRows(rows: RawRunRow[], date: string): DayStats {
  * Pull aggregated per-date stats over a window. Uses raw SQL so we don't have
  * to handle bigint conversions for COUNT(*) values from Prisma.
  */
-async function fetchRangeRows(tenantId: string, from: string, to: string): Promise<RawRunRow[]> {
+export async function fetchRangeRows(tenantId: string, from: string, to: string): Promise<RawRunRow[]> {
   return prisma.$queryRaw<RawRunRow[]>`
     SELECT
       rp."runDate"::date::text AS date,
@@ -122,11 +156,11 @@ async function fetchRangeRows(tenantId: string, from: string, to: string): Promi
     LEFT JOIN LATERAL (
       SELECT COALESCE(SUM(o."totalCases"), 0) AS total_cases
       FROM "Order" o
-      WHERE o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate"
+      WHERE ${PLAN_ORDERS_IN_SCOPE}
     ) AS case_totals ON TRUE
     WHERE rp."tenantId" = ${tenantId}
       AND rp."runDate" BETWEEN ${from}::date AND ${to}::date
-      AND rp.status IN ('READY', 'DISPATCHED')
+      AND ${LIVE_PLAN_IN_USE}
     GROUP BY rp."runDate"
     ORDER BY rp."runDate" ASC
   `;
@@ -161,7 +195,7 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
     JOIN "ScenarioResult" sr ON sr.id = rp."chosenScenarioId"
     WHERE rp."tenantId" = ${tenantId}
       AND rp."runDate" BETWEEN ${last30FromIso}::date AND ${todayIso}::date
-      AND rp.status IN ('READY', 'DISPATCHED')
+      AND ${LIVE_PLAN_IN_USE}
   `;
   const distanceIsEstimated =
     (est[0]?.anyEstimated ?? tenant.config?.distanceProvider === 'HAVERSINE') && (tenant.config?.labelEstimatedDistances ?? true);

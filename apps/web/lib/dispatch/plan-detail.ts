@@ -7,8 +7,10 @@ import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type TypeProfileLike } from './customer-attrs';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
-import { isDispatchDetails, type ScenarioDetails } from './plan-service';
-import { noteParts } from './driver-links';
+import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
+import { isSupersededRun } from './plan-status';
+import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
+import { driverChangeWarnings, noteParts } from './driver-links';
 import { readPortionLines, rowLines, splitPartLabels } from './split';
 import { lineWeightStatus, orderUsesLineWeights } from './weights';
 import { fmtWindow, isoOf } from './time';
@@ -61,8 +63,15 @@ export interface DetailLoad {
   driverId: string | null;
   driverName: string | null;
   driverPhone: string | null;
+  /**
+   * The dispatcher chose this driver by hand (the row's marker, isHandSetDriver; set by the Driver
+   * list and by Keep): a re-plan or "Use instead" keeps it on this truck and trip ("picked by hand").
+   * False: RouteIQ filled it in, or there is no driver.
+   */
+  driverHandSet: boolean;
   loadNo: number;
   status: string;
+  /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
   carried: boolean;
   departMin: number;
   returnMin: number;
@@ -137,6 +146,12 @@ export interface PlanDetail {
   versions: { id: string; version: number; status: string; reason: string; reasonNote: string | null; createdAt: string; changeText: string | null }[];
   job: { id: string; status: string; message: string | null; progressPct: number; startedAt: string | null; finishedAt: string | null } | null;
   warnings: string[];
+  /**
+   * Orders of the day that the applied plan does not contain yet (uploaded or recorded after it).
+   * With no PLANNED load and nothing unserved, 0 here means a re-plan has nothing to plan.
+   * Always 0 for a superseded version or one without an applied plan.
+   */
+  pendingOrders?: number;
 }
 
 export async function getPlanDetail(tenantId: string, runId: string): Promise<PlanDetail | null> {
@@ -249,9 +264,10 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       driverId: l.driverId,
       driverName: l.driver?.name ?? null,
       driverPhone: l.driver?.phone ?? null,
+      driverHandSet: isHandSetDriver(l),
       loadNo: l.loadNo,
       status: l.status,
-      carried: !!l.carriedFromLoadId,
+      carried: isCarriedFrozen(l),
       departMin: l.departMin,
       returnMin: l.returnMin,
       distanceKm: l.distanceKm,
@@ -313,10 +329,16 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   const versions = await db.runPlan.findMany({
     where: { depotId: run.depotId, runDate: run.runDate },
     orderBy: { version: 'desc' },
-    select: { id: true, version: true, status: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
+    select: { id: true, version: true, status: true, supersededAt: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
   });
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
-  const outdated = run.status !== 'SUPERSEDED' && chosenDetails ? outdatedNotes(loads) : [];
+  const live = !isSupersededRun(run);
+  const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
+  let pendingOrders = 0;
+  if (live && chosenDetails) {
+    const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
+    pendingOrders = await prisma.order.count({ where: { ...(await ordersInScopeWhere(tenantId, run.depotId, run.runDate)), id: { notIn: inPlan } } });
+  }
   return {
     run: {
       id: run.id,
@@ -360,7 +382,8 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     versions: versions.map((v) => ({
       id: v.id,
       version: v.version,
-      status: v.status,
+      // A version written READY over its supersede (before the stabilization release) is listed as replaced.
+      status: isSupersededRun(v) ? 'SUPERSEDED' : v.status,
       reason: v.reason,
       reasonNote: v.reasonNote,
       createdAt: v.createdAt.toISOString(),
@@ -372,8 +395,21 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     warnings: legacyChosen
       ? ['This plan was made by the previous optimizer (before May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
       : chosenDetails
-        ? [...new Set([...outdated, ...(chosenDetails.response_warnings ?? []), ...(chosenDetails.warnings ?? [])])]
+        ? [
+            ...new Set([
+              ...outdated,
+              // A driver the applied plan changed is never silent. Read with each row's marker, so a
+              // note ends once the dispatcher sets that trip's driver (a driver, Keep or "No driver").
+              ...driverChangeWarnings(
+                (run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [],
+                loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverSet: driverSetByDispatcher(l) })),
+              ),
+              ...(chosenDetails.response_warnings ?? []),
+              ...(chosenDetails.warnings ?? []),
+            ]),
+          ]
         : [],
+    pendingOrders,
   };
 }
 

@@ -159,7 +159,7 @@ export function rateLimit(key: string, limit: number, windowMs: number): RateLim
 export const LIMITS = {
   auth: { limit: 5, windowMs: 60_000 },
   ordersUpload: { limit: 60, windowMs: 60 * 60_000 }, // daily loop: upload -> fix -> re-upload
-  optimize: { limit: 30, windowMs: 60 * 60_000 },
+  // Optimization starts are limited by the solve admission (lib/dispatch/solve-admission.ts), not here.
   /** Sign-in throttle (lib/auth-credentials.ts). Soft: it pauses attempts, it never locks an account. */
   loginIpEmailFailures: { limit: 5, windowMs: 15 * 60_000 },
   loginIpAttempts: { limit: 30, windowMs: 10 * 60_000 },

@@ -1,20 +1,27 @@
 /**
- * Load lifecycle: allowed transitions, per-truck ordering (Load 1 before Load 2) and roles.
+ * Load lifecycle: allowed transitions, per-truck ordering (Load 1 before Load 2) and roles; the
+ * driver rules of a re-plan or "Use instead" (planDrivers), Keep and the driver clash warning.
  */
 import { describe, expect, it } from 'vitest';
 import {
-  assignReplanDrivers,
   checkDriverChange,
   checkTransition,
   driverClashes,
+  driverPickLink,
+  driverSetByDispatcher,
   FROZEN,
   isFrozen,
+  isDriverKeep,
+  isHandSetDriver,
   ON_ROAD,
-  pickLoadDriver,
+  planDrivers,
   timesClash,
+  timesOverlap,
+  type DriverNoteReason,
+  type EvidenceLoad,
   type LoadRef,
   type LoadStatusName,
-  type ReplanLoad,
+  type PlanTrip,
 } from '@/lib/dispatch/load-state';
 
 const L = (loadNo: number, status: LoadStatusName, id = `L${loadNo}`): LoadRef => ({ id, loadNo, status });
@@ -145,107 +152,324 @@ describe('frozen / on-road sets', () => {
   });
 });
 
-describe('pickLoadDriver - drivers stay with their truck across re-plans', () => {
-  const usable = new Set(['A', 'B', 'C']);
-  const loads = [
-    { truckId: 't1', loadNo: 1, driverId: 'A' },
-    { truckId: 't1', loadNo: 3, driverId: 'C' },
-    { truckId: 't2', loadNo: 1, driverId: 'B' },
-    { truckId: 't2', loadNo: 2, driverId: null },
-  ];
+/**
+ * planDrivers: the simplified driver rules (owner decision after the sixth review of PR3).
+ * Minutes from midnight: 360 = 06:00, 480 = 08:00, 570 = 09:30, 600 = 10:00, 660 = 11:00,
+ * 720 = 12:00, 840 = 14:00.
+ */
+const AT = new Date('2026-09-26T05:00:00Z');
+const HAND = { driverSetById: 'u1', driverSetAt: AT };
+const USABLE = new Set(['ALI', 'SAM', 'BOB']);
+/** A load of the version before the apply (the evidence); PLANNED and filled in unless `extra` says otherwise. */
+const was = (truckId: string, loadNo: number, driverId: string | null, departMin: number, returnMin: number, extra: Partial<EvidenceLoad> = {}): EvidenceLoad => ({
+  truckId,
+  loadNo,
+  driverId,
+  departMin,
+  returnMin,
+  status: 'PLANNED',
+  driverSetById: null,
+  driverSetAt: null,
+  ...extra,
+});
+/** A trip of the plan being applied. */
+const trip = (truckId: string, loadNo: number, departMin: number, returnMin: number, defaultDriverId: string | null = null): PlanTrip => ({
+  key: `${truckId}:${loadNo}`,
+  truckId,
+  loadNo,
+  departMin,
+  returnMin,
+  defaultDriverId,
+});
+const both = <T,>(list: T[]) => [list, [...list].reverse()];
+const ids = (r: ReturnType<typeof planDrivers>) => Object.fromEntries([...r.drivers].map(([k, v]) => [k, v.driverId]));
+/** The yellow clash warnings of the plan: its trips with their new drivers, and its frozen loads. */
+const clashesOf = (trips: PlanTrip[], r: ReturnType<typeof planDrivers>, evidence: EvidenceLoad[] = []) =>
+  driverClashes([
+    ...trips.map((t) => ({ id: t.key, truckId: t.truckId, departMin: t.departMin, returnMin: t.returnMin, driverId: r.drivers.get(t.key)!.driverId })),
+    ...evidence.filter((e) => e.status !== 'PLANNED').map((e, i) => ({ id: `kept${i}`, ...e })),
+  ]);
+const note = (key: string, departMin: number, returnMin: number, fromDriverId: string, toDriverId: string | null, reason: DriverNoteReason, other: { truckId: string; loadNo: number } | null = null) => {
+  const [truckId, loadNo] = key.split(':');
+  return { key, truckId: truckId!, loadNo: Number(loadNo), departMin, returnMin, fromDriverId, toDriverId, reason, other };
+};
 
-  it('takes the same trip first, else the nearest trip of the same truck (earlier on a tie)', () => {
-    expect(pickLoadDriver(loads, 't1', 1, usable)).toBe('A');
-    expect(pickLoadDriver(loads, 't1', 3, usable)).toBe('C');
-    expect(pickLoadDriver(loads, 't1', 2, usable)).toBe('A'); // Load 1 and 3 equally near
-    expect(pickLoadDriver(loads, 't1', 4, usable)).toBe('C');
-    expect(pickLoadDriver(loads, 't2', 2, usable)).toBe('B'); // Load 2 had none: Load 1's driver
+describe('planDrivers pass 1: a hand-set driver stays on its truck and trip', () => {
+  it('keeps the driver with its marker; the filled-in trip that now overlaps it loses the driver, with a CLASH note - in both truck orders', () => {
+    // T03 L1 Ali by hand 09:30-11:00; T02 L1 Ali filled in 12:00-14:00, moved to 10:00-12:00.
+    const evidence = [was('T02', 1, 'ALI', 720, 840), was('T03', 1, 'ALI', 570, 660, HAND)];
+    for (const trips of both([trip('T02', 1, 600, 720, 'SAM'), trip('T03', 1, 570, 660, 'SAM')])) {
+      const r = planDrivers(trips, evidence, USABLE);
+      expect(r.drivers.get('T03:1')).toEqual({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: AT });
+      expect(r.drivers.get('T02:1')).toEqual({ driverId: 'SAM', driverSetById: null, driverSetAt: null }); // its default
+      expect(r.notes).toEqual([note('T02:1', 600, 720, 'ALI', 'SAM', 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+      expect(clashesOf(trips, r)).toEqual([]);
+    }
   });
 
-  it('never picks another truck, an inactive driver or nobody', () => {
-    expect(pickLoadDriver(loads, 't3', 1, usable)).toBeNull();
-    expect(pickLoadDriver(loads, 't1', 1, new Set(['C']))).toBe('C');
-    expect(pickLoadDriver(loads, 't2', 1, new Set(['A']))).toBeNull();
-    expect(pickLoadDriver([], 't1', 1, usable)).toBeNull();
+  it('the hand-set trip wins even when it is the one that moved', () => {
+    // T02 L1 Ali filled in 09:30-11:00 (does not move); T03 L1 Ali by hand 12:00-14:00, moved to 10:00-12:00.
+    const evidence = [was('T02', 1, 'ALI', 570, 660), was('T03', 1, 'ALI', 720, 840, HAND)];
+    for (const trips of both([trip('T02', 1, 570, 660), trip('T03', 1, 600, 720)])) {
+      const r = planDrivers(trips, evidence, USABLE);
+      expect(r.drivers.get('T03:1')).toEqual({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: AT });
+      expect(ids(r)['T02:1']).toBeNull();
+      expect(r.notes).toEqual([note('T02:1', 570, 660, 'ALI', null, 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+    }
+  });
+
+  it('two hand-set trips of one driver that now overlap both keep it: the yellow clash warning shows it, no note', () => {
+    const evidence = [was('T02', 1, 'ALI', 570, 660, HAND), was('T03', 1, 'ALI', 720, 840, HAND)];
+    for (const trips of both([trip('T02', 1, 600, 720), trip('T03', 1, 630, 750)])) {
+      const r = planDrivers(trips, evidence, USABLE);
+      expect(ids(r)).toEqual({ 'T02:1': 'ALI', 'T03:1': 'ALI' });
+      expect(clashesOf(trips, r)).toHaveLength(1);
+      expect(r.notes).toEqual([]);
+    }
+  });
+
+  it('a hand-set trip moved onto a frozen load of its driver keeps the driver (the warning); a filled-in one loses it (CLASH note)', () => {
+    const locked = was('T01', 1, 'ALI', 360, 540, { status: 'LOCKED' });
+    const trips = [trip('T02', 1, 480, 660)];
+    const hand = planDrivers(trips, [locked, was('T02', 1, 'ALI', 570, 660, HAND)], USABLE);
+    expect(hand.drivers.get('T02:1')).toEqual({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: AT });
+    expect(clashesOf(trips, hand, [locked])).toHaveLength(1);
+    expect(hand.notes).toEqual([]);
+    const filled = planDrivers(trips, [locked, was('T02', 1, 'ALI', 570, 660)], USABLE);
+    expect(ids(filled)).toEqual({ 'T02:1': null });
+    expect(filled.notes).toEqual([note('T02:1', 480, 660, 'ALI', null, 'CLASH', { truckId: 'T01', loadNo: 1 })]);
+  });
+
+  it('copies the marker as the evidence row has it (driverSetById null once that user was deleted); either column makes a driver hand-set', () => {
+    const noUser = planDrivers([trip('T02', 1, 570, 660)], [was('T02', 1, 'ALI', 570, 660, { driverSetById: null, driverSetAt: AT })], USABLE);
+    expect(noUser.drivers.get('T02:1')).toEqual({ driverId: 'ALI', driverSetById: null, driverSetAt: AT });
+    const noTime = planDrivers([trip('T02', 1, 570, 660)], [was('T02', 1, 'ALI', 570, 660, { driverSetById: 'u1', driverSetAt: null })], USABLE);
+    expect(noTime.drivers.get('T02:1')).toEqual({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: null });
+    expect(isHandSetDriver({ driverId: 'ALI', driverSetById: null, driverSetAt: AT })).toBe(true);
+    expect(isHandSetDriver({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: null })).toBe(true);
+    expect(isHandSetDriver({ driverId: 'ALI', driverSetById: null, driverSetAt: null })).toBe(false);
+    expect(isHandSetDriver({ driverId: null, driverSetById: 'u1', driverSetAt: AT })).toBe(false); // "No driver": nothing to keep
+    // The dispatcher set the trip's driver (a driver, Keep or "No driver"): either column, whatever the driver.
+    expect(driverSetByDispatcher({ driverSetById: null, driverSetAt: AT })).toBe(true);
+    expect(driverSetByDispatcher({ driverSetById: 'u1', driverSetAt: null })).toBe(true);
+    expect(driverSetByDispatcher({ driverSetById: null, driverSetAt: null })).toBe(false);
+    expect(driverSetByDispatcher({})).toBe(false);
+  });
+
+  it('a hand-set driver who is no longer active is not kept: pass 2 fills the trip, without the marker, and an INACTIVE note says why', () => {
+    const r = planDrivers([trip('T03', 1, 480, 600, 'SAM')], [was('T03', 1, 'BOB', 480, 600, HAND)], new Set(['ALI', 'SAM']));
+    expect(r.drivers.get('T03:1')).toEqual({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
+    expect(r.notes).toEqual([note('T03:1', 480, 600, 'BOB', 'SAM', 'INACTIVE')]);
   });
 });
 
-describe('pickLoadDriver with exactOnly', () => {
-  it('takes only the same trip', () => {
-    const loads = [{ truckId: 't1', loadNo: 1, driverId: 'A' }];
-    expect(pickLoadDriver(loads, 't1', 2, new Set(['A']), { exactOnly: true })).toBeNull();
-    expect(pickLoadDriver(loads, 't1', 1, new Set(['A']), { exactOnly: true })).toBe('A');
+describe('planDrivers pass 2: drivers RouteIQ fills in', () => {
+  it('two filled-in trips of one driver that now overlap: the one that moved loses it, whatever the order (CLASH note)', () => {
+    const evidence = [was('T02', 1, 'ALI', 570, 660), was('T03', 1, 'ALI', 720, 840)];
+    for (const trips of both([trip('T02', 1, 570, 660), trip('T03', 1, 600, 720)])) {
+      const r = planDrivers(trips, evidence, USABLE); // T03 moved
+      expect(ids(r)).toEqual({ 'T02:1': 'ALI', 'T03:1': null });
+      expect(r.notes).toEqual([note('T03:1', 600, 720, 'ALI', null, 'CLASH', { truckId: 'T02', loadNo: 1 })]);
+      expect(clashesOf(trips, r)).toEqual([]);
+    }
+    for (const trips of both([trip('T02', 1, 700, 790), trip('T03', 1, 720, 840)])) {
+      const r = planDrivers(trips, evidence, USABLE); // T02 moved
+      expect(ids(r)).toEqual({ 'T02:1': null, 'T03:1': 'ALI' });
+      expect(r.notes).toEqual([note('T02:1', 700, 790, 'ALI', null, 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+    }
+  });
+
+  it('"moved" is the change of departure; a trip without an evidence load comes last', () => {
+    // T02 leaves 10 min later (and comes back 100 min later), T03 leaves 20 min later: T02 moved least.
+    const r = planDrivers([trip('T03', 1, 640, 700), trip('T02', 1, 490, 700)], [was('T02', 1, 'ALI', 480, 600), was('T03', 1, 'ALI', 620, 700)], USABLE);
+    expect(ids(r)).toEqual({ 'T03:1': null, 'T02:1': 'ALI' });
+    // T04 is a new trip (no evidence) listed first, with Ali as its default: T02 (moved 30 min) goes first.
+    for (const trips of both([trip('T04', 1, 580, 700, 'ALI'), trip('T02', 1, 600, 690)])) {
+      const n = planDrivers(trips, [was('T02', 1, 'ALI', 570, 660)], USABLE);
+      expect(ids(n)).toEqual({ 'T04:1': null, 'T02:1': 'ALI' });
+      expect(n.notes).toEqual([]); // T04 L1 had no driver before: nothing lost
+    }
+  });
+
+  it("a tie keeps the optimizer's order (stable): the trip listed first goes first", () => {
+    // No evidence (the first optimization of a day): both trucks default to Ali, at overlapping times.
+    const t02 = trip('T02', 1, 570, 660, 'ALI');
+    const t03 = trip('T03', 1, 600, 720, 'ALI');
+    expect(ids(planDrivers([t02, t03], [], USABLE))).toEqual({ 'T02:1': 'ALI', 'T03:1': null });
+    expect(ids(planDrivers([t03, t02], [], USABLE))).toEqual({ 'T02:1': null, 'T03:1': 'ALI' });
+    // Ali filled in on both; the plan moves both by 60 min, onto each other's hours: the one listed first keeps Ali.
+    const evidence = [was('T02', 1, 'ALI', 480, 600), was('T03', 1, 'ALI', 660, 780)];
+    const a = trip('T02', 1, 540, 660, null);
+    const b = trip('T03', 1, 600, 720, 'SAM');
+    const t02First = planDrivers([a, b], evidence, USABLE);
+    expect(ids(t02First)).toEqual({ 'T02:1': 'ALI', 'T03:1': 'SAM' });
+    expect(t02First.notes).toEqual([note('T03:1', 600, 720, 'ALI', 'SAM', 'CLASH', { truckId: 'T02', loadNo: 1 })]);
+    const t03First = planDrivers([b, a], evidence, USABLE);
+    expect(ids(t03First)).toEqual({ 'T02:1': null, 'T03:1': 'ALI' });
+    expect(t03First.notes).toEqual([note('T02:1', 540, 660, 'ALI', null, 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+  });
+
+  it("candidates in order: (a) the trip's own driver, (b) the driver of the truck's nearest trip, (c) the truck's default", () => {
+    // (a) beats (b) and (c).
+    const own = planDrivers([trip('T02', 1, 480, 600, 'BOB'), trip('T02', 2, 700, 800, 'BOB')], [was('T02', 1, 'SAM', 480, 600), was('T02', 2, 'ALI', 700, 800)], USABLE);
+    expect(ids(own)).toEqual({ 'T02:1': 'SAM', 'T02:2': 'ALI' });
+    // T03 L1 moved onto T02 L1 (Ali, did not move): (a) Ali is taken, so (b) T03 L2's Bob.
+    const evidence = [was('T02', 1, 'ALI', 480, 600), was('T03', 1, 'ALI', 700, 820), was('T03', 2, 'BOB', 900, 1000)];
+    const trips = [trip('T03', 1, 520, 640, 'SAM'), trip('T02', 1, 480, 600), trip('T03', 2, 900, 1000)];
+    const b = planDrivers(trips, evidence, USABLE);
+    expect(ids(b)).toEqual({ 'T03:1': 'BOB', 'T02:1': 'ALI', 'T03:2': 'BOB' });
+    expect(b.notes).toEqual([note('T03:1', 520, 640, 'ALI', 'BOB', 'CLASH', { truckId: 'T02', loadNo: 1 })]);
+    // (b) is Ali too (busy): (c) the default Sam; no default: no driver.
+    const onlyAli = [evidence[0]!, evidence[1]!, was('T03', 2, 'ALI', 900, 1000)];
+    expect(ids(planDrivers(trips, onlyAli, USABLE))['T03:1']).toBe('SAM');
+    expect(ids(planDrivers([{ ...trips[0]!, defaultDriverId: null }, trips[1]!, trips[2]!], onlyAli, USABLE))['T03:1']).toBeNull();
+  });
+
+  it("(b) is the truck's trip nearest in time that has a driver - a frozen one too - and only that one", () => {
+    const t03 = [was('T03', 1, 'BOB', 360, 460), was('T03', 3, 'SAM', 900, 1000)];
+    const trips = (l2: [number, number]) => [trip('T03', 1, 360, 460), trip('T03', 3, 900, 1000), trip('T03', 2, l2[0], l2[1])];
+    expect(ids(planDrivers(trips([500, 600]), t03, USABLE))['T03:2']).toBe('BOB'); // 40 min after L1, 300 before L3
+    expect(ids(planDrivers(trips([800, 880]), t03, USABLE))['T03:2']).toBe('SAM'); // 20 min before L3
+    // Bob, the nearest, is on another truck at that time (by hand): no driver - not the next trip's Sam.
+    const busy = planDrivers([...trips([500, 600]), trip('T05', 1, 500, 600)], [...t03, was('T05', 1, 'BOB', 500, 600, HAND)], USABLE);
+    expect(ids(busy)['T03:2']).toBeNull();
+    // The driver who took the truck's locked Load 1 gets its new Load 2.
+    const locked = planDrivers([trip('T01', 2, 560, 700)], [was('T01', 1, 'ALI', 360, 540, { status: 'LOCKED' })], USABLE);
+    expect(ids(locked)).toEqual({ 'T01:2': 'ALI' });
+    // (b) must be active too: the truck's dispatched Load 1 has a driver no longer active - (c) the default Sam.
+    const inactive = planDrivers([trip('T01', 2, 560, 700, 'SAM')], [was('T01', 1, 'OLD', 360, 540, { status: 'DISPATCHED' })], USABLE);
+    expect(ids(inactive)).toEqual({ 'T01:2': 'SAM' });
+    expect(inactive.notes).toEqual([]);
+    // A frozen load without a driver is not the nearest trip "that has a driver": new Load 2 gets Load 3's Bob, not the default.
+    const noDriver = planDrivers([trip('T01', 2, 560, 700, 'SAM'), trip('T01', 3, 900, 1000)], [was('T01', 1, null, 360, 540, { status: 'LOCKED' }), was('T01', 3, 'BOB', 900, 1000)], USABLE);
+    expect(ids(noDriver)).toEqual({ 'T01:2': 'BOB', 'T01:3': 'BOB' });
+    expect(noDriver.notes).toEqual([]);
+  });
+
+  it('filling a trip that had no driver, or a new trip, is not a note; keeping the same driver is not either', () => {
+    const r = planDrivers([trip('T03', 1, 480, 600, 'SAM'), trip('T04', 1, 480, 600, 'BOB'), trip('T02', 1, 480, 600)], [was('T03', 1, null, 480, 600), was('T02', 1, 'ALI', 480, 600)], USABLE);
+    expect(ids(r)).toEqual({ 'T03:1': 'SAM', 'T04:1': 'BOB', 'T02:1': 'ALI' });
+    expect(r.notes).toEqual([]);
+    // "No driver" chosen by the dispatcher (the row carries the marker, without a driver): not a
+    // hand-set driver, so the trip is filled in like any other - without the marker, and no note.
+    const cleared = planDrivers([trip('T03', 1, 480, 600, 'SAM')], [was('T03', 1, null, 480, 600, HAND)], USABLE);
+    expect(cleared.drivers.get('T03:1')).toEqual({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
+    expect(cleared.notes).toEqual([]);
+  });
+
+  it('a filled-in driver who is no longer active: the next candidate, and an INACTIVE note', () => {
+    const r = planDrivers([trip('T01', 1, 360, 480, 'SAM')], [was('T01', 1, 'OLD', 360, 480)], USABLE);
+    expect(ids(r)).toEqual({ 'T01:1': 'SAM' });
+    expect(r.notes).toEqual([note('T01:1', 360, 480, 'OLD', 'SAM', 'INACTIVE')]);
   });
 });
 
-describe('assignReplanDrivers - drivers across re-plans', () => {
-  const usable = new Set(['D', 'E', 'F']);
-  // Trip k of a truck: out 06:00 + 4 h per trip, back 3.5 h later.
-  const trip = (truckId: string, loadNo: number, defaultDriverId: string | null = null, shiftMin = 0): ReplanLoad => ({
-    key: `${truckId}:${loadNo}`,
-    truckId,
-    loadNo,
-    departMin: 360 + (loadNo - 1) * 240 + shiftMin,
-    returnMin: 360 + (loadNo - 1) * 240 + shiftMin + 210,
-    defaultDriverId,
-  });
-  const kept = (l: ReplanLoad, driverId: string | null) => ({ truckId: l.truckId, driverId, departMin: l.departMin, returnMin: l.returnMin });
-  const on = (truckId: string, loadNo: number, driverId: string | null) => ({ truckId, loadNo, driverId });
-
-  it('the same trip in the parent version beats another trip of this version (late order after trip 1 was locked)', () => {
-    // v1: trip 1 locked with D, trip 2 given to E by hand. v2 carries only trip 1.
-    const now = [on('A', 1, 'D')];
-    const parent = [on('A', 1, 'D'), on('A', 2, 'E')];
-    const got = assignReplanDrivers([trip('A', 2, 'D'), trip('A', 3, 'D')], now, parent, [kept(trip('A', 1), 'D')], usable);
-    expect(got.get('A:2')).toBe('E');
-    // A new trip 3 follows the nearest trip of either version (trip 2: E), not the carried trip 1.
-    expect(got.get('A:3')).toBe('E');
+describe('planDrivers: frozen loads, one truck, trips gone, first optimization', () => {
+  it('frozen loads are untouched (never in the result, no note even with an inactive driver); their times take their drivers', () => {
+    const evidence = [was('T01', 1, 'ALI', 360, 540, { status: 'LOCKED' }), was('T05', 1, 'OLD', 360, 540, { status: 'DISPATCHED', ...HAND }), was('T02', 1, 'ALI', 570, 660)];
+    const r = planDrivers([trip('T02', 1, 480, 660)], evidence, USABLE);
+    expect([...r.drivers.keys()]).toEqual(['T02:1']);
+    expect(ids(r)).toEqual({ 'T02:1': null });
+    expect(r.notes).toEqual([note('T02:1', 480, 660, 'ALI', null, 'CLASH', { truckId: 'T01', loadNo: 1 })]);
   });
 
-  it('this version wins for the same trip, and its nearest trip for a new one', () => {
-    const now = [on('A', 1, 'F'), on('A', 2, 'D')];
-    const parent = [on('A', 1, 'E'), on('A', 2, 'E'), on('A', 3, 'E')];
-    const got = assignReplanDrivers([trip('A', 1), trip('A', 2), trip('A', 3)], now, parent, [], usable);
-    expect([got.get('A:1'), got.get('A:2'), got.get('A:3')]).toEqual(['F', 'D', 'E']);
-    // "Use instead" on the same version (no parent): the nearest trip of this version.
-    const same = assignReplanDrivers([trip('A', 1), trip('A', 2), trip('A', 3)], now, [], [], usable);
-    expect([same.get('A:1'), same.get('A:2'), same.get('A:3')]).toEqual(['F', 'D', 'D']);
+  it("every frozen status - LOCKED, LOADING, DISPATCHED, COMPLETED - takes its driver's time, in both truck orders; (b) takes the driver of the truck's frozen Load 1", () => {
+    for (const status of ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']) {
+      // Ali drives T01 L1 06:00-09:00 (frozen). T02 L1, Ali filled in 09:30-11:00, now leaves 08:00;
+      // T03 L1 is new, 07:00-09:20, Ali its default: neither gets Ali, and only T02 L1 had him.
+      const evidence = [was('T01', 1, 'ALI', 360, 540, { status }), was('T02', 1, 'ALI', 570, 660)];
+      for (const trips of both([trip('T02', 1, 480, 660, 'ALI'), trip('T03', 1, 420, 560, 'ALI')])) {
+        const r = planDrivers(trips, evidence, USABLE);
+        expect(ids(r), status).toEqual({ 'T02:1': null, 'T03:1': null });
+        expect(r.notes, status).toEqual([note('T02:1', 480, 660, 'ALI', null, 'CLASH', { truckId: 'T01', loadNo: 1 })]);
+        expect(clashesOf(trips, r, evidence), status).toEqual([]);
+      }
+      // The truck's new Load 2 after its frozen Load 1: Ali from (b), not the default Sam.
+      expect(ids(planDrivers([trip('T01', 2, 560, 700, 'SAM')], [was('T01', 1, 'ALI', 360, 540, { status })], USABLE)), status).toEqual({ 'T01:2': 'ALI' });
+    }
   });
 
-  it('never guesses one driver onto two trucks at the same time', () => {
-    // Truck A (default D) was not used in v1; the dispatcher put D on truck B. v2 uses both.
-    const parent = [on('B', 1, 'D')];
-    const got = assignReplanDrivers([trip('A', 1, 'D'), trip('B', 1, null, 15)], [], parent, [], usable);
-    expect(got.get('B:1')).toBe('D'); // stronger evidence (B's own trip) wins, whatever the order of the loads
-    expect(got.get('A:1')).toBeNull(); // left for the dispatcher, not a second sheet for D
-    // Two trucks with the same default driver: only one of them gets D while their times overlap...
-    const shared = assignReplanDrivers([trip('A', 1, 'D'), trip('B', 1, 'D', 30)], [], [], [], usable);
-    expect([shared.get('A:1'), shared.get('B:1')].filter(Boolean)).toEqual(['D']);
-    // ...and both when they do not (A back 09:30, B out 10:00).
-    const later = assignReplanDrivers([trip('A', 1, 'D'), trip('B', 2, 'D')], [], [], [], usable);
-    expect([later.get('A:1'), later.get('B:2')]).toEqual(['D', 'D']);
-    // The same driver on consecutive trips of one truck is normal.
-    const own = assignReplanDrivers([trip('A', 1, 'D'), trip('A', 2, 'D')], [], [], [], usable);
-    expect([own.get('A:1'), own.get('A:2')]).toEqual(['D', 'D']);
+  it("trip 1 and trip 2 of one truck share a driver: no clash unless their times really overlap", () => {
+    for (const marker of [HAND, {}]) {
+      const evidence = [was('T01', 1, 'ALI', 360, 540, marker), was('T01', 2, 'ALI', 560, 700)];
+      const touching = [trip('T01', 1, 360, 560), trip('T01', 2, 560, 700)]; // back at 09:20, out again at 09:20
+      for (const trips of both(touching)) {
+        const r = planDrivers(trips, evidence, USABLE);
+        expect(ids(r)).toEqual({ 'T01:1': 'ALI', 'T01:2': 'ALI' });
+        expect(r.notes).toEqual([]);
+      }
+    }
+    // Not a valid plan, but the rule is the times: trip 2 (moved) does not get Ali on top of trip 1.
+    const overlap = planDrivers([trip('T01', 1, 360, 560), trip('T01', 2, 540, 700)], [was('T01', 1, 'ALI', 360, 540), was('T01', 2, 'ALI', 560, 700)], USABLE);
+    expect(ids(overlap)).toEqual({ 'T01:1': 'ALI', 'T01:2': null });
   });
 
-  it('counts kept (frozen) loads of other trucks as busy', () => {
-    const lockedC = kept(trip('C', 1), 'D'); // 06:00-09:30 on truck C
-    const got = assignReplanDrivers([trip('A', 1, 'D', 60), trip('A', 2, 'D', 60)], [on('C', 1, 'D')], [], [lockedC], usable);
-    expect(got.get('A:1')).toBeNull(); // 07:00-10:30 overlaps truck C
-    expect(got.get('A:2')).toBe('D'); // 11:00-14:30 does not
+  it('TRIP_GONE: a hand-set driver whose trip the plan does not have is a note; a filled-in driver, "No driver" and a frozen load are not', () => {
+    const evidence = [
+      was('T02', 1, 'ALI', 480, 600),
+      was('T03', 1, 'BOB', 480, 600, HAND),
+      was('T02', 2, 'SAM', 620, 740),
+      was('T04', 1, null, 480, 600),
+      was('T06', 1, null, 480, 600, HAND), // the dispatcher's "No driver"
+      was('T01', 1, 'SAM', 360, 470, { status: 'LOCKED', ...HAND }),
+    ];
+    for (const usable of [USABLE, new Set(['ALI', 'SAM'])]) {
+      const r = planDrivers([trip('T02', 1, 480, 600)], evidence, usable); // Bob inactive or not: still a note
+      expect(r.notes).toEqual([{ key: null, truckId: 'T03', loadNo: 1, departMin: 480, returnMin: 600, fromDriverId: 'BOB', toDriverId: null, reason: 'TRIP_GONE', other: null }]);
+      expect(Object.keys(r)).toEqual(['drivers', 'notes']); // nothing is kept to bring Bob back
+    }
   });
 
-  it("keeps this version's own choice for the trip even if it now overlaps (shown as a warning instead)", () => {
-    const now = [on('A', 1, 'D'), on('B', 1, 'D')];
-    const got = assignReplanDrivers([trip('A', 1), trip('B', 1)], now, [], [], usable);
-    expect([got.get('A:1'), got.get('B:1')]).toEqual(['D', 'D']);
+  it('nothing brings a hand-set driver back: the next plan with that trip reads only the loads in use', () => {
+    // After the plan without T03, the version's loads are T02 L1 (Ali) and T02 L2 (Ali): T03 L1 gets its default.
+    const after = [was('T02', 1, 'ALI', 480, 600), was('T02', 2, 'ALI', 620, 740)];
+    const r = planDrivers([trip('T02', 1, 480, 600, 'ALI'), trip('T03', 1, 480, 600, 'SAM')], after, USABLE);
+    expect(r.drivers.get('T03:1')).toEqual({ driverId: 'SAM', driverSetById: null, driverSetAt: null });
+    expect(r.notes).toEqual([]);
   });
 
-  it('skips inactive drivers, and "No driver" falls back to the next source', () => {
-    const got = assignReplanDrivers([trip('A', 1, 'D'), trip('B', 1, 'X', 300)], [on('A', 1, null), on('B', 1, 'X')], [], [], usable);
-    expect(got.get('A:1')).toBe('D'); // "No driver" is not kept: the truck default comes back
-    expect(got.get('B:1')).toBeNull(); // X is not active
+  it("the first optimization of a day (no evidence): the trucks' default drivers in the optimizer's order, never one driver on two overlapping trips", () => {
+    const trips = [trip('T02', 1, 570, 660, 'ALI'), trip('T03', 1, 600, 720, 'ALI'), trip('T04', 1, 700, 800, 'ALI'), trip('T05', 1, 600, 700, 'SAM'), trip('T05', 2, 720, 800, 'SAM')];
+    const r = planDrivers(trips, [], USABLE);
+    expect(ids(r)).toEqual({ 'T02:1': 'ALI', 'T03:1': null, 'T04:1': 'ALI', 'T05:1': 'SAM', 'T05:2': 'SAM' });
+    expect([...r.drivers.values()].every((v) => v.driverSetById === null && v.driverSetAt === null)).toBe(true);
+    expect(r.notes).toEqual([]);
+    // An inactive default driver is left out.
+    expect(ids(planDrivers([trip('T02', 1, 570, 660, 'OLD')], [], USABLE))).toEqual({ 'T02:1': null });
+  });
+});
+
+describe('isDriverKeep: re-sending the driver RouteIQ filled in on a load still at the depot', () => {
+  it('only a filled-in driver, re-sent, on a load that has not left', () => {
+    expect(isDriverKeep({ status: 'PLANNED', driverId: 'ALI', driverSetAt: null }, 'ALI')).toBe(true);
+    expect(isDriverKeep({ status: 'LOCKED', driverId: 'ALI', driverSetAt: null }, 'ALI')).toBe(true);
+    expect(isDriverKeep({ status: 'PLANNED', driverId: 'ALI', driverSetAt: AT }, 'ALI')).toBe(false); // already the dispatcher's
+    expect(isDriverKeep({ status: 'PLANNED', driverId: 'ALI', driverSetById: 'u1', driverSetAt: null }, 'ALI')).toBe(false);
+    expect(isDriverKeep({ status: 'PLANNED', driverId: 'ALI', driverSetAt: null }, 'SAM')).toBe(false); // a change
+    expect(isDriverKeep({ status: 'PLANNED', driverId: null, driverSetAt: null }, null)).toBe(false);
+    expect(isDriverKeep({ status: 'DISPATCHED', driverId: 'ALI', driverSetAt: null }, 'ALI')).toBe(false); // out: nothing changes
+  });
+});
+
+describe('driverPickLink: "picked by hand" or Keep next to a driver on the plan screen', () => {
+  const statuses: LoadStatusName[] = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
+
+  it('Keep shows exactly when the server takes the re-sent driver as a Keep (isDriverKeep) and the dispatcher can change this load to that active driver', () => {
+    for (const status of statuses) {
+      for (const driverId of [null, 'ALI']) {
+        for (const driverHandSet of [false, true]) {
+          for (const editable of [false, true]) {
+            for (const driverActive of [false, true]) {
+              const got = driverPickLink({ status, driverId, driverHandSet: driverHandSet && driverId !== null }, { editable, driverActive });
+              const serverKeeps = isDriverKeep({ status, driverId, driverSetAt: driverHandSet ? new Date() : null }, driverId);
+              const label = JSON.stringify({ status, driverId, driverHandSet, editable, driverActive });
+              expect(got === 'KEEP', label).toBe(serverKeeps && editable && driverActive);
+              expect(got === 'HAND_SET', label).toBe(driverId !== null && driverHandSet && !ON_ROAD.has(status));
+            }
+          }
+        }
+      }
+    }
   });
 });
 
@@ -261,6 +485,10 @@ describe('driverClashes / timesClash', () => {
     ]);
     expect(timesClash(loads[2], loads[3])).toBe(false); // back 13:20 = out 13:20 is fine
     expect(timesClash(loads[0], loads[2])).toBe(false); // same truck: consecutive trips
+    // The time rule alone (planDrivers): touching is not overlapping, whatever the trucks.
+    expect(timesOverlap(loads[2], loads[3])).toBe(false);
+    expect(timesOverlap(loads[0], loads[1])).toBe(true);
+    expect(timesOverlap({ departMin: 360, returnMin: 560 }, { departMin: 540, returnMin: 700 })).toBe(true);
   });
 });
 

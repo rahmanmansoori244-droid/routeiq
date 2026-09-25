@@ -96,6 +96,10 @@ export async function callDispatchSolver(req: DispatchRequest): Promise<Dispatch
     // Web and solver deploy independently: a new web briefly talking to the previous solver.
     throw new SolverError('The route optimizer is being updated. Try again in a minute.', 404, res.text);
   }
+  if (res.status === 503) {
+    // The solver runs at most MAX_CONCURRENT_DISPATCH solves at once (apps/solver/main.py).
+    throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, res.text);
+  }
   if (res.status < 200 || res.status >= 300) {
     // The solver explains aborted solves in FastAPI's { detail } (e.g. 504: out of time / worker died).
     let detail: string | undefined;
