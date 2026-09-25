@@ -8,6 +8,7 @@ import { parseUpload } from '@/lib/csv';
 import { normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/client-ip';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
 
@@ -40,13 +41,14 @@ function parsePayment(raw: string): 'CASH' | 'CREDIT' | 'PREPAID' | null {
 
 export async function POST(req: Request) {
   const session = await auth();
-  if (!session?.user || !session.user.tenantId) {
-    return NextResponse.json({ data: null, error: 'Unauthorized' }, { status: 401 });
-  }
+  // 401 only for "no session" (the dispatch screen then sends the browser to sign in again), like
+  // withTenantApi; a session without a tenant (platform admin) is 403.
+  if (!session?.user) return NextResponse.json({ data: null, error: 'Unauthorized' }, { status: 401 });
+  if (!session.user.tenantId) return NextResponse.json({ data: null, error: 'No tenant on session' }, { status: 403 });
   if (!hasRole(session.user.role, 'PLANNER')) {
     return NextResponse.json({ data: null, error: 'Forbidden' }, { status: 403 });
   }
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+  const ip = clientIp(req);
 
   const r = rateLimit(`customers-import:${session.user.tenantId}:${session.user.id}`, LIMITS.ordersUpload.limit, LIMITS.ordersUpload.windowMs);
   if (!r.ok) return NextResponse.json({ data: null, error: 'Too many uploads. Try again later.' }, { status: 429 });

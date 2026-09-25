@@ -1,10 +1,11 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { prisma } from '@/lib/db';
 import { hashPassword } from '@/lib/auth';
 import { audit } from '@/lib/audit';
-import { consumeResetToken } from '@/lib/password-reset';
+import { resetPasswordWithToken, resetTokenUsable } from '@/lib/password-reset';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { clientIp } from '@/lib/client-ip';
+import { invalidatePrincipal } from '@/lib/session-principal';
 
 const schema = z.object({
   token: z.string().min(20).max(200),
@@ -14,8 +15,8 @@ const schema = z.object({
 export const dynamic = 'force-dynamic';
 
 export async function POST(req: Request) {
-  const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown';
-  const limit = rateLimit(`auth:reset:${ip}`, LIMITS.auth.limit, LIMITS.auth.windowMs);
+  const ip = clientIp(req);
+  const limit = rateLimit(`auth:reset:${ip ?? 'unknown'}`, LIMITS.auth.limit, LIMITS.auth.windowMs);
   if (!limit.ok) {
     return NextResponse.json({ data: null, error: 'Too many attempts. Try again shortly.' }, { status: 429 });
   }
@@ -31,18 +32,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ data: null, error: 'Invalid request.' }, { status: 400 });
   }
 
-  const result = await consumeResetToken(parsed.data.token);
-  if (!result.ok) {
-    // Don't differentiate invalid vs expired vs used — same response avoids
-    // probing for token states.
-    return NextResponse.json({ data: null, error: 'This reset link is invalid or has expired.' }, { status: 400 });
-  }
+  // Don't differentiate invalid vs expired vs used — same response avoids
+  // probing for token states.
+  const invalid = () =>
+    NextResponse.json({ data: null, error: 'This reset link is invalid or has expired.' }, { status: 400 });
 
+  // Cheap read-only check first, so junk tokens never cost a bcrypt hash. Then hash (slow, outside
+  // the transaction), then consume the token and set the password in ONE transaction that also
+  // retires the user's other reset links.
+  if (!(await resetTokenUsable(parsed.data.token))) return invalid();
   const hash = await hashPassword(parsed.data.newPassword);
-  await prisma.user.update({
-    where: { id: result.userId },
-    data: { passwordHash: hash },
-  });
+  const result = await resetPasswordWithToken(parsed.data.token, hash);
+  if (!result.ok) return invalid();
+  // Sessions carry a fingerprint of the password hash: every open session of this user ends on
+  // its next request. Drop the cached copy so that happens now.
+  invalidatePrincipal(result.userId);
 
   if (result.tenantId) {
     try {

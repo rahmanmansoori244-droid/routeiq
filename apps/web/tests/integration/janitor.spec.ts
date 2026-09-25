@@ -34,9 +34,11 @@ async function optimizingRun(slugPrefix: string) {
   return { h, run };
 }
 
+// A production server (CI runs `pnpm start`) accepts only JANITOR_TOKEN; a dev server falls back
+// to SOLVER_TOKEN (lib/janitor-auth.ts).
 async function callJanitor() {
-  const tok = process.env.SOLVER_TOKEN ?? process.env.JANITOR_TOKEN;
-  expect(tok, 'SOLVER_TOKEN must be set in .env for this test').toBeTruthy();
+  const tok = process.env.JANITOR_TOKEN || process.env.SOLVER_TOKEN;
+  expect(tok, 'JANITOR_TOKEN (or, on a dev server, SOLVER_TOKEN) must be set for this test').toBeTruthy();
   const res = await fetch(`${BASE}/api/cron/janitor`, { method: 'POST', headers: { 'X-Janitor-Token': tok! } });
   expect(res.status).toBe(200);
 }
@@ -105,5 +107,19 @@ describe('orphan janitor', () => {
 
     const after = await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.status).toBe('RUNNING'); // untouched
+  });
+});
+
+describe('janitor authentication', () => {
+  it('refuses a call without a token', async () => {
+    const res = await fetch(`${BASE}/api/cron/janitor`, { method: 'POST' });
+    expect(res.status).toBe(401);
+  });
+
+  // With a separate JANITOR_TOKEN configured (CI, production), the solver secret is never accepted.
+  const both = process.env.JANITOR_TOKEN && process.env.SOLVER_TOKEN && process.env.JANITOR_TOKEN !== process.env.SOLVER_TOKEN;
+  it.skipIf(!both)('does not accept SOLVER_TOKEN when JANITOR_TOKEN is set', async () => {
+    const res = await fetch(`${BASE}/api/cron/janitor`, { method: 'POST', headers: { 'X-Janitor-Token': process.env.SOLVER_TOKEN! } });
+    expect(res.status).toBe(401);
   });
 });

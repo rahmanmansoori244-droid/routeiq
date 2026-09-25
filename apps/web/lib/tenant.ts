@@ -2,6 +2,8 @@ import { notFound } from 'next/navigation';
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { auth } from './auth';
+import { audit } from './audit';
+import { redirectToSignIn } from './session-redirect';
 
 /**
  * Tenant-scoped Prisma client wrapper.
@@ -104,7 +106,9 @@ export type TenantDb = ReturnType<typeof tenantDb>;
  */
 export async function getCurrentTenant(slug: string) {
   const session = await auth();
-  if (!session?.user) notFound();
+  // The edge middleware let the request through, so a cookie exists that the server no longer
+  // accepts (user or tenant deactivated, password reset, 12 h lifetime over): clear it and sign in.
+  if (!session?.user) redirectToSignIn();
 
   const tenant = await prisma.tenant.findUnique({ where: { slug } });
   if (!tenant || !tenant.active) notFound();
@@ -113,12 +117,54 @@ export async function getCurrentTenant(slug: string) {
   if (session.user.role !== 'SUPER_ADMIN' && session.user.tenantId !== tenant.id) {
     notFound();
   }
+  if (session.user.role === 'SUPER_ADMIN' && session.user.tenantId !== tenant.id) {
+    await recordCrossTenantView(session.user.id, session.user.email, tenant.id, tenant.slug);
+  }
 
   return {
     tenant,
     user: session.user,
     db: tenantDb(tenant.id),
   };
+}
+
+/** At most one CROSS_TENANT_VIEW row per platform admin, tenant and hour. */
+export const CROSS_TENANT_VIEW_EVERY_MS = 60 * 60 * 1000;
+const crossViews = ((globalThis as unknown as { __routeiqCrossViews?: Map<string, number> }).__routeiqCrossViews ??=
+  new Map<string, number>());
+
+/**
+ * A platform admin (SUPER_ADMIN) opened a page of a tenant that is not their own. Leave a trace in
+ * THAT tenant's audit log, so its admins can see who looked. Best effort: never blocks the page.
+ */
+export async function recordCrossTenantView(
+  userId: string,
+  email: string,
+  tenantId: string,
+  slug: string,
+  now: number = Date.now(),
+): Promise<boolean> {
+  const key = `${userId}:${tenantId}`;
+  const last = crossViews.get(key);
+  if (last !== undefined && now - last < CROSS_TENANT_VIEW_EVERY_MS) return false;
+  crossViews.set(key, now);
+  if (crossViews.size > 5000) {
+    for (const [k, t] of crossViews) if (now - t >= CROSS_TENANT_VIEW_EVERY_MS) crossViews.delete(k);
+  }
+  try {
+    await audit({
+      tenantId,
+      userId,
+      action: 'CROSS_TENANT_VIEW',
+      entity: 'Tenant',
+      entityId: tenantId,
+      afterJson: { slug, platformAdmin: email },
+    });
+    return true;
+  } catch (err) {
+    console.error('[tenant] CROSS_TENANT_VIEW audit failed', (err as Error)?.message ?? err);
+    return false;
+  }
 }
 
 export async function getCurrentTenantOrNull(slug: string) {

@@ -116,6 +116,8 @@ export async function cleanupTenant(slug: string): Promise<void> {
     if (!t) return;
     await prisma.$transaction([
       prisma.$executeRaw`DELETE FROM "DeliveryProof" WHERE "tenantId" = ${t.id}`,
+      // DriverShift -> Driver is ON DELETE RESTRICT (legacy driver app); TruckLocation cascades.
+      prisma.$executeRaw`DELETE FROM "DriverShift" WHERE "tenantId" = ${t.id}`,
       prisma.$executeRaw`DELETE FROM "RouteAssignment" WHERE "runId" IN (SELECT id FROM "RunPlan" WHERE "tenantId" = ${t.id})`,
       prisma.$executeRaw`DELETE FROM "PlanLoad" WHERE "tenantId" = ${t.id}`,
       prisma.$executeRaw`DELETE FROM "ManualBaselineAssignment" WHERE "baselineId" IN (SELECT id FROM "ManualBaseline" WHERE "tenantId" = ${t.id})`,
@@ -205,4 +207,59 @@ export function tomorrowIso(): string {
   const d = new Date();
   d.setDate(d.getDate() + 1);
   return d.toISOString().slice(0, 10);
+}
+
+export type InvitableRole = 'TENANT_ADMIN' | 'SUPERVISOR' | 'PLANNER' | 'VIEWER';
+
+export interface InvitedUser {
+  id: string;
+  email: string;
+  password: string;
+  role: InvitableRole;
+  jar: CookieJar;
+}
+
+/** Invite a user through the users API (admin session) and sign them in. */
+export async function inviteUser(admin: TenantHandle, role: InvitableRole): Promise<InvitedUser> {
+  const email = `${role.toLowerCase()}-${uniqueSuffix()}@x.test`;
+  const res = await fetchWith(admin.cookieJar, `${BASE}/api/users`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, name: `Test ${role}`, role }),
+  });
+  if (res.status !== 201) throw new Error(`invite ${role} ${res.status}: ${await res.text()}`);
+  const body = (await res.json()) as { data: { user: { id: string }; tempPassword: string } };
+  const jar = new CookieJar();
+  await login(jar, email, body.data.tempPassword);
+  return { id: body.data.user.id, email, password: body.data.tempPassword, role, jar };
+}
+
+/**
+ * GET `path` and follow redirects by hand (cookies kept in `jar`), up to `max` hops. Returns every
+ * URL visited and the final response. Also follows a Next.js meta-refresh redirect in a 200 page.
+ */
+export async function followRedirects(
+  jar: CookieJar | undefined,
+  path: string,
+  max = 5,
+): Promise<{ urls: string[]; final: Response; body: string }> {
+  const urls: string[] = [];
+  let url = new URL(path, BASE).toString();
+  for (let i = 0; i <= max; i++) {
+    urls.push(url);
+    const res = await fetchWith(jar, url);
+    const loc = res.headers.get('location');
+    if (res.status >= 300 && res.status < 400 && loc) {
+      url = new URL(loc, url).toString();
+      continue;
+    }
+    const body = await res.text();
+    const meta = /<meta[^>]+http-equiv="refresh"[^>]+content="\d+;url=([^"]+)"/i.exec(body);
+    if (res.status === 200 && meta) {
+      url = new URL(meta[1]!.replace(/&amp;/g, '&'), url).toString();
+      continue;
+    }
+    return { urls, final: res, body };
+  }
+  throw new Error(`more than ${max} redirects: ${urls.join(' -> ')}`);
 }

@@ -30,7 +30,7 @@ export const GET = withTenantApi(async (req, { db }) => {
 
   if (customers.length === 0 || products.length === 0) {
     return NextResponse.json(
-      { data: null, error: 'No active customers or products found. Seed the tenant first (`pnpm db:seed:nmwc`).' },
+      { data: null, error: 'No active customers or products found. Add customers and products first (Customers and Products screens, or `pnpm db:seed:dispatch` locally).' },
       { status: 400 },
     );
   }

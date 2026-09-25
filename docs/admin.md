@@ -7,27 +7,29 @@ Operational guide for tenant admins, on-call, and support. Pairs with [`CLAUDE.m
 ## Tenant lifecycle
 
 ### Creating a new tenant
-1. Send the prospective admin to `/signup`.
+1. Send the prospective admin to `/signup` (open by default; `SIGNUP_MODE=closed` turns it off).
 2. They fill: company name, tenant slug, country, currency, primary unit, admin email + password + name.
-3. The signup writes a `Tenant`, `TenantConfig` (with defaults), and a `TENANT_ADMIN` user transactionally.
+3. The signup writes a `Tenant`, `TenantConfig` (with defaults), and a `TENANT_ADMIN` user transactionally. Sign-up never creates a platform admin.
 4. The new admin lands on `/t/{slug}/onboard` — three-step wizard for first depot, first truck, customers (CSV optional).
 5. **Stopwatched onboarding target: <30 minutes** for a planner with the right CSV prepared.
 
-### Setting `SUPER_ADMIN_EMAILS`
-Allowlist of platform-level super admins. Comma-separated. They can:
+### Platform admins (`SUPER_ADMIN`)
+Since stabilization PR1 a platform admin needs BOTH the email in `SUPER_ADMIN_EMAILS` (comma-separated, web service) AND the role, granted only by the owner-run `apps/web/prisma/grant-platform-admin.ts <email> [--revoke]` (see [`SECURITY.md`](./SECURITY.md) section 3; it writes an audit row). Either one alone grants nothing. They can:
 - See every tenant in `/admin`
-- Access any `/t/{slug}` regardless of tenant assignment
-- Suspend/restore tenants (v1: read-only; suspend toggle lands in Phase 5+)
+- Open any `/t/{slug}` page; each view writes a `CROSS_TENANT_VIEW` row in that tenant's audit log
+- Suspend/restore tenants (read-only in the UI; see below)
+
+A tenant admin cannot deactivate or demote a platform admin.
 
 ### Suspending a tenant
-v1: set `Tenant.active = false` directly in DB. Users will hit 404 on tenant routes.
+Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this blocks the tenant's sign-in, every API call and every page within 30 s, and open sessions end without a redirect loop. First check that no platform admin account belongs to that tenant.
 
 ---
 
 ## Daily operations
 
 ### When a planner says "optimization failed"
-1. Open the run detail page; the failure banner has a "Download debug JSON" button.
+1. Open the run detail page; the failure banner has a "Download debug JSON" button (SUPERVISOR and above: the JSON holds revenue, margins and coordinates).
 2. The JSON contains `requestJson` (exact solver input), `responseJson` (if any), and `errorJson` (reason).
 3. Common reasons:
    - `SOLVER_ERROR` with HTTP 5xx → solver crashed; check Railway logs for `routeiq-solver`
@@ -46,34 +48,41 @@ v1: set `Tenant.active = false` directly in DB. Users will hit 404 on tenant rou
    curl -X POST $BASE/api/cron/janitor -H "X-Janitor-Token: $JANITOR_TOKEN"
    ```
 
-### When users say "I can't see the tenant"
+### When users say "I can't see the tenant" or "I was signed out"
 - Check the URL: it must be `/t/{their-tenant-slug}`. Cross-tenant access returns **404** (not 403) to avoid leaking tenant existence.
 - Check the user's `tenantId` matches the URL's tenant `slug` in DB.
-- Check the user is `active = true`.
+- Check the user and the tenant are `active = true`.
+- Sessions end after 12 h (one shift) even while in use, and at once when the user is deactivated, their password is reset or their tenant is suspended. "Your session has ended" on the sign-in page is expected then. After signing in again, a dispatcher who was on the dispatch screen returns to the same day and depot.
+- Only the server can end a session: opening `/api/auth/end-session` (for example from a link on another site) while the session is still valid just goes to the dashboard.
+- After 5 wrong passwords in 15 min from one place, sign-in for that email pauses for up to 15 min (same error message). It never locks the account.
 
 ---
 
 ## Auth and password resets
 
-### Standard reset (v2 — email-driven)
-v2 will send a Resend/Postmark email. For v1 we don't ship that yet.
+### Standard reset (email)
+`/forgot` sends a reset link through Resend when `RESEND_API_KEY` (and a verified `RESEND_FROM`) is set on web. Without it production sends nothing and logs nothing about the link (`/api/health` shows `"email":"not_configured"`), and `/forgot` says "Reset by email is not available" and points the user to their company admin. Only the newest link works; a reset ends the user's open sessions.
 
-### v1 emergency password reset
-In the DB:
+### Admin reset (works without email)
+A tenant admin opens `/t/{slug}/users` and clicks **Reset password** on the user's row (`POST /api/users/:id/reset-password`).
+- The old password stops working at once, the user is signed out on every device, and any outstanding reset link is retired.
+- The admin sees a new one-time password once. Share it over a secure channel (in person or by phone); it is stored only as a hash.
+- The audit log gets a `PASSWORD_RESET_BY_ADMIN` row (who reset whom; never the password).
+- A tenant admin cannot reset a platform admin's password (403) or their own (400): another admin of the company does it.
+
+Inviting the user again does **not** work for an existing account (the email already exists: 409), and neither does deactivating them first.
+
+### Last resort: SQL
+Only when no other admin can sign in (for example the company's only admin lost their password while email is not configured): an admin with database access runs the SQL below after a backup. Never put a real password in a file, a script or a commit.
 ```sql
 UPDATE "User"
    SET "passwordHash" = '<bcrypt-12 hash of new pwd>'
- WHERE email = 'user@tenant.test';
+ WHERE email = '<user email>';
 ```
-
-Generate the bcrypt hash via Node:
-```js
-const bcrypt = require('bcryptjs');
-bcrypt.hashSync('NewPassword!', 12);
-```
+Generate the hash interactively (`node -e "..."` reading the password from a prompt), never with the password written into a script. The user's open sessions end on their next request.
 
 ### Inviting a teammate
-Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp password shown to the inviter (copy → share over a secure channel). No emails sent in v1.
+Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp password shown to the inviter (copy → share over a secure channel). No emails sent in v1. An email that already has an account is refused (409); for an existing user who lost their password use **Reset password** instead.
 
 ---
 
@@ -141,14 +150,15 @@ If you add a new tenant-scoped model:
 
 | Endpoint | Limit | Source |
 |---|---|---|
-| `/api/auth/*` | 5/min/IP | `lib/rate-limit.ts` `LIMITS.auth` |
-| `/api/orders/upload` | 10/hr/user | `LIMITS.ordersUpload` |
-| `/api/customers/import` | 10/hr/user | `LIMITS.ordersUpload` |
-| `/api/runs/{id}/baseline` | 10/hr/user | `LIMITS.ordersUpload` |
+| Credential sign-in | 5 failures per IP + email in 15 min (a success clears it); 30 attempts per IP in 10 min; 20 failures per account in 1 h write a `LOGIN_THROTTLED` audit row (no account lock) | `lib/auth-credentials.ts` |
+| `/api/auth/signup`, `/forgot`, `/reset` | 5/min/IP | `lib/rate-limit.ts` `LIMITS.auth` |
+| `/api/orders/upload` | 60/hr/user | `LIMITS.ordersUpload` |
+| `/api/customers/import` | 60/hr/user | `LIMITS.ordersUpload` |
+| `/api/runs/{id}/baseline` | 60/hr/user | `LIMITS.ordersUpload` |
 | `/api/runs/{id}/optimize` | 30/hr/tenant | `LIMITS.optimize` |
-| Other authenticated endpoints | 300/min/user | `LIMITS.defaultAuthed` |
+| Other authenticated endpoints | none | |
 
-In production, swap the in-memory `Map` in `rate-limit.ts` for Upstash Redis. The interface is intentionally drop-in compatible.
+The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `lib/client-ip.ts`). Buckets live in memory (one web replica), are swept when they expire and capped in number. `RATE_LIMITS_DISABLED=1` is for test servers only: it is ignored on Railway. Moving to a shared store (Redis) is needed before running more than one web replica.
 
 ---
 

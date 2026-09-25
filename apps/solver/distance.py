@@ -46,17 +46,17 @@ HTTP_TIMEOUT_SECS = 30
 HTTP_MAX_RETRIES = 3
 HTTP_RETRY_BACKOFF_SECS = 1.5
 
-# OSRM provides real road distance/duration for free. Defaults to the public
-# demo (rate-limited but fine for v1 + small tenants). For production load,
-# point OSRM_URL at a self-hosted instance (e.g. a $10/mo Hetzner VM running
-# `osrm-routed --algo mld` on the Oman+UAE Geofabrik extract).
+# OSRM provides real road distance/duration for free. There is deliberately NO default
+# server: with OSRM_URL unset the legacy matrix stays Haversine, so customer coordinates
+# never go to a third-party demo server (review F22). Point OSRM_URL at the self-hosted
+# instance (infra/osrm, docs/OSRM_SETUP.md).
 #
 # When OSRM_URL is non-empty AND the configured provider is HAVERSINE, we
 # transparently upgrade the matrix to OSRM at solve time. This is what
 # eliminates the "zig-zag" routes a planner sees when straight-line distance
 # fools PyVRP into thinking two stops on opposite sides of a wadi/highway
 # are "close".
-OSRM_URL = os.environ.get("OSRM_URL", "https://router.project-osrm.org").rstrip("/")
+OSRM_URL = os.environ.get("OSRM_URL", "").strip().rstrip("/")
 OSRM_MAX_COORDS_PER_CALL = 100  # OSRM has no hard limit; this keeps URLs sane.
 
 # In-process LRU cache keyed by (provider, tenant_id, hash of coords + speed).

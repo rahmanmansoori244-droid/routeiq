@@ -6,7 +6,7 @@ There is no silent default:
 - **No URL configured:** plans still work, but use straight-line × 1.3, every km is labelled **Estimated**, and a warning is shown.
 - **Server down:** the same fallback applies, plus a `ROUTING_PROVIDER_FAILURE` warning. The evening plan is never blocked by routing.
 
-> `https://router.project-osrm.org` is a public **demo** server: rate-limited, with no uptime guarantee, and it receives customer coordinates. Use it for local demos only (`.dev/start-solver.sh`), never in production.
+> `https://router.project-osrm.org` is a public **demo** server: rate-limited, with no uptime guarantee, and it receives every customer coordinate you plan with. **Never use it, not even for local demos** (local `.dev/` data holds real NMWC customers). Locally, leave `OSRM_URL` empty (estimated km) or run `infra/osrm` on `127.0.0.1:5000` (below). The maintainer's git-ignored `.dev/start-solver.sh` still defaults to the demo server when `OSRM_URL` is unset: blank that default before using it.
 
 ## What is in the repo
 
@@ -50,7 +50,7 @@ On the **solver** service, set the variable below, then deploy the staged change
 OSRM_URL=http://routeiq-osrm.railway.internal:5000
 ```
 
-> The solver on `main` before PR #25 already reads `OSRM_URL`, but it **defaults to the public demo server** when the variable is unset. Setting it therefore also stops customer coordinates from going to `router.project-osrm.org`.
+> The solver on `main` before PR #25 already reads `OSRM_URL`, but it **defaults to the public demo server** when the variable is unset. Setting it therefore also stops customer coordinates from going to `router.project-osrm.org`. Since stabilization PR1 no RouteIQ code has a public default any more (the web's legacy Map tab and the solver's legacy `distance.py` included): unset means estimated distances or straight lines.
 
 Costs are usage-based: roughly 1 GB RAM running continuously plus a monthly rebuild. Check the Railway dashboard; it's usually well under 10 USD/month.
 

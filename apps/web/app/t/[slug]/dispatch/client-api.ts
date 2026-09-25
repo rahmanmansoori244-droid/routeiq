@@ -1,5 +1,7 @@
 'use client';
 
+import { endSessionUrl } from '@/lib/safe-redirect';
+
 export interface ApiResult<T> {
   ok: boolean;
   status: number;
@@ -17,6 +19,14 @@ export async function api<T>(url: string, init?: RequestInit & { json?: unknown 
     body: json !== undefined ? JSON.stringify(json) : rest.body,
     cache: 'no-store',
   });
+  if (res.status === 401 && typeof window !== 'undefined') {
+    // The server no longer accepts this session (signed out elsewhere, deactivated, password
+    // reset, or the 12 h limit). Clear the cookie and sign in again, then come back to this page
+    // (same day and depot). The page is being replaced, so this call never settles: no caller
+    // shows an "Unauthorized" error on the way out.
+    window.location.assign(endSessionUrl(window.location.pathname + window.location.search));
+    return new Promise<ApiResult<T>>(() => {});
+  }
   const body = await res.json().catch(() => ({}));
   const err = body?.error ?? null;
   let message: string | null = null;

@@ -5,6 +5,7 @@ import { auth } from './auth';
 import { prisma } from './db';
 import { tenantDb, type TenantDb } from './tenant';
 import { rateLimit, type RateLimitResult } from './rate-limit';
+import { clientIp } from './client-ip';
 
 export interface AuthedContext {
   user: {
@@ -63,7 +64,7 @@ export function withTenantApi(handler: (req: Request, ctx: AuthedContext) => Pro
       if (!session?.user) return fail('Unauthorized', 401);
       if (!session.user.tenantId) return fail('No tenant on session', 403);
 
-      const ip = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? null;
+      const ip = clientIp(req);
 
       if (opts.rateLimitKey) {
         const key = `${opts.rateLimitKey}:${session.user.tenantId}:${session.user.id}`;
@@ -94,7 +95,26 @@ export function withTenantApi(handler: (req: Request, ctx: AuthedContext) => Pro
   };
 }
 
+/**
+ * An expected, user-facing failure with its HTTP status. Throw it anywhere under withTenantApi
+ * (or pass it to handleError) and the caller gets `{ data: null, error }` with that status
+ * instead of a 500. `details` (optional) is merged into the error object.
+ */
+export class HttpError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+    public readonly details?: Record<string, unknown>,
+  ) {
+    super(message);
+    this.name = 'HttpError';
+  }
+}
+
 export function handleError(err: unknown) {
+  if (err instanceof HttpError) {
+    return fail(err.details ? { error: err.message, ...err.details } : err.message, err.status);
+  }
   if (err instanceof ZodError) {
     return fail(err.flatten(), 400);
   }

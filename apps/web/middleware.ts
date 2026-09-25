@@ -3,30 +3,30 @@ import { auth } from '@/lib/auth';
 
 /**
  * Edge middleware. Lightweight — only enforces authentication on protected
- * routes. The DB-backed tenant-slug match happens server-side in
- * `getCurrentTenant()` (see lib/tenant.ts) for defense in depth.
+ * routes. It checks the session JWT and its 12 h absolute lifetime, but cannot
+ * reach the database: the user/tenant re-check (lib/session-principal.ts) and
+ * the tenant-slug match (`getCurrentTenant()`, lib/tenant.ts) run server-side.
  *
  * Cross-tenant mismatches return 404 (not 403) to avoid leaking tenant existence.
  */
 export default auth((req) => {
-  const { pathname } = req.nextUrl;
+  const { pathname, search } = req.nextUrl;
   const session = req.auth;
 
   const isProtected = pathname.startsWith('/t/') || pathname.startsWith('/admin');
 
   if (isProtected && !session?.user) {
     const url = new URL('/login', req.nextUrl);
-    url.searchParams.set('callbackUrl', pathname);
+    // Keep the query string so dispatch deep links (?date=&depot=) survive sign-in. The login
+    // page only follows it after lib/safe-redirect.ts has reduced it to a same-origin path.
+    url.searchParams.set('callbackUrl', pathname + search);
     return NextResponse.redirect(url);
   }
 
-  // Bounce signed-in users away from login/signup screens.
+  // Bounce signed-in users away from login/signup screens. The root page decides where they go
+  // from the database (the role in this JWT can be stale), and clears a session the server no
+  // longer accepts instead of bouncing it back here.
   if ((pathname === '/login' || pathname === '/signup') && session?.user) {
-    if (session.user.role === 'SUPER_ADMIN') {
-      return NextResponse.redirect(new URL('/admin', req.nextUrl));
-    }
-    // Without a slug here we can't deep-link to the tenant home; let the root
-    // page resolve it from the session.
     return NextResponse.redirect(new URL('/', req.nextUrl));
   }
 
@@ -37,7 +37,7 @@ export const config = {
   matcher: [
     /*
      * Match everything except:
-     * - api/auth/* (NextAuth handlers)
+     * - api/auth/* (NextAuth handlers, /api/auth/end-session)
      * - api/health (must be public)
      * - _next/* (assets)
      * - favicon, robots, sitemap

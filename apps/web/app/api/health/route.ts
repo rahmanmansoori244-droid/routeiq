@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
+import { emailDeliveryConfigured } from '@/lib/password-reset';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -33,8 +34,11 @@ async function checkSolver(): Promise<{ solver: 'up' | 'down'; routing: Routing 
 
 // `routing` is informational: without OSRM plans still work (distances labelled estimated), so
 // it never makes the app unhealthy - alert on routing.status !== 'up' in monitoring instead.
+// `email` is informational too: without it password-reset emails are not sent (tenant admins
+// reset passwords on the Users screen instead: "Reset password", POST /api/users/:id/reset-password).
 export async function GET() {
   const [db, { solver, routing }] = await Promise.all([checkDb(), checkSolver()]);
   const ok = db === 'up' && solver === 'up';
-  return NextResponse.json({ ok, db, solver, routing }, { status: ok ? 200 : 503 });
+  const email = emailDeliveryConfigured() ? 'configured' : 'not_configured';
+  return NextResponse.json({ ok, db, solver, routing, email }, { status: ok ? 200 : 503 });
 }

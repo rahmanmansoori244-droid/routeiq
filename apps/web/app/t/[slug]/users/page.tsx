@@ -30,6 +30,7 @@ export default async function UsersPage({ params }: { params: { slug: string } }
       ) : (
         <UsersClient
           currentUserId={user.id}
+          currentUserRole={user.role}
           initial={users.map((u) => ({
             id: u.id,
             email: u.email,
