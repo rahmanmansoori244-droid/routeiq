@@ -336,6 +336,14 @@ describe('planDrivers pass 2: drivers RouteIQ fills in', () => {
     // The driver who took the truck's locked Load 1 gets its new Load 2.
     const locked = planDrivers([trip('T01', 2, 560, 700)], [was('T01', 1, 'ALI', 360, 540, { status: 'LOCKED' })], USABLE);
     expect(ids(locked)).toEqual({ 'T01:2': 'ALI' });
+    // (b) must be active too: the truck's dispatched Load 1 has a driver no longer active - (c) the default Sam.
+    const inactive = planDrivers([trip('T01', 2, 560, 700, 'SAM')], [was('T01', 1, 'OLD', 360, 540, { status: 'DISPATCHED' })], USABLE);
+    expect(ids(inactive)).toEqual({ 'T01:2': 'SAM' });
+    expect(inactive.notes).toEqual([]);
+    // A frozen load without a driver is not the nearest trip "that has a driver": new Load 2 gets Load 3's Bob, not the default.
+    const noDriver = planDrivers([trip('T01', 2, 560, 700, 'SAM'), trip('T01', 3, 900, 1000)], [was('T01', 1, null, 360, 540, { status: 'LOCKED' }), was('T01', 3, 'BOB', 900, 1000)], USABLE);
+    expect(ids(noDriver)).toEqual({ 'T01:2': 'BOB', 'T01:3': 'BOB' });
+    expect(noDriver.notes).toEqual([]);
   });
 
   it('filling a trip that had no driver, or a new trip, is not a note; keeping the same driver is not either', () => {
@@ -363,6 +371,22 @@ describe('planDrivers: frozen loads, one truck, trips gone, first optimization',
     expect([...r.drivers.keys()]).toEqual(['T02:1']);
     expect(ids(r)).toEqual({ 'T02:1': null });
     expect(r.notes).toEqual([note('T02:1', 480, 660, 'ALI', null, 'CLASH', { truckId: 'T01', loadNo: 1 })]);
+  });
+
+  it("every frozen status - LOCKED, LOADING, DISPATCHED, COMPLETED - takes its driver's time, in both truck orders; (b) takes the driver of the truck's frozen Load 1", () => {
+    for (const status of ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']) {
+      // Ali drives T01 L1 06:00-09:00 (frozen). T02 L1, Ali filled in 09:30-11:00, now leaves 08:00;
+      // T03 L1 is new, 07:00-09:20, Ali its default: neither gets Ali, and only T02 L1 had him.
+      const evidence = [was('T01', 1, 'ALI', 360, 540, { status }), was('T02', 1, 'ALI', 570, 660)];
+      for (const trips of both([trip('T02', 1, 480, 660, 'ALI'), trip('T03', 1, 420, 560, 'ALI')])) {
+        const r = planDrivers(trips, evidence, USABLE);
+        expect(ids(r), status).toEqual({ 'T02:1': null, 'T03:1': null });
+        expect(r.notes, status).toEqual([note('T02:1', 480, 660, 'ALI', null, 'CLASH', { truckId: 'T01', loadNo: 1 })]);
+        expect(clashesOf(trips, r, evidence), status).toEqual([]);
+      }
+      // The truck's new Load 2 after its frozen Load 1: Ali from (b), not the default Sam.
+      expect(ids(planDrivers([trip('T01', 2, 560, 700, 'SAM')], [was('T01', 1, 'ALI', 360, 540, { status })], USABLE)), status).toEqual({ 'T01:2': 'ALI' });
+    }
   });
 
   it("trip 1 and trip 2 of one truck share a driver: no clash unless their times really overlap", () => {

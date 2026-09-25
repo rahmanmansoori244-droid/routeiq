@@ -584,13 +584,15 @@ function solverLoad(truckId: string, loadNo: number, departMin: number, returnMi
 
 describe('copy-forward re-plan: drivers are never double-booked on a frozen load', () => {
   /**
-   * v1 (superseded): T01 L1 Ali 06:00-09:00 LOCKED; T02 L1 Ali 09:30-11:00 PLANNED. v2 holds copies
-   * of both (copy-forward) while its optimization runs; the optimization's RECOMMENDED plan has
-   * T02 L1 leaving at `t2DepartMin`, its MIN_COST option at 08:00.
+   * v1 (superseded): T01 L1 Ali 06:00-09:00 `frozen` (LOCKED unless said); T02 L1 Ali 09:30-11:00
+   * PLANNED. v2 holds copies of both (copy-forward) while its optimization runs; the optimization's
+   * RECOMMENDED plan has T02 L1 leaving at `t2DepartMin`, its MIN_COST option at 08:00. The trucks'
+   * codes (T01, T02) differ from their ids (T1, T2): a note names T01, which the new plan leaves
+   * out, by its code.
    */
-  function seedCopyForward(t2DepartMin: number) {
+  function seedCopyForward(t2DepartMin: number, frozen = 'LOCKED') {
     tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true }];
-    tables.truck = ['T1', 'T2'].map((id) => ({ id, tenantId: T, code: id, defaultDriverId: null }));
+    tables.truck = ['T1', 'T2'].map((id) => ({ id, tenantId: T, code: id.replace('T', 'T0'), defaultDriverId: null }));
     tables.driver = [{ id: 'ALI', tenantId: T, active: true, name: 'Ali' }];
     tables.order = ['O1', 'O2'].map((id) => ({ id, tenantId: T, customerId: 'c', totalCases: 20, totalWeightKg: 200, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'ASSIGNED' }));
     const base = { tenantId: T, depotId: 'D1', runDate: DAY, optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 2, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null, createdById: 'u1', createdAt: new Date() };
@@ -600,9 +602,9 @@ describe('copy-forward re-plan: drivers are never double-booked on a frozen load
     ];
     const byHand = { driverSetById: 'u1', driverSetAt: new Date('2026-09-26T05:00:00Z') };
     tables.planLoad = [
-      load('PL1', 'P', 1, 'LOCKED', { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540, ...byHand }),
+      load('PL1', 'P', 1, frozen, { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540, ...byHand }),
       load('PL2', 'P', 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 570, returnMin: 660 }),
-      load('CL1', 'C', 1, 'LOCKED', { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540, carriedFromLoadId: 'PL1', ...byHand }),
+      load('CL1', 'C', 1, frozen, { truckId: 'T1', driverId: 'ALI', departMin: 360, returnMin: 540, carriedFromLoadId: 'PL1', ...byHand }),
       load('CL2', 'C', 1, 'PLANNED', { truckId: 'T2', driverId: 'ALI', departMin: 570, returnMin: 660, carriedFromLoadId: 'PL2' }),
     ];
     tables.routeAssignment = [
@@ -623,19 +625,22 @@ describe('copy-forward re-plan: drivers are never double-booked on a frozen load
     tables.auditLog = [];
     tables.runJob = [{ id: 'J1', runId: 'C', tenantId: T, attemptNo: 1, status: 'RUNNING' }];
   }
-  const aliOnT1 = { truckId: 'T2', truckCode: 'T2', loadNo: 1, departMin: 480, returnMin: 660, from: { id: 'ALI', name: 'Ali' }, to: null, reason: 'CLASH', other: { truckCode: 'T1', loadNo: 1 } };
+  const aliOnT1 = { truckId: 'T2', truckCode: 'T02', loadNo: 1, departMin: 480, returnMin: 660, from: { id: 'ALI', name: 'Ali' }, to: null, reason: 'CLASH', other: { truckCode: 'T01', loadNo: 1 } };
 
-  it('the re-plan job: a PLANNED trip re-timed onto the LOCKED load of its filled-in driver loses the driver (CLASH note); the LOCKED load is untouched', async () => {
-    seedCopyForward(480);
-    const lockedBefore = { ...row('planLoad', 'CL1') };
-    const res = await applyScenario(fakePrisma as never, T, 'C', 'scNew', 'u1', { jobId: 'J1' });
-    const loads = tables.planLoad.filter((l) => l.runId === 'C');
-    expect(loads.find((l) => l.id === 'CL1')).toEqual(lockedBefore); // frozen: driver, marker and times as they were
-    const t2 = loads.find((l) => l.truckId === 'T2')!;
-    expect(t2.id).not.toBe('CL2'); // the copy was replaced by the new plan's load
-    expect(t2.driverId).toBeNull(); // not a second sheet for Ali at 08:00 while T01 is out until 09:00
-    expect(res.driverChanges).toEqual([aliOnT1]);
-  });
+  for (const frozen of ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']) {
+    it(`the re-plan job: a PLANNED trip re-timed onto the ${frozen} load of its filled-in driver loses the driver (CLASH note naming T01 by its code); the ${frozen} load is untouched`, async () => {
+      seedCopyForward(480, frozen);
+      const frozenBefore = { ...row('planLoad', 'CL1') };
+      const res = await applyScenario(fakePrisma as never, T, 'C', 'scNew', 'u1', { jobId: 'J1' });
+      const loads = tables.planLoad.filter((l) => l.runId === 'C');
+      expect(loads.find((l) => l.id === 'CL1')).toEqual(frozenBefore); // frozen: driver, marker, status and times as they were
+      const t2 = loads.find((l) => l.truckId === 'T2')!;
+      expect(t2.id).not.toBe('CL2'); // the copy was replaced by the new plan's load
+      expect(t2.driverId).toBeNull(); // not a second sheet for Ali at 08:00 while T01 is out until 09:00
+      expect(res.driverChanges).toEqual([aliOnT1]); // T01 by its code: the truck of the frozen load, not in the new plan
+      expect(row('runPlan', 'C').summaryJson.driverChanges).toEqual([aliOnT1]);
+    });
+  }
 
   it('"Use instead" re-timing a trip onto the LOCKED load of its driver leaves it without a driver (no double booking)', async () => {
     seedCopyForward(570); // RECOMMENDED keeps T02 L1 at 09:30: Ali stays on it
@@ -655,7 +660,7 @@ describe('copy-forward re-plan: drivers are never double-booked on a frozen load
 
 describe('drivers of an optimize, a re-plan and "Use instead" (the simplified driver rules)', () => {
   /**
-   * T2's default driver is Ali, T3's is Sam; Bob has no truck. `version(id, loads)` adds an applied
+   * Trucks T2 and T3 (codes T02, T03): T2's default driver is Ali, T3's is Sam; Bob has no truck. `version(id, loads)` adds an applied
    * READY version holding `loads` (RouteIQ's drivers unless `hand`) and its RECOMMENDED option.
    * "Use instead" (`useInstead`) and the re-plan job (`replanJob`, from a copy-forward version)
    * apply `trips` to the version. Minutes: 480 = 08:00, 570 = 09:30, 600 = 10:00, 620 = 10:20,
@@ -676,9 +681,10 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
   };
   function seedDay() {
     tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true, lat: 23.6, lng: 58.4 }];
+    // Codes differ from ids: a note names a truck by its code, also one the new plan leaves out.
     tables.truck = [
-      { id: 'T2', tenantId: T, code: 'T2', defaultDriverId: 'ALI' },
-      { id: 'T3', tenantId: T, code: 'T3', defaultDriverId: 'SAM' },
+      { id: 'T2', tenantId: T, code: 'T02', defaultDriverId: 'ALI' },
+      { id: 'T3', tenantId: T, code: 'T03', defaultDriverId: 'SAM' },
     ];
     tables.driver = [ali, sam, bob].map((d) => ({ ...d, tenantId: T, active: true }));
     // Orders the plan screen (getPlanDetail) can read: customer, lines and notes on the row.
@@ -836,13 +842,13 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
         [{ truck: 'T2', at: [720, 840], order: 'O2', driver: 'ALI' }, { truck: 'T3', at: [570, 660], order: 'O3', driver: 'ALI', hand: true }],
         inOrder(order, [{ truck: 'T2', at: [600, 720], order: 'O2' }, { truck: 'T3', at: [570, 660], order: 'O3' }]),
       );
-      const note = { truckId: 'T2', truckCode: 'T2', loadNo: 1, departMin: 600, returnMin: 720, from: ali, to: null, reason: 'CLASH', other: { truckCode: 'T3', loadNo: 1 } };
+      const note = { truckId: 'T2', truckCode: 'T02', loadNo: 1, departMin: 600, returnMin: 720, from: ali, to: null, reason: 'CLASH', other: { truckCode: 'T03', loadNo: 1 } };
       expect(viaUseInstead).toEqual({
         trips: { 'T2:1': 'none', 'T3:1': 'ALI (by hand: u1)' }, // Ali is T2's default too: taken
         notes: [note],
         stored: [note],
         clashes: 0,
-        shown: ['Driver changed by this plan: T2 · L1 (10:00–12:00) Ali → no driver, because Ali is on T3 · L1 at that time.'],
+        shown: ['Driver changed by this plan: T02 · L1 (10:00–12:00) Ali → no driver, because Ali is on T03 · L1 at that time.'],
       });
       expect(viaJob).toEqual(viaUseInstead);
       expect(loadOf(tables.runPlan.at(-1)!.id, 'T3').driverSetAt).toEqual(HAND_AT); // the marker, carried as it was
@@ -864,13 +870,13 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
         [{ truck: 'T2', at: [570, 660], order: 'O2', driver: 'ALI' }, { truck: 'T3', at: [720, 840], order: 'O3', driver: 'ALI' }],
         inOrder(order, [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [600, 720], order: 'O3' }]),
       );
-      const note = { truckId: 'T3', truckCode: 'T3', loadNo: 1, departMin: 600, returnMin: 720, from: ali, to: sam, reason: 'CLASH', other: { truckCode: 'T2', loadNo: 1 } };
+      const note = { truckId: 'T3', truckCode: 'T03', loadNo: 1, departMin: 600, returnMin: 720, from: ali, to: sam, reason: 'CLASH', other: { truckCode: 'T02', loadNo: 1 } };
       expect(viaUseInstead).toEqual({
         trips: { 'T2:1': 'ALI', 'T3:1': 'SAM' },
         notes: [note],
         stored: [note],
         clashes: 0,
-        shown: ['Driver changed by this plan: T3 · L1 (10:00–12:00) Ali → Sam, because Ali is on T2 · L1 at that time.'],
+        shown: ['Driver changed by this plan: T03 · L1 (10:00–12:00) Ali → Sam, because Ali is on T02 · L1 at that time.'],
       });
       expect(viaJob).toEqual(viaUseInstead);
     });
@@ -881,13 +887,13 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
         inOrder(order, [{ truck: 'T2', at: [480, 600], order: 'O2' }, { truck: 'T3', at: [480, 600], order: 'O3' }]),
         () => void Object.assign(row('driver', 'BOB'), { active: false }),
       );
-      const note = { truckId: 'T3', truckCode: 'T3', loadNo: 1, departMin: 480, returnMin: 600, from: bob, to: sam, reason: 'INACTIVE', other: null };
+      const note = { truckId: 'T3', truckCode: 'T03', loadNo: 1, departMin: 480, returnMin: 600, from: bob, to: sam, reason: 'INACTIVE', other: null };
       expect(viaUseInstead).toEqual({
         trips: { 'T2:1': 'ALI', 'T3:1': 'SAM' },
         notes: [note],
         stored: [note],
         clashes: 0,
-        shown: ['Driver changed by this plan: T3 · L1 (08:00–10:00) Bob → Sam, because Bob is no longer active.'],
+        shown: ['Driver changed by this plan: T03 · L1 (08:00–10:00) Bob → Sam, because Bob is no longer active.'],
       });
       expect(viaJob).toEqual(viaUseInstead);
     });
@@ -913,8 +919,8 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     });
 
     it(`TRIP_GONE: an option without the hand-set trip notes it; the plan with that trip again does not bring the driver back (${order})`, async () => {
-      const bobGone = { truckId: 'T3', truckCode: 'T3', loadNo: 1, departMin: 480, returnMin: 600, from: bob, to: null, reason: 'TRIP_GONE', other: null };
-      const bobText = 'Driver picked by hand, not in this plan: you picked Bob for T3 · L1 (08:00–10:00), and this plan has no such trip. If a later plan has that trip again, pick the driver again.';
+      const bobGone = { truckId: 'T3', truckCode: 'T03', loadNo: 1, departMin: 480, returnMin: 600, from: bob, to: null, reason: 'TRIP_GONE', other: null };
+      const bobText = 'Driver picked by hand, not in this plan: you picked Bob for T03 · L1 (08:00–10:00), and this plan has no such trip. If a later plan has that trip again, pick the driver again.';
       const bobAudited = { truckId: 'T3', loadNo: 1, from: 'BOB', to: null, reason: 'TRIP_GONE' };
       const held: Held[] = [{ truck: 'T2', at: [480, 600], order: 'O2', driver: 'ALI' }, { truck: 'T3', at: [480, 600], order: 'O3', driver: 'BOB', hand: true }];
       const t2only: Trip[] = [{ truck: 'T2', at: [480, 600], order: 'O2' }, { truck: 'T2', loadNo: 2, at: [620, 740], order: 'O3' }];
@@ -966,7 +972,7 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
       expect(t3).toMatchObject({ driverId: 'SAM', driverSetAt: null });
       let detail = (await getPlanDetail(T, 'R'))!;
       expect(detail.loads.find((l) => l.truckId === 'T3')!.driverHandSet).toBe(false);
-      expect(detail.warnings).toContain('Driver changed by this plan: T3 · L1 (10:00–12:00) Ali → Sam, because Ali is on T2 · L1 at that time.');
+      expect(detail.warnings).toContain('Driver changed by this plan: T03 · L1 (10:00–12:00) Ali → Sam, because Ali is on T02 · L1 at that time.');
       await updateLoad(T, 'R', t3.id, { driverId: pick }, user, allow); // SAM: Keep; BOB: another driver
       expect(loadOf('R', 'T3')).toMatchObject({ driverId: pick, driverSetById: 'u1' });
       detail = (await getPlanDetail(T, 'R'))!;
@@ -976,15 +982,22 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     }
   });
 
-  it('a note that left a trip without a driver ends for good once the dispatcher sets that trip\'s driver: Bob, then "No driver", does not bring it back', async () => {
+  it('a note that left a trip without a driver stays until the dispatcher picks a driver for it ("No driver" alone changes nothing); Bob, then "No driver", does not bring it back', async () => {
     // T2 L1 Ali filled in 12:00-14:00, moved to 10:00-12:00 onto T3 L1, Ali by hand: T2 L1 gets no driver (Ali is its default too).
     seedDay();
     version('R', [{ truck: 'T2', at: [720, 840], order: 'O2', driver: 'ALI' }, { truck: 'T3', at: [570, 660], order: 'O3', driver: 'ALI', hand: true }]);
     await useInstead('R', [{ truck: 'T2', at: [600, 720], order: 'O2' }, { truck: 'T3', at: [570, 660], order: 'O3' }]);
-    const text = 'Driver changed by this plan: T2 · L1 (10:00–12:00) Ali → no driver, because Ali is on T3 · L1 at that time.';
+    const text = 'Driver changed by this plan: T02 · L1 (10:00–12:00) Ali → no driver, because Ali is on T03 · L1 at that time.';
     expect(tripsOf('R')).toEqual({ 'T2:1': 'none', 'T3:1': 'ALI (by hand: u1)' });
     expect(await shown('R')).toEqual([text]);
     const t2 = loadOf('R', 'T2').id;
+    // "No driver" on the trip that has none: the Driver list sends nothing (it is already selected),
+    // and sent anyway it changes nothing - no marker, the note stays until a driver is picked.
+    const audits = tables.auditLog.length;
+    await updateLoad(T, 'R', t2, { driverId: null }, user, allow);
+    expect(row('planLoad', t2)).toMatchObject({ driverId: null, driverSetById: null, driverSetAt: null });
+    expect(tables.auditLog.length).toBe(audits);
+    expect(await shown('R')).toEqual([text]);
     await updateLoad(T, 'R', t2, { driverId: 'BOB' }, user, allow);
     expect(await shown('R')).toEqual([]);
     await updateLoad(T, 'R', t2, { driverId: null }, user, allow);
@@ -1003,7 +1016,7 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     // The same plan again: T3 L1 keeps Sam, its own driver now - no note, and the old one is gone.
     const held: Held[] = [{ truck: 'T2', at: [570, 660], order: 'O2', driver: 'ALI' }, { truck: 'T3', at: [720, 840], order: 'O3', driver: 'ALI' }];
     const trips: Trip[] = [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [600, 720], order: 'O3' }];
-    const text = 'Driver changed by this plan: T3 · L1 (10:00–12:00) Ali → Sam, because Ali is on T2 · L1 at that time.';
+    const text = 'Driver changed by this plan: T03 · L1 (10:00–12:00) Ali → Sam, because Ali is on T02 · L1 at that time.';
     const noteGone = async (runId: string, res: { driverChanges: unknown[] }) => {
       expect(tripsOf(runId)).toEqual({ 'T2:1': 'ALI', 'T3:1': 'SAM' });
       expect(res.driverChanges).toEqual([]);

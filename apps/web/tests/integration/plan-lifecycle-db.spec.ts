@@ -511,12 +511,13 @@ describe('copy-forward re-plan and drivers (the simplified driver rules)', () =>
     // Only Bob's trip is a note: the empty trips are filled in (a's trip 2 gets Ali from trip 1) or
     // stay empty (these trucks have no default driver), and filling a trip is not a note.
     const away = await chooseScenario(tenantId, v1.id, minTrucks.id, userId);
-    expect(away.driverChanges.map((c) => [c.truckId, c.loadNo, c.from.id, c.reason])).toEqual([[b.truckId, b.loadNo, bob.id, 'TRIP_GONE']]);
+    const bCode = (await prisma.truck.findUniqueOrThrow({ where: { id: b.truckId } })).code;
+    expect(away.driverChanges.map((c) => [c.truckId, c.truckCode, c.loadNo, c.from.id, c.reason])).toEqual([[b.truckId, bCode, b.loadNo, bob.id, 'TRIP_GONE']]);
     const trip2 = loads[1]!; // a's truck, trip 2
     expect(await prisma.planLoad.findFirstOrThrow({ where: { runId: v1.id, truckId: trip2.truckId, loadNo: trip2.loadNo } })).toMatchObject({ driverId: ali.id, driverSetById: null, driverSetAt: null });
     expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: v1.id } })).summaryJson).not.toHaveProperty('parkedDrivers');
     expect((await getPlanDetail(tenantId, v1.id))!.warnings.filter((w) => w.startsWith('Driver '))).toEqual([
-      expect.stringMatching(/^Driver picked by hand, not in this plan: you picked Bob for .* If a later plan has that trip again, pick the driver again\.$/),
+      expect.stringMatching(new RegExp(`^Driver picked by hand, not in this plan: you picked Bob for ${bCode} · L${b.loadNo} \\(.* If a later plan has that trip again, pick the driver again\\.$`)),
     ]);
 
     // Back to RECOMMENDED: Bob's trip is a new trip again - nothing brings Bob back, and it is no note.
