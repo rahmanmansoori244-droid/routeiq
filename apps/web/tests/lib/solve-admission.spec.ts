@@ -295,6 +295,20 @@ describe('fairness across companies (review: one company must not take every slo
       expect(kinds).toEqual([...Array(9).fill('queued before'), 'nmwc']); // as position() said
       expect(fresh.every((t) => t.waiting)).toBe(true);
     });
+
+    it('what is not guaranteed (third review of PR3: the docs promised it): a company running a solve is overtaken by later solves', () => {
+      // Defaults: 2 in total, 1 per company. NMWC runs one solve and queues a second (another depot).
+      const a = new SolveAdmission(defaultAdmissionLimits({} as NodeJS.ProcessEnv), () => 1_000_000, () => false);
+      const nmwc1 = ok(a.reserve('nmwc', 'd1'));
+      const s1 = ok(a.reserve('S1', 'u1'));
+      const nmwc2 = ok(a.reserve('nmwc', 'd1'));
+      const f1 = ok(a.reserve('F1', 'u1')); // queued after NMWC's second solve
+      expect([nmwc1.waiting, s1.waiting, nmwc2.waiting, f1.waiting]).toEqual([false, false, true, true]);
+      s1.release(); // S1's solve ends first; NMWC is at its own cap: the later sign-up gets the slot
+      expect([f1.waiting, nmwc2.waiting]).toEqual([false, true]);
+      nmwc1.release(); // its own solve ends: now its second one starts
+      expect(nmwc2.waiting).toBe(false);
+    });
   });
 
   it('the per-company queue cap is counted per company, and frees up when a waiting solve starts or is released', () => {

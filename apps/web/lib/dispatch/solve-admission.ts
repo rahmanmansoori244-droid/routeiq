@@ -9,8 +9,9 @@
  *   running, ...) releases its reservation without using quota.
  * - Concurrency: SOLVER_MAX_CONCURRENT (default 2, sized to the solver's CPUs) solves in total,
  *   and per company one less than that (at least 1). So one company can never hold every solver
- *   slot: another company's OPTIMIZE gets the next free one. A start beyond the caps is not
- *   refused: its job is created and waits in the queue until a slot frees.
+ *   slot; waiting solves start fewest-running first, then in the order they were queued (below).
+ *   A start beyond the caps is not refused: its job is created and waits in the queue until a
+ *   slot frees.
  * - Fair queue: a company may have at most 2 solves waiting. One more is refused with 429 and
  *   Retry-After, for that company only. The shared queue holds 10: once it is full, a company that
  *   already has a solve waiting is refused with 503 "optimizer busy" until there is room, but a
@@ -21,6 +22,13 @@
  *   running; among those, first come first served - the solve queued first, whether or not its
  *   company ever ran one (a new company never jumps ahead of one already waiting); so FIFO within
  *   a company. A company at its own concurrency cap keeps waiting.
+ * - What that guarantees another company (NMWC) while others flood the solver: a start with
+ *   nothing of its company waiting is never refused because others filled the shared queue (only
+ *   at queueHardCap); while one of its solves waits, a further start can get 503. A solve of a
+ *   company with nothing running is never overtaken by a solve queued after it: it waits at most
+ *   for the solves queued before it. Once the company runs a solve, solves queued later by
+ *   companies running fewer can start first, and at its own cap its next solve waits for one of
+ *   its own to end (third review of PR3: the docs promised more).
  * - The slot is held from the reservation until the job ends (success, failure or stale result).
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy

@@ -136,3 +136,26 @@ describe('password reset without email points to the real admin reset', () => {
     expect(src).toContain('Reset password');
   });
 });
+
+describe('docs promise only what the code guarantees (third review of PR3)', () => {
+  it('no doc or code comment repeats a promise the second round of fixes had to take back', () => {
+    const REPO = path.resolve(APPS, '..');
+    const files = [...walk(path.join(REPO, 'docs'), /\.md$/), ...walk(path.join(WEB, 'lib'), /\.ts$/)];
+    const STALE: [RegExp, string][] = [
+      // Admission: a company running a solve can be overtaken; a second start can get 503.
+      [/gets the next free one/i, 'another company gets the next free slot'],
+      [/its OPTIMIZE is never refused because others filled the queue/i, 'never refused'],
+      [/waits only for solves queued before it/i, 'waits only for solves queued before it'],
+      // Plan screen: after a network error the plan and the day may need Try again.
+      [/the buttons work again at once/i, 'buttons work again at once'],
+      // Drivers: RouteIQ no longer keeps a driver on two trips it moved onto each other's hours.
+      [/two planned trips that you gave the same driver/i, 'driver kept on two trips you gave'],
+      [/both keep this version's driver/i, "both keep this version's driver"],
+    ];
+    const offenders = files.flatMap((f) => {
+      const text = readFileSync(f, 'utf8');
+      return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+});
