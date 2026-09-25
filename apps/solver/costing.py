@@ -34,6 +34,7 @@ re-planned after it. The locked load's stored share still starts at the earlier 
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -159,3 +160,25 @@ def truck_day_costs(truck: TruckRates, rates: DayRates, loads: Sequence[LoadTimi
 
 def to_units(omr: float) -> int:
     return int(round(omr * COST_SCALE))
+
+
+def round_parts(parts: dict[str, float], places: int = 3) -> tuple[dict[str, float], float]:
+    """Round a load's cost parts to 0.001 OMR (one baisa) so that they add up EXACTLY to the load's
+    rounded total: (rounded parts, round(sum of the exact parts, 3)).
+
+    Rounding each part on its own lets the parts of one load drift up to 6 x 0.0005 OMR from the
+    exact money, so the parts, the load total and the day total disagreed (review of PR5: a check on
+    that drift failed 1-3 load re-plans with a 500). Largest remainder: every part is its exact value
+    rounded down or up to the baisa, never further, so a part that is exactly 0 stays 0 and none
+    turns negative; the baisas left over go to the parts with the largest remainders.
+    """
+    scale = 10 ** places
+    exact = {k: v * scale for k, v in parts.items()}
+    total = int(round(sum(exact.values())))
+    base = {k: math.floor(v) for k, v in exact.items()}
+    left = total - sum(base.values())
+    # Largest remainder first; ties in the given order (stable), so the result is deterministic.
+    order = sorted(exact, key=lambda k: exact[k] - base[k], reverse=True)
+    for k in order[:max(0, left)]:
+        base[k] += 1
+    return {k: round(v / scale, places) for k, v in base.items()}, round(total / scale, places)
