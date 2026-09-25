@@ -55,10 +55,12 @@ from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+import costing
 import feasibility as FZ
 import load_repack as LR
 from dispatch_models import (
     DAY_MIN,
+    MAX_STOPS,
     DispatchConfig,
     DispatchRequest,
     DispatchResponse,
@@ -70,13 +72,15 @@ from dispatch_models import (
     ObjectiveComponents,
     PlannedLoad,
     PlannedStop,
+    PreferencePenalties,
+    TruckDayCostOut,
     UnservedStop,
 )
 from providers import MatrixResult, resolve_matrix
 
 log = logging.getLogger("routeiq.dispatch")
 
-COST_SCALE = 100_000  # 1 OMR = 100,000 objective units
+COST_SCALE = costing.COST_SCALE  # 1 OMR = 100,000 objective units
 SERVICE_UNIT = 10_000_000_000  # weighted priorities: value of serving a P5 stop (= 100,000 OMR)
 MARGIN_WEIGHT = 10  # margin is weighted 10x operating cost ...
 MARGIN_CAP = int(SERVICE_UNIT * 0.4)  # ... but can never outweigh one service unit
@@ -97,6 +101,12 @@ REC_OVERHEAD_SEC = 20
 # Whole request (matrix + all scenarios) must answer before the web gives up (600 s): the
 # alternatives are skipped rather than overrun it. Env SOLVER_BUDGET_SEC overrides.
 SOLVER_BUDGET_SEC = 540
+# Road routing gets at most this much of the budget (review F19): 90 s, or 20% of the budget if
+# that is less. Env MATRIX_BUDGET_SEC overrides. After it the matrix is estimated, with a warning.
+MATRIX_BUDGET_CAP_SEC = 90
+MATRIX_BUDGET_SHARE = 0.2
+# Above this many stops the search gets its longest automatic time limit; a warning says so.
+LARGE_DAY_STOPS = 350
 # Post-solve stage (load repack): each CP-SAT solve gets min(CAP, max(MIN, search limit / 2)).
 REPACK_CAP_SEC = 15
 REPACK_MIN_SEC = 3
@@ -260,6 +270,9 @@ def _window_prefilter(
         he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
         window_ok = False
         shift_ok = False
+        # These are the only reasons presented as proof of impossibility: say when the proof
+        # rests on an estimated distance (review F18, new issue 27).
+        est = " (based on estimated distance)" if (mx.leg_estimated(0, node) or mx.leg_estimated(node, 0)) else ""
         for td in usable:
             if not _fits_capacity(s, td):
                 continue
@@ -282,10 +295,10 @@ def _window_prefilter(
             hw = f"{_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}"
             drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE",
                                    f"No truck can reach this customer inside its receiving window {hw} "
-                                   f"(earliest possible arrival {_hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)})."))
+                                   f"(earliest possible arrival {_hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)}){est}."))
         elif not shift_ok:
             drops.append(_unserved(s, "SHIFT_LIMIT",
-                                   "A round trip to this customer does not fit inside the truck shift / depot hours."))
+                                   f"A round trip to this customer does not fit inside the truck shift / depot hours{est}."))
         else:
             keep.append(k)
     return keep, drops
@@ -399,7 +412,8 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     """A scenario's objective prices for the post-solve stage, in objective units and with the
     same weights as its OR-Tools model (arc, fixed, span, soft-bound costs). One deliberate
     difference: overtime counts from the truck's FIRST ACTUAL departure, exactly as the plan
-    reports it (the routing model can only bound the return time from the shift start)."""
+    reports it (the routing model can only bound the return time from the shift start). The exact
+    OMR rates ride along, so the RECOMMENDED score's money equals the reported costs (costing.py)."""
     cfg = req.config
     w = SCENARIOS[name]
     trucks = {
@@ -411,12 +425,15 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
         for td in tds if td.usable
     }
     if not w.soft_prefs:
-        return LR.Pricing(trucks=trucks, span=int(round(cfg.driver_cost_per_hour * w.time * COST_SCALE / 3600.0)))
+        return LR.Pricing(trucks=trucks, span=int(round(cfg.driver_cost_per_hour * w.time * COST_SCALE / 3600.0)),
+                          driver_per_hour=cfg.driver_cost_per_hour * w.time, overtime_per_hour=0.0)
     continuity = cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
     return LR.Pricing(
         trucks=trucks,
         span=int(round(cfg.driver_cost_per_hour * w.time * COST_SCALE / 3600.0)),
+        driver_per_hour=cfg.driver_cost_per_hour * w.time,
         overtime=int(round(cfg.overtime_cost_per_hour * COST_SCALE / 3600.0)) if cfg.overtime_after_min is not None else 0,
+        overtime_per_hour=cfg.overtime_cost_per_hour if cfg.overtime_after_min is not None else 0.0,
         overtime_after_s=cfg.overtime_after_min * 60 if cfg.overtime_after_min is not None else None,
         pref=int(round(cfg.pref_window_penalty_per_min * COST_SCALE / 60.0)),
         early={p: int(round(v * COST_SCALE / 60.0)) for p, v in cfg.early_preference_per_min.items()},
@@ -592,7 +609,12 @@ def _solve_scenario(
         if td.shift_anchor_s is None:
             tdim.SetSpanUpperBoundForVehicle(shift_s, v)
         if time_coeff:
+            # Driver pay = the whole truck day (costing.py): the route's span, and for a truck with
+            # frozen loads also the time from its last frozen return to the first new departure
+            # (turnaround and waiting are paid too), i.e. last return - last frozen return.
             tdim.SetSpanCostCoefficientForVehicle(time_coeff, v)
+            if td.frozen_return_s is not None:
+                tdim.SetCumulVarSoftUpperBound(start, td.frozen_return_s, time_coeff)
         if ot_coeff and cfg.overtime_after_min is not None:
             anchor = td.shift_anchor_s if td.shift_anchor_s is not None else td.earliest_depart_s
             tdim.SetCumulVarSoftUpperBound(end, anchor + cfg.overtime_after_min * 60, ot_coeff)
@@ -706,17 +728,21 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     timing_drops = timing_drops or set()
     loads: list[PlannedLoad] = []
     served: set[int] = set()
-    comp = dict(fixed=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0)
+    comp = dict(fixed=0.0, trip=0.0, distance=0.0, fuel=0.0, time=0.0, overtime=0.0, window=0.0, early=0.0, continuity=0.0)
+    rates = costing.DayRates.from_config(cfg)
+    truck_days: list[TruckDayCostOut] = []
+    money_exact = 0.0
+    continuity = cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
 
     for idx in sorted(timed):
         td = tds[idx]
         t = td.truck
-        load_no = td.n_frozen
+        # Stops, km and legs of each load first; the money of the whole truck day after (costing.py).
+        built: list[tuple[LR.TimedLoad, list[PlannedStop], float, int, int, float, int, int]] = []
         for tl in timed[idx]:
-            load_no += 1
             depart_s = tl.depart_s
             prev_node, prev_dep = 0, depart_s
-            cum_m, cases, kg, seq = 0, 0, 0.0, 0
+            cum_m, cases, kg, seq, est_legs = 0, 0, 0.0, 0, 0
             stops_out: list[PlannedStop] = []
             for k, start_s in zip(tl.stops, tl.starts):
                 s = stops[k]
@@ -724,6 +750,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 served.add(k)
                 leg_m = mx.distance_m[prev_node][node]
                 leg_s = mx.duration_s[prev_node][node]
+                leg_est = mx.leg_estimated(prev_node, node)
+                est_legs += int(leg_est)
                 arrival_s = prev_dep + leg_s
                 dep_s = start_s + s.service_min * 60
                 cum_m += leg_m
@@ -738,6 +766,13 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 if not pref_ok:
                     dev = (max(0, ps - start_s) if ps is not None else 0) + (max(0, start_s - pe) if pe is not None else 0)
                     comp["window"] += dev / 60.0 * cfg.pref_window_penalty_per_min
+                early = cfg.early_preference_per_min.get(s.priority, 0.0)
+                if early > 0:
+                    # As the RECOMMENDED search prices it (load_repack._soft_cost).
+                    after = pe if (pe is not None and cfg.pref_window_penalty_per_min > 0) else cfg.shift_start_min * 60
+                    comp["early"] += max(0, start_s - after) / 60.0 * early
+                if continuity and s.previous_truck_id and s.previous_truck_id != t.id:
+                    comp["continuity"] += cfg.change_penalty_per_stop
                 # Rounded once: the shown unloading time (departure - start) is exactly the
                 # service time that was sent, and the wait is exactly start - arrival.
                 arrival_min, start_min = _min_of(arrival_s), _min_of(start_s)
@@ -747,47 +782,55 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                     departure_min=start_min + s.service_min, wait_min=max(0, start_min - arrival_min),
                     leg_km=round(leg_m / 1000.0, 2), cum_km=round(cum_m / 1000.0, 2), leg_min=int(round(leg_s / 60)),
                     cases=s.demand_cases, kg=round(s.demand_kg, 1),
-                    hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok,
+                    hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok, leg_estimated=leg_est,
                 ))
                 prev_node, prev_dep = node, dep_s
             back_m = mx.distance_m[prev_node][0]
-            back_s = mx.duration_s[prev_node][0]
+            est_legs += int(mx.leg_estimated(prev_node, 0))
             cum_m += back_m
-            return_s = prev_dep + back_s
-            km = cum_m / 1000.0
-            dur_min = (return_s - depart_s) / 60.0
-            litres = km / t.km_per_litre if t.km_per_litre else None
-            fuel_cost = (litres or 0.0) * cfg.fuel_price_per_litre
-            dist_cost = km * t.cost_per_km
-            time_cost = dur_min / 60.0 * cfg.driver_cost_per_hour
-            fixed_cost = (t.fixed_cost if load_no == 1 else 0.0) + t.trip_cost
+            return_s = prev_dep + mx.duration_s[prev_node][0]
+            built.append((tl, stops_out, cum_m / 1000.0, cases, return_s, kg, back_m, est_legs))
+        day_cost = costing.truck_day_costs(
+            costing.TruckRates.from_truck(t), rates,
+            [costing.LoadTiming(depart_s=tl.depart_s, return_s=ret, km=km) for tl, _, km, _, ret, _, _, _ in built],
+            anchor_s=td.shift_anchor_s, frozen_return_s=td.frozen_return_s,
+        )
+        money_exact += day_cost.total
+        load_no = td.n_frozen
+        mine: list[PlannedLoad] = []
+        for (tl, stops_out, km, cases, return_s, kg, back_m, est_legs), c in zip(built, day_cost.loads):
+            load_no += 1
             util_parts = [cases / t.capacity_cases if t.capacity_cases else 0.0]
             if t.capacity_kg > 0:
                 util_parts.append(kg / t.capacity_kg)
-            comp["fixed"] += fixed_cost
-            comp["distance"] += dist_cost
-            comp["fuel"] += fuel_cost
-            comp["time"] += time_cost
-            depart_min, return_min = _min_of(depart_s), _min_of(return_s)
-            loads.append(PlannedLoad(
+            depart_min, return_min = _min_of(tl.depart_s), _min_of(return_s)
+            parts = dict(fixed=round(c.fixed, 3), trip=round(c.trip, 3), distance=round(c.distance, 3), fuel=round(c.fuel, 3),
+                         time=round(c.driver, 3), overtime=round(c.overtime, 3))
+            for key, v in parts.items():
+                comp[key] += v
+            mine.append(PlannedLoad(
                 truck_id=t.id, load_no=load_no, depart_min=depart_min,
                 return_min=return_min, distance_km=round(km, 2), duration_min=return_min - depart_min,
                 cases=cases, kg=round(kg, 1), utilization_pct=round(100.0 * max(util_parts), 1),
-                fuel_litres=round(litres, 1) if litres is not None else None, fuel_cost=round(fuel_cost, 3),
-                distance_cost=round(dist_cost, 3), time_cost=round(time_cost, 3), fixed_cost=round(fixed_cost, 3),
-                total_cost=round(fixed_cost + dist_cost + fuel_cost + time_cost, 3),
+                fuel_litres=round(c.fuel_litres, 1) if c.fuel_litres is not None else None, fuel_cost=parts["fuel"],
+                distance_cost=parts["distance"], time_cost=parts["time"], fixed_cost=parts["fixed"],
+                total_cost=round(sum(parts.values()), 3),
                 return_leg_km=round(back_m / 1000.0, 2), stops=stops_out,
+                trip_cost=parts["trip"], driver_cost=parts["time"], overtime_cost=parts["overtime"],
+                driver_paid_min=_min_of(c.paid_s), paid_from_min=_min_of(c.paid_from_s), overtime_min=_min_of(c.overtime_s),
+                estimated_legs=est_legs,
             ))
-
-    if cfg.overtime_after_min is not None:
-        by_truck: dict[str, list[PlannedLoad]] = {}
-        for ld in loads:
-            by_truck.setdefault(ld.truck_id, []).append(ld)
-        for tid, lds in by_truck.items():
-            td = next(x for x in tds if x.truck.id == tid)
-            first_dep = td.shift_anchor_s / 60 if td.shift_anchor_s is not None else min(l.depart_min for l in lds)
-            over = max(0.0, max(l.return_min for l in lds) - first_dep - cfg.overtime_after_min)
-            comp["overtime"] += over / 60.0 * cfg.overtime_cost_per_hour
+        loads += mine
+        truck_days.append(TruckDayCostOut(
+            truck_id=t.id, loads=len(mine), frozen_loads=td.n_frozen,
+            day_start_min=_min_of(day_cost.day_start_s), paid_from_min=_min_of(day_cost.paid_from_s),
+            last_return_min=_min_of(day_cost.last_return_s), paid_min=sum(l.driver_paid_min or 0 for l in mine),
+            overtime_min=sum(l.overtime_min or 0 for l in mine),
+            fixed_cost=round(sum(l.fixed_cost for l in mine), 3), trip_cost=round(sum(l.trip_cost or 0 for l in mine), 3),
+            distance_cost=round(sum(l.distance_cost for l in mine), 3), fuel_cost=round(sum(l.fuel_cost for l in mine), 3),
+            driver_cost=round(sum(l.driver_cost or 0 for l in mine), 3), overtime_cost=round(sum(l.overtime_cost or 0 for l in mine), 3),
+            total_cost=round(sum(l.total_cost for l in mine), 3),
+        ))
 
     unserved = list(pre_drops)
     total_cap_cases = sum(td.truck.capacity_cases * td.trips_left for td in tds if td.usable)
@@ -843,6 +886,11 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             f"The trucks are {short} cases short today, but {left_cases} cases are unserved: more than the shortage "
             "alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
+    # The day's operating cost is the sum of its loads' costs (each rounded to 0.001 OMR), so the
+    # web's sums of stored load costs equal it exactly; the exact (unrounded) money must agree.
+    operating = round(sum(ld.total_cost for ld in loads), 3)
+    if abs(operating - money_exact) > 0.001 * max(1, len(loads)) + 1e-9:
+        raise CostError(f"scenario {name}: loads add up to {operating} OMR, the truck days to {money_exact:.4f} OMR")
     sc = DispatchScenario(
         name=name, status="OPTIMIZED", solver_status=solver_status, solver_time_sec=round(elapsed, 2),
         time_limit_sec=time_limit, objective_value=int(objective_value),
@@ -850,7 +898,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             unserved_penalty=round(unserved_penalty, 1), fixed_cost=round(comp["fixed"], 3),
             distance_cost=round(comp["distance"], 3), fuel_cost=round(comp["fuel"], 3),
             time_cost=round(comp["time"], 3), overtime_cost=round(comp["overtime"], 3),
-            window_penalty=round(comp["window"], 3), margin_served=margin_served,
+            window_penalty=round(comp["window"], 3), margin_served=margin_served, trip_cost=round(comp["trip"], 3),
         ),
         trucks_used=len({ld.truck_id for ld in loads}), trips=len(loads),
         total_distance_km=round(sum(ld.distance_km for ld in loads), 2),
@@ -858,8 +906,14 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         total_cases=sum(ld.cases for ld in loads), total_kg=round(sum(ld.kg for ld in loads), 1),
         avg_utilization_pct=round(sum(util) / len(util), 1) if util else 0.0,
         fuel_litres=round(sum(ld.fuel_litres or 0 for ld in loads), 1), fuel_cost=round(comp["fuel"], 3),
-        operating_cost=round(comp["fixed"] + comp["distance"] + comp["fuel"] + comp["time"] + comp["overtime"], 3),
+        operating_cost=operating,
         loads=loads, unserved=unserved, warnings=warnings,
+        cost_policy=costing.COST_POLICY, cost_version=costing.COST_VERSION,
+        truck_days=sorted(truck_days, key=lambda d: code_of[d.truck_id]),
+        paid_driver_min=sum(d.paid_min for d in truck_days),
+        preference_penalties=PreferencePenalties(window=round(comp["window"], 3), early=round(comp["early"], 3),
+                                                 continuity=round(comp["continuity"], 3)),
+        estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
     )
     _assert_reconciled(req, sc)
     exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
@@ -882,11 +936,16 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult) -> Dispat
         loads=[], unserved=list(drops), warnings=list(mx.warnings) if mx else [],
         # No load, so no timetable that could break a rule.
         feasibility=FeasibilityReport(status="VERIFIED", timing="EXACT", checked_at_version=FZ.CHECK_VERSION),
+        cost_policy=costing.COST_POLICY, cost_version=costing.COST_VERSION, paid_driver_min=0, estimated_legs=0,
     )
 
 
 class ReconciliationError(AssertionError):
     pass
+
+
+class CostError(AssertionError):
+    """The loads of a scenario do not add up to its truck days' money (costing.py)."""
 
 
 def _assert_reconciled(req: DispatchRequest, sc: DispatchScenario) -> None:
@@ -910,11 +969,28 @@ def _assert_reconciled(req: DispatchRequest, sc: DispatchScenario) -> None:
         raise ReconciliationError(f"scenario {sc.name}: cases {planned_cases}+{unserved_cases} != {total}")
 
 
+def matrix_budget_sec(budget: float) -> float:
+    """Seconds road routing may take within a request budget of ``budget`` seconds."""
+    env = os.environ.get("MATRIX_BUDGET_SEC")
+    if env:
+        try:
+            return max(1.0, float(env))
+        except ValueError:
+            pass
+    return max(1.0, min(MATRIX_BUDGET_CAP_SEC, MATRIX_BUDGET_SHARE * budget))
+
+
 def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResponse:
     started = time.monotonic()
     cfg = req.config
     tds = _truck_days(req)
     solvable, drops, warnings = _prefilter(req, tds)
+    budget = int(os.environ.get("SOLVER_BUDGET_SEC", SOLVER_BUDGET_SEC))
+    if len(req.stops) > LARGE_DAY_STOPS:
+        warnings.append(
+            f"Large day: {len(req.stops)} stops in one optimization (the planner supports up to {MAX_STOPS}). "
+            "The search is time-limited, so check the unserved orders; planning by depot or area keeps days smaller."
+        )
 
     coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
     mx = resolve_matrix(
@@ -925,14 +1001,16 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResp
         avg_speed_kmh=cfg.avg_speed_kmh,
         road_time_factor=cfg.road_time_factor,
         osrm_client=osrm_client,
+        deadline=started + matrix_budget_sec(budget),
     )
+    log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
+             req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
     keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)
     drops += window_drops
     if len(keep) != len(solvable):
         solvable, mx = _submatrix(solvable, keep, mx)
 
     time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
-    budget = int(os.environ.get("SOLVER_BUDGET_SEC", SOLVER_BUDGET_SEC))
     scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget)
     for sc in scenarios:
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
@@ -944,6 +1022,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResp
         engine=ENGINE,
         matrix_provider=mx.provider_name,
         distance_is_estimated=mx.is_estimated,
+        distance_quality=mx.quality,  # type: ignore[arg-type]
         scenarios=scenarios,
         warnings=warnings + list(mx.warnings),
     )
@@ -1510,7 +1589,12 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
 
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:
+    """The matrix of the kept stops, with which of its legs are estimates (review F18)."""
     nodes = [0] + [k + 1 for k in keep]
+    pos = {old: new for new, old in enumerate(nodes)}
     dist = [[mx.distance_m[i][j] for j in nodes] for i in nodes]
     dur = [[mx.duration_s[i][j] for j in nodes] for i in nodes]
-    return [stops[k] for k in keep], MatrixResult(dist, dur, mx.provider_name, mx.is_estimated, list(mx.warnings), mx.patched_cells)
+    est = {(pos[i], pos[j]) for i, j in mx.estimated if i in pos and j in pos}
+    return [stops[k] for k in keep], MatrixResult(dist, dur, mx.provider_name, mx.is_estimated, list(mx.warnings), len(est),
+                                                  estimated=est, all_estimated=mx.all_estimated, quality=mx.quality,
+                                                  seconds=mx.seconds)
