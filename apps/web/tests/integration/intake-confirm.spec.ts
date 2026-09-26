@@ -259,6 +259,9 @@ describe('batch delete (F20)', () => {
     expect((await confirm(a.batchId, late ? { lateReason: 'Test' } : {})).status).toBe(200);
     const [onLoad, unserved] = await prisma.order.findMany({ where: { uploadBatchId: a.batchId }, orderBy: { totalCases: 'desc' } });
     const { run, loadId } = await planWith({ unservedOrderIds: [unserved.id], loadOrderId: onLoad.id });
+    // planWith builds the rows directly, without the reconciliation an applied plan stores. Since
+    // PR4 a lock needs a reconciled plan, so give it the one the optimizer would have saved.
+    await prisma.runPlan.update({ where: { id: run.id }, data: { reconciliationJson: { ok: true, problems: [] } } });
     // Simulate legacy data: the unserved order vanished (the foreign key now forbids it, so its
     // rows go first, as an old cascade would have done).
     await prisma.$executeRaw`DELETE FROM "UnservedOrder" WHERE "orderId" = ${unserved.id}`;
