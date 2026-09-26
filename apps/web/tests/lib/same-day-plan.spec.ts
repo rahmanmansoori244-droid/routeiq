@@ -175,8 +175,11 @@ describe('buildDispatchRequest: a same-day re-plan starts from now', () => {
       expect(b.scope.frozenOrderIds).toContain('O0');
       expect(b.request.stops.flatMap((s) => s.order_ids)).not.toContain('O0');
     }
-    // Apart from the first departure and the warning, the two requests are the same.
-    const strip = (b: typeof sameDay) => JSON.stringify({ ...b.request, config: { ...b.request.config, shift_start_min: 0 } });
+    // Apart from the first departure, the time the plan was made (PR8 review) and the warning, the
+    // two requests are the same.
+    expect(sameDay.request.config.loading_from_min).toBe(540);
+    expect('loading_from_min' in nextDay.request.config).toBe(false);
+    const strip = (b: typeof sameDay) => JSON.stringify({ ...b.request, config: { ...b.request.config, shift_start_min: 0, loading_from_min: undefined } });
     expect(strip(sameDay)).toBe(strip(nextDay));
   });
 });
@@ -201,24 +204,62 @@ describe('the timetable rules of a same-day plan (the optimizer\'s truck day, an
     const earlier = await rulesOf(DAY_BEFORE_0900); // what the dispatched load was planned with
     expect(newRules.shiftStartMin).toBe(570);
     const dispatched = feasLoad('T1-L1', 'T1', 1, 360, 90, earlier, { onRoad: true, returnMin: 597 });
-    // T1 L2 at 10:10: 09:57 + 30 min turnaround + 0.04 x 50 cases = 10:29. T2 L1 at 09:00: before 09:30.
+    // T1 L2 at 10:10: 09:57 + 30 min turnaround + 0.04 x 50 cases = 10:29. T2 L1 at 09:00: before
+    // 09:30, and (PR8 review) before its 60 cases can be loaded from 09:00: 09:00 + 30 + 2.4 = 09:32.
     const tooEarly = checkPlanFeasibility({
       scenarioId: 's', solver: null,
       loads: [dispatched, feasLoad('T1-L2', 'T1', 2, 610, 50, newRules), feasLoad('T2-L1', 'T2', 1, 540, 60, newRules)],
     });
     expect(tooEarly.violations.map((v) => [v.truckCode, v.loadNo, v.code])).toEqual([
       ['T1', 2, 'TURNAROUND'],
-      ['T2', 1, 'EARLY_DEPARTURE'],
+      ['T2', 1, 'TURNAROUND'],
     ]);
     expect(tooEarly.violations[0].message).toContain('ready 10:29');
-    expect(tooEarly.violations[1].message).toContain('(09:30)');
-    // At 10:29 and 09:30 every rule holds, and the 06:00 dispatched load is not an early departure.
+    expect(tooEarly.violations[1].message).toContain('ready 09:32');
+    // Only before 09:30 (a later depot opening, no loading per case): the early departure itself.
+    const noLoading = { ...newRules, loadingMinPerCase: 0 };
+    const early = checkPlanFeasibility({ scenarioId: 's', solver: null, loads: [feasLoad('T2-L1', 'T2', 1, 540, 60, noLoading)] });
+    expect(early.violations.map((v) => [v.code, v.message])).toEqual([['EARLY_DEPARTURE', 'T2 load 1 leaves at 09:00, before the shift start (09:30).']]);
+    // At 10:29 and 09:33 every rule holds, and the 06:00 dispatched load is not an early departure.
     const onTime = checkPlanFeasibility({
       scenarioId: 's', solver: null,
-      loads: [dispatched, feasLoad('T1-L2', 'T1', 2, 629, 50, newRules), feasLoad('T2-L1', 'T2', 1, 570, 60, newRules)],
+      loads: [dispatched, feasLoad('T1-L2', 'T1', 2, 629, 50, newRules), feasLoad('T2-L1', 'T2', 1, 573, 60, newRules)],
     });
     expect(onTime.violations).toEqual([]);
     expect(onTime.ok).toBe(true);
+  });
+
+  it('PR8 review: a truck idle at the depot and trucks back at 09:00 or 08:00 are timed by the same rule for the same load', async () => {
+    const rules = await rulesOf(AT_0900);
+    const earlier = await rulesOf(DAY_BEFORE_0900);
+    expect(rules.loadingFromMin).toBe(540);
+    expect(earlier.loadingFromMin).toBeUndefined();
+    const backAt = (truckId: string, ret: number) => feasLoad(`${truckId}-L1`, truckId, 1, 360, 90, earlier, { onRoad: true, returnMin: ret });
+    const day = (depart: number) =>
+      checkPlanFeasibility({
+        scenarioId: 's', solver: null,
+        loads: [
+          feasLoad('TA-L1', 'TA', 1, depart, 700, rules), // at the depot all morning
+          backAt('TB', 540), feasLoad('TB-L2', 'TB', 2, depart, 700, rules), // back at 09:00 (now)
+          backAt('TC', 480), feasLoad('TC-L2', 'TC', 2, depart, 700, rules), // back at 08:00
+        ],
+      });
+    // 700 cases: 30 min + 0.04 x 700 = 58 min from 09:00 -> 09:58 on each truck; at 09:30 all three are short.
+    const at0930 = day(570);
+    expect(at0930.violations.map((v) => [v.truckCode, v.loadNo, v.code, v.severity, /ready (\d\d:\d\d)/.exec(v.message)?.[1]])).toEqual([
+      ['TA', 1, 'TURNAROUND', 'BLOCK', '09:58'],
+      ['TB', 2, 'TURNAROUND', 'BLOCK', '09:58'],
+      ['TC', 2, 'TURNAROUND', 'BLOCK', '09:58'],
+    ]);
+    expect(at0930.violations[0].message).toBe(
+      'TA load 1 leaves at 09:30, but the plan was made at 09:00 on its delivery day, so loading starts then: the truck needs 58 min to reload and load 700 cases: ready 09:58.',
+    );
+    expect(at0930.violations[1].message).toContain('after load 1 (back 09:00) the truck needs 58 min');
+    expect(at0930.violations[2].message).toContain('the plan was made at 09:00 on its delivery day');
+    expect(at0930.violations[0].shortBy).toBe(28);
+    expect(day(598).violations).toEqual([]);
+    // The same load planned the day before (no loadingFromMin): loaded before the shift, 06:00 is on time.
+    expect(checkPlanFeasibility({ scenarioId: 's', solver: null, loads: [feasLoad('TA-L1', 'TA', 1, 360, 700, earlier)] }).violations).toEqual([]);
   });
 
   it('a next-day plan keeps the first departure: a 06:00 load is on time', async () => {
@@ -229,11 +270,77 @@ describe('the timetable rules of a same-day plan (the optimizer\'s truck day, an
   });
 });
 
+describe('PR8 review: on its delivery day loading starts now, for every truck', () => {
+  /** 05:15 and 01:00 in Muscat on the delivery day (before the 06:00 first departure). */
+  const AT_0515 = new Date(`${DAY}T01:15:00Z`);
+  const AT_0100 = new Date('2026-10-04T21:00:00Z');
+
+  it('the request carries the time the plan is made on its delivery day - also before the first departure - and never for another day', async () => {
+    const at0900 = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0900 });
+    expect(at0900.request.config.loading_from_min).toBe(540);
+    expect(at0900.settings?.loadingFromMin).toBe(540);
+    expect(planInputsOf(at0900, 'job-1', AT_0900)!.config.loading_from_min).toBe(540);
+    // 05:15: 05:45 is not after 06:00, so no "Planned from" - but loading still cannot start before 05:15.
+    const early = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0515 });
+    expect(early.request.config.shift_start_min).toBe(360);
+    expect(early.request.config.loading_from_min).toBe(315);
+    expect(early.settings?.planFrom).toBeNull();
+    expect(early.settings?.loadingFromMin).toBe(315);
+    const nextDay = await buildDispatchRequest('TEN', 'R2', undefined, { now: DAY_BEFORE_0900 });
+    expect('loading_from_min' in nextDay.request.config).toBe(false);
+    expect(nextDay.settings?.loadingFromMin).toBeNull();
+  });
+
+  it('the plan warning says so, with a full truck as the example; before the first departure only when it can matter', async () => {
+    const at0900 = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0900 });
+    expect(at0900.warnings[0]).toBe(
+      'Planned from 09:30 (now 09:00 + 30 min preparation): the plan is for today, so no new load leaves the depot before 09:30. Loading starts now too, so each new load also waits for its own loading time, 0.04 min per case: a full 800-case truck leaves at 10:02 at the earliest. Locked, loading and dispatched loads keep their times; a truck still out leaves again only after it is back and turned around.',
+    );
+    // 05:15 + 30 min + 0.04 x 800 = 06:17, after the 06:00 first departure.
+    const early = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0515 });
+    expect(early.warnings[0]).toBe(
+      'Planned on the delivery day at 05:15: loading starts now, so a new load leaves no earlier than now + 30 min turnaround + 0.04 min per case of its load - a full 800-case truck at 06:17, although the first departure is 06:00.',
+    );
+    // 01:00: even a full truck is loaded by 02:02, long before 06:00 - no note (the time is still sent).
+    const night = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0100 });
+    expect(night.request.config.loading_from_min).toBe(60);
+    expect(night.warnings.some((w) => w.startsWith('Planned'))).toBe(false);
+    // Without loading per case nothing is added to the texts.
+    wire({ cfg: { loadingMinPerCase: 0 } });
+    const noLoading = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0900 });
+    expect(noLoading.warnings[0]).toBe(planFromWarning({ nowMin: 540, prepMin: 30, fromMin: 570 }, null));
+    expect(noLoading.warnings[0]).not.toContain('Loading starts now');
+    expect((await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0515 })).warnings.some((w) => w.startsWith('Planned'))).toBe(false);
+  });
+
+  it('ASSUMPTIONS: a plan made on its delivery day before the first departure has a "Loading from" row', async () => {
+    const early = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0515 });
+    const rows = tenantAssumptions(early.settings!, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
+    expect(rows['Loading from (plan made on the delivery day)']).toBe(
+      '05:15 - planned on the delivery day: loading starts then, so no new load leaves before now + 30 min turnaround + 0.04 min per case of that load (nor before the first departure).',
+    );
+    expect(Object.keys(rows).some((k) => k.startsWith('Planned from'))).toBe(false);
+    expect(rows['Shift start (earliest departure)']).toBe('06:00');
+    // Without loading per case the row would say nothing new: none.
+    wire({ cfg: { loadingMinPerCase: 0 } });
+    const plain = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0515 });
+    const plainRows = tenantAssumptions(plain.settings!, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
+    expect(Object.keys(plainRows).some((k) => k.startsWith('Loading from'))).toBe(false);
+  });
+
+  it('Settings says the loading time counts from now for every truck on the delivery day', () => {
+    const rows = effectivePlannerValues(CFG as never, 'Oman', 'OMR');
+    expect(rows.find((r) => r.label === 'First departure (earliest)')!.note).toMatch(/each new load also waits for its loading per case from now/);
+    expect(rows.find((r) => r.label === 'Turnaround between loads')!.note).toMatch(/loading per case counts from now for every truck, also one standing at the depot/);
+  });
+});
+
 describe('the plan says so: ASSUMPTIONS and Settings', () => {
   it('the ASSUMPTIONS sheet of a same-day plan has a "Planned from" row; a next-day plan has none', async () => {
     const sameDay = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0900 });
     const rows = tenantAssumptions(sameDay.settings!, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
-    expect(rows['Planned from (plan made on the delivery day)']).toBe(planFromAssumption({ nowMin: 540, prepMin: 30, fromMin: 570 }));
+    expect(rows['Planned from (plan made on the delivery day)']).toBe(planFromAssumption({ nowMin: 540, prepMin: 30, fromMin: 570 }, 0.04));
+    expect(rows['Planned from (plan made on the delivery day)']).toContain('+ 30 min preparation (the turnaround between loads) + 0.04 min loading per case of that load');
     expect(rows['Shift start (earliest departure)']).toBe('06:00 (the setting; this plan was made on the delivery day, see "Planned from")');
     // The row sits right after the shift start.
     const keys = Object.keys(rows);

@@ -317,6 +317,33 @@ def test_same_day_replan_starts_new_loads_from_now_and_keeps_the_turnaround():
     assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", sc.feasibility
 
 
+def test_same_day_loading_counts_from_now_on_an_idle_truck_as_on_one_back_at_now():
+    """PR8 review: a plan made at 09:00 on its delivery day is sent loading_from_min = 09:00 (and
+    09:30 as the first departure). A 700-case load then needs 30 min + 0.05 x 700 = 35 min from
+    09:00 and leaves at 10:05 - on a truck that stood at the depot all morning exactly as on one back
+    from its dispatched load at 09:00 or at 08:00. Before, the idle truck (and the one back at 08:00)
+    left at 09:30 with the 35 min of loading not counted. A plan for a later day (no
+    loading_from_min) still loads the first load before the shift starts."""
+    trucks = {
+        "idle": truck("TA", cap=800),
+        "back at 09:00": truck("TB", cap=800, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:00"), cases=300)]),
+        "back at 08:00": truck("TC", cap=800, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("08:00"), cases=300)]),
+    }
+    for name, t in trucks.items():
+        r = req([stop("BIG", 23.60, 58.40, cases=700)], [t], shift_start_min=hm("09:30"), reload_min=30,
+                loading_min_per_case=0.05, loading_from_min=hm("09:00"))
+        sc = rec(optimize_dispatch(r))
+        assert_reconciled(r, sc)
+        assert served_ids(sc) == {"BIG"}, name
+        (ld,) = sc.loads
+        assert ld.depart_min >= hm("10:05") - 1, (name, ld.depart_min)
+        assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", (name, sc.feasibility)
+    # The same load planned the day before (no loading_from_min): loaded before the 09:30 start.
+    nxt = rec(optimize_dispatch(req([stop("BIG", 23.60, 58.40, cases=700)], [truck("TA", cap=800)],
+                                    shift_start_min=hm("09:30"), reload_min=30, loading_min_per_case=0.05)))
+    assert nxt.loads[0].depart_min < hm("10:04")
+
+
 def test_same_day_replan_reports_a_window_that_closes_before_the_trucks_can_arrive():
     """S04c: a clinic receiving 06:00-09:35 about 50 min from the depot. A plan for the next day
     serves it; a re-plan at 09:00 for today (first departure 09:30) cannot, and says why."""

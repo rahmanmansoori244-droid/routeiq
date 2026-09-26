@@ -13,9 +13,16 @@
  *    after 09:57 + its turnaround; the plan warnings, the stored settings and the ASSUMPTIONS rows say
  *    "Planned from 09:30"; the new loads can be locked (the dispatch gate reads the dispatched 06:00
  *    load by the rules it was planned with).
+ *  - PR8 review: the request also says when the plan was made (loading_from_min), so loading per
+ *    case counts from then on a truck standing at the depot too. A 700-case load that an optimizer
+ *    ignoring it (a solver older than the web) puts on an idle truck at 09:30 is refused by the
+ *    dispatch gate (ready 10:05); re-planned by one that honours it, it leaves at 10:05 and locks.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
+
+/** true: the fake optimizer leaves loading_from_min out, like a solver older than the web. */
+const solverMode = vi.hoisted(() => ({ ignoresLoadingFrom: false }));
 
 vi.mock('@/lib/solver-client', () => {
   class SolverError extends Error {
@@ -29,6 +36,8 @@ vi.mock('@/lib/solver-client', () => {
     const firstDeparture = Math.max(cfg.shift_start_min ?? 360, req.depot.open_min ?? 0);
     const reload = cfg.reload_min ?? 30;
     const perCase = cfg.loading_min_per_case ?? 0;
+    // A plan made on its delivery day: loading starts then at the earliest, on every truck.
+    const loadingFrom = solverMode.ignoresLoadingFrom ? null : (cfg.loading_from_min ?? null);
     const state = new Map(
       req.trucks.map((t) => {
         const frozen = t.frozen_trips ?? [];
@@ -38,7 +47,8 @@ vi.mock('@/lib/solver-client', () => {
     const loads: PlannedLoad[] = req.stops.map((s, i) => {
       const truck = req.trucks[i % req.trucks.length]!;
       const st = state.get(truck.id)!;
-      const ready = st.back === null ? 0 : Math.ceil(st.back + reload + perCase * s.demand_cases);
+      const base = st.back === null ? loadingFrom : loadingFrom === null ? st.back : Math.max(st.back, loadingFrom);
+      const ready = base === null ? 0 : Math.ceil(base + reload + perCase * s.demand_cases);
       const depart = Math.max(firstDeparture, ready);
       const ret = depart + 237;
       st.loadNo += 1;
@@ -94,6 +104,7 @@ vi.mock('@/lib/solver-client', () => {
 });
 
 import { prisma as libPrisma } from '@/lib/db';
+import { PlanError } from '@/lib/dispatch/plan-errors';
 import { getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { planFromAssumption } from '@/lib/dispatch/plan-from';
@@ -136,7 +147,9 @@ async function jobsDone(runId: string) {
   throw new Error(`plan ${runId} still optimizing`);
 }
 
-async function addOrder(customerCode: string, n: number, late = false) {
+async function addOrder(customerCode: string, n: number, late = false, opts: { day?: string; cases?: number } = {}) {
+  const day = opts.day ?? DAY;
+  const cases = opts.cases ?? 10;
   const product = await prisma.product.findFirstOrThrow({ where: { tenantId } });
   const customer = await prisma.customer.findFirstOrThrow({ where: { tenantId, code: customerCode } });
   return prisma.order.create({
@@ -144,14 +157,14 @@ async function addOrder(customerCode: string, n: number, late = false) {
       tenantId,
       customerId: customer.id,
       depotId,
-      deliveryDate: new Date(`${DAY}T00:00:00.000Z`),
-      totalCases: 10,
-      totalWeightKg: 100,
+      deliveryDate: new Date(`${day}T00:00:00.000Z`),
+      totalCases: cases,
+      totalWeightKg: cases * 10,
       status: 'VALIDATED',
       priority: late ? 1 : 3,
       isLate: late,
       lateReason: late ? 'Clinic called at 09:00' : null,
-      lines: { create: [{ productId: product.id, cases: 10, weightKg: 100, salesOrderNo: `SO-${DAY}-${n}` }] },
+      lines: { create: [{ productId: product.id, cases, weightKg: cases * 10, salesOrderNo: `SO-${day}-${n}` }] },
     },
   });
 }
@@ -194,6 +207,7 @@ describe('a same-day re-plan starts from now (PR8)', () => {
     expect((await startDispatchOptimize(tenantId, v1.id, user(), null, { now: DAY_BEFORE_1500 })).status).toBe(202);
     expect((await jobsDone(v1.id)).status).toBe('READY');
     expect((await requestOf(v1.id)).config.shift_start_min).toBe(360);
+    expect((await requestOf(v1.id)).config.loading_from_min ?? null).toBeNull();
     const v1Detail = (await getPlanDetail(tenantId, v1.id))!;
     expect(v1Detail.warnings.some((w) => w.startsWith('Planned from'))).toBe(false);
     expect(v1Detail.planSettings?.planFrom ?? null).toBeNull();
@@ -215,11 +229,13 @@ describe('a same-day re-plan starts from now (PR8)', () => {
     // What the optimizer was sent: 09:30 as the first departure, T01's dispatched load as it was.
     const sent = await requestOf(v2.id);
     expect(sent.config.shift_start_min).toBe(570);
+    expect(sent.config.loading_from_min).toBe(540); // PR8 review: loading starts at 09:00 at the earliest
     const t01 = await prisma.truck.findFirstOrThrow({ where: { tenantId, code: 'T01' } });
     expect(sent.trucks.find((t) => t.id === t01.id)!.frozen_trips).toEqual([{ load_no: 1, depart_min: 360, return_min: 597, cases: 10 }]);
     expect(sent.trucks.every((t) => t.available_from_min === null)).toBe(true);
     const started = await prisma.auditLog.findFirstOrThrow({ where: { tenantId, action: 'OPTIMIZE_STARTED', entityId: v2.id } });
     expect((started.afterJson as { planFromMin?: number | null }).planFromMin).toBe(570);
+    expect((started.afterJson as { loadingFromMin?: number | null }).loadingFromMin).toBe(540);
     const startedV1 = await prisma.auditLog.findFirstOrThrow({ where: { tenantId, action: 'OPTIMIZE_STARTED', entityId: v1.id } });
     expect((startedV1.afterJson as { planFromMin?: number | null }).planFromMin).toBeNull();
 
@@ -240,12 +256,59 @@ describe('a same-day re-plan starts from now (PR8)', () => {
     expect(detail.warnings.some((w) => w.startsWith('Planned from 09:30 (now 09:00 + 30 min preparation)'))).toBe(true);
     expect(detail.planSettings?.planFrom).toEqual({ nowMin: 540, prepMin: 30, fromMin: 570 });
     expect(detail.planSettings?.shiftStartMin).toBe(360);
+    expect(detail.planSettings?.loadingFromMin).toBe(540);
     const rows = tenantAssumptions(detail.planSettings!, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
-    expect(rows['Planned from (plan made on the delivery day)']).toBe(planFromAssumption({ nowMin: 540, prepMin: 30, fromMin: 570 }));
+    expect(rows['Planned from (plan made on the delivery day)']).toBe(planFromAssumption({ nowMin: 540, prepMin: 30, fromMin: 570 }, 0.05));
 
     // The dispatch gate: the new loads' timetable holds (the 06:00 load is read by its own rules).
     expect(detail.feasibility?.violations.filter((v) => v.severity === 'BLOCK') ?? []).toEqual([]);
     await updateLoad(tenantId, v2.id, t01Next.id, { status: 'LOCKED' }, user(), everyRole);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: t01Next.id } })).status).toBe('LOCKED');
+  });
+
+  it('PR8 review: a 700-case load on a truck idle at the depot is not let out before it can be loaded from now', async () => {
+    const day = isoPlus(8);
+    const at0900 = new Date(`${day}T05:00:00Z`); // 09:00 in Muscat on that delivery day
+    await addOrder('C1', 11, false, { day, cases: 700 });
+
+    // An optimizer that leaves the loading from now out (a solver older than the web) plans 09:30.
+    solverMode.ignoresLoadingFrom = true;
+    let v1Id = '';
+    try {
+      const { run } = await getOrCreatePlan(tenantId, depotId, day, userId);
+      v1Id = run.id;
+      expect((await startDispatchOptimize(tenantId, run.id, user(), null, { now: at0900 })).status).toBe(202);
+      expect((await jobsDone(run.id)).status).toBe('READY');
+    } finally {
+      solverMode.ignoresLoadingFrom = false;
+    }
+    expect((await requestOf(v1Id)).config.loading_from_min).toBe(540);
+    const early = await prisma.planLoad.findFirstOrThrow({ where: { runId: v1Id } });
+    expect([early.loadNo, early.departMin, early.cases]).toEqual([1, 570, 700]);
+
+    // The dispatch gate: 30 min turnaround + 0.05 x 700 = 65 min from 09:00, so ready at 10:05.
+    const detail = (await getPlanDetail(tenantId, v1Id))!;
+    const blocking = detail.feasibility?.violations.filter((v) => v.severity === 'BLOCK') ?? [];
+    expect(blocking.map((v) => [v.code, v.loadNo])).toEqual([['TURNAROUND', 1]]);
+    expect(blocking[0].message).toContain('the plan was made at 09:00 on its delivery day, so loading starts then: the truck needs 65 min to reload and load 700 cases: ready 10:05');
+    if (process.env.FEASIBILITY_GATE !== 'warn') {
+      const err = await updateLoad(tenantId, v1Id, early.id, { status: 'LOCKED' }, user(), everyRole).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PlanError);
+      expect((err as PlanError).status).toBe(409);
+      expect((err as PlanError).details).toMatchObject({ code: 'TIMES_NOT_VERIFIED' });
+      expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: early.id } })).status).toBe('PLANNED');
+    }
+
+    // Re-planned by an optimizer that honours it: the load leaves at 10:05 and locks.
+    const rp = await replan(tenantId, v1Id, 'REOPTIMIZE', 'Loading time from now', user(), null, {}, undefined, { now: at0900 });
+    expect(rp.status).toBe(202);
+    const v2 = await jobsDone(String(rp.body.runId));
+    expect(v2.status).toBe('READY');
+    const onTime = await prisma.planLoad.findFirstOrThrow({ where: { runId: v2.id, status: 'PLANNED' } });
+    expect([onTime.departMin, onTime.cases]).toEqual([605, 700]);
+    const v2Detail = (await getPlanDetail(tenantId, v2.id))!;
+    expect(v2Detail.feasibility?.violations.filter((v) => v.severity === 'BLOCK') ?? []).toEqual([]);
+    await updateLoad(tenantId, v2.id, onTime.id, { status: 'LOCKED' }, user(), everyRole);
+    expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: onTime.id } })).status).toBe('LOCKED');
   });
 });

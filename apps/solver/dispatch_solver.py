@@ -14,7 +14,10 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
   cases of the next load``; the route search cannot know the next load's size and uses 80% of a
   full truck, the final timing (load_repack) uses the exact value.
   Loads that are LOCKED/LOADING/DISPATCHED arrive as ``frozen_trips``: they are not
-  re-optimized; they only push the truck's next departure after their return.
+  re-optimized; they only push the truck's next departure after their return. A plan made on its
+  own delivery day sends ``loading_from_min`` (when it was made): loading cannot start before it,
+  so a truck's first new load leaves no earlier than it + the turnaround of that load, on a truck
+  standing at the depot as on one coming back (``TruckDay.ready_s``).
 * Hard constraints: capacity in cases AND kg (when the truck has a payload), hard customer
   receiving windows (service must START inside the window), depot open hours, truck
   availability, trip linking, shift limit.
@@ -188,10 +191,24 @@ class TruckDay:
     # Last frozen return: the first new load leaves after it + reload + loading of ITS cases
     # (earliest_depart_s holds the reload part only).
     frozen_return_s: int | None = None
+    # config.loading_from_min (a plan made on its delivery day): loading cannot start before it.
+    loading_from_s: int | None = None
 
     @property
     def usable(self) -> bool:
         return self.trips_left > 0 and self.latest_return_s > self.earliest_depart_s
+
+    @property
+    def ready_s(self) -> int | None:
+        """When loading of the truck's first new load can start: the later of its last frozen return
+        and the time a same-day plan was made (loading_from_s). The first new load leaves no earlier
+        than this + reload + loading of ITS cases. None: loaded before the shift starts (a plan for a
+        later day, no frozen loads). Driver pay does not use it (costing.py: frozen_return_s)."""
+        if self.frozen_return_s is None:
+            return self.loading_from_s
+        if self.loading_from_s is None:
+            return self.frozen_return_s
+        return max(self.frozen_return_s, self.loading_from_s)
 
 
 def _truck_days(req: DispatchRequest) -> list[TruckDay]:
@@ -201,6 +218,8 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
         max_trips = t.max_trips or cfg.max_trips_per_truck
         frozen = sorted(t.frozen_trips, key=lambda f: f.load_no)
         earliest = max(cfg.shift_start_min, req.depot.open_min, t.available_from_min or 0)
+        if cfg.loading_from_min is not None:
+            earliest = max(earliest, cfg.loading_from_min + cfg.reload_min)
         anchor = frozen_return = None
         if frozen:
             anchor = min(f.depart_min for f in frozen)
@@ -221,6 +240,7 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
                 max_cases=t.capacity_cases,
                 max_kg=t.capacity_kg,
                 frozen_return_s=frozen_return * 60 if frozen_return is not None else None,
+                loading_from_s=cfg.loading_from_min * 60 if cfg.loading_from_min is not None else None,
             )
         )
     return out
@@ -678,8 +698,8 @@ def _solve_scenario(
     for v, td in enumerate(vehicles):
         start, end = routing.Start(v), routing.End(v)
         first = td.earliest_depart_s
-        if td.frozen_return_s is not None:  # frozen loads: + loading of the first new load
-            first = max(first, td.frozen_return_s + _approx_gap_s(cfg, td))
+        if td.ready_s is not None:  # frozen loads / same-day plan: + loading of the first new load
+            first = max(first, td.ready_s + _approx_gap_s(cfg, td))
         tdim.CumulVar(start).SetRange(min(first, td.latest_return_s), td.latest_return_s)
         tdim.CumulVar(end).SetRange(td.earliest_depart_s, td.latest_return_s)
         if td.shift_anchor_s is None:

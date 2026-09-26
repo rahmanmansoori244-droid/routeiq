@@ -20,7 +20,7 @@ import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 import { KG_ROUNDING_TOL } from './weights';
 import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
-import { planFromAssumption, type PlanFrom } from './plan-from';
+import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -902,6 +902,8 @@ export interface AssumptionConfig {
   outsideCoverage?: boolean;
   /** Stored with a plan (PlanSettings, PR8): built on its own delivery day, new loads from now + preparation. */
   planFrom?: PlanFrom | null;
+  /** Stored with a plan (PlanSettings, PR8 review): made on its delivery day at this time; loading starts then. */
+  loadingFromMin?: number | null;
   priorityWeightsJson?: unknown;
 }
 
@@ -946,7 +948,11 @@ export function tenantAssumptions(
     'Shift start (earliest departure)': cfg.planFrom
       ? `${fmtHhmm(cfg.shiftStartMin)} (the setting; this plan was made on the delivery day, see "Planned from")`
       : fmtHhmm(cfg.shiftStartMin),
-    ...(cfg.planFrom ? { 'Planned from (plan made on the delivery day)': planFromAssumption(cfg.planFrom) } : {}),
+    ...(cfg.planFrom
+      ? { 'Planned from (plan made on the delivery day)': planFromAssumption(cfg.planFrom, cfg.loadingMinPerCase) }
+      : typeof cfg.loadingFromMin === 'number' && (cfg.loadingMinPerCase ?? 0) > 0
+        ? { 'Loading from (plan made on the delivery day)': loadingFromAssumption(cfg.loadingFromMin, cfg.reloadMinutes, cfg.loadingMinPerCase ?? 0) }
+        : {}),
     'Driver shift maximum (h:mm)': fmtDuration(cfg.driverShiftMaxMinutes),
     'Depot reload time between loads': `${cfg.reloadMinutes} min`,
     'Loading time per case': cfg.loadingMinPerCase ? `${cfg.loadingMinPerCase} min per case of the next load, on top of the reload time` : 'not set (0)',

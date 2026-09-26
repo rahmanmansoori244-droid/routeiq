@@ -294,6 +294,8 @@ export async function startDispatchOptimize(
                 unknownWeightLines: built.unknownWeights.reduce((a, u) => a + u.lines, 0),
                 // PR8: a plan made on its delivery day - no new load before this time (minutes after midnight).
                 planFromMin: built.settings?.planFrom?.fromMin ?? null,
+                // PR8 review: made on the delivery day at this time - loading of new loads starts then.
+                loadingFromMin: built.settings?.loadingFromMin ?? null,
                 queued: waiting,
               } as never,
               ip,

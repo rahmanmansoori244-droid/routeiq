@@ -64,7 +64,7 @@ import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } 
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
-import { planFromWarning, sameDayPlanFrom, type PlanFrom } from './plan-from';
+import { loadingFromWarning, planDayNowMin, planFromWarning, sameDayPlanFrom, type PlanFrom } from './plan-from';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
@@ -583,11 +583,23 @@ export async function buildDispatchRequest(
   // loads from now + preparation (the turnaround between loads), never from 06:00 in the past. Sent
   // as the day's first departure, which the optimizer applies to every truck together with its
   // locked / dispatched loads' return + turnaround; those loads keep their times.
+  const now = opts.now ?? new Date();
+  const firstDepartureMin = Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0);
   const planFrom = sameDayPlanFrom(
-    { runDateIso: isoOf(run.runDate), timezone: cfg.timezone, firstDepartureMin: Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0), prepMin: cfg.reloadMinutes },
-    opts.now ?? new Date(),
+    { runDateIso: isoOf(run.runDate), timezone: cfg.timezone, firstDepartureMin, prepMin: cfg.reloadMinutes },
+    now,
   );
-  const warnings: string[] = [...(planFrom ? [planFromWarning(planFrom, run.depot.closeMin)] : []), ...settingProblems.warnings];
+  // PR8 review: on its delivery day loading starts now too. Sent as loading_from_min, so every new
+  // load - on a truck standing at the depot as on one coming back - leaves no earlier than now +
+  // turnaround + loading per case x its cases (the optimizer, its check and the dispatch gate).
+  const loadingFromMin = planDayNowMin(isoOf(run.runDate), cfg.timezone, now);
+  const loading = { perCase: cfg.loadingMinPerCase, exampleCases: Math.max(0, ...trucks.map((t) => t.capacityCases)) };
+  const loadingNote = !planFrom && loadingFromMin !== null ? loadingFromWarning(loadingFromMin, cfg.reloadMinutes, firstDepartureMin, loading) : null;
+  const warnings: string[] = [
+    ...(planFrom ? [planFromWarning(planFrom, run.depot.closeMin, loading)] : []),
+    ...(loadingNote ? [loadingNote] : []),
+    ...settingProblems.warnings,
+  ];
   // Review F19: the most stops one optimization supports; more is refused here with a clear
   // message rather than by the optimizer (422).
   if (stopList.length > MAX_DISPATCH_STOPS) {
@@ -608,6 +620,7 @@ export async function buildDispatchRequest(
   }
   const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
   if (planFrom) plannerConfig.shift_start_min = planFrom.fromMin;
+  if (loadingFromMin !== null) plannerConfig.loading_from_min = loadingFromMin;
   if (routing.outsideCoverage) {
     warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
   }
@@ -647,7 +660,7 @@ export async function buildDispatchRequest(
     warnings,
     unknownWeights,
     weightChanges,
-    settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom),
+    settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
   };
 }
 
@@ -656,6 +669,7 @@ export async function buildDispatchRequest(
  * `outsideCoverage`: the routing decision made for this plan (routingProviderFor, from the tenant's
  * country when it was built), so the sheet never re-derives it from today's settings. `planFrom`:
  * the plan was built on its own delivery day (plan-from.ts); `shiftStartMin` stays the setting.
+ * `loadingFromMin`: when a plan built on its delivery day was made (loading starts then, PR8 review).
  */
 export function planSettingsOf(
   cfg: {
@@ -666,6 +680,7 @@ export function planSettingsOf(
   },
   routing: { outsideCoverage: boolean } = { outsideCoverage: false },
   planFrom: PlanFrom | null = null,
+  loadingFromMin: number | null = null,
 ): PlanSettings {
   return {
     timezone: cfg.timezone,
@@ -689,6 +704,7 @@ export function planSettingsOf(
     osrmConfigured: !!cfg.osrmUrl,
     outsideCoverage: routing.outsideCoverage,
     planFrom,
+    loadingFromMin,
   };
 }
 

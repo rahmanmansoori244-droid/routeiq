@@ -208,7 +208,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       label: 'First departure (earliest)',
       value: fmtHhmm(cfg.shiftStartMin),
       source: 'SETTING',
-      note: `a plan made on the delivery day itself starts from now + ${cfg.reloadMinutes} min (the turnaround between loads) when that is later; locked, loading and dispatched loads keep their times`,
+      note: `a plan made on the delivery day itself starts from now + ${cfg.reloadMinutes} min (the turnaround between loads) when that is later, and each new load also waits for its loading per case from now; locked, loading and dispatched loads keep their times`,
     },
     { label: 'Driver shift maximum', value: `${hm(cfg.driverShiftMaxMinutes)} h`, source: 'SETTING', note: 'first departure to last return of a truck' },
     {
@@ -227,7 +227,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       label: 'Turnaround between loads',
       value: `${cfg.reloadMinutes} min + ${cfg.loadingMinPerCase} min per case of the next load`,
       source: 'SETTING',
-      note: `the ${cfg.reloadMinutes} min are also the preparation time of a plan made on the delivery day`,
+      note: `the ${cfg.reloadMinutes} min are also the preparation time of a plan made on the delivery day; there loading per case counts from now for every truck, also one standing at the depot`,
     },
     {
       label: 'Unloading time',
