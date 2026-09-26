@@ -1,9 +1,12 @@
 /**
  * Effective customer attributes (customer > type profile > default) and pre-optimize issues.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   coordStatus,
+  CUSTOMER_SERVICE_COLUMN_DEFAULT,
   customerIssues,
   DEFAULT_PRIORITY_WEIGHTS,
   describeServiceTime,
@@ -113,6 +116,7 @@ describe('describeServiceTime - the customer page shows what the planner uses (P
       minutes: 45,
       source: "this customer's confirmed time",
       note: null,
+      noteLevel: null,
     });
   });
 
@@ -124,7 +128,41 @@ describe('describeServiceTime - the customer page shows what the planner uses (P
     const d = show(C({ customerType: null, avgServiceTimeMin: 45 }));
     expect(d).toMatchObject({ minutes: 15, source: 'Settings default service time' });
     expect(d.note).toMatch(/stored 45 min was never confirmed, so the planner does not use it/);
+    expect(d.noteLevel).toBe('warning');
     expect(show(C({ customerType: null, avgServiceTimeMin: 15 })).note).toBeNull();
+  });
+
+  // Review of PR5: 10 min is the column default - customers created by an order upload, a late
+  // order or a form without a time hold it although nobody entered it.
+  it('the 10 min column default under a customer type is no note: the type time applies, nothing to confirm', () => {
+    expect(show(C({ customerType: 'HYPERMARKET', avgServiceTimeMin: 10 }))).toEqual({
+      minutes: 40,
+      source: 'customer type default (HYPERMARKET)',
+      note: null,
+      noteLevel: null,
+    });
+    // A real stored time under a type is still named (amber): it is not used either.
+    expect(show(C({ customerType: 'HYPERMARKET', avgServiceTimeMin: 45 }))).toMatchObject({ minutes: 40, noteLevel: 'warning' });
+  });
+
+  it('the 10 min column default without a type time: a neutral line, not the amber "never confirmed" warning', () => {
+    for (const customerType of [null, 'GROCERY']) {
+      const d = show(C({ customerType, avgServiceTimeMin: 10 }));
+      expect(d).toMatchObject({ minutes: 15, source: 'Settings default service time', noteLevel: 'info' });
+      expect(d.note).toMatch(/^No confirmed unloading time of its own \(10 min stored: the column default, or an earlier import\); the Settings default is used/);
+      expect(d.note).not.toMatch(/never confirmed, so the planner does not use it/);
+    }
+    // Settings default 10: the stored value is the one in use - no note.
+    const same = describeServiceTime(C({ customerType: null, avgServiceTimeMin: 10 }), effectiveAttrs(C({ customerType: null, avgServiceTimeMin: 10 }), PROFILES, { serviceTimeMin: 10 }));
+    expect(same).toMatchObject({ minutes: 10, note: null, noteLevel: null });
+  });
+
+  it('the column default is one value: schema.prisma, migration 20260928090100 and CUSTOMER_SERVICE_COLUMN_DEFAULT', () => {
+    const web = path.join(__dirname, '../..');
+    const schema = readFileSync(path.join(web, 'prisma/schema.prisma'), 'utf8');
+    expect(schema).toMatch(new RegExp(`avgServiceTimeMin\\s+Int\\s+@default\\(${CUSTOMER_SERVICE_COLUMN_DEFAULT}\\)`));
+    const migration = readFileSync(path.join(web, 'prisma/migrations/20260928090100_keep_imported_service_times/migration.sql'), 'utf8');
+    expect(migration).toContain(`c."avgServiceTimeMin" <> ${CUSTOMER_SERVICE_COLUMN_DEFAULT}`);
   });
 });
 

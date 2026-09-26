@@ -105,7 +105,14 @@ export default async function CustomerDetailPage({
                 <span data-testid="customer-service-time">
                   {service.minutes} min
                   <span className="block text-xs text-muted-foreground">{service.source}</span>
-                  {service.note ? <span className="block max-w-xs text-xs text-amber-700">{service.note}</span> : null}
+                  {service.note ? (
+                    <span
+                      className={`block max-w-xs text-xs ${service.noteLevel === 'warning' ? 'text-amber-700' : 'text-muted-foreground'}`}
+                      data-testid="customer-service-time-note"
+                    >
+                      {service.note}
+                    </span>
+                  ) : null}
                 </span>
               </Field>
               <Field label="Payment">

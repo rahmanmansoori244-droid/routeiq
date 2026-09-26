@@ -106,20 +106,51 @@ const SERVICE_SOURCE_TEXT: Record<AttrSource, string> = {
 };
 
 /**
+ * The `Customer.avgServiceTimeMin` column default (schema.prisma `@default(10)`). A customer
+ * created without a time - from an order upload, a late order, or a form left empty - holds it
+ * although nobody entered it. Migration `20260928090100_keep_imported_service_times` treats it the
+ * same way (`<> 10`: not a time from a file or a form); a unit test keeps the schema, the
+ * migration and this constant equal.
+ */
+export const CUSTOMER_SERVICE_COLUMN_DEFAULT = 10;
+
+export interface ServiceTimeView {
+  minutes: number;
+  source: string;
+  note: string | null;
+  /** 'warning' (amber): a stored time someone entered is not used; 'info' (neutral): nothing to fix. */
+  noteLevel: 'warning' | 'info' | null;
+}
+
+/**
  * The unloading time the planner uses for a customer and where it comes from, for the customer
- * page (which used to show only the stored value, even when the planner used another). A stored
- * time that was never confirmed is not used: the note says so.
+ * page (which used to show only the stored value, even when the planner used another).
+ *
+ * A stored time that was never confirmed is not used. When it is a real value (from an earlier
+ * import or a form), an amber note says so and how to give the customer its own time. The column
+ * default (10 min) is not a time anyone entered (PR5 review): under a customer type's own time
+ * there is no note at all (the type's time applied before and after PR5), and under the Settings
+ * default a neutral line says the customer has no confirmed time of its own - it may still be an
+ * earlier import's 10 min, which the pre-deploy check (handbook 5.12 check 11) asks to confirm.
  */
 export function describeServiceTime(
   c: Pick<CustomerForPlanning, 'avgServiceTimeMin' | 'serviceTimeConfirmed' | 'customerType'>,
   eff: Pick<EffectiveAttrs, 'serviceMin' | 'serviceSource'>,
-): { minutes: number; source: string; note: string | null } {
+): ServiceTimeView {
   const source = eff.serviceSource === 'TYPE' && c.customerType ? `${SERVICE_SOURCE_TEXT.TYPE} (${c.customerType})` : SERVICE_SOURCE_TEXT[eff.serviceSource];
-  const note =
-    !c.serviceTimeConfirmed && c.avgServiceTimeMin !== eff.serviceMin
-      ? `The stored ${c.avgServiceTimeMin} min was never confirmed, so the planner does not use it. To use a time of this customer's own, set it in the customer details on Daily dispatch or in a customer import.`
-      : null;
-  return { minutes: eff.serviceMin, source, note };
+  const view = (note: string | null, noteLevel: ServiceTimeView['noteLevel']): ServiceTimeView => ({ minutes: eff.serviceMin, source, note, noteLevel });
+  if (c.serviceTimeConfirmed || c.avgServiceTimeMin === eff.serviceMin) return view(null, null);
+  if (c.avgServiceTimeMin === CUSTOMER_SERVICE_COLUMN_DEFAULT) {
+    if (eff.serviceSource === 'TYPE') return view(null, null);
+    return view(
+      `No confirmed unloading time of its own (${c.avgServiceTimeMin} min stored: the column default, or an earlier import); the Settings default is used. If this customer really needs ${c.avgServiceTimeMin} min, set it in the customer details on Daily dispatch.`,
+      'info',
+    );
+  }
+  return view(
+    `The stored ${c.avgServiceTimeMin} min was never confirmed, so the planner does not use it. To use a time of this customer's own, set it in the customer details on Daily dispatch or in a customer import.`,
+    'warning',
+  );
 }
 
 export type CoordStatus = 'OK' | 'MISSING' | 'INVALID' | 'OUTSIDE_AREA';
