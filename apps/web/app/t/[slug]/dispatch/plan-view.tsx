@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, ChevronRight, Download, FileText, History, Lock, Truck, Unlock, PackageCheck, Send, Flag, RefreshCw, Plus } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
@@ -10,8 +10,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
+import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
+import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
+import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -35,31 +38,63 @@ interface Props {
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
   canEditProducts?: boolean;
-  /** called after anything that changes the day (late order, replan, status) */
-  onChanged?: (newRunId?: string) => void;
+  /**
+   * Called after anything that changes the day (late order, replan, status). May return the day's
+   * reload: the action keeps its busy state until it resolves.
+   */
+  onChanged?: (newRunId?: string) => void | Promise<void>;
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
+  /** A request of the screen around this plan is running (the day screen's OPTIMIZE / RE-PLAN): every action here waits. */
+  externalBusy?: boolean;
+  /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
+  onBusyChange?: (busy: boolean) => void;
+  /**
+   * Bumped by the screen around the plan to load it again in place - the day back after a failed
+   * load. Never a remount: an open late order, opened loads and a running action stay (fourth
+   * review of PR3: a remount after one failed day poll closed the late order being typed).
+   */
+  reloadSignal?: number;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null }: Props) {
-  const [d, setD] = useState<PlanDetail | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange, reloadSignal = 0 }: Props) {
+  // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
+  // with the error and Try again (planAfterLoad; third review of PR3).
+  const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
+  const d = panel.plan;
+  const err = panel.error;
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState<string | null>(null);
+  const [ownBusy, setBusy] = useState<string | null>(null);
+  // One action at a time across the whole day screen (F07): this plan's own request, or the day
+  // screen's OPTIMIZE / RE-PLAN request around it.
+  const busy = ownBusy ?? (externalBusy ? 'external' : null);
+  // Read synchronously, so two quick clicks cannot both start (plan-actions.ts).
+  const busyRef = useRef<string | null>(null);
+  const lock: ActionLock = {
+    current: () => busyRef.current ?? (externalBusy ? 'external' : null),
+    set: (key) => {
+      busyRef.current = key;
+      setBusy(key);
+    },
+  };
+  const failed = (message: string) => toast.error(message);
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
+  // Newest answer wins (createLoadOrder): an answer older than the one on screen is dropped (null).
+  const loadOrder = useRef(createLoadOrder());
+  // A load newer than the answer on screen is on its way: Try again waits for it.
+  const [reloading, setReloading] = useState(false);
   const load = useCallback(async () => {
+    const ticket = loadOrder.current.begin();
+    setReloading(true);
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
-    if (!r.ok || !r.data) {
-      setErr(r.error ?? 'Could not load the plan');
-      return null;
-    }
-    setErr(null);
-    setD(r.data);
-    return r.data;
+    if (!loadOrder.current.accept(ticket)) return null;
+    setReloading(loadOrder.current.pending());
+    setPanel((shown) => planAfterLoad(shown, r));
+    return r.ok ? r.data : null;
   }, [runId]);
 
   useEffect(() => {
@@ -67,10 +102,36 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }, [load]);
 
   useEffect(() => {
-    void api<DriverOption[]>('/api/drivers').then((r) => {
-      if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
-    });
+    onBusyChange?.(ownBusy !== null);
+  }, [ownBusy, onBusyChange]);
+  // Unmounted mid-action (the day reloads the plan): never leave the day screen waiting.
+  useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
+
+  const loadDrivers = useCallback(async () => {
+    const r = await api<DriverOption[]>('/api/drivers');
+    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
   }, []);
+
+  useEffect(() => {
+    void loadDrivers();
+  }, [loadDrivers]);
+
+  // Try again after a failed load: the plan, and the driver list if it did not load either.
+  const retry = () => {
+    void load();
+    if (!drivers.length) void loadDrivers();
+  };
+  // Off while a reload is on its way or an action runs (its own reload shows the plan).
+  const retryOff = !!busy || reloading;
+
+  // The screen around the plan asks for a reload (reloadSignal): the same, in place.
+  const seenReload = useRef(reloadSignal);
+  useEffect(() => {
+    if (reloadSignal === seenReload.current) return;
+    seenReload.current = reloadSignal;
+    void load();
+    if (!drivers.length) void loadDrivers();
+  }, [reloadSignal, load, loadDrivers, drivers.length]);
 
   useEffect(() => {
     if (!d) return;
@@ -91,91 +152,166 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
 
-  async function setStatus(l: DetailLoad, status: string) {
-    setBusy(l.id);
-    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not change the load.');
-      return;
-    }
-    toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
-    await load();
-    onChanged?.();
+  // One action at a time: while any request of this plan runs (a load change, Lock all, Use
+  // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
+  // user cannot race themselves (F07; plan-actions.ts).
+  function setStatus(l: DetailLoad, status: string) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not change the load.');
+          await load(); // show the plan as it is now (it may have changed meanwhile)
+          return;
+        }
+        toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
   }
 
-  async function setDriver(l: DetailLoad, driverId: string | null) {
-    setBusy(l.id);
-    const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not set the driver.');
-      return;
-    }
-    const name = drivers.find((x) => x.id === driverId)?.name;
-    toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
-    const fresh = await load();
-    // Allowed, but a driver cannot be on two trucks at once: say so right away.
-    const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
-    if (clash) toast.warning(clash.text);
+  /**
+   * Set the load's driver (the Driver list), or `keep` the driver RouteIQ filled in: the same
+   * driver re-sent, which the server marks as the dispatcher's choice (a re-plan or "Use instead"
+   * then keeps it on this truck and trip). The Driver list cannot do that: choosing the driver
+   * already selected fires no change.
+   */
+  function setDriver(l: DetailLoad, driverId: string | null, keep = false) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { driverId } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not set the driver.');
+          // Show the driver the server has (the change may have been saved before the answer was
+          // lost), or the out-of-date banner with Try again - never the old driver and its
+          // WhatsApp link as if current (fourth review of PR3).
+          await load();
+          return;
+        }
+        const name = drivers.find((x) => x.id === driverId)?.name;
+        if (keep) toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ?? 'driver'} kept as your pick. Re-plans keep this driver on this trip.`);
+        else toast.success(`${l.truckCode} Load ${l.loadNo}: ${name ? `driver ${name}` : 'no driver'}`);
+        const fresh = await load();
+        // Allowed, but a driver cannot be on two trucks at once: say so right away.
+        const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
+        if (clash) toast.warning(clash.text);
+      },
+      failed,
+    );
   }
 
-  async function lockAll() {
+  function lockAll() {
     if (!d) return;
-    setBusy('all');
     const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
-    let n = 0;
-    for (const l of planned) {
-      const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
-      if (r.ok) n++;
-    }
-    setBusy(null);
-    toast.success(`${n} load(s) locked.`);
-    await load();
-    onChanged?.();
+    return runPlanAction(
+      lock,
+      'all',
+      async () => {
+        let n = 0;
+        let firstError: string | null = null;
+        for (const l of planned) {
+          const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
+          if (r.ok) n++;
+          else firstError ??= r.error;
+        }
+        if (firstError && n < planned.length) toast.warning(`${n} of ${planned.length} load(s) locked. ${firstError}`);
+        else toast.success(`${n} load(s) locked.`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
   }
 
-  async function chooseScenario(id: string, name: string) {
-    setBusy(id);
-    const r = await api(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
-    setBusy(null);
-    if (!r.ok) {
-      toast.error(r.error ?? 'Could not switch.');
-      return;
-    }
-    toast.success(`Now using the ${name} plan.`);
-    await load();
-    onChanged?.();
+  function chooseScenario(id: string, name: string) {
+    return runPlanAction(
+      lock,
+      id,
+      async () => {
+        const r = await api<{ driversChanged?: number }>(`/api/runs/${runId}/choose-scenario`, { method: 'POST', json: { scenarioId: id } });
+        const changed = r.data?.driversChanged ?? 0;
+        if (!r.ok) toast.error(r.error ?? 'Could not switch.');
+        else if (changed) toast.warning(`Now using the ${name} plan. ${changed} driver note(s): see the yellow notes on the plan.`);
+        else toast.success(`Now using the ${name} plan.`);
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
   }
 
-  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', overrides: OptimizeOverrides = {}) {
-    setBusy('replan');
-    const r = await api<{ runId: string; version?: number; reason?: string }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, ...overrides } });
-    setBusy(null);
-    if (!r.ok || !r.data) {
-      // No location, or no weight: the same questions as OPTIMIZE on the day screen.
-      const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
-      if (more) return replan(reason, { ...overrides, ...more });
-      if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
-      toast.error(r.error ?? 'Re-plan failed.');
-      return;
-    }
-    const how =
-      r.data.reason === 'LATE_ORDER'
-        ? 'Late order added; the other orders stay on their trucks where possible.'
-        : 'Full re-optimize: orders may move to other trucks.';
-    toast.success(`Plan version ${r.data.version ?? ''} is being optimized. ${how} Locked and dispatched loads are kept.`);
-    onChanged?.(r.data.runId);
+  function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE') {
+    const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
+    return runPlanAction(
+      lock,
+      'replan',
+      async () => {
+        let overrides: OptimizeOverrides = {};
+        for (;;) {
+          const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } });
+          if (r.ok && r.data) {
+            const how =
+              r.data.reason === 'LATE_ORDER'
+                ? 'Late order added; the other orders stay on their trucks where possible.'
+                : 'Full re-optimize: orders may move to other trucks.';
+            toast.success(
+              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+            );
+            await onChanged?.(r.data.runId);
+            return;
+          }
+          // No location, or no weight: the same questions as OPTIMIZE on the day screen.
+          const more = askOverride(r.errorBody, 'Re-plan', { canEditProducts });
+          if (more) {
+            overrides = { ...overrides, ...more };
+            continue;
+          }
+          if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
+            toast.error(r.error ?? 'Re-plan failed.');
+            // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
+            // after a refused start): reload it and the day instead of keeping stale buttons.
+            await load();
+          }
+          // Not re-planned (also when a question was declined): the day as it is now - after a
+          // late order, with the order waiting.
+          await onChanged?.();
+          return;
+        }
+      },
+      failed,
+    );
   }
 
-  if (err) return <p className="text-sm text-destructive">{err}</p>;
-  if (!d) return <p className="text-sm text-muted-foreground">Loading plan…</p>;
+  if (!d) {
+    // Never loaded: the error alone, with Try again (a failed reload keeps the plan, below).
+    return err ? (
+      <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-load-error">
+        <AlertTriangle className="h-4 w-4 text-red-700" />
+        <span>Could not load the plan: {err}</span>
+        <Button size="sm" variant="outline" onClick={retry} disabled={retryOff}>
+          <RefreshCw className="mr-1 h-3 w-3" /> Try again
+        </Button>
+      </div>
+    ) : (
+      <p className="text-sm text-muted-foreground">Loading plan…</p>
+    );
+  }
 
   const s = d.summary;
   const rec = d.reconciliation;
   const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
-  const superseded = d.run.status === 'SUPERSEDED';
+  // Replaced by a newer version: status SUPERSEDED, or supersededAt set (review F07).
+  const superseded = isSupersededRun(d.run);
   const kmLabel = s?.distanceIsEstimated ? 'Estimated km' : 'Road km';
+  // Every order is on a locked, loading or dispatched load: a re-plan would have nothing to plan.
+  const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
+  const applied = !!d.run.chosenScenario;
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -184,7 +320,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <h2 className="text-lg font-semibold">
             Plan v{d.run.version} · {d.run.depot.code} · {d.run.runDate}
           </h2>
-          <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{d.run.status}</Badge>
+          <Badge variant={superseded ? 'secondary' : d.run.status === 'FAILED' ? 'destructive' : d.run.status === 'DISPATCHED' ? 'success' : 'outline'}>{superseded ? 'SUPERSEDED' : d.run.status}</Badge>
           {d.run.reason !== 'INITIAL' ? <Badge variant="warning">{d.run.reason.replace('_', ' ')}</Badge> : null}
           {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}</Badge> : null}
         </div>
@@ -205,15 +341,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>
-              <Button variant="outline" size="sm" onClick={() => setLateOpen(true)}>
+              <Button variant="outline" size="sm" disabled={!!busy} onClick={() => setLateOpen(true)}>
                 <Plus className="mr-1 h-4 w-4" /> Late order
               </Button>
               <Button
                 variant="outline"
                 size="sm"
-                disabled={busy === 'replan' || running}
+                disabled={!!busy || running || nothingToPlan}
                 onClick={() => replan('REOPTIMIZE')}
-                title="With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change."
+                data-testid="replan-btn"
+                title={
+                  nothingToPlan
+                    ? canStepBack(d.loads.map((l) => l.status))
+                      ? 'Nothing to plan: every order is on a locked, loading or dispatched load. Unlock a load (or add a late order) first.'
+                      : 'Nothing to plan: every load has left the depot. Add a late order to plan more.'
+                    : 'With a late order waiting: add it, keeping the other orders on their trucks where possible. Otherwise: re-optimize everything not locked, so orders may move to other trucks. Locked and dispatched loads never change.'
+                }
               >
                 <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
               </Button>
@@ -222,15 +365,34 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </div>
       </div>
 
+      {err ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-reload-error">
+          <AlertTriangle className="h-4 w-4 text-red-700" />
+          <span>{planReloadErrorText(err)}</span>
+          <Button size="sm" variant="outline" onClick={retry} disabled={retryOff}>
+            <RefreshCw className="mr-1 h-3 w-3" /> Try again
+          </Button>
+        </div>
+      ) : null}
       {superseded ? (
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm">This version was replaced by a newer plan version. It is kept read-only for traceability.</div>
       ) : null}
       {running ? (
         <div className="rounded-md border bg-muted/40 p-3 text-sm" data-testid="optimizing">
           Optimizing… {d.job?.message ?? ''} ({d.job?.progressPct ?? 0}%)
+          {applied ? ' Until the new plan is saved, the loads below are the previous plan (kept if the optimization fails).' : ''}
         </div>
       ) : null}
-      {d.run.status === 'FAILED' ? <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div> : null}
+      {d.run.status === 'FAILED' && !superseded ? (
+        applied ? (
+          // A failed re-plan: the version holds a copy of the previous plan (copy-forward, F03).
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="failed-plan-kept">
+            <b>Optimization failed - previous plan kept.</b> {d.job?.message ?? ''} The loads below are the previous plan: they can be locked and dispatched as they are. Re-plan to try again.
+          </div>
+        ) : (
+          <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div>
+        )
+      ) : null}
       {d.change ? (
         <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm" data-testid="change-summary">
           <b>Changes vs version {d.change.parentVersion}:</b> {d.change.text}.
@@ -329,8 +491,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2 text-right">
                       {sc.chosen ? (
                         <Badge variant="success">In use</Badge>
+                      ) : sc.status !== 'OPTIMIZED' ? (
+                        // NO_SOLUTION (or nothing to plan): this option has no plan to use.
+                        <span className="text-xs text-muted-foreground" title="This option found no plan; it cannot be used.">
+                          No plan
+                        </span>
                       ) : canPlan && !superseded ? (
-                        <Button size="sm" variant="ghost" disabled={!!busy} onClick={() => chooseScenario(sc.id, sc.name)}>
+                        <Button size="sm" variant="ghost" disabled={!!busy || running} onClick={() => chooseScenario(sc.id, sc.name)}>
                           Use instead
                         </Button>
                       ) : null}
@@ -348,8 +515,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <CardTitle className="flex items-center gap-2 text-sm">
             <Truck className="h-4 w-4" /> Truck loads ({d.loads.length})
           </CardTitle>
-          {canPlan && !superseded && d.loads.some((l) => l.status === 'PLANNED') ? (
-            <Button size="sm" variant="outline" disabled={!!busy} onClick={lockAll}>
+          {canPlan && !superseded && applied && d.loads.some((l) => l.status === 'PLANNED') ? (
+            <Button size="sm" variant="outline" disabled={!!busy || running} onClick={lockAll}>
               <Lock className="mr-1 h-4 w-4" /> Lock all loads
             </Button>
           ) : null}
@@ -386,8 +553,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         l={l}
                         drivers={drivers}
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
-                        busy={busy === l.id}
+                        busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
+                        onKeep={() => setDriver(l, l.driverId, true)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
                         whatsapp={
@@ -421,7 +589,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.fuelLitres ?? '—'}</td>
                     <td className="p-2">{l.operatingCost.toFixed(1)}</td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
-                      {!superseded ? <LoadActions l={l} busy={busy === l.id} canPlan={canPlan} canDispatch={canDispatch} reconOk={!!rec?.ok} onStatus={(st) => setStatus(l, st)} /> : null}
+                      {!superseded ? <LoadActions l={l} busy={!!busy || running} applied={applied} canPlan={canPlan} canDispatch={canDispatch} reconOk={!!rec?.ok} onStatus={(st) => setStatus(l, st)} /> : null}
                     </td>
                   </tr>
                   {open[l.id] ? (
@@ -528,17 +696,29 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         onOpenChange={setLateOpen}
         date={d.run.runDate}
         depotId={d.run.depot.id}
-        onSaved={(res) => {
-          onChanged?.();
-          if (res.productsWithoutWeight?.length) {
-            toast.warning(`No case weight for ${res.productsWithoutWeight.join(', ')}: ${weightFixText(canEditProducts)}, or the re-plan will ask before counting it as 0 kg.`);
-          }
-          if (res.locationRequired) {
-            toast.warning('New customer has no location yet — add it in step 2 before re-planning.');
-            return;
-          }
-          if (window.confirm('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.')) void replan('LATE_ORDER');
-        }}
+        onSaved={(res) =>
+          // Re-plan now, or reload the day - never the day first: that replaced this plan screen
+          // before the re-plan took the busy state (plan-actions.ts).
+          void afterLateOrderSaved(res, {
+            warn: (m) => toast.warning(m),
+            weightFix: weightFixText(canEditProducts),
+            confirmReplan: () => window.confirm('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.'),
+            replan: async () => {
+              await replan('LATE_ORDER');
+            },
+            refresh: async () => {
+              await runPlanAction(
+                lock,
+                'late-order',
+                async () => {
+                  await load();
+                  await onChanged?.();
+                },
+                failed,
+              );
+            },
+          })
+        }
       />
     </div>
   );
@@ -559,6 +739,7 @@ function LoadDriver({
   editable,
   busy,
   onChange,
+  onKeep,
   pdfUrl,
   clash,
   whatsapp,
@@ -568,6 +749,8 @@ function LoadDriver({
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
+  /** Keep the driver RouteIQ filled in as the dispatcher's own pick. */
+  onKeep: () => void;
   pdfUrl: string;
   /** This load's driver is also on another truck at the same time. */
   clash: string | null;
@@ -580,6 +763,10 @@ function LoadDriver({
   if (l.driverId && !options.some((x) => x.id === l.driverId)) {
     options.push({ id: l.driverId, code: '', name: l.driverName ?? 'Unknown driver', phone: l.driverPhone, active: false });
   }
+  const current = drivers.find((x) => x.id === l.driverId);
+  const driverName = l.driverName ?? current?.name ?? 'this driver';
+  // "picked by hand", or the Keep link exactly when the server marks the re-sent driver (driverPickLink).
+  const pick = driverPickLink(l, { editable, driverActive: !!current?.active });
   let waTitle = '';
   if ('url' in whatsapp) {
     if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
@@ -617,12 +804,47 @@ function LoadDriver({
             WhatsApp
           </span>
         )}
+        {/* Who chose the driver: a re-plan or "Use instead" keeps a driver picked by hand on this
+            truck and trip; Keep makes one RouteIQ filled in the dispatcher's pick. */}
+        {pick === 'HAND_SET' ? (
+          <span className="text-muted-foreground" data-testid={`driver-handset-${tag}`} title={`Picked by hand: a re-plan or Use instead keeps ${driverName} on this truck and trip.`}>
+            picked by hand
+          </span>
+        ) : pick === 'KEEP' ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={busy}
+            onClick={onKeep}
+            data-testid={`driver-keep-${tag}`}
+            title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
+          >
+            Keep
+          </button>
+        ) : null}
       </div>
     </div>
   );
 }
 
-function LoadActions({ l, busy, canPlan, canDispatch, reconOk, onStatus }: { l: DetailLoad; busy: boolean; canPlan: boolean; canDispatch: boolean; reconOk: boolean; onStatus: (s: string) => void }) {
+function LoadActions({
+  l,
+  busy,
+  applied,
+  canPlan,
+  canDispatch,
+  reconOk,
+  onStatus,
+}: {
+  l: DetailLoad;
+  busy: boolean;
+  /** The version has an optimized plan; without one only Unlock, Back to locked and Completed are offered. */
+  applied: boolean;
+  canPlan: boolean;
+  canDispatch: boolean;
+  reconOk: boolean;
+  onStatus: (s: string) => void;
+}) {
   const b = (label: string, to: string, icon: React.ReactNode, enabled = true, title?: string) => (
     <Button key={to} size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !enabled} title={title} onClick={() => onStatus(to)} data-testid={`act-${to}-${l.truckCode}-${l.loadNo}`}>
       {icon}
@@ -630,6 +852,14 @@ function LoadActions({ l, busy, canPlan, canDispatch, reconOk, onStatus }: { l: 
     </Button>
   );
   const out: React.ReactNode[] = [];
+  if (!applied) {
+    // No optimized plan on this version (left by a failed re-plan before the stabilization
+    // release): only the way back, so the day can be optimized again, and closing loads already out.
+    if (l.status === 'LOCKED' && canPlan) out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));
+    if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
+    if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
+    return <div className="flex flex-wrap gap-1">{out}</div>;
+  }
   if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
   if (l.status === 'LOCKED' && canPlan) {
     out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));

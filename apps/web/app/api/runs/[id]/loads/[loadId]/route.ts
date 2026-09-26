@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail, hasRole } from '@/lib/api';
-import { PlanError, updateLoad } from '@/lib/dispatch/plan-service';
+import { PlanError, planErrorBody, updateLoad } from '@/lib/dispatch/plan-service';
 
 interface Params { params: { id: string; loadId: string } }
 
@@ -24,7 +24,7 @@ export const PATCH = (req: Request, { params }: Params) =>
         const load = await updateLoad(user.tenantId, params.id, params.loadId, { status, driverId }, user, (role) => hasRole(user.role, role));
         return ok(load);
       } catch (e) {
-        if (e instanceof PlanError) return fail(e.message, e.status);
+        if (e instanceof PlanError) return fail(planErrorBody(e), e.status);
         throw e;
       }
     },

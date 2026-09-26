@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import { withTenantApi, ok, fail } from '@/lib/api';
-import { rateLimit, LIMITS } from '@/lib/rate-limit';
+import { withTenantApi, fail } from '@/lib/api';
 import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
+import { startResponse } from '@/lib/dispatch/start-response';
 
 interface Params { params: { id: string } }
 
@@ -10,11 +10,11 @@ const schema = z.object({ allowMissingLocations: z.boolean().optional(), allowMi
 // POST /api/runs/:id/optimize - NMWC dispatch planner (OR-Tools). Returns 202 + job id; poll
 // /api/runs/:id/status. A plan that is already applied is never re-optimized in place
 // (409 NEW_VERSION_REQUIRED): use /api/runs/:id/replan so versions stay traceable.
+// Quotas and the concurrency queue are the shared solve admission (lib/dispatch/solve-admission.ts,
+// inside startDispatchOptimize): a refused or no-op request uses no quota.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {
-      const limit = rateLimit(`optimize:${user.tenantId}`, LIMITS.optimize.limit, LIMITS.optimize.windowMs);
-      if (!limit.ok) return fail('Too many optimize requests for this tenant.', 429);
       let body: z.infer<typeof schema>;
       try {
         const t = await r.text();
@@ -26,8 +26,7 @@ export const POST = (req: Request, { params }: Params) =>
         allowMissingLocations: body?.allowMissingLocations,
         allowMissingWeights: body?.allowMissingWeights,
       });
-      if (res.status >= 400) return fail(res.body as Record<string, unknown>, res.status);
-      return ok(res.body, res.status);
+      return startResponse(res);
     },
     { role: 'PLANNER' },
   )(req);

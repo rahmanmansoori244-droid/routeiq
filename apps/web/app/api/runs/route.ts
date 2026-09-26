@@ -1,8 +1,7 @@
 import { z } from 'zod';
 import { OptimizationMode } from '@prisma/client';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
-import { audit } from '@/lib/audit';
-import { currentPlan } from '@/lib/dispatch/plan-service';
+import { createInitialPlan, currentPlan, PlanError, planErrorBody } from '@/lib/dispatch/plan-service';
 import { isRealIsoDate } from '@/lib/schemas';
 
 const createRunSchema = z.object({
@@ -50,34 +49,23 @@ export const POST = withTenantApi(
       );
     }
 
-    const run = await db.runPlan.create({
-      data: {
-        tenantId: user.tenantId,
-        depotId: depot.id,
-        runDate,
+    // Created under the day lock, like Daily dispatch (review F06): a concurrent OPTIMIZE or
+    // "New run" for the same day gets this plan instead of creating a second one.
+    let created;
+    try {
+      created = await createInitialPlan(user.tenantId, depot.id, input.runDate, user.id, {
         optimizationMode: input.optimizationMode,
         totalOrders: orderCount,
-        createdById: user.id,
-      },
-    });
-
-    await audit({
-      tenantId: user.tenantId,
-      userId: user.id,
-      action: 'CREATE',
-      entity: 'RunPlan',
-      entityId: run.id,
-      afterJson: {
-        depotId: depot.id,
-        depotCode: depot.code,
-        runDate: input.runDate,
-        optimizationMode: input.optimizationMode,
-        totalOrders: orderCount,
-      } as never,
-      ip,
-    });
-
-    return ok({ ...run, depot: { id: depot.id, code: depot.code, name: depot.name }, orderCount }, 201);
+        audit: { depotCode: depot.code, optimizationMode: input.optimizationMode, totalOrders: orderCount },
+        ip,
+      });
+    } catch (e) {
+      if (e instanceof PlanError) return fail(planErrorBody(e), e.status);
+      throw e;
+    }
+    const depotRef = { id: depot.id, code: depot.code, name: depot.name };
+    if (!created.created) return ok({ ...created.run, depot: depotRef, existing: true }, 200);
+    return ok({ ...created.run, depot: depotRef, orderCount }, 201);
   },
   { role: 'PLANNER' },
 );

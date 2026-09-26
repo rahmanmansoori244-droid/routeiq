@@ -109,6 +109,7 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     driverId: loadNo === 1 ? 'drv1' : null,
     driverName: loadNo === 1 ? 'Salim Al Harthy' : null,
     driverPhone: loadNo === 1 ? '+968 9123 4567' : null,
+    driverHandSet: false,
     loadNo,
     status: loadNo === 1 ? 'LOCKED' : 'PLANNED',
     carried: false,

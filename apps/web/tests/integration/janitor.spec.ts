@@ -108,6 +108,51 @@ describe('orphan janitor', () => {
     const after = await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(after.status).toBe('RUNNING'); // untouched
   });
+
+  // Stabilization PR3 (F03 copy-forward): a re-plan version starts as a copy of the previous plan.
+  // When a deploy kills its solve, the janitor fails it - and the copied plan stays usable.
+  it('reaping a re-plan version keeps its copied plan (loads and chosen option) intact', async () => {
+    const { h, run } = await optimizingRun('jan-copy');
+    const truck = await prisma.truck.create({ data: { tenantId: h.tenantId, depotId: run.depotId, code: 'T01', capacityCases: 100, fixedCostPerDay: 0, costPerKm: 0 } });
+    const scenario = await prisma.scenarioResult.create({
+      data: { runId: run.id, name: 'RECOMMENDED', trucksUsed: 1, totalDistanceKm: 5, totalTimeMin: 60, totalCost: 3, avgUtilizationPct: 20, unservedCount: 0, detailsJson: { name: 'RECOMMENDED', status: 'OPTIMIZED', loads: [], scope: { orderIds: [], frozenOrderIds: [], orderPriority: {} } } },
+    });
+    const load = await prisma.planLoad.create({
+      data: { tenantId: h.tenantId, runId: run.id, truckId: truck.id, loadNo: 1, status: 'PLANNED', departMin: 420, returnMin: 500, distanceKm: 5, durationMin: 80, cases: 20, weightKg: 200, utilizationPct: 20, carriedFromLoadId: 'previous-version-load' },
+    });
+    const job = await prisma.runJob.create({
+      data: { tenantId: h.tenantId, runId: run.id, attemptNo: 1, status: 'RUNNING', progressPct: 20, createdById: h.userId },
+    });
+    await prisma.runPlan.update({ where: { id: run.id }, data: { chosenScenarioId: scenario.id, currentJobId: job.id, version: 2, reason: 'REOPTIMIZE' } });
+    await prisma.$executeRawUnsafe(`UPDATE "RunJob" SET "startedAt" = NOW() - INTERVAL '16 minutes' WHERE id = $1`, job.id);
+
+    await callJanitor();
+
+    expect((await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe('FAILED');
+    const afterRun = await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } });
+    expect(afterRun.status).toBe('FAILED');
+    expect(afterRun.chosenScenarioId).toBe(scenario.id);
+    expect(await prisma.planLoad.findUnique({ where: { id: load.id } })).not.toBeNull();
+    expect(await prisma.scenarioResult.findUnique({ where: { id: scenario.id } })).not.toBeNull();
+  });
+
+  it('never fails a plan that another job took over (currentJobId differs)', async () => {
+    const { h, run } = await optimizingRun('jan-other');
+    const stuck = await prisma.runJob.create({
+      data: { tenantId: h.tenantId, runId: run.id, attemptNo: 1, status: 'RUNNING', progressPct: 20, createdById: h.userId },
+    });
+    const current = await prisma.runJob.create({
+      data: { tenantId: h.tenantId, runId: run.id, attemptNo: 2, status: 'RUNNING', progressPct: 20, createdById: h.userId, startedAt: new Date() },
+    });
+    await prisma.runPlan.update({ where: { id: run.id }, data: { currentJobId: current.id } });
+    await prisma.$executeRawUnsafe(`UPDATE "RunJob" SET "startedAt" = NOW() - INTERVAL '16 minutes' WHERE id = $1`, stuck.id);
+
+    await callJanitor();
+
+    expect((await prisma.runJob.findUniqueOrThrow({ where: { id: stuck.id } })).status).toBe('FAILED');
+    expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('OPTIMIZING');
+    expect((await prisma.runJob.findUniqueOrThrow({ where: { id: current.id } })).status).toBe('RUNNING');
+  });
 });
 
 describe('janitor authentication', () => {

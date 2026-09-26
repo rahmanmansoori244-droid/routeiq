@@ -5,6 +5,7 @@
  * Money honesty: revenue is only reported when every order carries a sales value, contribution
  * margin only when every order carries a margin. Otherwise they are null ("not supplied").
  */
+import type { DriverNoteReason } from './load-state';
 
 export interface SummaryOrder {
   id: string;
@@ -60,6 +61,32 @@ export interface DailySummary {
   distanceProvider: string;
   warnings: string[];
   solver: { engine: string; scenario: string; status: string; timeSec: number } | null;
+  /**
+   * The applied plan's driver notes (planDrivers in load-state.ts; absent when none): the trips that
+   * lost or changed the driver they had before it, and the hand-set drivers whose trip it does not
+   * have (TRIP_GONE). Kept through load changes, replaced by the next applied plan; the plan screen
+   * shows them as warnings (driverChangeWarnings in driver-links.ts). A summary saved before the
+   * simplified driver rules may also hold a `parkedDrivers` list: nothing reads it, and the next
+   * refresh of the plan facts leaves it out.
+   */
+  driverChanges?: DriverChangeNote[];
+}
+
+/** A driver note of an applied plan (planDrivers), with the names at that time. */
+export interface DriverChangeNote {
+  truckId: string;
+  truckCode: string;
+  loadNo: number;
+  /** The trip's times in the plan (TRIP_GONE: its times before; null when unknown). */
+  departMin: number | null;
+  returnMin: number | null;
+  /** The driver the truck and trip had before the plan. */
+  from: { id: string; name: string };
+  /** The driver the plan gave it (null: none, for the dispatcher to fill; TRIP_GONE: no trip). */
+  to: { id: string; name: string } | null;
+  reason: DriverNoteReason;
+  /** CLASH: the trip that got that driver at an overlapping time. */
+  other: { truckCode: string; loadNo: number | null } | null;
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;

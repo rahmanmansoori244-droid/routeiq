@@ -11,6 +11,7 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
 import hmac
 import logging
 import os
+import threading
 import time
 from typing import Annotated
 
@@ -32,6 +33,24 @@ log = logging.getLogger("routeiq.api")
 app = FastAPI(title="RouteIQ Solver", version="0.4.0")
 
 SOLVER_TOKEN = os.environ.get("SOLVER_TOKEN", "")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+# Review F16 (defence in depth): one solver process serves every company, and each dispatch solve
+# can use up to 3 OR-Tools processes for up to 540 s. At most MAX_CONCURRENT_DISPATCH solves run
+# at once (default 2; size it to the solver's CPUs); another one is refused at once with 503
+# "solver busy" instead of slowing every running solve past its deadline. The web's solve
+# admission (lib/dispatch/solve-admission.ts) queues before this limit is ever reached; the 503
+# covers a deploy overlap (two web processes) and direct callers.
+MAX_CONCURRENT_DISPATCH = _env_int("MAX_CONCURRENT_DISPATCH", 2)
+_DISPATCH_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_DISPATCH)
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -79,17 +98,29 @@ def optimize_dispatch_endpoint(
     x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
 ) -> DispatchResponse:
     _check_token(x_solver_token)
-    started = time.time()
-    log.info("optimize-dispatch run=%s tenant=%s stops=%d trucks=%d scenarios=%s",
-             req.run_id, req.tenant_id, len(req.stops), len(req.trucks), req.config.scenarios)
+    # Taken without waiting: a full solver answers 503 at once (the web shows "optimizer busy").
+    slots = _DISPATCH_SLOTS
+    if not slots.acquire(blocking=False):
+        log.warning("optimize-dispatch run=%s refused: %d solve(s) already running", req.run_id, MAX_CONCURRENT_DISPATCH)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Solver busy: {MAX_CONCURRENT_DISPATCH} optimization(s) already running. Try again in a minute.",
+            headers={"Retry-After": "60"},
+        )
     try:
-        resp = optimize_dispatch(req)
-    except SolveAborted as exc:
-        log.error("optimize-dispatch run=%s aborted: %s", req.run_id, exc)
-        raise HTTPException(status_code=504, detail=str(exc)) from None
-    log.info("optimize-dispatch run=%s done in %.1fs provider=%s", req.run_id, time.time() - started,
-             resp.matrix_provider)
-    return resp
+        started = time.time()
+        log.info("optimize-dispatch run=%s tenant=%s stops=%d trucks=%d scenarios=%s",
+                 req.run_id, req.tenant_id, len(req.stops), len(req.trucks), req.config.scenarios)
+        try:
+            resp = optimize_dispatch(req)
+        except SolveAborted as exc:
+            log.error("optimize-dispatch run=%s aborted: %s", req.run_id, exc)
+            raise HTTPException(status_code=504, detail=str(exc)) from None
+        log.info("optimize-dispatch run=%s done in %.1fs provider=%s", req.run_id, time.time() - started,
+                 resp.matrix_provider)
+        return resp
+    finally:
+        slots.release()
 
 
 @app.post("/route-geometry", response_model=GeometryResponse)

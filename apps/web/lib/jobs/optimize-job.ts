@@ -52,11 +52,17 @@ export function isOptimizing(runId: string): boolean {
  * so duplicate starts are refused and the stuck-job janitor never reaps a live job. */
 export function trackInflight(runId: string, start: () => Promise<void>): boolean {
   if (inflight.has(runId)) return false;
-  const p = start().finally(() => {
-    inflight.delete(runId);
+  const p: Promise<void> = start().finally(() => {
+    if (inflight.get(runId) === p) inflight.delete(runId);
   });
   inflight.set(runId, p);
   return true;
+}
+
+/** Resolves once no background optimize of this plan version is in flight (never rejects). */
+export async function whenIdle(runId: string): Promise<void> {
+  // Each tracked promise removes itself from the map in its own finally, before it settles.
+  for (let p = inflight.get(runId); p; p = inflight.get(runId)) await p.catch(() => undefined);
 }
 
 async function runOptimizeJob(args: ScheduleArgs): Promise<void> {
@@ -162,9 +168,11 @@ async function failJob(args: ScheduleArgs, err: unknown): Promise<void> {
       ? { reason: 'SOLVER_ERROR', message: err.message, status: err.status, responseBody: err.responseBody }
       : { reason: 'UNKNOWN', message: (err as Error)?.message ?? String(err) };
   try {
+    // Conditional, like the dispatch job's failJob: never over a finished job or a plan that
+    // is no longer optimizing (READY, SUPERSEDED).
     await prisma.$transaction(async (tx) => {
-      await tx.runJob.update({
-        where: { id: args.runJobId },
+      await tx.runJob.updateMany({
+        where: { id: args.runJobId, status: { in: ['QUEUED', 'RUNNING'] } },
         data: {
           status: 'FAILED',
           message: typeof errorJson.message === 'string' ? errorJson.message : 'Solver call failed',
@@ -172,8 +180,8 @@ async function failJob(args: ScheduleArgs, err: unknown): Promise<void> {
           finishedAt: new Date(),
         },
       });
-      await tx.runPlan.update({
-        where: { id: args.runId },
+      await tx.runPlan.updateMany({
+        where: { id: args.runId, status: 'OPTIMIZING', OR: [{ currentJobId: args.runJobId }, { currentJobId: null }] },
         data: { status: 'FAILED' },
       });
     });
@@ -250,8 +258,10 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
         },
       });
       if (flipped.count === 0) continue;
+      // Only the version this job was optimizing (review F07): never a version another job
+      // took over. A version that a re-plan copied forward keeps its copied plan, usable.
       await prisma.runPlan.updateMany({
-        where: { id: job.runId, status: 'OPTIMIZING' },
+        where: { id: job.runId, status: 'OPTIMIZING', OR: [{ currentJobId: job.id }, { currentJobId: null }] },
         data: { status: 'FAILED' },
       });
       reaped++;

@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, MapPin, Pencil, Upload, Wand2 } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, FileSpreadsheet, Loader2, MapPin, Pencil, RefreshCw, Upload, Wand2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,8 @@ import { api, askOverride, weightFixText, type OptimizeOverrides } from './clien
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
+import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
+import { dayKey } from './request-gate';
 
 interface Issue {
   code: string;
@@ -54,8 +56,18 @@ interface Day {
   weightsToApply?: WeightGap[];
   /** The plan in use is out of date without a new order: weights changed, customers deactivated. */
   outdated?: { weightCases: number; inactiveOrders: number };
-  plan: null | { id: string; version: number; status: string; chosen: boolean; job: { status: string; message: string | null; progressPct: number } | null };
+  plan: null | {
+    id: string;
+    version: number;
+    status: string;
+    chosen: boolean;
+    job: { status: string; message: string | null; progressPct: number } | null;
+    /** Loads of the plan per status (PLANNED, LOCKED, LOADING, DISPATCHED, COMPLETED). */
+    loadsByStatus?: Record<string, number>;
+  };
   pending: { count: number; cases: number; late: number };
+  /** Orders with cases not yet on a locked, loading or dispatched load (0 = nothing left to plan). */
+  openOrders?: number;
   trucks: { active: number; capacityCases: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
 }
@@ -101,44 +113,91 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const [editFor, setEditFor] = useState<IssueCustomer | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
+  // An action of the plan below (a load change, Lock all, Use instead, Re-plan) is running: Step 3
+  // waits for it, and the plan's actions wait for Step 3's request (one action at a time, F07).
+  const [planBusy, setPlanBusy] = useState(false);
   const [planKey, setPlanKey] = useState(0);
+  // Bumped to load the plan below again in place (PlanView reloadSignal), without a remount.
+  const [planReload, setPlanReload] = useState(0);
   const [showAllCustomers, setShowAllCustomers] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Every load is for the day selected NOW (day-loader.ts), also the reload after an action that
+  // ends after another day was picked; only answers for the day being loaded reach the screen,
+  // newest first (review ADD-STALE-DAY-CLIENT), and a failed load shows an error instead of the
+  // previous day.
+  const loaderRef = useRef<DayLoader | null>(null);
+  loaderRef.current ??= createDayLoader<Day>(
+    { date: initialDate, depotId: initialDepot },
+    {
+      fetchDay: (sel) => {
+        const q = new URLSearchParams();
+        if (sel.date) q.set('date', sel.date);
+        if (sel.depotId) q.set('depotId', sel.depotId);
+        return api<Day>(`/api/dispatch/day?${q}`);
+      },
+      show: (d, { afterError }) => {
+        setDay(d);
+        setLoadError(null);
+        // The day is back after a failed load: load the plan below again too (its own load most
+        // likely failed as well; third review of PR3) - in place, never a remount: a late order
+        // being typed, opened loads and a running action stay (fourth review of PR3: one failed
+        // day poll during an optimization closed the late-order dialog).
+        if (afterError) setPlanReload((k) => k + 1);
+      },
+      showError: setLoadError,
+      selected: (sel) => {
+        setDate(sel.date);
+        setDepotId(sel.depotId);
+      },
+    },
+  );
+  const loader = loaderRef.current;
+  const refresh = useCallback(() => loader.refresh(), [loader]);
 
-  const refresh = useCallback(async () => {
-    const q = new URLSearchParams();
-    if (date) q.set('date', date);
-    if (depotId) q.set('depotId', depotId);
-    const r = await api<Day>(`/api/dispatch/day?${q}`);
-    if (r.ok && r.data) {
-      setDay(r.data);
-      if (!date) setDate(r.data.date);
-      if (!depotId && r.data.depot) setDepotId(r.data.depot.id);
-    } else toast.error(r.error ?? 'Could not load the day.');
-  }, [date, depotId]);
-
+  // A new selection (or the first render) loads it.
   useEffect(() => {
     void refresh();
-  }, [refresh]);
+  }, [date, depotId, refresh]);
 
-  // Poll while an optimization runs.
+  // Poll while an optimization runs. A tick is skipped while the previous load of the same day is
+  // still on its way (a slow link or a busy server), so requests do not pile up - but never more
+  // than a few ticks in a row, in case that request hangs.
+  const skippedTicks = useRef(0);
   useEffect(() => {
     const running = day?.plan?.status === 'OPTIMIZING' || day?.plan?.job?.status === 'RUNNING' || day?.plan?.job?.status === 'QUEUED';
     if (!running) return;
-    const t = setInterval(() => void refresh(), 3000);
+    const t = setInterval(() => {
+      if (loader.pendingKey() === dayKey(date, depotId) && skippedTicks.current < 5) {
+        skippedTicks.current++;
+        return;
+      }
+      skippedTicks.current = 0;
+      void refresh();
+    }, 3000);
     return () => clearInterval(t);
-  }, [day, refresh]);
+  }, [day, refresh, loader, date, depotId]);
 
   function changeDay(nextDate: string, nextDepot: string | null) {
+    loader.select({ date: nextDate, depotId: nextDepot });
     setDate(nextDate);
     setDepotId(nextDepot);
     setBatch(null);
+    setLoadError(null);
     const q = new URLSearchParams({ date: nextDate, ...(nextDepot ? { depot: nextDepot } : {}) });
     router.replace(`/t/${slug}/dispatch?${q}`);
   }
 
+  // The day on screen must be the selected one, loaded without error, before anything is changed
+  // on it: payloads are built from the loaded day only, never from the date or depot selection.
+  const loadedKey = day ? dayKey(day.date, day.depot?.id) : null;
+  const selectedKey = dayKey(date ?? day?.date, depotId ?? day?.depot?.id);
+  const switching = !day || loadedKey !== selectedKey;
+  const dayReady = !switching && !loadError;
+
   async function upload() {
-    if (!file || !day?.depot) return;
+    if (!file || !day?.depot || !dayReady) return;
     setUploading(true);
+    const started = loader.selection();
     const fd = new FormData();
     fd.set('file', file);
     fd.set('depotId', day.depot.id);
@@ -146,6 +205,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     // Through api(), so an ended session goes to sign-in like every other dispatch call.
     const r = await api<{ batchId: string; validation: Validation }>('/api/orders/upload', { method: 'POST', body: fd });
     setUploading(false);
+    if (!sameSelection(started, loader.selection())) {
+      // Another day was picked meanwhile: the check was for the previous day, so it is not offered
+      // on this one (its "Add ... lines" would add the file to a day not on screen).
+      if (r.ok) toast.info(`The file was checked for ${started.date ?? 'the previous day'}. Click Check file again for the day on screen.`);
+      return;
+    }
     if (!r.ok || !r.data) {
       toast.error(r.error ?? 'Upload failed.');
       return;
@@ -155,11 +220,22 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   }
 
   async function confirmBatch() {
-    if (!batch) return;
+    if (!batch || !dayReady) return;
+    // The day the file is added on: the dispatcher may pick another one before the answer.
+    const started = loader.selection();
     const r = await api<{ ordersCreated: number; cases: number; customersCreated: number; deliveryDates: string[] }>(`/api/orders/${batch.id}/confirm`, {
       method: 'POST',
       json: batch.v.late.isLate ? { lateReason } : {},
     });
+    if (!sameSelection(started, loader.selection())) {
+      // Another day was picked meanwhile: say what happened to the file, and stay on the day
+      // picked (never jump back to the file's date; third review of PR3). Its screen - a file
+      // being checked there included - is left as it is.
+      if (r.ok && r.data) toast.success(`${r.data.ordersCreated} orders (${r.data.cases} cases) added to ${r.data.deliveryDates.join(', ') || (started.date ?? 'the previous day')}.`);
+      else toast.error(`The file for ${started.date ?? 'the previous day'} was not added: ${r.error ?? 'Confirm failed.'}`);
+      await refresh();
+      return;
+    }
     if (!r.ok || !r.data) {
       const code = r.errorBody?.code;
       if (code === 'LATE_REASON_REQUIRED') {
@@ -180,34 +256,66 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     toast.success(`${r.data.ordersCreated} orders (${r.data.cases} cases) added${r.data.customersCreated ? `, ${r.data.customersCreated} new customers need a location` : ''}.`);
     setBatch(null);
     setFile(null);
-    const d0 = r.data.deliveryDates[0];
-    if (d0 && d0 !== date) changeDay(d0, depotId);
+    // A file for another date than the day on screen: show that date.
+    const next = dayAfterConfirm(started, loader.selection(), r.data.deliveryDates);
+    if (next?.date) changeDay(next.date, next.depotId);
     else await refresh();
   }
 
-  async function optimize(overrides: OptimizeOverrides = {}) {
-    if (!day?.depot || !date) return;
+  async function optimize() {
+    if (!day?.depot || !dayReady || planBusy || optimizing) return;
+    // Everything from the loaded day (never the date or depot selection); the server refuses a
+    // plan of another day (409 DAY_MISMATCH).
+    const expect = { date: day.date, depotId: day.depot.id };
+    const replanning = !!day.plan?.chosen;
+    const planId = day.plan?.id;
+    const reason = day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE';
+    // Busy until the day shows the result (the job, or the day as it is after a refusal), and
+    // never stuck: api() never rejects, and the flag is cleared in finally (review of PR3).
     setOptimizing(true);
-    let r;
-    if (day.plan?.chosen) {
-      r = await api<{ runId: string }>(`/api/runs/${day.plan.id}/replan`, { method: 'POST', json: { reason: day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE', ...overrides } });
-    } else {
-      r = await api<{ runId: string }>('/api/dispatch/plan', { method: 'POST', json: { date, depotId: day.depot.id, optimize: true, ...overrides } });
+    try {
+      let overrides: OptimizeOverrides = {};
+      // False when the start never reached the server (status 0): the plan below stays as it is.
+      let reached = true;
+      for (;;) {
+        const r = replanning
+          ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } })
+          : await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', { method: 'POST', json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, ...overrides } });
+        if (r.ok) {
+          toast.success(r.data?.queued ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.' : 'Optimizing… this takes up to a minute for a normal day.');
+          break;
+        }
+        const more = askOverride(r.errorBody, replanning ? 'Re-plan' : 'Optimize', { canEditProducts });
+        if (more) {
+          overrides = { ...overrides, ...more };
+          continue;
+        }
+        if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
+        // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
+        toast.error(r.error ?? 'Could not start optimization.');
+        reached = r.status !== 0;
+        break;
+      }
+      // The plan below is loaded again: the job, or the plan as it is after a refusal.
+      if (reached) setPlanKey((k) => k + 1);
+      await refresh();
+    } finally {
+      setOptimizing(false);
     }
-    setOptimizing(false);
-    if (!r.ok) {
-      const more = askOverride(r.errorBody, day.plan?.chosen ? 'Re-plan' : 'Optimize', { canEditProducts });
-      if (more) return optimize({ ...overrides, ...more });
-      if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
-      toast.error(r.error ?? 'Could not start optimization.');
-      return;
-    }
-    toast.success('Optimizing… this takes up to a minute for a normal day.');
-    setPlanKey((k) => k + 1);
-    await refresh();
   }
 
-  if (!day) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  const loadFailed = loadError ? (
+    <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="day-load-error">
+      <AlertTriangle className="h-4 w-4 text-red-700" />
+      <span>
+        Could not load {date ?? 'the day'}: {loadError}
+      </span>
+      <Button size="sm" variant="outline" onClick={() => void refresh()}>
+        <RefreshCw className="mr-1 h-3 w-3" /> Try again
+      </Button>
+    </div>
+  ) : null;
+  if (!day) return loadFailed ?? <p className="text-sm text-muted-foreground">Loading…</p>;
   if (!day.depot) return <p className="text-sm">No active depot. Create a depot and trucks first.</p>;
 
   const blocking = day.customers.filter((c) => c.blocking);
@@ -222,30 +330,67 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
   const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0 };
   const planOutdated = !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0);
-  const needsPlan = day.orders.count > 0 && (!day.plan?.chosen || day.pending.count > 0 || planOutdated);
+  // Every order is already on a locked, loading or dispatched load: OPTIMIZE / RE-PLAN would have
+  // nothing to plan (the server answers 409 NOTHING_TO_PLAN), so the button is off (review F03).
+  const nothingLeft = day.orders.count > 0 && day.openOrders === 0 && day.pending.count === 0;
+  const lastFailed = day.plan?.status === 'FAILED';
+  const byStatus = day.plan?.loadsByStatus ?? {};
+  // A LOCKED or LOADING load can be unlocked (put back to locked); a dispatched one cannot.
+  const canUnlock = (byStatus.LOCKED ?? 0) + (byStatus.LOADING ?? 0) > 0;
+  const loadCount = Object.values(byStatus).reduce((a, n) => a + n, 0);
+  // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
+  // FAILED, holding the plan that was dispatched).
+  const allOut = loadCount > 0 && (byStatus.DISPATCHED ?? 0) + (byStatus.COMPLETED ?? 0) === loadCount;
+  const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || planOutdated || lastFailed);
   const fixWeight = weightFixText(canEditProducts);
+  const selectedDate = date ?? day.date;
+  const selectedDepot = depotId ?? day.depot.id;
+
+  const pickers = (
+    <div className="flex flex-wrap items-end gap-3">
+      <div className="space-y-1">
+        <Label htmlFor="d-date">Delivery date</Label>
+        <Input id="d-date" type="date" value={selectedDate} onChange={(e) => e.target.value && changeDay(e.target.value, selectedDepot)} className="w-44" />
+      </div>
+      <div className="space-y-1">
+        <Label htmlFor="d-depot">Depot</Label>
+        <select id="d-depot" className="h-9 rounded-md border bg-background px-2 text-sm" value={selectedDepot} onChange={(e) => changeDay(selectedDate, e.target.value)}>
+          {day.depots.map((d) => (
+            <option key={d.id} value={d.id}>
+              {d.code} — {d.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <p className="pb-2 text-xs text-muted-foreground">
+        {switching ? (
+          <span className="inline-flex items-center gap-1" data-testid="day-loading">
+            <Loader2 className="h-3 w-3 animate-spin" /> Loading {selectedDate}…
+          </span>
+        ) : (
+          <>
+            Order cutoff {day.cutoff} the day before · {day.trucks.active} trucks ({day.trucks.capacityCases.toLocaleString()} cases per load round)
+          </>
+        )}
+      </p>
+    </div>
+  );
+
+  // Another date or depot was picked: nothing of the previous day stays on screen (or usable)
+  // until the new one has loaded; a failed load shows the error, not the old day.
+  if (switching) {
+    return (
+      <div className="space-y-5">
+        {pickers}
+        {loadFailed}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="space-y-1">
-          <Label htmlFor="d-date">Delivery date</Label>
-          <Input id="d-date" type="date" value={day.date} onChange={(e) => e.target.value && changeDay(e.target.value, depotId)} className="w-44" />
-        </div>
-        <div className="space-y-1">
-          <Label htmlFor="d-depot">Depot</Label>
-          <select id="d-depot" className="h-9 rounded-md border bg-background px-2 text-sm" value={day.depot.id} onChange={(e) => changeDay(day.date, e.target.value)}>
-            {day.depots.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.code} — {d.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <p className="pb-2 text-xs text-muted-foreground">
-          Order cutoff {day.cutoff} the day before · {day.trucks.active} trucks ({day.trucks.capacityCases.toLocaleString()} cases per load round)
-        </p>
-      </div>
+      {pickers}
+      {loadFailed}
 
       {/* STEP 1 */}
       <Step n={1} title="Upload orders" done={day.orders.count > 0} summary={`${day.orders.count} orders · ${day.orders.customers} customers · ${day.orders.cases.toLocaleString()} cases${day.orders.late ? ` · ${day.orders.late} late` : ''}`}>
@@ -256,13 +401,13 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               <span>{file ? file.name : 'Choose the sales order file (Excel or CSV)'}</span>
               <input type="file" accept=".xlsx,.xls,.csv" className="hidden" data-testid="order-file" onChange={(e) => { setFile(e.target.files?.[0] ?? null); setBatch(null); }} />
             </label>
-            <Button onClick={upload} disabled={!file || uploading} data-testid="upload-btn">
+            <Button onClick={upload} disabled={!file || uploading || !dayReady} data-testid="upload-btn">
               {uploading ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Upload className="mr-1 h-4 w-4" />}
               Check file
             </Button>
           </div>
         ) : null}
-        {batch ? <ValidationPanel v={batch.v} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} /> : null}
+        {batch ? <ValidationPanel v={batch.v} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} disabled={!dayReady} /> : null}
         {day.batches.length ? (
           <p className="text-xs text-muted-foreground">
             Files for this day: {day.batches.map((b) => `${b.fileName} (${b.status.toLowerCase()}${b.isLate ? ', late' : ''})`).join(' · ')}
@@ -322,7 +467,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           running
             ? `Optimizing… ${day.plan?.job?.message ?? ''}`
             : day.plan?.chosen
-              ? `Plan version ${day.plan.version} ready${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
+              ? `Plan version ${day.plan.version} ${lastFailed ? 'in use: the last optimization failed, the previous plan was kept' : 'ready'}${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
               : 'Not optimized yet'
         }
       >
@@ -332,7 +477,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </div>
         ) : null}
         {canPlan ? (
-          <Button onClick={() => optimize()} disabled={optimizing || running || !needsPlan} data-testid="optimize-btn" size="lg">
+          <Button onClick={() => optimize()} disabled={optimizing || planBusy || running || !needsPlan || !dayReady} data-testid="optimize-btn" size="lg">
             {optimizing || running ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Wand2 className="mr-2 h-4 w-4" />}
             {day.plan?.chosen ? 'RE-PLAN' : 'OPTIMIZE'}
           </Button>
@@ -349,23 +494,39 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             . RE-PLAN to apply this — locked and dispatched loads are kept exactly as they are.
           </div>
         ) : null}
-        {!needsPlan && day.plan?.chosen ? <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p> : null}
+        {nothingLeft && !running ? (
+          <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
+            Every order of this day is already on a locked, loading or dispatched load: nothing left to plan.
+            {canUnlock
+              ? day.plan?.chosen
+                ? ' To change a load, unlock it first.'
+                : ' This version has no optimized plan yet: unlock one load below, then OPTIMIZE.'
+              : ' Every load has left the depot; a late order for this day can still be planned.'}
+          </p>
+        ) : !needsPlan && day.plan?.chosen ? (
+          <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>
+        ) : null}
       </Step>
 
       {/* STEPS 4-5 */}
       {day.plan ? (
-        <Step n={4} title="Review plan · 5 Lock, export, dispatch" done={day.plan.status === 'DISPATCHED'} summary={`Version ${day.plan.version} · ${day.plan.status}`}>
+        <Step n={4} title="Review plan · 5 Lock, export, dispatch" done={day.plan.status === 'DISPATCHED' || (day.plan.chosen && allOut)} summary={`Version ${day.plan.version} · ${day.plan.status}`}>
           <PlanView
             key={`${day.plan.id}-${planKey}`}
             slug={slug}
             runId={day.plan.id}
-            canPlan={canPlan}
-            canDispatch={canDispatch}
+            canPlan={canPlan && dayReady}
+            canDispatch={canDispatch && dayReady}
             canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
-            onChanged={() => {
-              setPlanKey((k) => k + 1);
-              void refresh();
+            externalBusy={optimizing}
+            onBusyChange={setPlanBusy}
+            reloadSignal={planReload}
+            onChanged={async () => {
+              // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
+              // result; then the plan screen is loaded fresh. When the day could not be loaded, the
+              // plan stays as it is (with its own Try again) until the day's Try again reloads both.
+              if (await refresh()) setPlanKey((k) => k + 1);
             }}
           />
         </Step>
@@ -439,7 +600,7 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
   );
 }
 
-function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, onCancel }: { v: Validation; fixWeight: string; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void }) {
+function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, onCancel, disabled = false }: { v: Validation; fixWeight: string; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void; disabled?: boolean }) {
   const ok = v.errorRows === 0;
   return (
     <div className={`space-y-2 rounded-md border p-3 text-sm ${ok ? 'border-green-300' : 'border-red-300'}`} data-testid="validation-panel">
@@ -495,7 +656,7 @@ function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, o
         </div>
       ) : null}
       <div className="flex gap-2">
-        <Button onClick={onConfirm} disabled={!ok || (v.late.isLate && lateReason.trim().length < 3)} data-testid="confirm-upload">
+        <Button onClick={onConfirm} disabled={disabled || !ok || (v.late.isLate && lateReason.trim().length < 3)} data-testid="confirm-upload">
           Add {v.totals.lines} lines to the day
         </Button>
         <Button variant="outline" onClick={onCancel}>

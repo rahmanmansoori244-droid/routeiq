@@ -5,6 +5,8 @@
  */
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
+import { isSupersededRun } from './plan-status';
+import type { DriverChangeNote } from './summary';
 import { fmtHhmm } from './time';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
@@ -101,8 +103,10 @@ export function stopTitle(s: Pick<DetailStop, 'customerName' | 'customerCode' | 
 export interface MessagePlan {
   runDate: string;
   version: number;
-  /** Plan version status: a SUPERSEDED version's message says it must not be used. */
+  /** Plan version status: a superseded version's message says it must not be used. */
   status?: string;
+  /** Set when a newer version replaced this one (superseded even if the status says otherwise). */
+  supersededAt?: string | null;
   depot: { lat: number; lng: number };
 }
 
@@ -121,7 +125,7 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
   const route = routeLinks(plan.depot, stops);
   const lines = [
-    ...(plan.status === 'SUPERSEDED' ? [REPLACED_LINE] : []),
+    ...(isSupersededRun({ status: plan.status ?? '', supersededAt: plan.supersededAt }) ? [REPLACED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
@@ -183,6 +187,42 @@ export function driverClashNotes(
     loadIds: [a.id, b.id],
     text: `${a.driverName ?? b.driverName ?? 'One driver'} is on ${at(a)} and ${at(b)} at the same time.`,
   }));
+}
+
+/** A driver note of the applied plan, in words ("Ali -> Sam, because ..."). */
+export function driverChangeText(c: DriverChangeNote): string {
+  const hours = c.departMin !== null && c.returnMin !== null ? ` (${fmtHhmm(c.departMin)}–${fmtHhmm(c.returnMin)})` : '';
+  const trip = `${c.truckCode} · L${c.loadNo}${hours}`;
+  const from = c.from.name;
+  if (c.reason === 'TRIP_GONE') {
+    return `Driver picked by hand, not in this plan: you picked ${from} for ${trip}, and this plan has no such trip. If a later plan has that trip again, pick the driver again.`;
+  }
+  const to = c.to?.name ?? 'no driver';
+  const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : 'another trip';
+  const why = c.reason === 'INACTIVE' ? `${from} is no longer active` : `${from} is on ${other} at that time`;
+  return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
+}
+
+/**
+ * The plan warnings for the applied plan's driver notes (summary `driverChanges`). A note on a trip
+ * of the plan is listed until the dispatcher sets that trip's driver, and never again after: any
+ * driver, the same one with Keep, or "No driver" (`driverSet`: the load row's marker, which the plan
+ * detail reads with driverSetByDispatcher). A TRIP_GONE note is listed while the plan has no load
+ * for that truck and trip. A note without a driver it lost (only written before the simplified
+ * driver rules, when filling an empty trip was a note) is left out.
+ */
+export function driverChangeWarnings(
+  changes: readonly DriverChangeNote[],
+  loads: readonly { truckId: string; loadNo: number; driverId: string | null; driverSet: boolean }[],
+): string[] {
+  return changes
+    .filter((c) => {
+      if (!c.from) return false;
+      const trip = loads.filter((l) => l.truckId === c.truckId && l.loadNo === c.loadNo);
+      if (c.reason === 'TRIP_GONE') return trip.length === 0;
+      return trip.some((l) => l.driverId === (c.to?.id ?? null) && !l.driverSet);
+    })
+    .map(driverChangeText);
 }
 
 /** Order notes as separate, de-duplicated remarks: upload joins every line's note with " | ", so

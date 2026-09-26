@@ -136,3 +136,51 @@ describe('password reset without email points to the real admin reset', () => {
     expect(src).toContain('Reset password');
   });
 });
+
+describe('docs promise only what the code guarantees (third review of PR3)', () => {
+  it('no doc or code comment repeats a promise the second round of fixes had to take back', () => {
+    const REPO = path.resolve(APPS, '..');
+    const files = [...walk(path.join(REPO, 'docs'), /\.md$/), ...walk(path.join(WEB, 'lib'), /\.ts$/)];
+    const STALE: [RegExp, string][] = [
+      // Admission: a company running a solve can be overtaken; a second start can get 503.
+      [/gets the next free one/i, 'another company gets the next free slot'],
+      [/its OPTIMIZE is never refused because others filled the queue/i, 'never refused'],
+      [/waits only for solves queued before it/i, 'waits only for solves queued before it'],
+      // Plan screen: after a network error the plan and the day may need Try again.
+      [/the buttons work again at once/i, 'buttons work again at once'],
+      // Drivers: RouteIQ no longer keeps a driver on two trips it moved onto each other's hours.
+      [/two planned trips that you gave the same driver/i, 'driver kept on two trips you gave'],
+      [/both keep this version's driver/i, "both keep this version's driver"],
+      // Fourth review: only a driver chosen by hand stays on overlapping trips (the marker decides,
+      // not whether the trips overlapped before), and the re-plan job orders its trips too.
+      [/Only when you had already given one driver two planned trips/i, 'a clash kept because the trips overlapped before'],
+      [/The one exception is in step 1/i, 'the step-1 exception of the third round'],
+      // Fifth review: picking the selected driver again fires nothing (Keep marks it), and the
+      // "Use instead" count is driver notes (parked hand-set drivers included), not trips.
+      [/until you pick it again/i, '"pick it again" to mark a driver'],
+      [/how many trips have another driver/i, '"Use instead" counts trips with another driver'],
+      // Simplified driver rules (owner decision after the sixth review): nothing brings a dropped
+      // hand-set driver back, filling an empty trip is no note, and the previous version is not
+      // read as separate evidence.
+      [/goes back on it when/i, 'a dropped hand-set driver coming back with its trip'],
+      [/RouteIQ remembers your pick/i, '"RouteIQ remembers your pick"'],
+      [/Driver added by this plan/i, 'a "Driver added" note (filling an empty trip is no note)'],
+      [/\b(planReplanDrivers|assignReplanDrivers|ownDriverEvidence|parkedEvidence|readParkedDrivers|toParkedDrivers|pickLoadDriver)\b/, 'a removed driver helper'],
+      // Review of the simplified rules: on a tie (the same move, or no evidence load) the trip the
+      // optimizer lists first goes first, and "No driver" is marked, so a note does not come back.
+      [/whatever order the optimizer lists/i, 'drivers independent of the optimizer\'s trip order'],
+      [/whichever truck is listed first/i, 'the same drivers whichever truck is listed first'],
+      [/"No driver" clears (both|the marker)/i, '"No driver" clears the marker'],
+      // Second review of the simplified rules: "No driver" cannot end a note on a trip that has no
+      // driver (nothing is sent, nothing is marked), and no dispatch screen shows a finished job's message.
+      [/or \*\*No driver\*\*\); after that it is not listed again/i, '"No driver" ends a note on a trip without a driver'],
+      [/\*\*Keep\*\*, or "No driver"(;| -) (it does not come back|and never again)/i, '"No driver" ends a note on a trip without a driver'],
+      [/The re-plan's message and \*\*Use instead\*\* also say/i, 'a re-plan message with the note count (never shown)'],
+    ];
+    const offenders = files.flatMap((f) => {
+      const text = readFileSync(f, 'utf8');
+      return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+});

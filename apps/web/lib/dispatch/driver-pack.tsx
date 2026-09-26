@@ -18,6 +18,7 @@ import * as React from 'react';
 import { Document, Link, Page, Path, StyleSheet, Svg, Text, View, renderToBuffer } from '@react-pdf/renderer';
 import { create as createQr } from 'qrcode';
 import type { DetailLoad, DetailStop, PlanDetail } from './plan-detail';
+import { isSupersededRun } from './plan-status';
 import { coordText, pinUrl, routeLinks, tripsByTruck, type RoutePlan } from './driver-links';
 import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
 import { fmtHhmm } from './time';
@@ -198,7 +199,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
     tenantName,
     runDate: d.run.runDate,
     version: v,
-    superseded: d.run.status === 'SUPERSEDED',
+    superseded: isSupersededRun(d.run),
     depot,
     sheets,
   };

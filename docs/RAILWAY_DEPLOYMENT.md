@@ -45,7 +45,9 @@ Follow-ups:
    - If a migration fails, the deploy stops before the app starts.
    - Web variables (names only; values live in Railway): `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `SOLVER_URL`, `SOLVER_TOKEN`. Optional ones are listed in `.env.example`.
    - Since stabilization PR1 (security) also set on web: a separate `JANITOR_TOKEN`, `RESEND_API_KEY` + a verified `RESEND_FROM`, `AUTH_URL` (or `NEXTAUTH_URL`), and `TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`; keep `RATE_LIMITS_DISABLED` unset. The full list and the post-deploy checks are in [`SECURITY.md`](./SECURITY.md) section 7.
+   - Since stabilization PR3 (plan lifecycle): optional `SOLVER_MAX_CONCURRENT` on web (default 2: solves at once over all companies; one company may use one less, at least 1). After the deploy, check it against the solver's vCPU and keep it at or below the solver's `MAX_CONCURRENT_DISPATCH`.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
+   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools processes, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
    - Wait until the solver deployment is **Active** before anyone plans.
 4. **routeiq-osrm** → Settings → Source → Branch: `main` (the PR branch can then be deleted).
