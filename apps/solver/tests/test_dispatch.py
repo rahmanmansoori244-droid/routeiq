@@ -296,6 +296,38 @@ def test_late_order_goes_to_other_truck_when_first_is_frozen():
     assert [(l.truck_id, l.load_no) for l in sc.loads] == [("T02", 1)]
 
 
+def test_same_day_replan_starts_new_loads_from_now_and_keeps_the_turnaround():
+    """Stabilization PR8: a re-plan made on the delivery day at 09:00 is sent with
+    shift_start_min = now + preparation (09:30). No new load leaves before it; T01, whose
+    dispatched load (06:00-09:57) is still out, leaves again only after its return + turnaround +
+    loading; and the 06:00 dispatched load is not reported as leaving too early."""
+    late = [stop(f"L{i}", 23.60 + i * 0.004, 58.40 + i * 0.004, cases=60, priority=1, late=True) for i in range(4)]
+    t1 = truck("T01", cap=300, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:57"), cases=280)])
+    t2 = truck("T02", cap=100, max_trips=1)  # takes one stop at most, so T01 must carry the rest
+    r = req(late, [t1, t2], shift_start_min=hm("09:30"), reload_min=30, loading_min_per_case=0.05)
+    sc = rec(optimize_dispatch(r))
+    assert_reconciled(r, sc)
+    assert not sc.unserved
+    for ld in sc.loads:
+        assert ld.depart_min >= hm("09:30"), (ld.truck_id, ld.load_no, ld.depart_min)
+    t1_new = sorted((ld for ld in sc.loads if ld.truck_id == "T01"), key=lambda ld: ld.load_no)
+    assert t1_new and t1_new[0].load_no == 2
+    # 09:57 + 30 min turnaround + 0.05 min per case of this load (1 min rounding tolerance).
+    assert t1_new[0].depart_min >= hm("09:57") + 30 + 0.05 * t1_new[0].cases - 1
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", sc.feasibility
+
+
+def test_same_day_replan_reports_a_window_that_closes_before_the_trucks_can_arrive():
+    """S04c: a clinic receiving 06:00-09:35 about 50 min from the depot. A plan for the next day
+    serves it; a re-plan at 09:00 for today (first departure 09:30) cannot, and says why."""
+    clinic = stop("CLINIC", 23.81, 58.39, cases=20, priority=1, hard_start_min=hm("06:00"), hard_end_min=hm("09:35"))
+    next_day = rec(optimize_dispatch(req([clinic], [truck("T01")], shift_start_min=hm("06:00"))))
+    assert served_ids(next_day) == {"CLINIC"}
+    same_day = rec(optimize_dispatch(req([clinic], [truck("T01")], shift_start_min=hm("09:30"))))
+    assert unserved_map(same_day) == {"CLINIC": "HARD_WINDOW_INFEASIBLE"}
+    assert "earliest possible arrival" in same_day.unserved[0].reason_message
+
+
 def test_late_order_without_capacity_gets_late_reason():
     base = stop("BASE", 23.60, 58.45, cases=100, priority=1)
     late = stop("LATE", 23.61, 58.45, cases=100, priority=5, late=True)

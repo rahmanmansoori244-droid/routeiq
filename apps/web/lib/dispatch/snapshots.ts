@@ -19,6 +19,7 @@
  * correction must reach the driver. The snapshot keeps the notes the plan was made with, for the record.
  */
 import type { DispatchConfig } from '@routeiq/shared-types';
+import type { PlanFrom } from './plan-from';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -89,6 +90,12 @@ export interface PlanSettings {
   /** The tenant is outside the shared OSRM map (Oman + UAE) and has no OSRM of its own, so the plan
    * was built on straight-line estimates. Absent on settings stored before it was kept. */
   outsideCoverage?: boolean;
+  /**
+   * Stabilization PR8: the plan was built on its own delivery day, so no new load leaves before
+   * now + preparation (plan-from.ts); the optimizer got `fromMin` as the first departure. Null / absent:
+   * planned from the first departure setting (a future day, or settings stored before PR8).
+   */
+  planFrom?: PlanFrom | null;
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */

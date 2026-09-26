@@ -64,6 +64,7 @@ import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } 
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
+import { planFromWarning, sameDayPlanFrom, type PlanFrom } from './plan-from';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
@@ -197,10 +198,19 @@ function toPlanningCustomer(c: {
   return { ...c };
 }
 
+export interface BuildOptions {
+  /**
+   * The time the plan is made (default: the clock now). A plan built on its own delivery day plans
+   * new loads from now + preparation (plan-from.ts, stabilization PR8); tests fix it here.
+   */
+  now?: Date;
+}
+
 export async function buildDispatchRequest(
   tenantId: string,
   runId: string,
   scenarios: DispatchScenarioName[] = ALL_SCENARIOS,
+  opts: BuildOptions = {},
 ): Promise<BuiltRequest> {
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUniqueOrThrow({ where: { id: runId }, include: { depot: true } });
@@ -569,7 +579,15 @@ export async function buildDispatchRequest(
     })),
   }));
 
-  const warnings: string[] = [...settingProblems.warnings];
+  // Stabilization PR8 (scenario finding S04 / N2): a plan made on its own delivery day plans new
+  // loads from now + preparation (the turnaround between loads), never from 06:00 in the past. Sent
+  // as the day's first departure, which the optimizer applies to every truck together with its
+  // locked / dispatched loads' return + turnaround; those loads keep their times.
+  const planFrom = sameDayPlanFrom(
+    { runDateIso: isoOf(run.runDate), timezone: cfg.timezone, firstDepartureMin: Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0), prepMin: cfg.reloadMinutes },
+    opts.now ?? new Date(),
+  );
+  const warnings: string[] = [...(planFrom ? [planFromWarning(planFrom, run.depot.closeMin)] : []), ...settingProblems.warnings];
   // Review F19: the most stops one optimization supports; more is refused here with a clear
   // message rather than by the optimizer (422).
   if (stopList.length > MAX_DISPATCH_STOPS) {
@@ -589,6 +607,7 @@ export async function buildDispatchRequest(
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
   }
   const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
+  if (planFrom) plannerConfig.shift_start_min = planFrom.fromMin;
   if (routing.outsideCoverage) {
     warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
   }
@@ -628,14 +647,15 @@ export async function buildDispatchRequest(
     warnings,
     unknownWeights,
     weightChanges,
-    settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }),
+    settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom),
   };
 }
 
 /**
  * The tenant settings a plan is built with, as the workbook's ASSUMPTIONS sheet reports them.
  * `outsideCoverage`: the routing decision made for this plan (routingProviderFor, from the tenant's
- * country when it was built), so the sheet never re-derives it from today's settings.
+ * country when it was built), so the sheet never re-derives it from today's settings. `planFrom`:
+ * the plan was built on its own delivery day (plan-from.ts); `shiftStartMin` stays the setting.
  */
 export function planSettingsOf(
   cfg: {
@@ -645,6 +665,7 @@ export function planSettingsOf(
     distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
   },
   routing: { outsideCoverage: boolean } = { outsideCoverage: false },
+  planFrom: PlanFrom | null = null,
 ): PlanSettings {
   return {
     timezone: cfg.timezone,
@@ -667,6 +688,7 @@ export function planSettingsOf(
     defaultServiceTimeMin: cfg.defaultServiceTimeMin,
     osrmConfigured: !!cfg.osrmUrl,
     outsideCoverage: routing.outsideCoverage,
+    planFrom,
   };
 }
 
