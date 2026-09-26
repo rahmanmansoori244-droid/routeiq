@@ -2,7 +2,9 @@
  * What the plan map says under itself about its lines (components/plan-map.tsx). Pure, so the rules
  * are tested: the caption never claims road shapes (OSRM) while any line is straight, says how many
  * loads are straight when only some are, never blames a cause that is not the one, and offers Retry
- * only when asking again can help.
+ * only when asking again can help. The map passes it the lines it actually draws (`drawnShapes` in
+ * lib/dispatch/plan-map-state.ts), not the server's rows as such: a load on screen that the answer has
+ * no row for is a straight line.
  */
 import type { EstimateReason } from '@/lib/dispatch/load-geometry';
 
@@ -10,6 +12,12 @@ export interface ShapeRow {
   estimated: boolean;
   /** Missing on an answer from a web older than this field: treated as worth a retry. */
   reason?: EstimateReason | null;
+  /**
+   * A load with no line at all (no located stop away from the depot): neither on the road nor
+   * straight, so left out of every count. Counted as "on the road" it hid the whole-map captions
+   * (not set up, off, outside coverage) and claimed OSRM for a line never routed.
+   */
+  noPath?: boolean;
 }
 
 export type RoadShapesState<R extends ShapeRow = ShapeRow> =
@@ -44,7 +52,7 @@ const isRetryable = (r: ShapeRow) => r.estimated && (!r.reason || RETRYABLE.has(
  */
 export function shouldAutoRetry(s: RoadShapesState): boolean {
   if (s.status === 'failed') return true;
-  return s.status === 'ready' && s.rows.some((r) => r.estimated && (!r.reason || r.reason === 'ROUTING_ERROR'));
+  return s.status === 'ready' && s.rows.some((r) => !r.noPath && r.estimated && (!r.reason || r.reason === 'ROUTING_ERROR'));
 }
 
 export function roadShapesCaption(s: RoadShapesState, opts: { retrying?: boolean } = {}): RoadShapesCaption {
@@ -53,8 +61,9 @@ export function roadShapesCaption(s: RoadShapesState, opts: { retrying?: boolean
   if (s.status === 'loading') return { text: LOADING_TEXT, warn: false, canRetry: false };
   if (s.status === 'failed') return { text: withRetrying(FAILED_TEXT), warn: true, canRetry: !retrying };
 
-  const n = s.rows.length;
-  const est = s.rows.filter((r) => r.estimated);
+  const lines = s.rows.filter((r) => !r.noPath);
+  const n = lines.length;
+  const est = lines.filter((r) => r.estimated);
   const k = est.length;
   if (k === 0) return { text: n ? ROAD_TEXT : 'No lines to show.', warn: false, canRetry: false };
 

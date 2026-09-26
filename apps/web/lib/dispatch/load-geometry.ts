@@ -19,7 +19,12 @@
  *   coordinate list. The key holds coordinates only: a tenant gets a hit only for the exact points of
  *   its own run's loads, which the route reads through the tenant-scoped client. The cache is
  *   in-memory, per process: fine for the single web replica; a second replica just has its own.
+ * - **Each row says which path it is for** (`pointsKey`, `loadPathKey` in lib/dispatch/load-path.ts),
+ *   so the map can tell an answer for other content (the plan changed after the screen loaded it)
+ *   from its own. A load with no located stop away from the depot is `noPath`: nothing is routed
+ *   and it is neither a road shape nor a straight-line estimate.
  */
+import { distinctPoints, loadPathKey } from '@/lib/dispatch/load-path';
 
 /** [lat, lng], the order the solver takes. */
 export type LatLng = [number, number];
@@ -63,7 +68,7 @@ export interface LoadPath {
   points: LatLng[];
 }
 
-/** One row of the API answer. The first five fields are the original shape; `reason` is new. */
+/** One row of the API answer. The first five fields are the original shape; the others are new. */
 export interface LoadGeometry {
   loadId: string;
   truckCode: string;
@@ -73,6 +78,14 @@ export interface LoadGeometry {
   coordinates: LngLat[];
   /** Only when `estimated`. */
   reason?: EstimateReason;
+  /** Fingerprint of the path this row is for (depot, located stops in order, depot): `loadPathKey`. */
+  pointsKey: string;
+  /**
+   * Only when true: the load has no located stop away from the depot (none located, or all on the
+   * depot's pin). Nothing was routed and there is no line to draw; `estimated` is false and the map's
+   * caption leaves the load out of its counts.
+   */
+  noPath?: true;
 }
 
 export type ClassifiedReply =
@@ -239,10 +252,6 @@ export interface ResolveOptions {
 export const LOAD_GEOMETRY_CONCURRENCY = 4;
 export const LOAD_GEOMETRY_DEADLINE_MS = 20_000;
 
-function distinctPoints(points: LatLng[]): number {
-  return new Set(points.map(([lat, lng]) => `${lat},${lng}`)).size;
-}
-
 /** Resolves when `p` settles or `signal` aborts, whichever is first (then as a timeout). */
 function untilAborted(p: Promise<RouteGeometryReply>, signal: AbortSignal): Promise<RouteGeometryReply> {
   if (signal.aborted) return Promise.resolve({ kind: 'timeout' });
@@ -273,12 +282,14 @@ export async function resolveLoadGeometries(loads: LoadPath[], opts: ResolveOpti
   let stopReason: EstimateReason | null = null;
 
   const one = async (l: LoadPath): Promise<LoadGeometry> => {
-    const base = { loadId: l.loadId, truckCode: l.truckCode, loadNo: l.loadNo };
+    const base = { loadId: l.loadId, truckCode: l.truckCode, loadNo: l.loadNo, pointsKey: loadPathKey(l.points) };
     const straight = straightLine(l.points);
     const estimate = (reason: EstimateReason): LoadGeometry => ({ ...base, estimated: true, coordinates: straight, reason });
+    // No located stop away from the depot: nothing to route and no line, so neither a road shape nor
+    // an estimate. Checked first, whatever the routing: counted as "on the road" it hid the "not set
+    // up" caption and claimed OSRM for a line never routed.
+    if (distinctPoints(l.points) < 2) return { ...base, estimated: false, coordinates: straight, noPath: true };
     if (!call) return estimate(opts.offReason ?? 'ROUTING_OFF');
-    // No located stop (depot -> depot): nothing to route, nothing to call it an estimate for.
-    if (distinctPoints(l.points) < 2) return { ...base, estimated: false, coordinates: straight };
     const key = roadShapeKey(opts.routingKey, l.points);
     const hit = cache?.get(key);
     if (hit) return { ...base, estimated: false, coordinates: hit };

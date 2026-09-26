@@ -3,7 +3,8 @@
  * asked 4 at a time within one deadline, one failed load never turns the others straight (only a
  * clear "not configured" stops the calls, and a timeout stops starting new ones so a hanging OSRM
  * holds at most 4 solver threads per request), road shapes are cached (never estimates) with a TTL
- * and size caps, and callRouteGeometry (lib/solver-client.ts) reports why it has no shape.
+ * and size caps, callRouteGeometry (lib/solver-client.ts) reports why it has no shape, each row carries
+ * the fingerprint of its path (pointsKey), and a load with no path is noPath (never "on the road").
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -19,6 +20,8 @@ import {
   type RouteGeometryReply,
 } from '@/lib/dispatch/load-geometry';
 import { callRouteGeometry } from '@/lib/solver-client';
+import { distinctPoints, loadPath, loadPathKey } from '@/lib/dispatch/load-path';
+import { roadShapesCaption } from '@/lib/dispatch/map-caption';
 
 const DEPOT: LatLng = [23.6, 58.4];
 
@@ -55,7 +58,7 @@ describe('resolveLoadGeometries - concurrency and independence', () => {
     expect(maxInFlight).toBe(4);
     expect(rows.map((r) => r.loadId)).toEqual(ls.map((l) => l.loadId));
     expect(rows.every((r) => !r.estimated && r.reason === undefined)).toBe(true);
-    expect(rows[0]).toEqual({ loadId: 'L1', truckCode: 'T1', loadNo: 1, estimated: false, coordinates: road(ls[0].points) });
+    expect(rows[0]).toEqual({ loadId: 'L1', truckCode: 'T1', loadNo: 1, estimated: false, coordinates: road(ls[0].points), pointsKey: loadPathKey(ls[0].points) });
   });
 
   it('honours a smaller concurrency', async () => {
@@ -136,12 +139,52 @@ describe('resolveLoadGeometries - concurrency and independence', () => {
     expect(rows.every((r) => r.estimated && r.reason === 'ROUTING_ERROR')).toBe(true);
   });
 
-  it('a load with no located stop (depot to depot) is not sent and not called an estimate', async () => {
+  it('a load with no located stop (depot to depot) is not sent, not called an estimate, and marked noPath', async () => {
     const call = spyCall(async (pts) => answer(pts));
     const empty: LoadPath = { loadId: 'E', truckCode: 'T', loadNo: 2, points: [DEPOT, DEPOT] };
     const [row] = await resolveLoadGeometries([empty], { call, routingKey: 'k' });
     expect(call).not.toHaveBeenCalled();
-    expect(row).toEqual({ loadId: 'E', truckCode: 'T', loadNo: 2, estimated: false, coordinates: [[DEPOT[1], DEPOT[0]], [DEPOT[1], DEPOT[0]]] });
+    expect(row).toEqual({ loadId: 'E', truckCode: 'T', loadNo: 2, estimated: false, coordinates: [[DEPOT[1], DEPOT[0]], [DEPOT[1], DEPOT[0]]], pointsKey: loadPathKey([DEPOT, DEPOT]), noPath: true });
+  });
+
+  it('a load whose stops all sit on the depot pin is noPath whatever the routing, so the whole-map captions stay reachable', async () => {
+    // Review: it came back { estimated: false } with no reason and counted as "on the road": with
+    // routing not set up the caption said "1 load of 2 ... The other lines follow the road network
+    // (OSRM)", and alone it said "Lines follow the road network (OSRM)".
+    const onDepot: LoadPath = { loadId: 'D', truckCode: 'T', loadNo: 1, points: [DEPOT, DEPOT, DEPOT] };
+    const real = load(1);
+    const cases: [string, Parameters<typeof resolveLoadGeometries>[1], string][] = [
+      ['web not configured', { call: async () => ({ kind: 'not_configured' }), routingKey: 'k' }, 'Straight dashed lines: road routing (OSRM) is not set up, so the map has no road shapes.'],
+      ['solver without an OSRM URL', { call: async () => solverFallback('Road routing (OSRM) is not configured; straight lines shown.'), routingKey: 'k' }, 'Straight dashed lines: road routing (OSRM) is not set up, so the map has no road shapes.'],
+      ['timeouts', { call: async () => ({ kind: 'timeout' }), routingKey: 'k' }, 'Road shapes could not be loaded - straight lines shown.'],
+      ['routing off', { call: null, offReason: 'ROUTING_OFF', routingKey: 'k' }, 'Straight dashed lines: this company plans on straight-line distances (Settings), so the map has no road shapes.'],
+      ['outside coverage', { call: null, offReason: 'OUTSIDE_COVERAGE', routingKey: 'k' }, "Straight dashed lines: the road map covers Oman and the UAE only, so this company's loads have no road shapes."],
+    ];
+    for (const [name, opts, text] of cases) {
+      const rows = await resolveLoadGeometries([onDepot, real], opts);
+      expect(rows[0], name).toMatchObject({ loadId: 'D', estimated: false, noPath: true });
+      expect(rows[0].reason, name).toBeUndefined();
+      expect(rows[1], name).toMatchObject({ loadId: 'L1', estimated: true });
+      expect(rows[1].noPath, name).toBeUndefined();
+      const c = roadShapesCaption({ status: 'ready', rows });
+      expect(c.text, name).toBe(text);
+      expect(c.text, name).not.toMatch(/OSRM\)\.$|follow the road network/);
+    }
+    // Alone: no claim either way.
+    const [d] = await resolveLoadGeometries([onDepot], { call: async () => ({ kind: 'not_configured' }), routingKey: 'k' });
+    expect(roadShapesCaption({ status: 'ready', rows: [d] }).text).toBe('No lines to show.');
+  });
+
+  it('every row carries the fingerprint of the path it is for (a moved pin is another fingerprint)', async () => {
+    const ls = loads(3);
+    const rows = await resolveLoadGeometries(ls, { call: async (pts) => (pts === ls[1].points ? { kind: 'failed' } : answer(pts)), routingKey: 'k' });
+    expect(rows.map((r) => r.pointsKey)).toEqual(ls.map((l) => loadPathKey(l.points)));
+    const off = await resolveLoadGeometries(ls, { call: null, routingKey: 'k' });
+    expect(off.map((r) => r.pointsKey)).toEqual(ls.map((l) => loadPathKey(l.points)));
+    const moved = ls[0].points.map(([a, b], i) => (i === 1 ? [a, b + 1e-9] : [a, b]) as LatLng);
+    expect(loadPathKey(moved)).not.toBe(loadPathKey(ls[0].points));
+    expect(loadPathKey([...ls[0].points].reverse())).not.toBe(loadPathKey(ls[0].points));
+    expect(loadPathKey(ls[0].points)).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it('no loads: no call, empty answer', async () => {
@@ -341,6 +384,16 @@ describe('classifyReply', () => {
     expect(classifyReply(w("OSRM unavailable: OSRM returned code='NoSegment'"))).toEqual(refused);
     // Coordinates in a URL never read as a 400.
     expect(classifyReply(w("OSRM unavailable: Server error '502 Bad Gateway' for url 'http://osrm/route/v1/driving/58.400000,23.400000'"))).toEqual(outage);
+  });
+});
+
+describe('loadPath / distinctPoints - the path both the route and the map build', () => {
+  it('depot, the located stops in order, depot', () => {
+    const depot = { lat: DEPOT[0], lng: DEPOT[1] };
+    expect(loadPath(depot, [{ lat: 23.61, lng: 58.41 }, { lat: null, lng: null }, { lat: 23.63, lng: 58.43 }])).toEqual([DEPOT, [23.61, 58.41], [23.63, 58.43], DEPOT]);
+    expect(loadPath(depot, [])).toEqual([DEPOT, DEPOT]);
+    expect(distinctPoints(loadPath(depot, [{ lat: DEPOT[0], lng: DEPOT[1] }]))).toBe(1);
+    expect(distinctPoints(loadPath(depot, [{ lat: 23.61, lng: 58.41 }]))).toBe(2);
   });
 });
 

@@ -2,7 +2,9 @@
  * GET /api/runs/:id/load-geometry end to end with a fake tenant client and a fake solver call: the
  * loads come from the caller's own run through the tenant-scoped client, each load's path is depot
  * -> stops in order -> depot, routing off makes no solver call, a failed load is the only straight one,
- * a second view is served from the road-shape cache, and the rows keep their original fields.
+ * a second view is served from the road-shape cache, the rows keep their original fields, and each
+ * row's fingerprint matches the one the map computes from the stops it shows (getPlanDetail's shape),
+ * so the map can tell when its plan is behind the answer.
  */
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -32,6 +34,9 @@ vi.mock('@/lib/solver-client', () => ({ callRouteGeometry: h.call }));
 
 import { GET } from '@/app/api/runs/[id]/load-geometry/route';
 import { roadShapeCache } from '@/lib/dispatch/load-geometry';
+import { loadPathKey } from '@/lib/dispatch/load-path';
+import { answerIsStale, drawnShapes, type GeoRow, type MapLoadStops } from '@/lib/dispatch/plan-map-state';
+import { ROAD_TEXT, roadShapesCaption } from '@/lib/dispatch/map-caption';
 
 const DEPOT = { lat: 23.6, lng: 58.4 };
 const cust = (lat: number | null, lng: number | null) => ({ order: { customer: { lat, lng } } });
@@ -86,9 +91,42 @@ describe('GET /api/runs/:id/load-geometry', () => {
     expect(h.call.mock.calls[0][1]).toBeNull(); // no tenant OSRM URL: the solver's own
     expect(h.call.mock.calls[0][2].signal).toBeInstanceOf(AbortSignal);
     expect(body.data).toEqual([
-      { loadId: 'L1', truckCode: 'T01', loadNo: 1, estimated: false, coordinates: bend([[23.6, 58.4], [23.61, 58.41], [23.63, 58.43], [23.6, 58.4]]) },
-      { loadId: 'L2', truckCode: 'T01', loadNo: 2, estimated: false, coordinates: bend([[23.6, 58.4], [23.7, 58.5], [23.6, 58.4]]) },
+      { loadId: 'L1', truckCode: 'T01', loadNo: 1, estimated: false, coordinates: bend([[23.6, 58.4], [23.61, 58.41], [23.63, 58.43], [23.6, 58.4]]), pointsKey: loadPathKey([[23.6, 58.4], [23.61, 58.41], [23.63, 58.43], [23.6, 58.4]]) },
+      { loadId: 'L2', truckCode: 'T01', loadNo: 2, estimated: false, coordinates: bend([[23.6, 58.4], [23.7, 58.5], [23.6, 58.4]]), pointsKey: loadPathKey([[23.6, 58.4], [23.7, 58.5], [23.6, 58.4]]) },
     ]);
+  });
+
+  it("each row's fingerprint is the one the map computes from the stops it shows; a pin moved on the server makes the answer stale", async () => {
+    h.call.mockImplementation(async (pts: Pt[]) => ({ kind: 'answer', provider: 'OSRM', isEstimated: false, coordinates: bend(pts), warning: null }));
+    // What PlanView passes the map for this run (getPlanDetail: one stop per sequence, first order's customer).
+    const onScreen: MapLoadStops[] = [
+      { id: 'L1', stops: [{ lat: 23.61, lng: 58.41 }, { lat: null, lng: null }, { lat: 23.63, lng: 58.43 }] },
+      { id: 'L2', stops: [{ lat: 23.7, lng: 58.5 }] },
+    ];
+    const answer = async () => ({ status: 'ready' as const, rows: (await get()).body.data as unknown as GeoRow[] });
+    const fresh = await answer();
+    expect(answerIsStale(fresh, onScreen, DEPOT)).toBe(false);
+    expect(roadShapesCaption(drawnShapes(fresh, onScreen, DEPOT)).text).toBe(ROAD_TEXT);
+
+    // The customer of L2's stop is moved after this screen loaded the plan: same load id, other path.
+    (h.loads[1].assignments as { order: { customer: { lat: number; lng: number } } }[])[0].order.customer = { lat: 23.75, lng: 58.55 };
+    const moved = await answer();
+    expect(answerIsStale(moved, onScreen, DEPOT)).toBe(true);
+    const c = roadShapesCaption(drawnShapes(moved, onScreen, DEPOT));
+    expect(c.text).not.toBe(ROAD_TEXT);
+    expect(c.text).toMatch(/^1 load of 2 is drawn as a straight dashed line/);
+  });
+
+  it('a load whose only stop is on the depot pin comes back noPath, never as a road shape, and is not routed', async () => {
+    h.loads[1].assignments = [{ sequenceInTruck: 1, ...cust(DEPOT.lat, DEPOT.lng) }];
+    h.call.mockResolvedValue({ kind: 'not_configured' });
+    const { body } = await get();
+    expect(h.call).toHaveBeenCalledTimes(1); // L1 only
+    expect(body.data?.map((r) => [r.loadId, r.estimated, r.reason, r.noPath])).toEqual([
+      ['L1', true, 'NOT_CONFIGURED', undefined],
+      ['L2', false, undefined, true],
+    ]);
+    expect(roadShapesCaption({ status: 'ready', rows: body.data as unknown as GeoRow[] }).text).toBe('Straight dashed lines: road routing (OSRM) is not set up, so the map has no road shapes.');
   });
 
   it('a failed load is straight with a reason; the other keeps its road shape; a second view asks only for the missing one', async () => {

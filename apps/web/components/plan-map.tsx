@@ -7,7 +7,7 @@ import maplibregl from 'maplibre-gl';
 import { Button } from '@/components/ui/button';
 import { OSM_RASTER_STYLE, truckColor } from '@/lib/maps';
 import { roadShapesCaption } from '@/lib/dispatch/map-caption';
-import { GEO_LOADING, afterFailedFetch, autoRetryDue, createDrawGate, linesToDraw, type DrawGate, type GeoRow, type GeoState } from '@/lib/dispatch/plan-map-state';
+import { GEO_LOADING, afterFailedFetch, answerIsStale, autoRetryDue, createDrawGate, drawnShapes, linesToDraw, type DrawGate, type GeoRow, type GeoState } from '@/lib/dispatch/plan-map-state';
 
 export interface PlanMapLoad {
   id: string;
@@ -23,6 +23,12 @@ interface Props {
   loads: PlanMapLoad[];
   unserved: { lat: number | null; lng: number | null; label: string }[];
   selectedLoadId?: string | null;
+  /**
+   * Called when the road shapes answer is for other content than the loads shown (the plan changed on
+   * the server after it was loaded here): reload the plan. May return the reload; when it brings the
+   * same loads, the map asks for the shapes once more.
+   */
+  onStale?: () => unknown;
 }
 
 /** One automatic second try this long after an answer with straight lines that a retry can fix. */
@@ -31,29 +37,39 @@ const AUTO_RETRY_MS = 5_000;
 /**
  * Loads as road polylines (OSRM via the solver). While the shapes load only the depot and stops are
  * drawn; a load without its road shape is a straight dashed line, and the caption says how many and
- * why (lib/dispatch/map-caption.ts), with a Retry button when a retry can help. The decisions live in
- * lib/dispatch/plan-map-state.ts (unit-tested); drawing waits for the map through its draw gate.
+ * why (lib/dispatch/map-caption.ts, counting the lines drawn), with a Retry button when a retry can
+ * help. An answer for other content than the loads shown makes the map reload the plan (onStale). The
+ * decisions live in lib/dispatch/plan-map-state.ts (unit-tested); drawing waits for the map's style
+ * (not its tiles) through the draw gate.
  */
-export function PlanMap({ runId, depot, loads, unserved, selectedLoadId }: Props) {
+export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale }: Props) {
   const el = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const gate = useRef<DrawGate | null>(null);
   const markers = useRef<maplibregl.Marker[]>([]);
   const lastFit = useRef<string | null>(null);
   const autoRetried = useRef(false);
+  const staleHandled = useRef(false);
   const [retrying, setRetrying] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  // The plan content a plan reload asked for by catchUp() has finished for.
+  const [reloadedFor, setReloadedFor] = useState<string | null>(null);
 
   // What the road shapes depend on: the run, its loads, and their stops' positions in order. An
-  // answer for other content is never drawn (it shows as loading until the new answer is in).
+  // answer asked for other content is never drawn (it shows as loading until the new answer is in),
+  // and an answer whose rows are for other content than the loads shown (the server's plan moved on
+  // after this screen loaded it) is caught by answerIsStale: those loads are drawn straight.
   const shapeKey = useMemo(() => loads.map((l) => `${l.id}:${l.stops.map((s) => `${s.lat},${s.lng}`).join(';')}`).join('|'), [loads]);
   const contentKey = `${runId}|${shapeKey}`;
   const [shapes, setShapes] = useState<{ key: string; geo: GeoState }>({ key: contentKey, geo: GEO_LOADING });
   const geo = shapes.key === contentKey ? shapes.geo : GEO_LOADING;
+  const depotAt = useMemo(() => ({ lat: depot.lat, lng: depot.lng }), [depot.lat, depot.lng]);
+  const stale = useMemo(() => answerIsStale(geo, loads, depotAt), [geo, loads, depotAt]);
 
-  // New plan content: the one automatic retry is available again.
+  // New plan content: the one automatic retry (or plan reload) is available again.
   useEffect(() => {
     autoRetried.current = false;
+    staleHandled.current = false;
     setRetrying(false);
   }, [contentKey]);
 
@@ -87,19 +103,47 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId }: Props
     setAttempt((a) => a + 1);
   }, []);
 
+  // The answer is for other content than the loads shown: this screen's plan is behind the server,
+  // and asking for the shapes again would give the same answer. Reload the plan (new plan content
+  // asks for its own shapes); when the reload brings the same loads, ask for the shapes once more.
+  const catchUp = useCallback(() => {
+    if (!onStale) return retry();
+    setRetrying(true);
+    const key = contentKey;
+    void Promise.resolve()
+      .then(onStale)
+      .catch(() => null)
+      .then(() => setReloadedFor(key));
+  }, [onStale, contentKey, retry]);
+
   useEffect(() => {
-    if (!autoRetryDue(geo, { retrying, alreadyRetried: autoRetried.current })) return;
+    if (reloadedFor === null) return;
+    setReloadedFor(null);
+    if (reloadedFor === contentKey) retry();
+  }, [reloadedFor, contentKey, retry]);
+
+  // A stale answer: catch up once per plan content, by itself (the one automatic second request).
+  useEffect(() => {
+    if (!stale || staleHandled.current) return;
+    staleHandled.current = true;
+    autoRetried.current = true;
+    catchUp();
+  }, [stale, catchUp]);
+
+  useEffect(() => {
+    if (!autoRetryDue(geo, { retrying, alreadyRetried: autoRetried.current, stale })) return;
     const t = setTimeout(() => {
       autoRetried.current = true;
       retry();
     }, AUTO_RETRY_MS);
     return () => clearTimeout(t);
-  }, [geo, retrying, retry]);
+  }, [geo, retrying, stale, retry]);
 
   useEffect(() => {
     if (!el.current) return;
     const m = new maplibregl.Map({ container: el.current, style: OSM_RASTER_STYLE as never, center: [depot.lng, depot.lat], zoom: 10 });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+    // Right after the map: ready once its style has loaded, whatever the base-map tiles do.
     const g = createDrawGate(m);
     map.current = m;
     gate.current = g;
@@ -123,7 +167,7 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId }: Props
       for (const id of Object.keys(m.getStyle().sources ?? {})) if (id.startsWith('load-')) m.removeSource(id);
       const bounds = new maplibregl.LngLatBounds([depot.lng, depot.lat], [depot.lng, depot.lat]);
       markers.current.push(new maplibregl.Marker({ color: '#0f172a' }).setLngLat([depot.lng, depot.lat]).setPopup(new maplibregl.Popup().setText(depot.name)).addTo(m));
-      const lines = new Map(linesToDraw(geo, loads, { lat: depot.lat, lng: depot.lng }).map((x) => [x.loadId, x] as const));
+      const lines = new Map(linesToDraw(geo, loads, depotAt).map((x) => [x.loadId, x] as const));
       for (const l of loads) {
         const dim = selectedLoadId && selectedLoadId !== l.id;
         const color = truckColor(l.colorIdx);
@@ -159,13 +203,15 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId }: Props
         lastFit.current = fitKey;
       }
     };
-    // Through the gate, not the map's style-loaded check: that check is false while tiles load, and
-    // a draw parked on the one-time 'load' event after it had fired never ran (createDrawGate).
+    // Through the gate: it waits for the map's style only. Not the map's 'load' event (it waits for
+    // every tile of the first view, until the map is moved when one hangs) nor its style-loaded check
+    // (false while tiles load; a draw parked on the one-time 'load' after it had fired never ran).
     g.run(draw);
     return () => g.cancel();
-  }, [geo, loads, unserved, selectedLoadId, depot.lat, depot.lng, depot.name, shapeKey]);
+  }, [geo, loads, unserved, selectedLoadId, depot.lat, depot.lng, depot.name, depotAt, shapeKey]);
 
-  const caption = roadShapesCaption(geo, { retrying });
+  // The caption counts the lines drawn (a load on screen the answer has no row for is straight).
+  const caption = roadShapesCaption(drawnShapes(geo, loads, depotAt), { retrying });
   return (
     <div className="space-y-1">
       <div ref={el} className="h-[420px] w-full overflow-hidden rounded-md border" data-testid="plan-map" />
@@ -174,7 +220,7 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId }: Props
           {caption.text}
         </p>
         {caption.canRetry ? (
-          <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={retry}>
+          <Button type="button" variant="outline" size="sm" className="h-7 px-2 text-xs" onClick={stale ? catchUp : retry}>
             Retry
           </Button>
         ) : null}

@@ -1,7 +1,8 @@
 /**
  * The plan map's caption (lib/dispatch/map-caption.ts): it never claims road shapes (OSRM) while a
  * line is straight, counts the straight loads when only some are, explains why, and offers Retry
- * (and the one automatic retry) only when asking again can help.
+ * (and the one automatic retry) only when asking again can help. A load with no line (noPath) is in
+ * no count.
  */
 import { describe, expect, it } from 'vitest';
 import type { EstimateReason } from '@/lib/dispatch/load-geometry';
@@ -117,6 +118,24 @@ describe('roadShapesCaption', () => {
 
   it('no rows: no claim either way', () => {
     expect(roadShapesCaption(ready())).toEqual({ text: 'No lines to show.', warn: false, canRetry: false });
+  });
+
+  it('a load with no line (noPath) is left out of every count: the whole-map captions stay, OSRM is never claimed for it', () => {
+    // Review: counted as "on the road" it turned "not set up" into "1 load of 2 ... The other lines
+    // follow the road network (OSRM)", where the only other line was a depot-to-depot dot.
+    const none: ShapeRow = { estimated: false, noPath: true };
+    expect(roadShapesCaption(ready(none, est('NOT_CONFIGURED')))).toEqual({
+      text: 'Straight dashed lines: road routing (OSRM) is not set up, so the map has no road shapes.',
+      warn: true,
+      canRetry: false,
+    });
+    expect(roadShapesCaption(ready(none, est('ROUTING_OFF'), est('ROUTING_OFF'))).text).toMatch(/^Straight dashed lines: this company plans on straight-line distances/);
+    expect(roadShapesCaption(ready(none, est('OUTSIDE_COVERAGE'))).text).toMatch(/^Straight dashed lines: the road map covers Oman and the UAE only/);
+    expect(roadShapesCaption(ready(none, est('TIMEOUT')))).toEqual({ text: FAILED_TEXT, warn: true, canRetry: true });
+    expect(roadShapesCaption(ready(none, roadRow, est('TIMEOUT'))).text).toMatch(/^1 load of 2 is drawn/);
+    expect(roadShapesCaption(ready(none, roadRow))).toEqual({ text: ROAD_TEXT, warn: false, canRetry: false });
+    expect(roadShapesCaption(ready(none, none))).toEqual({ text: 'No lines to show.', warn: false, canRetry: false });
+    expect(shouldAutoRetry(ready(none, roadRow))).toBe(false);
   });
 });
 

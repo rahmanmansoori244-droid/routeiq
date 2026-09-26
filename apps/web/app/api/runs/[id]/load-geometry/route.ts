@@ -4,7 +4,8 @@ import { prisma } from '@/lib/db';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { readPlanInputs, readStopSnapshot } from '@/lib/dispatch/snapshots';
-import { resolveLoadGeometries, roadShapeCache, routingOffReason, type LatLng, type LoadPath } from '@/lib/dispatch/load-geometry';
+import { resolveLoadGeometries, roadShapeCache, routingOffReason, type LoadPath } from '@/lib/dispatch/load-geometry';
+import { loadPath } from '@/lib/dispatch/load-path';
 
 interface Params { params: { id: string } }
 
@@ -14,7 +15,10 @@ interface Params { params: { id: string } }
 // segments with `estimated: true` and a `reason`; the other loads keep their road shapes.
 // Review F08: drawn through the pins each stop was PLANNED with (its snapshot) and from the depot
 // the plan was made from, so a pin corrected later never redraws a locked or dispatched load;
-// rows planned before snapshots existed use today's customer pin.
+// rows planned before snapshots existed use today's customer pin. Each row carries `pointsKey`, the
+// fingerprint of its path, built by the same `loadPath` the map uses on the stops it shows
+// (getPlanDetail: one stop per sequence at its first order's planned pin, the plan's depot), so the
+// map can tell when its plan is behind this answer.
 export const GET = (req: Request, { params }: Params) =>
   withTenantApi(async (_r, { db, user }) => {
     const run = await db.runPlan.findUnique({ where: { id: params.id }, include: { depot: true } });
@@ -30,25 +34,22 @@ export const GET = (req: Request, { params }: Params) =>
     const chosen = run.chosenScenarioId ? await prisma.scenarioResult.findFirst({ where: { id: run.chosenScenarioId, runId: run.id }, select: { detailsJson: true } }) : null;
     const raw: unknown = chosen?.detailsJson;
     const inputs = isDispatchDetails(raw) ? readPlanInputs(raw.inputs) : null;
-    const depot: LatLng = inputs ? [inputs.depot.lat, inputs.depot.lng] : [run.depot.lat, run.depot.lng];
+    const depot = inputs ? { lat: inputs.depot.lat, lng: inputs.depot.lng } : { lat: run.depot.lat, lng: run.depot.lng };
     const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { country: true } });
     // Road routing off (Settings), outside the shared road map, or no settings row: no solver call,
     // and each reason gets its own caption on the map.
     const offReason = routingOffReason(cfg ? routingProviderFor(cfg, tenant?.country) : null);
     const osrmUrl = cfg?.osrmUrl?.trim() || null;
     const paths: LoadPath[] = loads.map((l) => {
-      const pts: LatLng[] = [depot];
-      const seen = new Set<number>();
+      // One stop per sequence, in sequence order, at its first order's planned pin (as getPlanDetail).
+      const stops = new Map<number, { lat: number | null; lng: number | null }>();
       for (const a of l.assignments) {
-        if (seen.has(a.sequenceInTruck)) continue;
-        seen.add(a.sequenceInTruck);
+        if (stops.has(a.sequenceInTruck)) continue;
         const snap = readStopSnapshot(a.stopSnapshotJson);
-        const lat = snap ? snap.lat : a.order.customer.lat;
-        const lng = snap ? snap.lng : a.order.customer.lng;
-        if (lat !== null && lng !== null) pts.push([lat, lng]);
+        stops.set(a.sequenceInTruck, snap ? { lat: snap.lat, lng: snap.lng } : a.order.customer);
       }
-      pts.push(depot);
-      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: pts };
+      const inOrder = [...stops.entries()].sort(([x], [y]) => x - y).map(([, c]) => c);
+      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: loadPath(depot, inOrder) };
     });
     const rows = await resolveLoadGeometries(paths, {
       call: offReason ? null : (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }),
