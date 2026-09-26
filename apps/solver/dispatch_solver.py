@@ -120,6 +120,8 @@ ENGINE = "ortools-routing"
 
 # The automatic search time between 120 and 300 stops (PR7, T1): straight lines through these
 # (stops, seconds) points. Up to 120 stops 20 s, from 300 to LARGE_DAY_STOPS 150 s, above 240 s.
+# The web's Settings page states this schedule from packages/shared-types/src/planner-bounds.json
+# (searchTimeSec): change both together (test_web_search_time_schedule_is_the_solver_schedule).
 TIME_LIMIT_POINTS: tuple[tuple[int, int], ...] = ((120, 20), (150, 30), (300, 150))
 
 

@@ -6,7 +6,7 @@
  * Pure: no database, shared by the server and the Settings page.
  */
 import type { DispatchConfig, DispatchScenarioName } from '@routeiq/shared-types';
-import { CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, outOfBounds, type ConfigBoundKey } from '../planner-bounds';
+import { autoTimeLimitSec, CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, outOfBounds, SEARCH_TIME_SCHEDULE, type ConfigBoundKey } from '../planner-bounds';
 import { parsePriorityWeights, routingProviderFor } from './customer-attrs';
 import { fmtHhmm } from './time';
 
@@ -44,14 +44,32 @@ export interface TenantPlannerConfig {
 export const PLANNER_CONSTANTS = {
   earlyPreferencePerMin: { 1: 0.01, 2: 0.005 } as Record<number, number>,
   changePenaltyPerStop: 3,
-  autoTimeLimitSec: [
-    { upTo: 25, sec: 5 },
-    { upTo: 200, sec: 20 },
-    { upTo: 350, sec: 150 },
-    { upTo: MAX_DISPATCH_STOPS, sec: 240 },
-  ],
+  // The automatic search time: SEARCH_TIME_SCHEDULE / autoTimeLimitSec (lib/planner-bounds.ts),
+  // checked against the optimizer's schedule (PR7).
   matrixBudgetSec: 90,
 } as const;
+
+/** A 200-stop day: the size whose search time PR7 (T1) fixed, named on the Settings page. */
+const SEARCH_TIME_EXAMPLE_STOPS = 200;
+
+/**
+ * The Settings page's "Search time" row, from the schedule the optimizer uses (PR7, T1): "5 s up
+ * to 25 stops, 20 s up to 120, rising smoothly to 30 s at 150, 70 s at 200 and 150 s at 300, 150 s
+ * up to 350, 240 s above".
+ */
+export function searchTimeText(): string {
+  const s = SEARCH_TIME_SCHEDULE;
+  const [first, ...rest] = s.points;
+  const last = s.points[s.points.length - 1];
+  const marks = [...new Set([...rest.map(([n]) => n), SEARCH_TIME_EXAMPLE_STOPS])].filter((n) => n > first[0] && n <= last[0]).sort((a, b) => a - b);
+  const at = marks.map((n) => `${autoTimeLimitSec(n)} s at ${n}`);
+  const rising = at.length > 1 ? `${at.slice(0, -1).join(', ')} and ${at[at.length - 1]}` : at.join('');
+  return (
+    `${s.smallDaySec} s up to ${s.smallDayStops} stops, ${first[1]} s up to ${first[0]}` +
+    (rising ? `, rising smoothly to ${rising}` : '') +
+    `, ${last[1]} s up to ${LARGE_DAY_STOPS}, ${s.largeDaySec} s above`
+  );
+}
 
 /** Setting names as the Settings page shows them (also used in error messages). */
 export const SETTING_LABELS: Record<ConfigBoundKey, string> = {
@@ -233,9 +251,9 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
     { label: 'Keep late-order re-plans steady', value: `${PLANNER_CONSTANTS.changePenaltyPerStop} ${currency} per stop moved to another truck`, source: 'PLANNER' },
     {
       label: 'Search time',
-      value: PLANNER_CONSTANTS.autoTimeLimitSec.map((t) => `${t.sec} s up to ${t.upTo} stops`).join(', '),
+      value: searchTimeText(),
       source: 'PLANNER',
-      note: 'automatic by the size of the day',
+      note: 'automatic by the size of the day, for the recommended plan; the alternatives, started from it, get half',
     },
     {
       label: 'Largest day',

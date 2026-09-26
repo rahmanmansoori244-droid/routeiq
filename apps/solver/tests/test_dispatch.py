@@ -1078,6 +1078,38 @@ def test_web_setting_bounds_lie_inside_the_solver_contract():
         DispatchStop(stop_id="s", order_ids=["o"], customer_id="c", lat=23.6, lng=58.4, demand_cases=1, service_min=v)
 
 
+def test_web_search_time_schedule_is_the_solver_schedule():
+    """PR7 (T1) review: the Settings page states the automatic search time from the schedule in
+    planner-bounds.json (the web copy is checked against it by tenant-settings.spec.ts). It must be
+    the optimizer's own, for every day size: before, the page still said "20 s up to 200 stops,
+    150 s up to 350" after the optimizer had moved to the smooth schedule (a 200-stop day: 70 s)."""
+    import dispatch_solver as ds
+    from dispatch_models import MAX_STOPS
+
+    b = _planner_bounds()
+    st = b["searchTimeSec"]
+    assert b["largeDayStops"] == ds.LARGE_DAY_STOPS
+    assert [tuple(p) for p in st["points"]] == list(ds.TIME_LIMIT_POINTS)
+
+    def stated(n: int) -> int:
+        """The schedule as planner-bounds.json states it (and the Settings page shows it)."""
+        if n <= st["smallDayStops"]:
+            return st["smallDaySec"]
+        if n > b["largeDayStops"]:
+            return st["largeDaySec"]
+        pts = st["points"]
+        if n <= pts[0][0]:
+            return pts[0][1]
+        for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
+            if n <= xb:
+                return math.floor(ya + (yb - ya) * (n - xa) / (xb - xa) + 0.5)
+        return pts[-1][1]
+
+    assert [n for n in range(1, MAX_STOPS + 1) if ds.auto_time_limit(n) != stated(n)] == []
+    # The examples the web's own function is checked against (tenant-settings.spec.ts).
+    assert [(n, ds.auto_time_limit(n)) for n, _ in st["examples"]] == [tuple(e) for e in st["examples"]]
+
+
 def test_trucks_used_counts_the_trucks_of_frozen_loads():
     """PR7 (B3), the S04 probe: T02 carries a dispatched load and has no load left, so every new load
     goes to other trucks. The plan's trucks are still the day's physical trucks, T02 included: the

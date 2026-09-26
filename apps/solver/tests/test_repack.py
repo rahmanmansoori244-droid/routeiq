@@ -738,15 +738,30 @@ def test_score_counts_the_trucks_of_frozen_loads():
 
 
 def test_min_trucks_uses_the_trucks_already_out(monkeypatch):
-    """End to end on the same day: every option keeps G1 at the depot and reports the day's 2
-    physical trucks (the new loads' trucks + the trucks of the locked loads)."""
+    """End to end, MIN_TRUCKS' selection. The same day, but the trucks already out cost 3 OMR/km and
+    fresh G1 0.1: RECOMMENDED puts both new loads on G1 (G1's 30 OMR day is cheaper than the km on
+    F1/F2), so "both loads on G1" is among the candidates MIN_TRUCKS picks from. Counting only the
+    trucks of the new loads, that plan was 1 truck against 2 for "one load each on F1 and F2", so
+    MIN_TRUCKS picked it although the day then uses 3 physical trucks. Counted physically it is 3
+    against 2, and MIN_TRUCKS keeps G1 at the depot. Every option reports the day's physical trucks."""
     monkeypatch.setenv("SOLVER_PARALLEL", "0")
     r = frozen_two_trucks_day()
+    for t in r.trucks:
+        if t.frozen_trips:
+            t.cost_per_km = 3.0
     r.config.time_limit_sec = 2
     resp = optimize_dispatch(r)
     by = {s.name: s for s in resp.scenarios}
+    assert set(by) == set(ALL)
+    rec_sc, mt = by["RECOMMENDED"], by["MIN_TRUCKS"]
+    # The candidate that leaves the trucks already out idle exists: it is the recommendation.
+    assert {ld.truck_id for ld in rec_sc.loads} == {"G1"}, [(l.truck_id, l.load_no) for l in rec_sc.loads]
+    # MIN_TRUCKS: fewest physical trucks = the two trucks already out, not one more.
+    assert {ld.truck_id for ld in mt.loads} == {"F1", "F2"}, [(l.truck_id, l.load_no) for l in mt.loads]
+    assert (mt.trucks_used, mt.trips) == (2, 2)
+    assert (rec_sc.trucks_used, rec_sc.trips) == (3, 2)  # G1 + F1 + F2 (before: 1)
     for sc in by.values():
         assert served_ids(sc) == {"A", "B"}
-        assert {ld.truck_id for ld in sc.loads} <= {"F1", "F2"}, [(l.truck_id, l.load_no) for l in sc.loads]
-        assert (sc.trucks_used, sc.trips, sc.frozen_trucks, sc.frozen_loads) == (2, 2, 2, 2)
+        assert sc.trucks_used == len({ld.truck_id for ld in sc.loads} | {"F1", "F2"}), (sc.name, sc.trucks_used)
+        assert (sc.frozen_trucks, sc.frozen_loads) == (2, 2)
         assert_plan_rules(r, sc)
