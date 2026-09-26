@@ -21,7 +21,9 @@ import {
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
-import { portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
+import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
+import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceCost, type OptionFacts } from './plan-options';
+import type { PreferencePenalties } from '@routeiq/shared-types';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { fmtWindow, isoOf } from './time';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
@@ -158,8 +160,15 @@ export interface PlanDetail {
     status: string;
     solverStatus: string;
     solverTimeSec: number;
+    /**
+     * Physical trucks of the day with this option: its new loads' trucks + the trucks of the
+     * locked, loading and dispatched loads it was planned around (PR7, B3).
+     */
     trucksUsed: number;
+    /** This option's NEW loads. */
     trips: number;
+    /** The locked, loading and dispatched loads the option was planned around (the day's loads = trips + frozenLoads). */
+    frozenLoads: number;
     totalKm: number;
     totalDurationMin: number;
     /** This option's NEW loads (what the optimizer planned). */
@@ -178,6 +187,12 @@ export interface PlanDetail {
     distanceIsEstimated: boolean;
     provider: string;
     objective: ScenarioDetails['objective'] | null;
+    /** The preferences RECOMMENDED also values, in OMR-equivalent (not money); null from an older optimizer. */
+    preference: PreferencePenalties | null;
+    /** preference window + early + continuity (only the window part for an older option); null unknown. */
+    preferenceCost: number | null;
+    /** What this option gains over the others, or that it is the same plan (PR7, N1); null when there is nothing to compare. */
+    tradeoff: string | null;
     chosen: boolean;
     /** The optimizer's own timetable check of this option (null: an option from before the check existed). */
     feasibility: { status: string; timing: string; violations: number } | null;
@@ -434,6 +449,45 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
     pendingOrders = await prisma.order.count({ where: { ...(await ordersInScopeWhere(tenantId, run.depotId, run.runDate)), id: { notIn: inPlan } } });
   }
+  // The plan options (PR7). Each is counted as the whole day with it: the loads it was planned
+  // around (locked, loading, dispatched when it was optimized - the same for every option of the
+  // version) + its new loads, so its trucks are the day's physical trucks (B3) and its day cost
+  // adds the kept loads' stored cost (review F17). Then what each option gains over the others (N1).
+  const early = earlyPriorities(inputs?.config.early_preference_per_min as Record<string, number> | undefined);
+  const options = scenarios.map((s) => {
+    const d = (s.detailsJson ?? {}) as unknown as Partial<ScenarioDetails>;
+    const frozenIds = new Set(d.scope?.frozenLoadIds ?? loads.filter((l) => isCarriedFrozen(l)).map((l) => l.id));
+    const frozen = loads.filter((l) => frozenIds.has(l.id));
+    const frozenCost = frozen.reduce((a, l) => a + l.operatingCost, 0);
+    const newLoads = Array.isArray(d.loads) ? d.loads : null;
+    // An optimizer before PR7 counted only the new loads' trucks: counted again from the loads.
+    const trucksUsed = newLoads ? physicalTruckCount(newLoads, frozen.map((l) => l.truckId)) : s.trucksUsed;
+    const optInputs = readPlanInputs(d.inputs);
+    const priorityOfStop = (st: { stop_id: string; order_ids: string[] }): number | null => {
+      const planned = optInputs?.stops[st.stop_id]?.priority;
+      if (typeof planned === 'number') return planned;
+      const ps = st.order_ids.map((id) => d.scope?.orderPriority[orderIdOf(id)]).filter((p): p is number => typeof p === 'number');
+      return ps.length ? Math.min(...ps) : null;
+    };
+    const prefCost = preferenceCost(d.preference_penalties, d.objective?.window_penalty);
+    const facts: OptionFacts = {
+      name: s.name,
+      usable: (d.status ?? 'OPTIMIZED') === 'OPTIMIZED' && !!newLoads,
+      trucks: trucksUsed,
+      loads: (d.trips ?? 0) + frozen.length,
+      km: s.totalDistanceKm,
+      dayCost: frozenCost + s.totalCost,
+      preferenceCost: prefCost,
+      unserved: s.unservedCount,
+      signature: newLoads ? planSignature(newLoads) : s.id,
+      earlyStarts: newLoads ? earlyStarts(newLoads, early, priorityOfStop) : {},
+    };
+    return { s, d, frozenLoads: frozen.length, frozenCost, trucksUsed, prefCost, facts };
+  });
+  const tradeoffs = optionTradeoffs(
+    options.map((o) => o.facts),
+    early.map((p) => `P${p}`).join('/'),
+  );
   return {
     run: {
       id: run.id,
@@ -451,20 +505,16 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     summary: (run.summaryJson as unknown as DailySummary) ?? null,
     reconciliation: (run.reconciliationJson as unknown as Reconciliation) ?? null,
     change: (run.changeSummaryJson as unknown as ChangeSummary) ?? null,
-    scenarios: scenarios.map((s) => {
-      const d = (s.detailsJson ?? {}) as unknown as Partial<ScenarioDetails>;
-      // The loads this option was planned around (frozen when it was optimized): the same for
-      // every option of the version, so each option's day total adds them to its new loads.
-      const frozenIds = new Set(d.scope?.frozenLoadIds ?? loads.filter((l) => isCarriedFrozen(l)).map((l) => l.id));
-      const frozenCost = loads.filter((l) => frozenIds.has(l.id)).reduce((a, l) => a + l.operatingCost, 0);
+    scenarios: options.map(({ s, d, frozenLoads, frozenCost, trucksUsed, prefCost }) => {
       return {
         id: s.id,
         name: s.name,
         status: d.status ?? 'OPTIMIZED',
         solverStatus: d.solver_status ?? '',
         solverTimeSec: d.solver_time_sec ?? 0,
-        trucksUsed: s.trucksUsed,
+        trucksUsed,
         trips: d.trips ?? 0,
+        frozenLoads,
         totalKm: s.totalDistanceKm,
         totalDurationMin: s.totalTimeMin,
         operatingCost: s.totalCost,
@@ -476,6 +526,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         distanceIsEstimated: d.distance_is_estimated ?? true,
         provider: d.matrix_provider ?? 'HAVERSINE',
         objective: d.objective ?? null,
+        preference: d.preference_penalties ?? null,
+        preferenceCost: prefCost,
+        tradeoff: tradeoffs[s.name]?.text || null,
         chosen: s.id === run.chosenScenarioId,
         feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
       };

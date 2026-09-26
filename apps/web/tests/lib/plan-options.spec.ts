@@ -1,0 +1,257 @@
+/**
+ * Stabilization PR7 - the plan options table (plan screen, Excel SUMMARY, job message):
+ * - B3: an option's trucks are the day's PHYSICAL trucks, the trucks of locked / loading /
+ *   dispatched loads included; the job message says "N new loads + M kept on T trucks".
+ * - N1: each option says what it gains over the others (P1/P2 minutes, preference cost, OMR, km,
+ *   trucks), or that it is the same plan. RECOMMENDED's objective itself is unchanged.
+ * Pure helpers first, then getPlanDetail and the workbook on the in-memory database (fake-plan-db.ts).
+ */
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import ExcelJS from 'exceljs';
+import { resetDb, tables } from './fake-plan-db';
+
+vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
+vi.mock('@/lib/tenant', async () => {
+  const m = await import('./fake-plan-db');
+  return { tenantDb: () => m.fakePrisma };
+});
+vi.mock('@/lib/audit', async () => {
+  const m = await import('./fake-plan-db');
+  return { audit: vi.fn(async (input: Record<string, unknown>) => m.fakePrisma.auditLog.create({ data: { ...input } })) };
+});
+
+import type { DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
+import {
+  earlyPriorities,
+  earlyStarts,
+  frozenOfRequest,
+  optionTradeoffs,
+  physicalTruckCount,
+  planSignature,
+  preferenceCost,
+  type OptionFacts,
+} from '@/lib/dispatch/plan-options';
+import { jobMessage } from '@/lib/jobs/dispatch-job';
+import { getPlanDetail } from '@/lib/dispatch/plan-detail';
+import { buildDispatchWorkbook } from '@/lib/dispatch/workbook';
+
+const T = 'tA';
+const DAY = new Date('2026-09-27T00:00:00Z');
+
+/** A new load: stops [stop id, service start min]. */
+function newLoad(truck: string, loadNo: number, stops: [string, number][]): PlannedLoad {
+  return {
+    truck_id: truck, load_no: loadNo, depart_min: 400, return_min: 600, distance_km: 20, duration_min: 200, cases: 40, kg: 400,
+    utilization_pct: 40, fuel_litres: null, fuel_cost: 0, distance_cost: 2, time_cost: 0, fixed_cost: 0, total_cost: 2, return_leg_km: 5,
+    stops: stops.map(([id, start], i) => ({
+      sequence: i + 1, stop_id: id, order_ids: [id.replace('S', 'O')], customer_id: 'c1', arrival_min: start, service_start_min: start,
+      departure_min: start + 20, wait_min: 0, leg_km: 5, cum_km: 5 * (i + 1), leg_min: 10, cases: 40, kg: 400, hard_window_ok: true, pref_window_ok: true,
+    })),
+  };
+}
+
+function facts(over: Partial<OptionFacts> & { name: string }): OptionFacts {
+  return { usable: true, trucks: 3, loads: 4, km: 400, dayCost: 200, preferenceCost: 10, unserved: 0, signature: 'A', earlyStarts: {}, ...over };
+}
+
+describe('B3: physical trucks', () => {
+  it('counts the trucks of the new loads and of the kept loads once each', () => {
+    expect(physicalTruckCount([{ truck_id: 'T1' }, { truck_id: 'T3' }, { truck_id: 'T3' }], ['T1', 'T2'])).toBe(3);
+    expect(physicalTruckCount([], ['T1', 'T2'])).toBe(2);
+    expect(physicalTruckCount([{ truck_id: 'T1' }], [])).toBe(1);
+  });
+
+  it("reads the kept loads from the request's frozen trips", () => {
+    const trucks = [
+      { id: 'T1', frozen_trips: [{}, {}] },
+      { id: 'T2', frozen_trips: [] },
+      { id: 'T3' },
+      { id: 'T4', frozen_trips: [{}] },
+    ];
+    expect(frozenOfRequest(trucks)).toEqual({ truckIds: ['T1', 'T4'], loads: 3 });
+  });
+
+  it('the job message counts the physical trucks and says how many loads were kept (the S04 probe: "10 loads on 6 trucks" for a 7-truck day)', () => {
+    // As an optimizer before PR7 reported it: trucks_used counts only the trucks of the new loads.
+    const newTrucks = ['T01', 'T01', 'T03', 'T04', 'T04', 'T05', 'T05', 'T07', 'T08', 'T08'];
+    const sc = {
+      trips: 10, trucks_used: 6, unserved: [], loads: newTrucks.map((t, i) => newLoad(t, i + 2, [])),
+      feasibility: { status: 'VERIFIED', timing: 'EXACT', violations: [] },
+    } as unknown as DispatchScenario;
+    expect(jobMessage(sc, 0, 0, { truckIds: ['T01', 'T02'], loads: 2 })).toBe('10 new loads + 2 kept (locked or dispatched) on 7 trucks, 0 stop(s) unserved');
+    // A fresh day reads as before.
+    expect(jobMessage(sc, 0, 0, { truckIds: [], loads: 0 })).toBe('10 loads on 6 trucks, 0 stop(s) unserved');
+  });
+});
+
+describe('N1: what each option gains', () => {
+  it('RECOMMENDED shows what its extra cost buys; the cheaper option what it gives up; twins say "same plan"', () => {
+    const rec = facts({
+      name: 'RECOMMENDED', trucks: 7, loads: 11, km: 485.8, dayCost: 237.8, preferenceCost: 12.4, signature: 'R',
+      earlyStarts: { S1: 400, S2: 420, S3: 450 },
+    });
+    const minTrucks = facts({
+      name: 'MIN_TRUCKS', trucks: 6, loads: 11, km: 398.5, dayCost: 202.4, preferenceCost: 31.9, signature: 'M',
+      earlyStarts: { S1: 460, S2: 470, S3: 460 },
+    });
+    const minDistance = { ...minTrucks, name: 'MIN_DISTANCE' };
+    const t = optionTradeoffs([rec, minTrucks, minDistance], 'P1/P2');
+    expect(t.RECOMMENDED.text).toBe(
+      'vs MIN TRUCKS: P1/P2 delivered on average 40 min earlier, preference cost 19.5 OMR lower; but costs 35.4 OMR more, 87 km more, 1 more truck',
+    );
+    expect(t.MIN_TRUCKS.text).toBe(
+      'vs RECOMMENDED: 35.4 OMR cheaper, 87 km less, 1 fewer truck; but P1/P2 delivered on average 40 min later, preference cost 19.5 OMR higher',
+    );
+    expect(t.MIN_DISTANCE.text).toBe('Same plan as MIN TRUCKS');
+  });
+
+  it('identical options say "same plan"; an alternative equal to RECOMMENDED says so', () => {
+    const a = facts({ name: 'RECOMMENDED' });
+    const same = optionTradeoffs([a, { ...a, name: 'MIN_TRUCKS' }, { ...a, name: 'MIN_DISTANCE' }]);
+    expect(Object.values(same).map((x) => x.text)).toEqual(['Same plan as the other options', 'Same plan as the other options', 'Same plan as the other options']);
+    const d = facts({ name: 'MIN_DISTANCE', signature: 'D', km: 380, dayCost: 199 });
+    const t = optionTradeoffs([a, { ...a, name: 'MIN_TRUCKS' }, d]);
+    expect(t.MIN_TRUCKS.text).toBe('Same plan as RECOMMENDED');
+    expect(t.MIN_DISTANCE.text).toBe('vs RECOMMENDED: 1.0 OMR cheaper, 20 km less');
+    expect(t.RECOMMENDED.text).toBe('vs MIN DISTANCE: no gain; but costs 1.0 OMR more, 20 km more');
+  });
+
+  it('an option without a plan gets no line and is never compared', () => {
+    const t = optionTradeoffs([facts({ name: 'RECOMMENDED' }), facts({ name: 'MIN_TRUCKS', usable: false, signature: 'X', dayCost: 1 })]);
+    expect(t.MIN_TRUCKS).toBeUndefined();
+    expect(t.RECOMMENDED.text).toBe('');
+  });
+
+  it('serving more orders is a gain; minutes are compared over the stops both options serve', () => {
+    const rec = facts({ name: 'RECOMMENDED', unserved: 1, signature: 'R', earlyStarts: { S1: 400 } });
+    const alt = facts({ name: 'MIN_DISTANCE', unserved: 0, signature: 'D', earlyStarts: { S1: 400, S9: 900 } });
+    expect(optionTradeoffs([rec, alt]).MIN_DISTANCE.text).toBe('vs RECOMMENDED: 1 more order served');
+  });
+
+  it('preference cost adds preferred hours, early delivery and moved orders; an older option has the preferred-hours part only', () => {
+    expect(preferenceCost({ window: 1.25, early: 10.5, continuity: 3 })).toBe(14.75);
+    expect(preferenceCost(null, 2.5)).toBe(2.5);
+    expect(preferenceCost(undefined, undefined)).toBeNull();
+  });
+
+  it('the early priorities follow the optimizer config (default P1, P2)', () => {
+    expect(earlyPriorities(undefined)).toEqual([1, 2]);
+    expect(earlyPriorities({ 1: 0.01, 2: 0, 3: 0.002 } as unknown as Record<string, number>)).toEqual([1, 3]);
+    const loads = [newLoad('T1', 1, [['S1', 400], ['S2', 420]]), newLoad('T2', 1, [['S3', 500]])];
+    const prio: Record<string, number> = { S1: 1, S2: 3, S3: 2 };
+    expect(earlyStarts(loads, [1, 2], (s) => prio[s.stop_id] ?? null)).toEqual({ S1: 400, S3: 500 });
+  });
+
+  it('the plan signature ignores load order in the list but not the stop order', () => {
+    const a = [newLoad('T1', 1, [['S1', 400], ['S2', 420]]), newLoad('T2', 1, [['S3', 500]])];
+    expect(planSignature([...a].reverse())).toBe(planSignature(a));
+    expect(planSignature([newLoad('T1', 1, [['S2', 400], ['S1', 420]]), a[1]])).not.toBe(planSignature(a));
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// getPlanDetail + workbook on the in-memory database
+// ---------------------------------------------------------------------------------------
+
+const customer = { id: 'c1', tenantId: T, code: 'C1', branchCode: null, name: 'Lulu', customerType: null, address: null, accessNotes: null, lat: 23.6, lng: 58.4,
+  priority: 2, avgServiceTimeMin: 20, serviceTimeConfirmed: true, hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, active: true };
+
+function planLoad(id: string, truckId: string, loadNo: number, status: string, operatingCost: number, carriedFromLoadId: string | null = null) {
+  return {
+    id, tenantId: T, runId: 'P', truckId, loadNo, status, driverId: null, departMin: 400, returnMin: 500, distanceKm: 10, durationMin: 100, cases: 40, weightKg: 400,
+    utilizationPct: 40, fuelLitres: null, fuelCost: 0, operatingCost, returnLegKm: 2, distanceIsEstimated: true, carriedFromLoadId, truckSnapshotJson: null,
+    statusChangedAt: null, statusChangedById: null, createdAt: new Date(),
+  };
+}
+
+function assignment(id: string, loadId: string, truckId: string, orderId: string, loadNo: number) {
+  return {
+    id, runId: 'P', truckId, orderId, sequenceInTruck: 1, plannedArrivalMin: 20, plannedDistanceFromPrevKm: 5, plannedLoadCases: 40, lockedByUserId: null,
+    manualOverrideReason: null, loadId, loadNo, orderInStop: 0, etaMin: 420, serviceStartMin: 420, departureMin: 440, waitMin: 0, cumulativeKm: 5,
+    hardWindowOk: true, prefWindowOk: true, portionCases: null, portionWeightKg: null, portionLinesJson: null, stopSnapshotJson: null,
+  };
+}
+
+function option(id: string, name: string, loads: PlannedLoad[], over: Record<string, unknown>) {
+  const scope = { orderIds: ['O2', 'O3'], frozenOrderIds: ['O1'], orderPriority: { O1: 1, O2: 1, O3: 2 }, frozenLoadIds: ['K1'], frozenLoadOrderIds: ['O1'] };
+  return {
+    id, runId: 'P', name, trucksUsed: new Set(loads.map((l) => l.truck_id)).size, totalDistanceKm: 30, totalTimeMin: 300, totalCost: 50, avgUtilizationPct: 40,
+    unservedCount: 0, createdAt: new Date(),
+    detailsJson: {
+      name, status: 'OPTIMIZED', solver_status: 'ROUTING_SUCCESS', solver_time_sec: 1, trucks_used: new Set(loads.map((l) => l.truck_id)).size, trips: loads.length,
+      total_distance_km: 30, operating_cost: 50, loads, unserved: [], warnings: [], objective: { window_penalty: 1 }, engine: 'OR-Tools',
+      matrix_provider: 'HAVERSINE', distance_is_estimated: true, response_warnings: [], scope, feasibility: { status: 'VERIFIED', timing: 'EXACT', violations: [] },
+      ...over,
+    },
+  };
+}
+
+/**
+ * A re-plan: T2 carries a dispatched load K1 (kept); RECOMMENDED planned its new loads on T1 only,
+ * stored the way an optimizer before PR7 counted them (1 truck). MIN_TRUCKS is a cheaper plan
+ * that delivers the P1 / P2 stops later.
+ */
+function seed() {
+  tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot', active: true, lat: 23.58, lng: 58.39, openMin: 0, closeMin: 1440 }];
+  tables.truck = ['T1', 'T2', 'T3'].map((id, i) => ({ id, tenantId: T, code: `T0${i + 1}`, defaultDriverId: null, capacityCases: 100, capacityWeightKg: 1000 }));
+  tables.customer = [customer];
+  tables.order = ['O1', 'O2', 'O3'].map((id) => ({
+    id, tenantId: T, customerId: 'c1', customer, lines: [{ id: `${id}-l`, cases: 40, weightKg: 400, weightFromMaster: false, salesOrderNo: `SO-${id}`, product: { code: 'TAN', name: 'Tanuf', weightPerCaseKg: 10 } }],
+    totalCases: 40, totalWeightKg: 400, priority: 3, salesValue: null, marginValue: null, isLate: false, status: 'ASSIGNED', notes: null, depotId: 'D1', deliveryDate: DAY,
+  }));
+  tables.runPlan = [{
+    id: 'P', tenantId: T, depotId: 'D1', runDate: DAY, status: 'READY', version: 2, reason: 'LATE_ORDER', optimizationMode: 'BALANCED', chosenScenarioId: 'sc1',
+    parentRunId: null, supersededAt: null, currentJobId: null, finalizedAt: null, totalOrders: 3, unservedCount: 0, summaryJson: null,
+    reconciliationJson: null, changeSummaryJson: null, feasibilityJson: null, createdById: 'u1', createdAt: new Date(),
+  }];
+  tables.planLoad = [planLoad('K1', 'T2', 1, 'DISPATCHED', 30, 'K0'), planLoad('L2', 'T1', 1, 'PLANNED', 25), planLoad('L3', 'T1', 2, 'PLANNED', 25)];
+  tables.routeAssignment = [assignment('A1', 'K1', 'T2', 'O1', 1), assignment('A2', 'L2', 'T1', 'O2', 1), assignment('A3', 'L3', 'T1', 'O3', 2)];
+  const recLoads = [newLoad('T1', 1, [['S2', 400]]), newLoad('T1', 2, [['S3', 520]])];
+  const minLoads = [newLoad('T3', 1, [['S2', 420], ['S3', 520]])];
+  tables.scenarioResult = [
+    option('sc1', 'RECOMMENDED', recLoads, { preference_penalties: { window: 1, early: 4, continuity: 0 } }),
+    { ...option('sc2', 'MIN_TRUCKS', minLoads, { preference_penalties: { window: 1, early: 9, continuity: 0 } }), totalCost: 40, totalDistanceKm: 22 },
+  ];
+  tables.unservedOrder = [];
+  tables.runJob = [];
+  tables.auditLog = [];
+  tables.driver = [];
+  tables.tenantConfig = [{ id: 'cfg', tenantId: T, defaultServiceTimeMin: 10, timezone: 'Asia/Muscat' }];
+  tables.customerTypeProfile = [];
+}
+
+beforeEach(() => resetDb());
+
+describe('the plan options of a re-plan with a dispatched load (getPlanDetail)', () => {
+  it('counts the kept truck and load in every option, and says what each option gains', async () => {
+    seed();
+    const d = (await getPlanDetail(T, 'P'))!;
+    const [rec, min] = d.scenarios;
+    // B3: T1 (new loads) + T2 (dispatched K1), although the stored option says 1 truck.
+    expect(rec).toMatchObject({ name: 'RECOMMENDED', trucksUsed: 2, trips: 2, frozenLoads: 1, dayOperatingCost: 80, preferenceCost: 5 });
+    expect(min).toMatchObject({ name: 'MIN_TRUCKS', trucksUsed: 2, trips: 1, frozenLoads: 1, dayOperatingCost: 70, preferenceCost: 10 });
+    // N1: P1 (S2: O2) and P2 (S3: O3) stops, 400/520 against 420/520 = 10 min earlier on average.
+    expect(rec.tradeoff).toBe('vs MIN TRUCKS: P1/P2 delivered on average 10 min earlier, preference cost 5.0 OMR lower; but costs 10.0 OMR more, 8 km more, 1 more load');
+    expect(min.tradeoff).toBe('vs RECOMMENDED: 10.0 OMR cheaper, 8 km less, 1 fewer load; but P1/P2 delivered on average 10 min later, preference cost 5.0 OMR higher');
+  });
+
+  it('the workbook SUMMARY lists the options with the same trucks, loads and trade-offs', async () => {
+    seed();
+    const d = (await getPlanDetail(T, 'P'))!;
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const ws = wb.getWorksheet('SUMMARY')!;
+    const rows: string[][] = [];
+    ws.eachRow((row) => rows.push([1, 2, 3].map((c) => row.getCell(c).text)));
+    const at = rows.findIndex((r) => r[0] === 'PLAN OPTIONS');
+    expect(at).toBeGreaterThan(0);
+    const rec = rows.findIndex((r, i) => i > at && r[0] === 'RECOMMENDED (in use)');
+    expect(rows[rec][1]).toBe('2 trucks · 3 loads (2 new)');
+    expect(rows[rec][2]).toMatch(/day cost 80\.0 OMR · preference cost 5\.0 · 0 unserved$/);
+    expect(rows[rec + 1][2]).toBe(d.scenarios[0].tradeoff);
+    const min = rows.findIndex((r, i) => i > at && r[0] === 'MIN TRUCKS');
+    expect(rows[min][1]).toBe('2 trucks · 2 loads (1 new)');
+    expect(rows[min + 1][2]).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+  });
+});

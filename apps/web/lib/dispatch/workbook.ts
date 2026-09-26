@@ -408,6 +408,33 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · searched ${s.solver.timeSec} s`);
   }
 
+  if (d.scenarios.length > 1) {
+    // PR7 (B3, N1): the options as the plan screen shows them - the whole day with each option
+    // (physical trucks, kept + new loads, day cost), the preference cost RECOMMENDED also values,
+    // and what each option gains or gives up.
+    head('PLAN OPTIONS');
+    put(ws, r, 1, 'RECOMMENDED also values delivering P1/P2 early and inside preferred hours (preference cost); the other options ignore both.').font = GREY;
+    r++;
+    for (const sc of d.scenarios) {
+      const name = `${sc.name.replace('_', ' ')}${sc.chosen ? ' (in use)' : ''}`;
+      if (sc.status !== 'OPTIMIZED') {
+        kv(name, 'no plan');
+        continue;
+      }
+      const loadsText = sc.frozenLoads ? `${sc.trips + sc.frozenLoads} loads (${sc.trips} new)` : `${sc.trips} loads`;
+      kv(
+        name,
+        `${sc.trucksUsed} trucks · ${loadsText}`,
+        undefined,
+        `${sc.totalKm} km · day cost ${sc.dayOperatingCost.toFixed(1)} ${cur} · preference cost ${sc.preferenceCost !== null ? sc.preferenceCost.toFixed(1) : '—'} · ${sc.unservedOrders} unserved`,
+      );
+      if (sc.tradeoff) {
+        put(ws, r, 3, sc.tradeoff);
+        r++;
+      }
+    }
+  }
+
   head('TIMETABLE CHECK');
   const f = d.feasibility;
   if (!f) {

@@ -530,20 +530,31 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         <Card>
           <CardHeader className="py-3">
             <CardTitle className="text-sm">Plan options (the recommended plan balances service, priorities, customer hours and cost)</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              RECOMMENDED also values delivering P1/P2 customers early and inside their preferred hours (the preference cost); MIN TRUCKS and MIN DISTANCE ignore
+              both. That is why it can cost more: the last column says what each option gains.
+            </p>
           </CardHeader>
           <CardContent className="overflow-x-auto p-0">
             <table className="w-full text-sm">
               <thead className="bg-muted/50 text-left text-xs">
                 <tr>
                   <th className="p-2">Option</th>
-                  <th className="p-2">Trucks</th>
-                  <th className="p-2">Loads</th>
+                  <th className="p-2" title="Physical trucks of the day with this option, the trucks of locked, loading and dispatched loads included.">
+                    Trucks
+                  </th>
+                  <th className="p-2" title="Loads of the day with this option: the kept locked, loading and dispatched loads + its new loads.">
+                    Loads
+                  </th>
                   <th className="p-2">{kmShort}</th>
                   <th className="p-2" title="The whole day with this option: the locked, loading and dispatched loads kept as they are, plus this option's new loads. Driver paid for the whole truck day, overtime included.">
                     Day cost OMR
                   </th>
-                  <th className="p-2" title="Minutes outside customers' preferred hours, valued in OMR. Only the recommended plan tries to keep them low.">
-                    Preferred-hours miss
+                  <th
+                    className="p-2"
+                    title="What the recommended plan also values, in OMR-equivalent (not money): minutes outside preferred hours, P1/P2 delivered later in the day, and orders moved to another truck on a late-order re-plan. Only the recommended plan tries to keep it low."
+                  >
+                    Preference cost
                   </th>
                   <th className="p-2">Unserved</th>
                   <th className="p-2" title="The optimizer re-checked this option's timetable: loading time between loads, receiving hours, capacity, shift. An option that fails can be reviewed but its trucks cannot be dispatched.">
@@ -552,6 +563,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2" title="How long the route search ran, and how it ended. The search is time-limited: a plan is the best it found in that time.">
                     Search
                   </th>
+                  <th className="p-2" title="What this option gains over the other options, and what it gives up; or that it is the same plan.">
+                    What it gains
+                  </th>
                   <th className="p-2" />
                 </tr>
               </thead>
@@ -559,8 +573,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 {d.scenarios.map((sc) => (
                   <tr key={sc.id} className={sc.chosen ? 'bg-blue-50' : ''}>
                     <td className="p-2 font-medium">{sc.name === 'RECOMMENDED' ? 'RECOMMENDED' : sc.name.replace('_', ' ')}</td>
-                    <td className="p-2">{sc.trucksUsed}</td>
-                    <td className="p-2">{sc.trips}</td>
+                    <td className="p-2" data-testid={`trucks-${sc.name}`}>
+                      {sc.trucksUsed}
+                    </td>
+                    <td className="p-2">
+                      {sc.trips + sc.frozenLoads}
+                      {sc.frozenLoads ? (
+                        <span className="ml-1 text-xs text-muted-foreground" title="New loads this option planned (the rest are kept locked, loading or dispatched loads)">
+                          ({sc.trips} new)
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="p-2">
                       {sc.totalKm}
                       {sc.estimatedLegs ? <span className="ml-1 text-xs text-amber-700" title="Legs that could not be routed on roads use straight-line estimates">({sc.estimatedLegs} est.)</span> : null}
@@ -578,7 +601,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         </span>
                       )}
                     </td>
-                    <td className="p-2">{sc.objective ? sc.objective.window_penalty.toFixed(1) : '—'}</td>
+                    <td
+                      className="p-2"
+                      title={
+                        sc.preference
+                          ? `Preferred hours ${sc.preference.window.toFixed(1)} + early delivery ${sc.preference.early.toFixed(1)} + moved orders ${sc.preference.continuity.toFixed(1)}`
+                          : 'Preferred hours only (made by an older optimizer)'
+                      }
+                    >
+                      {sc.preferenceCost !== null ? sc.preferenceCost.toFixed(1) : '—'}
+                    </td>
                     <td className="p-2">{sc.unservedOrders}</td>
                     <td className="p-2 text-xs" data-testid={`timing-checked-${sc.name}`}>
                       {sc.status !== 'OPTIMIZED' ? (
@@ -597,6 +629,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     </td>
                     <td className="p-2 text-xs text-muted-foreground" title={solverStatusText(sc.solverStatus)} data-testid={`solver-${sc.name}`}>
                       {sc.solverTimeSec}s · {solverStatusText(sc.solverStatus, 'short')}
+                    </td>
+                    <td className="min-w-[16rem] p-2 text-xs" data-testid={`tradeoff-${sc.name}`}>
+                      {sc.tradeoff ?? '—'}
                     </td>
                     <td className="p-2 text-right">
                       {sc.chosen ? (
