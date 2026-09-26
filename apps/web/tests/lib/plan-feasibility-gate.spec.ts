@@ -26,6 +26,7 @@ import { chooseScenario, createNextVersion, updateLoad } from '@/lib/dispatch/pl
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { readFeasibility } from '@/lib/dispatch/feasibility';
 import type { PlanInputs } from '@/lib/dispatch/snapshots';
+import { readLoadCost } from '@/lib/dispatch/costs';
 
 const T = 'tA';
 const user = { id: 'u1', role: 'TENANT_ADMIN' };
@@ -293,6 +294,23 @@ describe('snapshots (F08)', () => {
     expect(stops.find((a) => a.orderId === 'O3')!.stopSnapshotJson).toBe(Prisma.DbNull);
     // The copy has its own timetable check.
     expect(readFeasibility(row('runPlan', child.id).feasibilityJson)?.ok).toBe(true);
+  });
+
+  it('PR5 on PR3 and PR4 (rebase): the copy also carries each load cost breakdown and its hand-set driver; a load costed the earlier way copies as SQL NULL', async () => {
+    seed();
+    const cost = { v: 2, policy: 'TRUCK_DAY_SPAN', fixed: 20, trip: 0, distance: 1, fuel: 1, driver: 5, overtime: 0, total: 27, driverPaidMin: 120, paidFromMin: 400, overtimeMin: 0, estimatedLegs: 2 };
+    const setAt = new Date('2026-09-27T05:00:00Z');
+    Object.assign(row('planLoad', 'L1'), { status: 'LOCKED', operatingCost: 27, costJson: cost, driverId: 'DRV', driverSetById: 'u1', driverSetAt: setAt });
+    row('planLoad', 'M1').costJson = null; // costed before PR5: its stored operatingCost stands
+    const { child } = await createNextVersion(T, 'P', 'REOPTIMIZE', null, 'u1');
+    const copies = tables.planLoad.filter((l) => l.runId === child.id);
+    const l1 = copies.find((l) => l.carriedFromLoadId === 'L1')!;
+    expect(l1.costJson).toEqual(cost);
+    expect(readLoadCost(l1.costJson)).toMatchObject({ total: 27, driverPaidMin: 120, estimatedLegs: 2 });
+    expect(l1).toMatchObject({ operatingCost: 27, driverId: 'DRV', driverSetById: 'u1', driverSetAt: setAt, truckSnapshotJson: truckSnap('T01') });
+    const m1 = copies.find((l) => l.carriedFromLoadId === 'M1')!;
+    expect(m1.costJson).toBe(Prisma.DbNull);
+    expect(m1.operatingCost).toBe(5);
   });
 
   it('the plan detail shows the planned facts and what changed since; older rows show today\'s data, labelled', async () => {
