@@ -149,7 +149,7 @@ function delegate(model: string) {
 
 const MODELS = [
   'runPlan', 'planLoad', 'routeAssignment', 'runJob', 'auditLog', 'scenarioResult', 'unservedOrder', 'order', 'orderLine',
-  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer',
+  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer', 'uploadBatch',
 ];
 
 export const fakePrisma: Row = {};

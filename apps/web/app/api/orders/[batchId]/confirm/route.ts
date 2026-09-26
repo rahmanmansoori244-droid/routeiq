@@ -8,6 +8,7 @@ import {
   IntakeConflict,
   isIntakeKeyConflict,
   isTransactionTimeout,
+  lateReasonRequiredMessage,
   lockIntake,
   revalidateIntake,
   type IntakeValidation,
@@ -42,13 +43,23 @@ export const POST = (req: Request, { params }: Params) =>
       const batch = notFoundIfNull(await db.uploadBatch.findUnique({ where: { id: params.batchId } }));
       if (batch.status === 'CONFIRMED') return fail('Batch already confirmed.', 409);
       if (batch.status === 'REJECTED' || batch.status === 'DELETED') return fail(`Batch is ${batch.status}.`, 409);
-      if (batch.errorRows > 0) return fail('Fix the file errors and upload it again - a batch with errors cannot be confirmed.', 400);
+      if (batch.errorRows > 0) {
+        return fail(
+          {
+            code: 'FILE_HAS_ERRORS',
+            message: `This file has ${batch.errorRows} error${batch.errorRows === 1 ? '' : 's'}: nothing was added. Fix the rows (or remove them) and upload the file again - a file with errors cannot be confirmed.`,
+          },
+          400,
+        );
+      }
       const v = batch.validationJson as unknown as IntakeValidation | null;
       if (!v || !Array.isArray(v.lines)) return fail('This batch was validated by an older version. Upload the file again.', 409);
       if (v.lines.length === 0) return fail('No valid rows to confirm.', 400);
       const lateReason = body?.lateReason?.trim() || null;
       if (v.late.isLate && !lateReason) {
-        return fail({ code: 'LATE_REASON_REQUIRED', message: 'These orders arrived after the planning cutoff. Enter the reason for accepting them.', reasons: v.late.reasons }, 400);
+        // The message names the real reason (after the cutoff, or a plan already in use), not always the cutoff.
+        const reasons = v.late.reasons ?? [];
+        return fail({ code: 'LATE_REASON_REQUIRED', message: lateReasonRequiredMessage(reasons), reasons }, 400);
       }
 
       let result;
@@ -65,7 +76,7 @@ export const POST = (req: Request, { params }: Params) =>
             // Checked before the cutoff (or before a plan was applied) but confirmed after it:
             // the orders are late now and need a reason like any other late order.
             if (late.isLate && !lateReason) {
-              throw new IntakeConflict('LATE_REASON_REQUIRED', 'These orders are late now (the cutoff passed or a plan was applied since the file was checked). Enter the reason for accepting them.', 409, {
+              throw new IntakeConflict('LATE_REASON_REQUIRED', lateReasonRequiredMessage(late.reasons, { sinceCheck: true }), 409, {
                 reasons: late.reasons,
               });
             }

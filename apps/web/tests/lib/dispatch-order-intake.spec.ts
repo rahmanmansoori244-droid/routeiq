@@ -492,7 +492,8 @@ describe('resolveOrderLines', () => {
     );
     expect(res.duplicates).toHaveLength(1);
     expect(res.duplicates[0]).toMatchObject({ row: 2, cases: 5 });
-    expect(res.duplicates[0].message).toMatch(/Already uploaded: sales order S1/);
+    // The master codes (W500), not the file's spelling (w500): PR6, scenario test S05.
+    expect(res.duplicates[0].message).toBe('Already confirmed: sales order S1, W500 for C001 on 2026-09-25. Skipped.');
     expect(res.errors).toEqual([]);
     expect(res.lines.map((l) => l.row)).toEqual([3, 4]);
     expect(res.totals.cases).toBe(11);

@@ -16,9 +16,54 @@ export interface ParsedFile {
   fileType: string;
   rows: Record<string, string>[];
   warnings: string[];
+  /** Excel: the sheet the rows were read from. */
+  sheetName?: string;
 }
 
-export async function parseUpload(file: File): Promise<ParsedFile> {
+/** One non-empty sheet of a workbook: its name and its rows (keys = the sheet's header row). */
+export interface ParsedSheet {
+  name: string;
+  rows: Record<string, string>[];
+}
+
+export interface ParseOptions {
+  /**
+   * Which sheets of a workbook hold the rows this upload is for, judged by their header row (e.g.
+   * the order columns). Given: a workbook with such rows on more than one sheet is refused
+   * (MultipleSheetsError) - it is never cut to one sheet without a word - and the one sheet that
+   * has them is read wherever it is in the workbook. Not given: the first sheet with rows.
+   */
+  isDataSheet?: (headers: string[]) => boolean;
+  /** What the rows are, for messages: "order" -> "order rows". */
+  rowsWord?: string;
+}
+
+/**
+ * A workbook with the rows of this upload on more than one sheet (scenario test S04: Orders +
+ * LateOrder). Nothing is read: each sheet must be uploaded as its own file, so each is checked
+ * (and, for late orders, confirmed with its reason) on its own.
+ */
+export class MultipleSheetsError extends Error {
+  readonly code = 'MULTIPLE_SHEETS';
+  constructor(
+    public readonly sheets: { name: string; rows: number }[],
+    rowsWord = '',
+  ) {
+    const what = rowsWord ? `${rowsWord} rows` : 'rows with these columns';
+    super(
+      `This workbook has ${what} on ${sheets.length} sheets: ${sheetList(sheets)}. Nothing was read. ` +
+        'Upload each sheet as its own file (save it as a separate workbook or CSV), so each one is checked and confirmed on its own.',
+    );
+    this.name = 'MultipleSheetsError';
+  }
+}
+
+const rowCount = (n: number) => `${n.toLocaleString('en-US')} row${n === 1 ? '' : 's'}`;
+function sheetList(sheets: { name: string; rows: number }[]): string {
+  return sheets.map((s) => `"${s.name}" (${rowCount(s.rows)})`).join(', ');
+}
+
+export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<ParsedFile> {
   if (file.size > MAX_FILE_BYTES) {
     throw new Error(`File too large (max ${MAX_FILE_BYTES / 1024 / 1024} MB).`);
   }
@@ -32,21 +77,22 @@ export async function parseUpload(file: File): Promise<ParsedFile> {
     file.type === 'application/vnd.ms-excel' ||
     /\.xlsx?$/i.test(file.name);
 
-  const warnings: string[] = [];
-
   if (isExcel) {
     const arr = new Uint8Array(await file.arrayBuffer());
-    const rows = await withTimeout(
-      Promise.resolve(parseExcel(arr)),
+    const sheets = await withTimeout(
+      Promise.resolve(parseExcelSheets(arr)),
       PARSE_TIMEOUT_MS,
       'XLSX parse timed out (possible zip bomb).',
     );
-    if (rows.length > MAX_ROWS) {
-      throw new Error(`Too many rows: ${rows.length}. Max ${MAX_ROWS}.`);
+    const total = sheets.reduce((a, s) => a + s.rows.length, 0);
+    if (total > MAX_ROWS) {
+      throw new Error(`Too many rows: ${total}${sheets.length > 1 ? ` on ${sheets.length} sheets` : ''}. Max ${MAX_ROWS}.`);
     }
-    return { fileName, fileType: 'xlsx', rows, warnings };
+    const pick = pickSheet(sheets, opts);
+    return { fileName, fileType: 'xlsx', rows: pick.rows, warnings: pick.warnings, ...(pick.name ? { sheetName: pick.name } : {}) };
   }
 
+  const warnings: string[] = [];
   const text = await file.text();
   const result = await withTimeout(parseCsv(text), PARSE_TIMEOUT_MS, 'CSV parse timed out.');
   if (result.rows.length > MAX_ROWS) {
@@ -60,17 +106,56 @@ export async function parseUpload(file: File): Promise<ParsedFile> {
   return { fileName, fileType: 'csv', rows: result.rows, warnings };
 }
 
-function parseExcel(buffer: Uint8Array): Record<string, string>[] {
+/**
+ * The sheet to read from a workbook's non-empty sheets (see ParseOptions.isDataSheet). Throws
+ * MultipleSheetsError when more than one sheet holds the rows; every other non-empty sheet that
+ * is not read is named in a warning, so nothing is left out without a word.
+ */
+export function pickSheet(
+  sheets: ParsedSheet[],
+  opts: ParseOptions = {},
+): { name: string | null; rows: Record<string, string>[]; warnings: string[] } {
+  if (!sheets.length) return { name: null, rows: [], warnings: [] };
+  // Only rows with a value count: a sheet whose rows are all blank cells (a template) holds no data.
+  const dataRows = (s: ParsedSheet) => s.rows.filter((r) => Object.values(r).some((v) => v !== '')).length;
+  const withData = sheets.filter((s) => dataRows(s) > 0);
+  const pool = withData.length ? withData : sheets;
+  const isData = opts.isDataSheet;
+  const matching = isData ? pool.filter((s) => isData(Object.keys(s.rows[0] ?? {}))) : [];
+  if (matching.length > 1) {
+    throw new MultipleSheetsError(
+      matching.map((s) => ({ name: s.name, rows: dataRows(s) })),
+      opts.rowsWord,
+    );
+  }
+  // No sheet with the expected columns: the first sheet with rows, whose check then names the
+  // missing columns (as before).
+  const chosen = matching[0] ?? pool[0];
+  const others = pool.filter((s) => s !== chosen).map((s) => ({ name: s.name, rows: dataRows(s) }));
+  const warnings: string[] = [];
+  if (others.length) {
+    warnings.push(
+      matching.length === 1
+        ? `Only sheet "${chosen.name}" was read. Other sheet(s) with rows but without the ${opts.rowsWord ? `${opts.rowsWord} ` : ''}columns were not read: ${sheetList(others)}.`
+        : `Only sheet "${chosen.name}" was read. Other sheet(s) with rows were not read: ${sheetList(others)}. Upload each sheet as its own file if it is needed.`,
+    );
+  }
+  return { name: chosen.name, rows: chosen.rows, warnings };
+}
+
+/** Every sheet of the workbook that has rows, in workbook order. */
+export function parseExcelSheets(buffer: Uint8Array): ParsedSheet[] {
   const wb = XLSX.read(buffer, { type: 'array', cellDates: false, cellNF: false });
-  // First sheet that actually has rows (exports often start with a cover/filter sheet).
+  const out: ParsedSheet[] = [];
   for (const sheetName of wb.SheetNames) {
     const sheet = wb.Sheets[sheetName];
+    if (!sheet) continue;
     // raw: true keeps real numbers (no "1,234" display strings) and returns date cells as
     // Excel serials, which the order intake converts; display text would depend on locale.
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true });
-    if (rows.length) return rows.map((r) => normalizeKeys(r));
+    if (rows.length) out.push({ name: sheetName, rows: rows.map((r) => normalizeKeys(r)) });
   }
-  return [];
+  return out;
 }
 
 function parseCsv(text: string): Promise<{ rows: Record<string, string>[]; errors: Papa.ParseError[] }> {
