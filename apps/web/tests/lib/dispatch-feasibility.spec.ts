@@ -467,7 +467,44 @@ describe('inverted windows and corrected trucks (PR4 review)', () => {
     expect(checkPlanFeasibility(input([load('L1', 1, { capacityNow: { cases: 100, kg: 800 } })])).violations).toEqual([]);
     expect(checkPlanFeasibility(input([load('L1', 1, { onRoad: true, capacityNow: { cases: 10, kg: 300 } })])).violations).toEqual([]);
     const lockedLoad = checkPlanFeasibility(input([load('L1', 1, { frozen: true, capacityNow: { cases: 10, kg: 1000 } })]));
-    expect(lockedLoad.violations[0].message).toMatch(/Put the load back to Planned and re-plan to use the new capacity\.$/);
+    expect(lockedLoad.violations[0].message).toMatch(/\)\. Put T01 L1 back to Planned first and re-plan to use the new capacity\.$/);
+  });
+
+  it('a corrected truck under a locked load with later locked loads: the warning names them all, latest first (Unlock is refused otherwise)', () => {
+    // "Lock all loads" locked T01 L1 and L2 (and T02 L1); T01's payload is then corrected to 300 kg:
+    // L1 (400 kg) no longer fits, L2 (200 kg) still does.
+    const now = { cases: 100, kg: 300 };
+    const light = (loadNo: number) => [stop({ orderId: `o${loadNo}`, kg: 200, etaMin: 420 + (loadNo - 1) * 200, serviceStartMin: 420 + (loadNo - 1) * 200, departureMin: 440 + (loadNo - 1) * 200 })];
+    const two = input([
+      load('L1', 1, { frozen: true, capacityNow: now }),
+      load('L2', 2, { frozen: true, capacityNow: now, weightKg: 200, stops: light(2) }),
+      load('M1', 1, { truckId: 't2', truckCode: 'T02', frozen: true }),
+    ]);
+    const f = checkPlanFeasibility(two);
+    expect(f.violations.map((v) => `${v.severity} ${v.code} ${v.truckCode} L${v.loadNo} ${v.frozen}`)).toEqual(['WARN CAPACITY_CHANGED T01 L1 true']);
+    expect(f.violations[0].message).toBe(
+      'T01 load 1 carries 40 cases / 400 kg, but the truck was changed to 100 cases / 300 kg after planning (planned with 100 cases / 1000 kg). ' +
+        'Put T01 L2, T01 L1 back to Planned first, in this order, and re-plan to use the new capacity.',
+    );
+    expect(f.ok).toBe(true);
+    // The same order as the block remedy (and the 409 of checkTransition) for the same loads.
+    expect(timingRemedy([{ ...f.violations[0], severity: 'BLOCK' }], remedyLoads(two.loads)).unlockFirst).toEqual(['T01 L2', 'T01 L1']);
+    // Three frozen loads, the problem on L2: L1 is earlier, so only L3 goes first.
+    const three = checkPlanFeasibility(
+      input([
+        load('L1', 1, { frozen: true, capacityNow: now, weightKg: 200, stops: light(1) }),
+        load('L2', 2, { frozen: true, capacityNow: now }),
+        load('L3', 3, { frozen: true, capacityNow: now, weightKg: 200, stops: light(3) }),
+      ]),
+    );
+    expect(three.violations.map((v) => `${v.code} L${v.loadNo}`)).toEqual(['CAPACITY_CHANGED L2']);
+    expect(three.violations[0].message).toMatch(/\. Put T01 L3, T01 L2 back to Planned first, in this order, and re-plan to use the new capacity\.$/);
+    // A later PLANNED load is not in the way; a PLANNED load over the new payload just needs a re-plan.
+    const rest = checkPlanFeasibility(input([load('L1', 1, { frozen: true, capacityNow: now }), load('L2', 2, { capacityNow: now })]));
+    expect(rest.violations.map((v) => v.message.replace(/^.*\)\. /, `L${v.loadNo}: `))).toEqual([
+      'L1: Put T01 L1 back to Planned first and re-plan to use the new capacity.',
+      'L2: Re-plan to use the new capacity.',
+    ]);
   });
 
   it('reads the truck now from the row, next to the snapshot', () => {

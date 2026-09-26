@@ -32,7 +32,8 @@
  * unchanged, so the remedy is to put it back to Planned first, with every later locked or loading
  * load of its truck, latest first (timingRemedy, feasibility-view.ts).
  * A truck whose capacity or payload was lowered since planning, below what a load not yet out
- * carries, is a warning (CAPACITY_CHANGED): the load keeps the truck it was planned with.
+ * carries, is a warning (CAPACITY_CHANGED): the load keeps the truck it was planned with. On a
+ * locked or loading load it names the same unlock order, latest first (frozenReplanText).
  *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
@@ -41,6 +42,7 @@ import { createHash } from 'node:crypto';
 import type { FeasibilityReport } from '@routeiq/shared-types';
 import { usableWindow, type PlanRules } from './snapshots';
 import { KG_ROUNDING_TOL } from './weights';
+import { unlockFirstText } from './feasibility-view';
 
 export const FEASIBILITY_VERSION = 1;
 export const TOL_MIN = 1;
@@ -149,6 +151,21 @@ const hhmm = (m: number) => {
 };
 const r1 = (x: number) => Math.round(x * 10) / 10;
 
+/**
+ * The CAPACITY_CHANGED remedy for a LOCKED or LOADING load: a re-plan keeps it as it is, so it goes
+ * back to Planned first - and Unlock is refused while a later load of the truck is still locked or
+ * loading (checkTransition), so those go first, latest first, like the block remedy (timingRemedy):
+ * "Put T01 L2, T01 L1 back to Planned first, in this order, and re-plan to use the new capacity."
+ * `truckLoads` = every load of the truck.
+ */
+function frozenReplanText(code: string, l: FeasLoad, truckLoads: FeasLoad[]): string {
+  const back = [l, ...truckLoads.filter((x) => x.frozen && !x.onRoad && x.loadNo > l.loadNo)]
+    .sort((a, b) => b.loadNo - a.loadNo)
+    .map((x) => `${code} L${x.loadNo}`);
+  const put = unlockFirstText(back);
+  return `${put.charAt(0).toUpperCase()}${put.slice(1)}${back.length > 1 ? ',' : ''} and re-plan to use the new capacity.`;
+}
+
 export function inputHash(input: FeasibilityInput): string {
   const loads = [...input.loads]
     .sort((a, b) => a.id.localeCompare(b.id))
@@ -234,7 +251,7 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
             code: 'CAPACITY_CHANGED',
             message:
               `${code} load ${l.loadNo} carries ${cases} cases / ${Math.round(kg)} kg, but the truck was changed to ${now.cases} cases / ${now.kg > 0 ? `${Math.round(now.kg)} kg` : 'no payload set'} after planning (planned with ${l.capacity.cases} cases / ${l.capacity.kg > 0 ? `${Math.round(l.capacity.kg)} kg` : 'no payload set'}). ` +
-              (l.frozen ? 'Put the load back to Planned and re-plan to use the new capacity.' : 'Re-plan to use the new capacity.'),
+              (l.frozen ? frozenReplanText(code, l, loads) : 'Re-plan to use the new capacity.'),
           });
         }
       }

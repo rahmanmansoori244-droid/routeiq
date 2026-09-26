@@ -352,4 +352,28 @@ describe('snapshots (F08)', () => {
     expect(d.feasibility!.ok).toBe(true);
     expect(d.loads.find((l) => l.id === 'M1')!.truckPayloadKg).toBe(1000);
   });
+
+  it('a truck corrected below its first locked load, the next load locked too: the warning names the later load first, and following it works', async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    row('planLoad', 'L2').status = 'LOCKED';
+    // L1 carries 400 kg, L2 200 kg, both planned on 1000 kg; T01 is then corrected to 300 kg.
+    const o2 = row('order', 'O2');
+    o2.totalWeightKg = 200;
+    o2.lines = [{ ...o2.lines[0], weightKg: 200 }];
+    row('planLoad', 'L2').weightKg = 200;
+    tables.truck[0].capacityWeightKg = 300;
+    const d = (await getPlanDetail(T, 'P'))!;
+    const w = d.feasibility!.violations.filter((v) => v.code === 'CAPACITY_CHANGED');
+    expect(w.map((v) => `${v.severity} ${v.truckCode} L${v.loadNo} ${v.frozen}`)).toEqual(['WARN T01 L1 true']);
+    expect(w[0].message).toMatch(/\. Put T01 L2, T01 L1 back to Planned first, in this order, and re-plan to use the new capacity\.$/);
+    // Unlocking L1 first is refused (a later load of the truck is locked) - the reason L2 comes first.
+    await expect(updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow)).rejects.toMatchObject({ status: 409, message: 'Unlock Load 2 of this truck first.' });
+    await updateLoad(T, 'P', 'L2', { status: 'PLANNED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['PLANNED', 'PLANNED']);
+    // Both Planned: a re-plan now uses the new payload.
+    const after = (await getPlanDetail(T, 'P'))!;
+    expect(after.feasibility!.violations.filter((v) => v.code === 'CAPACITY_CHANGED').map((v) => v.message.replace(/^.*\)\. /, ''))).toEqual(['Re-plan to use the new capacity.']);
+  });
 });
