@@ -363,6 +363,48 @@ def test_fleet_capacity_shortage_reason():
     assert all("shortage" in u.reason_message.lower() for u in sc.unserved)
 
 
+def test_weight_only_shortage_is_explained_in_kg():
+    """Scenario test S03 (PR6): the cases fit by count, the kg do not. The unserved stops carry a
+    shortage-by-weight reason, not "not placed within the time limit" and its re-plan advice."""
+    # 2 trucks x 1 load: 200 cases / 1,000 kg of room; 8 stops x 20 cases x 250 kg = 160 cases / 2,000 kg.
+    stops = [stop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=20, demand_kg=250, priority=3) for i in range(8)]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=500, max_trips=1), truck("T02", cap=100, capacity_kg=500, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert len(sc.unserved) >= 4
+    for u in sc.unserved:
+        assert "by weight" in u.reason_message and "kg" in u.reason_message, u.reason_message
+    assert not any("could not be placed" in w or "short today" in w for w in sc.warnings), sc.warnings
+    assert_reconciled(r, sc)
+
+
+def test_weight_bound_shortage_warning_counts_kg():
+    """Scenario test S03 (PR6): short of cases AND of kg, kg the tighter limit. What is left out
+    matches the kg shortage, so no "more than the shortage alone explains" warning (it used to
+    count cases only and advise a re-plan that cannot help), and each reason names the kg."""
+    # 1 truck x 1 load: 100 cases / 1,000 kg; 10 stops x 15 cases x 200 kg = 150 cases / 2,000 kg.
+    stops = [stop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=15, demand_kg=200, priority=3) for i in range(10)]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=1000, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert len(sc.unserved) >= 5
+    assert all(ld.kg <= 1000 for ld in sc.loads)
+    for u in sc.unserved:
+        assert "150 cases / 2,000 kg requested vs 100 cases / 1,000 kg" in u.reason_message, u.reason_message
+        assert "weight is the tighter limit" in u.reason_message
+    assert not any("short today" in w for w in sc.warnings), sc.warnings
+    assert_reconciled(r, sc)
+
+
+def test_no_plan_reason_is_in_plain_words():
+    """PR6: the search's raw status code (ROUTING_FAIL_TIMEOUT ...) never reaches an unserved reason."""
+    import dispatch_solver as ds
+
+    for code in ["ROUTING_FAIL_TIMEOUT", "ROUTING_FAIL", "ROUTING_INFEASIBLE", "ROUTING_INVALID", "SOME_NEW_CODE"]:
+        msg = ds._no_plan_message(code)
+        assert "ROUTING_" not in msg and "SOME_NEW_CODE" not in msg, msg
+        assert msg.startswith("The optimizer found no feasible plan")
+    assert "in the time allowed" in ds._no_plan_message("ROUTING_FAIL_TIMEOUT")
+
+
 def test_no_trucks():
     r = req([stop("A", 23.6, 58.4)], [])
     sc = rec(optimize_dispatch(r))

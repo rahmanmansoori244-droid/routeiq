@@ -224,6 +224,38 @@ def _unserved(stop: DispatchStop, code: str, msg: str) -> UnservedStop:
     return UnservedStop(stop_id=stop.stop_id, order_ids=list(stop.order_ids), reason_code=code, reason_message=msg)  # type: ignore[arg-type]
 
 
+# The route search's own status (OR-Tools RoutingSearchStatus) in plain words for the dispatcher
+# (scenario tests, PR6): the raw name stays in solver_status only.
+_NO_PLAN_WORDS = {
+    "ROUTING_FAIL_TIMEOUT": "no plan was found in the time allowed",
+    "ROUTING_FAIL": "the search found no way to plan these stops with these trucks and limits",
+    "ROUTING_INFEASIBLE": "no plan is possible with these trucks and limits",
+    "ROUTING_INVALID": "the route search could not start with this day's data",
+    "ROUTING_NOT_SOLVED": "the route search did not run",
+}
+
+
+def _no_plan_message(status_name: str) -> str:
+    """The unserved reason when the route search returned no plan at all."""
+    why = _NO_PLAN_WORDS.get(status_name, "no plan was found")
+    return f"The optimizer found no feasible plan: {why}. Re-plan to search again, or check trucks and customer hours."
+
+
+def _shortage_reason(priority: int, demand_cases: int, cap_cases: int, demand_kg: float, cap_kg: float,
+                     short_cases: bool, short_kg: bool) -> str:
+    """The unserved reason on a fleet-shortage day, in cases and / or kg - whichever the trucks are
+    short of (scenario test S03: a weight-bound day was explained in cases only)."""
+    tail = f" Lower priorities are left out first (this is P{priority})."
+    if short_kg and not short_cases:
+        return (f"Fleet capacity shortage by weight: {demand_kg:,.0f} kg requested vs {cap_kg:,.0f} kg across all "
+                f"available loads (the {demand_cases} cases would fit by count; the weight does not)." + tail)
+    if short_kg and short_cases:
+        tighter = "weight" if demand_kg * cap_cases > demand_cases * cap_kg else "the case count"
+        return (f"Fleet capacity shortage: {demand_cases} cases / {demand_kg:,.0f} kg requested vs {cap_cases} cases / "
+                f"{cap_kg:,.0f} kg across all available loads; {tighter} is the tighter limit today." + tail)
+    return f"Fleet capacity shortage: {demand_cases} cases requested vs {cap_cases} cases across all available loads." + tail
+
+
 def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[DispatchStop], list[UnservedStop], list[str]]:
     """Capacity / availability checks that do not need the matrix."""
     warnings: list[str] = []
@@ -645,7 +677,7 @@ def _solve_scenario(
 
     if assignment is None:
         drops = list(pre_drops) + [
-            _unserved(s, "INFEASIBLE", f"The optimizer found no feasible plan ({status_name}).") for s in stops
+            _unserved(s, "INFEASIBLE", _no_plan_message(status_name)) for s in stops
         ]
         sc = _empty_scenario(name, "NO_SOLUTION", drops, time_limit, mx)
         sc.solver_status = status_name
@@ -839,9 +871,17 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         ))
 
     unserved = list(pre_drops)
-    total_cap_cases = sum(td.truck.capacity_cases * td.trips_left for td in tds if td.usable)
+    usable_tds = [td for td in tds if td.usable]
+    total_cap_cases = sum(td.truck.capacity_cases * td.trips_left for td in usable_tds)
     demand_cases = sum(s.demand_cases for s in stops)
-    shortage = demand_cases > total_cap_cases
+    # Weight bounds the day too when every usable truck has a payload (0 = kg not limited): a day
+    # can be short of kg while the cases would fit (scenario test S03), and is then explained in kg.
+    kg_bound = bool(usable_tds) and all(td.max_kg > 0 for td in usable_tds)
+    total_cap_kg = sum(td.max_kg * td.trips_left for td in usable_tds) if kg_bound else 0.0
+    demand_kg = sum(s.demand_kg for s in stops)
+    short_cases = demand_cases > total_cap_cases
+    short_kg = kg_bound and demand_kg > total_cap_kg + 0.05
+    shortage = short_cases or short_kg
     unserved_penalty = 0.0
     open_drops = 0
     left_cases = 0
@@ -862,8 +902,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                                       "(lowest priorities first). Re-plan, add a truck, or check the loading time."))
         elif shortage:
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
-                                      f"Fleet capacity shortage: {demand_cases} cases requested vs {total_cap_cases} "
-                                      f"cases across all available loads. Lower priorities are left out first (this is P{s.priority})."))
+                                      _shortage_reason(s.priority, demand_cases, total_cap_cases, demand_kg, total_cap_kg,
+                                                       short_cases, short_kg)))
         else:
             # Never claimed impossible: no prefilter ruled this stop out, and the search is a
             # time-limited heuristic (it always ends on its limit, whatever status it reports).
@@ -883,14 +923,22 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             f"{open_drops} stop(s) could not be placed by the optimizer within its time limit; no check proves "
             "they are impossible. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
-    short = demand_cases - total_cap_cases
-    biggest_left = max((s.demand_cases for k, s in enumerate(stops) if k not in served), default=0)
-    if shortage and left_cases > short + biggest_left:
-        # The shortage explains leaving out about `short` cases (plus one order that does not
-        # split), not everything: the rest did not fit by time, hours or the search's limit.
+    left = [s for k, s in enumerate(stops) if k not in served]
+    left_kg = sum(s.demand_kg for s in left)
+    short_by_cases = demand_cases - total_cap_cases
+    short_by_kg = demand_kg - total_cap_kg
+    # The shortage explains leaving out about what the trucks are short of - in cases or in kg,
+    # whichever is short - plus one order that does not split.
+    explained = (short_cases and left_cases <= short_by_cases + max((s.demand_cases for s in left), default=0)) or (
+        short_kg and left_kg <= short_by_kg + max((s.demand_kg for s in left), default=0.0))
+    if shortage and not explained:
+        # Not everything: the rest did not fit by time, hours or the search's limit.
+        what = " and ".join(
+            ([f"{short_by_cases} cases"] if short_cases else []) + ([f"{short_by_kg:,.0f} kg"] if short_kg else []))
+        left_kg_text = f" ({left_kg:,.0f} kg)" if kg_bound else ""
         warnings.append(
-            f"The trucks are {short} cases short today, but {left_cases} cases are unserved: more than the shortage "
-            "alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
+            f"The trucks are {what} short today, but {left_cases} cases{left_kg_text} are unserved: more than the "
+            "shortage alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
     # The day's operating cost is the sum of its loads' costs, so the web's sums of stored load costs
     # equal it exactly. Each load's total is its exact money rounded once to 0.001 OMR, so the sum
