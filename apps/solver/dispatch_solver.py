@@ -256,6 +256,24 @@ def _shortage_reason(priority: int, demand_cases: int, cap_cases: int, demand_kg
     return f"Fleet capacity shortage: {demand_cases} cases requested vs {cap_cases} cases across all available loads." + tail
 
 
+def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> bool:
+    """Whether any of the unserved stops fits, by cases AND by kg, the room left on a load of the
+    plan or on a load slot a truck did not use (a full truck's room). False: every unserved stop
+    is bigger than the room left anywhere, so a fleet shortage explains all of it, however many
+    loads the room is spread over."""
+    by_truck: dict[str, list[PlannedLoad]] = {}
+    for ld in loads:
+        by_truck.setdefault(ld.truck_id, []).append(ld)
+    rooms: list[tuple[int, float]] = []
+    for td in usable_tds:
+        mine = by_truck.get(td.truck.id, [])
+        kg_cap = td.max_kg if td.max_kg > 0 else math.inf
+        rooms += [(td.max_cases - ld.cases, kg_cap - ld.kg) for ld in mine]
+        rooms += [(td.max_cases, kg_cap)] * max(0, td.trips_left - len(mine))
+    # Load kg are rounded to 0.1 kg: a stop within 0.05 kg of the room counts as fitting (warns).
+    return any(s.demand_cases <= rc and s.demand_kg <= rk + 0.05 for s in left for rc, rk in rooms)
+
+
 def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[DispatchStop], list[UnservedStop], list[str]]:
     """Capacity / availability checks that do not need the matrix."""
     warnings: list[str] = []
@@ -928,9 +946,13 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     short_by_cases = demand_cases - total_cap_cases
     short_by_kg = demand_kg - total_cap_kg
     # The shortage explains leaving out about what the trucks are short of - in cases or in kg,
-    # whichever is short - plus one order that does not split.
+    # whichever is short - plus one order that does not split. Or: no unserved stop fits the room
+    # left on any load (or on a load a truck did not use). Whole stops leave some room on EVERY
+    # load, so over several loads the unserved amount can pass "short + one order" although no
+    # re-plan can serve more (PR6 review: 6 loads each 116 kg short of full, every unserved stop 336 kg).
     explained = (short_cases and left_cases <= short_by_cases + max((s.demand_cases for s in left), default=0)) or (
-        short_kg and left_kg <= short_by_kg + max((s.demand_kg for s in left), default=0.0))
+        short_kg and left_kg <= short_by_kg + max((s.demand_kg for s in left), default=0.0)) or (
+        shortage and not _fits_room_left(left, usable_tds, loads))
     if shortage and not explained:
         # Not everything: the rest did not fit by time, hours or the search's limit.
         what = " and ".join(

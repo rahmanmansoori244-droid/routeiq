@@ -338,6 +338,46 @@ def test_drop_repair_also_runs_on_fleet_shortage_days():
     assert_plan_rules(r, sc)
 
 
+def _kg_day(n_stops: int, n_trucks: int):
+    """n_trucks x 1 load of 150 cases / 1,500 kg; stops of 30 cases / 336 kg near the depot."""
+    stops = [stop(f"S{i:02d}", 23.60 + (i % 6) * 0.002, 58.45 + (i // 6) * 0.002, cases=30, demand_kg=336)
+             for i in range(n_stops)]
+    return req(stops, [truck(f"T{k}", cap=150, capacity_kg=1500, max_trips=1) for k in range(n_trucks)])
+
+
+def _raw_scenario(r, plan):
+    day, tds = _day_for(r)
+    timed = LR.time_plan(day, plan, ds._pricing("RECOMMENDED", r, tds, r.stops))
+    assert timed is not None
+    return ds._build_scenario("RECOMMENDED", r, r.stops, tds, matrix_for(r), timed, day.values, False, [],
+                              solver_status="ROUTING_SUCCESS", elapsed=1.0, time_limit=2, objective_value=0)
+
+
+def test_shortage_warning_counts_the_room_left_on_every_load():
+    """PR6 review: 6 loads of 4 stops (1,344 of 1,500 kg): 156 kg of room on each, 936 kg in all,
+    and every unserved stop is 336 kg. The 12 unserved stops (4,032 kg) are more than "short +
+    one order" (3,096 + 336 kg), but none fits anywhere: the shortage explains them, no warning."""
+    r = _kg_day(36, 6)
+    sc = _raw_scenario(r, {k: [tuple(range(4 * k, 4 * k + 4))] for k in range(6)})
+    assert len(sc.unserved) == 12
+    assert all("weight is the tighter limit" in u.reason_message for u in sc.unserved)
+    assert not any("short today" in w for w in sc.warnings), sc.warnings
+
+
+def test_shortage_warning_stays_when_an_unserved_stop_fits_a_load():
+    """The same day with one load carrying 3 stops (492 kg of room): an unserved stop fits it, so
+    the shortage does not explain everything and the plan says so (a re-plan can serve more)."""
+    r = _kg_day(36, 6)
+    plan = {k: [tuple(range(4 * k, 4 * k + 4))] for k in range(5)}
+    plan[5] = [(20, 21, 22)]
+    sc = _raw_scenario(r, plan)
+    assert len(sc.unserved) == 13
+    assert any("180 cases and 3,096 kg short today, but 390 cases (4,368 kg) are unserved" in w for w in sc.warnings), sc.warnings
+    # A truck that did not load at all: its whole load is room, so the warning stays too.
+    sc = _raw_scenario(r, {k: [tuple(range(4 * k, 4 * k + 4))] for k in range(5)})
+    assert any("more than the shortage alone explains" in w for w in sc.warnings), sc.warnings
+
+
 def test_repack_failure_falls_back_to_the_search_plan(monkeypatch):
     monkeypatch.setenv("SOLVER_PARALLEL", "0")
     stops, trucks = half_load_day(n=24)
