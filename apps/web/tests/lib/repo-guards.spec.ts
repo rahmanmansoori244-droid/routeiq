@@ -176,11 +176,108 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/or \*\*No driver\*\*\); after that it is not listed again/i, '"No driver" ends a note on a trip without a driver'],
       [/\*\*Keep\*\*, or "No driver"(;| -) (it does not come back|and never again)/i, '"No driver" ends a note on a trip without a driver'],
       [/The re-plan's message and \*\*Use instead\*\* also say/i, 'a re-plan message with the note count (never shown)'],
+      // PR8 review: the plan screen shows the timing warnings and the notes about outdated weights,
+      // changed master data and drivers above the optimizer's warnings, so "Planned from" is not
+      // always the first yellow line (plan-view.tsx, plan-detail.ts).
+      [/first yellow line/i, '"Planned from" as the first yellow line'],
+      [/the first plan warning/i, '"Planned from" as the first plan warning'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
       return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
     });
     expect(offenders).toEqual([]);
+  });
+});
+
+/**
+ * How many tests pytest collects from one solver test file, read from its source: every `def
+ * test_...` (top level or in a class), times the size of each `@pytest.mark.parametrize` above it
+ * (a list literal or `range(n)`). Throws on a parametrize it cannot size, so the guard below fails
+ * loudly instead of guessing.
+ */
+function pytestCount(src: string, file: string): number {
+  const listSize = (arg: string): number => {
+    const t = arg.trim();
+    const r = /^range\((\d+)\)/.exec(t);
+    if (r) return Number(r[1]);
+    if (!t.startsWith('[')) throw new Error(`${file}: cannot size the parametrize values ${t}`);
+    let depth = 0;
+    let quote: string | null = null;
+    let items = 0;
+    let seen = false;
+    for (let i = 0; i < t.length; i++) {
+      const c = t[i];
+      if (quote) {
+        if (c === '\\') i++;
+        else if (c === quote) quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        seen = true;
+      } else if (c === '[' || c === '(' || c === '{') {
+        if (depth === 1) seen = true;
+        depth++;
+      } else if (c === ']' || c === ')' || c === '}') {
+        depth--;
+        if (depth === 0) return items + (seen ? 1 : 0);
+      } else if (c === ',' && depth === 1) {
+        items++;
+        seen = false;
+      } else if (!/\s/.test(c) && depth === 1) {
+        seen = true;
+      }
+    }
+    throw new Error(`${file}: unterminated parametrize values`);
+  };
+  let total = 0;
+  let mult = 1;
+  for (const line of src.split(/\r?\n/)) {
+    const p = /^\s*@pytest\.mark\.parametrize\(\s*(["'])[^"']*\1\s*,\s*(.*)$/.exec(line);
+    if (p) {
+      mult *= listSize(p[2]);
+      continue;
+    }
+    if (/^\s*@/.test(line)) continue;
+    if (/^\s*(async\s+)?def\s+test_\w*\s*\(/.test(line)) {
+      total += mult;
+      mult = 1;
+    } else if (/^\s*((async\s+)?def|class)\s/.test(line)) {
+      mult = 1;
+    }
+  }
+  return total;
+}
+
+describe('the handbook counts the solver tests pytest collects (PR8 review)', () => {
+  it('the solver test table lists every test file with its number of tests', () => {
+    const REPO = path.resolve(APPS, '..');
+    const dir = path.join(APPS, 'solver', 'tests');
+    const files = readdirSync(dir).filter((f) => /^test_\w+\.py$/.test(f)).sort();
+    const actual = Object.fromEntries(files.map((f) => [f, pytestCount(readFileSync(path.join(dir, f), 'utf8'), f)]));
+    const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8');
+    const table = handbook.slice(handbook.indexOf('**Solver tests**'), handbook.indexOf('**Benchmarks and scripts**'));
+    const documented = Object.fromEntries([...table.matchAll(/^\| `(test_\w+\.py)` \| (\d+) \|/gm)].map((m) => [m[1], Number(m[2])]));
+    expect(documented).toEqual(actual);
+  });
+
+  it('counts a parametrized test once per value, and a class method like a function', () => {
+    const src = [
+      '@pytest.mark.parametrize("a", [1, (2, 3), "x,y"])',
+      'def test_one(a):',
+      '    pass',
+      '@pytest.mark.parametrize("f", [False, True])',
+      '@pytest.mark.parametrize("seed", range(8))',
+      'def test_two(seed, f):',
+      '    def helper():',
+      '        pass',
+      'class TestThing:',
+      '    def test_three(self):',
+      '        pass',
+      'def not_a_test():',
+      '    pass',
+    ].join('\n');
+    expect(pytestCount(src, 'x.py')).toBe(3 + 16 + 1);
   });
 });

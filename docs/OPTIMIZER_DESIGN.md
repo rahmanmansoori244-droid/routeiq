@@ -9,7 +9,7 @@ The result is an **OPTIMIZED PLAN**: a good, feasible plan found within a time l
 - **Truck capacity:** cases **and** kilograms (when a payload is set). A truck is never overloaded to save kilometres.
 - **Receiving hours (hard window):** delivery must *start* inside the customer's hard window, e.g. a hypermarket 06:00–10:00. If no truck can make it, the order is unserved with reason *receiving hours cannot be met*. It is never silently delivered late.
 - **Truck day:** first departure to last return must fit the shift limit (default 11 h). Depot opening hours apply.
-- **Not in the past:** a plan made during its own delivery day (company timezone) sends no new load out before now + the turnaround between loads; the web sends that time as the day's first departure (stabilization PR8).
+- **Not in the past:** a plan made during its own delivery day (company timezone) sends no new load out before now + the turnaround between loads; the web sends that time as the day's first departure (stabilization PR8). Loading starts now too: the web also sends the time the plan was made (`loading_from_min`), and every new load leaves no earlier than it + the turnaround + the loading time of its own cases, on a truck standing at the depot exactly as on one coming back (PR8 review).
 - **Trip order:** load 2 of a truck leaves only after load 1 is back **and** its turnaround has passed: the reload time (default 30 min) plus the loading time per case of load 2 (default 0, see §8).
 - **Locked, loading and dispatched loads** are never re-planned.
 
@@ -92,7 +92,7 @@ The web checks each truck's day again before a load is locked, loaded or dispatc
 |---|---|---|
 | First departure | 06:00 | No truck leaves before this time (NMWC's trucks actually leave 07:10-08:00). A plan made during the delivery day starts from now + the turnaround instead, when that is later (PR8). |
 | Turnaround between loads | 30 min | Fixed depot time between two loads of a truck. Also the preparation time of a plan made during the delivery day (PR8). |
-| Loading minutes per case | 0 | Added to the turnaround for every case of the **next** load: at 0.04 min a 1,100-case load waits 44 min more. The route search does not know the next load's size yet and assumes 80% of a full truck; the final timetable uses the exact cases. |
+| Loading minutes per case | 0 | Added to the turnaround for every case of the **next** load: at 0.04 min a 1,100-case load waits 44 min more. The route search does not know the next load's size yet and assumes 80% of a full truck; the final timetable uses the exact cases. The first load of a day planned the day before is loaded before the first departure; on a plan made during the delivery day it counts from the time the plan was made, for every truck (PR8 review). |
 | Unloading minutes per case | 0 | Added to each customer's service time for every case delivered: at 0.05 min a 1,100-case drop takes 55 min more. A split part gets its share of the customer's time (at least 5 min) plus its own cases. At most 480 min per stop. |
 | Max loads per truck per day | 3 | A truck's own limit wins when it has one. |
 

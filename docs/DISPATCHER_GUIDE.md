@@ -33,7 +33,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 
 ## 3. Optimize
 - Click **OPTIMIZE**. A normal day (80-120 customers) takes about half a minute to a minute. Bigger days get more search time, step by step: about 1.5-2 minutes at 150 customers, 3 minutes at 175, 4-5 minutes from 200.
-- Optimizing **today's** day during the day plans from now: no load leaves before now + the turnaround between loads, and the plan says *Planned from ...* (see *Late orders*). Tomorrow's day starts at the first departure as usual.
+- Optimizing **today's** day during the day plans from now: no load leaves before now + the turnaround between loads + the loading time of its cases, and the plan says *Planned from ...* (see *Late orders*). Tomorrow's day starts at the first departure as usual.
 - If some customers still have no location, you are asked whether to plan without them. Their orders become *unserved: location missing*.
 - If some order lines have **no weight** and a truck has a payload, you are asked the same way: **Cancel** and add the case weights under **Products** (planners and supervisors: ask a company admin, only admins can edit products), or **optimize anyway** — those lines then count as **0 kg**, so a load can be heavier than shown, and the plan keeps a yellow warning that says so. **Re-plan** asks the same question.
 - One case heavier than every truck (usually a case weight typed per pallet or in grams) is not planned: it shows as *unserved: bigger than any truck* with *check the product weight*. The rest of that order is planned.
@@ -125,7 +125,9 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
   - locked, loading and dispatched loads stay exactly the same;
   - the late order goes into a free future load, another truck or an extra load, or is shown as *unserved: late order – no capacity*;
   - the blue bar tells you what changed.
-- **Re-planning today starts from now.** When you optimize or re-plan the day you are in (Muscat time), no new load leaves the depot before **now + the turnaround between loads** (30 min unless your admin changed it). The plan says so in its first yellow line, for example *Planned from 09:30 (now 09:00 + 30 min preparation)*, and the Excel ASSUMPTIONS sheet has a *Planned from* row.
+- **Re-planning today starts from now.** When you optimize or re-plan the day you are in (Muscat time), no new load leaves the depot before **now + the turnaround between loads** (30 min unless your admin changed it). The plan says so in a yellow note, for example *Planned from 09:30 (now 09:00 + 30 min preparation)* (other notes, such as weights or drivers changed, can be above it), and the Excel ASSUMPTIONS sheet has a *Planned from* row.
+  - **Loading starts now too.** When your company sets a loading time per case, a new load also waits for the loading of its own cases from now, on every truck: a truck that stood at the depot all morning is timed exactly like one that just came back. For example at 09:00, with 30 min turnaround and 0.05 min per case, a 700-case load leaves at 10:05 at the earliest, whichever truck carries it. The yellow note gives an example for a full truck.
+  - This also holds when you plan today early, before the first departure: at 05:15 with a 06:00 first departure, a full truck may leave after 06:00. The plan then says *Planned on the delivery day at 05:15: loading starts now ...*.
   - Locked, loading and dispatched loads keep their times. A truck that is still out leaves again only after it is back and turned around (for example back at 09:57: not before 10:27, plus loading time).
   - A customer whose receiving hours end before any truck can get there from now is shown as *unserved: no truck can reach this customer inside its receiving window* with the earliest possible arrival.
   - **Before you re-plan during the day, mark every load that has left as Dispatched.** A load still *Planned* in RouteIQ is planned again from now, even if the truck has already gone.
@@ -153,8 +155,8 @@ Settings shows only what the planner uses, each with its unit and allowed range,
 ### Dispatch timing (Settings → Daily dispatch: timing)
 Set these to what the depot and drivers really do; every load is timed with them.
 - **First departure:** no truck leaves before this time (e.g. 07:30). A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*).
-- **Turnaround between loads (minutes):** fixed depot time between two loads of one truck (paperwork, queue). Default 30. It is also the preparation time of a plan made during the delivery day: no new load leaves before now + this.
-- **Loading minutes per case:** added to the turnaround for every case of the next load. 0.04 = 44 min extra for a 1,100-case load. Default 0.
+- **Turnaround between loads (minutes):** fixed depot time between two loads of one truck (paperwork, queue). Default 30. It is also the preparation time of a plan made during the delivery day: no new load leaves before now + this + its loading time.
+- **Loading minutes per case:** added to the turnaround for every case of the next load. 0.04 = 44 min extra for a 1,100-case load. Default 0. The first load of a day planned the day before is loaded before the first departure; on a plan made during the delivery day, loading counts from now for every truck, also one standing at the depot.
 - **Unloading minutes per case:** added to each customer's service time for every case delivered. 0.05 = 55 min extra for a 1,100-case drop. Default 0. A split delivery part gets its share of the customer's time plus its own cases.
 - **Max loads per truck per day:** default 3; a truck's own limit wins when it has one.
 
