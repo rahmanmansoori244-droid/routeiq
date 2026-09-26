@@ -65,6 +65,10 @@ Every option keeps every hard rule and priority, and never serves less (by prior
 
 All three options are picked from the same set of candidate plans (§7), each by its own measure, so unless it serves more orders, MIN TRUCKS never needs more trucks and MIN DISTANCE never drives more km than the recommendation. When one plan is best on every measure, the options show the same plan. The dispatcher must click **Use instead** to switch; nothing switches automatically.
 
+**Trucks are physical trucks.** On a re-plan, a truck that already carries a locked, loading or dispatched load counts as used whether or not it gets a new load, and it never pays the "use one more truck" cost again (stabilization PR7). So MIN TRUCKS prefers putting new loads on trucks that are already out, and every option shows the day's real number of trucks, the kept loads' trucks included. Before PR7 only the trucks of the new loads were counted: after a re-plan the options showed fewer trucks than the day used, and MIN TRUCKS could pick a plan with more trucks and a higher cost.
+
+**Why the recommendation often costs more.** Only RECOMMENDED values the preferences of §2 point 6: arriving inside preferred hours, delivering P1 and P2 customers early (0.01 and 0.005 OMR per minute after the first departure time), and on late-order re-plans not moving orders (§5.4). MIN TRUCKS and MIN DISTANCE ignore them, so they are often cheaper in km and OMR while P1/P2 customers get their deliveries later. The plan screen and the Excel show each option's **preference cost** (these preferences in OMR, not money) and **what it gains**, for example *"vs MIN TRUCKS: P1/P2 delivered on average 40 min earlier, preference cost 19.5 OMR lower; but costs 35.4 OMR more, 87 km more, 1 more truck"*, or *"Same plan as RECOMMENDED"*. Whether the recommendation should instead be the cheapest plan is an open owner decision.
+
 ## 7. After the search: re-assigning whole loads
 The three route searches each produce loads (which customers, in which order). A second, exact step then keeps every load as it is and decides again **which truck carries it and when it leaves**, so that trucks do two or three loads each instead of one:
 1. For the recommendation's costs (and for MIN TRUCKS' when that option is asked for), OR-Tools CP-SAT assigns the loads of each search plan to trucks and departure times, respecting capacity, customer hours, turnaround, shift length, loads per truck, depot hours, truck availability and locked/dispatched loads.
@@ -97,11 +101,14 @@ With the per-case times at 0 nothing changes from the fixed times. NMWC's 24-Sep
 | Day size | Search limit | Typical wall time (3 options) |
 |---|---|---|
 | ≤ 25 stops | 5 s | ~10-15 s |
-| ≤ 200 stops (normal NMWC day ~80-150) | 20 s | ~30-55 s |
-| ≤ 350 stops | 150 s | ~4-5 min |
+| 26-120 stops (normal NMWC day ~80-120) | 20 s | ~30-55 s |
+| 150 stops | 30 s | ~1-1.5 min |
+| 200 stops | 70 s | ~2 min |
+| 250 stops | 110 s | ~3-3.5 min |
+| 300-350 stops | 150 s | ~4-5 min |
 | larger | 240 s | ~6-7 min |
 
-The wall time covers the recommended search, the alternatives (half the limit, in parallel) and the load re-assignment. Days of 26-80 stops now get 20 s instead of 8 s: cheap insurance against a search stopped before it settled.
+Between 120 and 300 stops the limit grows in straight lines through these points (+1 s per 3 stops to 150, then +0.8 s per stop), never more than 1 s for one more stop (stabilization PR7). Before, it jumped from 20 s at 200 stops to 150 s at 201: a 200-stop day got 20 s and gave visibly different plans from run to run. The wall time covers the recommended search, the alternatives (half the limit, in parallel) and the load re-assignment; times from 150 stops up are estimates from the search limits, not re-measured. Days of 26-80 stops get 20 s instead of the older 8 s: cheap insurance against a search stopped before it settled.
 
 If a stop is still left out while the fleet has room, it is labelled *"Not planned: the optimizer found no truck, trip or time slot for this P... stop within its time limit. Re-plan to search again, add a truck, or raise the loads-per-truck limit."* The planner never claims such a stop is impossible unless a check proved it (receiving hours, shift, bigger than any truck). On a fleet-shortage day the unserved orders say *"Fleet capacity shortage ..."*: the trucks cannot carry everything and lower priorities are left out first, which does not prove that a particular order cannot fit; when clearly more cases are unserved than the shortage, the plan says so. The plan screen heads all three with *"Not planned by the optimizer - see reason"*.
 
