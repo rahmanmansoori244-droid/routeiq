@@ -1,8 +1,9 @@
 /**
  * Plan map road shapes (GET /api/runs/:id/load-geometry, lib/dispatch/load-geometry.ts): loads are
- * asked 4 at a time within one deadline, one slow or failed load never turns the others straight
- * (only a clear "not configured" stops the calls), road shapes are cached (never estimates) with a
- * TTL and size caps, and callRouteGeometry (lib/solver-client.ts) reports why it has no shape.
+ * asked 4 at a time within one deadline, one failed load never turns the others straight (only a
+ * clear "not configured" stops the calls, and a timeout stops starting new ones so a hanging OSRM
+ * holds at most 4 solver threads per request), road shapes are cached (never estimates) with a TTL
+ * and size caps, and callRouteGeometry (lib/solver-client.ts) reports why it has no shape.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -10,6 +11,7 @@ import {
   resolveLoadGeometries,
   RoadShapeCache,
   roadShapeKey,
+  routingOffReason,
   type LatLng,
   type LngLat,
   type LoadPath,
@@ -120,6 +122,20 @@ describe('resolveLoadGeometries - concurrency and independence', () => {
     expect(rows[0].coordinates).toEqual(load(1).points.map(([a, b]) => [b, a]));
   });
 
+  it('no road routing for another reason: every load gets that reason (outside the road map, no settings row)', async () => {
+    for (const offReason of ['OUTSIDE_COVERAGE', 'NOT_CONFIGURED'] as const) {
+      const rows = await resolveLoadGeometries(loads(2), { call: null, offReason, routingKey: 'k' });
+      expect(rows.map((r) => [r.estimated, r.reason])).toEqual([[true, offReason], [true, offReason]]);
+    }
+  });
+
+  it('a solver that cannot reach OSRM ("No route to host") is an outage for each load, not an unroutable stop, and does not stop the calls', async () => {
+    const call = spyCall(async () => solverFallback('Road geometry unavailable (OSRM unavailable: [Errno 113] No route to host); straight lines shown.'));
+    const rows = await resolveLoadGeometries(loads(6), { call, routingKey: 'k' });
+    expect(call).toHaveBeenCalledTimes(6);
+    expect(rows.every((r) => r.estimated && r.reason === 'ROUTING_ERROR')).toBe(true);
+  });
+
   it('a load with no located stop (depot to depot) is not sent and not called an estimate', async () => {
     const call = spyCall(async (pts) => answer(pts));
     const empty: LoadPath = { loadId: 'E', truckCode: 'T', loadNo: 2, points: [DEPOT, DEPOT] };
@@ -158,6 +174,38 @@ describe('resolveLoadGeometries - one overall deadline', () => {
     const call: RouteGeometryCall = (pts) => (pts === ls[0].points ? new Promise<RouteGeometryReply>(() => {}) : Promise.resolve(answer(pts)));
     const rows = await resolveLoadGeometries(ls, { call, routingKey: 'k', deadlineMs: 60 });
     expect(rows.map((r) => r.reason ?? 'road')).toEqual(['TIMEOUT', 'road', 'road', 'road', 'road', 'road']);
+  });
+
+  it('routing hanging: after the first per-call timeout no new call starts, so one request holds at most 4 solver calls', async () => {
+    // Every call runs into its own timeout (15 s in production, 20 ms here). The solver keeps each
+    // abandoned call for up to a minute, so the old "4 more after each timeout" would pile up.
+    const call = spyCall(async () => {
+      await sleep(20);
+      return { kind: 'timeout' };
+    });
+    const rows = await resolveLoadGeometries(loads(14), { call, routingKey: 'k' });
+    expect(call).toHaveBeenCalledTimes(4);
+    expect(rows.every((r) => r.estimated && r.reason === 'TIMEOUT')).toBe(true);
+  });
+
+  it('a timeout stops only calls not yet started: loads answered meanwhile and cached shapes stay on the road', async () => {
+    const cache = new RoadShapeCache({ ttlMs: 60_000, maxEntries: 100, maxPoints: 100_000 });
+    const ls = loads(6);
+    await resolveLoadGeometries([ls[4]], { call: async (pts) => answer(pts), routingKey: 'k', cache });
+    // 2 lanes. Lane 1: load 1 times out at 30 ms. Lane 2: load 2 answers at once, then load 3 runs
+    // until 60 ms (still running when load 1 times out: it may finish). Lane 1 then goes on with
+    // load 4 (not asked), load 5 (cached) and load 6 (not asked).
+    const call = spyCall(async (pts) => {
+      if (pts === ls[0].points) {
+        await sleep(30);
+        return { kind: 'timeout' };
+      }
+      if (pts === ls[2].points) await sleep(60);
+      return answer(pts);
+    });
+    const rows = await resolveLoadGeometries(ls, { call, routingKey: 'k', cache, concurrency: 2 });
+    expect(rows.map((r) => r.reason ?? 'road')).toEqual(['TIMEOUT', 'road', 'road', 'TIMEOUT', 'road', 'TIMEOUT']);
+    expect(call.mock.calls.map(([pts]) => ls.findIndex((l) => l.points === pts) + 1)).toEqual([1, 2, 3]);
   });
 });
 
@@ -267,12 +315,41 @@ describe('classifyReply', () => {
     expect(classifyReply({ kind: 'answer', provider: 'OSRM', isEstimated: false, coordinates: [[1, 2], [3, 4]], warning: null })).toEqual({ coordinates: [[1, 2], [3, 4]], stopAll: false });
     expect(classifyReply({ kind: 'answer', provider: 'OSRM', isEstimated: false, coordinates: [], warning: null })).toEqual({ reason: 'ROUTING_ERROR', stopAll: false });
     expect(classifyReply({ kind: 'not_configured' })).toEqual({ reason: 'NOT_CONFIGURED', stopAll: true });
-    expect(classifyReply({ kind: 'timeout' })).toEqual({ reason: 'TIMEOUT', stopAll: false });
+    expect(classifyReply({ kind: 'timeout' })).toEqual({ reason: 'TIMEOUT', stopAll: true });
     expect(classifyReply({ kind: 'failed', status: 503 })).toEqual({ reason: 'ROUTING_ERROR', stopAll: false });
     expect(classifyReply(solverFallback("Road geometry unavailable (OSRM unavailable: Client error '400 Bad Request' for url 'http://osrm/route'); straight lines shown."))).toEqual({ reason: 'NOT_ROUTABLE', stopAll: false });
     expect(classifyReply(solverFallback("OSRM returned code='NoSegment'"))).toEqual({ reason: 'NOT_ROUTABLE', stopAll: false });
     expect(classifyReply(solverFallback('Road geometry unavailable (OSRM unavailable: [Errno 111] Connection refused); straight lines shown.'))).toEqual({ reason: 'ROUTING_ERROR', stopAll: false });
     expect(classifyReply({ kind: 'answer', provider: 'HAVERSINE', isEstimated: true, coordinates: [], warning: null })).toEqual({ reason: 'ROUTING_ERROR', stopAll: false });
+  });
+
+  it("only OSRM's own refusals are NOT_ROUTABLE; network trouble between the solver and OSRM is a retryable ROUTING_ERROR", () => {
+    // Exact texts apps/solver/main.py sends (providers.py wraps OSRM errors as "OSRM unavailable: ...").
+    const w = (inner: string) => solverFallback(`Road geometry unavailable (${inner}); straight lines shown.`);
+    const outage = { reason: 'ROUTING_ERROR', stopAll: false };
+    const refused = { reason: 'NOT_ROUTABLE', stopAll: false };
+    expect(classifyReply(w('OSRM unavailable: [Errno 113] No route to host'))).toEqual(outage);
+    expect(classifyReply(w('OSRM unavailable: [Errno 101] Network is unreachable'))).toEqual(outage);
+    expect(classifyReply(w('OSRM unavailable: [Errno 113] Host is unreachable'))).toEqual(outage);
+    expect(classifyReply(w('OSRM unavailable: timed out'))).toEqual(outage);
+    expect(classifyReply(w("OSRM unavailable: Server error '503 Service Unavailable' for url 'http://osrm/route/v1/driving/58.4,23.6;58.5,23.7'"))).toEqual(outage);
+    expect(classifyReply(w("OSRM unavailable: Client error '404 Not Found' for url 'http://osrm/route/v1/driving/58.4,23.6;58.5,23.7'"))).toEqual(outage);
+    // OSRM's NoRoute / NoSegment come with HTTP 400; an empty route list; a code in a 200 body.
+    expect(classifyReply(w("OSRM unavailable: Client error '400 Bad Request' for url 'http://osrm/route/v1/driving/58.400000,23.600000;58.500000,23.700000'"))).toEqual(refused);
+    expect(classifyReply(w('OSRM returned no route'))).toEqual(refused);
+    expect(classifyReply(w("OSRM unavailable: OSRM returned code='NoRoute'"))).toEqual(refused);
+    expect(classifyReply(w("OSRM unavailable: OSRM returned code='NoSegment'"))).toEqual(refused);
+    // Coordinates in a URL never read as a 400.
+    expect(classifyReply(w("OSRM unavailable: Server error '502 Bad Gateway' for url 'http://osrm/route/v1/driving/58.400000,23.400000'"))).toEqual(outage);
+  });
+});
+
+describe('routingOffReason - why a company gets no road shapes', () => {
+  it('Settings on Haversine, outside the shared road map, no settings row; null when it routes on roads', () => {
+    expect(routingOffReason({ provider: 'OSRM', outsideCoverage: false })).toBeNull();
+    expect(routingOffReason({ provider: 'HAVERSINE', outsideCoverage: false })).toBe('ROUTING_OFF');
+    expect(routingOffReason({ provider: 'HAVERSINE', outsideCoverage: true })).toBe('OUTSIDE_COVERAGE');
+    expect(routingOffReason(null)).toBe('NOT_CONFIGURED');
   });
 });
 

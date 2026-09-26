@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { readPlanInputs, readStopSnapshot } from '@/lib/dispatch/snapshots';
-import { resolveLoadGeometries, roadShapeCache, type LatLng, type LoadPath } from '@/lib/dispatch/load-geometry';
+import { resolveLoadGeometries, roadShapeCache, routingOffReason, type LatLng, type LoadPath } from '@/lib/dispatch/load-geometry';
 
 interface Params { params: { id: string } }
 
@@ -32,7 +32,9 @@ export const GET = (req: Request, { params }: Params) =>
     const inputs = isDispatchDetails(raw) ? readPlanInputs(raw.inputs) : null;
     const depot: LatLng = inputs ? [inputs.depot.lat, inputs.depot.lng] : [run.depot.lat, run.depot.lng];
     const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { country: true } });
-    const useRoads = !!cfg && routingProviderFor(cfg, tenant?.country).provider === 'OSRM';
+    // Road routing off (Settings), outside the shared road map, or no settings row: no solver call,
+    // and each reason gets its own caption on the map.
+    const offReason = routingOffReason(cfg ? routingProviderFor(cfg, tenant?.country) : null);
     const osrmUrl = cfg?.osrmUrl?.trim() || null;
     const paths: LoadPath[] = loads.map((l) => {
       const pts: LatLng[] = [depot];
@@ -49,11 +51,13 @@ export const GET = (req: Request, { params }: Params) =>
       return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: pts };
     });
     const rows = await resolveLoadGeometries(paths, {
-      call: useRoads ? (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }) : null,
+      call: offReason ? null : (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }),
+      offReason: offReason ?? undefined,
       routingKey: osrmUrl ? `osrm:${osrmUrl}` : 'solver-default',
       cache: roadShapeCache,
     });
-    const estimated = rows.filter((r) => r.estimated && r.reason !== 'ROUTING_OFF');
+    // A company setting or its country is not a problem to log; everything else is.
+    const estimated = rows.filter((r) => r.estimated && r.reason !== 'ROUTING_OFF' && r.reason !== 'OUTSIDE_COVERAGE');
     if (estimated.length) {
       const why = [...new Set(estimated.map((r) => r.reason))].join(',');
       console.warn(`[load-geometry] run=${run.id} ${estimated.length}/${rows.length} load(s) drawn straight (${why})`);

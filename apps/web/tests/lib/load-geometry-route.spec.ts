@@ -127,6 +127,30 @@ describe('GET /api/runs/:id/load-geometry', () => {
     ]);
   });
 
+  it('company outside the shared road map (Settings still say OSRM): no solver call, OUTSIDE_COVERAGE, not blamed on Settings', async () => {
+    h.country = 'Saudi Arabia';
+    const { body } = await get();
+    expect(h.call).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
+    expect(body.data?.map((r) => [r.estimated, r.reason])).toEqual([
+      [true, 'OUTSIDE_COVERAGE'],
+      [true, 'OUTSIDE_COVERAGE'],
+    ]);
+    // With its own OSRM the same company routes on roads.
+    h.cfg = { distanceProvider: 'OSRM', osrmUrl: 'http://ksa-osrm.test' };
+    h.call.mockResolvedValue({ kind: 'failed', status: 502 });
+    await get();
+    expect(h.call).toHaveBeenCalled();
+  });
+
+  it('no settings row: no solver call, NOT_CONFIGURED (logged)', async () => {
+    h.cfg = null;
+    const { body } = await get();
+    expect(h.call).not.toHaveBeenCalled();
+    expect(body.data?.map((r) => r.reason)).toEqual(['NOT_CONFIGURED', 'NOT_CONFIGURED']);
+    expect(warn).toHaveBeenCalledWith('[load-geometry] run=R1 2/2 load(s) drawn straight (NOT_CONFIGURED)');
+  });
+
   it('a run the tenant client does not find is 404, with no solver call', async () => {
     const { status } = await get('R-of-another-tenant');
     expect(status).toBe(404);

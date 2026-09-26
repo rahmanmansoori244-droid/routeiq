@@ -69,6 +69,22 @@ describe('roadShapesCaption', () => {
     });
   });
 
+  it('outside the shared road map: says so and does not send the user to Settings (Settings still say OSRM)', () => {
+    const c = roadShapesCaption(ready(est('OUTSIDE_COVERAGE'), est('OUTSIDE_COVERAGE')));
+    expect(c).toEqual({
+      text: "Straight dashed lines: the road map covers Oman and the UAE only, so this company's loads have no road shapes.",
+      warn: false,
+      canRetry: false,
+    });
+    expect(c.text).not.toMatch(/Settings/);
+  });
+
+  it('an OSRM outage ("No route to host") reaches the caption as ROUTING_ERROR: failure text with Retry, never "far from any road"', () => {
+    const c = roadShapesCaption(ready(...many(14, est('ROUTING_ERROR'))));
+    expect(c).toEqual({ text: FAILED_TEXT, warn: true, canRetry: true });
+    expect(c.text).not.toMatch(/far from any road/);
+  });
+
   it('cached road shapes plus "not configured" for the rest: a count, not "the map has no road shapes"', () => {
     expect(roadShapesCaption(ready(roadRow, est('NOT_CONFIGURED')))).toEqual({
       text: '1 load of 2 is drawn as a straight dashed line: its road shape could not be loaded. The other lines follow the road network (OSRM).',
@@ -83,7 +99,7 @@ describe('roadShapesCaption', () => {
   });
 
   it('never claims OSRM for all lines while any line is straight', () => {
-    const reasons: (EstimateReason | undefined)[] = ['ROUTING_OFF', 'NOT_CONFIGURED', 'NOT_ROUTABLE', 'ROUTING_ERROR', 'TIMEOUT', undefined];
+    const reasons: (EstimateReason | undefined)[] = ['ROUTING_OFF', 'OUTSIDE_COVERAGE', 'NOT_CONFIGURED', 'NOT_ROUTABLE', 'ROUTING_ERROR', 'TIMEOUT', undefined];
     for (const r of reasons) {
       for (const roads of [0, 1, 5]) {
         for (const straight of [1, 3]) {
@@ -105,18 +121,23 @@ describe('roadShapesCaption', () => {
 });
 
 describe('shouldAutoRetry', () => {
-  it('retries a failed request or loads that timed out or errored', () => {
+  it('retries a failed request or loads the solver or OSRM gave an error for (a restart)', () => {
     expect(shouldAutoRetry({ status: 'failed' })).toBe(true);
-    expect(shouldAutoRetry(ready(roadRow, est('TIMEOUT')))).toBe(true);
     expect(shouldAutoRetry(ready(est('ROUTING_ERROR')))).toBe(true);
+    expect(shouldAutoRetry(ready(roadRow, est('TIMEOUT'), est('ROUTING_ERROR')))).toBe(true);
     expect(shouldAutoRetry(ready(est()))).toBe(true);
   });
 
-  it('does not retry when nothing is missing or a retry cannot help', () => {
+  it('does not retry by itself when nothing is missing, a retry cannot help, or routing was hanging (timeouts: Retry button only)', () => {
     expect(shouldAutoRetry({ status: 'loading' })).toBe(false);
     expect(shouldAutoRetry(ready(roadRow, roadRow))).toBe(false);
     expect(shouldAutoRetry(ready(est('ROUTING_OFF')))).toBe(false);
+    expect(shouldAutoRetry(ready(est('OUTSIDE_COVERAGE')))).toBe(false);
     expect(shouldAutoRetry(ready(est('NOT_CONFIGURED')))).toBe(false);
     expect(shouldAutoRetry(ready(roadRow, est('NOT_ROUTABLE')))).toBe(false);
+    // Each timed-out call keeps a solver thread busy for up to a minute: no automatic second round.
+    expect(shouldAutoRetry(ready(roadRow, est('TIMEOUT')))).toBe(false);
+    expect(shouldAutoRetry(ready(...many(14, est('TIMEOUT'))))).toBe(false);
+    expect(roadShapesCaption(ready(...many(14, est('TIMEOUT'))))).toMatchObject({ canRetry: true });
   });
 });

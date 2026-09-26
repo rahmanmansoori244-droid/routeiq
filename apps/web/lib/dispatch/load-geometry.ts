@@ -8,9 +8,12 @@
  * - **Bounded concurrency** (`concurrency`, default 4) and **one overall deadline** (`deadlineMs`,
  *   default 20 s). A load still waiting when the deadline passes is drawn straight with reason
  *   `TIMEOUT`; the loads already answered keep their road shapes.
- * - **One slow or failed load never turns the others into straight lines.** Only a clear "road
- *   routing is not configured" answer (web without `SOLVER_URL`/`SOLVER_TOKEN`, or a solver without
- *   an OSRM URL) stops further calls, because every other load would get the same answer.
+ * - **One failed load never turns the others into straight lines.** Two answers stop further calls:
+ *   a clear "road routing is not configured" (web without `SOLVER_URL`/`SOLVER_TOKEN`, or a solver
+ *   without an OSRM URL), because every other load would get the same answer; and a timeout, because
+ *   routing is then hanging and every new call would hold another solver thread (the solver's
+ *   `/route-geometry` keeps waiting on OSRM, up to about a minute, after the web gives up). Calls
+ *   already running keep going, so a hang costs at most `concurrency` solver calls per request.
  * - **Cache** of road shapes (never of straight-line estimates, so a hiccup does not stick), keyed by
  *   the routing namespace (the tenant's own OSRM URL, else the solver's default) and the exact
  *   coordinate list. The key holds coordinates only: a tenant gets a hit only for the exact points of
@@ -25,9 +28,11 @@ export type LngLat = [number, number];
 
 /** Why a load is drawn as straight segments instead of its road shape (sent as `reason`). */
 export type EstimateReason =
-  /** The company plans on straight-line distances (Settings), or its country is outside the routing map. */
+  /** The company plans on straight-line distances (Settings: distance provider Haversine). No call is made. */
   | 'ROUTING_OFF'
-  /** No road routing configured: the web has no solver, or the solver has no OSRM URL. */
+  /** The company is outside the shared road map (Oman + UAE) and has no OSRM of its own. No call is made. */
+  | 'OUTSIDE_COVERAGE'
+  /** No road routing configured: the web has no solver, the solver has no OSRM URL, or the company has no settings row. */
   | 'NOT_CONFIGURED'
   /** OSRM answered but could not route this load (a stop far from any road, or an invalid point). */
   | 'NOT_ROUTABLE'
@@ -72,8 +77,24 @@ export interface LoadGeometry {
 
 export type ClassifiedReply =
   | { coordinates: LngLat[]; reason?: undefined; stopAll: false }
-  /** `stopAll`: every other load would get the same answer, so the route stops calling. */
+  /**
+   * `stopAll`: the route starts no further calls. Every other load would get the same answer (not
+   * configured), or routing is hanging (timeout) and more calls would only pile up on the solver.
+   */
   | { coordinates?: undefined; reason: EstimateReason; stopAll: boolean };
+
+/**
+ * The solver could not reach OSRM at all (Linux `[Errno 113] No route to host`, for example while
+ * OSRM is being redeployed): an outage, worth a retry, not a stop far from any road. Checked first,
+ * because it contains the words "no route".
+ */
+const NETWORK_TROUBLE = /no route to host|network is unreachable|host is unreachable/i;
+/**
+ * OSRM refused this path: its codes `NoRoute` / `NoSegment` (OSRM sends them with HTTP 400, which the
+ * solver's httpx reports as "Client error '400 Bad Request' for url ..."), or an empty route list
+ * ("OSRM returned no route", apps/solver/providers.py). The same answer would come back on a retry.
+ */
+const OSRM_REFUSED_PATH = /\bNoRoute\b|\bNoSegment\b|returned no route|Client error '400\b/i;
 
 /** How the route turns a solver reply into a road shape or an estimate reason. */
 export function classifyReply(reply: RouteGeometryReply): ClassifiedReply {
@@ -81,7 +102,7 @@ export function classifyReply(reply: RouteGeometryReply): ClassifiedReply {
     case 'not_configured':
       return { reason: 'NOT_CONFIGURED', stopAll: true };
     case 'timeout':
-      return { reason: 'TIMEOUT', stopAll: false };
+      return { reason: 'TIMEOUT', stopAll: true };
     case 'failed':
       return { reason: 'ROUTING_ERROR', stopAll: false };
     case 'answer': {
@@ -92,8 +113,8 @@ export function classifyReply(reply: RouteGeometryReply): ClassifiedReply {
       const w = reply.warning ?? '';
       // apps/solver/main.py: "Road routing (OSRM) is not configured; straight lines shown."
       if (/not configured/i.test(w)) return { reason: 'NOT_CONFIGURED', stopAll: true };
-      // OSRM refused this path: code NoRoute / NoSegment, or HTTP 400 for the request. Same answer on a retry.
-      if (/noroute|no route|nosegment|\b400\b|bad request/i.test(w)) return { reason: 'NOT_ROUTABLE', stopAll: false };
+      if (NETWORK_TROUBLE.test(w)) return { reason: 'ROUTING_ERROR', stopAll: false };
+      if (OSRM_REFUSED_PATH.test(w)) return { reason: 'NOT_ROUTABLE', stopAll: false };
       return { reason: 'ROUTING_ERROR', stopAll: false };
     }
   }
@@ -189,9 +210,25 @@ export class RoadShapeCache {
  */
 export const roadShapeCache = new RoadShapeCache({ ttlMs: 12 * 60 * 60 * 1000, maxEntries: 500, maxPoints: 300_000 });
 
+/** Why a company gets no road shapes at all (no solver call is made). */
+export type RoutingOffReason = Extract<EstimateReason, 'ROUTING_OFF' | 'OUTSIDE_COVERAGE' | 'NOT_CONFIGURED'>;
+
+/**
+ * Whether the company routes on roads: null when it does, else why not. `routing` is
+ * `routingProviderFor(cfg, country)` (lib/dispatch/customer-attrs.ts), or null when the company has
+ * no settings row. Keeps the caption truthful: only a Settings choice is blamed on Settings.
+ */
+export function routingOffReason(routing: { provider: string; outsideCoverage: boolean } | null): RoutingOffReason | null {
+  if (!routing) return 'NOT_CONFIGURED';
+  if (routing.provider === 'OSRM') return null;
+  return routing.outsideCoverage ? 'OUTSIDE_COVERAGE' : 'ROUTING_OFF';
+}
+
 export interface ResolveOptions {
-  /** The solver call, or null when the company does not use road routing (every load `ROUTING_OFF`). */
+  /** The solver call, or null when the company does not route on roads (every load gets `offReason`). */
   call: RouteGeometryCall | null;
+  /** The reason every load gets when `call` is null (default `ROUTING_OFF`); see `routingOffReason`. */
+  offReason?: RoutingOffReason;
   /** Cache namespace: which OSRM answers (the tenant's own URL, else the solver's default). */
   routingKey: string;
   cache?: RoadShapeCache | null;
@@ -239,7 +276,7 @@ export async function resolveLoadGeometries(loads: LoadPath[], opts: ResolveOpti
     const base = { loadId: l.loadId, truckCode: l.truckCode, loadNo: l.loadNo };
     const straight = straightLine(l.points);
     const estimate = (reason: EstimateReason): LoadGeometry => ({ ...base, estimated: true, coordinates: straight, reason });
-    if (!call) return estimate('ROUTING_OFF');
+    if (!call) return estimate(opts.offReason ?? 'ROUTING_OFF');
     // No located stop (depot -> depot): nothing to route, nothing to call it an estimate for.
     if (distinctPoints(l.points) < 2) return { ...base, estimated: false, coordinates: straight };
     const key = roadShapeKey(opts.routingKey, l.points);
