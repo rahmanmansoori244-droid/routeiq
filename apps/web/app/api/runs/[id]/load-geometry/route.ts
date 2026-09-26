@@ -4,11 +4,14 @@ import { prisma } from '@/lib/db';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { readPlanInputs, readStopSnapshot } from '@/lib/dispatch/snapshots';
+import { resolveLoadGeometries, roadShapeCache, type LatLng, type LoadPath } from '@/lib/dispatch/load-geometry';
 
 interface Params { params: { id: string } }
 
 // GET /api/runs/:id/load-geometry - road polyline per load (depot -> stops -> depot) via the
-// solver's configured OSRM; straight segments (flagged estimated) when routing is unavailable.
+// solver's configured OSRM, 4 loads at a time within one 20 s deadline, road shapes cached in memory
+// (lib/dispatch/load-geometry.ts). A load that cannot get its road shape comes back as straight
+// segments with `estimated: true` and a `reason`; the other loads keep their road shapes.
 // Review F08: drawn through the pins each stop was PLANNED with (its snapshot) and from the depot
 // the plan was made from, so a pin corrected later never redraws a locked or dispatched load;
 // rows planned before snapshots existed use today's customer pin.
@@ -27,12 +30,12 @@ export const GET = (req: Request, { params }: Params) =>
     const chosen = run.chosenScenarioId ? await prisma.scenarioResult.findFirst({ where: { id: run.chosenScenarioId, runId: run.id }, select: { detailsJson: true } }) : null;
     const raw: unknown = chosen?.detailsJson;
     const inputs = isDispatchDetails(raw) ? readPlanInputs(raw.inputs) : null;
-    const depot: [number, number] = inputs ? [inputs.depot.lat, inputs.depot.lng] : [run.depot.lat, run.depot.lng];
+    const depot: LatLng = inputs ? [inputs.depot.lat, inputs.depot.lng] : [run.depot.lat, run.depot.lng];
     const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { country: true } });
-    let useRoads = !!cfg && routingProviderFor(cfg, tenant?.country).provider === 'OSRM';
-    const out = [];
-    for (const l of loads) {
-      const pts: [number, number][] = [depot];
+    const useRoads = !!cfg && routingProviderFor(cfg, tenant?.country).provider === 'OSRM';
+    const osrmUrl = cfg?.osrmUrl?.trim() || null;
+    const paths: LoadPath[] = loads.map((l) => {
+      const pts: LatLng[] = [depot];
       const seen = new Set<number>();
       for (const a of l.assignments) {
         if (seen.has(a.sequenceInTruck)) continue;
@@ -43,18 +46,17 @@ export const GET = (req: Request, { params }: Params) =>
         if (lat !== null && lng !== null) pts.push([lat, lng]);
       }
       pts.push(depot);
-      const geo = useRoads ? await callRouteGeometry(pts, cfg?.osrmUrl) : null;
-      // Routing down, slow or not configured: straight lines for the remaining loads instead of
-      // one timeout each. A single load OSRM cannot route (e.g. no road to one stop) does not stop the rest.
-      const routeSpecific = /noroute|no route|nosegment/i.test(geo?.warning ?? '');
-      if (!geo || (geo.is_estimated && !routeSpecific)) useRoads = false;
-      out.push({
-        loadId: l.id,
-        truckCode: l.truck.code,
-        loadNo: l.loadNo,
-        estimated: geo ? geo.is_estimated : true,
-        coordinates: geo?.coordinates ?? pts.map(([lat, lng]) => [lng, lat]),
-      });
+      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: pts };
+    });
+    const rows = await resolveLoadGeometries(paths, {
+      call: useRoads ? (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }) : null,
+      routingKey: osrmUrl ? `osrm:${osrmUrl}` : 'solver-default',
+      cache: roadShapeCache,
+    });
+    const estimated = rows.filter((r) => r.estimated && r.reason !== 'ROUTING_OFF');
+    if (estimated.length) {
+      const why = [...new Set(estimated.map((r) => r.reason))].join(',');
+      console.warn(`[load-geometry] run=${run.id} ${estimated.length}/${rows.length} load(s) drawn straight (${why})`);
     }
-    return ok(out);
+    return ok(rows);
   })(req);
