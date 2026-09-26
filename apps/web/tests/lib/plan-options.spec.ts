@@ -4,6 +4,9 @@
  *   dispatched loads included; the job message says "N new loads + M kept on T trucks".
  * - N1: each option says what it gains over the others (P1/P2 minutes, preference cost, OMR, km,
  *   trucks), or that it is the same plan. RECOMMENDED's objective itself is unchanged.
+ * - PR7 review: an option saved by an optimizer that did not report the preference parts (every
+ *   plan made on main) compares its preferred-hours part under that name, never as "preference
+ *   cost"; km, like trucks, loads and day cost, is the whole day (kept + new loads).
  * Pure helpers first, then getPlanDetail and the workbook on the in-memory database (fake-plan-db.ts).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,7 +31,7 @@ import {
   optionTradeoffs,
   physicalTruckCount,
   planSignature,
-  preferenceCost,
+  preferenceFigures,
   type OptionFacts,
 } from '@/lib/dispatch/plan-options';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
@@ -51,7 +54,7 @@ function newLoad(truck: string, loadNo: number, stops: [string, number][]): Plan
 }
 
 function facts(over: Partial<OptionFacts> & { name: string }): OptionFacts {
-  return { usable: true, trucks: 3, loads: 4, km: 400, dayCost: 200, preferenceCost: 10, unserved: 0, signature: 'A', earlyStarts: {}, ...over };
+  return { usable: true, trucks: 3, loads: 4, km: 400, dayCost: 200, preferenceCost: 10, preferredHoursCost: 2, unserved: 0, signature: 'A', earlyStarts: {}, ...over };
 }
 
 describe('B3: physical trucks', () => {
@@ -129,9 +132,31 @@ describe('N1: what each option gains', () => {
   });
 
   it('preference cost adds preferred hours, early delivery and moved orders; an older option has the preferred-hours part only', () => {
-    expect(preferenceCost({ window: 1.25, early: 10.5, continuity: 3 })).toBe(14.75);
-    expect(preferenceCost(null, 2.5)).toBe(2.5);
-    expect(preferenceCost(undefined, undefined)).toBeNull();
+    expect(preferenceFigures({ window: 1.25, early: 10.5, continuity: 3 })).toEqual({ total: 14.75, preferredHours: 1.25 });
+    // An older option: its total is unknown, never its preferred-hours part under the total's name.
+    expect(preferenceFigures(null, 2.5)).toEqual({ total: null, preferredHours: 2.5 });
+    expect(preferenceFigures(undefined, undefined)).toEqual({ total: null, preferredHours: null });
+  });
+
+  it('options made before the optimizer reported the preference parts compare the preferred-hours cost under its own name (main/S01)', () => {
+    // main/S01 (repeat 2): objective.window_penalty only. Before, the MIN DISTANCE row read
+    // "preference cost 11.6 OMR lower ... but P1/P2 delivered on average 68 min later".
+    const old = (name: string, windowPenalty: number, over: Partial<OptionFacts>) =>
+      facts({ name, preferenceCost: null, preferredHoursCost: windowPenalty, ...over });
+    const rec = old('RECOMMENDED', 18.558, { trucks: 7, km: 520, dayCost: 230, signature: 'R', earlyStarts: { S1: 400, S2: 420 } });
+    const minTrucks = old('MIN_TRUCKS', 34.175, { trucks: 6, km: 530, dayCost: 215, signature: 'M', earlyStarts: { S1: 450, S2: 470 } });
+    const minDistance = old('MIN_DISTANCE', 6.953, { trucks: 8, km: 439, dayCost: 245.3, signature: 'D', earlyStarts: { S1: 468, S2: 488 } });
+    const t = optionTradeoffs([rec, minTrucks, minDistance]);
+    expect(t.MIN_DISTANCE.text).toBe(
+      'vs RECOMMENDED: preferred-hours cost 11.6 OMR lower, 81 km less; but P1/P2 delivered on average 68 min later, costs 15.3 OMR more, 1 more truck',
+    );
+    expect(t.RECOMMENDED.text).toBe(
+      'vs MIN TRUCKS: P1/P2 delivered on average 50 min earlier, preferred-hours cost 15.6 OMR lower, 10 km less; but costs 15.0 OMR more, 1 more truck',
+    );
+    expect(Object.values(t).map((x) => x.text).join(' ')).not.toContain('preference cost');
+    // One side known, the other not (never in one version): only the part both have.
+    const mixed = optionTradeoffs([facts({ name: 'RECOMMENDED', signature: 'R', preferenceCost: 12, preferredHoursCost: 3 }), old('MIN_TRUCKS', 5, { signature: 'M' })]);
+    expect(mixed.MIN_TRUCKS.text).toBe('vs RECOMMENDED: no gain; but preferred-hours cost 2.0 OMR higher');
   });
 
   it('the early priorities follow the optimizer config (default P1, P2)', () => {
@@ -204,7 +229,11 @@ function seed() {
     parentRunId: null, supersededAt: null, currentJobId: null, finalizedAt: null, totalOrders: 3, unservedCount: 0, summaryJson: null,
     reconciliationJson: null, changeSummaryJson: null, feasibilityJson: null, createdById: 'u1', createdAt: new Date(),
   }];
-  tables.planLoad = [planLoad('K1', 'T2', 1, 'DISPATCHED', 30, 'K0'), planLoad('L2', 'T1', 1, 'PLANNED', 25), planLoad('L3', 'T1', 2, 'PLANNED', 25)];
+  tables.planLoad = [
+    planLoad('K1', 'T2', 1, 'DISPATCHED', 30, 'K0'),
+    { ...planLoad('L2', 'T1', 1, 'PLANNED', 25), distanceKm: 15 },
+    { ...planLoad('L3', 'T1', 2, 'PLANNED', 25), distanceKm: 15 },
+  ];
   tables.routeAssignment = [assignment('A1', 'K1', 'T2', 'O1', 1), assignment('A2', 'L2', 'T1', 'O2', 1), assignment('A3', 'L3', 'T1', 'O3', 2)];
   const recLoads = [newLoad('T1', 1, [['S2', 400]]), newLoad('T1', 2, [['S3', 520]])];
   const minLoads = [newLoad('T3', 1, [['S2', 420], ['S3', 520]])];
@@ -228,8 +257,12 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     const d = (await getPlanDetail(T, 'P'))!;
     const [rec, min] = d.scenarios;
     // B3: T1 (new loads) + T2 (dispatched K1), although the stored option says 1 truck.
-    expect(rec).toMatchObject({ name: 'RECOMMENDED', trucksUsed: 2, trips: 2, frozenLoads: 1, dayOperatingCost: 80, preferenceCost: 5 });
-    expect(min).toMatchObject({ name: 'MIN_TRUCKS', trucksUsed: 2, trips: 1, frozenLoads: 1, dayOperatingCost: 70, preferenceCost: 10 });
+    expect(rec).toMatchObject({ name: 'RECOMMENDED', trucksUsed: 2, trips: 2, frozenLoads: 1, dayOperatingCost: 80, preferenceCost: 5, preferredHoursCost: 1 });
+    expect(min).toMatchObject({ name: 'MIN_TRUCKS', trucksUsed: 2, trips: 1, frozenLoads: 1, dayOperatingCost: 70, preferenceCost: 10, preferredHoursCost: 1 });
+    // PR7 review: km is the whole day too - K1's 10 km + the option's new loads (30 and 22 km).
+    // The option in use reads like the KPI (every load of the version: K1 10 + L2 15 + L3 15).
+    expect([rec.totalKm, rec.dayKm, min.totalKm, min.dayKm]).toEqual([30, 40, 22, 32]);
+    expect(rec.dayKm).toBe(tables.planLoad.reduce((a, l) => a + Number(l.distanceKm), 0));
     // N1: P1 (S2: O2) and P2 (S3: O3) stops, 400/520 against 420/520 = 10 min earlier on average.
     expect(rec.tradeoff).toBe('vs MIN TRUCKS: P1/P2 delivered on average 10 min earlier, preference cost 5.0 OMR lower; but costs 10.0 OMR more, 8 km more, 1 more load');
     expect(min.tradeoff).toBe('vs RECOMMENDED: 10.0 OMR cheaper, 8 km less, 1 fewer load; but P1/P2 delivered on average 10 min later, preference cost 5.0 OMR higher');
@@ -248,10 +281,36 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     expect(at).toBeGreaterThan(0);
     const rec = rows.findIndex((r, i) => i > at && r[0] === 'RECOMMENDED (in use)');
     expect(rows[rec][1]).toBe('2 trucks · 3 loads (2 new)');
-    expect(rows[rec][2]).toMatch(/day cost 80\.0 OMR · preference cost 5\.0 · 0 unserved$/);
+    expect(rows[rec][2]).toBe('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preference cost 5.0 · 0 unserved');
     expect(rows[rec + 1][2]).toBe(d.scenarios[0].tradeoff);
     const min = rows.findIndex((r, i) => i > at && r[0] === 'MIN TRUCKS');
     expect(rows[min][1]).toBe('2 trucks · 2 loads (1 new)');
+    expect(rows[min][2]).toBe('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved');
     expect(rows[min + 1][2]).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+  });
+
+  it('options saved by an optimizer without the preference parts show their preferred hours as such, on screen and in the Excel', async () => {
+    seed();
+    for (const [sc, w] of [
+      [tables.scenarioResult[0], 1.5],
+      [tables.scenarioResult[1], 4],
+    ] as const) {
+      const { preference_penalties: _pp, ...rest } = sc.detailsJson as Record<string, unknown>;
+      sc.detailsJson = { ...rest, objective: { window_penalty: w } };
+    }
+    const d = (await getPlanDetail(T, 'P'))!;
+    const [rec, min] = d.scenarios;
+    expect(rec).toMatchObject({ preference: null, preferenceCost: null, preferredHoursCost: 1.5 });
+    expect(min).toMatchObject({ preference: null, preferenceCost: null, preferredHoursCost: 4 });
+    expect(rec.tradeoff).toBe(
+      'vs MIN TRUCKS: P1/P2 delivered on average 10 min earlier, preferred-hours cost 2.5 OMR lower; but costs 10.0 OMR more, 8 km more, 1 more load',
+    );
+    expect(min.tradeoff).not.toContain('preference cost');
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const texts: string[] = [];
+    wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
+    expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved');
   });
 });

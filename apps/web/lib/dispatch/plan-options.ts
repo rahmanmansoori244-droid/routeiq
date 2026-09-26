@@ -26,15 +26,30 @@ export function frozenOfRequest(trucks: readonly { id: string; frozen_trips?: re
   return { truckIds: withFrozen.map((t) => t.id), loads: withFrozen.reduce((a, t) => a + (t.frozen_trips?.length ?? 0), 0) };
 }
 
+/** An option's preference figures, in OMR-equivalent (not money). */
+export interface PreferenceFigures {
+  /**
+   * What the RECOMMENDED objective adds on top of money: minutes outside preferred hours, the
+   * early-delivery push for high priorities and orders moved to another truck on a late-order
+   * re-plan. Null when the option was saved by an optimizer that did not report the parts
+   * (`preference_penalties`, before stabilization PR5 - every plan made on main).
+   */
+  total: number | null;
+  /**
+   * The preferred-hours part alone: `preference_penalties.window`, or for an older option the
+   * objective's `window_penalty` (the only part it reports). Null when neither is known.
+   */
+  preferredHours: number | null;
+}
+
 /**
- * What the RECOMMENDED objective adds on top of money, in OMR-equivalent (not money): minutes
- * outside preferred hours, the early-delivery push for high priorities and orders moved to
- * another truck on a late-order re-plan. Options saved before the optimizer reported the parts
- * give only the preferred-hours part (`windowPenalty`); null when neither is known.
+ * The preference cost of an option. An older option (no `preference_penalties`) has only its
+ * preferred-hours part: its total is unknown, never the preferred-hours part under the total's
+ * name (PR7 review: "preference cost 11.6 OMR lower" on a plan that delivers P1/P2 68 min later).
  */
-export function preferenceCost(pp: PreferencePenalties | null | undefined, windowPenalty?: number | null): number | null {
-  if (pp) return round2(pp.window + pp.early + pp.continuity);
-  return typeof windowPenalty === 'number' ? round2(windowPenalty) : null;
+export function preferenceFigures(pp: PreferencePenalties | null | undefined, windowPenalty?: number | null): PreferenceFigures {
+  if (pp) return { total: round2(pp.window + pp.early + pp.continuity), preferredHours: round2(pp.window) };
+  return { total: null, preferredHours: typeof windowPenalty === 'number' ? round2(windowPenalty) : null };
 }
 
 /** Same trucks carrying the same loads, stops in the same order = the same plan. */
@@ -83,12 +98,14 @@ export interface OptionFacts {
   trucks: number;
   /** Loads of the day with this option (kept + new). */
   loads: number;
-  /** km of its new loads (the kept loads are the same for every option). */
+  /** The whole day's km with this option: the kept loads' + its new loads' (the kept part is the same for every option). */
   km: number;
   /** The whole day's operating cost with this option (OMR). */
   dayCost: number;
-  /** preferenceCost(): null when unknown (an option saved before it was reported). */
+  /** preferenceFigures().total: null when unknown (an option saved before the optimizer reported the parts). */
   preferenceCost: number | null;
+  /** preferenceFigures().preferredHours: compared instead when a total is unknown. */
+  preferredHoursCost: number | null;
   /** Unserved orders. */
   unserved: number;
   signature: string;
@@ -126,9 +143,13 @@ function compare(a: OptionFacts, b: OptionFacts, early: string): { gains: string
   if (a.unserved !== b.unserved) put(a.unserved < b.unserved, `${count(a.unserved - b.unserved, a.unserved < b.unserved, 'order')} served`);
   const late = laterBy(a, b);
   if (late !== null && Math.abs(late) >= 1) put(late < 0, `${early} delivered on average ${Math.round(Math.abs(late))} min ${late < 0 ? 'earlier' : 'later'}`);
-  if (a.preferenceCost !== null && b.preferenceCost !== null && Math.abs(a.preferenceCost - b.preferenceCost) >= 0.05) {
-    put(a.preferenceCost < b.preferenceCost, `preference cost ${omr(a.preferenceCost - b.preferenceCost)} ${a.preferenceCost < b.preferenceCost ? 'lower' : 'higher'}`);
-  }
+  // The whole preference cost only when both options report it; an older option has only the
+  // preferred-hours part, which is then compared under its own name.
+  const [pa, pb, what] =
+    a.preferenceCost !== null && b.preferenceCost !== null
+      ? [a.preferenceCost, b.preferenceCost, 'preference cost']
+      : [a.preferredHoursCost, b.preferredHoursCost, 'preferred-hours cost'];
+  if (pa !== null && pb !== null && Math.abs(pa - pb) >= 0.05) put(pa < pb, `${what} ${omr(pa - pb)} ${pa < pb ? 'lower' : 'higher'}`);
   if (Math.abs(a.dayCost - b.dayCost) >= 0.05) put(a.dayCost < b.dayCost, a.dayCost < b.dayCost ? `${omr(a.dayCost - b.dayCost)} cheaper` : `costs ${omr(a.dayCost - b.dayCost)} more`);
   if (Math.abs(a.km - b.km) >= 0.5) put(a.km < b.km, `${Math.round(Math.abs(a.km - b.km))} km ${a.km < b.km ? 'less' : 'more'}`);
   if (a.trucks !== b.trucks) put(a.trucks < b.trucks, count(a.trucks - b.trucks, a.trucks > b.trucks, 'truck'));

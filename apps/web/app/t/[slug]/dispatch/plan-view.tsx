@@ -546,7 +546,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2" title="Loads of the day with this option: the kept locked, loading and dispatched loads + its new loads.">
                     Loads
                   </th>
-                  <th className="p-2">{kmShort}</th>
+                  <th className="p-2" title="The whole day with this option: the locked, loading and dispatched loads kept as they are, plus this option's new loads.">
+                    {kmShort}
+                  </th>
                   <th className="p-2" title="The whole day with this option: the locked, loading and dispatched loads kept as they are, plus this option's new loads. Driver paid for the whole truck day, overtime included.">
                     Day cost OMR
                   </th>
@@ -584,8 +586,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         </span>
                       ) : null}
                     </td>
-                    <td className="p-2">
-                      {sc.totalKm}
+                    <td className="p-2" data-testid={`day-km-${sc.name}`}>
+                      {sc.dayKm}
+                      {Math.abs(sc.dayKm - sc.totalKm) >= 0.05 ? (
+                        <span className="ml-1 text-xs text-muted-foreground" title="km of the new loads this option planned">
+                          (new {sc.totalKm.toFixed(1)})
+                        </span>
+                      ) : null}
                       {sc.estimatedLegs ? <span className="ml-1 text-xs text-amber-700" title="Legs that could not be routed on roads use straight-line estimates">({sc.estimatedLegs} est.)</span> : null}
                     </td>
                     <td className="p-2" data-testid={`day-cost-${sc.name}`}>
@@ -606,10 +613,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       title={
                         sc.preference
                           ? `Preferred hours ${sc.preference.window.toFixed(1)} + early delivery ${sc.preference.early.toFixed(1)} + moved orders ${sc.preference.continuity.toFixed(1)}`
-                          : 'Preferred hours only (made by an older optimizer)'
+                          : 'Preferred hours only: an older optimizer made this option and did not report its early-delivery part, so this is not the whole preference cost'
                       }
                     >
-                      {sc.preferenceCost !== null ? sc.preferenceCost.toFixed(1) : '—'}
+                      {sc.preferenceCost !== null ? (
+                        sc.preferenceCost.toFixed(1)
+                      ) : sc.preferredHoursCost !== null ? (
+                        <>
+                          {sc.preferredHoursCost.toFixed(1)}
+                          <span className="ml-1 text-xs text-muted-foreground">(hours only)</span>
+                        </>
+                      ) : (
+                        '—'
+                      )}
                     </td>
                     <td className="p-2">{sc.unservedOrders}</td>
                     <td className="p-2 text-xs" data-testid={`timing-checked-${sc.name}`}>
