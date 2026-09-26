@@ -84,11 +84,12 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
       PARSE_TIMEOUT_MS,
       'XLSX parse timed out (possible zip bomb).',
     );
-    const total = sheets.reduce((a, s) => a + s.rows.length, 0);
-    if (total > MAX_ROWS) {
-      throw new Error(`Too many rows: ${total}${sheets.length > 1 ? ` on ${sheets.length} sheets` : ''}. Max ${MAX_ROWS}.`);
-    }
     const pick = pickSheet(sheets, opts);
+    // The row limit is for the sheet that is read: a large sheet that is not read (a customer
+    // list next to the orders) is only named in the warning, never a reason to refuse the file.
+    if (pick.rows.length > MAX_ROWS) {
+      throw new Error(`Too many rows: ${pick.rows.length}${sheets.length > 1 ? ` on sheet "${pick.name}"` : ''}. Max ${MAX_ROWS}.`);
+    }
     return { fileName, fileType: 'xlsx', rows: pick.rows, warnings: pick.warnings, ...(pick.name ? { sheetName: pick.name } : {}) };
   }
 
