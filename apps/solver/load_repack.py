@@ -152,6 +152,9 @@ class Day:
     reload_s: int
     loading_s_per_case: float
     values: list[int]  # objective units lost when stop k is not served
+    # Truck idx of every truck with frozen (locked / loading / dispatched) loads today, usable for
+    # new loads or not: they are physical trucks of the day whatever a plan adds (score().trucks).
+    frozen_trucks: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
         self.by_idx = {td.idx: td for td in self.trucks}
@@ -433,8 +436,10 @@ def time_plan(day: Day, plan: Plan, pricing: Pricing) -> TimedPlan | None:
 class Score:
     unserved: int  # service value lost (strict or weighted priority values), objective units
     cost: int  # the rest of the RECOMMENDED objective, objective units
+    # Physical trucks of the day: trucks with new loads + trucks with frozen loads (PR7, B3). A
+    # truck that already carries a locked or dispatched load is never counted as one more truck.
     trucks: int
-    loads: int
+    loads: int  # new loads (the frozen ones are the same in every plan of the day)
     metres: int
     operating: int = 0  # the money part of cost: fixed + trip + km + driver span + overtime
 
@@ -449,14 +454,15 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
     cost model, costing.truck_day_costs - fixed, trip, distance and fuel, driver pay for the whole
     truck day and overtime - so it is exactly what the plan reports (dispatch_solver._build_scenario)."""
     served: set[int] = set()
-    soft = trucks = n_loads = metres = 0
+    soft = n_loads = metres = 0
+    used: set[int] = set(day.frozen_trucks)
     money = 0.0
     rates = pricing.day_rates()
     for idx, loads in plan.items():
         if not loads:
             continue
         td = day.by_idx[idx]
-        trucks += 1
+        used.add(idx)
         timings = []
         for tl in loads:
             n_loads += 1
@@ -472,7 +478,7 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
                                          frozen_return_s=td.frozen_return_s).total
     op = costing.to_units(money)
     unserved = sum(v for k, v in enumerate(day.values) if k not in served)
-    return Score(unserved=unserved, cost=op + soft, trucks=trucks, loads=n_loads, metres=metres, operating=op)
+    return Score(unserved=unserved, cost=op + soft, trucks=len(used), loads=n_loads, metres=metres, operating=op)
 
 
 # --------------------------------------------------------------------------------------------

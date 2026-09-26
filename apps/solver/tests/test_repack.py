@@ -651,8 +651,39 @@ def test_auto_time_limits():
     assert ds.auto_time_limit(25) == 5
     assert ds.auto_time_limit(26) == 20
     assert ds.auto_time_limit(80) == 20
-    assert ds.auto_time_limit(150) == 20
+    assert ds.auto_time_limit(100) == 20
+    assert ds.auto_time_limit(120) == 20
+    assert ds.auto_time_limit(135) == 25
+    assert ds.auto_time_limit(150) == 30
+    assert ds.auto_time_limit(200) == 70
+    assert ds.auto_time_limit(250) == 110
     assert ds.auto_time_limit(300) == 150
+    assert ds.auto_time_limit(350) == 150
+    assert ds.auto_time_limit(351) == 240
+    assert ds.auto_time_limit(600) == 240
+
+
+def test_auto_time_limit_schedule():
+    """PR7 (T1): the search time grows smoothly with the day. It used to jump from 20 s at 200 stops
+    to 150 s at 201, so a 200-stop day got 20 s and visibly different plans run to run."""
+    limits = {n: ds.auto_time_limit(n) for n in range(26, ds.LARGE_DAY_STOPS + 1)}
+    for n in range(27, ds.LARGE_DAY_STOPS + 1):
+        # Monotone, and at most 1 s more for one more stop.
+        assert 0 <= limits[n] - limits[n - 1] <= 1, (n, limits[n - 1], limits[n])
+    # NMWC's typical 80-120-stop days keep the 20 s they had.
+    assert all(limits[n] == 20 for n in range(26, 121))
+    # A 200-stop day gets real search time; 300-350 stops keep the 150 s that served big days fully.
+    assert limits[200] >= 60
+    assert all(limits[n] == 150 for n in range(300, ds.LARGE_DAY_STOPS + 1))
+    # Inside the request budget, which is inside the web's 600 s wait: with the slowest road matrix,
+    # RECOMMENDED + its overhead + the alternatives (half the limit, in parallel) + their grace + the
+    # post-solve stage (three sources) + its grace. Above LARGE_DAY_STOPS (240 s) the alternatives are
+    # shortened to fit, but RECOMMENDED itself never is.
+    matrix = ds.matrix_budget_sec(ds.SOLVER_BUDGET_SEC)
+    for n, t in limits.items():
+        stage = min(ds.REPACK_CAP_SEC, max(ds.REPACK_MIN_SEC, t / 2)) * 3 + ds.STAGE_GRACE_SEC
+        assert matrix + t + ds.REC_OVERHEAD_SEC + max(2, t // 2) + ds.ALT_GRACE_SEC + stage <= ds.SOLVER_BUDGET_SEC, n
+    assert matrix + ds.auto_time_limit(ds.MAX_STOPS) + ds.REC_OVERHEAD_SEC <= ds.SOLVER_BUDGET_SEC < 600
 
 
 def test_dropped_stop_reason_is_honest_when_nothing_proves_it_impossible():
@@ -668,3 +699,54 @@ def test_dropped_stop_reason_is_honest_when_nothing_proves_it_impossible():
         assert u.reason_message.startswith("Not planned: the optimizer found no truck, trip or time slot for this P3 stop")
         assert "could not be fitted" not in u.reason_message.lower()
     assert any("no check proves they are impossible" in w for w in sc.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# PHYSICAL TRUCKS WITH FROZEN LOADS (PR7, B3)
+# --------------------------------------------------------------------------------------
+
+def frozen_two_trucks_day():
+    """F1 and F2 are already out with a locked morning load (one load left each); G1 is fresh and
+    could carry both new loads alone."""
+    def out(tid: str):
+        return truck(tid, cap=100, fixed_cost=30, cost_per_km=0.1, max_trips=2,
+                     frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("07:30"), cases=90)])
+    stops = [stop("A", 23.60, 58.45, cases=90), stop("B", 23.62, 58.47, cases=90)]
+    return req(stops, [out("F1"), out("F2"), truck("G1", cap=100, fixed_cost=30, cost_per_km=0.1)], scenarios=ALL)
+
+
+def test_score_counts_the_trucks_of_frozen_loads():
+    """MIN_TRUCKS ranks candidates by score().trucks. Counting only the trucks of the NEW loads made
+    "both loads on fresh G1" (1 truck) beat "one load each on F1 and F2" (2 trucks), although the
+    first uses 3 physical trucks and pays G1's day. Both trucks with locked loads are out anyway."""
+    r = frozen_two_trucks_day()
+    tds = ds._truck_days(r)
+    ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
+    day, pricing = ctx.day, ctx.rec_pricing
+    assert day.frozen_trucks == frozenset({0, 1})
+    on_frozen = LR.time_plan(day, {0: [(0,)], 1: [(1,)]}, pricing)
+    on_fresh = LR.time_plan(day, {2: [(0,), (1,)]}, pricing)
+    assert on_frozen is not None and on_fresh is not None
+    s_frozen, s_fresh = LR.score(day, pricing, on_frozen), LR.score(day, pricing, on_fresh)
+    assert (s_frozen.trucks, s_frozen.loads) == (2, 2)
+    assert (s_fresh.trucks, s_fresh.loads) == (3, 2)
+    assert s_frozen.operating < s_fresh.operating  # G1's fixed cost
+    assert ds._GOALS["MIN_TRUCKS"](s_frozen) < ds._GOALS["MIN_TRUCKS"](s_fresh)
+    # MIN_TRUCKS' prices never charge a truck with frozen loads for "opening" it (x20 fixed).
+    mt = ds._pricing("MIN_TRUCKS", r, tds, r.stops)
+    assert (mt.trucks[0].fixed, mt.trucks[1].fixed, mt.trucks[2].fixed) == (0, 0, 30 * 20 * ds.COST_SCALE)
+
+
+def test_min_trucks_uses_the_trucks_already_out(monkeypatch):
+    """End to end on the same day: every option keeps G1 at the depot and reports the day's 2
+    physical trucks (the new loads' trucks + the trucks of the locked loads)."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    r = frozen_two_trucks_day()
+    r.config.time_limit_sec = 2
+    resp = optimize_dispatch(r)
+    by = {s.name: s for s in resp.scenarios}
+    for sc in by.values():
+        assert served_ids(sc) == {"A", "B"}
+        assert {ld.truck_id for ld in sc.loads} <= {"F1", "F2"}, [(l.truck_id, l.load_no) for l in sc.loads]
+        assert (sc.trucks_used, sc.trips, sc.frozen_trucks, sc.frozen_loads) == (2, 2, 2, 2)
+        assert_plan_rules(r, sc)

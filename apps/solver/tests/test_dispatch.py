@@ -1076,3 +1076,25 @@ def test_web_setting_bounds_lie_inside_the_solver_contract():
     svc = b["config"]["defaultServiceTimeMin"]
     for v in (svc["min"], svc["max"]):
         DispatchStop(stop_id="s", order_ids=["o"], customer_id="c", lat=23.6, lng=58.4, demand_cases=1, service_min=v)
+
+
+def test_trucks_used_counts_the_trucks_of_frozen_loads():
+    """PR7 (B3), the S04 probe: T02 carries a dispatched load and has no load left, so every new load
+    goes to other trucks. The plan's trucks are still the day's physical trucks, T02 included: the
+    options table, the job message and the Excel read this count (before: T02 was left out)."""
+    t1 = truck("T01", cap=100, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("08:00"), cases=90)])
+    t2 = truck("T02", cap=100, max_trips=1, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("12:00"), cases=95)])
+    stops = [stop(f"S{i}", 23.60 + 0.01 * i, 58.45, cases=60) for i in range(3)]
+    r = req(stops, [t1, t2, truck("T03", cap=100)], time_limit_sec=2, scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+    resp = optimize_dispatch(r)
+    assert len(resp.scenarios) == 3
+    for sc in resp.scenarios:
+        new = {ld.truck_id for ld in sc.loads}
+        assert "T02" not in new and sc.trips == 3
+        assert sc.trucks_used == len(new | {"T01", "T02"}), (sc.name, sorted(new), sc.trucks_used)
+        assert (sc.frozen_trucks, sc.frozen_loads) == (2, 2)
+    # Nothing can be planned (T02 is the only truck and has no load left): the day still used T02.
+    only = req([stop("X", 23.60, 58.45, cases=10)], [t2])
+    sc = rec(optimize_dispatch(only))
+    assert sc.status == "NOTHING_TO_PLAN" and not sc.loads
+    assert (sc.trucks_used, sc.frozen_trucks, sc.frozen_loads) == (1, 1, 1)

@@ -118,18 +118,35 @@ STAGE_GRACE_SEC = 20
 ENGINE = "ortools-routing"
 
 
+# The automatic search time between 120 and 300 stops (PR7, T1): straight lines through these
+# (stops, seconds) points. Up to 120 stops 20 s, from 300 to LARGE_DAY_STOPS 150 s, above 240 s.
+TIME_LIMIT_POINTS: tuple[tuple[int, int], ...] = ((120, 20), (150, 30), (300, 150))
+
+
 def auto_time_limit(n_stops: int) -> int:
-    # A normal NMWC day (~150 stops) stays fast. Big days get much more time: at 300 stops 45 s
-    # left feasible P5 stops unserved (search not converged) while 150 s served all of them.
-    # Small days are cheap: 20 s instead of 8 s up to 80 stops is insurance against a search
-    # stopped before it settled (the synthetic 60-stop days were 5-15% better at 20-30 s).
+    """RECOMMENDED's search time in seconds for a day of ``n_stops`` solvable stops.
+
+    Small days are cheap: 20 s instead of 8 s from 26 stops is insurance against a search stopped
+    before it settled (the synthetic 60-stop days were 5-15% better at 20-30 s). Big days need much
+    more: at 300 stops 45 s left feasible P5 stops unserved (search not converged) while 150 s
+    served all of them. Between them the time grows smoothly (TIME_LIMIT_POINTS): NMWC's usual
+    80-120-stop days keep their 20 s, then +1 s per 3 stops to 30 s at 150 stops and +0.8 s per stop
+    to 150 s at 300 stops (200 stops: 70 s). Until PR7 it jumped from 20 s at 200 stops to 150 s at
+    201, so a 200-stop day got 20 s and visibly different plans from run to run. Monotone, never
+    more than 1 s per extra stop between 26 and 350 stops; above LARGE_DAY_STOPS (the "Large day"
+    warning) it stays 240 s, and every value fits the request budget (SOLVER_BUDGET_SEC, see
+    test_auto_time_limit_schedule)."""
     if n_stops <= 25:
         return 5
-    if n_stops <= 200:
-        return 20
-    if n_stops <= 350:
-        return 150
-    return 240
+    if n_stops > LARGE_DAY_STOPS:
+        return 240
+    (x0, y0) = TIME_LIMIT_POINTS[0]
+    if n_stops <= x0:
+        return y0
+    for (xa, ya), (xb, yb) in zip(TIME_LIMIT_POINTS, TIME_LIMIT_POINTS[1:]):
+        if n_stops <= xb:
+            return int(math.floor(ya + (yb - ya) * (n_stops - xa) / (xb - xa) + 0.5))
+    return TIME_LIMIT_POINTS[-1][1]
 
 
 @dataclass(frozen=True)
@@ -471,6 +488,8 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     w = SCENARIOS[name]
     trucks = {
         td.idx: LR.TruckPrice(
+            # A truck with frozen loads is already out today: no "open a truck" cost again, in any
+            # scenario (MIN_TRUCKS' x20 included), as in the routing model (PR7, B3).
             fixed=int(round(td.truck.fixed_cost * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
             trip=int(round(td.truck.trip_cost * w.trip * COST_SCALE)),
             per_m=_km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0,
@@ -538,7 +557,7 @@ def _solve_scenario(
     use_margin = cfg.use_margin and bool(stops) and all(s.margin is not None for s in stops)
     started = time.perf_counter()
     if not stops:
-        return _empty_scenario(name, "NOTHING_TO_PLAN", pre_drops, time_limit, mx)
+        return _empty_scenario(name, "NOTHING_TO_PLAN", pre_drops, time_limit, mx, tds)
 
     vehicles = [td for td in tds if td.usable]
     reload_owner: list[int] = []
@@ -591,7 +610,7 @@ def _solve_scenario(
             cost_cb[key] = routing.RegisterTransitMatrix(mat)
         routing.SetArcCostEvaluatorOfVehicle(cost_cb[key], v)
         fixed = 0.0
-        if td.n_frozen == 0:
+        if td.n_frozen == 0:  # a truck with frozen loads is already out: never "opened" again (B3)
             fixed += td.truck.fixed_cost * (0.0 if w.pure_distance else w.fixed)
         if not w.pure_distance:
             fixed += td.truck.trip_cost * w.trip  # the first new load
@@ -697,7 +716,7 @@ def _solve_scenario(
         drops = list(pre_drops) + [
             _unserved(s, "INFEASIBLE", _no_plan_message(status_name)) for s in stops
         ]
-        sc = _empty_scenario(name, "NO_SOLUTION", drops, time_limit, mx)
+        sc = _empty_scenario(name, "NO_SOLUTION", drops, time_limit, mx, tds)
         sc.solver_status = status_name
         sc.solver_time_sec = round(elapsed, 2)
         return sc
@@ -973,6 +992,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             f"Cost check: the loads of this option add up to {operating:.3f} OMR but its truck days to {money_exact:.3f} OMR. "
             "The plan itself is valid; report this to the administrator."
         )
+    frozen_ids = _frozen_truck_ids(tds)
     sc = DispatchScenario(
         name=name, status="OPTIMIZED", solver_status=solver_status, solver_time_sec=round(elapsed, 2),
         time_limit_sec=time_limit, objective_value=int(objective_value),
@@ -982,7 +1002,9 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             time_cost=round(comp["time"], 3), overtime_cost=round(comp["overtime"], 3),
             window_penalty=round(comp["window"], 3), margin_served=margin_served, trip_cost=round(comp["trip"], 3),
         ),
-        trucks_used=len({ld.truck_id for ld in loads}), trips=len(loads),
+        # Physical trucks of the day (PR7, B3): the new loads' trucks + the trucks of the frozen loads.
+        trucks_used=len({ld.truck_id for ld in loads} | frozen_ids), trips=len(loads),
+        frozen_trucks=len(frozen_ids), frozen_loads=sum(td.n_frozen for td in tds),
         total_distance_km=round(sum(ld.distance_km for ld in loads), 2),
         total_duration_min=sum(ld.duration_min for ld in loads),
         total_cases=sum(ld.cases for ld in loads), total_kg=round(sum(ld.kg for ld in loads), 1),
@@ -1003,7 +1025,13 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     return sc
 
 
-def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult) -> DispatchScenario:
+def _frozen_truck_ids(tds: list[TruckDay]) -> set[str]:
+    """Trucks that carry locked / loading / dispatched loads today, usable for new loads or not."""
+    return {td.truck.id for td in tds if td.n_frozen}
+
+
+def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult, tds: list[TruckDay] | None = None) -> DispatchScenario:
+    frozen = _frozen_truck_ids(tds or [])
     return DispatchScenario(
         name=name,
         status=status,
@@ -1013,7 +1041,9 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult) -> Dispat
         objective_value=0,
         objective=ObjectiveComponents(unserved_penalty=0, fixed_cost=0, distance_cost=0, fuel_cost=0,
                                       time_cost=0, overtime_cost=0, window_penalty=0, margin_served=None),
-        trucks_used=0, trips=0, total_distance_km=0.0, total_duration_min=0, total_cases=0, total_kg=0.0,
+        # No new load: the day's trucks are those of its frozen loads (PR7, B3).
+        trucks_used=len(frozen), frozen_trucks=len(frozen), frozen_loads=sum(td.n_frozen for td in tds or []),
+        trips=0, total_distance_km=0.0, total_duration_min=0, total_cases=0, total_kg=0.0,
         avg_utilization_pct=0.0, fuel_litres=0.0, fuel_cost=0.0, operating_cost=0.0,
         loads=[], unserved=list(drops), warnings=list(mx.warnings) if mx else [],
         # No load, so no timetable that could break a rule.
@@ -1420,7 +1450,9 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
 _GOALS = {
     # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
     "RECOMMENDED": lambda sc: (sc.unserved, sc.cost),
-    # fewest trucks, then loads, then operating cost (like its search, it ignores preferences)
+    # fewest trucks, then loads, then operating cost (like its search, it ignores preferences).
+    # Physical trucks (PR7, B3): a truck with a frozen load counts whether or not it gets new loads,
+    # so putting new loads on it never looks like one truck more than opening a fresh one.
     "MIN_TRUCKS": lambda sc: (sc.unserved, sc.trucks, sc.loads, sc.operating, sc.cost),
     # fewest km, then the RECOMMENDED objective
     "MIN_DISTANCE": lambda sc: (sc.unserved, sc.metres, sc.cost),
@@ -1479,7 +1511,8 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
     values, value_warnings = _service_values(solvable, cfg, use_margin)
     day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
                  shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
-                 loading_s_per_case=cfg.loading_min_per_case * 60, values=values)
+                 loading_s_per_case=cfg.loading_min_per_case * 60, values=values,
+                 frozen_trucks=frozenset(td.idx for td in tds if td.n_frozen))
     return _StageCtx(req=req, solvable=solvable, tds=tds, mx=mx, drops=drops, values=values, value_warnings=value_warnings,
                      use_margin=use_margin, stop_idx={s.stop_id: k for k, s in enumerate(solvable)},
                      truck_idx={td.truck.id: td.idx for td in tds}, day=day,

@@ -353,8 +353,11 @@ class DispatchScenario(BaseModel):
     time_limit_sec: int
     objective_value: int
     objective: ObjectiveComponents
+    # Physical trucks of the day with this plan: the trucks of its new loads + the trucks that carry
+    # locked / loading / dispatched (frozen) loads (PR7, B3; before, the frozen loads' trucks were
+    # left out, so a re-plan showed fewer trucks than the day uses).
     trucks_used: int
-    trips: int
+    trips: int  # the NEW loads this plan adds (frozen_loads are on top)
     total_distance_km: float
     total_duration_min: int
     total_cases: int
@@ -376,6 +379,10 @@ class DispatchScenario(BaseModel):
     paid_driver_min: int | None = None
     preference_penalties: PreferencePenalties | None = None
     estimated_legs: int | None = None  # legs of the planned loads whose distance is an estimate
+    # Of trucks_used, the trucks with frozen loads, and how many frozen loads the plan was made
+    # around (PR7). None from a solver before them.
+    frozen_trucks: int | None = None
+    frozen_loads: int | None = None
 
 
 class DispatchResponse(BaseModel):
