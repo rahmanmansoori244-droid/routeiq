@@ -52,6 +52,10 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       outsideCoverage: planned ? undefined : cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
       // A plan costed before the whole-truck-day costs is described by the rules it was made with.
       rules: planRules(detail),
+      // Only settings the plan used are stated as used (PR6): road legs for the road time factor,
+      // estimated legs for the estimate speed, trucks with a km per litre for the fuel price.
+      estimatedLegs: detail.summary?.estimatedLegs ?? detail.loads.reduce((a, l) => a + (l.cost?.estimatedLegs ?? 0), 0),
+      fuelCosted: detail.loads.length ? detail.loads.some((l) => l.fuelLitres !== null) : undefined,
     }),
     assumptionsSource: planned ? 'PLAN' : 'CURRENT',
   });

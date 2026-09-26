@@ -63,6 +63,50 @@ export interface Reconciliation {
   bySalesOrder: ReconRow[];
 }
 
+/** bySalesOrder key of the lines of a delivery order that carry no sales-order number. */
+export const NO_SO_PREFIX = '(no SO) ';
+
+export interface InvoiceCounts {
+  /** Distinct sales orders (invoices), letter case ignored. */
+  invoices: number;
+  /** Every case of the invoice is on a truck. */
+  planned: number;
+  /** Some cases on a truck, the rest unserved (split delivery). */
+  partial: number;
+  /** No case on a truck. */
+  unserved: number;
+  /** Delivery orders with lines that carry no sales-order number (not counted as invoices). */
+  ordersWithoutSo: number;
+}
+
+/**
+ * Invoices of a plan from its reconciliation (scenario tests: the Excel SUMMARY gave only the
+ * delivery orders - one per customer branch - so 320 invoices read as "200 orders").
+ */
+export function invoiceCounts(r: Pick<Reconciliation, 'bySalesOrder'>): InvoiceCounts {
+  const bySo = new Map<string, { planned: number; unserved: number }>();
+  let ordersWithoutSo = 0;
+  for (const row of r.bySalesOrder) {
+    if (row.key.startsWith(NO_SO_PREFIX)) {
+      ordersWithoutSo++;
+      continue;
+    }
+    const k = row.key.trim().toUpperCase();
+    const cur = bySo.get(k) ?? { planned: 0, unserved: 0 };
+    cur.planned += row.planned;
+    cur.unserved += row.unserved;
+    bySo.set(k, cur);
+  }
+  const all = [...bySo.values()];
+  return {
+    invoices: all.length,
+    planned: all.filter((x) => x.planned > 0 && x.unserved === 0).length,
+    partial: all.filter((x) => x.planned > 0 && x.unserved > 0).length,
+    unserved: all.filter((x) => x.planned === 0).length,
+    ordersWithoutSo,
+  };
+}
+
 /**
  * `expectedOrderIds`: the orders the plan was made for (its scope). An expected order that no
  * longer exists (deleted after planning) is a problem: its cases would otherwise silently drop
@@ -152,7 +196,7 @@ export function reconcile(orders: ReconOrder[], planned: ReconPlanned[], unserve
       uploadedCases += l.cases;
       plannedCases += p;
       unservedCases += u;
-      const soKey = l.salesOrderNo ?? `(no SO) ${o.customerKey}`;
+      const soKey = l.salesOrderNo ?? `${NO_SO_PREFIX}${o.customerKey}`;
       bump(sku, l.productCode, l.productName, 'uploaded', l.cases);
       bump(so, soKey, soKey, 'uploaded', l.cases);
       bump(sku, l.productCode, l.productName, 'planned', p);

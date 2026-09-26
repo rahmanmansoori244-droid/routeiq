@@ -245,8 +245,9 @@ describe('buildDispatchWorkbook', () => {
     expect(text(val('Plan version'))).toBe('v2');
     expect(text(val('Plan reason'))).toBe('LATE_ORDER');
     expect(text(val('Generated at'))).toBe('2026-09-24 17:05'); // Asia/Muscat = UTC+4
-    expect(val('Total orders').value).toBe(6);
-    expect(val('Orders unserved').value).toBe(1);
+    // PR6: "orders" are named delivery orders (one per customer branch); invoices are their own row.
+    expect(val('Delivery orders (one per customer branch)').value).toBe(6);
+    expect(val('Delivery orders unserved').value).toBe(1);
     expect(val('P1 service %').value).toBe(100);
     expect(text(val('P5 service %'))).toBe('—');
     expect(val('Physical trucks used').value).toBe(2);

@@ -540,6 +540,8 @@ describe('job finalization (F07 / ADD-JOB-AUDIT)', () => {
     expect(plan.chosenScenarioId).toBe('scCopy');
     expect(tables.planLoad.map((l) => l.id)).toEqual(['LC']);
     expect(row('runJob', 'J1').message).toMatch(/previous plan is kept/);
+    // The search's raw OR-Tools code never reaches the dispatcher (PR6, scenario tests).
+    expect(row('runJob', 'J1').message).not.toMatch(/ROUTING_/);
   });
 
   it('a solver failure after a re-plan leaves the copied plan in place (FAILED, still applied)', async () => {

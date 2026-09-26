@@ -18,6 +18,11 @@ import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './c
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
 import { KG_ROUNDING_TOL } from './weights';
+import { invoiceCounts } from './reconcile';
+import { solverStatusText } from './solver-status';
+
+/** The SUMMARY row with the invoices (distinct sales orders) of the day. */
+export const INVOICES_LABEL = 'Invoices (sales orders)';
 
 export interface WorkbookMeta {
   tenantName: string;
@@ -330,17 +335,27 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     const reasons = Object.entries(s.unservedByReason)
       .map(([k, v]) => `${k} x${v}`)
       .join('; ');
-    kv('Total orders', s.totalOrders, FMT_INT);
+    // Invoices (sales orders) first, then the delivery orders RouteIQ plans (one per customer branch
+    // and day, all its invoices together) and the stops on the trucks (scenario tests S01-S05).
+    const inv = d.reconciliation ? invoiceCounts(d.reconciliation) : null;
+    if (inv) {
+      const noSo = inv.ordersWithoutSo ? `; plus ${inv.ordersWithoutSo} customer branch${inv.ordersWithoutSo === 1 ? '' : 'es'} with lines without a sales-order number` : '';
+      kv(INVOICES_LABEL, inv.invoices, FMT_INT, `${inv.planned} fully on trucks${inv.partial ? `, ${inv.partial} partly (split delivery)` : ''}, ${inv.unserved} not planned${noSo}`);
+    } else {
+      kv(INVOICES_LABEL, 'not available', undefined, 'no reconciliation for this plan version');
+    }
+    kv('Delivery orders (one per customer branch)', s.totalOrders, FMT_INT, "each is one customer branch's invoices for the day, delivered together");
+    kv('Stops on trucks', sum(d.loads.map((l) => l.stops.length)), FMT_INT, 'customer visits on the loads (a split delivery is one stop on each truck)');
     kv('Customers', s.totalCustomers, FMT_INT);
     kv('Total cases', s.totalCases, FMT_INT);
     kv('Total weight (kg)', s.totalWeightKg, FMT_KG);
-    kv('Orders served', s.ordersServed, FMT_INT, `${s.casesServed} cases`);
-    if (s.ordersPartial) kv('Orders part served (split)', s.ordersPartial, FMT_INT, 'bigger than one truck: some parts planned, the rest unserved');
-    kv('Orders unserved', s.ordersUnserved, FMT_INT, `${s.casesUnserved} cases${s.ordersPartial ? ' (incl. rest of split orders)' : ''}${reasons ? ` - ${reasons}` : ''}`);
+    kv('Delivery orders served', s.ordersServed, FMT_INT, `${s.casesServed} cases`);
+    if (s.ordersPartial) kv('Delivery orders part served (split)', s.ordersPartial, FMT_INT, 'bigger than one truck: some parts planned, the rest unserved');
+    kv('Delivery orders unserved', s.ordersUnserved, FMT_INT, `${s.casesUnserved} cases${s.ordersPartial ? ' (incl. rest of split orders)' : ''}${reasons ? ` - ${reasons}` : ''}`);
     for (let p = 1; p <= 5; p++) {
       const x = s.serviceByPriority[`P${p}`];
-      if (!x || x.orders === 0) kv(`P${p} service %`, '—', undefined, 'no orders');
-      else kv(`P${p} service %`, x.pct ?? 0, FMT_PCT, `${x.served} of ${x.orders} orders served`);
+      if (!x || x.orders === 0) kv(`P${p} service %`, '—', undefined, 'no delivery orders');
+      else kv(`P${p} service %`, x.pct ?? 0, FMT_PCT, `${x.served} of ${x.orders} delivery orders served`);
     }
     kv('Physical trucks used', s.trucksUsed, FMT_INT);
     kv('Total trips (loads)', s.trips, FMT_INT);
@@ -389,7 +404,8 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
       .map(([k, v]) => `${k} ${v}`)
       .join(', ');
     kv('Loads by status', byStatus || '—');
-    if (s.solver) kv('Solver', `${s.solver.engine} · ${s.solver.scenario} · ${s.solver.status}`, undefined, `${s.solver.timeSec}s`);
+    // The search's own status code in plain words (never "ROUTING_PARTIAL_SUCCESS_...").
+    if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · searched ${s.solver.timeSec} s`);
   }
 
   head('TIMETABLE CHECK');
@@ -546,7 +562,7 @@ const ROUTE_HEADS = [
   'Seq', 'Customer code', 'Branch', 'Customer name', 'Priority', 'Type', 'ETA', 'Service start', 'Window', 'Service min',
   'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Notes', 'Changed after planning', 'Received by (sign)',
 ];
-const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 9, 24, 8, 8, 10, 44, 20, 9, 10, 8, 24, 30, 18];
+const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 9, 24, 8, 8, 10, 44, 20, 9, 10, 8, 40, 30, 18];
 
 function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: DetailLoad, name: string) {
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 2 }], pageSetup: { ...LANDSCAPE } });
@@ -642,6 +658,10 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       s.prefWindowOk === false ? 'Outside preferred window' : null,
       s.waitMin ? `Wait ${Math.round(s.waitMin)} min` : null,
       s.mapsUrl ? null : 'No coordinates',
+      // What the PDF driver sheet prints too: the customer's access / receiving notes and the
+      // notes on the orders of this stop (scenario test S01: the Excel sheet had flags only).
+      s.accessNotes?.trim() ? `Access: ${s.accessNotes.trim()}` : null,
+      ...s.notes.map((n) => n.trim()).filter(Boolean).map((n) => `Note: ${n}`),
     ].filter(Boolean);
     tableRow(
       ws,
@@ -868,6 +888,10 @@ export function tenantAssumptions(
     outsideCoverage?: boolean;
     /** The rules the plan was made with (planRules); default CURRENT. */
     rules?: PlanRules;
+    /** Legs of the plan on straight-line estimates although it used road routing (review F18). */
+    estimatedLegs?: number;
+    /** Whether any load of the plan has a fuel figure (its truck has a km per litre); undefined = unknown. */
+    fuelCosted?: boolean;
   },
 ): Record<string, string> {
   if (!cfg) return { 'Tenant configuration': 'not set - system defaults were used' };
@@ -875,6 +899,13 @@ export function tenantAssumptions(
   const rules = opts.rules ?? 'CURRENT';
   const earlier = rules === 'EARLIER';
   const outsideCoverage = cfg.outsideCoverage ?? opts.outsideCoverage ?? false;
+  // A plan with no road leg at all (straight-line provider, or every leg estimated) never used the
+  // road time factor: it is timed at the estimate speed (scenario tests: HAVERSINE plans still
+  // printed "x1.25"). Under the earlier rule an OSRM plan whose legs all fell back to estimates
+  // did have the factor applied, so that one keeps the earlier wording.
+  const straightLine = (opts.providerUsed ?? '').toUpperCase() === 'HAVERSINE';
+  const noRoadLegs = straightLine || (!!opts.distanceIsEstimated && !earlier);
+  const estimatesUsed = cfg.distanceProvider === 'HAVERSINE' || !!opts.distanceIsEstimated || straightLine || (opts.estimatedLegs ?? 0) > 0;
   const out: Record<string, string> = {
     Timezone: cfg.timezone,
     'Planning cutoff (day before delivery)': `${fmtHhmm(cfg.planningCutoffMin)} - orders received later are LATE`,
@@ -884,7 +915,12 @@ export function tenantAssumptions(
     'Loading time per case': cfg.loadingMinPerCase ? `${cfg.loadingMinPerCase} min per case of the next load, on top of the reload time` : 'not set (0)',
     'Unloading time per case': cfg.serviceMinPerCase ? `${cfg.serviceMinPerCase} min per case delivered, on top of the service time` : 'not set (0)',
     'Max trips per truck per day': String(cfg.maxTripsPerTruck),
-    'Fuel price': cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${cur} per litre` : '0 - fuel not costed separately',
+    'Fuel price':
+      cfg.fuelPricePerLitre > 0
+        ? opts.fuelCosted === false
+          ? `${cfg.fuelPricePerLitre} ${cur} per litre - not used in this plan: its trucks have no km per litre, so no fuel was costed`
+          : `${cfg.fuelPricePerLitre} ${cur} per litre`
+        : '0 - fuel not costed separately',
     'Driver cost': earlier
       ? `${cfg.driverCostPerHour} ${cur} per hour of each load's time on the road, departure to return (costed the earlier way: depot turnaround and waiting not included)`
       : `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)${
@@ -896,10 +932,12 @@ export function tenantAssumptions(
             earlier ? " (priced in the optimizer's search only; not included in this plan's load costs or operating cost)" : ' on top of the driver cost'
           }${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}`
         : 'not costed',
-    'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} per minute outside the preferred window (soft)`,
-    'Road time factor (truck vs car)': earlier
-      ? `x${cfg.roadTimeFactor} on every travel time from the routing server, including legs it could not route (earlier rule)`
-      : `x${cfg.roadTimeFactor} on road travel times (not on estimated legs)`,
+    'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} ${cur} per minute outside the preferred window (soft)`,
+    'Road time factor (truck vs car)': noRoadLegs
+      ? `not used in this plan: every distance is a straight-line estimate, timed at the average speed for estimates (the x${cfg.roadTimeFactor} setting applies to road legs only)`
+      : earlier
+        ? `x${cfg.roadTimeFactor} on every travel time from the routing server, including legs it could not route (earlier rule)`
+        : `x${cfg.roadTimeFactor} on road travel times (not on estimated legs)`,
     'Default service time': earlier
       ? `${cfg.defaultServiceTimeMin} min per stop for customers with no service time of their own (earlier rule: a confirmed customer time, then the customer type's, then the customer's stored time won)`
       : `${cfg.defaultServiceTimeMin} min per stop for customers whose own time was never confirmed (a confirmed customer time, then the customer type's, wins)`,
@@ -913,9 +951,10 @@ export function tenantAssumptions(
     'Distance provider (this plan)': `${opts.providerUsed ?? 'unknown'}${opts.distanceIsEstimated ? ' - ESTIMATED distances' : ''}`,
     'OSRM server configured': (cfg.osrmConfigured ?? !!cfg.osrmUrl) ? 'yes (tenant setting)' : 'no tenant setting (the solver uses its own OSRM_URL if set)',
   };
-  if (cfg.distanceProvider === 'HAVERSINE' || opts.distanceIsEstimated) {
-    out['Estimated-distance multiplier'] = `x${cfg.distanceMultiplier} on straight-line distance`;
-    out['Average speed for estimates'] = `${cfg.avgSpeedKmh} km/h`;
+  if (estimatesUsed) {
+    const some = !noRoadLegs && !opts.distanceIsEstimated && (opts.estimatedLegs ?? 0) > 0 ? ` (on the ${opts.estimatedLegs} leg(s) that could not be routed on roads)` : '';
+    out['Estimated-distance multiplier'] = `x${cfg.distanceMultiplier} on straight-line distance${some}`;
+    out['Average speed for estimates'] = `${cfg.avgSpeedKmh} km/h${some}`;
   }
   return out;
 }
