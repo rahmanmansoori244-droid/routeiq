@@ -207,6 +207,26 @@ describe('the feasibility gate (F04)', () => {
     expect(again.message).toMatch(/Re-plan to get a timetable that keeps every rule\.$/);
   });
 
+  it('two locked loads of the truck (after "Lock all loads"): the 409 names the later one first, and following it works', async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    row('planLoad', 'L2').status = 'LOCKED';
+    row('routeAssignment', 'A1').hardWindowOk = false;
+    const e = await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow).catch((x) => x);
+    expect(e.status).toBe(409);
+    expect(e.details).toMatchObject({ code: 'TIMES_NOT_VERIFIED', unlockFirst: ['T01 L2', 'T01 L1'] });
+    expect(e.message).toMatch(/so put loads T01 L2, T01 L1 back to Planned first, in this order \(a truck's later loads go first; "Back to locked" if it is loading, then "Unlock"\), then re-plan\.$/);
+    // Unlocking L1 first is refused (a later load of the truck is frozen) - the reason the list starts with L2.
+    await expect(updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow)).rejects.toMatchObject({ status: 409 });
+    // In the order given, both go back.
+    await updateLoad(T, 'P', 'L2', { status: 'PLANNED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['PLANNED', 'PLANNED']);
+    // The stored check (the plan screen's red box) now says a re-plan fixes it.
+    const f = readFeasibility(row('runPlan', 'P').feasibilityJson)!;
+    expect(f.violations.find((v) => v.code === 'HARD_WINDOW')?.frozen).toBeUndefined();
+  });
+
   it('a plan from before the check (no report, no snapshots) is blocked only on a concrete violation', async () => {
     seed(undefined);
     const d = row('scenarioResult', 'sc1').detailsJson;

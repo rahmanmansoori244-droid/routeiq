@@ -21,8 +21,8 @@ import {
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
-import { readPortionLines, rowLines, splitPartLabels } from './split';
-import { lineWeightStatus, orderUsesLineWeights } from './weights';
+import { portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
+import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { fmtWindow, isoOf } from './time';
 
 export interface DetailStop {
@@ -532,6 +532,7 @@ type OutdatedLoad = {
   assignments: {
     orderId: string;
     portionLinesJson: unknown;
+    portionWeightKg?: number | null;
     order: {
       status: string;
       totalWeightKg: number;
@@ -546,7 +547,9 @@ type OutdatedLoad = {
  * (frozen loads keep what they were loaded with): customers deactivated since, whose orders are
  * still on trucks, and case weights entered or corrected under Products since. The open rest of
  * an order partly on a frozen load is planned with the product's weight at every optimize (it is
- * never saved on the line, which the frozen part shares), so it is not reported as out of date.
+ * never saved on the line, which the frozen part shares), so it is reported only while its PLANNED
+ * part carries another case weight than the product has now (portionPlannedKgPerCase, the
+ * timetable check's rule; second review of PR4) - the same rule as the day overview.
  */
 export function outdatedNotes(loads: OutdatedLoad[]): string[] {
   const inactive = new Map<string, Set<string>>();
@@ -561,13 +564,17 @@ export function outdatedNotes(loads: OutdatedLoad[]): string[] {
         const label = o.customer.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : o.customer.code;
         inactive.set(label, (inactive.get(label) ?? new Set()).add(`${l.truck.code} L${l.loadNo}`));
       }
-      if (partlyFrozen.has(a.orderId)) continue;
       const orderLevel = !orderUsesLineWeights(o);
       const portion = readPortionLines(a.portionLinesJson);
+      // A partly frozen order: only the lines this PLANNED part carries with another case weight.
+      const plannedKg = partlyFrozen.has(a.orderId)
+        ? (portionPlannedKgPerCase({ portionLinesJson: a.portionLinesJson, portionWeightKg: a.portionWeightKg ?? null }, o.lines, orderLevel) ?? new Map<string, number>())
+        : null;
       const casesOf = new Map((portion ?? o.lines.map((x) => ({ lineId: x.id, cases: x.cases }))).map((x) => [x.lineId, x.cases]));
       for (const ln of o.lines) {
         const cases = casesOf.get(ln.id) ?? 0;
         if (cases <= 0) continue;
+        if (plannedKg && !plannedKgDiffers(plannedKg.get(ln.id), ln.product.weightPerCaseKg)) continue;
         if (lineWeightStatus({ cases: ln.cases, weightKg: ln.weightKg, fromMaster: ln.weightFromMaster }, ln.product.weightPerCaseKg, orderLevel) === 'MASTER') {
           weights.set(ln.product.code, (weights.get(ln.product.code) ?? 0) + cases);
         }

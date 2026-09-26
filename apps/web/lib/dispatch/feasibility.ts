@@ -4,8 +4,9 @@
  * RunPlan.feasibilityJson.
  *
  * Checked per TRUCK-DAY over every load of the plan version, frozen copies included, from the
- * plan's own facts - the load and stop snapshots and the optimizer inputs - never from today's
- * master data:
+ * plan's own facts - the load and stop snapshots, the stored rows and the optimizer inputs. Only two
+ * checks read the master data now: the product's case weight for cases planned at 0 kg
+ * (CAPACITY_KG_NEW_WEIGHT, blocks) and the truck's capacity now (CAPACITY_CHANGED, a warning):
  * - cases per load (from its stops) vs the truck's capacity;
  * - physical kg per load (a split portion's own kg, else the order's) vs the payload, with one
  *   rounding tolerance (KG_ROUNDING_TOL); cases PLANNED at 0 kg (no weight when the plan was
@@ -28,7 +29,8 @@
  * as a warning, never blocks, so it can never lock the truck's later loads for good. A turnaround
  * problem belongs to the LATER load (the one that leaves too early), which a re-plan can move.
  * A problem on a LOCKED or LOADING load is flagged `frozen`: a re-plan carries that load over
- * unchanged, so the remedy is to put it back to Planned first (timingRemedy, feasibility-view.ts).
+ * unchanged, so the remedy is to put it back to Planned first, with every later locked or loading
+ * load of its truck, latest first (timingRemedy, feasibility-view.ts).
  * A truck whose capacity or payload was lowered since planning, below what a load not yet out
  * carries, is a warning (CAPACITY_CHANGED): the load keeps the truck it was planned with.
  *
@@ -385,4 +387,4 @@ export function feasibilityGateMode(env: Record<string, string | undefined> = pr
   return (env.FEASIBILITY_GATE ?? '').trim().toLowerCase() === 'warn' ? 'warn' : 'enforce';
 }
 
-export { truckDayOk, truckViolations, timingRemedy, REPLAN_REMEDY, TIMING_TEXT } from './feasibility-view';
+export { truckDayOk, truckViolations, timingRemedy, remedyLoads, REPLAN_REMEDY, TIMING_TEXT, type RemedyLoad } from './feasibility-view';

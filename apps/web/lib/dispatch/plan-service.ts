@@ -38,8 +38,8 @@ import {
   partDemandKg,
   portionId,
   portionMoney,
+  portionPlannedKgPerCase,
   portionsOfPart,
-  readPortionLineKg,
   readPortionLines,
   splitIntoParts,
   type FleetTruck,
@@ -81,6 +81,7 @@ import {
   checkPlanFeasibility,
   feasibilityGateMode,
   readFeasibility,
+  remedyLoads,
   timingRemedy,
   truckDayOk,
   truckViolations,
@@ -1420,25 +1421,13 @@ export function rowUnknownKg(a: FeasibilityRow['assignments'][number]): { unknow
   const pl = readPortionLines(a.portionLinesJson);
   let zero: { cases: number; productKg: number }[] = [];
   if (pl) {
-    const planned = readPortionLineKg(a.portionLinesJson);
-    const orderLevel = !orderUsesLineWeights(o);
-    if (planned) {
-      zero = pl.flatMap((x) => {
-        const l = byId.get(x.lineId);
-        return x.cases > 0 && !((planned.get(x.lineId) ?? 0) > 0) ? [{ cases: x.cases, productKg: l?.product.weightPerCaseKg ?? 0 }] : [];
-      });
-    } else if (!orderLevel) {
-      const zeroLines = pl.flatMap((x) => {
-        const l = byId.get(x.lineId);
-        return l && x.cases > 0 && !(l.weightKg > 0) ? [{ cases: x.cases, productKg: l.product.weightPerCaseKg }] : [];
-      });
-      const knownKg = pl.reduce((s, x) => {
-        const l = byId.get(x.lineId);
-        return s + (l && l.weightKg > 0 && l.cases > 0 ? (l.weightKg * x.cases) / l.cases : 0);
-      }, 0);
-      // Each stored kg is rounded to 0.1 kg: a part planned at the product's weight weighs more.
-      if (zeroLines.length && (a.portionWeightKg ?? 0) <= knownKg + 0.05 * (pl.length + 1)) zero = zeroLines;
-    }
+    // The case weight each line of the part was planned with, as far as the row says (split.ts).
+    const planned = portionPlannedKgPerCase(a, o.lines, !orderUsesLineWeights(o)) ?? new Map<string, number>();
+    zero = pl.flatMap((x) => {
+      const l = byId.get(x.lineId);
+      const kg = planned.get(x.lineId);
+      return x.cases > 0 && kg !== undefined && !(kg > 0) ? [{ cases: x.cases, productKg: l?.product.weightPerCaseKg ?? 0 }] : [];
+    });
   } else if (orderUsesLineWeights(o)) {
     zero = o.lines.filter((l) => l.cases > 0 && !(l.weightKg > 0)).map((l) => ({ cases: l.cases, productKg: l.product.weightPerCaseKg }));
   }
@@ -1965,7 +1954,8 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
  * (the stored report is only compared: a different inputHash means the plan changed since it was
  * last checked). Refused with 409 TIMES_NOT_VERIFIED and the violations; the remedy is Re-plan, or,
  * for a problem on a LOCKED / LOADING load (which a re-plan carries over unchanged), putting that
- * load back to Planned first (timingRemedy).
+ * load - and every later locked or loading load of its truck, latest first - back to Planned first
+ * (timingRemedy).
  * FEASIBILITY_GATE=warn (operator switch) lets the change through; the violations then go into
  * the load's audit row. Returns what the audit row records.
  */
@@ -1983,8 +1973,9 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     const first =
       blocking[0]?.message ??
       (t?.status === 'UNVERIFIED' ? 'The optimizer could not check this timetable.' : 'The timetable could not be checked.');
-    // A problem on a LOCKED / LOADING load comes back unchanged after a re-plan: say to unlock it first.
-    const remedy = timingRemedy(blocking);
+    // A problem on a LOCKED / LOADING load comes back unchanged after a re-plan: say to unlock it
+    // first, with every later locked or loading load of its truck (they must go back before it).
+    const remedy = timingRemedy(blocking, remedyLoads(input.loads));
     throw new PlanError(
       `Truck ${code}: the timetable is not verified, so its loads cannot be locked, loaded or dispatched. ${first}` +
         `${blocking.length > 1 ? ` (+${blocking.length - 1} more)` : ''} ${remedy.text}`,

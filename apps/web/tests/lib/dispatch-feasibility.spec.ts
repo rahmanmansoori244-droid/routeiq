@@ -1,7 +1,7 @@
 /**
  * Review F04 (web part B): the pure timetable check per truck-day (lib/dispatch/feasibility.ts),
- * and the facts it reads from the plan rows (feasibilityInputFromRows: snapshots first, never
- * today's master data).
+ * and the facts it reads from the plan rows (feasibilityInputFromRows: snapshots first; today's
+ * master data only for the case weight of cases planned at 0 kg and the truck's capacity now).
  */
 import { describe, expect, it } from 'vitest';
 import type { FeasibilityReport } from '@routeiq/shared-types';
@@ -11,6 +11,7 @@ import {
   inputHash,
   readFeasibility,
   REPLAN_REMEDY,
+  remedyLoads,
   timingRemedy,
   truckDayOk,
   truckViolations,
@@ -21,6 +22,7 @@ import {
 import { feasibilityInputFromRows, isGatedMove, rowUnknownKg, type FeasibilityRow, type ScenarioDetails } from '@/lib/dispatch/plan-service';
 import { rulesFrom, type PlanRules } from '@/lib/dispatch/snapshots';
 import { partDemandKg, portionsOfPart, splitIntoParts } from '@/lib/dispatch/split';
+import { timingReplanOff, unlockFirstText } from '@/lib/dispatch/feasibility-view';
 
 const RULES: PlanRules = {
   shiftStartMin: 360, shiftMaxMin: 660, reloadMin: 30, loadingMinPerCase: 0.5, maxTrips: 3,
@@ -378,17 +380,59 @@ describe("cases planned with no weight are judged from the plan, not today's pro
 describe('a problem on a locked or loading load: put it back to Planned first (PR4 review)', () => {
   it('flags violations on LOCKED / LOADING loads, and the remedy names them', () => {
     const locked = load('L1', 1, { frozen: true, stops: [stop({ hardWindowOk: false })] });
-    const f = checkPlanFeasibility(input([locked, load('L2', 2)]));
+    const inp = input([locked, load('L2', 2)]);
+    const f = checkPlanFeasibility(inp);
     expect(f.violations[0]).toMatchObject({ code: 'HARD_WINDOW', severity: 'BLOCK', frozen: true });
-    const r = timingRemedy(f.violations);
+    const r = timingRemedy(f.violations, remedyLoads(inp.loads));
     expect(r.unlockFirst).toEqual(['T01 L1']);
     expect(r.text).toBe(
       'A re-plan keeps locked and loading loads exactly as they are, so put load T01 L1 back to Planned first ("Back to locked" if it is loading, then "Unlock"), then re-plan.',
     );
+    expect(r.replanNow).toBe(false);
     // On a PLANNED load a re-plan is enough.
-    const planned = checkPlanFeasibility(input([load('L1', 1, { stops: [stop({ hardWindowOk: false })] })]));
+    const plannedIn = input([load('L1', 1, { stops: [stop({ hardWindowOk: false })] })]);
+    const planned = checkPlanFeasibility(plannedIn);
     expect(planned.violations[0].frozen).toBeUndefined();
-    expect(timingRemedy(planned.violations)).toEqual({ text: REPLAN_REMEDY, unlockFirst: [] });
+    expect(timingRemedy(planned.violations, remedyLoads(plannedIn.loads))).toEqual({ text: REPLAN_REMEDY, unlockFirst: [], replanNow: true });
+  });
+
+  it('names every later locked or loading load of the truck too, latest first: Unlock refuses a load while a later one is frozen', () => {
+    // "Lock all loads" locked L1, L2 and L3 of T01 (and T02 L1); only T01 L1 breaks a rule.
+    const inp = input([
+      load('L1', 1, { frozen: true, stops: [stop({ hardWindowOk: false })] }),
+      load('L2', 2, { frozen: true }),
+      load('L3', 3, { frozen: true }),
+      load('M1', 1, { truckId: 't2', truckCode: 'T02', frozen: true }),
+    ]);
+    const f = checkPlanFeasibility(inp);
+    expect(f.violations.filter((v) => v.severity === 'BLOCK').map((v) => `${v.code} ${v.truckCode} L${v.loadNo} ${v.frozen}`)).toEqual(['HARD_WINDOW T01 L1 true']);
+    const r = timingRemedy(f.violations, remedyLoads(inp.loads));
+    expect(r.unlockFirst).toEqual(['T01 L3', 'T01 L2', 'T01 L1']);
+    expect(r.text).toBe(
+      `A re-plan keeps locked and loading loads exactly as they are, so put loads T01 L3, T01 L2, T01 L1 back to Planned first, in this order (a truck's later loads go first; "Back to locked" if it is loading, then "Unlock"), then re-plan.`,
+    );
+    expect(r.replanNow).toBe(false);
+    // Only LOCKED and LOADING loads are listed, read from the plan detail's statuses the same way.
+    const detail = remedyLoads([
+      { truckId: 't1', truckCode: 'T01', loadNo: 1, status: 'LOCKED' },
+      { truckId: 't1', truckCode: 'T01', loadNo: 2, status: 'LOADING' },
+      { truckId: 't1', truckCode: 'T01', loadNo: 3, status: 'PLANNED' },
+    ]);
+    expect(timingRemedy(f.violations, detail).unlockFirst).toEqual(['T01 L2', 'T01 L1']);
+  });
+
+  it('the Re-plan button of the red box is off only when a re-plan cannot fix anything yet', () => {
+    const both = input([load('L1', 1, { frozen: true, stops: [stop({ hardWindowOk: false })] }), load('L2', 2, { frozen: true }), load('M1', 1, { truckId: 't2', truckCode: 'T02', stops: [stop({ hardWindowOk: false })] })]);
+    const f = checkPlanFeasibility(both);
+    const r = timingRemedy(f.violations, remedyLoads(both.loads));
+    // T02's problem is on a PLANNED load: a re-plan fixes it, so the button stays on.
+    expect(r.replanNow).toBe(true);
+    expect(timingReplanOff(r, false)).toBeNull();
+    expect(timingReplanOff(r, true)).toBe('Re-plan is off while every order is on a locked, loading or dispatched load: put T01 L2, T01 L1 back to Planned first, in this order.');
+    const onlyFrozen = timingRemedy(f.violations.filter((v) => v.truckId === 't1'), remedyLoads(both.loads));
+    expect(timingReplanOff(onlyFrozen, false)).toBe('Re-plan is off: it would keep these locked or loading loads exactly as they are: put T01 L2, T01 L1 back to Planned first, in this order.');
+    expect(unlockFirstText(['T01 L1'])).toBe('put T01 L1 back to Planned first');
+    expect(timingReplanOff(timingRemedy([], []), false)).toBeNull();
   });
 
   it("the optimizer's violation on a locked load is flagged the same way; a load already out is history", () => {

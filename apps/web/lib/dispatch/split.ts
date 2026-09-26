@@ -304,6 +304,40 @@ export function readPortionLineKg(json: unknown): Map<string, number> | null {
   return out;
 }
 
+/**
+ * The case weight each line of a stored portion row was PLANNED with, as far as the row says
+ * (stabilization PR4 review; the timetable check and the day overview read the same rule):
+ * - a part planned since kgPerCase is kept: every line's own kgPerCase (0 = planned with no weight);
+ * - a part planned before that: only its lines with no kg on the order that the part's own kg shows
+ *   were planned at 0 kg (the part weighs no more than its lines that have a kg) - those map to 0;
+ *   other lines are not known (absent). An order weighed on the order only (`orderLevelKg`) says nothing.
+ * Null when the row is not a portion (a whole order: its lines hold the kg it was planned with).
+ */
+export function portionPlannedKgPerCase(
+  row: { portionLinesJson: unknown; portionWeightKg: number | null },
+  lines: { id: string; cases: number; weightKg: number }[],
+  orderLevelKg: boolean,
+): Map<string, number> | null {
+  const pl = readPortionLines(row.portionLinesJson);
+  if (!pl) return null;
+  const kept = readPortionLineKg(row.portionLinesJson);
+  if (kept) return kept;
+  const out = new Map<string, number>();
+  if (orderLevelKg) return out;
+  const byId = new Map(lines.map((l) => [l.id, l]));
+  const zeroLines = pl.filter((x) => {
+    const l = byId.get(x.lineId);
+    return !!l && x.cases > 0 && !(l.weightKg > 0);
+  });
+  const knownKg = pl.reduce((s, x) => {
+    const l = byId.get(x.lineId);
+    return s + (l && l.weightKg > 0 && l.cases > 0 ? (l.weightKg * x.cases) / l.cases : 0);
+  }, 0);
+  // Each stored kg is rounded to 0.1 kg: a part planned at the product's weight weighs more.
+  if (zeroLines.length && (row.portionWeightKg ?? 0) <= knownKg + 0.05 * (pl.length + 1)) for (const x of zeroLines) out.set(x.lineId, 0);
+  return out;
+}
+
 /** Portion lines as stored in portionLinesJson (defensive: anything else = no portion). */
 export function readPortionLines(json: unknown): { lineId: string; cases: number }[] | null {
   if (!Array.isArray(json)) return null;

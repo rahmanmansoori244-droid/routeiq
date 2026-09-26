@@ -117,6 +117,17 @@ export function lineWeightStatus(
 }
 
 /**
+ * The case weight a line was planned with (`planned`; undefined = the row does not say) is not the
+ * product's case weight now: 0 kg and a weight entered since, or a weight corrected since. The
+ * open rest of an order partly on a frozen load is out of date only then (the day overview and
+ * the plan view, second review of PR4): it is planned with the product's weight at every optimize
+ * but never saved on the line it shares with the frozen part.
+ */
+export function plannedKgDiffers(planned: number | undefined, productKgPerCase: number): boolean {
+  return planned !== undefined && Math.abs(planned - productKgPerCase) > 1e-3;
+}
+
+/**
  * Lines whose kg now comes from the product master (see masterLineKg), and the new order
  * totals. Orders in `frozenOrderIds` (any part on a frozen load) and orders whose kg lives on
  * the order only are left as they are; lines with a file weight are never changed.

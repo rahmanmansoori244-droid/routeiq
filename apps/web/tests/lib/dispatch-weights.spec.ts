@@ -185,9 +185,21 @@ describe('outdatedNotes (plan view: what a re-plan would change on planned loads
     expect(notes[1]).toMatch(/P1 \(10 cases on planned loads\)/);
   });
 
-  it('does not report the open rest of an order partly on a frozen load (planned with the new weight every time)', () => {
+  it('does not report the open rest of an order partly on a frozen load once it was planned with the weight now', () => {
     const o = order({ totalWeightKg: 0, lines: [{ id: 'l1', cases: 10, weightKg: 0, weightFromMaster: true, product: { code: 'P1', weightPerCaseKg: 15 } }] });
-    expect(outdatedNotes([load('LOCKED', o, [{ lineId: 'l1', cases: 6 }]), load('PLANNED', o, [{ lineId: 'l1', cases: 4 }])])).toEqual([]);
+    expect(outdatedNotes([load('LOCKED', o, [{ lineId: 'l1', cases: 6, kgPerCase: 0 }]), load('PLANNED', o, [{ lineId: 'l1', cases: 4, kgPerCase: 15 }])])).toEqual([]);
+  });
+
+  it('reports the open rest of an order partly on a frozen load while its PLANNED part carries another weight (second review of PR4)', () => {
+    const o = order({ totalWeightKg: 0, lines: [{ id: 'l1', cases: 10, weightKg: 0, weightFromMaster: true, product: { code: 'P1', weightPerCaseKg: 15 } }] });
+    // Planned at 0 kg, the weight entered since: the same cases the check weighs for CAPACITY_KG_NEW_WEIGHT.
+    const notes = outdatedNotes([load('LOCKED', o, [{ lineId: 'l1', cases: 6, kgPerCase: 0 }]), load('PLANNED', o, [{ lineId: 'l1', cases: 4, kgPerCase: 0 }])]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toMatch(/P1 \(4 cases on planned loads\)/);
+    // A part stored before kgPerCase was kept, whose kg shows it was planned at 0 kg: the same.
+    const legacy = { ...load('PLANNED', o, [{ lineId: 'l1', cases: 4 }]) };
+    legacy.assignments = legacy.assignments.map((a) => ({ ...a, portionWeightKg: 0 }));
+    expect(outdatedNotes([load('LOCKED', o, [{ lineId: 'l1', cases: 6 }]), legacy])[0]).toMatch(/P1 \(4 cases on planned loads\)/);
   });
 
   it('counts only the cases of a split portion', () => {

@@ -17,8 +17,8 @@ import {
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { isRealIsoDate } from '../schemas';
-import { lineWeightStatus, orderUsesLineWeights } from './weights';
-import { readPortionLines } from './split';
+import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
+import { portionPlannedKgPerCase, readPortionLines } from './split';
 import { plannedLoadsMasterChanged } from './snapshots';
 
 export interface IssueCustomer {
@@ -54,6 +54,19 @@ export interface WeightGap {
   cases: number;
 }
 
+/**
+ * Why the plan in use is out of date although no new order is waiting (see `outdated` in the
+ * result). Every count 0 = up to date; tests compare against UP_TO_DATE, so a key added here is
+ * pinned everywhere at once.
+ */
+export interface DayOutdated {
+  weightCases: number;
+  inactiveOrders: number;
+  masterChanged: number;
+  trucksChanged: number;
+}
+export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 });
+
 export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null }) {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
@@ -70,7 +83,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -87,16 +100,25 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const onPlan = plan && orders.length
     ? await prisma.routeAssignment.findMany({
         where: { runId: plan.id, orderId: { in: orders.map((o) => o.id) } },
-        select: { orderId: true, portionLinesJson: true, stopSnapshotJson: true, load: { select: { status: true } } },
+        select: { orderId: true, portionLinesJson: true, portionWeightKg: true, stopSnapshotJson: true, load: { select: { status: true } } },
       })
     : [];
+  const orderById = new Map(orders.map((o) => [o.id, o]));
   const frozenWhole = new Set<string>();
   const frozenLineCases = new Map<string, number>();
   const onPlannedLoad = new Set<string>();
+  // The case weights each line's cases on PLANNED loads of the plan in use were planned with, as far
+  // as the rows say (portionPlannedKgPerCase, the timetable check's rule). The open rest of an order
+  // partly on a frozen load is planned with the product's weight at every optimize but never saved on
+  // its line, so its PLANNED parts are the only record of the weight the plan in use carries.
+  const plannedKgOfLine = new Map<string, number[]>();
   for (const a of onPlan) {
     if (!a.load) continue;
     if (a.load.status === 'PLANNED') {
       onPlannedLoad.add(a.orderId);
+      const o = orderById.get(a.orderId);
+      const kg = o ? portionPlannedKgPerCase(a, o.lines, !orderUsesLineWeights(o)) : null;
+      for (const [lineId, k] of kg ?? []) plannedKgOfLine.set(lineId, [...(plannedKgOfLine.get(lineId) ?? []), k]);
       continue;
     }
     const pl = readPortionLines(a.portionLinesJson);
@@ -113,21 +135,25 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const noWeight = new Map<string, WeightGap & { kgPerCase: number }>();
   const toApply = new Map<string, WeightGap & { kgPerCase: number }>();
   // Why the plan in use is out of date although no new order is waiting (RE-PLAN enabled).
-  const outdated = { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
+  const outdated: DayOutdated = { ...UP_TO_DATE };
   const openCasesOf = new Map<string, number>();
   for (const o of orders) {
     if (frozenWhole.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
     const orderLevel = !orderUsesLineWeights(o);
     // The open rest of an order partly on a frozen load is planned with the product's weight at
-    // every optimize but never saved (the frozen part shares the line): nothing to apply for it.
+    // every optimize but never saved (the frozen part shares the line). It is out of date only while
+    // a PLANNED part of the plan in use carries it with another case weight - planned at 0 kg, or
+    // the weight was entered or corrected since (PR4 review: the check then blocks a load it now
+    // overloads, CAPACITY_KG_NEW_WEIGHT); a re-plan plans it with the weight now.
     const partlyFrozen = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
+    const plannedWithOtherKg = (l: (typeof o.lines)[number]) => (plannedKgOfLine.get(l.id) ?? []).some((k) => plannedKgDiffers(k, l.product.weightPerCaseKg));
     let open = 0;
     for (const l of o.lines) {
       const cases = Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0));
       if (cases <= 0) continue;
       open += cases;
       const st = lineWeightStatus({ cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster }, l.product.weightPerCaseKg, orderLevel);
-      if (st === 'KNOWN' || (st === 'MASTER' && partlyFrozen)) continue;
+      if (st === 'KNOWN' || (st === 'MASTER' && partlyFrozen && !plannedWithOtherKg(l))) continue;
       const m = st === 'UNKNOWN' ? noWeight : toApply;
       const g = m.get(l.product.code) ?? { code: l.product.code, name: l.product.name, lines: 0, cases: 0, kgPerCase: l.product.weightPerCaseKg };
       g.lines++;
@@ -151,7 +177,6 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
   // plan was made, and trucks with PLANNED loads whose capacity or payload was corrected since. The
   // plan keeps what it was planned with; a re-plan adopts the new data.
-  const orderById = new Map(orders.map((o) => [o.id, o]));
   const plannedStops = onPlan.flatMap((a) => {
     const o = orderById.get(a.orderId);
     if (a.load?.status !== 'PLANNED' || !o) return [];
@@ -278,7 +303,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * (masterChanged) and trucks with planned loads whose capacity or payload was corrected
      * (trucksChanged). RE-PLAN applies them all.
      */
-    outdated: plan?.chosenScenarioId ? outdated : { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 },
+    outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
     trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,

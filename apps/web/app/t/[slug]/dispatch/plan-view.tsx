@@ -10,7 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
-import { TIMING_TEXT, timingRemedy } from '@/lib/dispatch/feasibility-view';
+import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
+import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
@@ -315,12 +316,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const applied = !!d.run.chosenScenario;
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
-  // LOCKED or LOADING load, which a re-plan carries over unchanged: that load goes back to Planned first.
+  // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
+  // or loading load of its truck (Unlock goes latest first), goes back to Planned first.
   const feas = d.feasibility ?? null;
   const gateOn = (d.feasibilityGate ?? 'enforce') === 'enforce';
   const blockingViolations = feas ? feas.violations.filter((v) => v.severity === 'BLOCK') : [];
   const timingWarnings = feas ? feas.violations.filter((v) => v.severity === 'WARN') : [];
-  const remedy = timingRemedy(blockingViolations);
+  const planLoads = remedyLoads(d.loads);
+  const remedy = timingRemedy(blockingViolations, planLoads);
+  const replanOff = timingReplanOff(remedy, nothingToPlan);
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -423,13 +427,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           </p>
           {canPlan && d.run.chosenScenario ? (
             <div className="mt-1 flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="destructive" disabled={!!busy || nothingToPlan} onClick={() => replan('REOPTIMIZE')} data-testid="timing-replan-btn">
+              <Button size="sm" variant="destructive" disabled={!!busy || !!replanOff} onClick={() => replan('REOPTIMIZE')} data-testid="timing-replan-btn">
                 <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
               </Button>
-              {nothingToPlan ? (
+              {replanOff ? (
                 <span className="text-xs text-red-800" data-testid="timing-replan-off">
-                  Re-plan is off while every order is on a locked, loading or dispatched load
-                  {remedy.unlockFirst.length ? `: put ${remedy.unlockFirst.join(', ')} back to Planned first.` : '.'}
+                  {replanOff}
                 </span>
               ) : null}
             </div>
@@ -657,11 +660,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           variant="destructive"
                           className="ml-1"
                           data-testid={`load-timing-${l.truckCode}-${l.loadNo}`}
-                          title={
-                            blockingViolations.some((v) => v.loadId === l.id && v.frozen)
-                              ? `${TIMING_TEXT[l.timing.status]}: this load breaks a rule and a re-plan keeps it as it is - put it back to Planned first, then re-plan.`
-                              : TIMING_TEXT[l.timing.status]
-                          }
+                          title={loadTimingTitle(l, blockingViolations, planLoads)}
                         >
                           Times not verified
                         </Badge>
@@ -937,6 +936,20 @@ function LoadDriver({
       </div>
     </div>
   );
+}
+
+/**
+ * The load's "Times not verified" tooltip. A load that itself breaks a rule while locked or loading
+ * says which loads go back to Planned first: it and every later locked or loading load of its
+ * truck, latest first (Unlock is refused while a later load of the truck is frozen).
+ */
+function loadTimingTitle(l: DetailLoad, blocking: PlanViolation[], loads: RemedyLoad[]): string {
+  const base = TIMING_TEXT[l.timing!.status];
+  const own = timingRemedy(
+    blocking.filter((v) => v.loadId === l.id),
+    loads,
+  );
+  return own.unlockFirst.length ? `${base}: this load breaks a rule and a re-plan keeps it as it is - ${unlockFirstText(own.unlockFirst)}, then re-plan.` : base;
 }
 
 function LoadActions({
