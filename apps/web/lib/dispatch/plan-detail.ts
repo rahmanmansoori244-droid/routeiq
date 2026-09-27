@@ -25,6 +25,7 @@ import { portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } 
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { fmtWindow, isoOf } from './time';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
+import { withPlainSolverCodes } from './solver-status';
 
 export interface DetailStop {
   sequence: number;
@@ -410,7 +411,8 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         weightKg: u.portionWeightKg ?? o.totalWeightKg,
         priority: priorityOf(o.id, o.priority),
         reasonCode: u.reasonCode,
-        reasonMessage: u.reasonMessage,
+        // A reason saved by an older solver may carry its raw status code: shown in plain words.
+        reasonMessage: withPlainSolverCodes(u.reasonMessage),
         late: o.isLate,
         salesOrders: [...new Set(rowLines(o.lines, u.portionLinesJson).map((l) => l.salesOrderNo).filter((x): x is string => !!x))],
         partial: u.portionLinesJson !== null && onTruck.has(o.id), // some of this order is on a truck

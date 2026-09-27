@@ -173,7 +173,7 @@ The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `li
 ## File upload hardening
 
 - Max 10 MB per file (CLAUDE.md §15).
-- Max 50,000 rows per file — `parseUpload` rejects during streaming, doesn't load into memory.
+- Max 50,000 rows on the sheet that is read (a CSV: the file) — `parseUpload` checks it after the file is parsed, so the 10 MB limit is what bounds the parse. A workbook's other sheets are named in a warning, never counted (PR6 review).
 - Content-type allowlist: CSV / XLSX / XLS only.
 - SheetJS parse wrapped in a 10-second wall-clock timeout (zip-bomb defense).
 - Filename sanitized before writing to `UploadBatch.fileName`: no path separators, max 200 chars.

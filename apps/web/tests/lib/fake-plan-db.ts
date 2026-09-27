@@ -74,6 +74,14 @@ function withInclude(model: string, r: Row, include?: Row) {
   return out;
 }
 
+function withCount(r: Row, include?: Row) {
+  const sel = include?._count?.select as Row | undefined;
+  if (!sel) return { ...r };
+  const count: Row = {};
+  for (const k of Object.keys(sel)) count[k] = Array.isArray(r[k]?.create) ? r[k].create.length : 0;
+  return { ...r, _count: count };
+}
+
 function sortRows(rows: Row[], orderBy: Row | Row[] | undefined): Row[] {
   if (!orderBy) return rows;
   const keys = (Array.isArray(orderBy) ? orderBy : [orderBy]).flatMap((o) => Object.entries(o)).filter(([, d]) => typeof d === 'string') as [string, string][];
@@ -122,7 +130,8 @@ function delegate(model: string) {
     findMany: async (a: Row = {}) => sortRows(t().filter((x) => match(x, a.where)), a.orderBy).map((r) => withInclude(model, r, a.include)),
     count: async (a: Row = {}) => t().filter((x) => match(x, a.where)).length,
     groupBy: async () => [],
-    create: async (a: Row) => ({ ...create(a.data) }),
+    // Nested creates (ManualBaseline.assignments: { create: [...] }) stay on the row; include._count counts them.
+    create: async (a: Row) => withCount(create(a.data), a.include),
     createMany: async (a: Row) => {
       for (const d of a.data) create(d);
       return { count: a.data.length };
@@ -149,7 +158,8 @@ function delegate(model: string) {
 
 const MODELS = [
   'runPlan', 'planLoad', 'routeAssignment', 'runJob', 'auditLog', 'scenarioResult', 'unservedOrder', 'order', 'orderLine',
-  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer',
+  'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer', 'uploadBatch',
+  'product', 'intakeLineKey', 'manualBaseline',
 ];
 
 export const fakePrisma: Row = {};

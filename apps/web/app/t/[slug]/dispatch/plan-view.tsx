@@ -15,6 +15,7 @@ import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
+import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
@@ -548,7 +549,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   <th className="p-2" title="The optimizer re-checked this option's timetable: loading time between loads, receiving hours, capacity, shift. An option that fails can be reviewed but its trucks cannot be dispatched.">
                     Timing checked
                   </th>
-                  <th className="p-2">Solver</th>
+                  <th className="p-2" title="How long the route search ran, and how it ended. The search is time-limited: a plan is the best it found in that time.">
+                    Search
+                  </th>
                   <th className="p-2" />
                 </tr>
               </thead>
@@ -592,8 +595,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         <span className="font-medium text-red-700" title="Not dispatchable: re-plan">Not verified</span>
                       )}
                     </td>
-                    <td className="p-2 text-xs text-muted-foreground">
-                      {sc.solverTimeSec}s · {sc.solverStatus.replace('ROUTING_', '')}
+                    <td className="p-2 text-xs text-muted-foreground" title={solverStatusText(sc.solverStatus)} data-testid={`solver-${sc.name}`}>
+                      {sc.solverTimeSec}s · {solverStatusText(sc.solverStatus, 'short')}
                     </td>
                     <td className="p-2 text-right">
                       {sc.chosen ? (

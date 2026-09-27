@@ -3,9 +3,10 @@ import { auth } from '@/lib/auth';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { hasRole } from '@/lib/api';
-import { parseUpload } from '@/lib/csv';
+import { MultipleSheetsError, parseUpload } from '@/lib/csv';
 import { prisma } from '@/lib/db';
 import { findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
+import { isOrderSheet, type CanonicalField } from '@/lib/dispatch/order-intake';
 import { dateOnly } from '@/lib/dispatch/time';
 import { isRealIsoDate } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
@@ -39,10 +40,17 @@ export async function POST(req: Request) {
     return NextResponse.json({ data: null, error: 'deliveryDate must be a real date as YYYY-MM-DD' }, { status: 400 });
   }
 
+  // Order rows on more than one sheet of a workbook are refused, naming the sheets (scenario test
+  // S04 / B2): reading only the first one would drop the others without a word.
+  const colMap = await prisma.tenantConfig.findUnique({ where: { tenantId }, select: { orderColumnMapJson: true } });
+  const extraAliases = (colMap?.orderColumnMapJson ?? {}) as Partial<Record<CanonicalField, string[]>>;
   let parsed;
   try {
-    parsed = await parseUpload(file);
+    parsed = await parseUpload(file, { isDataSheet: (headers) => isOrderSheet(headers, extraAliases), rowsWord: 'order' });
   } catch (err) {
+    if (err instanceof MultipleSheetsError) {
+      return NextResponse.json({ data: null, error: { code: err.code, message: err.message, sheets: err.sheets } }, { status: 400 });
+    }
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
 
@@ -52,6 +60,9 @@ export async function POST(req: Request) {
   } catch (err) {
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
+  // File-level notes (CSV parse warnings, workbook sheets not read) are kept with the check, so
+  // the upload page shows them too, not only the answer.
+  v.warnings.push(...parsed.warnings);
   const db = tenantDb(tenantId);
   // The hash is of the normalized lines including their delivery dates, in any row or column
   // order (contentFingerprint): the same orders for the same depot and dates, not the same bytes.
@@ -68,7 +79,8 @@ export async function POST(req: Request) {
   if (sameFile) {
     v.errors.unshift({
       row: 1,
-      message: `These orders were already confirmed for ${v.totals.deliveryDates.join(', ') || 'this date'} (file ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC).`,
+      // Every line of a re-sent file is skipped, so name the file's own dates (never "this date").
+      message: `These orders were already confirmed for ${(v.totals.deliveryDates.length ? v.totals.deliveryDates : v.fileDeliveryDates ?? []).join(', ') || 'this date'} (file ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC).`,
     });
   }
   const topDate = v.totals.deliveryDates[0] ?? deliveryDate;
@@ -111,7 +123,7 @@ export async function POST(req: Request) {
         errorRows: v.errors.length,
         warningRows: v.warnings.length + v.duplicates.length,
         errors: v.errors,
-        warnings: [...v.warnings, ...v.duplicates.map((d) => `Row ${d.row}: ${d.message}`), ...parsed.warnings],
+        warnings: [...v.warnings, ...v.duplicates.map((d) => `Row ${d.row}: ${d.message}`)],
         duplicates: v.duplicates,
         totals: v.totals,
         fileCases: v.fileCases,

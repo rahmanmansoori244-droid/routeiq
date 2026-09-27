@@ -22,6 +22,7 @@ import { callDispatchSolver, SolverError } from '../solver-client';
 import { trackInflight, whenIdle } from './optimize-job';
 import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
 import { lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
+import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import type { SolveTicket } from '../dispatch/solve-admission';
 import type { DispatchScenario } from '@routeiq/shared-types';
 
@@ -85,8 +86,10 @@ async function runJob(args: DispatchJobArgs) {
         // A version that already holds a plan (a re-plan's copy of the previous plan) keeps it
         // when the optimizer found no plan at all this time: that is a failed re-plan.
         if (recommended.status === 'NO_SOLUTION' && run.chosenScenarioId) {
+          // The search's own code in plain words, never the raw OR-Tools name.
+          const why = recommended.solver_status && !isPlanFoundStatus(recommended.solver_status) ? ` (${solverStatusText(recommended.solver_status, 'short')})` : '';
           throw new SolverError(
-            `The optimizer found no feasible plan this time (${recommended.solver_status || 'no solution'}). The previous plan is kept - try again, or check trucks and customer hours.`,
+            `The optimizer found no feasible plan this time${why}. The previous plan is kept - try again, or check trucks and customer hours.`,
             200,
             null,
           );

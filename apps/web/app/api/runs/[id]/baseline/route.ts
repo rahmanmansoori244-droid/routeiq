@@ -61,7 +61,9 @@ export async function POST(req: Request, { params }: Params) {
   const ordersByCust = new Map(orders.map((o) => [o.customerId, o]));
 
   const rows: Row[] = [];
-  const warnings: string[] = [];
+  // File-level notes first (CSV parse warnings, workbook sheets that were not read - lib/csv
+  // pickSheet): a baseline workbook with a second sheet is never cut to one sheet without a word.
+  const warnings: string[] = [...parsed.warnings];
   parsed.rows.forEach((raw, idx) => {
     const fileRow = idx + 2;
     const truck_code = (raw['truck_code'] ?? '').trim();
@@ -102,7 +104,8 @@ export async function POST(req: Request, { params }: Params) {
       totalTrucks: trucksUsed,
       totalDistanceKm: totalDistanceKm || null,
       totalTimeMin: totalTimeMin || null,
-      notes: warnings.length > 0 ? `Warnings: ${warnings.length}` : null,
+      // The count, and the file-level notes in full (the row notes are only counted, as before).
+      notes: warnings.length > 0 ? `Warnings: ${warnings.length}${parsed.warnings.length ? ` - ${parsed.warnings.join(' ')}` : ''}` : null,
       assignments: {
         create: rows.map((r2) => {
           const cust = custByKey.get(`${r2.customer_code}::${r2.branchKey}`);

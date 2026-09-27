@@ -35,6 +35,8 @@ export interface IntakeValidation extends ResolveResult {
   unmappedColumns: string[];
   fileCases: number;
   late: { isLate: boolean; reasons: string[] };
+  /** Every delivery date in the file, skipped lines included (totals.deliveryDates: the lines to add). */
+  fileDeliveryDates?: string[];
   /** SHA-256 of the file's normalized content (contentFingerprint): stored as UploadBatch.fileHash. */
   contentHash?: string;
   /**
@@ -136,6 +138,28 @@ async function confirmedLineMap(db: Tx | typeof prisma, tenantId: string, dates:
   return m;
 }
 
+/**
+ * The late reason of a day that already has a plan in use: its version and, when there are any,
+ * the loads already on their way or locked (the new orders are planned around those).
+ */
+export function planExistsReason(version: number, date: string, loads: { dispatched: number; locked: number } = { dispatched: 0, locked: 0 }): string {
+  const parts: string[] = [];
+  if (loads.dispatched) parts.push(`${loads.dispatched} of its loads ${loads.dispatched === 1 ? 'is' : 'are'} dispatched`);
+  if (loads.locked) parts.push(`${loads.locked} ${loads.locked === 1 ? 'is' : 'are'} locked or loading`);
+  return `A plan (version ${version}) already exists for ${date}${parts.length ? ` (${parts.join(', ')})` : ''}.`;
+}
+
+/**
+ * The LATE_REASON_REQUIRED message: the real reason(s) the orders count as late - received after
+ * the planning cutoff, or the day already has a plan (with loads dispatched) - never "after the
+ * cutoff" for a day that only has a plan (scenario test S04). `sinceCheck`: the file was not late
+ * when it was checked and became late before the confirm.
+ */
+export function lateReasonRequiredMessage(reasons: string[], opts: { sinceCheck?: boolean } = {}): string {
+  const why = reasons.length ? reasons.join(' ') : 'They were received after the planning cutoff, or the day already has a plan.';
+  return `${opts.sinceCheck ? 'These orders became late after the file was checked.' : 'These orders are late.'} ${why} Enter the reason for accepting them.`;
+}
+
 /** Why orders for these dates are late now: after the cutoff, or a plan is already in use. */
 async function lateReasons(tenantId: string, cfg: Pick<TenantConfig, 'planningCutoffMin' | 'timezone'>, depotId: string, dates: string[], now: Date) {
   const reasons: string[] = [];
@@ -144,7 +168,14 @@ async function lateReasons(tenantId: string, cfg: Pick<TenantConfig, 'planningCu
       reasons.push(`Received after the ${String(Math.floor(cfg.planningCutoffMin / 60)).padStart(2, '0')}:${String(cfg.planningCutoffMin % 60).padStart(2, '0')} cutoff for ${d}.`);
     }
     const plan = await currentPlan(tenantId, depotId, d);
-    if (plan?.chosenScenarioId) reasons.push(`A plan (version ${plan.version}) already exists for ${d}.`);
+    if (plan?.chosenScenarioId) {
+      const started = await prisma.planLoad.findMany({
+        where: { tenantId, runId: plan.id, status: { in: ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'] } },
+        select: { status: true },
+      });
+      const dispatched = started.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED').length;
+      reasons.push(planExistsReason(plan.version, d, { dispatched, locked: started.length - dispatched }));
+    }
   }
   return reasons;
 }
@@ -204,6 +235,7 @@ export async function validateIntake(
     unmappedColumns: norm.mapping.unmapped,
     fileCases: norm.fileCases,
     late: { isLate: reasons.length > 0, reasons },
+    fileDeliveryDates: [...dates].sort(),
     contentHash: sha256(contentFingerprint(norm.lines)),
   };
 }

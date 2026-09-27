@@ -111,7 +111,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
             </Button>
           </div>
           <div className="col-span-2 space-y-1">
-            <Label htmlFor="lo-reason">Reason for accepting after cutoff</Label>
+            <Label htmlFor="lo-reason">Reason for adding this order late (after the cutoff, or to a day already planned)</Label>
             <Input id="lo-reason" value={reason} placeholder="e.g. Key account promotion, requested by sales manager" onChange={(e) => setReason(e.target.value)} />
           </div>
         </div>

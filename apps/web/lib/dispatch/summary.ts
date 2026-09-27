@@ -198,7 +198,9 @@ export function computeSummary(input: {
     loadsByStatus,
     distanceIsEstimated: input.distanceIsEstimated,
     distanceProvider: input.distanceProvider,
-    warnings: input.warnings,
+    // Each warning once: the routing note comes back both on the solver's answer and on the option
+    // (scenario tests: "Distances are ESTIMATED" was stored twice with every plan).
+    warnings: [...new Set(input.warnings)],
     solver: input.solver,
   };
 }

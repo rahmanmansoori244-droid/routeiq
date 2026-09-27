@@ -51,6 +51,14 @@ export function BaselineTab({ slug, runId, baselines, canUpload, chosenScenario 
         return;
       }
       toast.success(`Baseline uploaded — ${body.data.totalTrucks} trucks, ${body.data.assignments} stops.`);
+      // Sheets of the workbook that were not read, rows skipped: said, not dropped silently.
+      const warnings: string[] = Array.isArray(body.data.warnings) ? body.data.warnings : [];
+      if (warnings.length) {
+        toast.warning(
+          `${warnings.slice(0, 3).join(' ')}${warnings.length > 3 ? ` (+${warnings.length - 3} more warning(s))` : ''}`,
+          { duration: 15_000 },
+        );
+      }
       setFile(null);
       router.refresh();
     });

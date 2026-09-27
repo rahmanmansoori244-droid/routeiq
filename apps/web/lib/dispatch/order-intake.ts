@@ -81,6 +81,16 @@ export function mapHeaders(headers: string[], extra: Partial<Record<CanonicalFie
   return { used, unmapped: headers.filter((h) => !taken.has(h)) };
 }
 
+/**
+ * A sheet whose header row has the order columns (canonical names or aliases, the tenant's own
+ * included): customer code, product code and cases. Used to find the sheets of a workbook that
+ * hold order rows, so a workbook with orders on two sheets is refused, not cut to one (S04 / B2).
+ */
+export function isOrderSheet(headers: string[], extra: Partial<Record<CanonicalField, string[]>> = {}): boolean {
+  const used = mapHeaders(headers, extra).used;
+  return !!(used.customer_code && used.product_code && used.cases);
+}
+
 export interface NormalizedLine {
   row: number; // file row (header = 1)
   salesOrderNo: string | null;
@@ -446,18 +456,28 @@ export function resolveOrderLines(
   const noWeight = new Set<string>();
   const merged = new Map<string, ResolvedLine>();
   const twinWarned = new Set<string>();
+  // Rows of an inactive customer or product, grouped like `merged`: a line of them that is already
+  // confirmed (the customer was deactivated after its orders were added) is a duplicate, never an
+  // "inactive" error (scenario test S05).
+  const blocked = new Map<string, { rows: NormalizedLine[]; cases: number; kind: 'CUSTOMER' | 'PRODUCT'; customerCode: string; productCode: string }>();
+  // Messages name the master codes ("S05-C05"), not the file's spelling ("s05-c05").
+  const custName = (l: NormalizedLine, c: KnownCustomer | undefined) => `${c?.code ?? l.customerCode}${l.branchCode ? ` / ${l.branchCode}` : ''}`;
 
   for (const l of norm.lines) {
     const ck = customerKey(l.customerCode, l.branchKey);
     const cust = custByKey.get(ck);
-    if (cust && !cust.active) {
-      errors.push({ row: l.row, message: `Customer ${l.customerCode}${l.branchCode ? ` / ${l.branchCode}` : ''} is inactive. Reactivate it or remove the row.`, cases: l.cases });
-      continue;
-    }
     const pk = l.productCode.trim().toUpperCase();
     const prod = prodByCode.get(pk);
-    if (prod && !prod.active) {
-      errors.push({ row: l.row, message: `Product ${l.productCode} is inactive.`, cases: l.cases });
+    const inactive: 'CUSTOMER' | 'PRODUCT' | null = cust && !cust.active ? 'CUSTOMER' : prod && !prod.active ? 'PRODUCT' : null;
+    if (inactive) {
+      const bk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
+      const g = blocked.get(bk);
+      if (g) {
+        g.rows.push(l);
+        g.cases += l.cases;
+      } else {
+        blocked.set(bk, { rows: [l], cases: l.cases, kind: inactive, customerCode: custName(l, cust), productCode: prod?.code ?? l.productCode });
+      }
       continue;
     }
     const twins = custTwins.get(ck) ?? [];
@@ -498,24 +518,53 @@ export function resolveOrderLines(
 
   // Lines already confirmed (another file, or a late order): an identical line is skipped; the
   // same line with another quantity would be an amendment, which is not supported yet.
+  // undefined = not confirmed; null = confirmed (quantity unknown); else the confirmed quantities.
+  const confirmedOf = (key: string): number[] | null | undefined =>
+    alreadyConfirmed instanceof Map ? alreadyConfirmed.get(key) : alreadyConfirmed.has(key) ? null : undefined;
+  const changedLineText = (so: string, product: string, customer: string, date: string, confirmed: number[], cases: number, rows: string) =>
+    `Sales order ${so}, ${product} for ${customer} on ${date} was already confirmed with ${confirmed.join(' + ')} cases; this file has ${cases}${rows}. Changing a confirmed line is not supported yet: remove the row. For extra cases, record a late order with no sales-order number (or a new one), or send them under a new sales-order number.`;
   const lines: ResolvedLine[] = [];
   for (const [mk, l] of merged) {
-    const confirmed = l.salesOrderNo ? (alreadyConfirmed instanceof Map ? alreadyConfirmed.get(mk) : alreadyConfirmed.has(mk) ? null : undefined) : undefined;
+    const confirmed = l.salesOrderNo ? confirmedOf(mk) : undefined;
     if (confirmed !== undefined) {
       const rows = l.sourceRows.length > 1 ? ` (rows ${l.sourceRows.join(', ')})` : '';
+      const product = prodByCode.get(l.productCode.trim().toUpperCase())?.code ?? l.productCode;
+      const customer = custByKey.get(l.customerKey)?.code ?? l.customerCode;
       if (confirmed === null || confirmed.includes(l.cases)) {
-        duplicates.push({ row: l.row, message: `Already uploaded: sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate}${rows}. Skipped.`, cases: l.cases });
+        duplicates.push({ row: l.row, message: `Already confirmed: sales order ${l.salesOrderNo}, ${product} for ${customer} on ${l.deliveryDate}${rows}. Skipped.`, cases: l.cases });
       } else {
-        errors.push({
-          row: l.row,
-          message: `Sales order ${l.salesOrderNo}, ${l.productCode} for ${l.customerCode} on ${l.deliveryDate} was already confirmed with ${confirmed.join(' + ')} cases; this file has ${l.cases}${rows}. Changing a confirmed line is not supported yet: remove the row. For extra cases, record a late order with no sales-order number (or a new one), or send them under a new sales-order number.`,
-          cases: l.cases,
-        });
+        errors.push({ row: l.row, message: changedLineText(l.salesOrderNo as string, product, customer, l.deliveryDate, confirmed, l.cases, rows), cases: l.cases });
       }
       continue;
     }
     lines.push(l);
   }
+  // Rows of an inactive customer or product: a line already confirmed with the same cases is a
+  // duplicate (skipped, like any re-sent line), and the note says the customer or product is
+  // inactive now; anything else is an error on each row, as before.
+  for (const [bk, g] of blocked) {
+    const first = g.rows[0];
+    const confirmed = first.salesOrderNo ? confirmedOf(bk) : undefined;
+    const rows = g.rows.length > 1 ? ` (rows ${g.rows.map((r) => r.row).join(', ')})` : '';
+    if (confirmed !== undefined && (confirmed === null || confirmed.includes(g.cases))) {
+      const now =
+        g.kind === 'CUSTOMER'
+          ? `Customer ${g.customerCode} is inactive now: its confirmed orders are not planned until it is reactivated.`
+          : `Product ${g.productCode} is inactive now: its confirmed lines stay on the day.`;
+      duplicates.push({
+        row: first.row,
+        message: `Already confirmed: sales order ${first.salesOrderNo}, ${g.productCode} for ${g.customerCode} on ${first.deliveryDate}${rows}. Skipped. ${now}`,
+        cases: g.cases,
+      });
+      continue;
+    }
+    const inactive = g.kind === 'CUSTOMER' ? `Customer ${g.customerCode} is inactive. Reactivate it or remove the row.` : `Product ${g.productCode} is inactive.`;
+    for (const l of g.rows) {
+      const changed = confirmed ? ` ${changedLineText(first.salesOrderNo as string, g.productCode, g.customerCode, first.deliveryDate, confirmed, g.cases, rows)}` : '';
+      errors.push({ row: l.row, message: `${inactive}${changed}`, cases: l.cases });
+    }
+  }
+  duplicates.sort((a, b) => a.row - b.row);
 
   const otherDateWarned = new Set<string>();
   for (const l of lines) {
