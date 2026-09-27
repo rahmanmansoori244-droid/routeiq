@@ -211,21 +211,41 @@ class TruckDay:
         return max(self.frozen_return_s, self.loading_from_s)
 
 
+def _new_load_start_min(req: DispatchRequest) -> int:
+    """The earliest any new load may leave, before a truck's own hours and frozen loads: the later
+    of the first departure (shift_start_min; on a plan made on its delivery day the web sends now +
+    turnaround), the depot opening and, with loading_from_min, that time + the turnaround."""
+    cfg = req.config
+    start = max(cfg.shift_start_min, req.depot.open_min)
+    if cfg.loading_from_min is not None:
+        start = max(start, cfg.loading_from_min + cfg.reload_min)
+    return start
+
+
+def _depot_close_min(req: DispatchRequest) -> int:
+    """The depot's closing time; 0 (not set) is the end of the day."""
+    return req.depot.close_min if req.depot.close_min > 0 else DAY_MIN
+
+
+def _truck_hours(req: DispatchRequest, t: DispatchTruck) -> tuple[int, int]:
+    """The truck's time for new loads before its frozen loads are counted: from the day's start
+    (``_new_load_start_min``) or its own availability, to the depot closing or its own end."""
+    return (max(_new_load_start_min(req), t.available_from_min or 0),
+            min(_depot_close_min(req), t.available_to_min or DAY_MIN * 2))
+
+
 def _truck_days(req: DispatchRequest) -> list[TruckDay]:
     cfg = req.config
     out: list[TruckDay] = []
     for i, t in enumerate(req.trucks):
         max_trips = t.max_trips or cfg.max_trips_per_truck
         frozen = sorted(t.frozen_trips, key=lambda f: f.load_no)
-        earliest = max(cfg.shift_start_min, req.depot.open_min, t.available_from_min or 0)
-        if cfg.loading_from_min is not None:
-            earliest = max(earliest, cfg.loading_from_min + cfg.reload_min)
+        earliest, latest = _truck_hours(req, t)
         anchor = frozen_return = None
         if frozen:
             anchor = min(f.depart_min for f in frozen)
             frozen_return = max(f.return_min for f in frozen)
             earliest = max(earliest, frozen_return + cfg.reload_min)
-        latest = min(req.depot.close_min if req.depot.close_min > 0 else DAY_MIN, t.available_to_min or DAY_MIN * 2)
         if anchor is not None:
             latest = min(latest, anchor + cfg.shift_max_min)
         out.append(
@@ -315,6 +335,45 @@ def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads:
     return any(s.demand_cases <= rc and s.demand_kg <= rk + 0.05 for s in left for rc, rk in rooms)
 
 
+def _day_hhmm(m: int) -> str:
+    """A time of the delivery day; 24:00 and later read "24:00", the end of the day (as the web's
+    "Planned from" warning)."""
+    return "24:00" if m >= DAY_MIN else _hhmm(m)
+
+
+def _no_usable_truck(req: DispatchRequest, tds: list[TruckDay]) -> tuple[str, str, str]:
+    """Why no truck can take a new load (no TruckDay is usable): the reason code and text every stop
+    gets, and the plan warning. Each truck is blamed for what actually closes it (PR8 rebase review):
+    a plan whose start (a same-day plan: now + turnaround) is at or after the depot closing, or a
+    truck outside its available hours, is not reported as busy with locked/dispatched loads - only a
+    truck that has such loads is."""
+    if all(td.trips_left == 0 for td in tds):
+        return ("TRIP_LIMIT", "Every truck has already used its maximum number of loads (locked/dispatched).",
+                "No truck has capacity left for new loads.")
+    start, close = _new_load_start_min(req), _depot_close_min(req)
+    same_day = req.config.loading_from_min is not None
+    if start >= close:  # nothing can leave, whatever a truck's hours or loads
+        closing = f"the depot closes at {_day_hhmm(close)}" if close < DAY_MIN else "the delivery day ends at 24:00"
+        msg = (f"Planned on the delivery day from {_day_hhmm(start)}: {closing}, so no new load can leave today."
+               if same_day else f"The first departure is {_day_hhmm(start)} and {closing}, so no new load can leave.")
+        return "SHIFT_LIMIT", msg, msg
+    # Trucks with loads left whose own hours hold no time for a new load (frozen loads aside). Every
+    # other unusable truck has frozen loads: its time after them (or its shift) is what is gone.
+    hours = {td.idx: _truck_hours(req, td.truck) for td in tds}
+    off_hours = [td for td in tds if td.trips_left > 0 and hours[td.idx][0] >= hours[td.idx][1]]
+    if not off_hours:
+        return ("SHIFT_LIMIT", "No truck has shift time left after its locked/dispatched loads.",
+                "No truck has capacity left for new loads.")
+    span = f"between {_day_hhmm(start)} and " + (f"the depot closing at {_day_hhmm(close)}" if close < DAY_MIN else "24:00")
+    msg = (f"No truck is available for a new load {span}: every truck's available hours are outside that time."
+           if len(off_hours) == len(tds) else
+           f"No truck has time left for a new load {span}: some are taken up by their locked/dispatched loads, "
+           "the others are outside their available hours.")
+    if same_day:
+        msg = f"Planned on the delivery day from {_day_hhmm(start)}. {msg}"
+    return "SHIFT_LIMIT", msg, msg
+
+
 def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[DispatchStop], list[UnservedStop], list[str]]:
     """Capacity / availability checks that do not need the matrix."""
     warnings: list[str] = []
@@ -325,14 +384,8 @@ def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[Dispatch
             "No trucks available."
         ]
     if not usable:
-        trip_exhausted = all(td.trips_left == 0 for td in tds)
-        code = "TRIP_LIMIT" if trip_exhausted else "SHIFT_LIMIT"
-        msg = (
-            "Every truck has already used its maximum number of loads (locked/dispatched)."
-            if trip_exhausted
-            else "No truck has shift time left after its locked/dispatched loads."
-        )
-        return [], [_unserved(s, code, msg) for s in req.stops], ["No truck has capacity left for new loads."]
+        code, msg, warning = _no_usable_truck(req, tds)
+        return [], [_unserved(s, code, msg) for s in req.stops], [warning]
     solvable: list[DispatchStop] = []
     for s in req.stops:
         if not any(_fits_capacity(s, td) for td in usable):

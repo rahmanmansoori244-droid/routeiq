@@ -371,6 +371,62 @@ def test_same_day_early_preference_counts_from_the_same_day_start():
     assert sc.preference_penalties.early < (start - hm("06:00")) * 0.01 - 1
 
 
+# When no truck can take a new load, the reason says what closes the trucks (PR8 rebase review).
+# Depot closing 18:00 unless the case says otherwise; "same day": made at 17:45, as the web sends it.
+LATE_SAME_DAY = dict(shift_start_min=hm("18:15"), loading_from_min=hm("17:45"), reload_min=30)
+BACK_17_50 = [FrozenTrip(load_no=1, depart_min=hm("07:00"), return_min=hm("17:50"), cases=90)]
+NO_TRUCK_CASES = {
+    # PR8: a plan made on its delivery day after the depot closes, no locked or dispatched load anywhere.
+    "same-day-closed": (
+        [truck("T01")], LATE_SAME_DAY, hm("18:00"),
+        "Planned on the delivery day from 18:15: the depot closes at 18:00, so no new load can leave today."),
+    # The closing is the cause for every truck, also one still out with a dispatched load.
+    "same-day-closed-truck-out": (
+        [truck("T01"), truck("T02", frozen_trips=BACK_17_50)], LATE_SAME_DAY, hm("18:00"),
+        "Planned on the delivery day from 18:15: the depot closes at 18:00, so no new load can leave today."),
+    # A depot open all day: the web caps "Planned from" at 24:00.
+    "same-day-end-of-day": (
+        [truck("T01")], dict(shift_start_min=hm("24:00"), loading_from_min=hm("23:45"), reload_min=30), 0,
+        "Planned on the delivery day from 24:00: the delivery day ends at 24:00, so no new load can leave today."),
+    "first-departure-after-closing": (
+        [truck("T01")], dict(shift_start_min=hm("18:30")), hm("18:00"),
+        "The first departure is 18:30 and the depot closes at 18:00, so no new load can leave."),
+    # Unchanged: the only truck is back at 17:50, too late for a turnaround before 18:00.
+    "locked-loads": (
+        [truck("T01", frozen_trips=BACK_17_50)], {}, hm("18:00"),
+        "No truck has shift time left after its locked/dispatched loads."),
+    "same-day-off-hours": (
+        [truck("T01", available_to_min=hm("12:00"))], dict(shift_start_min=hm("13:30"), loading_from_min=hm("13:00"), reload_min=30), hm("18:00"),
+        "Planned on the delivery day from 13:30. No truck is available for a new load between 13:30 and the depot "
+        "closing at 18:00: every truck's available hours are outside that time."),
+    "locked-loads-and-off-hours": (
+        [truck("T01", frozen_trips=BACK_17_50), truck("T02", available_from_min=hm("19:00"))], {}, hm("18:00"),
+        "No truck has time left for a new load between 06:00 and the depot closing at 18:00: some are taken up by "
+        "their locked/dispatched loads, the others are outside their available hours."),
+}
+
+
+@pytest.mark.parametrize("case", ["same-day-closed", "same-day-closed-truck-out", "same-day-end-of-day", "first-departure-after-closing", "locked-loads", "same-day-off-hours", "locked-loads-and-off-hours"])
+def test_no_usable_truck_reason_names_what_closes_the_trucks(case):
+    """With PR8 a plan made on its delivery day at or after the depot closing starts past it, so no
+    truck is usable. Every order used to read "No truck has shift time left after its
+    locked/dispatched loads." (and the plan "No truck has capacity left for new loads.") although no
+    truck had such a load. Now the reason names the closing, the truck's available hours, or the
+    locked/dispatched loads, whichever actually closes the trucks."""
+    trucks, cfg, close_min, reason = NO_TRUCK_CASES[case]
+    r = req([stop("A", 23.60, 58.40, cases=20), stop("B", 23.61, 58.41, cases=20)], trucks, **cfg)
+    r = r.model_copy(update={"depot": DEPOT.model_copy(update={"close_min": close_min})})
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_reconciled(r, sc)
+    assert not sc.loads
+    assert [(u.stop_id, u.reason_code, u.reason_message) for u in sc.unserved] == [
+        ("A", "SHIFT_LIMIT", reason), ("B", "SHIFT_LIMIT", reason)]
+    if case != "locked-loads":
+        assert "capacity" not in " ".join(resp.warnings)
+        assert reason in resp.warnings
+
+
 def test_late_order_without_capacity_gets_late_reason():
     base = stop("BASE", 23.60, 58.45, cases=100, priority=1)
     late = stop("LATE", 23.61, 58.45, cases=100, priority=5, late=True)

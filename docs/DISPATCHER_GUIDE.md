@@ -130,6 +130,7 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
   - This also holds when you plan today early, before the first departure: at 05:15 with a 06:00 first departure, a full truck may leave after 06:00. The plan then says *Planned on the delivery day at 05:15: loading starts now ...*.
   - Locked, loading and dispatched loads keep their times. A truck that is still out leaves again only after it is back and turned around (for example back at 09:57: not before 10:27, plus loading time).
   - A customer whose receiving hours end before any truck can get there from now is shown as *unserved: no truck can reach this customer inside its receiving window* with the earliest possible arrival.
+  - If now + the turnaround is at or after the depot's closing time, no new load can leave today. The yellow note says so, and every open order is *unserved: does not fit the shift* with the reason *Planned on the delivery day from 18:15: the depot closes at 18:00, so no new load can leave today.* (not a truck busy with locked or dispatched loads).
   - **Before you re-plan during the day, mark every load that has left as Dispatched.** A load still *Planned* in RouteIQ is planned again from now, even if the truck has already gone.
   - The time is taken when you click; a plan for tomorrow is not affected, whatever the time.
 - Older versions stay under **Plan versions** (read-only).

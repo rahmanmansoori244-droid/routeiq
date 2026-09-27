@@ -181,6 +181,15 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       // always the first yellow line (plan-view.tsx, plan-detail.ts).
       [/first yellow line/i, '"Planned from" as the first yellow line'],
       [/the first plan warning/i, '"Planned from" as the first plan warning'],
+      // PR8 rebase review: PR7's "What it gains" line is built from the P1/P2 minutes-earlier figure
+      // (independent of the same-day start) AND the preference-cost difference (whose early part
+      // counts from it), plan-options.ts compare(); the docs must not claim either alone.
+      [/\*What it gains\* compares service starts between options, which the start does not change/i, '"What it gains" never depends on the same-day start'],
+      [/\(and so its \*What it gains\* line\)/i, 'the whole "What it gains" line counts from the same-day start'],
+      // PR8 rebase review: the owner approved PR8 when it was merged; the docs record it as decided.
+      [/PR8, \*\*awaiting owner approval/i, 'PR8 awaiting owner approval (decisions table)'],
+      [/\(PR8, awaiting approval\.\)/i, 'PR8 awaiting approval (open questions)'],
+      [/A behaviour change the owner must approve/i, 'PR8 as a change the owner must still approve'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
