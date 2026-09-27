@@ -227,4 +227,33 @@ describe('GET /api/runs/[id]/route-geometries (review F22)', () => {
     expect(body.data.trucks[0].coordinates).toHaveLength(4);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
+
+  it('a failing solver: every truck straight, and it is asked only once (the plan-map fix reply shape)', async () => {
+    wireRun(false);
+    const run = await db.runPlan.findUnique();
+    run.routes.push({ truckId: 't2', sequenceInTruck: 1, truck: { id: 't2', code: 'T02' }, order: { customer: { lat: 23.7, lng: 58.5 } } });
+    db.runPlan.findUnique = vi.fn(async () => run);
+    process.env.SOLVER_URL = 'http://solver.internal:8000';
+    process.env.SOLVER_TOKEN = 'unit-test-token';
+    fetchSpy.mockResolvedValue(new Response('bad gateway', { status: 502 }));
+    const route = await import('@/app/api/runs/[id]/route-geometries/route');
+    const body = await (await route.GET(get('/api/runs/r1/route-geometries'), { params: { id: 'r1' } })).json();
+    expect(body.data.provider).toBe('fallback');
+    expect(body.data.trucks.map((t: { truckCode: string; provider: string }) => [t.truckCode, t.provider])).toEqual([
+      ['T01', 'fallback'],
+      ['T02', 'fallback'],
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the solver's own straight-line answer is drawn as 'fallback', not as a road", async () => {
+    wireRun(false);
+    process.env.SOLVER_URL = 'http://solver.internal:8000';
+    process.env.SOLVER_TOKEN = 'unit-test-token';
+    fetchSpy.mockResolvedValue(new Response(JSON.stringify({ provider: 'haversine', is_estimated: true, coordinates: [[58.39, 23.58], [58.45, 23.6]], warning: 'OSRM down' }), { status: 200 }));
+    const route = await import('@/app/api/runs/[id]/route-geometries/route');
+    const body = await (await route.GET(get('/api/runs/r1/route-geometries'), { params: { id: 'r1' } })).json();
+    expect(body.data.provider).toBe('fallback');
+    expect(body.data.trucks[0].coordinates).toHaveLength(4);
+  });
 });

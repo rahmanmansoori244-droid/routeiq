@@ -253,7 +253,7 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       // Render polylines per truck. Prefer real road geometry from the
       // /api/runs/[id]/route-geometries cache; fall back to the depot→stops
       // straight-line tour while the routing API is still resolving. The
-      // server's own 'fallback' (no Mapbox/OSRM answer) is straight too;
+      // server's own 'fallback' (no road shape from the solver) is straight too;
       // both are drawn dashed.
       for (const [truckId, list] of groupedByTruck) {
         const color = truckColor.get(truckId) ?? '#2563EB';

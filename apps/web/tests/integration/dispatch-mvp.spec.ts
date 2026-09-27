@@ -16,6 +16,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
+import { loadPath, loadPathKey } from '@/lib/dispatch/load-path';
+import { answerIsStale, type GeoRow } from '@/lib/dispatch/plan-map-state';
 import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
@@ -439,6 +441,22 @@ describe('frozen plan facts (review F08)', () => {
     wb.getWorksheet(sheetName)!.eachRow((r) => r.eachCell((c) => cellsText.push(c.text)));
     expect(cellsText.some((c) => c.startsWith('Location updated after planning'))).toBe(true);
     expect(cellsText).toContain(`${l.cases} / ${planned.capacity}`);
+  });
+
+  it('27a (plan map) the road shapes are drawn through the planned pins: every row is for the plan as shown, so the corrected pin neither redraws the locked load nor reloads the map', async () => {
+    const p = await plan(runV2);
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/load-geometry`);
+    expect(r.status).toBe(200);
+    const rows = (await json(r)).data as GeoRow[];
+    expect(rows.map((x) => x.loadId).sort()).toEqual(p.loads.map((l: any) => l.id).sort());
+    for (const l of p.loads) {
+      const row = rows.find((x) => x.loadId === l.id)!;
+      expect(row.pointsKey, `${l.truckCode} L${l.loadNo}`).toBe(loadPathKey(loadPath(p.run.depot, l.stops)));
+    }
+    const onScreen = p.loads.map((l: any) => ({ id: l.id, stops: l.stops }));
+    expect(answerIsStale({ status: 'ready', rows }, onScreen, p.run.depot)).toBe(false);
+    const locked = p.loads.find((l: any) => l.id === lockedId);
+    expect(loadPath(p.run.depot, locked.stops)).toContainEqual([planned!.lat, planned!.lng]);
   });
 
   it('27b a settings change after planning: the ASSUMPTIONS sheet still shows the settings the plan was built with', async () => {
