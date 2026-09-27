@@ -3,7 +3,9 @@
  * - a missing SOLVER_URL / SOLVER_TOKEN on web, a 401 from the solver or a solver without its own
  *   token (500 "Solver not configured") is a definite misconfiguration: 503 not_ready (the deploy
  *   gate fails);
- * - an unreachable or older solver is only degraded: HTTP 200, ok false (alert, do not block);
+ * - an unreachable or older solver, a 5xx, or a 403 (never the solver's own answer: a proxy or a
+ *   wrong host in front of it, the token was never checked) is only degraded: HTTP 200, ok false
+ *   (alert, do not block);
  * - the check is one authenticated GET /ready: it never calls /optimize-dispatch;
  * - liveness answers without the database or the solver.
  */
@@ -76,6 +78,16 @@ describe('checkDispatchReadiness', () => {
   it('the solver has no token itself (500 "Solver not configured"): misconfigured', async () => {
     const { f } = fakeFetch({ status: 500, body: { detail: 'Solver not configured' } });
     expect(await checkDispatchReadiness(ENV, f)).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_NOT_CONFIGURED' });
+  });
+
+  it('second review of audit PR4: a 403 is only degraded (the solver never answers 403: a proxy or wrong host did, the token was never checked)', async () => {
+    const json = await checkDispatchReadiness(ENV, fakeFetch({ status: 403, body: { detail: 'Forbidden' } }).f);
+    expect(json).toMatchObject({ status: 'degraded', reason: 'SOLVER_ERROR' });
+    expect(overallReadiness('up', json)).toEqual({ status: 'degraded', httpStatus: 200 });
+    const html = vi.fn(async () => new Response('<html>403 Forbidden</html>', { status: 403, headers: { 'content-type': 'text/html' } }));
+    expect(await checkDispatchReadiness(ENV, html as unknown as typeof fetch)).toMatchObject({ status: 'degraded', reason: 'SOLVER_ERROR' });
+    // The solver's own refusal stays a definite misconfiguration.
+    expect(await checkDispatchReadiness(ENV, fakeFetch({ status: 401, body: { detail: 'Invalid solver token' } }).f)).toMatchObject({ status: 'misconfigured' });
   });
 
   it('unreachable, timed out, an older solver or another error: only degraded', async () => {
@@ -151,6 +163,13 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { reason: 'SOLVER_UNREACHABLE' } });
+  });
+
+  it('a 403 from something in front of the solver is degraded: 200 (deploy not blocked) but ok false', async () => {
+    solverAnswers({ status: 403, body: { detail: 'Forbidden' } });
+    const res = await health();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_ERROR' } });
   });
 
   it('the database down is 503 whatever the solver says', async () => {

@@ -11,7 +11,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -26,7 +26,8 @@ const session = vi.hoisted(() => ({ role: 'SUPERVISOR' as string }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'sup1', tenantId: 'tA', role: session.role, name: 'S', email: 's@a.example' } })) }));
 
 import { JOB_LOST_AFTER_MS, resetStuckPlan, stuckPlanState } from '@/lib/dispatch/stuck-plan';
-import { repairStuckPlans, trackInflight } from '@/lib/jobs/optimize-job';
+import { isOptimizing, repairStuckPlans, trackInflight, whenIdle } from '@/lib/jobs/optimize-job';
+import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { POST as resetRoute } from '@/app/api/runs/[id]/reset-stuck/route';
 
 const T = 'tA';
@@ -162,6 +163,61 @@ describe('resetStuckPlan (Reset stuck plan)', () => {
   });
 });
 
+describe('second review of audit PR4: the plan screen read (getPlanDetail) racing the normal end of a live job', () => {
+  // The fake has no snapshot: the job's end (SUCCEEDED + READY) is written only after the read,
+  // which is what the read's REPEATABLE READ snapshot shows on PostgreSQL (the same schedule on a
+  // real database: tests/integration/recovery-races-db.spec.ts). During the read the job leaves
+  // the in-flight map, as its promise does right after its save commits.
+  const OLD = JOB_LOST_AFTER_MS + 60_000; // started 3 minutes ago: "lost" if it is not live
+
+  function liveJob() {
+    let finish!: () => void;
+    const done = new Promise<void>((r) => (finish = r));
+    expect(trackInflight('P', () => done)).toBe(true);
+    return { finish };
+  }
+
+  it('the job saves its plan and leaves the in-flight map during the read: no stuck line, no Reset button', async () => {
+    seed({}, [job('RUNNING', OLD)]);
+    const { finish } = liveJob();
+    const findFirst = fakePrisma.runJob.findFirst;
+    const spy = vi.spyOn(fakePrisma.runJob, 'findFirst').mockImplementationOnce(async (a: unknown) => {
+      finish();
+      await whenIdle('P');
+      expect(isOptimizing('P')).toBe(false); // left the map before the read asks about the job
+      return findFirst(a);
+    });
+    const d = (await getPlanDetail(T, 'P', { now: NOW }))!;
+    spy.mockRestore();
+    // The read's snapshot: still optimizing, the job still running (the race happened).
+    expect(d.run.status).toBe('OPTIMIZING');
+    expect(d.job?.status).toBe('RUNNING');
+    // Before the fix: JOB_LOST, "the server restarted while it ran", resettable (Reset stuck plan).
+    expect(d.stuck ?? null).toBeNull();
+    // The commit the snapshot did not see: the next reload shows the plan, never stuck.
+    Object.assign(row('runJob', 'J1'), { status: 'SUCCEEDED', finishedAt: NOW, progressPct: 100 });
+    row('runPlan', 'P').status = 'READY';
+    const next = (await getPlanDetail(T, 'P', { now: NOW }))!;
+    expect(next.run.status).toBe('READY');
+    expect(next.stuck ?? null).toBeNull();
+  });
+
+  it('controls: a live job is not stuck; a job not running in this server and 3 minutes old is lost (resettable)', async () => {
+    seed({}, [job('RUNNING', OLD)]);
+    const { finish } = liveJob();
+    expect((await getPlanDetail(T, 'P', { now: NOW }))!.stuck ?? null).toBeNull();
+    finish();
+    await whenIdle('P');
+    expect(await getPlanDetail(T, 'P', { now: NOW })).toMatchObject({ run: { status: 'OPTIMIZING' }, stuck: { kind: 'JOB_LOST', resettable: true } });
+    // A plan behind an ended job is stuck whatever the in-flight map says.
+    seed({}, [job('FAILED')]);
+    const again = liveJob();
+    expect(await getPlanDetail(T, 'P', { now: NOW })).toMatchObject({ stuck: { kind: 'JOB_ENDED', resettable: true } });
+    again.finish();
+    await whenIdle('P');
+  });
+});
+
 describe('the "Reset stuck plan" button (static: the plan screens)', () => {
   const read = (p: string) => readFileSync(path.join(__dirname, '../..', p), 'utf8');
 
@@ -215,6 +271,20 @@ describe('review of audit PR4: the stuck-plan text names only what the viewer ca
     expect(guide).toContain('A plan stuck on "Optimizing…"');
     expect(guide).not.toMatch(/resets it first/);
     expect(guide).toMatch(/\*\*Reset stuck plan\*\* now/);
+  });
+
+  it('second review of audit PR4: the admin runbook says the same (the buttons are greyed out; the janitor or Reset stuck plan)', () => {
+    const admin = read('../../docs/admin.md');
+    const start = admin.indexOf('### When a run is stuck "Optimizing"');
+    expect(start).toBeGreaterThan(-1);
+    const end = admin.indexOf('\n### ', start + 5);
+    const section = admin.slice(start, end === -1 ? undefined : end);
+    // Before: "**OPTIMIZE** and **Re-plan** on such a plan do the same first, then start a new optimization."
+    expect(section).not.toMatch(/on such a plan do the same first|resets it first/);
+    expect(section).toMatch(/\*\*OPTIMIZE\*\* and \*\*Re-plan\*\* stay greyed out while the plan shows \*Optimizing…\*/);
+    expect(section).toMatch(/or a supervisor presses \*\*Reset stuck plan\*\* now/);
+    // Reset stuck plan also covers a plan whose job has already ended, not only a job lost by a restart.
+    expect(section).toContain('a plan whose job has already ended');
   });
 });
 

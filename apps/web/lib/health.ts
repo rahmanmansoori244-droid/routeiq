@@ -13,8 +13,8 @@
  * The three answers:
  * - `ready`: everything works (HTTP 200, `ok: true`);
  * - `degraded`: nothing is known to be wrong, but the solver could not be asked (unreachable, timed
- *   out, an older solver without /ready, a 5xx). HTTP 200 so a deploy is not blocked, `ok: false` so
- *   monitoring alerts;
+ *   out, an older solver without /ready, a 5xx, a 403 from a proxy in front of it - the solver itself
+ *   never answers 403). HTTP 200 so a deploy is not blocked, `ok: false` so monitoring alerts;
  * - `not_ready`: a definite fault - the database is down, or dispatch is misconfigured (a token
  *   missing on the web, the solver answers 401, or the solver has no token itself). HTTP 503: the
  *   deploy gate fails and the previous version keeps serving.
@@ -58,7 +58,7 @@ const MESSAGES: Record<DispatchReason, string> = {
   SOLVER_NOT_CONFIGURED: 'The route optimizer has no SOLVER_TOKEN set: it refuses every optimization.',
   SOLVER_UNREACHABLE: 'The route optimizer did not answer (unreachable or too slow). Plans cannot be optimized until it answers.',
   SOLVER_READY_UNSUPPORTED: 'The route optimizer is an older version without the readiness check: the token could not be verified.',
-  SOLVER_ERROR: 'The route optimizer answered with an error to the readiness check.',
+  SOLVER_ERROR: 'The route optimizer, or a proxy in front of it, answered the readiness check with an error.',
 };
 
 function answer(status: DispatchReadiness['status'], reason: DispatchReason, routing: Routing = null): DispatchReadiness {
@@ -102,7 +102,11 @@ export async function checkDispatchReadiness(
     clearTimeout(timer);
   }
   const body = (await res.json().catch(() => null)) as { ok?: unknown; detail?: unknown; routing?: unknown } | null;
-  if (res.status === 401 || res.status === 403) return answer('misconfigured', 'SOLVER_TOKEN_REJECTED');
+  // Only the solver's own refusal is a definite misconfiguration: _check_token answers 401 and never
+  // 403. A 403 comes from something in front of the solver (a proxy, a firewall, a wrong host): the
+  // token was never checked, so it is only degraded like any other error (owner decision 5;
+  // second review of audit PR4).
+  if (res.status === 401) return answer('misconfigured', 'SOLVER_TOKEN_REJECTED');
   // The solver's own token is missing: _check_token answers 500 "Solver not configured".
   if (typeof body?.detail === 'string' && /not configured/i.test(body.detail)) return answer('misconfigured', 'SOLVER_NOT_CONFIGURED');
   // A solver deployed before /ready existed (web and solver deploy independently).

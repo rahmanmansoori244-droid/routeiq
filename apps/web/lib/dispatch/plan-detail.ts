@@ -289,10 +289,19 @@ export const PLAN_DETAIL_TX = { maxWait: 5_000, timeout: 20_000 } as const;
  * "ok". The transaction only reads (MVCC: it never blocks a writer and is never blocked) and is
  * kept short: nothing slow (road shapes, rendering the workbook or PDF) runs inside it; the export
  * routes render after this returns.
+ *
+ * Second review of audit PR4: whether this web process runs the plan's optimization (the in-flight
+ * map, for PlanDetail.stuck) is asked BEFORE the snapshot starts, not at the end of the read. A job
+ * that saved its plan and left the map while the read ran is still OPTIMIZING / RUNNING in the
+ * snapshot; asked at the end, it looked "lost", and the screen showed "the server restarted" and
+ * Reset stuck plan for one reload. Asked first: a job in the map then is either still active in
+ * the snapshot (really optimizing) or already ended there (plan READY or FAILED, never stuck); a
+ * job started after the question is under 2 minutes old, so never "lost" (JOB_LOST_AFTER_MS).
  */
 export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}): Promise<PlanDetail | null> {
   const db = tenantDb(tenantId);
-  return db.$transaction((tx) => readPlanDetail(tx as unknown as DetailDb, tenantId, runId, clock), {
+  const liveAtStart = isOptimizing(runId);
+  return db.$transaction((tx) => readPlanDetail(tx as unknown as DetailDb, tenantId, runId, clock, liveAtStart), {
     isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
     ...PLAN_DETAIL_TX,
   });
@@ -301,7 +310,8 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
 /** The tenant-scoped transaction client getPlanDetail reads through (typed as a plain transaction client). */
 type DetailDb = Prisma.TransactionClient;
 
-async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clock: { now?: Date }): Promise<PlanDetail | null> {
+/** `liveAtStart`: this web process was running the plan's optimization when the read began (getPlanDetail). */
+async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clock: { now?: Date }, liveAtStart: boolean): Promise<PlanDetail | null> {
   const run = await db.runPlan.findUnique({ where: { id: runId }, include: { depot: true } });
   if (!run) return null;
   const cfg = await db.tenantConfig.findUnique({ where: { tenantId } });
@@ -560,7 +570,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     select: { id: true, version: true, status: true, supersededAt: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
   });
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
-  const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, clock.now ?? new Date()) : null;
+  const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, liveAtStart, clock.now ?? new Date()) : null;
   const live = !isSupersededRun(run);
   const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
   let pendingOrders = 0;
@@ -702,16 +712,20 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   };
 }
 
-/** Audit F09: is this OPTIMIZING version stuck (its current job ended, missing or lost)? */
+/**
+ * Audit F09: is this OPTIMIZING version stuck (its current job ended, missing or lost)? `live`: the
+ * in-flight map as it was before the snapshot began (getPlanDetail), never asked during the read.
+ */
 async function stuckOf(
   db: DetailDb,
   run: { id: string; status: string; currentJobId: string | null },
   latest: { id: string; status: string; createdAt: Date; startedAt: Date | null } | null,
+  live: boolean,
   now: Date,
 ): Promise<StuckState | null> {
   const current = !run.currentJobId ? null : latest?.id === run.currentJobId ? latest : await db.runJob.findFirst({ where: { id: run.currentJobId, runId: run.id } });
   const otherActive = (await db.runJob.count({ where: { runId: run.id, status: { in: ['QUEUED', 'RUNNING'] } } })) > 0;
-  return stuckPlanState(run, current, otherActive, isOptimizing(run.id), now);
+  return stuckPlanState(run, current, otherActive, live, now);
 }
 
 /**

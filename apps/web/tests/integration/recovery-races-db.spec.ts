@@ -18,7 +18,9 @@
  *    before the fix is repaired by the sweep, a retry of OPTIMIZE / RE-PLAN starts real work, the
  *    job failure is one transaction, and "Reset stuck plan" is serialized by the plan row lock;
  *    (review of audit PR4, .dev/scratch-a4-v1/stale-stuck) an OPTIMIZE racing the end of the
- *    plan's job never answers 409 PLAN_STUCK for a plan that is not stuck;
+ *    plan's job never answers 409 PLAN_STUCK for a plan that is not stuck; (second review,
+ *    .dev/scratch-a4-v2/flash) a plan read racing the normal end of a live job never shows the
+ *    stuck line or Reset stuck plan;
  *  - F21: a plan read or an Excel export racing "Use instead" returns one revision (summary,
  *    chosen option, loads and reconciliation agree), and the read stays tenant-scoped.
  */
@@ -601,6 +603,47 @@ describe('F09: a plan can no longer be stranded on "optimizing" (real PostgreSQL
     expect(res.status).toBe(202);
     expect(res.body.runJobId).not.toBe(jobId);
     expect((await jobsDone(runId)).status).toBe('READY');
+  });
+
+  it('second review of audit PR4: a plan read racing the normal end of a live job never shows the stuck line or Reset stuck plan', async () => {
+    const h = await dispatchTenant('f09d');
+    const { runId, jobId } = await optimizingPlan(h, 11);
+    // Started 3 minutes ago (past JOB_LOST_AFTER_MS): "lost" as soon as it is not live.
+    await prisma.runJob.update({ where: { id: jobId }, data: { startedAt: new Date(Date.now() - 3 * 60_000) } });
+    // The job runs in this web process (its promise is in the in-flight map) until `end`.
+    const end = deferred();
+    expect(jobs.trackInflight(runId, () => end.promise)).toBe(true);
+    // Control: a live job, no race - not stuck.
+    expect((await planDetail.getPlanDetail(h.tenantId, runId))?.stuck ?? null).toBeNull();
+
+    // The reviewers' schedule (.dev/scratch-a4-v2/flash): after the read's snapshot began, before
+    // its job lookup, the job saves its plan (job SUCCEEDED, plan READY in one transaction) and
+    // its promise leaves the in-flight map.
+    let ran = false;
+    hooks.set('RunJob.findFirst', {
+      before: async () => {
+        hooks.delete('RunJob.findFirst');
+        await prisma.$transaction([
+          prisma.runJob.update({ where: { id: jobId }, data: { status: 'SUCCEEDED', finishedAt: new Date(), progressPct: 100 } }),
+          prisma.runPlan.update({ where: { id: runId }, data: { status: 'READY' } }),
+        ]);
+        end.resolve();
+        await jobs.whenIdle(runId);
+        ran = true;
+      },
+    });
+    const d = (await planDetail.getPlanDetail(h.tenantId, runId))!;
+    expect(ran).toBe(true);
+    expect(jobs.isOptimizing(runId)).toBe(false);
+    // The snapshot is from before the save: still optimizing, the job still running ...
+    expect(d.run.status).toBe('OPTIMIZING');
+    expect(d.job?.status).toBe('RUNNING');
+    // ... and not stuck. Before the fix: JOB_LOST, resettable ("the server restarted while it ran").
+    expect(d.stuck ?? null).toBeNull();
+    // The next reload shows the plan.
+    const after = (await planDetail.getPlanDetail(h.tenantId, runId))!;
+    expect(after.run.status).toBe('READY');
+    expect(after.stuck ?? null).toBeNull();
   });
 
   it('a job failure is one transaction: when its audit row cannot be written nothing changes (the janitor fails both later)', async () => {
