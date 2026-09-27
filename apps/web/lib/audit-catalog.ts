@@ -43,6 +43,7 @@ export const AUDIT_ACTIONS = {
   PLATFORM_ADMIN_REVOKED: { label: 'Platform admin revoked' },
   CUSTOMER_LOCATION_SET: { label: 'Customer location set' },
   LATE_ORDER_RECORDED: { label: 'Late order recorded' },
+  ORDERS_CARRIED_OVER: { label: 'Orders brought forward from earlier days' },
   ORDER_WEIGHTS_RESOLVED: { label: 'Order weights taken from products' },
   OPTIMIZE_STARTED: { label: 'Optimization started' },
   OPTIMIZE_SUCCEEDED: { label: 'Optimization finished' },

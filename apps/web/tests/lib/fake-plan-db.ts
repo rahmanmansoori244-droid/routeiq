@@ -32,6 +32,12 @@ function match(row: Row, where: Row | undefined): boolean {
     }
     if (['run', 'order', 'customer', 'load', 'truck', 'scenario'].includes(k)) continue; // relation filters: ignored
     if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
+      // Ranges (dates, numbers, strings); a row without the field is outside every range.
+      const val = (x: unknown) => (x instanceof Date ? x.getTime() : x) as number | string;
+      if ('gte' in v && !(row[k] != null && val(row[k]) >= val(v.gte))) return false;
+      if ('lte' in v && !(row[k] != null && val(row[k]) <= val(v.lte))) return false;
+      if ('gt' in v && !(row[k] != null && val(row[k]) > val(v.gt))) return false;
+      if ('lt' in v && !(row[k] != null && val(row[k]) < val(v.lt))) return false;
       if ('in' in v && !(v.in as unknown[]).some((x) => eq(row[k], x))) return false;
       if ('notIn' in v && (v.notIn as unknown[]).some((x) => eq(row[k], x))) return false;
       if ('not' in v) {
@@ -54,7 +60,13 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
     driver: () => null,
   },
   scenarioResult: { unservedOrders: (r) => (tables.unservedOrder ?? []).filter((u) => u.scenarioId === r.id).map((u) => ({ ...u })) },
-  order: { customer: () => ({ id: 'c', code: 'C', branchKey: '__MAIN__' }), lines: () => [] },
+  // carriedTo (PR9): the copy an order was brought forward to, as the test row gives it. A row's own
+  // customer and lines (PR9 review: the carry window and the reconciliation read them) when it has them.
+  order: {
+    customer: (r) => r.customer ?? { id: 'c', code: 'C', branchKey: '__MAIN__' },
+    lines: (r) => r.lines ?? [],
+    carriedTo: (r) => r.carriedTo ?? null,
+  },
   runPlan: { depot: (r) => (tables.depot ?? []).find((d) => d.id === r.depotId) ?? { id: r.depotId, code: 'D', name: 'D', lat: 23.6, lng: 58.4 } },
   routeAssignment: { load: (r) => (tables.planLoad ?? []).find((l) => l.id === r.loadId) ?? null, order: (r) => orderOf(r.orderId) },
 };
@@ -104,7 +116,9 @@ const DEFAULTS: Record<string, () => Row> = {
 function delegate(model: string) {
   const t = () => (tables[model] ??= []);
   const create = (data: Row) => {
-    const r = { id: newId(model), createdAt: new Date(), ...(DEFAULTS[model]?.() ?? {}), ...data };
+    // An order created with its lines (a PR9 copy: lines: { create: [...] }) keeps them as rows with ids.
+    const nested = model === 'order' && Array.isArray(data.lines?.create) ? { lines: data.lines.create.map((l: Row) => ({ id: newId('orderLine'), ...l })) } : {};
+    const r = { id: newId(model), createdAt: new Date(), ...(DEFAULTS[model]?.() ?? {}), ...data, ...nested };
     t().push(r);
     return r;
   };
@@ -131,7 +145,11 @@ function delegate(model: string) {
     count: async (a: Row = {}) => t().filter((x) => match(x, a.where)).length,
     groupBy: async () => [],
     // Nested creates (ManualBaseline.assignments: { create: [...] }) stay on the row; include._count counts them.
-    create: async (a: Row) => withCount(create(a.data), a.include),
+    // Other includes read the relation (an order's lines).
+    create: async (a: Row) => {
+      const r = create(a.data);
+      return a.include && !a.include._count ? withInclude(model, r, a.include) : withCount(r, a.include);
+    },
     createMany: async (a: Row) => {
       for (const d of a.data) create(d);
       return { count: a.data.length };

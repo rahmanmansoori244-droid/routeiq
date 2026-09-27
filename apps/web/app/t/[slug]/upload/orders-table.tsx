@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { carriedFromBadge, carriedToBadge, orderCarryMarks, orderListTotals } from '@/lib/dispatch/carry-view';
 
 export interface OrderRow {
   id: string;
@@ -25,6 +26,10 @@ export interface OrderRow {
     region: { id: string; code: string } | null;
   };
   _count: { lines: number };
+  /** PR9: the date this order was first due, when it was brought forward from an earlier day. */
+  carriedFromDate?: Date | null;
+  /** PR9: the copy this order was brought forward to (it is no longer open on its own day). */
+  carriedTo?: { deliveryDate: Date } | null;
 }
 
 export interface RegionOption {
@@ -67,19 +72,9 @@ export function OrdersTable({ initial, regions }: { initial: OrderRow[]; regions
     });
   }, [initial, q, date, regionFilter]);
 
-  // Aggregate totals for the filtered set
-  const totals = useMemo(
-    () =>
-      filtered.reduce(
-        (acc, o) => {
-          acc.cases += o.totalCases;
-          acc.kg += o.totalWeightKg;
-          return acc;
-        },
-        { cases: 0, kg: 0 },
-      ),
-    [filtered],
-  );
+  // Aggregate totals for the filtered set. PR9: an order brought forward to a later day is counted
+  // there (its copy), not twice.
+  const totals = useMemo(() => orderListTotals(filtered), [filtered]);
 
   if (initial.length === 0) {
     return (
@@ -124,6 +119,7 @@ export function OrdersTable({ initial, regions }: { initial: OrderRow[]; regions
         </Select>
         <span className="ms-auto text-xs text-muted-foreground">
           {filtered.length} of {initial.length} orders · {totals.cases.toLocaleString()} cases · {totals.kg.toLocaleString()} kg
+          {totals.carried ? ` · ${totals.carried} carried over to a later day (counted there)` : ''}
         </span>
       </div>
 
@@ -157,7 +153,28 @@ export function OrdersTable({ initial, regions }: { initial: OrderRow[]; regions
                   <Badge variant="outline">{o.priority}</Badge>
                 </TableCell>
                 <TableCell>
-                  <Badge variant={STATUS_VARIANT[o.status]}>{o.status.toLowerCase()}</Badge>
+                  {(() => {
+                    // PR9: a carried original is not open here any more; its copy says where it came from.
+                    const m = orderCarryMarks(o);
+                    return m.to ? (
+                      <Badge
+                        variant="secondary"
+                        data-testid="order-carried-to"
+                        title={`Not delivered on this day (${o.status.toLowerCase()} in its plan): brought forward, planned on that day now.`}
+                      >
+                        {carriedToBadge(m.to)}
+                      </Badge>
+                    ) : (
+                      <>
+                        <Badge variant={STATUS_VARIANT[o.status]}>{o.status.toLowerCase()}</Badge>
+                        {m.from ? (
+                          <Badge variant="warning" className="ml-1" data-testid="order-carried-from">
+                            {carriedFromBadge(m.from)}
+                          </Badge>
+                        ) : null}
+                      </>
+                    );
+                  })()}
                 </TableCell>
               </TableRow>
             ))}

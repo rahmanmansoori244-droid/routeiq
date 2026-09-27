@@ -60,6 +60,20 @@ export const DELETE = (req: Request, { params }: Params) =>
               if (running) {
                 throw new DeleteRefused(`A plan for ${isoOf(running.runDate)} is being optimized. Wait for it to finish.`, 409, 'PLAN_OPTIMIZING');
               }
+              // PR9: an order of this file brought forward to a later day has a copy there, linked to
+              // it: deleting the file would leave that copy without its original.
+              const carriedAway = await tx.order.findMany({
+                where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } },
+                select: { carriedTo: { select: { deliveryDate: true } } },
+              });
+              if (carriedAway.length) {
+                const to = [...new Set(carriedAway.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])))].sort().join(', ');
+                throw new DeleteRefused(
+                  `${carriedAway.length} order(s) from this file were brought forward to ${to || 'a later day'}, so the file cannot be deleted. Nothing was changed; ask your RouteIQ administrator.`,
+                  409,
+                  'BATCH_CARRIED',
+                );
+              }
               // Every plan version that used these orders: loads, unserved rows, or the scope of the
               // option in use (orders left out before the optimizer, e.g. no location, are there too).
               const used = new Map<string, { date: string; version: number }>();

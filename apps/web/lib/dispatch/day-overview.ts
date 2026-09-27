@@ -67,6 +67,28 @@ export interface DayOutdated {
 }
 export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 });
 
+/** PR9: an order of this day brought forward from an earlier day (badge "Carried over from 26 Sep"). */
+export interface CarriedInOrder {
+  orderId: string;
+  customerCode: string;
+  branchCode: string | null;
+  customerName: string;
+  cases: number;
+  /** The date the order was first due (YYYY-MM-DD). */
+  fromDate: string;
+  /** Not in the plan in use yet (RE-PLAN adds it). */
+  pending: boolean;
+}
+
+/** PR9: orders of this day brought forward to later days (not open here any more). */
+export interface CarriedOut {
+  orders: number;
+  /** Cases carried (the copies' cases: the open part of each order). */
+  cases: number;
+  /** The days they went to (YYYY-MM-DD, sorted). */
+  toDates: string[];
+}
+
 export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null }) {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
@@ -83,7 +105,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0 }, openOrders: 0, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -243,15 +265,37 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     (a, b) => Number(b.blocking) - Number(a.blocking) || b.issues.length - a.issues.length || a.priority - b.priority || b.cases - a.cases,
   );
 
-  let pending = { orderIds: [] as string[], count: 0, cases: 0, late: 0 };
+  let pending = { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 };
   let planInfo = null;
   if (plan) {
     const job = await db.runJob.findFirst({ where: { runId: plan.id }, orderBy: { attemptNo: 'desc' } });
     if (d?.scope) {
       const p = orders.filter((o) => !inScope.has(o.id));
-      pending = { orderIds: p.map((o) => o.id), count: p.length, cases: p.reduce((a, o) => a + o.totalCases, 0), late: p.filter((o) => o.isLate).length };
+      pending = {
+        orderIds: p.map((o) => o.id),
+        count: p.length,
+        cases: p.reduce((a, o) => a + o.totalCases, 0),
+        late: p.filter((o) => o.isLate).length,
+        // PR9: brought forward from earlier days (a re-plan adds them like late orders).
+        carried: p.filter((o) => o.carriedFromOrderId).length,
+      };
     }
     const loads = await db.planLoad.groupBy({ by: ['status'], where: { runId: plan.id }, _count: { _all: true } });
+    // PR9: the loads that are this day's work - a load that never left the depot and holds only
+    // orders brought forward to a later day is not (it stays in the plan for the record): Step 3
+    // never says "unlock it" or "every load has left the depot" because of it.
+    const ofDay = await db.planLoad.groupBy({
+      by: ['status'],
+      where: {
+        runId: plan.id,
+        OR: [
+          { status: { in: ['DISPATCHED', 'COMPLETED'] } },
+          { assignments: { some: { order: { carriedToOrderId: null } } } },
+          { assignments: { none: {} } },
+        ],
+      },
+      _count: { _all: true },
+    });
     planInfo = {
       id: plan.id,
       version: plan.version,
@@ -260,10 +304,38 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       chosen: !!plan.chosenScenarioId,
       job: job ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct } : null,
       loadsByStatus: Object.fromEntries(loads.map((g) => [g.status, g._count._all])),
+      /** Loads by status without the ones that never left and hold only orders brought forward (PR9). */
+      loadsOfDay: Object.fromEntries(ofDay.map((g) => [g.status, g._count._all])),
       summary: plan.summaryJson,
       reconciliationOk: (plan.reconciliationJson as { ok?: boolean } | null)?.ok ?? null,
     };
   }
+  // PR9: brought forward from earlier days (the day screen's order list marks them), and orders of
+  // this day brought forward to later days (no longer open here; the plan versions keep them).
+  const pendingIds = new Set(pending.orderIds);
+  const carriedIn: CarriedInOrder[] = orders
+    .filter((o) => o.carriedFromOrderId)
+    .map((o) => ({
+      orderId: o.id,
+      customerCode: o.customer.code,
+      branchCode: o.customer.branchCode,
+      customerName: o.customer.name,
+      cases: o.totalCases,
+      fromDate: isoOf(o.carriedFromDate ?? o.deliveryDate),
+      pending: !plan?.chosenScenarioId || pendingIds.has(o.id),
+    }))
+    .sort((a, b) => a.fromDate.localeCompare(b.fromDate) || a.customerCode.localeCompare(b.customerCode));
+  const away = await prisma.order.findMany({
+    where: { ...where, carriedToOrderId: { not: null } },
+    select: { carriedTo: { select: { deliveryDate: true, totalCases: true } } },
+  });
+  const carriedOut: CarriedOut | null = away.length
+    ? {
+        orders: away.length,
+        cases: away.reduce((a, o) => a + (o.carriedTo?.totalCases ?? 0), 0),
+        toDates: [...new Set(away.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])))].sort(),
+      }
+    : null;
   const trucks = await db.truck.findMany({ where: { depotId: depot.id, active: true }, select: { capacityCases: true } });
   const batches = await db.uploadBatch.findMany({
     where: { OR: [{ deliveryDate: dateOnly(date) }, { orders: { some: { deliveryDate: dateOnly(date) } } }], depotId: depot.id },
@@ -296,6 +368,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * use. 0 while orders exist = nothing left to plan (OPTIMIZE / RE-PLAN answer NOTHING_TO_PLAN).
      */
     openOrders: openCasesOf.size,
+    carriedIn,
+    carriedOut,
     /**
      * The plan in use is out of date without a new order waiting: open cases on it whose case
      * weight was entered or corrected since, orders of customers deactivated since that are still

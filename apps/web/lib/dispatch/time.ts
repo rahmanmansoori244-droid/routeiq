@@ -118,3 +118,12 @@ export function dateOnly(iso: string): Date {
 export function isoOf(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2026-09-27" -> "27 Sep" (the day and month a dispatcher reads, e.g. "Carried over from 27 Sep"). */
+export function fmtDayMonth(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!m) return iso;
+  return `${Number(m[3])} ${MONTHS[Number(m[2]) - 1] ?? m[2]}`;
+}

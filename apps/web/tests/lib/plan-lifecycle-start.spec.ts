@@ -355,3 +355,78 @@ describe('review fixes: in-place optimize, advice, weights at the start', () => 
     admissionIdle();
   });
 });
+
+describe('PR9: an order brought forward to a later day while the start was prepared', () => {
+  it('an open order of the request carried meanwhile: 409 ORDERS_CHANGED, no job, the plan is not OPTIMIZING', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    row('order', 'O2').carriedToOrderId = 'O2-copy';
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ORDERS_CHANGED');
+    expect(String(res.body.error)).toMatch(/brought forward to a later day/);
+    expect(tables.runJob).toHaveLength(0);
+    expect(row('runPlan', 'P').status).toBe('DRAFT');
+    admissionIdle();
+  });
+
+  it('PR9 review: every open order of the day was brought forward - the re-plan says so, never "every load has left the depot" or "unlock"', async () => {
+    seed();
+    // The dispatcher unlocked the load holding only a brought-forward order, as the app said, and re-plans:
+    // the builder leaves carried orders out, so nothing is left to plan.
+    Object.assign(row('order', 'O2'), { carriedToOrderId: 'O2-copy', deliveryDate: DAY, depotId: 'D1' });
+    for (const l of tables.planLoad) l.status = l.id === 'L1' ? 'DISPATCHED' : 'PLANNED';
+    buildState.orderIds = [];
+    const reserve = vi.spyOn(solveAdmission, 'reserve');
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 1 });
+    expect(String(res.body.error)).toMatch(/^Nothing left to plan: 1 order\(s\) of this day were brought forward to a later day and are planned there and every other order/);
+    expect(String(res.body.error)).toMatch(/nothing needs to be re-planned/);
+    expect(String(res.body.error)).not.toMatch(/left the depot|unlock|Upload orders first/i);
+    expect(createNextVersion).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+  });
+
+  it('PR9 review: with a locked load still holding an order of the day, the answer adds how to change it (unlock)', async () => {
+    seed(); // L1 LOCKED holds O1
+    Object.assign(row('order', 'O2'), { carriedToOrderId: 'O2-copy', deliveryDate: DAY, depotId: 'D1' });
+    buildState.orderIds = [];
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 1 });
+    expect(String(res.body.error)).toMatch(/To change a locked or loading load, unlock it first\.$/);
+  });
+
+  it('PR9 second review: a locked load holding only brought-forward orders was loaded - the answer says to unload it, never "never loaded"', async () => {
+    seed(); // L1 LOCKED (loaded at night), L2 PLANNED
+    Object.assign(row('order', 'O1'), { carriedToOrderId: 'O1-copy', deliveryDate: DAY, depotId: 'D1' });
+    tables.routeAssignment = [{ id: 'A1', runId: 'P', loadId: 'L1', orderId: 'O1' }];
+    buildState.orderIds = [];
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 1 });
+    expect(String(res.body.error)).toContain(
+      "1 locked or loading load(s) hold only brought-forward orders and were loaded: unload those cases back to stock, or tell the warehouse, before the loads of the later day are picked; then put the load back to Planned.",
+    );
+    expect(String(res.body.error)).not.toMatch(/never loaded/);
+  });
+
+  it('PR9 review: a day whose orders were all brought forward is not told to "upload orders first"', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    for (const id of ['O1', 'O2']) Object.assign(row('order', id), { carriedToOrderId: `${id}-copy`, deliveryDate: DAY, depotId: 'D1' });
+    buildState.orderIds = [];
+    buildState.frozenOrderIds = [];
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 2 });
+    expect(String(res.body.error)).not.toMatch(/Upload orders first|every other order/);
+    expect(tables.runJob).toHaveLength(0);
+    admissionIdle();
+  });
+
+  it('an order carried from a locked load stays on that load (history): the start goes ahead', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    row('order', 'O1').carriedToOrderId = 'O1-copy';
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(202);
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+  });
+});

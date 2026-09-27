@@ -15,6 +15,9 @@ import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
+import { CarryOverPanel } from './carry-over-panel';
+import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Issue {
   code: string;
@@ -42,6 +45,8 @@ interface WeightGap {
 }
 interface Day {
   date: string;
+  /** The company's today (tenant timezone). */
+  today: string;
   tomorrow: string;
   cutoff: string;
   depots: { id: string; code: string; name: string; lat: number; lng: number }[];
@@ -64,10 +69,17 @@ interface Day {
     job: { status: string; message: string | null; progressPct: number } | null;
     /** Loads of the plan per status (PLANNED, LOCKED, LOADING, DISPATCHED, COMPLETED). */
     loadsByStatus?: Record<string, number>;
+    /** PR9: the same without loads that never left and hold only orders brought forward to a later day. */
+    loadsOfDay?: Record<string, number>;
   };
-  pending: { count: number; cases: number; late: number };
+  /** `carried`: of them, brought forward from earlier days (PR9). */
+  pending: { count: number; cases: number; late: number; carried?: number };
   /** Orders with cases not yet on a locked, loading or dispatched load (0 = nothing left to plan). */
   openOrders?: number;
+  /** PR9: orders of this day brought forward from earlier days (badge "Carried over from 26 Sep"). */
+  carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
+  /** PR9: orders of this day brought forward to later days (no longer open here). */
+  carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
   trucks: { active: number; capacityCases: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
 }
@@ -269,7 +281,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     const expect = { date: day.date, depotId: day.depot.id };
     const replanning = !!day.plan?.chosen;
     const planId = day.plan?.id;
-    const reason = day.pending.late ? 'LATE_ORDER' : 'REOPTIMIZE';
+    // Orders brought forward from earlier days are added like late orders (PR9).
+    const reason = day.pending.late || day.pending.carried ? 'LATE_ORDER' : 'REOPTIMIZE';
     // Busy until the day shows the result (the job, or the day as it is after a refusal), and
     // never stuck: api() never rejects, and the flag is cleared in finally (review of PR3).
     setOptimizing(true);
@@ -331,13 +344,24 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
   const planOutdated =
     !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0 || (outdated.masterChanged ?? 0) > 0 || (outdated.trucksChanged ?? 0) > 0);
-  // Every order is already on a locked, loading or dispatched load: OPTIMIZE / RE-PLAN would have
-  // nothing to plan (the server answers 409 NOTHING_TO_PLAN), so the button is off (review F03).
-  const nothingLeft = day.orders.count > 0 && day.openOrders === 0 && day.pending.count === 0;
+  // Every order is already on a locked, loading or dispatched load, or was brought forward to a
+  // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
+  // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
+  // "every load has left the depot" because of a load holding only brought-forward orders.
+  const allLoads = day.plan?.loadsByStatus ?? {};
+  // The day's loads without the ones that never left and hold only brought-forward orders (PR9).
+  const byStatus = day.plan?.loadsOfDay ?? allLoads;
+  const nothingLeftText = dayNothingLeftText({
+    orders: day.orders.count,
+    openOrders: day.openOrders,
+    pending: day.pending.count,
+    chosen: !!day.plan?.chosen,
+    carriedOut: day.carriedOut,
+    loadsByStatus: allLoads,
+    loadsOfDay: day.plan?.loadsOfDay,
+  });
+  const nothingLeft = nothingLeftText !== null;
   const lastFailed = day.plan?.status === 'FAILED';
-  const byStatus = day.plan?.loadsByStatus ?? {};
-  // A LOCKED or LOADING load can be unlocked (put back to locked); a dispatched one cannot.
-  const canUnlock = (byStatus.LOCKED ?? 0) + (byStatus.LOADING ?? 0) > 0;
   const loadCount = Object.values(byStatus).reduce((a, n) => a + n, 0);
   // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
   // FAILED, holding the plan that was dispatched).
@@ -409,6 +433,42 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </div>
         ) : null}
         {batch ? <ValidationPanel v={batch.v} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} disabled={!dayReady} /> : null}
+        {/* PR9: orders of earlier days that were not delivered, to bring forward to this day. */}
+        <CarryOverPanel
+          date={day.date}
+          depotId={day.depot.id}
+          canPlan={canPlan}
+          ready={dayReady}
+          busy={optimizing || planBusy || running}
+          reloadKey={`${day.orders.count}|${day.orders.cases}|${day.plan?.id ?? ''}|${day.batches.length}`}
+          onCarried={async () => {
+            // The day shows the orders waiting; the plan below (its pending orders and Re-plan) is read again in place.
+            if (await refresh()) setPlanReload((k) => k + 1);
+          }}
+        />
+        {day.carriedIn?.length ? (
+          <details className="rounded-md border p-2 text-sm" data-testid="carried-in">
+            <summary className="cursor-pointer">
+              {day.carriedIn.length} order(s) ({day.carriedIn.reduce((a, o) => a + o.cases, 0).toLocaleString()} cases) brought forward from earlier days
+              {day.carriedIn.some((o) => o.pending) ? `, ${day.carriedIn.filter((o) => o.pending).length} not planned yet` : ''}
+            </summary>
+            <ul className="mt-1 space-y-0.5 text-xs">
+              {day.carriedIn.map((o) => (
+                <li key={o.orderId} data-testid={`carried-in-${o.customerCode}`}>
+                  {o.customerName} <span className="text-muted-foreground">{o.customerCode}{o.branchCode ? ` / ${o.branchCode}` : ''} · {o.cases} cases</span>{' '}
+                  <Badge variant="warning">{carriedFromBadge(o.fromDate)}</Badge>
+                  {o.pending ? <span className="ml-1 text-muted-foreground">not planned yet</span> : null}
+                </li>
+              ))}
+            </ul>
+          </details>
+        ) : null}
+        {day.carriedOut?.orders ? (
+          <p className="text-xs text-muted-foreground" data-testid="carried-out">
+            {day.carriedOut.orders} order(s) ({day.carriedOut.cases.toLocaleString()} cases) of this day were not delivered and were brought forward to{' '}
+            {day.carriedOut.toDates.map(fmtDayMonth).join(', ')}: they are planned there, not on this day.
+          </p>
+        ) : null}
         {day.batches.length ? (
           <p className="text-xs text-muted-foreground">
             Files for this day: {day.batches.map((b) => `${b.fileName} (${b.status.toLowerCase()}${b.isLate ? ', late' : ''})`).join(' · ')}
@@ -474,7 +534,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       >
         {day.pending.count > 0 && day.plan?.chosen ? (
           <div className="rounded-md border border-amber-300 bg-amber-50 p-2 text-sm" data-testid="pending-orders">
-            {day.pending.count} order(s) ({day.pending.cases} cases{day.pending.late ? `, ${day.pending.late} late` : ''}) arrived after this plan. Re-plan to add them — locked and dispatched loads are kept exactly as they are.
+            {day.pending.count} order(s) ({day.pending.cases} cases{day.pending.late ? `, ${day.pending.late} late` : ''}
+            {day.pending.carried ? `, ${day.pending.carried} brought forward from earlier days` : ''}) arrived after this plan. Re-plan to add them — locked and dispatched loads are kept exactly as they are.
           </div>
         ) : null}
         {canPlan ? (
@@ -497,14 +558,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             . RE-PLAN to apply this — locked and dispatched loads are kept exactly as they are.
           </div>
         ) : null}
-        {nothingLeft && !running ? (
+        {nothingLeftText && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
-            Every order of this day is already on a locked, loading or dispatched load: nothing left to plan.
-            {canUnlock
-              ? day.plan?.chosen
-                ? ' To change a load, unlock it first.'
-                : ' This version has no optimized plan yet: unlock one load below, then OPTIMIZE.'
-              : ' Every load has left the depot; a late order for this day can still be planned.'}
+            {nothingLeftText}
           </p>
         ) : !needsPlan && day.plan?.chosen ? (
           <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>
@@ -525,6 +581,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
             reloadSignal={planReload}
+            today={day.today}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the

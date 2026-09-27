@@ -9,6 +9,8 @@
  * - plan detail and the exports stay readable by VIEWER (the dispatch team reads plans);
  * - the legacy driver app routes are GONE (410);
  * - an admin password reset (a new one-time password for a user) is TENANT_ADMIN, like invites.
+ * - PR9: "Bring forward" (POST /api/dispatch/carry-over) is PLANNER, like confirming a file and a
+ *   late order; its preview (GET) is readable by every role, like the day overview.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -38,6 +40,8 @@ const EXPECTED: Record<string, string> = {
   'PUT /api/depots/[id]': '405',
   'PATCH /api/depots/[id]': 'TENANT_ADMIN',
   'DELETE /api/depots/[id]': 'TENANT_ADMIN',
+  'GET /api/dispatch/carry-over': 'ANY',
+  'POST /api/dispatch/carry-over': 'PLANNER',
   'GET /api/dispatch/day': 'ANY',
   'POST /api/dispatch/late-order': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',

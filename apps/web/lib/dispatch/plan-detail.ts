@@ -25,7 +25,8 @@ import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, splitPa
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties } from '@routeiq/shared-types';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
-import { fmtWindow, isoOf } from './time';
+import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
+import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 
@@ -75,6 +76,17 @@ export interface DetailStop {
   snapshot: boolean;
   /** What changed in the customer master since planning (never applied silently: re-plan to adopt it). */
   masterChanged: MasterChange[];
+  /**
+   * PR9: an order of this stop was brought forward from an earlier day: the date it was first due
+   * (YYYY-MM-DD, the earliest of the stop's orders); null = none. Badge "Carried over from 26 Sep".
+   */
+  carriedFrom: string | null;
+  /**
+   * PR9: an order of this stop was brought forward to a later day (YYYY-MM-DD): not delivered on this
+   * day. Only on a load that never left (PLANNED, LOCKED, LOADING): a dispatched or completed stop
+   * was delivered, also when the rest of its split order was carried.
+   */
+  carriedTo: string | null;
 }
 
 export interface DetailLoad {
@@ -118,6 +130,11 @@ export interface DetailLoad {
   masterChanged: MasterChange[];
   /** The timetable check of this load's truck-day (review F04); null = the version has no applied plan. */
   timing: { status: TruckTiming; ok: boolean } | null;
+  /**
+   * PR9: orders on this load brought forward to a later day (it cannot be locked, loaded or dispatched
+   * with them); always 0 on a load that left (what left was delivered, never carried).
+   */
+  carriedAway: number;
 }
 
 export interface DetailUnserved {
@@ -135,6 +152,10 @@ export interface DetailUnserved {
   salesOrders: string[];
   /** Split delivery: only these cases of the order are unserved; the rest is on a truck. */
   partial: boolean;
+  /** PR9: brought forward from an earlier day: the date it was first due (YYYY-MM-DD). */
+  carriedFrom: string | null;
+  /** PR9: brought forward to a later day since (YYYY-MM-DD): planned there, not a problem of this plan. */
+  carriedTo: string | null;
 }
 
 export interface PlanDetail {
@@ -222,6 +243,24 @@ export interface PlanDetail {
   feasibilityGate?: 'enforce' | 'warn';
   /** The tenant settings the plan in use was built with (null: an option from before they were kept). */
   planSettings?: PlanSettings | null;
+  /** PR9: orders of this plan (on its loads or unserved) brought forward from earlier days. */
+  carriedIn?: CarrySummary | null;
+  /** PR9: orders of this plan brought forward to later days since: not delivered on this day, planned there. */
+  carriedOut?: CarrySummary | null;
+  /**
+   * PR9: the company's today (YYYY-MM-DD, its timezone) when the plan was read. A load of today
+   * holding an order brought forward to tomorrow says "re-plan today" / "unlock" on every plan
+   * screen (carriedLoadTitle), also the standalone plan version page, like the 409 ORDERS_CARRIED.
+   */
+  today?: string;
+}
+
+/** PR9: orders brought forward, in one line: how many, their cases and the days (first due, or went to). */
+export interface CarrySummary {
+  orders: number;
+  cases: number;
+  /** YYYY-MM-DD, sorted: the days the orders were first due (carriedIn) or went to (carriedOut). */
+  dates: string[];
 }
 
 /** "hard 06:00–14:00, preferred 07:00–10:00" from planned hours (describeWindows reads only these four). */
@@ -230,7 +269,8 @@ function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | n
   return { window: describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null };
 }
 
-export async function getPlanDetail(tenantId: string, runId: string): Promise<PlanDetail | null> {
+/** `clock.now`: the moment the company's today is read for (PlanDetail.today); the real clock by default. */
+export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}): Promise<PlanDetail | null> {
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUnique({ where: { id: runId }, include: { depot: true } });
   if (!run) return null;
@@ -255,6 +295,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
             include: {
               customer: true,
               lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
+              carriedTo: { select: { deliveryDate: true, totalCases: true } },
             },
           },
         },
@@ -270,6 +311,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
+    const carriedAwayOrders = new Set<string>();
     for (const a of l.assignments) {
       const o = a.order;
       const c = o.customer;
@@ -283,7 +325,16 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const s = stops.get(a.sequenceInTruck);
       const snap = readStopSnapshot(a.stopSnapshotJson);
+      // PR9: brought forward from an earlier day (the date first due), or to a later day since. What
+      // was carried is what never left, so only a load that never left (PLANNED, LOCKED, LOADING)
+      // holds carried cases: on a dispatched or completed load the cases were delivered (the part
+      // of a split order that left), and nothing is marked there (carriedLoadShows).
+      const cameFrom = o.carriedFromDate ? isoOf(o.carriedFromDate) : null;
+      const wentTo = o.carriedTo && carriedLoadShows(l.status) ? isoOf(o.carriedTo.deliveryDate) : null;
+      if (wentTo) carriedAwayOrders.add(o.id);
       if (s) {
+        if (cameFrom && (!s.carriedFrom || cameFrom < s.carriedFrom)) s.carriedFrom = cameFrom;
+        if (wentTo && (!s.carriedTo || wentTo > s.carriedTo)) s.carriedTo = wentTo;
         s.cases += cases;
         s.weightKg += weightKg;
         s.orderIds.push(o.id);
@@ -347,6 +398,8 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
               prefEndMin: eff.prefEnd,
             })
           : [],
+        carriedFrom: cameFrom,
+        carriedTo: wentTo,
       });
     }
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
@@ -386,6 +439,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       truckSnapshot: !!ts,
       masterChanged: ts ? truckMasterChanges(ts, l.truck) : [],
       timing: null,
+      carriedAway: carriedAwayOrders.size,
     };
   });
 
@@ -415,7 +469,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
   const unservedOrders = unservedRows.length
     ? await prisma.order.findMany({
         where: { tenantId, id: { in: unservedRows.map((u) => u.orderId) } },
-        include: { customer: true, lines: { select: { id: true, cases: true, weightKg: true, salesOrderNo: true } } },
+        include: { customer: true, lines: { select: { id: true, cases: true, weightKg: true, salesOrderNo: true } }, carriedTo: { select: { deliveryDate: true, totalCases: true } } },
       })
     : [];
   const uo = new Map(unservedOrders.map((o) => [o.id, o]));
@@ -439,10 +493,36 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         late: o.isLate,
         salesOrders: [...new Set(rowLines(o.lines, u.portionLinesJson).map((l) => l.salesOrderNo).filter((x): x is string => !!x))],
         partial: u.portionLinesJson !== null && onTruck.has(o.id), // some of this order is on a truck
+        carriedFrom: o.carriedFromDate ? isoOf(o.carriedFromDate) : null,
+        carriedTo: o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : null,
       };
     })
     .filter((x): x is DetailUnserved => x !== null)
     .sort((a, b) => a.priority - b.priority || b.cases - a.cases);
+
+  // PR9: orders of this plan brought forward from earlier days, and orders of it brought forward to
+  // later days since (the plan keeps them as they were: history; they are planned on that day now).
+  const inPlanOrders = new Map<string, { totalCases: number; carriedFromDate: Date | null }>();
+  for (const l of loads) for (const a of l.assignments) inPlanOrders.set(a.orderId, a.order);
+  for (const o of unservedOrders) inPlanOrders.set(o.id, o);
+  const cameIn = [...inPlanOrders.values()].filter((o) => o.carriedFromDate);
+  const carriedIn: CarrySummary | null = cameIn.length
+    ? { orders: cameIn.length, cases: cameIn.reduce((a, o) => a + o.totalCases, 0), dates: [...new Set(cameIn.map((o) => isoOf(o.carriedFromDate!)))].sort() }
+    : null;
+  const planOrderIds = [...new Set([...inPlanOrders.keys(), ...(chosenDetails ? [...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds] : [])])];
+  const wentOut = planOrderIds.length
+    ? await prisma.order.findMany({
+        where: { tenantId, id: { in: planOrderIds }, carriedToOrderId: { not: null } },
+        select: { id: true, carriedTo: { select: { deliveryDate: true, totalCases: true } } },
+      })
+    : [];
+  const carriedOut: CarrySummary | null = wentOut.length
+    ? {
+        orders: wentOut.length,
+        cases: wentOut.reduce((a, o) => a + (o.carriedTo?.totalCases ?? 0), 0),
+        dates: [...new Set(wentOut.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])))].sort(),
+      }
+    : null;
 
   const versions = await db.runPlan.findMany({
     where: { depotId: run.depotId, runDate: run.runDate },
@@ -584,6 +664,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     feasibility,
     feasibilityGate: feasibilityGateMode(),
     planSettings: inputs?.settings ?? null,
+    carriedIn,
+    carriedOut,
+    today: todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
   };
 }
 

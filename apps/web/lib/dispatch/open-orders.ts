@@ -15,6 +15,8 @@ export async function openOrders(tenantId: string, of: { customerId: string } | 
     tenantId,
     status: { in: OPEN },
     deliveryDate: { gte: from },
+    // PR9: an order brought forward to a later day is open there (its copy), not here.
+    carriedToOrderId: null,
     ...('customerId' in of ? { customerId: of.customerId } : { lines: { some: { productId: of.productId } } }),
   };
   const [orders, first] = await Promise.all([
@@ -47,6 +49,7 @@ export async function openMasterWeighedLines(tenantId: string, productId: string
       tenantId,
       status: { in: OPEN },
       deliveryDate: { gte: from },
+      carriedToOrderId: null,
       assignments: { none: { load: { status: { not: 'PLANNED' as const } }, run: { status: { not: 'SUPERSEDED' as const } } } },
     },
   };

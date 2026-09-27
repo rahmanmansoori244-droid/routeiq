@@ -2,6 +2,7 @@ import { getCurrentTenant } from '@/lib/tenant';
 import { canPlan } from '@/lib/rbac';
 import { PageShell } from '@/components/page-shell';
 import { UploadTabs } from './upload-tabs';
+import { ORDER_LIST_INCLUDE } from '@/lib/orders-list';
 
 export const metadata = { title: 'Upload orders — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -20,21 +21,11 @@ export default async function UploadPage({ params }: { params: { slug: string } 
         _count: { select: { orders: true } },
       },
     }),
+    // PR9: with the carry links, so a carried original and its copy are marked (orderCarryMarks).
     db.order.findMany({
       orderBy: [{ deliveryDate: 'desc' }, { uploadedAt: 'desc' }],
       take: 200,
-      include: {
-        customer: {
-          select: {
-            id: true,
-            code: true,
-            name: true,
-            branchKey: true,
-            region: { select: { id: true, code: true } },
-          },
-        },
-        _count: { select: { lines: true } },
-      },
+      include: ORDER_LIST_INCLUDE,
     }),
     db.region.findMany({ orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),
   ]);

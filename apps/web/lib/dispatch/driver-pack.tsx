@@ -22,6 +22,7 @@ import { isSupersededRun } from './plan-status';
 import { coordText, pinUrl, routeLinks, tripsByTruck, type RoutePlan } from './driver-links';
 import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
 import { fmtHhmm } from './time';
+import { carriedStopText } from './carry-view';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -40,6 +41,11 @@ export interface SheetStop {
   /** Split delivery: this stop is part `part` of `parts`; `others` says where the other parts go. */
   split: { part: number; parts: number; others: string[]; restUnserved: boolean } | null;
   late: boolean;
+  /**
+   * PR9: "CARRIED OVER from 26 Sep" (an order of this stop was not delivered on its own day and was
+   * brought forward), or "CARRIED OVER to 28 Sep - not for this trip" on a sheet of the earlier day.
+   */
+  carried: string | null;
   eta: string;
   /** Receiving hours, one line each: "Receives 06:00–14:00", "Best 07:00–10:00" or "Any time". */
   hours: string[];
@@ -146,6 +152,7 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,
+    carried: carriedStopText(s),
     eta: fmtHhmm(s.etaMin),
     hours: hoursLines(s.window),
     outsideHours: s.hardWindowOk === false,
@@ -312,6 +319,7 @@ function StopRow({ st }: { st: SheetStop }) {
           </T>
         ) : null}
         {st.late ? <T style={{ fontFamily: BOLD, fontSize: 8 }}>LATE ORDER</T> : null}
+        {st.carried ? <T style={{ fontFamily: BOLD, fontSize: 8 }}>{st.carried}</T> : null}
         {st.accessNotes ? <T style={{ fontSize: 7.5, fontFamily: 'Helvetica-Oblique' }}>Access: {st.accessNotes}</T> : null}
         {st.changeNotes.map((n) => (
           <T key={n} style={{ fontFamily: BOLD, fontSize: 7.5 }}>
