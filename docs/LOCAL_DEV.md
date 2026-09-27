@@ -1,7 +1,7 @@
 # Local development (Windows notes included)
 
 ## Prerequisites
-- Node 20+ and pnpm 9 (`corepack pnpm@9.15.9 …` works without a global install)
+- Node 22 (pinned: `.nvmrc`, root `engines`; a newer Node works but pnpm warns "Unsupported engine") and pnpm 9 (`corepack pnpm@9.15.9 …` works without a global install)
 - Python 3.11/3.12 for the solver (OR-Tools and PyVRP publish wheels for these)
 - PostgreSQL 16 (PostGIS optional; the init migration skips it when unavailable)
 

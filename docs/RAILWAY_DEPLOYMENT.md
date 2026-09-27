@@ -99,9 +99,14 @@ How it was done, and what to know if it is ever needed again:
   - The CLI drops builder, restart policy, pre-deploy and health-check settings: <https://github.com/railwayapp/cli/issues/1199>.
   - An IaC file must list *every* resource, or Railway plans to delete what is missing, including the database.
 
+**Node version of `web` (audit A1).** The repo pins Node 22 LTS: root `package.json` `engines.node` is `22.x`, and `.nvmrc` and `.node-version` say `22`. Nixpacks takes the Node major from the service variable `NIXPACKS_NODE_VERSION` if it is set, otherwise from `engines.node`, otherwise from `.nvmrc`. Before A1 `engines.node` was `>=20.0.0`, and the version Nixpacks picked for it is not recorded here.
+- After the A1 deploy, open the web build log: the setup line names the Node package (for example `nodejs_22`).
+- If it does not say 22, set `NIXPACKS_NODE_VERSION=22` on `web` and redeploy.
+- Build on staging first where one exists (assessment risk for PR 1). Do not set a Node version on `solver` or `routeiq-osrm`; they are Dockerfile builds without Node.
+
 Later, as a separate change, move `web` from Nixpacks to Railpack:
 - Build command `pnpm --filter @routeiq/web build`.
-- Pin Node with `engines.node` or `RAILPACK_NODE_VERSION`.
+- Node: Railpack reads `RAILPACK_NODE_VERSION`, `engines.node`, `.nvmrc` or `.node-version`; all say 22 since A1.
 - Fix the root `packageManager` (`pnpm@9.0.0`, while the lockfile is built with pnpm 9.15).
 - Source: <https://railpack.com/languages/node>.
 

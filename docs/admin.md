@@ -173,9 +173,10 @@ The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `li
 ## File upload hardening
 
 - Max 10 MB per file (CLAUDE.md §15).
-- Max 50,000 rows on the sheet that is read (a CSV: the file) — `parseUpload` checks it after the file is parsed, so the 10 MB limit is what bounds the parse. A workbook's other sheets are named in a warning, never counted (PR6 review).
+- Max 50,000 rows on the sheet that is read (a CSV: the file). At most 50,100 rows of each sheet (or of a CSV) are read at all; a sheet that goes on past them is refused when it is the one read, and named "N rows or more" when it is not. A workbook's other sheets are named in a warning, never counted (PR6 review; the read cap since the audit A1).
+- An .xlsx is measured by unpacking it before anything is read (`lib/workbook-guard.ts`, audit E2): refused over 50 MB unpacked, over 1,000 parts, with a part whose header size is wrong, password-protected, or not an Excel workbook. More than 10 sheets are refused before any sheet is read.
 - Content-type allowlist: CSV / XLSX / XLS only.
-- SheetJS parse wrapped in a 10-second wall-clock timeout (zip-bomb defense).
+- No parse timeout: parsing is synchronous in the web process, so the former 10-second timer could never fire and was removed (audit E2). The limits above bound how long one upload can block the app (about 2 s at worst); a worker with a real timeout is audit PR 5.
 - Filename sanitized before writing to `UploadBatch.fileName`: no path separators, max 200 chars.
 
 ---

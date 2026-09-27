@@ -23,7 +23,7 @@ Route optimization for NMWC (National Mineral Water Company, Oman): the **daily 
 
 ## Prerequisites
 
-- Node.js 20+
+- Node.js 22 LTS (pinned in `.nvmrc` and the root `engines`, the version CI and the Railway build use)
 - pnpm 9+
 - Python 3.11+ (for solver)
 - Postgres 16 with PostGIS extension
