@@ -3,7 +3,8 @@
  * stabilization PR2).
  *
  *  - a re-import without the service-time column keeps a dispatcher-confirmed time (and region,
- *    address) instead of writing the default 10 min over it;
+ *    address) instead of writing the default 10 min over it; a blank cell keeps it too (an import
+ *    cannot put a customer back on the default; audit A2 review);
  *  - a service time in the file counts as confirmed, so it wins over the customer-type default;
  *  - a code that differs only in letter case updates the existing customer, no twin is created;
  *  - the dry-run reports new / updated rows and confirmed times that would change;
@@ -50,6 +51,14 @@ describe('customer import', () => {
     const c = await prisma.customer.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'C100' } });
     expect(c).toMatchObject({ name: 'Hyper Bawshar', avgServiceTimeMin: 45, serviceTimeConfirmed: true, address: 'Bawshar' });
     expect(c.regionId).not.toBeNull();
+  });
+
+  it('a blank service-time cell keeps the confirmed 45 min: an import cannot put a customer back on the default (A2 review)', async () => {
+    const r = await importCsv('code,name,priority,avg_service_time_min\nC100,Hyper Bawshar,1,\n');
+    expect(r.status).toBe(200);
+    expect(r.body.data.errorRows ?? 0).toBe(0);
+    const c = await prisma.customer.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'C100' } });
+    expect(c).toMatchObject({ avgServiceTimeMin: 45, serviceTimeConfirmed: true });
   });
 
   it('a service time in the file is confirmed and wins over the customer-type default', async () => {

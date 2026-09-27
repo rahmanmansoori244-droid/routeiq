@@ -190,6 +190,9 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/PR8, \*\*awaiting owner approval/i, 'PR8 awaiting owner approval (decisions table)'],
       [/\(PR8, awaiting approval\.\)/i, 'PR8 awaiting approval (open questions)'],
       [/A behaviour change the owner must approve/i, 'PR8 as a change the owner must still approve'],
+      // Audit A2 review: a customer import cannot clear an unloading time (a blank cell keeps the
+      // stored time; customer-import-service-time.spec.ts); only the Details dialog, box emptied, can.
+      [/(clear|cleared|clearing|back (on|to) the default)[^.\n]*\bor (by )?an? (customer )?import\b/i, 'an import clearing an unloading time'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');

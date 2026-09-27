@@ -22,6 +22,8 @@ Red cards need action before optimizing:
   - If the link only shows the map area and not a pin, or the point looks wrong, click the map to put the pin exactly on the shop.
   - Degrees, minutes and seconds work as Google copies them (`23°35'09.2"N 58°24'21.2"E`). Minutes and seconds must be below 60: `23°99'` is refused with the reason, never moved to another point. Whole degrees only (`23°N 58°E`, about 100 km) or no seconds (`23°35'N 58°24'E`, about 2 km) are read but marked for a pin check: put the pin on the shop before saving.
   - **Read** and **Save location** always belong to the customer the window is open for. If you cancel while a link is still being read and open another customer, the late answer is ignored; while a Read runs, pressing Enter again does nothing. Changing the text also cancels a Read still running.
+  - **Save location** saves the point read from the text in the box. If you change the text after **Read**, the result turns grey (*Text changed - press Read*) and **Save location** stays off until you press **Read** for the new text. Text you typed but did not read is never saved (*Press Read to find this point before saving*). A pin you put on the map yourself can always be saved.
+  - After **Confirm & save** for a point outside Oman/UAE, a new point (read again or put on the map) is asked about again.
   - The location is saved permanently. Tomorrow RouteIQ already knows this customer.
   - After saving, the day and the plan below are refreshed straight away: its notes (*changed after planning*), the map and the WhatsApp messages use the new pin. No page reload needed.
 
@@ -36,7 +38,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Preferred hours:** nice to have.
 - **Details** saves only what you change. A priority or unloading time that is still a default shows as a default: the priority list says *P3 - default, not confirmed* (pick a priority, P3 included, to confirm it), and the unloading box is empty with the default in grey. Pressing **Save** without changing anything confirms nothing.
 - Times are **HH:MM** (06:30; 24:00 = midnight at the end of the day). A time such as 06:90 is refused with a message; nothing is saved.
-- **Unloading time** is whole minutes, 0 to 480. Leave it **empty** to use the customer-type or Settings default; **0** means no unloading time at all. Text such as *10 min* is refused. Clearing a customer's own time puts it back on the default.
+- **Unloading time** is whole minutes, 0 to 480. Leave it **empty** to use the customer-type or Settings default; **0** means no unloading time at all. Text such as *10 min* is refused. Clearing a customer's own time puts it back on the default. This is the only way back to the default: a customer import can set a new time but cannot clear one (a blank cell keeps the time already saved).
 
 ## 3. Optimize
 - Click **OPTIMIZE**. A normal day (80-120 customers) takes about half a minute to a minute. Bigger days get more search time, step by step: about 1.5-2 minutes at 150 customers, 3 minutes at 175, 4-5 minutes from 200.

@@ -41,6 +41,10 @@ interface Props {
  * Every Read and Save belongs to the dialog as it was when it started (audit F06, location-requests.ts):
  * an answer for another customer, a closed dialog or text changed since never reaches the dialog
  * on screen, and one request runs at a time (the Read button and the Enter key alike).
+ *
+ * A point read earlier is out of date once the text in the box is no longer the text it was read
+ * from (audit F06, residual): the preview is greyed with "Text changed - press Read", and Save waits
+ * for a Read of the text on screen. A pin the dispatcher drops by hand is the point and can be saved.
  */
 export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }: Props) {
   const [input, setInput] = useState('');
@@ -101,22 +105,43 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
     if (r.data.ok && r.data.lat !== undefined && r.data.lng !== undefined) {
       setPin({ lat: r.data.lat, lng: r.data.lng });
       setPinMoved(false);
+      // "Confirm & save" confirmed the earlier point being outside Oman/UAE, not this one.
+      setOutsideConfirm(false);
     }
   }
 
+  // The text in the box is not the text the point on screen was read from: other text typed after a
+  // Read, or text never read (with nothing read, only an empty box saves the pin already on the map).
+  const typed = input.trim();
+  const textUnread = typed !== (readFrom ?? '');
+  // No "press Read" while the Read of this text is running.
+  const unreadNote = !textUnread || reading
+    ? null
+    : pinMoved
+      ? typed
+        ? 'This text was not read: Save keeps the pin you set on the map. Press Read to use the text instead.'
+        : null
+      : readFrom === null
+        ? 'Press Read to find this point before saving.'
+        : typed
+          ? 'Text changed - press Read. The point shown is from the earlier text.'
+          : 'Text cleared - paste it again and press Read, or drop the pin on the map.';
   const needsConfirmation = !!parse && (parse.needsPin || !parse.ok);
-  const canSave = !!pin && (!needsConfirmation || pinMoved || (parse?.ok ?? false));
+  const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved || (parse?.ok ?? false));
 
   async function save() {
-    if (!customer || !pin) return;
+    // The same rule as the button (a click that reaches a disabled button saves nothing either).
+    if (!customer || !pin || !canSave) return;
     const ticket = reqs.beginSave();
     if (!ticket) return;
     setSaving(true);
     const target = customer;
     const source = pinMoved || !parse?.ok ? 'MAP_PIN' : parse?.source ?? 'MANUAL_LATLNG';
+    // The saved input is the text the point was read from, never text that was not read (a pin
+    // dropped by hand without a Read is stored as "map pin").
     const r = await api(`/api/customers/${target.customerId}/location`, {
       method: 'PUT',
-      json: { lat: pin.lat, lng: pin.lng, source, input: (readFrom ?? input.trim()) || undefined, confirmOutsideArea: outsideConfirm || undefined },
+      json: { lat: pin.lat, lng: pin.lng, source, input: readFrom ?? undefined, confirmOutsideArea: outsideConfirm || undefined },
     });
     if (!reqs.answered(ticket)) {
       // Closed, or opened for another customer, while saving: say what happened to this customer
@@ -176,9 +201,24 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
                 {reading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Read'}
               </Button>
             </div>
+            {unreadNote ? (
+              <p className="text-xs font-medium text-amber-800" data-testid="location-text-unread">
+                {unreadNote}
+              </p>
+            ) : null}
           </div>
           {parse ? (
-            <div className={`rounded-md border p-2 text-sm ${parse.ok && !parse.needsPin ? 'border-green-300 bg-green-50' : 'border-amber-300 bg-amber-50'}`}>
+            <div
+              data-testid="location-preview"
+              data-out-of-date={textUnread || undefined}
+              className={`rounded-md border p-2 text-sm ${
+                textUnread
+                  ? 'border-muted bg-muted/40 text-muted-foreground'
+                  : parse.ok && !parse.needsPin
+                    ? 'border-green-300 bg-green-50'
+                    : 'border-amber-300 bg-amber-50'
+              }`}
+            >
               {parse.ok ? (
                 <p>
                   Found <b>{parse.lat?.toFixed(6)}, {parse.lng?.toFixed(6)}</b> ({parse.confidence?.toLowerCase()} confidence).
@@ -188,7 +228,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
                 <p>{parse.error}</p>
               )}
               {parse.warnings.map((w) => (
-                <p key={w} className="text-xs text-amber-800">
+                <p key={w} className={`text-xs ${textUnread ? '' : 'text-amber-800'}`}>
                   {w}
                 </p>
               ))}
@@ -204,6 +244,8 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
               setReading(false);
               setPin({ lat, lng });
               setPinMoved(true);
+              // A new point: "Confirm & save" confirmed the earlier one being outside Oman/UAE.
+              setOutsideConfirm(false);
             }}
           />
           <p className="flex items-center gap-1 text-xs text-muted-foreground">
