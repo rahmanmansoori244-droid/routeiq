@@ -2,6 +2,14 @@
   "_comment": "Bounds of the planner settings the web accepts (Settings, Trucks, Depots) and the solver field each one feeds. Every range lies inside the solver's Pydantic contract (apps/solver/dispatch_models.py), so a saved value can never make an optimization fail with 422. Checked by apps/solver/tests/test_dispatch.py and apps/web/tests/lib/tenant-settings.spec.ts; the web copy is apps/web/lib/planner-bounds.ts.",
   "maxStops": 600,
   "largeDayStops": 350,
+  "searchTimeSec": {
+    "_comment": "RECOMMENDED's automatic search time in seconds by solvable stops (stabilization PR7, T1), as the Settings page states it: smallDaySec up to smallDayStops; the first point's seconds up to its stops; straight lines through the points, rounded to whole seconds; the last point's seconds up to largeDayStops; largeDaySec above. Never less than the pre-PR7 schedule (5 s up to 25 stops, 20 s up to 200, 150 s up to 350, 240 s above) for any day size. The solver's own copy is auto_time_limit / TIME_LIMIT_POINTS in apps/solver/dispatch_solver.py: apps/solver/tests/test_dispatch.py checks it against this schedule and these examples for every day size, and apps/web/tests/lib/tenant-settings.spec.ts checks the web copy (apps/web/lib/planner-bounds.ts) and the Settings row.",
+    "smallDayStops": 25,
+    "smallDaySec": 5,
+    "points": [[120, 20], [150, 50], [200, 150]],
+    "largeDaySec": 240,
+    "examples": [[1, 5], [25, 5], [26, 20], [120, 20], [135, 35], [150, 50], [175, 100], [200, 150], [201, 150], [240, 150], [299, 150], [300, 150], [350, 150], [351, 240], [600, 240]]
+  },
   "config": {
     "shiftStartMin": { "solver": "shift_start_min", "min": 0, "max": 1439, "int": true },
     "driverShiftMaxMinutes": { "solver": "shift_max_min", "min": 60, "max": 1440, "int": true },

@@ -271,7 +271,12 @@ export interface DispatchScenario {
   time_limit_sec: number;
   objective_value: number;
   objective: ObjectiveComponents;
+  /**
+   * Physical trucks of the day: the new loads' trucks + the trucks of locked / loading / dispatched
+   * loads (PR7, B3). A solver before PR7 counted only the new loads' trucks.
+   */
   trucks_used: number;
+  /** The NEW loads this plan adds (frozen_loads are on top). */
   trips: number;
   total_distance_km: number;
   total_duration_min: number;
@@ -293,6 +298,9 @@ export interface DispatchScenario {
   paid_driver_min?: number | null;
   preference_penalties?: PreferencePenalties | null;
   estimated_legs?: number | null;
+  /** Of trucks_used, the trucks with frozen loads, and the frozen loads the plan was made around (PR7); absent from an older solver. */
+  frozen_trucks?: number | null;
+  frozen_loads?: number | null;
 }
 
 export interface DispatchResponse {

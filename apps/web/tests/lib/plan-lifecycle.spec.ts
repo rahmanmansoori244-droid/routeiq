@@ -1120,6 +1120,31 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     expect(row('runPlan', childId).summaryJson.driverChanges.map((c: { reason: string }) => c.reason)).toEqual(['TRIP_GONE']);
   });
 
+  it('the job message counts the kept loads and their trucks, also a truck no longer in the request (PR7, B3)', async () => {
+    seedDay();
+    version('P', [{ truck: 'T2', at: [480, 600], order: 'O2' }, { truck: 'T3', at: [360, 470], order: 'O3' }]);
+    loadOf('P', 'T3').status = 'DISPATCHED';
+    const childId = (await createNextVersion(T, 'P', 'LATE_ORDER', null, 'u1')).child.id;
+    const kept = loadOf(childId, 'T3');
+    expect(kept.status).toBe('DISPATCHED');
+    Object.assign(row('runPlan', childId), { status: 'OPTIMIZING', currentJobId: 'J9' });
+    tables.runJob.push({ id: 'J9', runId: childId, tenantId: T, attemptNo: 1, status: 'QUEUED' });
+    const t2only: Trip[] = [{ truck: 'T2', at: [480, 600], order: 'O2' }];
+    // As an optimizer before PR7 counted it: 1 truck (T2). T3 was deactivated after its load went
+    // out, so it is not in the request either; the day still used it.
+    const plan = {
+      ...scenarioDetails({ scope: undefined, loads: solverOf(t2only), trips: 1, trucks_used: 1 }),
+      unserved: [],
+      feasibility: { status: 'VERIFIED', timing: 'EXACT', violations: [] },
+    };
+    solver.impl = async () => ({ engine: 'OR-Tools', matrix_provider: 'HAVERSINE', distance_is_estimated: true, warnings: [], scenarios: [plan] });
+    const scopeKept = { ...sc(t2only), frozenOrderIds: ['O3'], frozenLoadIds: [kept.id], frozenLoadOrderIds: ['O3'] };
+    const built = { request: { stops: [{ stop_id: 's' }], trucks: [{ id: 'T2' }] }, preDrops: [], scope: scopeKept, blocking: [], warnings: [], unknownWeights: [], weightChanges: { lines: [], orders: [] } };
+    scheduleDispatchOptimize({ runId: childId, runJobId: 'J9', tenantId: T, userId: 'u1', ip: null, built: built as never });
+    await (globalThis as unknown as { __routeiqInflight: Map<string, Promise<void>> }).__routeiqInflight.get(childId);
+    expect(row('runJob', 'J9')).toMatchObject({ status: 'SUCCEEDED', message: '1 new loads + 1 kept (locked or dispatched) on 2 trucks, 0 stop(s) unserved' });
+  });
+
   it('applyScenario reads the times and the hand-set marker with the drivers (the fake database ignores `select`)', () => {
     const src = readFileSync(path.resolve(__dirname, '../../lib/dispatch/plan-service.ts'), 'utf8');
     const sel = /const driverSel = \{([^}]*)\} as const;/.exec(src)?.[1] ?? '';

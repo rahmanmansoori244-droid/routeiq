@@ -1076,3 +1076,57 @@ def test_web_setting_bounds_lie_inside_the_solver_contract():
     svc = b["config"]["defaultServiceTimeMin"]
     for v in (svc["min"], svc["max"]):
         DispatchStop(stop_id="s", order_ids=["o"], customer_id="c", lat=23.6, lng=58.4, demand_cases=1, service_min=v)
+
+
+def test_web_search_time_schedule_is_the_solver_schedule():
+    """PR7 (T1) review: the Settings page states the automatic search time from the schedule in
+    planner-bounds.json (the web copy is checked against it by tenant-settings.spec.ts). It must be
+    the optimizer's own, for every day size: before, the page still said "20 s up to 200 stops,
+    150 s up to 350" after the optimizer had moved to the new schedule (then a 200-stop day: 70 s)."""
+    import dispatch_solver as ds
+    from dispatch_models import MAX_STOPS
+
+    b = _planner_bounds()
+    st = b["searchTimeSec"]
+    assert b["largeDayStops"] == ds.LARGE_DAY_STOPS
+    assert [tuple(p) for p in st["points"]] == list(ds.TIME_LIMIT_POINTS)
+
+    def stated(n: int) -> int:
+        """The schedule as planner-bounds.json states it (and the Settings page shows it)."""
+        if n <= st["smallDayStops"]:
+            return st["smallDaySec"]
+        if n > b["largeDayStops"]:
+            return st["largeDaySec"]
+        pts = st["points"]
+        if n <= pts[0][0]:
+            return pts[0][1]
+        for (xa, ya), (xb, yb) in zip(pts, pts[1:]):
+            if n <= xb:
+                return math.floor(ya + (yb - ya) * (n - xa) / (xb - xa) + 0.5)
+        return pts[-1][1]
+
+    assert [n for n in range(1, MAX_STOPS + 1) if ds.auto_time_limit(n) != stated(n)] == []
+    # The examples the web's own function is checked against (tenant-settings.spec.ts).
+    assert [(n, ds.auto_time_limit(n)) for n, _ in st["examples"]] == [tuple(e) for e in st["examples"]]
+
+
+def test_trucks_used_counts_the_trucks_of_frozen_loads():
+    """PR7 (B3), the S04 probe: T02 carries a dispatched load and has no load left, so every new load
+    goes to other trucks. The plan's trucks are still the day's physical trucks, T02 included: the
+    options table, the job message and the Excel read this count (before: T02 was left out)."""
+    t1 = truck("T01", cap=100, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("08:00"), cases=90)])
+    t2 = truck("T02", cap=100, max_trips=1, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("12:00"), cases=95)])
+    stops = [stop(f"S{i}", 23.60 + 0.01 * i, 58.45, cases=60) for i in range(3)]
+    r = req(stops, [t1, t2, truck("T03", cap=100)], time_limit_sec=2, scenarios=["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"])
+    resp = optimize_dispatch(r)
+    assert len(resp.scenarios) == 3
+    for sc in resp.scenarios:
+        new = {ld.truck_id for ld in sc.loads}
+        assert "T02" not in new and sc.trips == 3
+        assert sc.trucks_used == len(new | {"T01", "T02"}), (sc.name, sorted(new), sc.trucks_used)
+        assert (sc.frozen_trucks, sc.frozen_loads) == (2, 2)
+    # Nothing can be planned (T02 is the only truck and has no load left): the day still used T02.
+    only = req([stop("X", 23.60, 58.45, cases=10)], [t2])
+    sc = rec(optimize_dispatch(only))
+    assert sc.status == "NOTHING_TO_PLAN" and not sc.loads
+    assert (sc.trucks_used, sc.frozen_trucks, sc.frozen_loads) == (1, 1, 1)

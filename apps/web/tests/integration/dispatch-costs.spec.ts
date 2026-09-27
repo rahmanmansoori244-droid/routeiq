@@ -182,6 +182,12 @@ describe('re-planned day costs (review F17)', () => {
     // The chosen option's new loads + the carried locked load = the day (KPI), and the options table says so.
     expect(Math.abs(p2.summary.operatingCost - (frozenCost + chosen.operatingCost))).toBeLessThan(0.01);
     expect(Math.abs(chosen.dayOperatingCost - p2.summary.operatingCost)).toBeLessThan(0.01);
+    // PR7 (B3): the options and the job message count the day's physical trucks and loads, the
+    // locked load's truck included, like the KPI.
+    expect(chosen.trucksUsed).toBe(p2.summary.trucksUsed);
+    expect(chosen.frozenLoads).toBe(carried.length);
+    expect(chosen.trips + chosen.frozenLoads).toBe(p2.loads.length);
+    expect(p2.job.message).toMatch(new RegExp(`^${chosen.trips} new loads \\+ ${carried.length} kept \\(locked or dispatched\\) on ${p2.summary.trucksUsed} trucks`));
     // The first new load of the locked truck is paid from the locked load's return (nothing twice).
     const lockedTruck = p2.loads.filter((l: any) => l.truckId === firstOfTruck.truckId).sort((a: any, b: any) => a.loadNo - b.loadNo);
     const next = lockedTruck.find((l: any) => !l.carried);

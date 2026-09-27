@@ -28,9 +28,9 @@ function earlierPlan(): PlanDetail {
 
 function scenarioRow(): PlanDetail['scenarios'][number] {
   return {
-    id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, totalKm: 10,
+    id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, frozenLoads: 0, totalKm: 10, dayKm: 10,
     totalDurationMin: 100, operatingCost: 50, dayOperatingCost: 50, costVersion: 2, estimatedLegs: 0, avgUtilizationPct: 50, unservedOrders: 0,
-    distanceIsEstimated: false, provider: 'OSRM', objective: null, chosen: false, feasibility: null,
+    distanceIsEstimated: false, provider: 'OSRM', objective: null, preference: null, preferenceCost: null, preferredHoursCost: null, tradeoff: null, chosen: false, feasibility: null,
   };
 }
 

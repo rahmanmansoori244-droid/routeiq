@@ -23,6 +23,7 @@ import { trackInflight, whenIdle } from './optimize-job';
 import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
 import { lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
+import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
 import type { DispatchScenario } from '@routeiq/shared-types';
 
@@ -102,6 +103,12 @@ async function runJob(args: DispatchJobArgs) {
         await applyWeightChanges(tx, tenantId, runId, built.weightChanges, userId);
         const ids = await persistDispatchResult(tx, tenantId, runId, built, resp, { jobId: runJobId });
         const { driverChanges } = await applyScenario(tx, tenantId, runId, ids.get(recommended.name)!, userId, { jobId: runJobId });
+        // PR7 (B3): the kept loads the plan was made around, counted like the plan screen does -
+        // from the version's rows, so a truck deactivated after its load went out (not in the
+        // request) still counts. A request without the list (older callers) uses its frozen trips.
+        const keptIds = built.scope.frozenLoadIds;
+        const keptRows = keptIds?.length ? await tx.planLoad.findMany({ where: { runId, id: { in: keptIds } }, select: { truckId: true } }) : [];
+        const kept = keptIds ? { truckIds: [...new Set(keptRows.map((l) => l.truckId))], loads: keptRows.length } : frozenOfRequest(built.request.trucks);
         const done = await tx.runJob.updateMany({
           where: { id: runJobId, status: 'RUNNING' },
           data: {
@@ -110,7 +117,7 @@ async function runJob(args: DispatchJobArgs) {
             finishedAt: new Date(),
             // The plan's driver notes (a trip that lost or changed its driver, a hand-set driver whose
             // trip the plan does not have) are counted in the message: never silent.
-            message: jobMessage(recommended, built.preDrops.length, driverChanges.length),
+            message: jobMessage(recommended, built.preDrops.length, driverChanges.length, kept),
           },
         });
         if (done.count !== 1) throw new StaleJobError('the job changed while its plan was being saved');
@@ -161,10 +168,17 @@ async function runJob(args: DispatchJobArgs) {
  * when the recommended timetable did not pass the optimizer's own check (review F04), that it
  * is not verified: such a plan is shown for review but its trucks cannot be locked or
  * dispatched until it is re-planned.
+ *
+ * `frozen`: the locked, loading and dispatched loads the plan was made around (their trucks and
+ * count). The trucks are then the day's physical trucks, those loads' trucks included, and
+ * the loads are "N new + M kept" (PR7, B3: "10 loads on 6 trucks" when the day used 7).
  */
-export function jobMessage(sc: DispatchScenario, preDrops: number, driverNotes = 0): string {
+export function jobMessage(sc: DispatchScenario, preDrops: number, driverNotes = 0, frozen?: { truckIds: string[]; loads: number }): string {
   const drivers = driverNotes ? `, ${driverNotes} driver note(s) (see the plan)` : '';
-  const base = `${sc.trips} loads on ${sc.trucks_used} trucks, ${sc.unserved.length + preDrops} stop(s) unserved${drivers}`;
+  const kept = frozen?.loads ?? 0;
+  const trucks = kept && Array.isArray(sc.loads) ? physicalTruckCount(sc.loads, frozen!.truckIds) : sc.trucks_used;
+  const loads = kept ? `${sc.trips} new loads + ${kept} kept (locked or dispatched)` : `${sc.trips} loads`;
+  const base = `${loads} on ${trucks} trucks, ${sc.unserved.length + preDrops} stop(s) unserved${drivers}`;
   const f = sc.feasibility;
   if (!f) return `${base}. Timetable not checked by the optimizer (older optimizer version).`;
   if (f.status === 'VERIFIED') return base;

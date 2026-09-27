@@ -648,11 +648,67 @@ def test_warm_start_that_cannot_load_solves_cold(monkeypatch):
 
 
 def test_auto_time_limits():
+    assert ds.auto_time_limit(1) == 5
     assert ds.auto_time_limit(25) == 5
     assert ds.auto_time_limit(26) == 20
     assert ds.auto_time_limit(80) == 20
-    assert ds.auto_time_limit(150) == 20
+    assert ds.auto_time_limit(100) == 20
+    assert ds.auto_time_limit(120) == 20
+    assert ds.auto_time_limit(135) == 35
+    assert ds.auto_time_limit(150) == 50
+    assert ds.auto_time_limit(175) == 100
+    assert ds.auto_time_limit(200) == 150
+    assert ds.auto_time_limit(201) == 150
+    assert ds.auto_time_limit(240) == 150
+    assert ds.auto_time_limit(299) == 150
     assert ds.auto_time_limit(300) == 150
+    assert ds.auto_time_limit(350) == 150
+    assert ds.auto_time_limit(351) == 240
+    assert ds.auto_time_limit(600) == 240
+
+
+def _pre_pr7_time_limit(n_stops: int) -> int:
+    """The automatic search time before stabilization PR7: 5 s up to 25 stops, 20 s up to 200,
+    150 s up to 350, 240 s above."""
+    if n_stops <= 25:
+        return 5
+    if n_stops <= 200:
+        return 20
+    if n_stops <= 350:
+        return 150
+    return 240
+
+
+def test_auto_time_limit_never_below_the_pre_pr7_schedule():
+    """PR7 (T1), owner decision: the new schedule may give a day more search time, never less. PR7's
+    first version reached 150 s only at 300 stops, so 201-299-stop days got less than the old flat
+    150 s (240 stops: 102 s), and those sizes (the re-test's S03, 240 stops) had not converged even
+    on 150 s."""
+    below = [n for n in range(1, ds.MAX_STOPS + 1) if ds.auto_time_limit(n) < _pre_pr7_time_limit(n)]
+    # (stops, now, before) of the first sizes that lost time.
+    assert below == [], [(n, ds.auto_time_limit(n), _pre_pr7_time_limit(n)) for n in below[:10]]
+
+
+def test_auto_time_limit_schedule():
+    """PR7 (T1): the search time rises steadily with the day. It used to jump from 20 s at 200 stops
+    to 150 s at 201, so a 200-stop day got 20 s and visibly different plans run to run."""
+    limits = {n: ds.auto_time_limit(n) for n in range(1, ds.MAX_STOPS + 1)}
+    # Monotone: one more stop never gets less time.
+    assert [n for n in range(2, ds.MAX_STOPS + 1) if limits[n] < limits[n - 1]] == []
+    # NMWC's typical 80-120-stop days keep the 20 s they had.
+    assert all(limits[n] == 20 for n in range(26, 121))
+    # 200-350 stops keep the 150 s that served big days fully (and the 200 -> 201 jump is gone).
+    assert all(limits[n] == 150 for n in range(200, ds.LARGE_DAY_STOPS + 1))
+    # Inside the request budget, which is inside the web's 600 s wait: with the slowest road matrix,
+    # RECOMMENDED + its overhead + the alternatives (half the limit, in parallel) + their grace + the
+    # post-solve stage (three sources) + its grace. Above LARGE_DAY_STOPS (240 s) the alternatives are
+    # shortened to fit, but RECOMMENDED itself never is.
+    matrix = ds.matrix_budget_sec(ds.SOLVER_BUDGET_SEC)
+    for n in range(1, ds.LARGE_DAY_STOPS + 1):
+        t = limits[n]
+        stage = min(ds.REPACK_CAP_SEC, max(ds.REPACK_MIN_SEC, t / 2)) * 3 + ds.STAGE_GRACE_SEC
+        assert matrix + t + ds.REC_OVERHEAD_SEC + max(2, t // 2) + ds.ALT_GRACE_SEC + stage <= ds.SOLVER_BUDGET_SEC, n
+    assert matrix + ds.auto_time_limit(ds.MAX_STOPS) + ds.REC_OVERHEAD_SEC <= ds.SOLVER_BUDGET_SEC < 600
 
 
 def test_dropped_stop_reason_is_honest_when_nothing_proves_it_impossible():
@@ -668,3 +724,69 @@ def test_dropped_stop_reason_is_honest_when_nothing_proves_it_impossible():
         assert u.reason_message.startswith("Not planned: the optimizer found no truck, trip or time slot for this P3 stop")
         assert "could not be fitted" not in u.reason_message.lower()
     assert any("no check proves they are impossible" in w for w in sc.warnings)
+
+
+# --------------------------------------------------------------------------------------
+# PHYSICAL TRUCKS WITH FROZEN LOADS (PR7, B3)
+# --------------------------------------------------------------------------------------
+
+def frozen_two_trucks_day():
+    """F1 and F2 are already out with a locked morning load (one load left each); G1 is fresh and
+    could carry both new loads alone."""
+    def out(tid: str):
+        return truck(tid, cap=100, fixed_cost=30, cost_per_km=0.1, max_trips=2,
+                     frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("07:30"), cases=90)])
+    stops = [stop("A", 23.60, 58.45, cases=90), stop("B", 23.62, 58.47, cases=90)]
+    return req(stops, [out("F1"), out("F2"), truck("G1", cap=100, fixed_cost=30, cost_per_km=0.1)], scenarios=ALL)
+
+
+def test_score_counts_the_trucks_of_frozen_loads():
+    """MIN_TRUCKS ranks candidates by score().trucks. Counting only the trucks of the NEW loads made
+    "both loads on fresh G1" (1 truck) beat "one load each on F1 and F2" (2 trucks), although the
+    first uses 3 physical trucks and pays G1's day. Both trucks with locked loads are out anyway."""
+    r = frozen_two_trucks_day()
+    tds = ds._truck_days(r)
+    ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
+    day, pricing = ctx.day, ctx.rec_pricing
+    assert day.frozen_trucks == frozenset({0, 1})
+    on_frozen = LR.time_plan(day, {0: [(0,)], 1: [(1,)]}, pricing)
+    on_fresh = LR.time_plan(day, {2: [(0,), (1,)]}, pricing)
+    assert on_frozen is not None and on_fresh is not None
+    s_frozen, s_fresh = LR.score(day, pricing, on_frozen), LR.score(day, pricing, on_fresh)
+    assert (s_frozen.trucks, s_frozen.loads) == (2, 2)
+    assert (s_fresh.trucks, s_fresh.loads) == (3, 2)
+    assert s_frozen.operating < s_fresh.operating  # G1's fixed cost
+    assert ds._GOALS["MIN_TRUCKS"](s_frozen) < ds._GOALS["MIN_TRUCKS"](s_fresh)
+    # MIN_TRUCKS' prices never charge a truck with frozen loads for "opening" it (x20 fixed).
+    mt = ds._pricing("MIN_TRUCKS", r, tds, r.stops)
+    assert (mt.trucks[0].fixed, mt.trucks[1].fixed, mt.trucks[2].fixed) == (0, 0, 30 * 20 * ds.COST_SCALE)
+
+
+def test_min_trucks_uses_the_trucks_already_out(monkeypatch):
+    """End to end, MIN_TRUCKS' selection. The same day, but the trucks already out cost 3 OMR/km and
+    fresh G1 0.1: RECOMMENDED puts both new loads on G1 (G1's 30 OMR day is cheaper than the km on
+    F1/F2), so "both loads on G1" is among the candidates MIN_TRUCKS picks from. Counting only the
+    trucks of the new loads, that plan was 1 truck against 2 for "one load each on F1 and F2", so
+    MIN_TRUCKS picked it although the day then uses 3 physical trucks. Counted physically it is 3
+    against 2, and MIN_TRUCKS keeps G1 at the depot. Every option reports the day's physical trucks."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    r = frozen_two_trucks_day()
+    for t in r.trucks:
+        if t.frozen_trips:
+            t.cost_per_km = 3.0
+    r.config.time_limit_sec = 2
+    resp = optimize_dispatch(r)
+    by = {s.name: s for s in resp.scenarios}
+    assert set(by) == set(ALL)
+    rec_sc, mt = by["RECOMMENDED"], by["MIN_TRUCKS"]
+    # The candidate that leaves the trucks already out idle exists: it is the recommendation.
+    assert {ld.truck_id for ld in rec_sc.loads} == {"G1"}, [(l.truck_id, l.load_no) for l in rec_sc.loads]
+    # MIN_TRUCKS: fewest physical trucks = the two trucks already out, not one more.
+    assert {ld.truck_id for ld in mt.loads} == {"F1", "F2"}, [(l.truck_id, l.load_no) for l in mt.loads]
+    assert (mt.trucks_used, mt.trips) == (2, 2)
+    assert (rec_sc.trucks_used, rec_sc.trips) == (3, 2)  # G1 + F1 + F2 (before: 1)
+    for sc in by.values():
+        assert served_ids(sc) == {"A", "B"}
+        assert sc.trucks_used == len({ld.truck_id for ld in sc.loads} | {"F1", "F2"}), (sc.name, sc.trucks_used)
+        assert (sc.frozen_trucks, sc.frozen_loads) == (2, 2)
+        assert_plan_rules(r, sc)

@@ -8,6 +8,8 @@
  * - the country is a pick-list: a typo can no longer switch road routing;
  * - the default service time applies to customers whose own time was never confirmed;
  * - the web's bounds are the contract copy (packages/shared-types/src/planner-bounds.json);
+ * - the Settings page states the optimizer's search-time schedule (PR7, T1: the copy in
+ *   planner-bounds.json, which apps/solver/tests checks against auto_time_limit);
  * - stored values outside the bounds refuse the optimize with a clear 409, more than 600 stops 422.
  */
 import { readFileSync } from 'node:fs';
@@ -20,7 +22,7 @@ vi.mock('@/lib/tenant', () => ({ tenantDb: () => fake.tdb }));
 
 import { buildDispatchRequest, PlanError } from '@/lib/dispatch/plan-service';
 import { depotSchema, tenantConfigSchema, tenantSettingsSchema, truckSchema } from '@/lib/schemas';
-import { CONFIG_BOUNDS, DEPOT_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, TRUCK_BOUNDS } from '@/lib/planner-bounds';
+import { autoTimeLimitSec, CONFIG_BOUNDS, DEPOT_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, SEARCH_TIME_SCHEDULE, TRUCK_BOUNDS } from '@/lib/planner-bounds';
 import { COUNTRY_NAMES } from '@/lib/countries';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { isAfterCutoff } from '@/lib/dispatch/time';
@@ -166,6 +168,30 @@ describe('bounds (review F21)', () => {
     expect(strip(TRUCK_BOUNDS)).toEqual(strip(json.truck));
     expect(strip(DEPOT_BOUNDS)).toEqual(strip(json.depot));
     expect(MAX_DISPATCH_STOPS).toBe(json.maxStops);
+    expect(LARGE_DAY_STOPS).toBe(json.largeDayStops);
+  });
+
+  it("the search time on Settings is the optimizer's schedule (PR7, T1 review)", () => {
+    const json = JSON.parse(readFileSync(path.resolve(__dirname, '../../../../packages/shared-types/src/planner-bounds.json'), 'utf8'));
+    const st = json.searchTimeSec;
+    expect({ ...SEARCH_TIME_SCHEDULE, points: SEARCH_TIME_SCHEDULE.points.map((p) => [...p]) }).toEqual({
+      smallDayStops: st.smallDayStops,
+      smallDaySec: st.smallDaySec,
+      points: st.points,
+      largeDaySec: st.largeDaySec,
+    });
+    // The examples apps/solver/tests checks against auto_time_limit, day size by day size.
+    for (const [n, sec] of st.examples as [number, number][]) expect(autoTimeLimitSec(n), `${n} stops`).toBe(sec);
+    for (let n = 2; n <= MAX_DISPATCH_STOPS; n++) expect(autoTimeLimitSec(n)).toBeGreaterThanOrEqual(autoTimeLimitSec(n - 1));
+    // Owner decision: no day size gets less than the pre-PR7 schedule (5 s up to 25 stops, 20 s up
+    // to 200, 150 s up to 350, 240 s above); PR7's first version gave 240 stops 102 s instead of 150 s.
+    const prePr7 = (n: number) => (n <= 25 ? 5 : n <= 200 ? 20 : n <= 350 ? 150 : 240);
+    const below = Array.from({ length: MAX_DISPATCH_STOPS }, (_, i) => i + 1).filter((n) => autoTimeLimitSec(n) < prePr7(n));
+    expect(below).toEqual([]);
+    // Before: "5 s up to 25 stops, 20 s up to 200 stops, 150 s up to 350 stops, 240 s up to 600 stops",
+    // while PR7's optimizer gave a 200-stop day more than 20 s (now 150 s).
+    const row = effectivePlannerValues(BASE_CFG as never, 'Oman', 'OMR').find((r) => r.label === 'Search time')!;
+    expect(row.value).toBe('5 s up to 25 stops, 20 s up to 120, rising steadily to 50 s at 150 and 150 s at 200, 150 s up to 350, 240 s above');
   });
 
   it('the schema accepts each bound and refuses just outside it', () => {

@@ -408,6 +408,37 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · searched ${s.solver.timeSec} s`);
   }
 
+  if (d.scenarios.length > 1) {
+    // PR7 (B3, N1): the options as the plan screen shows them - the whole day with each option
+    // (physical trucks, kept + new loads, km and day cost with the new loads' part when they
+    // differ), the preference cost RECOMMENDED also values (only its preferred-hours part for an
+    // option made by an older optimizer, said so), and what each option gains or gives up.
+    head('PLAN OPTIONS');
+    put(ws, r, 1, 'RECOMMENDED also values delivering P1/P2 early and inside preferred hours (preference cost); the other options ignore both.').font = GREY;
+    r++;
+    for (const sc of d.scenarios) {
+      const name = `${sc.name.replace('_', ' ')}${sc.chosen ? ' (in use)' : ''}`;
+      if (sc.status !== 'OPTIMIZED') {
+        kv(name, 'no plan');
+        continue;
+      }
+      const loadsText = sc.frozenLoads ? `${sc.trips + sc.frozenLoads} loads (${sc.trips} new)` : `${sc.trips} loads`;
+      const kmText = `${sc.dayKm.toFixed(1)} km${Math.abs(sc.dayKm - sc.totalKm) >= 0.05 ? ` (new ${sc.totalKm.toFixed(1)})` : ''}`;
+      const costText = `day cost ${sc.dayOperatingCost.toFixed(1)} ${cur}${Math.abs(sc.dayOperatingCost - sc.operatingCost) >= 0.05 ? ` (new ${sc.operatingCost.toFixed(1)})` : ''}`;
+      const prefText =
+        sc.preferenceCost !== null
+          ? `preference cost ${sc.preferenceCost.toFixed(1)}`
+          : sc.preferredHoursCost !== null
+            ? `preferred hours only ${sc.preferredHoursCost.toFixed(1)} (older optimizer: early delivery not reported)`
+            : 'preference cost —';
+      kv(name, `${sc.trucksUsed} trucks · ${loadsText}`, undefined, `${kmText} · ${costText} · ${prefText} · ${sc.unservedOrders} unserved`);
+      if (sc.tradeoff) {
+        put(ws, r, 3, sc.tradeoff);
+        r++;
+      }
+    }
+  }
+
   head('TIMETABLE CHECK');
   const f = d.feasibility;
   if (!f) {
