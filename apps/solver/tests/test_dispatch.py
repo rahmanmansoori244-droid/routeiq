@@ -355,6 +355,22 @@ def test_same_day_replan_reports_a_window_that_closes_before_the_trucks_can_arri
     assert "earliest possible arrival" in same_day.unserved[0].reason_message
 
 
+def test_same_day_early_preference_counts_from_the_same_day_start():
+    """PR8 rebased onto PR7 (N1): a same-day plan is sent now + preparation (09:30) as
+    shift_start_min, so RECOMMENDED's early-delivery push for P1/P2 - and the early part of the
+    preference cost the options table and the Excel PLAN OPTIONS compare (preference_penalties.early)
+    - count from 09:30, not from the 06:00 first departure setting."""
+    r = req([stop("P1", 23.60, 58.40, cases=20, priority=1)], [truck("T01")], shift_start_min=hm("09:30"))
+    sc = rec(optimize_dispatch(r))
+    (ld,) = sc.loads
+    start = ld.stops[0].service_start_min
+    assert start >= hm("09:30")
+    assert sc.preference_penalties is not None
+    # P1: 0.01 OMR-equivalent per minute after the start (service start printed in whole minutes).
+    assert sc.preference_penalties.early == pytest.approx((start - hm("09:30")) * 0.01, abs=0.006)
+    assert sc.preference_penalties.early < (start - hm("06:00")) * 0.01 - 1
+
+
 def test_late_order_without_capacity_gets_late_reason():
     base = stop("BASE", 23.60, 58.45, cases=100, priority=1)
     late = stop("LATE", 23.61, 58.45, cases=100, priority=5, late=True)

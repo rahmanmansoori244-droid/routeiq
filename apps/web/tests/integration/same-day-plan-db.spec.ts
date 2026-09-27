@@ -250,6 +250,9 @@ describe('a same-day re-plan starts from now (PR8)', () => {
     for (const l of fresh) expect(l.departMin, `${l.truck.code} L${l.loadNo}`).toBeGreaterThanOrEqual(570);
     const t01Next = fresh.find((l) => l.truck.code === 'T01' && l.loadNo === 2)!;
     expect(t01Next.departMin).toBeGreaterThanOrEqual(597 + 30 + 0.05 * t01Next.cases);
+    // With PR7 (B3): the job message counts the kept load and the day's physical trucks (T01 once).
+    const v2Job = await prisma.runJob.findFirstOrThrow({ where: { runId: v2.id }, orderBy: { attemptNo: 'desc' } });
+    expect(v2Job.message).toMatch(/^2 new loads \+ 1 kept \(locked or dispatched\) on 2 trucks, 0 stop\(s\) unserved/);
 
     // The plan says so: warnings, the settings kept with it, and the ASSUMPTIONS rows.
     const detail = (await getPlanDetail(tenantId, v2.id))!;
