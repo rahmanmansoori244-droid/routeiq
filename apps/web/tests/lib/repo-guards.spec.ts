@@ -190,6 +190,15 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/PR8, \*\*awaiting owner approval/i, 'PR8 awaiting owner approval (decisions table)'],
       [/\(PR8, awaiting approval\.\)/i, 'PR8 awaiting approval (open questions)'],
       [/A behaviour change the owner must approve/i, 'PR8 as a change the owner must still approve'],
+      // A1 review: the upload caps bound one upload's work, not its time. The "about 2 s" came from
+      // one file; files within every cap blocked the app for 6-33 s or crashed it, and a file just
+      // under the caps still blocks it for 5-11 s (lib/csv.ts, SECURITY.md section 9).
+      [/cannot freeze the app for long/i, 'uploads "cannot freeze the app for long"'],
+      [/(blocks?|block) (every user|it|the app) for about 2 s/i, 'the largest upload blocks the app for about 2 s'],
+      [/up to about 2 seconds for the largest file/i, 'the largest upload takes up to about 2 seconds'],
+      [/about 2 s at worst|worst case measured about 2 s/i, 'an upload worst case of about 2 s'],
+      [/fixed as far as a quick fix can/i, 'E2 "fixed as far as a quick fix can"'],
+      [/bounded by the 10 MB file limit and the row cap only/i, 'old .xls and text formats bounded by the size and row caps only'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
