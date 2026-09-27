@@ -179,3 +179,33 @@ describe('the rule and its words, shared by the dialog and the API', () => {
     expect(driverDeactivatedWarning(['T1'])).toMatch(/^This driver is still the default driver of truck T1\. New plans do not use an inactive driver/);
   });
 });
+
+/**
+ * The screens say what the API does (review of audit PR 3). The API always deactivates a driver
+ * and sends a `warning` when a driver or a depot is switched off; without these checks the
+ * Drivers dialog could promise a delete again ("that cannot be undone"), its toast could say
+ * "deleted" or "deactivated instead of deleted", and the Edit forms could drop the warning, with
+ * every other check still green.
+ */
+describe('the Drivers and Depots screens say what the API does (audit F20 / F03)', () => {
+  const screen = (file: string) => readFileSync(path.join(__dirname, '../../app/t/[slug]', file), 'utf8');
+
+  it('the Drivers screen only deactivates: its button, dialog and toast never speak of deleting', () => {
+    const table = screen('drivers/drivers-table.tsx');
+    expect(table).toMatch(/aria-label="Deactivate"/);
+    expect(table).toMatch(/Deactivate driver \{confirming\?\.code\}\?/);
+    expect(table).toMatch(/Drivers are never deleted/);
+    expect(table).toMatch(/toast\.success\(`Driver \$\{d\.code\} deactivated\.`\)/);
+    expect(table).not.toMatch(/aria-label="Delete"/);
+    expect(table).not.toMatch(/is deleted; that cannot be undone/);
+    expect(table).not.toMatch(/deactivated instead of deleted/);
+    expect(table).not.toMatch(/\} deleted\.`/);
+  });
+
+  it("the Drivers Deactivate and both Edit forms show the answer's warning (trucks that keep the driver, open orders of the depot)", () => {
+    const WARNING_TOAST = /typeof (\w+)\?\.data\?\.warning === 'string'\) toast\.warning\(\1\.data\.warning/;
+    for (const file of ['drivers/drivers-table.tsx', 'drivers/driver-form.tsx', 'depots/depot-form.tsx']) {
+      expect(screen(file), file).toMatch(WARNING_TOAST);
+    }
+  });
+});

@@ -215,7 +215,7 @@ Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep t
 - The old driver phone app (`/driver`) is retired. Drivers get the **driver sheet** (PDF) or the **WhatsApp** message from the plan.
 - **Drivers are never deleted**: the button on the Drivers page is **Deactivate**. Past and planned loads keep the driver, and the driver stays the default driver of their trucks (the message names those trucks: choose another default driver under **Trucks**); new plans do not use an inactive driver. Reactivate with **Edit**.
 - **Depots**: a depot that anything refers to (trucks, regions, plans, orders, order files) is **deactivated**, never deleted; the dialog says which will happen. Its orders keep the depot and wait until it is active again; they never move to another depot's plan.
-- **Clearing a field**: emptying a driver's phone (or choosing *No depot* for a region) and saving clears it; a region can be created without a depot. On the **Trucks** page, *Available until* 00:00 means midnight.
+- **Clearing a field**: emptying a driver's phone (or choosing **No depot** as a region's default depot) and saving clears it; a region can be created without a depot. On the **Trucks** page, *Available until* 00:00 means midnight.
 
 ## Good to know
 - "Estimated km" means straight-line distances were used: the road-routing service was not available or too slow, or (on one load) a customer pin is far from any road. "Road km (3 legs estimated)" means most of the plan is on real roads but a few legs are estimates - usually a wrong pin: check those customers' locations. The plan is still valid, but check long trips. A reason "No truck can reach this customer ... (based on estimated distance)" rests on such an estimate.

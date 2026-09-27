@@ -103,4 +103,16 @@ describe('region routes (audit F26)', () => {
     const src = readFileSync(path.join(__dirname, '../../app/t/[slug]/regions/region-form.tsx'), 'utf8');
     expect(src).toMatch(/depotId: form\.depotId === NONE \? null : form\.depotId/);
   });
+
+  it('the option is called "No depot" on the screen and in the dispatcher guide (review of audit PR 3)', async () => {
+    // The guide sent users to "No depot" while the form offered "— none —".
+    const { readFileSync } = await import('node:fs');
+    const path = await import('node:path');
+    const form = readFileSync(path.join(__dirname, '../../app/t/[slug]/regions/region-form.tsx'), 'utf8');
+    const label = form.match(/<SelectItem value=\{NONE\}>([^<]*)<\/SelectItem>/)?.[1].trim();
+    expect(label).toBe('No depot');
+    const guide = readFileSync(path.join(__dirname, '../../../../docs/DISPATCHER_GUIDE.md'), 'utf8');
+    const clearing = guide.split(/\r?\n/).find((l) => l.startsWith('- **Clearing a field**'));
+    expect(clearing).toContain(`choosing **${label}** as a region's default depot`);
+  });
 });

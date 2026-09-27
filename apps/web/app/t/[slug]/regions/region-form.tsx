@@ -118,7 +118,7 @@ export function RegionFormDialog({ open, onOpenChange, mode, region, depots, onS
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value={NONE}>— none —</SelectItem>
+                <SelectItem value={NONE}>No depot</SelectItem>
                 {depots.map((d) => (
                   <SelectItem key={d.id} value={d.id}>
                     {d.code} — {d.name}
