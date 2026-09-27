@@ -118,11 +118,12 @@ STAGE_GRACE_SEC = 20
 ENGINE = "ortools-routing"
 
 
-# The automatic search time between 120 and 300 stops (PR7, T1): straight lines through these
-# (stops, seconds) points. Up to 120 stops 20 s, from 300 to LARGE_DAY_STOPS 150 s, above 240 s.
+# The automatic search time between 120 and 200 stops (PR7, T1): straight lines through these
+# (stops, seconds) points. Up to 120 stops 20 s, from 200 to LARGE_DAY_STOPS 150 s, above 240 s.
+# No day size gets less than before PR7 (test_auto_time_limit_never_below_the_pre_pr7_schedule).
 # The web's Settings page states this schedule from packages/shared-types/src/planner-bounds.json
 # (searchTimeSec): change both together (test_web_search_time_schedule_is_the_solver_schedule).
-TIME_LIMIT_POINTS: tuple[tuple[int, int], ...] = ((120, 20), (150, 30), (300, 150))
+TIME_LIMIT_POINTS: tuple[tuple[int, int], ...] = ((120, 20), (150, 50), (200, 150))
 
 
 def auto_time_limit(n_stops: int) -> int:
@@ -131,13 +132,14 @@ def auto_time_limit(n_stops: int) -> int:
     Small days are cheap: 20 s instead of 8 s from 26 stops is insurance against a search stopped
     before it settled (the synthetic 60-stop days were 5-15% better at 20-30 s). Big days need much
     more: at 300 stops 45 s left feasible P5 stops unserved (search not converged) while 150 s
-    served all of them. Between them the time grows smoothly (TIME_LIMIT_POINTS): NMWC's usual
-    80-120-stop days keep their 20 s, then +1 s per 3 stops to 30 s at 150 stops and +0.8 s per stop
-    to 150 s at 300 stops (200 stops: 70 s). Until PR7 it jumped from 20 s at 200 stops to 150 s at
-    201, so a 200-stop day got 20 s and visibly different plans from run to run. Monotone, never
-    more than 1 s per extra stop between 26 and 350 stops; above LARGE_DAY_STOPS (the "Large day"
-    warning) it stays 240 s, and every value fits the request budget (SOLVER_BUDGET_SEC, see
-    test_auto_time_limit_schedule)."""
+    served all of them. Between them the time rises in straight lines (TIME_LIMIT_POINTS): NMWC's
+    usual 80-120-stop days keep their 20 s, then +1 s per stop to 50 s at 150 stops and +2 s per
+    stop to 150 s at 200 stops (175 stops: 100 s); 150 s from 200 up to LARGE_DAY_STOPS. Until PR7
+    it jumped from 20 s at 200 stops to 150 s at 201, so a 200-stop day got 20 s and visibly
+    different plans from run to run. Monotone, and never less than that pre-PR7 schedule for any
+    day size (201-299-stop days, such as the re-test's S03 at 240 stops, had not converged even on
+    150 s); above LARGE_DAY_STOPS (the "Large day" warning) it stays 240 s, and every value fits the
+    request budget (SOLVER_BUDGET_SEC, see test_auto_time_limit_schedule)."""
     if n_stops <= 25:
         return 5
     if n_stops > LARGE_DAY_STOPS:

@@ -24,16 +24,17 @@ export const LARGE_DAY_STOPS = 350;
  * RECOMMENDED's automatic search time by solvable stops (stabilization PR7, T1): `smallDaySec` up
  * to `smallDayStops`, the first point's seconds up to its stops, straight lines through `points`
  * ([stops, seconds], rounded to whole seconds), the last point's seconds up to LARGE_DAY_STOPS,
- * `largeDaySec` above. The optimizer's own copy is `auto_time_limit` (apps/solver/dispatch_solver.py);
- * both are checked against planner-bounds.json, so the Settings page never states another schedule.
+ * `largeDaySec` above; never less than the pre-PR7 schedule for any day size. The optimizer's own
+ * copy is `auto_time_limit` (apps/solver/dispatch_solver.py); both are checked against
+ * planner-bounds.json, so the Settings page never states another schedule.
  */
 export const SEARCH_TIME_SCHEDULE = {
   smallDayStops: 25,
   smallDaySec: 5,
   points: [
     [120, 20],
-    [150, 30],
-    [300, 150],
+    [150, 50],
+    [200, 150],
   ],
   largeDaySec: 240,
 } as const satisfies { smallDayStops: number; smallDaySec: number; points: readonly (readonly [number, number])[]; largeDaySec: number };

@@ -648,39 +648,64 @@ def test_warm_start_that_cannot_load_solves_cold(monkeypatch):
 
 
 def test_auto_time_limits():
+    assert ds.auto_time_limit(1) == 5
     assert ds.auto_time_limit(25) == 5
     assert ds.auto_time_limit(26) == 20
     assert ds.auto_time_limit(80) == 20
     assert ds.auto_time_limit(100) == 20
     assert ds.auto_time_limit(120) == 20
-    assert ds.auto_time_limit(135) == 25
-    assert ds.auto_time_limit(150) == 30
-    assert ds.auto_time_limit(200) == 70
-    assert ds.auto_time_limit(250) == 110
+    assert ds.auto_time_limit(135) == 35
+    assert ds.auto_time_limit(150) == 50
+    assert ds.auto_time_limit(175) == 100
+    assert ds.auto_time_limit(200) == 150
+    assert ds.auto_time_limit(201) == 150
+    assert ds.auto_time_limit(240) == 150
+    assert ds.auto_time_limit(299) == 150
     assert ds.auto_time_limit(300) == 150
     assert ds.auto_time_limit(350) == 150
     assert ds.auto_time_limit(351) == 240
     assert ds.auto_time_limit(600) == 240
 
 
+def _pre_pr7_time_limit(n_stops: int) -> int:
+    """The automatic search time before stabilization PR7: 5 s up to 25 stops, 20 s up to 200,
+    150 s up to 350, 240 s above."""
+    if n_stops <= 25:
+        return 5
+    if n_stops <= 200:
+        return 20
+    if n_stops <= 350:
+        return 150
+    return 240
+
+
+def test_auto_time_limit_never_below_the_pre_pr7_schedule():
+    """PR7 (T1), owner decision: the new schedule may give a day more search time, never less. PR7's
+    first version reached 150 s only at 300 stops, so 201-299-stop days got less than the old flat
+    150 s (240 stops: 102 s), and those sizes (the re-test's S03, 240 stops) had not converged even
+    on 150 s."""
+    below = [n for n in range(1, ds.MAX_STOPS + 1) if ds.auto_time_limit(n) < _pre_pr7_time_limit(n)]
+    # (stops, now, before) of the first sizes that lost time.
+    assert below == [], [(n, ds.auto_time_limit(n), _pre_pr7_time_limit(n)) for n in below[:10]]
+
+
 def test_auto_time_limit_schedule():
-    """PR7 (T1): the search time grows smoothly with the day. It used to jump from 20 s at 200 stops
+    """PR7 (T1): the search time rises steadily with the day. It used to jump from 20 s at 200 stops
     to 150 s at 201, so a 200-stop day got 20 s and visibly different plans run to run."""
-    limits = {n: ds.auto_time_limit(n) for n in range(26, ds.LARGE_DAY_STOPS + 1)}
-    for n in range(27, ds.LARGE_DAY_STOPS + 1):
-        # Monotone, and at most 1 s more for one more stop.
-        assert 0 <= limits[n] - limits[n - 1] <= 1, (n, limits[n - 1], limits[n])
+    limits = {n: ds.auto_time_limit(n) for n in range(1, ds.MAX_STOPS + 1)}
+    # Monotone: one more stop never gets less time.
+    assert [n for n in range(2, ds.MAX_STOPS + 1) if limits[n] < limits[n - 1]] == []
     # NMWC's typical 80-120-stop days keep the 20 s they had.
     assert all(limits[n] == 20 for n in range(26, 121))
-    # A 200-stop day gets real search time; 300-350 stops keep the 150 s that served big days fully.
-    assert limits[200] >= 60
-    assert all(limits[n] == 150 for n in range(300, ds.LARGE_DAY_STOPS + 1))
+    # 200-350 stops keep the 150 s that served big days fully (and the 200 -> 201 jump is gone).
+    assert all(limits[n] == 150 for n in range(200, ds.LARGE_DAY_STOPS + 1))
     # Inside the request budget, which is inside the web's 600 s wait: with the slowest road matrix,
     # RECOMMENDED + its overhead + the alternatives (half the limit, in parallel) + their grace + the
     # post-solve stage (three sources) + its grace. Above LARGE_DAY_STOPS (240 s) the alternatives are
     # shortened to fit, but RECOMMENDED itself never is.
     matrix = ds.matrix_budget_sec(ds.SOLVER_BUDGET_SEC)
-    for n, t in limits.items():
+    for n in range(1, ds.LARGE_DAY_STOPS + 1):
+        t = limits[n]
         stage = min(ds.REPACK_CAP_SEC, max(ds.REPACK_MIN_SEC, t / 2)) * 3 + ds.STAGE_GRACE_SEC
         assert matrix + t + ds.REC_OVERHEAD_SEC + max(2, t // 2) + ds.ALT_GRACE_SEC + stage <= ds.SOLVER_BUDGET_SEC, n
     assert matrix + ds.auto_time_limit(ds.MAX_STOPS) + ds.REC_OVERHEAD_SEC <= ds.SOLVER_BUDGET_SEC < 600

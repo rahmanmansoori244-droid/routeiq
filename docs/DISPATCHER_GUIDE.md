@@ -32,7 +32,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Preferred hours:** nice to have.
 
 ## 3. Optimize
-- Click **OPTIMIZE**. A normal day (80-120 customers) takes about half a minute to a minute. Bigger days get more search time, step by step: about 1-1.5 minutes at 150 customers, 2 minutes at 200, 3 minutes at 250, 4-5 minutes from 300.
+- Click **OPTIMIZE**. A normal day (80-120 customers) takes about half a minute to a minute. Bigger days get more search time, step by step: about 1.5-2 minutes at 150 customers, 3 minutes at 175, 4-5 minutes from 200.
 - If some customers still have no location, you are asked whether to plan without them. Their orders become *unserved: location missing*.
 - If some order lines have **no weight** and a truck has a payload, you are asked the same way: **Cancel** and add the case weights under **Products** (planners and supervisors: ask a company admin, only admins can edit products), or **optimize anyway** — those lines then count as **0 kg**, so a load can be heavier than shown, and the plan keeps a yellow warning that says so. **Re-plan** asks the same question.
 - One case heavier than every truck (usually a case weight typed per pallet or in grams) is not planned: it shows as *unserved: bigger than any truck* with *check the product weight*. The rest of that order is planned.

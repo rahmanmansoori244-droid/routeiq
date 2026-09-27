@@ -1082,7 +1082,7 @@ def test_web_search_time_schedule_is_the_solver_schedule():
     """PR7 (T1) review: the Settings page states the automatic search time from the schedule in
     planner-bounds.json (the web copy is checked against it by tenant-settings.spec.ts). It must be
     the optimizer's own, for every day size: before, the page still said "20 s up to 200 stops,
-    150 s up to 350" after the optimizer had moved to the smooth schedule (a 200-stop day: 70 s)."""
+    150 s up to 350" after the optimizer had moved to the new schedule (then a 200-stop day: 70 s)."""
     import dispatch_solver as ds
     from dispatch_models import MAX_STOPS
 

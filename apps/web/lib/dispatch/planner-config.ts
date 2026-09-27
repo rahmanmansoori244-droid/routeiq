@@ -54,8 +54,8 @@ const SEARCH_TIME_EXAMPLE_STOPS = 200;
 
 /**
  * The Settings page's "Search time" row, from the schedule the optimizer uses (PR7, T1): "5 s up
- * to 25 stops, 20 s up to 120, rising smoothly to 30 s at 150, 70 s at 200 and 150 s at 300, 150 s
- * up to 350, 240 s above".
+ * to 25 stops, 20 s up to 120, rising steadily to 50 s at 150 and 150 s at 200, 150 s up to 350,
+ * 240 s above".
  */
 export function searchTimeText(): string {
   const s = SEARCH_TIME_SCHEDULE;
@@ -66,7 +66,7 @@ export function searchTimeText(): string {
   const rising = at.length > 1 ? `${at.slice(0, -1).join(', ')} and ${at[at.length - 1]}` : at.join('');
   return (
     `${s.smallDaySec} s up to ${s.smallDayStops} stops, ${first[1]} s up to ${first[0]}` +
-    (rising ? `, rising smoothly to ${rising}` : '') +
+    (rising ? `, rising steadily to ${rising}` : '') +
     `, ${last[1]} s up to ${LARGE_DAY_STOPS}, ${s.largeDaySec} s above`
   );
 }

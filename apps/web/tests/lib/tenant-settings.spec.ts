@@ -183,10 +183,15 @@ describe('bounds (review F21)', () => {
     // The examples apps/solver/tests checks against auto_time_limit, day size by day size.
     for (const [n, sec] of st.examples as [number, number][]) expect(autoTimeLimitSec(n), `${n} stops`).toBe(sec);
     for (let n = 2; n <= MAX_DISPATCH_STOPS; n++) expect(autoTimeLimitSec(n)).toBeGreaterThanOrEqual(autoTimeLimitSec(n - 1));
+    // Owner decision: no day size gets less than the pre-PR7 schedule (5 s up to 25 stops, 20 s up
+    // to 200, 150 s up to 350, 240 s above); PR7's first version gave 240 stops 102 s instead of 150 s.
+    const prePr7 = (n: number) => (n <= 25 ? 5 : n <= 200 ? 20 : n <= 350 ? 150 : 240);
+    const below = Array.from({ length: MAX_DISPATCH_STOPS }, (_, i) => i + 1).filter((n) => autoTimeLimitSec(n) < prePr7(n));
+    expect(below).toEqual([]);
     // Before: "5 s up to 25 stops, 20 s up to 200 stops, 150 s up to 350 stops, 240 s up to 600 stops",
-    // while the optimizer gave a 200-stop day 70 s.
+    // while PR7's optimizer gave a 200-stop day more than 20 s (now 150 s).
     const row = effectivePlannerValues(BASE_CFG as never, 'Oman', 'OMR').find((r) => r.label === 'Search time')!;
-    expect(row.value).toBe('5 s up to 25 stops, 20 s up to 120, rising smoothly to 30 s at 150, 70 s at 200 and 150 s at 300, 150 s up to 350, 240 s above');
+    expect(row.value).toBe('5 s up to 25 stops, 20 s up to 120, rising steadily to 50 s at 150 and 150 s at 200, 150 s up to 350, 240 s above');
   });
 
   it('the schema accepts each bound and refuses just outside it', () => {
