@@ -23,10 +23,15 @@ import * as XLSX from 'xlsx';
  *    read from its local header, where SheetJS reads it, and must be the name in the central
  *    directory; the hyperlink ranges of every part are added up; binary parts (.bin: .xlsb sheets,
  *    printer settings, macros) are hidden from SheetJS, which needs none of them for an .xlsx;
- *  - an old .xls (a compound file, or a bare BIFF stream) is read only after the hyperlink ranges in
- *    its workbook stream are added up;
- *  - any other file is read only when SheetJS reads it as CSV or tab-separated text; a web page,
- *    an XML or OpenDocument file, SYLK, DIF, Lotus, dBASE, RTF or SocialCalc file is refused.
+ *  - an old .xls that is a compound file has its structure checked first (checkCompoundFile), in
+ *    linear time, so XLSX.CFB.read itself cannot be made to use time and memory that grow with the
+ *    square of the file's size; then, as for a bare BIFF stream, the hyperlink ranges in its
+ *    workbook stream are added up before SheetJS reads it;
+ *  - any other file is read only when SheetJS reads it as CSV or tab-separated text; a web page, an
+ *    XML or OpenDocument file, DIF, Lotus, dBASE, RTF, SocialCalc or a real SYLK file is refused.
+ *    A file that begins with "ID" is a CSV that SheetJS reads via its SYLK reader's CSV fallback,
+ *    unless it is really SYLK (see looksLikeSylk), so an order or customer CSV with a leading "ID"
+ *    column - which a Windows browser sends as application/vnd.ms-excel - is read, not refused.
  *
  * This bounds the work of one upload; it does not isolate it. A file under the caps is still parsed
  * on the event loop (see lib/csv.ts for what the worst one costs). Parsing in a worker thread with
@@ -100,6 +105,44 @@ const u64 = (b: Uint8Array, i: number) => u32(b, i) + u32(b, i + 4) * 0x10000000
  */
 export type SheetjsReader = 'zip' | 'cfb' | 'biff' | 'xml' | 'text' | 'text-ws' | 'text-utf16' | 'other';
 const DBF_VERSIONS = [0x02, 0x03, 0x30, 0x31, 0x83, 0x8b, 0x8c, 0xf5];
+
+/**
+ * The record types SheetJS's SYLK reader (sylk_to_aoa_str, xlsx 0.20.2) knows. It splits the file
+ * into records on line breaks, splits each record on ";", and, with WTF on (read_wb_ID sets it),
+ * throws "SYLK bad record" on the first record whose first field is not one of these; read_wb_ID
+ * then catches that (WTF is off for the caller) and reads the file as CSV instead.
+ */
+const SYLK_RECORD_TYPES = new Set(['ID', 'E', 'B', 'O', 'W', 'P', 'NN', 'C', 'F']);
+
+/**
+ * Whether SheetJS would read a file that begins with the bytes "ID" as SYLK (and so make a
+ * workbook that no cell cap bounds), rather than fall back to CSV. A real SYLK file opens with an
+ * "ID" record and then another SYLK record (for example `ID;PWXL` then `P;...` and `C;...`); the
+ * SYLK reader accepts it without throwing. A CSV whose first column header is "ID" does not: with
+ * a comma or tab the whole first line is one field ("ID,Customer Code" is not "ID"), and with a
+ * semicolon the first data row (`1;C1;...`) is not a SYLK record, so the reader throws on it and
+ * SheetJS reads the file as CSV (as it did before this guard). Chrome and Edge on a Windows PC
+ * with Excel installed send every .csv as application/vnd.ms-excel, so this path is common.
+ *
+ * This checks the two records that decide it (SheetJS's rule is "every record is a SYLK record",
+ * and these two separate all the real cases): the first record's first ";"-field must be exactly
+ * "ID", and the next non-empty record's first field must be a SYLK record type.
+ */
+function looksLikeSylk(b: Uint8Array): boolean {
+  // SYLK is ASCII; only the first records matter, so read a small prefix as latin1.
+  const head = Buffer.from(b.buffer, b.byteOffset, Math.min(b.byteLength, 4096)).toString('latin1');
+  const records = head.split(/[\n\r]+/);
+  // SheetJS trims each record, then splits on ";" with ";;" as an escaped ";". The record type is
+  // the first field; escapes never appear in it in practice, so only the ";;" escape is handled.
+  const recordType = (line: string): string =>
+    line.trim().replace(/;;/g, '\u0000').split(';')[0]!.replace(/\u0000/g, ';');
+  if (recordType(records[0] ?? '') !== 'ID') return false;
+  for (let i = 1; i < records.length; i++) {
+    if (records[i]!.trim() === '') continue; // SheetJS skips empty records (rstr.length > 0)
+    return SYLK_RECORD_TYPES.has(recordType(records[i]!));
+  }
+  return false; // "ID" alone: SheetJS makes an empty SYLK workbook; read it as (empty) text instead
+}
 export function sheetjsReader(b: Uint8Array): SheetjsReader {
   const n = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
   const le = (i: number, v: number) => n[i] !== undefined && n[i]! <= v;
@@ -114,7 +157,10 @@ export function sheetjsReader(b: Uint8Array): SheetjsReader {
       return 'xml';
     case 0x49:
       if (n[1] === 0x49 && n[2] === 0x2a && n[3] === 0x00) return 'other'; // TIFF
-      if (n[1] === 0x44) return 'other'; // SYLK
+      // "ID": SheetJS routes this to read_wb_ID, which reads it as SYLK, or, when the SYLK reader
+      // throws (WTF off, as lib/csv reads), falls back to its CSV reader. So it is SYLK (refused)
+      // only when it really parses as SYLK; otherwise it is delimited text (see looksLikeSylk).
+      if (n[1] === 0x44) return looksLikeSylk(b) ? 'other' : 'text';
       break;
     case 0x54:
       if (n[1] === 0x41 && n[2] === 0x42 && n[3] === 0x4c) return 'other'; // DIF
@@ -170,6 +216,10 @@ export function guardSpreadsheet(bytes: Uint8Array, limits: SpreadsheetLimits): 
     case 'zip':
       return checkWorkbookZip(b, limits).view;
     case 'cfb': {
+      // A crafted compound file can make XLSX.CFB.read itself use memory and time that grow with
+      // the square of the file's size (make_sector_list walks and copies a FAT chain from every
+      // sector), so its structure is checked in linear time before CFB.read is called.
+      checkCompoundFile(b);
       let cfb: unknown;
       try {
         cfb = XLSX.CFB.read(b, { type: 'buffer' });
@@ -261,6 +311,131 @@ function biffLinkCells(s: Uint8Array): number {
   }
   return total;
 }
+
+const s32 = (b: Uint8Array, i: number): number => {
+  const v = u32(b, i);
+  return v >= 0x80000000 ? v - 0x100000000 : v;
+};
+const ENDOFCHAIN = -2;
+
+/**
+ * Refuses a compound file (an old .xls, or any OLE2 file that begins with the compound-file
+ * signature) whose FAT would make XLSX.CFB.read do work that grows with the square of the file's
+ * size, in linear time and constant extra memory, before CFB.read is called.
+ *
+ * SheetJS's make_sector_list (xlsx 0.20.2) starts at dir_start and, wrapping, walks the FAT chain
+ * from every sector it has not already seen as a chain start, copying each walk into a new buffer.
+ * It only skips a sector as a *start* once some walk has reached it; a later walk can still walk
+ * *through* it. In a file whose chains are stored in descending sector order (sector s points to
+ * s-1) every sector starts a walk down through all the sectors below it, so the total walk is
+ * about D^2/2 for D sectors: a 2 MB file (about 4,000 sectors) copies 8 million sectors, 4 GB, and
+ * at the 10 MB limit the web process is killed. No real writer stores chains this way; each sector
+ * still has one predecessor, so it reads as one ordinary chain and no simpler structural check
+ * catches it.
+ *
+ * This replays make_sector_list's walk order, counting sectors only (no copies), and refuses the
+ * file as damaged once the total passes a few times the sector count - a well-formed file's chains
+ * are disjoint, so its total is the sector count. It also refuses a directory that is far larger
+ * than any real workbook's (SheetJS's build_full_paths is quadratic in the number of directory
+ * entries). Anything CFB.read would reject before make_sector_list (a bad header, a short file) is
+ * left to CFB.read, which throws quickly and is turned into "damaged" by the caller.
+ */
+function checkCompoundFile(file: Uint8Array): void {
+  const len = file.length;
+  if (len < 512) return; // CFB.read throws "CFB file size < 512"; no walk happens
+  const mver = u16(file, 26);
+  const ssz = mver === 3 ? 512 : mver === 4 ? 4096 : 0;
+  if (!ssz || u16(file, 30) !== (mver === 3 ? 0x09 : 0x0c)) return; // CFB.read throws on the header
+  if (mver === 3 && s32(file, 40) !== 0) return; // # directory sectors must be 0 for v3
+  const dirStart = s32(file, 48);
+  const difatStart = s32(file, 68);
+  let difatCnt = s32(file, 72);
+
+  // The number of sectors, indexed from 0; sector s is the ssz bytes at (s + 1) * ssz.
+  const sl = Math.ceil(len / ssz) - 1;
+  if (sl <= 0) return;
+
+  // FAT sector addresses: the 109 in the header (up to the first negative), then the DIFAT chain.
+  const fatAddrs: number[] = [];
+  for (let j = 0; j < 109; j++) {
+    const q = s32(file, 76 + j * 4);
+    if (q < 0) break;
+    fatAddrs.push(q);
+  }
+  const difatSeen = new Set<number>();
+  const entriesPerDifat = (ssz >>> 2) - 1;
+  for (let idx = difatStart; idx !== ENDOFCHAIN && idx >= 0 && idx < sl; ) {
+    if (difatSeen.has(idx)) break; // a looping DIFAT chain
+    difatSeen.add(idx);
+    const base = (idx + 1) * ssz;
+    for (let i = 0; i < entriesPerDifat; i++) {
+      const off = base + i * 4;
+      if (off + 4 > len) break;
+      const q = s32(file, off);
+      if (q === ENDOFCHAIN) break;
+      fatAddrs.push(q);
+    }
+    if (difatCnt < 1) break;
+    difatCnt -= 1;
+    const nextOff = base + ssz - 4;
+    if (nextOff + 4 > len) break;
+    idx = s32(file, nextOff);
+  }
+
+  // The next sector in the FAT chain from j, or a negative value when the chain ends here (the end
+  // marker, a free/FAT sector, or a FAT sector that is not present) - so the walk below stops.
+  const modulus = ssz - 1;
+  const fatNext = (j: number): number => {
+    const addr = fatAddrs[Math.floor((j * 4) / ssz)];
+    if (addr === undefined || addr < 0 || addr >= sl) return -1;
+    const off = (addr + 1) * ssz + ((j * 4) & modulus);
+    return off + 4 > len ? -1 : s32(file, off);
+  };
+
+  // The directory chain, from dir_start: its entries drive the quadratic build_full_paths.
+  const entriesPerSector = ssz >> 7; // 128-byte entries
+  const maxDirSectors = Math.ceil(MAX_DIR_ENTRIES / entriesPerSector) + 1;
+  if (dirStart >= 0 && dirStart < sl) {
+    const dseen = new Set<number>();
+    let dj = dirStart;
+    let dirSectors = 0;
+    while (dj >= 0 && dj < sl && !dseen.has(dj)) {
+      dseen.add(dj);
+      if (++dirSectors > maxDirSectors) throw damaged();
+      dj = fatNext(dj);
+    }
+  }
+
+  // Replay make_sector_list's walk, counting sectors only. A well-formed file visits each sector
+  // once (total = sl); the descending-chain file visits about sl^2 / 2, so it passes the limit -
+  // a few times the sector count - after only a few thousand steps and is refused at once.
+  const limit = Math.max(sl * 4 + 1024, 50_000);
+  const chkd = new Uint8Array(sl);
+  const seenGen = new Int32Array(sl); // 0 = unseen; each walk uses a fresh positive generation
+  let gen = 0;
+  let steps = 0;
+  for (let i = 0; i < sl; i++) {
+    let k = i + dirStart;
+    if (k >= sl) k -= sl;
+    if (k < 0 || k >= sl || chkd[k]) continue;
+    gen++;
+    for (let j = k; j >= 0; ) {
+      if (j >= sl) {
+        // A FAT entry past the sectors: CFB.read reads one absent sector and stops.
+        if (++steps > limit) throw damaged();
+        break;
+      }
+      if (seenGen[j] === gen) break; // a cycle within this one walk
+      seenGen[j] = gen;
+      chkd[j] = 1;
+      if (++steps > limit) throw damaged();
+      j = fatNext(j);
+    }
+  }
+}
+
+/** Most directory entries a workbook may have; SheetJS's build_full_paths is quadratic in this. */
+const MAX_DIR_ENTRIES = 16_384;
 
 /** Parts that make SheetJS read the archive as something other than an Excel workbook. */
 const FOREIGN_PARTS = new Set(['manifest.xml', 'objectdata.xml', 'document.iwa', 'index.zip', 'index.xml', 'index.xml.gz']);

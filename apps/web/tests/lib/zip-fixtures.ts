@@ -274,3 +274,44 @@ export function withComments(n: number): Buffer {
   part.data = Buffer.from(text.replace(one, one.repeat(n)));
   return zip(parts);
 }
+
+/**
+ * A crafted compound file (an .xls signature) whose FAT chains are stored in descending sector
+ * order: each data sector points to the one below it, so it reads as one ordinary chain, but
+ * SheetJS's make_sector_list walks and copies a chain from every sector - about `dataSectors`^2 / 2
+ * sectors in all. Its directory sector holds no streams, so once the walk is bounded the file is
+ * refused as damaged (no /Workbook stream); the point is that it must be refused before the walk.
+ * Adapted from .dev/scratch-a1-v2/cfb/run.ts. `dataSectors` is D; the file is 512 * (F + D + 1)
+ * bytes, where F is the number of FAT sectors it needs.
+ */
+export function cfbDescendingChain(dataSectors: number): Buffer {
+  const SSZ = 512;
+  const D = dataSectors;
+  let F = 1;
+  while (F * 128 < F + D) F++; // FAT sectors needed to hold F + D FAT entries
+  const N = F + D;
+  const file = Buffer.alloc(SSZ * (N + 1));
+  Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]).copy(file, 0);
+  file.writeUInt16LE(0x3e, 24); // minor version
+  file.writeUInt16LE(3, 26); // major version
+  file.writeUInt16LE(0xfffe, 28); // byte order
+  file.writeUInt16LE(9, 30); // sector shift (512)
+  file.writeUInt16LE(6, 32); // mini sector shift
+  file.writeInt32LE(0, 40); // directory sectors (v3: 0)
+  file.writeInt32LE(F, 44); // FAT sectors
+  file.writeInt32LE(F, 48); // first directory sector = first data sector
+  file.writeUInt32LE(0x1000, 56); // mini stream cutoff
+  file.writeInt32LE(-2, 60); // first mini FAT sector (none)
+  file.writeInt32LE(0, 64); // mini FAT sector count
+  file.writeInt32LE(-2, 68); // first DIFAT sector (none)
+  file.writeInt32LE(0, 72); // DIFAT sector count
+  for (let j = 0; j < 109; j++) file.writeInt32LE(j < F ? j : -1, 76 + j * 4);
+  // FAT: sectors 0..F-1 are FAT sectors (-3); sector F ends its chain (-2); every later sector
+  // points to the one before it, so the chains are stored in descending sector order.
+  const fatEntry = (s: number) => (s < F ? -3 : s === F ? -2 : s - 1);
+  for (let s = 0; s < N; s++) {
+    const fatSector = Math.floor(s / 128);
+    file.writeInt32LE(fatEntry(s), SSZ * (fatSector + 1) + (s % 128) * 4);
+  }
+  return file;
+}

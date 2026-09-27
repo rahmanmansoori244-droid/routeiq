@@ -29,7 +29,7 @@ vi.mock('xlsx', async (importOriginal) => {
 import * as XLSX from 'xlsx';
 import { MAX_CELLS, MAX_COLS, MAX_COMMENTS, MAX_LINK_CELLS, MAX_ROWS, MAX_SHEETS, MAX_ZIP_PARTS, READ_ROWS, parseExcelSheets, parseUpload } from '@/lib/csv';
 import { checkWorkbookZip } from '@/lib/workbook-guard';
-import { denseSheet, hugeSheet, rawSheet, row, sheetXml, withComments, workbook, xlsbWorkbook, xlsWithLink, xlsxFile, xlsxWithBinarySheet, zip, XLSX_TYPE } from './zip-fixtures';
+import { cfbDescendingChain, denseSheet, hugeSheet, rawSheet, row, sheetXml, withComments, workbook, xlsbWorkbook, xlsWithLink, xlsxFile, xlsxWithBinarySheet, zip, XLSX_TYPE } from './zip-fixtures';
 
 const readSpy = vi.mocked(XLSX.read);
 const toJsonSpy = vi.mocked(XLSX.utils.sheet_to_json);
@@ -479,6 +479,47 @@ describe('A1 review: SheetJS reads only the formats these checks bound', () => {
     expect(parsed.rows).toEqual([{ code: 'C2', cases: '3' }, { code: 'C3', cases: '' }]);
     expect(readSpy).toHaveBeenCalled();
     for (const [, opts] of readSpy.mock.calls) expect(opts).toMatchObject({ cellFormula: false });
+  });
+});
+
+describe('A1 v2: a crafted compound file (.xls) is refused before its FAT is walked', () => {
+  it('a descending-chain .xls of 2,000 data sectors is refused as damaged in milliseconds', async () => {
+    // Without the structural check, XLSX.CFB.read walks and copies a chain from every sector:
+    // about 2,000,000 sectors, ~1.1 GB over ~0.6 s (4,000 sectors: ~4 GB). It is refused as
+    // damaged (no /Workbook stream) once the walk is bounded - the point is that it is refused
+    // before the walk, not after it.
+    const crafted = cfbDescendingChain(2_000); // about 1 MB
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(asExcel(crafted, 'orders.xls')))).toBe(DAMAGED);
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('a real .xls (ascending chains, as Excel and SheetJS write) still reads', async () => {
+    expect((await parseUpload(asExcel(xlsWithLink(1, 1)))).rows).toEqual([{ code: 'C1', cases: '3' }, { code: 'C2', cases: '4' }]);
+  });
+});
+
+describe('A1 v2: a CSV whose first header is "ID", sent as Excel, is read; real SYLK stays refused', () => {
+  // Chrome and Edge on a Windows PC with Excel send every .csv as application/vnd.ms-excel, so an
+  // order, customer or baseline CSV with a leading "ID" column arrives on the Excel path. SheetJS
+  // reads it as CSV (read_wb_ID falls back to its CSV reader); the guard must not refuse it.
+  it('a comma CSV starting with "ID" reads its rows (key "id")', async () => {
+    const parsed = await parseUpload(asExcel('ID,Customer Code,Product Code,Cases\n1,C1,P1,5\n2,C2,P2,7\n', 'orders.csv'));
+    expect(parsed.rows).toEqual([
+      { id: '1', 'customer code': 'C1', 'product code': 'P1', cases: '5' },
+      { id: '2', 'customer code': 'C2', 'product code': 'P2', cases: '7' },
+    ]);
+  });
+
+  it('a tab file, an "IDNo" header and a semicolon CSV starting with "ID" are all read, not refused', async () => {
+    expect((await parseUpload(asExcel('ID\tcode\tname\n1\tC1\tShop\n', 'orders.csv'))).rows).toEqual([{ id: '1', code: 'C1', name: 'Shop' }]);
+    expect((await parseUpload(asExcel('IDNo,code,name\n7,CAT1,Shop\n', 'customers.csv'))).rows).toEqual([{ idno: '7', code: 'CAT1', name: 'Shop' }]);
+    expect((await parseUpload(asExcel('ID;Customer Code;Cases\n1;C1;5\n', 'orders.csv'))).rows).toEqual([{ id: '1', 'customer code': 'C1', cases: '5' }]);
+  });
+
+  it('a real SYLK file (an ID record then a SYLK record) is still refused as not Excel', async () => {
+    expect(await refusal(parseUpload(asExcel('ID;PWXL\nP;PGeneral\nC;Y1;X1;K"code"\nE\n', 'orders.xls')))).toBe(NOT_EXCEL);
+    expect(await refusal(parseUpload(asExcel('ID;PWXL\nC;Y1;X1;K"code"\nE\n', 'orders.xls')))).toBe(NOT_EXCEL);
   });
 });
 

@@ -234,6 +234,24 @@ describe('no Server Actions until the Next.js upgrade (owner decision 4)', () =>
 });
 
 // ---------------------------------------------------------------------------------------
+// Local server binds to localhost (owner decision 4)
+// ---------------------------------------------------------------------------------------
+
+describe('the dev server binds to localhost (owner decision 4)', () => {
+  // One of the recent critical Next.js advisories affects Windows hosts only. Until the Next.js
+  // upgrade, the app must not listen on every interface when it runs on the maintainer's Windows
+  // PC. `next dev` defaults to 0.0.0.0; `-H 127.0.0.1` keeps it on localhost. `start` (Railway)
+  // must not carry `-H`, because Railway needs every interface.
+  const pkg = JSON.parse(readFileSync(path.join(WEB, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
+
+  it('`dev` binds 127.0.0.1 and `start` has no -H (localhost:3000 still works)', () => {
+    expect(pkg.scripts.dev).toBe('next dev -H 127.0.0.1');
+    expect(pkg.scripts.start).toBe('next start');
+    expect(pkg.scripts.start).not.toMatch(/\s-H\b|--hostname/);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
 // Node 22 LTS
 // ---------------------------------------------------------------------------------------
 
