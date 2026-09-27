@@ -818,6 +818,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           runId={runId}
           depot={{ lat: d.run.depot.lat, lng: d.run.depot.lng, name: d.run.depot.name }}
           selectedLoadId={selectedLoad}
+          // The road shapes answer is for loads other than these (the plan changed on the server): reload.
+          onStale={load}
           loads={d.loads.map((l) => ({
             id: l.id,
             truckCode: l.truckCode,

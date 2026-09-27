@@ -62,13 +62,15 @@ export const GET = (req: Request, { params }: Params) =>
     // One truck at a time: a legacy run has a handful, and a down solver is noticed once.
     for (const [truckId, entry] of byTruck) {
       const pts: [number, number][] = [depot, ...[...entry.stops].sort((a, b) => a.sequence - b.sequence).map((s) => [s.lat, s.lng] as [number, number]), depot];
-      const geo = useSolver ? await callRouteGeometry(pts, cfg?.osrmUrl) : null;
+      // No answer (solver not configured, failed or slow): straight lines, and no call for the rest.
+      const reply = useSolver ? await callRouteGeometry(pts, cfg?.osrmUrl) : null;
+      const geo = reply?.kind === 'answer' ? reply : null;
       if (!geo) useSolver = false;
-      const roads = !!geo && !geo.is_estimated;
+      const roads = !!geo && !geo.isEstimated && geo.coordinates.length > 1;
       trucks.push({
         truckId,
         truckCode: entry.code,
-        coordinates: roads ? geo!.coordinates : pts.map(([lat, lng]) => [lng, lat] as [number, number]),
+        coordinates: roads ? geo.coordinates : pts.map(([lat, lng]) => [lng, lat] as [number, number]),
         distanceKm: 0,
         durationMin: 0,
         provider: roads ? ('osrm' as const) : ('fallback' as const),

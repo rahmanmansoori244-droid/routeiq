@@ -253,8 +253,8 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
       // Render polylines per truck. Prefer real road geometry from the
       // /api/runs/[id]/route-geometries cache; fall back to the depot→stops
       // straight-line tour while the routing API is still resolving. The
-      // straight-line shape only ever appears for the first ~600ms after
-      // page load before the geometry effect updates the map.
+      // server's own 'fallback' (no road shape from the solver) is straight too;
+      // both are drawn dashed.
       for (const [truckId, list] of groupedByTruck) {
         const color = truckColor.get(truckId) ?? '#2563EB';
         const realGeom = geometries.get(truckId);
@@ -282,11 +282,11 @@ export function MapTab({ runId, canEdit, mapboxToken, depot, stops, trucks, unse
           paint: {
             'line-color': color,
             'line-width': 3,
-            // Real road geometry is solid; provisional straight-line tour
-            // renders dashed so the planner can tell the difference at a
-            // glance while the routing API is still resolving.
+            // Real road geometry is solid; a straight-line tour (still
+            // resolving, or the server's 'fallback' when no routing
+            // answered) renders dashed so it never passes for a road.
             'line-opacity': 0.85,
-            ...(realGeom ? {} : { 'line-dasharray': [2, 2] as never }),
+            ...(realGeom && realGeom.provider !== 'fallback' ? {} : { 'line-dasharray': [2, 2] as never }),
           },
         });
 
