@@ -2,6 +2,7 @@ import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
+import { CUSTOMER_SERVICE_COLUMN_DEFAULT } from '@/lib/dispatch/customer-attrs';
 
 interface Params { params: { id: string } }
 
@@ -58,9 +59,15 @@ export const PATCH = (req: Request, { params }: Params) =>
         data.locationVerifiedById = user.id;
         data.locationVerifiedAt = new Date();
       }
-      // A dispatcher setting these explicitly confirms them (no more "default" warnings).
+      // A dispatcher setting these explicitly confirms them (no more "default" warnings). Only the
+      // fields sent: the Details dialog sends only what the dispatcher changed (audit F07).
       if (input.priority !== undefined) data.priorityConfirmed = true;
-      if (input.avgServiceTimeMin !== undefined) data.serviceTimeConfirmed = true;
+      if (input.avgServiceTimeMin === null) {
+        // Unloading time cleared: no own time any more, the customer-type or Settings default applies
+        // (owner decision 9). The column default is stored, as for a customer created without a time.
+        data.avgServiceTimeMin = CUSTOMER_SERVICE_COLUMN_DEFAULT;
+        data.serviceTimeConfirmed = false;
+      } else if (input.avgServiceTimeMin !== undefined) data.serviceTimeConfirmed = true;
 
       const after = await db.customer.update({ where: { id: params.id }, data: data as never });
       await audit({

@@ -190,6 +190,9 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       [/PR8, \*\*awaiting owner approval/i, 'PR8 awaiting owner approval (decisions table)'],
       [/\(PR8, awaiting approval\.\)/i, 'PR8 awaiting approval (open questions)'],
       [/A behaviour change the owner must approve/i, 'PR8 as a change the owner must still approve'],
+      // Audit A2 review: a customer import cannot clear an unloading time (a blank cell keeps the
+      // stored time; customer-import-service-time.spec.ts); only the Details dialog, box emptied, can.
+      [/(clear|cleared|clearing|back (on|to) the default)[^.\n]*\bor (by )?an? (customer )?import\b/i, 'an import clearing an unloading time'],
       // A1 review: the upload caps bound one upload's work, not its time. The "about 2 s" came from
       // one file; files within every cap blocked the app for 6-33 s or crashed it, and a file just
       // under the caps still blocks it for 5-11 s (lib/csv.ts, SECURITY.md section 9).
@@ -202,6 +205,27 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
+      return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
+    });
+    expect(offenders).toEqual([]);
+  });
+
+  it('after a pin correction, nothing says the map or the WhatsApp message moves to the new pin (second A2 review)', () => {
+    // A plan keeps the pin each stop was planned with (getPlanDetail reads the stop snapshot): the
+    // reload after a pin correction adds the orange note, the badge and the WhatsApp / driver sheet
+    // "New pin - ask the dispatcher" line, but the stop's pin link, the route link and the map stay
+    // the planned ones until the load is re-planned (a locked one unlocked first).
+    const REPO = path.resolve(APPS, '..');
+    const files = [...walk(path.join(REPO, 'docs'), /\.md$/), ...walk(path.join(WEB, 'lib'), /\.tsx?$/), ...walk(path.join(WEB, 'app/t/[slug]/dispatch'), /\.tsx?$/)];
+    const STALE: [RegExp, string][] = [
+      [/\b(map|WhatsApp (messages?|texts?))\b[^.\n]*\buses? the (new|corrected) pin\b/i, 'the map or WhatsApp message using the new pin'],
+      [/\b(map|WhatsApp)\b[^.\n]*\buse the customer as it is now\b/i, 'the map or WhatsApp texts using the customer as it is now'],
+      [/\bmap\b[^.\n]*\b(keep|kept) the customer as it was\b/i, 'a reload moving the map to the corrected customer'],
+    ];
+    const offenders = files.flatMap((f) => {
+      const raw = readFileSync(f, 'utf8');
+      // A code comment is read as one text: its "//" and " * " line breaks become spaces.
+      const text = f.endsWith('.md') ? raw : raw.replace(/[ \t]*\r?\n[ \t]*(\/\/|\*(?!\/))?[ \t]*/g, ' ');
       return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
     });
     expect(offenders).toEqual([]);
@@ -297,5 +321,35 @@ describe('the handbook counts the solver tests pytest collects (PR8 review)', ()
       '    pass',
     ].join('\n');
     expect(pytestCount(src, 'x.py')).toBe(3 + 16 + 1);
+  });
+});
+
+describe('the dispatcher guide keeps each customer rule under its own bullet (review of audit PR 3)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const guide = () => readFileSync(path.join(REPO, 'docs', 'DISPATCHER_GUIDE.md'), 'utf8').replace(/\r\n/g, '\n');
+  const bullet = (text: string, head: string) => {
+    const line = text.split('\n').find((l) => l.startsWith(`- **${head}:**`));
+    if (!line) throw new Error(`no "${head}" bullet in DISPATCHER_GUIDE.md`);
+    return line;
+  };
+
+  it("the import's service-time and Validate only rules are under Customer import, not under the Customers page toggles", () => {
+    const text = guide();
+    const importRules = /A service time in the file \(at most 480 min\) counts as confirmed|\*\*Validate only\*\*/g;
+    expect(bullet(text, 'Customer import').match(importRules)).toHaveLength(2);
+    expect(bullet(text, 'Customers page').match(importRules)).toBeNull();
+  });
+
+  it('the Customers page bullet says a server error is not a refusal (F24)', () => {
+    const page = bullet(guide(), 'Customers page');
+    expect(page).toMatch(/server answers with an error/);
+    expect(page).toMatch(/may or may not have been saved/);
+    expect(page).toMatch(/\*\*not confirmed\*\*/);
+  });
+
+  it('the re-check of files merged the old way names the files it refuses (not every file checked before the update)', () => {
+    const text = guide();
+    expect(text).not.toMatch(/A file checked before the update that keeps every priority and note of repeated rows asks to be checked again/);
+    expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
   });
 });

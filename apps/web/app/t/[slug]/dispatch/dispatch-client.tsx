@@ -166,6 +166,17 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const loader = loaderRef.current;
   const refresh = useCallback(() => loader.refresh(), [loader]);
 
+  // A customer's pin or details were saved (ADD LOCATION / Details): the day AND the plan below are
+  // read again, the plan in place (audit F13). A READY plan does not poll, so its "changed after
+  // planning" notes and badge and the WhatsApp texts' "New pin" line appeared only after a page
+  // reload - also for LOCKED loads, which the day banner does not count. The stops keep the planned
+  // pin (map, pin and route links) until the load is re-planned. Not only after a day load that
+  // succeeded: the plan shows its own error and Try again.
+  const afterCustomerSaved = useCallback(() => {
+    setPlanReload((k) => k + 1);
+    void refresh();
+  }, [refresh]);
+
   // A new selection (or the first render) loads it.
   useEffect(() => {
     void refresh();
@@ -592,8 +603,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         </Step>
       ) : null}
 
-      <LocationDialog open={locOpen} onOpenChange={setLocOpen} customer={locFor} depot={{ lat: day.depot.lat, lng: day.depot.lng }} onSaved={() => void refresh()} />
-      <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={() => void refresh()} />
+      <LocationDialog open={locOpen} onOpenChange={setLocOpen} customer={locFor} depot={{ lat: day.depot.lat, lng: day.depot.lng }} onSaved={afterCustomerSaved} />
+      <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={afterCustomerSaved} />
     </div>
   );
 }

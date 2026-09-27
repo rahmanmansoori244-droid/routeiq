@@ -11,6 +11,7 @@ import {
   contentFingerprint,
   customerKey,
   customerTypeFromText,
+  joinNotes,
   lineDupKey,
   normalizeOrderRows,
   normSalesOrder,
@@ -240,6 +241,32 @@ export async function validateIntake(
   };
 }
 
+/** STALE_VALIDATION message for a file checked before merged rows kept every priority and note. */
+export const MERGED_THE_OLD_WAY =
+  'This file was checked before RouteIQ kept the highest priority and every note of rows with the same sales order and product. Nothing was added: upload the file again so those rows are added together the new way.';
+
+/**
+ * A batch checked before this release with a line added together from several rows: that line
+ * kept only its first row's priority and note and could count blank money as 0 (audit F02 /
+ * F04). Its stored line cannot be repaired, so the file must be uploaded again.
+ */
+export function mergedTheOldWay(lines: Pick<ResolvedLine, 'sourceRows' | 'mergedRows'>[]): boolean {
+  return lines.some((l) => (l.sourceRows?.length ?? 1) > 1 && !l.mergedRows);
+}
+
+/**
+ * Why a checked file can no longer be confirmed for its depot (audit F03), or null: the depot
+ * was deactivated after the check, or deleted (before this release a delete set the batch's
+ * depot to empty).
+ */
+export function batchDepotProblem(depotId: string | null, depot: { code: string; active: boolean } | null): string | null {
+  if (!depotId || !depot) return 'The depot of this file was deleted after the file was checked. Nothing was added: upload the file again for an active depot.';
+  if (!depot.active) {
+    return `Depot ${depot.code} was deactivated after this file was checked. Nothing was added: reactivate the depot under Depots, or upload the file again for another depot.`;
+  }
+  return null;
+}
+
 /**
  * Re-check a validated batch inside the confirm transaction (after lockIntake), because the
  * world may have changed since the file was checked: another file or a late order confirmed
@@ -260,6 +287,19 @@ export async function revalidateIntake(
       'STALE_VALIDATION',
       `This file was checked more than ${VALIDATED_BATCH_MAX_AGE_HOURS} hours ago. Upload it again so it is checked against today's orders and master data.`,
     );
+  }
+  if (mergedTheOldWay(v.lines)) {
+    throw new IntakeConflict('STALE_VALIDATION', MERGED_THE_OLD_WAY);
+  }
+  {
+    // The depot is locked (FOR SHARE) until the orders are written: a depot deactivated or deleted
+    // after the check never receives them (audit F03), and one being deactivated right now is waited for.
+    const depot = batch.depotId
+      ? await tx.$queryRaw<Array<{ code: string; active: boolean }>>`
+          SELECT "code", "active" FROM "Depot" WHERE "id" = ${batch.depotId} AND "tenantId" = ${tenantId} FOR SHARE`
+      : [];
+    const problem = batchDepotProblem(batch.depotId, depot[0] ?? null);
+    if (problem) throw new IntakeConflict('MASTER_CHANGED', problem);
   }
   {
     const same = await findSameConfirmedFile(tx, tenantId, {
@@ -409,8 +449,9 @@ export async function confirmIntake(
         totalServiceTimeMin: Math.max(cust.avgServiceTimeMin, 1),
         priority: filePriorities.length ? Math.min(...filePriorities) : cust.priority,
         priorityFromFile: filePriorities.length > 0,
-        // Each distinct remark once: the same note usually repeats on every line of an order.
-        notes: [...new Set(rows.map((r) => r.notes?.trim()).filter(Boolean))].join(' | ') || null,
+        // Each distinct remark once: the same note usually repeats on every line of an order, and a
+        // line added together from several rows already holds each of its rows' notes (audit F02).
+        notes: joinNotes(...rows.map((r) => r.notes)),
         status: 'VALIDATED',
         uploadBatchId: batch.id,
         uploadedAt: now,

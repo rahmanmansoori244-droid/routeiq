@@ -3,7 +3,8 @@
  *
  * Accepted inputs
  *   - "23.5859, 58.4059" / "23.5859 58.4059" / "23.5859;58.4059"
- *   - DMS as Google copies it: 23°35'09.2"N 58°24'21.2"E
+ *   - DMS as Google copies it: 23°35'09.2"N 58°24'21.2"E (minutes and seconds below 60; whole
+ *     degrees or minutes only -> needs a pin confirmation)
  *   - Google Maps URLs carrying coordinates:
  *       .../place/...!3d23.5859!4d58.4059   (the pin - most reliable)
  *       ?q=23.58,58.40  ?ll=  ?query=  ?destination=  ?daddr=  /search/23.58,+58.40
@@ -54,19 +55,68 @@ function decimals(v: string): number {
   return i < 0 ? 0 : v.length - i - 1;
 }
 
-function dmsToDec(deg: string, min: string | undefined, sec: string | undefined, hemi: string): number {
-  let v = Number(deg) + (min ? Number(min) / 60 : 0) + (sec ? Number(sec) / 3600 : 0);
-  if (/[SW]/i.test(hemi)) v = -v;
-  return v;
+/** How precise a degrees-minutes-seconds point is: whole degrees (~110 km), whole minutes (~1.8 km) or seconds. */
+export type DmsPrecision = 'DEGREES' | 'MINUTES' | 'SECONDS';
+
+export type DmsParse = { lat: number; lng: number; precision: DmsPrecision } | { error: string };
+
+/**
+ * One coordinate of a DMS pair, or why it is not a real one (audit F17). Minutes and seconds must be
+ * below 60, seconds need minutes, and the value must stay within 90° (latitude, N/S) or 180°
+ * (longitude, E/W): 23°99'00"N used to be read as 24.65°N - another real point in Oman, with high
+ * confidence and no pin to confirm.
+ */
+function dmsValue(deg: string, min: string | undefined, sec: string | undefined, hemi: string, axis: 'lat' | 'lng'): number | string {
+  const name = axis === 'lat' ? 'Latitude' : 'Longitude';
+  const max = axis === 'lat' ? 90 : 180;
+  if (sec !== undefined && min === undefined) return `${name} ${deg}°${sec}": seconds without minutes. Write degrees, minutes and seconds, e.g. 23°35'09.2"N.`;
+  const d = Number(deg);
+  const m = min === undefined ? 0 : Number(min);
+  const s = sec === undefined ? 0 : Number(sec);
+  if (!(m < 60)) return `${name}: minutes must be 0 to 59 (got ${min}').`;
+  if (!(s < 60)) return `${name}: seconds must be below 60 (got ${sec}").`;
+  const v = d + m / 60 + s / 3600;
+  if (v > max) return `${name} must be at most ${max}° (got ${deg}°${min !== undefined ? `${min}'` : ''}${sec !== undefined ? `${sec}"` : ''}${hemi.toUpperCase()}).`;
+  return /[SW]/i.test(hemi) ? -v : v;
 }
 
-/** 23°35'09.2"N 58°24'21.2"E (also with ′ ″ or spaces). */
-function parseDms(s: string): { lat: number; lng: number } | null {
-  const re =
-    /(\d{1,3})\s*[°º]\s*(?:(\d{1,2})\s*['′’]\s*)?(?:(\d{1,2}(?:\.\d+)?)\s*(?:"|″|”|'')\s*)?([NSns])[\s,;+]*(\d{1,3})\s*[°º]\s*(?:(\d{1,2})\s*['′’]\s*)?(?:(\d{1,2}(?:\.\d+)?)\s*(?:"|″|”|'')\s*)?([EWew])/;
-  const m = re.exec(s);
+const dmsPrecisionOf = (min: string | undefined, sec: string | undefined): DmsPrecision => (min === undefined ? 'DEGREES' : sec === undefined ? 'MINUTES' : 'SECONDS');
+const PRECISION_RANK: Record<DmsPrecision, number> = { DEGREES: 0, MINUTES: 1, SECONDS: 2 };
+
+// Latitude (N/S) first, then longitude (E/W), as Google copies it. Minutes and seconds are matched
+// with up to 3 digits so an impossible value is refused with its reason instead of "not a location".
+// The degrees start a number ("1234°" is not read as 234°); no lookbehind, for older browsers.
+const DMS_RE =
+  /(?:^|[^\d.])(\d{1,3})\s*[°º]\s*(?:(\d{1,3})\s*['′’]\s*)?(?:(\d{1,3}(?:\.\d+)?)\s*(?:"|″|”|'')\s*)?([NSns])[\s,;+]*(\d{1,3})\s*[°º]\s*(?:(\d{1,3})\s*['′’]\s*)?(?:(\d{1,3}(?:\.\d+)?)\s*(?:"|″|”|'')\s*)?([EWew])/;
+
+/**
+ * 23°35'09.2"N 58°24'21.2"E (also with ′ ″ or spaces). null = no DMS pair in the text; `error` = a
+ * DMS pair that is not a real point (refused, never rolled over into another point).
+ */
+export function parseDms(s: string): DmsParse | null {
+  const m = DMS_RE.exec(s);
   if (!m) return null;
-  return { lat: dmsToDec(m[1], m[2], m[3], m[4]), lng: dmsToDec(m[5], m[6], m[7], m[8]) };
+  const lat = dmsValue(m[1], m[2], m[3], m[4], 'lat');
+  if (typeof lat === 'string') return { error: lat };
+  const lng = dmsValue(m[5], m[6], m[7], m[8], 'lng');
+  if (typeof lng === 'string') return { error: lng };
+  const a = dmsPrecisionOf(m[2], m[3]);
+  const b = dmsPrecisionOf(m[6], m[7]);
+  return { lat, lng, precision: PRECISION_RANK[a] <= PRECISION_RANK[b] ? a : b };
+}
+
+/**
+ * How sure a DMS point is. Whole degrees (about 110 km) or whole minutes (about 1.8 km) are not a
+ * delivery point: the dispatcher confirms the pin (audit F17), like decimals with fewer than 4 places.
+ */
+function dmsBase(precision: DmsPrecision): { confidence: Confidence; needsPin?: boolean; warnings?: string[] } {
+  if (precision === 'DEGREES') {
+    return { confidence: 'LOW', needsPin: true, warnings: ['Whole degrees only (accurate to about 100 km). Drop the pin on the customer.'] };
+  }
+  if (precision === 'MINUTES') {
+    return { confidence: 'MEDIUM', needsPin: true, warnings: ['Degrees and minutes only, no seconds (accurate to about 2 km). Confirm the pin.'] };
+  }
+  return { confidence: 'HIGH' };
 }
 
 function pairFrom(text: string): { lat: string; lng: string } | null {
@@ -92,7 +142,8 @@ function withValidation(
       warnings.push('Latitude and longitude looked swapped; they were swapped back. Please confirm on the map.');
       [lat, lng] = [lng, lat];
       needsPin = true;
-      confidence = 'MEDIUM';
+      // Never raises a lower confidence (whole-degree DMS stays LOW).
+      if (confidence === 'HIGH') confidence = 'MEDIUM';
     } else {
       warnings.push('This point is outside the delivery area (Oman/UAE). Confirm it on the map.');
       needsPin = true;
@@ -152,7 +203,8 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
   // 2. DMS
   const dmsPlain = parseDms(input);
   if (dmsPlain && !/^https?:/i.test(input)) {
-    return withValidation(dmsPlain.lat, dmsPlain.lng, { source: 'MANUAL_LATLNG', confidence: 'HIGH' }, area);
+    if ('error' in dmsPlain) return fail(dmsPlain.error);
+    return withValidation(dmsPlain.lat, dmsPlain.lng, { source: 'MANUAL_LATLNG', ...dmsBase(dmsPlain.precision) }, area);
   }
   // 3. geo: URI
   const geo = new RegExp(`^geo:(${NUM}),(${NUM})`, 'i').exec(input);
@@ -174,6 +226,12 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
     return { ...fail('Short link - resolving...'), needsResolve: true };
   }
   return parseGoogleMapsUrl(url, area);
+}
+
+/** A DMS pair found in a Google Maps link: refused when it is not a real point, else checked like any other. */
+function dmsResult(d: DmsParse, resolvedUrl: string, area: ServiceArea): LocationParse {
+  if ('error' in d) return fail(d.error, { resolvedUrl });
+  return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', ...dmsBase(d.precision), resolvedUrl }, area);
 }
 
 export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE_AREA): LocationParse {
@@ -211,7 +269,7 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
       }, area);
     }
     const d = parseDms(v);
-    if (d) return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', resolvedUrl }, area);
+    if (d) return dmsResult(d, resolvedUrl, area);
   }
   // Coordinates in the path: /search/23.58,+58.40  /place/23.58,58.40  /dir//23.58,58.40
   const pathPair = new RegExp(`/(?:search|place|dir(?:/[^/]*)?)/(${NUM}),\\s*\\+?(${NUM})(?:[/?@]|$)`).exec(full);
@@ -223,7 +281,7 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
   const pathDms = /\/(?:search|place)\/([^/@?]+)/.exec(full);
   if (pathDms) {
     const d = parseDms(pathDms[1]);
-    if (d) return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', resolvedUrl }, area);
+    if (d) return dmsResult(d, resolvedUrl, area);
   }
   // Map viewport centre: /@lat,lng,17z - NOT necessarily where the customer is.
   const at = new RegExp(`@(${NUM}),(${NUM})(?:,[\\d.]+[zm])?`).exec(full);

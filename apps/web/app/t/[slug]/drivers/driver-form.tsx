@@ -63,6 +63,8 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
         return;
       }
       toast.success(mode === 'create' ? 'Driver created' : 'Driver updated');
+      // Switched to inactive: the trucks that keep them as default driver are named (audit F20).
+      if (typeof data?.data?.warning === 'string') toast.warning(data.data.warning, { duration: 10_000 });
       onSaved();
     });
   }

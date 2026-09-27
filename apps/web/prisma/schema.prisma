@@ -343,7 +343,8 @@ model Truck {
   availableFromMin Int?
   availableToMin   Int?
   defaultDriverId  String?
-  defaultDriver    Driver?           @relation("TruckDefaultDriver", fields: [defaultDriverId], references: [id], onDelete: SetNull)
+  /// NO ACTION (audit F20): a driver still set as a truck's default is never deleted (drivers are deactivated).
+  defaultDriver    Driver?           @relation("TruckDefaultDriver", fields: [defaultDriverId], references: [id], onDelete: NoAction)
   active           Boolean           @default(true)
   routes           RouteAssignment[]
   shifts           DriverShift[]
@@ -546,7 +547,8 @@ model UploadBatch {
   orders         Order[]
   // --- dispatch MVP ---
   depotId        String?
-  depot          Depot?            @relation(fields: [depotId], references: [id], onDelete: SetNull)
+  /// NO ACTION (audit F03): a depot with order files is never deleted (it is deactivated).
+  depot          Depot?            @relation(fields: [depotId], references: [id], onDelete: NoAction)
   fileHash       String?
   isLate         Boolean           @default(false)
   lateReason     String?
@@ -579,7 +581,9 @@ model Order {
   manualBaselineAssignments ManualBaselineAssignment[]
   // --- dispatch MVP (uploadedAt = received time) ---
   depotId                   String?
-  depot                     Depot?                     @relation(fields: [depotId], references: [id], onDelete: SetNull)
+  /// NO ACTION (audit F03): a depot with orders is never deleted (it is deactivated), so an order
+  /// never loses its depot and never moves into another depot's plan.
+  depot                     Depot?                     @relation(fields: [depotId], references: [id], onDelete: NoAction)
   isLate                    Boolean                    @default(false)
   lateReason                String?
   lateRecordedById          String?
@@ -708,7 +712,9 @@ model PlanLoad {
   loadNo              Int
   status              LoadStatus        @default(PLANNED)
   driverId            String?
-  driver              Driver?           @relation(fields: [driverId], references: [id], onDelete: SetNull)
+  /// NO ACTION (audit F20): a driver on a load is never deleted (drivers are deactivated), so a
+  /// load never loses who drove it.
+  driver              Driver?           @relation(fields: [driverId], references: [id], onDelete: NoAction)
   departMin           Int
   returnMin           Int
   distanceKm          Float

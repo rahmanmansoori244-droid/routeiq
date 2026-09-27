@@ -1,25 +1,19 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api, CUSTOMER_TYPES, hhmm, toMinutes } from './client-api';
+import { api, CUSTOMER_TYPES } from './client-api';
+import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
-export interface EditableCustomer {
+export interface EditableCustomer extends DetailsCustomer {
   customerId: string;
   code: string;
   branchCode: string | null;
   name: string;
-  customerType: string | null;
-  priority: number;
-  serviceMin: number;
-  hardWindowStartMin: number | null;
-  hardWindowEndMin: number | null;
-  prefWindowStartMin: number | null;
-  prefWindowEndMin: number | null;
 }
 
 interface Props {
@@ -29,63 +23,75 @@ interface Props {
   onSaved: () => void;
 }
 
-/** Confirm priority / type / service time / receiving hours. Saved on the customer master. */
+// Where a default comes from. A priority has no Settings default: DEFAULT is the stored, unconfirmed one.
+const PRIORITY_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type default', DEFAULT: 'default' };
+const SERVICE_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type default', DEFAULT: 'Settings default' };
+
+/**
+ * Confirm priority / type / service time / receiving hours. Saved on the customer master.
+ *
+ * Audit F07 (owner decision 9, customer-details.ts): times are checked strictly (HH:MM), unloading
+ * time is whole minutes or blank (= the default, not confirmed), and Save sends only what the
+ * dispatcher changed, so a priority or unloading time nobody touched is never marked as confirmed.
+ * A window with a changed end is sent whole, both ends as shown (A2 review), so the saved window is
+ * always one the dispatcher saw.
+ */
 export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props) {
-  const [type, setType] = useState('');
-  const [priority, setPriority] = useState(3);
-  const [service, setService] = useState('10');
-  const [hs, setHs] = useState('');
-  const [he, setHe] = useState('');
-  const [ps, setPs] = useState('');
-  const [pe, setPe] = useState('');
+  // The form as it opened (what "changed" is measured against) and as typed now.
+  const [initial, setInitial] = useState<DetailsForm>(EMPTY_DETAILS);
+  const [form, setForm] = useState<DetailsForm>(EMPTY_DETAILS);
   const [busy, setBusy] = useState(false);
+  // Bumped whenever the dialog opens, closes or shows another customer: a Save answer that arrives
+  // after that is reported for its own customer, never applied to the dialog on screen.
+  const shown = useRef(0);
 
   useEffect(() => {
+    shown.current++;
+    setBusy(false);
     if (!open || !customer) return;
-    setType(customer.customerType ?? '');
-    setPriority(customer.priority);
-    setService(String(customer.serviceMin));
-    const f = (v: number | null) => (v === null ? '' : hhmm(v));
-    setHs(f(customer.hardWindowStartMin));
-    setHe(f(customer.hardWindowEndMin));
-    setPs(f(customer.prefWindowStartMin));
-    setPe(f(customer.prefWindowEndMin));
+    const f = detailsFormOf(customer);
+    setInitial(f);
+    setForm(f);
   }, [open, customer]);
 
+  const set = (key: keyof DetailsForm) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
+
   async function save() {
-    if (!customer) return;
-    const mins = [hs, he, ps, pe].map(toMinutes);
-    if (mins.some((m) => m !== null && Number.isNaN(m))) {
-      toast.error('Use HH:MM for times, e.g. 06:30.');
-      return;
-    }
-    const [a, b, c, d] = mins;
-    if ((a === null) !== (b === null) || (c === null) !== (d === null)) {
-      toast.error('Give both the start and the end of a window (or leave both empty).');
-      return;
-    }
-    setBusy(true);
-    const r = await api(`/api/customers/${customer.customerId}`, {
-      method: 'PATCH',
-      json: {
-        customerType: type || null,
-        priority,
-        avgServiceTimeMin: Number(service) || 0,
-        hardWindowStartMin: a,
-        hardWindowEndMin: b,
-        prefWindowStartMin: c,
-        prefWindowEndMin: d,
-      },
-    });
-    setBusy(false);
+    if (!customer || busy) return;
+    const r = detailsPatch(initial, form);
     if (!r.ok) {
-      toast.error(r.error ?? 'Could not save.');
+      toast.error(r.error);
+      return;
+    }
+    if (Object.keys(r.patch).length === 0) {
+      toast.info('Nothing changed.');
+      onOpenChange(false);
+      return;
+    }
+    const started = shown.current;
+    const target = customer;
+    setBusy(true);
+    const res = await api(`/api/customers/${target.customerId}`, { method: 'PATCH', json: r.patch });
+    if (started !== shown.current) {
+      if (res.ok) {
+        toast.success(`Details saved for ${target.name}.`);
+        onSaved();
+      } else toast.error(`The details of ${target.name} were not saved: ${res.error ?? 'error'}`);
+      return;
+    }
+    setBusy(false);
+    if (!res.ok) {
+      toast.error(res.error ?? 'Could not save.');
       return;
     }
     toast.success('Customer details saved.');
     onOpenChange(false);
     onSaved();
   }
+
+  const priorityDefault = initial.priority === '' && customer ? `P${customer.priority} - ${PRIORITY_DEFAULT_TEXT[customer.prioritySource ?? ''] ?? 'default'}, not confirmed` : null;
+  const serviceDefault =
+    customer && customer.serviceSource && customer.serviceSource !== 'CUSTOMER' ? `${customer.serviceMin} (${SERVICE_DEFAULT_TEXT[customer.serviceSource] ?? 'default'})` : 'empty = default';
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -94,13 +100,14 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <DialogTitle>Customer delivery details</DialogTitle>
           <DialogDescription>
             {customer?.name} — {customer?.code}
-            {customer?.branchCode ? ` / ${customer.branchCode}` : ''}. Empty receiving hours = use the customer-type default.
+            {customer?.branchCode ? ` / ${customer.branchCode}` : ''}. Only what you change is saved. Empty receiving hours = use the customer-type default; empty
+            unloading time = the customer-type or Settings default.
           </DialogDescription>
         </DialogHeader>
         <div className="grid grid-cols-2 gap-3">
           <div className="space-y-1">
             <Label htmlFor="cd-type">Customer type</Label>
-            <select id="cd-type" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={type} onChange={(e) => setType(e.target.value)}>
+            <select id="cd-type" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={form.type} onChange={(e) => set('type')(e.target.value)}>
               <option value="">— not set —</option>
               {CUSTOMER_TYPES.map((t) => (
                 <option key={t} value={t}>
@@ -111,34 +118,37 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           </div>
           <div className="space-y-1">
             <Label htmlFor="cd-prio">Priority (P1 = highest)</Label>
-            <select id="cd-prio" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
+            <select id="cd-prio" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={form.priority} onChange={(e) => set('priority')(e.target.value)}>
+              {priorityDefault ? <option value="">{priorityDefault}</option> : null}
               {[1, 2, 3, 4, 5].map((p) => (
-                <option key={p} value={p}>
+                <option key={p} value={String(p)}>
                   P{p}
                   {p === 1 ? ' — highest' : p === 5 ? ' — lowest' : ''}
                 </option>
               ))}
             </select>
+            {priorityDefault && form.priority === '' ? <p className="text-xs text-muted-foreground">Pick a priority to confirm it.</p> : null}
           </div>
           <div className="space-y-1">
-            <Label htmlFor="cd-svc">Unloading time (min, at most 480)</Label>
-            <Input id="cd-svc" inputMode="numeric" value={service} onChange={(e) => setService(e.target.value)} />
+            <Label htmlFor="cd-svc">Unloading time (whole minutes, 0 to 480)</Label>
+            <Input id="cd-svc" inputMode="numeric" value={form.service} placeholder={serviceDefault} onChange={(e) => set('service')(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Empty = the customer-type or Settings default. 0 = no unloading time.</p>
           </div>
           <div />
           <div className="space-y-1">
-            <Label>Receiving hours — HARD (never outside)</Label>
+            <Label htmlFor="cd-hs">Receiving hours — HARD (never outside)</Label>
             <div className="flex items-center gap-1">
-              <Input placeholder="06:00" value={hs} onChange={(e) => setHs(e.target.value)} />
+              <Input id="cd-hs" placeholder="06:00" value={form.hardStart} onChange={(e) => set('hardStart')(e.target.value)} />
               <span>–</span>
-              <Input placeholder="10:00" value={he} onChange={(e) => setHe(e.target.value)} />
+              <Input id="cd-he" aria-label="Receiving hours end" placeholder="10:00" value={form.hardEnd} onChange={(e) => set('hardEnd')(e.target.value)} />
             </div>
           </div>
           <div className="space-y-1">
-            <Label>Preferred hours (soft)</Label>
+            <Label htmlFor="cd-ps">Preferred hours (soft)</Label>
             <div className="flex items-center gap-1">
-              <Input placeholder="07:00" value={ps} onChange={(e) => setPs(e.target.value)} />
+              <Input id="cd-ps" placeholder="07:00" value={form.prefStart} onChange={(e) => set('prefStart')(e.target.value)} />
               <span>–</span>
-              <Input placeholder="09:00" value={pe} onChange={(e) => setPe(e.target.value)} />
+              <Input id="cd-pe" aria-label="Preferred hours end" placeholder="09:00" value={form.prefEnd} onChange={(e) => set('prefEnd')(e.target.value)} />
             </div>
           </div>
         </div>
@@ -146,7 +156,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={save} disabled={busy}>
+          <Button onClick={save} disabled={busy} data-testid="save-customer-details">
             Save
           </Button>
         </DialogFooter>

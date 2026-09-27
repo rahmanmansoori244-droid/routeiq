@@ -8,7 +8,10 @@ import { dateOnly, isoOf, todayIso } from './time';
 
 const OPEN: OrderStatus[] = ['UPLOADED', 'VALIDATED', 'ASSIGNED', 'UNSERVED'];
 
-export async function openOrders(tenantId: string, of: { customerId: string } | { productId: string }): Promise<{ orders: number; firstDate: string | null }> {
+export async function openOrders(
+  tenantId: string,
+  of: { customerId: string } | { productId: string } | { depotId: string },
+): Promise<{ orders: number; firstDate: string | null }> {
   const cfg = await prisma.tenantConfig.findUnique({ where: { tenantId }, select: { timezone: true } });
   const from = dateOnly(todayIso(cfg?.timezone ?? 'Asia/Muscat'));
   const where = {
@@ -17,7 +20,7 @@ export async function openOrders(tenantId: string, of: { customerId: string } | 
     deliveryDate: { gte: from },
     // PR9: an order brought forward to a later day is open there (its copy), not here.
     carriedToOrderId: null,
-    ...('customerId' in of ? { customerId: of.customerId } : { lines: { some: { productId: of.productId } } }),
+    ...('customerId' in of ? { customerId: of.customerId } : 'depotId' in of ? { depotId: of.depotId } : { lines: { some: { productId: of.productId } } }),
   };
   const [orders, first] = await Promise.all([
     prisma.order.count({ where }),
@@ -27,8 +30,12 @@ export async function openOrders(tenantId: string, of: { customerId: string } | 
 }
 
 /** The warning text, or null when nothing is open. */
-export function deactivateWarning(kind: 'customer' | 'product', open: { orders: number; firstDate: string | null }): string | null {
+export function deactivateWarning(kind: 'customer' | 'product' | 'depot', open: { orders: number; firstDate: string | null }): string | null {
   if (!open.orders) return null;
+  if (kind === 'depot') {
+    // Audit F03: the orders keep their depot (they never move to another depot's plan).
+    return `${open.orders} open order(s) of this depot (from ${open.firstDate}) keep it and are not planned while it is inactive. Reactivate the depot to plan them.`;
+  }
   return kind === 'customer'
     ? `${open.orders} open order(s) of this customer (from ${open.firstDate}) will be left unserved at the next optimize or re-plan. Reactivate the customer to deliver them.`
     : `${open.orders} open order(s) (from ${open.firstDate}) still contain this product. They are delivered as ordered; new files with it will be refused.`;

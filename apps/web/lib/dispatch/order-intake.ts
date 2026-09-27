@@ -320,6 +320,20 @@ export interface KnownProduct {
   weightPerCaseKg: number;
 }
 
+/**
+ * One file row of a line added together from several rows (the same sales order, customer
+ * branch, product and date), as it was in the file. Kept with the checked file (the batch's
+ * validation), so every row's quantity, priority, note and money stays traceable (audit F02).
+ */
+export interface MergedRow {
+  row: number;
+  cases: number;
+  priority: number | null;
+  notes: string | null;
+  salesValue: number | null;
+  margin: number | null;
+}
+
 export interface ResolvedLine extends NormalizedLine {
   customerKey: string; // code::branchKey
   customerId: string | null; // null = will be created on confirm
@@ -331,6 +345,69 @@ export interface ResolvedLine extends NormalizedLine {
    * before this field existed.
    */
   weightMissingCases?: number;
+  /**
+   * Only on a line added together from several rows: each row as it was in the file (audit F02).
+   * A batch checked before this field existed has merged lines without it and must be uploaded
+   * again (revalidateIntake): its priority, notes and money were merged the old way.
+   */
+  mergedRows?: MergedRow[];
+}
+
+/**
+ * The stronger of two file priorities (P1 is the highest). A row without a priority never
+ * weakens or removes another row's (audit F02: a P1 on a second row was lost).
+ */
+export function strongerPriority(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.min(a, b);
+}
+
+/**
+ * Notes as their distinct parts, joined with " | " - the separator the plan screen, driver sheets
+ * and WhatsApp split notes on. Blank notes are dropped; null when nothing is left (audit F02:
+ * the notes of every row of a merged line are kept, each once).
+ */
+export function joinNotes(...notes: (string | null | undefined)[]): string | null {
+  const parts = [...new Set(notes.flatMap((n) => (n ?? '').split(' | ')).map((n) => n.trim()).filter(Boolean))];
+  return parts.length ? parts.join(' | ') : null;
+}
+
+/** A money value of a merged line: known only when every row had one (audit F04: blank = unknown, never 0). */
+function sumKnown(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : a + b;
+}
+
+const fmtPriority = (p: number | null) => (p === null ? 'none' : `P${p}`);
+
+/**
+ * The warning for a line added together from rows that differ in priority, note or money
+ * (audit F02 / F04), naming each row; null when the rows differ only in cases. The plain
+ * "quantities added together" warning is given per row as well.
+ */
+export function mergedLineWarning(l: ResolvedLine, names: { customer: string; product: string }): string | null {
+  const rows = l.mergedRows;
+  if (!rows || rows.length < 2) return null;
+  const parts: string[] = [];
+  if (new Set(rows.map((r) => r.priority)).size > 1) {
+    parts.push(`Different priorities (${rows.map((r) => `row ${r.row} ${fmtPriority(r.priority)}`).join(', ')}): ${fmtPriority(l.priority)} is used, the highest.`);
+  }
+  const withNote = rows.filter((r) => r.notes && r.notes.trim());
+  if (withNote.length && new Set(rows.map((r) => (r.notes ?? '').trim())).size > 1) {
+    parts.push(`Notes kept: ${withNote.map((r) => `row ${r.row} "${(r.notes as string).trim()}"`).join('; ')}.`);
+  }
+  const blankMoney = (k: 'salesValue' | 'margin') => (rows.some((r) => r[k] !== null) ? rows.filter((r) => r[k] === null).map((r) => r.row) : []);
+  const blankValue = blankMoney('salesValue');
+  const blankMargin = blankMoney('margin');
+  if (blankValue.length || blankMargin.length) {
+    const what = [blankValue.length ? `sales value (blank on row ${blankValue.join(', ')})` : '', blankMargin.length ? `margin (blank on row ${blankMargin.join(', ')})` : '']
+      .filter(Boolean)
+      .join(' and ');
+    parts.push(`The line's ${what} ${blankValue.length && blankMargin.length ? 'are' : 'is'} unknown: a blank is not counted as 0.`);
+  }
+  if (!parts.length) return null;
+  const rowList = rows.map((r) => r.row);
+  return `Rows ${rowList.slice(0, -1).join(', ')} and ${rowList[rowList.length - 1]} are one line (sales order ${l.salesOrderNo}, ${names.product} for ${names.customer}), ${l.cases} cases in all. ${parts.join(' ')}`;
 }
 
 export interface NewCustomer {
@@ -455,6 +532,8 @@ export function resolveOrderLines(
   const noLoc = new Set<string>();
   const noWeight = new Set<string>();
   const merged = new Map<string, ResolvedLine>();
+  // Each line's first row as it was in the file: the start of `mergedRows` once a second row comes.
+  const firstRowOf = new Map<string, MergedRow>();
   const twinWarned = new Set<string>();
   // Rows of an inactive customer or product, grouped like `merged`: a line of them that is already
   // confirmed (the customer was deactivated after its orders were added) is a duplicate, never an
@@ -494,18 +573,25 @@ export function resolveOrderLines(
     }
     // Same sales order + customer branch + product + date twice in one file -> sum (warned).
     // Rows without a sales-order number are never merged (no evidence they are the same line).
+    // Whatever the row order: the highest priority of the rows, every distinct note, and money
+    // only when every row has it (audit F02 / F04); each row is kept in `mergedRows`.
     const mk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
+    const rowOf: MergedRow = { row: l.row, cases: l.cases, priority: l.priority, notes: l.notes, salesValue: l.salesValue, margin: l.margin };
     const existing = merged.get(mk);
     if (existing) {
       existing.cases += l.cases;
       if (l.weightKg !== null) existing.weightKg = (existing.weightKg ?? 0) + l.weightKg;
       else existing.weightMissingCases = (existing.weightMissingCases ?? 0) + l.cases;
-      if (l.salesValue !== null) existing.salesValue = (existing.salesValue ?? 0) + l.salesValue;
-      if (l.margin !== null) existing.margin = (existing.margin ?? 0) + l.margin;
+      existing.salesValue = sumKnown(existing.salesValue, l.salesValue);
+      existing.margin = sumKnown(existing.margin, l.margin);
+      existing.priority = strongerPriority(existing.priority, l.priority);
+      existing.notes = joinNotes(existing.notes, l.notes);
+      existing.mergedRows = [...(existing.mergedRows ?? [firstRowOf.get(mk)!]), rowOf];
       existing.sourceRows.push(l.row);
       warnings.push(`Row ${l.row}: same sales order/product as row ${existing.sourceRows[0]} - quantities added together.`);
       continue;
     }
+    firstRowOf.set(mk, rowOf);
     merged.set(mk, {
       ...l,
       customerKey: ck,
@@ -570,6 +656,8 @@ export function resolveOrderLines(
   for (const l of lines) {
     const cust = custByKey.get(l.customerKey);
     const prod = prodByCode.get(l.productCode.trim().toUpperCase());
+    const mergedWarning = mergedLineWarning(l, { customer: custName(l, cust), product: prod?.code ?? l.productCode });
+    if (mergedWarning) warnings.push(mergedWarning);
     if (!cust) {
       const nc = newCustomers.get(l.customerKey);
       if (nc) nc.rows.push(...l.sourceRows);

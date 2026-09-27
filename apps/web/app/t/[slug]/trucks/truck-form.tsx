@@ -17,7 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { unitLong } from '@/lib/format';
 import { errorMessage } from '@/lib/error-message';
-import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
+import { timeInputValue, truckAvailabilityFromForm } from '@/lib/dispatch/time-input';
 
 export interface TruckRow {
   id: string;
@@ -131,8 +131,9 @@ export function TruckFormDialog({
           tripCost: String(truck.tripCost ?? 0),
           kmPerLitre: truck.kmPerLitre != null ? String(truck.kmPerLitre) : '',
           maxTripsPerDay: truck.maxTripsPerDay != null ? String(truck.maxTripsPerDay) : '',
-          availableFrom: truck.availableFromMin != null ? fmtHhmm(truck.availableFromMin) : '',
-          availableTo: truck.availableToMin != null ? fmtHhmm(truck.availableToMin) : '',
+          // A time field shows 00:00-23:59: "until midnight" (1440) is 00:00 (audit F25).
+          availableFrom: timeInputValue(truck.availableFromMin, 'from'),
+          availableTo: timeInputValue(truck.availableToMin, 'until'),
           defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
           active: truck.active,
         });
@@ -147,9 +148,18 @@ export function TruckFormDialog({
     let availableFromMin: number | null;
     let availableToMin: number | null;
     try {
-      availableFromMin = form.availableFrom ? parseHhmm(form.availableFrom) : null;
-      // "24:00" (or 00:00 as the end) = until midnight.
-      availableToMin = form.availableTo ? (form.availableTo === '00:00' || form.availableTo === '24:00' ? 1440 : parseHhmm(form.availableTo)) : null;
+      // "Until" 00:00 or 24:00 = midnight (1440); a field left as loaded keeps its stored minutes.
+      ({ availableFromMin, availableToMin } = truckAvailabilityFromForm(
+        form,
+        mode === 'edit' && truck
+          ? {
+              availableFromMin: truck.availableFromMin,
+              availableToMin: truck.availableToMin,
+              shownFrom: timeInputValue(truck.availableFromMin, 'from'),
+              shownTo: timeInputValue(truck.availableToMin, 'until'),
+            }
+          : undefined,
+      ));
     } catch {
       toast.error('Enter availability as HH:MM.');
       return;
@@ -349,7 +359,7 @@ export function TruckFormDialog({
             </div>
             <p className="col-span-3 -mt-1 text-xs text-muted-foreground">
               Empty = the company settings: max loads from Settings, available all day from the first departure. The truck must be back by
-              &quot;available until&quot;.
+              &quot;available until&quot;; until 00:00 = until midnight.
             </p>
           </div>
           <div className="space-y-1.5">
