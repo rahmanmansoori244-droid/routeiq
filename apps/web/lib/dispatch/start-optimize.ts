@@ -83,6 +83,19 @@ async function hasUnlockableLoad(runId: string, opts: { withOrderOfDay?: boolean
   return (await prisma.planLoad.count({ where: opts.withOrderOfDay ? { ...where, assignments: { some: { order: { carriedToOrderId: null } } } } : where })) > 0;
 }
 
+/**
+ * PR9: LOCKED or LOADING loads of the version holding only orders brought forward to a later day.
+ * They were loaded (in NMWC's flow the night before): their cases are on the truck but planned on
+ * the later day now, so the answer says to unload them (never "they are never loaded").
+ */
+async function loadedCarriedLoads(runId: string): Promise<number> {
+  const loads = await prisma.planLoad.findMany({
+    where: { runId, status: { in: ['LOCKED', 'LOADING'] } },
+    include: { assignments: { select: { order: { select: { carriedToOrderId: true } } } } },
+  });
+  return loads.filter((l) => l.assignments.length > 0 && l.assignments.every((a) => !!a.order?.carriedToOrderId)).length;
+}
+
 const NO_TRUCKS: StartResult = { status: 400, body: { error: 'No active trucks at this depot.', code: 'NO_TRUCKS' } };
 const PLAN_BUSY: StartResult = { status: 409, body: { error: PLAN_BUSY_MESSAGE, code: 'PLAN_BUSY' } };
 
@@ -138,20 +151,26 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
 /**
  * PR9: nothing left to plan because the day's open orders were brought forward to a later day
  * (`carried` of them) - the loads and unserved lines that still show them stay in the plan for the
- * record and need nothing. Never "upload orders first" nor "every load has left the depot": the
- * dispatcher followed "leave it" or unlocked such a load, and a re-plan has nothing to change.
+ * record, and a re-plan has nothing to change. Never "upload orders first" nor "every load has left
+ * the depot". `loadedCarried`: LOCKED or LOADING loads holding only brought-forward orders - they
+ * were loaded, so their cases are on the truck: unload them before the loads of the later day are picked.
  */
-export function nothingLeftCarried(carried: number, othersFrozen: boolean, canUnlockOthers = false): StartResult {
+export function nothingLeftCarried(carried: number, othersFrozen: boolean, canUnlockOthers = false, loadedCarried = 0): StartResult {
   const rest = othersFrozen ? ' and every other order of this day is on a locked, loading or dispatched load' : '';
-  // Unlock advice only for a locked or loading load holding an order that is still this day's: a
-  // load holding only brought-forward orders needs nothing, so unlocking it would change nothing.
+  // Unlock advice only for a locked or loading load holding an order that is still this day's:
+  // unlocking a load holding only brought-forward orders would plan nothing.
   const unlock = canUnlockOthers ? ' To change a locked or loading load, unlock it first.' : '';
+  const loaded = loadedCarried
+    ? ` ${loadedCarried} locked or loading load(s) hold only brought-forward orders and were loaded: unload those cases back to stock, or tell the warehouse, before the loads of the later day are picked; then put the load back to Planned.`
+    : '';
   return {
     status: 409,
     body: {
       error:
         `Nothing left to plan: ${carried} order(s) of this day were brought forward to a later day and are planned there${rest}. ` +
-        'Loads and unserved lines that still show brought-forward orders stay in this plan for the record: they are never loaded or dispatched, so nothing needs to be re-planned. A late order for this day can still be planned.' +
+        'Loads and unserved lines that still show brought-forward orders stay in this plan for the record; nothing needs to be re-planned.' +
+        loaded +
+        ' A late order for this day can still be planned.' +
         unlock,
       code: 'NOTHING_TO_PLAN',
       carriedAway: carried,
@@ -168,7 +187,9 @@ export function nothingLeftCarried(carried: number, othersFrozen: boolean, canUn
 async function prerequisites(tenantId: string, runId: string, built: BuiltRequest, applied: boolean): Promise<StartResult | null> {
   if (built.scope.orderIds.length === 0) {
     const carried = await carriedAwayOfDay(tenantId, runId);
-    if (carried > 0) return nothingLeftCarried(carried, built.scope.frozenOrderIds.length > 0, await hasUnlockableLoad(runId, { withOrderOfDay: true }));
+    if (carried > 0) {
+      return nothingLeftCarried(carried, built.scope.frozenOrderIds.length > 0, await hasUnlockableLoad(runId, { withOrderOfDay: true }), await loadedCarriedLoads(runId));
+    }
     if (built.scope.frozenOrderIds.length > 0) return nothingToPlan(applied, await hasUnlockableLoad(runId));
     return { status: 400, body: { error: 'No orders to plan for this depot and date. Upload orders first.', code: 'NO_ORDERS' } };
   }

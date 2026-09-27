@@ -281,6 +281,21 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       };
     }
     const loads = await db.planLoad.groupBy({ by: ['status'], where: { runId: plan.id }, _count: { _all: true } });
+    // PR9: the loads that are this day's work - a load that never left the depot and holds only
+    // orders brought forward to a later day is not (it stays in the plan for the record): Step 3
+    // never says "unlock it" or "every load has left the depot" because of it.
+    const ofDay = await db.planLoad.groupBy({
+      by: ['status'],
+      where: {
+        runId: plan.id,
+        OR: [
+          { status: { in: ['DISPATCHED', 'COMPLETED'] } },
+          { assignments: { some: { order: { carriedToOrderId: null } } } },
+          { assignments: { none: {} } },
+        ],
+      },
+      _count: { _all: true },
+    });
     planInfo = {
       id: plan.id,
       version: plan.version,
@@ -289,6 +304,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       chosen: !!plan.chosenScenarioId,
       job: job ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct } : null,
       loadsByStatus: Object.fromEntries(loads.map((g) => [g.status, g._count._all])),
+      /** Loads by status without the ones that never left and hold only orders brought forward (PR9). */
+      loadsOfDay: Object.fromEntries(ofDay.map((g) => [g.status, g._count._all])),
       summary: plan.summaryJson,
       reconciliationOk: (plan.reconciliationJson as { ok?: boolean } | null)?.ok ?? null,
     };

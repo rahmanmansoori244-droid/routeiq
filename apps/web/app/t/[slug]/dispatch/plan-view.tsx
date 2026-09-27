@@ -765,7 +765,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           variant="warning"
                           className="ml-1"
                           data-testid={`load-carried-away-${l.truckCode}-${l.loadNo}`}
-                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l))}`}
+                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l), l.stops.flatMap((st) => (st.carriedTo ? [st.carriedTo] : [])))}`}
                         >
                           {l.carriedAway} order(s) carried over
                         </Badge>

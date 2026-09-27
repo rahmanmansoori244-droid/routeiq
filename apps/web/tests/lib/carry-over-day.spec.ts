@@ -8,7 +8,17 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const state = { orders: [] as unknown[], away: [] as unknown[], scope: [] as string[], chosen: true as boolean, orderWheres: [] as unknown[] };
+const state = {
+  orders: [] as unknown[],
+  away: [] as unknown[],
+  scope: [] as string[],
+  chosen: true as boolean,
+  orderWheres: [] as unknown[],
+  /** planLoad.groupBy: every load, and (a where with OR) the loads of the day. */
+  loadsAll: [] as { status: string; _count: { _all: number } }[],
+  loadsOfDay: [] as { status: string; _count: { _all: number } }[],
+  groupWheres: [] as unknown[],
+};
 
 vi.mock('@/lib/db', () => ({
   prisma: {
@@ -30,7 +40,12 @@ vi.mock('@/lib/tenant', () => ({
     depot: { findMany: async () => [{ id: 'D1', code: 'D1', name: 'Depot', lat: 23.6, lng: 58.4 }] },
     customerTypeProfile: { findMany: async () => [] },
     runJob: { findFirst: async () => null },
-    planLoad: { groupBy: async () => [] },
+    planLoad: {
+      groupBy: async (a: { where: { OR?: unknown } }) => {
+        state.groupWheres.push(a.where);
+        return a.where.OR ? state.loadsOfDay : state.loadsAll;
+      },
+    },
     truck: { findMany: async () => [{ capacityCases: 600 }] },
     uploadBatch: { findMany: async () => [] },
   }),
@@ -63,6 +78,9 @@ beforeEach(() => {
   state.scope = [];
   state.chosen = true;
   state.orderWheres = [];
+  state.loadsAll = [];
+  state.loadsOfDay = [];
+  state.groupWheres = [];
 });
 
 describe('the day screen marks orders brought forward (PR9)', () => {
@@ -108,5 +126,27 @@ describe('the day screen marks orders brought forward (PR9)', () => {
     const day = await getDayOverview('t', { date: '2026-09-28', depotId: 'D1' });
     expect(day.carriedIn).toEqual([]);
     expect(day.carriedOut).toBeNull();
+  });
+
+  it('PR9 second review: the loads of the day leave out a load that never left and holds only brought-forward orders', async () => {
+    // Day 1 after the carry: T01 L1 COMPLETED (C1), T02 L1 LOCKED holding only C2 (brought forward).
+    state.orders = [order('C1', 'C1', 10)];
+    state.scope = ['C1'];
+    state.away = [{ carriedTo: { deliveryDate: new Date('2026-09-29T00:00:00Z'), totalCases: 20 } }];
+    const n = (status: string, k: number) => ({ status, _count: { _all: k } });
+    state.loadsAll = [n('COMPLETED', 1), n('LOCKED', 1)];
+    state.loadsOfDay = [n('COMPLETED', 1)];
+    const day = await getDayOverview('t', { date: '2026-09-28', depotId: 'D1' });
+    expect(day.plan?.loadsByStatus).toEqual({ COMPLETED: 1, LOCKED: 1 });
+    expect(day.plan?.loadsOfDay).toEqual({ COMPLETED: 1 });
+    // What "of the day" means: it left the depot, or it holds an order not brought forward (or nothing).
+    expect(state.groupWheres[1]).toEqual({
+      runId: 'run1',
+      OR: [
+        { status: { in: ['DISPATCHED', 'COMPLETED'] } },
+        { assignments: { some: { order: { carriedToOrderId: null } } } },
+        { assignments: { none: {} } },
+      ],
+    });
   });
 });

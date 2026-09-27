@@ -6,7 +6,7 @@ import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { BringForwardResult, CarryCandidate, CarryPreview } from '@/lib/dispatch/carry-over';
-import { carryDoneText, carriedFromBadge, carrySelectionPayload, defaultCarrySelection } from '@/lib/dispatch/carry-view';
+import { carryDoneText, carriedFromBadge, carrySelected, carrySelectionPayload, toggleCarry } from '@/lib/dispatch/carry-view';
 import { addDaysIso, fmtDayMonth } from '@/lib/dispatch/time';
 import { api, REASON_TEXT } from './client-api';
 
@@ -23,7 +23,10 @@ interface Props {
   canPlan: boolean;
   /** The day on screen is the selected one and loaded without error. */
   ready: boolean;
-  /** Another action of the screen runs (OPTIMIZE / RE-PLAN, a plan action). */
+  /**
+   * Another action of the screen runs (OPTIMIZE / RE-PLAN, a plan action), or the day's plan is
+   * being optimized (or queued): that optimization was started without the orders it would bring.
+   */
   busy: boolean;
   /** Changes when the day's orders may have changed (a file added, a plan made): the list is read again. */
   reloadKey: string;
@@ -36,12 +39,16 @@ interface Props {
  * on a load that never left the depot, or never planned) - only days that are over, never today or
  * later in the company's timezone - with the reason for each, and the button
  * that brings the selected ones forward to this day. Orders that cannot be brought forward
- * (deactivated customer, entered again for this day, ...) are listed with the reason.
+ * (deactivated customer, entered again for this day or a later one, ...) are listed with the reason.
+ * The orders the dispatcher unticked stay unticked when the list is read again (after a refusal, a
+ * partial bring forward, a new plan version or file): only orders new to the list are ticked. A day
+ * that is over (before the company's today) shows nothing: nothing can be brought forward to it.
  */
 export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey, onCarried }: Props) {
   const [preview, setPreview] = useState<CarryPreview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // What the dispatcher unticked (kept across reloads of the list; reset for another day or depot).
+  const [unticked, setUnticked] = useState<Set<string>>(new Set());
   const [open, setOpen] = useState(false);
   const [running, setRunning] = useState(false);
   // Only the answer for the day and depot on screen is shown (an older request can answer later).
@@ -59,7 +66,6 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
     }
     setError(null);
     setPreview(r.data);
-    setSelected(defaultCarrySelection(r.data.candidates));
   }, [date, depotId]);
 
   // Another day or depot: nothing of the previous one stays on screen.
@@ -67,14 +73,15 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
     setPreview(null);
     setError(null);
     setOpen(false);
+    setUnticked(new Set());
   }, [date, depotId]);
   useEffect(() => {
     void load();
   }, [load, reloadKey]);
 
   async function bringForward() {
-    if (!preview || running || busy || !ready) return;
-    const body = carrySelectionPayload(preview.candidates, selected);
+    if (!preview || preview.dayOver || running || busy || !ready) return;
+    const body = carrySelectionPayload(preview.candidates, carrySelected(preview.candidates, unticked));
     if (!body.length) return;
     const cases = body.reduce((a, s) => a + s.cases, 0);
     const day = fmtDayMonth(date);
@@ -104,16 +111,12 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
       </div>
     );
   }
-  if (!preview || preview.candidates.length === 0) return null;
-  const chosen = preview.candidates.filter((c) => selected.has(c.orderId) && !c.blocked);
+  // A day that is over lists nothing (the server answers 409 DAY_OVER to a bring forward).
+  if (!preview || preview.dayOver || preview.candidates.length === 0) return null;
+  const selected = carrySelected(preview.candidates, unticked);
+  const chosen = preview.candidates.filter((c) => selected.has(c.orderId));
   const chosenCases = chosen.reduce((a, c) => a + c.cases, 0);
-  const toggle = (c: CarryCandidate) =>
-    setSelected((s) => {
-      const n = new Set(s);
-      if (n.has(c.orderId)) n.delete(c.orderId);
-      else n.add(c.orderId);
-      return n;
-    });
+  const toggle = (c: CarryCandidate) => setUnticked((u) => toggleCarry(u, c.orderId));
 
   return (
     <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm" data-testid="carry-over">

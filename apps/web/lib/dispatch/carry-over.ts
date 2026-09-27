@@ -26,8 +26,13 @@
  *   at the same time, carries nothing new.
  *
  * Not carried, and listed with the reason: orders of a deactivated customer, a sales-order line
- * already confirmed for D (entered again), the older of two open orders with the same sales-order
- * line, and orders of a day whose plan is being optimized right now.
+ * already confirmed for D (entered again), a sales-order line that is also on an order of a LATER
+ * delivery date - open, brought forward, dispatched or delivered, any depot (entered again: only
+ * the newest open one is carried, and none when the newer one was carried or delivered) - and
+ * orders of a day whose plan is being optimized right now.
+ *
+ * Day D must be today or later in the company's timezone (409 DAY_OVER otherwise): a day that is
+ * over is history, its loads have left.
  *
  * Priority stays as the order had it (no automatic bump). On D the copies are ordinary orders: with
  * no plan yet, OPTIMIZE plans them; with a plan, they are pending like late orders and RE-PLAN adds
@@ -121,10 +126,15 @@ export interface CarryPreview {
   to: string;
   /** The company's today (YYYY-MM-DD): its orders, and later ones, are not listed yet. */
   today: string;
+  /**
+   * Day D is before the company's today: it is over, nothing can be brought forward to it (nothing
+   * is listed; the POST answers 409 DAY_OVER).
+   */
+  dayOver: boolean;
   /** Orders and cases that can be brought forward (not blocked). */
   orders: number;
   cases: number;
-  /** Listed but not carried (deactivated customer, entered again, day being optimized). */
+  /** Listed but not carried (deactivated customer, entered again for D or a later day, day being optimized). */
   blocked: number;
   candidates: CarryCandidate[];
 }
@@ -162,6 +172,22 @@ export interface CarryPlanIn {
   unserved: { orderId: string; reasonCode: string; reasonMessage: string | null; portionLinesJson: unknown }[];
 }
 
+/**
+ * Where a sales-order line is, on an order of a later delivery date than the window's first day
+ * (any depot, any status, brought forward or not): what "entered again" is checked against.
+ */
+export interface LaterLine {
+  /** The line's identity without the date: lineDupKey('', sales order, customerKey, product code). */
+  key: string;
+  /** The order's delivery date (YYYY-MM-DD). */
+  date: string;
+  orderId: string;
+  /** The order's status (DISPATCHED / DELIVERED: it left). */
+  status: string;
+  /** Brought forward: the date its copy is on ('' when not known); null when not brought forward. */
+  carriedTo: string | null;
+}
+
 export interface CarryTarget {
   /** Day D (YYYY-MM-DD): candidates are strictly earlier. */
   date: string;
@@ -172,6 +198,13 @@ export interface CarryTarget {
   today: string;
   /** lineDupKey of every sales-order line already confirmed for D (the file intake's duplicate identity). */
   confirmedKeys: ReadonlySet<string>;
+  /**
+   * The same sales-order lines on orders of later delivery dates, in any depot and any state (open,
+   * brought forward, dispatched, delivered): a candidate whose line is on a later order was entered
+   * again, and is not carried (the line would be delivered twice). The orders given to
+   * carryCandidates count too.
+   */
+  laterLines?: readonly LaterLine[];
 }
 
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
@@ -185,12 +218,23 @@ function neverPlannedText(plan: CarryPlanIn | null, date: string, orderId: strin
   return `Not on any load of the ${day} plan (version ${plan.version})`;
 }
 
+/** What became of a later order with the same sales-order line: " (brought forward to 27 Sep)", " (delivered)", ... */
+function laterState(x: LaterLine): string {
+  if (x.carriedTo !== null) return x.carriedTo ? ` (brought forward to ${fmtDayMonth(x.carriedTo)})` : ' (brought forward)';
+  if (x.status === 'DELIVERED') return ' (delivered)';
+  if (x.status === 'DISPATCHED') return ' (dispatched)';
+  return '';
+}
+
 /**
  * The orders of earlier days whose cases were not delivered, per order with its open lines, why
  * (unserved / on a load that never left / never planned) and, when it cannot be carried, the reason.
  * `plans`: the live plan of each earlier day (null = no plan). Orders already carried, DISPATCHED or
  * DELIVERED, or with every case on a load that left, are not candidates; nor orders of today or a
- * later day (the day is not over: carryWindow).
+ * later day (the day is not over: carryWindow). A candidate with a sales-order line that is also on
+ * an order of a later date (the orders given, and `target.laterLines`: any depot, open, carried,
+ * dispatched or delivered) is listed but not carried: ALREADY_ON_DAY when that date is D, else
+ * SAME_LINE_LATER.
  */
 export function carryCandidates(orders: readonly CarryOrderIn[], plans: ReadonlyMap<string, CarryPlanIn | null>, target: CarryTarget): CarryCandidate[] {
   const out: CarryCandidate[] = [];
@@ -274,24 +318,55 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
       lines,
     });
   }
-  // The same sales-order line open on two earlier days (entered again for the next day, and not
-  // delivered either time): only the latest is carried, or D would get the line twice.
+  // A sales-order line that is also on an order of a later delivery date was entered again (sales
+  // re-keyed it for a later day): only the newest order holds it. Every order counts - open ones of
+  // the window, and (laterLines) orders of any later date and depot that were brought forward,
+  // dispatched or delivered, or are on D, today or a day still to come - or the customer would get
+  // the line twice: once from the newer order (or its copy), once from this one's.
   const custKeyOf = new Map(orders.map((o) => [o.id, customerKey(o.customer.code, o.customer.branchKey)]));
-  const claimed = new Map<string, string>(); // line identity -> date of the order that carries it
-  const newestFirst = [...out].sort((a, b) => b.date.localeCompare(a.date) || a.orderId.localeCompare(b.orderId));
-  for (const c of newestFirst) {
-    if (c.blocked) continue;
-    const keys = c.lines.filter((l) => normSalesOrder(l.salesOrderNo)).map((l) => lineDupKey('', l.salesOrderNo!, custKeyOf.get(c.orderId)!, l.productCode));
-    const taken = keys.find((k) => claimed.has(k));
-    if (taken) {
-      const line = c.lines.find((l) => normSalesOrder(l.salesOrderNo) && lineDupKey('', l.salesOrderNo!, custKeyOf.get(c.orderId)!, l.productCode) === taken)!;
-      c.blocked = {
-        code: 'SAME_LINE_LATER',
-        text: `Sales order ${line.salesOrderNo} (${line.productCode}) is also open on ${fmtDayMonth(claimed.get(taken)!)}: only that order is brought forward.`,
-      };
-      continue;
+  const identity = (so: string, ck: string, product: string) => lineDupKey('', so, ck, product);
+  const where = new Map<string, Map<string, LaterLine>>(); // line identity -> order id -> where it is
+  const note = (x: LaterLine) => {
+    const m = where.get(x.key) ?? new Map<string, LaterLine>();
+    if (!m.has(x.orderId)) m.set(x.orderId, x);
+    where.set(x.key, m);
+  };
+  // The database's rows first (they know the day a carried order went to), then the orders given.
+  for (const x of target.laterLines ?? []) note(x);
+  for (const o of orders) {
+    for (const l of o.lines) {
+      if (!normSalesOrder(l.salesOrderNo)) continue;
+      note({ key: identity(l.salesOrderNo!, custKeyOf.get(o.id)!, l.productCode), date: o.deliveryDate, orderId: o.id, status: o.status, carriedTo: o.carriedToOrderId ? '' : null });
     }
-    for (const k of keys) claimed.set(k, c.date);
+  }
+  const enteredAgain = new Map<string, { line: CarryLine; later: LaterLine[] }>();
+  for (const c of out) {
+    if (c.blocked) continue;
+    const ck = custKeyOf.get(c.orderId)!;
+    for (const l of c.lines) {
+      if (!normSalesOrder(l.salesOrderNo)) continue;
+      const later = [...(where.get(identity(l.salesOrderNo!, ck, l.productCode))?.values() ?? [])].filter((x) => x.orderId !== c.orderId && x.date > c.date);
+      if (later.length) {
+        enteredAgain.set(c.orderId, { line: l, later: later.sort((a, b) => a.date.localeCompare(b.date) || a.orderId.localeCompare(b.orderId)) });
+        break;
+      }
+    }
+  }
+  const carriers = new Map(out.filter((c) => !c.blocked && !enteredAgain.has(c.orderId)).map((c) => [c.orderId, c]));
+  for (const c of out) {
+    const hit = enteredAgain.get(c.orderId);
+    if (!hit) continue;
+    const { line, later } = hit;
+    const so = `Sales order ${line.salesOrderNo} (${line.productCode})`;
+    const latest = later[later.length - 1]!;
+    if (later.some((x) => x.date === target.date)) {
+      c.blocked = { code: 'ALREADY_ON_DAY', text: `${so} is already confirmed for ${fmtDayMonth(target.date)}: not brought forward. Check whether it was entered again for that day.` };
+    } else if (carriers.has(latest.orderId)) {
+      c.blocked = { code: 'SAME_LINE_LATER', text: `${so} is also open on ${fmtDayMonth(latest.date)}: only that order is brought forward.` };
+    } else {
+      const first = later[0]!;
+      c.blocked = { code: 'SAME_LINE_LATER', text: `${so} was entered again for ${fmtDayMonth(first.date)}${laterState(first)}: not brought forward, so it is not delivered twice.` };
+    }
   }
   return out.sort(
     (a, b) => a.date.localeCompare(b.date) || a.customerCode.localeCompare(b.customerCode) || (a.branchCode ?? '').localeCompare(b.branchCode ?? '') || a.orderId.localeCompare(b.orderId),
@@ -520,6 +595,55 @@ async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string
   return plans;
 }
 
+/**
+ * The window orders' sales-order lines on orders of later delivery dates than the window's first
+ * day, in any depot and any state (open, brought forward, dispatched, delivered): what "entered
+ * again" is checked against (carryCandidates). Two sources, so no line is missed: the intake keys
+ * of those sales orders (the file intake's duplicate identity: every confirmed line, late order and
+ * copy has one) and the lines of the same customers' later orders (also lines without a key).
+ */
+async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType<typeof windowOrders>>, from: string): Promise<LaterLine[]> {
+  const sos = [...new Set(orders.flatMap((o) => o.lines.map((l) => normSalesOrder(l.salesOrderNo)).filter((s): s is string => !!s)))];
+  if (!sos.length) return [];
+  const after = dateOnly(from);
+  const out: LaterLine[] = [];
+  const add = (
+    o: { id: string; deliveryDate: Date; status: string; carriedToOrderId: string | null; carriedTo?: { deliveryDate: Date } | null; customer: { code: string; branchKey: string } },
+    so: string | null,
+    productCode: string,
+  ) => {
+    if (!normSalesOrder(so)) return;
+    out.push({
+      key: lineDupKey('', so!, customerKey(o.customer.code, o.customer.branchKey), productCode),
+      date: isoOf(o.deliveryDate),
+      orderId: o.id,
+      status: o.status,
+      carriedTo: o.carriedToOrderId ? (o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : '') : null,
+    });
+  };
+  const orderSelect = {
+    id: true,
+    deliveryDate: true,
+    status: true,
+    carriedToOrderId: true,
+    carriedTo: { select: { deliveryDate: true } },
+    customer: { select: { code: true, branchKey: true } },
+  } as const;
+  const keys = await db.intakeLineKey.findMany({
+    where: { tenantId, salesOrderNorm: { in: sos }, deliveryDate: { gt: after } },
+    select: { salesOrderNorm: true, orderLine: { select: { product: { select: { code: true } }, order: { select: orderSelect } } } },
+  });
+  for (const k of keys) {
+    if (k.orderLine?.order && k.orderLine.product) add(k.orderLine.order, k.salesOrderNorm, k.orderLine.product.code);
+  }
+  const later = await db.order.findMany({
+    where: { tenantId, deliveryDate: { gt: after }, customerId: { in: [...new Set(orders.map((o) => o.customerId))] } },
+    select: { ...orderSelect, lines: { select: { salesOrderNo: true, product: { select: { code: true } } } } },
+  });
+  for (const o of later) for (const l of o.lines ?? []) if (l.product) add(o, l.salesOrderNo, l.product.code);
+  return out;
+}
+
 /** lineDupKey of every sales-order line confirmed for `date` (any depot, like the file intake). */
 async function confirmedKeysOn(db: Db, tenantId: string, date: string): Promise<Set<string>> {
   const rows = await db.orderLine.findMany({
@@ -557,7 +681,14 @@ async function readCandidates(db: Db, tenantId: string, depotId: string, date: s
   const dates = [...new Set(orders.map((o) => isoOf(o.deliveryDate)))];
   const plans = await dayPlans(db, tenantId, depotId, dates, runs);
   const confirmedKeys = orders.length ? await confirmedKeysOn(db, tenantId, date) : new Set<string>();
-  const candidates = carryCandidates(orders.map(toOrderIn), new Map([...plans].map(([d, p]) => [d, p?.plan ?? null])), { date, today, confirmedKeys });
+  const ordersIn = orders.map(toOrderIn);
+  const livePlans = new Map([...plans].map(([d, p]) => [d, p?.plan ?? null]));
+  const first = carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys });
+  // Then the lines of the orders with open cases, wherever else they are (entered again for a later
+  // day): read only for those orders' customers and sales orders, not the whole window.
+  const open = new Set(first.map((c) => c.orderId));
+  const laterLines = open.size ? await laterLinesOf(db, tenantId, orders.filter((o) => open.has(o.id)), from) : [];
+  const candidates = laterLines.length ? carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys, laterLines }) : first;
   return { from, to, candidates, plans };
 }
 
@@ -569,6 +700,7 @@ function previewOf(date: string, depotId: string, window: { from: string; to: st
     from: window.from,
     to: window.to,
     today: window.today,
+    dayOver: date < window.today,
     orders: open.length,
     cases: open.reduce((a, c) => a + c.cases, 0),
     blocked: candidates.length - open.length,
@@ -582,14 +714,25 @@ async function activeDepot(db: Db, tenantId: string, depotId: string) {
   return depot;
 }
 
+/** Day D is over (before the company's today): nothing is brought forward to it. */
+export function dayOverError(date: string, today: string): PlanError {
+  return new PlanError(
+    `${fmtDayMonth(date)} is over (today is ${fmtDayMonth(today)}): orders can only be brought forward to today or a later day. Open today's or a later day to bring them forward.`,
+    409,
+    { code: 'DAY_OVER' },
+  );
+}
+
 /**
  * GET /api/dispatch/carry-over: what "Bring forward to D" would carry for this depot. `now`: the
  * clock (tests fix it); orders of the company's today and later are never listed (carryWindow).
+ * A day D that is over lists nothing (dayOver): its loads have left, it is history.
  */
 export async function carryOverPreview(tenantId: string, depotId: string, date: string, opts: { now?: Date; db?: Db } = {}): Promise<CarryPreview> {
   const db = opts.db ?? prisma;
   await activeDepot(db, tenantId, depotId);
   const { today } = await companyToday(db, tenantId, opts.now ?? new Date());
+  if (date < today) return previewOf(date, depotId, { ...carryWindow(date, today), today }, []);
   const { from, to, candidates } = await readCandidates(db, tenantId, depotId, date, today);
   return previewOf(date, depotId, { from, to, today }, candidates);
 }
@@ -616,8 +759,13 @@ export interface BringForwardResult {
   skipped: SelectionCheck['skipped'];
   /** The copies count as late (the day already has a plan in use, or the cutoff passed). */
   late: boolean;
-  /** Day D has a plan in use: RE-PLAN adds the copies around its locked and dispatched loads. */
+  /**
+   * Day D has a plan in use, or its plan is being optimized right now: RE-PLAN adds the copies
+   * around its locked and dispatched loads (the running optimization was started without them).
+   */
   replanNeeded: boolean;
+  /** Day D's plan is being optimized (or queued) right now: the copies are not in it. */
+  optimizing: boolean;
   planId: string | null;
 }
 
@@ -630,7 +778,8 @@ export interface BringForwardResult {
  * then everything is read again from exactly those plans and checked. A selection that no longer
  * matches (a load dispatched meanwhile, a customer deactivated, an order of today, ...) carries
  * nothing: 409 CARRY_OVER_CHANGED. Orders already carried are skipped, so a second run - also at
- * the same time - carries nothing new. `now`: the clock (the company's today, the late flag).
+ * the same time - carries nothing new. A day D before the company's today is refused (409
+ * DAY_OVER). `now`: the clock (the company's today, the late flag).
  */
 export async function bringForward(
   tenantId: string,
@@ -648,6 +797,8 @@ export async function bringForward(
         await setLockTimeout(tx);
         const depot = await activeDepot(tx, tenantId, depotId);
         const { today, cfg } = await companyToday(tx, tenantId, now);
+        // A day that is over is history: its loads have left, nothing is planned onto it any more.
+        if (date < today) throw dayOverError(date, today);
         // The days read (orders only change under the intake lock held here), their day locks, then
         // their live plans' row locks: a load dispatched (or a plan applied) meanwhile is seen here,
         // and a dispatch after this commits sees the carried orders (it is refused).
@@ -686,6 +837,9 @@ export async function bringForward(
         const dayPlan = await currentPlan(tenantId, depotId, date, tx);
         // Like a late order: late after the cutoff, or when day D already has a plan in use.
         const late = isAfterCutoff(now, date, cfg.planningCutoffMin, cfg.timezone) || !!dayPlan?.chosenScenarioId;
+        // D's plan is being optimized (or queued) right now: that optimization was started without
+        // the copies, so they wait for it and a RE-PLAN adds them - also on a first version.
+        const optimizing = dayPlan?.status === 'OPTIMIZING';
         const sources = check.carry.length
           ? await tx.order.findMany({ where: { tenantId, id: { in: check.carry.map((c) => c.orderId) } }, include: { lines: true } })
           : [];
@@ -756,7 +910,8 @@ export async function bringForward(
           cases,
           skipped: check.skipped,
           late,
-          replanNeeded: !!dayPlan?.chosenScenarioId && carried.length > 0,
+          replanNeeded: (!!dayPlan?.chosenScenarioId || optimizing) && carried.length > 0,
+          optimizing: optimizing && carried.length > 0,
           planId: dayPlan?.id ?? null,
         };
       },

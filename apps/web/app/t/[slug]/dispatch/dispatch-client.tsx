@@ -16,7 +16,7 @@ import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
-import { carriedFromBadge } from '@/lib/dispatch/carry-view';
+import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Issue {
@@ -67,6 +67,8 @@ interface Day {
     job: { status: string; message: string | null; progressPct: number } | null;
     /** Loads of the plan per status (PLANNED, LOCKED, LOADING, DISPATCHED, COMPLETED). */
     loadsByStatus?: Record<string, number>;
+    /** PR9: the same without loads that never left and hold only orders brought forward to a later day. */
+    loadsOfDay?: Record<string, number>;
   };
   /** `carried`: of them, brought forward from earlier days (PR9). */
   pending: { count: number; cases: number; late: number; carried?: number };
@@ -340,13 +342,24 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
   const planOutdated =
     !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0 || (outdated.masterChanged ?? 0) > 0 || (outdated.trucksChanged ?? 0) > 0);
-  // Every order is already on a locked, loading or dispatched load: OPTIMIZE / RE-PLAN would have
-  // nothing to plan (the server answers 409 NOTHING_TO_PLAN), so the button is off (review F03).
-  const nothingLeft = day.orders.count > 0 && day.openOrders === 0 && day.pending.count === 0;
+  // Every order is already on a locked, loading or dispatched load, or was brought forward to a
+  // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
+  // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
+  // "every load has left the depot" because of a load holding only brought-forward orders.
+  const allLoads = day.plan?.loadsByStatus ?? {};
+  // The day's loads without the ones that never left and hold only brought-forward orders (PR9).
+  const byStatus = day.plan?.loadsOfDay ?? allLoads;
+  const nothingLeftText = dayNothingLeftText({
+    orders: day.orders.count,
+    openOrders: day.openOrders,
+    pending: day.pending.count,
+    chosen: !!day.plan?.chosen,
+    carriedOut: day.carriedOut,
+    loadsByStatus: allLoads,
+    loadsOfDay: day.plan?.loadsOfDay,
+  });
+  const nothingLeft = nothingLeftText !== null;
   const lastFailed = day.plan?.status === 'FAILED';
-  const byStatus = day.plan?.loadsByStatus ?? {};
-  // A LOCKED or LOADING load can be unlocked (put back to locked); a dispatched one cannot.
-  const canUnlock = (byStatus.LOCKED ?? 0) + (byStatus.LOADING ?? 0) > 0;
   const loadCount = Object.values(byStatus).reduce((a, n) => a + n, 0);
   // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
   // FAILED, holding the plan that was dispatched).
@@ -424,7 +437,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           depotId={day.depot.id}
           canPlan={canPlan}
           ready={dayReady}
-          busy={optimizing || planBusy}
+          busy={optimizing || planBusy || running}
           reloadKey={`${day.orders.count}|${day.orders.cases}|${day.plan?.id ?? ''}|${day.batches.length}`}
           onCarried={async () => {
             // The day shows the orders waiting; the plan below (its pending orders and Re-plan) is read again in place.
@@ -543,14 +556,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             . RE-PLAN to apply this — locked and dispatched loads are kept exactly as they are.
           </div>
         ) : null}
-        {nothingLeft && !running ? (
+        {nothingLeftText && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
-            Every order of this day is already on a locked, loading or dispatched load: nothing left to plan.
-            {canUnlock
-              ? day.plan?.chosen
-                ? ' To change a load, unlock it first.'
-                : ' This version has no optimized plan yet: unlock one load below, then OPTIMIZE.'
-              : ' Every load has left the depot; a late order for this day can still be planned.'}
+            {nothingLeftText}
           </p>
         ) : !needsPlan && day.plan?.chosen ? (
           <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>

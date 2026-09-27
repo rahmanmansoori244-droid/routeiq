@@ -156,25 +156,30 @@ Orders on **dispatched** or **completed** loads count as delivered and are never
 
 **Today is not over.** When you plan tomorrow (the day screen opens on tomorrow), today's orders are **not** listed: today's loads - also the ones locked and loaded last night - may still leave. The box says so. They are listed from tomorrow morning on: open tomorrow's day, **Bring forward**, then **RE-PLAN** adds them around the loads locked the night before. Orders of a day that is not due yet are never listed.
 
+**Only to today or a later day.** Orders are brought forward to the day on screen only when that day is today or later. When you open a day that is over (to look back), the box is not shown.
+
 **How to use it**
 - In step 1 a yellow box says *Not delivered on earlier days: 12 order(s) (840 cases)*. **Show list** gives each order: customer, the day it was due, the cases and why it was not delivered.
-- All orders that can be brought forward are ticked. Untick the ones you do not want (for example an order the customer cancelled, or a load that really left but was not marked Dispatched).
+- All orders that can be brought forward are ticked. Untick the ones you do not want (for example an order the customer cancelled, or a load that really left but was not marked Dispatched). An order you unticked **stays unticked** when the list is read again (after a message that the list changed, after bringing some orders forward, after an OPTIMIZE or RE-PLAN of the day); only orders that are new in the list are ticked. Check the count on the button before you click.
 - Click **Bring forward to (the day)** and confirm. The orders become orders of the day on screen: same customer, branch, sales orders, products and weight per case, with only the cases not delivered. Their **priority stays as it was** (it is not raised).
 - **No plan yet for the day:** **OPTIMIZE** plans them with the other orders.
+- **The day is being optimized right now:** the button is off until it finishes. (If orders were brought forward meanwhile, for example by a colleague, they are not in that optimization: **RE-PLAN** adds them when it finishes; the message says so.)
 - **The day already has a plan** (for example loads locked and loaded the night before): they wait like late orders. Step 3 says *... brought forward from earlier days*; click **RE-PLAN**. Locked, loading and dispatched loads stay exactly as they are; the brought-forward orders go on the other loads, or are *unserved: late order - no capacity* when nothing is left.
 
 **Where you see them**
 - On the day they were brought to: the list *brought forward from earlier days* in step 1, the badge **Carried over from 27 Sep** on the stop in the plan (the day the order was first due), *CARRIED OVER from 27 Sep* on the driver sheet and on the Excel truck-load sheet, and a **CARRIED OVER** part on the Excel SUMMARY.
 - On their own day: they are no longer open, unserved or waiting there (the dashboard counts them on the new day). The plan of that day stays as it was, for the record: its stop or unserved line says **Carried over to 28 Sep**, and a load that still holds such an order cannot be locked, loaded or dispatched (it would deliver them twice).
-  - A load that holds **only** brought-forward orders needs nothing: **leave it as it is** (you can put it back to Planned). It stays in that day's plan for the record. When nothing else of that day is open, a **RE-PLAN** has nothing to plan and says so (the Re-plan button is off).
-  - A load that also holds other orders: put it back to Planned (if it is locked or loading) and **RE-PLAN** that day; the other orders are planned again, the brought-forward ones are left out.
+  - A **Planned** load that holds **only** brought-forward orders was never loaded: **leave it as it is**. It stays in that day's plan for the record.
+  - A **Locked** or **Loading** load that holds **only** brought-forward orders **was loaded** (for example the night before) and never left: its cases are on the truck, but they are planned on the new day now. **Unload them back to stock, or tell the warehouse, before the new day's loads are picked**, so they are not loaded twice; then put the load back to Planned. It stays in that day's plan for the record. Step 3 of that day and the message on the load say the same.
+  - When nothing else of that day is open, a **RE-PLAN** has nothing to plan and says so (the Re-plan button is off); Step 3 never asks you to unlock such a load.
+  - A load that also holds other orders: put it back to Planned (if it is locked or loading, unload the brought-forward cases first) and **RE-PLAN** that day; the other orders are planned again, the brought-forward ones are left out.
   - The part of a split delivery that was **dispatched** was delivered: it shows no *Carried over* mark, on the plan, the driver sheet or the Excel. Only the part that did not leave was brought forward.
 - The **Orders** list (old *Upload orders* page) shows the original as **carried over to 28 Sep** and the copy with **Carried over from 27 Sep**; its totals count the cases once.
 
 **Not brought forward** (listed, without a tick, with the reason):
 - the customer is **deactivated**: reactivate it under **Customers** first;
 - the same sales-order line is **already on the day** (it was entered again, for example in the next day's file): nothing is added twice. Check which one is right;
-- the same sales-order line is open on two earlier days: only the newest one is brought forward;
+- the same sales-order line was **entered again for a later day** (same sales order, customer and product, in any depot): only the newest order is brought forward, and none when that newer order was already brought forward, dispatched or delivered, or is for today or a day still to come. The reason names the day, for example *was entered again for 26 Sep (brought forward to 27 Sep)*. This way the customer never gets the line twice. If it really is a second delivery, add it as a late order;
 - its day is **being optimized** right now: wait, then look again.
 
 An order is brought forward **once**: after that it leaves the list, and clicking again (or two people at the same time) adds nothing twice. If the list changed while you looked at it (for example a load was dispatched meanwhile), nothing is brought forward and you are asked to look again. The file of an order that was brought forward can no longer be deleted.

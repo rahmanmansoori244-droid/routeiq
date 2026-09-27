@@ -2046,11 +2046,12 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
 /**
  * PR9: LOCK, LOADING and DISPATCH of a load holding an order that was brought forward to a later
  * day (carriedToOrderId) are refused with 409 ORDERS_CARRIED, naming the customers and the day
- * they went to. The remedy (carriedLoadRemedy) depends on what else the load holds: with other
- * orders, re-plan this day (put a locked or loading load back to Planned first; the re-plan leaves
- * carried orders out); with nothing else, leave the load as it is - it stays in the plan for the
- * record, and a re-plan of the day would have nothing to plan (NOTHING_TO_PLAN). Read without a
- * relation filter.
+ * they went to. The remedy (carriedLoadRemedy) depends on what else the load holds and on its
+ * status: with other orders, re-plan this day (put a locked or loading load back to Planned first;
+ * the re-plan leaves carried orders out); with nothing else, a PLANNED load is left as it is - it
+ * stays in the plan for the record, and a re-plan of the day would have nothing to plan
+ * (NOTHING_TO_PLAN) - while a LOCKED or LOADING one was loaded: its cases are unloaded (they are
+ * planned on the later day) and it is put back to Planned. Read without a relation filter.
  */
 async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
   const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
@@ -2063,7 +2064,11 @@ async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; t
   const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
   const where = `${truck?.code ?? 'Truck'} L${load.loadNo}`;
   const names = [...new Set(carried.map((o) => `${o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id)}${o.carriedTo ? ` (to ${isoOf(o.carriedTo.deliveryDate)})` : ''}`))];
-  const remedy = carriedLoadRemedy(load.status, carried.length === ids.length);
+  const remedy = carriedLoadRemedy(
+    load.status,
+    carried.length === ids.length,
+    carried.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])),
+  );
   throw new PlanError(
     `${where} carries ${carried.length} order(s) that were brought forward to a later day: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. They are planned on that day now, so this load cannot be locked, loaded or dispatched with them. ${remedy}`,
     409,

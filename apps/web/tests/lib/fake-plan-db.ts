@@ -116,7 +116,9 @@ const DEFAULTS: Record<string, () => Row> = {
 function delegate(model: string) {
   const t = () => (tables[model] ??= []);
   const create = (data: Row) => {
-    const r = { id: newId(model), createdAt: new Date(), ...(DEFAULTS[model]?.() ?? {}), ...data };
+    // An order created with its lines (a PR9 copy: lines: { create: [...] }) keeps them as rows with ids.
+    const nested = model === 'order' && Array.isArray(data.lines?.create) ? { lines: data.lines.create.map((l: Row) => ({ id: newId('orderLine'), ...l })) } : {};
+    const r = { id: newId(model), createdAt: new Date(), ...(DEFAULTS[model]?.() ?? {}), ...data, ...nested };
     t().push(r);
     return r;
   };
@@ -143,7 +145,11 @@ function delegate(model: string) {
     count: async (a: Row = {}) => t().filter((x) => match(x, a.where)).length,
     groupBy: async () => [],
     // Nested creates (ManualBaseline.assignments: { create: [...] }) stay on the row; include._count counts them.
-    create: async (a: Row) => withCount(create(a.data), a.include),
+    // Other includes read the relation (an order's lines).
+    create: async (a: Row) => {
+      const r = create(a.data);
+      return a.include && !a.include._count ? withInclude(model, r, a.include) : withCount(r, a.include);
+    },
     createMany: async (a: Row) => {
       for (const d of a.data) create(d);
       return { count: a.data.length };

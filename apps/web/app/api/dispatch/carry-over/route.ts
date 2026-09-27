@@ -7,7 +7,8 @@ import { bringForward, carryOverPreview } from '@/lib/dispatch/carry-over';
 // delivery date in the 7 days before `date` (never the company's today or later: those days are
 // not over) whose cases were not delivered (unserved, on a load that never left the depot, or
 // never planned): what "Bring forward to <date>" would carry, with the reason for each and the
-// ones that cannot be carried. Reads only.
+// ones that cannot be carried. A `date` before the company's today lists nothing (dayOver: the day
+// is over). Reads only.
 export const GET = withTenantApi(async (req, { user }) => {
   const url = new URL(req.url);
   const date = url.searchParams.get('date') ?? '';
@@ -33,7 +34,8 @@ const schema = z
 // POST /api/dispatch/carry-over - bring the selected orders forward to `date` (one transaction under
 // the intake lock, like a confirmed file or a late order). Answers what was carried; orders already
 // carried are skipped. A list that changed since it was shown answers 409 CARRY_OVER_CHANGED and
-// carries nothing. Nothing is planned yet: OPTIMIZE (no plan) or RE-PLAN (a plan in use) does that.
+// carries nothing; a `date` before the company's today answers 409 DAY_OVER. Nothing is planned
+// yet: OPTIMIZE (no plan) or RE-PLAN (a plan in use, or being optimized) does that.
 export const POST = withTenantApi(
   async (req, { user, ip }) => {
     const input = await parseBody(req, schema);

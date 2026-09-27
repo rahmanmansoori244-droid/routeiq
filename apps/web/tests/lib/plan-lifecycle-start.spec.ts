@@ -396,6 +396,19 @@ describe('PR9: an order brought forward to a later day while the start was prepa
     expect(String(res.body.error)).toMatch(/To change a locked or loading load, unlock it first\.$/);
   });
 
+  it('PR9 second review: a locked load holding only brought-forward orders was loaded - the answer says to unload it, never "never loaded"', async () => {
+    seed(); // L1 LOCKED (loaded at night), L2 PLANNED
+    Object.assign(row('order', 'O1'), { carriedToOrderId: 'O1-copy', deliveryDate: DAY, depotId: 'D1' });
+    tables.routeAssignment = [{ id: 'A1', runId: 'P', loadId: 'L1', orderId: 'O1' }];
+    buildState.orderIds = [];
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 1 });
+    expect(String(res.body.error)).toContain(
+      "1 locked or loading load(s) hold only brought-forward orders and were loaded: unload those cases back to stock, or tell the warehouse, before the loads of the later day are picked; then put the load back to Planned.",
+    );
+    expect(String(res.body.error)).not.toMatch(/never loaded/);
+  });
+
   it('PR9 review: a day whose orders were all brought forward is not told to "upload orders first"', async () => {
     seed({ status: 'DRAFT', chosen: null });
     for (const id of ['O1', 'O2']) Object.assign(row('order', id), { carriedToOrderId: `${id}-copy`, deliveryDate: DAY, depotId: 'D1' });
