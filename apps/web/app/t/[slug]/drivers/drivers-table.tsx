@@ -2,7 +2,7 @@
 
 import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
-import { Pencil, Trash2 } from 'lucide-react';
+import { Pencil, UserX } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -28,17 +28,16 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
 
   function onDelete(d: DriverRow) {
     startDelete(async () => {
+      // DELETE deactivates, always (audit F20): drivers are never deleted.
       const res = await fetch(`/api/drivers/${d.id}`, { method: 'DELETE' });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        toast.error(errorMessage(body, 'Delete failed.'));
+        toast.error(errorMessage(body, 'Could not deactivate the driver.'));
         return;
       }
-      if (body?.data?.softDeleted) {
-        toast.success(`Driver ${d.code} is on past or planned loads, so it was deactivated instead of deleted.`);
-      } else {
-        toast.success(`Driver ${d.code} deleted.`);
-      }
+      toast.success(`Driver ${d.code} deactivated.`);
+      // The trucks that keep this driver as their default are named, never cleared silently.
+      if (typeof body?.data?.warning === 'string') toast.warning(body.data.warning, { duration: 10_000 });
       setConfirming(null);
       router.refresh();
     });
@@ -71,9 +70,11 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
                     <Button size="icon" variant="ghost" aria-label="Edit" onClick={() => setEditing(d)}>
                       <Pencil className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" variant="ghost" aria-label="Delete" onClick={() => setConfirming(d)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+                    {d.active ? (
+                      <Button size="icon" variant="ghost" aria-label="Deactivate" title="Deactivate" onClick={() => setConfirming(d)}>
+                        <UserX className="h-4 w-4 text-destructive" />
+                      </Button>
+                    ) : null}
                   </TableCell>
                 ) : null}
               </TableRow>
@@ -96,10 +97,11 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
       <AlertDialog open={!!confirming} onOpenChange={(o) => !o && setConfirming(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete driver {confirming?.code}?</AlertDialogTitle>
+            <AlertDialogTitle>Deactivate driver {confirming?.code}?</AlertDialogTitle>
             <AlertDialogDescription>
-              A driver who is on any load is deactivated instead, so past loads keep their driver.
-              A driver never used on a load is deleted; that cannot be undone.
+              Drivers are never deleted, so every load keeps who drove it. Deactivated, the driver stays on their
+              loads and stays the default driver of their trucks, but new plans do not use them. Reactivate them any
+              time with Edit.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -111,7 +113,7 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
                 if (confirming) onDelete(confirming);
               }}
             >
-              {deleting ? 'Working…' : 'Confirm'}
+              {deleting ? 'Working…' : 'Deactivate'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

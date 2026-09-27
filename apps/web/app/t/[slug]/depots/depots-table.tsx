@@ -19,6 +19,10 @@ import {
 } from '@/components/ui/alert-dialog';
 import { DepotFormDialog, type DepotRow } from './depot-form';
 import { errorMessage } from '@/lib/error-message';
+import { depotDeleteActionLabel, depotDeleteDialogText, depotDeletedToast } from '@/lib/master-data-delete';
+
+/** A row without counts (null) never promises a delete: the dialog then states the rule. */
+const refsOf = (d: DepotRow) => d._count ?? null;
 
 interface Props {
   initial: DepotRow[];
@@ -45,11 +49,9 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
         toast.error(errorMessage(body, 'Delete failed.'));
         return;
       }
-      if (body.data?.softDeleted) {
-        toast.success(`Depot ${d.code} deactivated (still referenced).`);
-      } else {
-        toast.success(`Depot ${d.code} deleted.`);
-      }
+      // The server decides on its own counts (audit F03); the toast says what it did.
+      toast.success(depotDeletedToast(d.code, { softDeleted: !!body.data?.softDeleted, references: body.data?.references ?? null }));
+      if (typeof body.data?.warning === 'string') toast.warning(body.data.warning, { duration: 10_000 });
       setConfirming(null);
       router.refresh();
     });
@@ -111,12 +113,9 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
       <AlertDialog open={!!confirming} onOpenChange={(o) => !o && setConfirming(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete depot {confirming?.code}?</AlertDialogTitle>
-            <AlertDialogDescription>
-              {confirming?._count && (confirming._count.trucks > 0 || (confirming._count.regions ?? 0) > 0)
-                ? `This depot has ${confirming._count.trucks} trucks and ${confirming._count.regions} regions. It will be deactivated rather than hard-deleted to preserve history.`
-                : 'This action cannot be undone.'}
-            </AlertDialogDescription>
+            <AlertDialogTitle>{confirming ? `${depotDeleteActionLabel(refsOf(confirming))} depot ${confirming.code}?` : ''}</AlertDialogTitle>
+            {/* The same rule and words as the API (audit F03): deactivated once anything refers to it. */}
+            <AlertDialogDescription>{confirming ? depotDeleteDialogText(confirming.code, refsOf(confirming)) : ''}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deleting}>Cancel</AlertDialogCancel>
@@ -127,7 +126,7 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
                 if (confirming) onDelete(confirming);
               }}
             >
-              {deleting ? 'Working…' : 'Confirm'}
+              {deleting ? 'Working…' : confirming ? depotDeleteActionLabel(refsOf(confirming)) : 'Confirm'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

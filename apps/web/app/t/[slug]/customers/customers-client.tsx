@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState, useTransition } from 'react';
+import { useEffect, useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { Search, MapPinOff } from 'lucide-react';
@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
-import { errorMessage } from '@/lib/error-message';
+import { runInlineUpdate } from '@/lib/customer-inline-update';
 
 interface CustomerRow {
   id: string;
@@ -53,6 +53,13 @@ export function CustomersClient({
 }) {
   const router = useRouter();
   const [rows, setRows] = useState(initial);
+  // Rows whose last change got no answer and could not be reloaded (audit F24).
+  const [uncertain, setUncertain] = useState<ReadonlySet<string>>(new Set());
+  // After router.refresh() the page's data is the server's: show it (reconciles every row).
+  useEffect(() => {
+    setRows(initial);
+    setUncertain(new Set());
+  }, [initial]);
   const [q, setQ] = useState('');
   const [regionFilter, setRegionFilter] = useState<string>(ALL);
   const [onlyActive, setOnlyActive] = useState(false);
@@ -78,25 +85,23 @@ export function CustomersClient({
   function patchRow(id: string, patch: Partial<CustomerRow>) {
     const before = rows.find((r) => r.id === id);
     if (!before) return;
-    // Optimistic update
+    // Optimistic update; runInlineUpdate then shows what the server has (saved, refused, or - with
+    // no answer - reloaded or marked "not confirmed"). It never throws and never re-sends (audit F24).
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     startUpdate(async () => {
-      const res = await fetch(`/api/customers/${id}`, {
-        method: 'PATCH',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(patch),
+      const result = await runInlineUpdate(before, patch, {
+        fetchImpl: fetch,
+        setRow: (row) => setRows((rs) => rs.map((r) => (r.id === id ? row : r))),
+        setUncertain: (u) =>
+          setUncertain((s) => {
+            const next = new Set(s);
+            if (u) next.add(id);
+            else next.delete(id);
+            return next;
+          }),
+        notify: { success: (m) => toast.success(m), error: (m) => toast.error(m, { duration: 10_000 }), warning: (m) => toast.warning(m, { duration: 10_000 }) },
       });
-      if (!res.ok) {
-        // Rollback
-        setRows((rs) => rs.map((r) => (r.id === id ? before : r)));
-        const body = await res.json().catch(() => ({}));
-        toast.error(errorMessage(body, 'Update failed.'));
-        return;
-      }
-      toast.success('Customer updated');
-      const body = await res.json().catch(() => ({}));
-      if (typeof body?.data?.warning === 'string') toast.warning(body.data.warning, { duration: 10_000 });
-      router.refresh();
+      if (result === 'SAVED') router.refresh();
     });
   }
 
@@ -188,6 +193,11 @@ export function CustomersClient({
                   </Badge>
                 </TableCell>
                 <TableCell className="text-center">
+                  {uncertain.has(c.id) ? (
+                    <Badge variant="warning" className="me-1" title="The last change got no answer: reload the page to see what is saved.">
+                      not confirmed
+                    </Badge>
+                  ) : null}
                   {canEdit ? (
                     <Switch
                       checked={c.active}

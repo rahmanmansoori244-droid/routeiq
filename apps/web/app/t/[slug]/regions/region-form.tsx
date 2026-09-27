@@ -60,7 +60,8 @@ export function RegionFormDialog({ open, onOpenChange, mode, region, depots, onS
     const body = {
       code: form.code,
       name: form.name,
-      depotId: form.depotId === NONE ? '' : form.depotId,
+      // null = no depot: clears it on an edit, none on a create (audit F26).
+      depotId: form.depotId === NONE ? null : form.depotId,
     };
     startTransition(async () => {
       const url = mode === 'create' ? '/api/regions' : `/api/regions/${region!.id}`;

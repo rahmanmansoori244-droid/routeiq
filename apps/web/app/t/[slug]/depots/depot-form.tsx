@@ -29,7 +29,7 @@ export interface DepotRow {
   /** Depot hours, minutes from midnight (null = 00:00 / 24:00). */
   openMin?: number | null;
   closeMin?: number | null;
-  _count?: { trucks: number; regions?: number; runs?: number };
+  _count?: { trucks: number; regions?: number; runs?: number; orders?: number; uploadBatches?: number };
 }
 
 interface Props {
@@ -116,6 +116,8 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
         return;
       }
       toast.success(mode === 'create' ? 'Depot created' : 'Depot updated');
+      // Deactivated with open orders: they keep the depot and wait for it (audit F03).
+      if (typeof data?.data?.warning === 'string') toast.warning(data.data.warning, { duration: 10_000 });
       onSaved();
     });
   }

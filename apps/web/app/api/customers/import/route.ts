@@ -233,7 +233,10 @@ export async function POST(req: Request) {
   }
 
   // Commit. Existing locations are never wiped by a file without coordinates, and a location a
-  // dispatcher confirmed on the map is never overwritten by an import.
+  // dispatcher confirmed on the map is never overwritten by an import - also one confirmed while
+  // this import runs (audit F05): the coordinates are written by their own update whose condition
+  // is "still not verified", checked by PostgreSQL on the row as it is at that moment (not on the
+  // list read above), and the kept count comes from what those updates did.
   let upserted = 0;
   let keptVerified = 0;
   for (const v of valid) {
@@ -264,21 +267,25 @@ export async function POST(req: Request) {
         },
       });
     } else {
-      if (m.locationVerified && fileHasLoc) keptVerified++;
-      const locUpdate = fileHasLoc && !m.locationVerified ? { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const } : {};
       await db.customer.update({
         where: { id: m.id },
         data: {
           name: v.name,
           ...(v.regionCode ? { regionId } : {}),
           ...(v.address ? { address: v.address } : {}),
-          ...locUpdate,
           priority: v.priority,
           priorityConfirmed: true,
           ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
           ...(v.paymentType ? { paymentType: v.paymentType } : {}),
         },
       });
+      if (fileHasLoc) {
+        const written = await db.customer.updateMany({
+          where: { id: m.id, locationVerified: false },
+          data: { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' },
+        });
+        if (written.count === 0) keptVerified++;
+      }
     }
     upserted++;
   }
