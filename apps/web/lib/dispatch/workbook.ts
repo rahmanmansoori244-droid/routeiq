@@ -16,7 +16,8 @@ import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
 import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './costs';
 import { TIMING_TEXT } from './feasibility-view';
-import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
+import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from './time';
+import { carriedStopText } from './carry-view';
 import { KG_ROUNDING_TOL } from './weights';
 import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
@@ -459,6 +460,14 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     }
   }
 
+  // PR9: orders brought forward from earlier days (not delivered on their own day) and, on an
+  // earlier day's plan, the orders brought forward from it since (planned on the later day now).
+  const carryRows = carriedOverRows(d);
+  if (carryRows.length) {
+    head('CARRIED OVER');
+    for (const [label, value, note] of carryRows) kv(label, value, undefined, note);
+  }
+
   head('RECONCILIATION');
   const rc = d.reconciliation;
   kv('Status', recon.status, undefined, rc ? `uploaded ${rc.uploadedCases} = planned ${rc.plannedCases} + unserved ${rc.unservedCases} cases` : undefined);
@@ -685,6 +694,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     running += s.legKm;
     const notes = [
       s.late ? 'LATE ORDER' : null,
+      carriedStopText(s),
       s.split ? `SPLIT DELIVERY part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' (rest unserved)' : ''}` : null,
       s.hardWindowOk === false ? 'HARD WINDOW MISSED' : null,
       s.prefWindowOk === false ? 'Outside preferred window' : null,
@@ -782,11 +792,56 @@ function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     tableRow(
       ws,
       r++,
-      [u.customerCode, u.branchCode ?? '', u.customerName, `P${u.priority}`, u.cases, u.weightKg, uniq(u.salesOrders).join(', '), u.late ? 'LATE' : '', u.reasonCode, `${u.partial ? 'Rest of a split delivery (the other part is on a truck). ' : ''}${u.reasonMessage ?? ''}`],
+      [
+        u.customerCode,
+        u.branchCode ?? '',
+        u.customerName,
+        `P${u.priority}`,
+        u.cases,
+        u.weightKg,
+        uniq(u.salesOrders).join(', '),
+        u.late ? 'LATE' : '',
+        u.reasonCode,
+        `${u.carriedTo ? `CARRIED OVER to ${fmtDayMonth(u.carriedTo)}: planned on that day now. ` : ''}${u.carriedFrom ? `CARRIED OVER from ${fmtDayMonth(u.carriedFrom)}. ` : ''}${u.partial ? 'Rest of a split delivery (the other part is on a truck). ' : ''}${u.reasonMessage ?? ''}`,
+      ],
       fmts,
     );
   }
   totalRow(ws, r, ['TOTAL', '', `${orders} order${orders === 1 ? '' : 's'}`, '', sum(d.unserved.map((u) => u.cases)), sum(d.unserved.map((u) => u.weightKg)), '', '', '', ''], fmts);
+}
+
+/**
+ * PR9: the SUMMARY's CARRIED OVER rows ([label, value, note]): orders of this plan brought forward
+ * from earlier days, per first-due day with the customers, and orders brought forward from this
+ * plan to later days since. Empty when neither.
+ */
+export function carriedOverRows(d: Pick<PlanDetail, 'loads' | 'unserved' | 'carriedIn' | 'carriedOut'>): [string, string, string | undefined][] {
+  const rows: [string, string, string | undefined][] = [];
+  if (d.carriedIn?.orders) {
+    const byDay = new Map<string, Set<string>>();
+    const add = (date: string | null, who: string) => {
+      if (!date) return;
+      byDay.set(date, (byDay.get(date) ?? new Set()).add(who));
+    };
+    for (const l of d.loads) for (const s of l.stops) add(s.carriedFrom, `${s.customerCode}${s.branchCode ? `/${s.branchCode}` : ''} (${l.truckCode} L${l.loadNo})`);
+    for (const u of d.unserved) add(u.carriedFrom, `${u.customerCode}${u.branchCode ? `/${u.branchCode}` : ''} (unserved)`);
+    rows.push([
+      'Brought forward from earlier days',
+      `${d.carriedIn.orders} order${d.carriedIn.orders === 1 ? '' : 's'} · ${d.carriedIn.cases} cases`,
+      'not delivered on the day they were due; their priority is kept as it was',
+    ]);
+    for (const [day, who] of [...byDay].sort(([a], [b]) => a.localeCompare(b))) {
+      rows.push([`  from ${fmtDayMonth(day)}`, [...who].join(', '), undefined]);
+    }
+  }
+  if (d.carriedOut?.orders) {
+    rows.push([
+      'Brought forward to later days',
+      `${d.carriedOut.orders} order${d.carriedOut.orders === 1 ? '' : 's'} · ${d.carriedOut.cases} cases`,
+      `to ${d.carriedOut.dates.map(fmtDayMonth).join(', ')}: not delivered on this day, planned there - do not load them from this plan`,
+    ]);
+  }
+  return rows;
 }
 
 function addReconciliationSheet(wb: ExcelJS.Workbook, d: PlanDetail, recon: ReconView) {

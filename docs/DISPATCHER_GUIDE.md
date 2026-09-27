@@ -13,6 +13,7 @@ Menu: **Daily dispatch**. Pick the **delivery date** (tomorrow by default) and t
 - **A file is added only once.** Lines already added (same delivery date, sales order, customer and product) are skipped, listed as *Already confirmed: …*. This is also the case when the customer (or product) has been deactivated since: the line says *Customer … is inactive now: its confirmed orders are not planned until it is reactivated*, not an error. Messages use the codes as they are in the customer and product lists, whatever letter case the file uses. Adding the same orders a second time — the same file again, a second browser tab, or an old checked file — is refused with a message and nothing is added. The same sales-order line with a **different number of cases** is an error: changing a confirmed line is not supported yet. Remove that row, and add the extra cases as a **late order without a sales-order number** (or with a new one); with the original number the late order is refused as well.
 - A checked file must be added within **24 hours**; after that, check it again. If the cutoff passes or a plan is applied between **Check file** and **Add**, you are asked for the late reason at that moment.
 - **Weights:** the weight column in a file is the kg of the whole line, and it is kept as it is. A weight of 0 counts as blank. A line without a weight (also a line added together from several rows when some of them have no weight) is weighed with the product's **case weight** and follows it: when a case weight is entered or corrected under **Products** (for example 1500 typed instead of 1.5), open orders get the new weight at the next **OPTIMIZE** or **RE-PLAN**. New products are created without a case weight. Only company admins can edit products: planners and supervisors ask an admin to add or correct it (see step 3).
+- **Orders not delivered on earlier days** are listed in step 1 too, with **Bring forward to (the day)**: see *Orders not delivered on earlier days* below.
 - **Deleting a file** (old *Upload orders* page) is possible only while none of its orders has been optimized. Once a plan was made with them, the delete is refused, so the plan keeps every order it was made for. **Orders that are in a plan cannot be removed in the app yet** (a cancel function is not built yet): a late order only adds orders and a re-plan plans the same orders again, so neither removes them. If a wrong file was planned, ask your RouteIQ administrator.
 
 ## 2. Resolve issues
@@ -142,6 +143,35 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
 - If the connection drops (or RouteIQ is being updated) while you click, you see *The server could not be reached*. The plan stays on screen (it may be out of date) with **Try again**; if the day could not be loaded either, the day shows **Try again** at the top. When the connection is back, click **Try again** (it is off while a reload or another action is still on its way): the screen then shows whether your change was saved, and the buttons work again. Click again if the change was not saved. A late order you are typing and the loads you opened stay open when the day comes back after a lost connection.
 - An option that found no plan shows *No plan* instead of **Use instead**.
 - **Busy optimizer:** one optimization per company runs at a time (with the standard settings); up to two more wait (*Queued: other optimizations are running*) and start on their own, in the order they were queued. A further one is refused with *Your company already has 2 optimization(s) waiting*: try again once one has started. When the optimizer is very busy with other companies, a second one may be refused with *The route optimizer is busy with other plans* while your first one waits; your first one is always queued. After many optimizations in one hour RouteIQ asks you to wait a few minutes.
+
+## Orders not delivered on earlier days (Bring forward)
+An order that was not delivered on its day does not move to the next day by itself. **Bring forward** does that, when you decide.
+
+**What counts as not delivered.** For the depot on screen, RouteIQ looks at the orders of the **7 days before** the day on screen and lists every order with cases that were not delivered:
+- **Unserved** in the plan of its day (for example *no truck had room left*);
+- **Load never left**: on a load of its day's plan that is still *Planned*, *Locked* or *Loading* (it never left the depot);
+- **Never planned**: its day was never planned, or it was added after that day's plan was made and not re-planned.
+
+Orders on **dispatched** or **completed** loads count as delivered and are never listed. **Mark every load that left as Dispatched** (and Completed) first, or RouteIQ lists its orders as not delivered. For a split delivery only the part that did not leave is listed, for example *40 of 100* cases.
+
+**How to use it**
+- In step 1 a yellow box says *Not delivered on earlier days: 12 order(s) (840 cases)*. **Show list** gives each order: customer, the day it was due, the cases and why it was not delivered.
+- All orders that can be brought forward are ticked. Untick the ones you do not want (for example an order the customer cancelled, or a load that really left but was not marked Dispatched).
+- Click **Bring forward to (the day)** and confirm. The orders become orders of the day on screen: same customer, branch, sales orders, products and weight per case, with only the cases not delivered. Their **priority stays as it was** (it is not raised).
+- **No plan yet for the day:** **OPTIMIZE** plans them with the other orders.
+- **The day already has a plan** (for example loads locked and loaded the night before): they wait like late orders. Step 3 says *... brought forward from earlier days*; click **RE-PLAN**. Locked, loading and dispatched loads stay exactly as they are; the brought-forward orders go on the other loads, or are *unserved: late order - no capacity* when nothing is left.
+
+**Where you see them**
+- On the day they were brought to: the list *brought forward from earlier days* in step 1, the badge **Carried over from 27 Sep** on the stop in the plan (the day the order was first due), *CARRIED OVER from 27 Sep* on the driver sheet and on the Excel truck-load sheet, and a **CARRIED OVER** part on the Excel SUMMARY.
+- On their own day: they are no longer open, unserved or waiting there (the dashboard counts them on the new day). The plan of that day stays as it was, for the record: its stop or unserved line says **Carried over to 28 Sep**, and a load that still holds such an order cannot be locked, loaded or dispatched (it would deliver them twice); re-plan that day to take them off (unlock the load first).
+
+**Not brought forward** (listed, without a tick, with the reason):
+- the customer is **deactivated**: reactivate it under **Customers** first;
+- the same sales-order line is **already on the day** (it was entered again, for example in the next day's file): nothing is added twice. Check which one is right;
+- the same sales-order line is open on two earlier days: only the newest one is brought forward;
+- its day is **being optimized** right now: wait, then look again.
+
+An order is brought forward **once**: after that it leaves the list, and clicking again (or two people at the same time) adds nothing twice. If the list changed while you looked at it (for example a load was dispatched meanwhile), nothing is brought forward and you are asked to look again. The file of an order that was brought forward can no longer be deleted.
 
 ## Changing date or depot
 While the new day loads, the screen shows *Loading ...* and its buttons are off; if it cannot be loaded, you see the error and **Try again** instead of the previous day. Everything you do (upload, confirm, optimize) is always for the day on the screen. If you change the date while a lock, OPTIMIZE, **Add … lines to the day** or a save is still running, it finishes for the day you started it on, and the screen then shows the date you picked. A **Check file** that finishes after you changed the date is not shown: check the file again for the day on screen. After **Add … lines to the day**, a file for another delivery date moves the screen to that date, unless you picked another date meanwhile.

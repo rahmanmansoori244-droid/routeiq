@@ -16,6 +16,8 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
+import { carriedFromBadge, carriedToBadge } from '@/lib/dispatch/carry-view';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
@@ -523,6 +525,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               {p}
             </p>
           ))}
+          {d.carriedOut?.orders ? (
+            <p className="mt-1 text-slate-700" data-testid="carried-out">
+              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were not delivered and were brought forward to{' '}
+              {d.carriedOut.dates.map(fmtDayMonth).join(', ')}: they are planned on that day now (this plan keeps them as history, not as a problem).
+            </p>
+          ) : null}
+          {d.carriedIn?.orders ? (
+            <p className="mt-1 text-slate-700" data-testid="carried-in">
+              {d.carriedIn.orders} order(s) ({d.carriedIn.cases.toLocaleString()} cases) were brought forward from {d.carriedIn.dates.map(fmtDayMonth).join(', ')} (not delivered that day).
+            </p>
+          ) : null}
         </div>
       ) : null}
 
@@ -742,6 +755,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         {l.status}
                       </Badge>
                       {l.carried ? <span className="ml-1 text-xs text-muted-foreground">kept</span> : null}
+                      {l.carriedAway ? (
+                        <Badge
+                          variant="warning"
+                          className="ml-1"
+                          data-testid={`load-carried-away-${l.truckCode}-${l.loadNo}`}
+                          title="Orders on this load were brought forward to a later day: it cannot be locked, loaded or dispatched with them. Re-plan this day (unlock the load first) to take them off."
+                        >
+                          {l.carriedAway} order(s) carried over
+                        </Badge>
+                      ) : null}
                       {l.timing && !l.timing.ok ? (
                         <Badge
                           variant="destructive"
@@ -851,13 +874,29 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       {u.customerName} <span className="text-xs text-muted-foreground">{u.customerCode}{u.branchCode ? ` / ${u.branchCode}` : ''}</span>
                       {u.late ? <Badge variant="warning" className="ml-1">LATE</Badge> : null}
                       {u.partial ? <Badge variant="secondary" className="ml-1" title="The rest of this order is on a truck">REST OF SPLIT</Badge> : null}
+                      {u.carriedFrom ? (
+                        <Badge variant="secondary" className="ml-1" data-testid="unserved-carried-from">
+                          {carriedFromBadge(u.carriedFrom)}
+                        </Badge>
+                      ) : null}
                     </td>
                     <td className="p-2">P{u.priority}</td>
                     <td className="p-2">{u.cases}</td>
                     <td className="p-2 text-xs">{u.salesOrders.join(', ') || '—'}</td>
                     <td className="p-2">
-                      <b>{REASON_TEXT[u.reasonCode] ?? u.reasonCode}</b>
-                      <span className="block text-xs text-muted-foreground">{u.reasonMessage}</span>
+                      {u.carriedTo ? (
+                        <>
+                          <b data-testid="unserved-carried-to">{carriedToBadge(u.carriedTo)}</b>
+                          <span className="block text-xs text-muted-foreground">
+                            Planned on that day now. Unserved here: {REASON_TEXT[u.reasonCode] ?? u.reasonCode}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <b>{REASON_TEXT[u.reasonCode] ?? u.reasonCode}</b>
+                          <span className="block text-xs text-muted-foreground">{u.reasonMessage}</span>
+                        </>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1178,6 +1217,16 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                     <Badge variant="secondary" className="mt-0.5" data-testid="split-part" title="Customer bigger than one truck: delivered in parts">
                       Part {st.split.part} of {st.split.parts}
                       {st.split.restUnserved ? ' · rest unserved' : ''}
+                    </Badge>
+                  ) : null}
+                  {st.carriedFrom ? (
+                    <Badge variant="warning" className="mt-0.5" data-testid="stop-carried-from" title="Not delivered on the day it was due: brought forward to this day. Its priority is kept as it was.">
+                      {carriedFromBadge(st.carriedFrom)}
+                    </Badge>
+                  ) : null}
+                  {st.carriedTo ? (
+                    <Badge variant="secondary" className="mt-0.5" data-testid="stop-carried-to" title="Brought forward to a later day: planned there, not delivered on this day.">
+                      {carriedToBadge(st.carriedTo)}
                     </Badge>
                   ) : null}
                   {st.masterChanged.length ? (

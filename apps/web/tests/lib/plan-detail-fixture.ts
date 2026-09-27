@@ -96,6 +96,8 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     split: null,
     snapshot: true,
     masterChanged: [],
+    carriedFrom: null,
+    carriedTo: null,
   };
 }
 
@@ -157,6 +159,7 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     truckSnapshot: true,
     masterChanged: [],
     timing: { status: 'VERIFIED', ok: true },
+    carriedAway: 0,
   };
 }
 
@@ -211,6 +214,8 @@ export function fixture(opts: { estimated?: boolean; revenue?: boolean; noUnserv
     late: o5.late,
     salesOrders: ['SO-1005'],
     partial: false,
+    carriedFrom: null,
+    carriedTo: null,
   }));
   return {
     run: {

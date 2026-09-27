@@ -355,3 +355,25 @@ describe('review fixes: in-place optimize, advice, weights at the start', () => 
     admissionIdle();
   });
 });
+
+describe('PR9: an order brought forward to a later day while the start was prepared', () => {
+  it('an open order of the request carried meanwhile: 409 ORDERS_CHANGED, no job, the plan is not OPTIMIZING', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    row('order', 'O2').carriedToOrderId = 'O2-copy';
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('ORDERS_CHANGED');
+    expect(String(res.body.error)).toMatch(/brought forward to a later day/);
+    expect(tables.runJob).toHaveLength(0);
+    expect(row('runPlan', 'P').status).toBe('DRAFT');
+    admissionIdle();
+  });
+
+  it('an order carried from a locked load stays on that load (history): the start goes ahead', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    row('order', 'O1').carriedToOrderId = 'O1-copy';
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(202);
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+  });
+});

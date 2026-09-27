@@ -261,6 +261,12 @@ export async function startDispatchOptimize(
           const ids = [...new Set([...built.scope.orderIds, ...built.scope.frozenOrderIds])];
           const found = ids.length ? await tx.order.count({ where: { tenantId, id: { in: ids } } }) : 0;
           if (found !== ids.length) throw new PlanError('Orders of this day were removed while the plan was being prepared (a file was deleted). Optimize again.', 409, { code: 'ORDERS_CHANGED' });
+          // PR9: an open order brought forward to a later day meanwhile is planned there now; this
+          // request still plans it here. (Orders on frozen loads stay: those loads keep them.)
+          const carriedAway = built.scope.orderIds.length ? await tx.order.count({ where: { tenantId, id: { in: built.scope.orderIds }, carriedToOrderId: { not: null } } }) : 0;
+          if (carriedAway > 0) {
+            throw new PlanError('Orders of this day were brought forward to a later day while the plan was being prepared. Optimize again.', 409, { code: 'ORDERS_CHANGED' });
+          }
           const waiting = ticket!.waiting;
           const created = await tx.runJob.create({
             data: {

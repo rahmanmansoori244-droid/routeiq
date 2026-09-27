@@ -281,6 +281,7 @@ model User {
   lateOrders           Order[]              @relation("OrderLateRecordedBy")
   loadStatusChanges    PlanLoad[]           @relation("PlanLoadStatusBy")
   loadDriversSet       PlanLoad[]           @relation("PlanLoadDriverSetBy")
+  ordersCarried        Order[]              @relation("OrderCarriedBy")
 
   @@index([tenantId])
 }
@@ -586,6 +587,20 @@ model Order {
   salesValue                Float?
   marginValue               Float?
   priorityFromFile          Boolean                    @default(false) // true = `priority` came from the order file
+  // --- Bring forward (PR9): an order not delivered on its own day, carried to a later day ---
+  /// On the copy: the order it was brought forward from (one copy per order: unique).
+  carriedFromOrderId        String?                    @unique
+  carriedFrom               Order?                     @relation("OrderCarriedFrom", fields: [carriedFromOrderId], references: [id], onDelete: NoAction)
+  carriedFromCopy           Order?                     @relation("OrderCarriedFrom")
+  /// On the copy: the delivery date the order was first due (the first order's date when carried more than once).
+  carriedFromDate           DateTime?                  @db.Date
+  /// On the original: its copy on the later day. Set = no longer open, unserved or pending on its own day.
+  carriedToOrderId          String?                    @unique
+  carriedTo                 Order?                     @relation("OrderCarriedTo", fields: [carriedToOrderId], references: [id], onDelete: NoAction)
+  carriedToOrigin           Order?                     @relation("OrderCarriedTo")
+  carriedAt                 DateTime?
+  carriedById               String?
+  carriedBy                 User?                      @relation("OrderCarriedBy", fields: [carriedById], references: [id], onDelete: SetNull)
 
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])

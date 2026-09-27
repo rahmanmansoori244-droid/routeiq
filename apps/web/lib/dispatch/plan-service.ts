@@ -170,12 +170,16 @@ const ORDER_INCLUDE = {
 } as const;
 
 /** Orders belonging to a plan: same delivery date and depot. Legacy orders without a depot
- * are included only when the tenant has exactly one active depot (unambiguous). */
+ * are included only when the tenant has exactly one active depot (unambiguous). An order brought
+ * forward to a later day (PR9, carriedToOrderId set) no longer belongs to its own day: it is not
+ * open, unserved or pending there (the plan versions that hold it keep it: frozen loads stay in
+ * scope through their assignments, see buildDispatchRequest). */
 export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date): Promise<Prisma.OrderWhereInput> {
   const depots = await prisma.depot.count({ where: { tenantId, active: true } });
   return {
     tenantId,
     deliveryDate: runDate,
+    carriedToOrderId: null,
     OR: depots <= 1 ? [{ depotId }, { depotId: null }] : [{ depotId }],
   };
 }
@@ -1623,7 +1627,8 @@ export function isDispatchDetails(json: unknown): json is ScenarioDetails {
 }
 
 /** Late orders for this plan's day that its applied scenario does not contain yet (the day
- * screen's "late orders waiting"). */
+ * screen's "late orders waiting"). Orders brought forward from an earlier day (PR9) count as late
+ * orders here: a re-plan adds them with plan continuity (reason LATE_ORDER). */
 export async function pendingLateOrderIds(
   tenantId: string,
   run: { depotId: string; runDate: Date; chosenScenarioId: string | null },
@@ -1634,7 +1639,7 @@ export async function pendingLateOrderIds(
   if (!isDispatchDetails(d)) return [];
   const inPlan = new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds, ...(d.scope.frozenLoadOrderIds ?? [])]);
   const where = await ordersInScopeWhere(tenantId, run.depotId, run.runDate);
-  const late = await prisma.order.findMany({ where: { ...where, isLate: true }, select: { id: true } });
+  const late = await prisma.order.findMany({ where: { ...where, AND: [{ OR: [{ isLate: true }, { carriedFromOrderId: { not: null } }] }] }, select: { id: true } });
   return late.map((o) => o.id).filter((id) => !inPlan.has(id));
 }
 
@@ -1958,6 +1963,10 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   if (isGatedMove(load.status, to) && run.chosenScenarioId && !recon?.ok) {
     throw new PlanError('Cases do not reconcile for this plan - re-plan before locking or loading.', 409, { code: 'NOT_RECONCILED' });
   }
+  // PR9: an order of this load that was brought forward to a later day is planned there now, so
+  // this load cannot move forward with it (it would be delivered twice). Stepping back and
+  // Completed are never refused (a load that left keeps its orders: they are never carried).
+  if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   const updated = await tx.planLoad.update({
     where: { id: loadId },
@@ -1998,6 +2007,31 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/**
+ * PR9: LOCK, LOADING and DISPATCH of a load holding an order that was brought forward to a later
+ * day (carriedToOrderId) are refused with 409 ORDERS_CARRIED, naming the customers and the day
+ * they went to. The remedy: re-plan this day (a PLANNED load), or put the load back to Planned
+ * and re-plan (the re-plan leaves carried orders out). Read without a relation filter.
+ */
+async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
+  const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (!ids.length) return;
+  const carried = await tx.order.findMany({
+    where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } },
+    select: { id: true, customer: { select: { code: true, branchCode: true } }, carriedTo: { select: { deliveryDate: true } } },
+  });
+  if (!carried.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  const where = `${truck?.code ?? 'Truck'} L${load.loadNo}`;
+  const names = [...new Set(carried.map((o) => `${o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id)}${o.carriedTo ? ` (to ${isoOf(o.carriedTo.deliveryDate)})` : ''}`))];
+  const remedy = load.status === 'PLANNED' ? 'Re-plan this day to take them off.' : 'Put the load back to Planned and re-plan this day to take them off.';
+  throw new PlanError(
+    `${where} carries ${carried.length} order(s) that were brought forward to a later day: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. They are planned on that day now, so this load cannot be locked, loaded or dispatched with them. ${remedy}`,
+    409,
+    { code: 'ORDERS_CARRIED', orderIds: carried.map((o) => o.id) },
+  );
 }
 
 /**

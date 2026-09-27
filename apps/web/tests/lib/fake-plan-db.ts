@@ -54,7 +54,8 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
     driver: () => null,
   },
   scenarioResult: { unservedOrders: (r) => (tables.unservedOrder ?? []).filter((u) => u.scenarioId === r.id).map((u) => ({ ...u })) },
-  order: { customer: () => ({ id: 'c', code: 'C', branchKey: '__MAIN__' }), lines: () => [] },
+  // carriedTo (PR9): the copy an order was brought forward to, as the test row gives it.
+  order: { customer: () => ({ id: 'c', code: 'C', branchKey: '__MAIN__' }), lines: () => [], carriedTo: (r) => r.carriedTo ?? null },
   runPlan: { depot: (r) => (tables.depot ?? []).find((d) => d.id === r.depotId) ?? { id: r.depotId, code: 'D', name: 'D', lat: 23.6, lng: 58.4 } },
   routeAssignment: { load: (r) => (tables.planLoad ?? []).find((l) => l.id === r.loadId) ?? null, order: (r) => orderOf(r.orderId) },
 };
