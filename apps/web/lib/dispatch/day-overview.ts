@@ -30,6 +30,8 @@ export interface IssueCustomer {
   priority: number;
   prioritySource: string;
   serviceMin: number;
+  /** Where serviceMin comes from: CUSTOMER = its own confirmed time; TYPE / DEFAULT = a default (audit F07: the Details dialog shows it as a default, not as the customer's own). */
+  serviceSource: string;
   window: string;
   hardWindowStartMin: number | null;
   hardWindowEndMin: number | null;
@@ -246,6 +248,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       priority: eff.priority,
       prioritySource: eff.prioritySource,
       serviceMin: eff.serviceMin,
+      serviceSource: eff.serviceSource,
       window: describeWindows(eff),
       hardWindowStartMin: c.hardWindowStartMin,
       hardWindowEndMin: c.hardWindowEndMin,

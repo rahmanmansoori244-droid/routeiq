@@ -54,6 +54,8 @@ The complete matrix is checked in and enforced by `apps/web/tests/lib/api-role-m
 | Admin password reset (`POST /api/users/:id/reset-password`: a new one-time password for a user) | TENANT_ADMIN. Never a platform admin unless the caller is one (403), never your own account (400); another tenant's user is 404 |
 | Plan detail and the Excel / PDF exports | any role (the dispatch team reads plans) |
 
+The audit of 27 Sep 2026, PR A2, changed no role. `PATCH /api/customers/:id` (PLANNER) takes the unloading minutes and the receiving hours as JSON numbers only: a string such as "" or "10 min" is refused (400), never turned into 0; `avgServiceTimeMin: null` puts the customer back on the default time. The Excel and PDF exports choose the dispatch or the legacy generator by `isDispatchPlan` (same company only), not by the load count; the PDF of a dispatch plan without loads is 404 `NO_LOADS`.
+
 ## 5. Secrets and credentials
 
 - **Password reset** (`lib/password-reset.ts`): in production the link is sent only through Resend (`RESEND_API_KEY`, verified `RESEND_FROM`); without it **nothing is sent and nothing about the link is logged** (only the user id). Links use `AUTH_URL`, else `NEXTAUTH_URL`; production refuses to build one without either. Issuing a link retires older ones; a reset consumes the token, sets the password and retires the user's other links in one transaction, and ends every open session of that user (`pwf`). `/api/health` reports `email: configured | not_configured`.

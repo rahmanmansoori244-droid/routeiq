@@ -11,6 +11,10 @@
  * - an admin password reset (a new one-time password for a user) is TENANT_ADMIN, like invites.
  * - PR9: "Bring forward" (POST /api/dispatch/carry-over) is PLANNER, like confirming a file and a
  *   late order; its preview (GET) is readable by every role, like the day overview.
+ * - Audit PR A2 (27 Sep 2026) changed three routes, not their roles: PATCH /api/customers/[id]
+ *   (PLANNER; avgServiceTimeMin null = back to the default, JSON numbers only), GET
+ *   /api/runs/[id]/export/excel and /export/pdf (ANY; chosen by isDispatchPlan, PDF 404 NO_LOADS
+ *   for a dispatch plan without loads).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';

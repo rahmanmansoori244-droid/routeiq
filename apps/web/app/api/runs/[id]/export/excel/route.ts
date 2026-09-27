@@ -6,6 +6,7 @@ import { buildRouteSheetExcel } from '@/lib/exports/excel';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, planRules, tenantAssumptions } from '@/lib/dispatch/workbook';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
+import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,7 +27,8 @@ function xlsxResponse(buf: Buffer, filename: string) {
   });
 }
 
-// NMWC dispatch plan version (has physical loads) -> the master dispatch workbook.
+// NMWC dispatch plan version -> the master dispatch workbook, also when every order is unserved and
+// the plan has no load (audit F16: the legacy route sheet was chosen by the load count alone).
 // Review F08: the ASSUMPTIONS sheet shows the settings stored with the plan in use (what it was
 // built with, including whether it was outside the routing map); only a plan from before settings
 // were stored shows today's, labelled as such. Never the web server's environment (the web does
@@ -66,9 +68,9 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
 
 export const GET = (req: Request, { params }: Params) =>
   withTenantApi(async (r, ctx) => {
-    if ((await ctx.db.planLoad.count({ where: { runId: params.id } })) > 0) return dispatchWorkbook(params.id, ctx);
+    if (await isDispatchPlan(ctx.user.tenantId, params.id)) return dispatchWorkbook(params.id, ctx);
 
-    // Legacy route-sheet export (runs without dispatch loads) - unchanged.
+    // Legacy route-sheet export (May-2026 runs, not dispatch plans) - unchanged.
     const url = new URL(r.url);
     const truck = url.searchParams.get('truck') || undefined;
 

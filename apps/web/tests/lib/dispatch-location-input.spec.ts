@@ -131,6 +131,71 @@ describe('parseLocationInput - plain coordinates', () => {
   });
 });
 
+describe('parseLocationInput - DMS limits (audit F17)', () => {
+  it('refuses minutes or seconds of 60 or more instead of rolling them over into another point', () => {
+    // Before: 23°99'00"N was read as 24.65°N - a real point in Oman, HIGH confidence, no pin asked.
+    expect(parseLocationInput(`23°99'00"N 58°24'00"E`)).toMatchObject({ ok: false, needsPin: true, error: expect.stringMatching(/Latitude: minutes must be 0 to 59/) });
+    expect(parseLocationInput(`23°60'00"N 58°24'00"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/minutes must be 0 to 59/) });
+    expect(parseLocationInput(`23°35'99"N 58°24'21"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Latitude: seconds must be below 60/) });
+    expect(parseLocationInput(`23°35'60"N 58°24'21"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/seconds must be below 60/) });
+    expect(parseLocationInput(`23°35'09"N 58°75'21"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Longitude: minutes must be 0 to 59/) });
+    expect(parseLocationInput(`23°35'09"N 58°24'60.5"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Longitude: seconds must be below 60/) });
+    for (const bad of [`23°99'00"N 58°24'00"E`, `23°35'99"N 58°24'21"E`]) {
+      const r = parseLocationInput(bad);
+      expect(r.lat, bad).toBeUndefined();
+      expect(r.confidence, bad).toBeUndefined();
+    }
+  });
+
+  it('still reads the highest valid minutes and seconds', () => {
+    const r = parseLocationInput(`23°59'59.9"N 58°59'59"E`);
+    expect(r).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false });
+    expect(r.lat).toBeCloseTo(23 + 59 / 60 + 59.9 / 3600, 6);
+    expect(r.lng).toBeCloseTo(58 + 59 / 60 + 59 / 3600, 6);
+    expect(parseLocationInput(`23°00'00"N 58°00'00.0"E`)).toMatchObject({ ok: true, lat: 23, lng: 58, confidence: 'HIGH', needsPin: false });
+  });
+
+  it('keeps latitude within 90° and longitude within 180°, the boundary itself included', () => {
+    expect(parseLocationInput(`90°00'01"N 58°24'21"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Latitude must be at most 90°/) });
+    expect(parseLocationInput(`123°35'09"N 58°24'21"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Latitude must be at most 90°/) });
+    expect(parseLocationInput(`23°35'09"N 181°00'00"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/Longitude must be at most 180°/) });
+    expect(parseLocationInput(`23°35'09"S 180°00'00.1"W`)).toMatchObject({ ok: false, error: expect.stringMatching(/Longitude must be at most 180°/) });
+    // 90°N and 180°E are real (outside Oman/UAE, so they need the pin like any far point).
+    expect(parseLocationInput(`90°00'00"N 58°24'21"E`)).toMatchObject({ ok: true, lat: 90, needsPin: true });
+    expect(parseLocationInput(`23°35'09"N 180°00'00"E`)).toMatchObject({ ok: true, lng: 180, needsPin: true });
+  });
+
+  it('refuses seconds without minutes', () => {
+    expect(parseLocationInput(`23°09.2"N 58°24'21.2"E`)).toMatchObject({ ok: false, error: expect.stringMatching(/seconds without minutes/) });
+  });
+
+  it('does not treat whole degrees or whole minutes as an exact point: the pin must be confirmed', () => {
+    // Before: "23°N 58°E" (about 100 km) came back HIGH with no pin to confirm.
+    expect(parseLocationInput('23°N 58°E')).toMatchObject({ ok: true, lat: 23, lng: 58, confidence: 'LOW', needsPin: true, warnings: [expect.stringMatching(/Whole degrees only/)] });
+    expect(parseLocationInput(`23°35'N 58°24'E`)).toMatchObject({ ok: true, confidence: 'MEDIUM', needsPin: true, warnings: [expect.stringMatching(/no seconds/)] });
+    // The less precise half decides.
+    expect(parseLocationInput(`23°35'09.2"N 58°E`)).toMatchObject({ ok: true, confidence: 'LOW', needsPin: true });
+    expect(parseLocationInput(`23°35'09.2"N 58°24'E`)).toMatchObject({ ok: true, confidence: 'MEDIUM', needsPin: true });
+    // A swap never raises the confidence of a whole-degree point.
+    expect(parseLocationInput('58°N 23°E')).toMatchObject({ ok: true, lat: 23, lng: 58, confidence: 'LOW', needsPin: true });
+    // Whole seconds (about 30 m) stay exact.
+    expect(parseLocationInput(`23°35'09"N 58°24'21"E`)).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false });
+  });
+
+  it('applies the same limits to DMS inside a Google Maps link', () => {
+    expect(parseLocationInput(`https://www.google.com/maps?q=${encodeURIComponent(`23°99'00"N 58°24'00"E`)}`)).toMatchObject({ ok: false, error: expect.stringMatching(/minutes must be 0 to 59/) });
+    expect(parseLocationInput(`https://www.google.com/maps/place/${encodeURIComponent(`23°35'75"N 58°24'21"E`)}`)).toMatchObject({ ok: false, error: expect.stringMatching(/seconds must be below 60/) });
+    expect(parseLocationInput(`https://www.google.com/maps/place/${encodeURIComponent(`23°35'N 58°24'E`)}`)).toMatchObject({ ok: true, source: 'GOOGLE_MAPS_URL', confidence: 'MEDIUM', needsPin: true });
+  });
+
+  it('the server-side resolve refuses them too (the Read button and PUT { input })', async () => {
+    const fetchImpl = vi.fn();
+    expect(await resolveLocationInput(`23°99'00"N 58°24'00"E`, { fetchImpl })).toMatchObject({ ok: false, needsPin: true });
+    expect(await resolveLocationInput('23°N 58°E', { fetchImpl })).toMatchObject({ ok: true, needsPin: true, confidence: 'LOW' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+});
+
 describe('parseLocationInput - Google Maps URLs', () => {
   it('prefers the place pin (!3d!4d) over the map centre (@)', () => {
     const r = parseLocationInput(PLACE_URL);
