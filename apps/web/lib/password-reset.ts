@@ -8,6 +8,9 @@
  *   - Throttle: max 3 reset requests per email per hour
  *   - Only the newest link works: issuing a token retires the user's older unused ones, and a
  *     reset retires every other token of the user, in the same transaction as the new password
+ *   - One credential change per user at a time (audit F10): issuing a link, using one and an admin
+ *     reset each lock the user's row first (lockUserCredentials), and a link is consumed only
+ *     while it is still unused and unexpired, checked in the DELETE itself
  *
  * Email delivery uses Resend when RESEND_API_KEY is set. In production without it, NOTHING is
  * sent and nothing about the link is logged (a logged link is a working account-takeover token):
@@ -42,6 +45,21 @@ export interface CreateTokenResult {
   tenantId?: string | null;
 }
 
+type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+/**
+ * Audit F10: every change to a user's credentials - issuing a reset link, using one, an admin
+ * reset - first locks that user's row, in the same transaction as the change. They therefore run
+ * one after the other per user, and always take their locks in the same order (the user row, then
+ * the reset links), so they can no longer deadlock each other (the verifiers saw link-then-user
+ * against user-then-link deadlock). FOR NO KEY UPDATE: it does not block rows elsewhere that only
+ * reference the user (audit rows, jobs). Returns false when the user no longer exists.
+ */
+export async function lockUserCredentials(tx: Tx, userId: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "User" WHERE id = ${userId} FOR NO KEY UPDATE`;
+  return rows.length === 1;
+}
+
 /**
  * Always returns 'unknown_email' OR 'throttled' OR 'created' — never throws.
  * Callers should respond identically for the first two so the response can't
@@ -55,30 +73,30 @@ export async function createResetTokenForEmail(email: string): Promise<CreateTok
   });
   if (!user || !user.active) return { rawToken: null, status: 'unknown_email' };
 
-  // Throttle: count tokens created for this user in the last hour.
-  const since = new Date(Date.now() - RESET_THROTTLE_WINDOW_MS);
-  const recent = await prisma.passwordResetToken.count({
-    where: { userId: user.id, createdAt: { gte: since } },
-  });
-  if (recent >= RESET_THROTTLE_MAX) return { rawToken: null, status: 'throttled' };
-
   const raw = generateRawToken();
-  const now = new Date();
-  await prisma.$transaction([
+  // One transaction under the user's lock (F10): the throttle count, retiring the older links and
+  // the new link cannot interleave with a reset being used or an admin reset of the same user.
+  const created = await prisma.$transaction(async (tx) => {
+    if (!(await lockUserCredentials(tx, user.id))) return false;
+    // Throttle: count tokens created for this user in the last hour.
+    const since = new Date(Date.now() - RESET_THROTTLE_WINDOW_MS);
+    const recent = await tx.passwordResetToken.count({ where: { userId: user.id, createdAt: { gte: since } } });
+    if (recent >= RESET_THROTTLE_MAX) return 'throttled' as const;
+    const now = new Date();
     // Retire older unused links (mark used rather than delete, so the throttle still counts them).
-    prisma.passwordResetToken.updateMany({
-      where: { userId: user.id, usedAt: null },
-      data: { usedAt: now },
-    }),
-    prisma.passwordResetToken.create({
+    await tx.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: now } });
+    await tx.passwordResetToken.create({
       data: {
         userId: user.id,
         tenantId: user.tenantId,
         tokenHash: hashToken(raw),
         expiresAt: new Date(now.getTime() + RESET_TOKEN_TTL_MS),
       },
-    }),
-  ]);
+    });
+    return true;
+  });
+  if (created === 'throttled') return { rawToken: null, status: 'throttled' };
+  if (!created) return { rawToken: null, status: 'unknown_email' };
   return { rawToken: raw, status: 'created', userId: user.id, tenantId: user.tenantId };
 }
 
@@ -86,11 +104,16 @@ export type ConsumeResult =
   | { ok: true; userId: string; tenantId: string | null }
   | { ok: false; reason: 'invalid' | 'expired' | 'used' };
 
-type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
-
 /**
  * Validate + atomically consume a token (delete-on-use). `onConsumed` runs inside the same
  * transaction, so the password update commits together with the consumption, or not at all.
+ *
+ * Audit F10: the consumption is conditional and serialized per user. The token row is found by its
+ * hash, then the user's row is locked (lockUserCredentials: the same lock an admin reset and a new
+ * link take), and only then is the token deleted - and only while it is still unused (not retired
+ * by an admin reset or a newer link) and unexpired, checked in the DELETE itself. A link retired
+ * after it was read therefore deletes 0 rows and is refused ('used'): it can never overwrite the
+ * password an admin just set.
  */
 export async function consumeResetToken(
   rawToken: string,
@@ -101,17 +124,21 @@ export async function consumeResetToken(
 
   try {
     const result = await prisma.$transaction(async (tx) => {
-      const row = await tx.passwordResetToken.findUnique({
-        where: { tokenHash },
-        select: { id: true, userId: true, tenantId: true, expiresAt: true, usedAt: true },
-      });
-      if (!row) return { ok: false as const, reason: 'invalid' as const };
-      if (row.usedAt) return { ok: false as const, reason: 'used' as const };
-      if (row.expiresAt < new Date()) return { ok: false as const, reason: 'expired' as const };
-      // Single-use: a concurrent consume of the same token deletes 0 rows and loses.
-      const deleted = await tx.passwordResetToken.deleteMany({ where: { id: row.id } });
-      if (deleted.count !== 1) return { ok: false as const, reason: 'used' as const };
-      if (onConsumed) await onConsumed(tx, { userId: row.userId, tenantId: row.tenantId });
+      const found = await tx.passwordResetToken.findUnique({ where: { tokenHash }, select: { userId: true, tenantId: true } });
+      if (!found) return { ok: false as const, reason: 'invalid' as const };
+      // Per-user order: the user row first (no lock is held yet), then the token.
+      if (!(await lockUserCredentials(tx, found.userId))) return { ok: false as const, reason: 'invalid' as const };
+      // Single-use, and only while still live: unused (never retired) and unexpired. A concurrent
+      // consume of the same token, or one retired meanwhile, deletes 0 rows and loses.
+      const deleted = await tx.passwordResetToken.deleteMany({ where: { tokenHash, usedAt: null, expiresAt: { gt: new Date() } } });
+      if (deleted.count !== 1) {
+        const row = await tx.passwordResetToken.findUnique({ where: { tokenHash }, select: { usedAt: true, expiresAt: true } });
+        if (!row) return { ok: false as const, reason: 'used' as const }; // consumed (deleted) by another request
+        if (row.usedAt) return { ok: false as const, reason: 'used' as const };
+        return { ok: false as const, reason: 'expired' as const };
+      }
+      const row = { userId: found.userId, tenantId: found.tenantId };
+      if (onConsumed) await onConsumed(tx, row);
       return { ok: true as const, userId: row.userId, tenantId: row.tenantId };
     });
     return result;

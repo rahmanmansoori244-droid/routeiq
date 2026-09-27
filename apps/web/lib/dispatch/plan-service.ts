@@ -175,8 +175,8 @@ const ORDER_INCLUDE = {
  * forward to a later day (PR9, carriedToOrderId set) no longer belongs to its own day: it is not
  * open, unserved or pending there (the plan versions that hold it keep it: frozen loads stay in
  * scope through their assignments, see buildDispatchRequest). */
-export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date): Promise<Prisma.OrderWhereInput> {
-  const depots = await prisma.depot.count({ where: { tenantId, active: true } });
+export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, db: Db = prisma): Promise<Prisma.OrderWhereInput> {
+  const depots = await db.depot.count({ where: { tenantId, active: true } });
   return {
     tenantId,
     deliveryDate: runDate,

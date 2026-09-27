@@ -73,6 +73,18 @@ export function asPlanBusy(e: unknown): unknown {
   return isLockBusy(e) ? new PlanBusyError() : e;
 }
 
+/**
+ * The plan row lock alone, with no checks: for the recovery paths (a job's failure, the janitor, a
+ * supervisor's reset), which read the row themselves under it. Same statement and order as
+ * lockRunForWrite, so they queue behind a plan being saved instead of racing it. False = no such
+ * plan in this company.
+ */
+export async function lockPlanRow(tx: Tx, tenantId: string, runId: string): Promise<boolean> {
+  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM "RunPlan" WHERE id = ${runId} AND "tenantId" = ${tenantId} FOR UPDATE`;
+  return rows.length > 0;
+}
+
 export interface LockRunOptions {
   /** Statuses the caller may act on (checked after superseded / optimizing). */
   allow?: readonly RunStatus[];

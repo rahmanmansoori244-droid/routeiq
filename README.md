@@ -68,7 +68,7 @@ Open <http://localhost:3000>.
 
 - [ ] Sign up at `/signup`, create tenant `nmwc`, log in, land on `/t/nmwc`.
 - [ ] Navigate sidebar — placeholder pages render.
-- [ ] `GET /api/health` returns `{ ok: true, db: 'up', solver: 'up' }`.
+- [ ] `GET /api/health` returns `{ ok: true, status: 'ready', db: 'up', solver: 'up' }` (readiness: 503 when dispatch is misconfigured, 200 `degraded` when the solver is only unreachable); `GET /api/health/live` returns `{ ok: true }`.
 - [ ] Solver `/health` returns `{ ok: true }`.
 - [ ] Cross-tenant URL access returns 404 (not 403).
 

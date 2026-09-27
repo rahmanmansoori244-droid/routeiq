@@ -1,7 +1,7 @@
 import type { RunPlan } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
-import { isOptimizing } from '../jobs/optimize-job';
+import { repairEndedJobPlan } from './stuck-plan';
 import { scheduleDispatchOptimize } from '../jobs/dispatch-job';
 import {
   buildDispatchRequest,
@@ -197,12 +197,46 @@ async function prerequisites(tenantId: string, runId: string, built: BuiltReques
   return null;
 }
 
-/** The job already running for this version (answered 202 without starting another one). */
+/**
+ * The job already running for this version (answered 202 without starting another one). Audit
+ * F09: only a job the database still has QUEUED or RUNNING - never an ended one, and never "the
+ * in-flight map has something" alone: a job whose promise is just finishing after its commit is
+ * over, and the new start is chained after it (scheduleDispatchOptimize).
+ */
 async function activeJobAnswer(runId: string): Promise<StartResult | null> {
-  const active = await prisma.runJob.findFirst({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } });
-  if (active || isOptimizing(runId)) return { status: 202, body: { runJobId: active?.id ?? null, status: active?.status ?? 'RUNNING', runId } };
+  const active = await prisma.runJob.findFirst({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } }, orderBy: { attemptNo: 'desc' } });
+  if (active) return { status: 202, body: { runJobId: active.id, status: active.status, runId } };
   return null;
 }
+
+/**
+ * Audit F09: a version still OPTIMIZING although its current job has ended (a stuck plan) is put
+ * back to FAILED first (repairEndedJobPlan, audited), so OPTIMIZE / RE-PLAN then start real work
+ * instead of answering 202 with the dead job (or 409 "optimizing" forever). Returns the version
+ * as it is now.
+ */
+async function unstickIfEnded<T extends Pick<RunPlan, 'status'>>(
+  tenantId: string,
+  run: T,
+  runId: string,
+  actor: { userId: string; ip: string | null; via: 'OPTIMIZE' | 'REPLAN' },
+): Promise<T | RunPlan | null> {
+  if (run.status !== 'OPTIMIZING') return run;
+  // Really optimizing (a job QUEUED or RUNNING): nothing to reset, and no plan row lock taken (a
+  // click while the plan is being saved answers 202 at once instead of waiting for the lock).
+  if ((await prisma.runJob.count({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } })) > 0) return run;
+  if (!(await repairEndedJobPlan(tenantId, runId, actor))) return run;
+  return prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
+}
+
+/** The version is OPTIMIZING but no job of it is QUEUED or RUNNING, and it could not be reset now. */
+const PLAN_STUCK: StartResult = {
+  status: 409,
+  body: {
+    error: 'This plan is still marked as optimizing although its optimization has ended. It is reset within a minute (a supervisor can reset it now); then try again.',
+    code: 'PLAN_STUCK',
+  },
+};
 
 /** Refused inside the start transaction: the version changed after the request was built. */
 class StartRefused extends Error {
@@ -271,14 +305,18 @@ export async function startDispatchOptimize(
   let ticket: SolveTicket | null = opts.ticket ?? null;
   let handedOff = false;
   try {
-    const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
-    if (!run) return { status: 404, body: { error: 'Plan not found' } };
-    const mismatch = dayMismatch(run, opts.expect);
+    const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
+    if (!found) return { status: 404, body: { error: 'Plan not found' } };
+    const mismatch = dayMismatch(found, opts.expect);
     if (mismatch) return mismatch;
-    if (isSupersededRun(run)) return SUPERSEDED;
+    if (isSupersededRun(found)) return SUPERSEDED;
     if (await isLegacyPlan(tenantId, runId)) return LEGACY_PLAN;
+    // Audit F09: a stuck plan (OPTIMIZING, its job ended) is reset first, then optimized.
+    const run = await unstickIfEnded(tenantId, found, runId, { userId: user.id, ip, via: 'OPTIMIZE' });
+    if (!run) return { status: 404, body: { error: 'Plan not found' } };
     const active = await activeJobAnswer(runId);
     if (active) return active;
+    if (run.status === 'OPTIMIZING') return PLAN_STUCK;
     const jobs = await prisma.runJob.count({ where: { runId } });
     if (inUse(run, jobs > 0, !!opts.freshVersion)) return NEW_VERSION_REQUIRED;
     // Weights entered or corrected under Products after the orders were confirmed are planned
@@ -306,9 +344,9 @@ export async function startDispatchOptimize(
           const jobsNow = await tx.runJob.findMany({ where: { runId }, select: { id: true, status: true, attemptNo: true }, orderBy: { attemptNo: 'desc' } });
           // Another start won the race: answer with its job, start nothing.
           const running = jobsNow.find((j) => j.status === 'QUEUED' || j.status === 'RUNNING');
-          if (running || locked.status === 'OPTIMIZING') {
-            throw new StartRefused({ status: 202, body: { runJobId: running?.id ?? locked.currentJobId, status: running?.status ?? 'RUNNING', runId } });
-          }
+          if (running) throw new StartRefused({ status: 202, body: { runJobId: running.id, status: running.status, runId } });
+          // Audit F09: OPTIMIZING with no job in progress is a stuck plan, never a 202 for a dead job.
+          if (locked.status === 'OPTIMIZING') throw new StartRefused(PLAN_STUCK);
           if (inUse(locked, jobsNow.length > 0, !!opts.freshVersion)) throw new StartRefused(NEW_VERSION_REQUIRED);
           // The frozen loads must still be the ones the request was built around.
           const frozenNow = (await tx.planLoad.findMany({ where: { runId, status: { not: 'PLANNED' } }, select: { id: true } })).map((l) => l.id).sort();
@@ -414,13 +452,16 @@ export async function replan(
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
 ): Promise<StartResult> {
-  const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
-  if (!run) return { status: 404, body: { error: 'Plan not found' } };
-  const mismatch = dayMismatch(run, expect);
+  const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
+  if (!found) return { status: 404, body: { error: 'Plan not found' } };
+  const mismatch = dayMismatch(found, expect);
   if (mismatch) return mismatch;
-  if (isSupersededRun(run)) return { status: 409, body: { error: 'This version was already superseded; open the latest version.', code: 'SUPERSEDED' } };
+  if (isSupersededRun(found)) return { status: 409, body: { error: 'This version was already superseded; open the latest version.', code: 'SUPERSEDED' } };
   // Checked before anything is superseded: a legacy parent must stay the live plan.
   if (await isLegacyPlan(tenantId, runId)) return LEGACY_PLAN;
+  // Audit F09: a stuck version (OPTIMIZING, its job ended) is reset first: never "optimizing" forever.
+  const run = await unstickIfEnded(tenantId, found, runId, { userId: user.id, ip, via: 'REPLAN' });
+  if (!run) return { status: 404, body: { error: 'Plan not found' } };
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
     return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now });

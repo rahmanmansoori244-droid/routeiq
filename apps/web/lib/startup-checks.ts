@@ -22,6 +22,12 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   }
   if (env.NODE_ENV !== 'production') return out;
 
+  // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.
+  for (const key of ['SOLVER_URL', 'SOLVER_TOKEN'] as const) {
+    if (!env[key]?.trim()) {
+      out.push({ level: 'error', message: `${key} is not set: no plan can be optimized, and /api/health answers 503 (not ready).` });
+    }
+  }
   if (!env.RESEND_API_KEY?.trim()) {
     out.push({
       level: 'warn',

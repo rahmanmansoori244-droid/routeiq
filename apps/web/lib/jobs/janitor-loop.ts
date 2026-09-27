@@ -14,7 +14,7 @@ const g = globalThis as unknown as { __routeiqJanitor?: NodeJS.Timeout };
 async function sweep() {
   try {
     const [jobs, shifts] = await Promise.all([reapStuckJobs(), reapStaleShifts()]);
-    if (jobs.reaped || shifts.reaped) console.warn('janitor: reaped', { jobs: jobs.reaped, shifts: shifts.reaped });
+    if (jobs.reaped || jobs.repaired || shifts.reaped) console.warn('janitor: reaped', { jobs: jobs.reaped, stuckPlansRepaired: jobs.repaired, shifts: shifts.reaped });
   } catch (err) {
     // The database may not be reachable yet at boot; the next sweep retries.
     console.error('janitor: sweep failed', (err as Error)?.message ?? err);

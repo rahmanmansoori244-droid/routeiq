@@ -101,6 +101,7 @@ interface Validation {
 interface Props {
   slug: string;
   canPlan: boolean;
+  /** Supervisor and above (canApproveOverride): dispatch actions and "Reset stuck plan" (audit F09). */
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products. */
   canEditProducts: boolean;
@@ -576,6 +577,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             runId={day.plan.id}
             canPlan={canPlan && dayReady}
             canDispatch={canDispatch && dayReady}
+            canResetStuck={canDispatch && dayReady}
             canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}

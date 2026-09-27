@@ -5,6 +5,8 @@
  * This is how a password is reset when reset email is not configured (RESEND_API_KEY), and the
  * quickest way when it is. In one transaction the password hash is replaced, the user's
  * outstanding reset links are retired and an audit row is written (who reset whom; never a hash).
+ * The user's row is locked first (audit F10: the same per-user lock as a reset link, so a link used
+ * at the same moment cannot overwrite the new password, and the two cannot deadlock).
  * The cached session state is then dropped, so every open session of the user ends on its next
  * request (the password fingerprint no longer matches).
  *
@@ -19,6 +21,7 @@ import { hashPassword } from '@/lib/auth';
 import { audit } from '@/lib/audit';
 import { invalidatePrincipal } from '@/lib/session-principal';
 import { generateTempPassword } from '@/lib/temp-password';
+import { lockUserCredentials } from '@/lib/password-reset';
 
 interface Params { params: { id: string } }
 
@@ -44,6 +47,11 @@ export const POST = (req: Request, { params }: Params) =>
       // bcrypt is slow: hash outside the transaction.
       const passwordHash = await hashPassword(tempPassword);
       const done = await prisma.$transaction(async (tx) => {
+        // Audit F10: the user's row first, like a reset link being used or issued - one credential
+        // change per user at a time, always in the same lock order (user, then links), so a link
+        // used at the same moment either commits before this reset (which then wins) or finds its
+        // link retired and is refused; the two can no longer deadlock.
+        if (!(await lockUserCredentials(tx, target.id))) return false;
         // Scoped to the tenant again, so a cross-tenant id can never be reset.
         const updated = await tx.user.updateMany({
           where: { id: target.id, tenantId: user.tenantId },

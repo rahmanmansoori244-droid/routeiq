@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { emailDeliveryConfigured } from '@/lib/password-reset';
+import { checkDispatchReadiness, overallReadiness, solverField } from '@/lib/health';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -14,31 +15,34 @@ async function checkDb(): Promise<'up' | 'down'> {
   }
 }
 
-type Routing = { provider: string; status: 'up' | 'down' | 'not_configured' } | null;
-
-async function checkSolver(): Promise<{ solver: 'up' | 'down'; routing: Routing }> {
-  const url = process.env.SOLVER_URL;
-  if (!url) return { solver: 'down', routing: null };
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4000);
-    const r = await fetch(`${url}/health`, { signal: ctrl.signal, cache: 'no-store' });
-    clearTimeout(t);
-    if (!r.ok) return { solver: 'down', routing: null };
-    const body = (await r.json().catch(() => null)) as { ok?: boolean; routing?: Routing } | null;
-    return { solver: body?.ok ? 'up' : 'down', routing: body?.routing ?? null };
-  } catch {
-    return { solver: 'down', routing: null };
-  }
-}
-
-// `routing` is informational: without OSRM plans still work (distances labelled estimated), so
-// it never makes the app unhealthy - alert on routing.status !== 'up' in monitoring instead.
-// `email` is informational too: without it password-reset emails are not sent (tenant admins
-// reset passwords on the Users screen instead: "Reset password", POST /api/users/:id/reset-password).
+/**
+ * GET /api/health - READINESS, Railway's deploy health check (audit F15, owner decision 5; the
+ * process-only liveness is GET /api/health/live). See lib/health.ts:
+ * - 503 `not_ready`: the database is down, or dispatch is misconfigured (SOLVER_URL / SOLVER_TOKEN
+ *   missing on web, the solver refuses the token with 401, or the solver has no token) - a deploy
+ *   with this fault fails its health check and the previous version keeps serving;
+ * - 200 `degraded` (`ok: false`): the solver could not be asked (unreachable, timeout, an older
+ *   solver) - alert, but do not block the deploy;
+ * - 200 `ready` (`ok: true`).
+ * It never starts an optimization. `routing` and `email` are informational and never change the
+ * answer: without OSRM plans still work (distances labelled estimated) - alert on
+ * routing.status !== 'up' instead; without email, tenant admins reset passwords on the Users
+ * screen ("Reset password", POST /api/users/:id/reset-password).
+ */
 export async function GET() {
-  const [db, { solver, routing }] = await Promise.all([checkDb(), checkSolver()]);
-  const ok = db === 'up' && solver === 'up';
+  const [db, dispatch] = await Promise.all([checkDb(), checkDispatchReadiness()]);
+  const { status, httpStatus } = overallReadiness(db, dispatch);
   const email = emailDeliveryConfigured() ? 'configured' : 'not_configured';
-  return NextResponse.json({ ok, db, solver, routing, email }, { status: ok ? 200 : 503 });
+  return NextResponse.json(
+    {
+      ok: status === 'ready',
+      status,
+      db,
+      solver: solverField(dispatch),
+      dispatch: { status: dispatch.status, reason: dispatch.reason, message: dispatch.message },
+      routing: dispatch.routing,
+      email,
+    },
+    { status: httpStatus, headers: { 'Cache-Control': 'no-store' } },
+  );
 }

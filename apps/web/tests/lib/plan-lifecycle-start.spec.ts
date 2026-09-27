@@ -430,3 +430,98 @@ describe('PR9: an order brought forward to a later day while the start was prepa
     vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
   });
 });
+
+describe('audit F09: a stuck plan is reset, never answered 202 with a dead job', () => {
+  /** The F09 state: the plan OPTIMIZING, its current job already FAILED (the janitor's first write). */
+  function seedStuck(chosen: string | null) {
+    seed({ status: 'OPTIMIZING', chosen });
+    row('runPlan', 'P').currentJobId = 'Jdead';
+    tables.runJob = [{ id: 'Jdead', runId: 'P', tenantId: T, attemptNo: 1, status: 'FAILED', createdAt: new Date(Date.now() - 20 * 60_000), startedAt: null }];
+  }
+
+  it('OPTIMIZE on a stuck first version resets it (audited) and starts a NEW job', async () => {
+    seedStuck(null);
+    const res = await startDispatchOptimize(T, 'P', user, '10.0.0.9');
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).not.toBe('Jdead');
+    expect(res.body.status).toBe('QUEUED');
+    expect(tables.runJob).toHaveLength(2);
+    const plan = row('runPlan', 'P');
+    expect(plan.status).toBe('OPTIMIZING');
+    expect(plan.currentJobId).toBe(res.body.runJobId);
+    const repair = tables.auditLog.find((a) => a.action === 'OPTIMIZE_FAILED');
+    expect(repair).toMatchObject({ userId: 'u1', entityId: 'P', afterJson: { reason: 'STUCK_PLAN', runJobId: 'Jdead', jobStatus: 'FAILED', repairedBy: 'OPTIMIZE' } });
+    expect(tables.auditLog.map((a) => a.action)).toEqual(['OPTIMIZE_FAILED', 'OPTIMIZE_STARTED']);
+    expect(scheduleDispatchOptimize).toHaveBeenCalledTimes(1);
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('RE-PLAN of a stuck version holding a plan resets it and creates the next version (never 409 OPTIMIZING)', async () => {
+    seedStuck('sc1');
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.status).toBe(202);
+    expect(res.body.version).toBe(2);
+    expect(row('runPlan', 'P').status).toBe('SUPERSEDED');
+    expect(tables.auditLog.find((a) => a.action === 'OPTIMIZE_FAILED')?.afterJson).toMatchObject({ reason: 'STUCK_PLAN', repairedBy: 'REPLAN' });
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('a stuck version holding a plan is reset by OPTIMIZE too, then answers NEW_VERSION_REQUIRED (re-plan it)', async () => {
+    seedStuck('sc1');
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.body.code).toBe('NEW_VERSION_REQUIRED');
+    expect(row('runPlan', 'P').status).toBe('FAILED'); // usable again, previous plan kept
+    admissionIdle();
+  });
+
+  it('a plan whose job is really QUEUED or RUNNING is never reset: 202 with that job, nothing started', async () => {
+    seedStuck(null);
+    tables.runJob[0]!.status = 'RUNNING';
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res).toMatchObject({ status: 202, body: { runJobId: 'Jdead', status: 'RUNNING' } });
+    expect(row('runPlan', 'P').status).toBe('OPTIMIZING');
+    expect(tables.auditLog).toHaveLength(0);
+    expect(scheduleDispatchOptimize).not.toHaveBeenCalled();
+    const rp = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(rp).toMatchObject({ status: 202, body: { runJobId: 'Jdead' } }); // the running job decides; nothing is reset
+    row('runPlan', 'P').chosenScenarioId = 'sc1';
+    expect((await replan(T, 'P', 'REOPTIMIZE', null, user, null)).body.code).toBe('OPTIMIZING');
+    expect(tables.auditLog).toHaveLength(0);
+    expect(tables.runPlan).toHaveLength(1);
+    admissionIdle();
+  });
+
+  it('the in-flight map alone (a job finishing after its commit) is no running job: the start goes ahead', async () => {
+    seed({ status: 'FAILED', chosen: null });
+    tables.runJob = [{ id: 'J1', runId: 'P', tenantId: T, attemptNo: 1, status: 'FAILED' }];
+    const { trackInflight } = await import('@/lib/jobs/optimize-job');
+    let finish!: () => void;
+    trackInflight('P', () => new Promise<void>((r) => (finish = r)));
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    finish();
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).toBeTruthy();
+    expect(res.body.runJobId).not.toBe('J1');
+    expect(tables.runJob).toHaveLength(2);
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('OPTIMIZING with no job in progress found inside the start transaction answers 409 PLAN_STUCK, never 202', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    const { buildDispatchRequest } = await import('@/lib/dispatch/plan-service');
+    vi.mocked(buildDispatchRequest).mockImplementationOnce(async (_t, runId) => {
+      // Stuck meanwhile: OPTIMIZING behind an ended job.
+      Object.assign(row('runPlan', 'P'), { status: 'OPTIMIZING', currentJobId: 'Jgone' });
+      tables.runJob.push({ id: 'Jgone', runId: 'P', tenantId: T, attemptNo: 1, status: 'FAILED' });
+      return builtFor(runId) as never;
+    });
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PLAN_STUCK');
+    expect(scheduleDispatchOptimize).not.toHaveBeenCalled();
+    admissionIdle();
+  });
+});
