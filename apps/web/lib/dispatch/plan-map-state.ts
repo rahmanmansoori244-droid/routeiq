@@ -98,7 +98,9 @@ export function drawnShapes(geo: GeoState, loads: MapLoadStops[], depot: Depot):
  * The answer is for other plan content than the screen shows: a load on screen has no row for its
  * stops as shown, or the answer has a load the screen does not. The screen's plan is then behind the
  * server (the shapes are always asked for after the plan was read): another dispatcher's "Use
- * instead" made new loads under the same run, or a customer's pin moved. Asking for the shapes
+ * instead" made new loads under the same run, or the pin of a stop planned before snapshots existed
+ * moved (no stopSnapshotJson, so its path is today's customer pin; a stop planned with a snapshot
+ * keeps its planned pin, and correcting the customer's pin changes nothing). Asking for the shapes
  * again gives the same answer; the plan must be reloaded.
  */
 export function answerIsStale(geo: GeoState, loads: MapLoadStops[], depot: Depot): boolean {

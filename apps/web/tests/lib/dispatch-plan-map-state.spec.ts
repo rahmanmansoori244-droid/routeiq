@@ -150,7 +150,7 @@ describe('answerIsStale - the answer is for other content than the screen', () =
     expect(answerIsStale(ready(road(L1)), [L1, L2], DEPOT)).toBe(true);
   });
 
-  it('same load id with other stops (a pin moved on the server)', () => {
+  it('same load id with other stops (the pin of a stop planned before snapshots moved on the server)', () => {
     const movedL2: MapLoadStops = { id: 'L2', stops: [{ lat: 23.71, lng: 58.5 }] };
     expect(answerIsStale(ready(road(L1), road(movedL2)), [L1, L2], DEPOT)).toBe(true);
   });

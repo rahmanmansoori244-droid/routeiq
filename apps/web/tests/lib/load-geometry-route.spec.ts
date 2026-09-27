@@ -113,7 +113,7 @@ describe('GET /api/runs/:id/load-geometry', () => {
     ]);
   });
 
-  it("each row's fingerprint is the one the map computes from the stops it shows; a pin moved on the server makes the answer stale", async () => {
+  it("each row's fingerprint is the one the map computes from the stops it shows; a moved pin makes the answer stale only for a stop planned before snapshots", async () => {
     h.call.mockImplementation(async (pts: Pt[]) => ({ kind: 'answer', provider: 'OSRM', isEstimated: false, coordinates: bend(pts), warning: null }));
     // What PlanView passes the map for this run (getPlanDetail: one stop per sequence, first order's customer).
     const onScreen: MapLoadStops[] = [
@@ -125,8 +125,18 @@ describe('GET /api/runs/:id/load-geometry', () => {
     expect(answerIsStale(fresh, onScreen, DEPOT)).toBe(false);
     expect(roadShapesCaption(drawnShapes(fresh, onScreen, DEPOT)).text).toBe(ROAD_TEXT);
 
-    // The customer of L2's stop is moved after this screen loaded the plan: same load id, other path.
-    (h.loads[1].assignments as { order: { customer: { lat: number; lng: number } } }[])[0].order.customer = { lat: 23.75, lng: 58.55 };
+    // L2's stop planned with a snapshot: its customer's pin is corrected after this screen loaded
+    // the plan, and the path stays on the planned pin (review F08), so the answer is not stale.
+    const l2 = (h.loads[1].assignments as { stopSnapshotJson?: unknown; order: { customer: { lat: number; lng: number } } }[])[0];
+    l2.stopSnapshotJson = { v: 1, customerId: 'C2', code: 'C2', name: 'C2', lat: 23.7, lng: 58.5 };
+    l2.order.customer = { lat: 23.75, lng: 58.55 };
+    const corrected = await answer();
+    expect(answerIsStale(corrected, onScreen, DEPOT)).toBe(false);
+    expect(roadShapesCaption(drawnShapes(corrected, onScreen, DEPOT)).text).toBe(ROAD_TEXT);
+
+    // The same stop planned before snapshots existed (no stopSnapshotJson): its path is today's
+    // customer pin, so the correction is another path under the same load id, and the answer is stale.
+    l2.stopSnapshotJson = null;
     const moved = await answer();
     expect(answerIsStale(moved, onScreen, DEPOT)).toBe(true);
     const c = roadShapesCaption(drawnShapes(moved, onScreen, DEPOT));
