@@ -10,6 +10,10 @@
  * - Save sends only the fields the dispatcher changed. Before, every Save sent the priority and the
  *   unloading time as shown - the defaults included - and the server marked both as confirmed, so a
  *   default nobody looked at became the customer's own value.
+ * - A window is one value: when either end changed, both ends are sent as shown (A2 review). One end
+ *   alone was merged by the route with the other end as stored, which a form opened earlier may no
+ *   longer show, so a window nobody typed could be saved (06:00-10:00 on screen, 12:00-15:00 stored
+ *   since, end set to 16:00: 12:00-16:00 saved).
  */
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
@@ -44,7 +48,7 @@ export interface DetailsForm {
   prefEnd: string;
 }
 
-/** The PATCH /api/customers/:id body: only the fields that changed. */
+/** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
 export interface DetailsPatch {
   customerType?: string | null;
   priority?: number;
@@ -121,7 +125,8 @@ export type DetailsResult = { ok: true; patch: DetailsPatch } | { ok: false; err
 /**
  * What Save sends: the fields whose value differs from the form as it opened (`initial`), after
  * every field was checked. Nothing is sent when one of them is wrong. An empty patch = nothing
- * changed.
+ * changed. A window whose start or end changed is sent whole (both ends as on screen), never one
+ * end alone.
  */
 export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsResult {
   const nowTimes = readTimes(now);
@@ -145,8 +150,10 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   if (!before.ok || before.minutes !== service.minutes) patch.avgServiceTimeMin = service.minutes;
   const was = readTimes(initial);
   for (const [a, b, fa, fb] of WINDOWS) {
-    if (!was.ok || was.times[a] !== t[a]) patch[fa] = t[a];
-    if (!was.ok || was.times[b] !== t[b]) patch[fb] = t[b];
+    if (!was.ok || was.times[a] !== t[a] || was.times[b] !== t[b]) {
+      patch[fa] = t[a];
+      patch[fb] = t[b];
+    }
   }
   return { ok: true, patch };
 }

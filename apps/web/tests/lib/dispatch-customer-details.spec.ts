@@ -99,7 +99,7 @@ describe('the Details form helpers (customer-details.ts)', () => {
     const midnight = detailsFormOf({ ...CONFIRMED, hardWindowStartMin: 1080, hardWindowEndMin: 1440 });
     expect(midnight).toMatchObject({ hardStart: '18:00', hardEnd: '24:00' });
     expect(detailsPatch(midnight, midnight)).toEqual({ ok: true, patch: {} });
-    expect(detailsPatch(midnight, { ...midnight, hardStart: '17:00' })).toEqual({ ok: true, patch: { hardWindowStartMin: 1020 } });
+    expect(detailsPatch(midnight, { ...midnight, hardStart: '17:00' })).toEqual({ ok: true, patch: { hardWindowStartMin: 1020, hardWindowEndMin: 1440 } });
   });
 
   it('unloading time: whole minutes 0..480, blank = the default', () => {
@@ -120,9 +120,14 @@ describe('the Details form helpers (customer-details.ts)', () => {
     expect(detailsPatch(f, { ...f, hardStart: '6:00', hardEnd: '1000' })).toEqual({ ok: true, patch: {} });
   });
 
-  it('sends only the fields that changed', () => {
+  it('sends only the fields that changed; a changed window with both its ends', () => {
     const f = detailsFormOf(UNCONFIRMED);
-    expect(detailsPatch(f, { ...f, hardEnd: '11:00' })).toEqual({ ok: true, patch: { hardWindowEndMin: 660 } });
+    // A2 review: one end changed = the whole window as shown (06:00 stays 06:00), never the end alone.
+    expect(detailsPatch(f, { ...f, hardEnd: '11:00' })).toEqual({ ok: true, patch: { hardWindowStartMin: 360, hardWindowEndMin: 660 } });
+    expect(detailsPatch(f, { ...f, hardStart: '05:30' })).toEqual({ ok: true, patch: { hardWindowStartMin: 330, hardWindowEndMin: 600 } });
+    // The other window, untouched, is not sent.
+    const both = detailsFormOf({ ...UNCONFIRMED, prefWindowStartMin: 420, prefWindowEndMin: 540 });
+    expect(detailsPatch(both, { ...both, prefEnd: '09:30' })).toEqual({ ok: true, patch: { prefWindowStartMin: 420, prefWindowEndMin: 570 } });
     expect(detailsPatch(f, { ...f, type: 'GROCERY' })).toEqual({ ok: true, patch: { customerType: 'GROCERY' } });
     expect(detailsPatch(f, { ...f, type: '' })).toEqual({ ok: true, patch: { customerType: null } });
     expect(detailsPatch(f, { ...f, prefStart: '07:00', prefEnd: '09:00' })).toEqual({ ok: true, patch: { prefWindowStartMin: 420, prefWindowEndMin: 540 } });
@@ -201,13 +206,13 @@ describe('CustomerDialog (audit F07)', () => {
     expect(t.host.props.open).toBe(false);
   });
 
-  it('a changed receiving hour alone is sent alone', async () => {
+  it('a changed receiving hour is sent with the other end of its window, nothing else', async () => {
     const t = setup();
     t.type('cd-he', '11:00');
     t.save();
     expect(t.patches()).toHaveLength(1);
     expect(t.patches()[0].url).toBe('/api/customers/c1');
-    expect(t.patches()[0].init.json).toEqual({ hardWindowEndMin: 660 });
+    expect(t.patches()[0].init.json).toEqual({ hardWindowStartMin: 360, hardWindowEndMin: 660 });
     t.patches()[0].resolve({ ok: true, status: 200, data: {}, error: null, errorBody: null });
     await t.host.settle();
     expect(t.saved).toHaveBeenCalledTimes(1);
@@ -298,8 +303,8 @@ describe('PATCH /api/customers/:id - unloading time and confirmation (audit F07)
   });
 
   it('only the fields sent: a receiving-hours change confirms neither priority nor unloading time', async () => {
-    expect((await patch({ hardWindowEndMin: 660 })).status).toBe(200);
-    expect(route.updates).toEqual([{ hardWindowEndMin: 660 }]);
+    expect((await patch({ hardWindowStartMin: 360, hardWindowEndMin: 660 })).status).toBe(200);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 660 }]);
   });
 
   it('refuses text, fractions and blanks instead of turning them into 0 (400, nothing saved)', async () => {
@@ -307,5 +312,47 @@ describe('PATCH /api/customers/:id - unloading time and confirmation (audit F07)
       expect((await patch(body)).status, JSON.stringify(body)).toBe(400);
     }
     expect(route.updates).toEqual([]);
+  });
+});
+
+/**
+ * A2 review: the Details dialog sent one end of a window alone, and the route merged it with the other
+ * end as stored. The day screen does not poll outside an optimization, so the dialog can open with
+ * hours another dispatcher (or another tab) has changed since: the saved window was then one nobody
+ * typed. Now a changed window is sent whole, as shown. The REAL dialog and the REAL PATCH route.
+ */
+describe('a window saved from a form opened before someone else changed it (A2 review)', () => {
+  const send = (body: unknown) =>
+    PATCH(new Request('http://localhost/api/customers/c1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: 'c1' } });
+  /** Customer c1 as stored now: its hard window was changed after the day screen was loaded. */
+  const storedNow = (hardWindowStartMin: number, hardWindowEndMin: number) => {
+    route.before = {
+      id: 'c1', code: 'C001', branchKey: '__MAIN__', active: true, avgServiceTimeMin: 10, serviceTimeConfirmed: false, priority: 3, priorityConfirmed: false,
+      hardWindowStartMin, hardWindowEndMin, prefWindowStartMin: null, prefWindowEndMin: null,
+    };
+    route.updates = [];
+  };
+
+  it('screen 06:00-10:00, stored 12:00-15:00 since, end set to 16:00: 06:00-16:00 is saved (before: 12:00-16:00)', async () => {
+    storedNow(720, 900);
+    const t = setup(); // the day screen's earlier load: 06:00-10:00
+    expect([t.field('cd-hs').props.value, t.field('cd-he').props.value]).toEqual(['06:00', '10:00']);
+    t.type('cd-he', '16:00');
+    t.save();
+    const body = t.patches()[0].init.json;
+    expect(body).toEqual({ hardWindowStartMin: 360, hardWindowEndMin: 960 });
+    expect((await send(body)).status).toBe(200);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 960 }]);
+  });
+
+  it('screen 06:00-10:00, stored 06:00-08:00 since, start set to 09:00: 09:00-10:00 is saved (before: refused, the end before the start)', async () => {
+    storedNow(360, 480);
+    const t = setup();
+    t.type('cd-hs', '09:00');
+    t.save();
+    const body = t.patches()[0].init.json;
+    expect(body).toEqual({ hardWindowStartMin: 540, hardWindowEndMin: 600 });
+    expect((await send(body)).status).toBe(200);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 540, hardWindowEndMin: 600 }]);
   });
 });

@@ -200,6 +200,27 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
     });
     expect(offenders).toEqual([]);
   });
+
+  it('after a pin correction, nothing says the map or the WhatsApp message moves to the new pin (second A2 review)', () => {
+    // A plan keeps the pin each stop was planned with (getPlanDetail reads the stop snapshot): the
+    // reload after a pin correction adds the orange note, the badge and the WhatsApp / driver sheet
+    // "New pin - ask the dispatcher" line, but the stop's pin link, the route link and the map stay
+    // the planned ones until the load is re-planned (a locked one unlocked first).
+    const REPO = path.resolve(APPS, '..');
+    const files = [...walk(path.join(REPO, 'docs'), /\.md$/), ...walk(path.join(WEB, 'lib'), /\.tsx?$/), ...walk(path.join(WEB, 'app/t/[slug]/dispatch'), /\.tsx?$/)];
+    const STALE: [RegExp, string][] = [
+      [/\b(map|WhatsApp (messages?|texts?))\b[^.\n]*\buses? the (new|corrected) pin\b/i, 'the map or WhatsApp message using the new pin'],
+      [/\b(map|WhatsApp)\b[^.\n]*\buse the customer as it is now\b/i, 'the map or WhatsApp texts using the customer as it is now'],
+      [/\bmap\b[^.\n]*\b(keep|kept) the customer as it was\b/i, 'a reload moving the map to the corrected customer'],
+    ];
+    const offenders = files.flatMap((f) => {
+      const raw = readFileSync(f, 'utf8');
+      // A code comment is read as one text: its "//" and " * " line breaks become spaces.
+      const text = f.endsWith('.md') ? raw : raw.replace(/[ \t]*\r?\n[ \t]*(\/\/|\*(?!\/))?[ \t]*/g, ' ');
+      return STALE.filter(([re]) => re.test(text)).map(([, what]) => `${path.relative(REPO, f).split(path.sep).join('/')}: ${what}`);
+    });
+    expect(offenders).toEqual([]);
+  });
 });
 
 /**

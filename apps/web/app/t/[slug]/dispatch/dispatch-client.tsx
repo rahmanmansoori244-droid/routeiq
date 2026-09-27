@@ -167,10 +167,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const refresh = useCallback(() => loader.refresh(), [loader]);
 
   // A customer's pin or details were saved (ADD LOCATION / Details): the day AND the plan below are
-  // read again, the plan in place (audit F13). A READY plan does not poll, so its warnings ("master
-  // data changed since optimization"), its map and the WhatsApp texts built from it kept the customer
-  // as it was until the page was reloaded - also for LOCKED loads, which the day banner does not
-  // count. Not only after a day load that succeeded: the plan shows its own error and Try again.
+  // read again, the plan in place (audit F13). A READY plan does not poll, so its "changed after
+  // planning" notes and badge and the WhatsApp texts' "New pin" line appeared only after a page
+  // reload - also for LOCKED loads, which the day banner does not count. The stops keep the planned
+  // pin (map, pin and route links) until the load is re-planned. Not only after a day load that
+  // succeeded: the plan shows its own error and Try again.
   const afterCustomerSaved = useCallback(() => {
     setPlanReload((k) => k + 1);
     void refresh();

@@ -4,9 +4,11 @@
  * (hook-host.ts): only api(), the toasts, the router and the maps are replaced.
  *
  *  - F13: saving a pin or the details refreshed the day but not the plan below it. A READY plan does
- *    not poll, so its warnings, map and WhatsApp texts kept the customer as it was until the page was
- *    reloaded - also for LOCKED loads, which the day banner does not count. Now the plan is read
- *    again in place (reloadSignal; never a remount, which would close an open late order).
+ *    not poll, so its "changed after planning" notes, badge and the WhatsApp "New pin" line appeared
+ *    only after a page reload - also for LOCKED loads, which the day banner does not count. Now the
+ *    plan is read again in place (reloadSignal; never a remount, which would close an open late
+ *    order). The stop itself keeps the planned pin (its link, the route link, the map) until the load
+ *    is re-planned; only the notes and the "New pin" line are new.
  *  - F16: a dispatch plan with no load (every order unserved) offered no Excel export at all; now the
  *    dispatch workbook is offered by the isDispatchPlan discriminator. The driver sheets (PDF) still
  *    need loads.
@@ -15,6 +17,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Host, elements, typeName } from './hook-host';
 import { fixture, ORDERS, PRODUCTS } from './plan-detail-fixture';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
+import { pinUrl } from '@/lib/dispatch/driver-links';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 
@@ -115,6 +118,30 @@ describe('F13: the reloaded plan brings the fresh WhatsApp text', () => {
     await host.settle();
     expect(requests.filter((u) => u.endsWith('/plan')).length).toBe(loadsBefore + 1);
     expect(whatsappOf(host.tree, 'T01', 1)).toContain('New pin - ask the dispatcher which one to use');
+  });
+
+  it('the reload does not move the stop: its pin link, the route link and the map stay the planned ones (A2 review, docs)', async () => {
+    const onScreen = fixture();
+    const host = mountPlan(onScreen);
+    await host.settle();
+    const planned = { lat: onScreen.loads[0].stops[0].lat!, lng: onScreen.loads[0].stops[0].lng! };
+    const moved = { lat: 23.6012, lng: 58.4101 };
+    const routeLines = (msg: string) => msg.split('\n').filter((l) => /^Route( \d+\/\d+)?: /.test(l));
+    const before = whatsappOf(host.tree, 'T01', 1);
+    // The plan as getPlanDetail gives it after the pin was saved: the stop keeps its snapshot point, the note has the new pin.
+    const fresh = structuredClone(onScreen);
+    fresh.loads[0].stops[0].masterChanged = [{ kind: 'LOCATION', text: 'Location updated after planning: new pin 23.60120, 58.41010 (2.1 km from the planned one)', newLat: moved.lat, newLng: moved.lng, movedM: 2100 }];
+    answers.plan = fresh;
+    host.render({ reloadSignal: 1 });
+    await host.settle();
+    const lines = whatsappOf(host.tree, 'T01', 1).split('\n');
+    const at = lines.findIndex((l) => l.startsWith('1. '));
+    expect(lines[at + 1]).toBe(pinUrl(planned)); // the stop's own link: the planned pin
+    expect(lines[at + 3]).toBe(`New pin - ask the dispatcher which one to use: ${pinUrl(moved)}`);
+    expect(lines.filter((l) => l.includes(pinUrl(moved)!))).toHaveLength(1); // only on the "New pin" line
+    expect(routeLines(lines.join('\n'))).toEqual(routeLines(before)); // the route link: unchanged
+    const map = elements(host.tree).find((e) => typeName(e) === 'DynamicStub' && Array.isArray(e.props?.loads));
+    expect(map.props.loads[0].stops[0]).toMatchObject(planned); // the map: the planned pin
   });
 });
 

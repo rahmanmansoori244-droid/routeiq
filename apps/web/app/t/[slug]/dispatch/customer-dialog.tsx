@@ -33,6 +33,8 @@ const SERVICE_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type defa
  * Audit F07 (owner decision 9, customer-details.ts): times are checked strictly (HH:MM), unloading
  * time is whole minutes or blank (= the default, not confirmed), and Save sends only what the
  * dispatcher changed, so a priority or unloading time nobody touched is never marked as confirmed.
+ * A window with a changed end is sent whole, both ends as shown (A2 review), so the saved window is
+ * always one the dispatcher saw.
  */
 export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props) {
   // The form as it opened (what "changed" is measured against) and as typed now.
