@@ -28,8 +28,9 @@
  *     leftovers - on a load locked last night that has not left, unserved, on a planned afternoon
  *     trip - are listed as today's, none ticked; sent without the Today tick they are refused
  *     (TODAY_NOT_SELECTED); ticked, they go to tomorrow and are closed on today like an earlier
- *     day's, today's load holding one cannot go out and the 409 says to unlock it; the unticked
- *     one stays today's and its load is dispatched; RE-PLAN of tomorrow adds the copies.
+ *     day's, today's load holding one cannot go out and the 409 says to unlock it (so does its
+ *     badge on the plan version page: the plan detail gives today); the unticked one stays
+ *     today's and its load is dispatched; RE-PLAN of tomorrow adds the copies.
  *
  * Bring forward never looks past the company's today; today's orders are listed as their own
  * group. Every carry here runs with the clock on the day it carries to (`onDay`), after the days it
@@ -103,7 +104,7 @@ import { bringForward, carryOverPreview } from '@/lib/dispatch/carry-over';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { carriedOverRows } from '@/lib/dispatch/workbook';
-import { carrySelectionPayload, dayNothingLeftText, defaultCarrySelection } from '@/lib/dispatch/carry-view';
+import { carriedLoadTitle, carrySelectionPayload, dayNothingLeftText, defaultCarrySelection } from '@/lib/dispatch/carry-view';
 import { fetchRangeRows } from '@/lib/dashboard';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { DELETE as deleteBatch } from '@/app/api/orders/[batchId]/route';
@@ -650,6 +651,12 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
       );
     }
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l2.id } })).status).toBe('LOCKED');
+    // The plan version page (no day screen around it) says the same on the load's badge: the plan detail gives today.
+    const pageT = (await getPlanDetail(tenantId, planT.id, { now: night }))!;
+    expect(pageT.today).toBe(T);
+    const badge = carriedLoadTitle(pageT.loads.find((l) => l.id === l2.id)!, pageT);
+    expect(badge).toContain(`its cases were brought forward to ${fmtDayMonth(N)} and are planned there, so it does not go out today. Unlock it (put it back to Planned)`);
+    expect(badge).toContain('A later locked or loading load of the same truck must be unlocked first.');
     // The unticked C5 stays today's: its load can still be locked and dispatched today.
     for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planT.id, l5.id, { status: s }, user(), everyRole, { now: night });
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l5.id } })).status).toBe('DISPATCHED');

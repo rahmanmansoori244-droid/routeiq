@@ -25,7 +25,7 @@ import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, splitPa
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties } from '@routeiq/shared-types';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
-import { fmtWindow, isoOf } from './time';
+import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
@@ -247,6 +247,12 @@ export interface PlanDetail {
   carriedIn?: CarrySummary | null;
   /** PR9: orders of this plan brought forward to later days since: not delivered on this day, planned there. */
   carriedOut?: CarrySummary | null;
+  /**
+   * PR9: the company's today (YYYY-MM-DD, its timezone) when the plan was read. A load of today
+   * holding an order brought forward to tomorrow says "re-plan today" / "unlock" on every plan
+   * screen (carriedLoadTitle), also the standalone plan version page, like the 409 ORDERS_CARRIED.
+   */
+  today?: string;
 }
 
 /** PR9: orders brought forward, in one line: how many, their cases and the days (first due, or went to). */
@@ -263,7 +269,8 @@ function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | n
   return { window: describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null };
 }
 
-export async function getPlanDetail(tenantId: string, runId: string): Promise<PlanDetail | null> {
+/** `clock.now`: the moment the company's today is read for (PlanDetail.today); the real clock by default. */
+export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}): Promise<PlanDetail | null> {
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUnique({ where: { id: runId }, include: { depot: true } });
   if (!run) return null;
@@ -659,6 +666,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     planSettings: inputs?.settings ?? null,
     carriedIn,
     carriedOut,
+    today: todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
   };
 }
 

@@ -3,6 +3,7 @@
  * another. Pure and browser-safe (the day screen, the plan screen, the driver sheets and the Excel
  * workbook all read these), so the marks never drift apart.
  */
+import type { CarryWhyKind } from './carry-over';
 import { fmtDayMonth } from './time';
 
 /** Badge of an order brought forward from an earlier day: "Carried over from 26 Sep" (the date it was first due). */
@@ -77,16 +78,48 @@ export function carryTodayTitle(todayIso: string): string {
 export const CARRY_TODAY_WARNING = "Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.";
 
 /**
- * The question before "Bring forward": how many orders and cases, and - when orders of today are
- * ticked - that they come off today's plan and cannot go out today any more.
+ * The "Why not delivered" label of a listed order on the day screen. Today's day is not over, so
+ * its orders' loads have not left YET: "Load not left yet" / "Not planned", never "Load never left"
+ * / "Never planned", which would contradict "may still leave today". An unserved order is labelled
+ * with its reason on the screen (REASON_TEXT) when the plan gave one.
  */
-export function carryConfirmText(chosen: readonly { cases: number; ofToday?: boolean }[], dateIso: string, todayIso: string): string {
+export function carryWhyLabel(kind: CarryWhyKind, ofToday: boolean): string {
+  switch (kind) {
+    case 'NOT_LEFT':
+      return ofToday ? 'Load not left yet' : 'Load never left';
+    case 'NEVER_PLANNED':
+      return ofToday ? 'Not planned' : 'Never planned';
+    case 'UNSERVED':
+      return 'Unserved';
+  }
+}
+
+/**
+ * The count after "Bring forward to 28 Sep" on the button: shown whenever the selection is not
+ * "every order of the earlier days" - fewer, or any order of today ticked, which it names
+ * (" (5 order(s), 320 cases, 2 of today)"); empty when exactly the earlier days' orders are ticked.
+ * `preview.orders`: the orders of the earlier days that can be brought forward.
+ */
+export function carryButtonSuffix(chosen: readonly { cases: number; ofToday: boolean }[], preview: { orders: number }): string {
+  const ofToday = chosen.filter((c) => c.ofToday).length;
+  if (chosen.length === preview.orders && !ofToday) return '';
+  const cases = chosen.reduce((a, c) => a + c.cases, 0);
+  return ` (${chosen.length} order(s), ${cases.toLocaleString()} cases${ofToday ? `, ${ofToday} of today` : ''})`;
+}
+
+/**
+ * The question before "Bring forward": how many orders and cases, and - when orders of today are
+ * ticked - that they are closed on today (today's plan stays as it is, for the record: the load
+ * keeps them) and that a load of today still holding one cannot go out today. `chosen` are the
+ * listed orders (CarryCandidate, which says `ofToday`), never the POST body (which says `today`).
+ */
+export function carryConfirmText(chosen: readonly { cases: number; ofToday: boolean }[], dateIso: string, todayIso: string): string {
   const day = fmtDayMonth(dateIso);
   const cases = chosen.reduce((a, c) => a + c.cases, 0);
   const ofToday = chosen.filter((c) => c.ofToday);
   const todayCases = ofToday.reduce((a, c) => a + c.cases, 0);
   const todayNote = ofToday.length
-    ? `\n\n${ofToday.length} of them (${todayCases.toLocaleString()} cases) are orders of TODAY (${fmtDayMonth(todayIso)}): they come off today's plan, and a load of today that still holds one cannot be locked, loaded or dispatched today. Only continue if you know they will not be delivered today.`
+    ? `\n\n${ofToday.length} of them (${todayCases.toLocaleString()} cases) are orders of TODAY (${fmtDayMonth(todayIso)}): they are closed on today (today's plan stays as it is, for the record), and a load of today that still holds one cannot be locked, loaded or dispatched today. Only continue if you know they will not be delivered today.`
     : '';
   return `Bring ${chosen.length} order(s) (${cases.toLocaleString()} cases) forward to ${day}?${todayNote}\n\nThey become orders of ${day} and are no longer open on their own days. The plans of those days stay as they are.`;
 }
@@ -112,7 +145,7 @@ export function carryDoneText(
   // Orders of today brought forward (in the evening): their loads of today no longer go out with them.
   const ofToday = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso).length : 0;
   const today = ofToday
-    ? ` ${ofToday} of them were orders of today (${fmtDayMonth(todayIso!)}): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (unload a loaded one).`
+    ? ` ${ofToday} of them were orders of today (${fmtDayMonth(todayIso!)}): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (a loading one goes Back to locked first; unload a loaded one).`
     : '';
   return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${today}`;
 }
@@ -153,20 +186,27 @@ export function carriedToDays(toDates: readonly string[] | undefined): string {
  * - A load of TODAY (`ofDay.isToday`: orders of today brought forward to tomorrow in the evening,
  *   owner decision): the words say today - re-plan today (its other orders are planned without
  *   the brought-forward ones), or unlock the load (back to Planned) when it was loaded - so the
- *   dispatcher knows the load does not go out today with them.
+ *   dispatcher knows the load does not go out today with them. The way back to Planned is named
+ *   with the plan screen's own buttons (load-state.ts, checkTransition): a LOCKED load has
+ *   "Unlock"; a LOADING load has none - it goes "Back to locked" first, then "Unlock" - and Unlock
+ *   is refused while a later load of the same truck is still locked or loading, so those go first.
  */
 export function carriedLoadRemedy(status: string, onlyCarried: boolean, toDates?: readonly string[], ofDay?: { date: string; isToday: boolean }): string {
   const days = carriedToDays(toDates);
   const loaded = status === 'LOCKED' || status === 'LOADING';
   if (ofDay?.isToday) {
     const today = `today (${fmtDayMonth(ofDay.date)})`;
+    const loading = status === 'LOADING';
+    const laterFirst = ' A later locked or loading load of the same truck must be unlocked first.';
     if (onlyCarried) {
+      const unlock = loading ? 'Put it Back to locked, then Unlock it (put it back to Planned),' : 'Unlock it (put it back to Planned)';
       return loaded
-        ? `This load holds nothing else, but it was loaded: its cases were brought forward to ${days} and are planned there, so it does not go out today. Unlock it (put it back to Planned) and unload those cases back to stock, or tell the warehouse, before the loads of ${days} are picked, so they are not loaded twice. It stays in today's plan for the record; nothing needs to be re-planned.`
+        ? `This load holds nothing else, but it was loaded: its cases were brought forward to ${days} and are planned there, so it does not go out today. ${unlock} and unload those cases back to stock, or tell the warehouse, before the loads of ${days} are picked, so they are not loaded twice.${laterFirst} It stays in today's plan for the record; nothing needs to be re-planned.`
         : `This load holds nothing else: it does not go out today. Leave it as it is (it stays in today's plan for the record); re-plan ${today} only if other orders of today still need a truck.`;
     }
+    const unlock = loading ? 'put the load Back to locked, then Unlock it (put it back to Planned),' : 'unlock the load (put it back to Planned)';
     return loaded
-      ? `Their cases were loaded: unload them (they are planned on ${days} now). To deliver its other orders today, unlock the load (put it back to Planned) and re-plan ${today}: the re-plan leaves the brought-forward orders out.`
+      ? `Their cases were loaded: unload them (they are planned on ${days} now). To deliver its other orders today, ${unlock} and re-plan ${today}: the re-plan leaves the brought-forward orders out.${laterFirst}`
       : `Re-plan ${today} to plan its other orders without them.`;
   }
   if (onlyCarried) {
@@ -227,6 +267,28 @@ export function dayNothingLeftText(day: {
 /** A load of the plan screen holds only orders brought forward to a later day. */
 export function holdsOnlyCarried(l: { carriedAway: number; stops: readonly { orderIds: readonly string[] }[] }): boolean {
   return l.carriedAway > 0 && l.carriedAway === new Set(l.stops.flatMap((s) => s.orderIds)).size;
+}
+
+/**
+ * The title of the plan screen's "N order(s) carried over" badge on a load: why it cannot be
+ * locked, loaded or dispatched, and what to do (carriedLoadRemedy) - the words of the server's
+ * 409 ORDERS_CARRIED for the same load. A load of the company's today says today: `today` is the
+ * day screen's when it gives one, else the plan's own (PlanDetail.today), so the standalone plan
+ * version page says the same as the day screen and as the 409 on that page.
+ */
+export function carriedLoadTitle(
+  l: { status: string; carriedAway: number; stops: readonly { orderIds: readonly string[]; carriedTo: string | null }[] },
+  plan: { run: { runDate: string }; today?: string },
+  today?: string,
+): string {
+  const companyToday = today ?? plan.today;
+  const remedy = carriedLoadRemedy(
+    l.status,
+    holdsOnlyCarried(l),
+    l.stops.flatMap((st) => (st.carriedTo ? [st.carriedTo] : [])),
+    { date: plan.run.runDate, isToday: !!companyToday && plan.run.runDate === companyToday },
+  );
+  return `Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${remedy}`;
 }
 
 /**

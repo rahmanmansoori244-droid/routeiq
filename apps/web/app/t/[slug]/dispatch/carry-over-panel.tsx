@@ -8,29 +8,19 @@ import { Button } from '@/components/ui/button';
 import type { BringForwardResult, CarryCandidate, CarryPreview } from '@/lib/dispatch/carry-over';
 import {
   CARRY_TODAY_WARNING,
+  carryButtonSuffix,
   carryConfirmText,
   carryDoneText,
   carriedFromBadge,
   carrySelected,
   carrySelectionPayload,
   carryTodayTitle,
+  carryWhyLabel,
   toggleCarry,
   type CarryChoices,
 } from '@/lib/dispatch/carry-view';
 import { addDaysIso, fmtDayMonth } from '@/lib/dispatch/time';
 import { api, REASON_TEXT } from './client-api';
-
-const WHY_LABEL: Record<string, string> = {
-  NOT_LEFT: 'Load never left',
-  UNSERVED: 'Unserved',
-  NEVER_PLANNED: 'Never planned',
-};
-/** Today's day is not over: its loads have not left YET. */
-const WHY_LABEL_TODAY: Record<string, string> = {
-  NOT_LEFT: 'Load not left yet',
-  UNSERVED: 'Unserved',
-  NEVER_PLANNED: 'Not planned',
-};
 
 interface Props {
   /** Day D and the depot on screen (the loaded day, never the pickers). */
@@ -137,16 +127,12 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
   if (!preview || preview.dayOver || preview.candidates.length === 0) return null;
   const selected = carrySelected(preview.candidates, choices);
   const chosen = preview.candidates.filter((c) => selected.has(c.orderId));
-  const chosenCases = chosen.reduce((a, c) => a + c.cases, 0);
   const chosenToday = chosen.filter((c) => c.ofToday).length;
   const earlier = preview.candidates.filter((c) => !c.ofToday);
   const todays = preview.candidates.filter((c) => c.ofToday);
   const toggle = (c: CarryCandidate) => setChoices((m) => toggleCarry(m, c));
-  // The count is on the button whenever the selection is not "every order of the earlier days".
-  const suffix =
-    chosen.length !== preview.orders || chosenToday
-      ? ` (${chosen.length} order(s), ${chosenCases.toLocaleString()} cases${chosenToday ? `, ${chosenToday} of today` : ''})`
-      : '';
+  // The count is on the button whenever the selection is not "every order of the earlier days" (with today's ticked).
+  const suffix = carryButtonSuffix(chosen, preview);
 
   const row = (c: CarryCandidate) => (
     <tr key={c.orderId} className={`border-t align-top ${c.ofToday ? 'bg-amber-50/60' : ''}`} data-testid={`carry-${c.customerCode}`}>
@@ -176,7 +162,7 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
       <td className="p-2">
         {c.why.map((w, i) => (
           <span key={i} className="block">
-            <b>{w.kind === 'UNSERVED' && w.reasonCode ? `Unserved: ${REASON_TEXT[w.reasonCode] ?? w.reasonCode}` : (c.ofToday ? WHY_LABEL_TODAY : WHY_LABEL)[w.kind]}</b>
+            <b>{w.kind === 'UNSERVED' && w.reasonCode ? `Unserved: ${REASON_TEXT[w.reasonCode] ?? w.reasonCode}` : carryWhyLabel(w.kind, c.ofToday)}</b>
             <span className="text-muted-foreground"> - {w.text}</span>
           </span>
         ))}

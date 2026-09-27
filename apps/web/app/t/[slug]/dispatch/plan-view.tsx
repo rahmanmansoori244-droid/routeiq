@@ -16,7 +16,7 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
-import { carriedFromBadge, carriedLoadRemedy, carriedToBadge, holdsOnlyCarried, replanWork } from '@/lib/dispatch/carry-view';
+import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
@@ -64,7 +64,8 @@ interface Props {
   reloadSignal?: number;
   /**
    * The company's today (YYYY-MM-DD) as the day screen knows it: a load of today holding orders
-   * brought forward to tomorrow says "re-plan today" / "unlock" (carriedLoadRemedy). Optional.
+   * brought forward to tomorrow says "re-plan today" / "unlock" (carriedLoadTitle). Optional:
+   * without it (the standalone plan version page) the plan's own today is used (PlanDetail.today).
    */
   today?: string;
 }
@@ -770,7 +771,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           variant="warning"
                           className="ml-1"
                           data-testid={`load-carried-away-${l.truckCode}-${l.loadNo}`}
-                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l), l.stops.flatMap((st) => (st.carriedTo ? [st.carriedTo] : [])), { date: d.run.runDate, isToday: !!today && d.run.runDate === today })}`}
+                          title={carriedLoadTitle(l, d, today)}
                         >
                           {l.carriedAway} order(s) carried over
                         </Badge>
