@@ -1,19 +1,27 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { checkWorkbookZip, isZipFile, WorkbookRefusedError } from './workbook-guard';
+import { guardSpreadsheet, safeDecodeRange, WorkbookRefusedError } from './workbook-guard';
 
 /**
  * Upload limits (owner decision 16, audit E2): 10 MB per file and 50,000 rows on the sheet that is
- * read, as before; a workbook may unpack to at most 50 MB and have at most 10 sheets.
+ * read, as before; a workbook may unpack to at most 50 MB and have at most 10 sheets. The A1
+ * review added caps that NMWC's real files (about 15 columns, a few thousand rows) are far from:
+ * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 50 columns), links over
+ * 200,000 cells, 10,000 comments. An upload read as Excel must be an .xlsx, an old .xls or CSV
+ * text; web pages, XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard).
  *
  * What these limits do and do not do. The file is parsed in the web process, on the event loop,
  * synchronously: while a file is parsed no other request is answered, and nothing can stop the
  * parse once it has started. (Until 27 Sep 2026 a 10 s "parse timeout" was armed here. It could
  * never fire: its timer can only run after the parse has finished. It is gone.) The limits bound
- * how much work one upload can cause - a workbook is measured and refused before any sheet is
- * read, and at most READ_ROWS rows of each sheet are turned into cells - but they do not isolate
- * it. Parsing in a worker thread with a memory cap and a timeout that really stops it is audit
- * PR 5.
+ * how much work one upload can cause - a file is checked (lib/workbook-guard) before SheetJS reads
+ * it, at most READ_ROWS rows of each sheet are turned into cells, and the ranges are checked before
+ * any sheet is turned into rows - but they do not isolate it, and a file just under them still
+ * blocks the app for seconds. Measured on the maintainer's machine (times vary by about a third
+ * from run to run): an .xlsx of 50,000 rows x 49 columns (0.19 MB, 37 MB unpacked) 9-10 s and
+ * 1 GB of memory; the same rows as CSV sent as Excel 7-11 s and 1.2 GB; ten sheets of 50,000 rows
+ * 5-6 s; NMWC's shape at the row limit (50,000 rows x 15 columns) about 2.5 s. Parsing in a worker
+ * thread with a memory cap and a timeout that really stops it is audit PR 5.
  */
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_ROWS = 50_000;
@@ -22,6 +30,14 @@ export const MAX_UNPACKED_BYTES = 50 * 1024 * 1024;
 export const MAX_SHEETS = 10;
 /** Parts (files inside the .xlsx zip); a real workbook has well under 100. */
 export const MAX_ZIP_PARTS = 1_000;
+/** Columns of one sheet (from the first to the last column holding a cell); NMWC's files have about 15. */
+export const MAX_COLS = 200;
+/** Cells (rows x columns) of all sheets' ranges together: e.g. 50,000 rows of 50 columns. */
+export const MAX_CELLS = 2_500_000;
+/** Cells all hyperlinks together may cover; SheetJS makes a cell object for each. */
+export const MAX_LINK_CELLS = 200_000;
+/** Comments (notes) in a workbook; SheetJS's time for many on one cell grows with the square. */
+export const MAX_COMMENTS = 10_000;
 /**
  * Rows read from each sheet (and from a CSV): the row limit plus room for a header, title rows and
  * one row over the limit. Rows below are never read; a sheet that goes on past them is refused
@@ -152,9 +168,10 @@ export function pickSheet(
 ): { name: string | null; rows: Record<string, string>[]; warnings: string[]; truncated: boolean } {
   if (!sheets.length) return { name: null, rows: [], warnings: [], truncated: false };
   // Only rows with a value count: a sheet whose rows are all blank cells (a template) holds no
-  // data. A sheet that goes on past READ_ROWS counts as holding data, whatever its first rows are.
+  // data, also when it goes on past READ_ROWS (A1 review: a cut sheet counted as data whatever
+  // its first rows were, so a blank formatted first sheet was chosen over the data sheet).
   const dataRows = (s: ParsedSheet) => s.rows.filter((r) => Object.values(r).some((v) => v !== '')).length;
-  const withData = sheets.filter((s) => s.truncated || dataRows(s) > 0);
+  const withData = sheets.filter((s) => dataRows(s) > 0);
   const pool = withData.length ? withData : sheets;
   const isData = opts.isDataSheet;
   const matching = isData ? pool.filter((s) => isData(Object.keys(s.rows[0] ?? {}))) : [];
@@ -179,36 +196,104 @@ export function pickSheet(
 
 /**
  * Every sheet of the workbook that has rows, in workbook order, each read to at most READ_ROWS
- * rows. Before any sheet is read it refuses (WorkbookRefusedError) a workbook that unpacks to more
- * than MAX_UNPACKED_BYTES, has more than MAX_ZIP_PARTS parts or has more than MAX_SHEETS sheets.
+ * rows. Before SheetJS reads the file it refuses (WorkbookRefusedError) a file that SheetJS would
+ * read with a reader whose work cannot be bounded, a workbook that unpacks to more than
+ * MAX_UNPACKED_BYTES, has more than MAX_ZIP_PARTS parts, MAX_CELLS cells with a value or
+ * MAX_COMMENTS comments, or links over more than MAX_LINK_CELLS cells (lib/workbook-guard), and
+ * one with more than MAX_SHEETS sheets. Before any sheet is turned
+ * into rows it refuses a sheet wider than MAX_COLS and sheets that span more than MAX_CELLS cells.
  */
 export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
-  if (isZipFile(bytes)) checkWorkbookZip(bytes, { maxUnpackedBytes: MAX_UNPACKED_BYTES, maxParts: MAX_ZIP_PARTS });
-  // A Buffer view of the same bytes (nothing is copied). Given a Uint8Array, SheetJS copies the
-  // rest of the file for every part it unpacks (5,000 small parts took 8 s); given a Buffer it
-  // takes views.
-  const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
+  // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
+  // given a Buffer it takes views.
+  const buf = guardSpreadsheet(bytes, { maxUnpackedBytes: MAX_UNPACKED_BYTES, maxParts: MAX_ZIP_PARTS, maxLinkCells: MAX_LINK_CELLS, maxCells: MAX_CELLS, maxComments: MAX_COMMENTS });
+  // cellFormula: false. Formulas are not used (their saved values are), and with them SheetJS
+  // compares every array-formula cell with every array formula before it: 20,000 such rows (a
+  // 275 KB workbook) took 2.6 s, and the time grows with the square of the count.
+  const read = { type: 'buffer', sheetRows: READ_ROWS, cellFormula: false } as const;
   // The sheet count comes from the workbook's list of sheets alone; no sheet is read in this pass.
-  const names = XLSX.read(buf, { type: 'buffer', bookSheets: true, sheetRows: READ_ROWS }).SheetNames ?? [];
+  const names = XLSX.read(buf, { ...read, bookSheets: true }).SheetNames ?? [];
   if (names.length > MAX_SHEETS) {
     throw new WorkbookRefusedError(
       `This workbook has ${names.length} sheets; at most ${MAX_SHEETS} can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`,
     );
   }
-  const wb = XLSX.read(buf, { type: 'buffer', cellDates: false, cellNF: false, sheetRows: READ_ROWS });
+  const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false });
   const out: ParsedSheet[] = [];
-  for (const sheetName of wb.SheetNames) {
-    const sheet = wb.Sheets[sheetName];
-    if (!sheet) continue;
+  for (const { name, sheet, range, clamped } of sheetRanges(wb)) {
     // raw: true keeps real numbers (no "1,234" display strings) and returns date cells as
     // Excel serials, which the order intake converts; display text would depend on locale.
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true });
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true, ...(clamped ? { range } : {}) });
     const truncated = goesPastReadRows(sheet);
-    if (rows.length || truncated) {
-      out.push({ name: sheetName, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) });
+    // A sheet with no row that holds a value in its first READ_ROWS rows is empty, even when its
+    // range goes on past them (formatting only): it is not a sheet with data, not read and not
+    // named. (Before the A1 review it was kept as "cut", so a blank formatted first sheet was
+    // read instead of the data sheet and refused with "Too many rows".)
+    if (rows.length) {
+      out.push({ name, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) });
     }
   }
   return out;
+}
+
+/**
+ * The range sheet_to_json walks on each sheet, checked before any sheet is turned into rows. It
+ * visits every cell of the range, rows x columns, and gives every row a key for every column,
+ * whether or not a cell is there, so the range - not the file - sets the work: a 1.6 KB workbook
+ * whose size record says A1:XFD2000 took 28 s, and one with a single header cell in column XFD
+ * and 2,000 rows ran out of memory.
+ *
+ * A range can claim more than the sheet's cells (a size record, formatting, a link's empty cell).
+ * When it is wider than MAX_COLS, or the ranges add up to more than MAX_CELLS, it is cut to the
+ * last row and column that hold a cell: no value is dropped, only empty trailing columns
+ * ("__EMPTY" keys) and blank rows. Within the caps a range is walked as it is, as before. What is
+ * still over is refused, naming the sheet.
+ */
+function sheetRanges(wb: XLSX.WorkBook): { name: string; sheet: XLSX.WorkSheet; range: XLSX.Range; clamped: boolean }[] {
+  const plan = wb.SheetNames.flatMap((name) => {
+    const sheet = wb.Sheets[name];
+    const ref = sheet?.['!ref'];
+    // sheet_to_json decodes "!ref" with safe_decode_range, and so does this.
+    return sheet && ref ? [{ name, sheet, range: safeDecodeRange(ref), clamped: false }] : [];
+  });
+  const width = (r: XLSX.Range) => Math.max(0, r.e.c - r.s.c + 1);
+  const cells = (r: XLSX.Range) => width(r) * Math.max(0, r.e.r - r.s.r + 1);
+  const total = () => plan.reduce((n, p) => n + cells(p.range), 0);
+  const clamp = (p: (typeof plan)[number]) => {
+    if (p.clamped) return;
+    p.range = toLastCell(p.sheet, p.range);
+    p.clamped = true;
+  };
+  for (const p of plan) if (width(p.range) > MAX_COLS || cells(p.range) > MAX_CELLS) clamp(p);
+  const wide = plan.find((p) => width(p.range) > MAX_COLS);
+  if (wide) {
+    throw new WorkbookRefusedError(
+      `Sheet "${wide.name}" has ${width(wide.range).toLocaleString('en-US')} columns; at most ${MAX_COLS} can be read. ` +
+        'Delete the columns you do not need, or save only the sheet you need as a new workbook or as CSV, and upload that.',
+    );
+  }
+  if (total() > MAX_CELLS) plan.forEach(clamp);
+  const n = total();
+  if (n > MAX_CELLS) {
+    throw new WorkbookRefusedError(
+      `This workbook is too large to read: its sheets span ${n.toLocaleString('en-US')} cells (rows x columns); at most ${MAX_CELLS.toLocaleString('en-US')} can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`,
+    );
+  }
+  return plan;
+}
+
+/** `range` with its end moved back to the last row and the last column that hold a cell. */
+function toLastCell(sheet: XLSX.WorkSheet, range: XLSX.Range): XLSX.Range {
+  let row = -1;
+  let col = -1;
+  for (const key of Object.keys(sheet)) {
+    if (key.startsWith('!')) continue; // "!ref", "!merges", ...
+    const at = XLSX.utils.decode_cell(key);
+    if (at.r > row) row = at.r;
+    if (at.c > col) col = at.c;
+  }
+  return { s: range.s, e: { r: Math.min(range.e.r, row), c: Math.min(range.e.c, col) } };
 }
 
 /**
