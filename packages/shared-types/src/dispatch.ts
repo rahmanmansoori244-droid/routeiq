@@ -89,6 +89,14 @@ export interface DispatchConfig {
   reload_min?: number;
   /** loading time per case of the NEXT load, on top of reload_min (0..1; default 0) */
   loading_min_per_case?: number;
+  /**
+   * A plan made on its own delivery day (stabilization PR8 review): when it was made (minutes after
+   * midnight, company timezone). Loading cannot start before it, so every new load - on a truck
+   * standing at the depot as on one coming back - leaves no earlier than it + reload_min +
+   * loading_min_per_case x its cases. Absent / null: a plan for a later day (first loads are loaded
+   * before the shift starts). Solvers without the field ignore it.
+   */
+  loading_from_min?: number | null;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
   /**

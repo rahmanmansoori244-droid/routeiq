@@ -159,6 +159,39 @@ def test_frozen_trip_overlap_and_turnaround_after_it():
     assert "LOAD_NUMBER" in codes(check(frozen, sc, mx))
 
 
+def test_same_day_plan_loading_starts_when_the_plan_was_made():
+    """PR8 review: on a plan made on its delivery day (loading_from_min) the first load of a truck
+    standing at the depot needs its turnaround (30 min + 0.5 x 60 cases = 60 min) from that time, as
+    after a frozen return; a truck back before that time is timed from it too."""
+    r = two_load_day()
+    sc, mx = valid(r)
+    l1 = min(sc.loads, key=lambda l: l.load_no)
+    # Made 40 min before load 1 leaves: 20 min short.
+    made_late = r.model_copy(deep=True)
+    made_late.config.loading_from_min = l1.depart_min - 40
+    rep = check(made_late, sc, mx)
+    assert codes(rep) == {"TURNAROUND"}
+    v = rep.violations[0]
+    assert v.truck_id == "T1" and v.load_no == 1 and v.short_by_min == pytest.approx(20, abs=0.1)
+    assert f"the plan was made at {FZ._hhmm(l1.depart_min - 40)} on its delivery day" in v.message
+    assert "needs 60 min to reload and load 60 cases" in v.message
+    # Made 60 min before: on time. No loading_from_min (a plan for a later day): loaded before the shift.
+    made_early = r.model_copy(deep=True)
+    made_early.config.loading_from_min = l1.depart_min - 60
+    assert check(made_early, sc, mx).violations == []
+    assert check(r, sc, mx).violations == []
+    # A locked load back 100 min before load 1 (now load 2) leaves: its own turnaround holds, but the
+    # plan was made 40 min before - the later of the two counts, and only that one is reported.
+    back_earlier = made_late.model_copy(deep=True)
+    back_earlier.trucks[0].frozen_trips = [FrozenTrip(load_no=1, depart_min=l1.depart_min - 180, return_min=l1.depart_min - 100, cases=50)]
+    renumbered = sc.model_copy(deep=True)
+    for ld in renumbered.loads:
+        ld.load_no += 1
+    rep = check(back_earlier, renumbered, mx)
+    assert [(v.code, v.load_no) for v in rep.violations] == [("TURNAROUND", 2)]
+    assert "the plan was made at" in rep.violations[0].message
+
+
 def test_travel_shortcut_service_time_and_return():
     r = two_load_day()
     sc, mx = valid(r)

@@ -109,6 +109,13 @@ class DispatchConfig(BaseModel):
     reload_min: int = Field(default=30, ge=0, le=240)  # depot turnaround between loads
     # Loading time on top of reload_min, per case of the NEXT load (0.04 -> 1,100 cases = 44 min).
     loading_min_per_case: float = Field(default=0.0, ge=0, le=1)
+    # A plan made on its own delivery day (web, stabilization PR8 review): the time it was made.
+    # Loading of a new load cannot start before it, so every new load - on a truck standing at the
+    # depot as on one coming back - leaves no earlier than loading_from_min + reload_min +
+    # loading_min_per_case x ITS cases (like after a frozen return, without using a trip or moving
+    # the shift). None (a plan for a later day): the first load of the day is loaded before the
+    # shift starts, as before. Optional and additive: an older web never sends it.
+    loading_from_min: int | None = Field(default=None, ge=0, le=DAY_MIN)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last

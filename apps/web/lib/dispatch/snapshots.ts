@@ -19,6 +19,7 @@
  * correction must reach the driver. The snapshot keeps the notes the plan was made with, for the record.
  */
 import type { DispatchConfig } from '@routeiq/shared-types';
+import type { PlanFrom } from './plan-from';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -34,6 +35,12 @@ export interface PlanRules {
   depotCloseMin: number;
   availableFromMin: number | null;
   availableToMin: number | null;
+  /**
+   * PR8 review: the load was planned on its delivery day at this time, so its loading could start
+   * only then: it leaves no earlier than this + reloadMin + loadingMinPerCase x its cases. Null /
+   * absent: planned for a later day (or before the rule was kept).
+   */
+  loadingFromMin?: number | null;
 }
 
 export interface TruckFacts {
@@ -89,6 +96,18 @@ export interface PlanSettings {
   /** The tenant is outside the shared OSRM map (Oman + UAE) and has no OSRM of its own, so the plan
    * was built on straight-line estimates. Absent on settings stored before it was kept. */
   outsideCoverage?: boolean;
+  /**
+   * Stabilization PR8: the plan was built on its own delivery day, so no new load leaves before
+   * now + preparation (plan-from.ts); the optimizer got `fromMin` as the first departure. Null / absent:
+   * planned from the first departure setting (a future day, or settings stored before PR8).
+   */
+  planFrom?: PlanFrom | null;
+  /**
+   * Stabilization PR8 review: the plan was made on its own delivery day at this time (minutes after
+   * midnight, company timezone), so loading of its new loads starts then at the earliest (sent as
+   * loading_from_min). Null / absent: a plan for a later day, or settings stored before it was kept.
+   */
+  loadingFromMin?: number | null;
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */
@@ -145,7 +164,7 @@ export function readPlanInputs(json: unknown): PlanInputs | null {
 
 /** The planning rules of a load on `truck`, from the optimizer config and depot it was planned with. */
 export function rulesFrom(
-  config: Pick<DispatchConfig, 'shift_start_min' | 'shift_max_min' | 'reload_min' | 'loading_min_per_case' | 'max_trips_per_truck'>,
+  config: Pick<DispatchConfig, 'shift_start_min' | 'shift_max_min' | 'reload_min' | 'loading_min_per_case' | 'max_trips_per_truck' | 'loading_from_min'>,
   depot: { openMin?: number | null; closeMin?: number | null; open_min?: number | null; close_min?: number | null },
   truck: { availableFromMin?: number | null; availableToMin?: number | null; maxTripsPerDay?: number | null },
 ): PlanRules {
@@ -160,6 +179,8 @@ export function rulesFrom(
     depotCloseMin: close > 0 ? close : 1440,
     availableFromMin: truck.availableFromMin ?? null,
     availableToMin: truck.availableToMin ?? null,
+    // Only on a plan made on its delivery day, so the rules of every other plan stay as they were.
+    ...(typeof config.loading_from_min === 'number' ? { loadingFromMin: config.loading_from_min } : {}),
   };
 }
 

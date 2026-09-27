@@ -15,7 +15,9 @@
  *   the load is over its payload, which blocks like any overload (CAPACITY_KG_NEW_WEIGHT);
  * - service starts inside the hard receiving window, and the stored "within hours" flag;
  * - turnaround: each load leaves after the previous load's return + reload + loading time per
- *   case x its cases (the rules the later load was planned with);
+ *   case x its cases (the rules the later load was planned with); a load planned on its delivery
+ *   day also after the time the plan was made + that turnaround, on a truck standing at the depot
+ *   too (PlanRules.loadingFromMin, stabilization PR8 review);
  * - the truck day: first departure after shift start / depot opening / truck availability,
  *   returns before the depot closes / availability ends, first departure -> last return within
  *   the shift maximum, loads per day;
@@ -172,7 +174,13 @@ export function inputHash(input: FeasibilityInput): string {
     .map((l) => [
       l.id, l.truckId, l.loadNo, l.onRoad, l.departMin, l.returnMin, l.cases, r1(l.weightKg), l.capacity?.cases ?? null, l.capacity?.kg ?? null,
       l.capacityNow?.cases ?? null, l.capacityNow?.kg ?? null,
-      l.rules ? [l.rules.shiftStartMin, l.rules.shiftMaxMin, l.rules.reloadMin, l.rules.loadingMinPerCase, l.rules.maxTrips, l.rules.depotOpenMin, l.rules.depotCloseMin, l.rules.availableFromMin, l.rules.availableToMin] : null,
+      l.rules
+        ? [
+            l.rules.shiftStartMin, l.rules.shiftMaxMin, l.rules.reloadMin, l.rules.loadingMinPerCase, l.rules.maxTrips, l.rules.depotOpenMin, l.rules.depotCloseMin, l.rules.availableFromMin, l.rules.availableToMin,
+            // Only when set, so the hash of every plan made without it is unchanged.
+            ...(typeof l.rules.loadingFromMin === 'number' ? [l.rules.loadingFromMin] : []),
+          ]
+        : null,
       [...l.stops]
         .sort((a, b) => a.sequence - b.sequence || a.orderId.localeCompare(b.orderId))
         .map((s) => [s.orderId, s.sequence, s.cases, r1(s.kg), s.kgUnknown, r1(s.unknownKgNow ?? 0), s.etaMin, s.serviceStartMin, s.departureMin, s.hardWindowOk, s.hardStartMin ?? null, s.hardEndMin ?? null]),
@@ -279,6 +287,28 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         v({ ...at(l), code: 'STOP_TIMES', message: `${code} load ${l.loadNo} is back (${hhmm(l.returnMin)}) before it leaves (${hhmm(l.departMin)}).` });
       }
     }
+    // A load planned on its delivery day (rules.loadingFromMin, PR8 review): its loading could start
+    // only when the plan was made, on a truck standing at the depot as on one coming back. Checked
+    // wherever that is later than the load's other bound (the previous load's return, or for the
+    // first load the shift start / depot opening / availability), which then reports nothing.
+    const loadedFromNow = (i: number): boolean => {
+      const b = loads[i];
+      const r = b.rules;
+      if (!r || r.loadingFromMin === null || r.loadingFromMin === undefined) return false;
+      const need = r.reloadMin + r.loadingMinPerCase * b.cases;
+      const ready = r.loadingFromMin + need;
+      const other = i > 0 ? loads[i - 1].returnMin + need : Math.max(r.shiftStartMin, r.depotOpenMin, r.availableFromMin ?? 0);
+      if (ready <= other) return false;
+      if (b.departMin < ready - TOL_MIN) {
+        v({
+          ...at(b),
+          code: 'TURNAROUND',
+          message: `${code} load ${b.loadNo} leaves at ${hhmm(b.departMin)}, but the plan was made at ${hhmm(r.loadingFromMin)} on its delivery day, so loading starts then: the truck needs ${r1(need)} min to reload and load ${b.cases} cases: ready ${hhmm(ready)}.`,
+          shortBy: r1(ready - b.departMin),
+        });
+      }
+      return true;
+    };
     // The truck day, with the rules of the loads (the later load's rules for its turnaround).
     for (let i = 1; i < loads.length; i++) {
       const a = loads[i - 1];
@@ -289,6 +319,7 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         }
         continue;
       }
+      if (loadedFromNow(i)) continue;
       const need = b.rules.reloadMin + b.rules.loadingMinPerCase * b.cases;
       const ready = a.returnMin + need;
       if (b.departMin < ready - TOL_MIN) {
@@ -304,7 +335,7 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     // change); the day as a whole (span, loads per day) against the latest load's rules, which
     // were planned around every earlier load.
     const first = loads[0];
-    if (first.rules) {
+    if (first.rules && !loadedFromNow(0)) {
       const r = first.rules;
       const earliest = Math.max(r.shiftStartMin, r.depotOpenMin, r.availableFromMin ?? 0);
       if (first.departMin < earliest - TOL_MIN) {

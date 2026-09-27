@@ -15,7 +15,9 @@ seconds to minutes in dispatch_solver._min_of):
   the truck is back no earlier than the last departure + the drive back;
 * unloading: departure - service start == the service time that was sent;
 * turnaround: a load departs no earlier than the previous load's return + reload + loading time
-  per case x ITS cases - also after the truck's last frozen (locked / dispatched) load;
+  per case x ITS cases - also after the truck's last frozen (locked / dispatched) load, and on a
+  plan made on its delivery day (config.loading_from_min) after the time it was made, on a truck
+  standing at the depot too;
 * the truck day: first departure after shift start, depot opening and the truck's availability;
   every return before the depot closes and the truck's availability ends; first departure (the
   first frozen one when there is one) -> last return within the shift maximum;
@@ -150,13 +152,23 @@ def check_scenario(
                 add("CAPACITY_KG", f"{code} load {lno} weighs {kg:.0f} kg; the truck's payload is {t.capacity_kg:.0f} kg.",
                     truck_id=tid, load_no=lno, short=kg - t.capacity_kg)
 
-            # Departure: after the truck is ready (turnaround) and inside its day.
-            if prev_return is not None:
+            # Departure: after the truck is ready (turnaround) and inside its day. On a plan made on
+            # its delivery day loading starts no earlier than then: the later of the two counts.
+            loading_from = cfg.loading_from_min
+            if prev_return is not None and (loading_from is None or prev_return >= loading_from):
                 ready = prev_return + turnaround(ld.cases)
                 if ld.depart_min < ready - TOL_MIN:
                     add("TURNAROUND",
                         f"{code} load {lno} leaves at {_hhmm(ld.depart_min)}, but after {prev_what} (back {_hhmm(prev_return)}) "
                         f"the truck needs {turnaround(ld.cases):g} min to reload and load {ld.cases} cases: ready {_hhmm(ready)}.",
+                        truck_id=tid, load_no=lno, short=ready - ld.depart_min)
+            elif loading_from is not None:
+                ready = loading_from + turnaround(ld.cases)
+                if ld.depart_min < ready - TOL_MIN:
+                    add("TURNAROUND",
+                        f"{code} load {lno} leaves at {_hhmm(ld.depart_min)}, but the plan was made at {_hhmm(loading_from)} on its "
+                        f"delivery day, so loading starts then: the truck needs {turnaround(ld.cases):g} min to reload and load "
+                        f"{ld.cases} cases: ready {_hhmm(ready)}.",
                         truck_id=tid, load_no=lno, short=ready - ld.depart_min)
             if ld.depart_min < earliest - TOL_MIN:
                 add("EARLY_DEPARTURE", f"{code} load {lno} leaves at {_hhmm(ld.depart_min)}, before {why_earliest} ({_hhmm(earliest)}).",

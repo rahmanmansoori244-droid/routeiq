@@ -161,6 +161,8 @@ export interface StartOptions extends OptimizeOverrides {
   /** Admission reserved by the caller (the re-plan reserves before creating the version). */
   ticket?: SolveTicket;
   expect?: ExpectedDay;
+  /** The time the plan is made (default: the clock now; see buildDispatchRequest). Tests fix it here. */
+  now?: Date;
 }
 
 /**
@@ -220,7 +222,7 @@ export async function startDispatchOptimize(
     if (inUse(run, jobs > 0, !!opts.freshVersion)) return NEW_VERSION_REQUIRED;
     // Weights entered or corrected under Products after the orders were confirmed are planned
     // with (in memory); the job saves them on the orders together with the plan that uses them.
-    const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId));
+    const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId, undefined, { now: opts.now }));
     const refused = gate(built, opts, 'optimizing') ?? (await prerequisites(runId, built, !!run.chosenScenarioId));
     if (refused) return refused;
 
@@ -290,6 +292,10 @@ export async function startDispatchOptimize(
                 allowMissingLocations: !!opts.allowMissingLocations,
                 allowMissingWeights: !!opts.allowMissingWeights,
                 unknownWeightLines: built.unknownWeights.reduce((a, u) => a + u.lines, 0),
+                // PR8: a plan made on its delivery day - no new load before this time (minutes after midnight).
+                planFromMin: built.settings?.planFrom?.fromMin ?? null,
+                // PR8 review: made on the delivery day at this time - loading of new loads starts then.
+                loadingFromMin: built.settings?.loadingFromMin ?? null,
                 queued: waiting,
               } as never,
               ip,
@@ -339,6 +345,7 @@ export async function replan(
   ip: string | null,
   overrides: OptimizeOverrides = {},
   expect?: ExpectedDay,
+  clock: { now?: Date } = {},
 ): Promise<StartResult> {
   const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
@@ -349,7 +356,7 @@ export async function replan(
   if (await isLegacyPlan(tenantId, runId)) return LEGACY_PLAN;
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
-    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect });
+    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now });
   }
   if (run.status === 'OPTIMIZING' || (await activeJobAnswer(runId))) {
     return { status: 409, body: { error: 'An optimization is running for this plan. Wait for it to finish.', code: 'OPTIMIZING' } };
@@ -358,7 +365,7 @@ export async function replan(
   // PLANNED loads, and the child copies the frozen ones). The probe plans weights entered since
   // the last optimize in memory only: the parent stays the live plan if this is refused, so its
   // orders and loads must not change. They are saved when the child's job applies its plan.
-  const probe = await buildDispatchRequest(tenantId, runId);
+  const probe = await buildDispatchRequest(tenantId, runId, undefined, { now: clock.now });
   const refused = gate(probe, overrides, 're-planning') ?? (await prerequisites(runId, probe, true));
   if (refused) return refused;
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
@@ -379,7 +386,7 @@ export async function replan(
     throw e;
   }
   // The ticket is handed over: startDispatchOptimize releases it on any answer that starts no job.
-  const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket });
+  const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now });
   return {
     status: res.status,
     headers: res.headers,

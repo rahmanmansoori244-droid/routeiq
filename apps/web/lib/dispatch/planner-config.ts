@@ -204,7 +204,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
   const { routing } = dispatchConfigFromTenant(cfg, country, ['RECOMMENDED']);
   const overtimeNever = cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes;
   const rows: EffectiveRow[] = [
-    { label: 'First departure (earliest)', value: fmtHhmm(cfg.shiftStartMin), source: 'SETTING' },
+    {
+      label: 'First departure (earliest)',
+      value: fmtHhmm(cfg.shiftStartMin),
+      source: 'SETTING',
+      note: `a plan made on the delivery day itself starts from now + ${cfg.reloadMinutes} min (the turnaround between loads) when that is later, and each new load also waits for its loading per case from now; locked, loading and dispatched loads keep their times`,
+    },
     { label: 'Driver shift maximum', value: `${hm(cfg.driverShiftMaxMinutes)} h`, source: 'SETTING', note: 'first departure to last return of a truck' },
     {
       label: 'Driver cost',
@@ -218,7 +223,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       source: 'SETTING',
       note: overtimeNever && cfg.overtimeCostPerHour > 0 ? 'never reached: the threshold is at or after the shift maximum' : undefined,
     },
-    { label: 'Turnaround between loads', value: `${cfg.reloadMinutes} min + ${cfg.loadingMinPerCase} min per case of the next load`, source: 'SETTING' },
+    {
+      label: 'Turnaround between loads',
+      value: `${cfg.reloadMinutes} min + ${cfg.loadingMinPerCase} min per case of the next load`,
+      source: 'SETTING',
+      note: `the ${cfg.reloadMinutes} min are also the preparation time of a plan made on the delivery day; there loading per case counts from now for every truck, also one standing at the depot`,
+    },
     {
       label: 'Unloading time',
       value: `customer's own time (default ${cfg.defaultServiceTimeMin} min) + ${cfg.serviceMinPerCase} min per case`,

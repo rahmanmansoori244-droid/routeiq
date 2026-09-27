@@ -193,10 +193,10 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC({ ...c, shiftStartMin: v })} hint="No truck leaves the depot before this time." changed={'shiftStartMin' in configDiff.changes} />
+          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC({ ...c, shiftStartMin: v })} hint="No truck leaves the depot before this time. A plan made on the delivery day itself starts later: from now + the turnaround between loads." changed={'shiftStartMin' in configDiff.changes} />
           {num('driverShiftMaxMinutes', 'Driver shift maximum', { step: 15, unit: 'min', hint: `First departure to last return of a truck (${hm(c.driverShiftMaxMinutes)} h).` })}
-          {num('reloadMinutes', 'Turnaround between loads', { step: 5, unit: 'min', hint: 'Fixed time at the depot between two loads of a truck (paperwork, queue).' })}
-          {num('loadingMinPerCase', 'Loading per case of the next load', { step: 0.01, unit: 'min', hint: 'Added to the turnaround: 0.04 = 44 min for 1,100 cases.' })}
+          {num('reloadMinutes', 'Turnaround between loads', { step: 5, unit: 'min', hint: 'Fixed time at the depot between two loads of a truck (paperwork, queue). Also the preparation time of a plan made on the delivery day: no new load leaves before now + this + its loading time.' })}
+          {num('loadingMinPerCase', 'Loading per case of the next load', { step: 0.01, unit: 'min', hint: 'Added to the turnaround: 0.04 = 44 min for 1,100 cases. On a plan made on the delivery day it counts from now for every truck, also one standing at the depot.' })}
           {num('serviceMinPerCase', 'Unloading per case', { step: 0.01, unit: 'min', hint: "Added to each customer's service time: 0.05 = 55 min for 1,100 cases." })}
           {num('defaultServiceTimeMin', 'Default service time', {
             step: 1,

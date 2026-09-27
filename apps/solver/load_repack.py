@@ -41,7 +41,9 @@ off_i). Departing before lo only moves the waiting onto the road (return = max(e
 the repack departs in [lo, hi]. When lo > hi the load must wait on the road; it then departs at
 hi (the latest time that still meets every window) and occupies the truck until lo + d. Before
 a load departs the truck needs its turnaround (reload + loading of THIS load's cases) after the
-previous load's return; the first load of the day is loaded before the shift starts. The LP
+previous load's return; the first load of the day is loaded before the shift starts, except on a
+plan made on its delivery day (config.loading_from_min): loading starts then at the earliest, so
+every load also departs no earlier than that time + its turnaround (TruckDay.ready_s). The LP
 timing afterwards may still improve the timetable (e.g. waiting on the road for a preferred
 window); the repack only chooses trucks and the order of loads.
 """
@@ -235,9 +237,11 @@ def _forward_starts(day: Day, f: Facts, depart: int) -> list[int]:
 
 
 def _first_departure_s(day: Day, td: "TruckDay", f: Facts) -> int:
+    """Earliest departure of load ``f`` on ``td``: after its turnaround (reload + loading of ITS
+    cases) from the truck's last frozen return or the time a same-day plan was made (td.ready_s)."""
     first = td.earliest_depart_s
-    if td.frozen_return_s is not None:
-        first = max(first, td.frozen_return_s + f.gap)
+    if td.ready_s is not None:
+        first = max(first, td.ready_s + f.gap)
     return first
 
 
@@ -390,7 +394,7 @@ def timing_ok(day: Day, td: "TruckDay", loads: list[TimedLoad]) -> bool:
         if j == 0:
             if tl.depart_s < td.earliest_depart_s:
                 return False
-            if td.frozen_return_s is not None and tl.depart_s < td.frozen_return_s + f_gap:
+            if td.ready_s is not None and tl.depart_s < td.ready_s + f_gap:
                 return False
         elif tl.depart_s < prev_return + f_gap:
             return False
@@ -717,7 +721,7 @@ def _identical_trucks(day: Day, pricing: Pricing) -> dict[int, tuple[int, int]]:
     groups: dict[tuple, list[int]] = defaultdict(list)
     for td in day.trucks:
         groups[(td.max_cases, td.max_kg, td.earliest_depart_s, td.latest_return_s, td.trips_left, td.n_frozen,
-                td.shift_anchor_s, td.frozen_return_s, pricing.trucks[td.idx])].append(td.idx)
+                td.shift_anchor_s, td.frozen_return_s, td.loading_from_s, pricing.trucks[td.idx])].append(td.idx)
     out: dict[int, tuple[int, int]] = {}
     for c, members in enumerate(v for v in groups.values() if len(v) > 1):
         for i, idx in enumerate(sorted(members)):

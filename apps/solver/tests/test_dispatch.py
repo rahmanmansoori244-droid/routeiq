@@ -296,6 +296,137 @@ def test_late_order_goes_to_other_truck_when_first_is_frozen():
     assert [(l.truck_id, l.load_no) for l in sc.loads] == [("T02", 1)]
 
 
+def test_same_day_replan_starts_new_loads_from_now_and_keeps_the_turnaround():
+    """Stabilization PR8: a re-plan made on the delivery day at 09:00 is sent with
+    shift_start_min = now + preparation (09:30). No new load leaves before it; T01, whose
+    dispatched load (06:00-09:57) is still out, leaves again only after its return + turnaround +
+    loading; and the 06:00 dispatched load is not reported as leaving too early."""
+    late = [stop(f"L{i}", 23.60 + i * 0.004, 58.40 + i * 0.004, cases=60, priority=1, late=True) for i in range(4)]
+    t1 = truck("T01", cap=300, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:57"), cases=280)])
+    t2 = truck("T02", cap=100, max_trips=1)  # takes one stop at most, so T01 must carry the rest
+    r = req(late, [t1, t2], shift_start_min=hm("09:30"), reload_min=30, loading_min_per_case=0.05)
+    sc = rec(optimize_dispatch(r))
+    assert_reconciled(r, sc)
+    assert not sc.unserved
+    for ld in sc.loads:
+        assert ld.depart_min >= hm("09:30"), (ld.truck_id, ld.load_no, ld.depart_min)
+    t1_new = sorted((ld for ld in sc.loads if ld.truck_id == "T01"), key=lambda ld: ld.load_no)
+    assert t1_new and t1_new[0].load_no == 2
+    # 09:57 + 30 min turnaround + 0.05 min per case of this load (1 min rounding tolerance).
+    assert t1_new[0].depart_min >= hm("09:57") + 30 + 0.05 * t1_new[0].cases - 1
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", sc.feasibility
+
+
+def test_same_day_loading_counts_from_now_on_an_idle_truck_as_on_one_back_at_now():
+    """PR8 review: a plan made at 09:00 on its delivery day is sent loading_from_min = 09:00 (and
+    09:30 as the first departure). A 700-case load then needs 30 min + 0.05 x 700 = 35 min from
+    09:00 and leaves at 10:05 - on a truck that stood at the depot all morning exactly as on one back
+    from its dispatched load at 09:00 or at 08:00. Before, the idle truck (and the one back at 08:00)
+    left at 09:30 with the 35 min of loading not counted. A plan for a later day (no
+    loading_from_min) still loads the first load before the shift starts."""
+    trucks = {
+        "idle": truck("TA", cap=800),
+        "back at 09:00": truck("TB", cap=800, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:00"), cases=300)]),
+        "back at 08:00": truck("TC", cap=800, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("08:00"), cases=300)]),
+    }
+    for name, t in trucks.items():
+        r = req([stop("BIG", 23.60, 58.40, cases=700)], [t], shift_start_min=hm("09:30"), reload_min=30,
+                loading_min_per_case=0.05, loading_from_min=hm("09:00"))
+        sc = rec(optimize_dispatch(r))
+        assert_reconciled(r, sc)
+        assert served_ids(sc) == {"BIG"}, name
+        (ld,) = sc.loads
+        assert ld.depart_min >= hm("10:05") - 1, (name, ld.depart_min)
+        assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", (name, sc.feasibility)
+    # The same load planned the day before (no loading_from_min): loaded before the 09:30 start.
+    nxt = rec(optimize_dispatch(req([stop("BIG", 23.60, 58.40, cases=700)], [truck("TA", cap=800)],
+                                    shift_start_min=hm("09:30"), reload_min=30, loading_min_per_case=0.05)))
+    assert nxt.loads[0].depart_min < hm("10:04")
+
+
+def test_same_day_replan_reports_a_window_that_closes_before_the_trucks_can_arrive():
+    """S04c: a clinic receiving 06:00-09:35 about 50 min from the depot. A plan for the next day
+    serves it; a re-plan at 09:00 for today (first departure 09:30) cannot, and says why."""
+    clinic = stop("CLINIC", 23.81, 58.39, cases=20, priority=1, hard_start_min=hm("06:00"), hard_end_min=hm("09:35"))
+    next_day = rec(optimize_dispatch(req([clinic], [truck("T01")], shift_start_min=hm("06:00"))))
+    assert served_ids(next_day) == {"CLINIC"}
+    same_day = rec(optimize_dispatch(req([clinic], [truck("T01")], shift_start_min=hm("09:30"))))
+    assert unserved_map(same_day) == {"CLINIC": "HARD_WINDOW_INFEASIBLE"}
+    assert "earliest possible arrival" in same_day.unserved[0].reason_message
+
+
+def test_same_day_early_preference_counts_from_the_same_day_start():
+    """PR8 rebased onto PR7 (N1): a same-day plan is sent now + preparation (09:30) as
+    shift_start_min, so RECOMMENDED's early-delivery push for P1/P2 - and the early part of the
+    preference cost the options table and the Excel PLAN OPTIONS compare (preference_penalties.early)
+    - count from 09:30, not from the 06:00 first departure setting."""
+    r = req([stop("P1", 23.60, 58.40, cases=20, priority=1)], [truck("T01")], shift_start_min=hm("09:30"))
+    sc = rec(optimize_dispatch(r))
+    (ld,) = sc.loads
+    start = ld.stops[0].service_start_min
+    assert start >= hm("09:30")
+    assert sc.preference_penalties is not None
+    # P1: 0.01 OMR-equivalent per minute after the start (service start printed in whole minutes).
+    assert sc.preference_penalties.early == pytest.approx((start - hm("09:30")) * 0.01, abs=0.006)
+    assert sc.preference_penalties.early < (start - hm("06:00")) * 0.01 - 1
+
+
+# When no truck can take a new load, the reason says what closes the trucks (PR8 rebase review).
+# Depot closing 18:00 unless the case says otherwise; "same day": made at 17:45, as the web sends it.
+LATE_SAME_DAY = dict(shift_start_min=hm("18:15"), loading_from_min=hm("17:45"), reload_min=30)
+BACK_17_50 = [FrozenTrip(load_no=1, depart_min=hm("07:00"), return_min=hm("17:50"), cases=90)]
+NO_TRUCK_CASES = {
+    # PR8: a plan made on its delivery day after the depot closes, no locked or dispatched load anywhere.
+    "same-day-closed": (
+        [truck("T01")], LATE_SAME_DAY, hm("18:00"),
+        "Planned on the delivery day from 18:15: the depot closes at 18:00, so no new load can leave today."),
+    # The closing is the cause for every truck, also one still out with a dispatched load.
+    "same-day-closed-truck-out": (
+        [truck("T01"), truck("T02", frozen_trips=BACK_17_50)], LATE_SAME_DAY, hm("18:00"),
+        "Planned on the delivery day from 18:15: the depot closes at 18:00, so no new load can leave today."),
+    # A depot open all day: the web caps "Planned from" at 24:00.
+    "same-day-end-of-day": (
+        [truck("T01")], dict(shift_start_min=hm("24:00"), loading_from_min=hm("23:45"), reload_min=30), 0,
+        "Planned on the delivery day from 24:00: the delivery day ends at 24:00, so no new load can leave today."),
+    "first-departure-after-closing": (
+        [truck("T01")], dict(shift_start_min=hm("18:30")), hm("18:00"),
+        "The first departure is 18:30 and the depot closes at 18:00, so no new load can leave."),
+    # Unchanged: the only truck is back at 17:50, too late for a turnaround before 18:00.
+    "locked-loads": (
+        [truck("T01", frozen_trips=BACK_17_50)], {}, hm("18:00"),
+        "No truck has shift time left after its locked/dispatched loads."),
+    "same-day-off-hours": (
+        [truck("T01", available_to_min=hm("12:00"))], dict(shift_start_min=hm("13:30"), loading_from_min=hm("13:00"), reload_min=30), hm("18:00"),
+        "Planned on the delivery day from 13:30. No truck is available for a new load between 13:30 and the depot "
+        "closing at 18:00: every truck's available hours are outside that time."),
+    "locked-loads-and-off-hours": (
+        [truck("T01", frozen_trips=BACK_17_50), truck("T02", available_from_min=hm("19:00"))], {}, hm("18:00"),
+        "No truck has time left for a new load between 06:00 and the depot closing at 18:00: some are taken up by "
+        "their locked/dispatched loads, the others are outside their available hours."),
+}
+
+
+@pytest.mark.parametrize("case", ["same-day-closed", "same-day-closed-truck-out", "same-day-end-of-day", "first-departure-after-closing", "locked-loads", "same-day-off-hours", "locked-loads-and-off-hours"])
+def test_no_usable_truck_reason_names_what_closes_the_trucks(case):
+    """With PR8 a plan made on its delivery day at or after the depot closing starts past it, so no
+    truck is usable. Every order used to read "No truck has shift time left after its
+    locked/dispatched loads." (and the plan "No truck has capacity left for new loads.") although no
+    truck had such a load. Now the reason names the closing, the truck's available hours, or the
+    locked/dispatched loads, whichever actually closes the trucks."""
+    trucks, cfg, close_min, reason = NO_TRUCK_CASES[case]
+    r = req([stop("A", 23.60, 58.40, cases=20), stop("B", 23.61, 58.41, cases=20)], trucks, **cfg)
+    r = r.model_copy(update={"depot": DEPOT.model_copy(update={"close_min": close_min})})
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_reconciled(r, sc)
+    assert not sc.loads
+    assert [(u.stop_id, u.reason_code, u.reason_message) for u in sc.unserved] == [
+        ("A", "SHIFT_LIMIT", reason), ("B", "SHIFT_LIMIT", reason)]
+    if case != "locked-loads":
+        assert "capacity" not in " ".join(resp.warnings)
+        assert reason in resp.warnings
+
+
 def test_late_order_without_capacity_gets_late_reason():
     base = stop("BASE", 23.60, 58.45, cases=100, priority=1)
     late = stop("LATE", 23.61, 58.45, cases=100, priority=5, late=True)

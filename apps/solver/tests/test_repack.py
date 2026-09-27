@@ -53,6 +53,9 @@ def assert_plan_rules(r, sc) -> None:
         else:
             assert lds[0].depart_min >= cfg.shift_start_min
             assert lds[-1].return_min - lds[0].depart_min <= cfg.shift_max_min
+        if cfg.loading_from_min is not None:  # a plan made on its delivery day: loading starts then
+            for ld in lds:
+                assert ld.depart_min >= cfg.loading_from_min + cfg.reload_min + cfg.loading_min_per_case * ld.cases - 1, ld
         for a, b in zip(lds, lds[1:]):
             assert b.depart_min >= a.return_min + cfg.reload_min + cfg.loading_min_per_case * b.cases - 1, (a, b)
         for ld in lds:
@@ -575,6 +578,29 @@ def test_loading_time_after_a_frozen_load():
     ld = rec(optimize_dispatch(r)).loads[0]
     assert ld.load_no == 2
     assert ld.depart_min == hm("09:00") + 20 + 20  # 80 cases x 0.25 min
+
+
+def test_loading_time_on_a_same_day_plan_counts_from_when_it_was_made():
+    """PR8 review: loading_from_min (a plan made at 09:00 on its delivery day, first departure 09:30).
+    Every scenario, through the route search, the repack and the exact timing: each new load leaves
+    no earlier than 09:00 + 30 min + 0.2 min x its cases - on the idle trucks, on T02 back at 09:40
+    and on T03 back at 08:00 - and every later load after the previous return + its turnaround."""
+    rnd = random.Random(5)
+    stops = [stop(f"S{i:02d}", 23.585 + rnd.uniform(-0.15, 0.15), 58.39 + rnd.uniform(-0.15, 0.15), cases=45) for i in range(12)]
+    trucks = [
+        truck("T01", cap=100),
+        truck("T02", cap=100, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("09:40"), cases=90)]),
+        truck("T03", cap=100, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm("08:00"), cases=90)]),
+        truck("T04", cap=100),
+    ]
+    r = req(stops, trucks, scenarios=ALL, shift_start_min=hm("09:30"), reload_min=30, loading_min_per_case=0.2,
+            loading_from_min=hm("09:00"))
+    resp = optimize_dispatch(r)
+    for sc in resp.scenarios:
+        assert sc.loads, sc.name
+        for ld in sc.loads:
+            assert ld.depart_min >= hm("09:30") + 0.2 * ld.cases - 1, (sc.name, ld.truck_id, ld.load_no, ld.depart_min, ld.cases)
+        assert_plan_rules(r, sc)
 
 
 def test_config_rejects_unrealistic_loading_time():
