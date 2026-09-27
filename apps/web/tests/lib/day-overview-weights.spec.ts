@@ -136,3 +136,14 @@ describe('day overview: case weights of a split order partly on a frozen load (P
     expect(d.productsWithoutWeight).toEqual([{ code: 'P1', name: 'Water', lines: 1, cases: 900, kgPerCase: 0 }]);
   });
 });
+
+describe('day overview: where the unloading time comes from (audit F07)', () => {
+  it('each issue card says whether the unloading time is the customer own time or a default (the Details dialog shows a default as blank)', async () => {
+    state.scope = ['O1'];
+    state.assignments = [];
+    state.orders = [order(10)];
+    expect((await day()).customers[0]).toMatchObject({ serviceMin: 10, serviceSource: 'CUSTOMER' });
+    state.orders = [{ ...order(10), customer: { ...customer, serviceTimeConfirmed: false } }];
+    expect((await day()).customers[0]).toMatchObject({ serviceSource: 'DEFAULT' });
+  });
+});

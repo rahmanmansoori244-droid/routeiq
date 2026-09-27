@@ -5,6 +5,7 @@ import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetPdf } from '@/lib/exports/pdf';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { driverPackModel, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
+import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,11 +27,16 @@ function pdfResponse(buf: Buffer, filename: string, disposition: 'inline' | 'att
 // Codes are free text - keep the download filename header-safe.
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, '_') || 'X';
 
-// NMWC dispatch plan version (has physical loads) -> driver sheets, one section per load.
+// NMWC dispatch plan version -> driver sheets, one section per load.
 // ?load=<loadId> one load, ?truck=<truckId or code> every load of that truck.
+// Driver sheets only (audit F16): a dispatch plan without loads (every order unserved) has none;
+// its unserved orders are in the Excel workbook. Never the legacy route sheet for a dispatch plan.
 async function driverSheets(r: Request, runId: string, { user }: AuthedContext) {
   const detail = await getPlanDetail(user.tenantId, runId);
   if (!detail) return fail('Not found', 404);
+  if (!detail.loads.length) {
+    return fail({ code: 'NO_LOADS', message: 'This plan has no loads, so there are no driver sheets. Its unserved orders are in the Excel export.' }, 404);
+  }
   const url = new URL(r.url);
   const loadId = url.searchParams.get('load');
   const truck = url.searchParams.get('truck');
@@ -48,9 +54,9 @@ async function driverSheets(r: Request, runId: string, { user }: AuthedContext) 
 
 export const GET = (req: Request, { params }: Params) =>
   withTenantApi(async (r, ctx) => {
-    if ((await ctx.db.planLoad.count({ where: { runId: params.id } })) > 0) return driverSheets(r, params.id, ctx);
+    if (await isDispatchPlan(ctx.user.tenantId, params.id)) return driverSheets(r, params.id, ctx);
 
-    // Legacy route-sheet export (runs without dispatch loads) - unchanged.
+    // Legacy route-sheet export (May-2026 runs, not dispatch plans) - unchanged.
     const url = new URL(r.url);
     const truck = url.searchParams.get('truck') || undefined;
 
