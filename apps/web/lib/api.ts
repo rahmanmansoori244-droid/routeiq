@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
-import { ZodError, type ZodSchema } from 'zod';
+import { ZodError, type ZodTypeAny, type z } from 'zod';
 import { Prisma, type Role } from '@prisma/client';
 import { auth } from './auth';
 import { prisma } from './db';
 import { tenantDb, type TenantDb } from './tenant';
 import { rateLimit, type RateLimitResult } from './rate-limit';
 import { clientIp } from './client-ip';
+import { HttpError, httpErrorBody } from './http-error';
 
 export interface AuthedContext {
   user: {
@@ -95,25 +96,13 @@ export function withTenantApi(handler: (req: Request, ctx: AuthedContext) => Pro
   };
 }
 
-/**
- * An expected, user-facing failure with its HTTP status. Throw it anywhere under withTenantApi
- * (or pass it to handleError) and the caller gets `{ data: null, error }` with that status
- * instead of a 500. `details` (optional) is merged into the error object.
- */
-export class HttpError extends Error {
-  constructor(
-    message: string,
-    public readonly status: number,
-    public readonly details?: Record<string, unknown>,
-  ) {
-    super(message);
-    this.name = 'HttpError';
-  }
-}
+// An expected, user-facing failure with its HTTP status (lib/http-error.ts): PlanError,
+// RouteAdjustError and BatchRaceError extend it, so an uncaught one maps to its status here.
+export { HttpError };
 
 export function handleError(err: unknown) {
   if (err instanceof HttpError) {
-    return fail(err.details ? { error: err.message, ...err.details } : err.message, err.status);
+    return fail(httpErrorBody(err), err.status);
   }
   if (err instanceof ZodError) {
     return fail(err.flatten(), 400);
@@ -127,7 +116,8 @@ export function handleError(err: unknown) {
   return fail('Internal server error', 500);
 }
 
-export async function parseBody<T>(req: Request, schema: ZodSchema<T>): Promise<T> {
+/** The parsed body: the schema's OUTPUT type (a field that preprocesses '' to null is typed as its output). */
+export async function parseBody<S extends ZodTypeAny>(req: Request, schema: S): Promise<z.output<S>> {
   let raw: unknown;
   try {
     raw = await req.json();

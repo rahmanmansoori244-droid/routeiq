@@ -17,6 +17,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch';
 import { unitLong } from '@/lib/format';
 import { errorMessage } from '@/lib/error-message';
+import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 
 export interface TruckRow {
   id: string;
@@ -28,6 +29,12 @@ export interface TruckRow {
   capacityVolumeL: number;
   fixedCostPerDay: number;
   costPerKm: number;
+  // Planner inputs (review F21: they could only be set in the database before).
+  tripCost?: number;
+  kmPerLitre?: number | null;
+  maxTripsPerDay?: number | null;
+  availableFromMin?: number | null;
+  availableToMin?: number | null;
   defaultDriverId: string | null;
   active: boolean;
   depot?: { id: string; code: string; name: string };
@@ -61,6 +68,11 @@ interface FormState {
   capacityVolumeL: string;
   fixedCostPerDay: string;
   costPerKm: string;
+  tripCost: string;
+  kmPerLitre: string;
+  maxTripsPerDay: string;
+  availableFrom: string; // HH:MM, '' = from the first departure
+  availableTo: string; // HH:MM, '' = to the end of the day
   defaultDriverId: string;
   active: boolean;
 }
@@ -73,8 +85,14 @@ function buildBlank(depots: DepotOption[]): FormState {
     capacityCases: '200',
     capacityWeightKg: '3000',
     capacityVolumeL: '8000',
-    fixedCostPerDay: '20',
-    costPerKm: '0.15',
+    // No invented costs: a new truck costs nothing until its real figures are entered.
+    fixedCostPerDay: '0',
+    costPerKm: '0',
+    tripCost: '0',
+    kmPerLitre: '',
+    maxTripsPerDay: '',
+    availableFrom: '',
+    availableTo: '',
     defaultDriverId: NO_DRIVER,
     active: true,
   };
@@ -110,6 +128,11 @@ export function TruckFormDialog({
           capacityVolumeL: String(truck.capacityVolumeL),
           fixedCostPerDay: String(truck.fixedCostPerDay),
           costPerKm: String(truck.costPerKm),
+          tripCost: String(truck.tripCost ?? 0),
+          kmPerLitre: truck.kmPerLitre != null ? String(truck.kmPerLitre) : '',
+          maxTripsPerDay: truck.maxTripsPerDay != null ? String(truck.maxTripsPerDay) : '',
+          availableFrom: truck.availableFromMin != null ? fmtHhmm(truck.availableFromMin) : '',
+          availableTo: truck.availableToMin != null ? fmtHhmm(truck.availableToMin) : '',
           defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
           active: truck.active,
         });
@@ -121,6 +144,16 @@ export function TruckFormDialog({
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
+    let availableFromMin: number | null;
+    let availableToMin: number | null;
+    try {
+      availableFromMin = form.availableFrom ? parseHhmm(form.availableFrom) : null;
+      // "24:00" (or 00:00 as the end) = until midnight.
+      availableToMin = form.availableTo ? (form.availableTo === '00:00' || form.availableTo === '24:00' ? 1440 : parseHhmm(form.availableTo)) : null;
+    } catch {
+      toast.error('Enter availability as HH:MM.');
+      return;
+    }
     const body = {
       code: form.code,
       description: form.description,
@@ -130,6 +163,11 @@ export function TruckFormDialog({
       capacityVolumeL: Number(form.capacityVolumeL),
       fixedCostPerDay: Number(form.fixedCostPerDay),
       costPerKm: Number(form.costPerKm),
+      tripCost: Number(form.tripCost || 0),
+      kmPerLitre: form.kmPerLitre === '' ? null : Number(form.kmPerLitre),
+      maxTripsPerDay: form.maxTripsPerDay === '' ? null : Number(form.maxTripsPerDay),
+      availableFromMin,
+      availableToMin,
       defaultDriverId: form.defaultDriverId === NO_DRIVER ? null : form.defaultDriverId,
       active: form.active,
     };
@@ -258,6 +296,61 @@ export function TruckFormDialog({
                 required
               />
             </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="tripCost">Cost per load {currency ? `(${currency})` : ''}</Label>
+              <Input
+                id="tripCost"
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.tripCost}
+                onChange={(e) => setForm({ ...form, tripCost: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">Loading labour and the like, per load.</p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="kmPerLitre">Km per litre</Label>
+              <Input
+                id="kmPerLitre"
+                type="number"
+                min="0.1"
+                max="100"
+                step="0.1"
+                value={form.kmPerLitre}
+                placeholder="not set"
+                onChange={(e) => setForm({ ...form, kmPerLitre: e.target.value })}
+              />
+              <p className="text-xs text-muted-foreground">Fuel use = km / this, costed at the fuel price in Settings. With it, keep fuel out of the cost per km.</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="maxTripsPerDay">Max loads per day</Label>
+              <Input
+                id="maxTripsPerDay"
+                type="number"
+                min="1"
+                max="10"
+                step="1"
+                value={form.maxTripsPerDay}
+                placeholder="company default"
+                onChange={(e) => setForm({ ...form, maxTripsPerDay: e.target.value })}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="availableFrom">Available from</Label>
+              <Input id="availableFrom" type="time" value={form.availableFrom} onChange={(e) => setForm({ ...form, availableFrom: e.target.value })} />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="availableTo">Available until</Label>
+              <Input id="availableTo" type="time" value={form.availableTo} onChange={(e) => setForm({ ...form, availableTo: e.target.value })} />
+            </div>
+            <p className="col-span-3 -mt-1 text-xs text-muted-foreground">
+              Empty = the company settings: max loads from Settings, available all day from the first departure. The truck must be back by
+              &quot;available until&quot;.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="defaultDriver">Default driver</Label>

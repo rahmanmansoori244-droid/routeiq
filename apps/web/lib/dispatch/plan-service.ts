@@ -17,6 +17,8 @@ import type {
   DispatchTruck,
 } from '@routeiq/shared-types';
 import { prisma } from '../db';
+import { audit } from '../audit';
+import { loadStatusAction } from '../audit-catalog';
 import { tenantDb } from '../tenant';
 import {
   coordStatus,
@@ -58,6 +60,9 @@ import {
   type UnknownWeight,
 } from './weights';
 import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
+import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
+import { MAX_DISPATCH_STOPS } from '../planner-bounds';
+import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, isoOf } from './time';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
@@ -200,6 +205,16 @@ export async function buildDispatchRequest(
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUniqueOrThrow({ where: { id: runId }, include: { depot: true } });
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
+  // Settings the optimizer would refuse (a direct database edit): a clear answer now, not a
+  // failed optimization later (review F21).
+  const settingProblems = plannerSettingProblems(cfg);
+  if (settingProblems.blocking.length) {
+    throw new PlanError(
+      `Planner settings out of range: ${settingProblems.blocking.join('; ')}. A company admin can correct them under Settings.`,
+      409,
+      { code: 'SETTINGS_OUT_OF_RANGE', problems: settingProblems.blocking },
+    );
+  }
   const profiles = new Map<string, TypeProfileLike>(
     (await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]),
   );
@@ -525,6 +540,15 @@ export async function buildDispatchRequest(
     for (const x of live) orderPriority[x.o.id] = pr;
   }
 
+  // Truck / depot values the optimizer would refuse (a direct database edit): named, not a 422.
+  const masterProblems = masterDataProblems(trucks, run.depot);
+  if (masterProblems.length) {
+    throw new PlanError(
+      `Truck or depot data out of range: ${masterProblems.join('; ')}. A company admin can correct it under Trucks or Depots.`,
+      409,
+      { code: 'MASTER_DATA_OUT_OF_RANGE', problems: masterProblems },
+    );
+  }
   const truckList: DispatchTruck[] = trucks.map((t) => ({
     id: t.id,
     code: t.code,
@@ -545,7 +569,18 @@ export async function buildDispatchRequest(
     })),
   }));
 
-  const warnings: string[] = [];
+  const warnings: string[] = [...settingProblems.warnings];
+  // Review F19: the most stops one optimization supports; more is refused here with a clear
+  // message rather than by the optimizer (422).
+  if (stopList.length > MAX_DISPATCH_STOPS) {
+    throw new PlanError(
+      `This day has ${stopList.length} delivery stops; one optimization supports at most ${MAX_DISPATCH_STOPS}. Plan it in parts (per depot), or ask for the limit to be raised.`,
+      422,
+      { code: 'TOO_MANY_STOPS', stops: stopList.length, max: MAX_DISPATCH_STOPS },
+    );
+  }
+  // Days above LARGE_DAY_STOPS get the optimizer's own "Large day" warning (it names the limit);
+  // the web adds none, so the plan does not show two near-identical ones.
   if (splitNotes.length) {
     warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
   }
@@ -553,7 +588,7 @@ export async function buildDispatchRequest(
   if (badWindows.length) {
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
   }
-  const routing = routingProviderFor(cfg, tenant.country);
+  const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
   if (routing.outsideCoverage) {
     warnings.push('Road distances (OSRM) cover Oman and the UAE only; this plan uses straight-line estimates.');
   }
@@ -582,29 +617,8 @@ export async function buildDispatchRequest(
     },
     trucks: truckList,
     stops: stopList,
-    config: {
-      shift_start_min: cfg.shiftStartMin,
-      shift_max_min: cfg.driverShiftMaxMinutes,
-      overtime_after_min: cfg.overtimeAfterMin,
-      overtime_cost_per_hour: cfg.overtimeCostPerHour,
-      reload_min: cfg.reloadMinutes,
-      loading_min_per_case: cfg.loadingMinPerCase,
-      max_trips_per_truck: cfg.maxTripsPerTruck,
-      fuel_price_per_litre: cfg.fuelPricePerLitre,
-      driver_cost_per_hour: cfg.driverCostPerHour,
-      // A higher priority always wins over any number of lower ones (weights kept for reference).
-      strict_priorities: true,
-      priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
-      pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
-      use_margin: true,
-      distance_provider: routing.provider,
-      osrm_url: cfg.osrmUrl ?? null,
-      haversine_multiplier: cfg.distanceMultiplier,
-      avg_speed_kmh: cfg.avgSpeedKmh,
-      road_time_factor: cfg.roadTimeFactor,
-      time_limit_sec: null,
-      scenarios,
-    },
+    // The one mapping from tenant settings to the optimizer (also behind Settings' effective values).
+    config: plannerConfig,
   };
   return {
     request,
@@ -748,8 +762,8 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
       WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
   }
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId,
       action: 'ORDER_WEIGHTS_RESOLVED',
@@ -757,13 +771,20 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
       entityId: runId,
       afterJson: { runDate: isoOf(run.runDate), version: run.version, lines: changes.lines, orders: changes.orders } as never,
     },
-  });
+    tx,
+  );
   return changes.lines.length;
 }
 
 // ---------------------------------------------------------------------------------------
 // Persist the solver response and apply a scenario as the plan
 // ---------------------------------------------------------------------------------------
+
+/** PlanLoad.costJson of a new load: its breakdown under the one cost model, or NULL from an older solver. */
+function loadCostJson(ld: DispatchScenario['loads'][number], costVersion: number | null | undefined) {
+  const c = loadCostFromSolver(ld, costVersion);
+  return c ? (c as unknown as Prisma.InputJsonValue) : Prisma.DbNull;
+}
 
 /** Portion columns of a RouteAssignment / UnservedOrder row (all null = the whole order). */
 function portionFields(p: PortionRecord | null) {
@@ -991,9 +1012,13 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         utilizationPct: ld.utilization_pct,
         fuelLitres: ld.fuel_litres,
         fuelCost: ld.fuel_cost,
+        // The load's share of the day under the one cost model (review F17): whole-day driver
+        // pay and overtime included. An older solver sends no breakdown: costed the earlier way.
         operatingCost: ld.total_cost,
+        costJson: loadCostJson(ld, d.cost_version),
         returnLegKm: ld.return_leg_km,
-        distanceIsEstimated: d.distance_is_estimated,
+        // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
+        distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
         truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
       },
     });
@@ -1051,8 +1076,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
   await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId,
       action: 'SCENARIO_CHOSEN',
@@ -1068,7 +1093,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
           : {}),
       } as never,
     },
-  });
+    tx,
+  );
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
   return { driverChanges };
 }
@@ -1298,6 +1324,10 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       fuelCost: l.fuelCost,
       operatingCost: l.operatingCost,
       status: l.status,
+      departMin: l.departMin,
+      returnMin: l.returnMin,
+      cost: readLoadCost(l.costJson),
+      distanceIsEstimated: l.distanceIsEstimated,
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,
@@ -1614,8 +1644,8 @@ export async function createInitialPlan(
             ...(extra.totalOrders !== undefined ? { totalOrders: extra.totalOrders } : {}),
           },
         });
-        await tx.auditLog.create({
-          data: {
+        await audit(
+          {
             tenantId,
             userId,
             action: 'CREATE',
@@ -1624,7 +1654,8 @@ export async function createInitialPlan(
             afterJson: { depotId, runDate: dateIso, version: 1, ...(extra.audit ?? {}) } as never,
             ...(extra.ip ? { ip: extra.ip } : {}),
           },
-        });
+          tx,
+        );
         return { run, created: true };
       },
       { timeout: 15_000, maxWait: 10_000 },
@@ -1764,8 +1795,8 @@ export async function createNextVersion(
 
         await tx.runPlan.update({ where: { id: parent.id }, data: { status: 'SUPERSEDED', supersededAt: new Date() } });
         const frozenLoadsCarried = loads.filter((l) => l.status !== 'PLANNED').length;
-        await tx.auditLog.create({
-          data: {
+        await audit(
+          {
             tenantId,
             userId,
             action: 'PLAN_VERSION_CREATED',
@@ -1781,7 +1812,8 @@ export async function createNextVersion(
               planCopied: !!chosenCopyId,
             } as never,
           },
-        });
+          tx,
+        );
         return { child: saved, frozenLoadsCarried };
       },
       { timeout: 60_000, maxWait: 10_000 },
@@ -1852,25 +1884,6 @@ export async function updateLoad(
   });
 }
 
-export async function changeLoadStatus(
-  tenantId: string,
-  runId: string,
-  loadId: string,
-  to: LoadStatusName,
-  user: { id: string; role: string },
-  hasRole: RoleCheck,
-) {
-  return inLoadTx(async (tx) => changeStatusTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, to, user, hasRole));
-}
-
-/**
- * Assign (or clear) the driver of one load. A driver is who drives, not what is planned: it
- * does not touch the plan facts. It can change until the load leaves the depot.
- */
-export async function setLoadDriver(tenantId: string, runId: string, loadId: string, driverId: string | null, user: { id: string }) {
-  return inLoadTx(async (tx) => setDriverTx(tx, tenantId, await lockOpenRun(tx, tenantId, runId), loadId, driverId, user));
-}
-
 /**
  * 409 NO_PLAN_APPLIED for a load change a version without an applied plan does not allow. The
  * advice is one the dispatcher can follow on this version: OPTIMIZE when a load is still PLANNED
@@ -1933,17 +1946,18 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
       data: { status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
     });
   }
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId: user.id,
-      action: `LOAD_${to}`,
+      action: loadStatusAction(to),
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { status: load.status } as never,
       afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}) } as never,
     },
-  });
+    tx,
+  );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
 }
@@ -2022,8 +2036,8 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
     where: { id: loadId },
     data: { driverId, driverSetById: user.id, driverSetAt: new Date() },
   });
-  await tx.auditLog.create({
-    data: {
+  await audit(
+    {
       tenantId,
       userId: user.id,
       action: 'LOAD_DRIVER_SET',
@@ -2032,12 +2046,9 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
       beforeJson: { driverId: load.driverId, driverName: before?.name ?? null, ...(keep ? { byHand: false } : {}) } as never,
       afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo, ...(keep ? { kept: true } : {}) } as never,
     },
-  });
+    tx,
+  );
   return updated;
-}
-
-export function frozenStatuses(): LoadStatus[] {
-  return ['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
 }
 
 export { isFrozen, isoOf };

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { isoDateSchema } from '@/lib/schemas';
-import { getOrCreatePlan, PlanError, planErrorBody } from '@/lib/dispatch/plan-service';
+import { getOrCreatePlan } from '@/lib/dispatch/plan-service';
 import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { startResponse } from '@/lib/dispatch/start-response';
 
@@ -24,13 +24,8 @@ export const POST = withTenantApi(
     if (input.expect && (input.expect.date !== input.date || input.expect.depotId !== input.depotId)) {
       return fail({ error: 'The date or depot changed on your screen. Reload the day and try again.', code: 'DAY_MISMATCH' }, 409);
     }
-    let run;
-    try {
-      run = (await getOrCreatePlan(user.tenantId, input.depotId, input.date, user.id)).run;
-    } catch (e) {
-      if (e instanceof PlanError) return fail(planErrorBody(e), e.status);
-      throw e;
-    }
+    // A PlanError (an HttpError) answers with its own status and code (review L16).
+    const { run } = await getOrCreatePlan(user.tenantId, input.depotId, input.date, user.id);
     if (!input.optimize) return ok({ runId: run.id, version: run.version, status: run.status });
     const res = await startDispatchOptimize(user.tenantId, run.id, user, ip, {
       allowMissingLocations: input.allowMissingLocations,

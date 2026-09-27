@@ -9,7 +9,7 @@ Synthetic data can prove that uploads parse, validation rules fire, the solver r
 
 | Path | Purpose |
 |---|---|
-| `generate_synthetic_data.py` | The generator. Re-run with different `SEED`, `NUM_CUSTOMERS`, `NUM_DAYS`, or `START_DATE` to vary the data. |
+| `generate_synthetic_data.py` | **Not in this repository** (the CSVs below were generated once and committed). The "Re-generating" section at the end describes the script as it was; to change the data, edit the CSVs or use `prisma/nmwc-dispatch-data.ts` (the maintained generator of the NMWC demo tenant, `db:seed:dispatch`). |
 | `master/regions.csv` | 15 Muscat neighborhoods (Ruwi, Khuwair, Qurum, Seeb, Bawshar, etc.) |
 | `master/customers.csv` | 150 customers across 8 realistic FMCG types (hotels, supermarkets, mini-marts, restaurants, offices, schools, clinics, construction sites) with real Muscat-area coordinates, branch codes for ~10% of supermarkets/minimarts, priority 1–5, payment type credit/cash/prepaid |
 | `master/customers_with_missing_coords.csv` | Same as above but with 7 customers' lat/lng deliberately blanked, to exercise the validation report + manual geocode flow |
@@ -75,6 +75,8 @@ You'll need to create one depot manually (or via API) before importing:
 - **Real coordinate density**: Muscat road network has real bottlenecks (Sultan Qaboos Highway, mountain passes around Wadi Adai) that Haversine ignores. Real-data pilot will surface this.
 
 ## Re-generating with different parameters
+
+> Historical: `generate_synthetic_data.py` is not in the repository (see the table above). Kept for reference.
 
 ```bash
 # Stress test: 2000 customers, 1 day

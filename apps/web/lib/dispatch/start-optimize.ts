@@ -45,7 +45,7 @@ export interface ExpectedDay {
 const LEGACY_PLAN: StartResult = {
   status: 409,
   body: {
-    error: 'This plan was made by the previous optimizer (before May 2026) and is kept exactly as it was. It cannot be re-optimized or re-planned.',
+    error: 'This plan was made by the previous optimizer (May 2026) and is kept exactly as it was. It cannot be re-optimized or re-planned.',
     code: 'LEGACY_PLAN',
   },
 };

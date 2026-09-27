@@ -35,13 +35,13 @@ self-hosted, next to the Next.js/Prisma app, and calls the solver over HTTP.
 | Hard windows | `CumulVar(stop).SetRange(start, end)`: service must **start** inside the window. Depot hours and truck availability limit the start and end cumuls. |
 | Soft windows | Preferred windows use `SetCumulVarSoftLowerBound` / `SetCumulVarSoftUpperBound` at `pref_window_penalty_per_min` OMR per minute. An early-arrival preference for P1/P2 and overtime after 9 h are also soft upper bounds. |
 | Priorities / droppable orders | Each stop is an `AddDisjunction`. **Strict (default since 25 Sep 2026):** penalty = `SERVICE_BASE (1,000 OMR) × w(P)`, w(P5) = 1, w(P) = 1 + Σ over lower priorities q of n_q × w(q) (n_q = stops of priority q in the model), so one stop outweighs all lower-priority stops together. The int64 total is guarded (base scaled down, then weights capped with a warning, only for days of thousands of stops). **Weighted (`strict_priorities: false`)**: `SERVICE_UNIT × weight(P) / weight(P5)` with 10,000 / 1,000 / 100 / 10 / 1, where 11 P3 outweigh one P2. Margin, when every stop has one, adds a bonus that saturates smoothly below 0.4 service unit (10x cost for small margins) and only breaks ties within the same priority. The MIN_TRUCKS search multiplies the penalties by its largest cost multiplier (x20), so it never drops a stop to save a truck. |
-| Costs | Each truck has its own arc cost (`cost_per_km + fuel_price / km_per_litre`, so fuel is counted once). The trip cost sits on arcs into reload nodes, and there is a fixed cost per truck-day. Driver time is a span cost, and overtime is a soft bound on the route end. |
+| Costs | Each truck has its own arc cost (`cost_per_km + fuel_price / km_per_litre`, so fuel is counted once). The trip cost sits on arcs into reload nodes, and there is a fixed cost per truck-day. Driver time is a span cost, and overtime is a soft bound on the route end. (Since stabilization PR5 the driver is paid for the whole truck day in the report as well - `costing.py`; a truck with frozen loads is paid from its last frozen return.) |
 | Frozen work | LOCKED / LOADING / DISPATCHED loads come in as `frozen_trips`. They stay out of the model and only change the truck's earliest departure (return + reload), its remaining trips and its shift anchor. |
 | Reasons | Pre-filters return `EXCEEDS_ANY_TRUCK_CAPACITY`, `HARD_WINDOW_INFEASIBLE`, `SHIFT_LIMIT`, `NO_AVAILABLE_TRUCK` and `TRIP_LIMIT`. After the solve, dropped stops get `LATE_ORDER_NO_CAPACITY`, the fleet-shortage text, *"Not planned: the optimizer found no truck, trip or time slot ... within its time limit"*, or, for stops the search planned but the exact loading time did not leave room for, *"Not planned: once every load was timed with the loading time between loads ..."* (the last three as `SOLVER_DROPPED_LOW_PRIORITY`, labelled *"Not planned by the optimizer - see reason"* on the plan screen). Guided local search always ends on its time limit and reports `ROUTING_SUCCESS`, so the status is no proof: the engine never claims a stop impossible unless a pre-filter proved it. `_assert_reconciled` raises if any stop or case is missing or duplicated. |
 | Search | `PARALLEL_CHEAPEST_INSERTION` followed by `GUIDED_LOCAL_SEARCH`. The automatic time limit is 5 / 20 / 150 / 240 s for ≤25 / ≤200 / ≤350 / >350 stops (was 3 / 8 / 20 for ≤25 / ≤80 / ≤200; alternatives get half), within a 540 s budget per request. |
 | Scenarios | RECOMMENDED runs first with the full time budget. MIN_TRUCKS and MIN_DISTANCE are **warm-started** from it with half the budget: `CloseModelWithParameters` + `RoutesToAssignment` (Next variables only) + `SolveFromAssignmentWithParameters`, falling back to a cold solve when the plan cannot be loaded or the warm solve returns nothing. (`ReadAssignmentFromRoutes`, used before, restores cumul values and could stall > 100 s under time-dimension costs.) Every scenario, RECOMMENDED included, runs in a spawn worker process. OR-Tools holds the GIL for its whole search, so threads would not run scenarios in parallel, and an in-process search froze the API (health checks, route geometry) until it ended. If the pool fails the scenarios run one after another in-process, and `SOLVER_PARALLEL=0` forces that. |
 | Post-solve load repack + selection | `load_repack.py`. For each raw scenario plan, CP-SAT keeps every load (stops and order) and re-assigns loads to trucks and departure times: no-wait offsets and a departure interval per load from hard windows; per truck earliest departure (after frozen loads + turnaround), latest return, depot hours, loads left, the shift span (unless anchored by frozen loads), cases / kg per load; loads of a truck do not overlap and are separated by the exact turnaround; identical trucks are symmetry-broken. Objective = the scenario's own prices (RECOMMENDED: fixed per used non-frozen truck + trip + km × truck rate + driver cost on the truck span + overtime + preferred-window / early-arrival hinges + plan continuity; MIN_TRUCKS: fixed × 20, trip × 5, km). Stops a plan left out (no shortage) enter as optional one-stop loads, lexicographically served first. Each solve: min(15 s, max(3 s, limit / 2)), 2 workers, stops when no better plan came for a quarter of that. Every candidate (raw plans re-timed + repacks) is timed by one LP per truck and scored on one RECOMMENDED objective (overtime from the first actual departure, as reported); RECOMMENDED takes the best objective, MIN_TRUCKS fewest trucks → loads → operating cost, MIN_DISTANCE fewest km → RECOMMENDED objective, none serving less than its raw plan. Runs in the worker pool with a deadline; on failure the raw plans are returned with a warning. |
-| Matrix | `providers.py` requests the OSRM `/table` in 90×90 tiles, because a stock server allows `--max-table-size` 100. Durations are multiplied by `road_time_factor` (1.25) to allow for slower trucks. The Haversine fallback uses ×1.3 at 40 km/h and is marked "estimated". |
+| Matrix | `providers.py` requests the OSRM `/table` in blocks of 45 sources × 45 destinations (at most 90 coordinates per call, `OSRM_TABLE_TILE` = 90, because a stock server allows `--max-table-size` 100; since stabilization PR5 the tile is an environment setting, so a server with a larger table size needs one call per day). Road durations are multiplied by `road_time_factor` (1.25) to allow for slower trucks; since PR5 only real road cells are, never an estimated leg. The Haversine fallback uses ×1.3 at 40 km/h and is marked "estimated". |
 
 ## 4. Candidates compared
 
@@ -163,7 +163,8 @@ not change, because the solver sees the same matrix size.
    - Priorities are exact penalties, so a P1 is never traded for km.
    - It runs in-process with no licence or per-run cost.
 2. ~~Apply the two §5 fixes before go-live~~: **done** (§5a). Keep the 300-stop benchmark in the release checklist
-   (`.venv/Scripts/python scripts/bench_dispatch.py 300`).
+   (`.venv/Scripts/python scripts/bench_dispatch.py 300`), and for any change to how locked loads are treated the re-plan
+   comparison (`scripts/bench_replan.py`, §9.2).
 3. **Configurable self-hosted OSRM** (already supported through `osrm_url` / `OSRM_URL`, see OSRM_SETUP.md). Run it with the
    GCC extract and `--max-table-size ≥ 400`. Calibrate `road_time_factor` against real Ayun GPS trip times, or build a truck
    Lua profile.
@@ -344,6 +345,68 @@ time, no margins, no shortage) found a 1,080 km plan instead of ~979 km, so no 1
 right after (3 runs each, same load): before the fixes 529.8-532.7, after 530.6-532.1, 5 trucks / 14 loads every time. Even
 that run meets the targets: 6 trucks (≤ 9) and 521 OMR, -31% against 754 OMR. Checks: 60 options, 0 evaluator violations,
 0 exact-turnaround violations, all reconciled. Wall time: 46-54 s for the ≤ 200-stop days, 239-244 s at 300 stops.
+
+## 9. Stabilization PR5 (26 Sep 2026): whole-truck-day costs, release benchmark and re-plans
+
+PR5 pays the driver for the whole truck day in the post-solve score and in every reported cost (`costing.py`), and aligns the
+search for trucks with locked loads: the routing model pays the time from the last locked return to the first new departure
+(a soft upper bound on the route start), the repack prices *last return - last locked return*, and the exact timing no longer
+rewards a later first departure after locked loads. Fresh days are priced as before. Measured on the §5 machine (AMD Ryzen 7
+7445HS, 31 GB RAM, Windows 11, Python 3.12.13, OR-Tools 9.15.6755), one run each, one version after the other. PR4 = `acb5f04`,
+PR5 = branch `stab-5-costs` with its review fixes.
+
+### 9.1 Release benchmark, 300 stops (`scripts/bench_dispatch.py 300`)
+
+| Version | Wall | Scenario | Trucks | Loads | km | Op. cost (OMR) | Unserved |
+|---|---|---|---|---|---|---|---|
+| PR4 | 243 s | RECOMMENDED | 12 | 24 | 1,806.5 | 950.1 | 0 |
+| | | MIN_TRUCKS | 12 | 24 | 1,740.1 | 932.6 | 0 |
+| | | MIN_DISTANCE | 12 | 24 | 1,740.1 | 932.6 | 0 |
+| PR5 | 251 s | RECOMMENDED | 12 | 24 | 1,806.5 | 965.2 | 0 |
+| | | MIN_TRUCKS | 12 | 24 | 1,738.9 | 947.1 | 0 |
+| | | MIN_DISTANCE | 12 | 24 | 1,738.9 | 947.1 | 0 |
+
+**No change in plan quality.** RECOMMENDED is the same plan (12 trucks, 24 loads, 1,806.5 km, all 300 stops served); the
+alternatives differ by 1.2 km (0.07%, inside the search's run-to-run variation). The reported cost rises by 15.1 OMR (+1.6%)
+only because the depot turnaround and the waiting between loads are now paid. The 150-stop day gave the same plan on both
+versions too (8 trucks, 9 loads, 805.3 km; 478.5 -> 479.8 OMR). Wall time stays inside the 540 s request budget.
+
+### 9.2 Re-plans around locked loads (`scripts/bench_replan.py`)
+
+The 300-stop day has no locked loads, so it cannot show the re-plan change. `scripts/bench_replan.py` builds two shapes of 8
+days each (60 stops with seeds 1-5 and 150 stops with seeds 1-3; the §5 fleet and rates, overtime after 8 h at 1 OMR/h; all three
+options, production worker pool). Both versions re-plan exactly the same requests, and the money of both is priced on one model
+(PR5's whole-truck-day costing of each version's new loads; the locked loads are the same for both):
+
+- **late**: the day is planned once, every truck's first load is locked, its stops leave the day; the other stops stay with the
+  truck they were on (plan continuity) and 6 or 15 late orders (P1-P3) are added. The late-order re-plan;
+- **half**: 6 of the 12 trucks have a locked first load 06:00-09:30; the whole day plus the late orders is planned around them.
+
+| Shape (8 days) | Version | Unserved | New loads | km (new loads) | Cost of new loads (OMR) |
+|---|---|---|---|---|---|
+| late | PR4 | 0 | 14 | 1,350.6 | 561.4 |
+| | PR5 | 0 | 14 | 1,359.3 | 585.4 |
+| half | PR4 | 0 | 69 | 5,365.2 | 2,594.6 |
+| | PR5 | 0 | 66 | 5,213.0 | 2,578.7 |
+
+- **late**: the same plan on 7 of 8 days. On one (150 stops, seed 2: 61 stops to re-plan) PR5 puts a new load on an unused
+  truck instead of a second load on a locked one: 143.4 against 119.4 OMR (+24.0 OMR, one truck's fixed cost). Two repeats
+  gave the same result.
+- **half**: PR5 is cheaper on 3 days (-13%, -6%, -5%) and dearer on 5 (+1%, +8%, +0.4%, +10%, +6%); in total 0.6% less money,
+  2.8% fewer km and 3 loads fewer.
+- No stop is left unserved on any day, by either version.
+- Run-to-run variation of one version on one machine is about 1% km, so a single day is not a verdict; the per-day swings
+  above are the two searches finding different plans.
+
+**Cause of the late-order day, and why the release keeps the alignment.** An experiment with PR5 minus the routing model's soft
+bound on the start of trucks with locked loads (the one change to the search model) found PR4's 119.5 OMR plan on that day and
+the same plans on the other late days, but made the *half* shape 1.6% dearer (2,618.8 against 2,578.7 OMR). Over all 16 days
+the totals are within 0.8% of each other: PR4 3,156.0, PR5 3,164.1, PR5 without the bound 3,180.3 OMR. Neither variant is
+better on both shapes, so PR5 keeps the owner's rule (the driver is paid for the whole truck day in the search as in the report).
+
+**Follow-up** (not in PR5): measure again on NMWC's real re-planned days once production has plans with locked loads. If the
+late-order case shows up there, one search without the start bound can be added as an extra candidate: the post-solve score
+already prices every candidate on the whole-day model, so it would only be chosen when it is cheaper.
 
 ## Sources
 
