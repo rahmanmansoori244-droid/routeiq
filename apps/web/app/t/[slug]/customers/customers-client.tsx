@@ -53,7 +53,7 @@ export function CustomersClient({
 }) {
   const router = useRouter();
   const [rows, setRows] = useState(initial);
-  // Rows whose last change got no answer and could not be reloaded (audit F24).
+  // Rows whose last change the server did not confirm (no answer or a server error) and that could not be reloaded (audit F24).
   const [uncertain, setUncertain] = useState<ReadonlySet<string>>(new Set());
   // After router.refresh() the page's data is the server's: show it (reconciles every row).
   useEffect(() => {
@@ -86,7 +86,7 @@ export function CustomersClient({
     const before = rows.find((r) => r.id === id);
     if (!before) return;
     // Optimistic update; runInlineUpdate then shows what the server has (saved, refused, or - with
-    // no answer - reloaded or marked "not confirmed"). It never throws and never re-sends (audit F24).
+    // no answer or a server error - reloaded or marked "not confirmed"). It never throws and never re-sends (audit F24).
     setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
     startUpdate(async () => {
       const result = await runInlineUpdate(before, patch, {
@@ -194,7 +194,7 @@ export function CustomersClient({
                 </TableCell>
                 <TableCell className="text-center">
                   {uncertain.has(c.id) ? (
-                    <Badge variant="warning" className="me-1" title="The last change got no answer: reload the page to see what is saved.">
+                    <Badge variant="warning" className="me-1" title="The server did not confirm the last change (no answer or a server error): reload the page to see what is saved.">
                       not confirmed
                     </Badge>
                   ) : null}
