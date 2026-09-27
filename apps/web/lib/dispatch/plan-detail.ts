@@ -29,6 +29,7 @@ import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
+import { isDispatchPlanShape } from './legacy-runs';
 
 export interface DetailStop {
   sequence: number;
@@ -228,6 +229,12 @@ export interface PlanDetail {
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
+  /**
+   * A daily dispatch plan (loads, a RECOMMENDED option or a later version; legacy-runs.ts): it has the
+   * dispatch Excel workbook, also when every order is unserved and it has no load (audit F16). The
+   * driver sheets (PDF) need loads. Always set by getPlanDetail; optional for older fixtures.
+   */
+  isDispatchPlan?: boolean;
   versions: { id: string; version: number; status: string; reason: string; reasonNote: string | null; createdAt: string; changeText: string | null }[];
   job: { id: string; status: string; message: string | null; progressPct: number; startedAt: string | null; finishedAt: string | null } | null;
   warnings: string[];
@@ -629,6 +636,7 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
     }),
     loads: detailLoads,
     unserved,
+    isDispatchPlan: isDispatchPlanShape({ loadCount: loads.length, scenarioNames: scenarios.map((s) => s.name), version: run.version }),
     versions: versions.map((v) => ({
       id: v.id,
       version: v.version,

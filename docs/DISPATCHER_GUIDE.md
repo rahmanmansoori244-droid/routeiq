@@ -20,7 +20,10 @@ Menu: **Daily dispatch**. Pick the **delivery date** (tomorrow by default) and t
 Red cards need action before optimizing:
 - **ADD LOCATION**: paste the customer's Google Maps link (a WhatsApp share link such as `maps.app.goo.gl/…` works) or `latitude, longitude`, click **Read**, check the pin, then **Save location**.
   - If the link only shows the map area and not a pin, or the point looks wrong, click the map to put the pin exactly on the shop.
+  - Degrees, minutes and seconds work as Google copies them (`23°35'09.2"N 58°24'21.2"E`). Minutes and seconds must be below 60: `23°99'` is refused with the reason, never moved to another point. Whole degrees only (`23°N 58°E`, about 100 km) or no seconds (`23°35'N 58°24'E`, about 2 km) are read but marked for a pin check: put the pin on the shop before saving.
+  - **Read** and **Save location** always belong to the customer the window is open for. If you cancel while a link is still being read and open another customer, the late answer is ignored; while a Read runs, pressing Enter again does nothing. Changing the text also cancels a Read still running.
   - The location is saved permanently. Tomorrow RouteIQ already knows this customer.
+  - After saving, the day and the plan below are refreshed straight away: its notes (*changed after planning*), the map and the WhatsApp messages use the new pin. No page reload needed.
 
 A red card **Customer is deactivated** means the customer was deactivated after its orders were added: its open orders are not delivered (they show as *unserved: customer deactivated*). Reactivate the customer under **Customers** and re-plan to deliver them. If the plan was made before the customer was deactivated, the card says its orders are **still on planned loads**: click **RE-PLAN** to take them off (or reactivate the customer). Orders already on locked, loading or dispatched loads stay there, and the card is not shown for them.
 
@@ -31,6 +34,9 @@ Below the cards:
 White cards are optional confirmations: priority (**P1 = highest**), customer type and receiving hours.
 - **Hard hours:** the customer cannot receive outside them, e.g. hypermarket 06:00–10:00.
 - **Preferred hours:** nice to have.
+- **Details** saves only what you change. A priority or unloading time that is still a default shows as a default: the priority list says *P3 - default, not confirmed* (pick a priority, P3 included, to confirm it), and the unloading box is empty with the default in grey. Pressing **Save** without changing anything confirms nothing.
+- Times are **HH:MM** (06:30; 24:00 = midnight at the end of the day). A time such as 06:90 is refused with a message; nothing is saved.
+- **Unloading time** is whole minutes, 0 to 480. Leave it **empty** to use the customer-type or Settings default; **0** means no unloading time at all. Text such as *10 min* is refused. Clearing a customer's own time puts it back on the default.
 
 ## 3. Optimize
 - Click **OPTIMIZE**. A normal day (80-120 customers) takes about half a minute to a minute. Bigger days get more search time, step by step: about 1.5-2 minutes at 150 customers, 3 minutes at 175, 4-5 minutes from 200.
@@ -65,7 +71,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 ## 5. Lock, export, dispatch
 - **Lock** a load when the warehouse starts preparing it. Loads of one truck are locked in order (Load 1 before Load 2).
 - **Loading → Dispatch** when the truck leaves. **Dispatched loads can never be changed.**
-- **Export Excel** gives the master workbook: summary, load plan, one sheet per truck load (manifest + route, printable), SKU loading summary, unserved, reconciliation, assumptions. The assumptions sheet shows the settings the plan was made with, even after the settings changed, and says *not used in this plan* for a setting the plan did not use (for example the road time factor on a plan with straight-line distances).
+- **Export Excel** gives the master workbook: summary, load plan, one sheet per truck load (manifest + route, printable), SKU loading summary, unserved, reconciliation, assumptions. It is there also when no order could be planned (no loads): the unserved sheet then lists every order with its reason. **Driver sheets (PDF)** only appear when the plan has loads. The assumptions sheet shows the settings the plan was made with, even after the settings changed, and says *not used in this plan* for a setting the plan did not use (for example the road time factor on a plan with straight-line distances).
   - The summary counts **Invoices (sales orders)** - how many are fully on trucks, partly (split) and not planned - and **Delivery orders**: one per customer branch, all its invoices of the day delivered together. So a day of 320 invoices to 200 branches shows 320 invoices and 200 delivery orders. **Stops on trucks** counts the customer visits (a split delivery is one stop on each truck).
   - Each truck-load sheet's **Notes** column has the customer's access notes (*Access: …*) and the order notes (*Note: …*), like the PDF driver sheet.
   - **Route search** says in words how the optimizer's search ended (see *Plan options*).

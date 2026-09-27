@@ -102,13 +102,8 @@ export function hhmm(min: number | null | undefined): string {
   return `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(((m % 60) + 60) % 60).padStart(2, '0')}${m >= 1440 ? ' +1' : ''}`;
 }
 
-export function toMinutes(v: string): number | null {
-  const s = v.trim();
-  if (!s) return null;
-  const m = /^(\d{1,2}):?(\d{2})$/.exec(s);
-  if (!m) return NaN;
-  return Number(m[1]) * 60 + Number(m[2]);
-}
+// Times typed on the dispatch screen are read with parseHhmm (lib/dispatch/time.ts) only: the lax
+// toMinutes that stood here read "06:90" as 07:30 (audit F07).
 
 export function durH(min: number): string {
   return `${Math.floor(min / 60)}:${String(Math.round(min % 60)).padStart(2, '0')}`;

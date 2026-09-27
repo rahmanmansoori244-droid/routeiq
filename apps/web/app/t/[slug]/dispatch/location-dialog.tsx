@@ -1,7 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MapPin, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from './client-api';
+import { createLocationRequests, type LocationRequests } from './location-requests';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -36,35 +37,67 @@ interface Props {
  * ADD LOCATION: paste a Google Maps link (incl. maps.app.goo.gl short links) or "lat, lng",
  * preview it, then confirm. If the link is not precise the dispatcher confirms/drops a pin.
  * Saving writes the customer master permanently.
+ *
+ * Every Read and Save belongs to the dialog as it was when it started (audit F06, location-requests.ts):
+ * an answer for another customer, a closed dialog or text changed since never reaches the dialog
+ * on screen, and one request runs at a time (the Read button and the Enter key alike).
  */
 export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }: Props) {
   const [input, setInput] = useState('');
   const [parse, setParse] = useState<ParseResult | null>(null);
+  // The text the point on screen was read from: saved as the location's input, never other text typed since.
+  const [readFrom, setReadFrom] = useState<string | null>(null);
   const [pin, setPin] = useState<{ lat: number; lng: number } | null>(null);
   const [pinMoved, setPinMoved] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [outsideConfirm, setOutsideConfirm] = useState(false);
+  const requests = useRef<LocationRequests | null>(null);
+  requests.current ??= createLocationRequests();
+  const reqs = requests.current;
+  const busy = reading || saving;
 
   useEffect(() => {
+    // Opened, closed, or opened for another customer: nothing started before belongs to this dialog
+    // (a Read on its way is aborted and its answer dropped). In the same effect as the reset below,
+    // so an answer either arrives before it (and is reset) or after it (and is dropped).
+    reqs.dialogChanged();
+    setReading(false);
+    setSaving(false);
     if (open) {
       setInput('');
       setParse(null);
+      setReadFrom(null);
       setPinMoved(false);
       setOutsideConfirm(false);
       setPin(customer?.lat != null && customer?.lng != null ? { lat: customer.lat, lng: customer.lng } : null);
     }
-  }, [open, customer]);
+  }, [open, customer, reqs]);
+
+  function changeInput(v: string) {
+    // A Read of the previous text is out of date (aborted, its answer dropped).
+    reqs.inputChanged();
+    setReading(false);
+    setInput(v);
+  }
 
   async function preview() {
-    if (!input.trim()) return;
-    setBusy(true);
-    const r = await api<ParseResult>('/api/locations/parse', { method: 'POST', json: { input } });
-    setBusy(false);
+    const text = input.trim();
+    if (!text || !customer) return;
+    // One request at a time: also for the Enter key, which used to start a Read while one was running.
+    const started = reqs.beginRead();
+    if (!started) return;
+    setReading(true);
+    const r = await api<ParseResult>('/api/locations/parse', { method: 'POST', json: { input: text }, signal: started.signal });
+    // For another customer, a closed dialog, or text changed since: dropped (the dialog was reset).
+    if (!reqs.answered(started.ticket)) return;
+    setReading(false);
     if (!r.ok || !r.data) {
       toast.error(r.error ?? 'Could not read that.');
       return;
     }
     setParse(r.data);
+    setReadFrom(text);
     if (r.data.ok && r.data.lat !== undefined && r.data.lng !== undefined) {
       setPin({ lat: r.data.lat, lng: r.data.lng });
       setPinMoved(false);
@@ -76,13 +109,29 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
 
   async function save() {
     if (!customer || !pin) return;
-    setBusy(true);
+    const ticket = reqs.beginSave();
+    if (!ticket) return;
+    setSaving(true);
+    const target = customer;
     const source = pinMoved || !parse?.ok ? 'MAP_PIN' : parse?.source ?? 'MANUAL_LATLNG';
-    const r = await api(`/api/customers/${customer.customerId}/location`, {
+    const r = await api(`/api/customers/${target.customerId}/location`, {
       method: 'PUT',
-      json: { lat: pin.lat, lng: pin.lng, source, input: input.trim() || undefined, confirmOutsideArea: outsideConfirm || undefined },
+      json: { lat: pin.lat, lng: pin.lng, source, input: (readFrom ?? input.trim()) || undefined, confirmOutsideArea: outsideConfirm || undefined },
     });
-    setBusy(false);
+    if (!reqs.answered(ticket)) {
+      // Closed, or opened for another customer, while saving: say what happened to this customer
+      // only; the dialog on screen is left as it is (it must not close, or ask to confirm its point).
+      if (r.ok) {
+        toast.success(`Location saved for ${target.name}.`);
+        onSaved();
+      } else if (r.errorBody?.code === 'OUTSIDE_AREA') {
+        toast.warning(`The location of ${target.name} was not saved: the point is outside Oman/UAE. Open ADD LOCATION again to confirm it.`);
+      } else {
+        toast.error(`The location of ${target.name} was not saved: ${r.error ?? 'error'}`);
+      }
+      return;
+    }
+    setSaving(false);
     if (!r.ok) {
       if (r.errorBody?.code === 'OUTSIDE_AREA') {
         setOutsideConfirm(true);
@@ -92,7 +141,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
       toast.error(r.error ?? 'Could not save the location.');
       return;
     }
-    toast.success(`Location saved for ${customer.name}. RouteIQ will remember it.`);
+    toast.success(`Location saved for ${target.name}. RouteIQ will remember it.`);
     onOpenChange(false);
     onSaved();
   }
@@ -115,7 +164,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
                 id="loc-input"
                 value={input}
                 placeholder="https://maps.app.goo.gl/…  or  23.5880, 58.4081"
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => changeInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault();
@@ -123,8 +172,8 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
                   }
                 }}
               />
-              <Button type="button" variant="secondary" onClick={preview} disabled={busy || !input.trim()}>
-                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Read'}
+              <Button type="button" variant="secondary" onClick={preview} disabled={busy || !input.trim()} data-testid="read-location">
+                {reading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Read'}
               </Button>
             </div>
           </div>
@@ -150,6 +199,9 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
             lng={pin?.lng ?? null}
             center={depot}
             onChange={(lat, lng) => {
+              // The dispatcher's own pin wins over a Read still on its way.
+              reqs.inputChanged();
+              setReading(false);
               setPin({ lat, lng });
               setPinMoved(true);
             }}

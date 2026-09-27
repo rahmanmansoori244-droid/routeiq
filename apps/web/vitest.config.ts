@@ -5,6 +5,9 @@ import path from 'node:path';
 const rootDir = path.dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
+  // JSX as Next.js compiles it (the automatic runtime: no `import React` in components), so the
+  // component tests (tests/lib/hook-host.ts) can load the dispatch screen's .tsx files.
+  esbuild: { jsx: 'automatic' },
   test: {
     environment: 'node',
     include: ['tests/**/*.spec.ts', 'lib/**/*.spec.ts'],

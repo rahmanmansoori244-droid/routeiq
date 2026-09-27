@@ -158,14 +158,21 @@ export const customerSchema = z.object({
 });
 export type CustomerInput = z.infer<typeof customerSchema>;
 
-/** Minutes from local midnight (06:30 = 390). 1440 = end of day. */
-const minuteOfDay = z.coerce.number().int().min(0).max(1440);
+/**
+ * Minutes from local midnight (06:30 = 390). 1440 = end of day. A JSON number only (audit F07): a
+ * coerced "" used to become 0, i.e. midnight.
+ */
+const minuteOfDay = z.number().int().min(0).max(1440);
 
 export const customerPatchSchema = customerSchema
   .partial()
   .extend({
     // NMWC dispatch MVP - null clears the customer's own value (type default applies again).
     customerType: z.nativeEnum(CustomerType).nullable().optional(),
+    // Audit F07 (owner decision 9): a whole number of minutes (0 allowed: an explicit "no unloading
+    // time") confirms the customer's own time; null = no own time, the customer-type or Settings
+    // default applies (not confirmed). A JSON number only: "" or "10 min" is refused, never 0.
+    avgServiceTimeMin: z.number().int().min(0).max(MAX_SERVICE_MIN).nullable().optional(),
     hardWindowStartMin: minuteOfDay.nullable().optional(),
     hardWindowEndMin: minuteOfDay.nullable().optional(),
     prefWindowStartMin: minuteOfDay.nullable().optional(),
