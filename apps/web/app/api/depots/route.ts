@@ -1,11 +1,12 @@
 import { withTenantApi, ok, parseBody } from '@/lib/api';
 import { depotSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { DEPOT_REF_COUNT } from '@/lib/master-data-delete';
 
 export const GET = withTenantApi(async (_req, { db }) => {
   const depots = await db.depot.findMany({
     orderBy: [{ active: 'desc' }, { code: 'asc' }],
-    include: { _count: { select: { trucks: true, regions: true, runs: true } } },
+    include: { _count: { select: DEPOT_REF_COUNT } },
   });
   return ok(depots);
 });

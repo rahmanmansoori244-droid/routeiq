@@ -5,7 +5,8 @@
  * DeliveryProof counts unchanged). /driver says "retired".
  *
  * NMWC regression: the Drivers API (GET, POST, PATCH) keeps working, and deleting a driver who is
- * on a DISPATCHED load deactivates the driver instead, leaving PlanLoad.driverId unchanged.
+ * on a DISPATCHED load deactivates the driver instead, leaving PlanLoad.driverId unchanged (since
+ * the audit of 27 Sep 2026, F20, a driver never used is deactivated too: drivers are never deleted).
  *
  * Requires: web server (RATE_LIMITS_DISABLED=1) + Postgres. No solver needed.
  */
@@ -116,10 +117,11 @@ describe('NMWC drivers keep working', () => {
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: load.id } })).driverId).toBe(d.id);
   });
 
-  it('deleting a driver never used on a load really deletes it', async () => {
+  it('audit F20: deleting a driver never used on a load deactivates it too (drivers are never deleted)', async () => {
     const d = await prisma.driver.create({ data: { tenantId: t.tenantId, code: 'D8', name: 'Unused' } });
     const res = await fetchWith(t.cookieJar, `${BASE}/api/drivers/${d.id}`, { method: 'DELETE' });
     expect(res.status).toBe(200);
-    expect(await prisma.driver.findUnique({ where: { id: d.id } })).toBeNull();
+    expect(((await res.json()) as { data: { softDeleted?: boolean } }).data.softDeleted).toBe(true);
+    expect(await prisma.driver.findUnique({ where: { id: d.id } })).toMatchObject({ active: false });
   });
 });

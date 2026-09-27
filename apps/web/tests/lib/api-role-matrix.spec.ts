@@ -15,6 +15,14 @@
  *   (PLANNER; avgServiceTimeMin null = back to the default, JSON numbers only), GET
  *   /api/runs/[id]/export/excel and /export/pdf (ANY; chosen by isDispatchPlan, PDF 404 NO_LOADS
  *   for a dispatch plan without loads).
+ * - Audit PR "Intake and master data" (27 Sep 2026): behaviour changed, roles unchanged, on
+ *   DELETE /api/depots/[id] (deactivates once anything refers to the depot), PATCH /api/depots/[id]
+ *   (deactivation warning), DELETE and PATCH /api/drivers/[id] (always deactivates; names the trucks
+ *   it stays default of; phone can be cleared), POST /api/regions and PATCH /api/regions/[id]
+ *   (no depot / clear the depot), and the POST / PATCH of customers, depots, drivers and trucks
+ *   (an empty optional text or reference clears it; a field left out is unchanged),
+ *   POST /api/customers/import (verified pins kept under concurrency), POST /api/orders/upload and
+ *   POST /api/orders/[batchId]/confirm (merged rows; depot and old-merge re-checks).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';

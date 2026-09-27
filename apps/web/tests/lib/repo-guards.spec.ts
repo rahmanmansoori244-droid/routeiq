@@ -314,3 +314,33 @@ describe('the handbook counts the solver tests pytest collects (PR8 review)', ()
     expect(pytestCount(src, 'x.py')).toBe(3 + 16 + 1);
   });
 });
+
+describe('the dispatcher guide keeps each customer rule under its own bullet (review of audit PR 3)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const guide = () => readFileSync(path.join(REPO, 'docs', 'DISPATCHER_GUIDE.md'), 'utf8').replace(/\r\n/g, '\n');
+  const bullet = (text: string, head: string) => {
+    const line = text.split('\n').find((l) => l.startsWith(`- **${head}:**`));
+    if (!line) throw new Error(`no "${head}" bullet in DISPATCHER_GUIDE.md`);
+    return line;
+  };
+
+  it("the import's service-time and Validate only rules are under Customer import, not under the Customers page toggles", () => {
+    const text = guide();
+    const importRules = /A service time in the file \(at most 480 min\) counts as confirmed|\*\*Validate only\*\*/g;
+    expect(bullet(text, 'Customer import').match(importRules)).toHaveLength(2);
+    expect(bullet(text, 'Customers page').match(importRules)).toBeNull();
+  });
+
+  it('the Customers page bullet says a server error is not a refusal (F24)', () => {
+    const page = bullet(guide(), 'Customers page');
+    expect(page).toMatch(/server answers with an error/);
+    expect(page).toMatch(/may or may not have been saved/);
+    expect(page).toMatch(/\*\*not confirmed\*\*/);
+  });
+
+  it('the re-check of files merged the old way names the files it refuses (not every file checked before the update)', () => {
+    const text = guide();
+    expect(text).not.toMatch(/A file checked before the update that keeps every priority and note of repeated rows asks to be checked again/);
+    expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
+  });
+});

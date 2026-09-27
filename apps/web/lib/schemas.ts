@@ -21,6 +21,17 @@ function optionalBounded(b: Bound): z.ZodOptional<z.ZodType<number | null, z.Zod
   return z.preprocess((v) => (v === '' ? null : v), bounded(b).nullable()).optional() as never;
 }
 
+/**
+ * An optional text or reference in a form or PATCH body (owner decision 10, audit F26): left out
+ * = unchanged (undefined); '' (or only spaces) or null = cleared (null); anything else is checked
+ * by `inner`. On a create, cleared = not set. Before, '' either kept the old value ("saved", but a
+ * driver's old phone stayed) or reached the database as an id that does not exist (a region's
+ * "no depot" failed).
+ */
+export function clearable<T extends z.ZodTypeAny>(inner: T) {
+  return z.preprocess((v) => (v === null || (typeof v === 'string' && v.trim() === '') ? null : v), inner.nullable()).optional();
+}
+
 const codeSchema = z
   .string()
   .trim()
@@ -54,7 +65,7 @@ const depotFields = z.object({
     name: nameSchema,
     lat: latSchema,
     lng: lngSchema,
-    address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+    address: clearable(z.string().trim().max(500)),
     active: z.boolean().optional(),
     // Depot hours (minutes from midnight; null = 00:00 / 24:00): no truck leaves before it opens or
     // returns after it closes (review F21: these were planner inputs no screen could set).
@@ -76,7 +87,7 @@ export type DepotInput = z.infer<typeof depotSchema>;
 
 const truckFields = z.object({
     code: codeSchema,
-    description: z.string().trim().max(200).optional().or(z.literal('').transform(() => undefined)),
+    description: clearable(z.string().trim().max(200)),
     depotId: z.string().min(1, 'Depot is required'),
     capacityCases: bounded(TRUCK_BOUNDS.capacityCases),
     capacityWeightKg: bounded(TRUCK_BOUNDS.capacityWeightKg),
@@ -111,13 +122,8 @@ export type TruckInput = z.infer<typeof truckSchema>;
 export const driverSchema = z.object({
   code: codeSchema,
   name: nameSchema,
-  phone: z
-    .string()
-    .trim()
-    .max(40)
-    .regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only')
-    .optional()
-    .or(z.literal('').transform(() => undefined)),
+  // '' or null clears the phone (audit F26): WhatsApp links then have no number to use.
+  phone: clearable(z.string().trim().max(40).regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only')),
   active: z.boolean().optional(),
 });
 export type DriverInput = z.infer<typeof driverSchema>;
@@ -125,7 +131,8 @@ export type DriverInput = z.infer<typeof driverSchema>;
 export const regionSchema = z.object({
   code: codeSchema,
   name: nameSchema,
-  depotId: z.string().optional().or(z.literal('').transform(() => undefined)),
+  // No depot: '' or null (audit F26: a region can be created without a depot, and its depot cleared).
+  depotId: clearable(z.string().min(1)),
 });
 export type RegionInput = z.infer<typeof regionSchema>;
 
@@ -141,9 +148,9 @@ export type ProductInput = z.infer<typeof productSchema>;
 export const customerSchema = z.object({
   code: codeSchema,
   name: nameSchema,
-  branchCode: z.string().trim().max(32).optional().or(z.literal('').transform(() => undefined)),
-  regionId: z.string().optional().or(z.literal('').transform(() => undefined)),
-  address: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+  branchCode: clearable(z.string().trim().max(32)),
+  regionId: clearable(z.string().min(1)),
+  address: clearable(z.string().trim().max(500)),
   lat: blankCoord.or(latSchema).optional(),
   lng: blankCoord.or(lngSchema).optional(),
   // Customer.priority and Customer.avgServiceTimeMin both have DB defaults
@@ -153,7 +160,7 @@ export const customerSchema = z.object({
   priority: z.coerce.number().int().min(1).max(5).optional().default(3),
   avgServiceTimeMin: z.coerce.number().int().min(0).max(MAX_SERVICE_MIN).optional().default(10),
   paymentType: z.nativeEnum(PaymentType).optional().default(PaymentType.CREDIT),
-  accessNotes: z.string().trim().max(500).optional().or(z.literal('').transform(() => undefined)),
+  accessNotes: clearable(z.string().trim().max(500)),
   active: z.boolean().optional(),
 });
 export type CustomerInput = z.infer<typeof customerSchema>;
