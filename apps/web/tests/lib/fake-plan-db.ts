@@ -32,6 +32,12 @@ function match(row: Row, where: Row | undefined): boolean {
     }
     if (['run', 'order', 'customer', 'load', 'truck', 'scenario'].includes(k)) continue; // relation filters: ignored
     if (v !== null && typeof v === 'object' && !(v instanceof Date)) {
+      // Ranges (dates, numbers, strings); a row without the field is outside every range.
+      const val = (x: unknown) => (x instanceof Date ? x.getTime() : x) as number | string;
+      if ('gte' in v && !(row[k] != null && val(row[k]) >= val(v.gte))) return false;
+      if ('lte' in v && !(row[k] != null && val(row[k]) <= val(v.lte))) return false;
+      if ('gt' in v && !(row[k] != null && val(row[k]) > val(v.gt))) return false;
+      if ('lt' in v && !(row[k] != null && val(row[k]) < val(v.lt))) return false;
       if ('in' in v && !(v.in as unknown[]).some((x) => eq(row[k], x))) return false;
       if ('notIn' in v && (v.notIn as unknown[]).some((x) => eq(row[k], x))) return false;
       if ('not' in v) {
@@ -54,8 +60,13 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
     driver: () => null,
   },
   scenarioResult: { unservedOrders: (r) => (tables.unservedOrder ?? []).filter((u) => u.scenarioId === r.id).map((u) => ({ ...u })) },
-  // carriedTo (PR9): the copy an order was brought forward to, as the test row gives it.
-  order: { customer: () => ({ id: 'c', code: 'C', branchKey: '__MAIN__' }), lines: () => [], carriedTo: (r) => r.carriedTo ?? null },
+  // carriedTo (PR9): the copy an order was brought forward to, as the test row gives it. A row's own
+  // customer and lines (PR9 review: the carry window and the reconciliation read them) when it has them.
+  order: {
+    customer: (r) => r.customer ?? { id: 'c', code: 'C', branchKey: '__MAIN__' },
+    lines: (r) => r.lines ?? [],
+    carriedTo: (r) => r.carriedTo ?? null,
+  },
   runPlan: { depot: (r) => (tables.depot ?? []).find((d) => d.id === r.depotId) ?? { id: r.depotId, code: 'D', name: 'D', lat: 23.6, lng: 58.4 } },
   routeAssignment: { load: (r) => (tables.planLoad ?? []).find((l) => l.id === r.loadId) ?? null, order: (r) => orderOf(r.orderId) },
 };

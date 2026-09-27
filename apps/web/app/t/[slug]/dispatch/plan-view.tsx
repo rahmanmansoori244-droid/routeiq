@@ -16,7 +16,7 @@ import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
-import { carriedFromBadge, carriedToBadge } from '@/lib/dispatch/carry-view';
+import { carriedFromBadge, carriedLoadRemedy, carriedToBadge, holdsOnlyCarried, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
@@ -317,8 +317,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // "Road km (3 legs estimated)" when some legs could not be routed on roads (review F18).
   const kmLabel = kmLabelFor({ distanceIsEstimated: !!s?.distanceIsEstimated, estimatedLegs: s?.estimatedLegs, estimatedLoads: s?.estimatedLoads });
   const kmShort = s?.distanceIsEstimated ? 'Estimated km' : 'Road km';
-  // Every order is on a locked, loading or dispatched load: a re-plan would have nothing to plan.
-  const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
+  // Every order is on a locked, loading or dispatched load, or was brought forward to a later day
+  // (PR9: a load or unserved line holding only such orders is not work): a re-plan has nothing to plan.
+  const nothingToPlan = nothingToReplan({ ...replanWork(d.loads, d.unserved), pendingOrders: d.pendingOrders ?? 1 });
+  // Nothing to plan only because the rest was brought forward (the title says so, never "unlock a load").
+  const onlyCarriedLeft = nothingToPlan && !nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
   // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
   // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
@@ -370,7 +373,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 onClick={() => replan('REOPTIMIZE')}
                 data-testid="replan-btn"
                 title={
-                  nothingToPlan
+                  onlyCarriedLeft
+                    ? 'Nothing to plan: the orders still shown on Planned loads or as unserved were brought forward to a later day (they need nothing: they stay here for the record), and every other order is on a locked, loading or dispatched load. Add a late order to plan more.'
+                    : nothingToPlan
                     ? canStepBack(d.loads.map((l) => l.status))
                       ? 'Nothing to plan: every order is on a locked, loading or dispatched load. Unlock a load (or add a late order) first.'
                       : 'Nothing to plan: every load has left the depot. Add a late order to plan more.'
@@ -760,7 +765,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           variant="warning"
                           className="ml-1"
                           data-testid={`load-carried-away-${l.truckCode}-${l.loadNo}`}
-                          title="Orders on this load were brought forward to a later day: it cannot be locked, loaded or dispatched with them. Re-plan this day (unlock the load first) to take them off."
+                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l))}`}
                         >
                           {l.carriedAway} order(s) carried over
                         </Badge>

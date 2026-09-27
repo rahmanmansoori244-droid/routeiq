@@ -16,7 +16,7 @@
  * tests/integration/carry-over.spec.ts.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -32,21 +32,38 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tena
 
 import { GET as previewRoute, POST as carryRoute } from '@/app/api/dispatch/carry-over/route';
 import {
+  bringForward,
   carryCandidates,
   carryCopyData,
+  carryOverPreview,
+  carryWindow,
   checkSelection,
   isCarryConflict,
   type CarryOrderIn,
   type CarryPlanIn,
   type CarrySource,
 } from '@/lib/dispatch/carry-over';
-import { carriedFromBadge, carriedStopText, carriedToBadge, carryDoneText, carrySelectionPayload, defaultCarrySelection } from '@/lib/dispatch/carry-view';
+import {
+  carriedFromBadge,
+  carriedLoadRemedy,
+  carriedLoadShows,
+  carriedStopText,
+  carriedToBadge,
+  carryDoneText,
+  carrySelectionPayload,
+  defaultCarrySelection,
+  holdsOnlyCarried,
+  orderCarryMarks,
+  orderListTotals,
+  replanWork,
+} from '@/lib/dispatch/carry-view';
+import { orderStatusFilter } from '@/lib/orders-list';
 import { customerKey, lineDupKey } from '@/lib/dispatch/order-intake';
-import { ordersInScopeWhere, pendingLateOrderIds, updateLoad } from '@/lib/dispatch/plan-service';
+import { carriedHeldCases, ordersInScopeWhere, pendingLateOrderIds, refreshPlanFacts, updateLoad } from '@/lib/dispatch/plan-service';
 import ExcelJS from 'exceljs';
 import { buildDispatchWorkbook, carriedOverRows, loadSheetName } from '@/lib/dispatch/workbook';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
-import { fmtDayMonth } from '@/lib/dispatch/time';
+import { addDaysIso, fmtDayMonth, todayIso } from '@/lib/dispatch/time';
 import { CARRIED_OUT_OF_PLAN } from '@/lib/dashboard';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { fixture } from './plan-detail-fixture';
@@ -77,7 +94,8 @@ function plan(over: Partial<CarryPlanIn> = {}): CarryPlanIn {
   return { version: 1, status: 'READY', chosen: true, scopeOrderIds: [], loads: [], unserved: [], ...over };
 }
 const load = (truckCode: string, loadNo: number, status: string, assignments: { orderId: string; portionLinesJson: unknown }[]) => ({ truckCode, loadNo, status, assignments });
-const target = (keys: string[] = []) => ({ date: D, confirmedKeys: new Set(keys) });
+/** Day D, the company's today (default: D itself, so every earlier day is over) and the lines already on D. */
+const target = (keys: string[] = [], today = D) => ({ date: D, today, confirmedKeys: new Set(keys) });
 
 describe('carryCandidates: what was not delivered', () => {
   it('an order unserved in its day\'s live plan is carried whole, with the unserved reason', () => {
@@ -218,6 +236,54 @@ describe('carryCandidates: what was not delivered', () => {
     expect(c.firstDate).toBe('2026-09-24');
     expect(c.weightKg).toBe(500);
     expect(c.salesOrders).toEqual([]);
+  });
+});
+
+describe('only days that are over: never today or later in the company\'s timezone (PR9 review)', () => {
+  const TODAY = D1; // 27 Sep; the day screen opens on tomorrow, D = 28 Sep
+  it('the window is [D-7, D-1] capped at yesterday; a day more than a week ahead has none', () => {
+    expect(carryWindow('2026-09-27', '2026-09-27')).toEqual({ from: '2026-09-20', to: '2026-09-26' });
+    expect(carryWindow('2026-09-28', '2026-09-27')).toEqual({ from: '2026-09-21', to: '2026-09-26' });
+    expect(carryWindow('2026-09-30', '2026-09-27')).toEqual({ from: '2026-09-23', to: '2026-09-26' });
+    expect(carryWindow('2026-09-20', '2026-09-27')).toEqual({ from: '2026-09-13', to: '2026-09-19' });
+    const far = carryWindow('2026-10-10', '2026-09-27');
+    expect(far.to < far.from).toBe(true);
+  });
+
+  it('D = tomorrow: today\'s orders (loads locked at night, afternoon trips, waiting late orders) are not listed; yesterday\'s are', () => {
+    const orders = [
+      ord('TP', { deliveryDate: TODAY }),
+      ord('TL', { deliveryDate: TODAY }),
+      ord('TU', { deliveryDate: TODAY }),
+      ord('TN', { deliveryDate: TODAY }),
+      ord('Y', { deliveryDate: D2 }),
+    ];
+    const todayPlan = plan({
+      scopeOrderIds: ['TP', 'TL', 'TU'],
+      loads: [load('T01', 1, 'LOCKED', [{ orderId: 'TL', portionLinesJson: null }]), load('T01', 2, 'PLANNED', [{ orderId: 'TP', portionLinesJson: null }])],
+      unserved: [{ orderId: 'TU', reasonCode: 'TRIP_LIMIT', reasonMessage: null, portionLinesJson: null }],
+    });
+    const out = carryCandidates(orders, new Map([[TODAY, todayPlan], [D2, null]]), target([], TODAY));
+    expect(out.map((c) => c.orderId)).toEqual(['Y']);
+    // The same orders once the day is over (the next morning, D = 28 Sep = today): all listed.
+    const later = carryCandidates(orders, new Map([[TODAY, todayPlan], [D2, null]]), target([], D));
+    expect(later.map((c) => [c.orderId, c.why[0].kind])).toEqual([
+      ['Y', 'NEVER_PLANNED'],
+      ['TL', 'NOT_LEFT'],
+      ['TN', 'NEVER_PLANNED'],
+      ['TP', 'NOT_LEFT'],
+      ['TU', 'UNSERVED'],
+    ]);
+  });
+
+  it('D = today + 2: tomorrow\'s confirmed orders are not due yet and never listed (nor today\'s)', () => {
+    const tomorrow = D; // 28 Sep
+    const out = carryCandidates(
+      [ord('TM', { deliveryDate: tomorrow }), ord('TD', { deliveryDate: TODAY }), ord('Y', { deliveryDate: D2 })],
+      new Map([[tomorrow, null], [TODAY, null], [D2, null]]),
+      { date: '2026-09-29', today: TODAY, confirmedKeys: new Set() },
+    );
+    expect(out.map((c) => c.orderId)).toEqual(['Y']);
   });
 });
 
@@ -473,9 +539,28 @@ describe('the planner around carried orders', () => {
         expect(e.status, `${from} -> ${to}`).toBe(409);
         expect(e.details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['O1'] });
         expect(e.message).toContain('T01 L1 carries 1 order(s) that were brought forward to a later day: C1 (to 2026-09-28)');
-        expect(e.message).toContain(from === 'PLANNED' ? 'Re-plan this day to take them off.' : 'Put the load back to Planned and re-plan this day');
+        // PR9 review: a load holding nothing else needs nothing - never "re-plan this day" (a re-plan
+        // of a day with nothing else open has nothing to plan: NOTHING_TO_PLAN).
+        expect(e.message).toContain('This load holds nothing else: leave it as it is.');
+        expect(e.message).toContain(from === 'PLANNED' ? 'never loaded or dispatched; nothing needs to be re-planned' : '(you can put it back to Planned)');
+        expect(e.message).not.toMatch(/re-plan this day/i);
         expect(row('planLoad', 'L1').status).toBe(from);
         expect(tables.auditLog.some((a) => String(a.action).startsWith('LOAD_'))).toBe(false);
+      }
+    });
+
+    it('a load that also holds orders not brought forward: re-plan the day for them (unlock first when locked)', async () => {
+      for (const from of ['PLANNED', 'LOCKED'] as const) {
+        resetDb();
+        seed(from);
+        tables.order.push({ id: 'O9', tenantId: T, customerId: 'c9', customer: { code: 'C9', branchCode: null }, totalCases: 10, totalWeightKg: 100, status: 'ASSIGNED', deliveryDate: new Date(`${D1}T00:00:00Z`), carriedToOrderId: null });
+        tables.routeAssignment.push({ id: 'A9', runId: 'P', truckId: 'T1', loadId: 'L1', loadNo: 1, orderId: 'O9', sequenceInTruck: 2, orderInStop: 0, portionLinesJson: null });
+        const e = await updateLoad(T, 'P', 'L1', { status: from === 'PLANNED' ? 'LOCKED' : 'LOADING' }, user, allow).catch((x) => x);
+        expect(e.details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['O1'] });
+        expect(e.message).toContain(
+          from === 'PLANNED' ? 'Re-plan this day to plan its other orders without them.' : 'To deliver its other orders, put the load back to Planned and re-plan this day',
+        );
+        expect(e.message).not.toContain('holds nothing else');
       }
     });
 
@@ -513,8 +598,309 @@ describe('the planner around carried orders', () => {
   });
 });
 
+describe('PR9 review: the carry on the database, split orders, re-plans, lists and the dashboard', () => {
+  const T = 'tA';
+  const day = (iso: string) => new Date(`${iso}T00:00:00Z`);
+  /** 10:00 in Muscat on 27 Sep: the dispatcher plans tomorrow, 28 Sep. */
+  const NOW = new Date('2026-09-27T06:00:00Z');
+  const shop = (code: string) => ({ id: `c-${code}`, code, branchCode: null, branchKey: '__MAIN__', name: `Shop ${code}`, active: true });
+  const order = (id: string, iso: string, status: string, over: Record<string, unknown> = {}) => ({
+    id,
+    tenantId: T,
+    depotId: 'DA',
+    customerId: `c-${id}`,
+    customer: shop(id),
+    deliveryDate: day(iso),
+    status,
+    totalCases: 10,
+    totalWeightKg: 100,
+    priority: 3,
+    isLate: false,
+    salesValue: null,
+    marginValue: null,
+    carriedToOrderId: null,
+    carriedFromDate: null,
+    uploadedAt: new Date('2026-09-20T00:00:00Z'),
+    lines: [{ id: `${id}-l1`, cases: 10, weightKg: 100, salesOrderNo: `SO-${id}`, product: { code: 'W500', name: 'Water' } }],
+    ...over,
+  });
+  const runPlan = (id: string, iso: string, over: Record<string, unknown> = {}) => ({
+    id, tenantId: T, depotId: 'DA', runDate: day(iso), status: 'READY', version: 1, reason: 'INITIAL', chosenScenarioId: `sc-${id}`, parentRunId: null, supersededAt: null,
+    currentJobId: null, finalizedAt: null, reconciliationJson: { ok: true }, summaryJson: null, feasibilityJson: null, createdAt: new Date('2026-09-25T12:00:00Z'), ...over,
+  });
+  const details = (orderIds: string[], over: Record<string, unknown> = {}) => ({
+    name: 'RECOMMENDED', status: 'OPTIMIZED', solver_status: 'ROUTING_SUCCESS', solver_time_sec: 1, engine: 'OR-Tools', matrix_provider: 'HAVERSINE',
+    distance_is_estimated: true, response_warnings: [], warnings: [], loads: [], unserved: [],
+    scope: { orderIds, frozenOrderIds: [], orderPriority: {}, frozenLoadIds: [], frozenLoadOrderIds: [] },
+    ...over,
+  });
+
+  /** 26 Sep: YEST unserved. 27 Sep (today): TODAY on T01 L1, locked last night, not left yet. */
+  function seedDays() {
+    tables.depot = [{ id: 'DA', tenantId: T, code: 'A1', active: true }];
+    tables.tenantConfig = [{ id: 'cfgA', tenantId: T, timezone: 'Asia/Muscat', planningCutoffMin: 1080 }];
+    tables.truck = [{ id: 'T1', tenantId: T, code: 'T01' }];
+    tables.order = [order('TODAY', D1, 'ASSIGNED'), order('YEST', D2, 'UNSERVED')];
+    tables.runPlan = [runPlan('P26', D2), runPlan('P27', D1)];
+    tables.planLoad = [
+      { id: 'L27', tenantId: T, runId: 'P27', truckId: 'T1', loadNo: 1, status: 'LOCKED', truck: { code: 'T01' }, assignments: [{ orderId: 'TODAY', portionLinesJson: null }] },
+    ];
+    tables.routeAssignment = [];
+    tables.scenarioResult = [
+      { id: 'sc-P26', runId: 'P26', name: 'RECOMMENDED', detailsJson: details(['YEST']) },
+      { id: 'sc-P27', runId: 'P27', name: 'RECOMMENDED', detailsJson: details(['TODAY']) },
+    ];
+    tables.unservedOrder = [{ id: 'U26', scenarioId: 'sc-P26', orderId: 'YEST', reasonCode: 'TRIP_LIMIT', reasonMessage: 'Trucks out of loads.', portionLinesJson: null }];
+    tables.orderLine = [];
+    tables.auditLog = [];
+  }
+
+  /** Every raw query of the fake with its values (the advisory lock keys are values). */
+  function recordRaw() {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const orig = fakePrisma.$queryRaw;
+    fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      calls.push({ sql: strings.join('?'), values });
+      return orig(strings, ...values);
+    };
+    return { calls, restore: () => (fakePrisma.$queryRaw = orig) };
+  }
+
+  beforeEach(() => {
+    resetDb();
+    vi.unstubAllEnvs();
+  });
+
+  it('the preview for tomorrow lists yesterday, never today (its locked load may still leave); the next morning it does', async () => {
+    seedDays();
+    const pv = await carryOverPreview(T, 'DA', D, { now: NOW });
+    expect(pv).toMatchObject({ from: '2026-09-21', to: D2, today: D1, orders: 1, cases: 10 });
+    expect(pv.candidates.map((c) => [c.orderId, c.why[0].kind])).toEqual([['YEST', 'UNSERVED']]);
+    // 28 Sep, 07:00 in Muscat: 27 Sep is over, its locked load never left.
+    const next = await carryOverPreview(T, 'DA', D, { now: new Date('2026-09-28T03:00:00Z') });
+    expect(next.candidates.map((c) => [c.orderId, c.why[0].kind])).toEqual([
+      ['YEST', 'UNSERVED'],
+      ['TODAY', 'NOT_LEFT'],
+    ]);
+  });
+
+  it("bringing forward one of today's orders is refused (409 CARRY_OVER_CHANGED), nothing is carried and its load keeps it", async () => {
+    seedDays();
+    const e = await bringForward(T, 'DA', D, [{ orderId: 'TODAY', cases: 10 }], { id: 'u1' }, { now: NOW }).catch((x) => x);
+    expect(e.status).toBe(409);
+    expect(e.details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
+    expect(row('order', 'TODAY').carriedToOrderId).toBeNull();
+    expect(tables.order).toHaveLength(2);
+  });
+
+  it("the day locks of the days read come before their plans' row locks (no re-plan makes a new version meanwhile)", async () => {
+    seedDays();
+    const raw = recordRaw();
+    try {
+      // The screen showed other cases: refused after every lock was taken.
+      const e = await bringForward(T, 'DA', D, [{ orderId: 'YEST', cases: 5 }], { id: 'u1' }, { now: NOW }).catch((x) => x);
+      expect(e.details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
+    } finally {
+      raw.restore();
+    }
+    const at = (pred: (c: { sql: string; values: unknown[] }) => boolean) => raw.calls.findIndex(pred);
+    const intake = at((c) => c.values[0] === 'intake:tA');
+    const dayLock = at((c) => c.values[0] === `planday:tA|DA|${D2}`);
+    const rowLock = at((c) => /FOR UPDATE/.test(c.sql) && c.values[0] === 'P26');
+    expect(intake).toBeGreaterThanOrEqual(0);
+    expect(dayLock).toBeGreaterThan(intake);
+    expect(rowLock).toBeGreaterThan(dayLock);
+    // Today is not read, so neither locked.
+    expect(raw.calls.some((c) => c.values[0] === `planday:tA|DA|${D1}`)).toBe(false);
+  });
+
+  it('a plan that stopped being the live one while it was being locked: 409 PLAN_BUSY, nothing read from the unlocked version, nothing carried', async () => {
+    seedDays();
+    const inner = fakePrisma.$queryRaw;
+    fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const res = await inner(strings, ...values);
+      // A re-plan of 26 Sep commits right before the row lock is granted: v1 superseded, v2 live.
+      if (/FOR UPDATE/.test(strings.join('?')) && values[0] === 'P26' && !tables.runPlan.some((r) => r.id === 'P26v2')) {
+        row('runPlan', 'P26').supersededAt = new Date();
+        row('runPlan', 'P26').status = 'SUPERSEDED';
+        tables.runPlan.push(runPlan('P26v2', D2, { version: 2, chosenScenarioId: 'sc-P26' }));
+      }
+      return res;
+    };
+    try {
+      const e = await bringForward(T, 'DA', D, [{ orderId: 'YEST', cases: 10 }], { id: 'u1' }, { now: NOW }).catch((x) => x);
+      expect(e.status).toBe(409);
+      expect(e.details).toMatchObject({ code: 'PLAN_BUSY' });
+      expect(e.message).toContain('The 26 Sep plan changed while the orders were being brought forward');
+    } finally {
+      fakePrisma.$queryRaw = inner;
+    }
+    expect(row('order', 'YEST').carriedToOrderId).toBeNull();
+    expect(tables.order.filter((o) => o.carriedFromOrderId)).toEqual([]);
+  });
+
+  /** 27 Sep re-planned (v2) after S's rest was brought forward: S's 60 cases left on T01 L1, its 40 were carried. */
+  function seedSplitReplan() {
+    tables.depot = [{ id: 'D1', tenantId: T, code: 'D1', name: 'Depot one', lat: 23.58, lng: 58.39, active: true }];
+    tables.truck = [
+      { id: 'T1', tenantId: T, code: 'T01', capacityCases: 800, capacityWeightKg: 12000 },
+      { id: 'T2', tenantId: T, code: 'T02', capacityCases: 800, capacityWeightKg: 12000 },
+    ];
+    tables.order = [
+      order('S', D1, 'ASSIGNED', {
+        depotId: 'D1',
+        customerId: 'cS',
+        totalCases: 100,
+        totalWeightKg: 1000,
+        carriedToOrderId: 'S2',
+        lines: [{ id: 'S-l1', cases: 100, weightKg: 1000, salesOrderNo: 'SO-S', product: { code: 'W500', name: 'Water' } }],
+      }),
+      order('N', D1, 'ASSIGNED', { depotId: 'D1', customerId: 'cN' }),
+    ];
+    tables.runPlan = [runPlan('P2', D1, { depotId: 'D1', version: 2, reason: 'LATE_ORDER', chosenScenarioId: 'sc2', reconciliationJson: null })];
+    tables.planLoad = [
+      { id: 'L1', tenantId: T, runId: 'P2', truckId: 'T1', loadNo: 1, status: 'DISPATCHED', departMin: 400, returnMin: 500, cases: 60, carriedFromLoadId: 'L1v1' },
+      { id: 'L2', tenantId: T, runId: 'P2', truckId: 'T2', loadNo: 1, status: 'PLANNED', departMin: 400, returnMin: 500, cases: 10, carriedFromLoadId: null },
+    ];
+    tables.routeAssignment = [
+      { id: 'A1', runId: 'P2', truckId: 'T1', loadId: 'L1', loadNo: 1, orderId: 'S', sequenceInTruck: 1, orderInStop: 0, portionLinesJson: [{ lineId: 'S-l1', cases: 60 }], portionCases: 60, portionWeightKg: 600 },
+      { id: 'A2', runId: 'P2', truckId: 'T2', loadId: 'L2', loadNo: 1, orderId: 'N', sequenceInTruck: 1, orderInStop: 0, portionLinesJson: null },
+    ];
+    // What buildDispatchRequest makes after the carry: S only through the dispatched load (frozenLoadOrderIds).
+    tables.scenarioResult = [
+      {
+        id: 'sc2',
+        runId: 'P2',
+        name: 'RECOMMENDED',
+        detailsJson: details(['N'], {
+          loads: [{ truck_id: 'T2', load_no: 1, stops: [{ order_ids: ['N'], customer_id: 'cN' }] }],
+          scope: { orderIds: ['N'], frozenOrderIds: ['S'], orderPriority: {}, frozenLoadIds: ['L1'], frozenLoadOrderIds: ['S'] },
+        }),
+      },
+    ];
+    tables.unservedOrder = [];
+    tables.auditLog = [];
+  }
+
+  it('a re-plan after carrying the rest of a split order whose other part left still reconciles, and its loads can be locked', async () => {
+    seedSplitReplan();
+    await refreshPlanFacts(fakePrisma as never, T, 'P2');
+    const recon = row('runPlan', 'P2').reconciliationJson;
+    expect(recon.problems).toEqual([]);
+    expect(recon.ok).toBe(true);
+    // S counts with the 60 cases this day still holds; its 40 are the copy's, on the day they went to.
+    expect([recon.uploadedCases, recon.plannedCases, recon.unservedCases]).toEqual([70, 70, 0]);
+    vi.stubEnv('FEASIBILITY_GATE', 'warn'); // this test is about the cases check, not the timetable
+    await updateLoad(T, 'P2', 'L2', { status: 'LOCKED' }, { id: 'u1', role: 'TENANT_ADMIN' }, () => true);
+    expect(row('planLoad', 'L2').status).toBe('LOCKED');
+  });
+
+  it('carriedHeldCases: only a carried order the version did not plan itself is cut to what it holds', () => {
+    const orders = [
+      { id: 'S', carriedToOrderId: 'S2', lines: [{ id: 'a', cases: 100 }, { id: 'b', cases: 20 }] },
+      { id: 'W', carriedToOrderId: 'W2', lines: [{ id: 'w', cases: 30 }] },
+      { id: 'X', carriedToOrderId: 'X2', lines: [{ id: 'x', cases: 50 }] },
+      { id: 'N', carriedToOrderId: null, lines: [{ id: 'n', cases: 10 }] },
+    ];
+    const planned = [
+      { orderId: 'S', lines: [{ lineId: 'a', cases: 60 }] },
+      { orderId: 'W', lines: null },
+      { orderId: 'X', lines: [{ lineId: 'x', cases: 20 }] },
+      { orderId: 'N', lines: null },
+    ];
+    const held = carriedHeldCases(orders, ['X', 'N'], planned, [{ orderId: 'S', portionLinesJson: [{ lineId: 'b', cases: 5 }] }]);
+    expect([...held.keys()]).toEqual(['S', 'W']); // X was planned by this version (before its carry): all its cases
+    expect([...held.get('S')!]).toEqual([
+      ['a', 60],
+      ['b', 5],
+    ]);
+    expect([...held.get('W')!]).toEqual([['w', 30]]);
+  });
+
+  it('a split order whose part left is not marked "carried over" on the dispatched load or the driver sheet; the part that never left is', async () => {
+    seedSplitReplan();
+    // The version as it was when the rest was carried: 60 on T01 L1 (dispatched), 40 unserved.
+    row('order', 'S').carriedTo = { deliveryDate: day(D), totalCases: 40 };
+    tables.unservedOrder = [{ id: 'US', scenarioId: 'sc2', orderId: 'S', reasonCode: 'TRIP_LIMIT', reasonMessage: 'Trucks out of loads.', portionLinesJson: [{ lineId: 'S-l1', cases: 40 }] }];
+    const d = (await getPlanDetail(T, 'P2'))!;
+    const l1 = d.loads.find((l) => l.id === 'L1')!;
+    expect(l1.carriedAway).toBe(0);
+    expect(l1.stops[0].carriedTo).toBeNull();
+    expect(d.unserved).toEqual([expect.objectContaining({ orderId: 'S', carriedTo: D })]);
+    const sheets = driverPackModel(d, { tenantName: 'NMWC' }).sheets;
+    expect(sheets.flatMap((s) => s.stops).every((s) => s.carried === null)).toBe(true);
+    // The same part on a load that never left (locked): marked, and the load cannot move forward with it.
+    row('planLoad', 'L1').status = 'LOCKED';
+    const d2 = (await getPlanDetail(T, 'P2'))!;
+    const locked = d2.loads.find((l) => l.id === 'L1')!;
+    expect(locked.carriedAway).toBe(1);
+    expect(locked.stops[0].carriedTo).toBe(D);
+    expect(carriedLoadShows('LOCKED') && carriedLoadShows('PLANNED') && carriedLoadShows('LOADING')).toBe(true);
+    expect(carriedLoadShows('DISPATCHED') || carriedLoadShows('COMPLETED')).toBe(false);
+  });
+
+  it('the plan screen: a load or an unserved line holding only brought-forward orders is no work for a re-plan', () => {
+    const loads = [
+      { status: 'PLANNED', carriedAway: 1, stops: [{ orderIds: ['C2'] }] },
+      { status: 'COMPLETED', carriedAway: 0, stops: [{ orderIds: ['C1'] }] },
+    ];
+    expect(replanWork(loads, [{ carriedTo: D }])).toEqual({ loadStatuses: ['COMPLETED'], unservedOrders: 0 });
+    // A load that also holds another order, or an unserved line not carried, is work.
+    expect(replanWork([{ status: 'PLANNED', carriedAway: 1, stops: [{ orderIds: ['C2', 'C9'] }] }], [{ carriedTo: null }])).toEqual({ loadStatuses: ['PLANNED'], unservedOrders: 1 });
+    expect(holdsOnlyCarried({ carriedAway: 0, stops: [] })).toBe(false);
+    expect(carriedLoadRemedy('PLANNED', true)).toBe(
+      'This load holds nothing else: leave it as it is. It stays in this plan for the record and is never loaded or dispatched; nothing needs to be re-planned.',
+    );
+    expect(carriedLoadRemedy('LOCKED', true)).toContain('(you can put it back to Planned)');
+  });
+
+  it('the dashboard subtracts the cases carried from their own day, so cost per case counts every case once', async () => {
+    const { fetchRangeRows } = await import('@/lib/dashboard');
+    const raw = recordRaw();
+    try {
+      await fetchRangeRows(T, D2, D1);
+    } finally {
+      raw.restore();
+    }
+    const sql = raw.calls.map((c) => c.sql).join('\n').replace(/\s+/g, ' ');
+    expect(sql).toContain(
+      `GREATEST(COALESCE(SUM(COALESCE((rp."summaryJson"->>'totalCases')::float8, case_totals.total_cases)), 0) - COALESCE(SUM(carried.cases), 0), 0) AS cases_total`,
+    );
+    expect(CARRIED_OUT_OF_PLAN.sql.replace(/\s+/g, ' ')).toContain('COALESCE(SUM(t.carried_cases) FILTER (WHERE t.unserved OR t.planned), 0) AS cases');
+    expect(CARRIED_OUT_OF_PLAN.sql).toContain('c.id = o."carriedToOrderId"');
+  });
+
+  it('the Orders list: an open status never lists a carried original; both are marked; totals count the cases once', async () => {
+    tables.order = [
+      order('ORIG', D2, 'UNSERVED', { carriedToOrderId: 'COPY', carriedTo: { deliveryDate: day(D1) } }),
+      order('COPY', D1, 'VALIDATED', { carriedFromOrderId: 'ORIG', carriedFromDate: day(D2) }),
+      order('OTHER', D2, 'UNSERVED'),
+    ];
+    const { GET: ordersRoute } = await import('@/app/api/orders/route');
+    const list = async (q: string) => {
+      const res = await ordersRoute(new Request(`http://localhost/api/orders${q}`));
+      expect(res.status).toBe(200);
+      return ((await res.json()) as { data: { id: string; carriedTo: { deliveryDate: string } | null; carriedFromDate: string | null }[] }).data;
+    };
+    expect((await list('?status=UNSERVED')).map((o) => o.id)).toEqual(['OTHER']);
+    expect((await list('?status=CARRIED')).map((o) => o.id)).toEqual(['ORIG']);
+    const all = (await list('')).sort((a, b) => a.id.localeCompare(b.id));
+    expect(all.map((o) => [o.id, orderCarryMarks(o)])).toEqual([
+      ['COPY', { to: null, from: D2 }],
+      ['ORIG', { to: D1, from: null }],
+      ['OTHER', { to: null, from: null }],
+    ]);
+    expect(orderListTotals(all.map((o) => ({ ...o, totalCases: 10, totalWeightKg: 100 })))).toEqual({ cases: 20, kg: 200, carried: 1 });
+    expect(orderStatusFilter('ASSIGNED')).toEqual({ status: 'ASSIGNED', carriedToOrderId: null });
+    expect(orderStatusFilter('DISPATCHED')).toEqual({ status: 'DISPATCHED' });
+    expect(carriedToBadge(orderCarryMarks(all[1]).to!)).toBe('Carried over to 27 Sep');
+  });
+});
+
 describe('the carry-over API: roles, bodies and tenant isolation', () => {
-  const DAY = '2099-03-10';
+  // The company's today on the real clock (the route has no clock of its own): yesterday is over.
+  const DAY = todayIso('Asia/Muscat');
+  const YESTERDAY = addDaysIso(DAY, -1);
   beforeEach(() => {
     resetDb();
     session.role = 'PLANNER';
@@ -523,8 +909,13 @@ describe('the carry-over API: roles, bodies and tenant isolation', () => {
       { id: 'DB', tenantId: 'tB', code: 'B1', active: true },
     ];
     tables.tenantConfig = [{ id: 'cfgA', tenantId: 'tA', timezone: 'Asia/Muscat', planningCutoffMin: 1080 }];
-    // An unserved order of ANOTHER company, the day before.
-    tables.order = [{ id: 'B-ORDER', tenantId: 'tB', depotId: 'DB', customerId: 'cb', deliveryDate: new Date('2099-03-09T00:00:00Z'), status: 'UNSERVED', totalCases: 5, totalWeightKg: 50, carriedToOrderId: null }];
+    // An order of this company and one of ANOTHER company, both not delivered the day before (no plan).
+    const line = (id: string) => [{ id: `${id}-l1`, cases: 5, weightKg: 50, salesOrderNo: `SO-${id}`, product: { code: 'W500' } }];
+    const customer = (code: string) => ({ code, branchCode: null, branchKey: '__MAIN__', name: code, active: true });
+    tables.order = [
+      { id: 'B-ORDER', tenantId: 'tB', depotId: 'DB', customerId: 'cb', customer: customer('CB'), deliveryDate: new Date(`${YESTERDAY}T00:00:00Z`), status: 'VALIDATED', priority: 3, totalCases: 5, totalWeightKg: 50, carriedToOrderId: null, carriedFromDate: null, lines: line('B') },
+      { id: 'A-ORDER', tenantId: 'tA', depotId: 'DA', customerId: 'ca', customer: customer('CA'), deliveryDate: new Date(`${YESTERDAY}T00:00:00Z`), status: 'VALIDATED', priority: 3, totalCases: 5, totalWeightKg: 50, carriedToOrderId: null, carriedFromDate: null, lines: line('A') },
+    ];
   });
   const post = (body: unknown) => carryRoute(new Request('http://localhost/api/dispatch/carry-over', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json' } }));
   const get = (q: string) => previewRoute(new Request(`http://localhost/api/dispatch/carry-over?${q}`));
@@ -532,13 +923,14 @@ describe('the carry-over API: roles, bodies and tenant isolation', () => {
   it('another company\'s orders are never listed, and selecting one carries nothing (409, no data about it)', async () => {
     const pv = await get(`date=${DAY}&depotId=DA`);
     expect(pv.status).toBe(200);
-    expect(((await pv.json()) as { data: { candidates: unknown[] } }).data.candidates).toEqual([]);
+    // Its own order is listed (the day before is over), the other company's never.
+    expect(((await pv.json()) as { data: { candidates: { orderId: string }[] } }).data.candidates.map((c) => c.orderId)).toEqual(['A-ORDER']);
     const res = await post({ date: DAY, depotId: 'DA', selected: [{ orderId: 'B-ORDER', cases: 5 }] });
     expect(res.status).toBe(409);
     const body = (await res.json()) as { error: { code: string; changed: { orderId: string; text: string }[] } };
     expect(body.error.code).toBe('CARRY_OVER_CHANGED');
     expect(body.error.changed).toEqual([{ orderId: 'B-ORDER', text: 'No longer open on an earlier day (delivered, dispatched or removed since the list was shown).' }]);
-    expect(tables.order).toHaveLength(1);
+    expect(tables.order).toHaveLength(2);
     expect(row('order', 'B-ORDER').carriedToOrderId).toBeNull();
   });
 

@@ -68,6 +68,7 @@ import { loadingFromWarning, planDayNowMin, planFromWarning, sameDayPlanFrom, ty
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
+import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
 import {
   readPlanInputs,
@@ -1273,6 +1274,38 @@ async function snapshotSource(
 }
 
 /**
+ * PR9: the cases per line a version still holds of each order that was brought forward to a later
+ * day and that this version did not plan itself (not in `optimized`, the option's scope.orderIds):
+ * a re-plan made after the carry leaves such an order out (ordersInScopeWhere) but keeps the parts
+ * of it on its frozen loads (in scope through frozenLoadOrderIds). Its rest - the cases carried - is
+ * the copy's, counted on the day it went to, so the version reconciles the order against those
+ * parts only: its planned portions and any unserved rows of it. Without this a split order with a
+ * dispatched part and a carried rest reconciled "uploaded 100 != planned 60 + unserved 0" for good,
+ * and every lock, load and dispatch of that day was refused (NOT_RECONCILED). Every other order -
+ * also a carried order in a version made before its carry - reconciles with all its cases.
+ */
+export function carriedHeldCases(
+  orders: readonly { id: string; carriedToOrderId: string | null; lines: readonly { id: string; cases: number }[] }[],
+  optimized: readonly string[],
+  planned: readonly { orderId: string; lines: { lineId: string; cases: number }[] | null }[],
+  unserved: readonly { orderId: string; portionLinesJson: unknown }[],
+): Map<string, Map<string, number>> {
+  const inOption = new Set(optimized);
+  const out = new Map<string, Map<string, number>>();
+  for (const o of orders) {
+    if (!o.carriedToOrderId || inOption.has(o.id)) continue;
+    const m = new Map(o.lines.map((l) => [l.id, 0]));
+    const add = (lines: { lineId: string; cases: number }[] | null) => {
+      for (const x of lines ?? o.lines.map((l) => ({ lineId: l.id, cases: l.cases }))) if (m.has(x.lineId)) m.set(x.lineId, m.get(x.lineId)! + x.cases);
+    };
+    for (const p of planned) if (p.orderId === o.id) add(p.lines);
+    for (const u of unserved) if (u.orderId === o.id) add(readPortionLines(u.portionLinesJson));
+    out.set(o.id, m);
+  }
+  return out;
+}
+
+/**
  * Recompute reconciliation, daily summary and (for versions > 1) the change summary.
  * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
  * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
@@ -1307,12 +1340,13 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
   for (const ld of d.loads) {
     for (const st of ld.stops) for (const oid of st.order_ids) stopCustomer.set(where(ld.truck_id, ld.load_no, orderIdOf(oid)), st.customer_id);
   }
+  const held = carriedHeldCases(orders, d.scope.orderIds, planned, sc.unservedOrders);
   const recon: Reconciliation = reconcile(
     orders.map((o) => ({
       id: o.id,
       customerId: o.customerId,
       customerKey: `${o.customer.code}::${o.customer.branchKey}`,
-      lines: o.lines.map((l) => ({ id: l.id, productCode: l.product.code, productName: l.product.name, salesOrderNo: l.salesOrderNo, cases: l.cases })),
+      lines: o.lines.map((l) => ({ id: l.id, productCode: l.product.code, productName: l.product.name, salesOrderNo: l.salesOrderNo, cases: held.get(o.id)?.get(l.id) ?? l.cases })),
     })),
     planned.map(({ cases: _c, ...p }) => ({ ...p, customerId: stopCustomer.get(where(p.truckId, p.loadNo, p.orderId)) ?? p.customerId })),
     sc.unservedOrders.map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode, lines: readPortionLines(u.portionLinesJson) })),
@@ -2012,8 +2046,11 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
 /**
  * PR9: LOCK, LOADING and DISPATCH of a load holding an order that was brought forward to a later
  * day (carriedToOrderId) are refused with 409 ORDERS_CARRIED, naming the customers and the day
- * they went to. The remedy: re-plan this day (a PLANNED load), or put the load back to Planned
- * and re-plan (the re-plan leaves carried orders out). Read without a relation filter.
+ * they went to. The remedy (carriedLoadRemedy) depends on what else the load holds: with other
+ * orders, re-plan this day (put a locked or loading load back to Planned first; the re-plan leaves
+ * carried orders out); with nothing else, leave the load as it is - it stays in the plan for the
+ * record, and a re-plan of the day would have nothing to plan (NOTHING_TO_PLAN). Read without a
+ * relation filter.
  */
 async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
   const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
@@ -2026,7 +2063,7 @@ async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; t
   const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
   const where = `${truck?.code ?? 'Truck'} L${load.loadNo}`;
   const names = [...new Set(carried.map((o) => `${o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id)}${o.carriedTo ? ` (to ${isoOf(o.carriedTo.deliveryDate)})` : ''}`))];
-  const remedy = load.status === 'PLANNED' ? 'Re-plan this day to take them off.' : 'Put the load back to Planned and re-plan this day to take them off.';
+  const remedy = carriedLoadRemedy(load.status, carried.length === ids.length);
   throw new PlanError(
     `${where} carries ${carried.length} order(s) that were brought forward to a later day: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. They are planned on that day now, so this load cannot be locked, loaded or dispatched with them. ${remedy}`,
     409,

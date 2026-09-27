@@ -52,17 +52,22 @@ export const PLAN_ORDERS_IN_SCOPE = Prisma.sql`o."tenantId" = rp."tenantId" AND 
  * PR9: the orders of plan rp that were brought forward to a later day since (carriedToOrderId): they
  * were not delivered on rp's day and are counted on the day they went to. `in_plan`: those the plan
  * counts in its totalOrders (on its loads or unserved in its option in use); `unserved`: those in its
- * unservedCount. The dashboard subtracts them, so an order carried forward counts once - on its new
- * day - and its own day's plan (kept as it was) no longer counts it as an order, nor as unserved.
+ * unservedCount; `cases`: of those in the plan, the cases carried (their copies' cases: what was not
+ * delivered). The plan's summary counts every order it holds with all its cases, so the dashboard
+ * subtracts them: an order carried forward counts once - on its new day - and its own day's plan
+ * (kept as it was) no longer counts it as an order, nor as unserved, and counts only the cases that
+ * left on its loads (the delivered part of a split order), so cost per case counts every case once.
  */
 export const CARRIED_OUT_OF_PLAN = Prisma.sql`
       SELECT
         COUNT(*) FILTER (WHERE t.unserved OR t.planned) AS in_plan,
-        COUNT(*) FILTER (WHERE t.unserved) AS unserved
+        COUNT(*) FILTER (WHERE t.unserved) AS unserved,
+        COALESCE(SUM(t.carried_cases) FILTER (WHERE t.unserved OR t.planned), 0) AS cases
       FROM (
         SELECT
           EXISTS (SELECT 1 FROM "UnservedOrder" u WHERE u."scenarioId" = rp."chosenScenarioId" AND u."orderId" = o.id) AS unserved,
-          EXISTS (SELECT 1 FROM "RouteAssignment" ra WHERE ra."runId" = rp.id AND ra."orderId" = o.id) AS planned
+          EXISTS (SELECT 1 FROM "RouteAssignment" ra WHERE ra."runId" = rp.id AND ra."orderId" = o.id) AS planned,
+          (SELECT c."totalCases" FROM "Order" c WHERE c.id = o."carriedToOrderId") AS carried_cases
         FROM "Order" o
         WHERE ${PLAN_ORDERS_IN_SCOPE} AND o."carriedToOrderId" IS NOT NULL
       ) AS t`;
@@ -165,7 +170,7 @@ export async function fetchRangeRows(tenantId: string, from: string, to: string)
       AVG(COALESCE((rp."summaryJson"->>'avgUtilizationPct')::float8, sr."avgUtilizationPct")) AS avg_util,
       GREATEST(COALESCE(SUM(rp."totalOrders"), 0) - COALESCE(SUM(carried.in_plan), 0), 0)::bigint AS orders_total,
       GREATEST(COALESCE(SUM(rp."unservedCount"), 0) - COALESCE(SUM(carried.unserved), 0), 0)::bigint AS orders_unserved,
-      COALESCE(SUM(COALESCE((rp."summaryJson"->>'totalCases')::float8, case_totals.total_cases)), 0) AS cases_total
+      GREATEST(COALESCE(SUM(COALESCE((rp."summaryJson"->>'totalCases')::float8, case_totals.total_cases)), 0) - COALESCE(SUM(carried.cases), 0), 0) AS cases_total
     FROM "RunPlan" rp
     LEFT JOIN "ScenarioResult" sr ON sr.id = rp."chosenScenarioId"
     LEFT JOIN LATERAL (

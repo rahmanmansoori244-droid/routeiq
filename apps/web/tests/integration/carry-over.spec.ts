@@ -16,12 +16,18 @@
  *     RE-PLAN (reason LATE_ORDER) keeps the locked load exactly as it was and adds them.
  *  3. Two "Bring forward" calls at the same time carry each order once (intake lock + unique links);
  *     a day that was never planned is carried whole; a list that changed answers 409 and carries nothing.
+ *  4. (PR9 review) A split order: the part on a dispatched load stays delivered (no "carried over" mark
+ *     there), only the rest is brought forward, and a re-plan of its day afterwards still reconciles
+ *     and its new load can be locked and dispatched.
+ *
+ * Bring forward only looks at days that are over (never the company's today or later), so every
+ * carry here runs with the clock on the day it carries to (`onDay`), after the days it reads.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
 
-/** Customer ids whose stops the fake optimizer leaves unserved. */
-const solverMode = vi.hoisted(() => ({ unserved: new Set<string>() }));
+/** Customer ids whose stops the fake optimizer leaves unserved; `unservedStops`: single stops (a split part "<customerId>#2"). */
+const solverMode = vi.hoisted(() => ({ unserved: new Set<string>(), unservedStops: new Set<string>() }));
 /** The signed-in user for the one route called directly (the batch delete). */
 const session = vi.hoisted(() => ({ user: null as null | Record<string, unknown> }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: session.user } : null)) }));
@@ -42,7 +48,8 @@ vi.mock('@/lib/solver-client', () => {
         return [t.id, { loadNo: frozen.length ? Math.max(...frozen.map((f) => f.load_no)) : 0, back: frozen.length ? Math.max(...frozen.map((f) => f.return_min)) : null as number | null }];
       }),
     );
-    const served = req.stops.filter((s) => !solverMode.unserved.has(s.customer_id));
+    const left = (s: DispatchRequest['stops'][number]) => solverMode.unserved.has(s.customer_id) || solverMode.unservedStops.has(s.stop_id);
+    const served = req.stops.filter((s) => !left(s));
     const loads: PlannedLoad[] = served.map((s, i) => {
       const truck = req.trucks[i % req.trucks.length]!;
       const st = state.get(truck.id)!;
@@ -66,7 +73,7 @@ vi.mock('@/lib/solver-client', () => {
       trucks_used: new Set(loads.map((l) => l.truck_id)).size, trips: loads.length, total_distance_km: loads.length * 40, total_duration_min: loads.length * 120,
       total_cases: loads.reduce((a, l) => a + l.cases, 0), total_kg: 0, avg_utilization_pct: 10, fuel_litres: 0, fuel_cost: 0, operating_cost: loads.length * 2.5, loads,
       unserved: req.stops
-        .filter((s) => solverMode.unserved.has(s.customer_id))
+        .filter((s) => left(s))
         .map((s) => ({ stop_id: s.stop_id, order_ids: s.order_ids, reason_code: 'SOLVER_DROPPED_LOW_PRIORITY', reason_message: 'No truck had room left (test).' })),
       warnings: [],
     };
@@ -109,6 +116,8 @@ const morningBefore = (iso: string) => {
   d.setUTCDate(d.getUTCDate() - 2);
   return d;
 };
+/** 09:00 in Muscat on `iso`: the days before it are over, so Bring forward to `iso` looks at them. */
+const onDay = (iso: string) => new Date(`${iso}T05:00:00Z`);
 
 async function jobsDone(runId: string) {
   const g = globalThis as unknown as { __routeiqInflight?: Map<string, Promise<void>> };
@@ -201,6 +210,8 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     const DAY1 = isoPlus(20);
     const DAY2 = isoPlus(21);
     const now = morningBefore(DAY1);
+    // The morning of day 2: day 1 is over (its locked load never left).
+    const carryNow = onDay(DAY2);
     const o1 = await addOrder('C1', DAY1, 10, 'SO-1');
     const o2 = await addOrder('C2', DAY1, 20, 'SO-2');
     const o3 = await addOrder('C3', DAY1, 30, 'SO-3');
@@ -216,8 +227,12 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     await updateLoad(tenantId, day1.id, l2.id, { status: 'LOCKED' }, user(), everyRole);
     expect(await prisma.unservedOrder.count({ where: { orderId: o3.id, scenario: { runId: day1.id } } })).toBe(1);
 
+    // While day 1 is still today, the preview for day 2 lists nothing: its loads may still leave.
+    const early = await carryOverPreview(tenantId, depotId, DAY2, { now: onDay(DAY1) });
+    expect(early).toMatchObject({ candidates: [], to: isoPlus(19), today: DAY1 });
+
     // The preview for day 2: C2 (its load never left) and C3 (unserved); C1 was delivered.
-    const preview = await carryOverPreview(tenantId, depotId, DAY2);
+    const preview = await carryOverPreview(tenantId, depotId, DAY2, { now: carryNow });
     expect(preview.candidates.map((c) => [c.customerCode, c.cases, c.why.map((w) => w.kind)])).toEqual([
       ['C2', 20, ['NOT_LEFT']],
       ['C3', 30, ['UNSERVED']],
@@ -227,8 +242,9 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     const day1KeysBefore = await prisma.intakeLineKey.findMany({ where: { tenantId, deliveryDate: new Date(`${DAY1}T00:00:00Z`) }, orderBy: { id: 'asc' } });
 
     // Bring forward.
-    const res = await bringForward(tenantId, depotId, DAY2, preview.candidates.map((c) => ({ orderId: c.orderId, cases: c.cases })), { id: userId }, { now });
-    expect(res).toMatchObject({ orders: 2, cases: 50, late: false, replanNeeded: false, skipped: [] });
+    const res = await bringForward(tenantId, depotId, DAY2, preview.candidates.map((c) => ({ orderId: c.orderId, cases: c.cases })), { id: userId }, { now: carryNow });
+    // Brought forward on day 2 itself: late, like a late order received that day; no plan yet, so no re-plan.
+    expect(res).toMatchObject({ orders: 2, cases: 50, late: true, replanNeeded: false, skipped: [] });
     const copies = await prisma.order.findMany({ where: { tenantId, carriedFromOrderId: { in: [o2.id, o3.id] } }, include: { lines: true }, orderBy: { totalCases: 'asc' } });
     expect(copies.map((c) => [c.carriedFromOrderId, c.totalCases, c.totalWeightKg, c.priority, c.salesValue, c.lines.map((l) => [l.salesOrderNo, l.cases, l.weightKg, l.productId])])).toEqual([
       [o2.id, 20, 240, 3, 40, [['SO-2', 20, 240, productId]]],
@@ -267,21 +283,41 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(d1Plan.carriedOut).toEqual({ orders: 2, cases: 50, dates: [DAY2] });
     expect(d1Plan.unserved.find((u) => u.orderId === o3.id)?.carriedTo).toBe(DAY2);
     expect(d1Plan.loads.find((l) => l.id === l2.id)?.carriedAway).toBe(1);
-    // The dashboard counts them once, on day 2: day 1 has 1 order, none unserved.
+    // The dashboard counts them once, on day 2: day 1 has 1 order, none unserved, and only C1's 10
+    // cases (its plan's summary counts 60; the 50 carried are day 2's).
     const [kpi] = await fetchRangeRows(tenantId, DAY1, DAY1);
-    expect([Number(kpi.orders_total), Number(kpi.orders_unserved)]).toEqual([1, 0]);
+    expect([Number(kpi.orders_total), Number(kpi.orders_unserved), Number(kpi.cases_total)]).toEqual([1, 0, 10]);
     // Day 1's locked load cannot be dispatched with an order that is now day 2's.
     const refused = await updateLoad(tenantId, day1.id, l2.id, { status: 'DISPATCHED' }, user(), everyRole).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(PlanError);
     expect((refused as PlanError).details).toMatchObject({ code: 'ORDERS_CARRIED' });
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l2.id } })).status).toBe('LOCKED');
+    // It holds nothing else, so the remedy is to leave it - never "re-plan this day".
+    expect((refused as PlanError).message).toContain('This load holds nothing else: leave it as it is.');
+    expect((refused as PlanError).message).not.toMatch(/re-plan this day/i);
 
     // Running it again carries nothing new; the list is empty.
-    const again = await bringForward(tenantId, depotId, DAY2, preview.candidates.map((c) => ({ orderId: c.orderId, cases: c.cases })), { id: userId }, { now });
+    const again = await bringForward(tenantId, depotId, DAY2, preview.candidates.map((c) => ({ orderId: c.orderId, cases: c.cases })), { id: userId }, { now: carryNow });
     expect(again.orders).toBe(0);
     expect(again.skipped.map((s) => s.code)).toEqual(['ALREADY_CARRIED', 'ALREADY_CARRIED']);
     expect(await prisma.order.count({ where: { tenantId, carriedFromOrderId: { not: null } } })).toBe(2);
-    expect((await carryOverPreview(tenantId, depotId, DAY2)).candidates).toEqual([]);
+    expect((await carryOverPreview(tenantId, depotId, DAY2, { now: carryNow })).candidates).toEqual([]);
+
+    // A re-plan of day 1 has nothing to plan and says why - never "unlock a load": the locked load
+    // holds only a brought-forward order, so unlocking it changes nothing.
+    const rp0 = await replan(tenantId, day1.id, 'REOPTIMIZE', null, user(), null, {}, undefined, { now: carryNow });
+    expect(rp0.status).toBe(409);
+    expect(rp0.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 2 });
+    expect(String(rp0.body.error)).not.toMatch(/unlock/i);
+    // The dispatcher unlocks that load anyway and re-plans day 1: nothing is left to plan there, and
+    // the answer says why (never "every load has left the depot" or "upload orders first"); no new version.
+    await updateLoad(tenantId, day1.id, l2.id, { status: 'PLANNED' }, user(), everyRole);
+    const rp1 = await replan(tenantId, day1.id, 'REOPTIMIZE', null, user(), null, {}, undefined, { now: carryNow });
+    expect(rp1.status).toBe(409);
+    expect(rp1.body).toMatchObject({ code: 'NOTHING_TO_PLAN', carriedAway: 2 });
+    expect(String(rp1.body.error)).toMatch(/brought forward to a later day/);
+    expect(String(rp1.body.error)).not.toMatch(/left the depot|Upload orders first/);
+    expect(await prisma.runPlan.count({ where: { tenantId, depotId, runDate: new Date(`${DAY1}T00:00:00Z`) } })).toBe(1);
 
     // Day 2 (no plan yet): the copies are ordinary open orders; OPTIMIZE plans them, and the papers mark them.
     const own = await addOrder('C4', DAY2, 5, 'SO-4');
@@ -320,7 +356,8 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     await optimize(A, now);
     solverMode.unserved = new Set();
 
-    const res = await bringForward(tenantId, depotId, B, [{ orderId: o5.id, cases: 12 }], { id: userId }, { now });
+    // The morning of day B (day A is over), its load locked the night before.
+    const res = await bringForward(tenantId, depotId, B, [{ orderId: o5.id, cases: 12 }], { id: userId }, { now: onDay(B) });
     expect(res).toMatchObject({ orders: 1, cases: 12, late: true, replanNeeded: true, planId: planB.id });
     const copy = await prisma.order.findFirstOrThrow({ where: { carriedFromOrderId: o5.id } });
     expect(copy.isLate).toBe(true);
@@ -348,7 +385,8 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
   it('two calls at the same time carry each order once; a day never planned is carried whole; a changed list carries nothing', async () => {
     const X = isoPlus(60);
     const Y = isoPlus(61);
-    const now = morningBefore(X);
+    // The morning of day Y: day X is over.
+    const now = onDay(Y);
     // Day X was never planned: its orders were confirmed and nothing more.
     const a = await addOrder('C7', X, 7, 'SO-X7');
     const b = await addOrder('C1', X, 9, 'SO-X1');
@@ -356,7 +394,7 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
       data: { tenantId, fileName: 'orders-x.xlsx', fileType: 'xlsx', uploadedById: userId, status: 'CONFIRMED', depotId, deliveryDate: new Date(`${X}T00:00:00Z`) },
     });
     await prisma.order.updateMany({ where: { id: { in: [a.id, b.id] } }, data: { uploadBatchId: batch.id } });
-    const preview = await carryOverPreview(tenantId, depotId, Y);
+    const preview = await carryOverPreview(tenantId, depotId, Y, { now });
     expect(preview.candidates.map((c) => [c.customerCode, c.cases, c.why[0].kind])).toEqual([
       ['C1', 9, 'NEVER_PLANNED'],
       ['C7', 7, 'NEVER_PLANNED'],
@@ -387,5 +425,61 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(((await del.json()) as { error: { code: string } }).error.code).toBe('BATCH_CARRIED');
     expect(await prisma.order.count({ where: { id: { in: [a.id, b.id] } } })).toBe(2);
     expect((await prisma.uploadBatch.findUniqueOrThrow({ where: { id: batch.id } })).status).toBe('CONFIRMED');
+  });
+
+  it('a split order: the part that left stays delivered and unmarked, the rest is brought forward, and a re-plan of its day still reconciles and dispatches', async () => {
+    const P = isoPlus(80);
+    const Q = isoPlus(81);
+    const now = morningBefore(P);
+    // Bigger than any truck (800 cases): planned in two parts, 800 + 200; the second finds no room.
+    const big = await addOrder('C4', P, 1000, 'SO-P4');
+    const small = await addOrder('C5', P, 10, 'SO-P5');
+    const c4 = await customerId('C4');
+    solverMode.unservedStops = new Set([`${c4}#2`]);
+    const planP = await optimize(P, now);
+    solverMode.unservedStops = new Set();
+    const parts = await prisma.routeAssignment.findMany({ where: { runId: planP.id, orderId: big.id }, include: { load: true } });
+    expect(parts).toHaveLength(1);
+    const partLoad = parts[0]!.load!;
+    const leftCases = parts[0]!.portionCases!;
+    expect(leftCases).toBeGreaterThan(0);
+    expect(leftCases).toBeLessThan(1000);
+    expect(await prisma.unservedOrder.count({ where: { orderId: big.id, scenario: { runId: planP.id } } })).toBe(1);
+    // Its part leaves the depot.
+    for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planP.id, partLoad.id, { status: s }, user(), everyRole);
+
+    // The morning of Q: only the rest of the split order is open (the small order's load never left, it stays).
+    const preview = await carryOverPreview(tenantId, depotId, Q, { now: onDay(Q) });
+    const cand = preview.candidates.find((c) => c.orderId === big.id)!;
+    expect([cand.cases, cand.orderCases, cand.partial]).toEqual([1000 - leftCases, 1000, true]);
+    const res = await bringForward(tenantId, depotId, Q, [{ orderId: big.id, cases: cand.cases }], { id: userId }, { now: onDay(Q) });
+    expect(res).toMatchObject({ orders: 1, cases: 1000 - leftCases });
+    const copy = await prisma.order.findFirstOrThrow({ where: { carriedFromOrderId: big.id }, include: { lines: true } });
+    expect([copy.totalCases, copy.lines.map((l) => [l.salesOrderNo, l.cases])]).toEqual([1000 - leftCases, [['SO-P4', 1000 - leftCases]]]);
+
+    // Day P's plan: the dispatched part is delivered, never "carried over" (its unserved rest is).
+    const detail = (await getPlanDetail(tenantId, planP.id))!;
+    const out = detail.loads.find((l) => l.id === partLoad.id)!;
+    expect([out.status, out.carriedAway, out.stops.map((s) => s.carriedTo)]).toEqual(['DISPATCHED', 0, [null]]);
+    expect(detail.unserved.find((u) => u.orderId === big.id)?.carriedTo).toBe(Q);
+    const sheet = driverPackModel(detail, { tenantName: 'NMWC', loadIds: [partLoad.id] }).sheets.flatMap((s) => s.stops);
+    expect(sheet.map((s) => s.carried)).toEqual([null]);
+
+    // Re-plan day P (the small order is still open there): the split order stays only through its
+    // dispatched part, and the new version reconciles, so its new load can be locked and dispatched.
+    const rp = await replan(tenantId, planP.id, 'REOPTIMIZE', null, user(), null, {}, undefined, { now });
+    expect(rp.status).toBe(202);
+    const v2 = await jobsDone(String(rp.body.runId));
+    expect(v2.status).toBe('READY');
+    const recon = v2.reconciliationJson as { ok: boolean; problems: string[]; uploadedCases: number; plannedCases: number; unservedCases: number };
+    expect(recon.problems).toEqual([]);
+    expect(recon.ok).toBe(true);
+    expect([recon.uploadedCases, recon.plannedCases, recon.unservedCases]).toEqual([leftCases + 10, leftCases + 10, 0]);
+    const kept = (await prisma.planLoad.findMany({ where: { runId: v2.id, carriedFromLoadId: partLoad.id } }))[0]!;
+    expect(kept.status).toBe('DISPATCHED');
+    const smallLoad = await loadOf(v2.id, small.id);
+    expect(smallLoad.status).toBe('PLANNED');
+    for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, v2.id, smallLoad.id, { status: s }, user(), everyRole);
+    expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: smallLoad.id } })).status).toBe('DISPATCHED');
   });
 });

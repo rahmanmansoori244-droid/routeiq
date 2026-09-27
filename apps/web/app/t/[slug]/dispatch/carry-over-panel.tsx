@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { BringForwardResult, CarryCandidate, CarryPreview } from '@/lib/dispatch/carry-over';
 import { carryDoneText, carriedFromBadge, carrySelectionPayload, defaultCarrySelection } from '@/lib/dispatch/carry-view';
-import { fmtDayMonth } from '@/lib/dispatch/time';
+import { addDaysIso, fmtDayMonth } from '@/lib/dispatch/time';
 import { api, REASON_TEXT } from './client-api';
 
 const WHY_LABEL: Record<string, string> = {
@@ -33,7 +33,8 @@ interface Props {
 
 /**
  * PR9 "Bring forward": the orders of the 7 days before this day that were not delivered (unserved,
- * on a load that never left the depot, or never planned), with the reason for each, and the button
+ * on a load that never left the depot, or never planned) - only days that are over, never today or
+ * later in the company's timezone - with the reason for each, and the button
  * that brings the selected ones forward to this day. Orders that cannot be brought forward
  * (deactivated customer, entered again for this day, ...) are listed with the reason.
  */
@@ -135,6 +136,12 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
       <p className="text-xs text-muted-foreground">
         Orders of this depot from {fmtDayMonth(preview.from)} to {fmtDayMonth(preview.to)} whose cases were not delivered: unserved, on a load that never left the depot, or never
         planned. Orders on dispatched or completed loads count as delivered. Brought forward, an order keeps its priority and its sales orders.
+        {preview.to < addDaysIso(date, -1) ? (
+          <span data-testid="carry-over-today-note">
+            {' '}
+            Orders due today ({fmtDayMonth(preview.today)}) are listed from tomorrow on: the day is not over and its loads may still leave.
+          </span>
+        ) : null}
       </p>
       {open ? (
         <div className="max-h-80 overflow-auto rounded border bg-background">

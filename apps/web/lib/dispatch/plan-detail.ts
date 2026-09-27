@@ -26,6 +26,7 @@ import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, plan
 import type { PreferencePenalties } from '@routeiq/shared-types';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { fmtWindow, isoOf } from './time';
+import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 
@@ -80,7 +81,11 @@ export interface DetailStop {
    * (YYYY-MM-DD, the earliest of the stop's orders); null = none. Badge "Carried over from 26 Sep".
    */
   carriedFrom: string | null;
-  /** PR9: an order of this stop was brought forward to a later day (YYYY-MM-DD): not delivered on this day. */
+  /**
+   * PR9: an order of this stop was brought forward to a later day (YYYY-MM-DD): not delivered on this
+   * day. Only on a load that never left (PLANNED, LOCKED, LOADING): a dispatched or completed stop
+   * was delivered, also when the rest of its split order was carried.
+   */
   carriedTo: string | null;
 }
 
@@ -125,7 +130,10 @@ export interface DetailLoad {
   masterChanged: MasterChange[];
   /** The timetable check of this load's truck-day (review F04); null = the version has no applied plan. */
   timing: { status: TruckTiming; ok: boolean } | null;
-  /** PR9: orders on this load brought forward to a later day (it cannot be locked, loaded or dispatched with them). */
+  /**
+   * PR9: orders on this load brought forward to a later day (it cannot be locked, loaded or dispatched
+   * with them); always 0 on a load that left (what left was delivered, never carried).
+   */
   carriedAway: number;
 }
 
@@ -310,9 +318,12 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const s = stops.get(a.sequenceInTruck);
       const snap = readStopSnapshot(a.stopSnapshotJson);
-      // PR9: brought forward from an earlier day (the date first due), or to a later day since.
+      // PR9: brought forward from an earlier day (the date first due), or to a later day since. What
+      // was carried is what never left, so only a load that never left (PLANNED, LOCKED, LOADING)
+      // holds carried cases: on a dispatched or completed load the cases were delivered (the part
+      // of a split order that left), and nothing is marked there (carriedLoadShows).
       const cameFrom = o.carriedFromDate ? isoOf(o.carriedFromDate) : null;
-      const wentTo = o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : null;
+      const wentTo = o.carriedTo && carriedLoadShows(l.status) ? isoOf(o.carriedTo.deliveryDate) : null;
       if (wentTo) carriedAwayOrders.add(o.id);
       if (s) {
         if (cameFrom && (!s.carriedFrom || cameFrom < s.carriedFrom)) s.carriedFrom = cameFrom;

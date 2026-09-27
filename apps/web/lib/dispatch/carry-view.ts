@@ -42,3 +42,72 @@ export function carriedStopText(s: { carriedFrom: string | null; carriedTo: stri
   if (s.carriedFrom) return `CARRIED OVER from ${fmtDayMonth(s.carriedFrom)} (not delivered that day)`;
   return null;
 }
+
+/**
+ * A load that never left the depot (PLANNED, LOCKED or LOADING): the only kind of load that can
+ * hold carried cases. What left (DISPATCHED, COMPLETED) was delivered - also the part of a split
+ * order whose rest was carried - so such a load shows no "carried over" mark.
+ */
+export function carriedLoadShows(status: string): boolean {
+  return status === 'PLANNED' || status === 'LOCKED' || status === 'LOADING';
+}
+
+/**
+ * What to do with a load of an earlier day that still holds orders brought forward to a later day
+ * (the end of the 409 ORDERS_CARRIED answer and the plan screen's badge). `onlyCarried`: the load
+ * holds nothing else. Such a load needs nothing: a re-plan of its day has nothing to plan when
+ * nothing else is open, so the answer never sends the dispatcher to one.
+ */
+export function carriedLoadRemedy(status: string, onlyCarried: boolean): string {
+  if (onlyCarried) {
+    return `This load holds nothing else: leave it as it is. It stays in this plan for the record and is never loaded or dispatched${status === 'PLANNED' ? '' : ' (you can put it back to Planned)'}; nothing needs to be re-planned.`;
+  }
+  return status === 'PLANNED'
+    ? 'Re-plan this day to plan its other orders without them.'
+    : 'To deliver its other orders, put the load back to Planned and re-plan this day: the re-plan leaves the brought-forward orders out.';
+}
+
+/** A load of the plan screen holds only orders brought forward to a later day. */
+export function holdsOnlyCarried(l: { carriedAway: number; stops: readonly { orderIds: readonly string[] }[] }): boolean {
+  return l.carriedAway > 0 && l.carriedAway === new Set(l.stops.flatMap((s) => s.orderIds)).size;
+}
+
+/**
+ * What a re-plan of this plan would still plan (the input of nothingToReplan): a PLANNED load
+ * holding only orders brought forward, and an unserved row brought forward, are not work - the
+ * re-plan leaves those orders out (ordersInScopeWhere), and the server answers NOTHING_TO_PLAN.
+ */
+export function replanWork(
+  loads: readonly { status: string; carriedAway: number; stops: readonly { orderIds: readonly string[] }[] }[],
+  unserved: readonly { carriedTo: string | null }[],
+): { loadStatuses: string[]; unservedOrders: number } {
+  return {
+    loadStatuses: loads.filter((l) => !(l.status === 'PLANNED' && holdsOnlyCarried(l))).map((l) => l.status),
+    unservedOrders: unserved.filter((u) => !u.carriedTo).length,
+  };
+}
+
+/** A carried original and its copy in an order list: "Carried over to 28 Sep" / "Carried over from 27 Sep". */
+export function orderCarryMarks(o: { carriedTo?: { deliveryDate: Date | string } | null; carriedFromDate?: Date | string | null }): { to: string | null; from: string | null } {
+  const iso = (d: Date | string) => (typeof d === 'string' ? d.slice(0, 10) : d.toISOString().slice(0, 10));
+  return { to: o.carriedTo ? iso(o.carriedTo.deliveryDate) : null, from: o.carriedFromDate ? iso(o.carriedFromDate) : null };
+}
+
+/**
+ * Totals of an order list without the carried originals (their cases are counted on the day they
+ * went to, by their copy): `carried` = how many were left out.
+ */
+export function orderListTotals(rows: readonly { totalCases: number; totalWeightKg: number; carriedTo?: unknown }[]): { cases: number; kg: number; carried: number } {
+  let cases = 0;
+  let kg = 0;
+  let carried = 0;
+  for (const r of rows) {
+    if (r.carriedTo) {
+      carried++;
+      continue;
+    }
+    cases += r.totalCases;
+    kg += r.totalWeightKg;
+  }
+  return { cases, kg, carried };
+}

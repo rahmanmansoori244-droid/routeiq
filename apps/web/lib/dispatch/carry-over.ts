@@ -4,7 +4,9 @@
  * Before PR9 an order that was not delivered stayed on its own delivery date for good: the next
  * day's plan never saw it. Now the day screen of day D lists the orders of the same depot with a
  * delivery date in [D-7, D-1] whose cases were not delivered, and "Bring forward to D" carries the
- * selected ones:
+ * selected ones. Only days that are over count: the window never reaches today or later in the
+ * company's timezone (carryWindow), so when D is tomorrow (the day screen's default) today's orders,
+ * whose loads may still leave, are not listed, and orders of days not due yet never are:
  *
  * - what counts as NOT delivered, per order line: its cases minus the cases on loads of its day's
  *   live plan that left the depot (DISPATCHED or COMPLETED). So an order unserved in that plan, on
@@ -16,8 +18,10 @@
  *   carriedFromDate: the date it was first due). The original is marked (carriedToOrderId,
  *   carriedAt, carriedById): from then on it is no longer open, unserved or pending on its own day
  *   (ordersInScopeWhere leaves it out), while that day's plan versions stay exactly as they were;
- * - it runs in ONE transaction under the intake lock (like confirm and the late order), with the
- *   live plans of the days it reads locked, so a load dispatched meanwhile is seen. An order is
+ * - it runs in ONE transaction under the intake lock (like confirm and the late order), then the
+ *   day locks of the days it reads (so no re-plan makes a new version of them meanwhile), then the
+ *   row locks of their live plans, checked to still be the live plans: a load dispatched meanwhile
+ *   is seen, and a dispatch after it commits sees the carried orders (and is refused). An order is
  *   carried at most once (unique carriedFromOrderId / carriedToOrderId): running it twice, or twice
  *   at the same time, carries nothing new.
  *
@@ -33,12 +37,12 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { PlanError } from './plan-errors';
-import { isLockBusy, PlanBusyError, setLockTimeout } from './plan-locks';
+import { isLockBusy, lockPlanDay, PlanBusyError, setLockTimeout } from './plan-locks';
 import { currentPlan, isDispatchDetails } from './plan-service';
 import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from './intake-server';
 import { customerKey, lineDupKey, normSalesOrder } from './order-intake';
 import { portionMoney, readPortionLines } from './split';
-import { addDaysIso, dateOnly, fmtDayMonth, isAfterCutoff, isoOf } from './time';
+import { addDaysIso, dateOnly, DEFAULT_TZ, fmtDayMonth, isAfterCutoff, isoOf, todayIso } from './time';
 import { orderUsesLineWeights } from './weights';
 
 type Tx = Prisma.TransactionClient;
@@ -46,6 +50,19 @@ type Db = Tx | typeof prisma;
 
 /** How many days back "Bring forward" looks: [D-7, D-1]. */
 export const CARRY_WINDOW_DAYS = 7;
+
+/**
+ * The delivery days "Bring forward to D" looks at: [D-7, D-1], but never today or later (`today`:
+ * the company's day, YYYY-MM-DD). A day is only looked at once it is over - today's loads may
+ * still leave (a dispatcher planning tomorrow must not take today's orders off their trucks), and a
+ * later day is not even due. `to < from` (D more than a week ahead) = nothing to look at.
+ */
+export function carryWindow(date: string, today: string): { from: string; to: string } {
+  const from = addDaysIso(date, -CARRY_WINDOW_DAYS);
+  const dayBefore = addDaysIso(date, -1);
+  const yesterday = addDaysIso(today, -1);
+  return { from, to: dayBefore < yesterday ? dayBefore : yesterday };
+}
 
 /** Load statuses whose cases count as delivered (the load left the depot). */
 const LEFT_DEPOT = new Set(['DISPATCHED', 'COMPLETED']);
@@ -99,9 +116,11 @@ export interface CarryCandidate {
 export interface CarryPreview {
   date: string;
   depotId: string;
-  /** The window looked at: [from, to] = [D-7, D-1]. */
+  /** The window looked at: [from, to] = [D-7, D-1], never today or later (carryWindow). */
   from: string;
   to: string;
+  /** The company's today (YYYY-MM-DD): its orders, and later ones, are not listed yet. */
+  today: string;
   /** Orders and cases that can be brought forward (not blocked). */
   orders: number;
   cases: number;
@@ -146,6 +165,11 @@ export interface CarryPlanIn {
 export interface CarryTarget {
   /** Day D (YYYY-MM-DD): candidates are strictly earlier. */
   date: string;
+  /**
+   * The company's today (YYYY-MM-DD, tenant timezone): candidates are strictly earlier too. Today's
+   * orders may still leave on today's loads, and later days are not due yet (carryWindow).
+   */
+  today: string;
   /** lineDupKey of every sales-order line already confirmed for D (the file intake's duplicate identity). */
   confirmedKeys: ReadonlySet<string>;
 }
@@ -165,13 +189,14 @@ function neverPlannedText(plan: CarryPlanIn | null, date: string, orderId: strin
  * The orders of earlier days whose cases were not delivered, per order with its open lines, why
  * (unserved / on a load that never left / never planned) and, when it cannot be carried, the reason.
  * `plans`: the live plan of each earlier day (null = no plan). Orders already carried, DISPATCHED or
- * DELIVERED, or with every case on a load that left, are not candidates.
+ * DELIVERED, or with every case on a load that left, are not candidates; nor orders of today or a
+ * later day (the day is not over: carryWindow).
  */
 export function carryCandidates(orders: readonly CarryOrderIn[], plans: ReadonlyMap<string, CarryPlanIn | null>, target: CarryTarget): CarryCandidate[] {
   const out: CarryCandidate[] = [];
   for (const o of orders) {
     if (o.carriedToOrderId || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
-    if (!(o.deliveryDate < target.date)) continue;
+    if (!(o.deliveryDate < target.date) || !(o.deliveryDate < target.today)) continue;
     const plan = plans.get(o.deliveryDate) ?? null;
     // Cases on loads that left the depot are delivered; loads that never left are listed.
     const delivered = new Map<string, number>();
@@ -426,13 +451,21 @@ export function carryCopyData(src: CarrySource, cand: Pick<CarryCandidate, 'line
 // Database: preview and bring forward
 // ---------------------------------------------------------------------------------------
 
-async function windowOrders(db: Db, tenantId: string, depotId: string, date: string) {
-  const from = addDaysIso(date, -CARRY_WINDOW_DAYS);
-  const to = addDaysIso(date, -1);
+type LiveRun = NonNullable<Awaited<ReturnType<typeof currentPlan>>>;
+
+/** The company's settings the carry needs, and its today (tenant timezone) at `now`. */
+async function companyToday(db: Db, tenantId: string, now: Date): Promise<{ today: string; cfg: { planningCutoffMin: number; timezone: string } }> {
+  const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId }, select: { planningCutoffMin: true, timezone: true } });
+  return { today: todayIso(cfg.timezone || DEFAULT_TZ, now), cfg };
+}
+
+async function windowOrders(db: Db, tenantId: string, depotId: string, window: { from: string; to: string }) {
+  const { from, to } = window;
+  if (to < from) return [];
   // The depot's orders, and orders without a depot when the tenant has one active depot
   // (the same scope as ordersInScopeWhere).
   const depots = await db.depot.count({ where: { tenantId, active: true } });
-  const orders = await db.order.findMany({
+  return db.order.findMany({
     where: {
       tenantId,
       deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
@@ -446,14 +479,19 @@ async function windowOrders(db: Db, tenantId: string, depotId: string, date: str
     },
     orderBy: [{ deliveryDate: 'asc' }, { uploadedAt: 'asc' }, { id: 'asc' }],
   });
-  return { from, to, orders };
 }
 
-/** The live plan of each day that has candidate orders (null = no plan that day). */
-async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string[]) {
+/**
+ * The live plan of each day that has candidate orders (null = no plan that day). `runs`: the live
+ * plans bringForward locked (read under the day locks and row locks); without it (the preview)
+ * each day's live plan is read here.
+ */
+async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string[], runs?: ReadonlyMap<string, LiveRun | null>) {
   const plans = new Map<string, { id: string; plan: CarryPlanIn } | null>();
   for (const date of dates) {
-    const run = await currentPlan(tenantId, depotId, date, db);
+    // A day bringForward did not lock (it cannot get orders under the intake lock): never read unlocked.
+    if (runs && !runs.has(date)) throw new PlanBusyError(`The ${fmtDayMonth(date)} orders changed while they were being brought forward. Nothing was brought forward: look at the list again.`);
+    const run = runs ? (runs.get(date) ?? null) : await currentPlan(tenantId, depotId, date, db);
     if (!run) {
       plans.set(date, null);
       continue;
@@ -496,7 +534,7 @@ async function confirmedKeysOn(db: Db, tenantId: string, date: string): Promise<
   return keys;
 }
 
-function toOrderIn(o: Awaited<ReturnType<typeof windowOrders>>['orders'][number]): CarryOrderIn {
+function toOrderIn(o: Awaited<ReturnType<typeof windowOrders>>[number]): CarryOrderIn {
   return {
     id: o.id,
     deliveryDate: isoOf(o.deliveryDate),
@@ -512,22 +550,25 @@ function toOrderIn(o: Awaited<ReturnType<typeof windowOrders>>['orders'][number]
   };
 }
 
-async function readCandidates(db: Db, tenantId: string, depotId: string, date: string) {
-  const { from, to, orders } = await windowOrders(db, tenantId, depotId, date);
+/** The candidates for day D; `runs`: the locked live plans (bringForward), else read here. */
+async function readCandidates(db: Db, tenantId: string, depotId: string, date: string, today: string, runs?: ReadonlyMap<string, LiveRun | null>) {
+  const { from, to } = carryWindow(date, today);
+  const orders = await windowOrders(db, tenantId, depotId, { from, to });
   const dates = [...new Set(orders.map((o) => isoOf(o.deliveryDate)))];
-  const plans = await dayPlans(db, tenantId, depotId, dates);
+  const plans = await dayPlans(db, tenantId, depotId, dates, runs);
   const confirmedKeys = orders.length ? await confirmedKeysOn(db, tenantId, date) : new Set<string>();
-  const candidates = carryCandidates(orders.map(toOrderIn), new Map([...plans].map(([d, p]) => [d, p?.plan ?? null])), { date, confirmedKeys });
+  const candidates = carryCandidates(orders.map(toOrderIn), new Map([...plans].map(([d, p]) => [d, p?.plan ?? null])), { date, today, confirmedKeys });
   return { from, to, candidates, plans };
 }
 
-function previewOf(date: string, depotId: string, from: string, to: string, candidates: CarryCandidate[]): CarryPreview {
+function previewOf(date: string, depotId: string, window: { from: string; to: string; today: string }, candidates: CarryCandidate[]): CarryPreview {
   const open = candidates.filter((c) => !c.blocked);
   return {
     date,
     depotId,
-    from,
-    to,
+    from: window.from,
+    to: window.to,
+    today: window.today,
     orders: open.length,
     cases: open.reduce((a, c) => a + c.cases, 0),
     blocked: candidates.length - open.length,
@@ -541,11 +582,16 @@ async function activeDepot(db: Db, tenantId: string, depotId: string) {
   return depot;
 }
 
-/** GET /api/dispatch/carry-over: what "Bring forward to D" would carry for this depot. */
-export async function carryOverPreview(tenantId: string, depotId: string, date: string, db: Db = prisma): Promise<CarryPreview> {
+/**
+ * GET /api/dispatch/carry-over: what "Bring forward to D" would carry for this depot. `now`: the
+ * clock (tests fix it); orders of the company's today and later are never listed (carryWindow).
+ */
+export async function carryOverPreview(tenantId: string, depotId: string, date: string, opts: { now?: Date; db?: Db } = {}): Promise<CarryPreview> {
+  const db = opts.db ?? prisma;
   await activeDepot(db, tenantId, depotId);
-  const { from, to, candidates } = await readCandidates(db, tenantId, depotId, date);
-  return previewOf(date, depotId, from, to, candidates);
+  const { today } = await companyToday(db, tenantId, opts.now ?? new Date());
+  const { from, to, candidates } = await readCandidates(db, tenantId, depotId, date, today);
+  return previewOf(date, depotId, { from, to, today }, candidates);
 }
 
 export interface CarriedOrder {
@@ -578,10 +624,13 @@ export interface BringForwardResult {
 /**
  * "Bring forward to D": carry the selected orders (with the open cases the screen showed) to day D.
  * One transaction: the intake lock first (confirm, late order and batch delete take it too), then
- * the live plans of the earlier days that are read (row locks, in id order), then everything is
- * read again and checked. A selection that no longer matches (a load dispatched meanwhile, a
- * customer deactivated, ...) carries nothing: 409 CARRY_OVER_CHANGED. Orders already carried are
- * skipped, so a second run - also at the same time - carries nothing new.
+ * the day locks of the earlier days read (lockPlanDay, in date order: createNextVersion and
+ * createInitialPlan take it, so no new version of those days appears meanwhile), then the row locks
+ * of their live plans (in id order), checked to still be the live plans (409 PLAN_BUSY otherwise),
+ * then everything is read again from exactly those plans and checked. A selection that no longer
+ * matches (a load dispatched meanwhile, a customer deactivated, an order of today, ...) carries
+ * nothing: 409 CARRY_OVER_CHANGED. Orders already carried are skipped, so a second run - also at
+ * the same time - carries nothing new. `now`: the clock (the company's today, the late flag).
  */
 export async function bringForward(
   tenantId: string,
@@ -598,19 +647,29 @@ export async function bringForward(
         await lockIntake(tx, tenantId);
         await setLockTimeout(tx);
         const depot = await activeDepot(tx, tenantId, depotId);
-        // Lock the live plans of the days read, so a load dispatched (or a plan applied) meanwhile
-        // is seen here, and a dispatch after this commits sees the carried orders (it is refused).
-        const { orders } = await windowOrders(tx, tenantId, depotId, date);
-        const dates = [...new Set(orders.map((o) => isoOf(o.deliveryDate)))];
-        const runIds: string[] = [];
-        for (const d of dates) {
-          const run = await currentPlan(tenantId, depotId, d, tx);
-          if (run) runIds.push(run.id);
-        }
-        for (const id of [...runIds].sort()) {
+        const { today, cfg } = await companyToday(tx, tenantId, now);
+        // The days read (orders only change under the intake lock held here), their day locks, then
+        // their live plans' row locks: a load dispatched (or a plan applied) meanwhile is seen here,
+        // and a dispatch after this commits sees the carried orders (it is refused).
+        const pre = await windowOrders(tx, tenantId, depotId, carryWindow(date, today));
+        const dates = [...new Set(pre.map((o) => isoOf(o.deliveryDate)))].sort();
+        for (const d of dates) await lockPlanDay(tx, tenantId, depotId, d);
+        const runs = new Map<string, LiveRun | null>();
+        for (const d of dates) runs.set(d, await currentPlan(tenantId, depotId, d, tx));
+        const runIds = [...runs.values()].flatMap((r) => (r ? [r.id] : [])).sort();
+        for (const id of runIds) {
           await tx.$queryRaw`SELECT id FROM "RunPlan" WHERE id = ${id} AND "tenantId" = ${tenantId} FOR UPDATE`;
         }
-        const { candidates } = await readCandidates(tx, tenantId, depotId, date);
+        // Still the live plans now that they are locked (a version made before the day lock was
+        // taken, or any other change of which version is live): read nothing from a plan not locked.
+        for (const d of dates) {
+          const again = await currentPlan(tenantId, depotId, d, tx);
+          if ((again?.id ?? null) !== (runs.get(d)?.id ?? null)) {
+            throw new PlanBusyError(`The ${fmtDayMonth(d)} plan changed while the orders were being brought forward. Nothing was brought forward: look at the list again.`);
+          }
+          runs.set(d, again);
+        }
+        const { candidates } = await readCandidates(tx, tenantId, depotId, date, today, runs);
         const ids = selected.map((s) => s.orderId);
         const done = await tx.order.findMany({
           where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } },
@@ -624,7 +683,6 @@ export async function bringForward(
             { code: 'CARRY_OVER_CHANGED', changed: check.changed },
           );
         }
-        const cfg = await tx.tenantConfig.findUniqueOrThrow({ where: { tenantId }, select: { planningCutoffMin: true, timezone: true } });
         const dayPlan = await currentPlan(tenantId, depotId, date, tx);
         // Like a late order: late after the cutoff, or when day D already has a plan in use.
         const late = isAfterCutoff(now, date, cfg.planningCutoffMin, cfg.timezone) || !!dayPlan?.chosenScenarioId;

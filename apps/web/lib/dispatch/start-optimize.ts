@@ -7,6 +7,7 @@ import {
   buildDispatchRequest,
   createNextVersion,
   isLegacyPlan,
+  ordersInScopeWhere,
   pendingLateOrderIds,
   PlanError,
   planErrorBody,
@@ -65,9 +66,21 @@ export function nothingToPlan(applied: boolean, canUnlock: boolean): StartResult
   return { status: 409, body: { error: `${what} ${advice}`, code: 'NOTHING_TO_PLAN' } };
 }
 
-/** True when the version has a LOCKED or LOADING load that could be unlocked (or put back to locked). */
-async function hasUnlockableLoad(runId: string): Promise<boolean> {
-  return (await prisma.planLoad.count({ where: { runId, status: { in: ['LOCKED', 'LOADING'] } } })) > 0;
+/** PR9: orders of this version's depot and day brought forward to a later day (no longer open here). */
+async function carriedAwayOfDay(tenantId: string, runId: string): Promise<number> {
+  const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { depotId: true, runDate: true } });
+  if (!run) return 0;
+  const where = await ordersInScopeWhere(tenantId, run.depotId, run.runDate);
+  return prisma.order.count({ where: { ...where, carriedToOrderId: { not: null } } });
+}
+
+/**
+ * True when the version has a LOCKED or LOADING load that could be unlocked (or put back to locked).
+ * `withOrderOfDay` (PR9): only one holding an order not brought forward to a later day.
+ */
+async function hasUnlockableLoad(runId: string, opts: { withOrderOfDay?: boolean } = {}): Promise<boolean> {
+  const where = { runId, status: { in: ['LOCKED' as const, 'LOADING' as const] } };
+  return (await prisma.planLoad.count({ where: opts.withOrderOfDay ? { ...where, assignments: { some: { order: { carriedToOrderId: null } } } } : where })) > 0;
 }
 
 const NO_TRUCKS: StartResult = { status: 400, body: { error: 'No active trucks at this depot.', code: 'NO_TRUCKS' } };
@@ -123,12 +136,39 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
 }
 
 /**
- * The checks after a request was built that would make the optimization pointless: nothing to
- * plan (409 NOTHING_TO_PLAN when every order is on a frozen load; 400 with no orders at all) and
- * no active truck (400). Shared by the optimize start and the re-plan preflight.
+ * PR9: nothing left to plan because the day's open orders were brought forward to a later day
+ * (`carried` of them) - the loads and unserved lines that still show them stay in the plan for the
+ * record and need nothing. Never "upload orders first" nor "every load has left the depot": the
+ * dispatcher followed "leave it" or unlocked such a load, and a re-plan has nothing to change.
  */
-async function prerequisites(runId: string, built: BuiltRequest, applied: boolean): Promise<StartResult | null> {
+export function nothingLeftCarried(carried: number, othersFrozen: boolean, canUnlockOthers = false): StartResult {
+  const rest = othersFrozen ? ' and every other order of this day is on a locked, loading or dispatched load' : '';
+  // Unlock advice only for a locked or loading load holding an order that is still this day's: a
+  // load holding only brought-forward orders needs nothing, so unlocking it would change nothing.
+  const unlock = canUnlockOthers ? ' To change a locked or loading load, unlock it first.' : '';
+  return {
+    status: 409,
+    body: {
+      error:
+        `Nothing left to plan: ${carried} order(s) of this day were brought forward to a later day and are planned there${rest}. ` +
+        'Loads and unserved lines that still show brought-forward orders stay in this plan for the record: they are never loaded or dispatched, so nothing needs to be re-planned. A late order for this day can still be planned.' +
+        unlock,
+      code: 'NOTHING_TO_PLAN',
+      carriedAway: carried,
+    },
+  };
+}
+
+/**
+ * The checks after a request was built that would make the optimization pointless: nothing to
+ * plan (409 NOTHING_TO_PLAN when every order is on a frozen load or was brought forward to a later
+ * day; 400 with no orders at all) and no active truck (400). Shared by the optimize start and the
+ * re-plan preflight.
+ */
+async function prerequisites(tenantId: string, runId: string, built: BuiltRequest, applied: boolean): Promise<StartResult | null> {
   if (built.scope.orderIds.length === 0) {
+    const carried = await carriedAwayOfDay(tenantId, runId);
+    if (carried > 0) return nothingLeftCarried(carried, built.scope.frozenOrderIds.length > 0, await hasUnlockableLoad(runId, { withOrderOfDay: true }));
     if (built.scope.frozenOrderIds.length > 0) return nothingToPlan(applied, await hasUnlockableLoad(runId));
     return { status: 400, body: { error: 'No orders to plan for this depot and date. Upload orders first.', code: 'NO_ORDERS' } };
   }
@@ -223,7 +263,7 @@ export async function startDispatchOptimize(
     // Weights entered or corrected under Products after the orders were confirmed are planned
     // with (in memory); the job saves them on the orders together with the plan that uses them.
     const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId, undefined, { now: opts.now }));
-    const refused = gate(built, opts, 'optimizing') ?? (await prerequisites(runId, built, !!run.chosenScenarioId));
+    const refused = gate(built, opts, 'optimizing') ?? (await prerequisites(tenantId, runId, built, !!run.chosenScenarioId));
     if (refused) return refused;
 
     if (!ticket) {
@@ -372,7 +412,7 @@ export async function replan(
   // the last optimize in memory only: the parent stays the live plan if this is refused, so its
   // orders and loads must not change. They are saved when the child's job applies its plan.
   const probe = await buildDispatchRequest(tenantId, runId, undefined, { now: clock.now });
-  const refused = gate(probe, overrides, 're-planning') ?? (await prerequisites(runId, probe, true));
+  const refused = gate(probe, overrides, 're-planning') ?? (await prerequisites(tenantId, runId, probe, true));
   if (refused) return refused;
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
   // trucks) whichever button started it; only with nothing late waiting is it a full re-optimize.

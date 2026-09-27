@@ -147,12 +147,14 @@ The Excel workbook stays the dispatcher and warehouse file (loading manifests, c
 ## Orders not delivered on earlier days (Bring forward)
 An order that was not delivered on its day does not move to the next day by itself. **Bring forward** does that, when you decide.
 
-**What counts as not delivered.** For the depot on screen, RouteIQ looks at the orders of the **7 days before** the day on screen and lists every order with cases that were not delivered:
+**What counts as not delivered.** For the depot on screen, RouteIQ looks at the orders of the **7 days before** the day on screen - only days that are **over**, never today or later - and lists every order with cases that were not delivered:
 - **Unserved** in the plan of its day (for example *no truck had room left*);
 - **Load never left**: on a load of its day's plan that is still *Planned*, *Locked* or *Loading* (it never left the depot);
 - **Never planned**: its day was never planned, or it was added after that day's plan was made and not re-planned.
 
 Orders on **dispatched** or **completed** loads count as delivered and are never listed. **Mark every load that left as Dispatched** (and Completed) first, or RouteIQ lists its orders as not delivered. For a split delivery only the part that did not leave is listed, for example *40 of 100* cases.
+
+**Today is not over.** When you plan tomorrow (the day screen opens on tomorrow), today's orders are **not** listed: today's loads - also the ones locked and loaded last night - may still leave. The box says so. They are listed from tomorrow morning on: open tomorrow's day, **Bring forward**, then **RE-PLAN** adds them around the loads locked the night before. Orders of a day that is not due yet are never listed.
 
 **How to use it**
 - In step 1 a yellow box says *Not delivered on earlier days: 12 order(s) (840 cases)*. **Show list** gives each order: customer, the day it was due, the cases and why it was not delivered.
@@ -163,7 +165,11 @@ Orders on **dispatched** or **completed** loads count as delivered and are never
 
 **Where you see them**
 - On the day they were brought to: the list *brought forward from earlier days* in step 1, the badge **Carried over from 27 Sep** on the stop in the plan (the day the order was first due), *CARRIED OVER from 27 Sep* on the driver sheet and on the Excel truck-load sheet, and a **CARRIED OVER** part on the Excel SUMMARY.
-- On their own day: they are no longer open, unserved or waiting there (the dashboard counts them on the new day). The plan of that day stays as it was, for the record: its stop or unserved line says **Carried over to 28 Sep**, and a load that still holds such an order cannot be locked, loaded or dispatched (it would deliver them twice); re-plan that day to take them off (unlock the load first).
+- On their own day: they are no longer open, unserved or waiting there (the dashboard counts them on the new day). The plan of that day stays as it was, for the record: its stop or unserved line says **Carried over to 28 Sep**, and a load that still holds such an order cannot be locked, loaded or dispatched (it would deliver them twice).
+  - A load that holds **only** brought-forward orders needs nothing: **leave it as it is** (you can put it back to Planned). It stays in that day's plan for the record. When nothing else of that day is open, a **RE-PLAN** has nothing to plan and says so (the Re-plan button is off).
+  - A load that also holds other orders: put it back to Planned (if it is locked or loading) and **RE-PLAN** that day; the other orders are planned again, the brought-forward ones are left out.
+  - The part of a split delivery that was **dispatched** was delivered: it shows no *Carried over* mark, on the plan, the driver sheet or the Excel. Only the part that did not leave was brought forward.
+- The **Orders** list (old *Upload orders* page) shows the original as **carried over to 28 Sep** and the copy with **Carried over from 27 Sep**; its totals count the cases once.
 
 **Not brought forward** (listed, without a tick, with the reason):
 - the customer is **deactivated**: reactivate it under **Customers** first;

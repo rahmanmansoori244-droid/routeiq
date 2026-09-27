@@ -4,9 +4,10 @@ import { isoDateSchema, isRealIsoDate } from '@/lib/schemas';
 import { bringForward, carryOverPreview } from '@/lib/dispatch/carry-over';
 
 // GET /api/dispatch/carry-over?date=YYYY-MM-DD&depotId=... - the orders of this depot with a
-// delivery date in the 7 days before `date` whose cases were not delivered (unserved, on a load
-// that never left the depot, or never planned): what "Bring forward to <date>" would carry, with
-// the reason for each and the ones that cannot be carried. Reads only.
+// delivery date in the 7 days before `date` (never the company's today or later: those days are
+// not over) whose cases were not delivered (unserved, on a load that never left the depot, or
+// never planned): what "Bring forward to <date>" would carry, with the reason for each and the
+// ones that cannot be carried. Reads only.
 export const GET = withTenantApi(async (req, { user }) => {
   const url = new URL(req.url);
   const date = url.searchParams.get('date') ?? '';
