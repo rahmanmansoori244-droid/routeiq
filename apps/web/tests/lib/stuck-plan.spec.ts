@@ -181,6 +181,43 @@ describe('the "Reset stuck plan" button (static: the plan screens)', () => {
   });
 });
 
+describe('review of audit PR4: the stuck-plan text names only what the viewer can do', () => {
+  const read = (p: string) => readFileSync(path.join(__dirname, '../..', p), 'utf8');
+  const texts = {
+    JOB_ENDED: stuckPlanState({ status: 'OPTIMIZING', currentJobId: 'J1' }, job('FAILED'), false, false, NOW)!.text,
+    NO_JOB: stuckPlanState({ status: 'OPTIMIZING', currentJobId: null }, null, false, false, NOW)!.text,
+    JOB_LOST: stuckPlanState({ status: 'OPTIMIZING', currentJobId: 'J1' }, job('RUNNING', JOB_LOST_AFTER_MS + 5_000), false, false, NOW)!.text,
+  };
+
+  it('OPTIMIZE and Re-plan are disabled while the plan is optimizing, so no stuck text sends the dispatcher to them', () => {
+    // The gating the text must match: both buttons are off while the plan is OPTIMIZING.
+    const view = read('app/t/[slug]/dispatch/plan-view.tsx');
+    expect(view).toContain("const running = d.run.status === 'OPTIMIZING'");
+    expect(view).toContain('disabled={!!busy || running || nothingToPlan}');
+    const day = read('app/t/[slug]/dispatch/dispatch-client.tsx');
+    expect(day).toContain("const running = day.plan?.status === 'OPTIMIZING'");
+    expect(day).toMatch(/disabled=\{optimizing \|\| planBusy \|\| running \|\|[^}]*\} data-testid="optimize-btn"/);
+    for (const [kind, text] of Object.entries(texts)) {
+      expect(text, kind).not.toMatch(/\b(OPTIMIZE|RE-PLAN)\b|resets it first/);
+    }
+  });
+
+  it('a plan behind an ended or missing job: wait (reset by itself within a minute) or a supervisor presses Reset stuck plan', () => {
+    for (const text of [texts.JOB_ENDED, texts.NO_JOB]) {
+      expect(text).toContain('RouteIQ resets it by itself within a minute');
+      expect(text).toContain('a supervisor can press Reset stuck plan');
+    }
+    expect(texts.JOB_LOST).toContain('A supervisor can reset the plan now');
+  });
+
+  it('the dispatcher guide says the same (no "OPTIMIZE or Re-plan resets it first")', () => {
+    const guide = read('../../docs/DISPATCHER_GUIDE.md');
+    expect(guide).toContain('A plan stuck on "Optimizing…"');
+    expect(guide).not.toMatch(/resets it first/);
+    expect(guide).toMatch(/\*\*Reset stuck plan\*\* now/);
+  });
+});
+
 describe('POST /api/runs/:id/reset-stuck', () => {
   const call = (body?: unknown) =>
     resetRoute(new Request('http://localhost/api/runs/P/reset-stuck', { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }), { params: { id: 'P' } });

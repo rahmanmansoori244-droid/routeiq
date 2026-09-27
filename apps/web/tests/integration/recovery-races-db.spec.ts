@@ -17,6 +17,8 @@
  *  - F09: the janitor's writes fail together (a stranded plan cannot be created), a plan stranded
  *    before the fix is repaired by the sweep, a retry of OPTIMIZE / RE-PLAN starts real work, the
  *    job failure is one transaction, and "Reset stuck plan" is serialized by the plan row lock;
+ *    (review of audit PR4, .dev/scratch-a4-v1/stale-stuck) an OPTIMIZE racing the end of the
+ *    plan's job never answers 409 PLAN_STUCK for a plan that is not stuck;
  *  - F21: a plan read or an Excel export racing "Use instead" returns one revision (summary,
  *    chosen option, loads and reconciliation agree), and the read stays tenant-scoped.
  */
@@ -547,6 +549,58 @@ describe('F09: a plan can no longer be stranded on "optimizing" (real PostgreSQL
     const child = await jobsDone(String(res.body.runId));
     expect(child.status).toBe('READY');
     expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } })).status).toBe('SUPERSEDED');
+  });
+
+  /** A first version really optimizing: OPTIMIZING with its current job RUNNING. */
+  async function optimizingPlan(h: Awaited<ReturnType<typeof dispatchTenant>>, dayOffset: number) {
+    const day = isoPlus(dayOffset);
+    await h.orders(day, 4);
+    const { run } = await planService.getOrCreatePlan(h.tenantId, h.depotId, day, h.admin.id);
+    const job = await prisma.runJob.create({ data: { tenantId: h.tenantId, runId: run.id, attemptNo: 1, status: 'RUNNING', createdById: h.admin.id, startedAt: new Date() } });
+    await prisma.runPlan.update({ where: { id: run.id }, data: { status: 'OPTIMIZING', currentJobId: job.id } });
+    return { runId: run.id, jobId: job.id };
+  }
+
+  it("review of audit PR4 (the verifiers' schedule): the job fails between OPTIMIZE's plan read and its active-job count - never 409 PLAN_STUCK, a new job starts", async () => {
+    const h = await dispatchTenant('f09e');
+    const { runId, jobId } = await optimizingPlan(h, 8);
+    const b = barrier('RunJob.count', 'before');
+    const res$ = start.startDispatchOptimize(h.tenantId, runId, { id: h.admin.id }, null);
+    await b.reached;
+    // The job's normal failure path: job and plan FAILED in one transaction.
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await dispatchJob.failJob({ runId, runJobId: jobId, tenantId: h.tenantId, userId: h.admin.id, ip: null, built: {} as never }, new Error('solver down'));
+    quiet.mockRestore();
+    expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } })).status).toBe('FAILED');
+    b.release();
+    const res = await res$;
+    // Before the fix: 409 PLAN_STUCK ("a supervisor can reset it now") for a FAILED plan.
+    expect(res.body.code).toBeUndefined();
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).not.toBe(jobId);
+    expect((await jobsDone(runId)).status).toBe('READY');
+    // Nothing was stuck: no STUCK_PLAN repair.
+    const failed = await prisma.auditLog.findMany({ where: { tenantId: h.tenantId, action: 'OPTIMIZE_FAILED', entityId: runId } });
+    expect(failed.map((r) => (r.afterJson as { reason?: string }).reason ?? null)).not.toContain('STUCK_PLAN');
+  });
+
+  it('review of audit PR4: the job saves its plan after the count saw it running, before the job lookup - never 409 PLAN_STUCK', async () => {
+    const h = await dispatchTenant('f09g');
+    const { runId, jobId } = await optimizingPlan(h, 9);
+    const b = barrier('RunJob.findFirst', 'before');
+    const res$ = start.startDispatchOptimize(h.tenantId, runId, { id: h.admin.id }, null);
+    await b.reached;
+    // What the job's save commits (job SUCCEEDED, plan READY), in one transaction.
+    await prisma.$transaction([
+      prisma.runJob.update({ where: { id: jobId }, data: { status: 'SUCCEEDED', finishedAt: new Date() } }),
+      prisma.runPlan.update({ where: { id: runId }, data: { status: 'READY' } }),
+    ]);
+    b.release();
+    const res = await res$;
+    expect(res.body.code).toBeUndefined();
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).not.toBe(jobId);
+    expect((await jobsDone(runId)).status).toBe('READY');
   });
 
   it('a job failure is one transaction: when its audit row cannot be written nothing changes (the janitor fails both later)', async () => {

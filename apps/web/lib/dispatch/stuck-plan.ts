@@ -9,8 +9,10 @@
  * - repairEndedJobPlan: a plan OPTIMIZING whose current job has ended (or is missing) is put back
  *   to FAILED - exactly what that job's failure would have done - with an OPTIMIZE_FAILED audit
  *   row (reason STUCK_PLAN). Automatic: the janitor sweep (every 60 s, repairStuckPlans in
- *   lib/jobs/optimize-job.ts) and every OPTIMIZE / RE-PLAN of such a plan run it first, so a retry
- *   starts real work instead of answering 202 with the dead job.
+ *   lib/jobs/optimize-job.ts) and every OPTIMIZE / RE-PLAN request for such a plan run it first, so
+ *   a retry starts real work instead of answering 202 with the dead job. (The screens disable
+ *   OPTIMIZE and Re-plan while a plan is OPTIMIZING, so for a dispatcher it is the janitor or a
+ *   supervisor's Reset stuck plan that puts the plan back; the screen text says so.)
  * - resetStuckPlan: the supervisor's "Reset stuck plan" (owner decision 17: SUPERVISOR and above,
  *   audited PLAN_RESET). Also for a job lost by a server restart that the janitor would only fail
  *   after 15 minutes. Never for a job still running in this web process.
@@ -51,10 +53,17 @@ export interface StuckState {
   text: string;
 }
 
+/**
+ * What the plan screen says under "Optimizing...". Review of audit PR4: never "click OPTIMIZE or
+ * RE-PLAN" - both buttons (the day screen's step 3 and the plan's Re-plan) are disabled while the
+ * plan is OPTIMIZING. The plan screen reloads every 2.5 s while it shows "Optimizing...", so the
+ * reset (by the janitor or a supervisor) appears by itself and the buttons come back.
+ */
 const TEXT: Record<StuckKind, string> = {
   JOB_ENDED:
-    'This plan is still marked as optimizing, but its optimization has already ended. RouteIQ resets it by itself within a minute; OPTIMIZE or RE-PLAN also resets it first.',
-  NO_JOB: 'This plan is marked as optimizing, but no optimization is running for it. RouteIQ resets it by itself within a minute.',
+    'This plan is still marked as optimizing, but its optimization has already ended. RouteIQ resets it by itself within a minute (a supervisor can press Reset stuck plan to do it now); then optimize or re-plan again.',
+  NO_JOB:
+    'This plan is marked as optimizing, but no optimization is running for it. RouteIQ resets it by itself within a minute (a supervisor can press Reset stuck plan to do it now); then optimize or re-plan again.',
   JOB_LOST:
     'This optimization stopped without a result (the server restarted while it ran). A supervisor can reset the plan now; otherwise RouteIQ fails it 15 minutes after it started.',
 };

@@ -13,7 +13,7 @@
  * - ADD-STALE-DAY-CLIENT: a plan of another day than the screen's answers 409 DAY_MISMATCH.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -521,6 +521,93 @@ describe('audit F09: a stuck plan is reset, never answered 202 with a dead job',
     const res = await startDispatchOptimize(T, 'P', user, null);
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PLAN_STUCK');
+    expect(scheduleDispatchOptimize).not.toHaveBeenCalled();
+    admissionIdle();
+  });
+});
+
+describe('review of audit PR4: the job ends while OPTIMIZE / RE-PLAN is being answered', () => {
+  /** A version really optimizing: OPTIMIZING with its current job RUNNING. */
+  function seedRunning(chosen: string | null) {
+    seed({ status: 'OPTIMIZING', chosen });
+    row('runPlan', 'P').currentJobId = 'Jlive';
+    tables.runJob = [{ id: 'Jlive', runId: 'P', tenantId: T, attemptNo: 1, status: 'RUNNING', createdAt: new Date(), startedAt: new Date() }];
+  }
+  /** What the job's end commits in one transaction: the job and its plan together. */
+  function jobEnds(result: 'FAILED' | 'SAVED') {
+    if (result === 'FAILED') {
+      row('runJob', 'Jlive').status = 'FAILED';
+      row('runPlan', 'P').status = 'FAILED';
+    } else {
+      row('runJob', 'Jlive').status = 'SUCCEEDED';
+      Object.assign(row('runPlan', 'P'), { status: 'READY', chosenScenarioId: 'sc1' });
+    }
+  }
+  /** Run `jobEnds` just before the first call of `op` on RunJob (a barrier on the fake client). */
+  function endJobBefore(op: 'count' | 'findFirst', result: 'FAILED' | 'SAVED') {
+    const real = fakePrisma.runJob[op];
+    vi.spyOn(fakePrisma.runJob, op).mockImplementationOnce(async (...args: unknown[]) => {
+      jobEnds(result);
+      return real(...args);
+    });
+  }
+
+  it('the job fails between the plan read and the active-job count: the plan is FAILED, so the start goes ahead (never 409 PLAN_STUCK)', async () => {
+    seedRunning(null);
+    endJobBefore('count', 'FAILED');
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.body.code).not.toBe('PLAN_STUCK');
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).not.toBe('Jlive');
+    // Nothing was stuck: no STUCK_PLAN repair, only the start.
+    expect(tables.auditLog.map((a) => a.action)).toEqual(['OPTIMIZE_STARTED']);
+    expect(row('runPlan', 'P')).toMatchObject({ status: 'OPTIMIZING', currentJobId: res.body.runJobId });
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('the job saves its plan between the plan read and the count: READY with a plan answers NEW_VERSION_REQUIRED (never PLAN_STUCK)', async () => {
+    seedRunning(null);
+    endJobBefore('count', 'SAVED');
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res).toMatchObject({ status: 409, body: { code: 'NEW_VERSION_REQUIRED' } });
+    expect(row('runPlan', 'P').status).toBe('READY');
+    expect(tables.auditLog).toHaveLength(0);
+    expect(scheduleDispatchOptimize).not.toHaveBeenCalled();
+    admissionIdle();
+  });
+
+  it('the job fails after the count saw it running, before the job lookup: the locked row decides, the start goes ahead', async () => {
+    seedRunning(null);
+    endJobBefore('findFirst', 'FAILED');
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.body.code).not.toBe('PLAN_STUCK');
+    expect(res.status).toBe(202);
+    expect(res.body.runJobId).not.toBe('Jlive');
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('RE-PLAN of a version holding a plan whose job fails during the request creates the next version (never 409 "optimizing")', async () => {
+    seedRunning('sc1');
+    endJobBefore('count', 'FAILED');
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.body.code).toBeUndefined();
+    expect(res).toMatchObject({ status: 202, body: { version: 2, parentRunId: 'P' } });
+    expect(row('runPlan', 'P').status).toBe('SUPERSEDED');
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0].ticket!.release();
+    admissionIdle();
+  });
+
+  it('a plan really stuck (OPTIMIZING, no job in progress) that cannot be reset now still answers 409 PLAN_STUCK, from the locked row', async () => {
+    seedRunning(null);
+    row('runJob', 'Jlive').status = 'FAILED';
+    // The repair did not move the plan (as when its row is busy): it stays OPTIMIZING behind the ended job.
+    vi.spyOn(fakePrisma.runPlan, 'updateMany').mockResolvedValueOnce({ count: 0 });
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res).toMatchObject({ status: 409, body: { code: 'PLAN_STUCK' } });
+    expect(row('runPlan', 'P').status).toBe('OPTIMIZING');
+    expect(tables.runJob).toHaveLength(1);
     expect(scheduleDispatchOptimize).not.toHaveBeenCalled();
     admissionIdle();
   });

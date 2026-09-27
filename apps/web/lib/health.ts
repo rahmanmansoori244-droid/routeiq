@@ -6,7 +6,9 @@
  * - Readiness (`GET /api/health`, Railway's deploy health check): the database answers AND the
  *   dispatch planner could accept an optimization. That second part is checked the way an optimize
  *   would use it, without running one: SOLVER_URL and SOLVER_TOKEN are set on the web, and the
- *   solver's authenticated `GET /ready` accepts the token (apps/solver/main.py).
+ *   solver's authenticated `GET /ready` accepts the token (apps/solver/main.py). Both values are
+ *   read by `solverEnv` (lib/solver-env.ts), the same function the optimize call uses, so the check
+ *   asks the base URL and sends the token an optimization would (review of audit PR4).
  *
  * The three answers:
  * - `ready`: everything works (HTTP 200, `ok: true`);
@@ -20,6 +22,8 @@
  * Only reason codes and plain sentences are returned (the endpoint is public): never a URL, a token
  * or a solver response body.
  */
+import { solverEnv } from './solver-env';
+
 export type ReadinessStatus = 'ready' | 'degraded' | 'not_ready';
 
 export type DispatchReason =
@@ -77,15 +81,16 @@ export async function checkDispatchReadiness(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = READY_TIMEOUT_MS,
 ): Promise<DispatchReadiness> {
-  const url = env.SOLVER_URL?.trim();
+  // Read exactly as the optimize call reads them (solverEnv, review of audit PR4): the check asks
+  // the URL and sends the token an optimization would use.
+  const { url, token } = solverEnv(env);
   if (!url) return answer('misconfigured', 'SOLVER_URL_MISSING');
-  const token = env.SOLVER_TOKEN?.trim();
   if (!token) return answer('misconfigured', 'SOLVER_TOKEN_MISSING');
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await fetchImpl(`${url.replace(/\/+$/, '')}/ready`, {
+    res = await fetchImpl(`${url}/ready`, {
       method: 'GET',
       headers: { 'X-Solver-Token': token },
       signal: ctrl.signal,

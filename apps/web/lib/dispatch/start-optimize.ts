@@ -213,7 +213,10 @@ async function activeJobAnswer(runId: string): Promise<StartResult | null> {
  * Audit F09: a version still OPTIMIZING although its current job has ended (a stuck plan) is put
  * back to FAILED first (repairEndedJobPlan, audited), so OPTIMIZE / RE-PLAN then start real work
  * instead of answering 202 with the dead job (or 409 "optimizing" forever). Returns the version
- * as it is now.
+ * as it is now: read again after the job checks, never the row read before them. Review of audit
+ * PR4: the job can end during the request (its failure or its saved plan moves the plan to FAILED
+ * or READY); the row read before it still said OPTIMIZING, and OPTIMIZE answered 409 PLAN_STUCK
+ * ("a supervisor can reset it now") for a plan that was not stuck.
  */
 async function unstickIfEnded<T extends Pick<RunPlan, 'status'>>(
   tenantId: string,
@@ -224,12 +227,16 @@ async function unstickIfEnded<T extends Pick<RunPlan, 'status'>>(
   if (run.status !== 'OPTIMIZING') return run;
   // Really optimizing (a job QUEUED or RUNNING): nothing to reset, and no plan row lock taken (a
   // click while the plan is being saved answers 202 at once instead of waiting for the lock).
-  if ((await prisma.runJob.count({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } })) > 0) return run;
-  if (!(await repairEndedJobPlan(tenantId, runId, actor))) return run;
+  const active = await prisma.runJob.count({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } });
+  if (active === 0) await repairEndedJobPlan(tenantId, runId, actor);
+  // Nothing to repair also when the job ended meanwhile and moved the plan itself: read it again.
   return prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
 }
 
-/** The version is OPTIMIZING but no job of it is QUEUED or RUNNING, and it could not be reset now. */
+/**
+ * The version is OPTIMIZING but no job of it is QUEUED or RUNNING, and it could not be reset now.
+ * Answered only inside the start transaction, on the locked plan row (see startDispatchOptimize).
+ */
 const PLAN_STUCK: StartResult = {
   status: 409,
   body: {
@@ -316,7 +323,11 @@ export async function startDispatchOptimize(
     if (!run) return { status: 404, body: { error: 'Plan not found' } };
     const active = await activeJobAnswer(runId);
     if (active) return active;
-    if (run.status === 'OPTIMIZING') return PLAN_STUCK;
+    // Review of audit PR4: no PLAN_STUCK here. `run` was read before the job lookup above, and a
+    // job that ends in between (it moves its plan to FAILED or READY in the same transaction,
+    // under the plan row lock) leaves this row saying OPTIMIZING although the plan is not stuck.
+    // The start transaction below decides on the locked row: a job in progress answers 202,
+    // OPTIMIZING without one answers 409 PLAN_STUCK, anything else is checked as usual.
     const jobs = await prisma.runJob.count({ where: { runId } });
     if (inUse(run, jobs > 0, !!opts.freshVersion)) return NEW_VERSION_REQUIRED;
     // Weights entered or corrected under Products after the orders were confirmed are planned

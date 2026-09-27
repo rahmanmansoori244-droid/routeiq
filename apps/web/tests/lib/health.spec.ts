@@ -7,7 +7,7 @@
  * - the check is one authenticated GET /ready: it never calls /optimize-dispatch;
  * - liveness answers without the database or the solver.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const db = vi.hoisted(() => ({ up: true }));
 vi.mock('@/lib/db', () => ({
@@ -19,7 +19,11 @@ vi.mock('@/lib/db', () => ({
   },
 }));
 
+import http from 'node:http';
 import { checkDispatchReadiness, overallReadiness } from '@/lib/health';
+import { configProblems } from '@/lib/startup-checks';
+import { callDispatchSolver, callRouteGeometry } from '@/lib/solver-client';
+import { solverEnv } from '@/lib/solver-env';
 import { GET as health } from '@/app/api/health/route';
 import { GET as live } from '@/app/api/health/live/route';
 
@@ -171,5 +175,110 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, service: 'web' });
     expect(calls).toHaveLength(0);
+  });
+});
+
+/**
+ * Review of audit PR4: the readiness check trimmed SOLVER_URL / SOLVER_TOKEN and dropped a trailing
+ * slash, while the optimize and road-line calls sent them as they were. `http://solver:8000/` was
+ * `ready` while every optimization posted `//optimize-dispatch` (404), and a token with a newline
+ * was `ready` while no call could even be sent. All of them now read the values through solverEnv:
+ * the check below runs the real readiness check and the real calls against one HTTP server that
+ * matches paths exactly, as the solver (FastAPI) does.
+ */
+describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER_TOKEN the same way', () => {
+  const saved = { url: process.env.SOLVER_URL, token: process.env.SOLVER_TOKEN };
+  const seen: { call: string; token: string | undefined }[] = [];
+  let server: http.Server;
+  let base = '';
+
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      const token = req.headers['x-solver-token'] as string | undefined;
+      seen.push({ call: `${req.method} ${req.url}`, token });
+      req.resume();
+      const reply = (status: number, body: unknown) => {
+        res.writeHead(status, { 'content-type': 'application/json' });
+        res.end(JSON.stringify(body));
+      };
+      const known = ['GET /ready', 'POST /optimize-dispatch', 'POST /route-geometry'];
+      if (!known.includes(`${req.method} ${req.url}`)) return reply(404, { detail: 'Not Found' });
+      if (token !== 'solver-token') return reply(401, { detail: 'Invalid solver token' });
+      if (req.url === '/ready') return reply(200, { ok: true, routing: { provider: 'OSRM', status: 'up' } });
+      if (req.url === '/optimize-dispatch') return reply(200, { run_id: 'r1', engine: 'test', scenarios: [], warnings: [] });
+      return reply(200, { provider: 'OSRM', is_estimated: false, coordinates: [[58.39, 23.58], [58.45, 23.6]], warning: null });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
+    base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  });
+  afterAll(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+  beforeEach(() => {
+    seen.length = 0;
+  });
+  afterEach(() => {
+    if (saved.url === undefined) delete process.env.SOLVER_URL;
+    else process.env.SOLVER_URL = saved.url;
+    if (saved.token === undefined) delete process.env.SOLVER_TOKEN;
+    else process.env.SOLVER_TOKEN = saved.token;
+  });
+
+  /** The readiness check, then an optimization and a road line, with the web's SOLVER_URL / SOLVER_TOKEN set to these. */
+  async function allThree(url: string, token: string) {
+    process.env.SOLVER_URL = url;
+    process.env.SOLVER_TOKEN = token;
+    const ready = await checkDispatchReadiness(process.env);
+    const optimize = await callDispatchSolver({ run_id: 'r1', stops: [], trucks: [] } as never).then(
+      (r) => ({ ok: true as const, runId: r.run_id }),
+      (e: { status?: number; message?: string }) => ({ ok: false as const, status: e.status, message: e.message }),
+    );
+    const geometry = await callRouteGeometry([
+      [58.39, 23.58],
+      [58.45, 23.6],
+    ]);
+    return { ready, optimize, geometry };
+  }
+
+  it('SOLVER_URL with a trailing slash: ready, and the optimize and road-line calls reach /optimize-dispatch and /route-geometry (never //...)', async () => {
+    const r = await allThree(`${base}/`, 'solver-token');
+    expect(r.ready).toMatchObject({ status: 'ready', reason: 'OK' });
+    expect(r.optimize).toEqual({ ok: true, runId: 'r1' });
+    expect(r.geometry).toMatchObject({ kind: 'answer', provider: 'OSRM', isEstimated: false });
+    expect(seen.map((s) => s.call)).toEqual(['GET /ready', 'POST /optimize-dispatch', 'POST /route-geometry']);
+  });
+
+  it('spaces or a line break around SOLVER_URL and SOLVER_TOKEN: every call sends the same trimmed token to the same paths', async () => {
+    const r = await allThree(`  ${base}//\n`, ' solver-token\n');
+    expect(r.ready.status).toBe('ready');
+    expect(r.optimize).toEqual({ ok: true, runId: 'r1' });
+    expect(r.geometry).toMatchObject({ kind: 'answer' });
+    expect(seen).toEqual([
+      { call: 'GET /ready', token: 'solver-token' },
+      { call: 'POST /optimize-dispatch', token: 'solver-token' },
+      { call: 'POST /route-geometry', token: 'solver-token' },
+    ]);
+  });
+
+  it('a token the solver refuses is refused for the check and the optimization alike (503 not ready, never ready)', async () => {
+    const r = await allThree(`${base}/`, 'another-token');
+    expect(r.ready).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_TOKEN_REJECTED' });
+    expect(r.optimize).toMatchObject({ ok: false, status: 401 });
+    expect(r.geometry).toEqual({ kind: 'failed', status: 401 });
+  });
+
+  it('solverEnv: empty after trimming is not set - for the check, the calls and the startup log alike', async () => {
+    expect(solverEnv(env({ SOLVER_URL: ' http://solver:8000/ ', SOLVER_TOKEN: 'tok\r\n' }))).toEqual({ url: 'http://solver:8000', token: 'tok' });
+    expect(solverEnv(env({ SOLVER_URL: ' / ', SOLVER_TOKEN: ' \n' }))).toEqual({ url: null, token: null });
+    expect(solverEnv(env({}))).toEqual({ url: null, token: null });
+    const odd = { SOLVER_URL: '/', SOLVER_TOKEN: '\n' };
+    expect((await checkDispatchReadiness(env(odd), fakeFetch({ status: 200, body: READY_BODY }).f)).reason).toBe('SOLVER_URL_MISSING');
+    const prod = { NODE_ENV: 'production', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j' };
+    expect(configProblems(env({ ...prod, ...odd })).map((p) => p.message.split(' ')[0])).toEqual(['SOLVER_URL', 'SOLVER_TOKEN']);
+    process.env.SOLVER_URL = '/';
+    process.env.SOLVER_TOKEN = 'solver-token';
+    await expect(callDispatchSolver({} as never)).rejects.toThrow('SOLVER_URL not set');
+    expect(await callRouteGeometry([])).toEqual({ kind: 'not_configured' });
+    expect(seen).toHaveLength(0);
   });
 });

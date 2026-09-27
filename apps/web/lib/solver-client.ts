@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
+import { solverEnv } from '@/lib/solver-env';
 
 export class SolverError extends Error {
   readonly status: number;
@@ -57,10 +58,12 @@ export function postJsonLong(
   });
 }
 
-/** NMWC dispatch planner (OR-Tools): POST /optimize-dispatch. */
+/**
+ * NMWC dispatch planner (OR-Tools): POST /optimize-dispatch. SOLVER_URL and SOLVER_TOKEN are read
+ * by solverEnv (lib/solver-env.ts), exactly as /api/health checks them (review of audit PR4).
+ */
 export async function callDispatchSolver(req: DispatchRequest): Promise<DispatchResponse> {
-  const url = process.env.SOLVER_URL;
-  const token = process.env.SOLVER_TOKEN;
+  const { url, token } = solverEnv();
   if (!url) throw new SolverError('SOLVER_URL not set', 0, null);
   if (!token) throw new SolverError('SOLVER_TOKEN not set', 0, null);
   const res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), DISPATCH_TIMEOUT_MS);
@@ -99,8 +102,7 @@ export async function callRouteGeometry(
   osrmUrl?: string | null,
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<RouteGeometryReply> {
-  const url = process.env.SOLVER_URL;
-  const token = process.env.SOLVER_TOKEN;
+  const { url, token } = solverEnv();
   if (!url || !token) return { kind: 'not_configured' };
   if (opts.signal?.aborted) return { kind: 'timeout' };
   const ctrl = new AbortController();
