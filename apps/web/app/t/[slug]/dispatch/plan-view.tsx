@@ -62,9 +62,14 @@ interface Props {
    * review of PR3: a remount after one failed day poll closed the late order being typed).
    */
   reloadSignal?: number;
+  /**
+   * The company's today (YYYY-MM-DD) as the day screen knows it: a load of today holding orders
+   * brought forward to tomorrow says "re-plan today" / "unlock" (carriedLoadRemedy). Optional.
+   */
+  today?: string;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange, reloadSignal = 0 }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange, reloadSignal = 0, today }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -765,7 +770,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           variant="warning"
                           className="ml-1"
                           data-testid={`load-carried-away-${l.truckCode}-${l.loadNo}`}
-                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l), l.stops.flatMap((st) => (st.carriedTo ? [st.carriedTo] : [])))}`}
+                          title={`Orders on this load were brought forward to a later day (planned there now): it cannot be locked, loaded or dispatched with them. ${carriedLoadRemedy(l.status, holdsOnlyCarried(l), l.stops.flatMap((st) => (st.carriedTo ? [st.carriedTo] : [])), { date: d.run.runDate, isToday: !!today && d.run.runDate === today })}`}
                         >
                           {l.carriedAway} order(s) carried over
                         </Badge>

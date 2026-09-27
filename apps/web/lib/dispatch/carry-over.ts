@@ -4,9 +4,16 @@
  * Before PR9 an order that was not delivered stayed on its own delivery date for good: the next
  * day's plan never saw it. Now the day screen of day D lists the orders of the same depot with a
  * delivery date in [D-7, D-1] whose cases were not delivered, and "Bring forward to D" carries the
- * selected ones. Only days that are over count: the window never reaches today or later in the
- * company's timezone (carryWindow), so when D is tomorrow (the day screen's default) today's orders,
- * whose loads may still leave, are not listed, and orders of days not due yet never are:
+ * selected ones. The window never goes past the company's today (carryWindow, tenant timezone):
+ * orders of days not due yet are never listed. The days before today are over: their orders are
+ * listed and ticked by default. Today's orders are listed too (owner decision: NMWC loads
+ * tomorrow's trucks tonight after 20:00 and plans tomorrow in the evening, today's leftovers
+ * included), but in their own group, UNTICKED, because today's loads that have not left yet may
+ * still go out today: the dispatcher ticks only the ones known not to be delivered today, and the
+ * POST carries an order of today only when it is sent with `today: true` (explicitly ticked, never
+ * implied by selecting the earlier days; 409 TODAY_NOT_SELECTED otherwise). An order is never
+ * carried to its own day: D is always later than the order's date. What qualifies is the same for
+ * every day:
  *
  * - what counts as NOT delivered, per order line: its cases minus the cases on loads of its day's
  *   live plan that left the depot (DISPATCHED or COMPLETED). So an order unserved in that plan, on
@@ -57,16 +64,16 @@ type Db = Tx | typeof prisma;
 export const CARRY_WINDOW_DAYS = 7;
 
 /**
- * The delivery days "Bring forward to D" looks at: [D-7, D-1], but never today or later (`today`:
- * the company's day, YYYY-MM-DD). A day is only looked at once it is over - today's loads may
- * still leave (a dispatcher planning tomorrow must not take today's orders off their trucks), and a
- * later day is not even due. `to < from` (D more than a week ahead) = nothing to look at.
+ * The delivery days "Bring forward to D" looks at: [D-7, D-1], but never after today (`today`: the
+ * company's day, YYYY-MM-DD): a later day is not even due. Today itself is in the window when D is
+ * later than today (tomorrow, planned in the evening): its orders are listed in their own group,
+ * unticked (CarryCandidate.ofToday). When D is today the window ends yesterday (an order is never
+ * carried to its own day). `to < from` (D more than a week ahead) = nothing to look at.
  */
 export function carryWindow(date: string, today: string): { from: string; to: string } {
   const from = addDaysIso(date, -CARRY_WINDOW_DAYS);
   const dayBefore = addDaysIso(date, -1);
-  const yesterday = addDaysIso(today, -1);
-  return { from, to: dayBefore < yesterday ? dayBefore : yesterday };
+  return { from, to: dayBefore < today ? dayBefore : today };
 }
 
 /** Load statuses whose cases count as delivered (the load left the depot). */
@@ -111,6 +118,12 @@ export interface CarryCandidate {
   weightKg: number;
   /** Only part of the order is open (the rest was delivered). */
   partial: boolean;
+  /**
+   * An order of the company's today (D is later): its day is not over, and its load may still go
+   * out today. Listed in its own group, UNTICKED by default; the POST carries it only when it is
+   * sent with `today: true` (CarrySelection), never implied by selecting the earlier days.
+   */
+  ofToday: boolean;
   salesOrders: string[];
   why: CarryWhy[];
   /** Listed but not carried, with the reason. */
@@ -121,19 +134,22 @@ export interface CarryCandidate {
 export interface CarryPreview {
   date: string;
   depotId: string;
-  /** The window looked at: [from, to] = [D-7, D-1], never today or later (carryWindow). */
+  /** The window looked at: [from, to] = [D-7, D-1], never after today (carryWindow). */
   from: string;
   to: string;
-  /** The company's today (YYYY-MM-DD): its orders, and later ones, are not listed yet. */
+  /** The company's today (YYYY-MM-DD): its orders are the "Today" group; later ones are not listed. */
   today: string;
   /**
    * Day D is before the company's today: it is over, nothing can be brought forward to it (nothing
    * is listed; the POST answers 409 DAY_OVER).
    */
   dayOver: boolean;
-  /** Orders and cases that can be brought forward (not blocked). */
+  /** Orders and cases of the days before today that can be brought forward (not blocked; ticked by default). */
   orders: number;
   cases: number;
+  /** Orders and cases of today that can be brought forward (not blocked; the "Today" group, unticked by default). */
+  todayOrders: number;
+  todayCases: number;
   /** Listed but not carried (deactivated customer, entered again for D or a later day, day being optimized). */
   blocked: number;
   candidates: CarryCandidate[];
@@ -189,11 +205,11 @@ export interface LaterLine {
 }
 
 export interface CarryTarget {
-  /** Day D (YYYY-MM-DD): candidates are strictly earlier. */
+  /** Day D (YYYY-MM-DD): candidates are strictly earlier (an order is never carried to its own day). */
   date: string;
   /**
-   * The company's today (YYYY-MM-DD, tenant timezone): candidates are strictly earlier too. Today's
-   * orders may still leave on today's loads, and later days are not due yet (carryWindow).
+   * The company's today (YYYY-MM-DD, tenant timezone): candidates are at most today (later days are
+   * not due yet: carryWindow). Today's candidates are marked `ofToday`: their loads may still leave.
    */
   today: string;
   /** lineDupKey of every sales-order line already confirmed for D (the file intake's duplicate identity). */
@@ -210,11 +226,14 @@ export interface CarryTarget {
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
 const label = (c: { code: string; branchCode: string | null }) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
 
-function neverPlannedText(plan: CarryPlanIn | null, date: string, orderId: string): string {
+/** Why an order is on no load and not unserved. `ofToday`: its day is not over, so "not yet", never "never". */
+function neverPlannedText(plan: CarryPlanIn | null, date: string, orderId: string, ofToday = false): string {
   const day = fmtDayMonth(date);
-  if (!plan) return `No plan was made for ${day}`;
-  if (!plan.chosen) return `The ${day} plan (version ${plan.version}) was never optimized`;
-  if (plan.scopeOrderIds && !plan.scopeOrderIds.includes(orderId)) return `Added after the ${day} plan (version ${plan.version}) was made: never planned`;
+  if (!plan) return ofToday ? `No plan made for ${day} yet` : `No plan was made for ${day}`;
+  if (!plan.chosen) return ofToday ? `The ${day} plan (version ${plan.version}) has not been optimized yet` : `The ${day} plan (version ${plan.version}) was never optimized`;
+  if (plan.scopeOrderIds && !plan.scopeOrderIds.includes(orderId)) {
+    return `Added after the ${day} plan (version ${plan.version}) was made: ${ofToday ? 'not planned yet' : 'never planned'}`;
+  }
   return `Not on any load of the ${day} plan (version ${plan.version})`;
 }
 
@@ -230,8 +249,11 @@ function laterState(x: LaterLine): string {
  * The orders of earlier days whose cases were not delivered, per order with its open lines, why
  * (unserved / on a load that never left / never planned) and, when it cannot be carried, the reason.
  * `plans`: the live plan of each earlier day (null = no plan). Orders already carried, DISPATCHED or
- * DELIVERED, or with every case on a load that left, are not candidates; nor orders of today or a
- * later day (the day is not over: carryWindow). A candidate with a sales-order line that is also on
+ * DELIVERED, or with every case on a load that left, are not candidates; nor orders of D or later,
+ * or of a day after today (not due yet: carryWindow). Today's orders (D later than today) qualify
+ * exactly like earlier days - on a load that has not left (PLANNED, LOCKED, LOADING), unserved, or
+ * never planned; never on a DISPATCHED or COMPLETED load - and are marked `ofToday` (their loads
+ * may still go out today). A candidate with a sales-order line that is also on
  * an order of a later date (the orders given, and `target.laterLines`: any depot, open, carried,
  * dispatched or delivered) is listed but not carried: ALREADY_ON_DAY when that date is D, else
  * SAME_LINE_LATER.
@@ -240,7 +262,8 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
   const out: CarryCandidate[] = [];
   for (const o of orders) {
     if (o.carriedToOrderId || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
-    if (!(o.deliveryDate < target.date) || !(o.deliveryDate < target.today)) continue;
+    if (!(o.deliveryDate < target.date) || o.deliveryDate > target.today) continue;
+    const ofToday = o.deliveryDate === target.today;
     const plan = plans.get(o.deliveryDate) ?? null;
     // Cases on loads that left the depot are delivered; loads that never left are listed.
     const delivered = new Map<string, number>();
@@ -276,13 +299,14 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
     );
 
     const why: CarryWhy[] = [];
-    if (notLeft.length) why.push({ kind: 'NOT_LEFT', text: `On ${notLeft.join(', ')}: never left the depot` });
+    // Today's loads have not left YET: they may still go out today.
+    if (notLeft.length) why.push({ kind: 'NOT_LEFT', text: `On ${notLeft.join(', ')}: ${ofToday ? 'has not left the depot yet' : 'never left the depot'}` });
     for (const u of plan?.chosen ? plan.unserved.filter((x) => x.orderId === o.id) : []) {
       const part = readPortionLines(u.portionLinesJson);
       const n = part ? part.reduce((a, x) => a + x.cases, 0) : o.totalCases;
       why.push({ kind: 'UNSERVED', reasonCode: u.reasonCode, text: `Unserved${part ? ` (${n} cases)` : ''}: ${u.reasonMessage?.trim() || u.reasonCode}` });
     }
-    if (!why.length) why.push({ kind: 'NEVER_PLANNED', text: neverPlannedText(plan, o.deliveryDate, o.id) });
+    if (!why.length) why.push({ kind: 'NEVER_PLANNED', text: neverPlannedText(plan, o.deliveryDate, o.id, ofToday) });
 
     let blocked: CarryCandidate['blocked'] = null;
     if (plan?.status === 'OPTIMIZING') {
@@ -312,6 +336,7 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
       orderCases: o.totalCases,
       weightKg,
       partial: cases < o.totalCases,
+      ofToday,
       salesOrders: [...new Set(lines.map((l) => l.salesOrderNo).filter((s): s is string => !!s))],
       why,
       blocked,
@@ -362,7 +387,9 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
     if (later.some((x) => x.date === target.date)) {
       c.blocked = { code: 'ALREADY_ON_DAY', text: `${so} is already confirmed for ${fmtDayMonth(target.date)}: not brought forward. Check whether it was entered again for that day.` };
     } else if (carriers.has(latest.orderId)) {
-      c.blocked = { code: 'SAME_LINE_LATER', text: `${so} is also open on ${fmtDayMonth(latest.date)}: only that order is brought forward.` };
+      c.blocked = carriers.get(latest.orderId)!.ofToday
+        ? { code: 'SAME_LINE_LATER', text: `${so} is also open today (${fmtDayMonth(latest.date)}): only that order can be brought forward.` }
+        : { code: 'SAME_LINE_LATER', text: `${so} is also open on ${fmtDayMonth(latest.date)}: only that order is brought forward.` };
     } else {
       const first = later[0]!;
       c.blocked = { code: 'SAME_LINE_LATER', text: `${so} was entered again for ${fmtDayMonth(first.date)}${laterState(first)}: not brought forward, so it is not delivered twice.` };
@@ -373,10 +400,15 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
   );
 }
 
-/** One selected order: its id and the open cases the screen showed (the expected state). */
+/**
+ * One selected order: its id and the open cases the screen showed (the expected state). `today`:
+ * the dispatcher ticked it in the "Today" group - required for an order of today (its load may still
+ * go out today, so it is never carried because the earlier days were selected).
+ */
 export interface CarrySelection {
   orderId: string;
   cases: number;
+  today?: boolean;
 }
 
 export interface SelectionCheck {
@@ -385,16 +417,19 @@ export interface SelectionCheck {
   skipped: { orderId: string; code: 'ALREADY_CARRIED'; text: string }[];
   /** No longer what the screen showed: nothing is carried until the list is reloaded. */
   changed: { orderId: string; text: string }[];
+  /** Orders of today sent without `today: true` (not ticked in the "Today" group): nothing is carried. */
+  todayNotSelected: { orderId: string; text: string }[];
 }
 
 /**
  * The selection against the candidates as they are now. An order already carried is skipped (so a
  * second run carries nothing new); one that is no longer a candidate, is blocked now, or has other
- * open cases than the screen showed is "changed".
+ * open cases than the screen showed is "changed"; an order of today sent without `today: true` is
+ * "todayNotSelected" (it is carried only when ticked on its own).
  */
 export function checkSelection(candidates: readonly CarryCandidate[], selected: readonly CarrySelection[], alreadyCarried: ReadonlyMap<string, string>): SelectionCheck {
   const byId = new Map(candidates.map((c) => [c.orderId, c]));
-  const res: SelectionCheck = { carry: [], skipped: [], changed: [] };
+  const res: SelectionCheck = { carry: [], skipped: [], changed: [], todayNotSelected: [] };
   for (const s of selected) {
     const to = alreadyCarried.get(s.orderId);
     if (to !== undefined) {
@@ -408,6 +443,11 @@ export function checkSelection(candidates: readonly CarryCandidate[], selected: 
       res.changed.push({ orderId: s.orderId, text: `${label({ code: c.customerCode, branchCode: c.branchCode })} (${fmtDayMonth(c.date)}): ${c.blocked.text}` });
     } else if (c.cases !== s.cases) {
       res.changed.push({ orderId: s.orderId, text: `${label({ code: c.customerCode, branchCode: c.branchCode })} (${fmtDayMonth(c.date)}): ${c.cases} cases are open now, the list showed ${s.cases}.` });
+    } else if (c.ofToday && s.today !== true) {
+      res.todayNotSelected.push({
+        orderId: s.orderId,
+        text: `${label({ code: c.customerCode, branchCode: c.branchCode })} is an order of today (${fmtDayMonth(c.date)}): it may still go out today, so it is brought forward only when it is ticked under Today.`,
+      });
     } else {
       res.carry.push(c);
     }
@@ -694,6 +734,8 @@ async function readCandidates(db: Db, tenantId: string, depotId: string, date: s
 
 function previewOf(date: string, depotId: string, window: { from: string; to: string; today: string }, candidates: CarryCandidate[]): CarryPreview {
   const open = candidates.filter((c) => !c.blocked);
+  const earlier = open.filter((c) => !c.ofToday);
+  const today = open.filter((c) => c.ofToday);
   return {
     date,
     depotId,
@@ -701,8 +743,10 @@ function previewOf(date: string, depotId: string, window: { from: string; to: st
     to: window.to,
     today: window.today,
     dayOver: date < window.today,
-    orders: open.length,
-    cases: open.reduce((a, c) => a + c.cases, 0),
+    orders: earlier.length,
+    cases: earlier.reduce((a, c) => a + c.cases, 0),
+    todayOrders: today.length,
+    todayCases: today.reduce((a, c) => a + c.cases, 0),
     blocked: candidates.length - open.length,
     candidates,
   };
@@ -725,8 +769,9 @@ export function dayOverError(date: string, today: string): PlanError {
 
 /**
  * GET /api/dispatch/carry-over: what "Bring forward to D" would carry for this depot. `now`: the
- * clock (tests fix it); orders of the company's today and later are never listed (carryWindow).
- * A day D that is over lists nothing (dayOver): its loads have left, it is history.
+ * clock (tests fix it); orders after the company's today are never listed, today's are listed as
+ * their own group (`ofToday`, unticked) when D is later than today (carryWindow). A day D that is
+ * over lists nothing (dayOver): its loads have left, it is history.
  */
 export async function carryOverPreview(tenantId: string, depotId: string, date: string, opts: { now?: Date; db?: Db } = {}): Promise<CarryPreview> {
   const db = opts.db ?? prisma;
@@ -776,10 +821,14 @@ export interface BringForwardResult {
  * createInitialPlan take it, so no new version of those days appears meanwhile), then the row locks
  * of their live plans (in id order), checked to still be the live plans (409 PLAN_BUSY otherwise),
  * then everything is read again from exactly those plans and checked. A selection that no longer
- * matches (a load dispatched meanwhile, a customer deactivated, an order of today, ...) carries
- * nothing: 409 CARRY_OVER_CHANGED. Orders already carried are skipped, so a second run - also at
- * the same time - carries nothing new. A day D before the company's today is refused (409
- * DAY_OVER). `now`: the clock (the company's today, the late flag).
+ * matches (a load dispatched meanwhile, a customer deactivated, an order of D itself, ...) carries
+ * nothing: 409 CARRY_OVER_CHANGED. An order of today is carried only when it is sent with
+ * `today: true` (ticked in the "Today" group): otherwise 409 TODAY_NOT_SELECTED and nothing is
+ * carried. Today's live plan is locked like the earlier days' (its loads are still moving: a load
+ * dispatched meanwhile is seen, and a lock, load or dispatch after this commits is refused with
+ * ORDERS_CARRIED). Orders already carried are skipped, so a second run - also at the same time -
+ * carries nothing new. A day D before the company's today is refused (409 DAY_OVER). `now`: the
+ * clock (the company's today, the late flag).
  */
 export async function bringForward(
   tenantId: string,
@@ -832,6 +881,15 @@ export async function bringForward(
             `The list changed since it was shown: ${check.changed.map((c) => c.text).slice(0, 5).join(' ')}${check.changed.length > 5 ? ` (and ${check.changed.length - 5} more)` : ''} Nothing was brought forward: look at the list again.`,
             409,
             { code: 'CARRY_OVER_CHANGED', changed: check.changed },
+          );
+        }
+        // Today's orders only when ticked on their own: never because the earlier days were selected.
+        if (check.todayNotSelected.length) {
+          const n = check.todayNotSelected.length;
+          throw new PlanError(
+            `${n} order(s) of today (${fmtDayMonth(today)}) were sent without being ticked under Today: ${check.todayNotSelected.map((c) => c.text).slice(0, 3).join(' ')}${n > 3 ? ` (and ${n - 3} more)` : ''} Today's loads that have not left yet may still go out today. Nothing was brought forward: tick under Today only the orders you know will not be delivered today.`,
+            409,
+            { code: 'TODAY_NOT_SELECTED', orderIds: check.todayNotSelected.map((c) => c.orderId) },
           );
         }
         const dayPlan = await currentPlan(tenantId, depotId, date, tx);

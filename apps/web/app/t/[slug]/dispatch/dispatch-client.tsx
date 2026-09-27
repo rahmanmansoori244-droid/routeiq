@@ -45,6 +45,8 @@ interface WeightGap {
 }
 interface Day {
   date: string;
+  /** The company's today (tenant timezone). */
+  today: string;
   tomorrow: string;
   cutoff: string;
   depots: { id: string; code: string; name: string; lat: number; lng: number }[];
@@ -579,6 +581,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
             reloadSignal={planReload}
+            today={day.today}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the

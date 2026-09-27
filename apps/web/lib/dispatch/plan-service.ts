@@ -63,7 +63,7 @@ import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySum
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
-import { dateOnly, isoOf } from './time';
+import { dateOnly, DEFAULT_TZ, isoOf, todayIso } from './time';
 import { loadingFromWarning, planDayNowMin, planFromWarning, sameDayPlanFrom, type PlanFrom } from './plan-from';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
@@ -1942,7 +1942,8 @@ export interface LoadChange {
 /**
  * One request on one load - its driver and/or its status - in ONE transaction under the plan's
  * row lock, so a refused status change also leaves the driver as it was. The driver goes first:
- * a load being dispatched can get its driver in the same request.
+ * a load being dispatched can get its driver in the same request. `now`: the clock (tests fix it;
+ * the words of a refusal say "today" for a load of the company's today).
  */
 export async function updateLoad(
   tenantId: string,
@@ -1951,12 +1952,13 @@ export async function updateLoad(
   change: LoadChange,
   user: { id: string; role: string },
   hasRole: RoleCheck,
+  opts: { now?: Date } = {},
 ) {
   return inLoadTx(async (tx) => {
     const run = await lockOpenRun(tx, tenantId, runId);
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
-    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole);
+    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date());
     return load;
   });
 }
@@ -1975,7 +1977,7 @@ export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
   return new PlanError(`This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. ${advice}`, 409, { code: 'NO_PLAN_APPLIED' });
 }
 
-async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck) {
+async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
@@ -2000,7 +2002,8 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // PR9: an order of this load that was brought forward to a later day is planned there now, so
   // this load cannot move forward with it (it would be delivered twice). Stepping back and
   // Completed are never refused (a load that left keeps its orders: they are never carried).
-  if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load);
+  // Also a load of today whose orders were brought forward to tomorrow in the evening.
+  if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   const updated = await tx.planLoad.update({
     where: { id: loadId },
@@ -2051,9 +2054,16 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
  * the re-plan leaves carried orders out); with nothing else, a PLANNED load is left as it is - it
  * stays in the plan for the record, and a re-plan of the day would have nothing to plan
  * (NOTHING_TO_PLAN) - while a LOCKED or LOADING one was loaded: its cases are unloaded (they are
- * planned on the later day) and it is put back to Planned. Read without a relation filter.
+ * planned on the later day) and it is put back to Planned. A load of the company's TODAY (orders of
+ * today brought forward to tomorrow in the evening, owner decision) is refused the same way, and
+ * the words say today: re-plan today, or unlock the load. Read without a relation filter.
  */
-async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
+async function carriedOrdersGate(
+  tx: Tx,
+  tenantId: string,
+  load: { id: string; truckId: string; loadNo: number; status: string },
+  day: { runDate: Date; now: Date },
+) {
   const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
   if (!ids.length) return;
   const carried = await tx.order.findMany({
@@ -2064,10 +2074,13 @@ async function carriedOrdersGate(tx: Tx, tenantId: string, load: { id: string; t
   const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
   const where = `${truck?.code ?? 'Truck'} L${load.loadNo}`;
   const names = [...new Set(carried.map((o) => `${o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id)}${o.carriedTo ? ` (to ${isoOf(o.carriedTo.deliveryDate)})` : ''}`))];
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { timezone: true } });
+  const date = isoOf(day.runDate);
   const remedy = carriedLoadRemedy(
     load.status,
     carried.length === ids.length,
     carried.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])),
+    { date, isToday: date === todayIso(cfg?.timezone || DEFAULT_TZ, day.now) },
   );
   throw new PlanError(
     `${where} carries ${carried.length} order(s) that were brought forward to a later day: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. They are planned on that day now, so this load cannot be locked, loaded or dispatched with them. ${remedy}`,

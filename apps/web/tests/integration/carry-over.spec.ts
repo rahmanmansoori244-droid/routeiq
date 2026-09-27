@@ -24,9 +24,16 @@
  *     delivered twice). Test 1 also checks: a day that is over takes nothing (409 DAY_OVER), and the
  *     earlier day's Step 3 and the 409 say to unload a locked load holding only brought-forward
  *     orders (it was loaded), never "unlock it" or "every load has left the depot".
+ *  6. (Owner decision: today's orders) At night, planning tomorrow (its load locked tonight): today's
+ *     leftovers - on a load locked last night that has not left, unserved, on a planned afternoon
+ *     trip - are listed as today's, none ticked; sent without the Today tick they are refused
+ *     (TODAY_NOT_SELECTED); ticked, they go to tomorrow and are closed on today like an earlier
+ *     day's, today's load holding one cannot go out and the 409 says to unlock it; the unticked
+ *     one stays today's and its load is dispatched; RE-PLAN of tomorrow adds the copies.
  *
- * Bring forward only looks at days that are over (never the company's today or later), so every
- * carry here runs with the clock on the day it carries to (`onDay`), after the days it reads.
+ * Bring forward never looks past the company's today; today's orders are listed as their own
+ * group. Every carry here runs with the clock on the day it carries to (`onDay`), after the days it
+ * reads, except test 6 (at night on the day before, `atNight`) and test 1's check of today's group.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -96,7 +103,7 @@ import { bringForward, carryOverPreview } from '@/lib/dispatch/carry-over';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { carriedOverRows } from '@/lib/dispatch/workbook';
-import { dayNothingLeftText } from '@/lib/dispatch/carry-view';
+import { carrySelectionPayload, dayNothingLeftText, defaultCarrySelection } from '@/lib/dispatch/carry-view';
 import { fetchRangeRows } from '@/lib/dashboard';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { DELETE as deleteBatch } from '@/app/api/orders/[batchId]/route';
@@ -124,6 +131,8 @@ const morningBefore = (iso: string) => {
 };
 /** 09:00 in Muscat on `iso`: the days before it are over, so Bring forward to `iso` looks at them. */
 const onDay = (iso: string) => new Date(`${iso}T05:00:00Z`);
+/** 21:00 in Muscat on `iso`: tomorrow's trucks are being loaded; `iso` is today, its orders are today's group. */
+const atNight = (iso: string) => new Date(`${iso}T17:00:00Z`);
 
 async function jobsDone(runId: string) {
   const g = globalThis as unknown as { __routeiqInflight?: Map<string, Promise<void>> };
@@ -233,9 +242,15 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     await updateLoad(tenantId, day1.id, l2.id, { status: 'LOCKED' }, user(), everyRole);
     expect(await prisma.unservedOrder.count({ where: { orderId: o3.id, scenario: { runId: day1.id } } })).toBe(1);
 
-    // While day 1 is still today, the preview for day 2 lists nothing: its loads may still leave.
+    // While day 1 is still today, the preview for day 2 lists C2 and C3 as today's orders - their own
+    // group, none ticked: today's loads may still leave (owner decision); C1's load left.
     const early = await carryOverPreview(tenantId, depotId, DAY2, { now: onDay(DAY1) });
-    expect(early).toMatchObject({ candidates: [], to: isoPlus(19), today: DAY1 });
+    expect(early).toMatchObject({ to: DAY1, today: DAY1, orders: 0, cases: 0, todayOrders: 2, todayCases: 50 });
+    expect(early.candidates.map((c) => [c.customerCode, c.ofToday, c.why.map((w) => w.kind)])).toEqual([
+      ['C2', true, ['NOT_LEFT']],
+      ['C3', true, ['UNSERVED']],
+    ]);
+    expect(defaultCarrySelection(early.candidates).size).toBe(0);
 
     // The preview for day 2: C2 (its load never left) and C3 (unserved); C1 was delivered.
     const preview = await carryOverPreview(tenantId, depotId, DAY2, { now: carryNow });
@@ -536,19 +551,121 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     const res = await bringForward(tenantId, depotId, C, [{ orderId: o2.id, cases: 15 }], { id: userId }, { now: onDay(C) });
     expect(res.orders).toBe(1);
 
-    // Still on C, planning E (tomorrow): B is carried, its copy is on C (today, not in the window).
-    // The older order is listed with the reason and never ticked; bringing it forward is refused.
+    // Still on C, planning E (tomorrow): B is carried, its copy is on C - today, so it is listed as
+    // today's (never planned, not ticked). The older order is listed with the reason and never
+    // ticked: only the copy can be brought forward; bringing the older one forward is refused.
     const next = await carryOverPreview(tenantId, depotId, E, { now: onDay(C) });
     const old = next.candidates.find((c) => c.orderId === o1.id)!;
     expect(old.blocked).toEqual({
       code: 'SAME_LINE_LATER',
-      text: `Sales order SO-SAME (W-500) was entered again for ${fmtDayMonth(B)} (brought forward to ${fmtDayMonth(C)}): not brought forward, so it is not delivered twice.`,
+      text: `Sales order SO-SAME (W-500) is also open today (${fmtDayMonth(C)}): only that order can be brought forward.`,
     });
+    const copyOfB = next.candidates.find((c) => c.ofToday && c.salesOrders.includes('so-same'))!;
+    expect([copyOfB.date, copyOfB.firstDate, copyOfB.blocked]).toEqual([C, B, null]);
+    expect([...defaultCarrySelection(next.candidates)].filter((id) => id === o1.id || id === copyOfB.orderId)).toEqual([]);
     const refused = await bringForward(tenantId, depotId, E, [{ orderId: o1.id, cases: 15 }], { id: userId }, { now: onDay(C) }).catch((e: unknown) => e);
     expect((refused as PlanError).details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
     expect((await prisma.order.findUniqueOrThrow({ where: { id: o1.id } })).carriedToOrderId).toBeNull();
     // The line exists once from C on: the copy of the newer order.
     const lines = await prisma.orderLine.findMany({ where: { salesOrderNo: { in: ['SO-SAME', 'so-same'] }, order: { tenantId, deliveryDate: { gte: new Date(`${C}T00:00:00Z`) } } } });
     expect(lines).toHaveLength(1);
+  });
+
+  it("at night: today's leftovers are listed as today's and none is ticked; the ticked ones go to tomorrow, an unticked one stays on today", async () => {
+    const T = isoPlus(120); // today, on the clock given
+    const N = isoPlus(121); // tomorrow
+    const night = atNight(T);
+    const plannedAhead = morningBefore(T);
+    // Tomorrow is planned and its load locked tonight (NMWC loads tomorrow's trucks after 20:00).
+    const ownN = await addOrder('C6', N, 8, 'SO-N6');
+    const planN = await optimize(N, plannedAhead);
+    const lockedN = await loadOf(planN.id, ownN.id);
+    await updateLoad(tenantId, planN.id, lockedN.id, { status: 'LOCKED' }, user(), everyRole);
+
+    // Today: C2 on a load locked last night that has not left, C5 on an afternoon trip still Planned, C3 unserved.
+    const o2 = await addOrder('C2', T, 20, 'SO-T2');
+    const o3 = await addOrder('C3', T, 30, 'SO-T3');
+    const o5 = await addOrder('C5', T, 12, 'SO-T5');
+    solverMode.unserved = new Set([await customerId('C3')]);
+    const planT = await optimize(T, plannedAhead);
+    solverMode.unserved = new Set();
+    const l2 = await loadOf(planT.id, o2.id);
+    const l5 = await loadOf(planT.id, o5.id);
+    // One stop per load, trucks in turn: each is the first load of its own truck.
+    expect(l2.truckId).not.toBe(l5.truckId);
+    await updateLoad(tenantId, planT.id, l2.id, { status: 'LOCKED' }, user(), everyRole);
+
+    // Planning today itself: today's orders are never listed (never brought forward to their own day).
+    expect((await carryOverPreview(tenantId, depotId, T, { now: night })).candidates.filter((c) => c.date === T)).toEqual([]);
+
+    // Planning tomorrow at night: today's leftovers are listed as today's, none ticked.
+    const pv = await carryOverPreview(tenantId, depotId, N, { now: night });
+    expect(pv).toMatchObject({ today: T, to: T, orders: 0, cases: 0, todayOrders: 3, todayCases: 62, blocked: 0 });
+    expect(pv.candidates.map((c) => [c.customerCode, c.ofToday, c.why.map((w) => w.kind), c.blocked])).toEqual([
+      ['C2', true, ['NOT_LEFT'], null],
+      ['C3', true, ['UNSERVED'], null],
+      ['C5', true, ['NOT_LEFT'], null],
+    ]);
+    expect(pv.candidates[0]!.why[0]!.text).toMatch(/: has not left the depot yet$/);
+    expect(defaultCarrySelection(pv.candidates).size).toBe(0);
+
+    // Sent as "select all" would (no Today tick): refused, nothing carried.
+    const implied = await bringForward(tenantId, depotId, N, pv.candidates.map((c) => ({ orderId: c.orderId, cases: c.cases })), { id: userId }, { now: night }).catch((e: unknown) => e);
+    expect(implied).toBeInstanceOf(PlanError);
+    expect((implied as PlanError).details).toMatchObject({ code: 'TODAY_NOT_SELECTED' });
+    expect(await prisma.order.count({ where: { tenantId, carriedFromOrderId: { in: [o2.id, o3.id, o5.id] } } })).toBe(0);
+    // Never to today itself (D must be later than the order's day).
+    const toToday = await bringForward(tenantId, depotId, T, [{ orderId: o5.id, cases: 12, today: true }], { id: userId }, { now: night }).catch((e: unknown) => e);
+    expect((toToday as PlanError).details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
+
+    // The dispatcher ticks C2 (its truck will not go out again today) and C3 under Today; C5 stays unticked.
+    const before = await planRows(planT.id);
+    const sel = carrySelectionPayload(pv.candidates, new Set([o2.id, o3.id]));
+    expect(sel).toEqual([
+      { orderId: o2.id, cases: 20, today: true },
+      { orderId: o3.id, cases: 30, today: true },
+    ]);
+    const res = await bringForward(tenantId, depotId, N, sel, { id: userId }, { now: night });
+    // Tomorrow already has a plan in use: late, and RE-PLAN adds them.
+    expect(res).toMatchObject({ orders: 2, cases: 50, late: true, replanNeeded: true, planId: planN.id, skipped: [] });
+    const copies = await prisma.order.findMany({ where: { tenantId, carriedFromOrderId: { in: [o2.id, o3.id] } }, orderBy: { totalCases: 'asc' } });
+    expect(copies.map((c) => [c.carriedFromOrderId, c.deliveryDate.toISOString().slice(0, 10), c.carriedFromDate?.toISOString().slice(0, 10), c.totalCases, c.isLate])).toEqual([
+      [o2.id, N, T, 20, true],
+      [o3.id, N, T, 30, true],
+    ]);
+
+    // Today: the originals are closed like an earlier day's, today's plan rows are exactly as they were, C5 is still today's.
+    expect(await planRows(planT.id)).toEqual(before);
+    const dT = await getDayOverview(tenantId, { date: T, depotId });
+    expect(dT.orders.count).toBe(1);
+    expect(dT.carriedOut).toEqual({ orders: 2, cases: 50, toDates: [N] });
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o5.id } })).carriedToOrderId).toBeNull();
+    // C2's load (loaded last night) cannot go out today with it: the 409 says so and says to unlock it.
+    for (const s of ['LOADING', 'DISPATCHED'] as const) {
+      const refused = await updateLoad(tenantId, planT.id, l2.id, { status: s }, user(), everyRole, { now: night }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(PlanError);
+      expect((refused as PlanError).details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: [o2.id] });
+      expect((refused as PlanError).message).toContain(
+        `its cases were brought forward to ${fmtDayMonth(N)} and are planned there, so it does not go out today. Unlock it (put it back to Planned)`,
+      );
+    }
+    expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l2.id } })).status).toBe('LOCKED');
+    // The unticked C5 stays today's: its load can still be locked and dispatched today.
+    for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planT.id, l5.id, { status: s }, user(), everyRole, { now: night });
+    expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l5.id } })).status).toBe('DISPATCHED');
+    // Read again: nothing of today is left (C2 and C3 were brought forward, C5's load left the depot).
+    expect((await carryOverPreview(tenantId, depotId, N, { now: night })).candidates).toEqual([]);
+
+    // Tomorrow: RE-PLAN adds the copies around the load locked tonight; C5 is not in it.
+    const rp = await replan(tenantId, planN.id, 'REOPTIMIZE', null, user(), null, {}, undefined, { now: night });
+    expect(rp.status).toBe(202);
+    expect(rp.body.reason).toBe('LATE_ORDER');
+    const v2 = await jobsDone(String(rp.body.runId));
+    expect(v2.status).toBe('READY');
+    const loads = await prisma.planLoad.findMany({ where: { runId: v2.id }, include: { assignments: true } });
+    const kept = loads.find((l) => l.carriedFromLoadId === lockedN.id)!;
+    expect([kept.status, kept.assignments.map((a) => a.orderId)]).toEqual(['LOCKED', [ownN.id]]);
+    const sent = (await prisma.runJob.findFirstOrThrow({ where: { runId: v2.id } })).requestJson as unknown as DispatchRequest;
+    expect(sent.stops.flatMap((s) => s.order_ids).sort()).toEqual(copies.map((c) => c.id).sort());
   });
 });

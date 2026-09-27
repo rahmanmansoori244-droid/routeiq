@@ -15,34 +15,80 @@ export function carriedToBadge(toDateIso: string): string {
   return `Carried over to ${fmtDayMonth(toDateIso)}`;
 }
 
-/** What the day screen offers by default: every listed order that can be brought forward. */
-export function defaultCarrySelection(candidates: readonly { orderId: string; blocked: unknown }[]): Set<string> {
-  return carrySelected(candidates, new Set());
+/** A listed order as the selection needs it; `ofToday`: an order of the company's today (the "Today" group). */
+type Listed = { orderId: string; blocked: unknown; ofToday?: boolean };
+
+/**
+ * Ticked unless the dispatcher changed it: an order of an earlier day (that day is over) yes, an
+ * order of today no - today's loads that have not left yet may still go out today (owner decision).
+ */
+export function carryTickedByDefault(c: Listed): boolean {
+  return !c.blocked && !c.ofToday;
+}
+
+/** What the day screen offers by default: every order of an earlier day that can be brought forward, none of today. */
+export function defaultCarrySelection(candidates: readonly Listed[]): Set<string> {
+  return carrySelected(candidates, new Map());
 }
 
 /**
- * The orders ticked on the day screen: every listed order that can be brought forward, except the
- * ones the dispatcher unticked. The screen keeps what was unticked (not what is ticked), so a
- * reload of the list - after a 409, a partial bring forward, an OPTIMIZE or RE-PLAN of the day, a
- * new file - never ticks again an order the dispatcher unticked (for example one the customer
- * cancelled); an order new to the list is ticked, like the first time. Reset only for another day
- * or depot.
+ * What the dispatcher ticked or unticked by hand on the day screen: order id -> ticked. Kept across
+ * reloads of the list; reset only for another day or depot.
  */
-export function carrySelected(candidates: readonly { orderId: string; blocked: unknown }[], unticked: ReadonlySet<string>): Set<string> {
-  return new Set(candidates.filter((c) => !c.blocked && !unticked.has(c.orderId)).map((c) => c.orderId));
+export type CarryChoices = ReadonlyMap<string, boolean>;
+
+/**
+ * The orders ticked on the day screen: what the dispatcher chose by hand, else the default - every
+ * order of an earlier day that can be brought forward, none of today (carryTickedByDefault). The
+ * screen keeps the choices (not the ticked set), so a reload of the list - after a 409, a partial
+ * bring forward, an OPTIMIZE or RE-PLAN of the day, a new file - never ticks again an order the
+ * dispatcher unticked (for example one the customer cancelled), never unticks an order of today
+ * the dispatcher ticked, and never ticks an order of today by itself; an order new to the list
+ * gets its default. A blocked order is never selected.
+ */
+export function carrySelected(candidates: readonly Listed[], choices: CarryChoices): Set<string> {
+  return new Set(candidates.filter((c) => !c.blocked && (choices.get(c.orderId) ?? carryTickedByDefault(c))).map((c) => c.orderId));
 }
 
-/** The dispatcher ticks or unticks one order: the new set of unticked orders. */
-export function toggleCarry(unticked: ReadonlySet<string>, orderId: string): Set<string> {
-  const n = new Set(unticked);
-  if (n.has(orderId)) n.delete(orderId);
-  else n.add(orderId);
+/** The dispatcher ticks or unticks one order: the new choices. */
+export function toggleCarry(choices: CarryChoices, c: Listed): Map<string, boolean> {
+  const n = new Map(choices);
+  n.set(c.orderId, !(choices.get(c.orderId) ?? carryTickedByDefault(c)));
   return n;
 }
 
-/** The POST body's selection: each selected order with the open cases the list showed (the expected state). */
-export function carrySelectionPayload(candidates: readonly { orderId: string; cases: number; blocked: unknown }[], selected: ReadonlySet<string>) {
-  return candidates.filter((c) => selected.has(c.orderId) && !c.blocked).map((c) => ({ orderId: c.orderId, cases: c.cases }));
+/**
+ * The POST body's selection: each selected order with the open cases the list showed (the expected
+ * state). An order of today carries `today: true` - it was ticked in the "Today" group, on its own:
+ * the server refuses an order of today sent without it (409 TODAY_NOT_SELECTED).
+ */
+export function carrySelectionPayload(candidates: readonly (Listed & { cases: number })[], selected: ReadonlySet<string>): { orderId: string; cases: number; today?: true }[] {
+  return candidates
+    .filter((c) => selected.has(c.orderId) && !c.blocked)
+    .map((c) => (c.ofToday ? { orderId: c.orderId, cases: c.cases, today: true as const } : { orderId: c.orderId, cases: c.cases }));
+}
+
+/** The heading of the day screen's group of today's orders: "Today (27 Sep) - may still leave today". */
+export function carryTodayTitle(todayIso: string): string {
+  return `Today (${fmtDayMonth(todayIso)}) - may still leave today`;
+}
+
+/** The warning above today's orders (owner decision: unticked by default). */
+export const CARRY_TODAY_WARNING = "Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.";
+
+/**
+ * The question before "Bring forward": how many orders and cases, and - when orders of today are
+ * ticked - that they come off today's plan and cannot go out today any more.
+ */
+export function carryConfirmText(chosen: readonly { cases: number; ofToday?: boolean }[], dateIso: string, todayIso: string): string {
+  const day = fmtDayMonth(dateIso);
+  const cases = chosen.reduce((a, c) => a + c.cases, 0);
+  const ofToday = chosen.filter((c) => c.ofToday);
+  const todayCases = ofToday.reduce((a, c) => a + c.cases, 0);
+  const todayNote = ofToday.length
+    ? `\n\n${ofToday.length} of them (${todayCases.toLocaleString()} cases) are orders of TODAY (${fmtDayMonth(todayIso)}): they come off today's plan, and a load of today that still holds one cannot be locked, loaded or dispatched today. Only continue if you know they will not be delivered today.`
+    : '';
+  return `Bring ${chosen.length} order(s) (${cases.toLocaleString()} cases) forward to ${day}?${todayNote}\n\nThey become orders of ${day} and are no longer open on their own days. The plans of those days stay as they are.`;
 }
 
 /**
@@ -50,7 +96,11 @@ export function carrySelectionPayload(candidates: readonly { orderId: string; ca
  * day's plan is being optimized (`optimizing`), that optimization was started without them: they
  * wait for it, and RE-PLAN adds them once it finished.
  */
-export function carryDoneText(res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean }, dateIso: string): string {
+export function carryDoneText(
+  res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean; carried?: readonly { fromDate: string }[] },
+  dateIso: string,
+  todayIso?: string,
+): string {
   const day = fmtDayMonth(dateIso);
   if (!res.orders) return res.skipped.length ? `Nothing new to bring forward: ${res.skipped.length} order(s) were already brought forward.` : 'Nothing was brought forward.';
   const next = res.optimizing
@@ -59,7 +109,12 @@ export function carryDoneText(res: { orders: number; cases: number; skipped: unk
       ? 'RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are.'
       : `OPTIMIZE plans them with the other orders of ${day}.`;
   const skipped = res.skipped.length ? ` ${res.skipped.length} order(s) were already brought forward.` : '';
-  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}`;
+  // Orders of today brought forward (in the evening): their loads of today no longer go out with them.
+  const ofToday = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso).length : 0;
+  const today = ofToday
+    ? ` ${ofToday} of them were orders of today (${fmtDayMonth(todayIso!)}): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (unload a loaded one).`
+    : '';
+  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${today}`;
 }
 
 /** The carried-over line of a stop on the driver sheet and the Excel load sheet, or null. */
@@ -95,10 +150,25 @@ export function carriedToDays(toDates: readonly string[] | undefined): string {
  *   cases are on the truck, but they are planned on the later day now, where the warehouse would
  *   pick them again. So: unload them back to stock, or tell the warehouse, before the later day's
  *   load is picked, then put this load back to Planned. Never "never loaded" or "needs nothing".
+ * - A load of TODAY (`ofDay.isToday`: orders of today brought forward to tomorrow in the evening,
+ *   owner decision): the words say today - re-plan today (its other orders are planned without
+ *   the brought-forward ones), or unlock the load (back to Planned) when it was loaded - so the
+ *   dispatcher knows the load does not go out today with them.
  */
-export function carriedLoadRemedy(status: string, onlyCarried: boolean, toDates?: readonly string[]): string {
+export function carriedLoadRemedy(status: string, onlyCarried: boolean, toDates?: readonly string[], ofDay?: { date: string; isToday: boolean }): string {
   const days = carriedToDays(toDates);
   const loaded = status === 'LOCKED' || status === 'LOADING';
+  if (ofDay?.isToday) {
+    const today = `today (${fmtDayMonth(ofDay.date)})`;
+    if (onlyCarried) {
+      return loaded
+        ? `This load holds nothing else, but it was loaded: its cases were brought forward to ${days} and are planned there, so it does not go out today. Unlock it (put it back to Planned) and unload those cases back to stock, or tell the warehouse, before the loads of ${days} are picked, so they are not loaded twice. It stays in today's plan for the record; nothing needs to be re-planned.`
+        : `This load holds nothing else: it does not go out today. Leave it as it is (it stays in today's plan for the record); re-plan ${today} only if other orders of today still need a truck.`;
+    }
+    return loaded
+      ? `Their cases were loaded: unload them (they are planned on ${days} now). To deliver its other orders today, unlock the load (put it back to Planned) and re-plan ${today}: the re-plan leaves the brought-forward orders out.`
+      : `Re-plan ${today} to plan its other orders without them.`;
+  }
   if (onlyCarried) {
     if (loaded) {
       return `This load holds nothing else, but it was loaded: its cases were brought forward to ${days} and are planned there. Unload them back to stock, or tell the warehouse, before the loads of ${days} are picked, so they are not loaded twice; then put this load back to Planned. It stays in this plan for the record; nothing needs to be re-planned.`;

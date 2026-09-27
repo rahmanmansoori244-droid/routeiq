@@ -45,14 +45,17 @@ import {
   type LaterLine,
 } from '@/lib/dispatch/carry-over';
 import {
+  CARRY_TODAY_WARNING,
   carriedFromBadge,
   carriedLoadRemedy,
   carriedLoadShows,
   carriedStopText,
   carriedToBadge,
+  carryConfirmText,
   carryDoneText,
   carrySelected,
   carrySelectionPayload,
+  carryTodayTitle,
   dayNothingLeftText,
   defaultCarrySelection,
   holdsOnlyCarried,
@@ -245,51 +248,93 @@ describe('carryCandidates: what was not delivered', () => {
   });
 });
 
-describe('only days that are over: never today or later in the company\'s timezone (PR9 review)', () => {
-  const TODAY = D1; // 27 Sep; the day screen opens on tomorrow, D = 28 Sep
-  it('the window is [D-7, D-1] capped at yesterday; a day more than a week ahead has none', () => {
+describe("today's orders: listed in their own group, unticked (owner decision); days not due yet never", () => {
+  const TODAY = D1; // 27 Sep; the day screen opens on tomorrow, D = 28 Sep (planned in the evening)
+  it('the window is [D-7, D-1] capped at today; for D = today it ends yesterday; a day more than a week ahead has none', () => {
     expect(carryWindow('2026-09-27', '2026-09-27')).toEqual({ from: '2026-09-20', to: '2026-09-26' });
-    expect(carryWindow('2026-09-28', '2026-09-27')).toEqual({ from: '2026-09-21', to: '2026-09-26' });
-    expect(carryWindow('2026-09-30', '2026-09-27')).toEqual({ from: '2026-09-23', to: '2026-09-26' });
+    expect(carryWindow('2026-09-28', '2026-09-27')).toEqual({ from: '2026-09-21', to: '2026-09-27' });
+    expect(carryWindow('2026-09-30', '2026-09-27')).toEqual({ from: '2026-09-23', to: '2026-09-27' });
     expect(carryWindow('2026-09-20', '2026-09-27')).toEqual({ from: '2026-09-13', to: '2026-09-19' });
     const far = carryWindow('2026-10-10', '2026-09-27');
     expect(far.to < far.from).toBe(true);
   });
 
-  it('D = tomorrow: today\'s orders (loads locked at night, afternoon trips, waiting late orders) are not listed; yesterday\'s are', () => {
+  it("D = tomorrow: today's orders on loads that have not left, unserved or not planned are listed as today's, exactly like an earlier day's; on a load that left never", () => {
     const orders = [
-      ord('TP', { deliveryDate: TODAY }),
-      ord('TL', { deliveryDate: TODAY }),
-      ord('TU', { deliveryDate: TODAY }),
-      ord('TN', { deliveryDate: TODAY }),
+      ord('TP', { deliveryDate: TODAY }), // afternoon trip, still PLANNED
+      ord('TL', { deliveryDate: TODAY }), // loaded last night, LOCKED
+      ord('TG', { deliveryDate: TODAY }), // LOADING
+      ord('TU', { deliveryDate: TODAY }), // unserved
+      ord('TN', { deliveryDate: TODAY }), // a late order not planned yet
+      ord('TD', { deliveryDate: TODAY }), // on a DISPATCHED load
+      ord('TC', { deliveryDate: TODAY }), // on a COMPLETED load
       ord('Y', { deliveryDate: D2 }),
     ];
     const todayPlan = plan({
-      scopeOrderIds: ['TP', 'TL', 'TU'],
-      loads: [load('T01', 1, 'LOCKED', [{ orderId: 'TL', portionLinesJson: null }]), load('T01', 2, 'PLANNED', [{ orderId: 'TP', portionLinesJson: null }])],
-      unserved: [{ orderId: 'TU', reasonCode: 'TRIP_LIMIT', reasonMessage: null, portionLinesJson: null }],
+      scopeOrderIds: ['TP', 'TL', 'TG', 'TU', 'TD', 'TC'],
+      loads: [
+        load('T01', 1, 'LOCKED', [{ orderId: 'TL', portionLinesJson: null }]),
+        load('T01', 2, 'PLANNED', [{ orderId: 'TP', portionLinesJson: null }]),
+        load('T02', 1, 'LOADING', [{ orderId: 'TG', portionLinesJson: null }]),
+        load('T03', 1, 'DISPATCHED', [{ orderId: 'TD', portionLinesJson: null }]),
+        load('T04', 1, 'COMPLETED', [{ orderId: 'TC', portionLinesJson: null }]),
+      ],
+      unserved: [{ orderId: 'TU', reasonCode: 'TRIP_LIMIT', reasonMessage: 'Trucks out of loads.', portionLinesJson: null }],
     });
     const out = carryCandidates(orders, new Map([[TODAY, todayPlan], [D2, null]]), target([], TODAY));
-    expect(out.map((c) => c.orderId)).toEqual(['Y']);
-    // The same orders once the day is over (the next morning, D = 28 Sep = today): all listed.
-    const later = carryCandidates(orders, new Map([[TODAY, todayPlan], [D2, null]]), target([], D));
-    expect(later.map((c) => [c.orderId, c.why[0].kind])).toEqual([
-      ['Y', 'NEVER_PLANNED'],
-      ['TL', 'NOT_LEFT'],
-      ['TN', 'NEVER_PLANNED'],
-      ['TP', 'NOT_LEFT'],
-      ['TU', 'UNSERVED'],
+    expect(out.map((c) => [c.orderId, c.ofToday, c.why[0].kind, c.why[0].text, c.blocked])).toEqual([
+      ['Y', false, 'NEVER_PLANNED', 'No plan was made for 26 Sep', null],
+      ['TG', true, 'NOT_LEFT', 'On T02 L1 (loading): has not left the depot yet', null],
+      ['TL', true, 'NOT_LEFT', 'On T01 L1 (locked): has not left the depot yet', null],
+      ['TN', true, 'NEVER_PLANNED', 'Added after the 27 Sep plan (version 1) was made: not planned yet', null],
+      ['TP', true, 'NOT_LEFT', 'On T01 L2 (planned): has not left the depot yet', null],
+      ['TU', true, 'UNSERVED', 'Unserved: Trucks out of loads.', null],
     ]);
+    // Earlier days are ticked by default, today's never: today's loads may still go out today.
+    expect([...defaultCarrySelection(out)]).toEqual(['Y']);
+    // The same orders once the day is over (the next morning, D = 28 Sep = today): earlier days, ticked.
+    const later = carryCandidates(orders, new Map([[TODAY, todayPlan], [D2, null]]), target([], D));
+    expect(later.map((c) => [c.orderId, c.ofToday, c.why[0].kind])).toEqual([
+      ['Y', false, 'NEVER_PLANNED'],
+      ['TG', false, 'NOT_LEFT'],
+      ['TL', false, 'NOT_LEFT'],
+      ['TN', false, 'NEVER_PLANNED'],
+      ['TP', false, 'NOT_LEFT'],
+      ['TU', false, 'UNSERVED'],
+    ]);
+    expect(later.find((c) => c.orderId === 'TL')!.why[0].text).toBe('On T01 L1 (locked): never left the depot');
+    expect(defaultCarrySelection(later).size).toBe(6);
   });
 
-  it('D = today + 2: tomorrow\'s confirmed orders are not due yet and never listed (nor today\'s)', () => {
+  it("D = today: today's own orders are never listed (an order is never brought forward to its own day)", () => {
+    const out = carryCandidates([ord('T', { deliveryDate: D }), ord('Y', { deliveryDate: D1 })], new Map([[D, null], [D1, null]]), target([], D));
+    expect(out.map((c) => [c.orderId, c.ofToday])).toEqual([['Y', false]]);
+  });
+
+  it("D = today + 2: tomorrow's confirmed orders are not due yet and never listed; today's are, as today's", () => {
     const tomorrow = D; // 28 Sep
     const out = carryCandidates(
       [ord('TM', { deliveryDate: tomorrow }), ord('TD', { deliveryDate: TODAY }), ord('Y', { deliveryDate: D2 })],
       new Map([[tomorrow, null], [TODAY, null], [D2, null]]),
       { date: '2026-09-29', today: TODAY, confirmedKeys: new Set() },
     );
-    expect(out.map((c) => c.orderId)).toEqual(['Y']);
+    expect(out.map((c) => [c.orderId, c.ofToday])).toEqual([
+      ['Y', false],
+      ['TD', true],
+    ]);
+    expect(out[1].why[0].text).toBe('No plan made for 27 Sep yet');
+  });
+
+  it("a line of an older order that is also on today's open order: only today's can be brought forward (and only when ticked)", () => {
+    const c1 = { code: 'C1', branchCode: null, branchKey: '__MAIN__', name: 'C1', active: true };
+    const old = ord('OLD', { deliveryDate: D2, customerId: 'c1', customer: c1 }, [{ id: 'o-l1', cases: 10, weightKg: 100, salesOrderNo: 'SO-9', productCode: 'W500' }]);
+    const neu = ord('NEW', { deliveryDate: TODAY, customerId: 'c1', customer: c1 }, [{ id: 'n-l1', cases: 10, weightKg: 100, salesOrderNo: 'SO-9', productCode: 'W500' }]);
+    const out = carryCandidates([old, neu], new Map([[D2, null], [TODAY, null]]), target([], TODAY));
+    expect(out.map((c) => [c.orderId, c.ofToday, c.blocked])).toEqual([
+      ['OLD', false, { code: 'SAME_LINE_LATER', text: 'Sales order SO-9 (W500) is also open today (27 Sep): only that order can be brought forward.' }],
+      ['NEW', true, null],
+    ]);
+    expect(defaultCarrySelection(out).size).toBe(0);
   });
 });
 
@@ -327,6 +372,32 @@ describe('checkSelection: the expected state, and idempotency', () => {
     expect(r.changed.map((c) => c.orderId)).toEqual(['A', 'B', 'nope']);
     expect(r.changed[0].text).toBe('C-A (27 Sep): 100 cases are open now, the list showed 90.');
     expect(r.changed[1].text).toMatch(/^CB \(27 Sep\): Customer CB is deactivated/);
+  });
+
+  it('an order of today is carried only when sent with today: true (ticked on its own), never implied by the earlier days', () => {
+    // 27 Sep is today, D = 28 Sep: Y (26 Sep) is an earlier day, T (27 Sep) is today's.
+    const cs = carryCandidates([ord('Y', { deliveryDate: D2 }), ord('T')], new Map([[D2, null], [D1, null]]), target([], D1));
+    expect(cs.map((c) => [c.orderId, c.ofToday])).toEqual([
+      ['Y', false],
+      ['T', true],
+    ]);
+    // Every listed order sent as the earlier days are ("select all"): today's is refused, not carried.
+    const implied = checkSelection(cs, [{ orderId: 'Y', cases: 100 }, { orderId: 'T', cases: 100 }], new Map());
+    expect(implied.carry.map((c) => c.orderId)).toEqual(['Y']);
+    expect(implied.changed).toEqual([]);
+    expect(implied.todayNotSelected).toEqual([
+      { orderId: 'T', text: 'C-T is an order of today (27 Sep): it may still go out today, so it is brought forward only when it is ticked under Today.' },
+    ]);
+    expect(checkSelection(cs, [{ orderId: 'T', cases: 100, today: false }], new Map()).todayNotSelected.map((c) => c.orderId)).toEqual(['T']);
+    // Ticked under Today: carried like an earlier day's order.
+    const ticked = checkSelection(cs, [{ orderId: 'Y', cases: 100 }, { orderId: 'T', cases: 100, today: true }], new Map());
+    expect(ticked.carry.map((c) => c.orderId)).toEqual(['Y', 'T']);
+    expect([ticked.changed, ticked.todayNotSelected]).toEqual([[], []]);
+    // The day screen sends exactly that: today's orders it ticked carry today: true.
+    expect(carrySelectionPayload(cs, new Set(['Y', 'T']))).toEqual([
+      { orderId: 'Y', cases: 100 },
+      { orderId: 'T', cases: 100, today: true },
+    ]);
   });
 });
 
@@ -414,6 +485,27 @@ describe('the words on every screen and paper', () => {
       '2 order(s) (17 cases) brought forward to 28 Sep. RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are.',
     );
     expect(carryDoneText({ orders: 0, cases: 0, skipped: [{}], replanNeeded: false }, D)).toBe('Nothing new to bring forward: 1 order(s) were already brought forward.');
+  });
+
+  it("today's group: its heading, the owner's warning, and the question before bringing today's orders forward", () => {
+    expect(carryTodayTitle('2026-09-27')).toBe('Today (27 Sep) - may still leave today');
+    expect(CARRY_TODAY_WARNING).toBe("Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.");
+    const earlierOnly = carryConfirmText([{ cases: 10 }, { cases: 5, ofToday: false }], D, D1);
+    expect(earlierOnly).toBe(
+      'Bring 2 order(s) (15 cases) forward to 28 Sep?\n\nThey become orders of 28 Sep and are no longer open on their own days. The plans of those days stay as they are.',
+    );
+    const withToday = carryConfirmText([{ cases: 10 }, { cases: 20, ofToday: true }], D, D1);
+    expect(withToday).toContain(
+      "1 of them (20 cases) are orders of TODAY (27 Sep): they come off today's plan, and a load of today that still holds one cannot be locked, loaded or dispatched today. Only continue if you know they will not be delivered today.",
+    );
+    expect(withToday.startsWith('Bring 2 order(s) (30 cases) forward to 28 Sep?')).toBe(true);
+    // The toast after bringing orders of today forward: their loads of today - re-plan today or unlock.
+    const done = { orders: 2, cases: 30, skipped: [], replanNeeded: true, carried: [{ fromDate: D2 }, { fromDate: D1 }] };
+    expect(carryDoneText(done, D, D1)).toBe(
+      '2 order(s) (30 cases) brought forward to 28 Sep. RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are. ' +
+        '1 of them were orders of today (27 Sep): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (unload a loaded one).',
+    );
+    expect(carryDoneText({ ...done, carried: [{ fromDate: D2 }] }, D, D1)).not.toMatch(/today/);
   });
 
   it('the driver sheet and the Excel SUMMARY mark carried orders', () => {
@@ -511,6 +603,10 @@ describe('the planner around carried orders', () => {
     const T = 'tA';
     const user = { id: 'u1', role: 'TENANT_ADMIN' };
     const allow = () => true;
+    /** 10:00 in Muscat on 28 Sep: the load's day (27 Sep) is over. */
+    const AFTER = { now: new Date('2026-09-28T06:00:00Z') };
+    /** 21:00 in Muscat on 27 Sep: the load's day is today (orders brought forward to tomorrow in the evening). */
+    const TONIGHT = { now: new Date('2026-09-27T17:00:00Z') };
     function seed(loadStatus: string) {
       const day = new Date(`${D1}T00:00:00Z`);
       tables.truck = [{ id: 'T1', tenantId: T, code: 'T01', defaultDriverId: null, capacityCases: 100, capacityWeightKg: 1000 }];
@@ -541,7 +637,7 @@ describe('the planner around carried orders', () => {
       for (const [from, to] of [['PLANNED', 'LOCKED'], ['LOCKED', 'LOADING'], ['LOCKED', 'DISPATCHED'], ['LOADING', 'DISPATCHED']] as const) {
         resetDb();
         seed(from);
-        const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+        const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow, AFTER).catch((x) => x);
         expect(e.status, `${from} -> ${to}`).toBe(409);
         expect(e.details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['O1'] });
         expect(e.message).toContain('T01 L1 carries 1 order(s) that were brought forward to a later day: C1 (to 2026-09-28)');
@@ -571,19 +667,57 @@ describe('the planner around carried orders', () => {
         seed(from);
         tables.order.push({ id: 'O9', tenantId: T, customerId: 'c9', customer: { code: 'C9', branchCode: null }, totalCases: 10, totalWeightKg: 100, status: 'ASSIGNED', deliveryDate: new Date(`${D1}T00:00:00Z`), carriedToOrderId: null });
         tables.routeAssignment.push({ id: 'A9', runId: 'P', truckId: 'T1', loadId: 'L1', loadNo: 1, orderId: 'O9', sequenceInTruck: 2, orderInStop: 0, portionLinesJson: null });
-        const e = await updateLoad(T, 'P', 'L1', { status: from === 'PLANNED' ? 'LOCKED' : 'LOADING' }, user, allow).catch((x) => x);
+        const e = await updateLoad(T, 'P', 'L1', { status: from === 'PLANNED' ? 'LOCKED' : 'LOADING' }, user, allow, AFTER).catch((x) => x);
         expect(e.details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['O1'] });
         expect(e.message).toContain(
           from === 'PLANNED' ? 'Re-plan this day to plan its other orders without them.' : 'To deliver its other orders, put the load back to Planned and re-plan this day',
         );
         if (from === 'LOCKED') expect(e.message).toContain('Their cases were loaded: unload them (they are planned on 28 Sep now).');
         expect(e.message).not.toContain('holds nothing else');
+        expect(e.message).not.toMatch(/today/i);
+      }
+    });
+
+    it("a load of TODAY (its order brought forward to tomorrow in the evening) is refused the same way, and the words say re-plan today or unlock", async () => {
+      for (const [from, to, others] of [
+        ['LOCKED', 'LOADING', false],
+        ['LOADING', 'DISPATCHED', false],
+        ['PLANNED', 'LOCKED', false],
+        ['LOCKED', 'DISPATCHED', true],
+        ['PLANNED', 'LOCKED', true],
+      ] as const) {
+        resetDb();
+        seed(from);
+        tables.tenantConfig = [{ id: 'cfg', tenantId: T, timezone: 'Asia/Muscat' }];
+        if (others) {
+          tables.order.push({ id: 'O9', tenantId: T, customerId: 'c9', customer: { code: 'C9', branchCode: null }, totalCases: 10, totalWeightKg: 100, status: 'ASSIGNED', deliveryDate: new Date(`${D1}T00:00:00Z`), carriedToOrderId: null });
+          tables.routeAssignment.push({ id: 'A9', runId: 'P', truckId: 'T1', loadId: 'L1', loadNo: 1, orderId: 'O9', sequenceInTruck: 2, orderInStop: 0, portionLinesJson: null });
+        }
+        const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow, TONIGHT).catch((x) => x);
+        const what = `${from} -> ${to}${others ? ' (with other orders)' : ''}`;
+        expect(e.status, what).toBe(409);
+        expect(e.details, what).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['O1'] });
+        expect(e.message, what).toMatch(/re-plan today \(27 Sep\)|unlock it|unlock the load/i);
+        expect(e.message, what).not.toMatch(/re-plan this day/i);
+        if (!others && from !== 'PLANNED') {
+          // Loaded last night, never left: it does not go out today; unlock it and unload the cases.
+          expect(e.message).toContain(
+            'This load holds nothing else, but it was loaded: its cases were brought forward to 28 Sep and are planned there, so it does not go out today. Unlock it (put it back to Planned) and unload those cases back to stock, or tell the warehouse, before the loads of 28 Sep are picked, so they are not loaded twice.',
+          );
+        } else if (!others) {
+          expect(e.message).toContain("This load holds nothing else: it does not go out today. Leave it as it is (it stays in today's plan for the record); re-plan today (27 Sep) only if other orders of today still need a truck.");
+        } else if (from === 'LOCKED') {
+          expect(e.message).toContain('To deliver its other orders today, unlock the load (put it back to Planned) and re-plan today (27 Sep): the re-plan leaves the brought-forward orders out.');
+        } else {
+          expect(e.message).toContain('Re-plan today (27 Sep) to plan its other orders without them.');
+        }
+        expect(row('planLoad', 'L1').status).toBe(from);
       }
     });
 
     it('stepping back is never refused: unlock the load to re-plan the day', async () => {
       seed('LOCKED');
-      await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow, TONIGHT);
       expect(row('planLoad', 'L1').status).toBe('PLANNED');
     });
 
@@ -688,26 +822,73 @@ describe('PR9 review: the carry on the database, split orders, re-plans, lists a
     vi.unstubAllEnvs();
   });
 
-  it('the preview for tomorrow lists yesterday, never today (its locked load may still leave); the next morning it does', async () => {
+  it("the preview for tomorrow lists yesterday (ticked) and today's order on its locked load as today's (unticked); the next morning both are earlier days", async () => {
     seedDays();
     const pv = await carryOverPreview(T, 'DA', D, { now: NOW });
-    expect(pv).toMatchObject({ from: '2026-09-21', to: D2, today: D1, orders: 1, cases: 10 });
-    expect(pv.candidates.map((c) => [c.orderId, c.why[0].kind])).toEqual([['YEST', 'UNSERVED']]);
-    // 28 Sep, 07:00 in Muscat: 27 Sep is over, its locked load never left.
-    const next = await carryOverPreview(T, 'DA', D, { now: new Date('2026-09-28T03:00:00Z') });
-    expect(next.candidates.map((c) => [c.orderId, c.why[0].kind])).toEqual([
-      ['YEST', 'UNSERVED'],
-      ['TODAY', 'NOT_LEFT'],
+    expect(pv).toMatchObject({ from: '2026-09-21', to: D1, today: D1, orders: 1, cases: 10, todayOrders: 1, todayCases: 10, blocked: 0 });
+    expect(pv.candidates.map((c) => [c.orderId, c.ofToday, c.why[0].kind, c.why[0].text])).toEqual([
+      ['YEST', false, 'UNSERVED', 'Unserved: Trucks out of loads.'],
+      ['TODAY', true, 'NOT_LEFT', 'On T01 L1 (locked): has not left the depot yet'],
     ]);
+    expect([...defaultCarrySelection(pv.candidates)]).toEqual(['YEST']);
+    // 28 Sep, 07:00 in Muscat: 27 Sep is over, its locked load never left; both are earlier days now.
+    const next = await carryOverPreview(T, 'DA', D, { now: new Date('2026-09-28T03:00:00Z') });
+    expect(next.candidates.map((c) => [c.orderId, c.ofToday, c.why[0].kind])).toEqual([
+      ['YEST', false, 'UNSERVED'],
+      ['TODAY', false, 'NOT_LEFT'],
+    ]);
+    expect(next).toMatchObject({ orders: 2, todayOrders: 0 });
+    // Today's own screen never lists today's orders: an order is never brought forward to its own day.
+    const own = await carryOverPreview(T, 'DA', D1, { now: NOW });
+    expect(own.candidates.map((c) => c.orderId)).toEqual(['YEST']);
   });
 
-  it("bringing forward one of today's orders is refused (409 CARRY_OVER_CHANGED), nothing is carried and its load keeps it", async () => {
+  it("one of today's orders sent without today: true (as selecting every order would): 409 TODAY_NOT_SELECTED, nothing carried, also not the earlier one", async () => {
     seedDays();
-    const e = await bringForward(T, 'DA', D, [{ orderId: 'TODAY', cases: 10 }], { id: 'u1' }, { now: NOW }).catch((x) => x);
-    expect(e.status).toBe(409);
-    expect(e.details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
+    for (const sel of [
+      [{ orderId: 'TODAY', cases: 10 }],
+      [{ orderId: 'YEST', cases: 10 }, { orderId: 'TODAY', cases: 10, today: false }],
+    ]) {
+      const e = await bringForward(T, 'DA', D, sel, { id: 'u1' }, { now: NOW }).catch((x) => x);
+      expect(e.status).toBe(409);
+      expect(e.details).toMatchObject({ code: 'TODAY_NOT_SELECTED', orderIds: ['TODAY'] });
+      expect(e.message).toContain('1 order(s) of today (27 Sep) were sent without being ticked under Today: TODAY is an order of today (27 Sep)');
+      expect(e.message).toContain("Today's loads that have not left yet may still go out today. Nothing was brought forward");
+      expect(row('order', 'TODAY').carriedToOrderId).toBeNull();
+      expect(row('order', 'YEST').carriedToOrderId).toBeNull();
+      expect(tables.order).toHaveLength(2);
+    }
+    // Brought forward to today itself: never (not a candidate of its own day).
+    const own = await bringForward(T, 'DA', D1, [{ orderId: 'TODAY', cases: 10, today: true }], { id: 'u1' }, { now: NOW }).catch((x) => x);
+    expect(own.details).toMatchObject({ code: 'CARRY_OVER_CHANGED' });
     expect(row('order', 'TODAY').carriedToOrderId).toBeNull();
-    expect(tables.order).toHaveLength(2);
+  });
+
+  it('ticked under Today at night: brought forward to tomorrow like an earlier day\'s order, closed on today; its load of today can no longer go out and the 409 says unlock', async () => {
+    seedDays();
+    tables.routeAssignment = [{ id: 'A27', runId: 'P27', truckId: 'T1', loadId: 'L27', loadNo: 1, orderId: 'TODAY', sequenceInTruck: 1, orderInStop: 0, portionLinesJson: null }];
+    const night = new Date('2026-09-27T17:00:00Z'); // 21:00 in Muscat: tomorrow's trucks are being loaded
+    const before = structuredClone({ runPlan: tables.runPlan, planLoad: tables.planLoad, routeAssignment: tables.routeAssignment, unservedOrder: tables.unservedOrder });
+    const raw = recordRaw();
+    const res = await bringForward(T, 'DA', D, [{ orderId: 'YEST', cases: 10 }, { orderId: 'TODAY', cases: 10, today: true }], { id: 'u1' }, { now: night }).finally(() => raw.restore());
+    // After the cutoff of 28 Sep: late, like a late order.
+    expect(res).toMatchObject({ orders: 2, cases: 20, late: true, skipped: [] });
+    const copy = tables.order.find((o) => o.carriedFromOrderId === 'TODAY')!;
+    expect([copy.deliveryDate, copy.carriedFromDate, copy.totalCases]).toEqual([day(D), day(D1), 10]);
+    expect(row('order', 'TODAY').carriedToOrderId).toBe(copy.id);
+    // Today's plan rows are exactly as they were (the original is closed on today by its mark, like an earlier day's).
+    expect({ runPlan: tables.runPlan, planLoad: tables.planLoad, routeAssignment: tables.routeAssignment, unservedOrder: tables.unservedOrder }).toEqual(before);
+    // Today's day and live plan were locked like the earlier days' (a load of today dispatched meanwhile is seen).
+    expect(raw.calls.some((c) => c.values[0] === `planday:tA|DA|${D1}`)).toBe(true);
+    expect(raw.calls.some((c) => /FOR UPDATE/.test(c.sql) && c.values[0] === 'P27')).toBe(true);
+    // Its load (loaded last night, never left) cannot be loaded or dispatched today with it.
+    row('order', 'TODAY').carriedTo = { deliveryDate: day(D) };
+    for (const to of ['LOADING', 'DISPATCHED'] as const) {
+      const e = await updateLoad(T, 'P27', 'L27', { status: to }, { id: 'u1', role: 'TENANT_ADMIN' }, () => true, { now: night }).catch((x) => x);
+      expect(e.details).toMatchObject({ code: 'ORDERS_CARRIED', orderIds: ['TODAY'] });
+      expect(e.message).toContain('so it does not go out today. Unlock it (put it back to Planned)');
+      expect(row('planLoad', 'L27').status).toBe('LOCKED');
+    }
   });
 
   it("the day locks of the days read come before their plans' row locks (no re-plan makes a new version meanwhile)", async () => {
@@ -723,12 +904,15 @@ describe('PR9 review: the carry on the database, split orders, re-plans, lists a
     const at = (pred: (c: { sql: string; values: unknown[] }) => boolean) => raw.calls.findIndex(pred);
     const intake = at((c) => c.values[0] === 'intake:tA');
     const dayLock = at((c) => c.values[0] === `planday:tA|DA|${D2}`);
+    // Today is read too (its orders are listed, as today's): its day lock comes after 26 Sep's (date order).
+    const todayLock = at((c) => c.values[0] === `planday:tA|DA|${D1}`);
     const rowLock = at((c) => /FOR UPDATE/.test(c.sql) && c.values[0] === 'P26');
+    const todayRowLock = at((c) => /FOR UPDATE/.test(c.sql) && c.values[0] === 'P27');
     expect(intake).toBeGreaterThanOrEqual(0);
     expect(dayLock).toBeGreaterThan(intake);
-    expect(rowLock).toBeGreaterThan(dayLock);
-    // Today is not read, so neither locked.
-    expect(raw.calls.some((c) => c.values[0] === `planday:tA|DA|${D1}`)).toBe(false);
+    expect(todayLock).toBeGreaterThan(dayLock);
+    expect(rowLock).toBeGreaterThan(todayLock);
+    expect(todayRowLock).toBeGreaterThan(rowLock);
   });
 
   it('a plan that stopped being the live one while it was being locked: 409 PLAN_BUSY, nothing read from the unlocked version, nothing carried', async () => {
@@ -878,6 +1062,9 @@ describe('PR9 review: the carry on the database, split orders, re-plans, lists a
       expect(t).not.toMatch(/never loaded|needs nothing|leave it as it is/);
     }
     expect(carriedLoadRemedy('LOCKED', true)).toContain('brought forward to the later day');
+    // A load of a day that is over keeps these words; one of today says today (the plan screen's badge, the 409).
+    expect(carriedLoadRemedy('LOCKED', true, [D], { date: D2, isToday: false })).toBe(carriedLoadRemedy('LOCKED', true, [D]));
+    expect(carriedLoadRemedy('PLANNED', false, [D], { date: D1, isToday: true })).toBe('Re-plan today (27 Sep) to plan its other orders without them.');
   });
 
   it('the dashboard subtracts the cases carried from their own day, so cost per case counts every case once', async () => {
@@ -927,6 +1114,8 @@ describe('the carry-over API: roles, bodies and tenant isolation', () => {
   // The company's today on the real clock (the route has no clock of its own): yesterday is over.
   const DAY = todayIso('Asia/Muscat');
   const YESTERDAY = addDaysIso(DAY, -1);
+  const line = (id: string) => [{ id: `${id}-l1`, cases: 5, weightKg: 50, salesOrderNo: `SO-${id}`, product: { code: 'W500' } }];
+  const customer = (code: string) => ({ code, branchCode: null, branchKey: '__MAIN__', name: code, active: true });
   beforeEach(() => {
     resetDb();
     session.role = 'PLANNER';
@@ -936,8 +1125,6 @@ describe('the carry-over API: roles, bodies and tenant isolation', () => {
     ];
     tables.tenantConfig = [{ id: 'cfgA', tenantId: 'tA', timezone: 'Asia/Muscat', planningCutoffMin: 1080 }];
     // An order of this company and one of ANOTHER company, both not delivered the day before (no plan).
-    const line = (id: string) => [{ id: `${id}-l1`, cases: 5, weightKg: 50, salesOrderNo: `SO-${id}`, product: { code: 'W500' } }];
-    const customer = (code: string) => ({ code, branchCode: null, branchKey: '__MAIN__', name: code, active: true });
     tables.order = [
       { id: 'B-ORDER', tenantId: 'tB', depotId: 'DB', customerId: 'cb', customer: customer('CB'), deliveryDate: new Date(`${YESTERDAY}T00:00:00Z`), status: 'VALIDATED', priority: 3, totalCases: 5, totalWeightKg: 50, carriedToOrderId: null, carriedFromDate: null, lines: line('B') },
       { id: 'A-ORDER', tenantId: 'tA', depotId: 'DA', customerId: 'ca', customer: customer('CA'), deliveryDate: new Date(`${YESTERDAY}T00:00:00Z`), status: 'VALIDATED', priority: 3, totalCases: 5, totalWeightKg: 50, carriedToOrderId: null, carriedFromDate: null, lines: line('A') },
@@ -972,6 +1159,34 @@ describe('the carry-over API: roles, bodies and tenant isolation', () => {
     expect((await post({ date: DAY, depotId: 'DA', selected: [{ orderId: 'a', cases: 1 }, { orderId: 'a', cases: 1 }] })).status).toBe(400);
     expect((await post({ date: DAY, depotId: 'DA', selected: [{ orderId: 'a', cases: 1.5 }] })).status).toBe(400);
     expect((await post({ date: DAY, depotId: 'DA', selected: [{ orderId: 'a', cases: 1 }], extra: true })).status).toBe(400);
+    expect((await post({ date: DAY, depotId: 'DA', selected: [{ orderId: 'a', cases: 1, today: 'yes' }] })).status).toBe(400);
+  });
+
+  it("an order of today is listed for tomorrow as today's, and the POST brings it forward only with today: true", async () => {
+    const TOMORROW = addDaysIso(DAY, 1);
+    tables.order.push({
+      id: 'A-TODAY', tenantId: 'tA', depotId: 'DA', customerId: 'ct', customer: customer('CT'), deliveryDate: new Date(`${DAY}T00:00:00Z`), status: 'VALIDATED', priority: 3,
+      totalCases: 5, totalWeightKg: 50, carriedToOrderId: null, carriedFromDate: null, lines: line('T'),
+    });
+    const pv = await get(`date=${TOMORROW}&depotId=DA`);
+    expect(pv.status).toBe(200);
+    const data = ((await pv.json()) as { data: { candidates: { orderId: string; ofToday: boolean }[]; orders: number; todayOrders: number } }).data;
+    expect(data.candidates.map((c) => [c.orderId, c.ofToday])).toEqual([
+      ['A-ORDER', false],
+      ['A-TODAY', true],
+    ]);
+    expect(data).toMatchObject({ orders: 1, todayOrders: 1 });
+    // Sent like the earlier day's order (no Today tick): refused, nothing carried.
+    const implied = await post({ date: TOMORROW, depotId: 'DA', selected: [{ orderId: 'A-ORDER', cases: 5 }, { orderId: 'A-TODAY', cases: 5 }] });
+    expect(implied.status).toBe(409);
+    expect(((await implied.json()) as { error: { code: string; orderIds: string[] } }).error).toMatchObject({ code: 'TODAY_NOT_SELECTED', orderIds: ['A-TODAY'] });
+    expect(row('order', 'A-ORDER').carriedToOrderId).toBeNull();
+    expect(row('order', 'A-TODAY').carriedToOrderId).toBeNull();
+    // Ticked under Today: brought forward with the earlier one.
+    const res = await post({ date: TOMORROW, depotId: 'DA', selected: [{ orderId: 'A-ORDER', cases: 5 }, { orderId: 'A-TODAY', cases: 5, today: true }] });
+    expect(res.status).toBe(201);
+    expect(row('order', 'A-ORDER').carriedToOrderId).not.toBeNull();
+    expect(row('order', 'A-TODAY').carriedToOrderId).not.toBeNull();
   });
 
   it('bringing forward needs a planner (like confirming a file or a late order); the preview is readable by every role', async () => {
@@ -1017,7 +1232,7 @@ describe('PR9 second review: a sales-order line entered again for a later day is
     expect(out.map((c) => [c.orderId, c.blocked?.code])).toEqual([['O1', 'SAME_LINE_LATER']]);
   });
 
-  it('the line re-entered for today or a later day (never in the window), or for day D itself', () => {
+  it('the line re-entered for today (on an order the database gives, not listed here) or a later day (never in the window), or for day D itself', () => {
     for (const d of [D1, '2026-09-30']) {
       const out = carryCandidates([O1()], noPlans, at28([later({ orderId: 'OT', date: d, status: 'ASSIGNED' })]));
       expect(blockOf(out, 'O1')).toEqual({ code: 'SAME_LINE_LATER', text: `Sales order SO-9 (W500) was entered again for ${fmtDayMonth(d)}: not brought forward, so it is not delivered twice.` });
@@ -1158,6 +1373,14 @@ describe('PR9 second review: the day it goes to must not be over; a day being op
     expect(carryDoneText({ ...res, replanNeeded: false, optimizing: false }, D)).toContain('OPTIMIZE plans them with the other orders of 28 Sep.');
   });
 
+  it("the plan screen on the day screen knows today: a load of today holding a brought-forward order says re-plan today or unlock", () => {
+    const dayScreen = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/dispatch-client.tsx'), 'utf8');
+    const planView = dayScreen.slice(dayScreen.indexOf('<PlanView'), dayScreen.indexOf('/>', dayScreen.indexOf('<PlanView')));
+    expect(planView).toContain('today={day.today}');
+    const badge = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/plan-view.tsx'), 'utf8');
+    expect(badge).toContain('{ date: d.run.runDate, isToday: !!today && d.run.runDate === today })');
+  });
+
   it('the day screen keeps the Bring forward button off while the day is being optimized', () => {
     const dayScreen = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/dispatch-client.tsx'), 'utf8');
     const panel = dayScreen.slice(dayScreen.indexOf('<CarryOverPanel'), dayScreen.indexOf('/>', dayScreen.indexOf('<CarryOverPanel')));
@@ -1172,29 +1395,62 @@ describe('PR9 second review: the day it goes to must not be over; a day being op
       { orderId: 'X', blocked: { code: 'CUSTOMER_INACTIVE' } },
     ];
     // The customer cancelled B: the dispatcher unticks it.
-    let unticked = toggleCarry(new Set(), 'B');
-    expect([...carrySelected(list, unticked)]).toEqual(['A']);
+    let choices = toggleCarry(new Map(), list[1]);
+    expect([...carrySelected(list, choices)]).toEqual(['A']);
     // 409 CARRY_OVER_CHANGED, or an OPTIMIZE / RE-PLAN of the day: the list comes back with a new order C.
     const again = [...list, { orderId: 'C', blocked: null }];
-    expect([...carrySelected(again, unticked)]).toEqual(['A', 'C']);
+    expect([...carrySelected(again, choices)]).toEqual(['A', 'C']);
     // A partial bring forward (A went): B is still left behind.
-    expect([...carrySelected(again.filter((c) => c.orderId !== 'A'), unticked)]).toEqual(['C']);
-    // Ticked again by the dispatcher: selected again. A blocked order is never selected.
-    unticked = toggleCarry(unticked, 'B');
-    expect([...carrySelected(again, unticked)]).toEqual(['A', 'B', 'C']);
-    expect(carrySelected(again, new Set()).has('X')).toBe(false);
+    expect([...carrySelected(again.filter((c) => c.orderId !== 'A'), choices)]).toEqual(['C']);
+    // Ticked again by the dispatcher: selected again. A blocked order is never selected, even when chosen.
+    choices = toggleCarry(choices, list[1]);
+    expect([...carrySelected(again, choices)]).toEqual(['A', 'B', 'C']);
+    expect(carrySelected(again, new Map()).has('X')).toBe(false);
+    expect(carrySelected(again, new Map([['X', true]])).has('X')).toBe(false);
   });
 
-  it('the panel keeps what was unticked across reloads (never re-ticks on load), resets it only for another day or depot, and shows nothing for a day that is over', () => {
+  it("an order of today is never ticked by itself - not at first, not after a reload - and stays ticked once the dispatcher ticked it", () => {
+    const list = [
+      { orderId: 'Y', blocked: null, ofToday: false },
+      { orderId: 'T', blocked: null, ofToday: true },
+      { orderId: 'T2', blocked: null, ofToday: true },
+    ];
+    expect([...defaultCarrySelection(list)]).toEqual(['Y']);
+    expect([...carrySelected(list, new Map())]).toEqual(['Y']);
+    // The dispatcher knows T will not be delivered today: ticks it.
+    let choices = toggleCarry(new Map(), list[1]);
+    expect([...carrySelected(list, choices)]).toEqual(['Y', 'T']);
+    // The list is read again (a 409, a new plan version, Look again) with another order of today: not ticked; T stays ticked.
+    const again = [...list, { orderId: 'T3', blocked: null, ofToday: true }];
+    expect([...carrySelected(again, choices)]).toEqual(['Y', 'T']);
+    choices = toggleCarry(choices, list[1]);
+    expect([...carrySelected(again, choices)]).toEqual(['Y']);
+  });
+
+  it("the panel keeps the dispatcher's ticks across reloads (never re-ticks on load), resets them only for another day or depot, shows today's group with the warning, and nothing for a day that is over", () => {
     const panel = readFileSync(path.resolve(__dirname, '../../app/t/[slug]/dispatch/carry-over-panel.tsx'), 'utf8');
     expect(panel).not.toContain('defaultCarrySelection(');
     expect(panel).not.toMatch(/setSelected\(/);
     const load = panel.slice(panel.indexOf('const load = useCallback('), panel.indexOf('}, [date, depotId]);'));
-    expect(load).not.toContain('setUnticked');
-    expect([...panel.matchAll(/setUnticked\(new Set\(\)\)/g)]).toHaveLength(1);
-    expect(panel).toMatch(/setOpen\(false\);\s*setUnticked\(new Set\(\)\);\s*\}, \[date, depotId\]\);/);
-    expect(panel).toContain('carrySelected(preview.candidates, unticked)');
+    expect(load).not.toContain('setChoices');
+    expect([...panel.matchAll(/setChoices\(new Map\(\)\)/g)]).toHaveLength(1);
+    expect(panel).toMatch(/setOpen\(false\);\s*setChoices\(new Map\(\)\);\s*\}, \[date, depotId\]\);/);
+    expect(panel).toContain('const selected = carrySelected(preview.candidates, choices);');
+    // What is sent is what is ticked, today's marked as ticked under Today (carrySelectionPayload).
+    expect(panel).toContain('const body = carrySelectionPayload(preview.candidates, selected);');
     expect(panel).toContain('if (!preview || preview.dayOver || preview.candidates.length === 0) return null;');
+    // Today's orders in their own group, after the earlier days, under the owner's heading and warning.
+    const list = panel.slice(panel.indexOf('data-testid="carry-over-list"'));
+    expect(list.indexOf('{earlier.map(row)}')).toBeGreaterThan(0);
+    expect(list.indexOf('{carryTodayTitle(preview.today)}')).toBeGreaterThan(list.indexOf('{earlier.map(row)}'));
+    expect(list.indexOf('{CARRY_TODAY_WARNING}')).toBeGreaterThan(list.indexOf('{carryTodayTitle(preview.today)}'));
+    expect(list.indexOf('{todays.map(row)}')).toBeGreaterThan(list.indexOf('{CARRY_TODAY_WARNING}'));
+    expect(panel).toContain('const todays = preview.candidates.filter((c) => c.ofToday);');
+    // The warning also shows with the list closed, and the question names today's orders.
+    expect(panel).toContain('data-testid="carry-over-today-warning"');
+    expect(panel).toContain('carryConfirmText(');
+    // After the carry the toast names today's orders and what to do with their loads.
+    expect(panel).toContain('carryDoneText(r.data, date, preview.today)');
   });
 });
 
