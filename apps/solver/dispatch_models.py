@@ -41,8 +41,9 @@ class DispatchDepot(BaseModel):
 
 
 class FrozenTrip(BaseModel):
-    """A load that is LOCKED / LOADING / DISPATCHED. The solver never touches it - it only
-    blocks that truck's time so new trips start after it returns."""
+    """A load that is LOCKED / LOADING / DISPATCHED / COMPLETED. The solver never touches it - it
+    only blocks that truck's time so new trips start after it returns (reload + loading of the
+    next load's cases), and it counts against the truck's loads per day."""
 
     load_no: int = Field(ge=1)
     depart_min: int = Field(ge=0, le=DAY_MIN * 2)
@@ -235,6 +236,57 @@ class ObjectiveComponents(BaseModel):
     margin_served: float | None
 
 
+FeasibilityCode = Literal[
+    "UNKNOWN_TRUCK",
+    "UNKNOWN_STOP",
+    "LOAD_NUMBER",
+    "LOAD_TOTALS",
+    "CAPACITY_CASES",
+    "CAPACITY_KG",
+    "HARD_WINDOW",
+    "TRAVEL",
+    "SERVICE_TIME",
+    "RETURN",
+    "TURNAROUND",
+    "EARLY_DEPARTURE",
+    "DEPOT_CLOSE",
+    "TRUCK_AVAILABILITY",
+    "SHIFT_LIMIT",
+    "TRIPS",
+    "FROZEN_OVERLAP",
+]
+
+
+class FeasibilityViolation(BaseModel):
+    """One hard rule a scenario's timetable breaks (feasibility.check_scenario)."""
+
+    code: FeasibilityCode
+    truck_id: str | None = None
+    load_no: int | None = None
+    stop_id: str | None = None
+    message: str
+    short_by_min: float | None = None  # how many minutes (or cases / kg for capacity) it is short
+
+
+class FeasibilityReport(BaseModel):
+    """Independent re-check of a scenario's timetable against the request (review F04).
+
+    status: VERIFIED = every hard rule holds; VIOLATED = at least one does not (see violations);
+    UNVERIFIED = the check itself could not run (the web treats this as not dispatchable).
+    timing: EXACT = departure times were computed with the exact loading time between loads
+    (load_repack.time_plan, or no loading time per case is set); ESTIMATED = the route search's
+    own times, which price each turnaround for 80% of a full truck (still checked exactly here).
+    """
+
+    status: Literal["VERIFIED", "VIOLATED", "UNVERIFIED"]
+    timing: Literal["EXACT", "ESTIMATED"]
+    violations: list[FeasibilityViolation] = Field(default_factory=list)
+    checked_at_version: int = 1
+    # False when no road matrix was available to the check: drive times were not re-checked.
+    travel_checked: bool = True
+    note: str | None = None
+
+
 class DispatchScenario(BaseModel):
     name: DispatchScenarioName
     status: Literal["OPTIMIZED", "NO_SOLUTION", "NOTHING_TO_PLAN"]
@@ -256,6 +308,9 @@ class DispatchScenario(BaseModel):
     loads: list[PlannedLoad]
     unserved: list[UnservedStop]
     warnings: list[str] = Field(default_factory=list)
+    # Optional for compatibility: a web app older than this field ignores it, and a solver older
+    # than it sends none (the web then treats the scenario as not checked by the solver).
+    feasibility: FeasibilityReport | None = None
 
 
 class DispatchResponse(BaseModel):

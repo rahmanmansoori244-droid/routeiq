@@ -45,6 +45,14 @@ export interface OrderWeightChange {
 
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
+/**
+ * The one tolerance for comparing a load's stored kg (a sum of order and portion kg, each kept to
+ * 0.1 kg) with a payload or with the optimizer's own kg: applyScenario's kg cross-check, the
+ * dispatch check's CAPACITY_KG (feasibility.ts) and the workbook's Kg check. Rounding can never
+ * block a load the optimizer filled to its payload; a real overload is always far above it.
+ */
+export const KG_ROUNDING_TOL = 0.5;
+
 /** Tolerance used when comparing an order's kg with the sum of its lines' kg (float sums). */
 export function kgTolerance(totalKg: number): number {
   return 0.5 + 0.001 * Math.abs(totalKg);
@@ -106,6 +114,17 @@ export function lineWeightStatus(
   if (orderLevelKg) return 'KNOWN';
   if (masterLineKg(line, productKgPerCase) !== null) return 'MASTER';
   return line.weightKg > 0 ? 'KNOWN' : 'UNKNOWN';
+}
+
+/**
+ * The case weight a line was planned with (`planned`; undefined = the row does not say) is not the
+ * product's case weight now: 0 kg and a weight entered since, or a weight corrected since. The
+ * open rest of an order partly on a frozen load is out of date only then (the day overview and
+ * the plan view, second review of PR4): it is planned with the product's weight at every optimize
+ * but never saved on the line it shares with the frozen part.
+ */
+export function plannedKgDiffers(planned: number | undefined, productKgPerCase: number): boolean {
+  return planned !== undefined && Math.abs(planned - productKgPerCase) > 1e-3;
 }
 
 /**

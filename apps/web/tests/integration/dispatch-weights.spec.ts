@@ -26,6 +26,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
 import { buildDispatchRequest, getOrCreatePlan } from '@/lib/dispatch/plan-service';
 import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
+// Every `outdated` count 0 but the one a test expects: a key added later is pinned here too.
+import { UP_TO_DATE } from '@/lib/dispatch/day-overview';
 
 let t: TenantHandle;
 let depotId = '';
@@ -209,7 +211,7 @@ describe('unknown weights (F02)', () => {
     const view = await dayView(day);
     expect(view.pending.count).toBe(0);
     expect(view.weightsToApply.map((x: any) => x.code)).toEqual(['WRONG-1']);
-    expect(view.outdated).toEqual({ weightCases: 1, inactiveOrders: 0 });
+    expect(view.outdated).toEqual({ ...UP_TO_DATE, weightCases: 1 });
     expect((await plan(v1)).warnings.join(' ')).toMatch(/WRONG-1 \(1 cases on planned loads\)/);
 
     const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${v1}/replan`, j({ reason: 'REOPTIMIZE' }));
@@ -229,7 +231,7 @@ describe('unknown weights (F02)', () => {
     for (const l of p2.loads) expect(l.weightKg).toBeCloseTo(l.stops.reduce((a: number, s: any) => a + s.weightKg, 0), 0);
     const after = await dayView(day);
     expect(after.weightsToApply).toEqual([]);
-    expect(after.outdated).toEqual({ weightCases: 0, inactiveOrders: 0 });
+    expect(after.outdated).toEqual(UP_TO_DATE);
   });
 
   it("a re-plan refused by the weight check leaves the live plan's order and load kg unchanged", async () => {
@@ -347,7 +349,7 @@ describe('deactivated customer (ADD-deactivated-masters)', () => {
       expect((await fetchWith(t.cookieJar, `${BASE}/api/customers/${c2.id}`, j({ active: false }, 'PATCH'))).status).toBe(200);
       const view = await dayView(day);
       expect(view.pending.count).toBe(0);
-      expect(view.outdated).toEqual({ weightCases: 0, inactiveOrders: 1 });
+      expect(view.outdated).toEqual({ ...UP_TO_DATE, inactiveOrders: 1 });
       const card = view.customers.find((c: any) => c.code === 'C2');
       expect(card.issues.map((i: any) => i.code)).toEqual(['CUSTOMER_INACTIVE']);
       expect(card.issues[0].message).toMatch(/after this plan was made: its orders are still on planned loads\. RE-PLAN/);
@@ -361,7 +363,7 @@ describe('deactivated customer (ADD-deactivated-masters)', () => {
       expect(p2.unserved.find((u: any) => u.customerCode === 'C2').reasonCode).toBe('INVALID_CUSTOMER');
       expect(p2.warnings.join(' ')).not.toMatch(/Deactivated after this plan was made/);
       const after = await dayView(day);
-      expect(after.outdated).toEqual({ weightCases: 0, inactiveOrders: 0 });
+      expect(after.outdated).toEqual(UP_TO_DATE);
       expect(after.customers.find((c: any) => c.code === 'C2').issues[0].message).toMatch(/open orders are left unserved/);
     } finally {
       await fetchWith(t.cookieJar, `${BASE}/api/customers/${c2.id}`, j({ active: true }, 'PATCH'));
@@ -386,7 +388,7 @@ describe('deactivated customer (ADD-deactivated-masters)', () => {
       const view = await dayView(day);
       expect(view.customers.find((c: any) => c.code === 'C3').issues).toEqual([]);
       expect(view.inactiveCustomers).toBe(0);
-      expect(view.outdated).toEqual({ weightCases: 0, inactiveOrders: 0 });
+      expect(view.outdated).toEqual(UP_TO_DATE);
 
       // Something new to plan, then a re-plan: the locked load still carries C3.
       const late = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/late-order`, j({ date: day, depotId, customerCode: 'C1', reason: 'Top-up', lines: [{ productCode: 'TAN-500-24', cases: 2, salesOrderNo: 'SO-86' }] }));

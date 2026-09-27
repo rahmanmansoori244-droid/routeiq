@@ -16,6 +16,7 @@ import {
   pinUrl,
   REPLACED_LINE,
   routeLinks,
+  TIMES_NOT_VERIFIED_LINE,
   tripsByTruck,
   whatsappNumber,
   whatsappText,
@@ -484,5 +485,67 @@ describe('WhatsApp safeguards and driver clashes', () => {
     // A note stored before the simplified rules for a trip that only got a driver (no `from`) is not shown.
     const filled = { ...note({}), from: null, reason: 'FILLED' } as unknown as DriverChangeNote;
     expect(driverChangeWarnings([filled], [load])).toEqual([]);
+  });
+});
+
+describe('frozen plan facts and unverified times on the sheet (review F08 / F04)', () => {
+  /** L1's first stop: its pin was corrected after planning; L2's truck-day breaks a rule. */
+  function changedAndUnverified(): PlanDetail {
+    const d = fixture();
+    const s = d.loads[0].stops[0];
+    d.loads[0].stops[0] = {
+      ...s,
+      masterChanged: [
+        { kind: 'LOCATION', text: 'Location updated after planning: new pin 23.60100, 58.39000 (1.8 km from the planned one)', newLat: 23.601, newLng: 58.39, movedM: 1800 },
+        { kind: 'HOURS', text: 'Receiving hours changed after planning: now receives 07:00–12:00 (planned with 06:00–14:00)' },
+      ],
+    };
+    d.loads[1] = { ...d.loads[1], timing: { status: 'VIOLATED', ok: false } };
+    return d;
+  }
+
+  it('keeps the planned pin and says the location was updated after planning, with the new pin', () => {
+    const m = driverPackModel(changedAndUnverified(), OPTS);
+    const st = m.sheets[0].stops[0];
+    expect(st.pinUrl).toBe(pinUrl({ lat: ORDERS[0].lat, lng: ORDERS[0].lng })); // the planned destination
+    expect(st.changeNotes[0]).toMatch(/^Location updated after planning: new pin 23\.60100, 58\.39000/);
+    expect(st.changeNotes[1]).toMatch(/^Receiving hours changed after planning/);
+    expect(st.newPinUrl).toBe(pinUrl({ lat: 23.601, lng: 58.39 }));
+    expect(m.sheets[1].stops.every((x) => x.changeNotes.length === 0 && x.newPinUrl === null)).toBe(true);
+  });
+
+  it('the WhatsApp message carries the same warnings as the sheet: change notes, the new pin, TIMES NOT VERIFIED', () => {
+    const d = changedAndUnverified();
+    const trips = tripsByTruck(d.loads);
+    const l1 = whatsappText(d.run, d.loads[0], trips.get('t1')!).split('\n');
+    const at = l1.indexOf('1. 06:40 Lulu Hypermarket Bausher (C001/B1) · 70 cs');
+    expect(at).toBeGreaterThan(0);
+    // The planned pin stays the stop's pin (and the route's); the change and the new pin follow it.
+    expect(l1[at + 1]).toBe(pinUrl({ lat: ORDERS[0].lat, lng: ORDERS[0].lng }));
+    expect(l1[at + 2]).toMatch(/^! Location updated after planning: new pin 23\.60100, 58\.39000/);
+    expect(l1[at + 3]).toBe(`New pin - ask the dispatcher which one to use: ${pinUrl({ lat: 23.601, lng: 58.39 })}`);
+    expect(l1[at + 4]).toMatch(/^! Receiving hours changed after planning/);
+    expect(l1).not.toContain(TIMES_NOT_VERIFIED_LINE);
+    // L2's truck-day fails the timetable check.
+    const l2 = whatsappText(d.run, d.loads[1], trips.get('t1')!).split('\n');
+    expect(l2[0]).toBe(TIMES_NOT_VERIFIED_LINE);
+    expect(l2[1]).toBe('*Truck T01 - Trip 2 of 2*');
+    expect(l2.some((x) => x.startsWith('! '))).toBe(false);
+    // A replaced version still says so first.
+    expect(whatsappText({ ...d.run, status: 'SUPERSEDED' }, d.loads[1], 2).split('\n').slice(0, 2)).toEqual([REPLACED_LINE, TIMES_NOT_VERIFIED_LINE]);
+  });
+
+  it('marks the sheets of a truck whose times are not verified, and only those', async () => {
+    const d = changedAndUnverified();
+    const m = driverPackModel(d, OPTS);
+    expect(m.timesNotVerified).toBe(true);
+    expect(m.sheets.map((x) => x.timesNotVerified)).toEqual([false, true, false]);
+    expect(m.sheets[1].badges).toContain('TIMES NOT VERIFIED');
+    const text = pageTexts(await renderDriverPackPdf(m));
+    expect(text.filter((t) => t.includes(sq('TIMES NOT VERIFIED - the departure or delivery times of this truck break a planning rule'))).length).toBeGreaterThanOrEqual(1);
+    expect(text[0]).not.toContain(sq('TIMES NOT VERIFIED'));
+    expect(text[0]).toContain(sq('Location updated after planning: new pin'));
+    expect(text[0]).toContain(sq('Open the new pin'));
+    expect(driverPackModel(fixture(), OPTS).timesNotVerified).toBe(false);
   });
 });

@@ -46,8 +46,11 @@ Follow-ups:
    - Web variables (names only; values live in Railway): `DATABASE_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `SOLVER_URL`, `SOLVER_TOKEN`. Optional ones are listed in `.env.example`.
    - Since stabilization PR1 (security) also set on web: a separate `JANITOR_TOKEN`, `RESEND_API_KEY` + a verified `RESEND_FROM`, `AUTH_URL` (or `NEXTAUTH_URL`), and `TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`; keep `RATE_LIMITS_DISABLED` unset. The full list and the post-deploy checks are in [`SECURITY.md`](./SECURITY.md) section 7.
    - Since stabilization PR3 (plan lifecycle): optional `SOLVER_MAX_CONCURRENT` on web (default 2: solves at once over all companies; one company may use one less, at least 1). After the deploy, check it against the solver's vCPU and keep it at or below the solver's `MAX_CONCURRENT_DISPATCH`.
+   - Since stabilization PR4 (feasibility gate): `FEASIBILITY_GATE` on web stays **unset** (the gate is enforced). `warn` is an emergency switch only (trucks whose times break a rule can then be dispatched; audited); see `docs/admin.md`. The PR4 migration `20260927090000_plan_snapshots_feasibility` only adds three nullable JSONB columns.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
    - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools processes, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
+   - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set).
+   - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
    - Wait until the solver deployment is **Active** before anyone plans.
 4. **routeiq-osrm** → Settings → Source → Branch: `main` (the PR branch can then be deleted).

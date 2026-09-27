@@ -4,15 +4,25 @@
  */
 import { prisma } from '../db';
 import { tenantDb } from '../tenant';
-import { effectiveAttrs, describeWindows, type TypeProfileLike } from './customer-attrs';
+import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
-import { isDispatchDetails, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
+import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
+import { checkPlanFeasibility, feasibilityGateMode, type PlanFeasibility, type TruckTiming } from './feasibility';
+import {
+  readPlanInputs,
+  readStopSnapshot,
+  readTruckSnapshot,
+  stopMasterChanges,
+  truckMasterChanges,
+  type MasterChange,
+  type PlanSettings,
+} from './snapshots';
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
-import { readPortionLines, rowLines, splitPartLabels } from './split';
-import { lineWeightStatus, orderUsesLineWeights } from './weights';
+import { portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
+import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { fmtWindow, isoOf } from './time';
 
 export interface DetailStop {
@@ -47,11 +57,20 @@ export interface DetailStop {
   address: string | null;
   /** Notes on the orders of this stop (from the order file / late-order entry). */
   notes: string[];
-  /** Customer master access / receiving notes (gate, forklift, contact...). */
+  /** Customer master access / receiving notes (gate, forklift, contact...), as they are NOW: contact
+   * details stay live like the driver's phone, so a correction reaches the driver sheet (review of PR4). */
   accessNotes: string | null;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
+  /**
+   * Review F08: true = the pin, hours, name and address above are the ones the stop was PLANNED
+   * with (its snapshot); false = a stop planned before snapshots existed, shown with today's
+   * customer data. Access notes are always today's.
+   */
+  snapshot: boolean;
+  /** What changed in the customer master since planning (never applied silently: re-plan to adopt it). */
+  masterChanged: MasterChange[];
 }
 
 export interface DetailLoad {
@@ -87,6 +106,12 @@ export interface DetailLoad {
   distanceIsEstimated: boolean;
   stops: DetailStop[];
   manifest: { productCode: string; productName: string; cases: number; weightKg: number }[];
+  /** The truck code and capacities above are the ones the load was planned with (false: today's truck). */
+  truckSnapshot: boolean;
+  /** Truck capacity changed since planning. */
+  masterChanged: MasterChange[];
+  /** The timetable check of this load's truck-day (review F04); null = the version has no applied plan. */
+  timing: { status: TruckTiming; ok: boolean } | null;
 }
 
 export interface DetailUnserved {
@@ -140,6 +165,8 @@ export interface PlanDetail {
     provider: string;
     objective: ScenarioDetails['objective'] | null;
     chosen: boolean;
+    /** The optimizer's own timetable check of this option (null: an option from before the check existed). */
+    feasibility: { status: string; timing: string; violations: number } | null;
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
@@ -152,6 +179,18 @@ export interface PlanDetail {
    * Always 0 for a superseded version or one without an applied plan.
    */
   pendingOrders?: number;
+  /** The timetable check per truck-day (review F04): what LOCK / LOADING / DISPATCH are gated on. */
+  feasibility?: PlanFeasibility | null;
+  /** enforce: a truck-day that fails the check cannot be locked, loaded or dispatched; warn: operator switch FEASIBILITY_GATE=warn. */
+  feasibilityGate?: 'enforce' | 'warn';
+  /** The tenant settings the plan in use was built with (null: an option from before they were kept). */
+  planSettings?: PlanSettings | null;
+}
+
+/** "hard 06:00–14:00, preferred 07:00–10:00" from planned hours (describeWindows reads only these four). */
+function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | null; prefStartMin: number | null; prefEndMin: number | null }) {
+  const eff = { hardStart: h.hardStartMin, hardEnd: h.hardEndMin, prefStart: h.prefStartMin, prefEnd: h.prefEndMin } as EffectiveAttrs;
+  return { window: describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null };
 }
 
 export async function getPlanDetail(tenantId: string, runId: string): Promise<PlanDetail | null> {
@@ -186,6 +225,9 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
     },
   });
   const priorityOf = (orderId: string, fallback: number) => chosenDetails?.scope.orderPriority[orderId] ?? fallback;
+  // The depot the option was planned from (F08); the live one for options from before inputs.
+  const inputs = readPlanInputs(chosenDetails?.inputs);
+  const depotPoint = inputs ? { lat: inputs.depot.lat, lng: inputs.depot.lng } : { lat: run.depot.lat, lng: run.depot.lng };
   // Stops that carry split portions, for the "Part k of n" labels across the whole plan.
   const portionStops: { stop: DetailStop; customerId: string; portion: boolean; departMin: number; truckCode: string; sequence: number }[] = [];
   const detailLoads: DetailLoad[] = loads.map((l) => {
@@ -203,6 +245,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       const skus = lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const s = stops.get(a.sequenceInTruck);
+      const snap = readStopSnapshot(a.stopSnapshotJson);
       if (s) {
         s.cases += cases;
         s.weightKg += weightKg;
@@ -214,22 +257,26 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         s.priority = Math.min(s.priority, priorityOf(o.id, o.priority));
         continue;
       }
+      // Review F08: the facts the stop was planned with; today's customer only for older rows.
+      const planned = snap ? plannedWindows(snap) : null;
+      const lat = snap ? snap.lat : c.lat;
+      const lng = snap ? snap.lng : c.lng;
       stops.set(a.sequenceInTruck, {
         sequence: a.sequenceInTruck,
         customerId: c.id,
-        customerCode: c.code,
-        branchCode: c.branchCode,
-        customerName: c.name,
-        customerType: c.customerType,
-        lat: c.lat,
-        lng: c.lng,
+        customerCode: snap?.code || c.code,
+        branchCode: snap ? snap.branchCode : c.branchCode,
+        customerName: snap?.name || c.name,
+        customerType: snap ? snap.customerType : c.customerType,
+        lat,
+        lng,
         priority: priorityOf(o.id, o.priority),
         etaMin: a.etaMin,
         serviceStartMin: a.serviceStartMin,
         departureMin: a.departureMin,
         waitMin: a.waitMin,
-        window: describeWindows(eff),
-        hardWindow: eff.hardStart !== null || eff.hardEnd !== null ? fmtWindow(eff.hardStart, eff.hardEnd) : null,
+        window: planned ? planned.window : describeWindows(eff),
+        hardWindow: planned ? planned.hardWindow : eff.hardStart !== null || eff.hardEnd !== null ? fmtWindow(eff.hardStart, eff.hardEnd) : null,
         // Show the unloading time the optimizer scheduled (a split part's share, plus the
         // per-case time when the tenant sets one); the customer's own time when not scheduled.
         serviceMin: a.departureMin !== null && a.serviceStartMin !== null ? a.departureMin - a.serviceStartMin : eff.serviceMin,
@@ -243,11 +290,26 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         orderIds: [o.id],
         salesOrders: [...new Set(salesOrders)],
         skus: aggregateSkus(skus),
-        mapsUrl: c.lat !== null && c.lng !== null ? `https://www.google.com/maps/search/?api=1&query=${c.lat},${c.lng}` : null,
-        address: c.address,
+        mapsUrl: lat !== null && lng !== null ? `https://www.google.com/maps/search/?api=1&query=${lat},${lng}` : null,
+        address: snap ? snap.address : c.address,
         notes: noteParts(o.notes),
+        // Live, never the snapshot: gate / receiver details do not change the timetable, and a
+        // correction must reach the driver sheet (the snapshot keeps the planned notes for the record).
         accessNotes: c.accessNotes,
         split: null,
+        snapshot: !!snap,
+        masterChanged: snap
+          ? stopMasterChanges(snap, {
+              name: c.name,
+              address: c.address,
+              lat: c.lat,
+              lng: c.lng,
+              hardStartMin: eff.hardStart,
+              hardEndMin: eff.hardEnd,
+              prefStartMin: eff.prefStart,
+              prefEndMin: eff.prefEnd,
+            })
+          : [],
       });
     }
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
@@ -255,12 +317,13 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       s.weightKg = Math.round(s.weightKg * 10) / 10;
       portionStops.push({ stop: s, customerId: s.customerId, portion: withPortion.has(s.sequence), departMin: l.departMin, truckCode: l.truck.code, sequence: s.sequence });
     }
+    const ts = readTruckSnapshot(l.truckSnapshotJson);
     return {
       id: l.id,
       truckId: l.truckId,
-      truckCode: l.truck.code,
-      truckCapacityCases: l.truck.capacityCases,
-      truckPayloadKg: l.truck.capacityWeightKg,
+      truckCode: ts?.code || l.truck.code,
+      truckCapacityCases: ts ? ts.capacityCases : l.truck.capacityCases,
+      truckPayloadKg: ts ? ts.capacityWeightKg : l.truck.capacityWeightKg,
       driverId: l.driverId,
       driverName: l.driver?.name ?? null,
       driverPhone: l.driver?.phone ?? null,
@@ -282,8 +345,24 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       distanceIsEstimated: l.distanceIsEstimated,
       stops: stopList,
       manifest: aggregateSkus(stopList.flatMap((s) => s.skus)),
+      truckSnapshot: !!ts,
+      masterChanged: ts ? truckMasterChanges(ts, l.truck) : [],
+      timing: null,
     };
   });
+
+  // The timetable check (review F04), recomputed from the plan's own facts on every read: the
+  // screen shows exactly what LOCK / LOADING / DISPATCH would be gated on right now.
+  let feasibility: PlanFeasibility | null = null;
+  if (chosenDetails) {
+    const needLegacy = loads.some((l) => l.carriedFromLoadId === null && !readTruckSnapshot(l.truckSnapshotJson));
+    const legacy = needLegacy ? await legacyPlanFacts(prisma, tenantId, run.currentJobId) : null;
+    feasibility = checkPlanFeasibility(feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy));
+    for (const dl of detailLoads) {
+      const t = feasibility.trucks[dl.truckId];
+      dl.timing = t ? { status: t.status, ok: t.ok } : null;
+    }
+  }
 
   const unservedRows = chosen?.unservedOrders ?? [];
   const restUnserved = new Set<string>();
@@ -347,7 +426,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
       reason: run.reason,
       reasonNote: run.reasonNote,
       runDate: isoOf(run.runDate),
-      depot: { id: run.depot.id, code: run.depot.code, name: run.depot.name, lat: run.depot.lat, lng: run.depot.lng },
+      depot: { id: run.depot.id, code: run.depot.code, name: run.depot.name, lat: depotPoint.lat, lng: depotPoint.lng },
       parentRunId: run.parentRunId,
       createdAt: run.createdAt.toISOString(),
       supersededAt: run.supersededAt?.toISOString() ?? null,
@@ -375,6 +454,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         provider: d.matrix_provider ?? 'HAVERSINE',
         objective: d.objective ?? null,
         chosen: s.id === run.chosenScenarioId,
+        feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
       };
     }),
     loads: detailLoads,
@@ -398,6 +478,7 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
         ? [
             ...new Set([
               ...outdated,
+              ...(live ? masterChangedNotes(detailLoads) : []),
               // A driver the applied plan changed is never silent. Read with each row's marker, so a
               // note ends once the dispatcher sets that trip's driver (a driver, Keep or "No driver").
               ...driverChangeWarnings(
@@ -410,7 +491,38 @@ export async function getPlanDetail(tenantId: string, runId: string): Promise<Pl
           ]
         : [],
     pendingOrders,
+    feasibility,
+    feasibilityGate: feasibilityGateMode(),
+    planSettings: inputs?.settings ?? null,
   };
+}
+
+/**
+ * Review F08: customer or truck master data corrected after this plan was made. The plan keeps
+ * what it was planned with (sheets included); nothing switches silently. A PLANNED load adopts the
+ * change at the next re-plan; a locked one must be unlocked first (a dispatched one keeps it).
+ */
+export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode' | 'loadNo' | 'stops' | 'masterChanged'>[]): string[] {
+  const stops: string[] = [];
+  const frozen: string[] = [];
+  const trucks: string[] = [];
+  for (const l of loads) {
+    if (l.masterChanged.length) trucks.push(`${l.truckCode} L${l.loadNo}`);
+    for (const s of l.stops) {
+      if (!s.masterChanged.some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) continue;
+      const label = `${s.customerCode}${s.branchCode ? `/${s.branchCode}` : ''} (${l.truckCode} L${l.loadNo})`;
+      (l.status === 'PLANNED' ? stops : frozen).push(label);
+    }
+  }
+  const out: string[] = [];
+  if (stops.length) {
+    out.push(`Location or receiving hours changed after this plan was made: ${stops.join(', ')}. The plan still uses what it was planned with - re-plan to use the new data.`);
+  }
+  if (frozen.length) {
+    out.push(`Location or receiving hours changed after these locked or dispatched loads were planned: ${frozen.join(', ')}. Their sheets show the planned stop with the change noted; unlock and re-plan to adopt it (not possible once a load has left).`);
+  }
+  if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
+  return out;
 }
 
 type OutdatedLoad = {
@@ -420,6 +532,7 @@ type OutdatedLoad = {
   assignments: {
     orderId: string;
     portionLinesJson: unknown;
+    portionWeightKg?: number | null;
     order: {
       status: string;
       totalWeightKg: number;
@@ -434,7 +547,9 @@ type OutdatedLoad = {
  * (frozen loads keep what they were loaded with): customers deactivated since, whose orders are
  * still on trucks, and case weights entered or corrected under Products since. The open rest of
  * an order partly on a frozen load is planned with the product's weight at every optimize (it is
- * never saved on the line, which the frozen part shares), so it is not reported as out of date.
+ * never saved on the line, which the frozen part shares), so it is reported only while its PLANNED
+ * part carries another case weight than the product has now (portionPlannedKgPerCase, the
+ * timetable check's rule; second review of PR4) - the same rule as the day overview.
  */
 export function outdatedNotes(loads: OutdatedLoad[]): string[] {
   const inactive = new Map<string, Set<string>>();
@@ -449,13 +564,17 @@ export function outdatedNotes(loads: OutdatedLoad[]): string[] {
         const label = o.customer.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : o.customer.code;
         inactive.set(label, (inactive.get(label) ?? new Set()).add(`${l.truck.code} L${l.loadNo}`));
       }
-      if (partlyFrozen.has(a.orderId)) continue;
       const orderLevel = !orderUsesLineWeights(o);
       const portion = readPortionLines(a.portionLinesJson);
+      // A partly frozen order: only the lines this PLANNED part carries with another case weight.
+      const plannedKg = partlyFrozen.has(a.orderId)
+        ? (portionPlannedKgPerCase({ portionLinesJson: a.portionLinesJson, portionWeightKg: a.portionWeightKg ?? null }, o.lines, orderLevel) ?? new Map<string, number>())
+        : null;
       const casesOf = new Map((portion ?? o.lines.map((x) => ({ lineId: x.id, cases: x.cases }))).map((x) => [x.lineId, x.cases]));
       for (const ln of o.lines) {
         const cases = casesOf.get(ln.id) ?? 0;
         if (cases <= 0) continue;
+        if (plannedKg && !plannedKgDiffers(plannedKg.get(ln.id), ln.product.weightPerCaseKg)) continue;
         if (lineWeightStatus({ cases: ln.cases, weightKg: ln.weightKg, fromMaster: ln.weightFromMaster }, ln.product.weightPerCaseKg, orderLevel) === 'MASTER') {
           weights.set(ln.product.code, (weights.get(ln.product.code) ?? 0) + cases);
         }

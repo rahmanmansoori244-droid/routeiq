@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, loadSheetName, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, kgCheck, loadSheetName, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
 import { fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
@@ -278,7 +278,7 @@ describe('tenantAssumptions', () => {
         prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
         defaultServiceTimeMin: 10, osrmUrl: null, priorityWeightsJson: null,
       },
-      { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, osrmEnvConfigured: false },
+      { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false },
     );
     expect(a['Planning cutoff (day before delivery)']).toContain('18:00');
     expect(a['Shift start (earliest departure)']).toBe('06:00');
@@ -289,8 +289,129 @@ describe('tenantAssumptions', () => {
     expect(a['Loading time per case']).toBe('not set (0)');
     expect(a['OSRM server configured']).toMatch(/^no/);
     expect(a['Estimated-distance multiplier']).toBeUndefined();
-    expect(tenantAssumptions(null, { currency: 'OMR', providerUsed: null, distanceIsEstimated: null, osrmEnvConfigured: false })).toEqual({
+    expect(tenantAssumptions(null, { currency: 'OMR', providerUsed: null, distanceIsEstimated: null })).toEqual({
       'Tenant configuration': 'not set - system defaults were used',
     });
+  });
+});
+
+describe('frozen plan facts, kg check and unverified times in the workbook (review F08 / F04)', () => {
+  it('ASSUMPTIONS says whether it shows the settings the plan was built with or the current ones', async () => {
+    const planned = sheet(await render(fixture(), { ...META, assumptionsSource: 'PLAN' }), SHEETS.assumptions);
+    expect(text(planned.getCell(2, 1))).toBe('Settings this plan (v2) was built and costed with.');
+    const current = sheet(await render(fixture(), { ...META, assumptionsSource: 'CURRENT' }), SHEETS.assumptions);
+    expect(text(current.getCell(2, 1))).toMatch(/^Current settings, at export time\. Plan v2 was made before its settings were stored with it/);
+  });
+
+  it('the settings kept with a plan feed the same assumptions (OSRM address never kept, only whether one was set)', () => {
+    const a = tenantAssumptions(
+      {
+        timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 390, driverShiftMaxMinutes: 600, reloadMinutes: 20, loadingMinPerCase: 0.04,
+        serviceMinPerCase: 0.05, maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 1.5, overtimeAfterMin: 540, overtimeCostPerHour: 0,
+        prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+        defaultServiceTimeMin: 10, osrmConfigured: true,
+      },
+      { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false },
+    );
+    expect(a['Shift start (earliest departure)']).toBe('06:30');
+    expect(a['Loading time per case']).toMatch(/^0\.04 min per case/);
+    expect(a['OSRM server configured']).toBe('yes (tenant setting)');
+  });
+
+  it('LOAD PLAN checks each load kg against its stops and the payload', async () => {
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], truckPayloadKg: 500 }; // L1 weighs 790 + 560 = 1,350 kg
+    const wb = await render(d);
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const col = find(lp, (t) => t === 'Kg check')!.col;
+    expect(text(lp.getCell(5, col))).toBe('OVER PAYLOAD by 850 kg');
+    expect(text(lp.getCell(6, col))).toBe('OK');
+    expect(text(sheet(wb, 'T01 - L1').getCell(5, 9))).toMatch(/OVER PAYLOAD/);
+    const mism = fixture();
+    mism.loads[1] = { ...mism.loads[1], weightKg: mism.loads[1].weightKg + 50 };
+    const lp2 = sheet(await render(mism), SHEETS.loadPlan);
+    expect(text(lp2.getCell(6, col))).toMatch(/^MISMATCH: stops add up to/);
+  });
+
+  it('a stop whose master data changed after planning says so in its own column', async () => {
+    const d = fixture();
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], masterChanged: [{ kind: 'LOCATION', text: 'Location updated after planning: new pin 23.60100, 58.39000 (1.8 km from the planned one)' }] };
+    const ws = sheet(await render(d), 'T01 - L1');
+    const head = find(ws, (t) => t === 'Changed after planning')!;
+    expect(text(ws.getCell(head.row + 2, head.col))).toMatch(/^Location updated after planning/);
+    expect(text(ws.getCell(head.row + 3, head.col))).toBe('');
+    expect(text(ws.getCell(head.row, head.col + 1))).toBe('Received by (sign)');
+  });
+
+  it('prints TIMES NOT VERIFIED on the summary, the load plan and the sheets of the trucks concerned', async () => {
+    const d = fixture();
+    d.loads[1] = { ...d.loads[1], timing: { status: 'VIOLATED', ok: false } };
+    d.feasibility = {
+      v: 1, ok: false, status: 'VIOLATED', source: 'SOLVER_AND_WEB', solverStatus: 'VIOLATED', solverTiming: 'ESTIMATED',
+      trucks: { t1: { truckCode: 'T01', status: 'VIOLATED', ok: false, blocking: 1, warnings: 0 } },
+      violations: [{ code: 'TURNAROUND', severity: 'BLOCK', source: 'SOLVER', truckId: 't1', truckCode: 'T01', loadId: 'L2', loadNo: 2, message: 'T01 load 2 leaves 20 min before the truck is reloaded.' }],
+      inputHash: 'x', checkedAt: '2026-09-27T05:00:00Z',
+    };
+    const wb = await render(d);
+    const s = sheet(wb, SHEETS.summary);
+    expect(find(s, (t) => t.startsWith('TIMES NOT VERIFIED'), 1)).toBeTruthy();
+    expect(find(s, (t) => t === 'T01 load 2 leaves 20 min before the truck is reloaded.', 3)).toBeTruthy();
+    expect(s.headerFooter.oddHeader).toContain('TIMES NOT VERIFIED');
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const col = find(lp, (t) => t === 'Timing')!.col;
+    expect(text(lp.getCell(6, col))).toBe('TIMES NOT VERIFIED');
+    expect(text(lp.getCell(5, col))).toBe('Times checked');
+    expect(text(sheet(wb, 'T01 - L2').getCell(3, 1))).toMatch(/^TIMES NOT VERIFIED/);
+    expect(sheet(wb, 'T01 - L2').headerFooter.oddHeader).toContain('TIMES NOT VERIFIED');
+    expect(text(sheet(wb, 'T01 - L1').getCell(3, 1))).toBe('');
+    // A verified plan carries no mark.
+    const ok = await render(fixture());
+    expect(find(sheet(ok, SHEETS.summary), (t) => t.startsWith('TIMES NOT VERIFIED'))).toBeUndefined();
+  });
+});
+
+describe('stabilization PR4 review fixes in the workbook', () => {
+  it('Kg check: a load filled to its payload with stored 0.1 kg rounding is OK, never "OVER PAYLOAD by 0 kg"', () => {
+    const d = fixture();
+    // 12.35 kg cases: parts stored before the fix held 12.4 + 9867.7 = 9880.1 kg on a 9880 kg truck.
+    const l = { ...d.loads[0], truckPayloadKg: 9880, weightKg: 9880.1 };
+    l.stops = [{ ...l.stops[0], weightKg: 12.4 }, { ...l.stops[1], weightKg: 9867.7 }];
+    expect(kgCheck(d, l)).toBe('OK');
+    // A real overload is still reported.
+    expect(kgCheck(d, { ...l, weightKg: 9881, stops: [{ ...l.stops[0], weightKg: 13.3 }, l.stops[1]] })).toBe('OVER PAYLOAD by 1 kg');
+  });
+
+  it('Kg check: cases planned at 0 kg whose case weight was entered since make the load over its payload', () => {
+    const d = fixture();
+    const l = d.loads[0];
+    d.feasibility = {
+      v: 1, ok: false, status: 'VIOLATED', source: 'SOLVER_AND_WEB', solverStatus: 'VERIFIED', solverTiming: 'EXACT',
+      trucks: { t1: { truckCode: 'T01', status: 'VIOLATED', ok: false, blocking: 1, warnings: 0 } },
+      violations: [{ code: 'CAPACITY_KG_NEW_WEIGHT', severity: 'BLOCK', source: 'WEB', truckId: 't1', truckCode: 'T01', loadId: l.id, loadNo: 1, message: 'x', shortBy: 5000 }],
+      inputHash: 'x', checkedAt: '2026-09-27T05:00:00Z',
+    };
+    expect(kgCheck(d, l)).toBe('OVER PAYLOAD at the case weights entered since planning (by about 5000 kg); SOME CASES HAVE NO WEIGHT');
+  });
+
+  it('ASSUMPTIONS: stored settings decide OSRM and coverage - never the web server environment or today\'s country', () => {
+    const stored = {
+      timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 390, driverShiftMaxMinutes: 600, reloadMinutes: 20, loadingMinPerCase: 0,
+      serviceMinPerCase: 0, maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 1.5, overtimeAfterMin: 540, overtimeCostPerHour: 0,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+      defaultServiceTimeMin: 10, osrmConfigured: false,
+    };
+    const prev = process.env.OSRM_URL;
+    process.env.OSRM_URL = 'http://osrm.web.internal:5000'; // the web's own (legacy Map tab)
+    try {
+      const a = tenantAssumptions({ ...stored, outsideCoverage: false }, { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, outsideCoverage: true });
+      expect(a['OSRM server configured']).toBe('no tenant setting (the solver uses its own OSRM_URL if set)');
+      // The plan was built inside the map: a later country change (today's outsideCoverage) does not rewrite it.
+      expect(a['Distance provider (configured)']).toBe('OSRM (the dispatch planner uses OSRM road distances)');
+      const outside = tenantAssumptions({ ...stored, outsideCoverage: true }, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
+      expect(outside['Distance provider (configured)']).toMatch(/straight-line estimates used \(outside the Oman \+ UAE routing map\)$/);
+    } finally {
+      if (prev === undefined) delete process.env.OSRM_URL;
+      else process.env.OSRM_URL = prev;
+    }
   });
 });

@@ -27,25 +27,31 @@ function xlsxResponse(buf: Buffer, filename: string) {
 }
 
 // NMWC dispatch plan version (has physical loads) -> the master dispatch workbook.
+// Review F08: the ASSUMPTIONS sheet shows the settings stored with the plan in use (what it was
+// built with, including whether it was outside the routing map); only a plan from before settings
+// were stored shows today's, labelled as such. Never the web server's environment (OSRM_URL here
+// only draws the legacy Map tab; the solver routes with its own).
 async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
   const detail = await getPlanDetail(user.tenantId, runId);
   if (!detail) return fail('Not found', 404);
   const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { name: true, currency: true, country: true } });
   const cfg = await db.tenantConfig.findUnique({ where: { tenantId: user.tenantId } });
   const currency = tenant?.currency ?? 'OMR';
+  const planned = detail.planSettings ?? null;
   const buf = await buildDispatchWorkbook(detail, {
     tenantName: tenant?.name ?? '',
     currency,
     generatedAt: new Date(),
     generatedBy: user.name || user.email,
-    timezone: cfg?.timezone,
-    assumptions: tenantAssumptions(cfg, {
+    timezone: planned?.timezone ?? cfg?.timezone,
+    assumptions: tenantAssumptions(planned ?? cfg, {
       currency,
       providerUsed: detail.summary?.distanceProvider ?? detail.scenarios.find((s) => s.chosen)?.provider ?? null,
       distanceIsEstimated: detail.summary?.distanceIsEstimated ?? detail.loads.some((l) => l.distanceIsEstimated),
-      osrmEnvConfigured: !!process.env.OSRM_URL,
-      outsideCoverage: cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
+      // Stored with the plan (PlanSettings.outsideCoverage); today's only for a plan without settings.
+      outsideCoverage: planned ? undefined : cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
     }),
+    assumptionsSource: planned ? 'PLAN' : 'CURRENT',
   });
   // Depot codes are free text - keep the download filename header-safe.
   const depot = detail.run.depot.code.replace(/[^A-Za-z0-9_-]+/g, '_') || 'DEPOT';

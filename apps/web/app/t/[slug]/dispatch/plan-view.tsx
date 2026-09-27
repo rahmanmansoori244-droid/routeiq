@@ -10,6 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
+import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
+import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
@@ -312,6 +314,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Every order is on a locked, loading or dispatched load: a re-plan would have nothing to plan.
   const nothingToPlan = nothingToReplan({ loadStatuses: d.loads.map((l) => l.status), unservedOrders: d.unserved.length, pendingOrders: d.pendingOrders ?? 1 });
   const applied = !!d.run.chosenScenario;
+  // Review F04: the timetable check. With the gate on (the default), a truck whose times break a
+  // rule cannot be locked, loaded or dispatched. The remedy is Re-plan - except for a problem on a
+  // LOCKED or LOADING load, which a re-plan carries over unchanged: that load, and every later locked
+  // or loading load of its truck (Unlock goes latest first), goes back to Planned first.
+  const feas = d.feasibility ?? null;
+  const gateOn = (d.feasibilityGate ?? 'enforce') === 'enforce';
+  const blockingViolations = feas ? feas.violations.filter((v) => v.severity === 'BLOCK') : [];
+  const timingWarnings = feas ? feas.violations.filter((v) => v.severity === 'WARN') : [];
+  const planLoads = remedyLoads(d.loads);
+  const remedy = timingRemedy(blockingViolations, planLoads);
+  const replanOff = timingReplanOff(remedy, nothingToPlan);
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -393,6 +406,49 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <div className="rounded-md border border-red-300 bg-red-50 p-3 text-sm">Optimization failed: {d.job?.message}</div>
         )
       ) : null}
+      {feas && !feas.ok && !superseded && !running ? (
+        <div className="space-y-1 rounded-md border border-red-400 bg-red-50 p-3 text-sm" data-testid="timing-violations">
+          <p className="flex items-center gap-2 font-medium text-red-800">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            Times not verified:{' '}
+            {gateOn
+              ? 'the trucks below cannot be locked, loaded or dispatched until this is fixed.'
+              : 'the check is switched to warn only (FEASIBILITY_GATE=warn), so these trucks can still be dispatched - check each time with the drivers.'}
+          </p>
+          {blockingViolations.slice(0, 8).map((v, i) => (
+            <p key={`${v.code}-${v.loadId ?? v.truckId ?? ''}-${i}`} className="text-red-800">
+              <b>{v.truckCode ?? 'Plan'}{v.loadNo ? ` L${v.loadNo}` : ''}:</b> {v.message}
+              {v.frozen ? <i> (locked or loading: a re-plan keeps it as it is)</i> : null}
+            </p>
+          ))}
+          {blockingViolations.length > 8 ? <p className="text-red-800">… and {blockingViolations.length - 8} more (all listed in the Excel export).</p> : null}
+          <p className="font-medium text-red-800" data-testid="timing-remedy">
+            {remedy.text}
+          </p>
+          {canPlan && d.run.chosenScenario ? (
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="destructive" disabled={!!busy || !!replanOff} onClick={() => replan('REOPTIMIZE')} data-testid="timing-replan-btn">
+                <RefreshCw className="mr-1 h-4 w-4" /> Re-plan
+              </Button>
+              {replanOff ? (
+                <span className="text-xs text-red-800" data-testid="timing-replan-off">
+                  {replanOff}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {timingWarnings.length && !superseded ? (
+        <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm" data-testid="timing-warnings">
+          {timingWarnings.slice(0, 6).map((v, i) => (
+            <p key={`${v.code}-${v.loadId ?? ''}-${i}`} className="flex gap-2">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+              {v.message}
+            </p>
+          ))}
+        </div>
+      ) : null}
       {d.change ? (
         <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-sm" data-testid="change-summary">
           <b>Changes vs version {d.change.parentVersion}:</b> {d.change.text}.
@@ -471,6 +527,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     Preferred-hours miss
                   </th>
                   <th className="p-2">Unserved</th>
+                  <th className="p-2" title="The optimizer re-checked this option's timetable: loading time between loads, receiving hours, capacity, shift. An option that fails can be reviewed but its trucks cannot be dispatched.">
+                    Timing checked
+                  </th>
                   <th className="p-2">Solver</th>
                   <th className="p-2" />
                 </tr>
@@ -485,6 +544,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{sc.operatingCost.toFixed(1)}</td>
                     <td className="p-2">{sc.objective ? sc.objective.window_penalty.toFixed(1) : '—'}</td>
                     <td className="p-2">{sc.unservedOrders}</td>
+                    <td className="p-2 text-xs" data-testid={`timing-checked-${sc.name}`}>
+                      {sc.status !== 'OPTIMIZED' ? (
+                        '—'
+                      ) : !sc.feasibility ? (
+                        <span className="text-muted-foreground" title="Made before the optimizer checked its own times">not checked</span>
+                      ) : sc.feasibility.status === 'VERIFIED' ? (
+                        <span className="text-green-700">Yes</span>
+                      ) : sc.feasibility.status === 'VIOLATED' ? (
+                        <span className="font-medium text-red-700" title="Not dispatchable: re-plan, or choose another option">
+                          No - {sc.feasibility.violations} rule(s) broken
+                        </span>
+                      ) : (
+                        <span className="font-medium text-red-700" title="Not dispatchable: re-plan">Not verified</span>
+                      )}
+                    </td>
                     <td className="p-2 text-xs text-muted-foreground">
                       {sc.solverTimeSec}s · {sc.solverStatus.replace('ROUTING_', '')}
                     </td>
@@ -497,7 +571,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           No plan
                         </span>
                       ) : canPlan && !superseded ? (
-                        <Button size="sm" variant="ghost" disabled={!!busy || running} onClick={() => chooseScenario(sc.id, sc.name)}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={!!busy || running}
+                          onClick={() => chooseScenario(sc.id, sc.name)}
+                          title={sc.feasibility && sc.feasibility.status !== 'VERIFIED' ? 'Its times break a rule: it can be reviewed, but its trucks cannot be dispatched.' : undefined}
+                        >
                           Use instead
                         </Button>
                       ) : null}
@@ -575,6 +655,26 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         {l.status}
                       </Badge>
                       {l.carried ? <span className="ml-1 text-xs text-muted-foreground">kept</span> : null}
+                      {l.timing && !l.timing.ok ? (
+                        <Badge
+                          variant="destructive"
+                          className="ml-1"
+                          data-testid={`load-timing-${l.truckCode}-${l.loadNo}`}
+                          title={loadTimingTitle(l, blockingViolations, planLoads)}
+                        >
+                          Times not verified
+                        </Badge>
+                      ) : null}
+                      {l.masterChanged.length || l.stops.some((st) => st.masterChanged.length) ? (
+                        <Badge
+                          variant="warning"
+                          className="ml-1"
+                          data-testid={`load-master-changed-${l.truckCode}-${l.loadNo}`}
+                          title={[...l.masterChanged, ...l.stops.flatMap((st) => st.masterChanged)].map((c) => c.text).join('\n')}
+                        >
+                          Changed after planning
+                        </Badge>
+                      ) : null}
                     </td>
                     <td className="p-2">
                       {hhmm(l.departMin)} → {hhmm(l.returnMin)}
@@ -589,7 +689,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.fuelLitres ?? '—'}</td>
                     <td className="p-2">{l.operatingCost.toFixed(1)}</td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
-                      {!superseded ? <LoadActions l={l} busy={!!busy || running} applied={applied} canPlan={canPlan} canDispatch={canDispatch} reconOk={!!rec?.ok} onStatus={(st) => setStatus(l, st)} /> : null}
+                      {!superseded ? (
+                        <LoadActions
+                          l={l}
+                          busy={!!busy || running}
+                          applied={applied}
+                          canPlan={canPlan}
+                          canDispatch={canDispatch}
+                          reconOk={!!rec?.ok}
+                          timingBlocked={gateOn && !!l.timing && !l.timing.ok}
+                          onStatus={(st) => setStatus(l, st)}
+                        />
+                      ) : null}
                     </td>
                   </tr>
                   {open[l.id] ? (
@@ -827,6 +938,20 @@ function LoadDriver({
   );
 }
 
+/**
+ * The load's "Times not verified" tooltip. A load that itself breaks a rule while locked or loading
+ * says which loads go back to Planned first: it and every later locked or loading load of its
+ * truck, latest first (Unlock is refused while a later load of the truck is frozen).
+ */
+function loadTimingTitle(l: DetailLoad, blocking: PlanViolation[], loads: RemedyLoad[]): string {
+  const base = TIMING_TEXT[l.timing!.status];
+  const own = timingRemedy(
+    blocking.filter((v) => v.loadId === l.id),
+    loads,
+  );
+  return own.unlockFirst.length ? `${base}: this load breaks a rule and a re-plan keeps it as it is - ${unlockFirstText(own.unlockFirst)}, then re-plan.` : base;
+}
+
 function LoadActions({
   l,
   busy,
@@ -834,6 +959,7 @@ function LoadActions({
   canPlan,
   canDispatch,
   reconOk,
+  timingBlocked,
   onStatus,
 }: {
   l: DetailLoad;
@@ -843,8 +969,16 @@ function LoadActions({
   canPlan: boolean;
   canDispatch: boolean;
   reconOk: boolean;
+  /** Review F04: this truck's times break a rule - Lock, Loading and Dispatch wait until it is fixed. */
+  timingBlocked: boolean;
   onStatus: (s: string) => void;
 }) {
+  const timingTitle = !reconOk
+    ? 'Cases must reconcile first'
+    : timingBlocked
+      ? "This truck's times break a planning rule: the red box above says what to do (re-plan, or first put a locked load back to Planned)"
+      : undefined;
+  const canFreeze = reconOk && !timingBlocked;
   const b = (label: string, to: string, icon: React.ReactNode, enabled = true, title?: string) => (
     <Button key={to} size="sm" variant="outline" className="h-7 px-2 text-xs" disabled={busy || !enabled} title={title} onClick={() => onStatus(to)} data-testid={`act-${to}-${l.truckCode}-${l.loadNo}`}>
       {icon}
@@ -860,13 +994,15 @@ function LoadActions({
     if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
     return <div className="flex flex-wrap gap-1">{out}</div>;
   }
-  if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
+  if (l.status === 'PLANNED' && canPlan) out.push(b('Lock', 'LOCKED', <Lock className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   if (l.status === 'LOCKED' && canPlan) {
     out.push(b('Unlock', 'PLANNED', <Unlock className="mr-1 h-3 w-3" />));
-    out.push(b('Loading', 'LOADING', <PackageCheck className="mr-1 h-3 w-3" />));
+    out.push(b('Loading', 'LOADING', <PackageCheck className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
   }
   if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
-  if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, reconOk, reconOk ? undefined : 'Cases must reconcile first'));
+  if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) {
+    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
+  }
   if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
   return <div className="flex flex-wrap gap-1">{out}</div>;
 }
@@ -940,6 +1076,12 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                       {st.split.restUnserved ? ' · rest unserved' : ''}
                     </Badge>
                   ) : null}
+                  {st.masterChanged.length ? (
+                    <span className="mt-0.5 block text-amber-700" data-testid="stop-master-changed">
+                      {st.masterChanged.map((c) => c.text).join(' · ')}
+                    </span>
+                  ) : null}
+                  {!st.snapshot ? <span className="block text-muted-foreground" title="Planned before stop details were kept with the plan">current customer data</span> : null}
                 </td>
                 <td>P{st.priority}</td>
                 <td className={st.hardWindowOk === false ? 'text-red-600' : ''}>
