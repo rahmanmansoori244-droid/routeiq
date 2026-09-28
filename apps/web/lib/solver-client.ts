@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
-import { TOKEN_CANNOT_BE_SENT, solverEnv, tokenCanBeSent } from '@/lib/solver-env';
+import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from '@/lib/solver-env';
 
 export class SolverError extends Error {
   readonly status: number;
@@ -67,6 +67,9 @@ export function postJsonLong(
 export async function callDispatchSolver(req: DispatchRequest): Promise<DispatchResponse> {
   const { url, token } = solverEnv();
   if (!url) throw new SolverError('SOLVER_URL not set', 0, null);
+  // Fourth review of audit PR4: say why, instead of node:http's "Protocol not supported" or
+  // "Invalid URL" (lib/solver-env.ts); /api/health says SOLVER_URL_INVALID.
+  if (!solverUrlUsable(url)) throw new SolverError(`${URL_NOT_USABLE}. An administrator must set it to ${URL_EXPECTED}.`, 0, null);
   if (!token) throw new SolverError('SOLVER_TOKEN not set', 0, null);
   // Third review of audit PR4: say why, instead of node:http's "Invalid character in header
   // content" or a 401 for a token sent as other bytes than the solver holds (lib/solver-env.ts).
@@ -117,9 +120,10 @@ export async function callRouteGeometry(
 ): Promise<RouteGeometryReply> {
   const { url, token } = solverEnv();
   if (!url || !token) return { kind: 'not_configured' };
-  // Third review of audit PR4: the same rules as the optimize call and /api/health - a token that
-  // is not plain ASCII is not sent, and a redirect is not followed (with the token) but failed.
-  if (!tokenCanBeSent(token)) return { kind: 'failed' };
+  // Third and fourth review of audit PR4: the same rules as the optimize call and /api/health - a
+  // URL no call can use and a token that is not plain ASCII are not sent, and a redirect is not
+  // followed (with the token) but failed.
+  if (!solverUrlUsable(url) || !tokenCanBeSent(token)) return { kind: 'failed' };
   if (opts.signal?.aborted) return { kind: 'timeout' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? GEOMETRY_TIMEOUT_MS);

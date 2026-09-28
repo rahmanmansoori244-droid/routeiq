@@ -14,7 +14,8 @@
  * - `SOLVER_TOKEN`: spaces and line breaks around it are dropped (HTTP drops spaces around a header
  *   value anyway, and a line break cannot be sent at all);
  * - empty after that = not set (`null`);
- * - a token that is set but not plain ASCII is a misconfiguration of its own (`tokenCanBeSent`).
+ * - a token that is set but not plain ASCII is a misconfiguration of its own (`tokenCanBeSent`);
+ * - so is a URL that is set but that no call can use (`solverUrlUsable`, fourth review).
  */
 export interface SolverEnv {
   /** Base URL without a trailing slash: append `/optimize-dispatch`, `/route-geometry`, `/ready`. */
@@ -50,3 +51,33 @@ export function tokenCanBeSent(token: string): boolean {
 /** The first half of every message about such a token (health, startup log, optimize). */
 export const TOKEN_CANNOT_BE_SENT =
   'SOLVER_TOKEN on the web service has a character that cannot be sent (for example a hidden space or a curly quote)';
+
+/**
+ * Can every solver call use this SOLVER_URL (as `solverEnv` returns it)? Fourth review of audit
+ * PR4: only "is it set?" was checked. A value without `http://` (Railway's private domain pasted
+ * alone, `host:8000`), `http//host`, or a zero-width space after it then read as "solver
+ * unreachable" (200 degraded, deploy allowed) while every optimization failed before anything was
+ * sent ("Protocol not supported", "Invalid URL"). The calls add `/ready`, `/optimize-dispatch` or
+ * `/route-geometry` to it and send it with `fetch` or `node:http`, so it must be:
+ * - plain ASCII without spaces (no hidden character, as for the token);
+ * - an address the URL parser reads, with `http:` or `https:` (the parser refuses either without a
+ *   host);
+ * - without a user name or password (`fetch` refuses such a URL, `node:http` sends it);
+ * - without `?` or `#` (the paths the calls add would go into the query or the fragment).
+ */
+export function solverUrlUsable(url: string): boolean {
+  if (!/^[\x21-\x7e]+$/.test(url) || /[?#]/.test(url)) return false;
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  return (u.protocol === 'http:' || u.protocol === 'https:') && u.username === '' && u.password === '';
+}
+
+/** The first half of every message about such a URL (health, startup log, optimize). Never the URL itself. */
+export const URL_NOT_USABLE = 'SOLVER_URL on the web service is not a usable address';
+
+/** What to set instead (health and optimize messages). */
+export const URL_EXPECTED = 'http://<solver private address>:<port>';

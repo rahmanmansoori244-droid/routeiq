@@ -16,9 +16,10 @@
  *   out, an older solver without /ready, a 5xx, a 403 from a proxy in front of it - the solver itself
  *   never answers 403 -, or a redirect). HTTP 200 so a deploy is not blocked, `ok: false` so
  *   monitoring alerts;
- * - `not_ready`: a definite fault - the database is down, or dispatch is misconfigured (a token
- *   missing on the web or one that cannot be sent, the solver answers 401, or the solver has no
- *   token itself). HTTP 503: the deploy gate fails and the previous version keeps serving.
+ * - `not_ready`: a definite fault - the database is down, or dispatch is misconfigured (a URL or a
+ *   token missing on the web, a URL no call can use, a token that cannot be sent, the solver
+ *   answers 401, or the solver has no token itself). HTTP 503: the deploy gate fails and the
+ *   previous version keeps serving.
  *
  * Third review of audit PR4 - the check behaves like the optimize call in three more ways:
  * - a token outside plain ASCII is `misconfigured` before anything is sent (`tokenCanBeSent`);
@@ -26,17 +27,21 @@
  *   `SOLVER_URL_REDIRECTS`, never `ready`;
  * - the 4 s timeout covers the whole answer, body included (it used to stop at the headers, so a
  *   body that stopped half-way kept `/api/health` waiting for minutes).
+ * Fourth review: a SOLVER_URL no call can use (no `http://`, a hidden character, a user name and
+ * password; `solverUrlUsable`) is `misconfigured` `SOLVER_URL_INVALID` before anything is sent. It
+ * used to fail inside `fetch` and read as `SOLVER_UNREACHABLE` (200, deploy allowed).
  *
  * Only reason codes and plain sentences are returned (the endpoint is public): never a URL, a token
  * or a solver response body.
  */
-import { TOKEN_CANNOT_BE_SENT, solverEnv, tokenCanBeSent } from './solver-env';
+import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from './solver-env';
 
 export type ReadinessStatus = 'ready' | 'degraded' | 'not_ready';
 
 export type DispatchReason =
   | 'OK'
   | 'SOLVER_URL_MISSING'
+  | 'SOLVER_URL_INVALID'
   | 'SOLVER_TOKEN_MISSING'
   | 'SOLVER_TOKEN_INVALID'
   | 'SOLVER_TOKEN_REJECTED'
@@ -63,6 +68,7 @@ export const READY_TIMEOUT_MS = 4000;
 const MESSAGES: Record<DispatchReason, string> = {
   OK: 'The route optimizer accepts this web service.',
   SOLVER_URL_MISSING: 'SOLVER_URL is not set on the web service: no plan can be optimized.',
+  SOLVER_URL_INVALID: `${URL_NOT_USABLE}: every optimization would fail. Set it to ${URL_EXPECTED} as plain text (http:// or https:// first, no spaces, no user name or password).`,
   SOLVER_TOKEN_MISSING: 'SOLVER_TOKEN is not set on the web service: every optimization would fail.',
   SOLVER_TOKEN_INVALID: `${TOKEN_CANNOT_BE_SENT}: every optimization would fail. Copy the token again as plain text, on web and solver.`,
   SOLVER_TOKEN_REJECTED: 'The route optimizer refused the web service token (401): set the same SOLVER_TOKEN on web and solver.',
@@ -98,6 +104,9 @@ export async function checkDispatchReadiness(
   // the URL and sends the token an optimization would use.
   const { url, token } = solverEnv(env);
   if (!url) return answer('misconfigured', 'SOLVER_URL_MISSING');
+  // A URL no call can use fails every optimization before anything is sent (fourth review of audit
+  // PR4): a definite misconfiguration on the web, like a missing one - not "unreachable".
+  if (!solverUrlUsable(url)) return answer('misconfigured', 'SOLVER_URL_INVALID');
   if (!token) return answer('misconfigured', 'SOLVER_TOKEN_MISSING');
   // A token the calls cannot send, or send differently from this check, fails every optimization
   // (third review of audit PR4): a definite misconfiguration on the web, like a missing one.

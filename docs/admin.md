@@ -33,7 +33,7 @@ Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this bloc
 2. The JSON contains `requestJson` (exact solver input), `responseJson` (if any), and `errorJson` (reason).
 3. Common reasons:
    - `SOLVER_ERROR` with HTTP 5xx → solver crashed; check Railway logs for `routeiq-solver`
-   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS
+   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS. If the message says `SOLVER_URL` "is not a usable address", set `SOLVER_URL` on web to `http://<solver private address>:<port>` as plain text (`/api/health` answers 503 `SOLVER_URL_INVALID` until then)
    - `STUCK` → the job had no result after 15 min and the janitor reaped it. Usually the web service restarted (a deploy) during the optimization; optimize again.
    - `RESET` → a supervisor pressed **Reset stuck plan** (audit log `PLAN_RESET`: who, when, the note).
    - `Solver returned HTTP 404` / "The route optimizer is being updated" → web was deployed before the solver finished deploying; retry in a minute.

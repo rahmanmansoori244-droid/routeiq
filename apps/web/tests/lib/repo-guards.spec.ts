@@ -387,3 +387,45 @@ describe('the handbook describes the web tests and the health gate as they are (
     expect(row4).toMatch(/`ok: false`/);
   });
 });
+
+describe('the handbook counts what is on disk and lists every spec in 5.3 (fourth review of audit PR4)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const handbook = () => readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+  const specs = (dir: string) => readdirSync(path.join(WEB, 'tests', dir)).filter((f) => f.endsWith('.spec.ts')).sort();
+  const between = (text: string, from: string, to: string) => {
+    const a = text.indexOf(from);
+    const b = text.indexOf(to, a + 1);
+    if (a < 0 || b < 0) throw new Error(`no text from "${from}" to "${to}" in PROJECT_HANDBOOK.md`);
+    return text.slice(a, b);
+  };
+  /** Every count the pattern finds (its group 1), with the words it was found in, so a failure names the stale phrase. */
+  const counts = (text: string, re: RegExp) => [...text.matchAll(re)].map((m) => ({ said: m[0], n: Number(m[1]) }));
+  const allAre = (found: { said: string; n: number }[], n: number) => {
+    expect(found.length).toBeGreaterThan(0);
+    expect(found).toEqual(found.map((f) => ({ ...f, n })));
+  };
+
+  it('sections 1 and 2 count the route files, the migrations, the models and the enums on disk (they said 60, 10 and 9, 26)', () => {
+    const text = handbook();
+    const top = text.slice(0, text.indexOf('## 3. Daily dispatch process flow'));
+    const routes = walk(path.join(WEB, 'app', 'api'), /^route\.ts$/);
+    const migrationsDir = path.join(WEB, 'prisma', 'migrations');
+    const migrations = readdirSync(migrationsDir).filter((n) => statSync(path.join(migrationsDir, n)).isDirectory());
+    const schema = readFileSync(path.join(WEB, 'prisma', 'schema.prisma'), 'utf8');
+    allAre(counts(top, /(\d+) route (?:handlers|files)\b/g), routes.length);
+    allAre(counts(top, /(\d+) of the \d+ route files use `withTenantApi\(\)`/g), routes.filter((f) => readFileSync(f, 'utf8').includes('withTenantApi(')).length);
+    allAre(counts(top, /(\d+) migrations\b/g), migrations.length);
+    allAre(counts(top, /(\d+) models\b/g), (schema.match(/^model \w+/gm) ?? []).length);
+    allAre(counts(top, /(\d+) enums\b/g), (schema.match(/^enum \w+/gm) ?? []).length);
+  });
+
+  it('5.3 names every spec file in its own part, unit or integration, and counts the unit specs (it said 32 of 74, and 17 specs were missing)', () => {
+    const s53 = between(handbook(), '### 5.3 Test suites', '### 5.4');
+    const unit = between(s53, '**Web unit specs**', '**Web integration specs**');
+    const integration = between(s53, '**Web integration specs**', '**Solver tests**');
+    const named = (part: string, f: string) => part.includes(`\`${f}\``) || part.includes(`\`${f.replace(/\.spec\.ts$/, '')}\``);
+    expect(specs('lib').filter((f) => !named(unit, f))).toEqual([]);
+    expect(specs('integration').filter((f) => !named(integration, f))).toEqual([]);
+    allAre(counts(unit, /^\*\*Web unit specs\*\* \(`apps\/web\/tests\/lib\/`, (\d+) files/gm), specs('lib').length);
+  });
+});

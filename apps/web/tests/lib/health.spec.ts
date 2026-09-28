@@ -14,6 +14,11 @@
  *   send it differently from the check;
  * - a redirect is never ready: the optimize call does not follow one, so the check does not either;
  * - the 4 s timeout covers the whole answer, body included: a body that stops half-way is degraded.
+ * Fourth review of audit PR4:
+ * - a SOLVER_URL no call can use (no http:// in front, http// without the colon, a hidden
+ *   character or a space in it, another scheme, a user name and password, a ? or #) is
+ *   misconfigured SOLVER_URL_INVALID (503): it used to read as "unreachable" (200, deploy allowed)
+ *   while every optimization failed.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,7 +36,7 @@ import http from 'node:http';
 import { checkDispatchReadiness, overallReadiness } from '@/lib/health';
 import { configProblems } from '@/lib/startup-checks';
 import { callDispatchSolver, callRouteGeometry } from '@/lib/solver-client';
-import { solverEnv } from '@/lib/solver-env';
+import { solverEnv, solverUrlUsable } from '@/lib/solver-env';
 import { GET as health } from '@/app/api/health/route';
 import { GET as live } from '@/app/api/health/live/route';
 
@@ -80,6 +85,35 @@ const UNSENDABLE_TOKENS = [
   'web\u00a0token', // a non-breaking space: fetch sends 1 byte, the optimize call 2 (UTF-8)
   'web\ntoken', // a line break inside it
   'web\u0001token', // a control character
+];
+
+/**
+ * SOLVER_URL values no call can use (fourth review of audit PR4). Before the fix the check said
+ * "unreachable" (200 degraded, deploy allowed) for each, while every optimization failed before
+ * anything was sent ("Protocol not supported", "Invalid URL"), or never reached the solver's paths.
+ */
+const UNUSABLE_URLS = [
+  'routeiq-solver.railway.internal:8000', // Railway's private domain without http:// (read as the scheme "routeiq-solver.railway.internal:")
+  '127.0.0.1:8000', // an address and port without http://
+  'solver.test', // a bare host
+  'http//solver.test:8000', // the colon missing
+  'http://solver.test:8000​', // a zero-width space pasted after it (trimming keeps it)
+  'http://solver.test:8000/​', // the same after a slash: parsed as a path, so every call went to /%E2%80%8B/...
+  'http://solver test:8000', // a space inside it
+  'ftp://solver.test:8000', // neither http nor https
+  'http://user:secret@solver.test:8000', // a user name and password: fetch refuses the URL
+  'http://solver.test:8000?x=1', // a query: the paths the calls add would go into it
+  'http://solver.test:8000#top', // a fragment: the same
+];
+
+/** Forms the URL parser reads as an http(s) address, the same way for every call: usable. */
+const USABLE_URLS = [
+  'http://solver.test:8000',
+  'https://solver.test',
+  'HTTP://solver.test:8000',
+  'http:solver.test:8000',
+  'http://solver.test:8000/base',
+  'http://[::1]:8000',
 ];
 
 const READY_BODY = { ok: true, service: 'routeiq-solver', routing: { provider: 'OSRM', status: 'up' } };
@@ -174,6 +208,28 @@ describe('checkDispatchReadiness', () => {
     expect(Date.now() - t0).toBeLessThan(2000);
   });
 
+  it('fourth review of audit PR4: a SOLVER_URL no call can use is misconfigured SOLVER_URL_INVALID (503), and the solver is not called', async () => {
+    for (const url of UNUSABLE_URLS) {
+      const { f, calls } = fakeFetch({ status: 200, body: READY_BODY });
+      const r = await checkDispatchReadiness(env({ SOLVER_URL: url, SOLVER_TOKEN: 'web-token' }), f);
+      expect(r, JSON.stringify(url)).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_URL_INVALID' });
+      // Says what to set, not "did not answer" (which sent the admin to the solver service).
+      expect(r.message).toMatch(/^SOLVER_URL on the web service is not a usable address: .*http:\/\/<solver private address>:<port>/);
+      expect(overallReadiness('up', r)).toEqual({ status: 'not_ready', httpStatus: 503 });
+      expect(calls).toHaveLength(0);
+      expect(solverUrlUsable(solverEnv(env({ SOLVER_URL: url })).url ?? ''), JSON.stringify(url)).toBe(false);
+    }
+    for (const url of USABLE_URLS) {
+      const r = await checkDispatchReadiness(env({ SOLVER_URL: url, SOLVER_TOKEN: 'web-token' }), fakeFetch({ status: 200, body: READY_BODY }).f);
+      expect(r.status, url).toBe('ready');
+    }
+    // The startup log says the same.
+    const prod = { NODE_ENV: 'production', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j', SOLVER_TOKEN: 'web-token' };
+    const bad = configProblems(env({ ...prod, SOLVER_URL: 'routeiq-solver.railway.internal:8000' }));
+    expect(bad).toEqual([{ level: 'error', message: expect.stringMatching(/^SOLVER_URL on the web service is not a usable address: .*503/) }]);
+    expect(configProblems(env({ ...prod, SOLVER_URL: 'http://routeiq-solver.railway.internal:8000' }))).toEqual([]);
+  });
+
   it('overall: a misconfiguration or a database down is 503, degraded is 200', () => {
     const d = (status: 'ready' | 'degraded' | 'misconfigured') => ({ status, reason: 'OK' as const, message: '', routing: null });
     expect(overallReadiness('up', d('ready'))).toEqual({ status: 'ready', httpStatus: 200 });
@@ -261,6 +317,17 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
     const res = await health();
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_URL_REDIRECTS' } });
+  });
+
+  it('fourth review of audit PR4: a SOLVER_URL without http:// is 503 not_ready SOLVER_URL_INVALID (it was 200 "unreachable"), and the answer never shows it', async () => {
+    process.env.SOLVER_URL = 'routeiq-solver.railway.internal:8000';
+    solverAnswers({ status: 200, body: READY_BODY });
+    const res = await health();
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body).toMatchObject({ ok: false, status: 'not_ready', solver: 'misconfigured', dispatch: { status: 'misconfigured', reason: 'SOLVER_URL_INVALID' } });
+    expect(JSON.stringify(body)).not.toContain('railway.internal');
+    expect(calls).toHaveLength(0);
   });
 
   it('the database down is 503 whatever the solver says', async () => {
@@ -423,6 +490,36 @@ describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER
       expect(r.optimize).toEqual({ ok: false, status: 0, message: expect.stringMatching(/^SOLVER_TOKEN .*cannot be sent/) });
       expect(r.geometry).toEqual({ kind: 'failed' });
       expect(seen).toEqual([]);
+    }
+  });
+
+  it('fourth review of audit PR4: a SOLVER_URL no call can use is refused by the check and by every call before anything is sent, with a message that names SOLVER_URL', async () => {
+    const hostPort = base.replace(/^http:\/\//, ''); // 127.0.0.1:<port>
+    const port = hostPort.split(':')[1];
+    const unusable = [
+      `localhost:${port}`, // read as the scheme "localhost:": the check said "unreachable", the optimize call "Protocol not supported"
+      hostPort, // "Invalid URL" for every call
+      `http//${hostPort}`, // the colon missing
+      `${base}​`, // a zero-width space pasted after it
+      `http://user:secret@${hostPort}`, // fetch refuses it (the check said "unreachable"), while the optimize call sent it
+      `${base}?x=1`, // every call reached "/" with the path in the query: 404, "The route optimizer is being updated"
+    ];
+    for (const url of unusable) {
+      seen.length = 0;
+      const r = await allThree(url, 'solver-token');
+      expect(r.ready, JSON.stringify(url)).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_URL_INVALID' });
+      expect(r.optimize).toEqual({ ok: false, status: 0, message: expect.stringMatching(/^SOLVER_URL on the web service is not a usable address/) });
+      expect(r.geometry).toEqual({ kind: 'failed' });
+      expect(seen).toEqual([]);
+    }
+    // Forms the URL parser reads as http://host:port for every call still work.
+    for (const url of [`HTTP://${hostPort}`, `http:${hostPort}`]) {
+      seen.length = 0;
+      const r = await allThree(url, 'solver-token');
+      expect(r.ready, url).toMatchObject({ status: 'ready', reason: 'OK' });
+      expect(r.optimize).toEqual({ ok: true, runId: 'r1' });
+      expect(r.geometry).toMatchObject({ kind: 'answer' });
+      expect(seen.map((s) => s.call)).toEqual(['GET /ready', 'POST /optimize-dispatch', 'POST /route-geometry']);
     }
   });
 
