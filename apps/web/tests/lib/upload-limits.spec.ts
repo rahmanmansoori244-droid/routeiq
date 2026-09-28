@@ -18,6 +18,10 @@
  * two names, hyperlink ranges (.xlsx, .xls, binary .xlsb sheets), the other formats SheetJS
  * guesses from a file's first bytes, CSV and .xlsx files with millions of cells, array formulas,
  * comments - and a blank formatted first sheet chosen over the data sheet.
+ *
+ * A1 v3 (the last blocks): files that still did - "ID" files whose SYLK reader works long before
+ * SheetJS reads them as CSV (and semicolon "ID" CSVs wrongly refused), a long number format on
+ * many cells, metadata entries, a threaded-comment person list, self-closing typed cells.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -27,9 +31,27 @@ vi.mock('xlsx', async (importOriginal) => {
 });
 
 import * as XLSX from 'xlsx';
-import { MAX_CELLS, MAX_COLS, MAX_COMMENTS, MAX_LINK_CELLS, MAX_ROWS, MAX_SHEETS, MAX_ZIP_PARTS, READ_ROWS, parseExcelSheets, parseUpload } from '@/lib/csv';
+import { MAX_CELLS, MAX_COLS, MAX_COMMENTS, MAX_LINK_CELLS, MAX_METADATA, MAX_PEOPLE, MAX_ROWS, MAX_SHEETS, MAX_ZIP_PARTS, READ_ROWS, parseExcelSheets, parseUpload } from '@/lib/csv';
 import { checkWorkbookZip } from '@/lib/workbook-guard';
-import { cfbDescendingChain, denseSheet, hugeSheet, rawSheet, row, sheetXml, withComments, workbook, xlsbWorkbook, xlsWithLink, xlsxFile, xlsxWithBinarySheet, zip, XLSX_TYPE } from './zip-fixtures';
+import {
+  cfbDescendingChain,
+  denseSheet,
+  hugeSheet,
+  rawSheet,
+  row,
+  sheetXml,
+  withComments,
+  withMetadata,
+  withNumberFormat,
+  withPeople,
+  workbook,
+  xlsbWorkbook,
+  xlsWithLink,
+  xlsxFile,
+  xlsxWithBinarySheet,
+  zip,
+  XLSX_TYPE,
+} from './zip-fixtures';
 
 const readSpy = vi.mocked(XLSX.read);
 const toJsonSpy = vi.mocked(XLSX.utils.sheet_to_json);
@@ -40,6 +62,16 @@ afterEach(() => {
 });
 
 const refusal = (p: Promise<unknown>) => p.then(() => 'accepted', (e: Error) => e.message);
+/** The limits parseExcelSheets passes to the guard. */
+const LIMITS = {
+  maxUnpackedBytes: 50 * 1024 * 1024,
+  maxParts: MAX_ZIP_PARTS,
+  maxLinkCells: MAX_LINK_CELLS,
+  maxCells: MAX_CELLS,
+  maxComments: MAX_COMMENTS,
+  maxMetadata: MAX_METADATA,
+  maxPeople: MAX_PEOPLE,
+};
 const TOO_BIG = 'This workbook is too large to read: it unpacks to more than 50 MB. Save only the sheet you need as a new workbook or as CSV and upload that.';
 
 /** A SheetJS-written workbook (with the size record Excel writes too), one sheet per entry. */
@@ -83,7 +115,7 @@ describe('a workbook is measured by unpacking it, before SheetJS reads it', () =
 
   it('a workbook just under 50 MB unpacked is not refused for its size (here: for its rows)', () => {
     const bytes = workbook({ Orders: { deflated: hugeSheet(45) } });
-    expect(checkWorkbookZip(bytes, { maxUnpackedBytes: 50 * 1024 * 1024, maxParts: MAX_ZIP_PARTS, maxLinkCells: MAX_LINK_CELLS, maxCells: MAX_CELLS, maxComments: MAX_COMMENTS }).unpackedBytes).toBeGreaterThan(45 * 1024 * 1024);
+    expect(checkWorkbookZip(bytes, { ...LIMITS, maxUnpackedBytes: 50 * 1024 * 1024 }).unpackedBytes).toBeGreaterThan(45 * 1024 * 1024);
     // About 1.1 M rows: only the first READ_ROWS are turned into rows (it took 9 s and 0.9 GB).
     const [sheet] = parseExcelSheets(bytes);
     expect(sheet!.rows).toHaveLength(READ_ROWS - 1);
@@ -233,7 +265,6 @@ describe('no parse timer', () => {
 const DAMAGED = 'This workbook is damaged and cannot be read. Open it in Excel, save it again as .xlsx and upload it again.';
 const NOT_EXCEL = 'This file is not an Excel workbook. Save it in Excel as .xlsx or as CSV and upload that.';
 const WEB_PAGE = 'This file is a web page or an XML file, not an Excel workbook or CSV. Open it in Excel, save it as .xlsx and upload that.';
-const LIMITS = { maxUnpackedBytes: 50 * 1024 * 1024, maxParts: MAX_ZIP_PARTS, maxLinkCells: MAX_LINK_CELLS, maxCells: MAX_CELLS, maxComments: MAX_COMMENTS };
 const links = (n: number) =>
   `This workbook has links over ${n.toLocaleString('en-US')} cells; at most 200,000 can be read. Remove the links (in Excel: select the cells, right-click, Remove Hyperlinks), save it and upload it again.`;
 const header = row(1, ['A', 'code'], ['B', 'cases']);
@@ -465,7 +496,9 @@ describe('A1 review: SheetJS reads only the formats these checks bound', () => {
     const formatted = Array.from({ length: 1_000 }, (_, i) => `<c r="C${i + 2}" s="1"/>`).join('');
     const count = (data: string) => checkWorkbookZip(workbook({ Orders: rawSheet(data) }), LIMITS).cells;
     expect(count(`${twoRows}<row r="9">${formatted}</row>`)).toBe(6);
-    expect(count(`${twoRows}<row r="9"><c r="A9"></c><x:c r="B9"><x:v>1</x:v></x:c></row>`)).toBe(8);
+    // A1 v3: counted as SheetJS keeps them. <c r="A9"></c> has neither a type nor a value, and
+    // SheetJS makes no cell for it (the count was 8 while every open tag counted).
+    expect(count(`${twoRows}<row r="9"><c r="A9"></c><x:c r="B9"><x:v>1</x:v></x:c></row>`)).toBe(7);
   });
 
   it('formulas are not read: each formula cell gives its saved value (cellFormula: false)', async () => {
@@ -540,5 +573,157 @@ describe('A1 review: a blank formatted sheet is not a sheet with data', () => {
   it('an upload that picks its sheet by columns reads the list and names no blank sheet', async () => {
     const parsed = await parseUpload(xlsxFile(blankFirst()), { isDataSheet: (h) => h.includes('code') && h.includes('name'), rowsWord: 'customer' });
     expect(parsed).toMatchObject({ sheetName: 'Customers', warnings: [] });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// A1 v3 review (28 Sep 2026): five findings, each confirmed by two reviewers with their own files.
+// ---------------------------------------------------------------------------------------------
+
+describe('A1 v3: a file that begins with "ID" is refused only when SheetJS reads it as SYLK or its SYLK reader works long', () => {
+  // SheetJS runs its SYLK reader on every file that begins with "ID" and reads the file as CSV
+  // once that reader throws: at the first record or field it does not know. What it did before
+  // that is done for real (a row field grows its sheet to that row).
+  it('a semicolon CSV whose first ID is a SYLK record letter ("C", "F", "E", "B") is read as SheetJS reads it', async () => {
+    // Before: the second line's first field ("C", "F", ...) was taken for a SYLK record, and the
+    // file was refused as "not an Excel workbook"; SheetJS reads each of these as CSV.
+    const read = async (csv: string) => (await parseUpload(asExcel(csv, 'orders.csv'))).rows;
+    expect(await read('ID;Code;Qty\nC;5;10\n')).toEqual([{ id: 'C', code: '5', qty: '10' }]);
+    expect(await read('ID;Grade;Score\nF;maths;40\n')).toEqual([{ id: 'F', grade: 'maths', score: '40' }]);
+    expect(await read('ID;Code;Qty\r\nC;5;10\r\nA;7;8\r\n')).toEqual([
+      { id: 'C', code: '5', qty: '10' },
+      { id: 'A', code: '7', qty: '8' },
+    ]);
+    expect(await read('ID;Code;Qty\nC;Customer;10\n')).toEqual([{ id: 'C', code: 'Customer', qty: '10' }]);
+    // A first data row that is a whole SYLK record: the reader gives up on the next one.
+    expect(await read('ID;Code;Qty\nE;5;10\n1;x;2\n')).toEqual([
+      { id: 'E', code: '5', qty: '10' },
+      { id: '1', code: 'x', qty: '2' },
+    ]);
+    expect(await read('ID;Code;Qty\nB;5;10\nC;6;11\n')).toEqual([
+      { id: 'B', code: '5', qty: '10' },
+      { id: 'C', code: '6', qty: '11' },
+    ]);
+  });
+
+  it('a file whose SYLK reader would grow its sheet to millions of rows before it gives up is refused in milliseconds', async () => {
+    // Each passed the check of the first two records and SheetJS then allocated the rows
+    // (reviewers: 5,000,000 rows 0.5-0.8 s and 0.7-1.1 GB; 20,000,000 ran out of memory).
+    const files = [
+      `ID\n${'\n'.repeat(5_000)}C;Y2000000;X1;K1\nE\n`, // the second record was past the first 4,096 bytes
+      `ID;${'P'.repeat(5_000)}\nC;Y2000000;X1;K1\nE\n`, // so was the end of the first
+      'ID\n\u001b$3;Y2000000;X1;K1\nE\n', // ESC "$3" is SheetJS's escape for "C"
+      'ID\nC;Y2000000;X1;K1\nnot SYLK\n', // a SYLK record, then CSV
+      'ID\nF;W1 90000000 10\nnot SYLK\n', // column widths over 90 million columns, then CSV
+    ];
+    const t0 = performance.now();
+    for (const f of files) expect(await refusal(parseUpload(asExcel(f, 'orders.csv')))).toBe(NOT_EXCEL);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it('a SYLK record with a small row, then CSV, is read as CSV; a real SYLK file stays refused', async () => {
+    expect((await parseUpload(asExcel('ID;P\nC;Y1;X1;K1\n1;2;3\n', 'orders.csv'))).rows).toEqual([
+      { id: 'C', p: 'Y1', __empty: 'X1', __empty_1: 'K1' },
+      { id: '1', p: '2', __empty: '3', __empty_1: '' },
+    ]);
+    expect(await refusal(parseUpload(asExcel('ID;PWXL;N;E\nC;Y1;X1;K"a"\nC;Y2;X1;K5\nE\n', 'orders.xls')))).toBe(NOT_EXCEL);
+  });
+});
+
+describe('A1 v3: number formats are not applied to the cells (cellText: false)', () => {
+  it('a long number format on every number cell: SheetJS makes no display text; values and headers read as before', async () => {
+    // SheetJS parsed the cell's format again for every number cell to make display text the
+    // upload never uses: one 255-character format on 50,000 rows x 44 cells (a 162 KB file within
+    // every cap) ran the process out of memory at about 4 GB.
+    const bytes = withNumberFormat(2_000, 10, `0${'!'.repeat(254)}`);
+    const t0 = performance.now();
+    const parsed = await parseUpload(xlsxFile(bytes));
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(parsed.rows).toHaveLength(2_000);
+    expect(parsed.rows[0]).toMatchObject({ c0: '200', c1: '201', c9: '209' });
+    // The workbook SheetJS made: the number cells carry their value and no display text.
+    const wb = readSpy.mock.results.at(-1)!.value as XLSX.WorkBook;
+    expect(wb.Sheets.Orders!.B2).toEqual({ t: 'n', v: 201 });
+    for (const [, opts] of readSpy.mock.calls) expect(opts).toMatchObject({ cellText: false });
+  });
+});
+
+describe('A1 v3: metadata entries and comment authors are counted before SheetJS reads the workbook', () => {
+  const metadata = (n: number) =>
+    `This workbook has ${n.toLocaleString('en-US')} metadata entries or more; at most ${MAX_METADATA.toLocaleString('en-US')} can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`;
+  const authors = (n: number) =>
+    `This workbook lists ${n.toLocaleString('en-US')} comment authors or more; at most ${MAX_PEOPLE.toLocaleString('en-US')} can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`;
+
+  it(`more than ${MAX_METADATA.toLocaleString('en-US')} metadata types and blocks are refused before SheetJS reads the workbook; ${MAX_METADATA.toLocaleString('en-US')} are read`, async () => {
+    expect(await refusal(parseUpload(xlsxFile(withMetadata(MAX_METADATA + 1))))).toBe(metadata(MAX_METADATA + 1));
+    expect(readSpy).not.toHaveBeenCalled();
+    expect((await parseUpload(xlsxFile(withMetadata(MAX_METADATA)))).rows).toHaveLength(1);
+  });
+
+  it('a 10 KB workbook with 20,000 metadata types and blocks is refused in milliseconds', async () => {
+    // SheetJS looks through every type for each block: this file took about 4 s, 100,000 of each
+    // (15 KB) 28 s, and 1,000,000 of each fit under the 50 MB cap (about an hour).
+    const bytes = withMetadata(20_000);
+    expect(bytes.length).toBeLessThan(12_000);
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(bytes)))).toBe(metadata(20_000));
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it(`a person list of more than ${MAX_PEOPLE.toLocaleString('en-US')} is refused before SheetJS reads the workbook; ${MAX_PEOPLE.toLocaleString('en-US')} are read`, async () => {
+    expect(await refusal(parseUpload(xlsxFile(withPeople(MAX_PEOPLE + 1, 10))))).toBe(authors(MAX_PEOPLE + 1));
+    expect(readSpy).not.toHaveBeenCalled();
+    expect((await parseUpload(xlsxFile(withPeople(MAX_PEOPLE, 10)))).rows).toHaveLength(1);
+  });
+
+  it('2,000 threaded comments by an author missing from a list of 100,000 people (26 KB) are refused in milliseconds', async () => {
+    // SheetJS looks up each threaded comment's author in the whole list: this file took about
+    // 1.3 s; 9,900 comments and 2.9 million people (142 KB) took 109 s.
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(withPeople(100_000, 2_000))))).toBe(authors(100_000));
+    expect(performance.now() - t0).toBeLessThan(500);
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('A1 v3: every cell SheetJS keeps is counted, also one whose tag closes itself', () => {
+  it('each way SheetJS keeps a piece of a row as a cell is counted as one cell; a formatted empty cell is not', () => {
+    // SheetJS keeps a piece when its tag has a type or a <v> value follows the tag.
+    const variants: [string, string, number][] = [
+      ['a type on a tag that closes itself', '<c r="C2" t="b"/>', 1],
+      ['a type without quotes', '<c r="C2" t=b/>', 1],
+      ['a type after "<c/"', '<c/t=b>', 1],
+      ['a type in capitals', '<c r="C2" T="e"/>', 1],
+      ['a type with a namespace prefix', '<c r="C2" x:t="b"/>', 1],
+      ['a type with a "_" suffix', '<c r="C2" t_x="b"/>', 1],
+      ['a namespaced tag with a type', '<x:c r="C2" t="str"/>', 1],
+      ['a value after "<c/>"', '<c/><v>1</v>', 1],
+      ['a value after a tag that closes itself', '<c r="C2" s="1"/><v>1</v>', 1],
+      ['a type in the text before the first cell', 't="b"<c r="C2" s="1"/>', 1],
+      ['a formatted empty cell', '<c r="C2" s="1"/>', 0],
+      ['an empty cell that does not close itself', '<c r="C2"></c>', 0],
+    ];
+    const base = row(1, ['A', 'code'], ['B', 'cases']);
+    for (const [what, cell, extra] of variants) {
+      const bytes = workbook({ Orders: rawSheet(`${base}<row r="2">${cell}</row>`) });
+      const ws = XLSX.read(bytes, { type: 'buffer', cellFormula: false }).Sheets.Orders!;
+      const made = Object.keys(ws).filter((k) => !k.startsWith('!')).length;
+      expect([what, made]).toEqual([what, 2 + extra]);
+      expect([what, checkWorkbookZip(bytes, LIMITS).cells]).toEqual([what, 2 + extra]);
+    }
+  });
+
+  it(`more than ${MAX_CELLS.toLocaleString('en-US')} typed empty cells (<c t="b"/>, each a FALSE cell) are refused before SheetJS reads them`, async () => {
+    // Uncounted before: 4.5 million of them (a 133 KB file) took SheetJS 15-19 s and 1.1 GB, and
+    // were refused only after it had made every cell.
+    const sheet = denseSheet(50, 26, '<c t="b"/>');
+    expect(sheet.cells).toBeGreaterThan(MAX_CELLS);
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(workbook({ Orders: { deflated: sheet } }))))).toBe(
+      `This file is too large to read: it has about ${sheet.cells.toLocaleString('en-US')} cells (rows x columns); at most 2,500,000 can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`,
+    );
+    expect(performance.now() - t0).toBeLessThan(5_000);
+    expect(readSpy).not.toHaveBeenCalled();
   });
 });

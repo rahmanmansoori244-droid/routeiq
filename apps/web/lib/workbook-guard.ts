@@ -21,8 +21,10 @@ import * as XLSX from 'xlsx';
  *  - a zip archive must be an Excel workbook (checkWorkbookZip): every part is unpacked with zlib
  *    under a hard cap, so the size is measured, never taken from the headers; each part's name is
  *    read from its local header, where SheetJS reads it, and must be the name in the central
- *    directory; the hyperlink ranges of every part are added up; binary parts (.bin: .xlsb sheets,
- *    printer settings, macros) are hidden from SheetJS, which needs none of them for an .xlsx;
+ *    directory; the hyperlink ranges of every part are added up, and so are the cells, comments,
+ *    metadata entries and comment authors SheetJS would make or compare (scanXmlPart); binary
+ *    parts (.bin: .xlsb sheets, printer settings, macros) are hidden from SheetJS, which needs none
+ *    of them for an .xlsx;
  *  - an old .xls that is a compound file has its structure checked first (checkCompoundFile), in
  *    linear time, so XLSX.CFB.read itself cannot be made to use time and memory that grow with the
  *    square of the file's size; then, as for a bare BIFF stream, the hyperlink ranges in its
@@ -30,8 +32,9 @@ import * as XLSX from 'xlsx';
  *  - any other file is read only when SheetJS reads it as CSV or tab-separated text; a web page, an
  *    XML or OpenDocument file, DIF, Lotus, dBASE, RTF, SocialCalc or a real SYLK file is refused.
  *    A file that begins with "ID" is a CSV that SheetJS reads via its SYLK reader's CSV fallback,
- *    unless it is really SYLK (see looksLikeSylk), so an order or customer CSV with a leading "ID"
- *    column - which a Windows browser sends as application/vnd.ms-excel - is read, not refused.
+ *    unless it is really SYLK or its SYLK reader would do more than a little work first (see
+ *    idFileReader), so an order or customer CSV with a leading "ID" column - which a Windows
+ *    browser sends as application/vnd.ms-excel - is read, not refused.
  *
  * This bounds the work of one upload; it does not isolate it. A file under the caps is still parsed
  * on the event loop (see lib/csv.ts for what the worst one costs). Parsing in a worker thread with
@@ -54,18 +57,22 @@ export interface SpreadsheetLimits {
   /** Most cells all hyperlink ranges together may cover (SheetJS makes a cell for each). */
   maxLinkCells: number;
   /**
-   * Most cells SheetJS may read: counted from the cell tags of a workbook's parts, or from the
-   * separators and line breaks of a text file, before it reads them.
+   * Most cells SheetJS may read: counted from the cells of a workbook's parts that have a type or
+   * a value, or from the separators and line breaks of a text file, before it reads them.
    */
   maxCells: number;
   /** Most comments (notes) a workbook may have. */
   maxComments: number;
+  /** Most cell-metadata types, and most future-metadata blocks, a workbook may have (each). */
+  maxMetadata: number;
+  /** Most people the threaded comments' person list may name. */
+  maxPeople: number;
 }
 
 export interface WorkbookZipCheck {
   parts: number;
   unpackedBytes: number;
-  /** Cell tags in all parts (rows past `sheetRows` included). */
+  /** Cells SheetJS makes from all parts: pieces with a type or a value (rows past `sheetRows` included). */
   cells: number;
   /** Cells covered by all hyperlink ranges, as SheetJS would expand them. */
   linkCells: number;
@@ -107,41 +114,115 @@ export type SheetjsReader = 'zip' | 'cfb' | 'biff' | 'xml' | 'text' | 'text-ws' 
 const DBF_VERSIONS = [0x02, 0x03, 0x30, 0x31, 0x83, 0x8b, 0x8c, 0xf5];
 
 /**
- * The record types SheetJS's SYLK reader (sylk_to_aoa_str, xlsx 0.20.2) knows. It splits the file
- * into records on line breaks, splits each record on ";", and, with WTF on (read_wb_ID sets it),
- * throws "SYLK bad record" on the first record whose first field is not one of these; read_wb_ID
- * then catches that (WTF is off for the caller) and reads the file as CSV instead.
+ * The record types SheetJS's SYLK reader (sylk_to_aoa_str, xlsx 0.20.2) knows, and the field codes
+ * its C (cell) and F (format) records know. With WTF on (read_wb_ID sets it) it throws "SYLK bad
+ * record" at the first record whose type is not one of these, and at the first field of a C or F
+ * record whose code (first letter) is not one of these; read_wb_ID then catches that (WTF is off
+ * for the caller) and reads the file as CSV instead.
  */
 const SYLK_RECORD_TYPES = new Set(['ID', 'E', 'B', 'O', 'W', 'P', 'NN', 'C', 'F']);
+const SYLK_FIELD_CODES: Record<string, string> = { C: 'AXYKESGRC', F: 'XYMFGPSDNWCR' };
+/**
+ * Steps SheetJS's SYLK reader may take on a file before it gives up and reads it as CSV: one per
+ * record, one per row it adds, one per column a width field loops over, one per character of a
+ * format it checks. 100,000 is a few milliseconds and about 10 MB; a CSV takes a handful.
+ */
+const SYLK_MAX_STEPS = 100_000;
+
+/** How many times `for (j = from; j <= to; ++j)` runs; Infinity when it never ends. */
+function loopCount(from: number, to: number): number {
+  if (Number.isNaN(from) || Number.isNaN(to) || to < from) return 0;
+  // Past 2^53, ++j no longer changes j: such a loop never ends.
+  if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to + 1)) return Infinity;
+  return to - from + 1;
+}
 
 /**
- * Whether SheetJS would read a file that begins with the bytes "ID" as SYLK (and so make a
- * workbook that no cell cap bounds), rather than fall back to CSV. A real SYLK file opens with an
- * "ID" record and then another SYLK record (for example `ID;PWXL` then `P;...` and `C;...`); the
- * SYLK reader accepts it without throwing. A CSV whose first column header is "ID" does not: with
- * a comma or tab the whole first line is one field ("ID,Customer Code" is not "ID"), and with a
- * semicolon the first data row (`1;C1;...`) is not a SYLK record, so the reader throws on it and
- * SheetJS reads the file as CSV (as it did before this guard). Chrome and Edge on a Windows PC
- * with Excel installed send every .csv as application/vnd.ms-excel, so this path is common.
+ * How SheetJS reads a file that begins with the bytes "ID": 'text' when it reads it as CSV after
+ * little work, 'other' (refused) when it reads it as SYLK - a workbook that no cell cap bounds - or
+ * when it does too much work before it falls back to CSV.
  *
- * This checks the two records that decide it (SheetJS's rule is "every record is a SYLK record",
- * and these two separate all the real cases): the first record's first ";"-field must be exactly
- * "ID", and the next non-empty record's first field must be a SYLK record type.
+ * SheetJS routes such a file to read_wb_ID, which runs its SYLK reader and reads the file as CSV
+ * when that throws. The SYLK reader splits the file into records on line breaks and each record on
+ * ";" (";;" is a ";"), and works record by record and field by field: everything before the record
+ * or field that makes it throw is done for real. Its costly steps are a Y field (a row: the sheet
+ * grows to that row, one array per row), a W field of an F record (column widths: a loop from its
+ * first to its last column) and a K field (a value) after an F record gave it a format (the whole
+ * format is checked). So "ID", then `C;Y5000000;X1;K1`, then any line that is not SYLK allocates 5
+ * million rows (0.6 GB) before SheetJS reads the file as CSV.
+ *
+ * A CSV whose first header is "ID" makes the reader give up at once: with a comma or a tab the
+ * first field is the whole line ("ID,Customer Code" is not "ID"); with a semicolon the first data
+ * row is not a SYLK record (`1;C1;5`), or starts with a SYLK record type and goes on with plain
+ * data, which is not a field of that record (`C;5;10`: "5" is not a C field; `F;maths;40`). Chrome
+ * and Edge on a Windows PC with Excel installed send every .csv as application/vnd.ms-excel, so
+ * this path is common.
+ *
+ * This replays the reader's walk over the whole file, counting its steps (SYLK_MAX_STEPS), up to
+ * the first record or field it throws on. A record after the first that holds an ESC character is
+ * refused: SheetJS decodes escape sequences before it reads a record (ESC "$3" is a "C"), and no
+ * CSV has one. Only the errors WTF raises are replayed; SheetJS may give up earlier on another
+ * error (a value before any row), which only means it does less work than counted here, or reads
+ * as CSV a short file refused here.
  */
-function looksLikeSylk(b: Uint8Array): boolean {
-  // SYLK is ASCII; only the first records matter, so read a small prefix as latin1.
-  const head = Buffer.from(b.buffer, b.byteOffset, Math.min(b.byteLength, 4096)).toString('latin1');
-  const records = head.split(/[\n\r]+/);
-  // SheetJS trims each record, then splits on ";" with ";;" as an escaped ";". The record type is
-  // the first field; escapes never appear in it in practice, so only the ";;" escape is handled.
-  const recordType = (line: string): string =>
-    line.trim().replace(/;;/g, '\u0000').split(';')[0]!.replace(/\u0000/g, ';');
-  if (recordType(records[0] ?? '') !== 'ID') return false;
-  for (let i = 1; i < records.length; i++) {
-    if (records[i]!.trim() === '') continue; // SheetJS skips empty records (rstr.length > 0)
-    return SYLK_RECORD_TYPES.has(recordType(records[i]!));
+function idFileReader(b: Uint8Array): 'text' | 'other' {
+  const text = Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('latin1');
+  const RECORD_BREAK = /[\n\r]+/g;
+  let steps = 0;
+  let records = 0; // non-empty records read
+  let rows = 0; // the rows the reader's sheet has so far
+  const formats: number[] = []; // the length of each format a "P;P..." record defines
+  let format: number | null = null; // the length of the format the next value is checked against
+  for (let pos = 0; pos <= text.length; ) {
+    RECORD_BREAK.lastIndex = pos;
+    const brk = RECORD_BREAK.exec(text);
+    const record = text.slice(pos, brk ? brk.index : text.length).trim();
+    pos = brk ? RECORD_BREAK.lastIndex : text.length + 1;
+    if (++steps > SYLK_MAX_STEPS) return 'other';
+    if (record === '') continue; // SheetJS skips empty records
+    if (records > 0 && record.includes('\u001b')) return 'other';
+    records++;
+    // The record type is the first field: up to the first ";" that is not part of ";;".
+    const sep = record.indexOf(';');
+    const type = sep < 0 ? record : record[sep + 1] === ';' ? null : record.slice(0, sep);
+    if (type === null || !SYLK_RECORD_TYPES.has(type)) return 'text'; // SYLK bad record: CSV
+    if (type === 'P' && sep > 0 && record[sep + 1] === 'P') formats.push(record.slice(3).replace(/;;/g, ';').length);
+    const codes = SYLK_FIELD_CODES[type];
+    if (!codes) continue; // ID, E, B, O, W, P, NN: no field is refused, no costly step
+    const fields = record.replace(/;;/g, '\u0000').split(';').map((f) => f.replace(/\u0000/g, ';'));
+    let columnSet = false; // F: an X field (else the format is dropped)
+    let value = false; // C: a K field (the format is then used up)
+    for (let i = 1; i < fields.length; i++) {
+      const field = fields[i]!;
+      const code = field.charAt(0);
+      if (code === '' || !codes.includes(code)) return 'text'; // SYLK bad record: CSV
+      const n = parseInt(field.slice(1), 10);
+      if (code === 'Y' && n > rows) {
+        steps += n - rows; // the sheet grows to row n, one array per row (Infinity never ends)
+        rows = n;
+      } else if (code === 'W') {
+        const range = field.slice(1).split(' ');
+        steps += loopCount(parseInt(range[0]!, 10), parseInt(range[1]!, 10));
+      } else if (code === 'K') {
+        value = true;
+        steps += format ?? 0; // a number is checked against the whole format
+      } else if (code === 'P' && type === 'F') {
+        format = formats[n] ?? 0;
+      } else if (code === 'X' && type === 'F') {
+        columnSet = true;
+      }
+      if (steps > SYLK_MAX_STEPS) return 'other';
+    }
+    if (type === 'C' && value) {
+      steps += format ?? 0; // and the value is formatted with it once
+      format = null;
+    }
+    if (type === 'F' && !columnSet) format = null;
+    if (steps > SYLK_MAX_STEPS) return 'other';
   }
-  return false; // "ID" alone: SheetJS makes an empty SYLK workbook; read it as (empty) text instead
+  // Every record is SYLK: SheetJS reads the file as SYLK. "ID" alone makes an empty workbook with
+  // no work (as before this guard it is left to SheetJS, which reads no rows from it).
+  return records <= 1 ? 'text' : 'other';
 }
 export function sheetjsReader(b: Uint8Array): SheetjsReader {
   const n = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
@@ -158,9 +239,10 @@ export function sheetjsReader(b: Uint8Array): SheetjsReader {
     case 0x49:
       if (n[1] === 0x49 && n[2] === 0x2a && n[3] === 0x00) return 'other'; // TIFF
       // "ID": SheetJS routes this to read_wb_ID, which reads it as SYLK, or, when the SYLK reader
-      // throws (WTF off, as lib/csv reads), falls back to its CSV reader. So it is SYLK (refused)
-      // only when it really parses as SYLK; otherwise it is delimited text (see looksLikeSylk).
-      if (n[1] === 0x44) return looksLikeSylk(b) ? 'other' : 'text';
+      // throws (WTF off, as lib/csv reads), falls back to its CSV reader. So it is refused only
+      // when it really reads as SYLK or its SYLK reader does too much work before it gives up;
+      // otherwise it is delimited text (see idFileReader).
+      if (n[1] === 0x44) return idFileReader(b);
       break;
     case 0x54:
       if (n[1] === 0x41 && n[2] === 0x42 && n[3] === 0x4c) return 'other'; // DIF
@@ -482,9 +564,10 @@ function baseName(name: string): string {
  * Measures what SheetJS would unpack from this zip archive and refuses it when the total is over
  * `maxUnpackedBytes`, when it has more than `maxParts` parts, when a part says it is smaller or
  * larger than it really is, when a part's two names differ, when its hyperlinks cover more than
- * `maxLinkCells` cells, when it has more than `maxCells` cells with content or `maxComments`
- * comments, and when it is not an Excel workbook. Throws WorkbookRefusedError. Returns what it
- * measured and the bytes SheetJS is to read.
+ * `maxLinkCells` cells, when it has more than `maxCells` cells (with a type or a value),
+ * `maxComments` comments, `maxMetadata` metadata types or future-metadata blocks, or `maxPeople`
+ * comment authors in its person list (see scanXmlPart), and when it is not an Excel workbook.
+ * Throws WorkbookRefusedError. Returns what it measured and the bytes SheetJS is to read.
  */
 export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): WorkbookZipCheck {
   // End of the central directory: SheetJS takes the last signature in the file, and so does this.
@@ -509,6 +592,9 @@ export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): Work
   let linkCells = 0;
   let cells = 0;
   let comments = 0;
+  let metadataTypes = 0;
+  let futureMetadata = 0;
+  let people = 0;
   let contentTypes = false;
   let binaryWorkbook = false;
   /** Central-directory records SheetJS is given (start, end); binary parts are left out. */
@@ -590,6 +676,20 @@ export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): Work
             'Delete the comments (in Excel: Review, Delete), save it and upload it again.',
         );
       }
+      metadataTypes += scan.metadataTypes;
+      futureMetadata += scan.futureMetadata;
+      const metadata = Math.max(metadataTypes, futureMetadata);
+      if (metadata > limits.maxMetadata) {
+        throw new WorkbookRefusedError(
+          `This workbook has ${metadata.toLocaleString('en-US')} metadata entries or more; at most ${limits.maxMetadata.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
+        );
+      }
+      people += scan.people;
+      if (people > limits.maxPeople) {
+        throw new WorkbookRefusedError(
+          `This workbook lists ${people.toLocaleString('en-US')} comment authors or more; at most ${limits.maxPeople.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
+        );
+      }
     }
   }
   if (binaryWorkbook) {
@@ -637,42 +737,92 @@ const HLINK_TAG = /<(?:\w+:)?hyperlink [^<>]*>/gm;
 const ATTR = /\s([^"\s?>\/]+)\s*=\s*((?:")([^"]*)(?:")|(?:')([^']*)(?:')|([^'">\s]+))/g;
 
 /**
- * The opening tag of a cell (SheetJS splits a row at /<(?:\w+:)?c[ \/>]/). A tag that closes
- * itself (<c r="B2" s="1"/>: a formatted empty cell, which Excel writes for borders and colours)
- * holds no value; it is not counted, so formatting alone never makes a workbook "too large".
+ * Where SheetJS cuts a worksheet into cells, and which pieces it keeps (parse_ws_xml_data, xlsx
+ * 0.20.2). It cuts the sheet data at each row end (</row>) and, after each row's opening tag, at
+ * each cell start (/<(?:\w+:)?c[ \/>]/); each piece - also the text between a row's opening tag and
+ * its first cell start - is read as "<c " + the piece. With formulas and stub cells off (as lib/csv
+ * reads) a piece is kept as a cell when its tag has a type (a `t` attribute, as parsexmltag reads
+ * it: any case, a namespace prefix, a "_..." suffix) or a <v> value follows the tag, and dropped
+ * otherwise. So a formatted empty cell (<c r="B2" s="1"/>, which Excel writes for borders and
+ * colours) is not a cell, and formatting alone never makes a workbook "too large"; but a tag that
+ * closes itself is a cell when it has a type (<c t="b"/> is a FALSE cell) or a value follows it
+ * (<c r="A1" s="1"/><v>1</v>, <c/><v>1</v>).
+ *
+ * CELL_PIECES finds, in one pass, where pieces start (group 1: a cell start or a row end, without
+ * the character after it, which may begin the piece) and the two marks of a kept piece: a `t`
+ * attribute (whitespace, ":", ">" or "/" before it; "=", "_" or whitespace after it) and a <v> tag.
+ * A piece with a mark counts as one cell. A mark SheetJS does not read as one (a "t=" after the tag,
+ * a "<v/>") can only count a piece that is not a cell, never miss one that is.
  */
-const CELL_TAG = /<(?:\w+:)?c(?:>| [^<>]*>)/g;
+const CELL_PIECES = /(<(?:\w+:)?c(?=[ \/>])|<\/(?:\w+:)?row(?=>))|[\s:>\/][tT][\s=_]|<(?:\w+:)?v\b/g;
 /** A comment or threaded comment (not <comments> or <commentList>). */
 const COMMENT_TAG = /<(?:\w+:)?(?:threadedComment|comment)[ >/]/g;
+/** A cell-metadata type and a future-metadata block of xl/metadata.xml (not <metadataTypes>). */
+const METADATA_TYPE_TAG = /<(?:\w+:)?metadataType[\s/>]/g;
+const FUTURE_METADATA_TAG = /<(?:\w+:)?futureMetadata[\s/>]/g;
+/** A person of the threaded comments' person list, xl/persons/person.xml (not <personList>). */
+const PERSON_TAG = /<(?:\w+:)?person[\s/>]/g;
+
+function countMatches(re: RegExp, text: string): number {
+  let n = 0;
+  re.lastIndex = 0;
+  while (re.exec(text)) n++;
+  return n;
+}
+
+interface XmlPartScan {
+  cells: number;
+  comments: number;
+  links: number;
+  metadataTypes: number;
+  futureMetadata: number;
+  people: number;
+}
 
 /**
- * What one XML part makes SheetJS do beyond its size: `cells`, the cells with content in it (every
- * cell SheetJS reads a value from has an opening tag; rows past `sheetRows` are counted too),
- * `comments`, its comments (SheetJS checks every comment already on a cell before adding one, so
- * many on one cell take time growing with the square: 20,000 took 0.4 s, and 50 MB of them would
- * take minutes), and `links`, the cells its hyperlinks cover. SheetJS finds each <hyperlink ...>
- * tag of a worksheet with HLINK_TAG, reads its `ref` with parsexmltag (from the tag decoded as
- * UTF-8; namespace prefixes and "_..." suffixes dropped, any case) and makes a cell for every
- * address of the range (parse_ws_xml_hlinks). This reads every part that way, whether or not
- * SheetJS reads it as a worksheet, and every link, also those after one without `ref` (where
- * SheetJS stops).
+ * What one XML part makes SheetJS do beyond its size:
+ *  - `cells`, the cells SheetJS makes from it (see CELL_PIECES; rows past `sheetRows` are counted
+ *    too);
+ *  - `comments`, its comments (SheetJS checks every comment already on a cell before adding one, so
+ *    many on one cell take time growing with the square: 20,000 took 0.4 s, and 50 MB of them
+ *    would take minutes);
+ *  - `links`, the cells its hyperlinks cover. SheetJS finds each <hyperlink ...> tag of a worksheet
+ *    with HLINK_TAG, reads its `ref` with parsexmltag (from the tag decoded as UTF-8; namespace
+ *    prefixes and "_..." suffixes dropped, any case) and makes a cell for every address of the
+ *    range (parse_ws_xml_hlinks). This reads every link that way, also those after one without
+ *    `ref` (where SheetJS stops);
+ *  - `metadataTypes` and `futureMetadata`: for each future-metadata block SheetJS looks through
+ *    every metadata type (parse_xlmeta_xml), so the time grows with the product: 100,000 of each
+ *    (a 15 KB upload) took 28 s, and 1,000,000 of each fit under the 50 MB cap (about an hour);
+ *  - `people`: for each threaded comment SheetJS looks up its author in the whole person list
+ *    (sheet_insert_comments), so the time grows with comments x people: 9,900 threaded comments
+ *    and a person list of 2.9 million (a 142 KB upload) took 109 s.
+ * Every part is read this way, whether or not SheetJS reads it as a worksheet, comments, metadata
+ * or a person list.
  */
-function scanXmlPart(d: Buffer): { cells: number; comments: number; links: number } {
+function scanXmlPart(d: Buffer): XmlPartScan {
   const utf16 = (d[0] === 0xff && d[1] === 0xfe) || (d[1] === 0xfe && d[2] === 0xff);
-  const hasTags = utf16 || d.indexOf('<') >= 0;
-  const hasLinks = utf16 || d.indexOf('hyperlink ') >= 0;
-  if (!hasTags) return { cells: 0, comments: 0, links: 0 };
+  // A UTF-16 part is searched after decoding; a UTF-8 one only when its bytes hold the tag name.
+  const has = (s: string) => utf16 || d.indexOf(s) >= 0;
+  if (!has('<')) return { cells: 0, comments: 0, links: 0, metadataTypes: 0, futureMetadata: 0, people: 0 };
   // The tags' structure is ASCII, the same in the bytes read as latin1 (as SheetJS scans them)
   // and in the decoded text; only a matched link tag is decoded, as SheetJS does.
   const text = utf16 ? partText(d) : d.toString('latin1');
   let cells = 0;
-  CELL_TAG.lastIndex = 0;
-  while (CELL_TAG.exec(text)) if (text.charCodeAt(CELL_TAG.lastIndex - 2) !== 0x2f) cells++;
-  let comments = 0;
-  COMMENT_TAG.lastIndex = 0;
-  while (COMMENT_TAG.exec(text)) comments++;
+  let kept = false; // the current piece has a type or a value
+  CELL_PIECES.lastIndex = 0;
+  for (let m = CELL_PIECES.exec(text); m; m = CELL_PIECES.exec(text)) {
+    if (m[1] === undefined) {
+      kept = true;
+    } else {
+      if (kept) cells++;
+      kept = false;
+    }
+  }
+  if (kept) cells++;
+  const comments = countMatches(COMMENT_TAG, text);
   let links = 0;
-  if (hasLinks) {
+  if (has('hyperlink ')) {
     for (const tag of text.match(HLINK_TAG) ?? []) {
       const ref = hyperlinkRef(utf16 ? tag : Buffer.from(tag, 'latin1').toString('utf8'));
       if (!ref) continue;
@@ -680,7 +830,14 @@ function scanXmlPart(d: Buffer): { cells: number; comments: number; links: numbe
       links += rangeCells(range.s, range.e);
     }
   }
-  return { cells, comments, links };
+  return {
+    cells,
+    comments,
+    links,
+    metadataTypes: has('metadataType') ? countMatches(METADATA_TYPE_TAG, text) : 0,
+    futureMetadata: has('futureMetadata') ? countMatches(FUTURE_METADATA_TAG, text) : 0,
+    people: has('person') ? countMatches(PERSON_TAG, text) : 0,
+  };
 }
 
 /** The `ref` SheetJS's parsexmltag(tag, true) gives a tag: the same key rules, the last value wins. */

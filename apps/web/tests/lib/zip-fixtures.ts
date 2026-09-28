@@ -89,10 +89,15 @@ const xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
 const MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
 const REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 
-/** The parts every workbook has, for `n` sheets (sheet i at xl/worksheets/sheet{i}.xml). */
-function skeleton(names: string[]): ZipPart[] {
+/**
+ * The parts every workbook has, for `n` sheets (sheet i at xl/worksheets/sheet{i}.xml); `more`
+ * lists other parts in [Content_Types].xml ({ part: '/xl/metadata.xml', type: '...' }).
+ */
+function skeleton(names: string[], more: { part: string; type: string }[] = []): ZipPart[] {
   const n = names.length;
-  const overrides = names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('');
+  const overrides =
+    names.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join('') +
+    more.map((o) => `<Override PartName="${o.part}" ContentType="${o.type}"/>`).join('');
   return [
     {
       name: '[Content_Types].xml',
@@ -142,11 +147,15 @@ export function hugeSheet(mb: number): { raw: Buffer; size: number } {
   return { raw: Buffer.concat([head, ...Array<Buffer>(mb).fill(body), tail]), size: SHEET_HEAD.length + mb * block.length + SHEET_TAIL.length };
 }
 
-/** A workbook with one sheet per entry; a sheet is its XML, or a part to use as is. */
-export function workbook(sheets: Record<string, Buffer | Omit<ZipPart, 'name'>>, extra: ZipPart[] = []): Buffer {
+/**
+ * A workbook with one sheet per entry; a sheet is its XML, or a part to use as is. `extra` parts
+ * are added as they are; `types` lists some of them in [Content_Types].xml, which is how SheetJS
+ * finds a metadata part or a person list.
+ */
+export function workbook(sheets: Record<string, Buffer | Omit<ZipPart, 'name'>>, extra: ZipPart[] = [], types: { part: string; type: string }[] = []): Buffer {
   const names = Object.keys(sheets);
   return zip([
-    ...skeleton(names),
+    ...skeleton(names, types),
     ...names.map((s, i) => {
       const v = sheets[s]!;
       return Buffer.isBuffer(v) ? { name: `xl/worksheets/sheet${i + 1}.xml`, data: v } : { name: `xl/worksheets/sheet${i + 1}.xml`, ...v };
@@ -232,11 +241,12 @@ export function xlsbWorkbook(link?: { rows: number; cols: number }): Buffer {
 }
 
 /**
- * A sheet that unpacks to about `mb` MB of rows of `perRow` one-digit number cells, from a small
- * file (one deflated 1 MB block, repeated, as in hugeSheet). `cells` is how many it holds.
+ * A sheet that unpacks to about `mb` MB of rows of `perRow` cells (by default one-digit numbers;
+ * `cell` is the XML of one), from a small file (one deflated 1 MB block, repeated, as in
+ * hugeSheet). `cells` is how many it holds.
  */
-export function denseSheet(perRow: number, mb: number): { raw: Buffer; size: number; cells: number } {
-  const unit = `<row>${'<c><v>1</v></c>'.repeat(perRow)}</row>`;
+export function denseSheet(perRow: number, mb: number, cell = '<c><v>1</v></c>'): { raw: Buffer; size: number; cells: number } {
+  const unit = `<row>${cell.repeat(perRow)}</row>`;
   const rowsPerBlock = Math.floor((1 << 20) / unit.length);
   const block = unit.repeat(rowsPerBlock);
   const head = deflateRawSync(Buffer.from(SHEET_HEAD), { finishFlush: constants.Z_SYNC_FLUSH });
@@ -273,6 +283,61 @@ export function withComments(n: number): Buffer {
   const one = /<comment [\s\S]*?<\/comment>/.exec(text)![0];
   part.data = Buffer.from(text.replace(one, one.repeat(n)));
   return zip(parts);
+}
+
+/**
+ * A workbook whose one sheet has a header row (c0, c1, ...) and `rows` rows of `cols` number cells
+ * (row r, column c holds r * 100 + c), every number cell in the custom number format `format`.
+ */
+export function withNumberFormat(rows: number, cols: number, format: string): Buffer {
+  const names = Array.from({ length: cols }, (_, c) => XLSX.utils.encode_col(c));
+  let data = row(1, ...names.map((col, c): [string, string] => [col, `c${c}`]));
+  for (let r = 2; r <= rows + 1; r++) data += `<row r="${r}">${names.map((col, c) => `<c r="${col}${r}" s="1"><v>${r * 100 + c}</v></c>`).join('')}</row>`;
+  const styles =
+    `${xml}<styleSheet xmlns="${MAIN}"><numFmts count="1"><numFmt numFmtId="164" formatCode="${format}"/></numFmts>` +
+    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills>' +
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
+    '<cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs></styleSheet>';
+  return workbook({ Orders: rawSheet(data) }, [{ name: 'xl/styles.xml', data: Buffer.from(styles) }], [
+    { part: '/xl/styles.xml', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml' },
+  ]);
+}
+
+const METADATA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml';
+const PERSON_TYPE = 'application/vnd.ms-excel.person+xml';
+
+/**
+ * A workbook ("code, cases" and one row) with an xl/metadata.xml that SheetJS reads, holding `n`
+ * metadata types and `n` future-metadata blocks: SheetJS looks through every type for each block.
+ */
+export function withMetadata(n: number): Buffer {
+  const data =
+    `${xml}<metadata xmlns="${MAIN}"><metadataTypes count="${n}">${'<metadataType name="XLDAPR" minSupportedVersion="120000"/>'.repeat(n)}</metadataTypes>` +
+    `${'<futureMetadata name="XLDAPR" count="1"><bk></bk></futureMetadata>'.repeat(n)}</metadata>`;
+  return workbook({ Orders: sheetXml(1) }, [{ name: 'xl/metadata.xml', data: Buffer.from(data) }], [{ part: '/xl/metadata.xml', type: METADATA_TYPE }]);
+}
+
+/**
+ * A workbook ("code, cases" and one row) with `comments` threaded comments (column C, one per row
+ * from row 2) by an author who is not in its person list of `people` people: SheetJS looks
+ * through the whole list for each comment.
+ */
+export function withPeople(people: number, comments: number): Buffer {
+  const TCMNT_REL = 'http://schemas.microsoft.com/office/2017/10/relationships/threadedComment';
+  const threaded =
+    `${xml}<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">` +
+    Array.from({ length: comments }, (_, i) => `<threadedComment ref="C${i + 2}" personId="{nobody}" id="{c${i}}"><text>check</text></threadedComment>`).join('') +
+    '</ThreadedComments>';
+  const list = `${xml}<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">${'<person displayName="Dispatcher" id="{p}"/>'.repeat(people)}</personList>`;
+  return workbook(
+    { Orders: sheetXml(1) },
+    [
+      { name: 'xl/worksheets/_rels/sheet1.xml.rels', data: Buffer.from(`${xml}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${TCMNT_REL}" Target="../threadedComments/threadedComment1.xml"/></Relationships>`) },
+      { name: 'xl/threadedComments/threadedComment1.xml', data: Buffer.from(threaded) },
+      { name: 'xl/persons/person.xml', data: Buffer.from(list) },
+    ],
+    [{ part: '/xl/persons/person.xml', type: PERSON_TYPE }],
+  );
 }
 
 /**

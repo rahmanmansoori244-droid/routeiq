@@ -7,8 +7,9 @@ import { guardSpreadsheet, safeDecodeRange, WorkbookRefusedError } from './workb
  * read, as before; a workbook may unpack to at most 50 MB and have at most 10 sheets. The A1
  * review added caps that NMWC's real files (about 15 columns, a few thousand rows) are far from:
  * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 50 columns), links over
- * 200,000 cells, 10,000 comments. An upload read as Excel must be an .xlsx, an old .xls or CSV
- * text; web pages, XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard).
+ * 200,000 cells, 10,000 comments; the A1 v3 review 1,000 metadata entries of each kind and 1,000
+ * comment authors. An upload read as Excel must be an .xlsx, an old .xls or CSV text; web pages,
+ * XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard).
  *
  * What these limits do and do not do. The file is parsed in the web process, on the event loop,
  * synchronously: while a file is parsed no other request is answered, and nothing can stop the
@@ -38,6 +39,17 @@ export const MAX_CELLS = 2_500_000;
 export const MAX_LINK_CELLS = 200_000;
 /** Comments (notes) in a workbook; SheetJS's time for many on one cell grows with the square. */
 export const MAX_COMMENTS = 10_000;
+/**
+ * Cell-metadata types and future-metadata blocks (each) in a workbook: SheetJS compares every
+ * block with every type. Excel writes one or two (dynamic arrays, rich values).
+ */
+export const MAX_METADATA = 1_000;
+/**
+ * People in the threaded comments' person list (the people who wrote them): SheetJS looks up each
+ * threaded comment's author in the whole list, so with MAX_COMMENTS comments the lookups stay
+ * under 10^7 (10,000 x 10,000 took 0.5 s).
+ */
+export const MAX_PEOPLE = 1_000;
 /**
  * Rows read from each sheet (and from a CSV): the row limit plus room for a header, title rows and
  * one row over the limit. Rows below are never read; a sheet that goes on past them is refused
@@ -198,20 +210,35 @@ export function pickSheet(
  * Every sheet of the workbook that has rows, in workbook order, each read to at most READ_ROWS
  * rows. Before SheetJS reads the file it refuses (WorkbookRefusedError) a file that SheetJS would
  * read with a reader whose work cannot be bounded, a workbook that unpacks to more than
- * MAX_UNPACKED_BYTES, has more than MAX_ZIP_PARTS parts, MAX_CELLS cells with a value or
- * MAX_COMMENTS comments, or links over more than MAX_LINK_CELLS cells (lib/workbook-guard), and
- * one with more than MAX_SHEETS sheets. Before any sheet is turned
+ * MAX_UNPACKED_BYTES, has more than MAX_ZIP_PARTS parts, MAX_CELLS cells with a type or a value,
+ * MAX_COMMENTS comments, MAX_METADATA metadata entries of a kind or MAX_PEOPLE comment authors, or
+ * links over more than MAX_LINK_CELLS cells (lib/workbook-guard), and one with more than
+ * MAX_SHEETS sheets. Before any sheet is turned
  * into rows it refuses a sheet wider than MAX_COLS and sheets that span more than MAX_CELLS cells.
  */
 export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
   // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
   // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
   // given a Buffer it takes views.
-  const buf = guardSpreadsheet(bytes, { maxUnpackedBytes: MAX_UNPACKED_BYTES, maxParts: MAX_ZIP_PARTS, maxLinkCells: MAX_LINK_CELLS, maxCells: MAX_CELLS, maxComments: MAX_COMMENTS });
+  const buf = guardSpreadsheet(bytes, {
+    maxUnpackedBytes: MAX_UNPACKED_BYTES,
+    maxParts: MAX_ZIP_PARTS,
+    maxLinkCells: MAX_LINK_CELLS,
+    maxCells: MAX_CELLS,
+    maxComments: MAX_COMMENTS,
+    maxMetadata: MAX_METADATA,
+    maxPeople: MAX_PEOPLE,
+  });
   // cellFormula: false. Formulas are not used (their saved values are), and with them SheetJS
   // compares every array-formula cell with every array formula before it: 20,000 such rows (a
   // 275 KB workbook) took 2.6 s, and the time grows with the square of the count.
-  const read = { type: 'buffer', sheetRows: READ_ROWS, cellFormula: false } as const;
+  // cellText: false. The rows are read as raw values (sheet_to_json raw: true), never as display
+  // text, but SheetJS would make the display text of every cell with a number format, parsing the
+  // format again for each cell (safe_format, safe_format_xf): one 255-character format on 50,000
+  // rows x 44 cells (a 162 KB file within every cap) ran the process out of memory at about 4 GB.
+  // Header names still come from format_cell, which formats a header cell on its own (General
+  // format for an .xlsx).
+  const read = { type: 'buffer', sheetRows: READ_ROWS, cellFormula: false, cellText: false } as const;
   // The sheet count comes from the workbook's list of sheets alone; no sheet is read in this pass.
   const names = XLSX.read(buf, { ...read, bookSheets: true }).SheetNames ?? [];
   if (names.length > MAX_SHEETS) {
