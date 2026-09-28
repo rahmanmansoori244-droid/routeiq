@@ -33,17 +33,26 @@ Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this bloc
 2. The JSON contains `requestJson` (exact solver input), `responseJson` (if any), and `errorJson` (reason).
 3. Common reasons:
    - `SOLVER_ERROR` with HTTP 5xx → solver crashed; check Railway logs for `routeiq-solver`
-   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS
+   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS. If the message says `SOLVER_URL` "is not a usable address", set `SOLVER_URL` on web to `http://<solver private address>:<port>` as plain text (`/api/health` answers 503 `SOLVER_URL_INVALID` until then)
    - `STUCK` → the job had no result after 15 min and the janitor reaped it. Usually the web service restarted (a deploy) during the optimization; optimize again.
+   - `RESET` → a supervisor pressed **Reset stuck plan** (audit log `PLAN_RESET`: who, when, the note).
    - `Solver returned HTTP 404` / "The route optimizer is being updated" → web was deployed before the solver finished deploying; retry in a minute.
 4. Once the solver is healthy, click "Retry optimization" on the run — it spawns attempt #N+1 with the same input.
 
 ### When a run is stuck "Optimizing"
 1. The orphan janitor runs **inside the web process every 60 s** (`lib/jobs/janitor-loop.ts`, started from `instrumentation.ts`).
    - It fails any `RunJob` RUNNING or still QUEUED for more than 15 min (`STUCK_JOB_MS`), which is longer than any real optimization (the solver call is capped at 10 min).
-   - It flips the parent plan to `FAILED`, so it can be optimized again. No cron service is needed.
+   - It flips the parent plan to `FAILED`, so it can be optimized again. The job, the plan and the `OPTIMIZE_FAILED` audit row are written in one transaction (audit F09): a failed write changes nothing and the next sweep retries. No cron service is needed.
+   - (Audit F09) It also repairs any plan still `OPTIMIZING` whose current job has already ended (what the old janitor left when its second write failed): the plan goes to `FAILED` with an `OPTIMIZE_FAILED` audit row, reason `STUCK_PLAN`. **OPTIMIZE** and **Re-plan** stay greyed out while the plan shows *Optimizing…*: the janitor puts it back within a minute, or a supervisor presses **Reset stuck plan** now (step 2); the plan screen then shows *Optimization failed* and both buttons work again. (An OPTIMIZE / RE-PLAN request that reaches the server for such a plan, for example from an API call, resets it the same way first, then starts a new optimization.)
    - `ROUTEIQ_DISABLE_JANITOR=1` turns it off.
-2. To run the janitor manually:
+2. A **supervisor** (or company admin) does not have to wait: **Reset stuck plan** on the plan (`POST /api/runs/:id/reset-stuck`) puts the plan back to `FAILED` at once (audit `PLAN_RESET`). That covers a plan whose job has already ended (the case the janitor repairs within a minute) and a job lost by a restart (which the janitor fails only after 15 minutes): the lost job is failed with the plan. It is refused while the optimization is really running in the web process or started less than 2 minutes ago. A re-plan version keeps the plan it holds.
+3. Read-only check for plans stuck this way (expect 0 rows once the janitor has run):
+   ```sql
+   SELECT p.id, p."runDate", p.version, j.status AS job_status FROM "RunPlan" p
+   LEFT JOIN "RunJob" j ON j.id = p."currentJobId"
+   WHERE p.status = 'OPTIMIZING' AND (j.id IS NULL OR j.status NOT IN ('QUEUED', 'RUNNING'));
+   ```
+4. To run the janitor manually:
    ```bash
    curl -X POST $BASE/api/cron/janitor -H "X-Janitor-Token: $JANITOR_TOKEN"
    ```
@@ -90,7 +99,7 @@ Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp p
 
 ### Rotating `SOLVER_TOKEN`
 Every 90 days per CLAUDE.md §14.
-1. Generate a new random 32-byte base64 secret.
+1. Generate a new random 32-byte base64 secret. Paste it as plain text: a hidden space or curly quotes copied with it make `/api/health` answer 503 `SOLVER_TOKEN_INVALID`, and no plan can be optimized.
 2. Set on `routeiq-solver` env → redeploy solver. **It will continue accepting the old token until restart.** Wait for the new replica to come up.
 3. Set on `routeiq-web` env → redeploy web. Web will start sending the new token.
 4. Verify a fresh optimize call works.

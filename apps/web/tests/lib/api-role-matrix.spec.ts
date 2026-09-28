@@ -23,6 +23,8 @@
  *   (an empty optional text or reference clears it; a field left out is unchanged),
  *   POST /api/customers/import (verified pins kept under concurrency), POST /api/orders/upload and
  *   POST /api/orders/[batchId]/confirm (merged rows; depot and old-merge re-checks).
+ * - audit PR4 (F09, owner decision 17): "Reset stuck plan" (POST /api/runs/[id]/reset-stuck) is
+ *   SUPERVISOR and above; (F15) GET /api/health/live (liveness) is public like /api/health.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -69,6 +71,7 @@ const EXPECTED: Record<string, string> = {
   'DELETE /api/drivers/[id]': 'TENANT_ADMIN',
   'POST /api/drivers/[id]/pin': 'GONE',
   'GET /api/health': 'PUBLIC',
+  'GET /api/health/live': 'PUBLIC',
   'POST /api/locations/parse': 'PLANNER',
   'GET /api/orders': 'ANY',
   'GET /api/orders/[batchId]': 'ANY',
@@ -101,6 +104,7 @@ const EXPECTED: Record<string, string> = {
   'POST /api/runs/[id]/optimize': 'PLANNER',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
+  'POST /api/runs/[id]/reset-stuck': 'SUPERVISOR',
   'GET /api/runs/[id]/route-geometries': 'ANY',
   'PATCH /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'DELETE /api/runs/[id]/routes/[assignmentId]': 'PLANNER',

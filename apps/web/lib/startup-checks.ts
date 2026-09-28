@@ -3,6 +3,7 @@
  * stop the server; they make a missing production setting visible in the Railway logs.
  */
 import { rateLimitConfigProblem } from './rate-limit';
+import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from './solver-env';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -22,6 +23,28 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
   }
   if (env.NODE_ENV !== 'production') return out;
 
+  // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.
+  // Read as the optimize call and /api/health read them (solverEnv, review of audit PR4).
+  const solver = solverEnv(env);
+  for (const [key, value] of [['SOLVER_URL', solver.url], ['SOLVER_TOKEN', solver.token]] as const) {
+    if (!value) {
+      out.push({ level: 'error', message: `${key} is not set: no plan can be optimized, and /api/health answers 503 (not ready).` });
+    }
+  }
+  // Fourth review of audit PR4: set, but no call can use it (no http://, a hidden character...).
+  if (solver.url && !solverUrlUsable(solver.url)) {
+    out.push({
+      level: 'error',
+      message: `${URL_NOT_USABLE}: no plan can be optimized, and /api/health answers 503 (not ready). Set it to ${URL_EXPECTED}.`,
+    });
+  }
+  // Third review of audit PR4: set, but not plain ASCII - no call can send it as the solver has it.
+  if (solver.token && !tokenCanBeSent(solver.token)) {
+    out.push({
+      level: 'error',
+      message: `${TOKEN_CANNOT_BE_SENT}: no plan can be optimized, and /api/health answers 503 (not ready). Copy the token again as plain text.`,
+    });
+  }
   if (!env.RESEND_API_KEY?.trim()) {
     out.push({
       level: 'warn',

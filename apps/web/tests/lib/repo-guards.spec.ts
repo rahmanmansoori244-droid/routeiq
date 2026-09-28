@@ -344,3 +344,88 @@ describe('the dispatcher guide keeps each customer rule under its own bullet (re
     expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
   });
 });
+
+describe('the handbook describes the web tests and the health gate as they are (third review of audit PR4)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const handbook = () => readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+  const specs = (dir: string) => readdirSync(path.join(WEB, 'tests', dir)).filter((f) => f.endsWith('.spec.ts')).sort();
+  const bullet = (text: string, start: string) => {
+    const line = text.split('\n').find((l) => l.startsWith(start));
+    if (!line) throw new Error(`no line starting with ${start} in PROJECT_HANDBOOK.md`);
+    return line;
+  };
+
+  it('section 2.2 counts the unit and integration spec files on disk (merging main left 63 and 25)', () => {
+    const text = handbook();
+    const count = (line: string) => Number(/\((\d+) files\b/.exec(line)?.[1]);
+    expect(count(bullet(text, '- `tests/lib/*.spec.ts` ('))).toBe(specs('lib').length);
+    expect(count(bullet(text, '- `tests/integration/*.spec.ts` ('))).toBe(specs('integration').length);
+  });
+
+  it('section 2.2 names every integration spec that runs on the real database without the web server', () => {
+    const line = bullet(handbook(), '- `tests/integration/*.spec.ts` (');
+    const noServer = specs('integration').filter((f) => {
+      // The header comment as one text: its " * " line starts become spaces.
+      const header = readFileSync(path.join(WEB, 'tests', 'integration', f), 'utf8')
+        .split('*/')[0]
+        .replace(/\r?\n[ \t]*\*?[ \t]*/g, ' ')
+        .replace(/\s+/g, ' ');
+      return /the web server and (the )?solver are not used/i.test(header);
+    });
+    expect(noServer.length).toBeGreaterThanOrEqual(8);
+    expect(noServer.filter((f) => !line.includes(`\`${f.replace(/\.spec\.ts$/, '')}\``))).toEqual([]);
+  });
+
+  it('no gotcha says /api/health answers 503 when the solver is down (since audit PR4 that is 200 degraded)', () => {
+    const text = handbook();
+    // Only the matching words are printed on a failure, not the whole handbook.
+    expect(/`\/api\/health` returns 503 when the solver is down/i.exec(text)?.[0] ?? null).toBeNull();
+    const gotchas = text.slice(text.indexOf('### 5.11 Known operational gotchas'), text.indexOf('### 5.12'));
+    const row4 = bullet(gotchas, '| 4 |');
+    expect(row4).toMatch(/200/);
+    expect(row4).toMatch(/degraded/);
+    expect(row4).toMatch(/`ok: false`/);
+  });
+});
+
+describe('the handbook counts what is on disk and lists every spec in 5.3 (fourth review of audit PR4)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const handbook = () => readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+  const specs = (dir: string) => readdirSync(path.join(WEB, 'tests', dir)).filter((f) => f.endsWith('.spec.ts')).sort();
+  const between = (text: string, from: string, to: string) => {
+    const a = text.indexOf(from);
+    const b = text.indexOf(to, a + 1);
+    if (a < 0 || b < 0) throw new Error(`no text from "${from}" to "${to}" in PROJECT_HANDBOOK.md`);
+    return text.slice(a, b);
+  };
+  /** Every count the pattern finds (its group 1), with the words it was found in, so a failure names the stale phrase. */
+  const counts = (text: string, re: RegExp) => [...text.matchAll(re)].map((m) => ({ said: m[0], n: Number(m[1]) }));
+  const allAre = (found: { said: string; n: number }[], n: number) => {
+    expect(found.length).toBeGreaterThan(0);
+    expect(found).toEqual(found.map((f) => ({ ...f, n })));
+  };
+
+  it('sections 1 and 2 count the route files, the migrations, the models and the enums on disk (they said 60, 10 and 9, 26)', () => {
+    const text = handbook();
+    const top = text.slice(0, text.indexOf('## 3. Daily dispatch process flow'));
+    const routes = walk(path.join(WEB, 'app', 'api'), /^route\.ts$/);
+    const migrationsDir = path.join(WEB, 'prisma', 'migrations');
+    const migrations = readdirSync(migrationsDir).filter((n) => statSync(path.join(migrationsDir, n)).isDirectory());
+    const schema = readFileSync(path.join(WEB, 'prisma', 'schema.prisma'), 'utf8');
+    allAre(counts(top, /(\d+) route (?:handlers|files)\b/g), routes.length);
+    allAre(counts(top, /(\d+) of the \d+ route files use `withTenantApi\(\)`/g), routes.filter((f) => readFileSync(f, 'utf8').includes('withTenantApi(')).length);
+    allAre(counts(top, /(\d+) migrations\b/g), migrations.length);
+    allAre(counts(top, /(\d+) models\b/g), (schema.match(/^model \w+/gm) ?? []).length);
+    allAre(counts(top, /(\d+) enums\b/g), (schema.match(/^enum \w+/gm) ?? []).length);
+  });
+
+  it('5.3 names every spec file in its own part, unit or integration, and counts the unit specs (it said 32 of 74, and 17 specs were missing)', () => {
+    const s53 = between(handbook(), '### 5.3 Test suites', '### 5.4');
+    const unit = between(s53, '**Web unit specs**', '**Web integration specs**');
+    const integration = between(s53, '**Web integration specs**', '**Solver tests**');
+    const named = (part: string, f: string) => part.includes(`\`${f}\``) || part.includes(`\`${f.replace(/\.spec\.ts$/, '')}\``);
+    expect(specs('lib').filter((f) => !named(unit, f))).toEqual([]);
+    expect(specs('integration').filter((f) => !named(integration, f))).toEqual([]);
+    allAre(counts(unit, /^\*\*Web unit specs\*\* \(`apps\/web\/tests\/lib\/`, (\d+) files/gm), specs('lib').length);
+  });
+});

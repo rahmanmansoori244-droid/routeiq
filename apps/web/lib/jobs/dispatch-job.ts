@@ -14,14 +14,15 @@
  * - weights taken from the product master (BuiltRequest.weightChanges) are saved on the orders in
  *   that same transaction too, never earlier: a failed optimization leaves order kg as they were;
  * - failJob only fails a job that is still QUEUED or RUNNING, and only moves the plan to FAILED
- *   while it is OPTIMIZING with this job as current: it never overwrites READY or SUPERSEDED.
+ *   while it is OPTIMIZING with this job as current: it never overwrites READY or SUPERSEDED. The
+ *   job, the plan and the OPTIMIZE_FAILED audit row commit in ONE transaction (audit F09).
  */
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
 import { trackInflight, whenIdle } from './optimize-job';
 import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
-import { lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
+import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
@@ -188,35 +189,56 @@ export function jobMessage(sc: DispatchScenario, preDrops: number, driverNotes =
     : `${base}. Timetable NOT verified: the optimizer could not check it - re-plan before locking.`;
 }
 
-/** A result for a version that moved on: the job fails as "stale result", the plan is not touched. */
+/** A failure write waits this long for the plan row (a plan being saved holds it); then it gives up. */
+const FAIL_TX = { timeout: 30_000, maxWait: 10_000 } as const;
+
+/**
+ * A result for a version that moved on: the job fails as "stale result", the plan is not touched.
+ * The job and its OPTIMIZE_FAILED audit row commit together (audit F09).
+ */
 async function markStale(args: DispatchJobArgs, e: StaleJobError) {
   console.warn('dispatch optimize: stale result not applied', { runId: args.runId, runJobId: args.runJobId, reason: e.reason });
   try {
-    const n = await prisma.runJob.updateMany({
-      where: { id: args.runJobId, status: { in: ['QUEUED', 'RUNNING'] } },
-      data: {
-        status: 'FAILED',
-        finishedAt: new Date(),
-        message: 'Stale result: the plan changed while this optimization ran, so nothing was applied.',
-        errorJson: { reason: 'STALE_RESULT', message: e.reason } as never,
-      },
-    });
-    if (n.count) {
-      await audit({
-        tenantId: args.tenantId,
-        userId: args.userId,
-        action: 'OPTIMIZE_FAILED',
-        entity: 'RunPlan',
-        entityId: args.runId,
-        afterJson: { runJobId: args.runJobId, errorJson: { reason: 'STALE_RESULT', message: e.reason } } as never,
-        ip: args.ip,
+    await prisma.$transaction(async (tx) => {
+      const n = await tx.runJob.updateMany({
+        where: { id: args.runJobId, status: { in: ['QUEUED', 'RUNNING'] } },
+        data: {
+          status: 'FAILED',
+          finishedAt: new Date(),
+          message: 'Stale result: the plan changed while this optimization ran, so nothing was applied.',
+          errorJson: { reason: 'STALE_RESULT', message: e.reason } as never,
+        },
       });
-    }
+      if (!n.count) return;
+      await audit(
+        {
+          tenantId: args.tenantId,
+          userId: args.userId,
+          action: 'OPTIMIZE_FAILED',
+          entity: 'RunPlan',
+          entityId: args.runId,
+          afterJson: { runJobId: args.runJobId, errorJson: { reason: 'STALE_RESULT', message: e.reason } } as never,
+          ip: args.ip,
+        },
+        tx,
+      );
+    }, FAIL_TX);
   } catch (writeErr) {
+    // Nothing was written: the job stays RUNNING and the janitor fails it after 15 minutes.
     console.error('dispatch markStale: could not record the stale result', writeErr);
   }
 }
 
+/**
+ * A job that failed (solver error, no plan found, an error while saving). Audit F09: ONE
+ * transaction under the plan row lock (the order every plan writer uses: plan, then its job) -
+ * the job FAILED (only while still QUEUED or RUNNING), its plan FAILED (only while OPTIMIZING with
+ * this job as current: never over READY or SUPERSEDED) and the OPTIMIZE_FAILED audit row commit
+ * together or not at all. If this write itself fails, nothing changed: the job is still in
+ * progress in the database with no live process, and the janitor fails job and plan together
+ * 15 minutes after it started (or a supervisor resets the plan) - a plan is never left OPTIMIZING
+ * behind an ended job.
+ */
 export async function failJob(args: DispatchJobArgs, err: unknown) {
   const errorJson =
     err instanceof SolverError
@@ -224,7 +246,8 @@ export async function failJob(args: DispatchJobArgs, err: unknown) {
       : { reason: 'UNKNOWN', message: (err as Error)?.message ?? String(err) };
   console.error('dispatch optimize failed', errorJson);
   try {
-    const changed = await prisma.$transaction(async (tx) => {
+    await prisma.$transaction(async (tx) => {
+      await lockPlanRow(tx, args.tenantId, args.runId);
       // Only a job still in progress fails; only its own OPTIMIZING version goes FAILED.
       const job = await tx.runJob.updateMany({
         where: { id: args.runJobId, status: { in: ['QUEUED', 'RUNNING'] } },
@@ -234,19 +257,21 @@ export async function failJob(args: DispatchJobArgs, err: unknown) {
         where: { id: args.runId, tenantId: args.tenantId, status: 'OPTIMIZING', currentJobId: args.runJobId },
         data: { status: 'FAILED' },
       });
-      return { job: job.count, plan: plan.count };
-    });
-    if (!changed.job && !changed.plan) return;
-    await audit({
-      tenantId: args.tenantId,
-      userId: args.userId,
-      action: 'OPTIMIZE_FAILED',
-      entity: 'RunPlan',
-      entityId: args.runId,
-      afterJson: { runJobId: args.runJobId, errorJson } as never,
-      ip: args.ip,
-    });
+      if (!job.count && !plan.count) return;
+      await audit(
+        {
+          tenantId: args.tenantId,
+          userId: args.userId,
+          action: 'OPTIMIZE_FAILED',
+          entity: 'RunPlan',
+          entityId: args.runId,
+          afterJson: { runJobId: args.runJobId, errorJson } as never,
+          ip: args.ip,
+        },
+        tx,
+      );
+    }, FAIL_TX);
   } catch (writeErr) {
-    console.error('dispatch failJob: could not record failure', writeErr);
+    console.error('dispatch failJob: could not record failure (nothing changed; the janitor fails the job and its plan later)', writeErr);
   }
 }
