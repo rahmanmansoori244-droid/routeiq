@@ -387,8 +387,14 @@ describe('NMWC dispatch MVP workflow', () => {
 describe('frozen plan facts (review F08)', () => {
   const put = (url: string, body: unknown) => fetchWith(t.cookieJar, url, { ...j(body), method: 'PUT' });
   const patch = (url: string, body: unknown) => fetchWith(t.cookieJar, url, { ...j(body), method: 'PATCH' });
+  // A place link as Google writes it when a marker is shared: the pin (!3d!4d) with 7 decimals and no
+  // zeros at the end. The fixture's points have 3 decimals or fewer, and since the A5 sixth review a
+  // Google pin with fewer than 4 decimals is a coordinate searched for, not a marker Google placed: the
+  // save is refused (422 PIN_REQUIRED) and the pin is placed by hand. The 7th decimal moves the point
+  // by under 15 cm.
+  const marker = (v: number) => `${v.toFixed(6)}7`;
   const mapsUrl = (lat: number, lng: number) =>
-    `https://www.google.com/maps/place/Moved/@${lat},${lng},17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d${lat}!4d${lng}`;
+    `https://www.google.com/maps/place/Moved/@${marker(lat)},${marker(lng)},17z/data=!3m1!4b1!4m6!3m5!1s0x0:0x0!8m2!3d${marker(lat)}!4d${marker(lng)}`;
   let lockedId = '';
   let planned: { customerId: string; lat: number; lng: number; window: string; capacity: number } | null = null;
 
