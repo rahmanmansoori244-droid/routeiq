@@ -7,7 +7,7 @@ import { MAX_SERVICE_MIN, normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
-import { parseLocationInput } from '@/lib/dispatch/location-input';
+import { fileAgreesWithSaved, pointsElsewhereText, readImportedPair, type ImportedPair } from '@/lib/dispatch/import-location';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { clientIp } from '@/lib/client-ip';
 
@@ -20,11 +20,15 @@ import { clientIp } from '@/lib/client-ip';
 // Codes match existing customers whatever their letter case (as in the order intake).
 //
 // Locations (owner's rule, audit PR A5: "locations should always be correct"): each lat/lng pair is
-// read like ADD LOCATION reads "lat, lng", with the company's delivery area. A pair that is not exact
-// (fewer than 4 decimals, swapped, outside the area, 0,0) is never stored as a usable location: a new
-// customer gets no coordinates (it shows LOCATION REQUIRED), an existing one keeps what it has, and the
-// row is listed in `locationsNotSaved` with the reason. It is not an error: the rest of the row and
-// the rest of the file are imported. A location a dispatcher verified is never overwritten (F05).
+// read like ADD LOCATION reads "lat, lng", with the company's delivery area (`readImportedPair`; an
+// Excel number cell counts the decimals it shows). A pair that is not exact (fewer than 4 decimals,
+// swapped, outside the area, 0,0) is never stored as a usable location, and the row is listed in
+// `locationsNotSaved` with the reason in plain words. It is not an error: the rest of the row and the
+// rest of the file are imported. A new customer gets no coordinates (it shows LOCATION REQUIRED). An
+// existing one keeps its saved point when the file's pair points at the same place (within the
+// file's own precision); when the file points elsewhere (A5 review: the customer moved, or one of
+// the two is wrong) its saved point stays on the map but is marked LOW, so it is not planned until a
+// dispatcher drops the pin. A location a dispatcher verified is never changed (F05).
 
 interface ImportError {
   row: number;
@@ -37,8 +41,12 @@ interface LocationNotSaved {
   code: string;
   branchCode: string | null;
   reason: string;
-  /** The customer already exists and keeps the location it has (null = it has none). */
-  kept: 'SAVED_LOCATION' | null;
+  /**
+   * What the customer has: SAVED_LOCATION = it exists and keeps its saved point (confirmed, or the file
+   * points at the same place); SAVED_LOCATION_NEEDS_PIN = the file points elsewhere, so its saved point
+   * (never confirmed) is marked LOW and not used until the pin is placed by hand; null = it has none.
+   */
+  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null;
 }
 
 interface CustomerRow {
@@ -89,7 +97,8 @@ export async function POST(req: Request) {
 
   let parsed;
   try {
-    parsed = await parseUpload(file);
+    // lat / lng from Excel: the decimals the cell shows count (23.5850, not the number 23.585).
+    parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
   } catch (err) {
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
@@ -98,7 +107,7 @@ export async function POST(req: Request) {
   const warnings: string[] = [...parsed.warnings];
   const valid: CustomerRow[] = [];
   const codeSeen = new Map<string, number>();
-  const notExact: { row: number; reason: string }[] = [];
+  const notExact: { row: number; pair: ImportedPair }[] = [];
 
   const db = tenantDb(session.user.tenantId);
   const regions = await db.region.findMany({ select: { id: true, code: true } });
@@ -179,12 +188,12 @@ export async function POST(req: Request) {
         return;
       }
       // Read as ADD LOCATION reads "lat, lng" (the text as in the file, so its decimals count).
-      const p = parseLocationInput(`${latRaw}, ${lngRaw}`, area);
-      if (p.ok && !p.needsPin && p.lat !== undefined && p.lng !== undefined) {
-        lat = p.lat;
-        lng = p.lng;
+      const pair = readImportedPair(latRaw, lngRaw, area);
+      if (pair.point) {
+        lat = pair.point.lat;
+        lng = pair.point.lng;
       } else {
-        notExact.push({ row, reason: p.ok ? p.warnings.join(' ') : p.error ?? 'The location could not be read.' });
+        notExact.push({ row, pair });
       }
     } else {
       warnings.push(`Row ${row} (${code}): missing coordinates — will need map geocode.`);
@@ -220,16 +229,35 @@ export async function POST(req: Request) {
   let updates = 0;
   const confirmedServiceChanges: { code: string; branchCode: string | null; from: number; to: number }[] = [];
   const locationsNotSaved: LocationNotSaved[] = [];
-  const notExactByRow = new Map(notExact.map((n) => [n.row, n.reason]));
+  // Customers whose saved point (never confirmed) the file contradicts: marked LOW at commit, only if
+  // still unverified and still at the point compared here.
+  const needsPin = new Map<string, { lat: number; lng: number }>();
+  const notExactByRow = new Map(notExact.map((n) => [n.row, n.pair]));
   for (const v of valid) {
-    const reason = notExactByRow.get(v.row);
-    if (reason === undefined) continue;
+    const pair = notExactByRow.get(v.row);
+    if (pair === undefined) continue;
     const m = matchOf(v);
-    locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: m && m.lat !== null && m.lng !== null ? 'SAVED_LOCATION' : null });
+    const reason = pair.reason ?? 'Not exact.';
+    if (!m || m.lat === null || m.lng === null) {
+      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: null });
+      continue;
+    }
+    const saved = { lat: m.lat, lng: m.lng };
+    if (m.locationVerified || fileAgreesWithSaved(pair, saved)) {
+      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: 'SAVED_LOCATION' });
+    } else {
+      needsPin.set(m.id, saved);
+      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason: `${reason} ${pointsElsewhereText(pair, saved)}`, kept: 'SAVED_LOCATION_NEEDS_PIN' });
+    }
   }
   if (locationsNotSaved.length) {
     warnings.push(
       `${locationsNotSaved.length} location(s) in the file are not exact and were not saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: use at least 4 decimals, and in Excel format the lat and lng cells as text.`,
+    );
+  }
+  if (needsPin.size) {
+    warnings.push(
+      `${needsPin.size} saved location(s) ${dryRun || errors.length > 0 ? 'will not be' : 'are not'} used until the pin is placed by hand: the file points somewhere else. Nothing is delivered to them until then. Drop the pin on each one (ADD LOCATION on Daily dispatch, or Set location on the customer page).`,
     );
   }
   for (const v of valid) {
@@ -280,6 +308,7 @@ export async function POST(req: Request) {
   // list read above), and the kept count comes from what those updates did.
   let upserted = 0;
   let keptVerified = 0;
+  let markedLow = 0;
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
     const fileHasLoc = v.lat !== null && v.lng !== null;
@@ -326,6 +355,17 @@ export async function POST(req: Request) {
           data: { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' },
         });
         if (written.count === 0) keptVerified++;
+      } else {
+        // The file points elsewhere: the saved point is not used until a dispatcher drops the pin
+        // (LOW blocks planning). Never a verified one, nor one changed since it was compared (F05).
+        const saved = needsPin.get(m.id);
+        if (saved) {
+          const marked = await db.customer.updateMany({
+            where: { id: m.id, locationVerified: false, lat: saved.lat, lng: saved.lng },
+            data: { geocodeConfidence: 'LOW' },
+          });
+          markedLow += marked.count;
+        }
       }
     }
     upserted++;
@@ -337,7 +377,7 @@ export async function POST(req: Request) {
     action: 'CREATE',
     entity: 'Customer',
     entityId: null,
-    afterJson: { bulkImport: { fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges } } as never,
+    afterJson: { bulkImport: { fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length, savedLocationsMarkedLow: markedLow } } as never,
     ip,
   });
 

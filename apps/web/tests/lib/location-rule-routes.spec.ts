@@ -38,7 +38,7 @@ vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return n
 import { PUT as locationPut } from '@/app/api/customers/[id]/location/route';
 import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
-import { PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE } from '@/lib/dispatch/location-input';
+import { DEFAULT_SERVICE_AREA, PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE, SAVED_SWAPPED_MESSAGE } from '@/lib/dispatch/location-input';
 import { CustomerEditor } from '@/app/t/[slug]/customers/[id]/customer-editor';
 
 const T = 'tA';
@@ -85,7 +85,9 @@ beforeEach(() => {
     customer('K1'),
     customer('MED', { geocodeConfidence: 'MEDIUM' }),
     customer('LOW', { geocodeConfidence: 'LOW', lat: 23, lng: 58 }),
-    customer('COARSE', { lat: 23.58, lng: 58.4 }), // stored HIGH by an import before A5, 2 decimals
+    customer('ZERO', { lat: 23.585, lng: 58.4 }), // stored HIGH from "23.5850, 58.4000": the number drops the zeros
+    customer('AWAY', { lat: 24.7136, lng: 46.6753 }), // HIGH import from before A5, outside Oman/UAE, never confirmed
+    customer('SWAP', { lat: 58.4059, lng: 23.5859 }), // HIGH import from before A5, latitude and longitude swapped
     customer('OK', { locationVerified: true, locationSource: 'MAP_PIN', locationInput: 'map pin' }),
     customer('NONE', { lat: null, lng: null, geocodeConfidence: 'MISSING', locationSource: null }),
   ];
@@ -170,7 +172,6 @@ describe('PUT /api/customers/:id/location: hand pins and the saved point', () =>
   it.each([
     ['a MEDIUM import', 'MED'],
     ['a LOW reading', 'LOW'],
-    ['a HIGH import with 2 decimals (stored before A5)', 'COARSE'],
   ])("the customer's saved point sent back unchanged is not confirmed when it is not exact: %s", async (_what, id) => {
     const before = stored(id);
     const r = await put(id, { lat: before.lat, lng: before.lng, source: 'MAP_PIN' });
@@ -178,6 +179,39 @@ describe('PUT /api/customers/:id/location: hand pins and the saved point', () =>
     expect(r.status).toBe(422);
     expect(r.body.error).toMatchObject({ code: 'PIN_REQUIRED', message: SAVED_NOT_EXACT_MESSAGE });
     expect(stored(id)).toEqual(before);
+  });
+
+  it.each([
+    ['outside the delivery area', 'AWAY', SAVED_OUTSIDE_AREA_MESSAGE],
+    ['with latitude and longitude swapped', 'SWAP', SAVED_SWAPPED_MESSAGE],
+  ])('a saved HIGH point %s, never confirmed, is refused with that reason, also with "confirm"', async (_what, id, message) => {
+    const before = stored(id);
+    for (const confirmOutsideArea of [undefined, true]) {
+      const r = await put(id, { lat: before.lat, lng: before.lng, source: 'MAP_PIN', confirmOutsideArea });
+      // Before: 422 PIN_REQUIRED "This saved location is not exact" - the wrong reason.
+      expect(r.status).toBe(422);
+      expect(r.body.error).toMatchObject({ code: 'PIN_REQUIRED', message });
+    }
+    expect(stored(id)).toEqual(before);
+    // A pin placed by hand is the way out.
+    if (id === 'AWAY') {
+      // The customer really is abroad: the moved pin is asked about ("Confirm & save"), then saved.
+      const moved = { lat: before.lat + 0.0001, lng: before.lng + 0.0001, source: 'MAP_PIN' };
+      expect((await put(id, moved)).body.error).toMatchObject({ code: 'OUTSIDE_AREA' });
+      expect((await put(id, { ...moved, confirmOutsideArea: true })).status).toBe(200);
+    } else {
+      expect((await put(id, { lat: 23.5859, lng: 58.4059, source: 'MAP_PIN' })).status).toBe(200);
+    }
+    expect(stored(id)).toMatchObject({ verified: true, source: 'MAP_PIN', confidence: 'HIGH' });
+  });
+
+  it('a saved HIGH point whose stored number ends in 0 is exact: confirmed as it is', async () => {
+    // "23.5850, 58.4000" was accepted as exact (4 decimals) and stored as 23.585, 58.4.
+    const r = await put('ZERO', { lat: 23.585, lng: 58.4, source: 'MAP_PIN' });
+    // Before: 422 PIN_REQUIRED, the stored number read again as text had "fewer than 4 decimals".
+    expect(r.status).toBe(200);
+    expect(stored('ZERO')).toMatchObject({ lat: 23.585, lng: 58.4, verified: true, source: 'IMPORT', confidence: 'HIGH' });
+    expect(audits[0]!.afterJson).toMatchObject({ check: 'SAVED_POINT' });
   });
 
   it('an exact saved point is confirmed as it is, keeping where it came from; a verified one stays verified', async () => {
@@ -248,6 +282,8 @@ describe('the customer page sets a location through ADD LOCATION (the same dialo
   const props = {
     customer: { id: 'MED', code: 'MED', branchCode: null, name: 'Customer MED', lat: 23.5859, lng: 58.4059, locationVerified: false, geocodeConfidence: 'MEDIUM' },
     center: { lat: 23.58, lng: 58.39 },
+    // The company's own delivery area (Settings), as the page loads it.
+    serviceArea: { ...DEFAULT_SERVICE_AREA, maxLng: 61 },
     canEdit: true,
   };
 
@@ -264,6 +300,8 @@ describe('the customer page sets a location through ADD LOCATION (the same dialo
     expect(dialog().props.customer).toEqual({
       customerId: 'MED', code: 'MED', branchCode: null, name: 'Customer MED', lat: 23.5859, lng: 58.4059, locationVerified: false, geocodeConfidence: 'MEDIUM',
     });
+    // The company's area, so the dialog judges the saved point as the server does (before: none, the whole world).
+    expect(dialog().props.serviceArea).toEqual({ ...DEFAULT_SERVICE_AREA, maxLng: 61 });
     // The map only shows the pin: no element of the page saves anything itself.
     expect(elements(host.tree).some((e) => typeName(e) === 'MapPicker')).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();

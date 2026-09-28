@@ -3,16 +3,14 @@ import { withTenantApi, ok, parseBody, fail, notFoundIfNull } from '@/lib/api';
 import { audit } from '@/lib/audit';
 import {
   checkManualLocation,
-  parseLocationInput,
   pinRequiredMessage,
   rereadSavedInput,
   resolveLocationInput,
   samePoint,
   PIN_REQUIRED_MESSAGE,
-  SAVED_NOT_EXACT_MESSAGE,
   type Confidence,
 } from '@/lib/dispatch/location-input';
-import { coordStatus } from '@/lib/dispatch/customer-attrs';
+import { coordStatus, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 
 interface Params { params: { id: string } }
@@ -38,8 +36,10 @@ const pinRequired = (message: string, parse?: unknown) => fail({ code: 'PIN_REQU
 // exact is never saved as read. This route enforces it itself, whatever the screen sends:
 //  - { lat, lng, source: 'MAP_PIN' }: a pin placed by hand, stored HIGH. The customer's own saved
 //    point sent back unchanged is not a hand pin: it is confirmed as it is only when it is already
-//    verified, or HIGH and still reads as exact; else 422 PIN_REQUIRED. A "hand pin" exactly on the
-//    point its text reads as, when that reading needs a pin, was not moved: 422 PIN_REQUIRED.
+//    verified, or HIGH and inside the company's delivery area (savedPointProblem, the dialog's test);
+//    else 422 PIN_REQUIRED with the reason (not exact, outside the area, swapped). A "hand pin"
+//    exactly on the point its text reads as, when that reading needs a pin, was not moved: 422
+//    PIN_REQUIRED.
 //  - { lat, lng, input, resolvedUrl? } from a Read: the input is read again (no network; a short link
 //    through the resolvedUrl the Read returned). 422 PIN_REQUIRED when the reading needs a pin or
 //    cannot be read, 422 LOCATION_MISMATCH when the point sent is not the point it reads as.
@@ -74,10 +74,9 @@ export const PUT = (req: Request, { params }: Params) =>
         check = 'HAND_PIN';
         if (before.lat !== null && before.lng !== null && samePoint({ lat, lng }, { lat: before.lat, lng: before.lng })) {
           // The customer's saved point, sent back as it is (the dialog opens on it): not placed by hand.
-          if (!before.locationVerified) {
-            const reread = parseLocationInput(`${before.lat}, ${before.lng}`, area);
-            if (before.geocodeConfidence !== 'HIGH' || !reread.ok || reread.needsPin) return pinRequired(SAVED_NOT_EXACT_MESSAGE);
-          }
+          // The dialog's own test (savedPointProblem), with the company's area; the reason is named.
+          const problem = savedPointProblem(before, area);
+          if (problem) return pinRequired(problem);
           source = before.locationSource ?? 'MAP_PIN';
           confidence = before.locationVerified ? before.geocodeConfidence ?? 'HIGH' : 'HIGH';
           input = before.locationInput;

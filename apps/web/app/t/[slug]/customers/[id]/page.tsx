@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { describeServiceTime, effectiveAttrs, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
 
 export const dynamic = 'force-dynamic';
@@ -45,6 +46,8 @@ export default async function CustomerDetailPage({
   // Where the map looks when the customer has no pin: the company's first active depot, else Muscat.
   const depot = await db.depot.findFirst({ where: { active: true }, orderBy: { code: 'asc' }, select: { lat: true, lng: true } });
   const center = depot ?? { lat: 23.5859, lng: 58.4059 };
+  // The company's delivery area, so Set location judges the saved pin as the server does.
+  const serviceArea = await tenantServiceArea(tenant.id);
   const canEdit = canPlan(user.role);
 
   return (
@@ -84,6 +87,7 @@ export default async function CustomerDetailPage({
                   geocodeConfidence: customer.geocodeConfidence,
                 }}
                 center={center}
+                serviceArea={serviceArea}
                 canEdit={canEdit}
               />
             </CardContent>

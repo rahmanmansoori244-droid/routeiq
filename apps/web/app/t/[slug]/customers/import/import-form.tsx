@@ -10,6 +10,14 @@ import { Badge } from '@/components/ui/badge';
 import { errorMessage } from '@/lib/error-message';
 
 interface ImportError { row: number; message: string }
+/** A row whose location is not exact: not saved (owner's location rule, audit PR A5). */
+interface LocationNotSaved {
+  row: number;
+  code: string;
+  branchCode: string | null;
+  reason: string;
+  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null;
+}
 interface ImportResult {
   fileName: string;
   totalRows: number;
@@ -24,7 +32,18 @@ interface ImportResult {
   updates?: number;
   confirmedServiceChanges?: { code: string; branchCode: string | null; from: number; to: number }[];
   /** Rows whose location is not exact: not saved (owner's location rule, audit PR A5). */
-  locationsNotSaved?: { row: number; code: string; branchCode: string | null; reason: string; kept: 'SAVED_LOCATION' | null }[];
+  locationsNotSaved?: LocationNotSaved[];
+}
+
+/** One listed row: why its location is not saved, then what the customer has now (or will have after the import). */
+export function locationNotSavedLine(l: LocationNotSaved, dryRun: boolean): string {
+  const after =
+    l.kept === 'SAVED_LOCATION'
+      ? 'The location it already has is kept.'
+      : l.kept === 'SAVED_LOCATION_NEEDS_PIN'
+        ? `Its saved location ${dryRun ? 'will no longer be' : 'is no longer'} used: nothing is delivered to it until someone drops the pin on the map.`
+        : 'It has no location until you set one.';
+  return `${l.reason} ${after}`;
 }
 
 export function CustomerImportForm({ slug }: { slug: string }) {
@@ -142,7 +161,7 @@ export function CustomerImportForm({ slug }: { slug: string }) {
                   {result.locationsNotSaved.slice(0, 50).map((l) => (
                     <li key={l.row}>
                       <span className="font-mono">Row {l.row}</span> {l.code}
-                      {l.branchCode ? ` / ${l.branchCode}` : ''}: {l.reason} {l.kept ? 'The location it already has is kept.' : 'It has no location until you set one.'}
+                      {l.branchCode ? ` / ${l.branchCode}` : ''}: {locationNotSavedLine(l, !!result.dryRun || result.errorRows > 0)}
                     </li>
                   ))}
                 </ul>

@@ -36,6 +36,14 @@ export interface ParseOptions {
   isDataSheet?: (headers: string[]) => boolean;
   /** What the rows are, for messages: "order" -> "order rows". */
   rowsWord?: string;
+  /**
+   * Excel: columns (header names, any case) whose number cells keep the decimals the cell shows. A
+   * number holds no trailing zeros (23.5850 is the number 23.585), but a cell formatted to show 4
+   * decimals shows "23.5850": for these columns that text is used when it is the same number with
+   * more decimals. A cell showing fewer decimals than the number has keeps the number's own. Used for
+   * the customer import's lat / lng, whose decimals decide whether a location is exact (audit PR A5).
+   */
+  decimalTextColumns?: string[];
 }
 
 /**
@@ -80,7 +88,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
   if (isExcel) {
     const arr = new Uint8Array(await file.arrayBuffer());
     const sheets = await withTimeout(
-      Promise.resolve(parseExcelSheets(arr)),
+      Promise.resolve(parseExcelSheets(arr, { decimalTextColumns: opts.decimalTextColumns })),
       PARSE_TIMEOUT_MS,
       'XLSX parse timed out (possible zip bomb).',
     );
@@ -145,8 +153,9 @@ export function pickSheet(
 }
 
 /** Every sheet of the workbook that has rows, in workbook order. */
-export function parseExcelSheets(buffer: Uint8Array): ParsedSheet[] {
+export function parseExcelSheets(buffer: Uint8Array, opts: Pick<ParseOptions, 'decimalTextColumns'> = {}): ParsedSheet[] {
   const wb = XLSX.read(buffer, { type: 'array', cellDates: false, cellNF: false });
+  const decimalCols = new Set((opts.decimalTextColumns ?? []).map((c) => c.trim().toLowerCase()));
   const out: ParsedSheet[] = [];
   for (const sheetName of wb.SheetNames) {
     const sheet = wb.Sheets[sheetName];
@@ -154,9 +163,31 @@ export function parseExcelSheets(buffer: Uint8Array): ParsedSheet[] {
     // raw: true keeps real numbers (no "1,234" display strings) and returns date cells as
     // Excel serials, which the order intake converts; display text would depend on locale.
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true });
+    if (decimalCols.size && rows.length) {
+      // The same rows as shown (the same blank-row rule, so row i is row i).
+      const shown = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
+      rows.forEach((r, i) => {
+        for (const k of Object.keys(r)) {
+          if (decimalCols.has(k.trim().toLowerCase())) r[k] = withShownDecimals(r[k], shown[i]?.[k]);
+        }
+      });
+    }
     if (rows.length) out.push({ name: sheetName, rows: rows.map((r) => normalizeKeys(r)) });
   }
   return out;
+}
+
+/**
+ * A number cell as the text it shows when that text is the same number with more decimals (trailing
+ * zeros: 23.585 shown as "23.5850"); else the number itself (a cell showing fewer decimals than the
+ * number has, a date, text).
+ */
+export function withShownDecimals(value: unknown, shown: unknown): unknown {
+  if (typeof value !== 'number' || typeof shown !== 'string') return value;
+  const t = shown.trim();
+  if (!/^[-+]?\d+\.\d+$/.test(t) || Number(t) !== value) return value;
+  const places = (x: string) => (x.includes('.') ? x.length - x.indexOf('.') - 1 : 0);
+  return places(t) > places(String(value)) ? t : value;
 }
 
 function parseCsv(text: string): Promise<{ rows: Record<string, string>[]; errors: Papa.ParseError[] }> {

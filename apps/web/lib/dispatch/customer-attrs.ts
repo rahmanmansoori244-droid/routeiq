@@ -5,7 +5,7 @@
  * Precedence for every attribute: the customer's own value > the customer-type default >
  * the tenant default. Priority 1 is the HIGHEST, 5 the LOWEST - everywhere.
  */
-import { DEFAULT_SERVICE_AREA, type ServiceArea } from './location-input';
+import { DEFAULT_SERVICE_AREA, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE, SAVED_SWAPPED_MESSAGE, type ServiceArea } from './location-input';
 import { fmtWindow } from './time';
 
 export interface CustomerForPlanning {
@@ -178,6 +178,36 @@ export function isUnverifiedLowLocation(c: Pick<CustomerForPlanning, 'locationVe
 export const LOW_LOCATION_MESSAGE = "Saved location is not exact (low confidence). Drop the pin on the customer's exact location.";
 
 /**
+ * A saved point outside the delivery area that no dispatcher confirmed (the day card and the unserved
+ * reason). It says to drop the pin: the dialog never confirms such a point as it is (A5 review); a
+ * pin placed by hand that is still outside the area is then confirmed with "Confirm & save".
+ */
+export const OUTSIDE_AREA_LOCATION_MESSAGE = "Saved location is outside Oman/UAE and was never confirmed. Drop the pin on the customer's exact location.";
+
+/**
+ * Why the customer's saved point cannot be saved again as it is (ADD LOCATION opens on it, and Save
+ * without a hand pin sends it back unchanged, which confirms it), in plain words; null = it can.
+ * The dialog (to keep Save off, with this note) and PUT /api/customers/:id/location (to refuse it)
+ * use this one test, both with the company's delivery area:
+ *  - confirmed by a dispatcher: it can (outside the area the save still asks "Confirm & save");
+ *  - outside the area, latitude and longitude swapped included: drop the pin (the reason is named);
+ *  - not HIGH (MEDIUM, LOW or unknown): not exact, drop the pin.
+ * The decimals of the stored number are never counted (A5 review): "23.5850" is stored as 23.585,
+ * so a point read as exact would look coarse whenever it ends in 0 (about 1 in 5). Since audit PR A5
+ * only an exact reading or a pin placed by hand is stored HIGH.
+ */
+export function savedPointProblem(
+  c: { lat: number | null; lng: number | null; locationVerified?: boolean | null; geocodeConfidence?: string | null },
+  area: ServiceArea = DEFAULT_SERVICE_AREA,
+): string | null {
+  if (c.locationVerified === true) return null;
+  const cs = coordStatus(c.lat, c.lng, area);
+  if (cs === 'OUTSIDE_AREA') return coordStatus(c.lng, c.lat, area) === 'OK' ? SAVED_SWAPPED_MESSAGE : SAVED_OUTSIDE_AREA_MESSAGE;
+  if (cs !== 'OK' || c.geocodeConfidence !== 'HIGH') return SAVED_NOT_EXACT_MESSAGE;
+  return null;
+}
+
+/**
  * A customer with no usable location, whose orders are never put on a truck (owner's rule, audit PR
  * A5): no coordinates, 0,0 or out of range, outside the delivery area and never confirmed, or a LOW
  * reading never confirmed. The same test as the blocking location issues of `customerIssues`.
@@ -230,7 +260,7 @@ export function customerIssues(c: CustomerForPlanning, eff: EffectiveAttrs, area
   if (cs === 'MISSING') out.push({ code: 'LOCATION_REQUIRED', blocking: true, message: 'Location missing - add a Google Maps link, coordinates or a map pin.' });
   else if (cs === 'INVALID') out.push({ code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is not valid (0,0 or out of range). Set it again.' });
   else if (cs === 'OUTSIDE_AREA' && !c.locationVerified) {
-    out.push({ code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is outside Oman/UAE. Confirm or correct it on the map.' });
+    out.push({ code: 'INVALID_LOCATION', blocking: true, message: OUTSIDE_AREA_LOCATION_MESSAGE });
   } else if (isUnverifiedLowLocation(c)) {
     out.push({ code: 'INVALID_LOCATION', blocking: true, message: LOW_LOCATION_MESSAGE });
   } else if (!c.locationVerified) {

@@ -40,6 +40,8 @@ vi.mock('sonner', () => ({
 vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return null; } }));
 
 import { LocationDialog } from '@/app/t/[slug]/dispatch/location-dialog';
+import { DEFAULT_SERVICE_AREA } from '@/lib/dispatch/location-input';
+import { WHOLE_WORLD } from '@/lib/dispatch/customer-attrs';
 
 const A = { customerId: 'cust-A', code: 'A001', branchCode: null, name: 'Customer A (Seeb)', lat: null, lng: null };
 const B = { customerId: 'cust-B', code: 'B001', branchCode: null, name: 'Customer B (Barka)', lat: null, lng: null };
@@ -60,6 +62,8 @@ function setup() {
     open: false,
     customer: null,
     depot: { lat: 23.58, lng: 58.4 },
+    // The company's delivery area (the day screen and the customer page pass it): Oman + UAE.
+    serviceArea: DEFAULT_SERVICE_AREA,
     onSaved: saved,
     onOpenChange: (v: boolean) => host.render({ open: v }),
   });
@@ -466,7 +470,6 @@ describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
     ['a MEDIUM import', { locationVerified: false, geocodeConfidence: 'MEDIUM' }],
     ['a LOW reading', { locationVerified: false, geocodeConfidence: 'LOW' }],
     ['a point of unknown quality', { locationVerified: false, geocodeConfidence: null }],
-    ['labelled HIGH but with 2 decimals (stored before the rule)', { locationVerified: false, geocodeConfidence: 'HIGH', lat: 23.68, lng: 57.89 }],
   ])("the customer's saved pin is not saved again as it is when it is not exact (%s)", (_what, quality) => {
     const t = setup();
     const c = { ...B_PINNED, ...quality };
@@ -486,9 +489,39 @@ describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
   it.each([
     ['HIGH, not confirmed yet', { locationVerified: false, geocodeConfidence: 'HIGH' }],
     ['confirmed by a dispatcher', { locationVerified: true, geocodeConfidence: 'HIGH' }],
+    // "23.6780, 57.8850" was read as exact (4 decimals) and is stored as 23.678, 57.885.
+    // Before: the stored number was read again as text, 3 decimals, "not exact" (about 1 in 5 points).
+    ['HIGH, the stored numbers ending in 0 (23.6780, 57.8850)', { locationVerified: false, geocodeConfidence: 'HIGH', lat: 23.678, lng: 57.885 }],
   ])("control: an exact saved pin (%s) can be saved again as it is", (_what, quality) => {
     const t = setup();
-    t.openFor({ ...B_PINNED, ...quality });
+    const c = { ...B_PINNED, ...quality };
+    t.openFor(c);
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: c.lat, lng: c.lng, source: 'MAP_PIN' });
+  });
+
+  it.each([
+    ['outside the delivery area', 24.7136, 46.6753, "This saved location is outside the delivery area and was never confirmed. Drop the pin on the customer's exact location, then save."],
+    ['with latitude and longitude swapped', 58.4059, 23.5859, "This saved location has latitude and longitude swapped. Drop the pin on the customer's exact location, then save."],
+  ])('a saved HIGH pin %s, never confirmed: Save stays off with the reason, until the pin is placed by hand', (_what, lat, lng, reason) => {
+    const t = setup();
+    t.openFor({ ...B_PINNED, lat, lng });
+    // Before: the dialog judged it with no area (Save on, no note); the server then refused it as "not exact".
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe(reason);
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.5859, 58.4059);
+    expect(pinRequired(t)).toBe('');
+    expect(t.saveBtn().props.disabled).toBe(false);
+  });
+
+  it("the company's own area decides: with no area check (a company outside Oman/UAE) the same saved pin can be saved as it is", () => {
+    const t = setup();
+    t.host.render({ serviceArea: WHOLE_WORLD });
+    t.openFor({ ...B_PINNED, lat: 24.7136, lng: 46.6753 });
     expect(t.saveBtn().props.disabled).toBe(false);
     expect(pinRequired(t)).toBe('');
   });

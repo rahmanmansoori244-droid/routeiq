@@ -29,6 +29,9 @@ import {
   pinRequiredMessage,
   rereadSavedInput,
   samePoint,
+  SAVED_NOT_EXACT_MESSAGE,
+  SAVED_OUTSIDE_AREA_MESSAGE,
+  SAVED_SWAPPED_MESSAGE,
 } from '@/lib/dispatch/location-input';
 import {
   customerIssues,
@@ -36,6 +39,9 @@ import {
   isUnverifiedLowLocation,
   locationBlocksDelivery,
   LOW_LOCATION_MESSAGE,
+  OUTSIDE_AREA_LOCATION_MESSAGE,
+  savedPointProblem,
+  WHOLE_WORLD,
   type CustomerForPlanning,
 } from '@/lib/dispatch/customer-attrs';
 import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
@@ -119,6 +125,55 @@ describe('checkManualLocation: a save that is not a hand pin is read again (L2)'
       'Google returned a consent page instead of the location. Drop a pin instead.',
     );
     expect(rereadSavedInput('23.5859, 58.4059', undefined)).toMatchObject({ ok: true, needsPin: false });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// L1/L2: the customer's saved point, saved again as it is (the dialog opens on it)
+// ---------------------------------------------------------------------------------------------
+
+describe('savedPointProblem: when the saved point may be confirmed as it is (dialog and server share it)', () => {
+  const saved = (lat: number, lng: number, over: { locationVerified?: boolean; geocodeConfidence?: string | null } = {}) => ({
+    lat, lng, locationVerified: false, geocodeConfidence: 'HIGH' as string | null, ...over,
+  });
+
+  it.each([
+    ['4 decimals, the last one 0 (23.5850 is stored as 23.585)', saved(23.585, 58.4059)],
+    ['4 decimals, both ending in 0 (23.5800, 58.4000)', saved(23.58, 58.4)],
+    ['6 decimals ending in 0 (58.405900)', saved(23.585012, 58.4059)],
+    ['an exact 4-decimal point', saved(23.5851, 58.4059)],
+  ])('a HIGH point is exact whatever digits the stored number shows: %s', (_what, c) => {
+    // Before: the stored number was read again as text, "23.585" has 3 decimals: "not exact" (about 1 in 5 NMWC points).
+    expect(savedPointProblem(c, DEFAULT_SERVICE_AREA)).toBeNull();
+  });
+
+  it('a HIGH point outside the delivery area, never confirmed, needs the pin, and says why', () => {
+    expect(savedPointProblem(saved(24.7136, 46.6753), DEFAULT_SERVICE_AREA)).toBe(SAVED_OUTSIDE_AREA_MESSAGE);
+    expect(SAVED_OUTSIDE_AREA_MESSAGE).toBe("This saved location is outside the delivery area and was never confirmed. Drop the pin on the customer's exact location, then save.");
+    // Swapped latitude and longitude (a file with the columns the wrong way round).
+    expect(savedPointProblem(saved(58.4059, 23.5859), DEFAULT_SERVICE_AREA)).toBe(SAVED_SWAPPED_MESSAGE);
+    expect(SAVED_SWAPPED_MESSAGE).toBe("This saved location has latitude and longitude swapped. Drop the pin on the customer's exact location, then save.");
+    // A company with no area check (outside Oman/UAE): the same point is inside.
+    expect(savedPointProblem(saved(24.7136, 46.6753), WHOLE_WORLD)).toBeNull();
+  });
+
+  it.each([
+    ['MEDIUM', { geocodeConfidence: 'MEDIUM' }],
+    ['LOW', { geocodeConfidence: 'LOW' }],
+    ['of unknown quality', { geocodeConfidence: null }],
+  ])('a point that is not HIGH (%s) and never confirmed needs the pin', (_what, over) => {
+    expect(savedPointProblem(saved(23.5859, 58.4059, over), DEFAULT_SERVICE_AREA)).toBe(SAVED_NOT_EXACT_MESSAGE);
+  });
+
+  it('a point a dispatcher confirmed may be confirmed again (outside the area, the save still asks "Confirm & save")', () => {
+    expect(savedPointProblem(saved(24.7136, 46.6753, { locationVerified: true, geocodeConfidence: 'LOW' }), DEFAULT_SERVICE_AREA)).toBeNull();
+    expect(savedPointProblem(saved(23.5859, 58.4059, { locationVerified: true, geocodeConfidence: 'MEDIUM' }), DEFAULT_SERVICE_AREA)).toBeNull();
+  });
+
+  it('the day card of a point outside the area never confirmed says to drop the pin (it said "Confirm", which the dialog refuses)', () => {
+    const c = C({ lat: 24.7136, lng: 46.6753 });
+    expect(issuesOf(c).find((i) => i.blocking)).toEqual({ code: 'INVALID_LOCATION', blocking: true, message: OUTSIDE_AREA_LOCATION_MESSAGE });
+    expect(OUTSIDE_AREA_LOCATION_MESSAGE).toBe("Saved location is outside Oman/UAE and was never confirmed. Drop the pin on the customer's exact location.");
   });
 });
 

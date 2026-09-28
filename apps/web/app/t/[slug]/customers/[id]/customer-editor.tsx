@@ -6,6 +6,7 @@ import { useRouter } from 'next/navigation';
 import { MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LocationDialog } from '../../dispatch/location-dialog';
+import type { ServiceArea } from '@/lib/dispatch/location-input';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -22,6 +23,8 @@ interface Props {
   };
   /** Where the map looks when the customer has no pin (its depot, else Muscat). */
   center: { lat: number; lng: number };
+  /** The company's delivery area: the dialog judges the saved pin with it, as the server does. */
+  serviceArea: ServiceArea;
   canEdit: boolean;
 }
 
@@ -32,7 +35,7 @@ interface Props {
  * PUT /api/customers/:id/location. The page used to save a map click or two typed numbers through
  * PATCH /api/customers/:id as a verified HIGH location, with no check at all.
  */
-export function CustomerEditor({ customer, center, canEdit }: Props) {
+export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   // The customer as it was when the dialog was opened: one object for the whole dialog (a new one on
@@ -71,7 +74,7 @@ export function CustomerEditor({ customer, center, canEdit }: Props) {
           </Button>
         ) : null}
       </div>
-      <LocationDialog open={open} onOpenChange={setOpen} customer={target} depot={center} onSaved={() => router.refresh()} />
+      <LocationDialog open={open} onOpenChange={setOpen} customer={target} depot={center} serviceArea={serviceArea} onSaved={() => router.refresh()} />
     </div>
   );
 }

@@ -18,6 +18,7 @@ import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import type { ServiceArea } from '@/lib/dispatch/location-input';
 
 interface Issue {
   code: string;
@@ -83,6 +84,8 @@ interface Day {
   carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
   trucks: { active: number; capacityCases: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
+  /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
+  serviceArea: ServiceArea;
 }
 interface Validation {
   totalRows: number;
@@ -604,7 +607,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         </Step>
       ) : null}
 
-      <LocationDialog open={locOpen} onOpenChange={setLocOpen} customer={locFor} depot={{ lat: day.depot.lat, lng: day.depot.lng }} onSaved={afterCustomerSaved} />
+      <LocationDialog
+        open={locOpen}
+        onOpenChange={setLocOpen}
+        customer={locFor}
+        depot={{ lat: day.depot.lat, lng: day.depot.lng }}
+        serviceArea={day.serviceArea}
+        onSaved={afterCustomerSaved}
+      />
       <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={afterCustomerSaved} />
     </div>
   );

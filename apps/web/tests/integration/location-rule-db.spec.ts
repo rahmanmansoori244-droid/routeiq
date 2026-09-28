@@ -12,7 +12,8 @@
  *     and the customer's saved MEDIUM point sent back unchanged; it reads a short link from the
  *     address the Read found; the customer page's old PATCH path and POST /api/customers refuse.
  *  2. L3: a customer import stores no location that needs a pin; the new customer shows LOCATION
- *     REQUIRED on the day screen.
+ *     REQUIRED on the day screen; an existing customer keeps its saved point when the file points at
+ *     the same place, else that point is marked LOW and blocks the day until the pin is placed.
  *  3. L4: a LOW location nobody confirmed blocks the day and is never sent to the optimizer; with
  *     "optimize anyway" its order is left unserved with a reason that says to drop the pin.
  *  4. L5: a legacy run (previous planner) is not dispatched while one of its customers has no
@@ -70,7 +71,7 @@ import { getOrCreatePlan } from '@/lib/dispatch/plan-service';
 import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { getDayOverview } from '@/lib/dispatch/day-overview';
 import { LOW_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
-import { PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE } from '@/lib/dispatch/location-input';
+import { PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE } from '@/lib/dispatch/location-input';
 import { PUT as locationPut } from '@/app/api/customers/[id]/location/route';
 import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
@@ -179,6 +180,19 @@ describe('1. saving a location (L1, L2)', () => {
     expect((await prisma.customer.findUniqueOrThrow({ where: { id: c.id } })).locationVerified).toBe(false);
   });
 
+  it("the saved point is judged with the company's area, never by the digits of the stored number", async () => {
+    // "23.5850, 58.4000" read as exact and stored as 23.585, 58.4: confirmed as it is.
+    const zero = await cust('P6', { lat: 23.585, lng: 58.4, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    expect((await put(zero.id, { lat: 23.585, lng: 58.4, source: 'MAP_PIN' })).status).toBe(200);
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: zero.id } })).toMatchObject({ locationVerified: true, geocodeConfidence: 'HIGH' });
+    // A HIGH import outside Oman/UAE, never confirmed: refused with that reason, also with "confirm".
+    const away = await cust('P7', { lat: 24.7136, lng: 46.6753, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    const r = await put(away.id, { lat: 24.7136, lng: 46.6753, source: 'MAP_PIN', confirmOutsideArea: true });
+    expect(r.status).toBe(422);
+    expect(r.body.error).toMatchObject({ code: 'PIN_REQUIRED', message: SAVED_OUTSIDE_AREA_MESSAGE });
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: away.id } })).locationVerified).toBe(false);
+  });
+
   it('PATCH /api/customers/:id refuses coordinates; POST /api/customers refuses a pair that needs a pin', async () => {
     const c = await cust('P4', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'MEDIUM' });
     const p = await answer(await customerPatch(new Request(`http://localhost/api/customers/${c.id}`, json('PATCH', { lat: 58.4059, lng: 23.5859 })), { params: { id: c.id } }));
@@ -194,24 +208,43 @@ describe('1. saving a location (L1, L2)', () => {
 });
 
 describe('2. the customer import (L3)', () => {
-  it('a location that needs a pin is not stored: the new customer shows LOCATION REQUIRED; an existing one keeps its own', async () => {
-    const kept = await cust('I2', { lat: 23.6111, lng: 58.4111, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+  it('a location that needs a pin is not stored: the new customer shows LOCATION REQUIRED; an existing one keeps its own only where the file agrees', async () => {
+    // I2: the file has it (swapped) about 3 km from its saved point; I4: 3 decimals around its saved point.
+    const moved = await cust('I2', { lat: 23.6111, lng: 58.4111, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    const same = await cust('I4', { lat: 23.5901, lng: 58.4101, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
     const fd = new FormData();
-    fd.set('file', new File(['code,name,priority,lat,lng\nI1,Import one,2,23.58,58.40\nI2,Import two,3,58.4059,23.5859\nI3,Import three,3,23.5901,58.4101\n'], 'customers.csv', { type: 'text/csv' }));
+    fd.set(
+      'file',
+      new File(
+        ['code,name,priority,lat,lng\nI1,Import one,2,23.58,58.40\nI2,Import two,3,58.4059,23.5859\nI3,Import three,3,23.5901,58.4101\nI4,Import four,3,23.590,58.410\n'],
+        'customers.csv',
+        { type: 'text/csv' },
+      ),
+    );
     const res = await answer(await importCustomers(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd })));
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ errorRows: 0, upserted: 3 });
-    expect(res.body.data.locationsNotSaved.map((l: any) => [l.code, l.kept])).toEqual([['I1', null], ['I2', 'SAVED_LOCATION']]);
+    expect(res.body.data).toMatchObject({ errorRows: 0, upserted: 4 });
+    expect(res.body.data.locationsNotSaved.map((l: any) => [l.code, l.kept, l.reason])).toEqual([
+      ['I1', null, 'Fewer than 4 decimals.'],
+      ['I2', 'SAVED_LOCATION_NEEDS_PIN', 'Latitude and longitude look swapped. The file points about 2.9 km from the saved location.'],
+      ['I4', 'SAVED_LOCATION', 'Fewer than 4 decimals.'],
+    ]);
     const i1 = await prisma.customer.findFirstOrThrow({ where: { tenantId, code: 'I1' } });
     expect(i1).toMatchObject({ lat: null, lng: null, geocodeConfidence: 'MISSING', locationSource: null, priority: 2 });
-    expect(await prisma.customer.findUniqueOrThrow({ where: { id: kept.id } })).toMatchObject({ lat: 23.6111, lng: 58.4111, name: 'Import two' });
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: moved.id } })).toMatchObject({ lat: 23.6111, lng: 58.4111, name: 'Import two', geocodeConfidence: 'LOW', locationVerified: false });
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: same.id } })).toMatchObject({ lat: 23.5901, lng: 58.4101, geocodeConfidence: 'HIGH' });
     expect(await prisma.customer.findFirstOrThrow({ where: { tenantId, code: 'I3' } })).toMatchObject({ lat: 23.5901, lng: 58.4101, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
 
     const day = isoPlus(6);
     await orderFor(i1.id, day, 'SO-I1');
-    const card = (await getDayOverview(tenantId, { date: day, depotId })).customers.find((c) => c.customerId === i1.id)!;
-    expect(card.blocking).toBe(true);
-    expect(card.issues.find((i) => i.blocking)?.code).toBe('LOCATION_REQUIRED');
+    await orderFor(moved.id, day, 'SO-I2');
+    await orderFor(same.id, day, 'SO-I4');
+    const cards = (await getDayOverview(tenantId, { date: day, depotId })).customers;
+    const card = (id: string) => cards.find((c) => c.customerId === id)!;
+    expect(card(i1.id).blocking).toBe(true);
+    expect(card(i1.id).issues.find((i) => i.blocking)?.code).toBe('LOCATION_REQUIRED');
+    expect(card(moved.id).issues.find((i) => i.blocking)).toEqual({ code: 'INVALID_LOCATION', blocking: true, message: LOW_LOCATION_MESSAGE });
+    expect(card(same.id).blocking).toBe(false);
   });
 });
 

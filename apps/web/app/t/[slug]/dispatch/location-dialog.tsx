@@ -10,8 +10,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from './client-api';
 import { createLocationRequests, type LocationRequests } from './location-requests';
-import { parseLocationInput } from '@/lib/dispatch/location-input';
-import { WHOLE_WORLD } from '@/lib/dispatch/customer-attrs';
+import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -27,22 +27,8 @@ interface ParseResult {
   resolvedUrl?: string;
 }
 
-/**
- * The customer's saved point can be saved again as it is only when it is exact: confirmed by a
- * dispatcher, or a HIGH reading that still reads as exact (a point stored before the owner's rule
- * may be labelled HIGH with fewer than 4 decimals). The same test as the server's, which also
- * checks the company's delivery area (PUT /api/customers/:id/location).
- */
-export function savedPointIsExact(c: { lat: number | null; lng: number | null; locationVerified?: boolean; geocodeConfidence?: string | null }): boolean {
-  if (c.locationVerified === true) return true;
-  if (c.geocodeConfidence !== 'HIGH' || c.lat === null || c.lng === null) return false;
-  const p = parseLocationInput(`${c.lat}, ${c.lng}`, WHOLE_WORLD);
-  return p.ok && !p.needsPin;
-}
-
 export const PIN_REQUIRED_TEXT = "This reading is not exact. Drop the pin on the customer's exact location, then save.";
 export const UNREAD_PIN_TEXT = "This could not be read. Drop the pin on the customer's exact location, then save.";
-export const SAVED_NOT_EXACT_TEXT = "This saved location is not exact. Drop the pin on the customer's exact location, then save.";
 
 interface Props {
   open: boolean;
@@ -59,6 +45,11 @@ interface Props {
     geocodeConfidence?: string | null;
   } | null;
   depot: { lat: number; lng: number };
+  /**
+   * The company's delivery area (Settings; Oman + UAE by default), as the server checks it: a saved
+   * pin outside it that no dispatcher confirmed is not saved again as it is (A5 review).
+   */
+  serviceArea: ServiceArea;
   onSaved: () => void;
 }
 
@@ -79,10 +70,12 @@ interface Props {
  * reading that is not exact (`needsPin`: LOW, and the MEDIUM ones - map centre, fewer than 4
  * decimals, degrees and minutes only, swapped, outside the area) or that could not be read is never
  * saved as read: Save stays off until the dispatcher drops or drags the pin by hand. The customer's
- * saved pin, shown when the dialog opens, can be saved again as it is only when it is exact
- * (verified, or HIGH). The server checks all of this again (PUT /api/customers/:id/location).
+ * saved pin, shown when the dialog opens, can be saved again as it is only when it is exact:
+ * verified, or HIGH and inside the company's delivery area (`savedPointProblem`, the server's own
+ * test, with the reason as the note: not exact, outside the area, or latitude and longitude swapped).
+ * The server checks all of this again (PUT /api/customers/:id/location).
  */
-export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }: Props) {
+export function LocationDialog({ open, onOpenChange, customer, depot, serviceArea, onSaved }: Props) {
   const [input, setInput] = useState('');
   const [parse, setParse] = useState<ParseResult | null>(null);
   // The text the point on screen was read from: saved as the location's input, never other text typed since.
@@ -166,7 +159,9 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
   const needsConfirmation = !!parse && (parse.needsPin || !parse.ok);
   // Nothing read and no hand pin: Save would store the customer's saved pin as it is.
   const savedAsIs = !!pin && !pinMoved && readFrom === null;
-  const savedNotExact = savedAsIs && !!customer && !savedPointIsExact(customer);
+  // Why that saved pin cannot be saved as it is (null = it can): the server's test, with the company's area.
+  const savedProblem = savedAsIs && customer ? savedPointProblem(customer, serviceArea) : null;
+  const savedNotExact = savedProblem !== null;
   const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved) && !savedNotExact;
   // What to do, in the owner's words (not while the text on screen waits for a Read: that note says it).
   const pinNote = pinMoved || textUnread || reading
@@ -175,9 +170,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
       ? parse?.ok
         ? PIN_REQUIRED_TEXT
         : UNREAD_PIN_TEXT
-      : savedNotExact
-        ? SAVED_NOT_EXACT_TEXT
-        : null;
+      : savedProblem;
 
   async function save() {
     // The same rule as the button (a click that reaches a disabled button saves nothing either).

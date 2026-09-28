@@ -5,17 +5,21 @@
  * It creates the database, applies every migration up to 20260930093000_master_data_no_orphans
  * with `prisma migrate deploy` (the command production runs), inserts orders and order files
  * without a depot for every backfill step, then applies the new migration the same way while
- * another connection is reading "Order" (the migration's lock loop must wait for it, not fail).
+ * another connection is still writing an order and an order file without a depot (an app request
+ * that started before the deploy and commits after the migration started). The migration's lock
+ * step must wait for that write and then fill it in: without the lock, its backfill cannot see the
+ * row, and SET NOT NULL fails on it (P3018, then P3009 on every later deploy).
  * It checks every filled-in depot, the history-only depots, the audit rows and NOT NULL, and
  * that running the migration's SQL a second time changes nothing.
  *
  * Skipped unless MIGRATION_TEST_DB_ADMIN_URL is set: a URL of a maintenance database (for example
  * .../postgres) whose user may create databases. The throwaway database is
- * MIGRATION_TEST_DB_NAME (default routeiq_migtest; it must end in _migtest). It is dropped first
- * if it exists, and dropped again at the end. From apps/web:
+ * MIGRATION_TEST_DB_NAME (default routeiq_a5_migtest; it must start with routeiq_a5_ and end in
+ * migtest, see ./db-name.ts). It is dropped first if it exists, and dropped again at the end. From
+ * apps/web:
  *
  *   MIGRATION_TEST_DB_ADMIN_URL=postgresql://USER:PASSWORD@localhost:5432/postgres \
- *   MIGRATION_TEST_DB_NAME=routeiq_migtest pnpm exec vitest run tests/migrations
+ *   pnpm exec vitest run tests/migrations
  */
 import { spawn, spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -23,9 +27,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { DEFAULT_MIGRATION_TEST_DB_NAME, migrationTestDbName } from './db-name';
 
 const ADMIN_URL = process.env.MIGRATION_TEST_DB_ADMIN_URL ?? '';
-const DB_NAME = process.env.MIGRATION_TEST_DB_NAME ?? 'routeiq_migtest';
+// Checked in beforeAll (migrationTestDbName), before anything is dropped.
+const DB_NAME = process.env.MIGRATION_TEST_DB_NAME ?? DEFAULT_MIGRATION_TEST_DB_NAME;
 const NEW = '20260930120000_orders_always_have_depot';
 const LAST_BEFORE = '20260930093000_master_data_no_orphans';
 const WEB = path.join(__dirname, '../..');
@@ -216,7 +222,7 @@ async function seed() {
 
 describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
   beforeAll(async () => {
-    if (!/^[a-z0-9_]+_migtest$/.test(DB_NAME)) throw new Error(`MIGRATION_TEST_DB_NAME must end in _migtest (got ${DB_NAME}): the test drops it.`);
+    migrationTestDbName(process.env.MIGRATION_TEST_DB_NAME);
     admin = new PrismaClient({ datasourceUrl: ADMIN_URL });
     await admin.$executeRawUnsafe(`DROP DATABASE IF EXISTS "${DB_NAME}" WITH (FORCE)`);
     await admin.$executeRawUnsafe(`CREATE DATABASE "${DB_NAME}"`);
@@ -240,15 +246,24 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     db = new PrismaClient({ datasourceUrl: dbUrl(DB_NAME) });
     await seed();
 
-    // The new migration, while another connection has read "Order" (an app request): that
-    // connection keeps its lock until the migration is seen running, then 1.5 s longer, so the
-    // migration's first tries cannot get its locks and must wait for them instead of failing.
+    // The new migration, while another connection (an app request that started before the deploy)
+    // has read "Order" and written an order file and an order without a depot, not yet committed.
+    // It keeps its locks until the migration is seen running, then 1.5 s longer, and commits: the
+    // migration's lock step must wait for it instead of failing, and only then fill in the depots,
+    // so it sees these rows too. Without the lock step the backfill runs past the uncommitted rows
+    // and SET NOT NULL then waits for the commit and fails on them.
     cpSync(path.join(MIGRATIONS, NEW), path.join(tmp, 'migrations', NEW), { recursive: true });
     let reading!: () => void;
     const readDone = new Promise<void>((r) => (reading = r));
     const holder = db.$transaction(
       async (tx) => {
         await tx.$queryRawUnsafe('SELECT count(*) FROM "Order"');
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "UploadBatch" ("id", "tenantId", "fileName", "fileType", "uploadedById", "depotId", "status") VALUES ('B_INFLIGHT', 'TB', 'late.csv', 'csv', 'U', NULL, 'CONFIRMED')`,
+        );
+        await tx.$executeRawUnsafe(
+          `INSERT INTO "Order" ("id", "tenantId", "customerId", "deliveryDate", "depotId", "uploadBatchId", "totalCases") VALUES ('O_INFLIGHT', 'TB', 'C_TB', '${DAY}'::date, NULL, 'B_INFLIGHT', 5)`,
+        );
         reading();
         const t0 = Date.now();
         while (Date.now() - t0 < 60_000) {
@@ -288,15 +303,21 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     }
   }, 120_000);
 
-  it('applies with prisma migrate deploy while the app reads orders (the lock loop waits, never fails)', () => {
+  it('applies with prisma migrate deploy while a request is still writing an order without a depot (the lock step waits, then fills it in)', async () => {
     expect(firstDeploy.status).toBe(0);
-    // The migration was running while the reader still held "Order" (and 1.5 s more): it waited.
+    // The migration was running while the writer still held "Order" (and 1.5 s more): it waited.
     expect(migrationSeenWhileHeld).toBe(true);
     expect(heldMs).toBeGreaterThanOrEqual(1400);
-    // It could only finish after the reader let go of "Order".
+    // It could only finish after the writer committed.
     expect(deployedAt).toBeGreaterThan(releasedAt);
     expect(secondDeploy.out).toContain(NEW);
+    // Without the lock step: P3018 (23502, "depotId" contains null values), and P3009 on every later deploy.
     expect(secondDeploy.status, secondDeploy.out).toBe(0);
+    // The rows written while the migration started got a depot too (step d: TB's only active depot).
+    expect(await q(`SELECT "id", "depotId" FROM "Order" WHERE "id" = 'O_INFLIGHT' UNION ALL SELECT "id", "depotId" FROM "UploadBatch" WHERE "id" = 'B_INFLIGHT' ORDER BY 1`)).toEqual([
+      { id: 'B_INFLIGHT', depotId: 'TB_D1' },
+      { id: 'O_INFLIGHT', depotId: 'TB_D1' },
+    ]);
   });
 
   it('every order has the depot its evidence shows (steps a to e), and rows that had one keep it', async () => {
@@ -323,6 +344,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
       O_XT2: history.TA, // a stop on another company's plan: not evidence
       O_TB: 'TB_D1', // d: the only active depot (one inactive besides)
       O_TB2: 'TB_D1',
+      O_INFLIGHT: 'TB_D1', // d: written while the migration started (committed after it took its locks)
       O_TC: 'TC_D0', // d: the only depot, inactive
       O_TD: history.TD, // e: no depot at all
       O_TE: history.TE, // e: two inactive depots
@@ -343,6 +365,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
       B_V: history.TA, // still VALIDATED: its confirm is refused (history-only depot)
       B_XT: 'TB_D1', // had one (another company's): never changed by this migration
       B_TB: 'TB_D1', // d
+      B_INFLIGHT: 'TB_D1', // d: written while the migration started
       B_TC: 'TC_D0', // d
       B_TD: history.TD, // e
       B_TF: 'TF_D1',
@@ -388,7 +411,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
         historyDepotCode: 'NO-DEPOT-2',
         historyDepotCreated: true,
       },
-      TB: { ...zero, by, ordersOnlyDepot: 2, filesOnlyDepot: 1 },
+      TB: { ...zero, by, ordersOnlyDepot: 3, filesOnlyDepot: 2 }, // O_TB, O_TB2, O_INFLIGHT; B_TB, B_INFLIGHT
       TC: { ...zero, by, ordersOnlyDepot: 1, filesOnlyDepot: 1 },
       TD: { ...zero, by, ordersHistoryDepot: 1, filesHistoryDepot: 1, historyDepotCode: 'NO-DEPOT', historyDepotCreated: true },
       TE: { ...zero, by, ordersHistoryDepot: 1, historyDepotCode: 'NO-DEPOT', historyDepotCreated: true },

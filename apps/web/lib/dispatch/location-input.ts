@@ -55,6 +55,9 @@ function decimals(v: string): number {
   return i < 0 ? 0 : v.length - i - 1;
 }
 
+/** How many decimals a written number has ("23.5850" has 4): its precision as written. */
+export const decimalPlaces = (text: string): number => decimals(text.trim());
+
 /** How precise a degrees-minutes-seconds point is: whole degrees (~110 km), whole minutes (~1.8 km) or seconds. */
 export type DmsPrecision = 'DEGREES' | 'MINUTES' | 'SECONDS';
 
@@ -306,6 +309,10 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
 export const PIN_REQUIRED_MESSAGE = "This reading is not exact. Drop the pin on the customer's exact location, then save.";
 /** The customer's saved point shown on the map, saved again without a hand pin, when it is not exact. */
 export const SAVED_NOT_EXACT_MESSAGE = "This saved location is not exact. Drop the pin on the customer's exact location, then save.";
+/** The same, for a saved point outside the company's delivery area that no dispatcher confirmed. */
+export const SAVED_OUTSIDE_AREA_MESSAGE = "This saved location is outside the delivery area and was never confirmed. Drop the pin on the customer's exact location, then save.";
+/** The same, for a saved point whose latitude and longitude are the wrong way round. */
+export const SAVED_SWAPPED_MESSAGE = "This saved location has latitude and longitude swapped. Drop the pin on the customer's exact location, then save.";
 export const LOCATION_MISMATCH_MESSAGE = 'The point sent is not where this text points. Press Read again, or drop the pin by hand, then save.';
 
 /** Two points the same to the 6 decimals the parser and the pin map round to. */

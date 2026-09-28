@@ -49,6 +49,7 @@ beforeEach(() => {
 });
 
 const DEPOT = { id: 'd1', code: 'MCT', name: 'Muscat', lat: 23.58, lng: 58.4 };
+const AREA = { minLat: 20, maxLat: 26, minLng: 55, maxLng: 60 };
 const customer = {
   customerId: 'c1', code: 'C001', branchCode: 'B1', name: 'Lulu Hypermarket Bausher', customerType: 'HYPERMARKET', priority: 1, prioritySource: 'CUSTOMER',
   serviceMin: 20, serviceSource: 'CUSTOMER', hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, window: 'Any time',
@@ -60,6 +61,8 @@ const day = (loadStatus: 'PLANNED' | 'LOCKED') => ({
   outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 },
   plan: { id: 'run1', version: 1, status: 'READY', chosen: true, job: null, loadsByStatus: { [loadStatus]: 1 } },
   pending: { count: 0, cases: 0, late: 0 }, openOrders: loadStatus === 'PLANNED' ? 1 : 0, trucks: { active: 2, capacityCases: 1200 }, batches: [],
+  // The company's delivery area (getDayOverview sends it): here a box of its own, not the default.
+  serviceArea: AREA,
 });
 
 async function mountDay(loadStatus: 'PLANNED' | 'LOCKED') {
@@ -89,6 +92,13 @@ describe('F13: a customer saved on the day screen reloads the plan below in plac
       });
     }
   }
+});
+
+describe("ADD LOCATION on the day screen judges the saved pin with the company's area (A5 review)", () => {
+  it('the dialog gets the area the day was read with (before: none, so a saved pin outside it looked exact)', async () => {
+    const t = await mountDay('PLANNED');
+    expect(t.dialog('LocationDialog').props.serviceArea).toEqual(AREA);
+  });
 });
 
 function whatsappOf(tree: unknown, truckCode: string, loadNo: number): string {

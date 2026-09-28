@@ -8,12 +8,17 @@
  *
  * Audit PR A5 (owner's location rule, L3): a pair that is not exact (fewer than 4 decimals, swapped,
  * outside the delivery area, 0,0) is never stored as a usable location. A new customer gets none, an
- * existing one keeps what it has, and the row is listed in `locationsNotSaved` with the reason; the
- * rest of the row and of the file is imported.
+ * existing one keeps what it has when the file's pair points at the same place (within the file's
+ * own precision), else its saved point is marked LOW (not used until the pin is placed by hand), and
+ * the row is listed in `locationsNotSaved` with the reason in the import's words; the rest of the row
+ * and of the file is imported. An Excel number cell counts the decimals it shows (23.5850 in a cell
+ * formatted with 4 decimals is 4 decimals, not the 23.585 the number holds).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as XLSX from 'xlsx';
+import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
 
-interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean }
+interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean; geocodeConfidence?: string | null }
 const S = vi.hoisted(() => ({
   rows: [] as Row[],
   /** Runs after the import has read the customers, before it writes (a dispatcher verifying a pin). */
@@ -30,6 +35,7 @@ vi.mock('@/lib/dispatch/service-area', async () => {
   return { tenantServiceArea: async () => DEFAULT_SERVICE_AREA };
 });
 vi.mock('@/lib/tenant', () => ({
+  getCurrentTenant: async () => ({ user: { id: 'u1', role: 'PLANNER' } }),
   tenantDb: () => ({
     region: { findMany: async () => [] },
     customer: {
@@ -60,12 +66,26 @@ vi.mock('@/lib/tenant', () => ({
 }));
 
 import { POST } from '@/app/api/customers/import/route';
+import CustomerImportPage from '@/app/t/[slug]/customers/import/page';
+import { locationNotSavedLine } from '@/app/t/[slug]/customers/import/import-form';
+import { elements, typeName } from './hook-host';
 
-async function importCsv(csv: string) {
+async function importFile(file: File, dryRun = false) {
   const fd = new FormData();
-  fd.set('file', new File([csv], 'customers.csv', { type: 'text/csv' }));
+  fd.set('file', file);
+  if (dryRun) fd.set('dryRun', '1');
   const res = await POST(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd }));
   return { status: res.status, body: (await res.json()) as { data: any } };
+}
+const importCsv = (csv: string, dryRun = false) => importFile(new File([csv], 'customers.csv', { type: 'text/csv' }), dryRun);
+/** An Excel file whose lat / lng are number cells; `formats` gives a cell its number format (e.g. D2: '0.0000'). */
+function xlsx(rows: unknown[][], formats: Record<string, string> = {}): File {
+  const ws = XLSX.utils.aoa_to_sheet([['code', 'name', 'priority', 'lat', 'lng'], ...rows]);
+  for (const [cell, z] of Object.entries(formats)) ws[cell]!.z = z;
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+  const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+  return new File([buf], 'customers.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
 const cust = (id: string, over: Partial<Row> = {}): Row => ({
   id, code: id, branchKey: '__MAIN__', active: true, lat: 23.5, lng: 58.3, locationVerified: false, avgServiceTimeMin: 10, serviceTimeConfirmed: false, ...over,
@@ -108,11 +128,15 @@ describe('customer import and verified locations (audit F05)', () => {
 });
 
 describe("owner's location rule (audit PR A5): a location that is not exact is never saved", () => {
+  // The reason in the import's own words: what is wrong with the pair, nothing about a pin or a map
+  // this screen does not have. Before: the Read dialog's warnings ("...they were swapped back. Please
+  // confirm on the map.", "Confirm the pin.") although nothing was swapped back or saved.
   const NOT_EXACT = [
-    ['fewer than 4 decimals', '23.58,58.40', /fewer than 4 decimals/],
-    ['swapped', '58.4059,23.5859', /swapped/],
-    ['outside the delivery area', '19.0760,72.8777', /outside the delivery area/],
-    ['0,0', '0,0', /0,0 is not a real delivery location/],
+    ['fewer than 4 decimals', '23.58,58.40', 'Fewer than 4 decimals.'],
+    ['swapped', '58.4059,23.5859', 'Latitude and longitude look swapped.'],
+    ['outside the delivery area', '19.0760,72.8777', 'Outside the delivery area.'],
+    ['0,0', '0,0', '0,0 is not a location.'],
+    ['swapped, with fewer than 4 decimals', '58.40,23.58', 'Latitude and longitude look swapped. Fewer than 4 decimals.'],
   ] as const;
 
   it.each(NOT_EXACT)('a new customer (%s): created without coordinates (LOCATION REQUIRED), listed with the reason, the row imported', async (_what, pair, reason) => {
@@ -125,27 +149,92 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     expect(n1.locationSource).toBeUndefined();
     // The exact pair is stored as read: HIGH, from the import, not verified.
     expect(S.creates.find((c) => c.code === 'N2')).toMatchObject({ lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
-    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'N1', branchCode: null, reason: expect.stringMatching(reason), kept: null }]);
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'N1', branchCode: null, reason, kept: null }]);
     expect(r.body.data.warnings.join(' ')).toMatch(/1 location\(s\) in the file are not exact and were not saved\. Set them on the map/);
   });
 
-  it('an existing customer keeps the location it has; its other fields are updated', async () => {
-    const r = await importCsv('code,name,priority,lat,lng\nK1,Renamed,1,23.7,58.5\n');
+  it('an existing customer keeps the location it has when the file points at the same place; its other fields are updated', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH' });
+    // 3 decimals: 23.586 stands for 23.5855 to 23.5865, and the saved 23.5859 is in it.
+    const r = await importCsv('code,name,priority,lat,lng\nK1,Renamed,1,23.586,58.406\n');
     expect(r.status).toBe(200);
     expect(S.updateManys).toEqual([]);
     expect(S.updates[0]!.data).toMatchObject({ name: 'Renamed', priority: 1 });
-    expect(S.rows[0]).toMatchObject({ lat: 23.5, lng: 58.3, locationVerified: false });
-    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'K1', branchCode: null, reason: expect.stringMatching(/fewer than 4 decimals/), kept: 'SAVED_LOCATION' }]);
+    expect(S.rows[0]).toMatchObject({ lat: 23.5859, lng: 58.4059, locationVerified: false, geocodeConfidence: 'HIGH' });
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals.', kept: 'SAVED_LOCATION' }]);
+  });
+
+  it.each([
+    ['the same point with a trailing zero dropped (23.5850 read as 23.585)', '23.585,58.4059', 23.585, 58.4059],
+    ['the same point, latitude and longitude swapped', '58.4059,23.5859', 23.5859, 58.4059],
+    ['2 decimals around the saved point', '23.59,58.41', 23.5859, 58.4059],
+  ])('the file agrees with the saved point: kept and still used (%s)', async (_what, pair, lat, lng) => {
+    S.rows[0] = cust('K1', { lat, lng, geocodeConfidence: 'HIGH' });
+    const r = await importCsv(`code,name,priority,lat,lng\nK1,K1,3,${pair}\n`);
+    expect(r.body.data.locationsNotSaved[0]).toMatchObject({ code: 'K1', kept: 'SAVED_LOCATION' });
+    expect(S.updateManys).toEqual([]);
+    expect(locationBlocksDelivery(S.rows[0]!)).toBe(false);
+  });
+
+  it('the file points somewhere else: the saved point is kept on the map but marked LOW, so it is not used until the pin is placed by hand', async () => {
+    // The customer moved: the new master file has it about 12 km away, with 2 decimals.
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH' });
+    const r = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.61,58.52\n');
+    expect(r.status).toBe(200);
+    // Before: kept as it was, HIGH, and planned at the old point (LOCATION_UNVERIFIED does not block).
+    expect(r.body.data.locationsNotSaved).toEqual([
+      { row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals. The file points about 12 km from the saved location.', kept: 'SAVED_LOCATION_NEEDS_PIN' },
+    ]);
+    // Only while it is still not verified and still at the point that was compared (F05).
+    expect(S.updateManys).toEqual([{ where: { id: 'K1', locationVerified: false, lat: 23.5859, lng: 58.4059 }, data: { geocodeConfidence: 'LOW' } }]);
+    expect(S.rows[0]).toMatchObject({ lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationVerified: false });
+    expect(locationBlocksDelivery(S.rows[0]!)).toBe(true);
+    expect(r.body.data.warnings.join(' ')).toMatch(/1 saved location\(s\) are not used until the pin is placed by hand: the file points somewhere else\./);
+  });
+
+  it('the file points somewhere else, and the pair is outside the area: marked LOW too; the dry run lists it and writes nothing', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH' });
+    const dry = await importCsv('code,name,priority,lat,lng\nK1,K1,3,24.7136,46.6753\n', true);
+    expect(dry.body.data).toMatchObject({
+      dryRun: true,
+      locationsNotSaved: [{ code: 'K1', kept: 'SAVED_LOCATION_NEEDS_PIN', reason: expect.stringMatching(/^Outside the delivery area\. The file points about [0-9,]+ km from the saved location\.$/) }],
+    });
+    expect(S.updateManys).toEqual([]);
+    expect(S.rows[0]!.geocodeConfidence).toBe('HIGH');
+  });
+
+  it('a location a dispatcher confirmed is never changed, whatever the file says (F05)', async () => {
+    const r = await importCsv('code,name,priority,lat,lng\nK3,K3,3,23.61,58.52\n');
+    expect(r.body.data.locationsNotSaved[0]).toMatchObject({ code: 'K3', kept: 'SAVED_LOCATION' });
+    expect(S.updateManys).toEqual([]);
+    expect(S.rows[2]).toMatchObject({ lat: 23.9, lng: 58.9, locationVerified: true });
   });
 
   it('the check (Validate only) lists them too, and saves nothing', async () => {
-    const fd = new FormData();
-    fd.set('file', new File(['code,name,priority,lat,lng\nN1,New,3,23.58,58.40\n'], 'customers.csv', { type: 'text/csv' }));
-    fd.set('dryRun', '1');
-    const res = await POST(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd }));
-    const body = (await res.json()) as { data: any };
+    const { body } = await importCsv('code,name,priority,lat,lng\nN1,New,3,23.58,58.40\n', true);
     expect(body.data).toMatchObject({ dryRun: true, errorRows: 0, locationsNotSaved: [{ row: 2, code: 'N1', kept: null }] });
     expect(S.creates).toEqual([]);
+  });
+
+  it('Excel: a number cell counts the decimals it shows, so 23.5850 formatted with 4 decimals is exact', async () => {
+    const r = await importFile(
+      xlsx(
+        [
+          ['X1', 'Shown 23.5850', 3, 23.585, 58.4059], // the number is 23.585; the cell shows 23.5850
+          ['X2', 'More decimals than shown', 3, 23.58591234, 58.40591234], // shown 23.5859: the number's own 8 decimals count
+          ['X3', 'General format', 3, 23.585, 58.4059], // shows 23.585: 3 decimals, as the sheet shows it
+        ],
+        { D2: '0.0000', D3: '0.0000', E3: '0.0000' },
+      ),
+    );
+    expect(r.status).toBe(200);
+    // Before: X1 lost its trailing zero (the number 23.585 read as "23.585"): "fewer than 4 decimals", no location.
+    expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence])).toEqual([
+      ['X1', 23.585, 58.4059, 'HIGH'],
+      ['X2', 23.585912, 58.405912, 'HIGH'],
+      ['X3', null, null, 'MISSING'],
+    ]);
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 4, code: 'X3', branchCode: null, reason: 'Fewer than 4 decimals.', kept: null }]);
   });
 
   it('control: exact pairs with 4 to 6 decimals are stored as read (like the NMWC master data)', async () => {
@@ -156,5 +245,27 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
       [23.58591, 58.40591, 'HIGH'],
       [23.585912, 58.405912, 'HIGH'],
     ]);
+  });
+});
+
+describe('the import screen says the location rule in plain words (A5 review)', () => {
+  it('the lat and lng hints give the rule before the file is imported', async () => {
+    const tree = await CustomerImportPage({ params: { slug: 'nmwc' } });
+    const hints = Object.fromEntries(elements(tree).filter((e) => typeName(e) === 'Field').map((e) => [e.props.name, e.props.hint]));
+    // Before: "-90 to 90; leave blank to fix on the map later." and "-180 to 180." - nothing about the rule.
+    expect(hints.lat).toBe('At least 4 decimals, inside the delivery area. In Excel, format the cell as text or to show 4 decimals. Leave blank to set the location on the map later.');
+    expect(hints.lng).toBe('At least 4 decimals. A pair that is not exact is not saved: the row is imported without it and listed after the check.');
+  });
+
+  it('each row listed says what happens to the customer\'s location', () => {
+    const row = (kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null) => ({ row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals.', kept });
+    expect(locationNotSavedLine(row(null), false)).toBe('Fewer than 4 decimals. It has no location until you set one.');
+    expect(locationNotSavedLine(row('SAVED_LOCATION'), false)).toBe('Fewer than 4 decimals. The location it already has is kept.');
+    expect(locationNotSavedLine(row('SAVED_LOCATION_NEEDS_PIN'), false)).toBe(
+      'Fewer than 4 decimals. Its saved location is no longer used: nothing is delivered to it until someone drops the pin on the map.',
+    );
+    expect(locationNotSavedLine(row('SAVED_LOCATION_NEEDS_PIN'), true)).toBe(
+      'Fewer than 4 decimals. Its saved location will no longer be used: nothing is delivered to it until someone drops the pin on the map.',
+    );
   });
 });
