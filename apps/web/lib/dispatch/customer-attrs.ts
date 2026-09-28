@@ -26,6 +26,8 @@ export interface CustomerForPlanning {
   prefWindowEndMin: number | null;
   locationVerified: boolean;
   createdFromUpload: boolean;
+  /** HIGH / MEDIUM / LOW / MISSING (null or left out: not known). LOW and never confirmed blocks planning (audit PR A5). */
+  geocodeConfidence?: string | null;
 }
 
 export interface TypeProfileLike {
@@ -163,6 +165,31 @@ export function coordStatus(lat: number | null, lng: number | null, area: Servic
   return 'OK';
 }
 
+/**
+ * A saved location that is not exact (a LOW reading) and that no dispatcher confirmed: treated like
+ * an invalid location (owner's rule, audit PR A5: "no item will be delivered without location").
+ * The order is not planned until the pin is placed by hand. A confirmed location, and a HIGH or
+ * MEDIUM import not confirmed yet (LOCATION_UNVERIFIED, a note), are planned as before.
+ */
+export function isUnverifiedLowLocation(c: Pick<CustomerForPlanning, 'locationVerified' | 'geocodeConfidence'>): boolean {
+  return !c.locationVerified && c.geocodeConfidence === 'LOW';
+}
+
+export const LOW_LOCATION_MESSAGE = "Saved location is not exact (low confidence). Drop the pin on the customer's exact location.";
+
+/**
+ * A customer with no usable location, whose orders are never put on a truck (owner's rule, audit PR
+ * A5): no coordinates, 0,0 or out of range, outside the delivery area and never confirmed, or a LOW
+ * reading never confirmed. The same test as the blocking location issues of `customerIssues`.
+ */
+export function locationBlocksDelivery(
+  c: Pick<CustomerForPlanning, 'lat' | 'lng' | 'locationVerified' | 'geocodeConfidence'>,
+  area: ServiceArea = DEFAULT_SERVICE_AREA,
+): boolean {
+  const cs = coordStatus(c.lat, c.lng, area);
+  return cs === 'MISSING' || cs === 'INVALID' || (cs === 'OUTSIDE_AREA' && !c.locationVerified) || isUnverifiedLowLocation(c);
+}
+
 export type IssueCode =
   | 'LOCATION_REQUIRED'
   | 'INVALID_LOCATION'
@@ -204,6 +231,8 @@ export function customerIssues(c: CustomerForPlanning, eff: EffectiveAttrs, area
   else if (cs === 'INVALID') out.push({ code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is not valid (0,0 or out of range). Set it again.' });
   else if (cs === 'OUTSIDE_AREA' && !c.locationVerified) {
     out.push({ code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is outside Oman/UAE. Confirm or correct it on the map.' });
+  } else if (isUnverifiedLowLocation(c)) {
+    out.push({ code: 'INVALID_LOCATION', blocking: true, message: LOW_LOCATION_MESSAGE });
   } else if (!c.locationVerified) {
     out.push({ code: 'LOCATION_UNVERIFIED', blocking: false, message: 'Location came from an import and was never confirmed by a dispatcher.' });
   }

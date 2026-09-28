@@ -24,6 +24,7 @@ import {
   coordStatus,
   customerIssues,
   effectiveAttrs,
+  locationBlocksDelivery,
   parsePriorityWeights,
   parseServiceArea,
   routingProviderFor,
@@ -194,6 +195,7 @@ function toPlanningCustomer(c: {
   priority: number; priorityConfirmed: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean;
   customerType: string | null; hardWindowStartMin: number | null; hardWindowEndMin: number | null;
   prefWindowStartMin: number | null; prefWindowEndMin: number | null; locationVerified: boolean; createdFromUpload: boolean;
+  geocodeConfidence?: string | null;
 }): CustomerForPlanning {
   return { ...c };
 }
@@ -421,7 +423,9 @@ export async function buildDispatchRequest(
       continue;
     }
     const cs = coordStatus(c.lat, c.lng, area);
-    const locBad = cs === 'MISSING' || cs === 'INVALID' || (cs === 'OUTSIDE_AREA' && !c.locationVerified);
+    // Never planned without a usable location (owner's rule, audit PR A5): none, 0,0 or out of
+    // range, outside the area and never confirmed, or a LOW reading never confirmed.
+    const locBad = locationBlocksDelivery(c, area);
     if (locBad) {
       const code: UnservedReasonCode = cs === 'MISSING' ? 'MISSING_COORDINATES' : 'INVALID_LOCATION';
       const issue = customerIssues(c, eff, area).find((i) => i.blocking);
