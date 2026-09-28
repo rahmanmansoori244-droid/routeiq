@@ -4,9 +4,9 @@
  * Accepted inputs
  *   - "23.5859, 58.4059" / "23.5859 58.4059" / "23.5859;58.4059"
  *   - DMS as Google copies it: 23°35'09.2"N 58°24'21.2"E (minutes and seconds below 60; whole
- *     degrees or minutes only -> needs a pin confirmation)
+ *     degrees or minutes only, or a pair with 3 decimals or fewer written as DMS -> needs a pin)
  *   - Google Maps URLs carrying coordinates:
- *       .../place/...!3d23.5859!4d58.4059   (the pin - most reliable)
+ *       .../place/...!3d23.5859!4d58.4059   (the pin - most reliable; fewer than 4 decimals -> needs a pin)
  *       ?q=23.58,58.40  ?query=  ?destination=  ?daddr=  /search/23.58,+58.40
  *       /dir/<start>/23.58,58.40            (a directions link: only the END of the route is read)
  *       .../@23.5859,58.4059,17z  ?ll=  ?center=  ?sll=   (map CENTRE only -> needs a pin confirmation)
@@ -24,9 +24,15 @@
  * `?q=`, `?query=`, `?destination=`, `?daddr=`, `/search/`, `/place/<pair>`, the end of a directions
  * link - because padding reaches those: /search/ and ?q= carry the text searched for, as typed, and
  * other programs build such links with a fixed number of decimals (Java "%f", JavaScript toFixed(6)),
- * so a rough 23.58 comes out "23.580000". Google's own pin (`!3d...!4d...`) keeps its digits, as
- * before: Google writes the marker's position itself, nobody types it. RouteIQ's own links
- * (`driver-links.ts`) never pad a number. A map centre needs a pin whatever its digits.
+ * so a rough 23.58 comes out "23.580000". RouteIQ's own links (`driver-links.ts`) never pad a number.
+ * A map centre needs a pin whatever its digits.
+ *
+ * Google's own pin (`!3d...!4d...`) needs 4 decimals too (A5 sixth review), counted as Google wrote
+ * them: Google writes no zeros at the end (a searched "23.5800, 58.4100" comes back as !3d23.58!4d58.41),
+ * so its digits are not cut, but it is not always a marker Google placed: Google repeats a coordinate
+ * searched for as the pin. A real place marker has 6 or 7 decimals. For the same reason degrees,
+ * minutes and seconds that are a pair with 3 decimals or fewer written another way (Google shows a
+ * searched "23.58, 58.41" as 23°34'48.0"N 58°24'36.0"E) need a pin (`dmsIsRoughPair`).
  */
 
 export type LocationSourceKind = 'MANUAL_LATLNG' | 'GOOGLE_MAPS_URL' | 'MAP_PIN';
@@ -161,14 +167,39 @@ export function parseDms(s: string): DmsParse | null {
  * the pin is placed). They said "Confirm the pin", "Please confirm on the map" or "move the pin if
  * needed", which Save did not allow.
  */
-function dmsBase(precision: DmsPrecision): { confidence: Confidence; needsPin?: boolean; warnings?: string[] } {
-  if (precision === 'DEGREES') {
+function dmsBase(d: { lat: number; lng: number; precision: DmsPrecision }): { confidence: Confidence; needsPin?: boolean; warnings?: string[] } {
+  if (d.precision === 'DEGREES') {
     return { confidence: 'LOW', needsPin: true, warnings: ['Whole degrees only (accurate to about 100 km).'] };
   }
-  if (precision === 'MINUTES') {
+  if (d.precision === 'MINUTES') {
     return { confidence: 'MEDIUM', needsPin: true, warnings: ['Degrees and minutes only, no seconds (accurate to about 2 km).'] };
   }
+  if (dmsIsRoughPair(d.lat, d.lng)) {
+    const text = (v: number) => String(Number(v.toFixed(3)));
+    return {
+      confidence: 'MEDIUM',
+      needsPin: true,
+      warnings: [`These degrees, minutes and seconds are ${text(d.lat)}, ${text(d.lng)} written another way: fewer than 4 decimals (accurate to ~100 m or worse).`],
+    };
+  }
   return { confidence: 'HIGH' };
+}
+
+/** How far a coordinate is from the nearest value with 3 decimals or fewer, in seconds of arc (0.001° is 3.6"). */
+const secondsFromThreeDecimals = (v: number): number => Math.abs(v * 1000 - Math.round(v * 1000)) * 3.6;
+
+/**
+ * Degrees, minutes and seconds that are a pair with fewer than 4 decimals written another way (A5
+ * sixth review, the owner's rule and "Same rule everywhere"): both coordinates within 0.05" (half the
+ * tenth of a second Google writes) of a value with 3 decimals or fewer. Google Maps shows a searched
+ * "23.58, 58.41" as 23°34'48.0"N 58°24'36.0"E, and a value with 3 decimals is always a whole number of
+ * tenths of a second (0.001° is 3.6"), so the text alone looked exact. A real point written to a tenth
+ * of a second lands there on both coordinates about once in 1,300 (once in 36 per coordinate), in whole
+ * seconds once in 324; its pin is then placed by hand. One coordinate alone is not enough: a real
+ * point does that once in 36.
+ */
+function dmsIsRoughPair(lat: number, lng: number): boolean {
+  return secondsFromThreeDecimals(lat) < 0.05 && secondsFromThreeDecimals(lng) < 0.05;
 }
 
 function pairFrom(text: string): { lat: string; lng: string } | null {
@@ -265,7 +296,7 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
   const dmsPlain = parseDms(input);
   if (dmsPlain && !/^https?:/i.test(input)) {
     if ('error' in dmsPlain) return fail(dmsPlain.error);
-    return withValidation(dmsPlain.lat, dmsPlain.lng, { source: 'MANUAL_LATLNG', ...dmsBase(dmsPlain.precision) }, area);
+    return withValidation(dmsPlain.lat, dmsPlain.lng, { source: 'MANUAL_LATLNG', ...dmsBase(dmsPlain) }, area);
   }
   // 3. geo: URI
   const geo = new RegExp(`^geo:(${NUM}),(${NUM})`, 'i').exec(input);
@@ -292,7 +323,7 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
 /** A DMS pair found in a Google Maps link: refused when it is not a real point, else checked like any other. */
 function dmsResult(d: DmsParse, resolvedUrl: string, area: ServiceArea): LocationParse {
   if ('error' in d) return fail(d.error, { resolvedUrl });
-  return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', ...dmsBase(d.precision), resolvedUrl }, area);
+  return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', ...dmsBase(d), resolvedUrl }, area);
 }
 
 const MAP_CENTRE_WARNING = 'This link only gives the map centre, not a pin.';
@@ -346,12 +377,16 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
   const resolvedUrl = url.href;
   const dir = directionsWaypoints(url);
 
-  // Place pin: !3d<lat>!4d<lng> (most precise - the actual marker). Not on a directions link: its
-  // data part does not say which waypoint a point belongs to. Its digits are Google's own and are
-  // not counted (owner decision of 28 Sep 2026 applies to pairs written as text, see the top).
+  // Place pin: !3d<lat>!4d<lng> (the actual marker). Not on a directions link: its data part does not
+  // say which waypoint a point belongs to. It needs 4 decimals like any pair (A5 sixth review): Google
+  // repeats a coordinate searched for as the pin, so a searched "23.58, 58.41" (or "23.5800, 58.4100":
+  // Google drops the zeros at the end) comes back as !3d23.58!4d58.41. Its digits are counted as Google
+  // wrote them, the zeros at the end not cut (Google writes none; a real marker has 6 or 7 decimals).
   const pin = dir ? null : new RegExp(`!3d(${NUM})!4d(${NUM})`).exec(full);
   if (pin) {
-    return withValidation(Number(pin[1]), Number(pin[2]), { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', resolvedUrl }, area);
+    return withValidation(Number(pin[1]), Number(pin[2]), {
+      source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(pin[1]), decimals(pin[2])), resolvedUrl,
+    }, area);
   }
   // Explicit coordinate query parameters.
   for (const key of ['q', 'query', 'll', 'destination', 'daddr', 'center', 'sll']) {

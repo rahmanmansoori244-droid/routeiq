@@ -246,7 +246,7 @@ describe('Same rule everywhere (owner decision of 28 Sep 2026): of the zeros at 
     ['4 decimals, one zero at the end', '23.5850, 58.4105'],
     ['6 decimals', '23.585912, 58.405934'],
     ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900'],
-    ["Google's own pin, whose digits are Google's", 'https://www.google.com/maps/place/Seeb/data=!4m4!3m3!8m2!3d23.5850000!4d58.4105000'],
+    ["Google's own pin with 7 decimals (its zeros at the end are not cut)", 'https://www.google.com/maps/place/Seeb/data=!4m4!3m3!8m2!3d23.5850000!4d58.4105000'],
   ])('control, Read: %s still reads exact', async (_what, input) => {
     const r = await read(input);
     expect(r.body.data).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
@@ -281,6 +281,69 @@ describe('Same rule everywhere (owner decision of 28 Sep 2026): of the zeros at 
     const r = await put('MED', { lat, lng, source: 'MANUAL_LATLNG', input });
     expect(r.status).toBe(200);
     expect(stored('MED')).toEqual({ lat, lng, verified: true, source: 'MANUAL_LATLNG', confidence: 'HIGH', input });
+  });
+});
+
+// A5 sixth review. "23.58, 58.41" (or "23.5800, 58.4100") searched in Google Maps opens as a place whose
+// address carries Google's pin with the numbers searched for (Google drops the zeros at the end), and
+// Google shows the point as 23°34'48.0"N 58°24'36.0"E. Both read as exact, HIGH: the Read offered Save,
+// and the server saved a point good to about 1 km as a confirmed location, while the same pair typed
+// was refused ("Same rule everywhere").
+describe('a rough coordinate searched in Google Maps and shared is not exact, however it is pasted (A5 sixth review)', () => {
+  const SHARED = "https://www.google.com/maps/place/23%C2%B034'48.0%22N+58%C2%B024'36.0%22E/@23.58,58.41,17z/data=!3m1!4b1!4m4!3m3!8m2!3d23.58!4d58.41?entry=ttu";
+  const NO_DATA = "https://www.google.com/maps/place/23%C2%B034'48.0%22N+58%C2%B024'36.0%22E/@23.58,58.41,17z";
+  const DMS = `23°34'48.0"N 58°24'36.0"E`;
+  const SHORT = 'https://maps.app.goo.gl/abc123';
+  const read = async (input: string) => answer(await locationParse(json('/api/locations/parse', 'POST', { input })));
+
+  it('ADD LOCATION Read (POST /api/locations/parse): not exact, as the link, the short link or the text Google shows', async () => {
+    for (const input of [SHARED, NO_DATA, DMS]) {
+      const r = await read(input);
+      expect(r.status, input).toBe(200);
+      // Before: confidence HIGH, needsPin false.
+      expect(r.body.data, input).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, confidence: 'MEDIUM', needsPin: true });
+    }
+    // The short link Google shares leads to the address above.
+    fetchSpy.mockImplementationOnce((async () => new Response(null, { status: 302, headers: { location: SHARED } })) as never);
+    const short = await read(SHORT);
+    expect(short.body.data).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, confidence: 'MEDIUM', needsPin: true, resolvedUrl: expect.stringContaining('!3d23.58!4d58.41') });
+  });
+
+  it('PUT /api/customers/:id/location refuses it however it is sent; a hand pin saves the customer', async () => {
+    const before = stored('K1');
+    for (const body of [
+      { input: SHARED },
+      { input: NO_DATA },
+      { input: DMS },
+      { lat: 23.58, lng: 58.41, source: 'GOOGLE_MAPS_URL', input: SHARED },
+      { lat: 23.58, lng: 58.41, source: 'GOOGLE_MAPS_URL', input: NO_DATA },
+      { lat: 23.58, lng: 58.41, source: 'MANUAL_LATLNG', input: DMS },
+      { lat: 23.58, lng: 58.41, source: 'GOOGLE_MAPS_URL', input: SHORT, resolvedUrl: SHARED },
+      // A "hand pin" exactly on the reading was never moved.
+      { lat: 23.58, lng: 58.41, source: 'MAP_PIN', input: SHARED },
+      { lat: 23.58, lng: 58.41, source: 'MAP_PIN', input: DMS },
+    ]) {
+      const r = await put('K1', body);
+      // Before: 200, stored as the reading, verified HIGH.
+      expect(r.status, JSON.stringify(body)).toBe(422);
+      expect(r.body.error, JSON.stringify(body)).toMatchObject({ code: 'PIN_REQUIRED', message: PIN_REQUIRED_MESSAGE });
+    }
+    expect(stored('K1')).toEqual(before);
+    expect(audits).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const pinned = await put('K1', { lat: 23.580412, lng: 58.410377, source: 'MAP_PIN', input: SHARED });
+    expect(pinned.status).toBe(200);
+    expect(stored('K1')).toEqual({ lat: 23.580412, lng: 58.410377, verified: true, source: 'MAP_PIN', confidence: 'HIGH', input: SHARED });
+  });
+
+  it.each([
+    ['a real place marker (Google writes 7 decimals)', 'https://www.google.com/maps/place/Grand+Mosque/@23.5838,58.3887,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d23.5838077!4d58.3886687', 23.583808, 58.388669, 'GOOGLE_MAPS_URL'],
+    ['degrees, minutes and seconds of a real point', `23°35'09.2"N 58°24'21.2"E`, 23.585889, 58.405889, 'MANUAL_LATLNG'],
+  ])('control: %s is read exact and saved as read (HIGH)', async (_what, input, lat, lng, source) => {
+    expect((await read(input)).body.data).toMatchObject({ ok: true, lat, lng, confidence: 'HIGH', needsPin: false, warnings: [] });
+    const r = await put('MED', { lat, lng, source, input });
+    expect(r.status).toBe(200);
+    expect(stored('MED')).toEqual({ lat, lng, verified: true, source, confidence: 'HIGH', input });
   });
 });
 

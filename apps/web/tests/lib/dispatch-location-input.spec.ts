@@ -32,6 +32,9 @@ describe('parseLocationInput - a reading that needs a pin never asks to confirm 
     ['outside the delivery area', '19.0760, 72.8777', /outside the delivery area/],
     ['degrees and minutes only', `23°35'N 58°24'E`, /no seconds/],
     ['whole degrees only', '23°N 58°E', /Whole degrees only/],
+    // A5 sixth review.
+    ['a rough pair written as degrees, minutes and seconds', `23°34'48.0"N 58°24'36.0"E`, /written another way: fewer than 4 decimals/],
+    ["Google's pin with fewer than 4 decimals", 'https://www.google.com/maps/place/X/data=!3d23.58!4d58.41', /fewer than 4 decimals/],
   ])('%s', (_what, input, says) => {
     const r = parseLocationInput(input);
     expect(r).toMatchObject({ ok: true, needsPin: true });
@@ -177,7 +180,9 @@ describe('parseLocationInput - DMS limits (audit F17)', () => {
     expect(r).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false });
     expect(r.lat).toBeCloseTo(23 + 59 / 60 + 59.9 / 3600, 6);
     expect(r.lng).toBeCloseTo(58 + 59 / 60 + 59 / 3600, 6);
-    expect(parseLocationInput(`23°00'00"N 58°00'00.0"E`)).toMatchObject({ ok: true, lat: 23, lng: 58, confidence: 'HIGH', needsPin: false });
+    // The lowest are read too. Whole degrees written with seconds are the rough pair 23, 58 (A5 sixth
+    // review), so they need a pin: this line expected HIGH and needsPin false.
+    expect(parseLocationInput(`23°00'00"N 58°00'00.0"E`)).toMatchObject({ ok: true, lat: 23, lng: 58, confidence: 'MEDIUM', needsPin: true });
   });
 
   it('keeps latitude within 90° and longitude within 180°, the boundary itself included', () => {
@@ -638,8 +643,80 @@ describe('parseLocationInput - only one zero at the end counts (owner decision o
     expect(parseLocationInput(link)).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
   });
 
-  it("Google's own pin (!3d!4d) keeps its digits: Google writes the marker's position itself, nobody types it", () => {
+  it("Google's own pin (!3d!4d) keeps its digits: its zeros at the end are not cut (Google writes none; its decimals are checked, see below)", () => {
     const r = parseLocationInput('https://www.google.com/maps/place/Seeb/@23.58,58.41,17z/data=!3m1!4b1!4m4!3m3!8m2!3d23.5850000!4d58.4105000');
     expect(r).toMatchObject({ ok: true, lat: 23.585, lng: 58.4105, confidence: 'HIGH', needsPin: false, warnings: [] });
+  });
+});
+
+// A5 sixth review. Google Maps repeats a coordinate searched for. "23.58, 58.41" (or "23.5800, 58.4100")
+// typed into Google Maps opens as the address below (seen live on 28 Sep 2026: Google drops the zeros at
+// the end), whose pin (!3d!4d) is the numbers searched for, and Google shows the point as
+// 23°34'48.0"N 58°24'36.0"E. The pin was read with no decimals check and those degrees, minutes and
+// seconds as exact, so a point good to about 1 km was read HIGH with no hand pin, while the same pair
+// typed was refused.
+describe('parseLocationInput - a rough coordinate searched in Google Maps and shared is not exact (A5 sixth review)', () => {
+  const FEW = 'Coordinates have fewer than 4 decimals (accurate to ~100 m or worse).';
+  const ROUGH_DMS = 'These degrees, minutes and seconds are 23.58, 58.41 written another way: fewer than 4 decimals (accurate to ~100 m or worse).';
+  const SHARED = "https://www.google.com/maps/place/23%C2%B034'48.0%22N+58%C2%B024'36.0%22E/@23.58,58.41,17z/data=!3m1!4b1!4m4!3m3!8m2!3d23.58!4d58.41?entry=ttu";
+
+  it.each([
+    ['the address Google opens for a searched "23.58, 58.41"', SHARED, 23.58, 58.41],
+    ['one decimal', 'https://www.google.com/maps/place/X/data=!4m4!3m3!8m2!3d23.5!4d58.4', 23.5, 58.4],
+    ['one side only', 'https://www.google.com/maps/place/X/data=!4m4!3m3!8m2!3d23.58!4d58.4105123', 23.58, 58.410512],
+    ['through a consent page', `https://consent.google.com/ml?continue=${encodeURIComponent(SHARED)}&gl=OM`, 23.58, 58.41],
+    // The price: a searched "23.5850, 58.4105" comes back with the zero dropped, 3 decimals, so its pin
+    // is placed by hand (typed, it is exact). A real place marker has 6 or 7 decimals.
+    ['a 4-decimal search ending in 0 (Google drops the zero)', 'https://www.google.com/maps/place/X/data=!4m4!3m3!8m2!3d23.585!4d58.4105', 23.585, 58.4105],
+  ])("Google's pin with fewer than 4 decimals, %s: not exact", (_what, link, lat, lng) => {
+    const r = parseLocationInput(link);
+    // Before: HIGH, needsPin false, no warning.
+    expect(r).toMatchObject({ ok: true, lat, lng, source: 'GOOGLE_MAPS_URL', confidence: 'MEDIUM', needsPin: true, warnings: [FEW] });
+    expect(pinRequiredMessage(r)).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");
+  });
+
+  it.each([
+    ['as Google shows it', `23°34'48.0"N 58°24'36.0"E`, 'MANUAL_LATLNG'],
+    ['with typographic primes and a comma', '23°34′48.0″N, 58°24′36.0″E', 'MANUAL_LATLNG'],
+    ['in whole seconds', `23°34'48"N 58°24'36"E`, 'MANUAL_LATLNG'],
+    ['in the /place/ address without its data part', "https://www.google.com/maps/place/23%C2%B034'48.0%22N+58%C2%B024'36.0%22E/@23.58,58.41,17z", 'GOOGLE_MAPS_URL'],
+    ['in ?q=', `https://www.google.com/maps?q=${encodeURIComponent(`23°34'48.0"N 58°24'36.0"E`)}`, 'GOOGLE_MAPS_URL'],
+    ['at the end of a directions link', `https://www.google.com/maps/dir/Office/${encodeURIComponent(`23°34'48.0"N 58°24'36.0"E`)}`, 'GOOGLE_MAPS_URL'],
+  ])('degrees, minutes and seconds that are a pair with fewer than 4 decimals, %s: not exact, and the warning says why', (_what, text, source) => {
+    const r = parseLocationInput(text);
+    // Before: HIGH, needsPin false (seconds were always read as exact).
+    expect(r).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, source, confidence: 'MEDIUM', needsPin: true, warnings: [ROUGH_DMS] });
+    expect(pinRequiredMessage(r)).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");
+  });
+
+  it('whole degrees written with seconds are the pair 23, 58: not exact (before: HIGH)', () => {
+    expect(parseLocationInput(`23°00'00"N 58°00'00.0"E`)).toMatchObject({
+      ok: true, lat: 23, lng: 58, confidence: 'MEDIUM', needsPin: true,
+      warnings: ['These degrees, minutes and seconds are 23, 58 written another way: fewer than 4 decimals (accurate to ~100 m or worse).'],
+    });
+  });
+
+  it('the server-side resolve: the short link Google shares for it is not exact either', async () => {
+    const { impl } = fetchSequence([redirect(SHARED)]);
+    const r = await resolveLocationInput('https://maps.app.goo.gl/AbCdEf123', { fetchImpl: impl });
+    // Before: HIGH, needsPin false.
+    expect(r).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, confidence: 'MEDIUM', needsPin: true, warnings: [FEW] });
+    expect(r.resolvedUrl).toContain('!3d23.58!4d58.41');
+  });
+
+  it.each([
+    ['a real place marker (Google writes 7 decimals)', 'https://www.google.com/maps/place/Grand+Mosque/@23.5838,58.3887,17z/data=!4m6!3m5!1s0x0:0x0!8m2!3d23.5838077!4d58.3886687'],
+    ['a pin with exactly 4 decimals', PLACE_URL],
+    ['degrees, minutes and seconds of a real point', `23°35'09.2"N 58°24'21.2"E`],
+    ['whole seconds of a real point', `23°35'09"N 58°24'21"E`],
+    ['a tenth of a second from a 3-decimal value', `23°34'48.1"N 58°24'36.1"E`],
+    ['the highest seconds', `23°59'59.9"N 58°59'59"E`],
+    ['a searched "23.5801, 58.4105" as Google shows it', `23°34'48.4"N 58°24'37.8"E`],
+    // Both coordinates must land on a value with 3 decimals: one alone does that for a real point
+    // once in 36 (a tenth of a second).
+    ['only one coordinate lands on a value with 3 decimals', `23°34'48.0"N 58°24'21.2"E`],
+    ['a real point in the /place/ address', `https://www.google.com/maps/place/${encodeURIComponent(`23°35'09.2"N 58°24'21.2"E`)}`],
+  ])('control: %s still reads exact', (_what, text) => {
+    expect(parseLocationInput(text)).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
   });
 });
