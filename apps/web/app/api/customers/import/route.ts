@@ -7,6 +7,8 @@ import { MAX_SERVICE_MIN, normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
+import { parseLocationInput } from '@/lib/dispatch/location-input';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { clientIp } from '@/lib/client-ip';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
@@ -16,10 +18,27 @@ import { clientIp } from '@/lib/client-ip';
 // dispatcher entered (service time, region, address, payment type, location). A service time
 // from the file counts as confirmed for that customer (it wins over the customer-type default).
 // Codes match existing customers whatever their letter case (as in the order intake).
+//
+// Locations (owner's rule, audit PR A5: "locations should always be correct"): each lat/lng pair is
+// read like ADD LOCATION reads "lat, lng", with the company's delivery area. A pair that is not exact
+// (fewer than 4 decimals, swapped, outside the area, 0,0) is never stored as a usable location: a new
+// customer gets no coordinates (it shows LOCATION REQUIRED), an existing one keeps what it has, and the
+// row is listed in `locationsNotSaved` with the reason. It is not an error: the rest of the row and
+// the rest of the file are imported. A location a dispatcher verified is never overwritten (F05).
 
 interface ImportError {
   row: number;
   message: string;
+}
+
+/** A row whose location was not saved because it is not exact (owner's location rule). */
+interface LocationNotSaved {
+  row: number;
+  code: string;
+  branchCode: string | null;
+  reason: string;
+  /** The customer already exists and keeps the location it has (null = it has none). */
+  kept: 'SAVED_LOCATION' | null;
 }
 
 interface CustomerRow {
@@ -79,9 +98,11 @@ export async function POST(req: Request) {
   const warnings: string[] = [...parsed.warnings];
   const valid: CustomerRow[] = [];
   const codeSeen = new Map<string, number>();
+  const notExact: { row: number; reason: string }[] = [];
 
   const db = tenantDb(session.user.tenantId);
   const regions = await db.region.findMany({ select: { id: true, code: true } });
+  const area = await tenantServiceArea(session.user.tenantId);
   const regionByCode = new Map(regions.map((r) => [r.code.toLowerCase(), r.id]));
 
   parsed.rows.forEach((raw, idx) => {
@@ -157,8 +178,14 @@ export async function POST(req: Request) {
         errors.push({ row, message: 'lng must be -180..180.' });
         return;
       }
-      lat = latN;
-      lng = lngN;
+      // Read as ADD LOCATION reads "lat, lng" (the text as in the file, so its decimals count).
+      const p = parseLocationInput(`${latRaw}, ${lngRaw}`, area);
+      if (p.ok && !p.needsPin && p.lat !== undefined && p.lng !== undefined) {
+        lat = p.lat;
+        lng = p.lng;
+      } else {
+        notExact.push({ row, reason: p.ok ? p.warnings.join(' ') : p.error ?? 'The location could not be read.' });
+      }
     } else {
       warnings.push(`Row ${row} (${code}): missing coordinates — will need map geocode.`);
     }
@@ -192,6 +219,19 @@ export async function POST(req: Request) {
   let creates = 0;
   let updates = 0;
   const confirmedServiceChanges: { code: string; branchCode: string | null; from: number; to: number }[] = [];
+  const locationsNotSaved: LocationNotSaved[] = [];
+  const notExactByRow = new Map(notExact.map((n) => [n.row, n.reason]));
+  for (const v of valid) {
+    const reason = notExactByRow.get(v.row);
+    if (reason === undefined) continue;
+    const m = matchOf(v);
+    locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: m && m.lat !== null && m.lng !== null ? 'SAVED_LOCATION' : null });
+  }
+  if (locationsNotSaved.length) {
+    warnings.push(
+      `${locationsNotSaved.length} location(s) in the file are not exact and were not saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: use at least 4 decimals, and in Excel format the lat and lng cells as text.`,
+    );
+  }
   for (const v of valid) {
     const m = matchOf(v);
     if (!m) {
@@ -227,6 +267,7 @@ export async function POST(req: Request) {
         creates,
         updates,
         confirmedServiceChanges,
+        locationsNotSaved,
       },
       error: null,
     });
@@ -311,6 +352,7 @@ export async function POST(req: Request) {
       creates,
       updates,
       confirmedServiceChanges,
+      locationsNotSaved,
       keptVerifiedLocations: keptVerified,
       warnings: keptVerified ? [...warnings, `${keptVerified} customer location(s) confirmed by a dispatcher were kept (file coordinates ignored).`] : warnings,
     },

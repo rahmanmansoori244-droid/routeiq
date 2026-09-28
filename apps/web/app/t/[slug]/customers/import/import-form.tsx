@@ -23,6 +23,8 @@ interface ImportResult {
   creates?: number;
   updates?: number;
   confirmedServiceChanges?: { code: string; branchCode: string | null; from: number; to: number }[];
+  /** Rows whose location is not exact: not saved (owner's location rule, audit PR A5). */
+  locationsNotSaved?: { row: number; code: string; branchCode: string | null; reason: string; kept: 'SAVED_LOCATION' | null }[];
 }
 
 export function CustomerImportForm({ slug }: { slug: string }) {
@@ -126,7 +128,27 @@ export function CustomerImportForm({ slug }: { slug: string }) {
               {result.creates !== undefined ? <Badge variant="outline">{result.creates} new</Badge> : null}
               {result.updates !== undefined ? <Badge variant="outline">{result.updates} updated</Badge> : null}
               {result.confirmedServiceChanges?.length ? <Badge variant="warning">{result.confirmedServiceChanges.length} confirmed service time(s) change</Badge> : null}
+              {result.locationsNotSaved?.length ? <Badge variant="warning">{result.locationsNotSaved.length} location(s) not exact</Badge> : null}
             </div>
+            {result.locationsNotSaved && result.locationsNotSaved.length > 0 ? (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs" data-testid="locations-not-saved">
+                <p className="mb-1 font-medium text-amber-900">
+                  {result.locationsNotSaved.length} location(s) are not exact, so they are {result.dryRun ? 'not going to be' : 'not'} saved. No item is delivered without a correct location.
+                </p>
+                <p className="mb-2 text-amber-900">
+                  Set each one on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file and import it again: use at least 4 decimals, and in Excel format the lat and lng cells as text.
+                </p>
+                <ul className="space-y-1">
+                  {result.locationsNotSaved.slice(0, 50).map((l) => (
+                    <li key={l.row}>
+                      <span className="font-mono">Row {l.row}</span> {l.code}
+                      {l.branchCode ? ` / ${l.branchCode}` : ''}: {l.reason} {l.kept ? 'The location it already has is kept.' : 'It has no location until you set one.'}
+                    </li>
+                  ))}
+                </ul>
+                {result.locationsNotSaved.length > 50 ? <p className="mt-2 text-muted-foreground">…and {result.locationsNotSaved.length - 50} more.</p> : null}
+              </div>
+            ) : null}
             {result.errors && result.errors.length > 0 ? (
               <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">
                 <p className="mb-2 font-medium text-destructive">Errors (must fix before import):</p>
