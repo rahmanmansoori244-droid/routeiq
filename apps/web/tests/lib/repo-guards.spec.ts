@@ -344,3 +344,46 @@ describe('the dispatcher guide keeps each customer rule under its own bullet (re
     expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
   });
 });
+
+describe('the handbook describes the web tests and the health gate as they are (third review of audit PR4)', () => {
+  const REPO = path.resolve(APPS, '..');
+  const handbook = () => readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+  const specs = (dir: string) => readdirSync(path.join(WEB, 'tests', dir)).filter((f) => f.endsWith('.spec.ts')).sort();
+  const bullet = (text: string, start: string) => {
+    const line = text.split('\n').find((l) => l.startsWith(start));
+    if (!line) throw new Error(`no line starting with ${start} in PROJECT_HANDBOOK.md`);
+    return line;
+  };
+
+  it('section 2.2 counts the unit and integration spec files on disk (merging main left 63 and 25)', () => {
+    const text = handbook();
+    const count = (line: string) => Number(/\((\d+) files\b/.exec(line)?.[1]);
+    expect(count(bullet(text, '- `tests/lib/*.spec.ts` ('))).toBe(specs('lib').length);
+    expect(count(bullet(text, '- `tests/integration/*.spec.ts` ('))).toBe(specs('integration').length);
+  });
+
+  it('section 2.2 names every integration spec that runs on the real database without the web server', () => {
+    const line = bullet(handbook(), '- `tests/integration/*.spec.ts` (');
+    const noServer = specs('integration').filter((f) => {
+      // The header comment as one text: its " * " line starts become spaces.
+      const header = readFileSync(path.join(WEB, 'tests', 'integration', f), 'utf8')
+        .split('*/')[0]
+        .replace(/\r?\n[ \t]*\*?[ \t]*/g, ' ')
+        .replace(/\s+/g, ' ');
+      return /the web server and (the )?solver are not used/i.test(header);
+    });
+    expect(noServer.length).toBeGreaterThanOrEqual(8);
+    expect(noServer.filter((f) => !line.includes(`\`${f.replace(/\.spec\.ts$/, '')}\``))).toEqual([]);
+  });
+
+  it('no gotcha says /api/health answers 503 when the solver is down (since audit PR4 that is 200 degraded)', () => {
+    const text = handbook();
+    // Only the matching words are printed on a failure, not the whole handbook.
+    expect(/`\/api\/health` returns 503 when the solver is down/i.exec(text)?.[0] ?? null).toBeNull();
+    const gotchas = text.slice(text.indexOf('### 5.11 Known operational gotchas'), text.indexOf('### 5.12'));
+    const row4 = bullet(gotchas, '| 4 |');
+    expect(row4).toMatch(/200/);
+    expect(row4).toMatch(/degraded/);
+    expect(row4).toMatch(/`ok: false`/);
+  });
+});

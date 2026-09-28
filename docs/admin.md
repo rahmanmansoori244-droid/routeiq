@@ -99,7 +99,7 @@ Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp p
 
 ### Rotating `SOLVER_TOKEN`
 Every 90 days per CLAUDE.md §14.
-1. Generate a new random 32-byte base64 secret.
+1. Generate a new random 32-byte base64 secret. Paste it as plain text: a hidden space or curly quotes copied with it make `/api/health` answer 503 `SOLVER_TOKEN_INVALID`, and no plan can be optimized.
 2. Set on `routeiq-solver` env → redeploy solver. **It will continue accepting the old token until restart.** Wait for the new replica to come up.
 3. Set on `routeiq-web` env → redeploy web. Web will start sending the new token.
 4. Verify a fresh optimize call works.

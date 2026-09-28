@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
-import { solverEnv } from '@/lib/solver-env';
+import { TOKEN_CANNOT_BE_SENT, solverEnv, tokenCanBeSent } from '@/lib/solver-env';
 
 export class SolverError extends Error {
   readonly status: number;
@@ -61,12 +61,25 @@ export function postJsonLong(
 /**
  * NMWC dispatch planner (OR-Tools): POST /optimize-dispatch. SOLVER_URL and SOLVER_TOKEN are read
  * by solverEnv (lib/solver-env.ts), exactly as /api/health checks them (review of audit PR4).
+ * A redirect is never followed (node:http), and /api/health does not follow one either (third
+ * review of audit PR4).
  */
 export async function callDispatchSolver(req: DispatchRequest): Promise<DispatchResponse> {
   const { url, token } = solverEnv();
   if (!url) throw new SolverError('SOLVER_URL not set', 0, null);
   if (!token) throw new SolverError('SOLVER_TOKEN not set', 0, null);
+  // Third review of audit PR4: say why, instead of node:http's "Invalid character in header
+  // content" or a 401 for a token sent as other bytes than the solver holds (lib/solver-env.ts).
+  if (!tokenCanBeSent(token)) throw new SolverError(`${TOKEN_CANNOT_BE_SENT}. An administrator must copy it again as plain text.`, 0, null);
   const res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), DISPATCH_TIMEOUT_MS);
+  if (res.status >= 300 && res.status < 400) {
+    // An http-to-https edge or a proxy in front of the solver: /api/health says SOLVER_URL_REDIRECTS.
+    throw new SolverError(
+      "The route optimizer address (SOLVER_URL) answers with a redirect, which is not followed. An administrator must set SOLVER_URL to the solver's own address.",
+      res.status,
+      res.text,
+    );
+  }
   if (res.status === 404) {
     // Web and solver deploy independently: a new web briefly talking to the previous solver.
     throw new SolverError('The route optimizer is being updated. Try again in a minute.', 404, res.text);
@@ -104,6 +117,9 @@ export async function callRouteGeometry(
 ): Promise<RouteGeometryReply> {
   const { url, token } = solverEnv();
   if (!url || !token) return { kind: 'not_configured' };
+  // Third review of audit PR4: the same rules as the optimize call and /api/health - a token that
+  // is not plain ASCII is not sent, and a redirect is not followed (with the token) but failed.
+  if (!tokenCanBeSent(token)) return { kind: 'failed' };
   if (opts.signal?.aborted) return { kind: 'timeout' };
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), opts.timeoutMs ?? GEOMETRY_TIMEOUT_MS);
@@ -116,6 +132,7 @@ export async function callRouteGeometry(
       body: JSON.stringify({ coords, osrm_url: osrmUrl ?? null }),
       signal: ctrl.signal,
       cache: 'no-store',
+      redirect: 'manual',
     });
     if (!res.ok) return { kind: 'failed', status: res.status };
     const b = (await res.json()) as { provider?: string; is_estimated?: boolean; coordinates?: [number, number][]; warning?: string | null };

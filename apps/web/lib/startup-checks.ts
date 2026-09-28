@@ -3,7 +3,7 @@
  * stop the server; they make a missing production setting visible in the Railway logs.
  */
 import { rateLimitConfigProblem } from './rate-limit';
-import { solverEnv } from './solver-env';
+import { TOKEN_CANNOT_BE_SENT, solverEnv, tokenCanBeSent } from './solver-env';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -30,6 +30,13 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
     if (!value) {
       out.push({ level: 'error', message: `${key} is not set: no plan can be optimized, and /api/health answers 503 (not ready).` });
     }
+  }
+  // Third review of audit PR4: set, but not plain ASCII - no call can send it as the solver has it.
+  if (solver.token && !tokenCanBeSent(solver.token)) {
+    out.push({
+      level: 'error',
+      message: `${TOKEN_CANNOT_BE_SENT}: no plan can be optimized, and /api/health answers 503 (not ready). Copy the token again as plain text.`,
+    });
   }
   if (!env.RESEND_API_KEY?.trim()) {
     out.push({

@@ -8,6 +8,12 @@
  *   (alert, do not block);
  * - the check is one authenticated GET /ready: it never calls /optimize-dispatch;
  * - liveness answers without the database or the solver.
+ * Third review of audit PR4:
+ * - a SOLVER_TOKEN with a character outside plain ASCII (a hidden zero-width space, a curly quote,
+ *   a non-breaking space, a line break inside it) is misconfigured: the calls cannot send it, or
+ *   send it differently from the check;
+ * - a redirect is never ready: the optimize call does not follow one, so the check does not either;
+ * - the 4 s timeout covers the whole answer, body included: a body that stops half-way is degraded.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,23 +35,52 @@ import { solverEnv } from '@/lib/solver-env';
 import { GET as health } from '@/app/api/health/route';
 import { GET as live } from '@/app/api/health/live/route';
 
-type Reply = { status: number; body?: unknown } | 'network-error' | 'hang';
+type Reply = { status: number; body?: unknown } | 'network-error' | 'hang' | 'stall-body';
 const env = (e: Record<string, string>) => e as NodeJS.ProcessEnv;
 const ENV = env({ SOLVER_URL: 'http://solver.test', SOLVER_TOKEN: 'web-token' });
 
 function fakeFetch(reply: Reply) {
-  const calls: { url: string; token: string | null; method: string }[] = [];
+  const calls: { url: string; token: string | null; method: string; redirect: RequestRedirect | undefined }[] = [];
   const f = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const headers = new Headers(init?.headers);
-    calls.push({ url: String(input), token: headers.get('X-Solver-Token'), method: init?.method ?? 'GET' });
+    calls.push({ url: String(input), token: headers.get('X-Solver-Token'), method: init?.method ?? 'GET', redirect: init?.redirect });
     if (reply === 'network-error') throw new TypeError('fetch failed');
     if (reply === 'hang') {
       return new Promise<Response>((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+    }
+    if (reply === 'stall-body') {
+      // The headers and the first bytes of the body arrive, then nothing (a wedged proxy or worker).
+      // Like Node's fetch, aborting the request's signal errors the body that is still being read.
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          c.enqueue(new TextEncoder().encode('{"ok":tr'));
+          init?.signal?.addEventListener('abort', () => c.error(new DOMException('This operation was aborted', 'AbortError')));
+        },
+      });
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json' } });
     }
     return new Response(reply.body === undefined ? null : JSON.stringify(reply.body), { status: reply.status, headers: { 'content-type': 'application/json' } });
   });
   return { f: f as unknown as typeof fetch, calls };
 }
+
+/** Resolves with `'still pending'` if `p` has not settled after `ms` (a hang must fail the test, not time it out). */
+function within<T>(p: Promise<T>, ms: number): Promise<T | 'still pending'> {
+  let timer: NodeJS.Timeout | undefined;
+  const cap = new Promise<'still pending'>((r) => {
+    timer = setTimeout(() => r('still pending'), ms);
+  });
+  return Promise.race([p, cap]).finally(() => clearTimeout(timer));
+}
+
+/** Characters no HTTP client sends the same way as plain ASCII (the solver compares bytes). */
+const UNSENDABLE_TOKENS = [
+  'web-token\u200b', // a zero-width space pasted after it (trim keeps it)
+  '\u201cweb-token\u201d', // curly quotes from a document or a chat
+  'web\u00a0token', // a non-breaking space: fetch sends 1 byte, the optimize call 2 (UTF-8)
+  'web\ntoken', // a line break inside it
+  'web\u0001token', // a control character
+];
 
 const READY_BODY = { ok: true, service: 'routeiq-solver', routing: { provider: 'OSRM', status: 'up' } };
 
@@ -54,7 +89,7 @@ describe('checkDispatchReadiness', () => {
     const { f, calls } = fakeFetch({ status: 200, body: READY_BODY });
     const r = await checkDispatchReadiness(ENV, f);
     expect(r).toMatchObject({ status: 'ready', reason: 'OK', routing: { provider: 'OSRM', status: 'up' } });
-    expect(calls).toEqual([{ url: 'http://solver.test/ready', token: 'web-token', method: 'GET' }]);
+    expect(calls).toEqual([{ url: 'http://solver.test/ready', token: 'web-token', method: 'GET', redirect: 'manual' }]);
   });
 
   it('SOLVER_TOKEN missing on web: misconfigured, and the solver is not even called', async () => {
@@ -99,6 +134,44 @@ describe('checkDispatchReadiness', () => {
     expect((await checkDispatchReadiness(ENV, fakeFetch({ status: 404, body: { detail: 'Not Found' } }).f)).reason).toBe('SOLVER_READY_UNSUPPORTED');
     expect(await checkDispatchReadiness(ENV, fakeFetch({ status: 502 }).f)).toMatchObject({ status: 'degraded', reason: 'SOLVER_ERROR' });
     expect((await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: { ok: false } }).f)).status).toBe('degraded');
+  });
+
+  it('third review of audit PR4: a SOLVER_TOKEN with a character outside plain ASCII is misconfigured, and the solver is not called', async () => {
+    for (const token of UNSENDABLE_TOKENS) {
+      const { f, calls } = fakeFetch({ status: 200, body: READY_BODY });
+      const r = await checkDispatchReadiness(env({ SOLVER_URL: 'http://solver.test', SOLVER_TOKEN: token }), f);
+      expect(r, JSON.stringify(token)).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_TOKEN_INVALID' });
+      expect(overallReadiness('up', r)).toEqual({ status: 'not_ready', httpStatus: 503 });
+      expect(calls).toHaveLength(0);
+    }
+    // Letters, digits, punctuation, and a space or a tab inside it are sent the same way by every call.
+    const plain = await checkDispatchReadiness(env({ SOLVER_URL: 'http://solver.test', SOLVER_TOKEN: 'a b\tc~!{}' }), fakeFetch({ status: 200, body: READY_BODY }).f);
+    expect(plain.status).toBe('ready');
+    // The startup log says the same.
+    const prod = { NODE_ENV: 'production', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver.test' };
+    expect(configProblems(env({ ...prod, SOLVER_TOKEN: 'web-token\u200b' })).map((p) => p.message.split(' ')[0])).toEqual(['SOLVER_TOKEN']);
+    expect(configProblems(env({ ...prod, SOLVER_TOKEN: 'web-token' }))).toEqual([]);
+  });
+
+  it('third review of audit PR4: a redirect is never ready (the optimize call does not follow one): degraded SOLVER_URL_REDIRECTS', async () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      const { f, calls } = fakeFetch({ status });
+      const r = await checkDispatchReadiness(ENV, f);
+      expect(r, String(status)).toMatchObject({ status: 'degraded', reason: 'SOLVER_URL_REDIRECTS' });
+      expect(overallReadiness('up', r)).toEqual({ status: 'degraded', httpStatus: 200 });
+      // Asked without following it: the token never goes to the address the redirect names.
+      expect(calls.map((c) => c.redirect)).toEqual(['manual']);
+    }
+    // What a browser-style fetch returns for redirect: 'manual'.
+    const opaque = vi.fn(async () => ({ status: 0, type: 'opaqueredirect', ok: false, body: null, json: async () => null }) as unknown as Response);
+    expect(await checkDispatchReadiness(ENV, opaque as unknown as typeof fetch)).toMatchObject({ status: 'degraded', reason: 'SOLVER_URL_REDIRECTS' });
+  });
+
+  it('third review of audit PR4: the timeout covers the body too - a body that stops half-way is degraded, never a hang', async () => {
+    const t0 = Date.now();
+    const r = await within(checkDispatchReadiness(ENV, fakeFetch('stall-body').f, 50), 2000);
+    expect(r).toMatchObject({ status: 'degraded', reason: 'SOLVER_UNREACHABLE' });
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   it('overall: a misconfiguration or a database down is 503, degraded is 200', () => {
@@ -172,6 +245,24 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
     expect(await res.json()).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_ERROR' } });
   });
 
+  it('third review of audit PR4: a SOLVER_TOKEN that cannot be sent is 503 not_ready, and the answer never shows it', async () => {
+    process.env.SOLVER_TOKEN = 'web-token\u200b';
+    solverAnswers({ status: 200, body: READY_BODY });
+    const res = await health();
+    const body = await res.json();
+    expect(res.status).toBe(503);
+    expect(body).toMatchObject({ ok: false, status: 'not_ready', solver: 'misconfigured', dispatch: { status: 'misconfigured', reason: 'SOLVER_TOKEN_INVALID' } });
+    expect(JSON.stringify(body)).not.toContain('web-token');
+    expect(calls).toHaveLength(0);
+  });
+
+  it('third review of audit PR4: a SOLVER_URL that redirects is 200 degraded with ok false, never ready', async () => {
+    solverAnswers({ status: 308 });
+    const res = await health();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_URL_REDIRECTS' } });
+  });
+
   it('the database down is 503 whatever the solver says', async () => {
     db.up = false;
     solverAnswers({ status: 200, body: READY_BODY });
@@ -210,6 +301,8 @@ describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER
   const seen: { call: string; token: string | undefined }[] = [];
   let server: http.Server;
   let base = '';
+  /** The solver's own SOLVER_TOKEN. Node reads header bytes as Latin-1, as the solver (Starlette) does. */
+  let solverToken = 'solver-token';
 
   beforeAll(async () => {
     server = http.createServer((req, res) => {
@@ -222,7 +315,8 @@ describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER
       };
       const known = ['GET /ready', 'POST /optimize-dispatch', 'POST /route-geometry'];
       if (!known.includes(`${req.method} ${req.url}`)) return reply(404, { detail: 'Not Found' });
-      if (token !== 'solver-token') return reply(401, { detail: 'Invalid solver token' });
+      // main.py _check_token compares the UTF-8 bytes of the header as Starlette decoded it (Latin-1).
+      if (Buffer.compare(Buffer.from(token ?? '', 'utf8'), Buffer.from(solverToken, 'utf8')) !== 0) return reply(401, { detail: 'Invalid solver token' });
       if (req.url === '/ready') return reply(200, { ok: true, routing: { provider: 'OSRM', status: 'up' } });
       if (req.url === '/optimize-dispatch') return reply(200, { run_id: 'r1', engine: 'test', scenarios: [], warnings: [] });
       return reply(200, { provider: 'OSRM', is_estimated: false, coordinates: [[58.39, 23.58], [58.45, 23.6]], warning: null });
@@ -235,6 +329,7 @@ describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER
   });
   beforeEach(() => {
     seen.length = 0;
+    solverToken = 'solver-token';
   });
   afterEach(() => {
     if (saved.url === undefined) delete process.env.SOLVER_URL;
@@ -299,5 +394,75 @@ describe('the readiness check and the real solver calls read SOLVER_URL / SOLVER
     await expect(callDispatchSolver({} as never)).rejects.toThrow('SOLVER_URL not set');
     expect(await callRouteGeometry([])).toEqual({ kind: 'not_configured' });
     expect(seen).toHaveLength(0);
+  });
+
+  /** Another in-process HTTP server for one test (an edge in front of the solver, a stalled proxy). */
+  async function listen(handler: http.RequestListener): Promise<{ base: string; close: () => Promise<void> }> {
+    const s = http.createServer(handler);
+    await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
+    return {
+      base: `http://127.0.0.1:${(s.address() as { port: number }).port}`,
+      close: () =>
+        new Promise<void>((r) => {
+          s.closeAllConnections();
+          s.close(() => r());
+        }),
+    };
+  }
+
+  it('third review of audit PR4: a token outside plain ASCII is refused before anything is sent - by the check and by every call', async () => {
+    for (const webToken of UNSENDABLE_TOKENS) {
+      seen.length = 0;
+      // Both services were given the same pasted value. Before the fix the check was "ready" for the
+      // non-breaking space (fetch sends it as 1 byte) while the optimize call sent 2 bytes (UTF-8) and
+      // got 401; for the others the check said "unreachable" while no call could be sent at all.
+      const token = webToken.replace('web', 'solver');
+      solverToken = token;
+      const r = await allThree(base, token);
+      expect(r.ready, JSON.stringify(token)).toMatchObject({ status: 'misconfigured', reason: 'SOLVER_TOKEN_INVALID' });
+      expect(r.optimize).toEqual({ ok: false, status: 0, message: expect.stringMatching(/^SOLVER_TOKEN .*cannot be sent/) });
+      expect(r.geometry).toEqual({ kind: 'failed' });
+      expect(seen).toEqual([]);
+    }
+  });
+
+  it('third review of audit PR4: a SOLVER_URL that answers with a redirect (an http-to-https edge) is never ready, and no call follows it', async () => {
+    for (const code of [301, 302, 307, 308]) {
+      seen.length = 0;
+      const edgeCalls: string[] = [];
+      const edge = await listen((req, res) => {
+        edgeCalls.push(`${req.method} ${req.url}`);
+        req.resume();
+        res.writeHead(code, { location: `${base}${req.url}` });
+        res.end();
+      });
+      try {
+        const r = await allThree(edge.base, 'solver-token');
+        expect(r.ready, String(code)).toMatchObject({ status: 'degraded', reason: 'SOLVER_URL_REDIRECTS' });
+        expect(r.optimize).toEqual({ ok: false, status: code, message: expect.stringMatching(/redirect/i) });
+        expect(r.geometry).toEqual({ kind: 'failed', status: code });
+        expect(edgeCalls).toEqual(['GET /ready', 'POST /optimize-dispatch', 'POST /route-geometry']);
+        // The token never went on to the address the redirect names.
+        expect(seen).toEqual([]);
+      } finally {
+        await edge.close();
+      }
+    }
+  });
+
+  it('third review of audit PR4: a /ready answer whose body stops half-way is degraded within the timeout, never a hang', async () => {
+    const stalled = await listen((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': '60' });
+      res.write('{"ok":tr');
+    });
+    try {
+      const t0 = Date.now();
+      const r = await within(checkDispatchReadiness(env({ SOLVER_URL: stalled.base, SOLVER_TOKEN: 'solver-token' }), fetch, 300), 3000);
+      expect(r).toMatchObject({ status: 'degraded', reason: 'SOLVER_UNREACHABLE' });
+      expect(Date.now() - t0).toBeLessThan(3000);
+    } finally {
+      await stalled.close();
+    }
   });
 });

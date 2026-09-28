@@ -14,15 +14,23 @@
  * - `ready`: everything works (HTTP 200, `ok: true`);
  * - `degraded`: nothing is known to be wrong, but the solver could not be asked (unreachable, timed
  *   out, an older solver without /ready, a 5xx, a 403 from a proxy in front of it - the solver itself
- *   never answers 403). HTTP 200 so a deploy is not blocked, `ok: false` so monitoring alerts;
+ *   never answers 403 -, or a redirect). HTTP 200 so a deploy is not blocked, `ok: false` so
+ *   monitoring alerts;
  * - `not_ready`: a definite fault - the database is down, or dispatch is misconfigured (a token
- *   missing on the web, the solver answers 401, or the solver has no token itself). HTTP 503: the
- *   deploy gate fails and the previous version keeps serving.
+ *   missing on the web or one that cannot be sent, the solver answers 401, or the solver has no
+ *   token itself). HTTP 503: the deploy gate fails and the previous version keeps serving.
+ *
+ * Third review of audit PR4 - the check behaves like the optimize call in three more ways:
+ * - a token outside plain ASCII is `misconfigured` before anything is sent (`tokenCanBeSent`);
+ * - a redirect is not followed (the optimize call's node:http never follows one): `degraded`
+ *   `SOLVER_URL_REDIRECTS`, never `ready`;
+ * - the 4 s timeout covers the whole answer, body included (it used to stop at the headers, so a
+ *   body that stopped half-way kept `/api/health` waiting for minutes).
  *
  * Only reason codes and plain sentences are returned (the endpoint is public): never a URL, a token
  * or a solver response body.
  */
-import { solverEnv } from './solver-env';
+import { TOKEN_CANNOT_BE_SENT, solverEnv, tokenCanBeSent } from './solver-env';
 
 export type ReadinessStatus = 'ready' | 'degraded' | 'not_ready';
 
@@ -30,9 +38,11 @@ export type DispatchReason =
   | 'OK'
   | 'SOLVER_URL_MISSING'
   | 'SOLVER_TOKEN_MISSING'
+  | 'SOLVER_TOKEN_INVALID'
   | 'SOLVER_TOKEN_REJECTED'
   | 'SOLVER_NOT_CONFIGURED'
   | 'SOLVER_UNREACHABLE'
+  | 'SOLVER_URL_REDIRECTS'
   | 'SOLVER_READY_UNSUPPORTED'
   | 'SOLVER_ERROR';
 
@@ -54,9 +64,12 @@ const MESSAGES: Record<DispatchReason, string> = {
   OK: 'The route optimizer accepts this web service.',
   SOLVER_URL_MISSING: 'SOLVER_URL is not set on the web service: no plan can be optimized.',
   SOLVER_TOKEN_MISSING: 'SOLVER_TOKEN is not set on the web service: every optimization would fail.',
+  SOLVER_TOKEN_INVALID: `${TOKEN_CANNOT_BE_SENT}: every optimization would fail. Copy the token again as plain text, on web and solver.`,
   SOLVER_TOKEN_REJECTED: 'The route optimizer refused the web service token (401): set the same SOLVER_TOKEN on web and solver.',
   SOLVER_NOT_CONFIGURED: 'The route optimizer has no SOLVER_TOKEN set: it refuses every optimization.',
   SOLVER_UNREACHABLE: 'The route optimizer did not answer (unreachable or too slow). Plans cannot be optimized until it answers.',
+  SOLVER_URL_REDIRECTS:
+    "SOLVER_URL answers with a redirect, and an optimization does not follow one: plans cannot be optimized. Set SOLVER_URL to the solver's own address (on Railway, its private address).",
   SOLVER_READY_UNSUPPORTED: 'The route optimizer is an older version without the readiness check: the token could not be verified.',
   SOLVER_ERROR: 'The route optimizer, or a proxy in front of it, answered the readiness check with an error.',
 };
@@ -86,22 +99,38 @@ export async function checkDispatchReadiness(
   const { url, token } = solverEnv(env);
   if (!url) return answer('misconfigured', 'SOLVER_URL_MISSING');
   if (!token) return answer('misconfigured', 'SOLVER_TOKEN_MISSING');
+  // A token the calls cannot send, or send differently from this check, fails every optimization
+  // (third review of audit PR4): a definite misconfiguration on the web, like a missing one.
+  if (!tokenCanBeSent(token)) return answer('misconfigured', 'SOLVER_TOKEN_INVALID');
+  // One deadline for the whole answer, headers AND body (third review of audit PR4: the timer used
+  // to stop at the headers, so a body that stopped half-way kept /api/health waiting for minutes).
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
+  let body: { ok?: unknown; detail?: unknown; routing?: unknown } | null;
   try {
     res = await fetchImpl(`${url}/ready`, {
       method: 'GET',
       headers: { 'X-Solver-Token': token },
       signal: ctrl.signal,
       cache: 'no-store',
+      // The optimize call (node:http) never follows a redirect, so the check must not either: it
+      // used to follow one and answer `ready` while every optimization failed with "HTTP 301". Not
+      // following it also keeps the token away from the address the redirect names.
+      redirect: 'manual',
     });
+    if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
+      void res.body?.cancel().catch(() => undefined);
+      return answer('degraded', 'SOLVER_URL_REDIRECTS');
+    }
+    body = (await res.json().catch(() => null)) as typeof body;
   } catch {
     return answer('degraded', 'SOLVER_UNREACHABLE');
   } finally {
     clearTimeout(timer);
   }
-  const body = (await res.json().catch(() => null)) as { ok?: unknown; detail?: unknown; routing?: unknown } | null;
+  // The deadline passed while the body was being read: no complete answer, as if none came.
+  if (ctrl.signal.aborted) return answer('degraded', 'SOLVER_UNREACHABLE');
   // Only the solver's own refusal is a definite misconfiguration: _check_token answers 401 and never
   // 403. A 403 comes from something in front of the solver (a proxy, a firewall, a wrong host): the
   // token was never checked, so it is only degraded like any other error (owner decision 5;
