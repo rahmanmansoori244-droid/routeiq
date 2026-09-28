@@ -531,6 +531,60 @@ describe("load changes and the owner's location rule (audit PR A5, second review
       await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
       expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
     });
+
+    // A5 fourth review: only the change that moved the customer off the planned point counts. A
+    // change that confirmed the point where it was (a dispatcher typing its own coordinates, read as
+    // exact; the ADD LOCATION dialog allows it) moves nothing, and an older change off the point is
+    // not the one that replaced it. Before: any row whose "before" was the planned point while it was
+    // flagged refused the load, so an ordinary correction of a confirmed point was refused with
+    // "its old point, which was not usable" and a locked load was sent through unlock and RE-PLAN.
+    const NOW = { lat: 23.64, lng: 58.44 };
+    const R = { lat: 23.62, lng: 58.42 };
+    const flagged = { verified: false, confidence: 'LOW' };
+    const confirmed = { verified: true, confidence: 'HIGH' };
+    /** Location changes of customer c, oldest first: [before, after]. */
+    function history(changes: [Record<string, unknown>, Record<string, unknown>][]) {
+      tables.auditLog = changes.map(([before, after], i) => ({
+        id: `AU${i + 1}`, tenantId: T, userId: 'u1', action: 'CUSTOMER_LOCATION_SET', entity: 'Customer', entityId: 'c',
+        beforeJson: { source: 'IMPORT', ...before }, afterJson: { source: 'MAP_PIN', confidence: 'HIGH', check: 'HAND_PIN', ...after },
+        createdAt: new Date(Date.UTC(2026, 8, 26, 18, i)),
+      }));
+    }
+
+    it.each([
+      [
+        // Also a usable point planned, then flagged by a customer file (which writes no row), then this.
+        'a flagged point confirmed where it was (its coordinates typed), then corrected by hand',
+        [[{ ...P1, ...flagged }, { ...P1, source: 'MANUAL_LATLNG', check: 'READING' }], [{ ...P1, ...confirmed, source: 'MANUAL_LATLNG' }, NOW]],
+      ],
+      [
+        'a flagged point replaced, set back by hand, then corrected by hand',
+        [[{ ...P1, ...flagged }, R], [{ ...R, ...confirmed }, P1], [{ ...P1, ...confirmed }, NOW]],
+      ],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('control: %s is locked and dispatched as before', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+    });
+
+    it.each([
+      [
+        'confirmed where it was, flagged again by a customer file, then replaced',
+        [[{ ...P1, ...flagged }, { ...P1, check: 'READING' }], [{ ...P1, ...flagged }, NOW]],
+      ],
+      [
+        'corrected once while usable, set back, flagged, then replaced',
+        [[{ ...P1, ...confirmed }, R], [{ ...R, ...confirmed }, { ...P1, source: 'IMPORT', check: 'IMPORT' }], [{ ...P1, ...flagged }, NOW]],
+      ],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('still refused: %s (the newest change off the planned point was made while it was flagged)', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes);
+      await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+      await expect(updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+    });
   });
 });
 

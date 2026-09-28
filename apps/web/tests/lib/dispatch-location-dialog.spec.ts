@@ -40,7 +40,7 @@ vi.mock('sonner', () => ({
 vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return null; } }));
 
 import { LocationDialog } from '@/app/t/[slug]/dispatch/location-dialog';
-import { DEFAULT_SERVICE_AREA } from '@/lib/dispatch/location-input';
+import { DEFAULT_SERVICE_AREA, parseLocationInput } from '@/lib/dispatch/location-input';
 import { WHOLE_WORLD } from '@/lib/dispatch/customer-attrs';
 
 const A = { customerId: 'cust-A', code: 'A001', branchCode: null, name: 'Customer A (Seeb)', lat: null, lng: null };
@@ -423,22 +423,25 @@ describe('LocationDialog (audit F06)', () => {
 });
 
 describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
-  const notExact = (lat: number, lng: number, confidence: 'MEDIUM' | 'LOW', warning: string, extra: Record<string, unknown> = {}) =>
-    ok({ ok: true, lat, lng, source: 'GOOGLE_MAPS_URL', confidence, needsPin: true, warnings: [warning], ...extra });
   const pinRequired = (t: ReturnType<typeof setup>) => textOf(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'location-pin-required') ?? null);
 
   it.each([
-    ['LOW (whole degrees)', 'LOW', "23°N 58°E"],
-    ['MEDIUM (fewer than 4 decimals)', 'MEDIUM', '23.58, 58.40'],
-    ['MEDIUM (map centre only)', 'MEDIUM', 'https://www.google.com/maps/@23.5859,58.4059,17z'],
-  ] as const)('a reading that is not exact, %s: Save stays off until the pin is placed by hand', async (_what, confidence, text) => {
+    ['LOW (whole degrees)', "23°N 58°E", '23.000000, 58.000000'],
+    ['MEDIUM (fewer than 4 decimals)', '23.58, 58.40', '23.580000, 58.400000'],
+    ['MEDIUM (map centre only)', 'https://www.google.com/maps/@23.5859,58.4059,17z', '23.585900, 58.405900'],
+    ['MEDIUM (swapped)', '58.4059, 23.5859', '23.585900, 58.405900'],
+  ] as const)('a reading that is not exact, %s: Save stays off until the pin is placed by hand', async (_what, text, at) => {
     const t = setup();
     t.openFor(A);
     t.type(text);
     t.read();
-    calls[0].resolve(notExact(23.58, 58.4, confidence, 'Confirm the pin.'));
+    // What POST /api/locations/parse answers: the parser's own reading and warnings.
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
     await t.host.settle();
-    expect(t.found()).toContain('23.580000, 58.400000');
+    expect(t.found()).toContain(at);
+    // A5 fourth review: nothing on screen asks to "confirm the pin" or to "move the pin if needed"
+    // (before: the parser's notes did, next to the note below, while Save stayed off).
+    expect(textOf(t.previewBox())).not.toMatch(/confirm|if needed|check the point/i);
     // Before: Save was on and stored the reading as read (source GOOGLE_MAPS_URL), marked verified.
     expect(t.saveBtn().props.disabled).toBe(true);
     expect(pinRequired(t)).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");

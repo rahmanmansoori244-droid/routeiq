@@ -24,7 +24,8 @@
  *     the day says the plan is out of date so RE-PLAN is offered. A5 third review: once the pin is
  *     placed, the stop still goes to the old, flagged point, so LOCK, LOADING and DISPATCH stay
  *     refused (409 STOP_PIN_REPLACED) until a re-plan gives the stop the new pin - also when a second
- *     customer file replaced the flagged point; an ordinary pin correction is not refused.
+ *     customer file replaced the flagged point; an ordinary pin correction is not refused. A5 fourth
+ *     review: nor is the correction of a flagged point that was confirmed where it was.
  */
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -536,5 +537,39 @@ describe('5. a planned customer whose location stops being usable is never locke
     const l7 = await loadOf(runId, k7.id);
     await updateLoad(tenantId, runId, l7.id, { status: 'LOCKED' }, planner(), everyRole);
     expect(await statusOf(l7.id)).toBe('LOCKED');
+  });
+
+  it('A5 fourth review: a flagged point confirmed where it was (its coordinates typed), then corrected by hand, is an ordinary correction: the loads lock and load', async () => {
+    const day = isoPlus(20);
+    // B: R2's saved point is LOW (nobody confirmed it); a dispatcher confirms it before planning by
+    // typing its own coordinates in ADD LOCATION (read as exact).
+    const r2 = await cust('R2', { lat: 23.5051, lng: 58.2851, geocodeConfidence: 'LOW', locationSource: 'IMPORT' });
+    expect(await put(r2.id, { input: '23.5051, 58.2851' })).toMatchObject({
+      status: 200,
+      body: { data: { lat: 23.5051, lng: 58.2851, locationVerified: true, geocodeConfidence: 'HIGH' } },
+    });
+    // A: A1's usable point is planned; a customer file then marks it LOW.
+    const a1 = await cust('A1', { lat: 23.5551, lng: 58.3351, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    await orderFor(r2.id, day, 'SO-R2');
+    await orderFor(a1.id, day, 'SO-A1');
+    const runId = await planDay(day);
+    const lr = await loadOf(runId, r2.id);
+    const la = await loadOf(runId, a1.id);
+    expect(stopOf(await getPlanDetail(tenantId, runId), r2.id)).toMatchObject({ lat: 23.5051, lng: 58.2851 });
+    expect((await importCsv('code,name,priority,lat,lng\nA1,A1,3,23.57,58.35\n')).body.data.locationsNotSaved).toMatchObject([{ code: 'A1', kept: 'SAVED_LOCATION_NEEDS_PIN' }]);
+    await expect(updateLoad(tenantId, runId, la.id, { status: 'LOCKED' }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+    // The dispatcher confirms A1 where it is: the load locks (its stop goes to that point).
+    expect((await put(a1.id, { input: '23.5551, 58.3351' })).status).toBe(200);
+    await updateLoad(tenantId, runId, la.id, { status: 'LOCKED' }, planner(), everyRole);
+
+    // Ordinary corrections of the two confirmed points, about 1 km away (owner default: the planned
+    // stop stays, the sheets note the new pin).
+    expect((await put(r2.id, { lat: 23.5141, lng: 58.2901, source: 'MAP_PIN' })).status).toBe(200);
+    expect((await put(a1.id, { lat: 23.5641, lng: 58.3401, source: 'MAP_PIN' })).status).toBe(200);
+    // Before: both refused with 409 STOP_PIN_REPLACED ("its old point, which was not usable"), and
+    // A1's locked load sent back through unlock and RE-PLAN.
+    await updateLoad(tenantId, runId, lr.id, { status: 'LOCKED' }, planner(), everyRole);
+    await updateLoad(tenantId, runId, la.id, { status: 'LOADING' }, planner(), everyRole);
+    expect([await statusOf(lr.id), await statusOf(la.id)]).toEqual(['LOCKED', 'LOADING']);
   });
 });

@@ -111,14 +111,21 @@ export function parseDms(s: string): DmsParse | null {
 
 /**
  * How sure a DMS point is. Whole degrees (about 110 km) or whole minutes (about 1.8 km) are not a
- * delivery point: the dispatcher confirms the pin (audit F17), like decimals with fewer than 4 places.
+ * delivery point: the dispatcher drops the pin by hand (audit F17, owner's rule A5), like decimals
+ * with fewer than 4 places.
+ *
+ * The warnings of a reading (here and in withValidation) say what is wrong with it, never what to do
+ * (A5 fourth review): a reading that needs a pin is saved only as a pin placed by hand, and the
+ * screens say that in their own words (ADD LOCATION: PIN_REQUIRED_MESSAGE, and Save stays off until
+ * the pin is placed). They said "Confirm the pin", "Please confirm on the map" or "move the pin if
+ * needed", which Save did not allow.
  */
 function dmsBase(precision: DmsPrecision): { confidence: Confidence; needsPin?: boolean; warnings?: string[] } {
   if (precision === 'DEGREES') {
-    return { confidence: 'LOW', needsPin: true, warnings: ['Whole degrees only (accurate to about 100 km). Drop the pin on the customer.'] };
+    return { confidence: 'LOW', needsPin: true, warnings: ['Whole degrees only (accurate to about 100 km).'] };
   }
   if (precision === 'MINUTES') {
-    return { confidence: 'MEDIUM', needsPin: true, warnings: ['Degrees and minutes only, no seconds (accurate to about 2 km). Confirm the pin.'] };
+    return { confidence: 'MEDIUM', needsPin: true, warnings: ['Degrees and minutes only, no seconds (accurate to about 2 km).'] };
   }
   return { confidence: 'HIGH' };
 }
@@ -143,19 +150,19 @@ function withValidation(
   const inArea = (a: number, b: number) => a >= area.minLat && a <= area.maxLat && b >= area.minLng && b <= area.maxLng;
   if (!inArea(lat, lng)) {
     if (inArea(lng, lat)) {
-      warnings.push('Latitude and longitude looked swapped; they were swapped back. Please confirm on the map.');
+      warnings.push('Latitude and longitude looked swapped; they were swapped back.');
       [lat, lng] = [lng, lat];
       needsPin = true;
       // Never raises a lower confidence (whole-degree DMS stays LOW).
       if (confidence === 'HIGH') confidence = 'MEDIUM';
     } else {
-      warnings.push('This point is outside the delivery area (Oman/UAE). Confirm it on the map.');
+      warnings.push('This point is outside the delivery area (Oman/UAE).');
       needsPin = true;
       confidence = 'LOW';
     }
   }
   if (base.precision !== undefined && base.precision < 4) {
-    warnings.push('Coordinates have fewer than 4 decimals (accurate to ~100 m or worse). Confirm the pin.');
+    warnings.push('Coordinates have fewer than 4 decimals (accurate to ~100 m or worse).');
     needsPin = true;
     if (confidence === 'HIGH') confidence = 'MEDIUM';
   }
@@ -238,7 +245,7 @@ function dmsResult(d: DmsParse, resolvedUrl: string, area: ServiceArea): Locatio
   return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', ...dmsBase(d.precision), resolvedUrl }, area);
 }
 
-const MAP_CENTRE_WARNING = 'This link only gives the map centre, not a pin. Check the point and move the pin if needed.';
+const MAP_CENTRE_WARNING = 'This link only gives the map centre, not a pin.';
 const DIRECTIONS_NO_POINT = 'This directions link does not end at a point, so it does not say where the customer is.';
 
 /**

@@ -11,6 +11,9 @@
  * row, and SET NOT NULL fails on it (P3018, then P3009 on every later deploy). The database has a
  * statement_timeout and a lock_timeout of 1 s meanwhile, and the writer holds on for 2.5 s: the
  * migration must turn the timeouts off before its lock step, or the wait is cancelled (57014).
+ * The database's default isolation is REPEATABLE READ meanwhile, and the writer also changes an
+ * order without a depot: the migration must read committed, or its backfill fails on that order
+ * (40001) or cannot see the new one (A5 fourth review).
  * Migrations added after it are not applied (./folders.ts).
  * It checks every filled-in depot, the history-only depots, the audit rows and NOT NULL, and
  * that running the migration's SQL a second time changes nothing.
@@ -260,9 +263,16 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     // The database also has a statement_timeout and a lock_timeout of 1 s (as ALTER DATABASE or
     // ALTER ROLE can set them): the migration must turn them off before its lock step starts, so a
     // wait longer than 1 s never cancels it (A5 second review: 57014, P3018, then P3009).
+    // A5 fourth review: the database's default isolation is REPEATABLE READ (as ALTER DATABASE or
+    // ALTER ROLE ... SET default_transaction_isolation can set it), and the writer also changes an
+    // order that has no depot (main's planner sets such orders ASSIGNED). The migration must read
+    // committed: its first query took the transaction's one snapshot before its lock step, so the
+    // backfill then failed on the changed order (40001, "could not serialize access due to concurrent
+    // update") and could not see the new one (23502 at SET NOT NULL): P3018, then P3009.
     cpSync(path.join(MIGRATIONS, NEW), path.join(tmp, 'migrations', NEW), { recursive: true });
     await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" SET statement_timeout = '1s'`);
     await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" SET lock_timeout = '1s'`);
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" SET default_transaction_isolation = 'repeatable read'`);
     let reading!: () => void;
     const readDone = new Promise<void>((r) => (reading = r));
     const holder = db.$transaction(
@@ -274,6 +284,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
         await tx.$executeRawUnsafe(
           `INSERT INTO "Order" ("id", "tenantId", "customerId", "deliveryDate", "depotId", "uploadBatchId", "totalCases") VALUES ('O_INFLIGHT', 'TB', 'C_TB', '${DAY}'::date, NULL, 'B_INFLIGHT', 5)`,
         );
+        await tx.$executeRawUnsafe(`UPDATE "Order" SET "status" = 'ASSIGNED' WHERE "id" = 'O_TB2' AND "depotId" IS NULL`);
         reading();
         const t0 = Date.now();
         while (Date.now() - t0 < 60_000) {
@@ -300,6 +311,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     secondDeploy = second;
     await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" RESET statement_timeout`);
     await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" RESET lock_timeout`);
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" RESET default_transaction_isolation`);
   }, 300_000);
 
   afterAll(async () => {
@@ -315,11 +327,12 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     }
   }, 120_000);
 
-  it('applies with prisma migrate deploy while a request is still writing an order without a depot, on a database with 1 s timeouts (the lock step waits, then fills it in)', async () => {
+  it('applies with prisma migrate deploy while a request is still writing orders without a depot, on a database with 1 s timeouts and REPEATABLE READ by default (the lock step waits, then fills them in)', async () => {
     expect(firstDeploy.status).toBe(0);
     // Without the lock step: P3018 (23502, "depotId" contains null values), and P3009 on every later
     // deploy. With the timeout turned off only inside the lock step: P3018 (57014, "canceling
-    // statement due to statement timeout"), the same.
+    // statement due to statement timeout"), the same. Without READ COMMITTED first: P3018 (40001,
+    // "could not serialize access due to concurrent update"), the same.
     expect(secondDeploy.status, secondDeploy.out).toBe(0);
     expect(secondDeploy.out).toContain(NEW);
     // The migration was running while the writer still held "Order" (and 2.5 s more): it waited,
@@ -333,6 +346,8 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
       { id: 'B_INFLIGHT', depotId: 'TB_D1' },
       { id: 'O_INFLIGHT', depotId: 'TB_D1' },
     ]);
+    // The order the writer changed meanwhile: filled in, its change kept.
+    expect(await q(`SELECT "id", "depotId", "status"::text AS "status" FROM "Order" WHERE "id" = 'O_TB2'`)).toEqual([{ id: 'O_TB2', depotId: 'TB_D1', status: 'ASSIGNED' }]);
   });
 
   it('every order has the depot its evidence shows (steps a to e), and rows that had one keep it', async () => {

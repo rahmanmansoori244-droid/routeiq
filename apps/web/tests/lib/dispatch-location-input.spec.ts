@@ -17,6 +17,29 @@ const LNG = 58.4059;
 const PLACE_URL =
   'https://www.google.com/maps/place/Lulu+Hypermarket+Bawshar/@23.5800,58.3900,17z/data=!3m1!4b1!4m6!3m5!1s0x3e91ff:0x1!8m2!3d23.5859!4d58.4059!16s%2Fg%2F11';
 
+// A5 fourth review. The owner's rule: a reading that is not exact is saved only as a pin placed by
+// hand, and ADD LOCATION keeps Save off until then. Its notes said "Confirm the pin", "Please confirm
+// on the map" or "move the pin if needed", which the dialog does not allow. The warnings now say what
+// is wrong with the reading; the dialog's own note says what to do (drop the pin by hand).
+describe('parseLocationInput - a reading that needs a pin never asks to confirm it', () => {
+  it.each([
+    ['fewer than 4 decimals', '23.585, 58.4059', /fewer than 4 decimals/],
+    ['a map-centre link', 'https://www.google.com/maps/@23.5859,58.4059,17z', /map centre, not a pin/],
+    ['an ?ll= link', 'https://maps.google.com/maps?ll=23.5859,58.4059&z=16', /map centre, not a pin/],
+    ['swapped', '58.4059, 23.5859', /swapped/],
+    ['outside the delivery area', '19.0760, 72.8777', /outside the delivery area/],
+    ['degrees and minutes only', `23°35'N 58°24'E`, /no seconds/],
+    ['whole degrees only', '23°N 58°E', /Whole degrees only/],
+  ])('%s', (_what, input, says) => {
+    const r = parseLocationInput(input);
+    expect(r).toMatchObject({ ok: true, needsPin: true });
+    expect(r.warnings.join(' ')).toMatch(says);
+    // Before: "Confirm the pin.", "Please confirm on the map.", "Confirm it on the map.", "Check the
+    // point and move the pin if needed."
+    expect(r.warnings.join(' ')).not.toMatch(/confirm|if needed|check the point/i);
+  });
+});
+
 describe('parseLocationInput - plain coordinates', () => {
   it('reads "lat, lng"', () => {
     const r = parseLocationInput('23.5859, 58.4059');

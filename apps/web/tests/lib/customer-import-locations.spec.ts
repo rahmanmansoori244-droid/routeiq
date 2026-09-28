@@ -20,7 +20,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
-import { MAX_SHOWN_FORMAT, parseUpload } from '@/lib/csv';
+import { MAX_SHOWN_FORMAT, MAX_SHOWN_FORMATS, parseUpload } from '@/lib/csv';
 
 interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean; geocodeConfidence?: string | null; locationSource?: string | null }
 const S = vi.hoisted(() => ({
@@ -302,6 +302,50 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     expect(r.body.data.locationsNotSaved).toEqual([{ row: 4, code: 'X3', branchCode: null, reason: 'Fewer than 4 decimals.', kept: null }]);
   });
 
+  // A5 fourth review: the screen said "format the cell ... to show 4 decimals". A number holds no
+  // trailing zeros, so a cell of 23.58 formatted 0.0000 shows 23.5800: the padding counted as
+  // precision, and every rough pair became exact. A number format now adds at most one zero.
+  it('Excel: a number format adds at most one zero, so a rough 1- or 2-decimal pair formatted to show 4 or 6 decimals stays not exact', async () => {
+    const r = await importFile(
+      xlsx(
+        [
+          ['R2', 'Two decimals shown as 4', 3, 23.58, 58.41],
+          ['R1', 'One decimal shown as 4', 3, 23.6, 58.4],
+          ['R6', 'Two decimals shown as 6', 3, 23.58, 58.41],
+          ['X6', 'Three decimals shown as 6', 3, 23.585, 58.406],
+        ],
+        { D2: '0.0000', E2: '0.0000', D3: '0.0000', E3: '0.0000', D4: '0.000000', E4: '0.000000', D5: '0.000000', E5: '0.000000' },
+      ),
+    );
+    expect(r.status).toBe(200);
+    // Before: R2, R1 and R6 stored as exact (HIGH, from the import) at 23.58, 58.41 and 23.6, 58.4.
+    expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence])).toEqual([
+      ['R2', null, null, 'MISSING'],
+      ['R1', null, null, 'MISSING'],
+      ['R6', null, null, 'MISSING'],
+      // 23.585 shown with 6 decimals reads as 23.5850 (one zero more), like 0.0000: exact.
+      ['X6', 23.585, 58.406, 'HIGH'],
+    ]);
+    expect(r.body.data.locationsNotSaved.map((l: { code: string; reason: string }) => [l.code, l.reason])).toEqual([
+      ['R2', 'Fewer than 4 decimals.'],
+      ['R1', 'Fewer than 4 decimals.'],
+      ['R6', 'Fewer than 4 decimals.'],
+    ]);
+  });
+
+  it('the warning says what the check will do on Validate only, and what the import did (A5 fourth review)', async () => {
+    const csv = 'code,name,priority,lat,lng\nN1,New,3,23.58,58.40\n';
+    const advice =
+      'Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.';
+    // Before: "were not saved" also on Validate only, and "in Excel format the lat and lng cells as text".
+    expect((await importCsv(csv, true)).body.data.warnings).toContain(`1 location(s) in the file are not exact and will not be saved. ${advice}`);
+    expect((await importCsv(csv)).body.data.warnings).toContain(`1 location(s) in the file are not exact and were not saved. ${advice}`);
+    // A file with errors (here a row without a name) saves nothing either.
+    const withError = await importCsv(`${csv}N2,,3,23.5859,58.4059\n`);
+    expect(withError.body.data.errorRows).toBe(1);
+    expect(withError.body.data.warnings).toContain(`1 location(s) in the file are not exact and will not be saved. ${advice}`);
+  });
+
   it('control: exact pairs with 4 to 6 decimals are stored as read (like the NMWC master data)', async () => {
     const r = await importCsv('code,name,priority,lat,lng\nA1,A,3,23.5859,58.4059\nA2,B,3,23.58591,58.40591\nA3,C,3,23.585912,58.405912\n');
     expect(r.body.data.locationsNotSaved).toEqual([]);
@@ -355,6 +399,85 @@ describe('the decimals a lat / lng cell shows, with A1 merged (SheetJS reads wit
     }
   });
 
+  // A5 fourth review: SheetJS parses a format again for every cell it formats, and a 64-character
+  // format it cannot apply cost about 50 microseconds a cell. Every lat / lng cell of every sheet was
+  // formatted, also the sheets that are not read and every column named "lat", "LAT", "lat " ... that
+  // the rows then fold into one: a 83 KB file of ten sheets took 40 s, a 222 KB one with 44 such
+  // columns 108 s, with the app answering nothing meanwhile.
+  describe('the work is bounded per upload, not per cell (A5 fourth review)', () => {
+    const THROWS = '#,'.repeat(32); // 64 characters: within MAX_SHOWN_FORMAT, and SheetJS cannot apply it
+    /** A workbook of sheets [name, rows (header first), number format by column letter]. */
+    function book(sheets: [string, unknown[][], Record<string, string>][]): File {
+      const wb = XLSX.utils.book_new();
+      for (const [name, rows, formats] of sheets) {
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        for (const [col, z] of Object.entries(formats)) {
+          for (let r = 2; r <= rows.length; r++) if (ws[`${col}${r}`]) ws[`${col}${r}`]!.z = z;
+        }
+        XLSX.utils.book_append_sheet(wb, ws, name);
+      }
+      return new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer], 'customers.xlsx', {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+    }
+    const rowsOf = (n: number, row: (i: number) => unknown[]) => Array.from({ length: n }, (_, i) => row(i));
+
+    it('each number format is tried once per upload, not once per cell (also one SheetJS cannot apply)', async () => {
+      const file = book([['Customers', [['code', 'name', 'priority', 'lat', 'lng'], ...rowsOf(300, (i) => [`C${i}`, 'n', 3, 23.585, 58.4059])], { D: THROWS, E: '0.0000' }]]);
+      const format = vi.spyOn(XLSX.SSF, 'format');
+      try {
+        const parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
+        // Before: 600 calls, one per cell (300 of them throwing).
+        expect(format.mock.calls.map((c) => c[0]).sort()).toEqual([THROWS, '0.0000'].sort());
+        expect(parsed.rows).toHaveLength(300);
+        // The format that cannot be applied: the number's own decimals count.
+        expect(parsed.rows[0]).toMatchObject({ lat: '23.585', lng: '58.4059' });
+      } finally {
+        format.mockRestore();
+      }
+    });
+
+    it('only the sheet that is read, and only the one column per name the rows keep, are formatted', async () => {
+      const other = '0.0000000';
+      const file = book([
+        // "lat", "LAT" and "Lat " all become "lat" in the rows, which keep the last one (F).
+        ['Customers', [['code', 'name', 'priority', 'lat', 'LAT', 'Lat ', 'lng'], ['C1', 'n', 3, 23.1, 23.2, 23.585, 58.4059]], { D: '0.00000', E: '0.000000', F: '0.0000' }],
+        ...Array.from({ length: 9 }, (_, i): [string, unknown[][], Record<string, string>] => [`Other${i + 1}`, [['lat', 'lng'], ...rowsOf(50, () => [23.5, 58.4])], { A: other, B: THROWS }]),
+      ]);
+      const format = vi.spyOn(XLSX.SSF, 'format');
+      try {
+        const parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
+        // Before: D2, E2 and F2, and every lat / lng cell of the nine sheets that are not read.
+        expect(format.mock.calls.map((c) => c[0])).toEqual(['0.0000']);
+        expect(parsed.sheetName).toBe('Customers');
+        expect(parsed.rows).toEqual([{ code: 'C1', name: 'n', priority: '3', lat: '23.5850', lng: '58.4059' }]);
+        expect(parsed.warnings.join(' ')).toMatch(/Only sheet "Customers" was read/);
+      } finally {
+        format.mockRestore();
+      }
+    });
+
+    it(`at most ${MAX_SHOWN_FORMATS} different formats are tried in one upload; a cell in any other counts its number's own decimals`, async () => {
+      // Formats that all show 4 decimals, each written differently.
+      const formats = Array.from({ length: MAX_SHOWN_FORMATS + 5 }, (_, i) => `0.0000${'""'.repeat(i)}`);
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet([['code', 'name', 'priority', 'lat', 'lng'], ...formats.map((_, i) => [`C${i}`, 'n', 3, 23.585, 58.4059])]);
+      formats.forEach((z, i) => (ws[`D${i + 2}`]!.z = z));
+      XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+      const file = new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer], 'customers.xlsx', {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const format = vi.spyOn(XLSX.SSF, 'format');
+      try {
+        const parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
+        expect(format).toHaveBeenCalledTimes(MAX_SHOWN_FORMATS);
+        expect(parsed.rows.map((r) => r.lat)).toEqual(formats.map((_, i) => (i < MAX_SHOWN_FORMATS ? '23.5850' : '23.585')));
+      } finally {
+        format.mockRestore();
+      }
+    });
+  });
+
   it('every other cell reads exactly as without the lat / lng columns: a date format on another column is not applied', async () => {
     const ws = XLSX.utils.aoa_to_sheet([
       ['code', 'since', 'lat', 'lng'],
@@ -380,7 +503,12 @@ describe('the import screen says the location rule in plain words (A5 review)', 
     const tree = await CustomerImportPage({ params: { slug: 'nmwc' } });
     const hints = Object.fromEntries(elements(tree).filter((e) => typeName(e) === 'Field').map((e) => [e.props.name, e.props.hint]));
     // Before: "-90 to 90; leave blank to fix on the map later." and "-180 to 180." - nothing about the rule.
-    expect(hints.lat).toBe('At least 4 decimals, inside the delivery area. In Excel, format the cell as text or to show 4 decimals. Leave blank to set the location on the map later.');
+    // A5 fourth review: before, "In Excel, format the cell as text or to show 4 decimals" - and a cell
+    // of 23.58 formatted to show 4 decimals shows 23.5800, which made a rough point exact.
+    expect(hints.lat).toBe(
+      'At least 4 decimals, inside the delivery area. Type or paste each coordinate with all the decimals it really has; if Excel drops a trailing zero, format the column as Text before typing or pasting. Leave blank to set the location on the map later.',
+    );
+    expect(Object.values(hints).join(' ')).not.toMatch(/show 4 decimals/);
     expect(hints.lng).toBe('At least 4 decimals. A pair that is not exact is not saved: the row is imported without it and listed after the check.');
   });
 

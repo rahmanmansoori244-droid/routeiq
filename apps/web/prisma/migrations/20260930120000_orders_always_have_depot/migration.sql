@@ -13,9 +13,10 @@
 --      it anyway, so there is never a lock upgrade), "Tenant" in SHARE mode (no company is deleted
 --      while a depot is added). It tries without waiting (NOWAIT) for about 30 s, then waits at most
 --      5 s per try. A busy app delays the migration; it never makes it fail (no deadlock: a try that
---      cannot get every lock gives them all back and tries again). Before it, the migration turns off
---      any statement or transaction time limit for its own transaction, so a limit set on the
---      database or the role cannot cancel the wait either.
+--      cannot get every lock gives them all back and tries again). Before it, the migration sets its
+--      own transaction to READ COMMITTED and turns off any statement or transaction time limit for
+--      it, so an isolation level or a limit set on the database or the role cannot make it fail
+--      either.
 --   1. "Depot"."historyOnly" (default false): a depot that only keeps old orders and files. It is
 --      never active and never offered in a picker; the app refuses to make it active.
 --   2. Gives every order and order file without a depot the best depot the data shows:
@@ -49,7 +50,17 @@
 -- stay: old code ignores the column (but its Depots screen could switch a history-only depot on).
 
 -- 0. Locks
--- First, in statements of their own: no statement or transaction time limit for this migration's
+-- The very first statement: this transaction reads committed, whatever the database or the role
+-- sets (ALTER DATABASE / ALTER ROLE ... SET default_transaction_isolation, or PGOPTIONS). Under
+-- REPEATABLE READ or SERIALIZABLE the first query below would take the transaction's one snapshot
+-- before the lock step; a busy app that changed an order without a depot while the lock step
+-- waited then failed the backfill (40001, "could not serialize access due to concurrent update"),
+-- and an order it added was not seen by the backfill but was by SET NOT NULL (23502): P3018, then
+-- P3009 (A5 fourth review). It must come before any query, which is why it is here; under READ
+-- COMMITTED each statement sees what was committed before it started, so the backfill after the
+-- lock step sees every row.
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
+-- Then, in statements of their own: no statement or transaction time limit for this migration's
 -- transaction (is_local = true: nothing outside it changes). A limit set on the database or the
 -- role (ALTER DATABASE / ALTER ROLE ... SET statement_timeout, or PGOPTIONS) would otherwise cancel
 -- the lock step while it waits for a busy app (57014, then P3018 and P3009). PostgreSQL starts each

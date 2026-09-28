@@ -106,7 +106,8 @@ export async function POST(req: Request) {
 
   let parsed;
   try {
-    // lat / lng from Excel: the decimals the cell shows count (23.5850, not the number 23.585).
+    // lat / lng from Excel: the decimals the cell shows count (23.5850, not the number 23.585), a
+    // number format adding one zero at most (23.58 shown as 23.5800 is 23.580: A5 fourth review).
     parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
   } catch (err) {
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
@@ -265,8 +266,11 @@ export async function POST(req: Request) {
     }
   }
   if (locationsNotSaved.length) {
+    // A5 fourth review: the tense follows what happens (Validate only, or a file with errors, saves
+    // nothing yet), like the warning below. The fix is never "format the cells to show 4 decimals":
+    // a number holds no trailing zeros, and a cell of 23.58 shown as 23.5800 is not exact.
     warnings.push(
-      `${locationsNotSaved.length} location(s) in the file are not exact and were not saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: use at least 4 decimals, and in Excel format the lat and lng cells as text.`,
+      `${locationsNotSaved.length} location(s) in the file are not exact and ${dryRun || errors.length > 0 ? 'will not be' : 'were not'} saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.`,
     );
   }
   // What happens to their orders is what the system enforces: not planned (planning leaves them

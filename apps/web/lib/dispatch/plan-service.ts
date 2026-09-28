@@ -2088,15 +2088,32 @@ function replacedPoint(json: unknown): { lat: number; lng: number; locationVerif
   return { lat: b.lat, lng: b.lng, locationVerified: b.verified === true, geocodeConfidence: typeof b.confidence === 'string' ? b.confidence : null };
 }
 
+/** The point a location change set (CUSTOMER_LOCATION_SET afterJson), or null when the row does not say. */
+function setPoint(json: unknown): { lat: number; lng: number } | null {
+  if (!json || typeof json !== 'object') return null;
+  const a = json as Record<string, unknown>;
+  return typeof a.lat === 'number' && typeof a.lng === 'number' ? { lat: a.lat, lng: a.lng } : null;
+}
+
 /**
  * The customers of `stops` whose stop is still planned at a point that was NOT usable when a new
  * pin replaced it (A5 third review): the stop's planned pin (stopSnapshotJson) is more than
- * PIN_MOVED_M from the customer's point now, and a recorded location change (CUSTOMER_LOCATION_SET:
+ * PIN_MOVED_M from the customer's point now, and the recorded location change (CUSTOMER_LOCATION_SET:
  * a pin or reading saved in ADD LOCATION or Set location, or a customer import that wrote a new pair
- * over it) replaced exactly that point while it blocked delivery (`locationBlocksDelivery`: LOW or
- * outside the area and never confirmed, 0,0). The stop, its links and the driver's texts still go to
- * the planned point until a re-plan. An ordinary correction of a usable point is not refused: the
- * sheets show the planned stop with the new pin noted (frozen plan facts, owner default, F08).
+ * over it) that last moved the customer off exactly that point did so while the point blocked
+ * delivery (`locationBlocksDelivery`: LOW or outside the area and never confirmed, 0,0). The stop, its
+ * links and the driver's texts still go to the planned point until a re-plan. An ordinary correction
+ * of a usable point is not refused: the sheets show the planned stop with the new pin noted (frozen
+ * plan facts, owner default, F08).
+ * A5 fourth review: only the change that replaced the planned point counts. A change that confirmed
+ * the point where it was (its "after" is the same point: a dispatcher typing its own coordinates,
+ * read as exact) moves nothing, and of the changes off the point only the newest is the one that
+ * replaced it (an older one was undone when the customer came back to it). Before, any recorded
+ * "before" at the planned point while it was flagged refused the load, so an ordinary correction of a
+ * point confirmed where it was got "its old point, which was not usable" and a locked load was sent
+ * through unlock and RE-PLAN. Changes made in the same millisecond count as the newest together
+ * (refused when one of them blocked). A move off a usable point by a customer import writes no row;
+ * the newest recorded change then stands for it, which can only refuse more, never less.
  */
 async function stopsAtReplacedPoints(
   tx: Tx,
@@ -2118,14 +2135,28 @@ async function stopsAtReplacedPoints(
   if (!moved.size) return out;
   const changes = await tx.auditLog.findMany({
     where: { tenantId, entity: 'Customer', action: 'CUSTOMER_LOCATION_SET', entityId: { in: [...moved.keys()] } },
-    select: { entityId: true, beforeJson: true },
+    select: { entityId: true, beforeJson: true, afterJson: true, createdAt: true },
   });
+  // Per customer and planned point: the newest change that moved the customer off that point, and
+  // whether it (or one made in the same millisecond) did so while the point blocked delivery.
+  const newest = new Map<string, { at: number; blocked: boolean }>();
   for (const ch of changes) {
     const before = replacedPoint(ch.beforeJson);
     const planned = ch.entityId ? moved.get(ch.entityId) : undefined;
-    if (!before || !planned || !locationBlocksDelivery(before, area)) continue;
-    if (planned.some((p) => samePoint(p, before))) out.add(ch.entityId!);
+    if (!before || !planned) continue;
+    const after = setPoint(ch.afterJson);
+    if (after && samePoint(after, before)) continue; // confirmed where it was: nothing moved
+    const at = ch.createdAt.getTime();
+    const blocked = locationBlocksDelivery(before, area);
+    planned.forEach((p, i) => {
+      if (!samePoint(p, before)) return;
+      const key = `${ch.entityId}\u0000${i}`;
+      const seen = newest.get(key);
+      if (!seen || at > seen.at) newest.set(key, { at, blocked });
+      else if (at === seen.at && blocked) seen.blocked = true;
+    });
   }
+  for (const [key, { blocked }] of newest) if (blocked) out.add(key.slice(0, key.indexOf('\u0000')));
   return out;
 }
 
