@@ -44,9 +44,10 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # Node 22 LTS, pinned for CI and the Railway build alike (root package.json engines, .nvmrc).
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .nvmrc
           cache: pnpm
 
       - uses: actions/setup-python@v5
@@ -91,6 +92,11 @@ jobs:
       - name: Build Next.js
         run: pnpm --filter @routeiq/web build
 
+      # Audit F01 / owner decision 4 and the source-map side item: no use-server directive in the
+      # app's code, no Server Action in the built manifest, no .map file under .next/static.
+      - name: Build output check (no Server Actions, no public source maps)
+        run: pnpm --filter @routeiq/web exec tsx scripts/check-build-output.ts
+
       - name: Start Next.js in background
         working-directory: apps/web
         run: |
@@ -100,6 +106,22 @@ jobs:
             sleep 1
           done
           curl -fsS http://localhost:3000/api/health
+
+      # The running app: the image endpoint answers 404 (with it on, w=1 would answer 400), and
+      # the source map of a real browser chunk is not served.
+      - name: Image endpoint off, source maps not served
+        working-directory: apps/web
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' 'http://localhost:3000/_next/image?url=%2Ffavicon.ico&w=1&q=75')
+          echo "/_next/image -> $code"
+          test "$code" = 404
+          chunk=$(cd .next/static/chunks && ls *.js | head -1)
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000/_next/static/chunks/$chunk")
+          echo "/_next/static/chunks/$chunk -> $code"
+          test "$code" = 200
+          code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:3000/_next/static/chunks/$chunk.map")
+          echo "/_next/static/chunks/$chunk.map -> $code"
+          test "$code" = 404
 
       - name: Integration tests (web + solver up)
         run: pnpm --filter @routeiq/web exec vitest run tests/integration

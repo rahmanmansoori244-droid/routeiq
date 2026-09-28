@@ -193,6 +193,15 @@ describe('docs promise only what the code guarantees (third review of PR3)', () 
       // Audit A2 review: a customer import cannot clear an unloading time (a blank cell keeps the
       // stored time; customer-import-service-time.spec.ts); only the Details dialog, box emptied, can.
       [/(clear|cleared|clearing|back (on|to) the default)[^.\n]*\bor (by )?an? (customer )?import\b/i, 'an import clearing an unloading time'],
+      // A1 review: the upload caps bound one upload's work, not its time. The "about 2 s" came from
+      // one file; files within every cap blocked the app for 6-33 s or crashed it, and a file just
+      // under the caps still blocks it for 5-11 s (lib/csv.ts, SECURITY.md section 9).
+      [/cannot freeze the app for long/i, 'uploads "cannot freeze the app for long"'],
+      [/(blocks?|block) (every user|it|the app) for about 2 s/i, 'the largest upload blocks the app for about 2 s'],
+      [/up to about 2 seconds for the largest file/i, 'the largest upload takes up to about 2 seconds'],
+      [/about 2 s at worst|worst case measured about 2 s/i, 'an upload worst case of about 2 s'],
+      [/fixed as far as a quick fix can/i, 'E2 "fixed as far as a quick fix can"'],
+      [/bounded by the 10 MB file limit and the row cap only/i, 'old .xls and text formats bounded by the size and row caps only'],
     ];
     const offenders = files.flatMap((f) => {
       const text = readFileSync(f, 'utf8');
@@ -342,6 +351,19 @@ describe('the dispatcher guide keeps each customer rule under its own bullet (re
     const text = guide();
     expect(text).not.toMatch(/A file checked before the update that keeps every priority and note of repeated rows asks to be checked again/);
     expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
+  });
+});
+
+describe('the handbook names every audit PR that is in it at the top (A1 v4 review)', () => {
+  it('the audit status line near the top names each audit PR that has a 7.4 block', () => {
+    const REPO = path.resolve(APPS, '..');
+    const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+    const status = handbook.split('\n').find((l) => l.startsWith('- **Audit of 27 Sep 2026.**')) ?? '';
+    const review = handbook.slice(handbook.indexOf('### 7.4 '), handbook.indexOf('### 7.5 '));
+    // "**Audit of 27 Sep 2026, PR A2 ...", "**Audit of 27 Sep 2026, PR 3 ..." (A3), "**Audit A1 ...".
+    const prs = new Set([...review.matchAll(/^\*\*Audit (?:of 27 Sep 2026, PR A?(\d+)|A(\d+)) /gm)].map((m) => `A${m[1] ?? m[2]}`));
+    expect(prs.size).toBeGreaterThanOrEqual(3);
+    for (const pr of prs) expect([pr, status.includes(`**${pr} `)]).toEqual([pr, true]);
   });
 });
 
