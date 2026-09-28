@@ -64,10 +64,9 @@ describe('dashboard: the plan in use of each depot and day, once', () => {
 });
 
 describe('dashboard: cost per case counts every case once (review of PR3: 1/N with N depots)', () => {
-  it("each plan's cases are the orders of its own depot and day (legacy depot-less orders only with one active depot)", async () => {
+  it("each plan's cases are the orders of its own depot and day (every order has a depot: owner rule, audit PR A5)", async () => {
     const sql = flat(PLAN_ORDERS_IN_SCOPE);
-    expect(sql).toContain('o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate"');
-    expect(sql).toContain('AND (o."depotId" = rp."depotId" OR (o."depotId" IS NULL AND (SELECT COUNT(*) FROM "Depot" d WHERE d."tenantId" = rp."tenantId" AND d.active) <= 1))');
+    expect(sql).toBe('o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate" AND o."depotId" = rp."depotId"');
     captured.length = 0;
     await getDashboardData('t1');
     const range = captured.filter((q) => q.includes('AS cases_total'));

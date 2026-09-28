@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { truckHoursProblem, truckPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 
 interface Params { params: { id: string } }
 
@@ -20,6 +21,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       if (input.depotId) {
         const depot = await db.depot.findUnique({ where: { id: input.depotId } });
         if (!depot) return fail('Depot not found in this tenant', 400);
+        if (depot.historyOnly) return fail({ code: 'DEPOT_HISTORY_ONLY', message: historyOnlyDepotLinkMessage(depot.code, 'truck') }, 422);
       }
       // A new default driver must be an active driver of this tenant (keeping the current one
       // is fine even if they were deactivated since - the form sends every field back).

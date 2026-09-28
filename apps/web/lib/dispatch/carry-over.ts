@@ -577,14 +577,12 @@ async function companyToday(db: Db, tenantId: string, now: Date): Promise<{ toda
 async function windowOrders(db: Db, tenantId: string, depotId: string, window: { from: string; to: string }) {
   const { from, to } = window;
   if (to < from) return [];
-  // The depot's orders, and orders without a depot when the tenant has one active depot
-  // (the same scope as ordersInScopeWhere).
-  const depots = await db.depot.count({ where: { tenantId, active: true } });
+  // The depot's orders (the same scope as ordersInScopeWhere; every order has a depot).
   return db.order.findMany({
     where: {
       tenantId,
       deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
-      OR: depots <= 1 ? [{ depotId }, { depotId: null }] : [{ depotId }],
+      depotId,
       carriedToOrderId: null,
       status: { notIn: ['DISPATCHED', 'DELIVERED'] },
     },

@@ -53,8 +53,7 @@ export const DELETE = (req: Request, { params }: Params) =>
               const dates = [...new Set(orders.map((o) => o.deliveryDate.getTime()))].map((t) => new Date(t));
               const depots = [...new Set(orders.map((o) => o.depotId))];
               const running = await tx.runPlan.findFirst({
-                // Orders without a depot belong to the plan of any depot that day.
-                where: { tenantId, runDate: { in: dates }, status: 'OPTIMIZING', ...(depots.includes(null) ? {} : { depotId: { in: depots as string[] } }) },
+                where: { tenantId, runDate: { in: dates }, status: 'OPTIMIZING', depotId: { in: depots } },
                 select: { runDate: true, version: true },
               });
               if (running) {

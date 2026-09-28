@@ -68,6 +68,20 @@ export function depotDeletedToast(code: string, outcome: { softDeleted?: boolean
 }
 
 /**
+ * The history-only depot (audit PR A5, `Depot.historyOnly`): migration 20260930120000 put the
+ * orders and order files that had no depot on it (code NO-DEPOT). It stays inactive: the Depots
+ * screen and PATCH /api/depots/:id refuse to switch it on, and no truck or region can use it.
+ */
+export function historyOnlyDepotMessage(code: string): string {
+  return `Depot ${code} only keeps old orders and order files that had no depot. It cannot be made active. Add a new depot instead.`;
+}
+
+/** The refusal when a truck or region is put on the history-only depot. */
+export function historyOnlyDepotLinkMessage(code: string, what: 'truck' | 'region'): string {
+  return `Depot ${code} only keeps old orders and order files that had no depot. Choose an active depot for this ${what}.`;
+}
+
+/**
  * The warning when a driver is deactivated (from the Drivers screen or the Active switch): the
  * trucks that still have them as default driver keep that setting - never cleared silently -
  * and new plans skip an inactive driver. Null when no truck has them as default.

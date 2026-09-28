@@ -7,7 +7,7 @@
  *    optimization (FAILED), never the superseded parent; of two live versions (legacy data) only
  *    the newest; a first optimization (no plan applied yet) not at all;
  *  - cost per case: each plan counts the orders of its own depot and day, so a tenant with two
- *    depots is not counted twice (and depot-less orders only with one active depot).
+ *    depots is not counted twice (every order has its depot: owner rule, audit PR A5).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { prisma as libPrisma } from '@/lib/db';
@@ -31,7 +31,7 @@ const D2 = isoPlus(41);
 const D3 = isoPlus(42);
 const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
 
-async function order(depotId: string | null, iso: string, cases: number) {
+async function order(depotId: string, iso: string, cases: number) {
   await prisma.order.create({
     data: { tenantId, customerId, depotId, deliveryDate: day(iso), totalCases: cases, totalWeightKg: cases * 10, status: 'VALIDATED', priority: 3 },
   });
@@ -87,11 +87,10 @@ beforeAll(async () => {
   depotB = (await prisma.depot.create({ data: { tenantId, code: 'SOH', name: 'Sohar', lat: 24.34, lng: 56.73 } })).id;
   customerId = (await prisma.customer.create({ data: { tenantId, code: 'C1', name: 'C1', branchKey: '__MAIN__', lat: 23.6, lng: 58.4, priority: 3 } })).id;
 
-  // D1: depot A 1000 cases, depot B 500; a depot-less order (not counted: two active depots).
+  // D1: depot A 1000 cases, depot B 500.
   await order(depotA, D1, 600);
   await order(depotA, D1, 400);
   await order(depotB, D1, 500);
-  await order(null, D1, 70);
   // Depot B on D2 has no plan: its cases never count for depot A's plan.
   await order(depotB, D2, 999);
 
@@ -122,7 +121,7 @@ describe('dashboard on real PostgreSQL: one plan per depot and day, each case on
     expect(Number(d1.run_count)).toBe(2);
     expect(Number(d1.trucks_used)).toBe(3 + 2);
     expect(Number(d1.cost)).toBe(60 + 30);
-    expect(Number(d1.cases_total)).toBe(1000 + 500); // not 1570 per plan (the whole day of the tenant, twice)
+    expect(Number(d1.cases_total)).toBe(1000 + 500); // not 3000 (the whole day of the tenant, once per plan)
     expect(rollupRows([d1], D1).costPerCase).toBe(0.06);
   });
 

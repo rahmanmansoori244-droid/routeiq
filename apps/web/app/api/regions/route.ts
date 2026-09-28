@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { regionSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 
 export const GET = withTenantApi(async (_req, { db }) => {
   const regions = await db.region.findMany({
@@ -19,6 +20,8 @@ export const POST = withTenantApi(
     if (input.depotId) {
       const depot = await db.depot.findUnique({ where: { id: input.depotId } });
       if (!depot) return fail('Depot not found in this tenant', 400);
+      // Audit PR A5: the history-only depot (orders that had no depot) is never a region's default.
+      if (depot.historyOnly) return fail({ code: 'DEPOT_HISTORY_ONLY', message: historyOnlyDepotLinkMessage(depot.code, 'region') }, 422);
     }
     const created = await db.region.create({
       data: { tenantId: user.tenantId, code: input.code, name: input.name, depotId: input.depotId },

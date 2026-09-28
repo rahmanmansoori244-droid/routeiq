@@ -34,6 +34,7 @@ async function legacyRun(h: { tenantId: string; userId: string }, seeded: Seeded
     data: {
       tenantId: h.tenantId,
       customerId: seeded.customerIds[0],
+      depotId: seeded.depotId,
       deliveryDate: runDate,
       totalCases: 5,
       totalWeightKg: 60,
@@ -142,6 +143,7 @@ describe('one live plan per depot and day', () => {
       data: {
         tenantId: h.tenantId,
         customerId: seeded.customerIds[0],
+        depotId: seeded.depotId,
         deliveryDate: new Date(tomorrowIso()),
         totalCases: 5,
         totalWeightKg: 60,

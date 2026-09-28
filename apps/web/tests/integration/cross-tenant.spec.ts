@@ -51,6 +51,7 @@ beforeAll(async () => {
         fileName: 'xt-test.csv',
         fileType: 'csv',
         uploadedById: t.handle.userId,
+        depotId: t.seeded.depotId,
         status: 'CONFIRMED',
         totalRows: 1,
         validRows: 1,
@@ -60,6 +61,7 @@ beforeAll(async () => {
       data: {
         tenantId: t.handle.tenantId,
         customerId: t.seeded.customerIds[0],
+        depotId: t.seeded.depotId,
         deliveryDate: tomorrow,
         totalCases: 5,
         totalWeightKg: 60,

@@ -55,6 +55,7 @@ export const AUDIT_ACTIONS = {
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
+  DEPOT_BACKFILL: { label: 'Depot filled in for orders and order files without one (migration)' },
   LOGOUT: { label: 'Signed out', legacy: true },
   DRIVER_LOGIN: { label: 'Driver app sign-in (retired)', legacy: true },
   DELIVERY_PROOF_CREATED: { label: 'Driver app delivery proof (retired)', legacy: true },

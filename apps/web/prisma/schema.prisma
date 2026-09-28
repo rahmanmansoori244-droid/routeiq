@@ -313,6 +313,11 @@ model Depot {
   active        Boolean       @default(true)
   openMin       Int? // depot opening, minutes from midnight; null = 00:00
   closeMin      Int? // depot closing; null = 24:00
+  /// Audit PR A5: a depot that only keeps the orders and order files that had no depot before the
+  /// owner rule "every order has a depot" (migration 20260930120000_orders_always_have_depot, code
+  /// NO-DEPOT). Always inactive: never offered in a picker, never planned, and the app refuses to
+  /// make it active or to put a truck or region on it.
+  historyOnly   Boolean       @default(false)
   trucks        Truck[]
   regions       Region[]
   runs          RunPlan[]
@@ -546,9 +551,10 @@ model UploadBatch {
   validationJson Json?
   orders         Order[]
   // --- dispatch MVP ---
-  depotId        String?
+  /// Required (owner rule, audit PR A5): every order file is for one depot.
+  depotId        String
   /// NO ACTION (audit F03): a depot with order files is never deleted (it is deactivated).
-  depot          Depot?            @relation(fields: [depotId], references: [id], onDelete: NoAction)
+  depot          Depot             @relation(fields: [depotId], references: [id], onDelete: NoAction)
   fileHash       String?
   isLate         Boolean           @default(false)
   lateReason     String?
@@ -580,10 +586,11 @@ model Order {
   unservedRecords           UnservedOrder[]
   manualBaselineAssignments ManualBaselineAssignment[]
   // --- dispatch MVP (uploadedAt = received time) ---
-  depotId                   String?
+  /// Required (owner rule "all orders must have depots linked to them", audit PR A5).
+  depotId                   String
   /// NO ACTION (audit F03): a depot with orders is never deleted (it is deactivated), so an order
   /// never loses its depot and never moves into another depot's plan.
-  depot                     Depot?                     @relation(fields: [depotId], references: [id], onDelete: NoAction)
+  depot                     Depot                      @relation(fields: [depotId], references: [id], onDelete: NoAction)
   isLate                    Boolean                    @default(false)
   lateReason                String?
   lateRecordedById          String?

@@ -184,13 +184,18 @@ describe('confirm re-check: files merged the old way, and the depot (F02 / F03)'
   });
 
   it('batchDepotProblem: deleted or deactivated after the check', () => {
-    expect(batchDepotProblem('d1', { code: 'NZW', active: true })).toBeNull();
-    expect(batchDepotProblem('d1', { code: 'NZW', active: false })).toMatch(/^Depot NZW was deactivated after this file was checked/);
-    expect(batchDepotProblem(null, null)).toMatch(/deleted after the file was checked/);
-    expect(batchDepotProblem('d1', null)).toMatch(/deleted after the file was checked/);
+    expect(batchDepotProblem({ code: 'NZW', active: true })).toBeNull();
+    expect(batchDepotProblem({ code: 'NZW', active: false })).toMatch(/^Depot NZW was deactivated after this file was checked/);
+    expect(batchDepotProblem(null)).toMatch(/deleted after the file was checked/);
   });
 
-  async function revalidate(v: Partial<IntakeValidation>, depot: { code: string; active: boolean } | null, depotId: string | null = 'd1') {
+  it('batchDepotProblem: a file that had no depot (now on the history-only depot) is never confirmed, and never told to reactivate it (audit PR A5)', () => {
+    const problem = batchDepotProblem({ code: 'NO-DEPOT', active: false, historyOnly: true });
+    expect(problem).toBe('This file was checked before every order file had a depot. Nothing was added: upload the file again on the Daily dispatch screen for an active depot.');
+    expect(problem).not.toMatch(/reactivate/i);
+  });
+
+  async function revalidate(v: Partial<IntakeValidation>, depot: { code: string; active: boolean; historyOnly?: boolean } | null, depotId = 'd1') {
     const queries: string[] = [];
     const tx: any = {
       $queryRaw: async (strings: TemplateStringsArray) => {
@@ -223,8 +228,15 @@ describe('confirm re-check: files merged the old way, and the depot (F02 / F03)'
     const off = await revalidate({}, { code: 'NZW', active: false });
     expect(off.ok ? null : off.error.code).toBe('MASTER_CHANGED');
     expect(off.queries.join(' ')).toMatch(/FROM "Depot" WHERE "id" = \? AND "tenantId" = \? FOR SHARE/);
-    const gone = await revalidate({}, null, null);
+    const gone = await revalidate({}, null);
     expect(gone.ok ? null : gone.error.message).toMatch(/deleted after the file was checked/);
     expect((await revalidate({}, { code: 'MCT', active: true })).ok).toBe(true);
+    // Audit PR A5: the history-only depot is read with the depot and refuses the file.
+    const history = await revalidate({}, { code: 'NO-DEPOT', active: false, historyOnly: true });
+    expect(history.ok ? null : [history.error.code, history.error.message]).toEqual([
+      'MASTER_CHANGED',
+      'This file was checked before every order file had a depot. Nothing was added: upload the file again on the Daily dispatch screen for an active depot.',
+    ]);
+    expect(history.queries.join(' ')).toMatch(/SELECT "code", "active", "historyOnly" FROM "Depot"/);
   });
 });

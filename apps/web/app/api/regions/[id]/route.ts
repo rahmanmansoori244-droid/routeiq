@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { regionSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 
 interface Params { params: { id: string } }
 
@@ -12,6 +13,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       if (input.depotId) {
         const depot = await db.depot.findUnique({ where: { id: input.depotId } });
         if (!depot) return fail('Depot not found in this tenant', 400);
+        if (depot.historyOnly) return fail({ code: 'DEPOT_HISTORY_ONLY', message: historyOnlyDepotLinkMessage(depot.code, 'region') }, 422);
       }
       const after = await db.region.update({ where: { id: params.id }, data: input });
       await audit({

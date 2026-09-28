@@ -5,7 +5,7 @@ import { audit } from '@/lib/audit';
 import { hasRole } from '@/lib/api';
 import { MultipleSheetsError, parseUpload } from '@/lib/csv';
 import { prisma } from '@/lib/db';
-import { findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
+import { DepotRequired, findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
 import { isOrderSheet, type CanonicalField } from '@/lib/dispatch/order-intake';
 import { dateOnly } from '@/lib/dispatch/time';
 import { isRealIsoDate } from '@/lib/schemas';
@@ -58,6 +58,9 @@ export async function POST(req: Request) {
   try {
     v = await validateIntake(tenantId, parsed.rows, { depotId, defaultDeliveryDate: deliveryDate });
   } catch (err) {
+    // Owner rule (audit PR A5): every order file is for one depot. No active depot, or no choice
+    // among two or more, or a chosen depot that is not active: 422, nothing is saved.
+    if (err instanceof DepotRequired) return NextResponse.json({ data: null, error: err.body() }, { status: err.status });
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
   // File-level notes (CSV parse warnings, workbook sheets not read) are kept with the check, so

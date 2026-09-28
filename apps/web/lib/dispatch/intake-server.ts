@@ -88,9 +88,43 @@ export const INTAKE_BUSY = {
   code: 'INTAKE_BUSY',
 } as const;
 
-export async function defaultDepot(tenantId: string, depotId?: string | null) {
-  if (depotId) return prisma.depot.findFirst({ where: { tenantId, id: depotId, active: true } });
-  return prisma.depot.findFirst({ where: { tenantId, active: true }, orderBy: { code: 'asc' } });
+/** An order file that cannot be linked to a depot (owner rule, audit PR A5): 422, nothing saved. */
+export class DepotRequired extends Error {
+  readonly status = 422;
+  constructor(
+    public code: 'DEPOT_REQUIRED' | 'DEPOT_NOT_ACTIVE',
+    message: string,
+  ) {
+    super(message);
+  }
+  body(): Record<string, unknown> {
+    return { code: this.code, message: this.message };
+  }
+}
+
+export const NO_ACTIVE_DEPOT =
+  'There is no active depot, so these orders cannot be linked to one. Add a depot under Depots, then upload the file again.';
+export const CHOOSE_DEPOT =
+  'This company has more than one depot. Upload the file on the Daily dispatch screen after choosing its depot, so every order is linked to the right depot.';
+export const DEPOT_NOT_ACTIVE =
+  'The depot chosen for this file is not active. Choose an active depot on the Daily dispatch screen, then upload the file again.';
+
+/**
+ * The depot an order file is for. Owner rule of 27 Sep 2026 (audit PR A5): "all orders must have
+ * depots linked to them", so a file is never linked to a depot nobody chose. The depot chosen on
+ * the dispatch screen must be an active depot of this company. Without a choice (the older Upload
+ * orders page sends none) the company's only active depot is used; with none, or with two or more,
+ * the file is refused (DEPOT_REQUIRED). Before, the first active depot by code was taken.
+ */
+export async function intakeDepot(tenantId: string, depotId?: string | null) {
+  if (depotId) {
+    const depot = await prisma.depot.findFirst({ where: { tenantId, id: depotId, active: true } });
+    if (!depot) throw new DepotRequired('DEPOT_NOT_ACTIVE', DEPOT_NOT_ACTIVE);
+    return depot;
+  }
+  const active = await prisma.depot.findMany({ where: { tenantId, active: true }, orderBy: { code: 'asc' }, take: 2 });
+  if (active.length === 1) return active[0];
+  throw new DepotRequired('DEPOT_REQUIRED', active.length ? CHOOSE_DEPOT : NO_ACTIVE_DEPOT);
 }
 
 /** SHA-256 of an order-insensitive text (see contentFingerprint). */
@@ -111,7 +145,7 @@ export function legacyRowsHash(rows: Record<string, string>[]): string {
 export async function findSameConfirmedFile(
   db: Tx | typeof prisma,
   tenantId: string,
-  q: { depotId: string | null; contentHash: string | null; legacyHash: string | null; deliveryDates: string[]; excludeBatchId?: string },
+  q: { depotId: string; contentHash: string | null; legacyHash: string | null; deliveryDates: string[]; excludeBatchId?: string },
 ): Promise<{ fileName: string; uploadedAt: Date } | null> {
   const or: Prisma.UploadBatchWhereInput[] = [];
   if (q.contentHash) or.push({ fileHash: q.contentHash });
@@ -188,8 +222,7 @@ export async function validateIntake(
 ): Promise<IntakeValidation> {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
-  const depot = await defaultDepot(tenantId, opts.depotId);
-  if (!depot) throw new Error('No active depot. Create a depot first.');
+  const depot = await intakeDepot(tenantId, opts.depotId);
   const extra = (cfg.orderColumnMapJson ?? {}) as Partial<Record<CanonicalField, string[]>>;
   const norm = normalizeOrderRows(rows, {
     defaultDeliveryDate: opts.defaultDeliveryDate || tomorrowIso(cfg.timezone, opts.now),
@@ -256,11 +289,14 @@ export function mergedTheOldWay(lines: Pick<ResolvedLine, 'sourceRows' | 'merged
 
 /**
  * Why a checked file can no longer be confirmed for its depot (audit F03), or null: the depot
- * was deactivated after the check, or deleted (before this release a delete set the batch's
- * depot to empty).
+ * was deactivated after the check, or is not found. Every file has a depot (audit PR A5); a file
+ * that had none before that rule is on the company's history-only depot, which never gets orders.
  */
-export function batchDepotProblem(depotId: string | null, depot: { code: string; active: boolean } | null): string | null {
-  if (!depotId || !depot) return 'The depot of this file was deleted after the file was checked. Nothing was added: upload the file again for an active depot.';
+export function batchDepotProblem(depot: { code: string; active: boolean; historyOnly?: boolean } | null): string | null {
+  if (!depot) return 'The depot of this file was deleted after the file was checked. Nothing was added: upload the file again for an active depot.';
+  if (depot.historyOnly) {
+    return 'This file was checked before every order file had a depot. Nothing was added: upload the file again on the Daily dispatch screen for an active depot.';
+  }
   if (!depot.active) {
     return `Depot ${depot.code} was deactivated after this file was checked. Nothing was added: reactivate the depot under Depots, or upload the file again for another depot.`;
   }
@@ -277,7 +313,7 @@ export function batchDepotProblem(depotId: string | null, depot: { code: string;
 export async function revalidateIntake(
   tx: Tx,
   tenantId: string,
-  batch: { id: string; depotId: string | null; uploadedAt: Date; fileHash: string | null },
+  batch: { id: string; depotId: string; uploadedAt: Date; fileHash: string | null },
   v: IntakeValidation,
   now: Date,
 ): Promise<{ isLate: boolean; reasons: string[] }> {
@@ -294,11 +330,9 @@ export async function revalidateIntake(
   {
     // The depot is locked (FOR SHARE) until the orders are written: a depot deactivated or deleted
     // after the check never receives them (audit F03), and one being deactivated right now is waited for.
-    const depot = batch.depotId
-      ? await tx.$queryRaw<Array<{ code: string; active: boolean }>>`
-          SELECT "code", "active" FROM "Depot" WHERE "id" = ${batch.depotId} AND "tenantId" = ${tenantId} FOR SHARE`
-      : [];
-    const problem = batchDepotProblem(batch.depotId, depot[0] ?? null);
+    const depot = await tx.$queryRaw<Array<{ code: string; active: boolean; historyOnly: boolean }>>`
+      SELECT "code", "active", "historyOnly" FROM "Depot" WHERE "id" = ${batch.depotId} AND "tenantId" = ${tenantId} FOR SHARE`;
+    const problem = batchDepotProblem(depot[0] ?? null);
     if (problem) throw new IntakeConflict('MASTER_CHANGED', problem);
   }
   {
@@ -344,7 +378,7 @@ export async function revalidateIntake(
     throw new IntakeConflict('MASTER_CHANGED', `Master data changed after this file was checked: ${list.slice(0, 8).join('; ')}${list.length > 8 ? '; ...' : ''}. Upload the file again.`, 409, { changes: list });
   }
   const cfg = await tx.tenantConfig.findUniqueOrThrow({ where: { tenantId }, select: { planningCutoffMin: true, timezone: true } });
-  const reasons = batch.depotId ? await lateReasons(tenantId, cfg, batch.depotId, v.totals.deliveryDates, now) : [];
+  const reasons = await lateReasons(tenantId, cfg, batch.depotId, v.totals.deliveryDates, now);
   const all = [...new Set([...(v.late?.reasons ?? []), ...reasons])];
   return { isLate: !!v.late?.isLate || reasons.length > 0, reasons: all };
 }
@@ -357,7 +391,7 @@ export async function revalidateIntake(
 export async function confirmIntake(
   tx: Prisma.TransactionClient,
   tenantId: string,
-  batch: { id: string; depotId: string | null },
+  batch: { id: string; depotId: string },
   v: IntakeValidation,
   user: { id: string },
   late: { isLate: boolean; reason: string | null },

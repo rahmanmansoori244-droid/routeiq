@@ -170,19 +170,14 @@ const ORDER_INCLUDE = {
   lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, active: true } } } },
 } as const;
 
-/** Orders belonging to a plan: same delivery date and depot. Legacy orders without a depot
- * are included only when the tenant has exactly one active depot (unambiguous). An order brought
- * forward to a later day (PR9, carriedToOrderId set) no longer belongs to its own day: it is not
- * open, unserved or pending there (the plan versions that hold it keep it: frozen loads stay in
- * scope through their assignments, see buildDispatchRequest). */
+/** Orders belonging to a plan: same delivery date and depot. Every order has a depot (owner rule,
+ * audit PR A5: "Order"."depotId" is NOT NULL since migration 20260930120000; before it, orders
+ * without a depot were included when the tenant had one active depot, and the migration gave them
+ * that depot). An order brought forward to a later day (PR9, carriedToOrderId set) no longer
+ * belongs to its own day: it is not open, unserved or pending there (the plan versions that hold
+ * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest). */
 export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date): Promise<Prisma.OrderWhereInput> {
-  const depots = await prisma.depot.count({ where: { tenantId, active: true } });
-  return {
-    tenantId,
-    deliveryDate: runDate,
-    carriedToOrderId: null,
-    OR: depots <= 1 ? [{ depotId }, { depotId: null }] : [{ depotId }],
-  };
+  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, depotId };
 }
 
 /**
@@ -334,8 +329,8 @@ export async function buildDispatchRequest(
       : { o, lines, cases: o.totalCases, kg: orderKg, partial };
     openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
   }
-  // Orders on frozen loads that today's order query no longer returns (e.g. a legacy order
-  // without a depot once a second depot exists) stay in scope, so the plan still reconciles.
+  // Orders on frozen loads that today's order query no longer returns (e.g. an order brought
+  // forward to a later day after it was loaded) stay in scope, so the plan still reconciles.
   const inScope = new Set([...frozenOrderIds, ...[...openByCustomer.values()].flat().map((x) => x.o.id)]);
   for (const id of frozenLoadOrderIds) if (!inScope.has(id)) frozenOrderIds.push(id);
 

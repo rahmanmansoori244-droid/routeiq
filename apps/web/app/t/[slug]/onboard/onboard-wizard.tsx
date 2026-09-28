@@ -182,7 +182,8 @@ function TruckStep({ slug, onSaved }: { slug: string; onSaved: () => void }) {
     fetch('/api/depots')
       .then((r) => r.json())
       .then((b) => {
-        const list = b.data ?? [];
+        // Active depots only, like the Trucks page: never an inactive or history-only depot (audit PR A5).
+        const list = ((b.data ?? []) as { id: string; code: string; name: string; active: boolean }[]).filter((d) => d.active);
         setDepots(list);
         if (list[0]) setForm((f) => ({ ...f, depotId: list[0].id }));
       })

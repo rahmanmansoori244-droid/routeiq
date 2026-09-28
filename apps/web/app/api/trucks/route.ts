@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { truckSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 
 export const GET = withTenantApi(async (_req, { db }) => {
   const trucks = await db.truck.findMany({
@@ -15,6 +16,8 @@ export const POST = withTenantApi(
     const input = await parseBody(req, truckSchema);
     const depot = await db.depot.findUnique({ where: { id: input.depotId } });
     if (!depot) return ok({ error: 'Depot not found in this tenant' }, 400);
+    // Audit PR A5: the history-only depot (orders that had no depot) never gets trucks.
+    if (depot.historyOnly) return fail({ code: 'DEPOT_HISTORY_ONLY', message: historyOnlyDepotLinkMessage(depot.code, 'truck') }, 422);
     if (input.defaultDriverId) {
       const driver = await db.driver.findUnique({ where: { id: input.defaultDriverId }, select: { id: true, name: true, active: true } });
       if (!driver) return fail('Driver not found in this tenant', 400);

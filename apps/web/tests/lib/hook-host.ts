@@ -118,6 +118,15 @@ export const hooks = {
     }
     return s.v;
   },
+  /** Never pending: the callback runs at once (an async one runs to its first await, like React). */
+  useTransition(): [boolean, (fn: () => unknown) => void] {
+    return [
+      false,
+      (fn) => {
+        void fn();
+      },
+    ];
+  },
 };
 
 /** The `vi.mock('react', ...)` factory: the real React with the hooks above. */

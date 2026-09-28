@@ -23,6 +23,13 @@
  *   (an empty optional text or reference clears it; a field left out is unchanged),
  *   POST /api/customers/import (verified pins kept under concurrency), POST /api/orders/upload and
  *   POST /api/orders/[batchId]/confirm (merged rows; depot and old-merge re-checks).
+ * - Audit PR A5 "Owner rules" (every order has a depot): behaviour changed, roles unchanged, on
+ *   POST /api/orders/upload (422 DEPOT_REQUIRED without a depot choice unless the company has
+ *   exactly one active depot; 422 DEPOT_NOT_ACTIVE for a chosen depot that is not active),
+ *   POST /api/orders/[batchId]/confirm (a file on the history-only depot is refused),
+ *   PATCH /api/depots/[id] (422 DEPOT_HISTORY_ONLY: the history-only depot is never made active),
+ *   POST /api/trucks, PATCH /api/trucks/[id], POST /api/regions and PATCH /api/regions/[id]
+ *   (422 DEPOT_HISTORY_ONLY: never on the history-only depot).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
