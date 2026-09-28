@@ -11,10 +11,14 @@
  *  - PATCH /api/customers/:id refuses coordinates (it stored any pair as verified HIGH, with no check);
  *  - POST /api/customers refuses a pair that needs a pin (it stored any pair as HIGH);
  *  - the customer page sets a location through the same dialog and route as ADD LOCATION.
+ *
+ * A5 third review: a directions link read as its start and a classic ?ll= link (the map centre) are
+ * refused as read (422 PIN_REQUIRED); the location and its audit row commit together (LOCK reads the
+ * row); the customer page and the customers list say when a saved point blocks delivery.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetDb, row, tables } from './fake-plan-db';
-import { Host, elements, typeName } from './hook-host';
+import { Host, elements, textOf, typeName } from './hook-host';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 vi.mock('@/lib/auth', () => ({
@@ -36,10 +40,13 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ replace() {}, refresh() 
 vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return null; } }));
 
 import { PUT as locationPut } from '@/app/api/customers/[id]/location/route';
+import { audit } from '@/lib/audit';
 import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
 import { DEFAULT_SERVICE_AREA, PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE, SAVED_SWAPPED_MESSAGE } from '@/lib/dispatch/location-input';
 import { CustomerEditor } from '@/app/t/[slug]/customers/[id]/customer-editor';
+import { CustomersClient } from '@/app/t/[slug]/customers/customers-client';
+import { LOW_LOCATION_MESSAGE, OUTSIDE_AREA_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
 
 const T = 'tA';
 const customer = (id: string, over: Record<string, unknown> = {}) => ({
@@ -107,6 +114,48 @@ describe('PUT /api/customers/:id/location: a reading is read again on the server
     }
     expect(stored('K1')).toEqual(before);
     expect(audits).toEqual([]);
+  });
+
+  it('a directions link read as its start, and a classic ?ll= link (the map centre), sent as read: 422 PIN_REQUIRED (A5 third review)', async () => {
+    const before = stored('K1');
+    const dir = 'https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu+Hypermarket+Bawshar/@23.59,58.42,13z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3e8dfd:0x1!2m2!1d58.4059!2d23.5859';
+    const cases: [string, Record<string, unknown>][] = [
+      // Before: 200, the start of the route (the salesman's own position) stored as verified HIGH.
+      ['directions link', { lat: 23.610012, lng: 58.540046, source: 'GOOGLE_MAPS_URL', input: dir }],
+      ['directions link, as the map centre', { lat: 23.59, lng: 58.42, source: 'GOOGLE_MAPS_URL', input: dir }],
+      ['short link that led to a directions link', { lat: 23.610012, lng: 58.540046, source: 'GOOGLE_MAPS_URL', input: 'https://maps.app.goo.gl/abc123', resolvedUrl: dir }],
+      // Before: 200, the centre of the view stored as verified HIGH.
+      ['?ll=', { lat: 23.585912, lng: 58.405912, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/maps?ll=23.585912,58.405912&z=15' }],
+      ['?q=<place>&ll=', { lat: 23.585912, lng: 58.405912, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/maps?q=Lulu+Hypermarket&ll=23.585912,58.405912&z=15' }],
+    ];
+    for (const [what, body] of cases) {
+      const r = await put('K1', body);
+      expect(r.status, what).toBe(422);
+      expect(r.body.error, what).toMatchObject({ code: 'PIN_REQUIRED', message: PIN_REQUIRED_MESSAGE });
+    }
+    // { input } alone is refused the same way.
+    expect((await put('K1', { input: dir })).body.error, 'input only').toMatchObject({ code: 'PIN_REQUIRED' });
+    expect(stored('K1')).toEqual(before);
+    expect(audits).toEqual([]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // A pin placed by hand at the destination is the way to save it.
+    expect((await put('K1', { lat: 23.5859, lng: 58.4061, source: 'MAP_PIN', input: dir })).status).toBe(200);
+    expect(stored('K1')).toMatchObject({ lat: 23.5859, lng: 58.4061, verified: true, source: 'MAP_PIN', confidence: 'HIGH' });
+  });
+
+  it('the location and its audit row commit together: if the row cannot be written, nothing is saved (A5 third review)', async () => {
+    // LOCK reads the row's "before" point (plan-service locationGate): a saved pin without its row
+    // would let a stop planned at the old, flagged point go out.
+    const before = stored('LOW');
+    vi.mocked(audit).mockRejectedValueOnce(new Error('audit insert failed (simulated)'));
+    const r = await put('LOW', { lat: 23.6011, lng: 58.4011, source: 'MAP_PIN' });
+    expect(r.status).toBe(500);
+    // Before: the pin was saved (verified HIGH) and only the audit row was missing.
+    expect(stored('LOW')).toEqual(before);
+    const ok = await put('LOW', { lat: 23.6011, lng: 58.4011, source: 'MAP_PIN' });
+    expect(ok.status).toBe(200);
+    expect(vi.mocked(audit).mock.calls.at(-1)![1]).toBeDefined(); // written in the save's transaction
+    expect(audits.at(-1)).toMatchObject({ entityId: 'LOW', beforeJson: { lat: 23, lng: 58, verified: false, confidence: 'LOW' } });
   });
 
   it('a point that is not where the text points: 422 LOCATION_MISMATCH', async () => {
@@ -311,5 +360,64 @@ describe('the customer page sets a location through ADD LOCATION (the same dialo
     const host = new Host(CustomerEditor as any, { ...props, canEdit: false });
     host.render();
     expect(elements(host.tree).some((e) => e.props?.['data-testid'] === 'set-location')).toBe(false);
+  });
+
+  // A5 third review: a saved point that blocks delivery (an import marked it LOW, or it is outside the
+  // area and nobody confirmed it) looked the same as a usable one on the customer page.
+  const pageText = (customer: Record<string, unknown>) => {
+    const host = new Host(CustomerEditor as any, { ...props, customer: { ...props.customer, ...customer } });
+    host.render();
+    const blocked = elements(host.tree).find((e) => e.props?.['data-testid'] === 'customer-location-blocked');
+    return { line: textOf(elements(host.tree).find((e) => e.props?.['data-testid'] === 'customer-location-text')), blocked: blocked ? textOf(blocked) : null };
+  };
+  it('a saved point that blocks delivery says so, with what to do', () => {
+    // Before: "Pin: 23.585900, 58.405900 (from an import, not confirmed)", the same as a usable HIGH import.
+    expect(pageText({ geocodeConfidence: 'LOW' }).blocked).toBe(`${LOW_LOCATION_MESSAGE} Its orders are not planned or sent out until then.`);
+    expect(pageText({ geocodeConfidence: 'LOW' }).line).toMatch(/not usable/);
+    // Judged with the company's area (maxLng 61 here): 60.5 is inside it, 62 is not.
+    expect(pageText({ lng: 62, geocodeConfidence: 'HIGH' }).blocked).toBe(`${OUTSIDE_AREA_LOCATION_MESSAGE} Its orders are not planned or sent out until then.`);
+    expect(pageText({ lng: 60.5, geocodeConfidence: 'HIGH' }).blocked).toBeNull();
+  });
+  it.each([
+    ['a HIGH import not confirmed', { geocodeConfidence: 'HIGH' }, 'from an import, not confirmed'],
+    ['a MEDIUM import not confirmed', { geocodeConfidence: 'MEDIUM' }, 'from an import, not confirmed'],
+    ['a LOW point confirmed by a dispatcher', { geocodeConfidence: 'LOW', locationVerified: true }, 'confirmed by a dispatcher'],
+  ])('control: %s shows no block', (_what, customer, line) => {
+    const t = pageText(customer);
+    expect(t.blocked).toBeNull();
+    expect(t.line).toContain(line);
+  });
+});
+
+describe('the customers list flags saved points that need a pin (A5 third review)', () => {
+  const listRow = (id: string, over: Record<string, unknown>) => ({
+    ...customer(id, over),
+    regionId: null,
+    region: null,
+    address: null,
+    priority: 3,
+    avgServiceTimeMin: 10,
+    paymentType: 'CREDIT',
+  });
+  it('a LOW point nobody confirmed, one outside the area and 0,0 are flagged and counted; usable ones and missing ones are not', () => {
+    const rows = [
+      listRow('LOW', { geocodeConfidence: 'LOW' }),
+      listRow('AWAY', { lat: 24.7136, lng: 46.6753 }),
+      listRow('ZERO', { lat: 0, lng: 0 }),
+      listRow('HIGH', {}),
+      listRow('MED', { geocodeConfidence: 'MEDIUM' }),
+      listRow('OKLOW', { geocodeConfidence: 'LOW', locationVerified: true }),
+      listRow('NONE', { lat: null, lng: null, geocodeConfidence: 'MISSING' }),
+    ];
+    const host = new Host(CustomersClient as any, { slug: 'acme', initial: rows, regions: [], canEdit: false, serviceArea: DEFAULT_SERVICE_AREA });
+    host.render();
+    const flagged = elements(host.tree).filter((e) => e.props?.['data-testid'] === 'customer-needs-pin');
+    // Before: the coordinates only, with no flag, and the header counted only the missing one.
+    expect(flagged.map((e) => e.props['data-customer'])).toEqual(['LOW', 'AWAY', 'ZERO']);
+    expect(flagged.map((e) => textOf(e))).toEqual(['needs pin', 'needs pin', 'needs pin']);
+    expect(flagged[0]!.props.title).toBe(LOW_LOCATION_MESSAGE);
+    const count = elements(host.tree).find((e) => e.props?.['data-testid'] === 'customers-need-pin');
+    expect(textOf(count)).toBe('3 need a pin');
+    expect(textOf(elements(host.tree).find((e) => e.props?.['data-testid'] === 'customers-missing-location'))).toBe('1 missing geocode');
   });
 });

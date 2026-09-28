@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Search, MapPinOff } from 'lucide-react';
+import { Search, MapPin, MapPinOff } from 'lucide-react';
 import { toast } from 'sonner';
 import type { PaymentType } from '@prisma/client';
 import { Input } from '@/components/ui/input';
@@ -12,6 +12,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { runInlineUpdate } from '@/lib/customer-inline-update';
+import { locationIssue } from '@/lib/dispatch/customer-attrs';
+import type { ServiceArea } from '@/lib/dispatch/location-input';
 
 interface CustomerRow {
   id: string;
@@ -25,6 +27,7 @@ interface CustomerRow {
   lat: number | null;
   lng: number | null;
   geocodeConfidence: string | null;
+  locationVerified: boolean;
   priority: number;
   avgServiceTimeMin: number;
   paymentType: PaymentType;
@@ -45,11 +48,14 @@ export function CustomersClient({
   initial,
   regions,
   canEdit,
+  serviceArea,
 }: {
   slug: string;
   initial: CustomerRow[];
   regions: RegionOption[];
   canEdit: boolean;
+  /** The company's delivery area: a saved point outside it that nobody confirmed needs a pin. */
+  serviceArea: ServiceArea;
 }) {
   const router = useRouter();
   const [rows, setRows] = useState(initial);
@@ -106,6 +112,18 @@ export function CustomersClient({
   }
 
   const missingCoords = rows.filter((c) => c.lat === null || c.lng === null).length;
+  // A5 third review: a saved point that blocks delivery (LOW or outside the area and never
+  // confirmed, or 0,0) is not "missing", but its orders are not planned or sent out either. The
+  // day card's test and words (locationIssue), so the dispatcher can find them before they have orders.
+  const needsPinMessage = useMemo(() => {
+    const out = new Map<string, string>();
+    for (const c of rows) {
+      if (c.lat === null || c.lng === null) continue;
+      const issue = locationIssue(c, serviceArea);
+      if (issue?.blocking) out.set(c.id, issue.message);
+    }
+    return out;
+  }, [rows, serviceArea]);
 
   return (
     <div className="space-y-3">
@@ -137,8 +155,14 @@ export function CustomersClient({
           <Switch checked={onlyActive} onCheckedChange={setOnlyActive} />
           Active only
         </label>
+        {needsPinMessage.size > 0 ? (
+          <Badge variant="destructive" className="ms-auto" data-testid="customers-need-pin" title="Their saved location is not usable. Open each one and use Set location to drop the pin.">
+            <MapPin className="me-1 h-3 w-3" />
+            {needsPinMessage.size} need a pin
+          </Badge>
+        ) : null}
         {missingCoords > 0 ? (
-          <Badge variant="warning" className="ms-auto">
+          <Badge variant="warning" className={needsPinMessage.size > 0 ? '' : 'ms-auto'} data-testid="customers-missing-location">
             <MapPinOff className="me-1 h-3 w-3" />
             {missingCoords} missing geocode
           </Badge>
@@ -175,7 +199,14 @@ export function CustomersClient({
                 <TableCell className="text-muted-foreground">{c.region ? c.region.code : '—'}</TableCell>
                 <TableCell className="text-right font-mono text-xs">
                   {c.lat !== null && c.lng !== null ? (
-                    `${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`
+                    <>
+                      {`${c.lat.toFixed(4)}, ${c.lng.toFixed(4)}`}
+                      {needsPinMessage.has(c.id) ? (
+                        <Badge variant="destructive" className="ms-2" data-testid="customer-needs-pin" data-customer={c.code} title={needsPinMessage.get(c.id)}>
+                          needs pin
+                        </Badge>
+                      ) : null}
+                    </>
                   ) : (
                     <Badge variant="warning">missing</Badge>
                   )}

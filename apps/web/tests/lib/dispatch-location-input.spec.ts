@@ -216,8 +216,83 @@ describe('parseLocationInput - Google Maps URLs', () => {
     }
   });
 
-  it('reads ?ll=', () => {
-    expect(parseLocationInput('https://maps.google.com/maps?ll=23.5859,58.4059&z=16')).toMatchObject({ ok: true, lat: LAT, lng: LNG, needsPin: false });
+  it('reads ?ll= only as the map centre -> needs a pin (A5 third review)', () => {
+    // In a classic link, ll is the centre of the view: Google shows no marker there. Before: HIGH,
+    // needsPin false, so ADD LOCATION saved it as read and the server agreed.
+    for (const u of [
+      'https://maps.google.com/maps?ll=23.5859,58.4059&z=16',
+      // q names a place, so the only coordinates are the view centre.
+      'https://maps.google.com/maps?q=Lulu+Hypermarket&ll=23.5859,58.4059&z=15',
+    ]) {
+      const r = parseLocationInput(u);
+      expect(r, u).toMatchObject({ ok: true, lat: LAT, lng: LNG, confidence: 'MEDIUM', needsPin: true });
+      expect(r.warnings.join(' '), u).toMatch(/map centre, not a pin/);
+    }
+    // The other centre keys say the same.
+    for (const key of ['center', 'sll']) {
+      const r = parseLocationInput(`https://maps.google.com/maps?${key}=23.5859,58.4059&z=16`);
+      expect(r, key).toMatchObject({ ok: true, confidence: 'MEDIUM', needsPin: true });
+      expect(r.warnings.join(' '), key).toMatch(/map centre, not a pin/);
+    }
+    // Control: ?q= with coordinates wins over ?ll= and stays exact.
+    expect(parseLocationInput('https://maps.google.com/maps?q=23.5859,58.4059&ll=23.5,58.3&z=15')).toMatchObject({ lat: LAT, lng: LNG, confidence: 'HIGH', needsPin: false });
+  });
+
+  describe('directions links (/maps/dir/...): only the end of the route is read (A5 third review)', () => {
+    // Google puts the start in the path as coordinates when the route starts at "Your location" or at
+    // a dropped pin. The destination here is a place name (its point is only in the data part).
+    const FROM_HERE_TO_PLACE =
+      'https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu+Hypermarket+Bawshar/@23.59,58.42,13z/data=!4m8!4m7!1m0!1m5!1m1!1s0x3e8dfd:0x1!2m2!1d58.4059!2d23.5859';
+
+    it('a link that starts at coordinates and ends at a place name never reads the start', () => {
+      const r = parseLocationInput(FROM_HERE_TO_PLACE);
+      // Before: { ok: true, lat: 23.610012, lng: 58.540046, confidence: 'HIGH', needsPin: false } - the start.
+      expect(r.lat).not.toBeCloseTo(23.610012, 4);
+      expect(r).toMatchObject({ ok: true, lat: 23.59, lng: 58.42, confidence: 'MEDIUM', needsPin: true });
+      expect(r.warnings.join(' ')).toMatch(/directions link does not end at a point/);
+      // The same with Google's "Your location" data part.
+      const yours = parseLocationInput('https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu+Hypermarket,+Muscat/@23.59,58.42,13z/data=!4m9!4m8!1m1!4e1!1m5!1m1!1s0x3e8dfd:0x1!2m2!1d58.4059!2d23.5859');
+      expect(yours).toMatchObject({ needsPin: true, confidence: 'MEDIUM' });
+      expect(yours.lat).not.toBeCloseTo(23.610012, 4);
+    });
+
+    it('three waypoints ending at a place name never read the middle one', () => {
+      const r = parseLocationInput('https://www.google.com/maps/dir/23.6100123,58.5400456/23.5859123,58.4059123/Lulu+Hypermarket/@23.59,58.42,13z');
+      // Before: the middle waypoint 23.585912, 58.405912, HIGH.
+      expect(r).toMatchObject({ ok: true, lat: 23.59, lng: 58.42, needsPin: true });
+    });
+
+    it('"directions from here" (the start filled, the end empty) is not read as the customer', () => {
+      for (const u of ['https://www.google.com/maps/dir/23.6100123,58.5400456//@23.59,58.42,13z', 'https://www.google.com/maps/dir/23.6100123,58.5400456']) {
+        const r = parseLocationInput(u);
+        // Before: the start, HIGH.
+        expect(r.lat, u).not.toBeCloseTo(23.610012, 4);
+        expect(r.needsPin, u).toBe(true);
+      }
+      // No map centre either: not read, drop a pin.
+      const bare = parseLocationInput('https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu+Hypermarket');
+      expect(bare).toMatchObject({ ok: false, needsPin: true });
+      expect(bare.error).toMatch(/directions link does not end at a point.*Drop a pin/);
+    });
+
+    it('a data part with a place pin (!3d!4d) is not read on a directions link', () => {
+      const r = parseLocationInput('https://www.google.com/maps/dir/23.6100123,58.5400456/Lulu/@23.59,58.42,13z/data=!3d23.6100123!4d58.5400456');
+      expect(r.lat).not.toBeCloseTo(23.610012, 4);
+      expect(r.needsPin).toBe(true);
+    });
+
+    it('control: the end of the route, when it is a point, is read as before', () => {
+      for (const u of [
+        'https://www.google.com/maps/dir//23.5859,58.4059/@23.59,58.42,13z',
+        'https://www.google.com/maps/dir/Office/23.5859,58.4059/@23.59,58.42,13z',
+        'https://www.google.com/maps/dir/23.6100123,58.5400456/23.5859,+58.4059',
+        'https://www.google.com/maps/dir/23.6100123,58.5400456/23.5859%2C58.4059/',
+      ]) {
+        expect(parseLocationInput(u), u).toMatchObject({ ok: true, lat: LAT, lng: LNG, confidence: 'HIGH', needsPin: false });
+      }
+      // Fewer than 4 decimals at the end: read, but needs a pin (as any other coarse pair).
+      expect(parseLocationInput('https://www.google.com/maps/dir//23.58,58.40/')).toMatchObject({ ok: true, lat: 23.58, needsPin: true });
+    });
   });
 
   it('reads ?query= (api=1 search links)', () => {

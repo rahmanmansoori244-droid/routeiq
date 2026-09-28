@@ -13,12 +13,15 @@
  * the row is listed in `locationsNotSaved` with the reason in the import's words; the rest of the row
  * and of the file is imported. An Excel number cell counts the decimals it shows (23.5850 in a cell
  * formatted with 4 decimals is 4 decimals, not the 23.585 the number holds).
+ *
+ * A5 third review: an exact pair that replaces a saved point that was not usable writes a
+ * CUSTOMER_LOCATION_SET row (the point it replaced), which LOCK reads (plan-service locationGate).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
 
-interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean; geocodeConfidence?: string | null }
+interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean; geocodeConfidence?: string | null; locationSource?: string | null }
 const S = vi.hoisted(() => ({
   rows: [] as Row[],
   /** Runs after the import has read the customers, before it writes (a dispatcher verifying a pin). */
@@ -66,6 +69,7 @@ vi.mock('@/lib/tenant', () => ({
 }));
 
 import { POST } from '@/app/api/customers/import/route';
+import { audit } from '@/lib/audit';
 import CustomerImportPage from '@/app/t/[slug]/customers/import/page';
 import { locationNotSavedLine } from '@/app/t/[slug]/customers/import/import-form';
 import { elements, typeName } from './hook-host';
@@ -232,6 +236,28 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'K1', branchCode: null, reason, kept: 'SAVED_LOCATION_NOT_USABLE' }]);
     expect(r.body.data.warnings.join(' ')).toMatch(/^.*1 saved location\(s\) are not used until the pin is placed by hand: the saved location is not exact/);
     expect(locationBlocksDelivery(S.rows[0]!)).toBe(true);
+  });
+
+  it('a saved point that was not usable, replaced by an exact pair from the file, is recorded as a location change (A5 third review)', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationSource: 'IMPORT' });
+    S.rows[1] = cust('K2', { lat: 23.5901, lng: 58.4101, geocodeConfidence: 'HIGH' });
+    vi.mocked(audit).mockClear();
+    const r = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.6012,58.4201\nK2,K2,3,23.6013,58.4202\nK3,K3,3,23.6014,58.4203\n');
+    expect(r.status).toBe(200);
+    expect(S.rows[0]).toMatchObject({ lat: 23.6012, lng: 58.4201, geocodeConfidence: 'HIGH' });
+    // Before: no row, so LOCK could not tell that a stop still planned at 23.5859, 58.4059 goes to
+    // a point that was not usable (plan-service locationGate reads these rows).
+    const changes = vi.mocked(audit).mock.calls.map((c) => c[0]).filter((a) => a.action === 'CUSTOMER_LOCATION_SET');
+    expect(changes).toEqual([
+      expect.objectContaining({
+        entity: 'Customer',
+        entityId: 'K1',
+        beforeJson: { lat: 23.5859, lng: 58.4059, source: 'IMPORT', verified: false, confidence: 'LOW' },
+        afterJson: { lat: 23.6012, lng: 58.4201, source: 'IMPORT', confidence: 'HIGH', check: 'IMPORT', fileName: 'customers.csv' },
+      }),
+    ]);
+    // Control: K2's usable point and K3's confirmed one (kept) write no such row.
+    expect(S.rows[2]).toMatchObject({ lat: 23.9, lng: 58.9 });
   });
 
   it('control: a LOW point a dispatcher confirmed is usable: kept as SAVED_LOCATION, no warning', async () => {

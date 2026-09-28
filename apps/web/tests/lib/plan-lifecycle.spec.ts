@@ -49,6 +49,7 @@ import {
   LOCATION_GATE_RULE,
   noLocationLoadRemedy,
   PlanError,
+  replacedPinRemedy,
   updateLoad,
 } from '@/lib/dispatch/plan-service';
 import { driverClashes, isHandSetDriver } from '@/lib/dispatch/load-state';
@@ -458,13 +459,78 @@ describe("load changes and the owner's location rule (audit PR A5, second review
     expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
   });
 
-  it('the remedy says what to do for the load as it is: drop the pin, then RE-PLAN or try again; or go without them', () => {
+  it('the remedy says what to do for the load as it is: drop the pin, then RE-PLAN (a locked or loading load unlocked first); or go without them', () => {
     const pin = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
     expect(noLocationLoadRemedy('PLANNED')).toBe(`${pin}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`);
-    expect(noLocationLoadRemedy('LOCKED')).toBe(`${pin}, then try again. Or unlock this load (put it back to Planned) and RE-PLAN to leave their orders unserved.`);
-    expect(noLocationLoadRemedy('LOADING')).toBe(
-      `${pin}, then try again. Or put this load Back to locked, then Unlock it (put it back to Planned), take their cases off the truck, and RE-PLAN to leave their orders unserved.`,
+    // A5 third review. Before: "then try again", and trying again sent the load out with the stop
+    // still at the old point (a stop keeps the pin it was planned with until a re-plan).
+    expect(noLocationLoadRemedy('LOCKED')).toBe(
+      `${pin}. Then unlock this load (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or unlock it and RE-PLAN now to leave their orders unserved.`,
     );
+    expect(noLocationLoadRemedy('LOADING')).toBe(
+      `${pin}. Then put this load Back to locked, Unlock it (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or do that now, and take their cases off the truck, to leave their orders unserved.`,
+    );
+    for (const s of ['PLANNED', 'LOCKED', 'LOADING']) expect(noLocationLoadRemedy(s)).not.toMatch(/try again/);
+  });
+
+  // A5 third review: the dispatcher follows the refusal ("drop the pin") and tries again. The customer
+  // is usable now, but the stop was planned at the point that was flagged: its pin, route link and
+  // WhatsApp text still go there until a re-plan.
+  describe('a stop still planned at a point that was not usable when a new pin replaced it', () => {
+    const P1 = { lat: 23.6111, lng: 58.4111 };
+    const snapshot = (at: { lat: number; lng: number } | null) => ({ v: 1, customerId: 'c', code: 'C1', branchCode: null, name: 'C1', customerType: null, address: null, accessNotes: null, hardStartMin: null, hardEndMin: null, prefStartMin: null, prefEndMin: null, serviceMin: 20, priority: 3, source: 'PLAN', capturedAt: '2026-09-26T18:00:00.000Z', ...(at ?? { lat: null, lng: null }) });
+    /** Both stops planned at P1; the customer now at `now`; one location change replaced `before`. */
+    function seedReplaced(now: Record<string, unknown>, before: Record<string, unknown> | null, planned: { lat: number; lng: number } | null = P1) {
+      seedAppliedPlan();
+      for (const a of tables.routeAssignment!) a.stopSnapshotJson = planned ? snapshot(planned) : null;
+      customerNow({ lat: 23.64, lng: 58.44, locationVerified: true, geocodeConfidence: 'HIGH', ...now });
+      if (before) {
+        tables.auditLog!.push({ id: 'AU1', tenantId: T, userId: 'u1', action: 'CUSTOMER_LOCATION_SET', entity: 'Customer', entityId: 'c', beforeJson: before, afterJson: { lat: 23.64, lng: 58.44, source: 'MAP_PIN', confidence: 'HIGH', check: 'HAND_PIN' }, createdAt: new Date() });
+      }
+    }
+
+    it.each([
+      ['an import had marked it LOW', { ...P1, verified: false, confidence: 'LOW' }],
+      ['it was outside the delivery area, never confirmed', { lat: 24.7136, lng: 46.6753, verified: false, confidence: 'HIGH' }],
+    ])('%s: LOCK, LOADING and DISPATCH are refused (409 STOP_PIN_REPLACED) until a re-plan', async (_what, before) => {
+      const planned = { lat: before.lat, lng: before.lng };
+      seedReplaced({}, before, planned);
+      const lock = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+      // Before: locked (and then loaded and dispatched) with the stop at the flagged point.
+      expect(lock).toBeInstanceOf(PlanError);
+      expect(lock).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customerIds: ['c'], customers: ['C1'] } });
+      expect(lock.message).toBe(`T01 L2: the stop for C1 still goes to its old point, which was not usable. A new pin was placed after this load was planned. ${LOCATION_GATE_RULE} ${replacedPinRemedy('PLANNED')}`);
+      for (const to of ['LOADING', 'DISPATCHED'] as const) {
+        const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+        expect(e, to).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+        expect(e.message).toContain(replacedPinRemedy('LOCKED'));
+      }
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOCKED', 'PLANNED']);
+      // The way back is never refused.
+      await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+      expect(row('planLoad', 'L1').status).toBe('PLANNED');
+    });
+
+    it('the remedy: RE-PLAN, after unlocking a locked or loading load', () => {
+      expect(replacedPinRemedy('PLANNED')).toBe('RE-PLAN so the stops go to the new pins.');
+      expect(replacedPinRemedy('LOCKED')).toBe('Unlock this load (put it back to Planned), then RE-PLAN so the stops go to the new pins.');
+      expect(replacedPinRemedy('LOADING')).toBe('Put this load Back to locked, then Unlock it (put it back to Planned), then RE-PLAN so the stops go to the new pins.');
+    });
+
+    it.each([
+      // A2's "New pin" path (owner default, frozen plan facts): an ordinary correction of a point that was usable.
+      ['an ordinary correction of a usable point (HIGH, not confirmed)', {}, { ...P1, verified: false, confidence: 'HIGH' }, P1],
+      ['an ordinary correction of a confirmed point', {}, { ...P1, verified: true, confidence: 'LOW' }, P1],
+      ['the new pin within 50 m of the planned one', { lat: 23.6113, lng: 58.4112 }, { ...P1, verified: false, confidence: 'LOW' }, P1],
+      ['a flagged point that is not the planned one', {}, { lat: 23.5, lng: 58.3, verified: false, confidence: 'LOW' }, P1],
+      ['no location change recorded', {}, null, P1],
+      ['a stop planned before snapshots existed (it shows the live pin)', {}, { ...P1, verified: false, confidence: 'LOW' }, null],
+    ])('control: %s is locked and dispatched as before', async (_what, now, before, planned) => {
+      seedReplaced(now, before, planned);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+    });
   });
 });
 

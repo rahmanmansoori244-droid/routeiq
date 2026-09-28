@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail, notFoundIfNull } from '@/lib/api';
 import { audit } from '@/lib/audit';
+import { prisma } from '@/lib/db';
 import {
   checkManualLocation,
   pinRequiredMessage,
@@ -102,30 +103,39 @@ export const PUT = (req: Request, { params }: Params) =>
       if (cs === 'OUTSIDE_AREA' && !body.confirmOutsideArea) {
         return fail({ code: 'OUTSIDE_AREA', message: 'This point is outside Oman/UAE. Confirm to save it anyway.' } as Record<string, unknown>, 422);
       }
-      const after = await db.customer.update({
-        where: { id: params.id },
-        data: {
-          lat,
-          lng,
-          locationInput: input ?? (source === 'MAP_PIN' ? 'map pin' : `${lat}, ${lng}`),
-          locationSource: source as never,
-          locationVerified: true,
-          locationVerifiedById: user.id,
-          locationVerifiedAt: new Date(),
-          // Truthful (audit PR A5): a hand pin is HIGH; a reading is the parser's (always HIGH, the
-          // parser asks for a pin for every MEDIUM or LOW one); a saved point confirmed keeps its own.
-          geocodeConfidence: confidence,
-        },
-      });
-      await audit({
-        tenantId: user.tenantId,
-        userId: user.id,
-        action: 'CUSTOMER_LOCATION_SET',
-        entity: 'Customer',
-        entityId: after.id,
-        beforeJson: { lat: before.lat, lng: before.lng, source: before.locationSource, verified: before.locationVerified, confidence: before.geocodeConfidence } as never,
-        afterJson: { lat, lng, source: after.locationSource, input: after.locationInput, confidence: after.geocodeConfidence, check } as never,
-        ip,
+      // The change and its audit row commit together (A5 third review): LOCK, LOADING and DISPATCH
+      // read the row's "before" point to refuse a stop still planned at a point replaced while it
+      // was not usable (plan-service locationGate).
+      const after = await prisma.$transaction(async (tx) => {
+        const saved = await tx.customer.update({
+          where: { id: params.id, tenantId: user.tenantId },
+          data: {
+            lat,
+            lng,
+            locationInput: input ?? (source === 'MAP_PIN' ? 'map pin' : `${lat}, ${lng}`),
+            locationSource: source as never,
+            locationVerified: true,
+            locationVerifiedById: user.id,
+            locationVerifiedAt: new Date(),
+            // Truthful (audit PR A5): a hand pin is HIGH; a reading is the parser's (always HIGH, the
+            // parser asks for a pin for every MEDIUM or LOW one); a saved point confirmed keeps its own.
+            geocodeConfidence: confidence,
+          },
+        });
+        await audit(
+          {
+            tenantId: user.tenantId,
+            userId: user.id,
+            action: 'CUSTOMER_LOCATION_SET',
+            entity: 'Customer',
+            entityId: saved.id,
+            beforeJson: { lat: before.lat, lng: before.lng, source: before.locationSource, verified: before.locationVerified, confidence: before.geocodeConfidence } as never,
+            afterJson: { lat, lng, source: saved.locationSource, input: saved.locationInput, confidence: saved.geocodeConfidence, check } as never,
+            ip,
+          },
+          tx,
+        );
+        return saved;
       });
       return ok({ id: after.id, lat: after.lat, lng: after.lng, locationSource: after.locationSource, locationVerified: after.locationVerified, geocodeConfidence: after.geocodeConfidence });
     },

@@ -10,6 +10,7 @@ import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
 import { fileAgreesWithSaved, pointsElsewhereText, readImportedPair, type ImportedPair } from '@/lib/dispatch/import-location';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
+import { samePoint } from '@/lib/dispatch/location-input';
 import { clientIp } from '@/lib/client-ip';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
@@ -31,7 +32,9 @@ import { clientIp } from '@/lib/client-ip';
 // the two is wrong) its saved point stays on the map but is marked LOW, so it is not planned until a
 // dispatcher drops the pin. A kept saved point that is itself not usable (LOW, or outside the area,
 // and never confirmed) is listed as not used, with its own warning (A5 second review). A location a
-// dispatcher verified is never changed (F05).
+// dispatcher verified is never changed (F05). An exact pair that replaces a saved point that was not
+// usable is recorded (CUSTOMER_LOCATION_SET, the point it replaced): a stop still planned at that
+// point is then refused at LOCK, LOADING and DISPATCH until a re-plan (A5 third review).
 
 interface ImportError {
   row: number;
@@ -223,7 +226,7 @@ export async function POST(req: Request) {
 
   // Existing customers, matched case-insensitively (twins resolve like the order intake).
   const existingRows = await db.customer.findMany({
-    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
+    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
   });
   const twins = new Map<string, typeof existingRows>();
   for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
@@ -327,6 +330,7 @@ export async function POST(req: Request) {
   let upserted = 0;
   let keptVerified = 0;
   let markedLow = 0;
+  let replacedNotUsable = 0;
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
     const fileHasLoc = v.lat !== null && v.lng !== null;
@@ -373,6 +377,23 @@ export async function POST(req: Request) {
           data: { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' },
         });
         if (written.count === 0) keptVerified++;
+        else if (m.lat !== null && m.lng !== null && locationBlocksDelivery(m, area) && !samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat!, lng: v.lng! })) {
+          // A saved point that was not usable (an earlier file marked it LOW, or it is outside the
+          // area) is replaced by the file's exact pair: recorded like a pin set in ADD LOCATION, so a
+          // stop still planned at the old point is refused at LOCK, LOADING and DISPATCH until a
+          // re-plan gives it the new one (plan-service locationGate, A5 third review).
+          await audit({
+            tenantId: session.user.tenantId,
+            userId: session.user.id,
+            action: 'CUSTOMER_LOCATION_SET',
+            entity: 'Customer',
+            entityId: m.id,
+            beforeJson: { lat: m.lat, lng: m.lng, source: m.locationSource, verified: m.locationVerified, confidence: m.geocodeConfidence } as never,
+            afterJson: { lat: v.lat, lng: v.lng, source: 'IMPORT', confidence: geocodeConfidence, check: 'IMPORT', fileName: parsed.fileName } as never,
+            ip,
+          });
+          replacedNotUsable++;
+        }
       } else {
         // The file points elsewhere: the saved point is not used until a dispatcher drops the pin
         // (LOW blocks planning). Never a verified one, nor one changed since it was compared (F05).
@@ -398,7 +419,7 @@ export async function POST(req: Request) {
     afterJson: {
       bulkImport: {
         fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length,
-        savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size,
+        savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size, savedLocationsNotUsableReplaced: replacedNotUsable,
       },
     } as never,
     ip,

@@ -10,6 +10,8 @@
  *  - L4 (planning): a saved location that is LOW and never confirmed is treated like an invalid one:
  *    blocking on the day screen, and its orders are left unserved with a reason that says to drop
  *    the pin. Confirmed locations and HIGH / MEDIUM imports not confirmed yet are planned as before.
+ *  - A5 third review: the question before OPTIMIZE / RE-PLAN without them says whether a location is
+ *    missing or saved but not usable (it called every one "no location ... location missing").
  *
  * The routes, the customer page and the legacy run dispatch are in location-rule-routes.spec.ts and
  * (real PostgreSQL) tests/integration/location-rule-db.spec.ts; the dialog in
@@ -45,6 +47,7 @@ import {
   type CustomerForPlanning,
 } from '@/lib/dispatch/customer-attrs';
 import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
+import { askOverride } from '@/app/t/[slug]/dispatch/client-api';
 
 const fetchSpy = vi.fn(async () => {
   throw new Error('no network call is allowed when a location is saved');
@@ -261,5 +264,44 @@ describe('buildDispatchRequest: an unverified LOW location is never sent to the 
     ]);
     // In the scope (left unserved with its reason), not lost.
     expect(b.scope.orderIds).toContain('O1');
+  });
+});
+// ---------------------------------------------------------------------------------------------
+// A5 third review: the OPTIMIZE / RE-PLAN question says why, from the blocking list
+// ---------------------------------------------------------------------------------------------
+
+describe('askOverride: the question before optimizing names what is wrong with the locations', () => {
+  function asked(blocking: { code: string; message?: string }[], verb: 'Optimize' | 'Re-plan' = 'Optimize') {
+    let text = '';
+    const g = globalThis as unknown as { window?: { confirm: (t: string) => boolean } };
+    const prev = g.window;
+    g.window = { confirm: (t: string) => ((text = t), true) };
+    try {
+      expect(askOverride({ code: 'LOCATION_REQUIRED', blocking }, verb)).toEqual({ allowMissingLocations: true });
+    } finally {
+      g.window = prev;
+    }
+    return text;
+  }
+
+  it('a customer whose saved point is LOW (or outside the area) is not called "no location", "location missing"', () => {
+    const text = asked([{ code: 'INVALID_LOCATION', message: LOW_LOCATION_MESSAGE }], 'Re-plan');
+    // Before: '1 customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". Re-plan anyway?'
+    expect(text).toBe(
+      '1 customer(s) have a saved location that cannot be used (not exact, outside the delivery area, or not valid). Their orders will be UNSERVED until the pin is placed on each one. Re-plan anyway?',
+    );
+    expect(text).not.toMatch(/location missing|no location/);
+  });
+
+  it('missing and not usable together are counted apart', () => {
+    expect(asked([{ code: 'LOCATION_REQUIRED' }, { code: 'INVALID_LOCATION' }, { code: 'INVALID_LOCATION' }])).toBe(
+      '3 customer(s) have no usable location (1 missing, 2 not exact or not valid). Their orders will be UNSERVED until the pin is placed on each one. Optimize anyway?',
+    );
+  });
+
+  it('control: only missing locations keep the words they had', () => {
+    expect(asked([{ code: 'LOCATION_REQUIRED' }, { code: 'LOCATION_REQUIRED' }])).toBe(
+      '2 customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". Optimize anyway?',
+    );
   });
 });

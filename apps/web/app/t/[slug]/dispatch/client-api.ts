@@ -75,13 +75,31 @@ export function weightFixText(canEditProducts: boolean): string {
 }
 
 /**
+ * The question before optimizing without some customers' locations, from the blocking list (A5 third
+ * review): LOCATION_REQUIRED is a customer with no location (its orders are unserved as "location
+ * missing"); INVALID_LOCATION is a saved point that cannot be used - LOW and never confirmed, outside
+ * the delivery area and never confirmed, or 0,0 (unserved as "Invalid location", with what to fix).
+ * The question used to call every one of them "no location ... location missing".
+ */
+function locationQuestion(blocking: { code?: unknown }[], verb: 'Optimize' | 'Re-plan'): string {
+  const n = blocking.length;
+  const missing = blocking.filter((b) => b.code === 'LOCATION_REQUIRED').length;
+  const notUsable = n - missing;
+  if (notUsable === 0) return `${n} customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". ${verb} anyway?`;
+  const who =
+    missing === 0
+      ? `${n} customer(s) have a saved location that cannot be used (not exact, outside the delivery area, or not valid).`
+      : `${n} customer(s) have no usable location (${missing} missing, ${notUsable} not exact or not valid).`;
+  return `${who} Their orders will be UNSERVED until the pin is placed on each one. ${verb} anyway?`;
+}
+
+/**
  * Optimize / re-plan answers that need the dispatcher's go-ahead (409 LOCATION_REQUIRED or
  * WEIGHT_REQUIRED): asks, and returns the override to send again, or null (not asked or declined).
  */
 export function askOverride(errorBody: Record<string, unknown> | null, verb: 'Optimize' | 'Re-plan', opts: { canEditProducts?: boolean } = {}): OptimizeOverrides | null {
   if (errorBody?.code === 'LOCATION_REQUIRED') {
-    const n = (errorBody.blocking as unknown[] | undefined)?.length ?? 0;
-    const ok = window.confirm(`${n} customer(s) still have no location. Their orders will be UNSERVED with reason "location missing". ${verb} anyway?`);
+    const ok = window.confirm(locationQuestion((errorBody.blocking as { code?: unknown }[] | undefined) ?? [], verb));
     return ok ? { allowMissingLocations: true } : null;
   }
   if (errorBody?.code === 'WEIGHT_REQUIRED') {

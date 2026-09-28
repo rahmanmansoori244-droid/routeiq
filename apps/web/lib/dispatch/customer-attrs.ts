@@ -254,18 +254,28 @@ export function inactiveCustomerIssue(onPlannedLoads = false): CustomerIssue {
   };
 }
 
+/**
+ * The customer's location issue, the one the day card shows, or null (a usable point a dispatcher
+ * confirmed). A blocking one is exactly `locationBlocksDelivery`. Also used by the customer page and
+ * the customers list (A5 third review), so a point that blocks delivery says so there too.
+ */
+export function locationIssue(
+  c: Pick<CustomerForPlanning, 'lat' | 'lng' | 'locationVerified' | 'geocodeConfidence'>,
+  area: ServiceArea = DEFAULT_SERVICE_AREA,
+): CustomerIssue | null {
+  const cs = coordStatus(c.lat, c.lng, area);
+  if (cs === 'MISSING') return { code: 'LOCATION_REQUIRED', blocking: true, message: 'Location missing - add a Google Maps link, coordinates or a map pin.' };
+  if (cs === 'INVALID') return { code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is not valid (0,0 or out of range). Set it again.' };
+  if (cs === 'OUTSIDE_AREA' && !c.locationVerified) return { code: 'INVALID_LOCATION', blocking: true, message: OUTSIDE_AREA_LOCATION_MESSAGE };
+  if (isUnverifiedLowLocation(c)) return { code: 'INVALID_LOCATION', blocking: true, message: LOW_LOCATION_MESSAGE };
+  if (!c.locationVerified) return { code: 'LOCATION_UNVERIFIED', blocking: false, message: 'Location came from an import and was never confirmed by a dispatcher.' };
+  return null;
+}
+
 export function customerIssues(c: CustomerForPlanning, eff: EffectiveAttrs, area: ServiceArea = DEFAULT_SERVICE_AREA): CustomerIssue[] {
   const out: CustomerIssue[] = [];
-  const cs = coordStatus(c.lat, c.lng, area);
-  if (cs === 'MISSING') out.push({ code: 'LOCATION_REQUIRED', blocking: true, message: 'Location missing - add a Google Maps link, coordinates or a map pin.' });
-  else if (cs === 'INVALID') out.push({ code: 'INVALID_LOCATION', blocking: true, message: 'Saved location is not valid (0,0 or out of range). Set it again.' });
-  else if (cs === 'OUTSIDE_AREA' && !c.locationVerified) {
-    out.push({ code: 'INVALID_LOCATION', blocking: true, message: OUTSIDE_AREA_LOCATION_MESSAGE });
-  } else if (isUnverifiedLowLocation(c)) {
-    out.push({ code: 'INVALID_LOCATION', blocking: true, message: LOW_LOCATION_MESSAGE });
-  } else if (!c.locationVerified) {
-    out.push({ code: 'LOCATION_UNVERIFIED', blocking: false, message: 'Location came from an import and was never confirmed by a dispatcher.' });
-  }
+  const loc = locationIssue(c, area);
+  if (loc) out.push(loc);
   if (c.createdFromUpload) out.push({ code: 'NEW_CUSTOMER', blocking: false, message: 'New customer created from the order file.' });
   if (eff.prioritySource === 'DEFAULT') {
     out.push({ code: 'PRIORITY_UNCONFIRMED', blocking: false, message: `Priority P${eff.priority} is a default - confirm it (P1 highest, P5 lowest).` });

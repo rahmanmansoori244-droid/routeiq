@@ -31,6 +31,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
+import { samePoint, type ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
@@ -72,6 +73,8 @@ import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
 import {
+  distanceM,
+  PIN_MOVED_M,
   readPlanInputs,
   readStopSnapshot,
   readTruckSnapshot,
@@ -2054,17 +2057,74 @@ export const LOCATION_GATE_RULE = 'A load cannot be locked, loaded or dispatched
 const DROP_THE_PIN = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
 
 /**
- * What to do about a load refused by locationGate, by the load's status: drop the pin, then
- * RE-PLAN (a PLANNED load was planned with the old point) or try again (a LOCKED or LOADING load is
- * kept as it is by a re-plan); or go without them - a re-plan leaves their orders unserved, and a
- * locked or loading load must be put back to Planned first.
+ * What to do about a load refused by locationGate, by the load's status: drop the pin, then RE-PLAN
+ * so the stops go to the new pins - a locked or loading load is put back to Planned first, because a
+ * stop keeps the pin it was planned with until a re-plan (A5 third review: "then try again" sent a
+ * locked load out with its stop still at the old point); or go without them - a re-plan leaves
+ * their orders unserved.
  */
 export function noLocationLoadRemedy(status: string): string {
   if (status === 'PLANNED') return `${DROP_THE_PIN}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`;
   if (status === 'LOADING') {
-    return `${DROP_THE_PIN}, then try again. Or put this load Back to locked, then Unlock it (put it back to Planned), take their cases off the truck, and RE-PLAN to leave their orders unserved.`;
+    return `${DROP_THE_PIN}. Then put this load Back to locked, Unlock it (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or do that now, and take their cases off the truck, to leave their orders unserved.`;
   }
-  return `${DROP_THE_PIN}, then try again. Or unlock this load (put it back to Planned) and RE-PLAN to leave their orders unserved.`;
+  return `${DROP_THE_PIN}. Then unlock this load (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or unlock it and RE-PLAN now to leave their orders unserved.`;
+}
+
+/** What to do about a load refused because a stop still goes to a point that was replaced when it was not usable. */
+export function replacedPinRemedy(status: string): string {
+  if (status === 'PLANNED') return 'RE-PLAN so the stops go to the new pins.';
+  if (status === 'LOADING') return 'Put this load Back to locked, then Unlock it (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
+  return 'Unlock this load (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
+}
+
+/** A customer's point as a location change recorded it before the change (CUSTOMER_LOCATION_SET beforeJson). */
+function replacedPoint(json: unknown): { lat: number; lng: number; locationVerified: boolean; geocodeConfidence: string | null } | null {
+  if (!json || typeof json !== 'object') return null;
+  const b = json as Record<string, unknown>;
+  if (typeof b.lat !== 'number' || typeof b.lng !== 'number') return null;
+  return { lat: b.lat, lng: b.lng, locationVerified: b.verified === true, geocodeConfidence: typeof b.confidence === 'string' ? b.confidence : null };
+}
+
+/**
+ * The customers of `stops` whose stop is still planned at a point that was NOT usable when a new
+ * pin replaced it (A5 third review): the stop's planned pin (stopSnapshotJson) is more than
+ * PIN_MOVED_M from the customer's point now, and a recorded location change (CUSTOMER_LOCATION_SET:
+ * a pin or reading saved in ADD LOCATION or Set location, or a customer import that wrote a new pair
+ * over it) replaced exactly that point while it blocked delivery (`locationBlocksDelivery`: LOW or
+ * outside the area and never confirmed, 0,0). The stop, its links and the driver's texts still go to
+ * the planned point until a re-plan. An ordinary correction of a usable point is not refused: the
+ * sheets show the planned stop with the new pin noted (frozen plan facts, owner default, F08).
+ */
+async function stopsAtReplacedPoints(
+  tx: Tx,
+  tenantId: string,
+  stops: { customerId: string; stopSnapshotJson: unknown }[],
+  customers: Map<string, { lat: number | null; lng: number | null }>,
+  area: ServiceArea,
+): Promise<Set<string>> {
+  const moved = new Map<string, { lat: number; lng: number }[]>();
+  for (const s of stops) {
+    const snap = readStopSnapshot(s.stopSnapshotJson);
+    const now = customers.get(s.customerId);
+    if (!snap || snap.lat === null || snap.lng === null || !now || now.lat === null || now.lng === null) continue;
+    const planned = { lat: snap.lat, lng: snap.lng };
+    if (distanceM(planned, { lat: now.lat, lng: now.lng }) <= PIN_MOVED_M) continue;
+    moved.set(s.customerId, [...(moved.get(s.customerId) ?? []), planned]);
+  }
+  const out = new Set<string>();
+  if (!moved.size) return out;
+  const changes = await tx.auditLog.findMany({
+    where: { tenantId, entity: 'Customer', action: 'CUSTOMER_LOCATION_SET', entityId: { in: [...moved.keys()] } },
+    select: { entityId: true, beforeJson: true },
+  });
+  for (const ch of changes) {
+    const before = replacedPoint(ch.beforeJson);
+    const planned = ch.entityId ? moved.get(ch.entityId) : undefined;
+    if (!before || !planned || !locationBlocksDelivery(before, area)) continue;
+    if (planned.some((p) => samePoint(p, before))) out.add(ch.entityId!);
+  }
+  return out;
 }
 
 /**
@@ -2077,12 +2137,18 @@ export function noLocationLoadRemedy(status: string): string {
  * area can put it outside; "Use instead" and a failed re-plan's copy can then hold it too. Stepping
  * back (unlock, back to locked) and Completed are never refused. Verified points, and HIGH or MEDIUM
  * points inside the area, pass as before (NMWC's locked loads are not affected).
+ * A5 third review: once the pin is dropped the customer passes, but the stop still goes to the point
+ * it was planned with. A stop planned at a point that was replaced while it was not usable is
+ * refused too (409 STOP_PIN_REPLACED, `stopsAtReplacedPoints`), until a re-plan gives it the new pin.
  * Read without a relation filter (the customers by id), like carriedOrdersGate.
  */
 async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
-  const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  const rows = await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true, stopSnapshotJson: true } });
+  const orderIds = [...new Set(rows.map((a) => a.orderId))];
   if (!orderIds.length) return;
-  const customerIds = [...new Set((await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { customerId: true } })).map((o) => o.customerId))];
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, customerId: true } });
+  const customerOf = new Map(orders.map((o) => [o.id, o.customerId]));
+  const customerIds = [...new Set(orders.map((o) => o.customerId))];
   if (!customerIds.length) return;
   const customers = await tx.customer.findMany({
     where: { tenantId, id: { in: customerIds } },
@@ -2094,16 +2160,37 @@ async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckI
   const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { serviceAreaJson: true } });
   const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
   const area = parseServiceArea(cfg?.serviceAreaJson, tenant?.country);
+  const nameOf = (c: { code: string; branchCode: string | null }) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
+  const list = (names: string[]) => `${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`;
   const blocked = customers.filter((c) => locationBlocksDelivery(c, area));
-  if (!blocked.length) return;
+  if (blocked.length) {
+    const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+    const names = blocked.map(nameOf);
+    const who = blocked.length === 1 ? '1 customer on this load has' : `${blocked.length} customers on this load have`;
+    throw new PlanError(
+      `${truck?.code ?? 'Truck'} L${load.loadNo}: ${who} no usable location: ${list(names)}. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy(load.status)}`,
+      409,
+      { code: 'LOCATION_REQUIRED', customerIds: blocked.map((c) => c.id), customers: names },
+    );
+  }
+  const stops = rows.flatMap((a) => {
+    const customerId = customerOf.get(a.orderId);
+    return customerId ? [{ customerId, stopSnapshotJson: a.stopSnapshotJson }] : [];
+  });
+  const replaced = await stopsAtReplacedPoints(tx, tenantId, stops, new Map(customers.map((c) => [c.id, c])), area);
+  if (!replaced.size) return;
+  const stale = customers.filter((c) => replaced.has(c.id));
   const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
-  const names = blocked.map((c) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code));
-  const who = blocked.length === 1 ? '1 customer on this load has' : `${blocked.length} customers on this load have`;
-  throw new PlanError(
-    `${truck?.code ?? 'Truck'} L${load.loadNo}: ${who} no usable location: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy(load.status)}`,
-    409,
-    { code: 'LOCATION_REQUIRED', customerIds: blocked.map((c) => c.id), customers: names },
-  );
+  const names = stale.map(nameOf);
+  const what =
+    stale.length === 1
+      ? `the stop for ${names[0]} still goes to its old point, which was not usable. A new pin was placed after this load was planned.`
+      : `the stops for ${list(names)} still go to their old points, which were not usable. New pins were placed after this load was planned.`;
+  throw new PlanError(`${truck?.code ?? 'Truck'} L${load.loadNo}: ${what} ${LOCATION_GATE_RULE} ${replacedPinRemedy(load.status)}`, 409, {
+    code: 'STOP_PIN_REPLACED',
+    customerIds: stale.map((c) => c.id),
+    customers: names,
+  });
 }
 
 /**

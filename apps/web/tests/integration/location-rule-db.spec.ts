@@ -21,7 +21,10 @@
  *  5. L5 (A5 second review): a customer import can mark a planned customer's saved point LOW after
  *     planning. Its load cannot then be locked, loaded or dispatched (409 LOCATION_REQUIRED, the
  *     customers named), also after "Use instead" and when the load was locked before the import;
- *     the day says the plan is out of date so RE-PLAN is offered; once the pin is placed, it goes.
+ *     the day says the plan is out of date so RE-PLAN is offered. A5 third review: once the pin is
+ *     placed, the stop still goes to the old, flagged point, so LOCK, LOADING and DISPATCH stay
+ *     refused (409 STOP_PIN_REPLACED) until a re-plan gives the stop the new pin - also when a second
+ *     customer file replaced the flagged point; an ordinary pin correction is not refused.
  */
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -98,7 +101,9 @@ vi.mock('@/lib/solver-client', () => {
 });
 
 import { prisma as libPrisma } from '@/lib/db';
-import { chooseScenario, getOrCreatePlan, LOCATION_GATE_RULE, noLocationLoadRemedy, updateLoad } from '@/lib/dispatch/plan-service';
+import { chooseScenario, getOrCreatePlan, LOCATION_GATE_RULE, noLocationLoadRemedy, replacedPinRemedy, updateLoad } from '@/lib/dispatch/plan-service';
+import { getPlanDetail, type PlanDetail } from '@/lib/dispatch/plan-detail';
+import { whatsappText } from '@/lib/dispatch/driver-links';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { getDayOverview, UP_TO_DATE } from '@/lib/dispatch/day-overview';
 import { LOW_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
@@ -136,6 +141,8 @@ async function jobsDone(runId: string) {
 
 const json = (method: string, body: unknown) => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 const answer = async (res: Response) => ({ status: res.status, body: (await res.json()) as { data: any; error: any } });
+/** The stop of a customer in a plan, with the pin it was planned with. */
+const stopOf = (d: PlanDetail | null, customerId: string) => d!.loads.flatMap((l) => l.stops).find((st) => st.customerId === customerId)!;
 const put = async (id: string, body: unknown) => answer(await locationPut(new Request(`http://localhost/api/customers/${id}/location`, json('PUT', body)), { params: { id } }));
 const cust = (code: string, data: Record<string, unknown>) =>
   prisma.customer.create({ data: { tenantId, code, name: code, branchKey: '__MAIN__', priority: 3, priorityConfirmed: true, avgServiceTimeMin: 20, serviceTimeConfirmed: true, ...data } });
@@ -413,12 +420,25 @@ describe('5. a planned customer whose location stops being usable is never locke
     await updateLoad(tenantId, runId, l2.id, { status: 'DISPATCHED' }, planner(), everyRole);
     expect(await statusOf(l2.id)).toBe('DISPATCHED');
 
-    // The dispatcher drops the pin: K1 is usable again, the plan is out of date because its pin
-    // moved (F08), and the load can be locked.
+    // The dispatcher drops the pin: K1 is usable again and the plan is out of date because its pin
+    // moved (F08). A5 third review: the stop is still planned at the old, flagged point, so LOCK is
+    // still refused (before: locked, and sent out to 23.6111, 58.4111); RE-PLAN gives it the new pin.
     expect((await put(k1.id, { lat: 23.6402, lng: 58.4403, source: 'MAP_PIN' })).status).toBe(200);
     expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual({ ...UP_TO_DATE, masterChanged: 1 });
-    await updateLoad(tenantId, runId, l1b.id, { status: 'LOCKED' }, planner(), everyRole);
-    expect(await statusOf(l1b.id)).toBe('LOCKED');
+    const stale = await updateLoad(tenantId, runId, l1b.id, { status: 'LOCKED' }, planner(), everyRole).catch((e) => e);
+    expect(stale).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customerIds: [k1.id], customers: ['K1'] } });
+    expect(stale.message).toBe(
+      `${l1b.truck.code} L${l1b.loadNo}: the stop for K1 still goes to its old point, which was not usable. A new pin was placed after this load was planned. ${LOCATION_GATE_RULE} ${replacedPinRemedy('PLANNED')}`,
+    );
+    expect(await statusOf(l1b.id)).toBe('PLANNED');
+    const again = await replan(tenantId, runId, 'REOPTIMIZE', null, planner(), null);
+    expect(again.status).toBe(202);
+    const childId = again.body.runId as string;
+    expect((await jobsDone(childId)).status).toBe('READY');
+    expect(stopOf(await getPlanDetail(tenantId, childId), k1.id)).toMatchObject({ lat: 23.6402, lng: 58.4403 });
+    const l1c = await loadOf(childId, k1.id);
+    await updateLoad(tenantId, childId, l1c.id, { status: 'LOCKED' }, planner(), everyRole);
+    expect(await statusOf(l1c.id)).toBe('LOCKED');
   });
 
   it('a load LOCKED before the import: LOADING and DISPATCH are refused (with how to go back), unlocking is not; RE-PLAN then asks first', async () => {
@@ -449,5 +469,72 @@ describe('5. a planned customer whose location stops being usable is never locke
     const again = await replan(tenantId, runId, 'REOPTIMIZE', null, planner(), null);
     expect(again.status).toBe(409);
     expect(again.body).toMatchObject({ code: 'LOCATION_REQUIRED' });
+  });
+
+  it('A5 third review: following the refusal (drop the pin) on a LOCKED load, it stays refused until unlock and RE-PLAN; then it goes, to the new pin', async () => {
+    const day = isoPlus(16);
+    const k5 = await cust('K5', { lat: 23.555, lng: 58.335, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    await orderFor(k5.id, day, 'SO-K5');
+    const runId = await planDay(day);
+    const l5 = await loadOf(runId, k5.id);
+    await updateLoad(tenantId, runId, l5.id, { status: 'LOCKED' }, planner(), everyRole);
+    // The customer file has K5 about 2 km away with 3 decimals: its saved point is marked LOW.
+    expect((await importCsv('code,name,priority,lat,lng\nK5,K5,3,23.572,58.345\n')).body.data.locationsNotSaved).toMatchObject([{ code: 'K5', kept: 'SAVED_LOCATION_NEEDS_PIN' }]);
+    const first = await updateLoad(tenantId, runId, l5.id, { status: 'LOADING' }, planner(), everyRole).catch((e) => e);
+    expect(first).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+    // The refusal says to unlock and RE-PLAN after the pin (before: "then try again").
+    expect(first.message).toContain(noLocationLoadRemedy('LOCKED'));
+    expect(first.message).toMatch(/unlock this load \(put it back to Planned\) and RE-PLAN, so the stops go to the new pins/);
+
+    // The dispatcher drops the pin at the shop and tries again. Before: LOADING and DISPATCHED went
+    // through, with the stop, its links and the WhatsApp text still at 23.555, 58.335.
+    expect((await put(k5.id, { lat: 23.5721, lng: 58.3451, source: 'MAP_PIN' })).status).toBe(200);
+    for (const to of ['LOADING', 'DISPATCHED'] as const) {
+      const refused = await updateLoad(tenantId, runId, l5.id, { status: to }, planner(), everyRole).catch((e) => e);
+      expect(refused, to).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customers: ['K5'] } });
+      expect(refused.message).toContain(replacedPinRemedy('LOCKED'));
+    }
+    expect(await statusOf(l5.id)).toBe('LOCKED');
+    expect(stopOf(await getPlanDetail(tenantId, runId), k5.id)).toMatchObject({ lat: 23.555, lng: 58.335 });
+
+    // Unlock and RE-PLAN: the stop gets the new pin, and the load locks, loads and goes out.
+    await updateLoad(tenantId, runId, l5.id, { status: 'PLANNED' }, planner(), everyRole);
+    const again = await replan(tenantId, runId, 'REOPTIMIZE', null, planner(), null);
+    expect(again.status).toBe(202);
+    const childId = again.body.runId as string;
+    expect((await jobsDone(childId)).status).toBe('READY');
+    const detail = await getPlanDetail(tenantId, childId);
+    const stop = stopOf(detail, k5.id);
+    expect(stop).toMatchObject({ lat: 23.5721, lng: 58.3451 });
+    expect(stop.mapsUrl).toContain('query=23.5721,58.3451');
+    const l5b = await loadOf(childId, k5.id);
+    for (const to of ['LOCKED', 'LOADING', 'DISPATCHED'] as const) await updateLoad(tenantId, childId, l5b.id, { status: to }, planner(), everyRole);
+    expect(await statusOf(l5b.id)).toBe('DISPATCHED');
+    const load = detail!.loads.find((l) => l.id === l5b.id)!;
+    const text = whatsappText(detail!.run as never, load as never, 1);
+    expect(text).toContain('query=23.5721,58.3451');
+    expect(text).not.toContain('23.555,58.335');
+  });
+
+  it('A5 third review: the same when a second customer file replaces the flagged point with an exact pair; an ordinary pin correction is not refused', async () => {
+    const day = isoPlus(18);
+    const k6 = await cust('K6', { lat: 23.5451, lng: 58.3251, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    const k7 = await cust('K7', { lat: 23.5251, lng: 58.3051, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    await orderFor(k6.id, day, 'SO-K6');
+    await orderFor(k7.id, day, 'SO-K7');
+    const runId = await planDay(day);
+    // File 1 points elsewhere (2 decimals): K6's saved point is marked LOW. File 2 has the exact pair.
+    expect((await importCsv('code,name,priority,lat,lng\nK6,K6,3,23.56,58.34\n')).body.data.locationsNotSaved).toMatchObject([{ code: 'K6', kept: 'SAVED_LOCATION_NEEDS_PIN' }]);
+    expect((await importCsv('code,name,priority,lat,lng\nK6,K6,3,23.5612,58.3405\n')).status).toBe(200);
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: k6.id } })).toMatchObject({ lat: 23.5612, lng: 58.3405, geocodeConfidence: 'HIGH', locationVerified: false });
+    const l6 = await loadOf(runId, k6.id);
+    // Before: locked, with the stop at 23.5451, 58.3251, the point file 1 had flagged.
+    await expect(updateLoad(tenantId, runId, l6.id, { status: 'LOCKED' }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customers: ['K6'] } });
+    // Control (A2's "New pin" path, owner default): K7's usable point corrected by hand about 1 km
+    // away: its load locks, and the sheets show the planned stop with the new pin noted.
+    expect((await put(k7.id, { lat: 23.5341, lng: 58.3101, source: 'MAP_PIN' })).status).toBe(200);
+    const l7 = await loadOf(runId, k7.id);
+    await updateLoad(tenantId, runId, l7.id, { status: 'LOCKED' }, planner(), everyRole);
+    expect(await statusOf(l7.id)).toBe('LOCKED');
   });
 });

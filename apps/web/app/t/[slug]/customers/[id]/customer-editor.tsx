@@ -7,6 +7,7 @@ import { MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LocationDialog } from '../../dispatch/location-dialog';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { locationIssue } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -42,6 +43,10 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props
   // every render would reset the dialog, which starts again for another customer).
   const [target, setTarget] = useState<ComponentProps<typeof LocationDialog>['customer']>(null);
   const has = customer.lat !== null && customer.lng !== null;
+  // A saved point that blocks delivery (A5 third review): an import marked it LOW, or it is outside
+  // the company's area, or 0,0, and nobody confirmed it. The day card's words, on this page too.
+  const issue = has ? locationIssue(customer, serviceArea) : null;
+  const blocked = issue?.blocking ? issue.message : null;
   function openDialog() {
     setTarget({
       customerId: customer.id,
@@ -65,7 +70,7 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props
         <p className="flex items-center gap-1 text-xs text-muted-foreground" data-testid="customer-location-text">
           <MapPin className="h-3 w-3" />
           {has
-            ? `Pin: ${customer.lat!.toFixed(6)}, ${customer.lng!.toFixed(6)} (${customer.locationVerified ? 'confirmed by a dispatcher' : 'from an import, not confirmed'})`
+            ? `Pin: ${customer.lat!.toFixed(6)}, ${customer.lng!.toFixed(6)} (${blocked ? 'not usable' : customer.locationVerified ? 'confirmed by a dispatcher' : 'from an import, not confirmed'})`
             : 'No location yet: nothing is delivered to this customer until it has one.'}
         </p>
         {canEdit ? (
@@ -74,6 +79,11 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props
           </Button>
         ) : null}
       </div>
+      {blocked ? (
+        <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700" data-testid="customer-location-blocked">
+          {`${blocked} Its orders are not planned or sent out until then.`}
+        </p>
+      ) : null}
       <LocationDialog open={open} onOpenChange={setOpen} customer={target} depot={center} serviceArea={serviceArea} onSaved={() => router.refresh()} />
     </div>
   );

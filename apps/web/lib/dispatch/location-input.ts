@@ -7,8 +7,9 @@
  *     degrees or minutes only -> needs a pin confirmation)
  *   - Google Maps URLs carrying coordinates:
  *       .../place/...!3d23.5859!4d58.4059   (the pin - most reliable)
- *       ?q=23.58,58.40  ?ll=  ?query=  ?destination=  ?daddr=  /search/23.58,+58.40
- *       .../@23.5859,58.4059,17z            (map CENTRE only -> needs a pin confirmation)
+ *       ?q=23.58,58.40  ?query=  ?destination=  ?daddr=  /search/23.58,+58.40
+ *       /dir/<start>/23.58,58.40            (a directions link: only the END of the route is read)
+ *       .../@23.5859,58.4059,17z  ?ll=  ?center=  ?sll=   (map CENTRE only -> needs a pin confirmation)
  *       geo:23.5859,58.4059
  *   - Short share links (maps.app.goo.gl/..., goo.gl/maps/...) - resolved server-side by
  *     following redirects to Google hosts only (no open proxy / SSRF).
@@ -237,6 +238,41 @@ function dmsResult(d: DmsParse, resolvedUrl: string, area: ServiceArea): Locatio
   return withValidation(d.lat, d.lng, { source: 'GOOGLE_MAPS_URL', ...dmsBase(d.precision), resolvedUrl }, area);
 }
 
+const MAP_CENTRE_WARNING = 'This link only gives the map centre, not a pin. Check the point and move the pin if needed.';
+const DIRECTIONS_NO_POINT = 'This directions link does not end at a point, so it does not say where the customer is.';
+
+/**
+ * Query keys that hold the centre of the map view, not a marker: `ll` (classic links; Google shows
+ * no pin there), `center` and `sll`. Read as MEDIUM and always need a pin (A5 third review: `ll` was
+ * read as an exact point, HIGH, and saved as read).
+ */
+const CENTRE_KEYS = new Set(['ll', 'center', 'sll']);
+
+/**
+ * The waypoints of a directions link, /maps/dir/<start>/<stops>/<end>/@centre/data=..., in route
+ * order (decoded; an empty one is a box left blank), or null when the link is not a directions link.
+ * Only the LAST one is where the route ends. Google puts the start in the path as coordinates when
+ * the route starts at "Your location" or at a dropped pin, so any earlier waypoint can be the
+ * dispatcher's or the salesman's own position (A5 third review). One waypoint alone is the start
+ * (Google's own "directions to here" link leaves the start blank: /dir//<point>).
+ */
+function directionsWaypoints(url: URL): string[] | null {
+  const m = /^(?:\/maps)?\/dir(?:\/(.*))?$/.exec(url.pathname);
+  if (!m) return null;
+  const parts = (m[1] ?? '').split('/');
+  const end = parts.findIndex((p) => p.startsWith('@') || p.startsWith('data='));
+  const slots = end < 0 ? parts : parts.slice(0, end);
+  // "/dir/A/B/": the last slash ends the path, it is not a blank waypoint.
+  if (end < 0 && slots.length > 1 && slots[slots.length - 1] === '') slots.pop();
+  return slots.map((s) => {
+    try {
+      return decodeURIComponent(s.replace(/\+/g, ' ')).trim();
+    } catch {
+      return s.trim();
+    }
+  });
+}
+
 export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE_AREA): LocationParse {
   if (url.hostname === 'consent.google.com') {
     const cont = url.searchParams.get('continue');
@@ -251,9 +287,11 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
   }
   const full = decodeURIComponent(url.href.replace(/\+/g, ' '));
   const resolvedUrl = url.href;
+  const dir = directionsWaypoints(url);
 
-  // Place pin: !3d<lat>!4d<lng> (most precise - the actual marker).
-  const pin = new RegExp(`!3d(${NUM})!4d(${NUM})`).exec(full);
+  // Place pin: !3d<lat>!4d<lng> (most precise - the actual marker). Not on a directions link: its
+  // data part does not say which waypoint a point belongs to.
+  const pin = dir ? null : new RegExp(`!3d(${NUM})!4d(${NUM})`).exec(full);
   if (pin) {
     return withValidation(Number(pin[1]), Number(pin[2]), { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', resolvedUrl }, area);
   }
@@ -263,10 +301,12 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
     if (!v) continue;
     const p = pairFrom(v.replace(/^loc:/i, ''));
     if (p) {
+      const centre = CENTRE_KEYS.has(key);
       return withValidation(Number(p.lat), Number(p.lng), {
         source: 'GOOGLE_MAPS_URL',
-        confidence: key === 'center' || key === 'sll' ? 'MEDIUM' : 'HIGH',
-        needsPin: key === 'center' || key === 'sll',
+        confidence: centre ? 'MEDIUM' : 'HIGH',
+        needsPin: centre,
+        warnings: centre ? [MAP_CENTRE_WARNING] : [],
         precision: Math.min(decimals(p.lat), decimals(p.lng)),
         resolvedUrl,
       }, area);
@@ -274,17 +314,31 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
     const d = parseDms(v);
     if (d) return dmsResult(d, resolvedUrl, area);
   }
-  // Coordinates in the path: /search/23.58,+58.40  /place/23.58,58.40  /dir//23.58,58.40
-  const pathPair = new RegExp(`/(?:search|place|dir(?:/[^/]*)?)/(${NUM}),\\s*\\+?(${NUM})(?:[/?@]|$)`).exec(full);
-  if (pathPair) {
-    return withValidation(Number(pathPair[1]), Number(pathPair[2]), {
-      source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(pathPair[1]), decimals(pathPair[2])), resolvedUrl,
-    }, area);
-  }
-  const pathDms = /\/(?:search|place)\/([^/@?]+)/.exec(full);
-  if (pathDms) {
-    const d = parseDms(pathDms[1]);
+  if (dir) {
+    // A directions link: only the end of the route can be the customer. It is read when it is a
+    // point and something comes before it (a start, even a blank one); never another waypoint.
+    const last = dir[dir.length - 1] ?? '';
+    const p = dir.length >= 2 ? pairFrom(last) : null;
+    if (p) {
+      return withValidation(Number(p.lat), Number(p.lng), {
+        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(p.lat), decimals(p.lng)), resolvedUrl,
+      }, area);
+    }
+    const d = dir.length >= 2 && last ? parseDms(last) : null;
     if (d) return dmsResult(d, resolvedUrl, area);
+  } else {
+    // Coordinates in the path: /search/23.58,+58.40  /place/23.58,58.40
+    const pathPair = new RegExp(`/(?:search|place)/(${NUM}),\\s*\\+?(${NUM})(?:[/?@]|$)`).exec(full);
+    if (pathPair) {
+      return withValidation(Number(pathPair[1]), Number(pathPair[2]), {
+        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(pathPair[1]), decimals(pathPair[2])), resolvedUrl,
+      }, area);
+    }
+    const pathDms = /\/(?:search|place)\/([^/@?]+)/.exec(full);
+    if (pathDms) {
+      const d = parseDms(pathDms[1]);
+      if (d) return dmsResult(d, resolvedUrl, area);
+    }
   }
   // Map viewport centre: /@lat,lng,17z - NOT necessarily where the customer is.
   const at = new RegExp(`@(${NUM}),(${NUM})(?:,[\\d.]+[zm])?`).exec(full);
@@ -293,10 +347,11 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
       source: 'GOOGLE_MAPS_URL',
       confidence: 'MEDIUM',
       needsPin: true,
-      warnings: ['This link only gives the map centre, not a pin. Check the point and move the pin if needed.'],
+      warnings: dir ? [`${DIRECTIONS_NO_POINT} The pin shows the map centre. Drop the pin on the customer's exact location.`] : [MAP_CENTRE_WARNING],
       resolvedUrl,
     }, area);
   }
+  if (dir) return fail(`${DIRECTIONS_NO_POINT} Drop a pin on the map instead.`, { resolvedUrl });
   return fail('This Google Maps link does not contain coordinates (it only names a place). Drop a pin on the map instead.', { resolvedUrl });
 }
 
