@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { guardSpreadsheet, safeDecodeRange, WorkbookRefusedError } from './workbook-guard';
+import { guardSpreadsheet, safeDecodeRange, sameSheetList, WorkbookRefusedError } from './workbook-guard';
 
 /**
  * Upload limits (owner decision 16, audit E2): 10 MB per file and 50,000 rows on the sheet that is
@@ -9,7 +9,10 @@ import { guardSpreadsheet, safeDecodeRange, WorkbookRefusedError } from './workb
  * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 50 columns), links over
  * 200,000 cells, 10,000 comments; the A1 v3 review 1,000 metadata entries of each kind and 1,000
  * comment authors. An upload read as Excel must be an .xlsx, an old .xls or CSV text; web pages,
- * XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard).
+ * XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard). Since the A1 v4
+ * review a part SheetJS reads more than once (for another sheet, another spelling of its name, an
+ * external link listed again) counts again against these caps, two sheets that read one worksheet
+ * part are refused, and so is a workbook with a chart, dialog or macro sheet.
  *
  * What these limits do and do not do. The file is parsed in the web process, on the event loop,
  * synchronously: while a file is parsed no other request is answered, and nothing can stop the
@@ -20,7 +23,7 @@ import { guardSpreadsheet, safeDecodeRange, WorkbookRefusedError } from './workb
  * any sheet is turned into rows - but they do not isolate it, and a file just under them still
  * blocks the app for seconds. Measured on the maintainer's machine (times vary by about a third
  * from run to run): an .xlsx of 50,000 rows x 49 columns (0.19 MB, 37 MB unpacked) 9-10 s and
- * 1 GB of memory; the same rows as CSV sent as Excel 7-11 s and 1.2 GB; ten sheets of 50,000 rows
+ * 1 GB of memory (before A1 v4, ten sheets naming that one part took ten times as long); the same rows as CSV sent as Excel 7-11 s and 1.2 GB; ten sheets of 50,000 rows
  * 5-6 s; NMWC's shape at the row limit (50,000 rows x 15 columns) about 2.5 s. Parsing in a worker
  * thread with a memory cap and a timeout that really stops it is audit PR 5.
  */
@@ -212,15 +215,16 @@ export function pickSheet(
  * read with a reader whose work cannot be bounded, a workbook that unpacks to more than
  * MAX_UNPACKED_BYTES, has more than MAX_ZIP_PARTS parts, MAX_CELLS cells with a type or a value,
  * MAX_COMMENTS comments, MAX_METADATA metadata entries of a kind or MAX_PEOPLE comment authors, or
- * links over more than MAX_LINK_CELLS cells (lib/workbook-guard), and one with more than
- * MAX_SHEETS sheets. Before any sheet is turned
- * into rows it refuses a sheet wider than MAX_COLS and sheets that span more than MAX_CELLS cells.
+ * links over more than MAX_LINK_CELLS cells, each part counted again for every further read, or a
+ * chart, dialog or macro sheet (lib/workbook-guard), one with more than MAX_SHEETS sheets, and one
+ * whose sheet list SheetJS reads otherwise than the guard. Before any sheet is turned into rows it
+ * refuses a sheet wider than MAX_COLS and sheets that span more than MAX_CELLS cells.
  */
 export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
   // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
   // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
   // given a Buffer it takes views.
-  const buf = guardSpreadsheet(bytes, {
+  const { view: buf, sheetNames } = guardSpreadsheet(bytes, {
     maxUnpackedBytes: MAX_UNPACKED_BYTES,
     maxParts: MAX_ZIP_PARTS,
     maxLinkCells: MAX_LINK_CELLS,
@@ -228,6 +232,7 @@ export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
     maxComments: MAX_COMMENTS,
     maxMetadata: MAX_METADATA,
     maxPeople: MAX_PEOPLE,
+    maxSheets: MAX_SHEETS,
   });
   // cellFormula: false. Formulas are not used (their saved values are), and with them SheetJS
   // compares every array-formula cell with every array formula before it: 20,000 such rows (a
@@ -246,6 +251,9 @@ export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
       `This workbook has ${names.length} sheets; at most ${MAX_SHEETS} can be read. Save only the sheet you need as a new workbook or as CSV and upload that.`,
     );
   }
+  // The guard counted the parts these sheets read (lib/workbook-guard, sheetReads) for the sheet
+  // list it read; SheetJS must have read the same list.
+  sameSheetList(sheetNames, names);
   const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false });
   const out: ParsedSheet[] = [];
   for (const { name, sheet, range, clamped } of sheetRanges(wb)) {

@@ -380,3 +380,119 @@ export function cfbDescendingChain(dataSectors: number): Buffer {
   }
   return file;
 }
+
+/** Relationship types SheetJS reads (its RELS table, xlsx 0.20.2). */
+export const RELS = {
+  worksheet: `${REL}/worksheet`,
+  chartsheet: `${REL}/chartsheet`,
+  dialogsheet: `${REL}/dialogsheet`,
+  macrosheet: 'http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet',
+  comments: `${REL}/comments`,
+  vmlDrawing: `${REL}/vmlDrawing`,
+  drawing: `${REL}/drawing`,
+  chart: `${REL}/chart`,
+};
+
+export interface Rel {
+  id: string;
+  target: string;
+  /** Worksheet when not given. */
+  type?: string;
+}
+
+/** A relationships part (.rels) listing `rels`. */
+export function relsXml(rels: Rel[]): Buffer {
+  return Buffer.from(
+    `${xml}<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${rels
+      .map((r) => `<Relationship Id="${r.id}" Type="${r.type ?? RELS.worksheet}" Target="${r.target}"/>`)
+      .join('')}</Relationships>`,
+  );
+}
+
+/**
+ * A workbook built by hand, for the tests of which part each sheet reads: its sheet list (each
+ * sheet's name and relationship id), the relationships of the workbook part and every other part.
+ * [Content_Types].xml (with `types` added), _rels/.rels and the workbook part are added; the
+ * workbook part is xl/workbook.xml unless `workbookPart` names another one, and its relationships
+ * are in the _rels folder next to it. `sheetTags` replaces the <sheet> tags made from `sheets`.
+ */
+export function handWorkbook(
+  sheets: { name: string; rid: string }[],
+  rels: Rel[],
+  parts: ZipPart[],
+  opts: { types?: { part: string; type: string }[]; workbookPart?: string; sheetTags?: string } = {},
+): Buffer {
+  const wb = opts.workbookPart ?? 'xl/workbook.xml';
+  const slash = wb.lastIndexOf('/');
+  const overrides = [{ part: `/${wb}`, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml' }, ...(opts.types ?? [])];
+  return zip([
+    {
+      name: '[Content_Types].xml',
+      data: Buffer.from(
+        `${xml}<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>${overrides
+          .map((o) => `<Override PartName="${o.part}" ContentType="${o.type}"/>`)
+          .join('')}</Types>`,
+      ),
+    },
+    { name: '_rels/.rels', data: relsXml([{ id: 'rId1', type: `${REL}/officeDocument`, target: wb }]) },
+    {
+      name: wb,
+      data: Buffer.from(
+        `${xml}<workbook xmlns="${MAIN}" xmlns:r="${REL}"><sheets>${opts.sheetTags ?? sheets.map((s, i) => `<sheet name="${s.name}" sheetId="${i + 1}" r:id="${s.rid}"/>`).join('')}</sheets></workbook>`,
+      ),
+    },
+    { name: `${wb.slice(0, slash + 1)}_rels/${wb.slice(slash + 1)}.rels`, data: relsXml(rels) },
+    ...parts,
+  ]);
+}
+
+/** A comments part with `n` comments, all on `ref`. */
+export function commentsXml(n: number, ref = 'B2'): Buffer {
+  return Buffer.from(
+    `${xml}<comments xmlns="${MAIN}"><authors><author>Dispatcher</author></authors><commentList>${`<comment ref="${ref}" authorId="0"><text><t>check</t></text></comment>`.repeat(n)}</commentList></comments>`,
+  );
+}
+
+/**
+ * A legacy drawing (VML) with one note shape per row from row 2 (column B) for `notes` rows:
+ * SheetJS reads it for a sheet whose <legacyDrawing r:id> names it, and makes a cell for each note.
+ */
+export function vmlNotes(notes: number): Buffer {
+  const shape = (r: number) => `<v:shape type="#_x0000_t202"><x:ClientData ObjectType="Note"><x:Row>${r}</x:Row><x:Column>1</x:Column></x:ClientData></v:shape>`;
+  const shapes: string[] = [];
+  for (let r = 1; r <= notes; r++) shapes.push(shape(r));
+  return Buffer.from(`<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:schemas-microsoft-com:office:excel">${shapes.join('')}</xml>`);
+}
+
+/** A worksheet ("code, cases" and one row) whose <legacyDrawing> names relationship `rid`. */
+export function sheetWithLegacyDrawing(rid: string): Buffer {
+  return Buffer.from(
+    `${xml}<worksheet xmlns="${MAIN}" xmlns:r="${REL}"><sheetData>${row(1, ['A', 'code'], ['B', 'cases'])}${row(2, ['A', 'C1'], ['B', 3])}</sheetData><legacyDrawing r:id="${rid}"/></worksheet>`,
+  );
+}
+
+/**
+ * A chart sheet (as Excel writes one: the sheet, its drawing, the chart) whose chart caches
+ * `points` numbers: SheetJS reads a chart sheet into a sheet with one cell per cached point.
+ */
+export function chartSheetParts(points: number): ZipPart[] {
+  const C = 'http://schemas.openxmlformats.org/drawingml/2006/chart';
+  const pts = Array.from({ length: points }, (_, i) => `<c:pt idx="${i}"><c:v>${i + 1}</c:v></c:pt>`).join('');
+  return [
+    { name: 'xl/chartsheets/sheet1.xml', data: Buffer.from(`${xml}<chartsheet xmlns="${MAIN}" xmlns:r="${REL}"><drawing r:id="rId1"/></chartsheet>`) },
+    { name: 'xl/chartsheets/_rels/sheet1.xml.rels', data: relsXml([{ id: 'rId1', type: RELS.drawing, target: '../drawings/drawing1.xml' }]) },
+    {
+      name: 'xl/drawings/drawing1.xml',
+      data: Buffer.from(
+        `${xml}<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:absoluteAnchor><xdr:graphicFrame><a:graphic><a:graphicData uri="${C}"><c:chart xmlns:c="${C}" xmlns:r="${REL}" r:id="rId1"/></a:graphicData></a:graphic></xdr:graphicFrame></xdr:absoluteAnchor></xdr:wsDr>`,
+      ),
+    },
+    { name: 'xl/drawings/_rels/drawing1.xml.rels', data: relsXml([{ id: 'rId1', type: RELS.chart, target: '../charts/chart1.xml' }]) },
+    {
+      name: 'xl/charts/chart1.xml',
+      data: Buffer.from(
+        `${xml}<c:chartSpace xmlns:c="${C}"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numRef><c:f>Orders!$B$2:$B$${points + 1}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="${points}"/>${pts}</c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>`,
+      ),
+    },
+  ];
+}

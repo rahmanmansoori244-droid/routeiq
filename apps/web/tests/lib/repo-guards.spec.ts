@@ -353,3 +353,16 @@ describe('the dispatcher guide keeps each customer rule under its own bullet (re
     expect(text).toMatch(/A file checked before this update that has the same sales order and product on two rows is refused at \*\*Add\*\*: check it again\./);
   });
 });
+
+describe('the handbook names every audit PR that is in it at the top (A1 v4 review)', () => {
+  it('the audit status line near the top names each audit PR that has a 7.4 block', () => {
+    const REPO = path.resolve(APPS, '..');
+    const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+    const status = handbook.split('\n').find((l) => l.startsWith('- **Audit of 27 Sep 2026.**')) ?? '';
+    const review = handbook.slice(handbook.indexOf('### 7.4 '), handbook.indexOf('### 7.5 '));
+    // "**Audit of 27 Sep 2026, PR A2 ...", "**Audit of 27 Sep 2026, PR 3 ..." (A3), "**Audit A1 ...".
+    const prs = new Set([...review.matchAll(/^\*\*Audit (?:of 27 Sep 2026, PR A?(\d+)|A(\d+)) /gm)].map((m) => `A${m[1] ?? m[2]}`));
+    expect(prs.size).toBeGreaterThanOrEqual(3);
+    for (const pr of prs) expect([pr, status.includes(`**${pr} `)]).toEqual([pr, true]);
+  });
+});

@@ -19,9 +19,14 @@
  * guesses from a file's first bytes, CSV and .xlsx files with millions of cells, array formulas,
  * comments - and a blank formatted first sheet chosen over the data sheet.
  *
- * A1 v3 (the last blocks): files that still did - "ID" files whose SYLK reader works long before
- * SheetJS reads them as CSV (and semicolon "ID" CSVs wrongly refused), a long number format on
- * many cells, metadata entries, a threaded-comment person list, self-closing typed cells.
+ * A1 v3: files that still did - "ID" files whose SYLK reader works long before SheetJS reads them
+ * as CSV (and semicolon "ID" CSVs wrongly refused), a long number format on many cells, metadata
+ * entries, a threaded-comment person list, self-closing typed cells.
+ *
+ * A1 v4 (the last blocks): a part that SheetJS reads more than once while the checks counted it
+ * once - one worksheet part named by several sheets, a comments part or a drawing named again and
+ * again, an external link listed many times - and chart sheets, whose points SheetJS turns into
+ * cells past every cap.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -35,11 +40,18 @@ import { MAX_CELLS, MAX_COLS, MAX_COMMENTS, MAX_LINK_CELLS, MAX_METADATA, MAX_PE
 import { checkWorkbookZip } from '@/lib/workbook-guard';
 import {
   cfbDescendingChain,
+  chartSheetParts,
+  commentsXml,
   denseSheet,
+  handWorkbook,
   hugeSheet,
   rawSheet,
+  RELS,
+  relsXml,
   row,
+  sheetWithLegacyDrawing,
   sheetXml,
+  vmlNotes,
   withComments,
   withMetadata,
   withNumberFormat,
@@ -71,6 +83,7 @@ const LIMITS = {
   maxComments: MAX_COMMENTS,
   maxMetadata: MAX_METADATA,
   maxPeople: MAX_PEOPLE,
+  maxSheets: MAX_SHEETS,
 };
 const TOO_BIG = 'This workbook is too large to read: it unpacks to more than 50 MB. Save only the sheet you need as a new workbook or as CSV and upload that.';
 
@@ -725,5 +738,225 @@ describe('A1 v3: every cell SheetJS keeps is counted, also one whose tag closes 
     );
     expect(performance.now() - t0).toBeLessThan(5_000);
     expect(readSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('A1 v4: each sheet of a workbook reads its own worksheet part', () => {
+  const sheet = rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C1'], ['B', 3]));
+  const part = { name: 'xl/worksheets/sheet1.xml', data: sheet };
+  const two = [
+    { name: 'A', rid: 'rId1' },
+    { name: 'B', rid: 'rId2' },
+  ];
+  const first = { id: 'rId1', target: 'worksheets/sheet1.xml' };
+  // Each makes SheetJS read xl/worksheets/sheet1.xml for both sheets (checked below with SheetJS).
+  const aliases: [string, Buffer][] = [
+    ['one relationship for both sheets', handWorkbook([{ name: 'A', rid: 'rId1' }, { name: 'B', rid: 'rId1' }], [first], [part])],
+    ['two relationships, one target', handWorkbook(two, [first, { id: 'rId2', target: 'worksheets/sheet1.xml' }], [part])],
+    ['a target from the root', handWorkbook(two, [first, { id: 'rId2', target: '/xl/worksheets/sheet1.xml' }], [part])],
+    ['a target with the "xl/" folder', handWorkbook(two, [first, { id: 'rId2', target: 'xl/worksheets/sheet1.xml' }], [part])],
+    ['a target in capitals', handWorkbook(two, [first, { id: 'rId2', target: 'WORKSHEETS/Sheet1.XML' }], [part])],
+    ['a target with a backslash', handWorkbook(two, [first, { id: 'rId2', target: 'worksheets\\sheet1.xml' }], [part])],
+    [
+      'a workbook in its own folder, the part found next to it',
+      handWorkbook(two, [{ id: 'rId1', target: 'sheet1.xml' }, { id: 'rId2', target: 'SHEET1.xml' }], [{ name: 'wb/sheet1.xml', data: sheet }], { workbookPart: 'wb/workbook.xml' }),
+    ],
+  ];
+
+  it('two sheets that name one worksheet part are refused as damaged before SheetJS reads the file', async () => {
+    for (const [what, bytes] of aliases) {
+      // SheetJS itself reads the one part once for each sheet.
+      const wb = XLSX.read(bytes, { type: 'buffer' });
+      expect([what, wb.SheetNames, wb.Sheets.A?.A2?.v, wb.Sheets.B?.A2?.v]).toEqual([what, ['A', 'B'], 'C1', 'C1']);
+      readSpy.mockClear();
+      expect([what, await refusal(parseUpload(xlsxFile(bytes)))]).toEqual([what, DAMAGED]);
+      expect(readSpy).not.toHaveBeenCalled();
+    }
+  });
+
+  it('ten sheets naming one part of 49 columns (a 30 KB upload) are refused in milliseconds; one sheet naming it is read', async () => {
+    // Measured before the fix: 10,000 rows x 49 columns named by ten sheets took 14-18 s and about
+    // 1 GB before the range check refused it (1.1-2.5 s for one sheet); 50,000 rows took 94-108 s
+    // and 3.4 GB, or ran out of memory with a 2 GB heap.
+    const ws = denseSheet(49, 4);
+    const named = (n: number) =>
+      handWorkbook(Array.from({ length: n }, (_, i) => ({ name: `S${i + 1}`, rid: 'rId1' })), [first], [{ name: 'xl/worksheets/sheet1.xml', deflated: ws }]);
+    expect(named(10).length).toBeLessThan(30_000);
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(named(10))))).toBe(DAMAGED);
+    expect(performance.now() - t0).toBeLessThan(1_000);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(parseExcelSheets(named(1))[0]!.rows.length).toBeGreaterThan(5_000);
+  });
+
+  it('sheets that each name their own part, however the target is written, are read as before', () => {
+    const other = rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C2'], ['B', 4]));
+    const bytes = handWorkbook(two, [{ id: 'rId1', target: '/xl/worksheets/sheet1.xml' }, { id: 'rId2', target: 'WORKSHEETS\\Sheet2.XML' }], [
+      part,
+      { name: 'xl/worksheets/sheet2.xml', data: other },
+    ]);
+    expect(parseExcelSheets(bytes).map((s) => [s.name, s.rows[0]!.code])).toEqual([
+      ['A', 'C1'],
+      ['B', 'C2'],
+    ]);
+  });
+
+  it('the sheet list is read as SheetJS reads it (namespaces, quotes, escapes, UTF-8); a list SheetJS reads otherwise is refused', async () => {
+    const tags =
+      '<x:sheet xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="One" sheetId="1" r:id="rId1"/>' +
+      "<sheet name='Two' sheetId='2' id='rId2'/>" +
+      '<sheet name="Th&amp;ree_x0021_ Caf\u00e9" sheetId="3" r:id="rId3" />';
+    const parts = [1, 2, 3].map((i) => ({ name: `xl/worksheets/sheet${i}.xml`, data: sheetXml(1) }));
+    const hand = handWorkbook([], [1, 2, 3].map((i) => ({ id: `rId${i}`, target: `worksheets/sheet${i}.xml` })), parts, { sheetTags: tags });
+    const one = () => XLSX.utils.aoa_to_sheet(listRows(1));
+    const written = sheetjsWorkbook({ Orders: one(), 'A & B': one(), 'Caf\u00e9 \u03a9': one() });
+    for (const bytes of [hand, written]) {
+      expect(checkWorkbookZip(bytes, LIMITS).sheetNames).toEqual(XLSX.read(bytes, { type: 'buffer', bookSheets: true }).SheetNames);
+    }
+    expect(checkWorkbookZip(hand, LIMITS).sheetNames).toEqual(['One', 'Two', 'Th&ree! Caf\u00e9']);
+    expect(parseExcelSheets(hand).map((s) => s.name)).toEqual(['One', 'Two', 'Th&ree! Caf\u00e9']);
+    // Should SheetJS ever read another list than the guard, nothing is read.
+    readSpy.mockClear();
+    readSpy.mockImplementationOnce(() => ({ SheetNames: ['One', 'Two'] }) as unknown as XLSX.WorkBook);
+    expect(await refusal(parseUpload(xlsxFile(hand)))).toBe(DAMAGED);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('A1 v4: a part SheetJS reads again for a sheet is counted again', () => {
+  const sheet = rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C1'], ['B', 3]));
+  const comments = (n: number) =>
+    `This workbook has ${n.toLocaleString('en-US')} comments or more; at most ${MAX_COMMENTS.toLocaleString('en-US')} can be read. Delete the comments (in Excel: Review, Delete), save it and upload it again.`;
+  const READ_AGAIN =
+    'This workbook is too large to read: its sheets read the same parts again, more than 50 MB in all. Save only the sheet you need as a new workbook or as CSV and upload that.';
+  /** `n` spellings of "../comments1.xml" that differ only in capitals: one part for SheetJS. */
+  const spellings = (n: number) =>
+    Array.from({ length: n }, (_, i) => `../${[...'comments1.xml'].map((c, b) => (b < 8 && i & (1 << b) ? c.toUpperCase() : c)).join('')}`);
+  const commentedSheet = (targets: string[], n: number) =>
+    handWorkbook([{ name: 'Orders', rid: 'rId1' }], [{ id: 'rId1', target: 'worksheets/sheet1.xml' }], [
+      { name: 'xl/worksheets/sheet1.xml', data: sheet },
+      { name: 'xl/worksheets/_rels/sheet1.xml.rels', data: relsXml(targets.map((target, i) => ({ id: `rId${i + 1}`, type: RELS.comments, target }))) },
+      { name: 'xl/comments1.xml', data: commentsXml(n) },
+    ]);
+  /** `n` sheets, each with its own worksheet part and relationships, all naming the same part `shared` for `type`. */
+  const sharing = (n: number, type: string, shared: { name: string; data: Buffer }, ws = sheet) =>
+    handWorkbook(
+      Array.from({ length: n }, (_, i) => ({ name: `S${i + 1}`, rid: `rId${i + 1}` })),
+      Array.from({ length: n }, (_, i) => ({ id: `rId${i + 1}`, target: `worksheets/sheet${i + 1}.xml` })),
+      [
+        ...Array.from({ length: n }, (_, i) => [
+          { name: `xl/worksheets/sheet${i + 1}.xml`, data: ws },
+          { name: `xl/worksheets/_rels/sheet${i + 1}.xml.rels`, data: relsXml([{ id: 'rId1', type, target: `../${shared.name.slice(3)}` }]) },
+        ]).flat(),
+        shared,
+      ],
+    );
+
+  it('a comments part a sheet names several times (in capitals and small letters) is counted each time', async () => {
+    // SheetJS reads the part once for each spelling and adds its comments again each time.
+    const ws = XLSX.read(commentedSheet(spellings(3), 2), { type: 'buffer' }).Sheets.Orders!;
+    expect((ws.B2 as XLSX.CellObject).c).toHaveLength(6);
+    readSpy.mockClear();
+    expect(await refusal(parseUpload(xlsxFile(commentedSheet(spellings(6), 2_000))))).toBe(comments(12_000));
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(await parseUpload(xlsxFile(commentedSheet(spellings(5), 2_000)))).toMatchObject({ rows: [{ code: 'C1' }] });
+  });
+
+  it('a 3 KB file whose sheet names one comments part 20 times is refused in milliseconds', async () => {
+    // SheetJS checks every comment already on a cell before adding one: 20 x 5,000 comments on one
+    // cell took 8.8 s before the fix, and 256 spellings of 10,000 comments would take hours.
+    const bytes = commentedSheet(spellings(20), 5_000);
+    expect(bytes.length).toBeLessThan(4_000);
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(bytes)))).toBe(comments(15_000));
+    expect(performance.now() - t0).toBeLessThan(500);
+  });
+
+  it('a comments part two sheets name is counted for each sheet', async () => {
+    const shared = (n: number) => sharing(2, RELS.comments, { name: 'xl/comments1.xml', data: commentsXml(n) });
+    expect(await refusal(parseUpload(xlsxFile(shared(6_000))))).toBe(comments(12_000));
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(parseExcelSheets(shared(5_000)).map((s) => s.name)).toEqual(['S1', 'S2']);
+  });
+
+  it('a drawing of notes (VML) shared by ten sheets is counted for each sheet: 6.5 MB shared by ten is refused', async () => {
+    // Measured before the fix: a 51 MB drawing of 400,000 notes shared by ten sheets (a 1.1 MB
+    // upload) took 58 s; one sheet reading it 4.3 s.
+    const shared = (n: number, notes: number) =>
+      sharing(n, RELS.vmlDrawing, { name: 'xl/drawings/vmlDrawing1.vml', data: vmlNotes(notes) }, sheetWithLegacyDrawing('rId1'));
+    // SheetJS reads the drawing for each sheet: each sheet gets a cell for every note.
+    const wb = XLSX.read(shared(2, 3), { type: 'buffer' });
+    expect([wb.Sheets.S1!.B4, wb.Sheets.S2!.B4]).toEqual([{ t: 'z' }, { t: 'z' }]);
+    readSpy.mockClear();
+    const ten = shared(10, 50_000);
+    const t0 = performance.now();
+    expect(await refusal(parseUpload(xlsxFile(ten)))).toBe(READ_AGAIN);
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(parseExcelSheets(shared(1, 50_000)).map((s) => s.name)).toEqual(['S1']);
+  });
+
+  it('an external link listed again and again in [Content_Types].xml is counted each time', async () => {
+    // SheetJS reads the link part (and its relationships) once for every listing, in both passes.
+    const LINK = 'application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml';
+    const link = Buffer.from(`<externalLink>${'<x/>'.repeat(250_000)}</externalLink>`);
+    const listed = (n: number) =>
+      handWorkbook(
+        [{ name: 'Orders', rid: 'rId1' }],
+        [{ id: 'rId1', target: 'worksheets/sheet1.xml' }],
+        [
+          { name: 'xl/worksheets/sheet1.xml', data: sheet },
+          { name: 'xl/externalLinks/externalLink1.xml', data: link },
+          { name: 'xl/externalLinks/_rels/externalLink1.xml.rels', data: relsXml([]) },
+        ],
+        { types: Array.from({ length: n }, () => ({ part: '/xl/externalLinks/externalLink1.xml', type: LINK })) },
+      );
+    expect(await refusal(parseUpload(xlsxFile(listed(60))))).toBe(READ_AGAIN);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect((await parseUpload(xlsxFile(listed(1)))).rows).toHaveLength(1);
+  });
+});
+
+describe("A1 v4: a workbook's sheets must be worksheets", () => {
+  const NOT_A_WORKSHEET =
+    'This workbook has a chart sheet (or a dialog or macro sheet), which cannot be read. Delete that sheet, or save only the sheet you need as a new workbook or as CSV, and upload that.';
+  const sheet = rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C1'], ['B', 3]));
+  const withSheet = (type: string) =>
+    handWorkbook(
+      [{ name: 'Orders', rid: 'rId1' }, { name: 'Chart1', rid: 'rId2' }],
+      [{ id: 'rId1', target: 'worksheets/sheet1.xml' }, { id: 'rId2', type, target: 'chartsheets/sheet1.xml' }],
+      [{ name: 'xl/worksheets/sheet1.xml', data: sheet }, ...chartSheetParts(3)],
+    );
+
+  it('a chart sheet is refused before SheetJS reads it (it makes a cell for each point of the chart, past the row limit and every cap)', async () => {
+    // Measured before the fix: a chart of 1,300,000 points (a 3.1 MB upload; the guard counted 1
+    // cell) read as a sheet of 1.3 million rows in 5.5 s and 1 GB; one point at index 4,294,967,294
+    // (a 1.7 KB upload) blocked the app for about 3 minutes.
+    const wb = XLSX.read(withSheet(RELS.chartsheet), { type: 'buffer' });
+    expect([wb.Sheets.Chart1!['!ref'], wb.Sheets.Chart1!.A3]).toEqual(['A1:A3', { t: 'n', v: 3, z: 'General' }]);
+    readSpy.mockClear();
+    expect(await refusal(parseUpload(xlsxFile(withSheet(RELS.chartsheet))))).toBe(NOT_A_WORKSHEET);
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it('dialog and macro sheets are refused too', async () => {
+    for (const type of [RELS.dialogsheet, RELS.macrosheet]) {
+      expect(await refusal(parseUpload(xlsxFile(withSheet(type))))).toBe(NOT_A_WORKSHEET);
+    }
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it('a chart placed on a worksheet (a drawing) is read as before', async () => {
+    const ws = Buffer.from(
+      rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C1'], ['B', 3]), { after: '<drawing r:id="rId1"/>' })
+        .toString('utf8')
+        .replace('<worksheet ', '<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '),
+    );
+    const bytes = handWorkbook([{ name: 'Orders', rid: 'rId1' }], [{ id: 'rId1', target: 'worksheets/sheet1.xml' }], [
+      { name: 'xl/worksheets/sheet1.xml', data: ws },
+      { name: 'xl/worksheets/_rels/sheet1.xml.rels', data: relsXml([{ id: 'rId1', type: RELS.drawing, target: '../drawings/drawing1.xml' }]) },
+      ...chartSheetParts(3).filter((p) => !p.name.startsWith('xl/chartsheets/')),
+    ]);
+    expect(await parseUpload(xlsxFile(bytes))).toMatchObject({ rows: [{ code: 'C1', cases: '3' }], warnings: [] });
   });
 });

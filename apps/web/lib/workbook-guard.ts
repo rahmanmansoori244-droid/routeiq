@@ -24,7 +24,10 @@ import * as XLSX from 'xlsx';
  *    directory; the hyperlink ranges of every part are added up, and so are the cells, comments,
  *    metadata entries and comment authors SheetJS would make or compare (scanXmlPart); binary
  *    parts (.bin: .xlsb sheets, printer settings, macros) are hidden from SheetJS, which needs none
- *    of them for an .xlsx;
+ *    of them for an .xlsx; which parts SheetJS reads for each sheet is replayed (sheetReads), so a
+ *    part it reads more than once is counted once more for every further read, two sheets that
+ *    read one worksheet part are refused, and so is a sheet that is not a worksheet (a chart
+ *    sheet's chart becomes cells that no cap bounds);
  *  - an old .xls that is a compound file has its structure checked first (checkCompoundFile), in
  *    linear time, so XLSX.CFB.read itself cannot be made to use time and memory that grow with the
  *    square of the file's size; then, as for a bare BIFF stream, the hyperlink ranges in its
@@ -67,17 +70,37 @@ export interface SpreadsheetLimits {
   maxMetadata: number;
   /** Most people the threaded comments' person list may name. */
   maxPeople: number;
+  /**
+   * Most sheets a workbook may list. The guard does not refuse more (lib/csv does, on the sheet
+   * list SheetJS reads first); it only stops replaying the sheets' reads there.
+   */
+  maxSheets: number;
 }
 
 export interface WorkbookZipCheck {
   parts: number;
   unpackedBytes: number;
-  /** Cells SheetJS makes from all parts: pieces with a type or a value (rows past `sheetRows` included). */
+  /** The bytes SheetJS reads: `unpackedBytes`, plus each part's size again for every further read. */
+  readBytes: number;
+  /**
+   * Cells SheetJS makes from all parts: pieces with a type or a value (rows past `sheetRows`
+   * included), a part's again for every further read.
+   */
   cells: number;
   /** Cells covered by all hyperlink ranges, as SheetJS would expand them. */
   linkCells: number;
+  /** The workbook's sheet names, as SheetJS reads them (the sheet list lib/csv checks against). */
+  sheetNames: string[];
   /** The bytes SheetJS reads: the upload itself, or it with the binary parts left out. */
   view: Buffer;
+}
+
+/** What guardSpreadsheet gives SheetJS to read. */
+export interface GuardedSpreadsheet {
+  /** The bytes SheetJS is to read. */
+  view: Buffer;
+  /** For an .xlsx: its sheet names, as SheetJS reads them (see sameSheetList). */
+  sheetNames?: string[];
 }
 
 const SAVE_AGAIN = 'Save only the sheet you need as a new workbook or as CSV and upload that.';
@@ -288,15 +311,18 @@ export function sheetjsReader(b: Uint8Array): SheetjsReader {
 }
 
 /**
- * Checks an upload that is to be read as Excel and returns the bytes SheetJS should read. Throws
- * WorkbookRefusedError when SheetJS would read it with a reader whose work these checks cannot
- * bound, or when a check fails (see the top of this file).
+ * Checks an upload that is to be read as Excel and returns the bytes SheetJS should read (and, for
+ * an .xlsx, its sheet names as SheetJS reads them). Throws WorkbookRefusedError when SheetJS would
+ * read it with a reader whose work these checks cannot bound, or when a check fails (see the top
+ * of this file).
  */
-export function guardSpreadsheet(bytes: Uint8Array, limits: SpreadsheetLimits): Buffer {
+export function guardSpreadsheet(bytes: Uint8Array, limits: SpreadsheetLimits): GuardedSpreadsheet {
   const b = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   switch (sheetjsReader(b)) {
-    case 'zip':
-      return checkWorkbookZip(b, limits).view;
+    case 'zip': {
+      const { view, sheetNames } = checkWorkbookZip(b, limits);
+      return { view, sheetNames };
+    }
     case 'cfb': {
       // A crafted compound file can make XLSX.CFB.read itself use memory and time that grow with
       // the square of the file's size (make_sector_list walks and copies a FAT chain from every
@@ -313,21 +339,30 @@ export function guardSpreadsheet(bytes: Uint8Array, limits: SpreadsheetLimits): 
       const stream = XLSX.CFB.find(cfb, '/Workbook') || XLSX.CFB.find(cfb, '/Book');
       if (!stream?.content) throw notExcel();
       checkLinkCells(biffLinkCells(stream.content as Uint8Array), limits.maxLinkCells);
-      return b;
+      return { view: b };
     }
     case 'biff':
       checkLinkCells(biffLinkCells(b), limits.maxLinkCells);
-      return b;
+      return { view: b };
     case 'text':
     case 'text-ws':
     case 'text-utf16':
       checkDelimitedText(b, limits.maxCells);
-      return b;
+      return { view: b };
     case 'xml':
       throw webPageOrXml();
     default:
       throw notExcel();
   }
+}
+
+/**
+ * Refuses (as damaged) a workbook whose sheet list, as SheetJS read it (`names`), is not the one
+ * the guard replayed its reads for (`guarded`, from guardSpreadsheet): its counts would then be
+ * for other parts than the ones SheetJS reads. A file that is not an .xlsx has no `guarded` list.
+ */
+export function sameSheetList(guarded: string[] | undefined, names: string[]): void {
+  if (guarded && (guarded.length !== names.length || guarded.some((n, i) => n !== names[i]))) throw damaged();
 }
 
 const webPageOrXml = () =>
@@ -560,6 +595,67 @@ function baseName(name: string): string {
   return trimmed.slice(Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\')) + 1);
 }
 
+/** What SheetJS makes or compares from the parts, added up over the parts it reads. */
+interface Totals {
+  links: number;
+  cells: number;
+  comments: number;
+  metadataTypes: number;
+  futureMetadata: number;
+  people: number;
+}
+
+/** Adds one part's counts to the totals. */
+function addScan(t: Totals, scan: XmlPartScan): void {
+  t.links += scan.links;
+  t.cells += scan.cells;
+  t.comments += scan.comments;
+  t.metadataTypes += scan.metadataTypes;
+  t.futureMetadata += scan.futureMetadata;
+  t.people += scan.people;
+}
+
+/** Refuses totals over a cap, the first one found in this order. */
+function checkTotals(t: Totals, limits: SpreadsheetLimits): void {
+  checkLinkCells(t.links, limits.maxLinkCells);
+  if (t.cells > limits.maxCells) throw tooManyCells(t.cells, limits.maxCells, SAVE_AGAIN);
+  if (t.comments > limits.maxComments) {
+    throw new WorkbookRefusedError(
+      `This workbook has ${t.comments.toLocaleString('en-US')} comments or more; at most ${limits.maxComments.toLocaleString('en-US')} can be read. ` +
+        'Delete the comments (in Excel: Review, Delete), save it and upload it again.',
+    );
+  }
+  const metadata = Math.max(t.metadataTypes, t.futureMetadata);
+  if (metadata > limits.maxMetadata) {
+    throw new WorkbookRefusedError(
+      `This workbook has ${metadata.toLocaleString('en-US')} metadata entries or more; at most ${limits.maxMetadata.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
+    );
+  }
+  if (t.people > limits.maxPeople) {
+    throw new WorkbookRefusedError(
+      `This workbook lists ${t.people.toLocaleString('en-US')} comment authors or more; at most ${limits.maxPeople.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
+    );
+  }
+}
+
+/**
+ * Relationship types of sheets that are not worksheets (SheetJS's RELS.CS, DS and MS, xlsx
+ * 0.20.2). For a chart sheet SheetJS reads the chart of its drawing and makes a cell for every
+ * point cached in it (parse_chart), with no row limit: a 3.1 MB upload whose chart part caches
+ * 1.3 million points (the cell count saw 1 cell) read as 1.3 million rows in 5.5 s and 1 GB, and
+ * one point at index 4,294,967,294 in a 1.7 KB upload made it walk an array of 4.3 billion slots
+ * for about 3 minutes. RouteIQ reads only worksheets, so a workbook with any of these is refused.
+ */
+const NOT_WORKSHEET_RELS = [
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet',
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet',
+  'http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet',
+];
+const notWorksheet = () =>
+  new WorkbookRefusedError(
+    'This workbook has a chart sheet (or a dialog or macro sheet), which cannot be read. Delete that sheet, or save only the sheet you need as a new workbook or as CSV, and upload that.',
+  );
+
 /**
  * Measures what SheetJS would unpack from this zip archive and refuses it when the total is over
  * `maxUnpackedBytes`, when it has more than `maxParts` parts, when a part says it is smaller or
@@ -567,7 +663,13 @@ function baseName(name: string): string {
  * `maxLinkCells` cells, when it has more than `maxCells` cells (with a type or a value),
  * `maxComments` comments, `maxMetadata` metadata types or future-metadata blocks, or `maxPeople`
  * comment authors in its person list (see scanXmlPart), and when it is not an Excel workbook.
- * Throws WorkbookRefusedError. Returns what it measured and the bytes SheetJS is to read.
+ *
+ * A part SheetJS reads more than once (see sheetReads) is counted once more for every further read:
+ * its size, cells, links, comments and the rest. Two sheets that read one worksheet part, and a
+ * sheet that is not a worksheet (a chart, dialog or macro sheet), are refused.
+ *
+ * Throws WorkbookRefusedError. Returns what it measured, the sheet names as SheetJS reads them and
+ * the bytes SheetJS is to read.
  */
 export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): WorkbookZipCheck {
   // End of the central directory: SheetJS takes the last signature in the file, and so does this.
@@ -589,16 +691,14 @@ export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): Work
 
   let p = u32(b, eocd + 16); // start of the central directory
   let unpacked = 0;
-  let linkCells = 0;
-  let cells = 0;
-  let comments = 0;
-  let metadataTypes = 0;
-  let futureMetadata = 0;
-  let people = 0;
+  const totals: Totals = { links: 0, cells: 0, comments: 0, metadataTypes: 0, futureMetadata: 0, people: 0 };
   let contentTypes = false;
   let binaryWorkbook = false;
+  let notWorksheetRel = false;
   /** Central-directory records SheetJS is given (start, end); binary parts are left out. */
   const kept: [number, number][] = [];
+  /** The parts SheetJS is given, in the order it finds them. */
+  const entries: ZipEntry[] = [];
   for (let k = 0; k < parts; k++) {
     // Central directory record: SheetJS uses where the part starts; the name it uses is the one in
     // the part's local header (parse_local_file), which must be this one.
@@ -665,30 +765,14 @@ export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): Work
     if (unpacked > limits.maxUnpackedBytes) throw tooBig();
     if (!binary) {
       const scan = scanXmlPart(data);
-      linkCells += scan.links;
-      checkLinkCells(linkCells, limits.maxLinkCells);
-      cells += scan.cells;
-      if (cells > limits.maxCells) throw tooManyCells(cells, limits.maxCells, SAVE_AGAIN);
-      comments += scan.comments;
-      if (comments > limits.maxComments) {
-        throw new WorkbookRefusedError(
-          `This workbook has ${comments.toLocaleString('en-US')} comments or more; at most ${limits.maxComments.toLocaleString('en-US')} can be read. ` +
-            'Delete the comments (in Excel: Review, Delete), save it and upload it again.',
-        );
-      }
-      metadataTypes += scan.metadataTypes;
-      futureMetadata += scan.futureMetadata;
-      const metadata = Math.max(metadataTypes, futureMetadata);
-      if (metadata > limits.maxMetadata) {
-        throw new WorkbookRefusedError(
-          `This workbook has ${metadata.toLocaleString('en-US')} metadata entries or more; at most ${limits.maxMetadata.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
-        );
-      }
-      people += scan.people;
-      if (people > limits.maxPeople) {
-        throw new WorkbookRefusedError(
-          `This workbook lists ${people.toLocaleString('en-US')} comment authors or more; at most ${limits.maxPeople.toLocaleString('en-US')} can be read. ${SAVE_AGAIN}`,
-        );
+      addScan(totals, scan);
+      checkTotals(totals, limits);
+      entries.push({ key: sheetjsPath(name).toLowerCase(), size: data.length, data, scan });
+      // SheetJS reads the workbook's relationships from a part whose name ends in ".rels"; the
+      // type it compares must be written out in full, so a part that holds it names such a sheet.
+      if (name.toLowerCase().endsWith('.rels')) {
+        const text = sheetjsText(data);
+        if (NOT_WORKSHEET_RELS.some((t) => text.includes(t))) notWorksheetRel = true;
       }
     }
   }
@@ -696,8 +780,399 @@ export function checkWorkbookZip(b: Uint8Array, limits: SpreadsheetLimits): Work
     throw new WorkbookRefusedError('This is an Excel binary workbook (.xlsb), which cannot be read. Save it in Excel as .xlsx and upload that.');
   }
   if (!contentTypes) throw notExcel();
+  if (notWorksheetRel) throw notWorksheet();
+
+  // Parts SheetJS reads more than once: counted again for every further read, and refused as soon
+  // as a cap is passed (so the replay itself never reads much more than the caps allow).
+  const reads = entries.map(() => 0);
+  let readBytes = unpacked;
+  const onRead = (i: number) => {
+    if (++reads[i]! < 2) return;
+    readBytes += entries[i]!.size;
+    if (readBytes > limits.maxUnpackedBytes) {
+      throw new WorkbookRefusedError(`This workbook is too large to read: its sheets read the same parts again, more than ${mb} MB in all. ${SAVE_AGAIN}`);
+    }
+    addScan(totals, entries[i]!.scan);
+    checkTotals(totals, limits);
+  };
+  let sheetNames: string[];
+  try {
+    sheetNames = sheetReads(entries, onRead, limits.maxSheets);
+  } catch (err) {
+    if (err instanceof WorkbookRefusedError) throw err;
+    throw damaged(); // the replay met something SheetJS would fail on as well
+  }
+
   const view = kept.length === parts ? Buffer.from(b.buffer, b.byteOffset, b.byteLength) : withCentralDirectory(b, kept);
-  return { parts, unpackedBytes: unpacked, cells, linkCells, view };
+  return { parts, unpackedBytes: unpacked, readBytes, cells: totals.cells, linkCells: totals.links, sheetNames, view };
+}
+
+/** A part SheetJS is given: its name as SheetJS looks it up (lower case), size, bytes and counts. */
+interface ZipEntry {
+  key: string;
+  size: number;
+  data: Buffer;
+  scan: XmlPartScan;
+}
+
+/**
+ * Relationship types SheetJS compares (its RELS table, xlsx 0.20.2): a worksheet, and the comments
+ * and threaded comments a sheet's relationships name.
+ */
+const REL_WORKSHEET = [
+  'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet',
+  'http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet',
+];
+const REL_COMMENTS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments';
+const REL_THREADED_COMMENTS = 'http://schemas.microsoft.com/office/2017/10/relationships/threadedComment';
+
+/**
+ * The parts of [Content_Types].xml SheetJS reads (its ct2type table, xlsx 0.20.2), by content type.
+ * Of each kind it reads the first part listed, except external links: every one listed, each time
+ * it is listed.
+ */
+const CONTENT_KINDS = new Map<string, string>([
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml', 'workbooks'],
+  ['application/vnd.ms-excel.sheet.macroEnabled.main+xml', 'workbooks'],
+  ['application/vnd.ms-excel.sheet.binary.macroEnabled.main', 'workbooks'],
+  ['application/vnd.ms-excel.addin.macroEnabled.main+xml', 'workbooks'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml', 'workbooks'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml', 'strs'],
+  ['application/vnd.ms-excel.sharedStrings', 'strs'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml', 'styles'],
+  ['application/vnd.ms-excel.styles', 'styles'],
+  ['application/vnd.openxmlformats-package.core-properties+xml', 'coreprops'],
+  ['application/vnd.openxmlformats-officedocument.custom-properties+xml', 'custprops'],
+  ['application/vnd.openxmlformats-officedocument.extended-properties+xml', 'extprops'],
+  ['application/vnd.ms-excel.person+xml', 'people'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml', 'metadata'],
+  ['application/vnd.ms-excel.sheetMetadata', 'metadata'],
+  ['application/vnd.ms-excel.externalLink', 'links'],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml', 'links'],
+]);
+
+/**
+ * Replays how SheetJS's parse_zip (xlsx 0.20.2, reading an .xlsx with the options lib/csv uses)
+ * finds the parts it reads, calls `onRead` with each part (its index in `entries`) every time
+ * SheetJS reads it, and returns the sheet names as SheetJS reads them. Refuses two sheets that
+ * read one worksheet part (as damaged). A workbook that lists more than `maxSheets` sheets is not
+ * replayed past its sheet list: lib/csv refuses it on that list before any sheet is read.
+ *
+ * SheetJS reads each sheet listed in the workbook part from the part its relationship names: the
+ * sheet's r:id is looked up in the workbook's relationships, and the target is tried as
+ * "xl/" + target, as it is, and next to the relationships folder, each through its lookup that
+ * ignores capitals and takes "\" for "/" (safegetzipfile). Nothing stops two sheets from naming one
+ * part, so a part counted once was read (and turned into cells) up to ten times: a 121 KB upload of
+ * 50,000 rows x 49 columns in one part, named by ten sheets, took 94-108 s and 3.4 GB before the
+ * sheets' range was refused, or ran the process out of memory. For each sheet SheetJS also reads
+ * its relationships, every part they name as comments or threaded comments (one read per spelling
+ * of the target, so "comments1.xml" and "Comments1.xml" are two reads of one part) and the drawing
+ * of notes its <legacyDrawing> names; and it reads every external link as often as
+ * [Content_Types].xml lists it. A 3 KB file whose sheet named one comments part 20 times took
+ * 8.8 s (each read adds the comments again, and SheetJS checks every comment already on a cell);
+ * a 51 MB drawing of notes shared by ten sheets 58 s.
+ *
+ * Where SheetJS would stop with an error, the replay goes on when it can: it may count reads that
+ * never happen (the file is then refused, where SheetJS would have failed on it anyway), never
+ * miss one. The reads of the sheet-list pass (lib/csv reads the workbook part, [Content_Types].xml
+ * and the external links once more) are not counted: they double those few parts at most.
+ */
+function sheetReads(entries: ZipEntry[], onRead: (i: number) => void, maxSheets: number): string[] {
+  const find = partLookup(entries);
+  const read = (i: number | undefined) => {
+    if (i !== undefined && i >= 0) onRead(i);
+  };
+  const found = (file: string) => find(file) !== undefined;
+  const text = (i: number | undefined): string | null => (i === undefined || i < 0 ? null : sheetjsText(entries[i]!.data));
+  const none: string[] = [];
+
+  const ctPart = find('[Content_Types].xml');
+  read(ctPart);
+  const ct = parseContentTypes(text(ctPart));
+  let workbook = ct.get('workbooks')?.[0];
+  if (!ct.get('workbooks')?.length) {
+    const i = find('xl/workbook.xml');
+    if (i !== undefined && i >= 0 && entries[i]!.size > 0) workbook = 'xl/workbook.xml';
+  }
+  if (typeof workbook !== 'string') return none; // SheetJS: "Could not find workbook", or an error
+  const wbext = workbook.slice(-3) === 'bin' ? 'bin' : 'xml';
+  const first = (kind: string) => ct.get(kind)?.[0];
+  const readFirst = (kind: string) => {
+    const part = first(kind);
+    if (typeof part === 'string' && part) read(find(stripFrontSlash(part)));
+  };
+  readFirst('strs');
+  readFirst('styles');
+  for (const link of ct.get('links') ?? []) {
+    if (typeof link !== 'string') continue;
+    const rels = find(relsPathOf(stripFrontSlash(link)));
+    if (rels === undefined) continue; // SheetJS gives up on this link before reading it
+    read(rels);
+    read(find(stripFrontSlash(link)));
+  }
+  const wbPart = find(stripFrontSlash(workbook));
+  if (wbPart === undefined) return none;
+  read(wbPart);
+  const sheets = workbookSheets(text(wbPart));
+  const sheetNames = sheets.map((s) => unescapeXml(utf8read(String(s.name))));
+  if (ct.get('coreprops')?.length) {
+    readFirst('coreprops');
+    if (ct.get('extprops')?.length) readFirst('extprops');
+  }
+  if (sheets.length > maxSheets) return sheetNames;
+  readFirst('custprops');
+
+  const slash = workbook.lastIndexOf('/');
+  let wbRelsFile = (workbook.slice(0, slash + 1) + '_rels/' + workbook.slice(slash + 1) + '.rels').replace(/^\//, '');
+  if (!found(wbRelsFile)) wbRelsFile = `xl/_rels/workbook.${wbext}.rels`;
+  const wbRelsPart = find(wbRelsFile);
+  read(wbRelsPart);
+  const wbRels = parseRels(text(wbRelsPart), wbRelsFile.replace(/_rels.*/, 's5s'));
+  readFirst('metadata');
+  readFirst('people');
+  const targets = sheetTargets(wbRels, sheets);
+  const numbers = find('xl/worksheets/sheet.xml');
+  const nmode = numbers !== undefined && numbers >= 0 && entries[numbers]!.size > 0 ? 1 : 0;
+
+  const sheetParts = new Set<number>();
+  for (let i = 0; i < sheets.length; i++) {
+    let path: string;
+    let stype = 'sheet';
+    const t = targets?.[i];
+    if (t) {
+      const target = t[1];
+      if (typeof target !== 'string') break; // SheetJS throws here and reads no further sheet
+      path = 'xl/' + target.replace(/[\/]?xl\//, '');
+      if (!found(path)) path = target;
+      if (!found(path)) path = wbRelsFile.replace(/_rels\/[\S\s]*$/, '') + target;
+      stype = t[2];
+    } else {
+      path = ('xl/worksheets/sheet' + (i + 1 - nmode) + '.' + wbext).replace(/sheet0\./, 'sheet.');
+    }
+    // A chart, dialog or macro sheet never gets here: checkWorkbookZip refused its relationship.
+    // safe_parse_sheet: the sheet's relationships, then the sheet itself.
+    const relsPart = find(path.replace(/^(.*)(\/)([^/]*)$/, '$1/_rels/$3.rels'));
+    read(relsPart);
+    const rels = parseRels(text(relsPart), path);
+    const part = find(path);
+    if (part === undefined) continue; // SheetJS: "Cannot find file"
+    read(part);
+    if (part >= 0) {
+      if (sheetParts.has(part)) throw damaged();
+      sheetParts.add(part);
+    }
+    if (stype !== 'sheet') continue; // "Unrecognized sheet type", thrown after both reads
+    // Every part its relationships name as comments or threaded comments, once per key.
+    for (const key of Object.keys(rels)) {
+      const rel = rels[key] as { Type?: unknown; Target?: unknown };
+      if (rel.Type === REL_COMMENTS || rel.Type === REL_THREADED_COMMENTS) read(find(resolvePath(String(rel.Target), path)));
+    }
+    // The drawing of notes its <legacyDrawing r:id="..."> names. SheetJS takes the first one after
+    // the sheet data, or, with none, the relationship whose Id is missing ("undefined"); every
+    // one of them is counted.
+    const ids = new Set(['undefined']);
+    const sheetData = part >= 0 ? entries[part]!.data : null;
+    if (sheetData && (sheetData.includes('legacyDrawing') || isUtf16(sheetData))) {
+      for (const m of text(part)!.matchAll(/legacyDrawing r:id="(.*?)"/g)) ids.add(m[1]!);
+    }
+    const byId = rels['!id'] as Record<string, { Target?: unknown } | undefined>;
+    for (const id of ids) {
+      const rel = byId[id];
+      if (rel && typeof rel.Target === 'string') read(find(resolvePath(rel.Target, path)));
+    }
+  }
+  return sheetNames;
+}
+
+/**
+ * SheetJS's part lookup (safegetzipfile): the first part whose name, without "Root Entry/" and in
+ * lower case, is the path in lower case with every "/" as "\" or every "\" as "/". SheetJS's zip
+ * reader lists two entries of its own first (the root, and "\u0001Sh33tJ5"), found as -1.
+ */
+function partLookup(entries: ZipEntry[]): (file: string) => number | undefined {
+  const first = new Map<string, number>([
+    ['', -1],
+    ['\u0001sh33tj5', -1],
+  ]);
+  entries.forEach((e, i) => {
+    if (!first.has(e.key)) first.set(e.key, i);
+  });
+  return (file) => {
+    const back = file.toLowerCase().replace(/\//g, '\\');
+    const a = first.get(back);
+    const b = first.get(back.replace(/\\/g, '/'));
+    return a === undefined ? b : b === undefined ? a : Math.min(a, b);
+  };
+}
+
+/**
+ * The text SheetJS reads a part as (cc2str with its byte-order-mark handling): the bytes as
+ * latin1, or UTF-16 decoded and written back as UTF-8 bytes.
+ */
+function sheetjsText(d: Buffer): string {
+  return isUtf16(d) ? Buffer.from(partText(d), 'utf8').toString('latin1') : d.toString('latin1');
+}
+
+/** SheetJS's test for a part in UTF-16 (a byte-order mark; its big-endian test looks at bytes 1-2). */
+const isUtf16 = (d: Buffer) => (d[0] === 0xff && d[1] === 0xfe) || (d[1] === 0xfe && d[2] === 0xff);
+
+/** SheetJS's tag pattern (tagregex1) and namespace patterns (nsregex, nsregex2), xlsx 0.20.2. */
+const TAG = /<[\/\?]?[a-zA-Z0-9:_-]+(?:\s+[^"\s?<>\/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^'"<>\s=]+))*\s*[\/\?]?>/gm;
+const NS = /<\w*:/;
+const NS2 = /<(\/?)\w+:/;
+
+type XmlTag = Record<string, string>;
+
+/** SheetJS's parsexmltag (xlsx 0.20.2): the tag's attributes, and with `skipRoot` false its name as `0`. */
+function parseXmlTag(tag: string, skipRoot = false): XmlTag {
+  const z: XmlTag = {};
+  let eq = 0;
+  for (; eq !== tag.length; ++eq) {
+    const c = tag.charCodeAt(eq);
+    if (c === 32 || c === 10 || c === 13) break;
+  }
+  if (!skipRoot) z[0] = tag.slice(0, eq);
+  if (eq === tag.length) return z;
+  for (const m of tag.match(ATTR) ?? []) {
+    const cc = m.slice(1);
+    let c = 0;
+    for (; c !== cc.length; ++c) if (cc.charCodeAt(c) === 61) break;
+    let q = cc.slice(0, c).trim();
+    while (cc.charCodeAt(c + 1) === 32) ++c;
+    const e = cc.charCodeAt(c + 1);
+    const quot = e === 34 || e === 39 ? 1 : 0;
+    const v = cc.slice(c + 1 + quot, cc.length - quot);
+    let j = 0;
+    for (; j !== q.length; ++j) if (q.charCodeAt(j) === 58) break;
+    if (j === q.length) {
+      if (q.indexOf('_') > 0) q = q.slice(0, q.indexOf('_'));
+      z[q] = v;
+      z[q.toLowerCase()] = v;
+    } else {
+      const k = (j === 5 && q.slice(0, 5) === 'xmlns' ? 'xmlns' : '') + q.slice(j + 1);
+      if (z[k] && q.slice(j - 3, j) === 'ext') continue;
+      z[k] = v;
+      z[k.toLowerCase()] = v;
+    }
+  }
+  return z;
+}
+
+const XML_ENTITIES: Record<string, string> = { '&quot;': '"', '&apos;': "'", '&gt;': '>', '&lt;': '<', '&amp;': '&' };
+/** SheetJS's unescapexml (xlsx 0.20.2): entities, character references, _xHHHH_ codes, CDATA. */
+function unescapeXml(text: string): string {
+  const i = text.indexOf('<![CDATA[');
+  if (i === -1) {
+    return text
+      .replace(/&(?:quot|apos|gt|lt|amp|#x?([\da-fA-F]+));/gi, (all: string, n: string) => XML_ENTITIES[all] || String.fromCharCode(parseInt(n, all.indexOf('x') > -1 ? 16 : 10)) || all)
+      .replace(/_x([\da-fA-F]{4})_/gi, (_: string, c: string) => String.fromCharCode(parseInt(c, 16)));
+  }
+  const j = text.indexOf(']]>');
+  return unescapeXml(text.slice(0, i)) + text.slice(i + 9, j) + unescapeXml(text.slice(j + 3));
+}
+
+/** SheetJS's utf8read with a Buffer (utf8readc): the latin1 characters read as UTF-8 bytes. */
+const utf8read = (s: string) => Buffer.from(s, 'latin1').toString('utf8');
+
+const stripFrontSlash = (x: string) => (x.charAt(0) === '/' ? x.slice(1) : x);
+
+/** SheetJS's get_rels_path: the relationships part of a part. */
+function relsPathOf(file: string): string {
+  const n = file.lastIndexOf('/');
+  return file.slice(0, n + 1) + '_rels/' + file.slice(n + 1) + '.rels';
+}
+
+/** SheetJS's resolve_path: a relationship's target, from the folder of the part that names it. */
+function resolvePath(path: string, base: string): string {
+  if (path.charAt(0) === '/') return path.slice(1);
+  const result = base.split('/');
+  if (base.slice(-1) !== '/') result.pop();
+  for (const step of path.split('/')) {
+    if (step === '..') result.pop();
+    else if (step !== '.') result.push(step);
+  }
+  return result.join('/');
+}
+
+/** SheetJS's parse_ct, the lists it reads: part names by kind (CONTENT_KINDS), in order. */
+function parseContentTypes(data: string | null): Map<string, (string | undefined)[]> {
+  const ct = new Map<string, (string | undefined)[]>();
+  for (const x of data?.match(TAG) ?? []) {
+    if (!x.includes('Override')) continue; // quick: no other tag can be one
+    const y = parseXmlTag(x);
+    if (y[0]!.replace(NS, '<') !== '<Override') continue;
+    const kind = CONTENT_KINDS.get(y.ContentType as string);
+    if (!kind) continue;
+    const list = ct.get(kind);
+    if (list) list.push(y.PartName);
+    else ct.set(kind, [y.PartName]);
+  }
+  return ct;
+}
+
+/** SheetJS's parse_wb_xml, the sheet list: every <sheet ...> tag (any namespace), in order. */
+function workbookSheets(data: string | null): XmlTag[] {
+  const sheets: XmlTag[] = [];
+  for (const x of data?.match(TAG) ?? []) {
+    if (!x.includes('sheet')) continue; // quick: no other tag can be one
+    const y = parseXmlTag(x);
+    if (y[0]!.replace(NS2, '<$1') === '<sheet') sheets.push(y);
+  }
+  return sheets;
+}
+
+type Rels = Record<string, unknown>;
+/**
+ * SheetJS's parse_rels: each relationship under its target resolved from `currentFilePath` (the
+ * last one wins), and under "!id" by its Id. Plain objects, as SheetJS keeps them, so a key such
+ * as "__proto__" or "constructor" behaves as it does there.
+ */
+function parseRels(data: string | null, currentFilePath: string): Rels {
+  const rels: Rels = { '!id': {} };
+  if (!data) return rels;
+  const base = currentFilePath.charAt(0) !== '/' ? '/' + currentFilePath : currentFilePath;
+  const hash: Record<string, unknown> = {};
+  if (!data.includes('<Relationship')) return rels; // quick: e.g. a worksheet read as relationships
+  for (const x of data.match(TAG) ?? []) {
+    if (!x.startsWith('<Relationship')) continue; // quick: no other tag can be one
+    const y = parseXmlTag(x);
+    if (y[0] !== '<Relationship') continue;
+    const rel: Record<string, unknown> = { Type: y.Type, Target: unescapeXml(String(y.Target)), Id: y.Id };
+    if (y.TargetMode) rel.TargetMode = y.TargetMode;
+    const canonic = y.TargetMode === 'External' ? y.Target : resolvePath(String(y.Target), base);
+    rels[canonic as string] = rel;
+    hash[y.Id as string] = rel;
+  }
+  rels['!id'] = hash;
+  return rels;
+}
+
+/** SheetJS's get_sheet_type. */
+function sheetType(n: unknown): string {
+  if (REL_WORKSHEET.includes(n as string)) return 'sheet';
+  if (n === NOT_WORKSHEET_RELS[0]) return 'chart';
+  if (n === NOT_WORKSHEET_RELS[1]) return 'dialog';
+  if (n === NOT_WORKSHEET_RELS[2]) return 'macro';
+  return n && (n as { length?: number }).length ? String(n) : 'sheet';
+}
+
+/**
+ * SheetJS's safe_parse_wbrels: for each sheet [name, target, type] from the workbook's
+ * relationships, or null (then every sheet is read from xl/worksheets/sheet<n>.xml) when a
+ * sheet's r:id is not there.
+ */
+function sheetTargets(wbRels: Rels, sheets: XmlTag[]): [unknown, unknown, string][] | null {
+  const byId = wbRels['!id'] as Record<string, { Target?: unknown; Type?: unknown }>;
+  try {
+    const out = sheets.map((w): [unknown, unknown, string] => {
+      if (!w.id) w.id = w.strRelID!;
+      const rel = byId[w.id]!;
+      return [w.name, rel.Target, sheetType(rel.Type)];
+    });
+    return out.length ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -842,36 +1317,7 @@ function scanXmlPart(d: Buffer): XmlPartScan {
 
 /** The `ref` SheetJS's parsexmltag(tag, true) gives a tag: the same key rules, the last value wins. */
 function hyperlinkRef(tag: string): string | undefined {
-  const z: Record<string, string> = {};
-  let eq = 0;
-  for (; eq !== tag.length; ++eq) {
-    const c = tag.charCodeAt(eq);
-    if (c === 32 || c === 10 || c === 13) break;
-  }
-  if (eq === tag.length) return undefined;
-  for (const m of tag.match(ATTR) ?? []) {
-    const cc = m.slice(1);
-    let c = 0;
-    for (; c !== cc.length; ++c) if (cc.charCodeAt(c) === 61) break;
-    let q = cc.slice(0, c).trim();
-    while (cc.charCodeAt(c + 1) === 32) ++c;
-    const e = cc.charCodeAt(c + 1);
-    const quot = e === 34 || e === 39 ? 1 : 0;
-    const v = cc.slice(c + 1 + quot, cc.length - quot);
-    let j = 0;
-    for (; j !== q.length; ++j) if (q.charCodeAt(j) === 58) break;
-    if (j === q.length) {
-      if (q.indexOf('_') > 0) q = q.slice(0, q.indexOf('_'));
-      z[q] = v;
-      z[q.toLowerCase()] = v;
-    } else {
-      const k = (j === 5 && q.slice(0, 5) === 'xmlns' ? 'xmlns' : '') + q.slice(j + 1);
-      if (z[k] && q.slice(j - 3, j) === 'ext') continue;
-      z[k] = v;
-      z[k.toLowerCase()] = v;
-    }
-  }
-  return z.ref;
+  return parseXmlTag(tag, true).ref;
 }
 
 /**
