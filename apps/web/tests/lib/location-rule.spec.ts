@@ -142,7 +142,9 @@ describe('savedPointProblem: when the saved point may be confirmed as it is (dia
 
   it.each([
     ['4 decimals, the last one 0 (23.5850 is stored as 23.585)', saved(23.585, 58.4059)],
-    ['4 decimals, both ending in 0 (23.5800, 58.4000)', saved(23.58, 58.4)],
+    // A text "23.5800, 58.4000" needs a pin since the owner decision of 28 Sep 2026 (one zero at the
+    // end counts); a point stored as 23.58, 58.4 before it is judged by what is stored, like the others.
+    ['stored as 23.58, 58.4 (for example "23.5800, 58.4000" read before the one-zero rule)', saved(23.58, 58.4)],
     ['6 decimals ending in 0 (58.405900)', saved(23.585012, 58.4059)],
     ['an exact 4-decimal point', saved(23.5851, 58.4059)],
   ])('a HIGH point is exact whatever digits the stored number shows: %s', (_what, c) => {

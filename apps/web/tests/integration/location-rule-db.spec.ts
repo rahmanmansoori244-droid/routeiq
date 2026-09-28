@@ -220,7 +220,8 @@ describe('1. saving a location (L1, L2)', () => {
   });
 
   it("the saved point is judged with the company's area, never by the digits of the stored number", async () => {
-    // "23.5850, 58.4000" read as exact and stored as 23.585, 58.4: confirmed as it is.
+    // Stored HIGH as 23.585, 58.4 (for example "23.5850, 58.4000" read before the one-zero rule of
+    // 28 Sep 2026; that text now needs a pin): confirmed as it is.
     const zero = await cust('P6', { lat: 23.585, lng: 58.4, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
     expect((await put(zero.id, { lat: 23.585, lng: 58.4, source: 'MAP_PIN' })).status).toBe(200);
     expect(await prisma.customer.findUniqueOrThrow({ where: { id: zero.id } })).toMatchObject({ locationVerified: true, geocodeConfidence: 'HIGH' });

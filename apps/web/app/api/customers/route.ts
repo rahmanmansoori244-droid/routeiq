@@ -46,17 +46,20 @@ export const POST = withTenantApi(
     }
     // Coordinates are checked like a Read (owner's location rule, audit PR A5): a pair that needs a
     // pin (fewer than 4 decimals, swapped, outside the delivery area, 0,0) is refused, never stored
-    // as a usable location. The text as sent is read, so "23.5800" keeps its 4 decimals.
+    // as a usable location. The text as sent is read, and of the zeros at the end of each coordinate
+    // only one counts (owner decision of 28 Sep 2026, "Same rule everywhere", as in the customer
+    // import): "23.5800" is 3 decimals. A JSON number has no zeros at the end (23.58).
     let loc: { lat: number; lng: number } | null = null;
     if (input.lat !== undefined || input.lng !== undefined) {
       if (input.lat === undefined || input.lng === undefined) return fail('Send both lat and lng, or neither.', 400);
       const p = parseLocationInput(`${String(raw.lat).trim()}, ${String(raw.lng).trim()}`, await tenantServiceArea(user.tenantId));
       if (!p.ok || p.needsPin || p.lat === undefined || p.lng === undefined) {
-        const why = p.ok ? p.warnings.join(' ') : p.error ?? '';
+        // The reasons as sentences (they end with a full stop), then what to do.
+        const why = (p.ok ? p.warnings.join(' ') : p.error ?? '').trim();
         return fail(
           {
             code: 'PIN_REQUIRED',
-            message: `This location is not exact${why ? ` (${why})` : ''}. Create the customer without coordinates, then set its location on the map (Set location on the customer page).`,
+            message: `This location is not exact.${why ? ` ${why}` : ''} Create the customer without coordinates, then set its location on the map (Set location on the customer page).`,
             parse: p,
           } as Record<string, unknown>,
           422,

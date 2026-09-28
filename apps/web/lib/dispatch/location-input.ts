@@ -16,6 +16,17 @@
  *
  * Anything we cannot read confidently comes back with `needsPin: true` so the UI asks the
  * dispatcher to drop / confirm a pin instead of guessing.
+ *
+ * Decimals (owner decision of 28 Sep 2026, "Same rule everywhere", audit PR A5): a pair written as
+ * decimals needs at least 4, and of the zeros at the end of each coordinate only one counts
+ * (`countedText`, the customer import's rule): "23.5800, 58.4100" counts 3 and needs a pin. That
+ * holds for a pair typed or pasted, and for a pair written as text inside a link or URI - `geo:`,
+ * `?q=`, `?query=`, `?destination=`, `?daddr=`, `/search/`, `/place/<pair>`, the end of a directions
+ * link - because padding reaches those: /search/ and ?q= carry the text searched for, as typed, and
+ * other programs build such links with a fixed number of decimals (Java "%f", JavaScript toFixed(6)),
+ * so a rough 23.58 comes out "23.580000". Google's own pin (`!3d...!4d...`) keeps its digits, as
+ * before: Google writes the marker's position itself, nobody types it. RouteIQ's own links
+ * (`driver-links.ts`) never pad a number. A map centre needs a pin whatever its digits.
  */
 
 export type LocationSourceKind = 'MANUAL_LATLNG' | 'GOOGLE_MAPS_URL' | 'MAP_PIN';
@@ -58,6 +69,36 @@ function decimals(v: string): number {
 
 /** How many decimals a written number has ("23.5850" has 4): its precision as written. */
 export const decimalPlaces = (text: string): number => decimals(text.trim());
+
+/**
+ * A written coordinate as its decimals are counted: of the zeros at the end, one ("23.5800" ->
+ * "23.580", "23.580000" -> "23.580", "23.0000" -> "23.0"; "23.5850" stays). The rule for every
+ * decimal coordinate a person or a program wrote: the customer import (A5 fifth review, `readImportedPair`)
+ * and, by the owner's decision of 28 Sep 2026 ("Same rule everywhere"), every pair ADD LOCATION and
+ * `POST /api/customers` read. Text cannot tell padding from precision: Excel writes a cell formatted
+ * to show 4 decimals as it shows it (23.58 as "23.5800"), and programs print a fixed number of
+ * decimals (Java "%f", JavaScript toFixed(6): "23.580000"). A rough pair is never made exact by its
+ * format. The price: a real 4-decimal value ending in 00 (about 1 in 100 per axis) is not exact
+ * either; its pin is placed by hand.
+ */
+export function countedText(text: string): string {
+  const t = text.trim();
+  return /^([-+]?\d+\.\d*?0)0+$/.exec(t)?.[1] ?? t;
+}
+
+/** Did the zeros at the end make the difference: a value written with 4 decimals or more that counts fewer? */
+export function zerosCut(texts: string[]): boolean {
+  return texts.some((c) => decimalPlaces(c) >= 4 && decimalPlaces(countedText(c)) < 4);
+}
+
+/** The reason when the zeros made the difference (the import's words too, `IMPORT_REASON.FEW_DECIMALS_ZEROS`). */
+export const FEW_DECIMALS_ZEROS_WARNING = 'Fewer than 4 decimals (only one zero at the end counts).';
+const FEW_DECIMALS_WARNING = 'Coordinates have fewer than 4 decimals (accurate to ~100 m or worse).';
+
+/** How precise a written pair is, as counted (one zero at the end), and whether the zeros made the difference. */
+function pairPrecision(lat: string, lng: string): { precision: number; zerosCut: boolean } {
+  return { precision: Math.min(decimals(countedText(lat)), decimals(countedText(lng))), zerosCut: zerosCut([lat, lng]) };
+}
 
 /** How precise a degrees-minutes-seconds point is: whole degrees (~110 km), whole minutes (~1.8 km) or seconds. */
 export type DmsPrecision = 'DEGREES' | 'MINUTES' | 'SECONDS';
@@ -138,7 +179,16 @@ function pairFrom(text: string): { lat: string; lng: string } | null {
 function withValidation(
   lat: number,
   lng: number,
-  base: { source: LocationSourceKind; confidence: Confidence; needsPin?: boolean; warnings?: string[]; resolvedUrl?: string; precision?: number },
+  base: {
+    source: LocationSourceKind;
+    confidence: Confidence;
+    needsPin?: boolean;
+    warnings?: string[];
+    resolvedUrl?: string;
+    /** Decimals of a written pair as counted (`pairPrecision`); none for a point nobody wrote as decimals. */
+    precision?: number;
+    zerosCut?: boolean;
+  },
   area: ServiceArea,
 ): LocationParse {
   const warnings = [...(base.warnings ?? [])];
@@ -162,7 +212,7 @@ function withValidation(
     }
   }
   if (base.precision !== undefined && base.precision < 4) {
-    warnings.push('Coordinates have fewer than 4 decimals (accurate to ~100 m or worse).');
+    warnings.push(base.zerosCut ? FEW_DECIMALS_ZEROS_WARNING : FEW_DECIMALS_WARNING);
     needsPin = true;
     if (confidence === 'HIGH') confidence = 'MEDIUM';
   }
@@ -209,7 +259,7 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
   const pair = pairFrom(input);
   if (pair) {
     return withValidation(Number(pair.lat), Number(pair.lng),
-      { source: 'MANUAL_LATLNG', confidence: 'HIGH', precision: Math.min(decimals(pair.lat), decimals(pair.lng)) }, area);
+      { source: 'MANUAL_LATLNG', confidence: 'HIGH', ...pairPrecision(pair.lat, pair.lng) }, area);
   }
   // 2. DMS
   const dmsPlain = parseDms(input);
@@ -221,7 +271,7 @@ export function parseLocationInput(raw: string, area: ServiceArea = DEFAULT_SERV
   const geo = new RegExp(`^geo:(${NUM}),(${NUM})`, 'i').exec(input);
   if (geo) {
     return withValidation(Number(geo[1]), Number(geo[2]),
-      { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(geo[1]), decimals(geo[2])) }, area);
+      { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', ...pairPrecision(geo[1], geo[2]) }, area);
   }
   // 4. URLs
   let url: URL;
@@ -297,7 +347,8 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
   const dir = directionsWaypoints(url);
 
   // Place pin: !3d<lat>!4d<lng> (most precise - the actual marker). Not on a directions link: its
-  // data part does not say which waypoint a point belongs to.
+  // data part does not say which waypoint a point belongs to. Its digits are Google's own and are
+  // not counted (owner decision of 28 Sep 2026 applies to pairs written as text, see the top).
   const pin = dir ? null : new RegExp(`!3d(${NUM})!4d(${NUM})`).exec(full);
   if (pin) {
     return withValidation(Number(pin[1]), Number(pin[2]), { source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', resolvedUrl }, area);
@@ -314,7 +365,7 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
         confidence: centre ? 'MEDIUM' : 'HIGH',
         needsPin: centre,
         warnings: centre ? [MAP_CENTRE_WARNING] : [],
-        precision: Math.min(decimals(p.lat), decimals(p.lng)),
+        ...pairPrecision(p.lat, p.lng),
         resolvedUrl,
       }, area);
     }
@@ -328,7 +379,7 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
     const p = dir.length >= 2 ? pairFrom(last) : null;
     if (p) {
       return withValidation(Number(p.lat), Number(p.lng), {
-        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(p.lat), decimals(p.lng)), resolvedUrl,
+        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', ...pairPrecision(p.lat, p.lng), resolvedUrl,
       }, area);
     }
     const d = dir.length >= 2 && last ? parseDms(last) : null;
@@ -338,7 +389,7 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
     const pathPair = new RegExp(`/(?:search|place)/(${NUM}),\\s*\\+?(${NUM})(?:[/?@]|$)`).exec(full);
     if (pathPair) {
       return withValidation(Number(pathPair[1]), Number(pathPair[2]), {
-        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', precision: Math.min(decimals(pathPair[1]), decimals(pathPair[2])), resolvedUrl,
+        source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', ...pairPrecision(pathPair[1], pathPair[2]), resolvedUrl,
       }, area);
     }
     const pathDms = /\/(?:search|place)\/([^/@?]+)/.exec(full);
@@ -369,6 +420,16 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
  * outside the delivery area) is never saved as read: the dispatcher places the pin by hand.
  */
 export const PIN_REQUIRED_MESSAGE = "This reading is not exact. Drop the pin on the customer's exact location, then save.";
+/**
+ * The same, when the zeros at the end made the difference (owner decision of 28 Sep 2026, "Same rule
+ * everywhere"): the reason is said plainly, since the text on screen looks like 4 decimals.
+ */
+export const ZEROS_PIN_REQUIRED_MESSAGE = `${FEW_DECIMALS_ZEROS_WARNING} Drop the pin on the customer's exact location.`;
+
+/** What to do with a reading that needs a pin (ADD LOCATION's note and the server's 422 say the same). */
+export function notExactMessage(p: { warnings?: string[] }): string {
+  return p.warnings?.includes(FEW_DECIMALS_ZEROS_WARNING) ? ZEROS_PIN_REQUIRED_MESSAGE : PIN_REQUIRED_MESSAGE;
+}
 /** The customer's saved point shown on the map, saved again without a hand pin, when it is not exact. */
 export const SAVED_NOT_EXACT_MESSAGE = "This saved location is not exact. Drop the pin on the customer's exact location, then save.";
 /** The same, for a saved point outside the company's delivery area that no dispatcher confirmed. */
@@ -384,8 +445,8 @@ export function samePoint(a: { lat: number; lng: number }, b: { lat: number; lng
 }
 
 /** A parse's refusal in plain words, always ending with what to do (drop the pin). */
-export function pinRequiredMessage(p: Pick<LocationParse, 'ok' | 'error'>): string {
-  if (p.ok) return PIN_REQUIRED_MESSAGE;
+export function pinRequiredMessage(p: Pick<LocationParse, 'ok' | 'error'> & { warnings?: string[] }): string {
+  if (p.ok) return notExactMessage(p);
   const e = (p.error ?? 'This location could not be read.').trim();
   return /\bpin\b/i.test(e) ? e : `${e} Drop the pin on the customer's exact location, then save.`;
 }

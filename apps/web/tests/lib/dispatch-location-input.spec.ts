@@ -7,8 +7,10 @@ import {
   isGoogleMapsHost,
   isShortMapsLink,
   parseLocationInput,
+  pinRequiredMessage,
   resolveLocationInput,
 } from '@/lib/dispatch/location-input';
+import { IMPORT_REASON, readImportedPair } from '@/lib/dispatch/import-location';
 
 const LAT = 23.5859;
 const LNG = 58.4059;
@@ -558,5 +560,86 @@ describe('resolveLocationInput', () => {
     expect(r.ok).toBe(false);
     expect(r.needsPin).toBe(true);
     expect(r.resolvedUrl).toBe('https://www.google.com/maps/place/Lulu+Hypermarket');
+  });
+});
+
+// Owner decision of 28 Sep 2026, "Same rule everywhere" (audit PR A5): a coordinate pair a dispatcher
+// types or pastes is judged like the customer import. Of the zeros at the end of a decimal coordinate
+// only one counts: "23.5800" is 3 decimals. A rough 23.58 copied from a cell formatted to show 4
+// decimals, or written by a program that always prints 6 (Java "%f", JavaScript toFixed(6)), looks
+// exact and is not. Before, ADD LOCATION and POST /api/customers counted every zero.
+describe('parseLocationInput - only one zero at the end counts (owner decision of 28 Sep 2026)', () => {
+  const ZEROS = 'Fewer than 4 decimals (only one zero at the end counts).';
+  const FEW = 'Coordinates have fewer than 4 decimals (accurate to ~100 m or worse).';
+
+  it.each([
+    ['4 decimals ending in 00', '23.5800, 58.4100', 23.58, 58.41],
+    ['one side only', '23.5859, 58.4100', 23.5859, 58.41],
+    ['6 decimals ending in 0000', '23.580000, 58.410000', 23.58, 58.41],
+    ['space separated', '23.5800 58.4100', 23.58, 58.41],
+    ['semicolon, signed', '+23.5800;+58.4100', 23.58, 58.41],
+    ['whole degrees padded', '23.0000, 58.0000', 23, 58],
+  ])('a typed or pasted pair, %s: not exact, and the warning says why', (_what, text, lat, lng) => {
+    const r = parseLocationInput(text);
+    // Before: HIGH and needsPin false ("23.5800" counted 4 decimals), saved as a verified reading.
+    expect(r).toMatchObject({ ok: true, lat, lng, source: 'MANUAL_LATLNG', confidence: 'MEDIUM', needsPin: true });
+    expect(r.warnings).toEqual([ZEROS]);
+    expect(pinRequiredMessage(r)).toBe("Fewer than 4 decimals (only one zero at the end counts). Drop the pin on the customer's exact location.");
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', '23.5850, 58.4105'],
+    ['4 decimals, no zero at the end', '23.5859, 58.4059'],
+    ['6 decimals', '23.585912, 58.405934'],
+    ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900'],
+    ['5 decimals ending in 00 (4 count)', '23.58500, 58.41050'],
+  ])('control: %s still reads exact', (_what, text) => {
+    expect(parseLocationInput(text)).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
+  });
+
+  it('a pair written with fewer than 4 decimals keeps its own warning (the zeros did not make the difference)', () => {
+    expect(parseLocationInput('23.58, 58.41').warnings).toEqual([FEW]);
+    // "23.500" counts 2 decimals, but it was written with 3: fewer than 4 either way.
+    expect(parseLocationInput('23.500, 58.4105').warnings).toEqual([FEW]);
+    expect(pinRequiredMessage(parseLocationInput('23.58, 58.41'))).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");
+  });
+
+  it('the same rule and the same words as the customer import (one implementation)', () => {
+    const imported = readImportedPair('23.5800', '58.4100', DEFAULT_SERVICE_AREA);
+    expect(imported).toMatchObject({ point: null, reason: IMPORT_REASON.FEW_DECIMALS_ZEROS });
+    expect(parseLocationInput('23.5800, 58.4100').warnings).toEqual([IMPORT_REASON.FEW_DECIMALS_ZEROS]);
+    expect(readImportedPair('23.5850', '58.4105', DEFAULT_SERVICE_AREA).point).toEqual({ lat: 23.585, lng: 58.4105 });
+  });
+
+  // A pair written into a link is text a person or another program wrote: /search/ and ?q= carry
+  // the text searched for, as typed, and other programs build ?q=, ?query=, ?destination= and
+  // geo: links with a fixed number of decimals. Padding reaches them, so they count the same way.
+  it.each([
+    ['?q=', 'https://maps.google.com/?q=23.5800,58.4100'],
+    ['?query= (api=1 search link built by a program)', 'https://www.google.com/maps/search/?api=1&query=23.580000%2C58.410000'],
+    ['?destination=', 'https://www.google.com/maps/dir/?api=1&destination=23.5800,58.4100&travelmode=driving'],
+    ['?daddr=', 'https://maps.google.com/maps?saddr=My+Location&daddr=23.5800,58.4100'],
+    ['/search/ (the text searched for)', 'https://www.google.com/maps/search/23.5800,+58.4100?entry=tts'],
+    ['/place/<pair>', 'https://www.google.com/maps/place/23.5800,58.4100'],
+    ['the end of a directions link', 'https://www.google.com/maps/dir/Seeb/23.5800,58.4100/'],
+    ['geo: (Android apps print it with "%f", 6 decimals)', 'geo:23.580000,58.410000'],
+  ])('a pair written in a link, %s, counts one zero at the end too', (_what, link) => {
+    const r = parseLocationInput(link);
+    // Before: HIGH, needsPin false.
+    expect(r).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, confidence: 'MEDIUM', needsPin: true });
+    expect(r.warnings).toEqual([ZEROS]);
+  });
+
+  it.each([
+    ['?q=', 'https://maps.google.com/?q=23.5850,58.4105'],
+    ['/search/', 'https://www.google.com/maps/search/23.585900,+58.410500'],
+    ['geo:', 'geo:23.585912,58.410534'],
+  ])('control: a link whose pair counts 4 decimals or more, %s, still reads exact', (_what, link) => {
+    expect(parseLocationInput(link)).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
+  });
+
+  it("Google's own pin (!3d!4d) keeps its digits: Google writes the marker's position itself, nobody types it", () => {
+    const r = parseLocationInput('https://www.google.com/maps/place/Seeb/@23.58,58.41,17z/data=!3m1!4b1!4m4!3m3!8m2!3d23.5850000!4d58.4105000');
+    expect(r).toMatchObject({ ok: true, lat: 23.585, lng: 58.4105, confidence: 'HIGH', needsPin: false, warnings: [] });
   });
 });

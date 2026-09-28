@@ -101,7 +101,7 @@ export interface ParseOptions {
    * cell showing fewer decimals than the number has keeps the number's own. Used for the customer
    * import's lat / lng, whose decimals decide whether a location is exact (audit PR A5); the import
    * counts one zero at the end at most, whatever the file (A5 fifth review, `countedText` in
-   * lib/dispatch/import-location: 23.5800 is 3 decimals - the padding is not precision). CSV text,
+   * lib/dispatch/location-input: 23.5800 is 3 decimals - the padding is not precision). CSV text,
    * also a CSV sent as Excel: the text in the file, as it is written. Only the sheet that is read,
    * and in it the one column per name the rows keep, are looked at; each number format is tried
    * once per upload, at most MAX_SHOWN_FORMATS of them (see shownSources and ShownFormats).

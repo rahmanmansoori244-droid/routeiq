@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from './client-api';
 import { createLocationRequests, type LocationRequests } from './location-requests';
-import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { notExactMessage, type ServiceArea } from '@/lib/dispatch/location-input';
 import { savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
@@ -27,7 +27,6 @@ interface ParseResult {
   resolvedUrl?: string;
 }
 
-export const PIN_REQUIRED_TEXT = "This reading is not exact. Drop the pin on the customer's exact location, then save.";
 export const UNREAD_PIN_TEXT = "This could not be read. Drop the pin on the customer's exact location, then save.";
 
 interface Props {
@@ -164,13 +163,17 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
   const savedNotExact = savedProblem !== null;
   const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved) && !savedNotExact;
   // What to do, in the owner's words (not while the text on screen waits for a Read: that note says it).
+  // A pair padded with zeros says why first (owner decision of 28 Sep 2026: only one zero at the end
+  // counts, and the text on screen looks like 4 decimals); the server's 422 says the same.
   const pinNote = pinMoved || textUnread || reading
     ? null
     : needsConfirmation
       ? parse?.ok
-        ? PIN_REQUIRED_TEXT
+        ? notExactMessage(parse)
         : UNREAD_PIN_TEXT
       : savedProblem;
+  // The preview's notes, without one the note above already says.
+  const previewWarnings = parse ? parse.warnings.filter((w) => !pinNote?.startsWith(w)) : [];
 
   async function save() {
     // The same rule as the button (a click that reaches a disabled button saves nothing either).
@@ -283,7 +286,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
               ) : (
                 <p>{parse.error}</p>
               )}
-              {parse.warnings.map((w) => (
+              {previewWarnings.map((w) => (
                 <p key={w} className={`text-xs ${textUnread ? '' : 'text-amber-800'}`}>
                   {w}
                 </p>

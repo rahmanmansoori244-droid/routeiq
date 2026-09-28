@@ -40,6 +40,7 @@ vi.mock('next/navigation', () => ({ useRouter: () => ({ replace() {}, refresh() 
 vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return null; } }));
 
 import { PUT as locationPut } from '@/app/api/customers/[id]/location/route';
+import { POST as locationParse } from '@/app/api/locations/parse/route';
 import { audit } from '@/lib/audit';
 import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
@@ -92,7 +93,9 @@ beforeEach(() => {
     customer('K1'),
     customer('MED', { geocodeConfidence: 'MEDIUM' }),
     customer('LOW', { geocodeConfidence: 'LOW', lat: 23, lng: 58 }),
-    customer('ZERO', { lat: 23.585, lng: 58.4 }), // stored HIGH from "23.5850, 58.4000": the number drops the zeros
+    // Stored HIGH as 23.585, 58.4: the number drops the zeros (for example "23.5850, 58.4000" read
+    // before the one-zero rule; that text now needs a pin).
+    customer('ZERO', { lat: 23.585, lng: 58.4 }),
     customer('AWAY', { lat: 24.7136, lng: 46.6753 }), // HIGH import from before A5, outside Oman/UAE, never confirmed
     customer('SWAP', { lat: 58.4059, lng: 23.5859 }), // HIGH import from before A5, latitude and longitude swapped
     customer('OK', { locationVerified: true, locationSource: 'MAP_PIN', locationInput: 'map pin' }),
@@ -220,6 +223,67 @@ describe('PUT /api/customers/:id/location: a reading is read again on the server
   });
 });
 
+// Owner decision of 28 Sep 2026, "Same rule everywhere": a pair a dispatcher types or pastes is judged
+// like the customer import. Of the zeros at the end of a decimal coordinate only one counts, so
+// "23.5800, 58.4100" (3 decimals as counted) is not exact. Before, it read as 4 decimals: HIGH, saved
+// as a verified reading, planned and loaded at a point good to about 1 km.
+describe('Same rule everywhere (owner decision of 28 Sep 2026): of the zeros at the end of a typed coordinate, one counts', () => {
+  const ZEROS = 'Fewer than 4 decimals (only one zero at the end counts).';
+  const ZEROS_PIN = "Fewer than 4 decimals (only one zero at the end counts). Drop the pin on the customer's exact location.";
+  const read = async (input: string) => answer(await locationParse(json('/api/locations/parse', 'POST', { input })));
+
+  it('ADD LOCATION Read (POST /api/locations/parse): a padded pair, typed or in a link, is not exact and says why', async () => {
+    for (const input of ['23.5800, 58.4100', '23.580000, 58.410000', 'https://maps.google.com/?q=23.5800,58.4100', 'https://www.google.com/maps/search/23.5800,+58.4100', 'geo:23.580000,58.410000']) {
+      const r = await read(input);
+      expect(r.status, input).toBe(200);
+      // Before: confidence HIGH, needsPin false, no warning.
+      expect(r.body.data, input).toMatchObject({ ok: true, lat: 23.58, lng: 58.41, confidence: 'MEDIUM', needsPin: true, warnings: [ZEROS] });
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', '23.5850, 58.4105'],
+    ['6 decimals', '23.585912, 58.405934'],
+    ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900'],
+    ["Google's own pin, whose digits are Google's", 'https://www.google.com/maps/place/Seeb/data=!4m4!3m3!8m2!3d23.5850000!4d58.4105000'],
+  ])('control, Read: %s still reads exact', async (_what, input) => {
+    const r = await read(input);
+    expect(r.body.data).toMatchObject({ ok: true, confidence: 'HIGH', needsPin: false, warnings: [] });
+  });
+
+  it('PUT /api/customers/:id/location checks again: a padded pair is refused with the reason, however it is sent; a hand pin saves the customer', async () => {
+    const before = stored('K1');
+    for (const body of [
+      { lat: 23.58, lng: 58.41, source: 'MANUAL_LATLNG', input: '23.5800, 58.4100' },
+      { lat: 23.58, lng: 58.41, source: 'GOOGLE_MAPS_URL', input: 'https://maps.google.com/?q=23.5800,58.4100' },
+      { input: '23.5800, 58.4100' },
+      // A "hand pin" exactly on the padded pair was never moved.
+      { lat: 23.58, lng: 58.41, source: 'MAP_PIN', input: '23.580000, 58.410000' },
+    ]) {
+      const r = await put('K1', body);
+      // Before: 200, stored as the reading, verified HIGH (the "hand pin" too).
+      expect(r.status, JSON.stringify(body)).toBe(422);
+      expect(r.body.error, JSON.stringify(body)).toMatchObject({ code: 'PIN_REQUIRED', message: ZEROS_PIN });
+    }
+    expect(stored('K1')).toEqual(before);
+    expect(audits).toEqual([]);
+    const pinned = await put('K1', { lat: 23.580123, lng: 58.410456, source: 'MAP_PIN', input: '23.5800, 58.4100' });
+    expect(pinned.status).toBe(200);
+    expect(stored('K1')).toEqual({ lat: 23.580123, lng: 58.410456, verified: true, source: 'MAP_PIN', confidence: 'HIGH', input: '23.5800, 58.4100' });
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', '23.5850, 58.4105', 23.585, 58.4105],
+    ['6 decimals', '23.585912, 58.405934', 23.585912, 58.405934],
+    ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900', 23.5859, 58.4059],
+  ])('control, PUT: %s is saved as read (HIGH)', async (_what, input, lat, lng) => {
+    const r = await put('MED', { lat, lng, source: 'MANUAL_LATLNG', input });
+    expect(r.status).toBe(200);
+    expect(stored('MED')).toEqual({ lat, lng, verified: true, source: 'MANUAL_LATLNG', confidence: 'HIGH', input });
+  });
+});
+
 describe('PUT /api/customers/:id/location: hand pins and the saved point', () => {
   it('a pin placed by hand is saved: MAP_PIN, HIGH, verified', async () => {
     const r = await put('MED', { lat: 23.6011, lng: 58.4011, source: 'MAP_PIN', input: '23.58, 58.40' });
@@ -273,7 +337,8 @@ describe('PUT /api/customers/:id/location: hand pins and the saved point', () =>
   });
 
   it('a saved HIGH point whose stored number ends in 0 is exact: confirmed as it is', async () => {
-    // "23.5850, 58.4000" was accepted as exact (4 decimals) and stored as 23.585, 58.4.
+    // Stored as 23.585, 58.4 (the text it came from is not kept; the stored number cannot say how many
+    // decimals it was written with, so its digits are never counted).
     const r = await put('ZERO', { lat: 23.585, lng: 58.4, source: 'MAP_PIN' });
     // Before: 422 PIN_REQUIRED, the stored number read again as text had "fewer than 4 decimals".
     expect(r.status).toBe(200);
@@ -330,10 +395,33 @@ describe('POST /api/customers checks coordinates like a Read', () => {
     expect(tables.customer).toEqual([]);
   });
 
-  it('the text as sent is read: "23.5800" has 4 decimals; stored HIGH', async () => {
-    const r = await create({ lat: '23.5800', lng: '58.4000' });
+  // Owner decision of 28 Sep 2026, "Same rule everywhere": the text as sent is read, and of the zeros
+  // at the end only one counts, as in the customer import. This test said "23.5800" has 4 decimals and
+  // expected 201, stored HIGH: a rough 23.58 padded to 4 decimals was created as an exact location.
+  it.each([
+    ['4 decimals ending in 00', { lat: '23.5800', lng: '58.4000' }],
+    ['one side only', { lat: '23.5859', lng: '58.4100' }],
+    ['6 decimals ending in 0000', { lat: '23.580000', lng: '58.410000' }],
+  ])('the text as sent is read, and only one zero at the end counts: %s is refused with the reason (422 PIN_REQUIRED)', async (_what, coords) => {
+    const r = await create(coords);
+    // Before: 201, stored HIGH.
+    expect(r.status).toBe(422);
+    expect(r.body.error).toMatchObject({
+      code: 'PIN_REQUIRED',
+      message: 'This location is not exact. Fewer than 4 decimals (only one zero at the end counts). Create the customer without coordinates, then set its location on the map (Set location on the customer page).',
+    });
+    expect(tables.customer).toEqual([]);
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', { lat: '23.5850', lng: '58.4105' }, 23.585, 58.4105],
+    ['6 decimals', { lat: '23.585912', lng: '58.405934' }, 23.585912, 58.405934],
+    ['6 decimals ending in 00 (5 count)', { lat: '23.585900', lng: '58.405900' }, 23.5859, 58.4059],
+    ['JSON numbers with 4 decimals', { lat: 23.5851, lng: 58.4059 }, 23.5851, 58.4059],
+  ])('control: %s is created with its location, HIGH', async (_what, coords, lat, lng) => {
+    const r = await create(coords);
     expect(r.status).toBe(201);
-    expect(tables.customer![0]).toMatchObject({ lat: 23.58, lng: 58.4, geocodeConfidence: 'HIGH' });
+    expect(tables.customer![0]).toMatchObject({ lat, lng, geocodeConfidence: 'HIGH' });
   });
 
   it('one coordinate without the other is refused; none at all is a customer without a location', async () => {

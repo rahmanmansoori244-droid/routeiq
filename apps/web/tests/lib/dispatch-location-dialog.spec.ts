@@ -222,17 +222,19 @@ describe('LocationDialog (audit F06)', () => {
     t.openFor(A);
     t.type(A_LINK);
     t.read();
-    t.type('23.6100, 58.4100');
+    // 4 decimals with one zero at the end: exact (a padded "23.6100, 58.4100" is not since the
+    // owner decision of 28 Sep 2026, so the server would not answer it as below).
+    t.type('23.6150, 58.4150');
     expect(calls[0].init.signal?.aborted).toBe(true);
     expect(t.readBtn().props.disabled).toBe(false);
     calls[0].resolve(parsed(23.6703, 58.1889));
     await t.host.settle();
     expect(t.found()).toBe('');
     t.read();
-    calls[1].resolve(parsed(23.61, 58.41, 'MANUAL_LATLNG'));
+    calls[1].resolve(parsed(23.615, 58.415, 'MANUAL_LATLNG'));
     await t.host.settle();
     t.save();
-    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.61, lng: 58.41, source: 'MANUAL_LATLNG', input: '23.6100, 58.4100' });
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.615, lng: 58.415, source: 'MANUAL_LATLNG', input: '23.6150, 58.4150' });
   });
 
   it('scenario 3: text changed after a Read - the preview is out of date and Save waits for a Read of the new text', async () => {
@@ -467,6 +469,53 @@ describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
     expect(pinRequired(t)).toBe("This could not be read. Drop the pin on the customer's exact location, then save.");
     t.dropPin(23.6787, 57.886);
     expect(t.saveBtn().props.disabled).toBe(false);
+  });
+
+  // Owner decision of 28 Sep 2026, "Same rule everywhere": of the zeros at the end of a typed or
+  // pasted coordinate only one counts, as in the customer import.
+  it.each([
+    ['4 decimals ending in 00', '23.5800, 58.4100', '23.580000, 58.410000'],
+    ['6 decimals ending in 0000', '23.580000, 58.410000', '23.580000, 58.410000'],
+    ['a link with the pair as text', 'https://maps.google.com/?q=23.5800,58.4100', '23.580000, 58.410000'],
+  ] as const)('a pair padded with zeros (%s) is not exact: the note says why, and only a hand pin is saved', async (_what, text, at) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
+    await t.host.settle();
+    expect(t.found()).toContain(at);
+    // Before: "(high confidence)", Save on, and the rough point stored as a verified reading.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("Fewer than 4 decimals (only one zero at the end counts). Drop the pin on the customer's exact location.");
+    // Said once: the preview does not repeat the reason under the note.
+    expect(textOf(t.previewBox())).not.toContain('only one zero');
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.580123, 58.410456);
+    expect(pinRequired(t)).toBe('');
+    // The note is gone with the hand pin; the preview keeps the reason.
+    expect(textOf(t.previewBox())).toContain('Fewer than 4 decimals (only one zero at the end counts).');
+    t.save();
+    expect(t.puts()).toHaveLength(1);
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.580123, lng: 58.410456, source: 'MAP_PIN', input: text });
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', '23.5850, 58.4105', 23.585, 58.4105],
+    ['6 decimals', '23.585912, 58.405934', 23.585912, 58.405934],
+    ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900', 23.5859, 58.4059],
+  ] as const)('control: %s still reads exact and is saved as read', async (_what, text, lat, lng) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
+    await t.host.settle();
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat, lng, source: 'MANUAL_LATLNG', input: text });
   });
 
   it.each([

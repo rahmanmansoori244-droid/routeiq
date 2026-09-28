@@ -8,7 +8,6 @@ import {
   rereadSavedInput,
   resolveLocationInput,
   samePoint,
-  PIN_REQUIRED_MESSAGE,
   type Confidence,
 } from '@/lib/dispatch/location-input';
 import { coordStatus, savedPointProblem } from '@/lib/dispatch/customer-attrs';
@@ -45,6 +44,8 @@ const pinRequired = (message: string, parse?: unknown) => fail({ code: 'PIN_REQU
 //    through the resolvedUrl the Read returned). 422 PIN_REQUIRED when the reading needs a pin or
 //    cannot be read, 422 LOCATION_MISMATCH when the point sent is not the point it reads as.
 //  - { input } alone: read (short links resolved, as the Read does); 422 PIN_REQUIRED unless exact.
+// A pair written as decimals counts one zero at the end of each coordinate (owner decision of 28 Sep
+// 2026, "Same rule everywhere", `countedText`): "23.5800, 58.4100" needs a pin, and the 422 says why.
 // A point outside the service area is 422 OUTSIDE_AREA until the dispatcher confirms it (only a
 // hand pin can get there: a reading outside the area always needs a pin).
 export const PUT = (req: Request, { params }: Params) =>
@@ -83,10 +84,10 @@ export const PUT = (req: Request, { params }: Params) =>
           input = before.locationInput;
           check = 'SAVED_POINT';
         } else if (input) {
-          // A hand pin exactly on a reading that needs a pin was never moved.
+          // A hand pin exactly on a reading that needs a pin was never moved (the reason said, as for a reading).
           const p = rereadSavedInput(input, body.resolvedUrl, area);
           if (p.ok && p.needsPin && p.lat !== undefined && p.lng !== undefined && samePoint({ lat, lng }, { lat: p.lat, lng: p.lng })) {
-            return pinRequired(PIN_REQUIRED_MESSAGE, p);
+            return pinRequired(pinRequiredMessage(p), p);
           }
         }
       } else {
