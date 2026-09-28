@@ -38,6 +38,16 @@ jobs:
       - name: Smoke test
         run: OSRM_URL=http://localhost:5000 sh infra/osrm/smoke-test.sh
 
+      # Audit F19: the docker-compose health check runs inside this image (no curl there: it uses
+      # bash). It must pass against the running server and fail, within its deadline, on a port
+      # nothing answers.
+      - name: Compose health check script
+        run: |
+          docker cp infra/osrm/healthcheck.sh osrm:/tmp/healthcheck.sh
+          docker exec osrm sh /tmp/healthcheck.sh
+          if docker exec -e OSRM_HEALTH_PORT=5999 osrm sh /tmp/healthcheck.sh; then echo "health check passed without a server" >&2; exit 1; fi
+          echo "health check: passes on the live graph, fails without a server"
+
       - name: IPv6 bind (Railway private networking uses OSRM_BIND=::)
         run: |
           docker run -d --name osrm6 -e OSRM_BIND=:: -p 5001:5000 routeiq-osrm:ci

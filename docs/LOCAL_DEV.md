@@ -1,7 +1,7 @@
 # Local development (Windows notes included)
 
 ## Prerequisites
-- Node 20+ and pnpm 9 (`corepack pnpm@9.15.9 …` works without a global install)
+- Node 22 (pinned: `.nvmrc`, root `engines`; a newer Node works but pnpm warns "Unsupported engine") and pnpm 9 (`corepack pnpm@9.15.9 …` works without a global install)
 - Python 3.11/3.12 for the solver (OR-Tools and PyVRP publish wheels for these)
 - PostgreSQL 16 (PostGIS optional; the init migration skips it when unavailable)
 
@@ -31,10 +31,10 @@ Use `SEED_PASSWORD=...` to choose the demo password instead of a random one. Nev
 # apps/solver/.env holds SOLVER_TOKEN (and OSRM_URL for a local OSRM); --env-file loads it (review L29).
 # A wrong X-Solver-Token must answer 401: a 500 "Solver not configured" means the token was not loaded.
 cd apps/solver && .venv/Scripts/python -m uvicorn main:app --env-file .env --port 8000
-# web
+# web (binds 127.0.0.1: the dev script is `next dev -H 127.0.0.1`, owner decision 4)
 pnpm --filter @routeiq/web dev
 ```
-Open http://localhost:3000/t/nmwc/dispatch.
+Open http://localhost:3000/t/nmwc/dispatch. The web dev server binds to localhost only (not every interface), because one recent critical Next.js advisory affects Windows hosts; `localhost` still resolves to 127.0.0.1, so nothing local changes. For a local production run, use `next start -H 127.0.0.1` the same way (`next start` alone, as on Railway, listens on every interface).
 
 ## Tests
 ```bash

@@ -48,6 +48,7 @@ export const AUDIT_ACTIONS = {
   OPTIMIZE_STARTED: { label: 'Optimization started' },
   OPTIMIZE_SUCCEEDED: { label: 'Optimization finished' },
   OPTIMIZE_FAILED: { label: 'Optimization failed' },
+  PLAN_RESET: { label: 'Stuck plan reset by a supervisor' },
   SCENARIO_CHOSEN: { label: 'Plan option applied' },
   PLAN_VERSION_CREATED: { label: 'Plan version created (re-plan)' },
   ...LOAD_ACTIONS,
@@ -98,7 +99,7 @@ export const AUDIT_ENTITY_NAMES = Object.keys(AUDIT_ENTITIES) as [AuditEntity, .
 export function auditActionTone(action: string): 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline' {
   if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED') return 'destructive';
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
-  if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
+  if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
   if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';
   return 'outline';
 }

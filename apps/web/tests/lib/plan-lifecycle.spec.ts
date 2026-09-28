@@ -656,6 +656,39 @@ describe('job finalization (F07 / ADD-JOB-AUDIT)', () => {
     expect(row('runJob', 'J1').status).toBe('FAILED');
   });
 
+  it('audit F09: failJob writes the job, the plan and OPTIMIZE_FAILED in ONE transaction under the plan row lock', async () => {
+    seedOptimizing();
+    tables.runJob[0]!.status = 'RUNNING';
+    failAudit.action = 'OPTIMIZE_FAILED';
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await failJob(args(), new Error('solver down'));
+    quiet.mockRestore();
+    // The audit write failed: nothing changed - never a FAILED job behind an OPTIMIZING plan (or
+    // the reverse). The job stays in progress with no process, so the janitor fails both later.
+    expect(row('runJob', 'J1').status).toBe('RUNNING');
+    expect(row('runPlan', 'R').status).toBe('OPTIMIZING');
+    expect(tables.auditLog.filter((a) => a.action === 'OPTIMIZE_FAILED')).toHaveLength(0);
+
+    failAudit.action = null;
+    rawLog.length = 0;
+    await failJob(args(), new Error('solver down'));
+    expect(row('runJob', 'J1').status).toBe('FAILED');
+    expect(row('runPlan', 'R').status).toBe('FAILED');
+    expect(tables.auditLog.filter((a) => a.action === 'OPTIMIZE_FAILED')).toHaveLength(1);
+    expect(forUpdateIndex()).toBeGreaterThanOrEqual(0); // the plan row was locked first
+  });
+
+  it('audit F09: a stale result is recorded (job FAILED + OPTIMIZE_FAILED) in one transaction too', async () => {
+    seedOptimizing({ status: 'SUPERSEDED', supersededAt: new Date() });
+    solver.impl = async () => response();
+    failAudit.action = 'OPTIMIZE_FAILED';
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await runToEnd();
+    quiet.mockRestore();
+    expect(row('runJob', 'J1').status).toBe('RUNNING'); // not FAILED without its audit row
+    expect(tables.auditLog.filter((a) => a.action === 'OPTIMIZE_FAILED')).toHaveLength(0);
+  });
+
   it('a version that holds a plan (re-plan copy) keeps it when the optimizer finds no solution', async () => {
     seedOptimizing({ chosen: 'scCopy' });
     tables.scenarioResult = [{ id: 'scCopy', runId: 'R', name: 'RECOMMENDED', detailsJson: scenarioDetails() }];

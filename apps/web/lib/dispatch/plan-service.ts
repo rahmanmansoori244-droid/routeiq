@@ -179,8 +179,10 @@ const ORDER_INCLUDE = {
  * without a depot were included when the tenant had one active depot, and the migration gave them
  * that depot). An order brought forward to a later day (PR9, carriedToOrderId set) no longer
  * belongs to its own day: it is not open, unserved or pending there (the plan versions that hold
- * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest). */
-export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date): Promise<Prisma.OrderWhereInput> {
+ * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest).
+ * `_db`: the client the caller reads with (audit A4: the plan detail reads in one snapshot). The
+ * scope needs no read since A5 (the depot count is gone), so it is not used. */
+export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, _db: Db = prisma): Promise<Prisma.OrderWhereInput> {
   return { tenantId, deliveryDate: runDate, carriedToOrderId: null, depotId };
 }
 

@@ -82,11 +82,11 @@ Railway stops reading `railway.json` files on 2026-12-01 ("Config as Code" is de
 | web | Build command | `corepack enable && pnpm install --frozen-lockfile && pnpm --filter @routeiq/web build` |
 | web | Pre-deploy command | `pnpm --filter @routeiq/web db:migrate:deploy` (a failed migration stops the deploy; the previous version keeps serving) |
 | web | Start command | `pnpm --filter @routeiq/web start` |
-| web | Healthcheck | `/api/health`, timeout 300 s (Railway default) |
+| web | Healthcheck | `/api/health`, timeout 300 s (Railway default). Since audit PR4 it is **dispatch readiness**: 503 when the database is down or dispatch is misconfigured (`SOLVER_URL` / `SOLVER_TOKEN` missing on web, a `SOLVER_URL` no call can use - `SOLVER_URL_INVALID`, for example the solver's private domain without `http://`: set it to `http://<solver private address>:<port>` -, a `SOLVER_TOKEN` that is not plain ASCII, the solver refuses the token with 401, or the solver has no token), so such a deploy fails and the previous version keeps serving; 200 `degraded` (`ok: false`) when the solver is only unreachable or something answers with an error (a 5xx, or a 403 from a proxy or wrong host in front of it: the solver never answers 403) or a redirect (`SOLVER_URL_REDIRECTS`: optimizations fail too, so point `SOLVER_URL` at the solver's private address), which does not block a deploy. `/api/health/live` is the process-only liveness. Deploy the solver first when both change, so the new web finds `/ready` (an older solver gives `degraded`, never 503) |
 | web | Restart policy | On Failure (Railway default: 10 retries) |
 | solver | Root directory | `/apps/solver` |
 | solver | Builder | Dockerfile (`/apps/solver/Dockerfile`) |
-| solver | Healthcheck | `/health` |
+| solver | Healthcheck | `/health` (public; `/ready` is token-protected and only for the web's readiness check) |
 | routeiq-osrm | all | see [OSRM_SETUP.md](OSRM_SETUP.md) |
 
 How it was done, and what to know if it is ever needed again:
@@ -99,9 +99,14 @@ How it was done, and what to know if it is ever needed again:
   - The CLI drops builder, restart policy, pre-deploy and health-check settings: <https://github.com/railwayapp/cli/issues/1199>.
   - An IaC file must list *every* resource, or Railway plans to delete what is missing, including the database.
 
+**Node version of `web` (audit A1).** The repo pins Node 22 LTS: root `package.json` `engines.node` is `22.x`, and `.nvmrc` and `.node-version` say `22`. Nixpacks takes the Node major from the service variable `NIXPACKS_NODE_VERSION` if it is set, otherwise from `engines.node`, otherwise from `.nvmrc`. Before A1 `engines.node` was `>=20.0.0`, and the version Nixpacks picked for it is not recorded here.
+- After the A1 deploy, open the web build log: the setup line names the Node package (for example `nodejs_22`).
+- If it does not say 22, set `NIXPACKS_NODE_VERSION=22` on `web` and redeploy.
+- Build on staging first where one exists (assessment risk for PR 1). Do not set a Node version on `solver` or `routeiq-osrm`; they are Dockerfile builds without Node.
+
 Later, as a separate change, move `web` from Nixpacks to Railpack:
 - Build command `pnpm --filter @routeiq/web build`.
-- Pin Node with `engines.node` or `RAILPACK_NODE_VERSION`.
+- Node: Railpack reads `RAILPACK_NODE_VERSION`, `engines.node`, `.nvmrc` or `.node-version`; all say 22 since A1.
 - Fix the root `packageManager` (`pnpm@9.0.0`, while the lockfile is built with pnpm 9.15).
 - Source: <https://railpack.com/languages/node>.
 

@@ -16,8 +16,15 @@ services:
     ports:
       - '127.0.0.1:5000:5000'
     mem_limit: 2g
+    # The health check script (audit F19), mounted read-only so the image stays as built.
+    volumes:
+      - ./healthcheck.sh:/usr/local/bin/routeiq-osrm-healthcheck:ro
+    # Healthy = the running server answers a real in-region query: /nearest for the Muscat depot
+    # returns HTTP 200 with "code":"Ok" within 4 s (healthcheck.sh). A hung server, one that lost
+    # its graph, or a wrong map fails; `docker ps` then shows the container unhealthy.
     healthcheck:
-      test: ['CMD-SHELL', 'osrm-routed --version >/dev/null 2>&1 || exit 1']
+      test: ['CMD', 'sh', '/usr/local/bin/routeiq-osrm-healthcheck']
       interval: 60s
       timeout: 5s
       retries: 3
+      start_period: 60s

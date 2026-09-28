@@ -2,7 +2,7 @@
  * Everything the dispatcher reviews for one plan version - used by the plan screen AND the
  * Excel export so both always show identical numbers.
  */
-import { prisma } from '../db';
+import { Prisma } from '@prisma/client';
 import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
 import { aggregateSkus, type Reconciliation } from './reconcile';
@@ -30,6 +30,8 @@ import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
+import { stuckPlanState, type StuckState } from './stuck-plan';
+import { isOptimizing } from '../jobs/optimize-job';
 
 export interface DetailStop {
   sequence: number;
@@ -260,6 +262,11 @@ export interface PlanDetail {
    * screen (carriedLoadTitle), also the standalone plan version page, like the 409 ORDERS_CARRIED.
    */
   today?: string;
+  /**
+   * Audit F09: the version is shown as optimizing but its optimization has ended or was lost (a
+   * stuck plan): what the screen says, and whether a supervisor may reset it now. null = not stuck.
+   */
+  stuck?: StuckState | null;
 }
 
 /** PR9: orders brought forward, in one line: how many, their cases and the days (first due, or went to). */
@@ -276,14 +283,47 @@ function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | n
   return { window: describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null };
 }
 
-/** `clock.now`: the moment the company's today is read for (PlanDetail.today); the real clock by default. */
+/** How long the consistent read may wait for a connection and run (it takes no locks). */
+export const PLAN_DETAIL_TX = { maxWait: 5_000, timeout: 20_000 } as const;
+
+/**
+ * `clock.now`: the moment the company's today is read for (PlanDetail.today); the real clock by default.
+ *
+ * Audit F21: every row of the answer comes from ONE database snapshot - a REPEATABLE READ
+ * transaction on the tenant-scoped client. Before, the plan row (chosen option, summary,
+ * reconciliation) and the loads were separate reads, so "Use instead" committing in between gave
+ * a screen or an Excel file with option A's summary and option B's loads, reconciliation still
+ * "ok". The transaction only reads (MVCC: it never blocks a writer and is never blocked) and is
+ * kept short: nothing slow (road shapes, rendering the workbook or PDF) runs inside it; the export
+ * routes render after this returns.
+ *
+ * Second review of audit PR4: whether this web process runs the plan's optimization (the in-flight
+ * map, for PlanDetail.stuck) is asked BEFORE the snapshot starts, not at the end of the read. A job
+ * that saved its plan and left the map while the read ran is still OPTIMIZING / RUNNING in the
+ * snapshot; asked at the end, it looked "lost", and the screen showed "the server restarted" and
+ * Reset stuck plan for one reload. Asked first: a job in the map then is either still active in
+ * the snapshot (really optimizing) or already ended there (plan READY or FAILED, never stuck); a
+ * job started after the question is under 2 minutes old, so never "lost" (JOB_LOST_AFTER_MS).
+ */
 export async function getPlanDetail(tenantId: string, runId: string, clock: { now?: Date } = {}): Promise<PlanDetail | null> {
   const db = tenantDb(tenantId);
+  const liveAtStart = isOptimizing(runId);
+  return db.$transaction((tx) => readPlanDetail(tx as unknown as DetailDb, tenantId, runId, clock, liveAtStart), {
+    isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead,
+    ...PLAN_DETAIL_TX,
+  });
+}
+
+/** The tenant-scoped transaction client getPlanDetail reads through (typed as a plain transaction client). */
+type DetailDb = Prisma.TransactionClient;
+
+/** `liveAtStart`: this web process was running the plan's optimization when the read began (getPlanDetail). */
+async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clock: { now?: Date }, liveAtStart: boolean): Promise<PlanDetail | null> {
   const run = await db.runPlan.findUnique({ where: { id: runId }, include: { depot: true } });
   if (!run) return null;
   const cfg = await db.tenantConfig.findUnique({ where: { tenantId } });
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
-  const scenarios = await prisma.scenarioResult.findMany({ where: { runId }, orderBy: { createdAt: 'asc' }, include: { unservedOrders: true } });
+  const scenarios = await db.scenarioResult.findMany({ where: { runId }, orderBy: { createdAt: 'asc' }, include: { unservedOrders: true } });
   const chosen = scenarios.find((s) => s.id === run.chosenScenarioId) ?? null;
   // Plans from the previous optimizer (May 2026) stored another shape: shown without dispatch details.
   const chosenRaw = chosen?.detailsJson;
@@ -455,7 +495,7 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
   let feasibility: PlanFeasibility | null = null;
   if (chosenDetails) {
     const needLegacy = loads.some((l) => l.carriedFromLoadId === null && !readTruckSnapshot(l.truckSnapshotJson));
-    const legacy = needLegacy ? await legacyPlanFacts(prisma, tenantId, run.currentJobId) : null;
+    const legacy = needLegacy ? await legacyPlanFacts(db, tenantId, run.currentJobId) : null;
     feasibility = checkPlanFeasibility(feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy));
     for (const dl of detailLoads) {
       const t = feasibility.trucks[dl.truckId];
@@ -474,7 +514,7 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
   for (const [p, label] of splitPartLabels(portionStops)) p.stop.split = { ...label, restUnserved: restUnserved.has(p.customerId) };
 
   const unservedOrders = unservedRows.length
-    ? await prisma.order.findMany({
+    ? await db.order.findMany({
         where: { tenantId, id: { in: unservedRows.map((u) => u.orderId) } },
         include: { customer: true, lines: { select: { id: true, cases: true, weightKg: true, salesOrderNo: true } }, carriedTo: { select: { deliveryDate: true, totalCases: true } } },
       })
@@ -518,7 +558,7 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
     : null;
   const planOrderIds = [...new Set([...inPlanOrders.keys(), ...(chosenDetails ? [...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds] : [])])];
   const wentOut = planOrderIds.length
-    ? await prisma.order.findMany({
+    ? await db.order.findMany({
         where: { tenantId, id: { in: planOrderIds }, carriedToOrderId: { not: null } },
         select: { id: true, carriedTo: { select: { deliveryDate: true, totalCases: true } } },
       })
@@ -537,12 +577,13 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
     select: { id: true, version: true, status: true, supersededAt: true, reason: true, reasonNote: true, createdAt: true, changeSummaryJson: true },
   });
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
+  const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, liveAtStart, clock.now ?? new Date()) : null;
   const live = !isSupersededRun(run);
   const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
   let pendingOrders = 0;
   if (live && chosenDetails) {
     const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
-    pendingOrders = await prisma.order.count({ where: { ...(await ordersInScopeWhere(tenantId, run.depotId, run.runDate)), id: { notIn: inPlan } } });
+    pendingOrders = await db.order.count({ where: { ...(await ordersInScopeWhere(tenantId, run.depotId, run.runDate, db)), id: { notIn: inPlan } } });
   }
   // The plan options (PR7). Each is counted as the whole day with it: the loads it was planned
   // around (locked, loading, dispatched when it was optimized - the same for every option of the
@@ -675,7 +716,24 @@ export async function getPlanDetail(tenantId: string, runId: string, clock: { no
     carriedIn,
     carriedOut,
     today: todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
+    stuck,
   };
+}
+
+/**
+ * Audit F09: is this OPTIMIZING version stuck (its current job ended, missing or lost)? `live`: the
+ * in-flight map as it was before the snapshot began (getPlanDetail), never asked during the read.
+ */
+async function stuckOf(
+  db: DetailDb,
+  run: { id: string; status: string; currentJobId: string | null },
+  latest: { id: string; status: string; createdAt: Date; startedAt: Date | null } | null,
+  live: boolean,
+  now: Date,
+): Promise<StuckState | null> {
+  const current = !run.currentJobId ? null : latest?.id === run.currentJobId ? latest : await db.runJob.findFirst({ where: { id: run.currentJobId, runId: run.id } });
+  const otherActive = (await db.runJob.count({ where: { runId: run.id, status: { in: ['QUEUED', 'RUNNING'] } } })) > 0;
+  return stuckPlanState(run, current, otherActive, live, now);
 }
 
 /**

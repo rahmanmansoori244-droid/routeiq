@@ -20,6 +20,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as XLSX from 'xlsx';
 import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
+import { MAX_SHOWN_FORMAT, parseUpload } from '@/lib/csv';
 
 interface Row { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null; locationVerified: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean; geocodeConfidence?: string | null; locationSource?: string | null }
 const S = vi.hoisted(() => ({
@@ -309,6 +310,68 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
       [23.58591, 58.40591, 'HIGH'],
       [23.585912, 58.405912, 'HIGH'],
     ]);
+  });
+});
+
+describe('the decimals a lat / lng cell shows, with A1 merged (SheetJS reads with cellText: false)', () => {
+  it('a CSV sent as Excel (Chrome and Edge on a PC with Excel send a .csv as application/vnd.ms-excel) keeps the decimals in the file', async () => {
+    const r = await importFile(
+      new File(['code,name,priority,lat,lng\nX1,Saved by Excel,3,23.5850,58.4059\nX2,Three decimals,3,23.585,58.4059\n'], 'customers.csv', { type: 'application/vnd.ms-excel' }),
+    );
+    expect(r.status).toBe(200);
+    // SheetJS reads this file with its CSV reader. Without the cell's own text (A1 reads with
+    // cellText: false) X1 would be the number 23.585: "Fewer than 4 decimals", no location.
+    expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence])).toEqual([
+      ['X1', 23.585, 58.4059, 'HIGH'],
+      ['X2', null, null, 'MISSING'],
+    ]);
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 3, code: 'X2', branchCode: null, reason: 'Fewer than 4 decimals.', kept: null }]);
+  });
+
+  it(`only the lat and lng cells are formatted, and only with a format of at most ${MAX_SHOWN_FORMAT} characters`, async () => {
+    const at64 = `0.0000${'""'.repeat(29)}`; // shows 23.5850
+    const at66 = `0.0000${'""'.repeat(30)}`; // shows 23.5850 too, but is longer than the cap
+    expect([at64.length, at66.length]).toEqual([MAX_SHOWN_FORMAT, MAX_SHOWN_FORMAT + 2]);
+    const format = vi.spyOn(XLSX.SSF, 'format');
+    try {
+      const r = await importFile(
+        xlsx(
+          [
+            ['X1', 'Format of 64 characters', 3, 23.585, 58.4059],
+            ['X2', 'Format of 66 characters', 3, 23.585, 58.4059],
+          ],
+          { C2: '0.00', D2: at64, C3: '0.00', D3: at66, E3: at66 },
+        ),
+      );
+      expect(r.status).toBe(200);
+      // One cell formatted: D2. Not the priority cells (C2, C3), not E2 (General), not D3 or E3.
+      expect(format.mock.calls.map((c) => c[0])).toEqual([at64]);
+      expect(S.creates.map((c) => [c.code, c.priority, c.lat, c.geocodeConfidence])).toEqual([
+        ['X1', 3, 23.585, 'HIGH'],
+        ['X2', 3, null, 'MISSING'],
+      ]);
+    } finally {
+      format.mockRestore();
+    }
+  });
+
+  it('every other cell reads exactly as without the lat / lng columns: a date format on another column is not applied', async () => {
+    const ws = XLSX.utils.aoa_to_sheet([
+      ['code', 'since', 'lat', 'lng'],
+      ['X1', 45000, 23.585, 58.4059],
+    ]);
+    ws.B2!.z = 'yyyy-mm-dd';
+    ws.C2!.z = '0.0000';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+    const file = new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer], 'customers.xlsx', {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const withDecimals = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
+    // The cells keep their number formats for this read (cellNF): a "since" read as a date here
+    // would be a date string, not the Excel serial the rows always hold.
+    expect(withDecimals.rows).toEqual([{ code: 'X1', since: '45000', lat: '23.5850', lng: '58.4059' }]);
+    expect((await parseUpload(file)).rows).toEqual([{ code: 'X1', since: '45000', lat: '23.585', lng: '58.4059' }]);
   });
 });
 
