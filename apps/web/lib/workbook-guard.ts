@@ -890,10 +890,8 @@ function sheetReads(entries: ZipEntry[], onRead: (i: number) => void, maxSheets:
   read(ctPart);
   const ct = parseContentTypes(text(ctPart));
   let workbook = ct.get('workbooks')?.[0];
-  if (!ct.get('workbooks')?.length) {
-    const i = find('xl/workbook.xml');
-    if (i !== undefined && i >= 0 && entries[i]!.size > 0) workbook = 'xl/workbook.xml';
-  }
+  // SheetJS tests the part's text (getzipdata), not its size: a byte-order mark alone is no text.
+  if (!ct.get('workbooks')?.length && text(find('xl/workbook.xml'))) workbook = 'xl/workbook.xml';
   if (typeof workbook !== 'string') return none; // SheetJS: "Could not find workbook", or an error
   const wbext = workbook.slice(-3) === 'bin' ? 'bin' : 'xml';
   const first = (kind: string) => ct.get(kind)?.[0];
@@ -931,8 +929,12 @@ function sheetReads(entries: ZipEntry[], onRead: (i: number) => void, maxSheets:
   readFirst('metadata');
   readFirst('people');
   const targets = sheetTargets(wbRels, sheets);
-  const numbers = find('xl/worksheets/sheet.xml');
-  const nmode = numbers !== undefined && numbers >= 0 && entries[numbers]!.size > 0 ? 1 : 0;
+  // Its "Numbers iOS" numbering (sheet.xml, sheet1.xml, ...) for sheets it finds by number, taken
+  // when xl/worksheets/sheet.xml holds text as SheetJS reads it (getzipdata). Its size is not the
+  // test: a part of only a UTF-16 byte-order mark (FF FE) has a size but no text, so SheetJS reads
+  // sheet1.xml ... sheetN.xml, and a replay that took sheet.xml would never count the last sheet's
+  // comments (a 3.5 KB file of 20 x 5,000 comments passed and blocked the app for 10-22 s).
+  const nmode = text(find('xl/worksheets/sheet.xml')) ? 1 : 0;
 
   const sheetParts = new Set<number>();
   for (let i = 0; i < sheets.length; i++) {

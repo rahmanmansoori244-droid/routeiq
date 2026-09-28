@@ -23,10 +23,13 @@
  * as CSV (and semicolon "ID" CSVs wrongly refused), a long number format on many cells, metadata
  * entries, a threaded-comment person list, self-closing typed cells.
  *
- * A1 v4 (the last blocks): a part that SheetJS reads more than once while the checks counted it
- * once - one worksheet part named by several sheets, a comments part or a drawing named again and
- * again, an external link listed many times - and chart sheets, whose points SheetJS turns into
- * cells past every cap.
+ * A1 v4: a part that SheetJS reads more than once while the checks counted it once - one
+ * worksheet part named by several sheets, a comments part or a drawing named again and again, an
+ * external link listed many times - and chart sheets, whose points SheetJS turns into cells past
+ * every cap.
+ *
+ * A1 v5 (the last block): sheets SheetJS finds by number are counted on the parts it numbers them
+ * by (a byte-order mark alone as xl/worksheets/sheet.xml made the checks count another part).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -958,5 +961,104 @@ describe("A1 v4: a workbook's sheets must be worksheets", () => {
       ...chartSheetParts(3).filter((p) => !p.name.startsWith('xl/chartsheets/')),
     ]);
     expect(await parseUpload(xlsxFile(bytes))).toMatchObject({ rows: [{ code: 'C1', cases: '3' }], warnings: [] });
+  });
+});
+
+describe('A1 v5: a sheet SheetJS finds by its number is counted on the part SheetJS reads', () => {
+  const sheet = rawSheet(row(1, ['A', 'code'], ['B', 'cases']) + row(2, ['A', 'C1'], ['B', 3]));
+  const comments = (n: number) =>
+    `This workbook has ${n.toLocaleString('en-US')} comments or more; at most ${MAX_COMMENTS.toLocaleString('en-US')} can be read. Delete the comments (in Excel: Review, Delete), save it and upload it again.`;
+  /** `n` spellings of "../comments1.xml" that differ only in capitals: one part for SheetJS. */
+  const spellings = (n: number) =>
+    Array.from({ length: n }, (_, i) => `../${[...'comments1.xml'].map((c, b) => (b < 8 && i & (1 << b) ? c.toUpperCase() : c)).join('')}`);
+  /**
+   * `sheets` sheets that the workbook's relationships do not name (it has none), so SheetJS finds
+   * each one's part by its number: xl/worksheets/sheet1.xml, sheet2.xml, ... or, when
+   * xl/worksheets/sheet.xml holds text as SheetJS reads it (its "Numbers iOS" numbering),
+   * sheet.xml, sheet1.xml, ... The relationships of the last part, sheet{sheets}.xml, name
+   * xl/comments1.xml (`n` comments) once for each of `targets`. `numbers` is the sheet.xml part.
+   */
+  const byNumber = (numbers: Buffer | null, sheets: number, targets: string[], n: number) =>
+    handWorkbook(
+      Array.from({ length: sheets }, (_, i) => ({ name: `S${i + 1}`, rid: `rId${i + 1}` })),
+      [],
+      [
+        ...(numbers ? [{ name: 'xl/worksheets/sheet.xml', data: numbers }] : []),
+        ...Array.from({ length: sheets }, (_, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: sheet })),
+        {
+          name: `xl/worksheets/_rels/sheet${sheets}.xml.rels`,
+          data: relsXml(targets.map((target, i) => ({ id: `rId${i + 1}`, type: RELS.comments, target }))),
+        },
+        { name: 'xl/comments1.xml', data: commentsXml(n) },
+      ],
+    );
+  /** sheet.xml parts whose text, as SheetJS reads it (a UTF-16 byte-order mark is decoded), is empty. */
+  const noText: [string, Buffer][] = [
+    ['a UTF-16 byte-order mark alone (FF FE)', Buffer.from([0xff, 0xfe])],
+    ['a big-endian mark as SheetJS tests it (00 FE FF)', Buffer.from([0x00, 0xfe, 0xff])],
+    ['a mark and half a character (FF FE 41)', Buffer.from([0xff, 0xfe, 0x41])],
+  ];
+
+  it('SheetJS numbers from xl/worksheets/sheet.xml only when it holds text as SheetJS reads it; the guard counts the part SheetJS reads', () => {
+    const variants: [string, Buffer][] = [
+      ['empty', Buffer.alloc(0)],
+      ...noText,
+      ['a mark and one character (FF FE 00 00)', Buffer.from([0xff, 0xfe, 0, 0])],
+      ['a space', Buffer.from(' ')],
+      ['a worksheet', sheet],
+    ];
+    for (const sheets of [1, 2]) {
+      const seen = variants.map(([what, numbers]) => {
+        const bytes = byNumber(numbers, sheets, spellings(3), 2);
+        // SheetJS read the last numbered part (and its comments part three times) when the last
+        // sheet's B2 has the 6 comments.
+        const b2 = XLSX.read(bytes, { type: 'buffer' }).Sheets[`S${sheets}`]?.B2 as XLSX.CellObject | undefined;
+        const g = checkWorkbookZip(bytes, LIMITS);
+        return [sheets, what, b2?.c?.length === 6, g.readBytes > g.unpackedBytes];
+      });
+      // SheetJS's own numbering, and the guard counting the comments again exactly when SheetJS read them.
+      expect(seen).toEqual(variants.map(([what], i) => [sheets, what, i < 4, i < 4]));
+    }
+  });
+
+  it('a 3.5 KB file with a byte-order mark as xl/worksheets/sheet.xml is refused for its comments in milliseconds, as without that part', async () => {
+    // Measured before the fix: the FF FE part made the guard count the comments of sheet.xml's
+    // relationships (there are none) instead of sheet1.xml's, so 20 reads of 5,000 comments passed
+    // and SheetJS blocked the app for 10-22 s putting 100,000 comments on one cell.
+    for (const [what, numbers] of [['no sheet.xml part', null] as [string, null], ...noText]) {
+      for (const sheets of [1, 2]) {
+        const bytes = byNumber(numbers, sheets, spellings(20), 5_000);
+        expect(bytes.length).toBeLessThan(4_500);
+        readSpy.mockClear();
+        const t0 = performance.now();
+        expect([what, sheets, await refusal(parseUpload(xlsxFile(bytes)))]).toEqual([what, sheets, comments(15_000)]);
+        expect(performance.now() - t0).toBeLessThan(500);
+        expect(readSpy).not.toHaveBeenCalled();
+      }
+    }
+    // Within the caps the numbered sheets are read as before.
+    expect((await parseUpload(xlsxFile(byNumber(noText[0]![1], 1, spellings(1), 2)))).rows).toEqual([{ code: 'C1', cases: '3' }]);
+  });
+
+  it('xl/workbook.xml is taken for the workbook part only when it holds text as SheetJS reads it', () => {
+    // [Content_Types].xml names no workbook part and lists an external link twice; SheetJS then
+    // looks for xl/workbook.xml, finds only a byte-order mark and stops before reading any link.
+    const LINK = 'application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml';
+    const bytes = zip([
+      {
+        name: '[Content_Types].xml',
+        data: Buffer.from(
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+            `<Override PartName="/xl/externalLinks/externalLink1.xml" ContentType="${LINK}"/>`.repeat(2) +
+            '</Types>',
+        ),
+      },
+      { name: 'xl/workbook.xml', data: Buffer.from([0xff, 0xfe]) },
+      { name: 'xl/externalLinks/externalLink1.xml', data: Buffer.from('<externalLink/>') },
+      { name: 'xl/externalLinks/_rels/externalLink1.xml.rels', data: relsXml([]) },
+    ]);
+    expect(() => XLSX.read(bytes, { type: 'buffer' })).toThrow('Could not find workbook');
+    const g = checkWorkbookZip(bytes, LIMITS);
+    expect([g.sheetNames, g.readBytes]).toEqual([[], g.unpackedBytes]);
   });
 });
