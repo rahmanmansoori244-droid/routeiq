@@ -105,8 +105,17 @@ export const PUT = (req: Request, { params }: Params) =>
       }
       // The change and its audit row commit together (A5 third review): LOCK, LOADING and DISPATCH
       // read the row's "before" point to refuse a stop still planned at a point replaced while it
-      // was not usable (plan-service locationGate).
+      // was not usable (plan-service locationGate). That point is the customer's as it is when the
+      // change is written, the customer locked meanwhile (A5 fifth review: the row said what the
+      // route had read at the start, so a point a customer file marked LOW in between was recorded
+      // as usable).
       const after = await prisma.$transaction(async (tx) => {
+        await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${params.id} AND "tenantId" = ${user.tenantId} FOR UPDATE`;
+        const replaced =
+          (await tx.customer.findFirst({
+            where: { id: params.id, tenantId: user.tenantId },
+            select: { lat: true, lng: true, locationSource: true, locationVerified: true, geocodeConfidence: true },
+          })) ?? before;
         const saved = await tx.customer.update({
           where: { id: params.id, tenantId: user.tenantId },
           data: {
@@ -129,7 +138,7 @@ export const PUT = (req: Request, { params }: Params) =>
             action: 'CUSTOMER_LOCATION_SET',
             entity: 'Customer',
             entityId: saved.id,
-            beforeJson: { lat: before.lat, lng: before.lng, source: before.locationSource, verified: before.locationVerified, confidence: before.geocodeConfidence } as never,
+            beforeJson: { lat: replaced.lat, lng: replaced.lng, source: replaced.locationSource, verified: replaced.locationVerified, confidence: replaced.geocodeConfidence } as never,
             afterJson: { lat, lng, source: saved.locationSource, input: saved.locationInput, confidence: saved.geocodeConfidence, check } as never,
             ip,
           },

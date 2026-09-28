@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { guardSpreadsheet, safeDecodeRange, sameSheetList, sheetjsReader, WorkbookRefusedError } from './workbook-guard';
+import { guardSpreadsheet, idFileFormatsCells, safeDecodeRange, sameSheetList, sheetjsReader, WorkbookRefusedError } from './workbook-guard';
 
 /**
  * Upload limits (owner decision 16, audit E2): 10 MB per file and 50,000 rows on the sheet that is
@@ -96,14 +96,15 @@ export interface ParseOptions {
   /**
    * Excel: columns (header names, any case) whose number cells keep the decimals the cell shows. A
    * number holds no trailing zeros (23.5850 is the number 23.585), but a cell formatted to show 4
-   * decimals shows "23.5850": for these columns a number format that shows more decimals than the
-   * number has adds ONE zero (A5 fourth review: 23.585 shown as 23.5850 counts 4 decimals, but 23.58
-   * shown as 23.5800 counts 3, not 4 - the padding is not precision). A cell showing fewer decimals
-   * than the number has keeps the number's own. Used for the customer import's lat / lng, whose
-   * decimals decide whether a location is exact (audit PR A5). CSV text sent as Excel: the text in
-   * the file, as a CSV upload reads it. Only the sheet that is read, and in it the one column per
-   * name the rows keep, are looked at; each number format is tried once per upload, at most
-   * MAX_SHOWN_FORMATS of them (see shownSources and ShownFormats).
+   * decimals shows "23.5850": for these columns a cell whose number format shows more decimals than
+   * the number has reads as the text it shows ("23.5850"; 23.58 in the same format "23.5800"). A
+   * cell showing fewer decimals than the number has keeps the number's own. Used for the customer
+   * import's lat / lng, whose decimals decide whether a location is exact (audit PR A5); the import
+   * counts one zero at the end at most, whatever the file (A5 fifth review, `countedText` in
+   * lib/dispatch/import-location: 23.5800 is 3 decimals - the padding is not precision). CSV text,
+   * also a CSV sent as Excel: the text in the file, as it is written. Only the sheet that is read,
+   * and in it the one column per name the rows keep, are looked at; each number format is tried
+   * once per upload, at most MAX_SHOWN_FORMATS of them (see shownSources and ShownFormats).
    */
   decimalTextColumns?: string[];
 }
@@ -338,8 +339,8 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
 /**
  * A number cell as the text it shows when that text is the same number with more decimals (trailing
  * zeros: 23.585 shown as "23.5850"); else the number itself (a cell showing fewer decimals than the
- * number has, a date, text). For a number format the text comes from ShownFormats (one zero more at
- * most); for CSV sent as Excel it is the text in the file.
+ * number has, a date, text). For a number format the text comes from ShownFormats; for CSV sent as
+ * Excel it is the text in the file.
  */
 export function withShownDecimals(value: unknown, shown: unknown): unknown {
   if (typeof value !== 'number' || typeof shown !== 'string') return value;
@@ -371,19 +372,20 @@ export const MAX_SHOWN_FORMATS = 20;
  * about 50 microseconds a cell, so 50,000 rows of lat / lng on ten sheets blocked the app for 40 s).
  * A format is tried on the number 1 (-1 for a negative number): when it shows "1.0000" (a sign, 1, a
  * point and zeros, padding trimmed) it shows 4 decimals, and a number with fewer is shown with
- * trailing zeros. Of those zeros ONE counts: 23.585 in a cell formatted 0.0000 reads "23.5850" (the
- * number cannot tell 23.5850 from 23.585, and 1 in 10 real 4-decimal coordinates ends in 0), but
- * 23.58 reads "23.580", never "23.5800" - padding is not precision, and a rough point formatted to
- * show 4 decimals stays not exact. Anything else (a date, a percentage, text around the number, a
- * scale, a condition, a format SheetJS cannot apply) adds nothing: the number's own decimals count.
- * At most MAX_SHOWN_FORMATS formats are tried in one upload.
+ * trailing zeros: 23.585 in a cell formatted 0.0000 reads "23.5850" (the number cannot tell 23.5850
+ * from 23.585, and 1 in 10 real 4-decimal coordinates ends in 0), 23.58 "23.5800". The customer
+ * import counts one of those zeros at most (A5 fifth review: this rule was here, for number formats
+ * only, and a CSV saved from the same cells read "23.5800" as 4 decimals), so a rough point formatted
+ * to show 4 decimals stays not exact in any file. Anything else (a date, a percentage, text around
+ * the number, a scale, a condition, a format SheetJS cannot apply) adds nothing: the number's own
+ * decimals count. At most MAX_SHOWN_FORMATS formats are tried in one upload.
  */
 class ShownFormats {
   private readonly positive = new Map<string, number | null>();
   private readonly negative = new Map<string, number | null>();
   private tried = 0;
 
-  /** The text a number cell in format `z` counts as (see above); undefined when it adds nothing. */
+  /** The text a number cell in format `z` shows (see above); undefined when it adds nothing. */
   shown(z: string, value: number): string | undefined {
     if (!Number.isFinite(value) || value === 0) return undefined;
     const cache = value < 0 ? this.negative : this.positive;
@@ -400,7 +402,7 @@ class ShownFormats {
     const own = String(value);
     if (/e/i.test(own)) return undefined;
     const places = decimalPlaces(own);
-    return zeros > places ? `${own}${places ? '' : '.'}0` : undefined;
+    return zeros > places ? `${own}${places ? '' : '.'}${'0'.repeat(zeros - places)}` : undefined;
   }
 }
 
@@ -426,18 +428,17 @@ function zerosShown(z: string, probe: 1 | -1): number | null {
  * number format (a reference; cellText stays false and nothing is formatted while the file is
  * read). Text read as CSV: cellText, each cell keeps its own text, which SheetJS's CSV reader has
  * anyway and formats nothing to make (Chrome and Edge send a .csv as application/vnd.ms-excel on a
- * PC with Excel installed, so a CSV that Excel saved with "23.5850" comes this way). Not for text
- * whose first record SheetJS's SYLK reader reads as "ID" before it falls back to CSV: that reader
- * formats cells as it goes, however far it gets; such a file counts the numbers' own decimals.
+ * PC with Excel installed, so a CSV that Excel saved with "23.5850" comes this way). A file that
+ * begins with "ID" goes through SheetJS's SYLK reader first, which formats a value when a format
+ * record came before it (and throws where a format cannot be applied); such a file - never a CSV -
+ * counts the numbers' own decimals (idFileFormatsCells). A CSV whose first header is "ID" is read
+ * with its text like any other (A5 fifth review: every "ID;" file was, so a semicolon CSV lost its
+ * trailing zeros only when the browser sent it as Excel).
  */
 function shownTextRead(buf: Buffer): { cellNF: true } | { cellText: true } | Record<string, never> {
   const reader = sheetjsReader(buf);
   if (reader !== 'text' && reader !== 'text-ws' && reader !== 'text-utf16') return { cellNF: true };
-  if (buf[0] === 0x49 && buf[1] === 0x44) {
-    // sylk_to_aoa_str: the first line, trimmed, up to its first ";" is the record type.
-    const rest = buf.toString('latin1', 2, Math.min(buf.length, 4_096)).split(/[\r\n]/)[0]!;
-    if (rest.trim() === '' || rest[0] === ';' || rest[0] === '\x1b') return {};
-  }
+  if (buf[0] === 0x49 && buf[1] === 0x44 && idFileFormatsCells(buf)) return {};
   return { cellText: true };
 }
 

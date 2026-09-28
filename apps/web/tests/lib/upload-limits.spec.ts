@@ -1062,3 +1062,43 @@ describe('A1 v5: a sheet SheetJS finds by its number is counted on the part Shee
     expect([g.sheetNames, g.readBytes]).toEqual([[], g.unpackedBytes]);
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// A5 fifth review: the customer import reads the decimals written in a CSV sent as Excel (cellText),
+// and did not for any file whose first record is "ID", so a semicolon CSV with a leading "ID" column
+// lost its trailing zeros only when the browser sent it as Excel. SheetJS's SYLK reader, which such a
+// file goes through first, formats a value with cellText only after a format record: a CSV never
+// has one, and a file that does is still read without cellText (the guard's replay says which).
+// ---------------------------------------------------------------------------------------------
+
+describe('A5 fifth review: a file that begins with "ID", read for the customer import (lat / lng decimals)', () => {
+  const decimals = { decimalTextColumns: ['lat', 'lng'] };
+  const cellTextReads = () => readSpy.mock.calls.filter(([, o]) => (o as { cellText?: boolean }).cellText === true).length;
+
+  it('a CSV whose first header is "ID" is read with its cells\' own text, like any other CSV sent as Excel', async () => {
+    const parsed = await parseUpload(asExcel('ID;code;lat;lng\n1;C1;23.5850;58.4150\n', 'customers.csv'), decimals);
+    expect(parsed.rows).toEqual([{ id: '1', code: 'C1', lat: '23.5850', lng: '58.4150' }]);
+    expect(cellTextReads()).toBe(1);
+  });
+
+  it('a file whose SYLK reader formats a value before it reads the file as CSV is read without the cells\' text, as without the decimal columns', async () => {
+    // With cellText, SheetJS formats K23.585 with the format "[h" and throws a string, which its
+    // read_wb_ID does not catch: "Cannot read properties of undefined (reading 'indexOf')".
+    const file = 'ID;PWXL\nP;P[h\nF;P0;X1\nC;Y1;X1;K23.585\nnot;sylk\n';
+    expect(() => XLSX.read(Buffer.from(file), { type: 'buffer', cellText: true })).toThrow(/indexOf/);
+    readSpy.mockClear();
+    const withDecimals = await parseUpload(asExcel(file, 'customers.csv'), decimals);
+    expect(cellTextReads()).toBe(0);
+    expect(withDecimals.rows).toEqual((await parseUpload(asExcel(file, 'customers.csv'))).rows);
+  });
+
+  it('the most formatting such a file can ask for within the guard is not done: read in milliseconds, no cell formatted', async () => {
+    // As many formatted values as the guard's SYLK budget allows (each costs its format twice).
+    const body = `ID\nP;P0.0000\n${'F;P0;X1\nC;Y1;X1;K1\n'.repeat(7_000)}not;sylk\n`;
+    const t0 = performance.now();
+    const parsed = await parseUpload(asExcel(body, 'customers.csv'), decimals);
+    expect(performance.now() - t0).toBeLessThan(2_000);
+    expect(cellTextReads()).toBe(0);
+    expect(parsed.rows.length).toBeGreaterThan(0);
+  });
+});

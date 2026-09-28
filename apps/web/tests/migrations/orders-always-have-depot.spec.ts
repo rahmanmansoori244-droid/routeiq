@@ -467,6 +467,22 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     expect(historyCol).toEqual([{ data_type: 'boolean', is_nullable: 'NO', column_default: 'false' }]);
   });
 
+  it('the database refuses a history-only depot that is active, so the previous version cannot switch one on while the deploy goes live (A5 fifth review)', async () => {
+    // The previous version keeps serving after this migration (Railway's pre-deploy command), and its
+    // Depots screen saves "active" with no history-only check. Switched on, the new app offered the
+    // depot for late orders and new plans, and had no screen to switch it off. 23514 = check_violation.
+    await expect(x(`UPDATE "Depot" SET "active" = true WHERE "tenantId" = 'TD' AND "historyOnly"`)).rejects.toThrow(/Code: `23514`/);
+    await expect(
+      x(`INSERT INTO "Depot" ("id", "tenantId", "code", "name", "lat", "lng", "active", "historyOnly") VALUES ('TF_H', 'TF', 'H', 'H', 23.5, 58.4, true, true)`),
+    ).rejects.toThrow(/Code: `23514`/);
+    expect(await q(`SELECT count(*)::int AS n FROM "Depot" WHERE "historyOnly" AND "active"`)).toEqual([{ n: 0 }]);
+    // Anything else about it can still be edited, and any other depot switched on and off.
+    await x(`UPDATE "Depot" SET "name" = 'Old orders' WHERE "tenantId" = 'TD' AND "historyOnly"`);
+    await x(`UPDATE "Depot" SET "name" = 'No depot (kept for history)' WHERE "tenantId" = 'TD' AND "historyOnly"`);
+    await x(`UPDATE "Depot" SET "active" = NOT "active" WHERE "id" = 'TF_D1'`);
+    await x(`UPDATE "Depot" SET "active" = NOT "active" WHERE "id" = 'TF_D1'`);
+  });
+
   it('running the migration\'s SQL a second time changes nothing', async () => {
     const snapshot = async () => ({
       orders: await q(`SELECT "id", "depotId" FROM "Order" ORDER BY "id"`),

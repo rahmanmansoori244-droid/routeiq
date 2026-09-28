@@ -316,7 +316,8 @@ model Depot {
   /// Audit PR A5: a depot that only keeps the orders and order files that had no depot before the
   /// owner rule "every order has a depot" (migration 20260930120000_orders_always_have_depot, code
   /// NO-DEPOT). Always inactive: never offered in a picker, never planned, and the app refuses to
-  /// make it active or to put a truck or region on it.
+  /// make it active or to put a truck or region on it. The database refuses it too (CHECK
+  /// "Depot_historyOnly_not_active", in that migration; Prisma's schema has no CHECK constraints).
   historyOnly   Boolean       @default(false)
   trucks        Truck[]
   regions       Region[]

@@ -572,4 +572,34 @@ describe('5. a planned customer whose location stops being usable is never locke
     await updateLoad(tenantId, runId, la.id, { status: 'LOADING' }, planner(), everyRole);
     expect([await statusOf(lr.id), await statusOf(la.id)]).toEqual(['LOCKED', 'LOADING']);
   });
+
+  it('A5 fifth review: a flagged point confirmed by a hand pin a few metres off (a pin exactly on it is refused), then corrected by hand, is an ordinary correction; a pin far away still is not', async () => {
+    const day = isoPlus(22);
+    const b1 = await cust('B1', { lat: 23.5351, lng: 58.3151, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    const b2 = await cust('B2', { lat: 23.5151, lng: 58.2951, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    await orderFor(b1.id, day, 'SO-B1');
+    await orderFor(b2.id, day, 'SO-B2');
+    const runId = await planDay(day);
+    const l1 = await loadOf(runId, b1.id);
+    const l2 = await loadOf(runId, b2.id);
+    // A customer file points elsewhere (2 decimals): both saved points are marked LOW.
+    expect((await importCsv('code,name,priority,lat,lng\nB1,B1,3,23.55,58.33\nB2,B2,3,23.53,58.31\n')).body.data.locationsNotSaved).toMatchObject([
+      { code: 'B1', kept: 'SAVED_LOCATION_NEEDS_PIN' },
+      { code: 'B2', kept: 'SAVED_LOCATION_NEEDS_PIN' },
+    ]);
+    // A pin dropped exactly on B1's flagged point is not placed by hand: refused. The dispatcher drops
+    // it on the shop, about 6 m away; the gate counts that as the same place, and the load locks.
+    expect(await put(b1.id, { lat: 23.5351, lng: 58.3151, source: 'MAP_PIN' })).toMatchObject({ status: 422, body: { error: { code: 'PIN_REQUIRED' } } });
+    expect((await put(b1.id, { lat: 23.53515, lng: 58.3151, source: 'MAP_PIN' })).status).toBe(200);
+    await updateLoad(tenantId, runId, l1.id, { status: 'LOCKED' }, planner(), everyRole);
+    // Later an ordinary correction of that confirmed pin, about 1 km away: the load goes on (owner
+    // default: the planned stop stays, the sheets note the new pin). Before: 409 STOP_PIN_REPLACED,
+    // "its old point, which was not usable", and the locked load sent through unlock and RE-PLAN.
+    expect((await put(b1.id, { lat: 23.5441, lng: 58.3201, source: 'MAP_PIN' })).status).toBe(200);
+    await updateLoad(tenantId, runId, l1.id, { status: 'LOADING' }, planner(), everyRole);
+    expect(await statusOf(l1.id)).toBe('LOADING');
+    // Control: B2's flagged point replaced by a pin about 2 km away is still refused.
+    expect((await put(b2.id, { lat: 23.5301, lng: 58.3051, source: 'MAP_PIN' })).status).toBe(200);
+    await expect(updateLoad(tenantId, runId, l2.id, { status: 'LOCKED' }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customers: ['B2'] } });
+  });
 });

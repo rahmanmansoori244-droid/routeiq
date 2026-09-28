@@ -18,7 +18,9 @@
 --      it, so an isolation level or a limit set on the database or the role cannot make it fail
 --      either.
 --   1. "Depot"."historyOnly" (default false): a depot that only keeps old orders and files. It is
---      never active and never offered in a picker; the app refuses to make it active.
+--      never active and never offered in a picker; the app refuses to make it active, and so does
+--      the database (CHECK "Depot_historyOnly_not_active", A5 fifth review): the previous version
+--      keeps serving while the deploy goes live, and its Depots screen could switch it on.
 --   2. Gives every order and order file without a depot the best depot the data shows:
 --      a. an order: the depot of its order file;
 --      b. an order: the one depot of the plans that held it (its stops, its unserved rows, the
@@ -46,8 +48,9 @@
 --   UNION ALL
 --   SELECT "tenantId", 'order files', count(*) FROM "UploadBatch" WHERE "depotId" IS NULL GROUP BY 1;
 -- Rollback: ALTER TABLE "Order" ALTER COLUMN "depotId" DROP NOT NULL; and the same for
--- "UploadBatch". The filled-in depots, the history-only depots and the "historyOnly" column can
--- stay: old code ignores the column (but its Depots screen could switch a history-only depot on).
+-- "UploadBatch". The filled-in depots, the history-only depots, the "historyOnly" column and its
+-- CHECK can stay: old code ignores the column, and its Depots screen gets an error if someone
+-- switches a history-only depot on (the CHECK refuses it; nothing else changes).
 
 -- 0. Locks
 -- The very first statement: this transaction reads committed, whatever the database or the role
@@ -97,6 +100,11 @@ $$;
 
 -- 1. AlterTable
 ALTER TABLE "Depot" ADD COLUMN IF NOT EXISTS "historyOnly" BOOLEAN NOT NULL DEFAULT false;
+-- A history-only depot is never active, whichever version of the app writes it (A5 fifth review).
+-- Prisma's schema has no CHECK constraints; `prisma migrate diff` leaves this one alone. Dropped
+-- first so that a second run of this file adds it again instead of failing.
+ALTER TABLE "Depot" DROP CONSTRAINT IF EXISTS "Depot_historyOnly_not_active";
+ALTER TABLE "Depot" ADD CONSTRAINT "Depot_historyOnly_not_active" CHECK (NOT ("historyOnly" AND "active"));
 
 -- 2. Backfill. The counts go to a temporary table (dropped at the end) for the audit rows.
 CREATE TEMP TABLE IF NOT EXISTS "_depot_backfill" ("tenantId" TEXT NOT NULL, "step" TEXT NOT NULL, "n" INTEGER NOT NULL, "note" TEXT);

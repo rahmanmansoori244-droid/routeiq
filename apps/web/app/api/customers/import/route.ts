@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import type { Prisma } from '@prisma/client';
 import { auth } from '@/lib/auth';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
@@ -34,7 +35,9 @@ import { clientIp } from '@/lib/client-ip';
 // and never confirmed) is listed as not used, with its own warning (A5 second review). A location a
 // dispatcher verified is never changed (F05). An exact pair that replaces a saved point that was not
 // usable is recorded (CUSTOMER_LOCATION_SET, the point it replaced): a stop still planned at that
-// point is then refused at LOCK, LOADING and DISPATCH until a re-plan (A5 third review).
+// point is then refused at LOCK, LOADING and DISPATCH until a re-plan (A5 third review). The pair and
+// its row commit together, judged on the customer as it is when written (A5 fifth review). Rows that
+// keep a usable saved location are counted apart: nothing to do for them (A5 fifth review).
 
 interface ImportError {
   row: number;
@@ -265,12 +268,22 @@ export async function POST(req: Request) {
       locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason: `${reason} ${pointsElsewhereText(pair, saved)}`, kept: 'SAVED_LOCATION_NEEDS_PIN' });
     }
   }
-  if (locationsNotSaved.length) {
+  // A5 fifth review: only the rows whose customer has no usable location after the import are told to
+  // set it on the map; a customer that keeps a usable saved location (confirmed, or the file points at
+  // the same place) is planned and sent out as before, so its rows are counted apart.
+  const keptUsable = locationsNotSaved.filter((l) => l.kept === 'SAVED_LOCATION').length;
+  const needPin = locationsNotSaved.length - keptUsable;
+  if (needPin) {
     // A5 fourth review: the tense follows what happens (Validate only, or a file with errors, saves
     // nothing yet), like the warning below. The fix is never "format the cells to show 4 decimals":
     // a number holds no trailing zeros, and a cell of 23.58 shown as 23.5800 is not exact.
     warnings.push(
-      `${locationsNotSaved.length} location(s) in the file are not exact and ${dryRun || errors.length > 0 ? 'will not be' : 'were not'} saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.`,
+      `${needPin} location(s) in the file are not exact and ${dryRun || errors.length > 0 ? 'will not be' : 'were not'} saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.`,
+    );
+  }
+  if (keptUsable) {
+    warnings.push(
+      `${keptUsable} location(s) in the file are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do. To correct the file, type or paste each coordinate with all the decimals it really has (at least 4).`,
     );
   }
   // What happens to their orders is what the system enforces: not planned (planning leaves them
@@ -376,28 +389,62 @@ export async function POST(req: Request) {
         },
       });
       if (fileHasLoc) {
-        const written = await db.customer.updateMany({
-          where: { id: m.id, locationVerified: false },
-          data: { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' },
-        });
-        if (written.count === 0) keptVerified++;
-        else if (m.lat !== null && m.lng !== null && locationBlocksDelivery(m, area) && !samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat!, lng: v.lng! })) {
-          // A saved point that was not usable (an earlier file marked it LOW, or it is outside the
-          // area) is replaced by the file's exact pair: recorded like a pin set in ADD LOCATION, so a
-          // stop still planned at the old point is refused at LOCK, LOADING and DISPATCH until a
-          // re-plan gives it the new one (plan-service locationGate, A5 third review).
-          await audit({
-            tenantId: session.user.tenantId,
-            userId: session.user.id,
-            action: 'CUSTOMER_LOCATION_SET',
-            entity: 'Customer',
-            entityId: m.id,
-            beforeJson: { lat: m.lat, lng: m.lng, source: m.locationSource, verified: m.locationVerified, confidence: m.geocodeConfidence } as never,
-            afterJson: { lat: v.lat, lng: v.lng, source: 'IMPORT', confidence: geocodeConfidence, check: 'IMPORT', fileName: parsed.fileName } as never,
-            ip,
+        const data = { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const };
+        // A saved point that was not usable (an earlier file marked it LOW, or it is outside the area)
+        // replaced by the file's exact pair is recorded like a pin set in ADD LOCATION, so a stop
+        // still planned at the old point is refused at LOCK, LOADING and DISPATCH until a re-plan
+        // gives it the new one (plan-service locationGate, A5 third review).
+        const needsRow = (c: { lat: number | null; lng: number | null; locationVerified: boolean; geocodeConfidence: string | null }) =>
+          c.lat !== null && c.lng !== null && locationBlocksDelivery(c, area) && !samePoint({ lat: c.lat, lng: c.lng }, { lat: v.lat!, lng: v.lng! });
+        let outcome: 'KEPT_VERIFIED' | 'WRITTEN' | 'REPLACED' | null = null;
+        if (m.locationVerified) {
+          // Nothing un-confirms a location, so this one stays as it is (F05: checked on the row).
+          const written = await db.customer.updateMany({ where: { id: m.id, locationVerified: false }, data });
+          if (written.count === 0) outcome = 'KEPT_VERIFIED';
+        } else if (!needsRow(m)) {
+          // Most rows, in one statement: written only while the customer is still as the import read
+          // it (still not confirmed, at that point, with that confidence), so "no row needed" holds
+          // for the row as it is when written (A5 fifth review; before, a point another file marked
+          // LOW meanwhile was replaced with no row).
+          const written = await db.customer.updateMany({
+            where: { id: m.id, locationVerified: false, lat: m.lat, lng: m.lng, geocodeConfidence: m.geocodeConfidence },
+            data,
           });
-          replacedNotUsable++;
+          if (written.count === 1) outcome = 'WRITTEN';
         }
+        if (!outcome) {
+          // The customer changed since the import read it, or the change needs its row: lock the
+          // customer, judge it as it is, and write the pair and the row in one transaction (A5 fifth
+          // review; before, the row was written after the change, so a restart or a failed insert
+          // between them left the change without its row, and LOCK passed the stale stop).
+          const tenantId = session.user.tenantId;
+          outcome = await db.$transaction(async (tx) => {
+            await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${m.id} AND "tenantId" = ${tenantId} FOR UPDATE`;
+            const now = await tx.customer.findFirst({
+              where: { id: m.id },
+              select: { lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true },
+            });
+            const written = await tx.customer.updateMany({ where: { id: m.id, locationVerified: false }, data });
+            if (written.count === 0 || !now) return 'KEPT_VERIFIED' as const;
+            if (!needsRow(now)) return 'WRITTEN' as const;
+            await audit(
+              {
+                tenantId,
+                userId: session.user.id,
+                action: 'CUSTOMER_LOCATION_SET',
+                entity: 'Customer',
+                entityId: m.id,
+                beforeJson: { lat: now.lat, lng: now.lng, source: now.locationSource, verified: now.locationVerified, confidence: now.geocodeConfidence } as never,
+                afterJson: { lat: v.lat, lng: v.lng, source: 'IMPORT', confidence: geocodeConfidence, check: 'IMPORT', fileName: parsed.fileName } as never,
+                ip,
+              },
+              tx as unknown as Prisma.TransactionClient,
+            );
+            return 'REPLACED' as const;
+          });
+        }
+        if (outcome === 'KEPT_VERIFIED') keptVerified++;
+        else if (outcome === 'REPLACED') replacedNotUsable++;
       } else {
         // The file points elsewhere: the saved point is not used until a dispatcher drops the pin
         // (LOW blocks planning). Never a verified one, nor one changed since it was compared (F05).

@@ -8,6 +8,13 @@
  * is never stored as a usable location, and the import says why in its own words (the Read dialog's
  * warnings talk about a pin and a map the import screen does not have, A5 review).
  *
+ * Of the zeros at the end of a coordinate's decimals, one counts (`countedText`, A5 fifth review):
+ * 23.5850 is 4 decimals, 23.5800 is 3. A file cannot tell padding from precision - Excel writes a
+ * cell formatted to show 4 decimals into a CSV as it shows it (23.58 as "23.5800"), and a number
+ * format shows it so in the workbook (lib/csv) - and a rough pair is never made exact by its format
+ * (the owner's rule). The price: a real 4-decimal value ending in 00 (about 1 in 100 per axis) is
+ * not exact either; its pin is placed by hand, or the file gives more decimals.
+ *
  * A customer that already has a saved point, not confirmed by a dispatcher, keeps it only when the
  * file's pair points at the same place within the file's own precision (23.586 stands for 23.5855 to
  * 23.5865), or within 150 m. Otherwise the file contradicts it (the customer moved, or one of the two
@@ -35,6 +42,8 @@ export const IMPORT_REASON = {
   SWAPPED: 'Latitude and longitude look swapped.',
   OUTSIDE: 'Outside the delivery area.',
   FEW_DECIMALS: 'Fewer than 4 decimals.',
+  /** A coordinate written (or shown) with 4 decimals or more, fewer once only one zero at the end counts. */
+  FEW_DECIMALS_ZEROS: 'Fewer than 4 decimals (only one zero at the end counts).',
 } as const;
 
 /** A saved point this close to the file's point is the same place, whatever the decimals (GPS noise). */
@@ -42,9 +51,17 @@ export const SAME_PLACE_M = 150;
 
 const halfUnit = (text: string) => 0.5 * 10 ** -decimalPlaces(text);
 
+/** A coordinate as the import counts its decimals: of the zeros at the end, one ("23.5800" -> "23.580", "23.0000" -> "23.0"). */
+export function countedText(text: string): string {
+  const t = text.trim();
+  return /^([-+]?\d+\.\d*?0)0+$/.exec(t)?.[1] ?? t;
+}
+
 /** Read a file's pair (both cells already checked to be numbers in range). */
-export function readImportedPair(latText: string, lngText: string, area: ServiceArea): ImportedPair {
-  const p = parseLocationInput(`${latText.trim()}, ${lngText.trim()}`, area);
+export function readImportedPair(latCell: string, lngCell: string, area: ServiceArea): ImportedPair {
+  const latText = countedText(latCell);
+  const lngText = countedText(lngCell);
+  const p = parseLocationInput(`${latText}, ${lngText}`, area);
   if (!p.ok || p.lat === undefined || p.lng === undefined) {
     const zero = Number(latText) === 0 && Number(lngText) === 0;
     return { point: null, reason: zero ? IMPORT_REASON.ZERO : IMPORT_REASON.UNREADABLE, filePoint: null, tolerance: null };
@@ -57,7 +74,11 @@ export function readImportedPair(latText: string, lngText: string, area: Service
   const reasons: string[] = [];
   if (swapped) reasons.push(IMPORT_REASON.SWAPPED);
   else if (coordStatus(p.lat, p.lng, area) === 'OUTSIDE_AREA') reasons.push(IMPORT_REASON.OUTSIDE);
-  if (Math.min(decimalPlaces(latText), decimalPlaces(lngText)) < 4) reasons.push(IMPORT_REASON.FEW_DECIMALS);
+  if (Math.min(decimalPlaces(latText), decimalPlaces(lngText)) < 4) {
+    // Written (or shown) with 4 or more, fewer as counted: say why.
+    const cut = [latCell, lngCell].some((c) => decimalPlaces(c) >= 4 && decimalPlaces(countedText(c)) < 4);
+    reasons.push(cut ? IMPORT_REASON.FEW_DECIMALS_ZEROS : IMPORT_REASON.FEW_DECIMALS);
+  }
   return { point: null, reason: reasons.join(' ') || 'Not exact.', filePoint, tolerance };
 }
 

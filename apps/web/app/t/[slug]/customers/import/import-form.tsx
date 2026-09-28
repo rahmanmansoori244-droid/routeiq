@@ -53,6 +53,31 @@ export function locationNotSavedLine(l: LocationNotSaved, dryRun: boolean): stri
   return `${l.reason} ${after}`;
 }
 
+/**
+ * The result box's words above the listed rows (A5 fifth review): what to do about the rows whose
+ * customer has no usable location after the import (`needPin`), and, apart, the rows whose customer
+ * keeps a usable saved location, which is planned and sent out as before (`kept`). Before, every
+ * listed row was told to be set on the map, with "No item is delivered without a correct location".
+ * `notYet`: Validate only, or a file with errors (nothing is saved yet).
+ */
+export function locationsNotSavedSummary(
+  list: LocationNotSaved[],
+  notYet: boolean,
+): { needPin: { heading: string; advice: string } | null; kept: string | null } {
+  const kept = list.filter((l) => l.kept === 'SAVED_LOCATION').length;
+  const needPin = list.length - kept;
+  return {
+    needPin: needPin
+      ? {
+          heading: `${needPin} location(s) are not exact, so they are ${notYet ? 'not going to be' : 'not'} saved. No item is delivered without a correct location.`,
+          advice:
+            'Set each one on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file and import it again: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.',
+        }
+      : null,
+    kept: kept ? `${kept} location(s) are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do.` : null,
+  };
+}
+
 export function CustomerImportForm({ slug }: { slug: string }) {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
@@ -158,12 +183,20 @@ export function CustomerImportForm({ slug }: { slug: string }) {
             </div>
             {result.locationsNotSaved && result.locationsNotSaved.length > 0 ? (
               <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs" data-testid="locations-not-saved">
-                <p className="mb-1 font-medium text-amber-900">
-                  {result.locationsNotSaved.length} location(s) are not exact, so they are {result.dryRun || result.errorRows > 0 ? 'not going to be' : 'not'} saved. No item is delivered without a correct location.
-                </p>
-                <p className="mb-2 text-amber-900">
-                  Set each one on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file and import it again: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.
-                </p>
+                {(() => {
+                  const summary = locationsNotSavedSummary(result.locationsNotSaved, !!result.dryRun || result.errorRows > 0);
+                  return (
+                    <>
+                      {summary.needPin ? (
+                        <>
+                          <p className="mb-1 font-medium text-amber-900">{summary.needPin.heading}</p>
+                          <p className="mb-2 text-amber-900">{summary.needPin.advice}</p>
+                        </>
+                      ) : null}
+                      {summary.kept ? <p className="mb-2 text-amber-900">{summary.kept}</p> : null}
+                    </>
+                  );
+                })()}
                 <ul className="space-y-1">
                   {result.locationsNotSaved.slice(0, 50).map((l) => (
                     <li key={l.row}>

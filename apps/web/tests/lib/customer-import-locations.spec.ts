@@ -30,6 +30,8 @@ const S = vi.hoisted(() => ({
   updates: [] as { where: Record<string, unknown>; data: Record<string, unknown> }[],
   updateManys: [] as { where: Record<string, unknown>; data: Record<string, unknown> }[],
   creates: [] as Record<string, unknown>[],
+  /** Raw SQL the import ran (the row lock). */
+  raw: [] as string[],
 }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'PLANNER', name: 'P', email: 'p@a.example' } })) }));
 vi.mock('@/lib/audit', () => ({ audit: vi.fn(async () => ({})) }));
@@ -41,12 +43,30 @@ vi.mock('@/lib/dispatch/service-area', async () => {
 vi.mock('@/lib/tenant', () => ({
   getCurrentTenant: async () => ({ user: { id: 'u1', role: 'PLANNER' } }),
   tenantDb: () => ({
+    // An interactive transaction: the rows are put back when the callback throws (rollback).
+    async $transaction(cb: (tx: unknown) => Promise<unknown>) {
+      const saved = S.rows.map((r) => ({ ...r }));
+      try {
+        return await cb(this);
+      } catch (e) {
+        S.rows.splice(0, S.rows.length, ...saved);
+        throw e;
+      }
+    },
+    $queryRaw: async (strings: TemplateStringsArray) => {
+      S.raw.push(strings.join('?').replace(/\s+/g, ' ').trim());
+      return [];
+    },
     region: { findMany: async () => [] },
     customer: {
       findMany: async () => {
         const snapshot = S.rows.map((r) => ({ ...r }));
         S.afterRead?.();
         return snapshot;
+      },
+      findFirst: async (args: { where: { id: string } }) => {
+        const r = S.rows.find((x) => x.id === args.where.id);
+        return r ? { ...r } : null;
       },
       create: async (args: { data: Record<string, unknown> }) => {
         S.creates.push(args.data);
@@ -58,9 +78,10 @@ vi.mock('@/lib/tenant', () => ({
         Object.assign(r, args.data);
         return r;
       },
-      updateMany: async (args: { where: { id: string; locationVerified?: boolean }; data: Record<string, unknown> }) => {
+      updateMany: async (args: { where: Record<string, unknown> & { id: string }; data: Record<string, unknown> }) => {
         S.updateManys.push(args);
-        const r = S.rows.find((x) => x.id === args.where.id && (args.where.locationVerified === undefined || x.locationVerified === args.where.locationVerified));
+        // Every condition given is checked on the row as it is now (a missing field is null).
+        const r = S.rows.find((x) => Object.entries(args.where).every(([k, v]) => v === undefined || ((x as unknown as Record<string, unknown>)[k] ?? null) === v));
         if (!r) return { count: 0 };
         Object.assign(r, args.data);
         return { count: 1 };
@@ -72,7 +93,7 @@ vi.mock('@/lib/tenant', () => ({
 import { POST } from '@/app/api/customers/import/route';
 import { audit } from '@/lib/audit';
 import CustomerImportPage from '@/app/t/[slug]/customers/import/page';
-import { locationNotSavedLine } from '@/app/t/[slug]/customers/import/import-form';
+import { locationNotSavedLine, locationsNotSavedSummary } from '@/app/t/[slug]/customers/import/import-form';
 import { elements, typeName } from './hook-host';
 
 async function importFile(file: File, dryRun = false) {
@@ -92,6 +113,8 @@ function xlsx(rows: unknown[][], formats: Record<string, string> = {}): File {
   const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
   return new File([buf], 'customers.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 }
+/** The reason for a pair shown or written with more decimals than it counts (A5 fifth review). */
+const ZEROS = 'Fewer than 4 decimals (only one zero at the end counts).';
 const cust = (id: string, over: Partial<Row> = {}): Row => ({
   id, code: id, branchKey: '__MAIN__', active: true, lat: 23.5, lng: 58.3, locationVerified: false, avgServiceTimeMin: 10, serviceTimeConfirmed: false, ...over,
 });
@@ -102,6 +125,9 @@ beforeEach(() => {
   S.updates = [];
   S.updateManys = [];
   S.creates = [];
+  S.raw = [];
+  vi.mocked(audit).mockReset();
+  vi.mocked(audit).mockImplementation(async () => ({}) as never);
 });
 
 describe('customer import and verified locations (audit F05)', () => {
@@ -122,7 +148,12 @@ describe('customer import and verified locations (audit F05)', () => {
     await importCsv('code,name,priority,lat,lng\nK1,New name,2,23.7001,58.5001\n');
     expect(S.updates[0]!.data).not.toHaveProperty('lat');
     expect(S.updates[0]!.data).toMatchObject({ name: 'New name', priority: 2 });
-    expect(S.updateManys).toEqual([{ where: { id: 'K1', locationVerified: false }, data: { lat: 23.7001, lng: 58.5001, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' } }]);
+    // A5 fifth review: and on the point and confidence the import read, so that "no location-change
+    // row needed" is judged on the customer as it is when written (else the locked path below).
+    expect(S.updateManys).toEqual([
+      { where: { id: 'K1', locationVerified: false, lat: 23.5, lng: 58.3 }, data: { lat: 23.7001, lng: 58.5001, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' } },
+    ]);
+    expect(S.raw).toEqual([]);
   });
 
   it('a file without coordinates writes no location and counts nothing as kept', async () => {
@@ -261,6 +292,62 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     expect(S.rows[2]).toMatchObject({ lat: 23.9, lng: 58.9 });
   });
 
+  // A5 fifth review: the coordinates were written by one call and the row by another, after it, and
+  // whether to write the row was judged on the customer as the import had read it at the start.
+  it('the new pair and its location-change row are written together, with the customer locked: no row, no change', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationSource: 'IMPORT' });
+    vi.mocked(audit).mockImplementation(async (a) => {
+      if (a.action === 'CUSTOMER_LOCATION_SET') throw new Error('simulated: the row could not be written');
+      return {} as never;
+    });
+    const file = 'code,name,priority,lat,lng\nK1,K1,3,23.6012,58.4201\n';
+    await expect(importCsv(file)).rejects.toThrow('simulated');
+    // Before: the customer was at the new pair with no row, so a stop still planned at the flagged
+    // point locked, loaded and went out; importing the file again did not write the row either.
+    expect(S.rows[0]).toMatchObject({ lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW' });
+    expect(S.raw).toEqual(['SELECT id FROM "Customer" WHERE id = ? AND "tenantId" = ? FOR UPDATE']);
+    vi.mocked(audit).mockClear();
+    vi.mocked(audit).mockImplementation(async () => ({}) as never);
+    expect((await importCsv(file)).status).toBe(200);
+    expect(S.rows[0]).toMatchObject({ lat: 23.6012, lng: 58.4201, geocodeConfidence: 'HIGH' });
+    expect(vi.mocked(audit).mock.calls.map((c) => c[0]).filter((a) => a.action === 'CUSTOMER_LOCATION_SET')).toEqual([
+      expect.objectContaining({ entityId: 'K1', beforeJson: { lat: 23.5859, lng: 58.4059, source: 'IMPORT', verified: false, confidence: 'LOW' } }),
+    ]);
+    // The row is written in the transaction of the change.
+    expect(vi.mocked(audit).mock.calls.find((c) => c[0].action === 'CUSTOMER_LOCATION_SET')![1]).toBeDefined();
+  });
+
+  it('the row is judged on the customer as it is when the pair is written, not as the import read it at the start', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    // Another customer file marks K1's saved point LOW after this import read the customers.
+    S.afterRead = () => Object.assign(S.rows[0]!, { geocodeConfidence: 'LOW' });
+    expect((await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.6012,58.4201\n')).status).toBe(200);
+    expect(S.rows[0]).toMatchObject({ lat: 23.6012, lng: 58.4201, geocodeConfidence: 'HIGH' });
+    // Before: no row (the import's own read said the point was usable), so LOCK let a stop still
+    // planned at the flagged point go.
+    expect(vi.mocked(audit).mock.calls.map((c) => c[0]).filter((a) => a.action === 'CUSTOMER_LOCATION_SET')).toEqual([
+      expect.objectContaining({ entityId: 'K1', beforeJson: { lat: 23.5859, lng: 58.4059, source: 'IMPORT', verified: false, confidence: 'LOW' } }),
+    ]);
+  });
+
+  // A5 fifth review: the warning and the result box told the dispatcher to set on the map every row
+  // listed, also the customers that keep a usable saved location (an Excel re-save that dropped a
+  // trailing zero: every row of the master list), and said "No item is delivered" for them.
+  it('rows whose customer keeps a usable saved location are counted apart: nothing to do for them', async () => {
+    S.rows[0] = cust('K1', { lat: 23.585, lng: 58.4059, geocodeConfidence: 'HIGH' });
+    const kept = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.585,58.4059\nK3,K3,3,23.9,58.9\n');
+    expect(kept.body.data.locationsNotSaved.map((l: { kept: string }) => l.kept)).toEqual(['SAVED_LOCATION', 'SAVED_LOCATION']);
+    expect(kept.body.data.warnings.join(' ')).not.toMatch(/Set them on the map|not planned or sent out/);
+    expect(kept.body.data.warnings).toContain(
+      '2 location(s) in the file are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do. To correct the file, type or paste each coordinate with all the decimals it really has (at least 4).',
+    );
+    // Mixed: only the rows that need a pin are counted in the instruction.
+    const mixed = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.585,58.4059\nN1,New,3,23.58,58.40\n');
+    const w = mixed.body.data.warnings.join(' | ');
+    expect(w).toMatch(/^1 location\(s\) in the file are not exact and were not saved\. Set them on the map/);
+    expect(w).toContain('1 location(s) in the file are not exact, but each of these customers keeps the location it already has');
+  });
+
   it('control: a LOW point a dispatcher confirmed is usable: kept as SAVED_LOCATION, no warning', async () => {
     S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationVerified: true });
     const r = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.586,58.406\n');
@@ -326,11 +413,68 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
       // 23.585 shown with 6 decimals reads as 23.5850 (one zero more), like 0.0000: exact.
       ['X6', 23.585, 58.406, 'HIGH'],
     ]);
+    // A5 fifth review: the reason says why a pair shown with 4 or 6 decimals has fewer.
     expect(r.body.data.locationsNotSaved.map((l: { code: string; reason: string }) => [l.code, l.reason])).toEqual([
-      ['R2', 'Fewer than 4 decimals.'],
-      ['R1', 'Fewer than 4 decimals.'],
-      ['R6', 'Fewer than 4 decimals.'],
+      ['R2', ZEROS],
+      ['R1', ZEROS],
+      ['R6', ZEROS],
     ]);
+  });
+
+  // A5 fifth review: the one-zero rule held only for Excel number formats. A CSV (typed, or saved by
+  // Excel from cells formatted to show 4 decimals, which writes each cell as it shows) and an Excel
+  // Text cell were read as written, so 23.5800 was 4 decimals and a point good to about 1 km was
+  // stored as exact: the same sheet was refused as .xlsx and stored as CSV.
+  it('a pair written with zeros at the end counts one of them, whatever the file: 23.5800 is not exact, 23.5850 is', async () => {
+    const csv = 'code,name,priority,lat,lng\nT1,Typed with padding,3,23.5800,58.4100\nT2,One zero,3,23.5850,58.4150\nT3,Six decimals,3,23.585000,58.415012\nT4,Padded to 6,3,23.580000,58.410000\n';
+    const textCells = XLSX.utils.aoa_to_sheet([['code', 'name', 'priority', 'lat', 'lng'], ...csv.trim().split('\n').slice(1).map((l) => l.split(','))]);
+    expect(textCells.D2).toMatchObject({ t: 's', v: '23.5800' }); // Text cells, as typed
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, textCells, 'Customers');
+    const files = [
+      new File([csv], 'customers.csv', { type: 'text/csv' }),
+      new File([csv], 'customers.csv', { type: 'application/vnd.ms-excel' }),
+      new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer], 'customers.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+    ];
+    for (const file of files) {
+      S.creates = [];
+      const r = await importFile(file);
+      expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence]), file.type).toEqual([
+        ['T1', null, null, 'MISSING'],
+        ['T2', 23.585, 58.415, 'HIGH'],
+        ['T3', 23.585, 58.415012, 'HIGH'],
+        ['T4', null, null, 'MISSING'],
+      ]);
+      expect(r.body.data.locationsNotSaved, file.type).toEqual([
+        { row: 2, code: 'T1', branchCode: null, reason: ZEROS, kept: null },
+        { row: 5, code: 'T4', branchCode: null, reason: ZEROS, kept: null },
+      ]);
+    }
+  });
+
+  it('the CSV Excel saves from cells formatted to show 4 decimals is read like the workbook, sent as CSV or as Excel', async () => {
+    const ws = XLSX.utils.aoa_to_sheet([['code', 'name', 'priority', 'lat', 'lng'], ['C1', 'Rough', 2, 23.58, 58.41], ['C2', 'Exact, ends in 0', 2, 23.585, 58.4105]]);
+    for (const c of ['D2', 'E2', 'D3', 'E3']) ws[c]!.z = '0.0000';
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, 'Customers');
+    // Excel, like SheetJS, writes each cell of a CSV as it shows.
+    const csv = XLSX.write(wb, { type: 'string', bookType: 'csv' }) as string;
+    expect(csv.split('\n').slice(1, 3)).toEqual(['C1,Rough,2,23.5800,58.4100', 'C2,"Exact, ends in 0",2,23.5850,58.4105']);
+    const files = [
+      new File([XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer], 'customers.xlsx', { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+      new File([csv], 'customers.csv', { type: 'text/csv' }),
+      new File([csv], 'customers.csv', { type: 'application/vnd.ms-excel' }),
+    ];
+    for (const file of files) {
+      S.creates = [];
+      const r = await importFile(file);
+      // Before: the CSV stored C1 as exact (HIGH, from the import) at 23.58, 58.41, on both paths.
+      expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence]), file.type).toEqual([
+        ['C1', null, null, 'MISSING'],
+        ['C2', 23.585, 58.4105, 'HIGH'],
+      ]);
+      expect(r.body.data.locationsNotSaved, file.type).toEqual([{ row: 2, code: 'C1', branchCode: null, reason: ZEROS, kept: null }]);
+    }
   });
 
   it('the warning says what the check will do on Validate only, and what the import did (A5 fourth review)', async () => {
@@ -370,6 +514,22 @@ describe('the decimals a lat / lng cell shows, with A1 merged (SheetJS reads wit
       ['X2', null, null, 'MISSING'],
     ]);
     expect(r.body.data.locationsNotSaved).toEqual([{ row: 3, code: 'X2', branchCode: null, reason: 'Fewer than 4 decimals.', kept: null }]);
+  });
+
+  // A5 fifth review: a CSV whose first header is "ID" goes through SheetJS's SYLK reader before its
+  // CSV reader, and was read without its own text, so a trailing zero was lost only when the browser
+  // sent it as Excel (Chrome and Edge on a PC with Excel): 23.5850 became "Fewer than 4 decimals.".
+  it.each([
+    ['semicolons', 'ID;code;name;priority;lat;lng\n1;C1;Shop;2;23.5850;58.4150\n'],
+    ['semicolons, CRLF', 'ID;code;name;priority;lat;lng\r\n1;C1;Shop;2;23.5850;58.4150\r\n'],
+    ['commas', 'ID,code,name,priority,lat,lng\n1,C1,Shop,2,23.5850,58.4150\n'],
+  ])('a CSV whose first header is "ID" (%s) keeps the decimals in the file, sent as CSV or as Excel', async (_what, csv) => {
+    for (const type of ['text/csv', 'application/vnd.ms-excel']) {
+      S.creates = [];
+      const r = await importFile(new File([csv], 'customers.csv', { type }));
+      expect(S.creates.map((c) => [c.code, c.lat, c.lng, c.geocodeConfidence]), type).toEqual([['C1', 23.585, 58.415, 'HIGH']]);
+      expect(r.body.data.locationsNotSaved, type).toEqual([]);
+    }
   });
 
   it(`only the lat and lng cells are formatted, and only with a format of at most ${MAX_SHOWN_FORMAT} characters`, async () => {
@@ -530,5 +690,27 @@ describe('the import screen says the location rule in plain words (A5 review)', 
         'Fewer than 4 decimals. Its saved location is not exact or is outside the delivery area, so it is not used either: its orders are not planned or sent out until someone drops the pin on the map.',
       );
     }
+  });
+
+  // A5 fifth review: the box told the dispatcher to set every listed row on the map and that "No item
+  // is delivered without a correct location", also for customers that keep a usable saved location.
+  it('the result box asks for a pin only for the rows that need one; the others are counted apart', () => {
+    const row = (kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | 'SAVED_LOCATION_NOT_USABLE' | null, n: number) => ({ row: n, code: `K${n}`, branchCode: null, reason: 'Fewer than 4 decimals.', kept });
+    const advice =
+      'Set each one on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file and import it again: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.';
+    const keptOnly = locationsNotSavedSummary([row('SAVED_LOCATION', 2), row('SAVED_LOCATION', 3)], false);
+    expect(keptOnly).toEqual({
+      needPin: null,
+      kept: '2 location(s) are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do.',
+    });
+    const mixed = locationsNotSavedSummary([row('SAVED_LOCATION', 2), row(null, 3), row('SAVED_LOCATION_NEEDS_PIN', 4), row('SAVED_LOCATION_NOT_USABLE', 5)], false);
+    expect(mixed).toEqual({
+      needPin: { heading: '3 location(s) are not exact, so they are not saved. No item is delivered without a correct location.', advice },
+      kept: '1 location(s) are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do.',
+    });
+    expect(locationsNotSavedSummary([row(null, 2)], true)).toEqual({
+      needPin: { heading: '1 location(s) are not exact, so they are not going to be saved. No item is delivered without a correct location.', advice },
+      kept: null,
+    });
   });
 });

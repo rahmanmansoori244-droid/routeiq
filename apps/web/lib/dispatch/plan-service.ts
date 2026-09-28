@@ -31,7 +31,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { samePoint, type ServiceArea } from './location-input';
+import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
@@ -2106,14 +2106,20 @@ function setPoint(json: unknown): { lat: number; lng: number } | null {
  * of a usable point is not refused: the sheets show the planned stop with the new pin noted (frozen
  * plan facts, owner default, F08).
  * A5 fourth review: only the change that replaced the planned point counts. A change that confirmed
- * the point where it was (its "after" is the same point: a dispatcher typing its own coordinates,
- * read as exact) moves nothing, and of the changes off the point only the newest is the one that
- * replaced it (an older one was undone when the customer came back to it). Before, any recorded
+ * the point where it was moves nothing, and of the changes off the point only the newest is the one
+ * that replaced it (an older one was undone when the customer came back to it). Before, any recorded
  * "before" at the planned point while it was flagged refused the load, so an ordinary correction of a
  * point confirmed where it was got "its old point, which was not usable" and a locked load was sent
  * through unlock and RE-PLAN. Changes made in the same millisecond count as the newest together
  * (refused when one of them blocked). A move off a usable point by a customer import writes no row;
  * the newest recorded change then stands for it, which can only refuse more, never less.
+ * A5 fifth review: "the planned point" is its place, PIN_MOVED_M around it - the distance at which
+ * this gate (above) and the sheets' "New pin" note count a pin as the same place. A change counts
+ * when it started there and moved the customer out of it; one that ended there too (a flagged point
+ * confirmed where it is: its coordinates typed, or a hand pin a few metres off, which is the only way
+ * a pin can confirm it - a pin exactly on a flagged saved point is refused, PIN_REQUIRED) moved
+ * nothing. Before, a change had to start exactly at the planned point (within 5 cm): the correction
+ * of such a pin was never counted, so the older flagged row refused an ordinary correction.
  */
 async function stopsAtReplacedPoints(
   tx: Tx,
@@ -2137,19 +2143,20 @@ async function stopsAtReplacedPoints(
     where: { tenantId, entity: 'Customer', action: 'CUSTOMER_LOCATION_SET', entityId: { in: [...moved.keys()] } },
     select: { entityId: true, beforeJson: true, afterJson: true, createdAt: true },
   });
-  // Per customer and planned point: the newest change that moved the customer off that point, and
-  // whether it (or one made in the same millisecond) did so while the point blocked delivery.
+  // Per customer and planned point: the newest change that moved the customer out of that point's
+  // place, and whether it (or one made in the same millisecond) did so while the point it started
+  // from blocked delivery.
   const newest = new Map<string, { at: number; blocked: boolean }>();
   for (const ch of changes) {
     const before = replacedPoint(ch.beforeJson);
     const planned = ch.entityId ? moved.get(ch.entityId) : undefined;
     if (!before || !planned) continue;
     const after = setPoint(ch.afterJson);
-    if (after && samePoint(after, before)) continue; // confirmed where it was: nothing moved
     const at = ch.createdAt.getTime();
     const blocked = locationBlocksDelivery(before, area);
     planned.forEach((p, i) => {
-      if (!samePoint(p, before)) return;
+      if (distanceM(p, before) > PIN_MOVED_M) return; // started elsewhere
+      if (after && distanceM(p, after) <= PIN_MOVED_M) return; // ended there too: nothing moved out
       const key = `${ch.entityId}\u0000${i}`;
       const seen = newest.get(key);
       if (!seen || at > seen.at) newest.set(key, { at, blocked });

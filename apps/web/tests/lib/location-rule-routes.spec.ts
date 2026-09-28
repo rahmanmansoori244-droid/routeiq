@@ -17,7 +17,7 @@
  * row); the customer page and the customers list say when a saved point blocks delivery.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 import { Host, elements, textOf, typeName } from './hook-host';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
@@ -156,6 +156,24 @@ describe('PUT /api/customers/:id/location: a reading is read again on the server
     expect(ok.status).toBe(200);
     expect(vi.mocked(audit).mock.calls.at(-1)![1]).toBeDefined(); // written in the save's transaction
     expect(audits.at(-1)).toMatchObject({ entityId: 'LOW', beforeJson: { lat: 23, lng: 58, verified: false, confidence: 'LOW' } });
+  });
+
+  it('the row records the point as it is when the change is written, with the customer locked (A5 fifth review)', async () => {
+    // A customer file marks K1's saved point LOW after the route read the customer, before it writes.
+    const tx = fakePrisma.$transaction;
+    fakePrisma.$transaction = async (cb: (t: unknown) => Promise<unknown>) => {
+      Object.assign(row('customer', 'K1'), { geocodeConfidence: 'LOW' });
+      return tx(cb);
+    };
+    try {
+      expect((await put('K1', { lat: 23.6011, lng: 58.4011, source: 'MAP_PIN' })).status).toBe(200);
+    } finally {
+      fakePrisma.$transaction = tx;
+    }
+    // Before: "confidence: HIGH", as the route had read it, so LOCK let a stop still planned at the
+    // flagged point go (it reads this row's "before" point).
+    expect(audits.at(-1)).toMatchObject({ entityId: 'K1', beforeJson: { lat: 23.5859, lng: 58.4059, verified: false, confidence: 'LOW' } });
+    expect(rawLog).toContain('SELECT id FROM "Customer" WHERE id = ? AND "tenantId" = ? FOR UPDATE');
   });
 
   it('a point that is not where the text points: 422 LOCATION_MISMATCH', async () => {

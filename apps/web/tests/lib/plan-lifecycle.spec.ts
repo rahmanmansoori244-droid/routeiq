@@ -542,14 +542,18 @@ describe("load changes and the owner's location rule (audit PR A5, second review
     const R = { lat: 23.62, lng: 58.42 };
     const flagged = { verified: false, confidence: 'LOW' };
     const confirmed = { verified: true, confidence: 'HIGH' };
-    /** Location changes of customer c, oldest first: [before, after]. */
-    function history(changes: [Record<string, unknown>, Record<string, unknown>][]) {
+    /** Location changes of customer c, oldest first: [before, after]; `sameMs`: all made in the same millisecond. */
+    function history(changes: [Record<string, unknown>, Record<string, unknown>][], sameMs = false) {
       tables.auditLog = changes.map(([before, after], i) => ({
         id: `AU${i + 1}`, tenantId: T, userId: 'u1', action: 'CUSTOMER_LOCATION_SET', entity: 'Customer', entityId: 'c',
         beforeJson: { source: 'IMPORT', ...before }, afterJson: { source: 'MAP_PIN', confidence: 'HIGH', check: 'HAND_PIN', ...after },
-        createdAt: new Date(Date.UTC(2026, 8, 26, 18, i)),
+        createdAt: new Date(Date.UTC(2026, 8, 26, 18, sameMs ? 0 : i)),
       }));
     }
+    // A hand pin a few metres from the planned point (P1 + about 3 m, about 44 m, about 61 m north).
+    const P1_3M = { lat: 23.61113, lng: 58.4111 };
+    const P1_44M = { lat: 23.6115, lng: 58.4111 };
+    const P1_61M = { lat: 23.61165, lng: 58.4111 };
 
     it.each([
       [
@@ -560,6 +564,19 @@ describe("load changes and the owner's location rule (audit PR A5, second review
       [
         'a flagged point replaced, set back by hand, then corrected by hand',
         [[{ ...P1, ...flagged }, R], [{ ...R, ...confirmed }, P1], [{ ...P1, ...confirmed }, NOW]],
+      ],
+      // A5 fifth review: a pin dropped exactly on a flagged saved point is refused (PIN_REQUIRED), so a
+      // hand pin confirms it a few metres off; the gate counts that pin as the same place (within 50 m),
+      // and so does this. Before: its later correction was refused as "its old point, which was not
+      // usable" (the change off the pin did not start exactly at the planned point, so the older
+      // flagged row decided).
+      [
+        'a flagged point confirmed by a hand pin about 3 m off, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_3M], [{ ...P1_3M, ...confirmed }, NOW]],
+      ],
+      [
+        'a flagged point confirmed by a hand pin about 44 m off, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_44M], [{ ...P1_44M, ...confirmed }, NOW]],
       ],
     ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('control: %s is locked and dispatched as before', async (_what, changes) => {
       seedReplaced({}, null);
@@ -579,11 +596,43 @@ describe("load changes and the owner's location rule (audit PR A5, second review
         'corrected once while usable, set back, flagged, then replaced',
         [[{ ...P1, ...confirmed }, R], [{ ...R, ...confirmed }, { ...P1, source: 'IMPORT', check: 'IMPORT' }], [{ ...P1, ...flagged }, NOW]],
       ],
+      // A pin more than 50 m from the flagged point is not the same place: the change that moved the
+      // customer there was made while the point was flagged, whatever came after it.
+      [
+        'a flagged point replaced by a hand pin about 61 m away, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_61M], [{ ...P1_61M, ...confirmed }, NOW]],
+      ],
+      ['a flagged point replaced by a hand pin about 3 km away', [[{ ...P1, ...flagged }, NOW]]],
+      // The planned point's place is PIN_MOVED_M around it: a flagged point about 33 m from it (the
+      // saved point moved a little after planning, then a file flagged it) is the same place.
+      ['a flagged point about 33 m from the planned one, replaced by a hand pin about 3 km away', [[{ lat: 23.6114, lng: 58.4111, ...flagged }, NOW]]],
     ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('still refused: %s (the newest change off the planned point was made while it was flagged)', async (_what, changes) => {
       seedReplaced({}, null);
       history(changes);
       await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
       await expect(updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+    });
+
+    // A5 fifth review: a change that left the customer at the planned point's place (a flagged point
+    // confirmed where it is, typed or by a hand pin a few metres off) moved nothing, so it never
+    // decides, also when a correction was recorded in the same millisecond. Before: the fourth
+    // review's "confirmed where it was" skip was reached by no test (removing it left every test
+    // green), and changes of the same millisecond were refused when one of them blocked.
+    it.each([
+      ['confirmed by its coordinates typed', [[{ ...P1, ...flagged }, { ...P1, source: 'MANUAL_LATLNG', check: 'READING' }], [{ ...P1, ...confirmed, source: 'MANUAL_LATLNG' }, NOW]]],
+      ['confirmed by a hand pin about 3 m off', [[{ ...P1, ...flagged }, P1_3M], [{ ...P1_3M, ...confirmed }, NOW]]],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('control: a flagged point %s, then corrected by hand in the same millisecond, is locked and loaded', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes, true);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOADING', 'LOCKED']);
+    });
+
+    it('still refused in the same millisecond: a flagged point replaced by a pin 3 km away, whatever else was recorded then', async () => {
+      seedReplaced({}, null);
+      history([[{ ...P1, ...flagged }, P1_3M], [{ ...P1, ...flagged }, NOW]], true);
+      await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
     });
   });
 });
