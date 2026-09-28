@@ -32,6 +32,10 @@ const STATUS_VARIANT: Record<string, 'outline' | 'secondary' | 'warning' | 'succ
   COMPLETED: 'default',
 };
 
+/** Asked before "Reset stuck plan" (audit F09). */
+const STUCK_RESET_CONFIRM =
+  'Reset this plan? It is shown as optimizing, but its optimization has ended or was lost. The plan goes back to "failed" (a re-plan version keeps the loads it holds) so it can be optimized or re-planned again. This is recorded in the audit log.';
+
 /** Once a load is out, who drove it is history. */
 const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
 
@@ -52,6 +56,8 @@ interface Props {
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
+  /** Supervisor and above: may "Reset stuck plan" (audit F09, owner decision 17). */
+  canResetStuck?: boolean;
   /** A request of the screen around this plan is running (the day screen's OPTIMIZE / RE-PLAN): every action here waits. */
   externalBusy?: boolean;
   /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
@@ -70,7 +76,7 @@ interface Props {
   today?: string;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, externalBusy = false, onBusyChange, reloadSignal = 0, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, externalBusy = false, onBusyChange, reloadSignal = 0, today }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -258,6 +264,26 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     );
   }
 
+  /**
+   * "Reset stuck plan" (audit F09, owner decision 17: supervisors and above, audited). Only offered
+   * when the server says the version is stuck on "optimizing" (PlanDetail.stuck).
+   */
+  function resetStuck() {
+    if (!window.confirm(STUCK_RESET_CONFIRM)) return;
+    return runPlanAction(
+      lock,
+      'reset-stuck',
+      async () => {
+        const r = await api<{ status: string }>(`/api/runs/${runId}/reset-stuck`, { method: 'POST', json: {} });
+        if (r.ok) toast.success('Plan reset: it is no longer optimizing. Optimize or re-plan it again.');
+        else toast.error(r.error ?? 'Could not reset the plan.');
+        await load();
+        await onChanged?.();
+      },
+      failed,
+    );
+  }
+
   function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE') {
     const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
     return runPlanAction(
@@ -414,6 +440,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         <div className="rounded-md border bg-muted/40 p-3 text-sm" data-testid="optimizing">
           Optimizing… {d.job?.message ?? ''} ({d.job?.progressPct ?? 0}%)
           {applied ? ' Until the new plan is saved, the loads below are the previous plan (kept if the optimization fails).' : ''}
+          {d.stuck ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-amber-800" data-testid="plan-stuck">
+              <AlertTriangle className="h-4 w-4" />
+              <span>{d.stuck.text}</span>
+              {canResetStuck && d.stuck.resettable ? (
+                <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void resetStuck()} data-testid="reset-stuck-btn">
+                  <RefreshCw className="mr-1 h-3 w-3" /> Reset stuck plan
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : null}
       {d.run.status === 'FAILED' && !superseded ? (

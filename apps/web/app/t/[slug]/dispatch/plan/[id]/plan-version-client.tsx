@@ -32,6 +32,7 @@ export function PlanVersionClient({
         runId={runId}
         canPlan={canPlan}
         canDispatch={canDispatch}
+        canResetStuck={canDispatch}
         canEditProducts={canEditProducts}
         phoneCountryCode={phoneCountryCode}
         onChanged={(newRunId) => {

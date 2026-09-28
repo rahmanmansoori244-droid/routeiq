@@ -13,6 +13,8 @@
  */
 import { prisma } from '../db';
 import { audit } from '../audit';
+import { lockPlanRow, setLockTimeout } from '../dispatch/plan-locks';
+import { isActiveJob, repairEndedJobPlan, stuckPlanState } from '../dispatch/stuck-plan';
 
 // On globalThis: Next compiles instrumentation.ts (the in-process janitor) into its own bundle
 // layer with a separate copy of this module, and the janitor must see the same live jobs.
@@ -47,8 +49,14 @@ export const STUCK_JOB_MS = 15 * 60 * 1000;
  * Orphan janitor — mark jobs RUNNING (or never started) for longer than any real optimization
  * as FAILED with reason STUCK, and put their plan back to FAILED so it can be optimized again.
  * Runs every 60 s inside the web process (instrumentation.ts) and from the cron route.
+ *
+ * Audit F09: each job is reaped in ONE transaction - the plan row lock (the order every plan
+ * writer uses: plan, then its job), the job FAILED, its plan FAILED and the OPTIMIZE_FAILED audit
+ * row - so a failed write leaves both as they were (the next sweep retries) and can never strand a
+ * plan OPTIMIZING behind a FAILED job again. Then repairStuckPlans puts back any plan stranded
+ * that way before the fix.
  */
-export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reaped: number }> {
+export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reaped: number; repaired: number }> {
   // We use a Postgres-side NOW() comparison instead of passing a JS Date,
   // because RunJob.startedAt is a TIMESTAMP (no time zone) column — comparing
   // it against a JS Date via Prisma's serialized ISO string would mis-match
@@ -76,8 +84,6 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
         OR (status = 'QUEUED' AND "createdAt" < NOW() - ($1::int || ' minutes')::interval)`,
     minutes,
   );
-  if (stuck.length === 0) return { reaped: 0 };
-
   let reaped = 0;
   for (const job of stuck) {
     // Skip jobs whose background promise is still tracked in-process. The
@@ -87,36 +93,90 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
     // RunPlan.status.
     if (inflight.has(job.runId)) continue;
     try {
-      // Conditional update so we don't FAIL a job that just succeeded
-      // between the SELECT and the UPDATE.
-      const flipped = await prisma.runJob.updateMany({
-        where: { id: job.id, status: job.status },
-        data: {
-          status: 'FAILED',
-          finishedAt: new Date(),
-          message: `No result after ${minutes} minutes (the server restarted during the optimization). Optimize again.`,
-          errorJson: { reason: 'STUCK', message: `Job ${job.status} for more than ${minutes} minutes.` } as never,
+      const done = await prisma.$transaction(
+        async (tx) => {
+          // A plan being saved holds its row: wait at most 5 s, then leave it to the next sweep.
+          await setLockTimeout(tx);
+          await lockPlanRow(tx, job.tenantId, job.runId);
+          // Conditional update so we don't FAIL a job that just succeeded
+          // between the SELECT and the UPDATE.
+          const flipped = await tx.runJob.updateMany({
+            where: { id: job.id, status: job.status },
+            data: {
+              status: 'FAILED',
+              finishedAt: new Date(),
+              message: `No result after ${minutes} minutes (the server restarted during the optimization). Optimize again.`,
+              errorJson: { reason: 'STUCK', message: `Job ${job.status} for more than ${minutes} minutes.` } as never,
+            },
+          });
+          if (flipped.count === 0) return false;
+          // Only the version this job was optimizing (review F07): never a version another job
+          // took over. A version that a re-plan copied forward keeps its copied plan, usable.
+          await tx.runPlan.updateMany({
+            where: { id: job.runId, status: 'OPTIMIZING', OR: [{ currentJobId: job.id }, { currentJobId: null }] },
+            data: { status: 'FAILED' },
+          });
+          await audit(
+            {
+              tenantId: job.tenantId,
+              userId: job.createdById,
+              action: 'OPTIMIZE_FAILED',
+              entity: 'RunPlan',
+              entityId: job.runId,
+              afterJson: { runJobId: job.id, attemptNo: job.attemptNo, reason: 'STUCK' } as never,
+            },
+            tx,
+          );
+          return true;
         },
-      });
-      if (flipped.count === 0) continue;
-      // Only the version this job was optimizing (review F07): never a version another job
-      // took over. A version that a re-plan copied forward keeps its copied plan, usable.
-      await prisma.runPlan.updateMany({
-        where: { id: job.runId, status: 'OPTIMIZING', OR: [{ currentJobId: job.id }, { currentJobId: null }] },
-        data: { status: 'FAILED' },
-      });
-      reaped++;
-      await audit({
-        tenantId: job.tenantId,
-        userId: job.createdById,
-        action: 'OPTIMIZE_FAILED',
-        entity: 'RunPlan',
-        entityId: job.runId,
-        afterJson: { runJobId: job.id, attemptNo: job.attemptNo, reason: 'STUCK' } as never,
-      });
+        { timeout: 15_000, maxWait: 5_000 },
+      );
+      if (done) reaped++;
     } catch (err) {
+      // Nothing was written (one transaction); the next sweep tries again.
       console.error('reapStuckJobs: failed to reap', job.id, err);
     }
   }
-  return { reaped };
+  const { repaired } = await repairStuckPlans();
+  return { reaped, repaired };
+}
+
+/**
+ * A plan without a current job counts as stuck only this long after it was created: a start writes
+ * the plan and its job together, but a plan row written by hand (or by an older release) gets a
+ * moment before the sweep calls it stuck.
+ */
+export const STUCK_PLAN_GRACE_MS = 60_000;
+
+/**
+ * Audit F09 repair sweep: every plan OPTIMIZING whose current job is not QUEUED or RUNNING (it
+ * ended, or is missing) goes back to FAILED with an OPTIMIZE_FAILED audit row (reason STUCK_PLAN),
+ * one transaction each (repairEndedJobPlan). These rows are what the old two-write janitor left
+ * behind when its second write failed; the sweep also mends any found later. A plan whose current
+ * job is still QUEUED or RUNNING is never touched here (reapStuckJobs fails it after 15 minutes).
+ */
+export async function repairStuckPlans(now: Date = new Date()): Promise<{ repaired: number }> {
+  const plans = await prisma.runPlan.findMany({
+    where: { status: 'OPTIMIZING' },
+    select: { id: true, tenantId: true, status: true, currentJobId: true, createdAt: true },
+  });
+  if (plans.length === 0) return { repaired: 0 };
+  const jobs = await prisma.runJob.findMany({
+    where: { runId: { in: plans.map((p) => p.id) } },
+    select: { id: true, runId: true, status: true, createdAt: true, startedAt: true },
+  });
+  let repaired = 0;
+  for (const p of plans) {
+    const current = p.currentJobId ? (jobs.find((j) => j.id === p.currentJobId) ?? null) : null;
+    const otherActive = jobs.some((j) => j.runId === p.id && isActiveJob(j.status));
+    const state = stuckPlanState(p, current, otherActive, false, now);
+    if (!state || state.kind === 'JOB_LOST') continue;
+    if (state.kind === 'NO_JOB' && now.getTime() - p.createdAt.getTime() < STUCK_PLAN_GRACE_MS) continue;
+    try {
+      if (await repairEndedJobPlan(p.tenantId, p.id, { userId: null, via: 'JANITOR' })) repaired++;
+    } catch (err) {
+      console.error('repairStuckPlans: failed to repair', p.id, err);
+    }
+  }
+  return { repaired };
 }

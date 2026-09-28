@@ -47,14 +47,21 @@ describe('startup configuration checks', () => {
     expect(msgs).toMatch(/JANITOR_TOKEN/);
   });
 
+  it('audit F15: a production server without SOLVER_URL or SOLVER_TOKEN logs an error (no plan can be optimized)', () => {
+    const base = { NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example', JANITOR_TOKEN: 'j' };
+    const p = configProblems(env({ ...base, SOLVER_URL: 'http://solver' }));
+    expect(p).toEqual([{ level: 'error', message: expect.stringMatching(/^SOLVER_TOKEN is not set/) }]);
+    expect(configProblems(env(base)).map((x) => x.message.split(' ')[0])).toEqual(['SOLVER_URL', 'SOLVER_TOKEN']);
+  });
+
   it('is quiet for a fully configured production server and outside production', () => {
-    const ok = env({ NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example', JANITOR_TOKEN: 'j' });
+    const ok = env({ NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' });
     expect(configProblems(ok)).toEqual([]);
     expect(configProblems(env({ NODE_ENV: 'development' }))).toEqual([]);
   });
 
   it('reports RATE_LIMITS_DISABLED on a production server as an error', () => {
-    const p = configProblems(env({ NODE_ENV: 'production', RATE_LIMITS_DISABLED: '1', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j' }));
+    const p = configProblems(env({ NODE_ENV: 'production', RATE_LIMITS_DISABLED: '1', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' }));
     expect(p).toHaveLength(1);
     expect(p[0]!.level).toBe('error');
   });

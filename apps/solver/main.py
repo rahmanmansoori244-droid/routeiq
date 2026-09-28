@@ -5,6 +5,8 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
 * ``POST /optimize-dispatch`` - NMWC daily dispatch planner (OR-Tools): time windows,
   P1-P5 priorities, multi-load trucks, frozen (locked/dispatched) loads, road distance.
 * ``POST /route-geometry``    - road polyline for a load via the configured OSRM.
+* ``GET  /ready``             - dispatch readiness for the web's /api/health: proves the token is
+  set on both sides and matches, without running an optimization (audit F15).
 * ``POST /optimize``          - legacy v1 three-scenario PyVRP solver (kept for comparison).
 """
 
@@ -112,6 +114,27 @@ def _check_token(token: str | None) -> None:
         raise HTTPException(status_code=500, detail="Solver not configured")
     if not hmac.compare_digest((token or "").encode("utf-8"), SOLVER_TOKEN.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Invalid solver token")
+
+
+@app.get("/ready")
+def ready_endpoint(
+    x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
+) -> dict:
+    """Dispatch readiness (audit F15): the same token check as /optimize-dispatch, and nothing else.
+
+    The web's /api/health calls it with its SOLVER_TOKEN. 401 = the web's token is wrong or
+    missing; 500 "Solver not configured" = this service has no SOLVER_TOKEN; 200 = an optimize
+    would be accepted. It never solves, takes no dispatch slot and reads no request body; the
+    routing status is the cached one /health reports.
+    """
+    _check_token(x_solver_token)
+    return {
+        "ok": True,
+        "service": "routeiq-solver",
+        "version": app.version,
+        "max_concurrent_dispatch": MAX_CONCURRENT_DISPATCH,
+        "routing": routing_status(),
+    }
 
 
 @app.post("/optimize-dispatch", response_model=DispatchResponse)

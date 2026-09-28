@@ -129,25 +129,66 @@ describe('role gates (F15, F23)', () => {
 });
 
 describe('users: platform admins are protected; changes reach open sessions', () => {
+  /** PATCH /api/users/:id runs in one transaction (audit F11); `order` records its steps. */
+  function usersTx(user: Record<string, unknown>) {
+    const order: string[] = [];
+    const tx = {
+      $executeRawUnsafe: vi.fn(async (sql: string) => (order.push(sql), 0)),
+      $queryRaw: vi.fn(async (strings: TemplateStringsArray) => (order.push(strings.join('?')), [{ id: 'tA' }])),
+      user: Object.fromEntries(Object.entries(user).map(([k, fn]) => [k, vi.fn(async (a: unknown) => (order.push(`user.${k}`), (fn as (a: unknown) => unknown)(a)))])),
+      auditLog: { create: vi.fn(async (_a: unknown) => (order.push('auditLog.create'), {})) },
+    };
+    prismaFake.$transaction = vi.fn(async (fn: (t: typeof tx) => Promise<unknown>) => fn(tx));
+    return { tx, order };
+  }
+
   it('a TENANT_ADMIN cannot deactivate or demote a SUPER_ADMIN of the tenant', async () => {
-    prismaFake.user = { findFirst: vi.fn(async () => ({ id: 'boss', email: 'o@x', name: 'O', role: 'SUPER_ADMIN', active: true })) };
+    const { tx } = usersTx({ findFirst: () => ({ id: 'boss', email: 'o@x', name: 'O', role: 'SUPER_ADMIN', active: true }) });
     const route = await import('@/app/api/users/[id]/route');
     const res = await route.PATCH(send('/api/users/boss', 'PATCH', { active: false }), { params: { id: 'boss' } });
     expect(res.status).toBe(403);
+    expect(tx.user.updateMany).toBeUndefined();
     expect(invalidatePrincipal).not.toHaveBeenCalled();
   });
 
   it('a normal role change invalidates the cached principal of that user', async () => {
-    prismaFake.user = {
-      findFirst: vi.fn(async () => ({ id: 'u2', email: 'p@x', name: 'P', role: 'PLANNER', active: true })),
-      count: vi.fn(async () => 1),
-      updateMany: vi.fn(async () => ({ count: 1 })),
-      findUniqueOrThrow: vi.fn(async () => ({ id: 'u2', email: 'p@x', name: 'P', role: 'VIEWER', active: true })),
-    };
+    usersTx({
+      findFirst: () => ({ id: 'u2', email: 'p@x', name: 'P', role: 'PLANNER', active: true }),
+      count: () => 1,
+      updateMany: () => ({ count: 1 }),
+      findUniqueOrThrow: () => ({ id: 'u2', email: 'p@x', name: 'P', role: 'VIEWER', active: true }),
+    });
     const route = await import('@/app/api/users/[id]/route');
     const res = await route.PATCH(send('/api/users/u2', 'PATCH', { role: 'VIEWER' }), { params: { id: 'u2' } });
     expect(res.status).toBe(200);
     expect(invalidatePrincipal).toHaveBeenCalledWith('u2');
+  });
+
+  it('audit F11: the company lock is taken first, then the user is read, the last-admin check counted, the change and its audit row written - one transaction', async () => {
+    const { tx, order } = usersTx({
+      findFirst: () => ({ id: 'a2', email: 'a2@x', name: 'A2', role: 'TENANT_ADMIN', active: true }),
+      count: () => 1,
+      updateMany: () => ({ count: 1 }),
+      findUniqueOrThrow: () => ({ id: 'a2', email: 'a2@x', name: 'A2', role: 'TENANT_ADMIN', active: false }),
+    });
+    const route = await import('@/app/api/users/[id]/route');
+    const res = await route.PATCH(send('/api/users/a2', 'PATCH', { active: false }), { params: { id: 'a2' } });
+    expect(res.status).toBe(200);
+    expect(order[0]).toMatch(/lock_timeout/);
+    expect(order[1]).toContain('FROM "Tenant" WHERE id = ? FOR NO KEY UPDATE');
+    expect(order.slice(2)).toEqual(['user.findFirst', 'user.count', 'user.updateMany', 'user.findUniqueOrThrow', 'auditLog.create']);
+    expect(tx.$queryRaw.mock.calls[0]?.slice(1)).toEqual(['tA']);
+    // The last-admin check ran inside the transaction, never on the unscoped client.
+    expect(prismaFake.user).toBeUndefined();
+  });
+
+  it('audit F11: the last active admin cannot be deactivated or demoted, by themselves or another admin (400, nothing written)', async () => {
+    const { tx } = usersTx({ findFirst: () => ({ id: 'a2', email: 'a2@x', name: 'A2', role: 'TENANT_ADMIN', active: true }), count: () => 0 });
+    const route = await import('@/app/api/users/[id]/route');
+    const res = await route.PATCH(send('/api/users/a2', 'PATCH', { role: 'PLANNER' }), { params: { id: 'a2' } });
+    expect(res.status).toBe(400);
+    expect(tx.user.updateMany).toBeUndefined();
+    expect(tx.auditLog.create).not.toHaveBeenCalled();
   });
 });
 
@@ -155,6 +196,8 @@ describe('admin password reset (POST /api/users/[id]/reset-password)', () => {
   const ctx = (id: string) => ({ params: { id } });
   function fakeTx() {
     const tx = {
+      // Audit F10: the user's row is locked first (lockUserCredentials).
+      $queryRaw: vi.fn(async (_s: TemplateStringsArray, ..._v: unknown[]) => [{ id: 'u2' }]),
       user: { updateMany: vi.fn(async (_args: unknown) => ({ count: 1 })) },
       passwordResetToken: { updateMany: vi.fn(async (_args: unknown) => ({ count: 2 })) },
       auditLog: { create: vi.fn(async (_args: unknown) => ({})) },
@@ -203,6 +246,10 @@ describe('admin password reset (POST /api/users/[id]/reset-password)', () => {
     expect(body.data.user).toEqual({ id: 'u2', email: 'planner@a.example' });
     expect(body.data.tempPassword).toMatch(/^[A-Za-z0-9]{18}$/);
     expect(tx.user.updateMany).toHaveBeenCalledWith({ where: { id: 'u2', tenantId: 'tA' }, data: { passwordHash: 'h' } });
+    // Audit F10: the user's row lock (the same one a reset link takes) comes before any write.
+    expect(tx.$queryRaw.mock.calls[0]?.[0].join('?')).toContain('FROM "User" WHERE id = ? FOR NO KEY UPDATE');
+    expect(tx.$queryRaw.mock.calls[0]?.slice(1)).toEqual(['u2']);
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.user.updateMany.mock.invocationCallOrder[0]!);
     expect(tx.passwordResetToken.updateMany.mock.calls[0]?.[0]).toMatchObject({ where: { userId: 'u2', usedAt: null } });
     const row = (tx.auditLog.create.mock.calls[0]?.[0] as { data: Record<string, unknown> }).data;
     expect(row).toMatchObject({ tenantId: 'tA', userId: 'me', action: 'PASSWORD_RESET_BY_ADMIN', entity: 'User', entityId: 'u2' });

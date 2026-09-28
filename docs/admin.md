@@ -33,17 +33,26 @@ Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this bloc
 2. The JSON contains `requestJson` (exact solver input), `responseJson` (if any), and `errorJson` (reason).
 3. Common reasons:
    - `SOLVER_ERROR` with HTTP 5xx → solver crashed; check Railway logs for `routeiq-solver`
-   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS
+   - `SOLVER_ERROR` with HTTP 0 → solver unreachable; check `SOLVER_URL` / private DNS. If the message says `SOLVER_URL` "is not a usable address", set `SOLVER_URL` on web to `http://<solver private address>:<port>` as plain text (`/api/health` answers 503 `SOLVER_URL_INVALID` until then)
    - `STUCK` → the job had no result after 15 min and the janitor reaped it. Usually the web service restarted (a deploy) during the optimization; optimize again.
+   - `RESET` → a supervisor pressed **Reset stuck plan** (audit log `PLAN_RESET`: who, when, the note).
    - `Solver returned HTTP 404` / "The route optimizer is being updated" → web was deployed before the solver finished deploying; retry in a minute.
 4. Once the solver is healthy, click "Retry optimization" on the run — it spawns attempt #N+1 with the same input.
 
 ### When a run is stuck "Optimizing"
 1. The orphan janitor runs **inside the web process every 60 s** (`lib/jobs/janitor-loop.ts`, started from `instrumentation.ts`).
    - It fails any `RunJob` RUNNING or still QUEUED for more than 15 min (`STUCK_JOB_MS`), which is longer than any real optimization (the solver call is capped at 10 min).
-   - It flips the parent plan to `FAILED`, so it can be optimized again. No cron service is needed.
+   - It flips the parent plan to `FAILED`, so it can be optimized again. The job, the plan and the `OPTIMIZE_FAILED` audit row are written in one transaction (audit F09): a failed write changes nothing and the next sweep retries. No cron service is needed.
+   - (Audit F09) It also repairs any plan still `OPTIMIZING` whose current job has already ended (what the old janitor left when its second write failed): the plan goes to `FAILED` with an `OPTIMIZE_FAILED` audit row, reason `STUCK_PLAN`. **OPTIMIZE** and **Re-plan** stay greyed out while the plan shows *Optimizing…*: the janitor puts it back within a minute, or a supervisor presses **Reset stuck plan** now (step 2); the plan screen then shows *Optimization failed* and both buttons work again. (An OPTIMIZE / RE-PLAN request that reaches the server for such a plan, for example from an API call, resets it the same way first, then starts a new optimization.)
    - `ROUTEIQ_DISABLE_JANITOR=1` turns it off.
-2. To run the janitor manually:
+2. A **supervisor** (or company admin) does not have to wait: **Reset stuck plan** on the plan (`POST /api/runs/:id/reset-stuck`) puts the plan back to `FAILED` at once (audit `PLAN_RESET`). That covers a plan whose job has already ended (the case the janitor repairs within a minute) and a job lost by a restart (which the janitor fails only after 15 minutes): the lost job is failed with the plan. It is refused while the optimization is really running in the web process or started less than 2 minutes ago. A re-plan version keeps the plan it holds.
+3. Read-only check for plans stuck this way (expect 0 rows once the janitor has run):
+   ```sql
+   SELECT p.id, p."runDate", p.version, j.status AS job_status FROM "RunPlan" p
+   LEFT JOIN "RunJob" j ON j.id = p."currentJobId"
+   WHERE p.status = 'OPTIMIZING' AND (j.id IS NULL OR j.status NOT IN ('QUEUED', 'RUNNING'));
+   ```
+4. To run the janitor manually:
    ```bash
    curl -X POST $BASE/api/cron/janitor -H "X-Janitor-Token: $JANITOR_TOKEN"
    ```
@@ -90,7 +99,7 @@ Tenant admin uses `/t/{slug}/users` → "Invite user". Returns a one-time temp p
 
 ### Rotating `SOLVER_TOKEN`
 Every 90 days per CLAUDE.md §14.
-1. Generate a new random 32-byte base64 secret.
+1. Generate a new random 32-byte base64 secret. Paste it as plain text: a hidden space or curly quotes copied with it make `/api/health` answer 503 `SOLVER_TOKEN_INVALID`, and no plan can be optimized.
 2. Set on `routeiq-solver` env → redeploy solver. **It will continue accepting the old token until restart.** Wait for the new replica to come up.
 3. Set on `routeiq-web` env → redeploy web. Web will start sending the new token.
 4. Verify a fresh optimize call works.
@@ -176,7 +185,7 @@ The IP is the proxy-appended one (`TRUSTED_PROXY_HOPS` / `CLIENT_IP_HEADER`, `li
 - Max 50,000 rows on the sheet that is read (a CSV: the file). At most 50,100 rows of each sheet (or of a CSV) are read at all; a sheet that goes on past them is refused when it is the one read, and named "N rows or more" when it is not. A workbook's other sheets are named in a warning, never counted (PR6 review; the read cap since the audit A1).
 - An .xlsx is measured by unpacking it before anything is read (`lib/workbook-guard.ts`, audit E2): refused over 50 MB unpacked, over 1,000 parts, with a part whose header size is wrong or whose two names differ, password-protected, or not an Excel workbook; and (A1 review) over 2,500,000 cells, 10,000 comments, or hyperlinks over 200,000 cells; and (A1 v3) over 1,000 metadata entries of each kind or 1,000 comment authors. A cell is counted as SheetJS makes one: with a type or a value, also when its tag closes itself (A1 v3); a formatted empty cell is not counted. Binary parts (.bin) are hidden from SheetJS; an .xlsb is refused. Since A1 v4 the guard replays which parts SheetJS reads for each sheet (its part, relationships, comments, drawing of notes; external links as often as they are listed): a part read again counts again against every cap, two sheets that read one worksheet part are refused as damaged, SheetJS must read the same sheet list as the guard, and a workbook with a chart, dialog or macro sheet is refused. More than 10 sheets are refused before any sheet is read. Before any sheet is turned into rows, a sheet wider than 200 columns or sheets spanning more than 2,500,000 cells are refused. Formulas are not read, only their saved values, and number formats are not applied (no display text is made, A1 v3).
 - Content-type allowlist: CSV / XLSX / XLS only. A file read as Excel must also be one by content (A1 review): an .xlsx, an old .xls (its hyperlinks count against the same limit; A1 v2 also checks the compound-file structure first, so it cannot be crafted to exhaust memory) or CSV text; SheetJS guesses the format from the first bytes, so web pages, XML, OpenDocument, DIF, Lotus, dBASE, RTF, SocialCalc and real SYLK files are refused before it reads them. A CSV whose first column header is "ID" is read as CSV, not refused as SYLK (A1 v2); since A1 v3 also a semicolon one whose first ID is "C", "F", "E" or "B", while a file that would make SheetJS's SYLK reader grow its sheet to millions of rows first is refused.
-- No parse timeout: parsing is synchronous in the web process, so the former 10-second timer could never fire and was removed (audit E2). The limits above bound one upload's work but not its time: a file just under them still blocks the app for 5-11 s and uses about 1 GB (50,000 rows x 49 columns, or ten sheets of 50,000 rows; see `docs/SECURITY.md` section 9). A worker with a real timeout is audit PR 5.
+- No parse timeout: parsing is synchronous in the web process, so the former 10-second timer could never fire and was removed (audit E2). The limits above bound one upload's work but not its time: a file just under them still blocks the app for 5-11 s and uses about 1 GB (50,000 rows x 49 columns, or ten sheets of 50,000 rows; see `docs/SECURITY.md` section 10). A worker with a real timeout is audit PR 5.
 - Filename sanitized before writing to `UploadBatch.fileName`: no path separators, max 200 chars.
 
 ---
