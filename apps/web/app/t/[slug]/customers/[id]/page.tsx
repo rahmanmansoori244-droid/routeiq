@@ -42,7 +42,9 @@ export default async function CustomerDetailPage({
   });
   const service = describeServiceTime(customer, eff);
 
-  const mapboxToken = process.env.MAPBOX_TOKEN ?? '';
+  // Where the map looks when the customer has no pin: the company's first active depot, else Muscat.
+  const depot = await db.depot.findFirst({ where: { active: true }, orderBy: { code: 'asc' }, select: { lat: true, lng: true } });
+  const center = depot ?? { lat: 23.5859, lng: 58.4059 };
   const canEdit = canPlan(user.role);
 
   return (
@@ -73,11 +75,15 @@ export default async function CustomerDetailPage({
               <CustomerEditor
                 customer={{
                   id: customer.id,
+                  code: customer.code,
+                  branchCode: customer.branchCode,
+                  name: customer.name,
                   lat: customer.lat,
                   lng: customer.lng,
+                  locationVerified: customer.locationVerified,
                   geocodeConfidence: customer.geocodeConfidence,
                 }}
-                mapboxToken={mapboxToken}
+                center={center}
                 canEdit={canEdit}
               />
             </CardContent>
@@ -135,7 +141,7 @@ export default async function CustomerDetailPage({
               <CardTitle className="text-base">Phase 1 scope</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1 text-xs text-muted-foreground">
-              <p>You can drag the pin to update lat/lng. Full edit dialog (priority, service time, payment type) is reachable from the customer list inline controls.</p>
+              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Full edit dialog (priority, service time, payment type) is reachable from the customer list inline controls.</p>
               <p>The {regions.length} regions in this tenant are visible in the dropdown filter.</p>
             </CardContent>
           </Card>

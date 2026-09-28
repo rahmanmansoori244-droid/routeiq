@@ -22,6 +22,19 @@ export const PATCH = (req: Request, { params }: Params) =>
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.customer.findUnique({ where: { id: params.id } }));
       const input = await parseBody(r, customerPatchSchema);
+      // A location is set only through PUT /api/customers/:id/location, which checks the point
+      // (owner's location rule, audit PR A5). This route used to store any pair as verified HIGH,
+      // with no check at all (not 0,0, not the area). Refused, not dropped: the screen would think
+      // it saved.
+      if (input.lat !== undefined || input.lng !== undefined) {
+        return fail(
+          {
+            code: 'USE_SET_LOCATION',
+            message: 'A location is not changed here. Use Set location on the customer page, or ADD LOCATION on Daily dispatch: they check the point before saving it.',
+          } as Record<string, unknown>,
+          400,
+        );
+      }
       // The schema checks a window only when both ends are in the request: validate the
       // merged record, so patching one end cannot leave an end before its start.
       const windows = [
@@ -51,13 +64,6 @@ export const PATCH = (req: Request, { params }: Params) =>
           select: { code: true, branchCode: true },
         });
         if (twin) return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
-      }
-      if (input.lat !== undefined && input.lng !== undefined) {
-        data.geocodeConfidence = 'HIGH';
-        data.locationSource = 'MANUAL_LATLNG';
-        data.locationVerified = true;
-        data.locationVerifiedById = user.id;
-        data.locationVerifiedAt = new Date();
       }
       // A dispatcher setting these explicitly confirms them (no more "default" warnings). Only the
       // fields sent: the Details dialog sends only what the dispatcher changed (audit F07).

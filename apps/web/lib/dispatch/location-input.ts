@@ -297,6 +297,84 @@ export function parseGoogleMapsUrl(url: URL, area: ServiceArea = DEFAULT_SERVICE
   return fail('This Google Maps link does not contain coordinates (it only names a place). Drop a pin on the map instead.', { resolvedUrl });
 }
 
+/**
+ * The owner's standing rule (27 Sep 2026, audit PR A5): "locations should always be correct ... no
+ * item will be delivered without location". A reading that needs a pin (`needsPin`: every LOW
+ * reading and the MEDIUM ones - map centre, fewer than 4 decimals, degrees and minutes only, swapped,
+ * outside the delivery area) is never saved as read: the dispatcher places the pin by hand.
+ */
+export const PIN_REQUIRED_MESSAGE = "This reading is not exact. Drop the pin on the customer's exact location, then save.";
+/** The customer's saved point shown on the map, saved again without a hand pin, when it is not exact. */
+export const SAVED_NOT_EXACT_MESSAGE = "This saved location is not exact. Drop the pin on the customer's exact location, then save.";
+export const LOCATION_MISMATCH_MESSAGE = 'The point sent is not where this text points. Press Read again, or drop the pin by hand, then save.';
+
+/** Two points the same to the 6 decimals the parser and the pin map round to. */
+export function samePoint(a: { lat: number; lng: number }, b: { lat: number; lng: number }): boolean {
+  // Half a unit of the 6th decimal: 23.123456 and 23.123457 differ, 23.1234560 and 23.123456 do not.
+  return Math.abs(a.lat - b.lat) < 5e-7 && Math.abs(a.lng - b.lng) < 5e-7;
+}
+
+/** A parse's refusal in plain words, always ending with what to do (drop the pin). */
+export function pinRequiredMessage(p: Pick<LocationParse, 'ok' | 'error'>): string {
+  if (p.ok) return PIN_REQUIRED_MESSAGE;
+  const e = (p.error ?? 'This location could not be read.').trim();
+  return /\bpin\b/i.test(e) ? e : `${e} Drop the pin on the customer's exact location, then save.`;
+}
+
+/**
+ * Read a saved location's text again, with no network call. A short link (maps.app.goo.gl ...) is
+ * read from `resolvedUrl`, the final Google Maps address the Read (POST /api/locations/parse) found
+ * by following it on the server: only an http(s) Google Maps address that is not itself a short link
+ * is accepted. Without one the answer is "not read" (press Read again, or drop a pin).
+ */
+export function rereadSavedInput(input: string, resolvedUrl: string | null | undefined, area: ServiceArea = DEFAULT_SERVICE_AREA): LocationParse {
+  const first = parseLocationInput(input, area);
+  if (!first.needsResolve) return first;
+  const notRead = fail('This short link was not read on this screen. Press Read again, or drop the pin on the map.');
+  if (!resolvedUrl) return notRead;
+  let u: URL;
+  try {
+    u = new URL(resolvedUrl);
+  } catch {
+    return notRead;
+  }
+  if ((u.protocol !== 'https:' && u.protocol !== 'http:') || !isGoogleMapsHost(u.hostname) || SHORT_HOSTS.test(u.hostname)) return notRead;
+  return { ...parseGoogleMapsUrl(u, area), resolvedUrl: u.href };
+}
+
+export type ManualLocationCheck =
+  | { ok: true; lat: number; lng: number; source: LocationSourceKind; confidence: Confidence }
+  | { ok: false; code: 'PIN_REQUIRED' | 'LOCATION_MISMATCH'; message: string; parse?: LocationParse };
+
+/**
+ * Server side of the location rule for a save that is NOT a pin placed by hand (audit PR A5, L2):
+ * the text the point was read from is read again with the same parser (no network), and the save
+ * is refused when that reading needs a pin or cannot be read (PIN_REQUIRED), or when the point sent
+ * is not the point the text reads as (LOCATION_MISMATCH). The source and confidence stored are the
+ * parser's, never the client's. An accepted reading is always HIGH: the parser asks for a pin for
+ * every MEDIUM or LOW one.
+ */
+export function checkManualLocation(args: {
+  input: string | null | undefined;
+  resolvedUrl?: string | null;
+  lat: number;
+  lng: number;
+  area?: ServiceArea;
+}): ManualLocationCheck {
+  const text = (args.input ?? '').trim();
+  if (!text) {
+    return { ok: false, code: 'PIN_REQUIRED', message: 'Paste the Google Maps link or coordinates and press Read, or drop the pin on the map, then save.' };
+  }
+  const p = rereadSavedInput(text, args.resolvedUrl, args.area ?? DEFAULT_SERVICE_AREA);
+  if (!p.ok || p.needsPin || p.lat === undefined || p.lng === undefined) {
+    return { ok: false, code: 'PIN_REQUIRED', message: pinRequiredMessage(p), parse: p };
+  }
+  if (!samePoint({ lat: p.lat, lng: p.lng }, { lat: args.lat, lng: args.lng })) {
+    return { ok: false, code: 'LOCATION_MISMATCH', message: LOCATION_MISMATCH_MESSAGE, parse: p };
+  }
+  return { ok: true, lat: p.lat, lng: p.lng, source: p.source ?? 'MANUAL_LATLNG', confidence: p.confidence ?? 'HIGH' };
+}
+
 type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 /**

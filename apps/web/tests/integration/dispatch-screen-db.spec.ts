@@ -203,7 +203,8 @@ describe('F17: PUT /api/customers/:id/location refuses impossible or imprecise D
     const put = (input: string) => locationPut(new Request(`http://localhost/api/customers/${customerId}/location`, json('PUT', { input })), { params: { id: customerId } });
     const bad = await put(`23°99'00"N 58°24'00"E`);
     expect(bad.status).toBe(422);
-    expect(((await bad.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: 'CONFIRM_ON_MAP', message: expect.stringMatching(/minutes must be 0 to 59/) });
+    // PIN_REQUIRED since audit PR A5 (one code for every "needs a pin by hand"; it was CONFIRM_ON_MAP).
+    expect(((await bad.json()) as { error: { code: string; message: string } }).error).toMatchObject({ code: 'PIN_REQUIRED', message: expect.stringMatching(/minutes must be 0 to 59/) });
     const coarse = await put('23°N 58°E');
     expect(coarse.status).toBe(422);
     const after = await prisma.customer.findUniqueOrThrow({ where: { id: customerId } });

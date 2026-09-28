@@ -40,6 +40,8 @@ export interface IssueCustomer {
   lat: number | null;
   lng: number | null;
   locationVerified: boolean;
+  /** How exact the saved point is (HIGH / MEDIUM / LOW / MISSING): ADD LOCATION saves it again as it is only when exact (audit PR A5). */
+  geocodeConfidence: string | null;
   orders: number;
   cases: number;
   issues: CustomerIssue[];
@@ -257,6 +259,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       lat: c.lat,
       lng: c.lng,
       locationVerified: c.locationVerified,
+      geocodeConfidence: c.geocodeConfidence,
       orders: 1,
       cases: o.totalCases,
       issues,

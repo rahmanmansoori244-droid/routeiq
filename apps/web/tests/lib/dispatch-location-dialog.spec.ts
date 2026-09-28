@@ -43,7 +43,8 @@ import { LocationDialog } from '@/app/t/[slug]/dispatch/location-dialog';
 
 const A = { customerId: 'cust-A', code: 'A001', branchCode: null, name: 'Customer A (Seeb)', lat: null, lng: null };
 const B = { customerId: 'cust-B', code: 'B001', branchCode: null, name: 'Customer B (Barka)', lat: null, lng: null };
-const B_PINNED = { ...B, lat: 23.6786, lng: 57.8859 };
+// An exact saved point (a HIGH import, not confirmed yet): it can be saved again as it is.
+const B_PINNED = { ...B, lat: 23.6786, lng: 57.8859, locationVerified: false, geocodeConfidence: 'HIGH' };
 const A_LINK = 'https://maps.app.goo.gl/AAAAshortA';
 const ok = (data: unknown) => ({ ok: true, status: 200, data, error: null, errorBody: null });
 const parsed = (lat: number, lng: number, source = 'GOOGLE_MAPS_URL') => ok({ ok: true, lat, lng, source, confidence: 'HIGH', needsPin: false, warnings: [] });
@@ -414,5 +415,99 @@ describe('LocationDialog (audit F06)', () => {
     await t.host.settle();
     expect(t.host.props.open).toBe(false);
     expect(t.saved).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
+  const notExact = (lat: number, lng: number, confidence: 'MEDIUM' | 'LOW', warning: string, extra: Record<string, unknown> = {}) =>
+    ok({ ok: true, lat, lng, source: 'GOOGLE_MAPS_URL', confidence, needsPin: true, warnings: [warning], ...extra });
+  const pinRequired = (t: ReturnType<typeof setup>) => textOf(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'location-pin-required') ?? null);
+
+  it.each([
+    ['LOW (whole degrees)', 'LOW', "23°N 58°E"],
+    ['MEDIUM (fewer than 4 decimals)', 'MEDIUM', '23.58, 58.40'],
+    ['MEDIUM (map centre only)', 'MEDIUM', 'https://www.google.com/maps/@23.5859,58.4059,17z'],
+  ] as const)('a reading that is not exact, %s: Save stays off until the pin is placed by hand', async (_what, confidence, text) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    calls[0].resolve(notExact(23.58, 58.4, confidence, 'Confirm the pin.'));
+    await t.host.settle();
+    expect(t.found()).toContain('23.580000, 58.400000');
+    // Before: Save was on and stored the reading as read (source GOOGLE_MAPS_URL), marked verified.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");
+    t.save();
+    expect(t.puts()).toEqual([]);
+    // The dispatcher drops the pin on the customer: that point is saved, as a hand pin, with the text it came from.
+    t.dropPin(23.581234, 58.401234);
+    expect(pinRequired(t)).toBe('');
+    expect(t.saveBtn().props.disabled).toBe(false);
+    t.save();
+    expect(t.puts()).toHaveLength(1);
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.581234, lng: 58.401234, source: 'MAP_PIN', input: text });
+  });
+
+  it('a reading that could not be read also needs a hand pin', async () => {
+    const t = setup();
+    t.openFor(B_PINNED);
+    t.type('https://www.google.com/maps/place/Lulu+Hypermarket');
+    t.read();
+    calls[0].resolve(ok({ ok: false, needsPin: true, warnings: [], error: 'This Google Maps link does not contain coordinates (it only names a place). Drop a pin on the map instead.' }));
+    await t.host.settle();
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This could not be read. Drop the pin on the customer's exact location, then save.");
+    t.dropPin(23.6787, 57.886);
+    expect(t.saveBtn().props.disabled).toBe(false);
+  });
+
+  it.each([
+    ['a MEDIUM import', { locationVerified: false, geocodeConfidence: 'MEDIUM' }],
+    ['a LOW reading', { locationVerified: false, geocodeConfidence: 'LOW' }],
+    ['a point of unknown quality', { locationVerified: false, geocodeConfidence: null }],
+    ['labelled HIGH but with 2 decimals (stored before the rule)', { locationVerified: false, geocodeConfidence: 'HIGH', lat: 23.68, lng: 57.89 }],
+  ])("the customer's saved pin is not saved again as it is when it is not exact (%s)", (_what, quality) => {
+    const t = setup();
+    const c = { ...B_PINNED, ...quality };
+    t.openFor(c);
+    expect(t.pinText()).toContain(`${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`);
+    // Before: Save stored this point as a hand pin, verified HIGH, although nobody placed it.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This saved location is not exact. Drop the pin on the customer's exact location, then save.");
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.6788, 57.8861);
+    expect(t.saveBtn().props.disabled).toBe(false);
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.6788, lng: 57.8861, source: 'MAP_PIN' });
+  });
+
+  it.each([
+    ['HIGH, not confirmed yet', { locationVerified: false, geocodeConfidence: 'HIGH' }],
+    ['confirmed by a dispatcher', { locationVerified: true, geocodeConfidence: 'HIGH' }],
+  ])("control: an exact saved pin (%s) can be saved again as it is", (_what, quality) => {
+    const t = setup();
+    t.openFor({ ...B_PINNED, ...quality });
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+  });
+
+  it('Save sends the address a short link led to at the Read, so the server reads the same text again without opening it', async () => {
+    const t = setup();
+    t.openFor(A);
+    t.type(A_LINK);
+    t.read();
+    const resolvedUrl = 'https://www.google.com/maps/place/A/data=!3d23.6703!4d58.1889';
+    calls[0].resolve(ok({ ok: true, lat: 23.6703, lng: 58.1889, source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', needsPin: false, warnings: [], resolvedUrl }));
+    await t.host.settle();
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.6703, lng: 58.1889, source: 'GOOGLE_MAPS_URL', input: A_LINK, resolvedUrl });
+    // A hand pin with no Read sends neither text nor address.
+    const u = setup();
+    u.openFor(B);
+    u.dropPin(23.68, 57.89);
+    u.save();
+    expect(u.puts().at(-1)!.init.json.resolvedUrl).toBeUndefined();
   });
 });

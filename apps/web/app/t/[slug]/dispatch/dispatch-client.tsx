@@ -30,6 +30,7 @@ interface IssueCustomer extends EditableCustomer {
   lat: number | null;
   lng: number | null;
   locationVerified: boolean;
+  geocodeConfidence?: string | null;
   orders: number;
   cases: number;
   issues: Issue[];
@@ -646,9 +647,16 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
       {c.inactive ? (
         <p className="mt-1 text-xs font-medium text-red-700">{c.issues.find((i) => i.code === 'CUSTOMER_INACTIVE')?.message}</p>
       ) : (
-        <p className="mt-1 text-xs">
-          Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
-        </p>
+        <>
+          <p className="mt-1 text-xs">
+            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
+          </p>
+          {needsLoc ? (
+            <p className="text-xs text-red-700" data-testid={`location-issue-${c.code}`}>
+              {c.issues.find((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION')?.message}
+            </p>
+          ) : null}
+        </>
       )}
       {c.issues
         .filter((i) => !i.blocking && i.code !== 'NEW_CUSTOMER')

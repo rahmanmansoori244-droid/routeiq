@@ -1,6 +1,8 @@
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { customerSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { parseLocationInput } from '@/lib/dispatch/location-input';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
 
 export const GET = withTenantApi(async (req, { db }) => {
   const url = new URL(req.url);
@@ -35,12 +37,32 @@ export const POST = withTenantApi(
     const raw = (await req
       .clone()
       .json()
-      .catch(() => ({}))) as { avgServiceTimeMin?: unknown };
+      .catch(() => ({}))) as { avgServiceTimeMin?: unknown; lat?: unknown; lng?: unknown };
     const serviceTimeGiven = raw?.avgServiceTimeMin !== undefined && raw?.avgServiceTimeMin !== null && raw?.avgServiceTimeMin !== '';
     const input = await parseBody(req, customerSchema);
     if (input.regionId) {
       const region = await db.region.findUnique({ where: { id: input.regionId } });
       if (!region) return fail('Region not found in this tenant', 400);
+    }
+    // Coordinates are checked like a Read (owner's location rule, audit PR A5): a pair that needs a
+    // pin (fewer than 4 decimals, swapped, outside the delivery area, 0,0) is refused, never stored
+    // as a usable location. The text as sent is read, so "23.5800" keeps its 4 decimals.
+    let loc: { lat: number; lng: number } | null = null;
+    if (input.lat !== undefined || input.lng !== undefined) {
+      if (input.lat === undefined || input.lng === undefined) return fail('Send both lat and lng, or neither.', 400);
+      const p = parseLocationInput(`${String(raw.lat).trim()}, ${String(raw.lng).trim()}`, await tenantServiceArea(user.tenantId));
+      if (!p.ok || p.needsPin || p.lat === undefined || p.lng === undefined) {
+        const why = p.ok ? p.warnings.join(' ') : p.error ?? '';
+        return fail(
+          {
+            code: 'PIN_REQUIRED',
+            message: `This location is not exact${why ? ` (${why})` : ''}. Create the customer without coordinates, then set its location on the map (Set location on the customer page).`,
+            parse: p,
+          } as Record<string, unknown>,
+          422,
+        );
+      }
+      loc = { lat: p.lat, lng: p.lng };
     }
     const branchKey = normalizeBranchKey(input.branchCode);
     // Codes are one customer whatever their letter case (the order intake matches them that way):
@@ -52,7 +74,6 @@ export const POST = withTenantApi(
     if (twin) {
       return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
     }
-    const geocodeConfidence = input.lat !== undefined && input.lng !== undefined ? 'HIGH' : 'MISSING';
     const created = await db.customer.create({
       data: {
         tenantId: user.tenantId,
@@ -62,9 +83,10 @@ export const POST = withTenantApi(
         branchKey,
         regionId: input.regionId,
         address: input.address,
-        lat: input.lat as number | undefined,
-        lng: input.lng as number | undefined,
-        geocodeConfidence,
+        lat: loc?.lat,
+        lng: loc?.lng,
+        // An accepted reading is always HIGH (the parser asks for a pin for every other one).
+        geocodeConfidence: loc ? 'HIGH' : 'MISSING',
         priority: input.priority,
         avgServiceTimeMin: input.avgServiceTimeMin,
         serviceTimeConfirmed: serviceTimeGiven,
