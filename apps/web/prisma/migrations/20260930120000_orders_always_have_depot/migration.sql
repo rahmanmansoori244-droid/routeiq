@@ -13,7 +13,9 @@
 --      it anyway, so there is never a lock upgrade), "Tenant" in SHARE mode (no company is deleted
 --      while a depot is added). It tries without waiting (NOWAIT) for about 30 s, then waits at most
 --      5 s per try. A busy app delays the migration; it never makes it fail (no deadlock: a try that
---      cannot get every lock gives them all back and tries again).
+--      cannot get every lock gives them all back and tries again). Before it, the migration turns off
+--      any statement or transaction time limit for its own transaction, so a limit set on the
+--      database or the role cannot cancel the wait either.
 --   1. "Depot"."historyOnly" (default false): a depot that only keeps old orders and files. It is
 --      never active and never offered in a picker; the app refuses to make it active.
 --   2. Gives every order and order file without a depot the best depot the data shows:
@@ -47,11 +49,19 @@
 -- stay: old code ignores the column (but its Depots screen could switch a history-only depot on).
 
 -- 0. Locks
+-- First, in statements of their own: no statement or transaction time limit for this migration's
+-- transaction (is_local = true: nothing outside it changes). A limit set on the database or the
+-- role (ALTER DATABASE / ALTER ROLE ... SET statement_timeout, or PGOPTIONS) would otherwise cancel
+-- the lock step while it waits for a busy app (57014, then P3018 and P3009). PostgreSQL starts each
+-- statement's timer when that statement starts, so the setting must come before the DO block: set
+-- inside it, it only reaches the statements after it (A5 second review). transaction_timeout exists
+-- from PostgreSQL 17 on (production runs 18); on older servers this statement does nothing.
+SELECT set_config('statement_timeout', '0', true);
+SELECT set_config('transaction_timeout', '0', true) WHERE current_setting('server_version_num')::int >= 170000;
 DO $$
 DECLARE
   tries integer := 0;
 BEGIN
-  PERFORM set_config('statement_timeout', '0', true);
   LOOP
     BEGIN
       IF tries < 300 THEN

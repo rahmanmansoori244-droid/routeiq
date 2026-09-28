@@ -189,7 +189,9 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     expect(S.updateManys).toEqual([{ where: { id: 'K1', locationVerified: false, lat: 23.5859, lng: 58.4059 }, data: { geocodeConfidence: 'LOW' } }]);
     expect(S.rows[0]).toMatchObject({ lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationVerified: false });
     expect(locationBlocksDelivery(S.rows[0]!)).toBe(true);
-    expect(r.body.data.warnings.join(' ')).toMatch(/1 saved location\(s\) are not used until the pin is placed by hand: the file points somewhere else\./);
+    expect(r.body.data.warnings).toContain(
+      '1 saved location(s) are not used until the pin is placed by hand: the file points somewhere else. Their orders are not planned or sent out until then. Drop the pin on each one (ADD LOCATION on Daily dispatch, or Set location on the customer page).',
+    );
   });
 
   it('the file points somewhere else, and the pair is outside the area: marked LOW too; the dry run lists it and writes nothing', async () => {
@@ -201,6 +203,42 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
     });
     expect(S.updateManys).toEqual([]);
     expect(S.rows[0]!.geocodeConfidence).toBe('HIGH');
+  });
+
+  it('a saved point that is itself not usable is kept but reported as not used, and not marked again (A5 second review)', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'HIGH' });
+    // Import 1 points elsewhere: the saved point is marked LOW.
+    await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.61,58.52\n');
+    expect(S.rows[0]).toMatchObject({ geocodeConfidence: 'LOW', locationVerified: false });
+    S.updateManys = [];
+    // Import 2 agrees with the saved point, which is still LOW: before, "The location it already has
+    // is kept." with no warning, although nothing is delivered to it.
+    const r = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.59,58.41\n');
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals.', kept: 'SAVED_LOCATION_NOT_USABLE' }]);
+    expect(r.body.data.warnings).toContain(
+      '1 saved location(s) are not used until the pin is placed by hand: the saved location is not exact or is outside the delivery area, and nobody confirmed it. Their orders are not planned or sent out until then. Drop the pin on each one (ADD LOCATION on Daily dispatch, or Set location on the customer page).',
+    );
+    expect(S.updateManys).toEqual([]);
+    expect(S.rows[0]).toMatchObject({ lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW' });
+  });
+
+  it.each([
+    ['outside the delivery area, never confirmed (coarse file pair)', { lat: 19.076, lng: 72.8777, geocodeConfidence: 'HIGH' }, '19.076,72.878', 'Outside the delivery area. Fewer than 4 decimals.'],
+    ['outside the delivery area, never confirmed (exact file pair)', { lat: 19.076, lng: 72.8777, geocodeConfidence: 'HIGH' }, '19.0760,72.8777', 'Outside the delivery area.'],
+    ['LOW, never confirmed (Validate only)', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW' }, '23.586,58.406', 'Fewer than 4 decimals.'],
+  ])('a saved point %s: SAVED_LOCATION_NOT_USABLE', async (_what, saved, pair, reason) => {
+    S.rows[0] = cust('K1', saved);
+    const r = await importCsv(`code,name,priority,lat,lng\nK1,K1,3,${pair}\n`, true);
+    expect(r.body.data.locationsNotSaved).toEqual([{ row: 2, code: 'K1', branchCode: null, reason, kept: 'SAVED_LOCATION_NOT_USABLE' }]);
+    expect(r.body.data.warnings.join(' ')).toMatch(/^.*1 saved location\(s\) are not used until the pin is placed by hand: the saved location is not exact/);
+    expect(locationBlocksDelivery(S.rows[0]!)).toBe(true);
+  });
+
+  it('control: a LOW point a dispatcher confirmed is usable: kept as SAVED_LOCATION, no warning', async () => {
+    S.rows[0] = cust('K1', { lat: 23.5859, lng: 58.4059, geocodeConfidence: 'LOW', locationVerified: true });
+    const r = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.586,58.406\n');
+    expect(r.body.data.locationsNotSaved[0]).toMatchObject({ kept: 'SAVED_LOCATION' });
+    expect(r.body.data.warnings.join(' ')).not.toMatch(/not used until the pin/);
   });
 
   it('a location a dispatcher confirmed is never changed, whatever the file says (F05)', async () => {
@@ -258,14 +296,22 @@ describe('the import screen says the location rule in plain words (A5 review)', 
   });
 
   it('each row listed says what happens to the customer\'s location', () => {
-    const row = (kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null) => ({ row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals.', kept });
+    const row = (kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | 'SAVED_LOCATION_NOT_USABLE' | null) => ({ row: 2, code: 'K1', branchCode: null, reason: 'Fewer than 4 decimals.', kept });
     expect(locationNotSavedLine(row(null), false)).toBe('Fewer than 4 decimals. It has no location until you set one.');
     expect(locationNotSavedLine(row('SAVED_LOCATION'), false)).toBe('Fewer than 4 decimals. The location it already has is kept.');
+    // A5 second review: what happens to its orders, in the words of the rule the system enforces
+    // (before: "nothing is delivered to it", also for a load already on the road).
     expect(locationNotSavedLine(row('SAVED_LOCATION_NEEDS_PIN'), false)).toBe(
-      'Fewer than 4 decimals. Its saved location is no longer used: nothing is delivered to it until someone drops the pin on the map.',
+      'Fewer than 4 decimals. Its saved location is no longer used: its orders are not planned or sent out until someone drops the pin on the map.',
     );
     expect(locationNotSavedLine(row('SAVED_LOCATION_NEEDS_PIN'), true)).toBe(
-      'Fewer than 4 decimals. Its saved location will no longer be used: nothing is delivered to it until someone drops the pin on the map.',
+      'Fewer than 4 decimals. Its saved location will no longer be used: its orders are not planned or sent out until someone drops the pin on the map.',
     );
+    // A kept point that is itself not usable (before: "The location it already has is kept.").
+    for (const dryRun of [false, true]) {
+      expect(locationNotSavedLine(row('SAVED_LOCATION_NOT_USABLE'), dryRun)).toBe(
+        'Fewer than 4 decimals. Its saved location is not exact or is outside the delivery area, so it is not used either: its orders are not planned or sent out until someone drops the pin on the map.',
+      );
+    }
   });
 });

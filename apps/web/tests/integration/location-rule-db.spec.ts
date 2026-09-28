@@ -18,19 +18,50 @@
  *     "optimize anyway" its order is left unserved with a reason that says to drop the pin.
  *  4. L5: a legacy run (previous planner) is not dispatched while one of its customers has no
  *     location; once the pin is placed it is.
+ *  5. L5 (A5 second review): a customer import can mark a planned customer's saved point LOW after
+ *     planning. Its load cannot then be locked, loaded or dispatched (409 LOCATION_REQUIRED, the
+ *     customers named), also after "Use instead" and when the load was locked before the import;
+ *     the day says the plan is out of date so RE-PLAN is offered; once the pin is placed, it goes.
  */
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import type { DispatchRequest, DispatchResponse, DispatchScenario } from '@routeiq/shared-types';
+import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
 
 const session = vi.hoisted(() => ({ user: { id: '', tenantId: '', role: 'TENANT_ADMIN', name: 'Planner', email: 'planner@a5.test' } }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { ...session.user } })) }));
 
 const solverCalls = vi.hoisted(() => [] as DispatchRequest[]);
+/** unserved: every stop unserved (sections 1-4); plan: every stop on a truck (section 5). */
+const solverMode = vi.hoisted(() => ({ mode: 'unserved' as 'unserved' | 'plan' }));
 vi.mock('@/lib/solver-client', () => {
   class SolverError extends Error {
     constructor(message: string, public status = 0, public responseBody: unknown = null) {
       super(message);
     }
+  }
+  /** Stop i on truck i % n, load floor(i / n) + 1 (after the truck's frozen trips), and an alternative with the same loads ("Use instead"). */
+  function planAll(req: DispatchRequest): DispatchResponse {
+    const frozenNos = new Map(req.trucks.map((t) => [t.id, (t.frozen_trips ?? []).length]));
+    const loads: PlannedLoad[] = req.stops.map((s, i) => {
+      const truck = req.trucks[i % req.trucks.length]!;
+      const loadNo = (frozenNos.get(truck.id) ?? 0) + Math.floor(i / req.trucks.length) + 1;
+      const depart = 360 + loadNo * 150;
+      return {
+        truck_id: truck.id, load_no: loadNo, depart_min: depart, return_min: depart + 90, distance_km: 12, duration_min: 90, cases: s.demand_cases, kg: s.demand_kg ?? 0,
+        utilization_pct: 10, fuel_litres: 2, fuel_cost: 0.5, distance_cost: 1, time_cost: 1, fixed_cost: 0, total_cost: 2.5, return_leg_km: 6,
+        stops: [
+          { sequence: 1, stop_id: s.stop_id, order_ids: s.order_ids, customer_id: s.customer_id, arrival_min: depart + 20, service_start_min: depart + 20, departure_min: depart + 40, wait_min: 0, leg_km: 6, cum_km: 6, leg_min: 20, cases: s.demand_cases, kg: s.demand_kg ?? 0, hard_window_ok: true, pref_window_ok: true },
+        ],
+      };
+    });
+    const sc: DispatchScenario = {
+      name: 'RECOMMENDED', status: 'OPTIMIZED', solver_status: 'ROUTING_SUCCESS', solver_time_sec: 0.1, time_limit_sec: 5, objective_value: 1,
+      objective: { unserved_penalty: 0, fixed_cost: 0, distance_cost: 0, fuel_cost: 0, time_cost: 0, overtime_cost: 0, window_penalty: 0, margin_served: null },
+      trucks_used: new Set(loads.map((l) => l.truck_id)).size, trips: loads.length, total_distance_km: loads.length * 12, total_duration_min: loads.length * 90,
+      total_cases: loads.reduce((a, l) => a + l.cases, 0), total_kg: 0, avg_utilization_pct: 10, fuel_litres: 0, fuel_cost: 0, operating_cost: loads.length * 2.5,
+      loads, unserved: [], warnings: [],
+    };
+    const alt: DispatchScenario = { ...sc, name: 'MIN_TRUCKS', loads: sc.loads.map((l) => ({ ...l })) };
+    return { run_id: req.run_id, engine: 'test', matrix_provider: 'HAVERSINE', distance_is_estimated: true, scenarios: [sc, alt], warnings: [] };
   }
   function allUnserved(req: DispatchRequest): DispatchResponse {
     const sc: DispatchScenario = {
@@ -61,15 +92,15 @@ vi.mock('@/lib/solver-client', () => {
     SolverError,
     callDispatchSolver: vi.fn(async (req: DispatchRequest) => {
       solverCalls.push(req);
-      return allUnserved(req);
+      return solverMode.mode === 'plan' ? planAll(req) : allUnserved(req);
     }),
   };
 });
 
 import { prisma as libPrisma } from '@/lib/db';
-import { getOrCreatePlan } from '@/lib/dispatch/plan-service';
-import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
-import { getDayOverview } from '@/lib/dispatch/day-overview';
+import { chooseScenario, getOrCreatePlan, LOCATION_GATE_RULE, noLocationLoadRemedy, updateLoad } from '@/lib/dispatch/plan-service';
+import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
+import { getDayOverview, UP_TO_DATE } from '@/lib/dispatch/day-overview';
 import { LOW_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
 import { PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE } from '@/lib/dispatch/location-input';
 import { PUT as locationPut } from '@/app/api/customers/[id]/location/route';
@@ -303,5 +334,120 @@ describe('4. a legacy run is not dispatched with a customer without a location (
     const ok = await dispatch();
     expect(ok.status).toBe(200);
     expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).status).toBe('DISPATCHED');
+  });
+});
+describe('5. a planned customer whose location stops being usable is never locked, loaded or dispatched (L5, A5 second review)', () => {
+  const planner = () => ({ id: session.user.id, role: 'TENANT_ADMIN' });
+  const everyRole = () => true;
+  const importCsv = async (csv: string) => {
+    const fd = new FormData();
+    fd.set('file', new File([csv], 'customers.csv', { type: 'text/csv' }));
+    return answer(await importCustomers(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd })));
+  };
+  const loadOf = async (runId: string, customerId: string) =>
+    (await prisma.routeAssignment.findFirstOrThrow({ where: { runId, order: { customerId } }, include: { load: { include: { truck: true } } } })).load!;
+  const statusOf = async (loadId: string) => (await prisma.planLoad.findUniqueOrThrow({ where: { id: loadId } })).status;
+  async function planDay(day: string) {
+    const { run } = await getOrCreatePlan(tenantId, depotId, day, session.user.id);
+    expect((await startDispatchOptimize(tenantId, run.id, { id: session.user.id }, null)).status).toBe(202);
+    expect((await jobsDone(run.id)).status).toBe('READY');
+    return run.id;
+  }
+
+  beforeAll(async () => {
+    // A second truck: each customer gets Load 1 of its own truck (loads are locked in order).
+    await prisma.truck.create({ data: { tenantId, depotId, code: 'T02', capacityCases: 200, capacityWeightKg: 3000, fixedCostPerDay: 20, costPerKm: 0.1 } });
+  });
+  beforeEach(() => {
+    solverMode.mode = 'plan';
+  });
+  afterEach(() => {
+    solverMode.mode = 'unserved';
+  });
+
+  it('a PLANNED load: the day says RE-PLAN, LOCK is refused naming the customer, also after "Use instead"; once the pin is placed it locks', async () => {
+    const day = isoPlus(12);
+    const k1 = await cust('K1', { lat: 23.6111, lng: 58.4111, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    const k2 = await cust('K2', { lat: 23.588, lng: 58.41, geocodeConfidence: 'HIGH', locationVerified: true });
+    await orderFor(k1.id, day, 'SO-K1');
+    await orderFor(k2.id, day, 'SO-K2');
+    const runId = await planDay(day);
+    expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual(UP_TO_DATE);
+
+    // The new master file has K1 about 4 km away, with 2 decimals: its saved point is marked LOW.
+    const imp = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.64,58.44\n');
+    expect(imp.status).toBe(200);
+    expect(imp.body.data.locationsNotSaved).toMatchObject([{ code: 'K1', kept: 'SAVED_LOCATION_NEEDS_PIN' }]);
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: k1.id } })).toMatchObject({ lat: 23.6111, lng: 58.4111, geocodeConfidence: 'LOW', locationVerified: false });
+    // A file that agrees with the saved point keeps it, and says it is still not used (before: "The
+    // location it already has is kept.", with no warning).
+    const agrees = await importCsv('code,name,priority,lat,lng\nK1,K1,3,23.61,58.41\n');
+    expect(agrees.body.data.locationsNotSaved).toMatchObject([{ code: 'K1', kept: 'SAVED_LOCATION_NOT_USABLE' }]);
+    expect(agrees.body.data.warnings.join(' ')).toMatch(/1 saved location\(s\) are not used until the pin is placed by hand: the saved location is not exact/);
+
+    // The day: K1 blocks and the plan in use is out of date, so RE-PLAN is offered (before: every
+    // count 0, "The plan is up to date with all orders").
+    const day1 = await getDayOverview(tenantId, { date: day, depotId });
+    expect(day1.customers.find((c) => c.customerId === k1.id)).toMatchObject({ blocking: true });
+    expect(day1.outdated).toEqual({ ...UP_TO_DATE, locationBlocked: 1 });
+
+    // LOCK of K1's load is refused (before: locked, then dispatched to the old point).
+    const l1 = await loadOf(runId, k1.id);
+    const refused = await updateLoad(tenantId, runId, l1.id, { status: 'LOCKED' }, planner(), everyRole).catch((e) => e);
+    expect(refused).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED', customerIds: [k1.id], customers: ['K1'] } });
+    expect(refused.message).toBe(`${l1.truck.code} L1: 1 customer on this load has no usable location: K1. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy('PLANNED')}`);
+    expect(await statusOf(l1.id)).toBe('PLANNED');
+
+    // "Use instead": the other option was computed before the mark and puts K1 on a new PLANNED
+    // load; locking it is refused the same way.
+    const plan = await prisma.runPlan.findUniqueOrThrow({ where: { id: runId } });
+    const alt = await prisma.scenarioResult.findFirstOrThrow({ where: { runId, id: { not: plan.chosenScenarioId! } } });
+    await chooseScenario(tenantId, runId, alt.id, session.user.id);
+    const l1b = await loadOf(runId, k1.id);
+    expect(l1b.status).toBe('PLANNED');
+    await expect(updateLoad(tenantId, runId, l1b.id, { status: 'LOCKED' }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+    expect(await statusOf(l1b.id)).toBe('PLANNED');
+    // Control: K2's load (a confirmed location) locks and dispatches.
+    const l2 = await loadOf(runId, k2.id);
+    await updateLoad(tenantId, runId, l2.id, { status: 'LOCKED' }, planner(), everyRole);
+    await updateLoad(tenantId, runId, l2.id, { status: 'DISPATCHED' }, planner(), everyRole);
+    expect(await statusOf(l2.id)).toBe('DISPATCHED');
+
+    // The dispatcher drops the pin: K1 is usable again, the plan is out of date because its pin
+    // moved (F08), and the load can be locked.
+    expect((await put(k1.id, { lat: 23.6402, lng: 58.4403, source: 'MAP_PIN' })).status).toBe(200);
+    expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual({ ...UP_TO_DATE, masterChanged: 1 });
+    await updateLoad(tenantId, runId, l1b.id, { status: 'LOCKED' }, planner(), everyRole);
+    expect(await statusOf(l1b.id)).toBe('LOCKED');
+  });
+
+  it('a load LOCKED before the import: LOADING and DISPATCH are refused (with how to go back), unlocking is not; RE-PLAN then asks first', async () => {
+    const day = isoPlus(14);
+    const k3 = await cust('K3', { lat: 23.555, lng: 58.335, geocodeConfidence: 'HIGH', locationSource: 'IMPORT' });
+    await orderFor(k3.id, day, 'SO-K3');
+    const runId = await planDay(day);
+    const l3 = await loadOf(runId, k3.id);
+    await updateLoad(tenantId, runId, l3.id, { status: 'LOCKED' }, planner(), everyRole);
+
+    expect((await importCsv('code,name,priority,lat,lng\nK3,K3,3,23.49,58.30\n')).body.data.locationsNotSaved).toMatchObject([{ code: 'K3', kept: 'SAVED_LOCATION_NEEDS_PIN' }]);
+    // Only PLANNED loads make the plan out of date (a re-plan keeps a locked load as it is).
+    expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual(UP_TO_DATE);
+
+    for (const to of ['DISPATCHED', 'LOADING'] as const) {
+      const refused = await updateLoad(tenantId, runId, l3.id, { status: to }, planner(), everyRole).catch((e) => e);
+      // Before: dispatched, and the order DISPATCHED, to a point the import had just said was not usable.
+      expect(refused, to).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED', customers: ['K3'] } });
+      expect(refused.message).toContain(noLocationLoadRemedy('LOCKED'));
+    }
+    expect(await statusOf(l3.id)).toBe('LOCKED');
+    expect((await prisma.order.findFirstOrThrow({ where: { tenantId, customerId: k3.id } })).status).not.toBe('DISPATCHED');
+
+    // The way back is open, and a re-plan then asks before leaving K3 unserved.
+    await updateLoad(tenantId, runId, l3.id, { status: 'PLANNED' }, planner(), everyRole);
+    expect(await statusOf(l3.id)).toBe('PLANNED');
+    expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual({ ...UP_TO_DATE, locationBlocked: 1 });
+    const again = await replan(tenantId, runId, 'REOPTIMIZE', null, planner(), null);
+    expect(again.status).toBe(409);
+    expect(again.body).toMatchObject({ code: 'LOCATION_REQUIRED' });
   });
 });

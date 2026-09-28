@@ -46,6 +46,8 @@ import {
   chooseScenario,
   createInitialPlan,
   createNextVersion,
+  LOCATION_GATE_RULE,
+  noLocationLoadRemedy,
   PlanError,
   updateLoad,
 } from '@/lib/dispatch/plan-service';
@@ -404,6 +406,65 @@ describe('load changes on a version without an applied plan (F03 / L14)', () => 
     expect(isLockBusy({ code: 'P2002' })).toBe(false);
     expect(isLockBusy(new Error('boom'))).toBe(false);
     expect(isLockBusy(null)).toBe(false);
+  });
+});
+
+describe("load changes and the owner's location rule (audit PR A5, second review)", () => {
+  // The customer of O1 (on LOCKED L1) and O2 (on PLANNED L2), as it is NOW: the gate reads it by id.
+  const customerNow = (over: Record<string, unknown>) => {
+    tables.customer = [{ id: 'c', tenantId: T, code: 'C1', branchCode: null, lat: 23.6111, lng: 58.4111, locationVerified: false, geocodeConfidence: 'HIGH', ...over }];
+  };
+
+  it('a saved point marked LOW after planning: LOCK, LOADING and DISPATCH are refused (409 LOCATION_REQUIRED) and nothing changes', async () => {
+    seedAppliedPlan();
+    customerNow({ geocodeConfidence: 'LOW' });
+    const lock = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+    // Before: locked (and then dispatched) to the point the import had said was not usable.
+    expect(lock).toBeInstanceOf(PlanError);
+    expect(lock).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED', customerIds: ['c'], customers: ['C1'] } });
+    expect(lock.message).toBe(`T01 L2: 1 customer on this load has no usable location: C1. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy('PLANNED')}`);
+    for (const to of ['LOADING', 'DISPATCHED'] as const) {
+      const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+      expect(e, to).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+      expect(e.message).toContain(noLocationLoadRemedy('LOCKED'));
+    }
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOCKED', 'PLANNED']);
+    expect(tables.auditLog).toEqual([]);
+    // The way back is never refused.
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+  });
+
+  it.each([
+    ['a point outside the delivery area, never confirmed', { lat: 24.7136, lng: 46.6753 }],
+    ['no coordinates', { lat: null, lng: null, geocodeConfidence: 'MISSING' }],
+    ['the point 0,0', { lat: 0, lng: 0 }],
+  ])('a customer with %s is refused the same way', async (_what, over) => {
+    seedAppliedPlan();
+    customerNow(over);
+    await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+  });
+
+  it.each([
+    ['a HIGH point not confirmed yet (an import, like the demo customers)', { geocodeConfidence: 'HIGH' }],
+    ['a MEDIUM point not confirmed yet', { geocodeConfidence: 'MEDIUM' }],
+    ['a LOW point confirmed by a dispatcher', { geocodeConfidence: 'LOW', locationVerified: true }],
+    ['a point outside the delivery area, confirmed', { lat: 24.7136, lng: 46.6753, locationVerified: true }],
+  ])('control: a customer with %s is locked and dispatched as before', async (_what, over) => {
+    seedAppliedPlan();
+    customerNow(over);
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+  });
+
+  it('the remedy says what to do for the load as it is: drop the pin, then RE-PLAN or try again; or go without them', () => {
+    const pin = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
+    expect(noLocationLoadRemedy('PLANNED')).toBe(`${pin}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`);
+    expect(noLocationLoadRemedy('LOCKED')).toBe(`${pin}, then try again. Or unlock this load (put it back to Planned) and RE-PLAN to leave their orders unserved.`);
+    expect(noLocationLoadRemedy('LOADING')).toBe(
+      `${pin}, then try again. Or put this load Back to locked, then Unlock it (put it back to Planned), take their cases off the truck, and RE-PLAN to leave their orders unserved.`,
+    );
   });
 });
 

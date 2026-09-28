@@ -2003,6 +2003,9 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // Completed are never refused (a load that left keeps its orders: they are never carried).
   // Also a load of today whose orders were brought forward to tomorrow in the evening.
   if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
+  // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
+  // location is not usable now (a saved point marked LOW by an import after planning, ...).
+  if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   const updated = await tx.planLoad.update({
     where: { id: loadId },
@@ -2043,6 +2046,64 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/** Why LOCK, LOADING and DISPATCH refuse a load holding a customer without a usable location (locationGate). */
+export const LOCATION_GATE_RULE = 'A load cannot be locked, loaded or dispatched while a customer on it has no correct location.';
+
+const DROP_THE_PIN = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
+
+/**
+ * What to do about a load refused by locationGate, by the load's status: drop the pin, then
+ * RE-PLAN (a PLANNED load was planned with the old point) or try again (a LOCKED or LOADING load is
+ * kept as it is by a re-plan); or go without them - a re-plan leaves their orders unserved, and a
+ * locked or loading load must be put back to Planned first.
+ */
+export function noLocationLoadRemedy(status: string): string {
+  if (status === 'PLANNED') return `${DROP_THE_PIN}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`;
+  if (status === 'LOADING') {
+    return `${DROP_THE_PIN}, then try again. Or put this load Back to locked, then Unlock it (put it back to Planned), take their cases off the truck, and RE-PLAN to leave their orders unserved.`;
+  }
+  return `${DROP_THE_PIN}, then try again. Or unlock this load (put it back to Planned) and RE-PLAN to leave their orders unserved.`;
+}
+
+/**
+ * Owner's location rule (audit PR A5, "no item will be delivered without location"), A5 second
+ * review: LOCK, LOADING and DISPATCH of a load are refused with 409 LOCATION_REQUIRED while a
+ * customer of one of its stops has no usable location NOW - the planner's own test
+ * (`locationBlocksDelivery`, with the company's delivery area) on the customer as it is at this
+ * moment, not on the stop's planned pin. A stop was planned with a usable location, but a customer
+ * import can mark that saved point LOW afterwards (the file points elsewhere), and a changed delivery
+ * area can put it outside; "Use instead" and a failed re-plan's copy can then hold it too. Stepping
+ * back (unlock, back to locked) and Completed are never refused. Verified points, and HIGH or MEDIUM
+ * points inside the area, pass as before (NMWC's locked loads are not affected).
+ * Read without a relation filter (the customers by id), like carriedOrdersGate.
+ */
+async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
+  const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (!orderIds.length) return;
+  const customerIds = [...new Set((await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { customerId: true } })).map((o) => o.customerId))];
+  if (!customerIds.length) return;
+  const customers = await tx.customer.findMany({
+    where: { tenantId, id: { in: customerIds } },
+    select: { id: true, code: true, branchCode: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true },
+    orderBy: [{ code: 'asc' }, { branchCode: 'asc' }],
+  });
+  if (!customers.length) return;
+  // The company's delivery area, as planning reads it (tenantServiceArea, here in the transaction).
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { serviceAreaJson: true } });
+  const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
+  const area = parseServiceArea(cfg?.serviceAreaJson, tenant?.country);
+  const blocked = customers.filter((c) => locationBlocksDelivery(c, area));
+  if (!blocked.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  const names = blocked.map((c) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code));
+  const who = blocked.length === 1 ? '1 customer on this load has' : `${blocked.length} customers on this load have`;
+  throw new PlanError(
+    `${truck?.code ?? 'Truck'} L${load.loadNo}: ${who} no usable location: ${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy(load.status)}`,
+    409,
+    { code: 'LOCATION_REQUIRED', customerIds: blocked.map((c) => c.id), customers: names },
+  );
 }
 
 /**

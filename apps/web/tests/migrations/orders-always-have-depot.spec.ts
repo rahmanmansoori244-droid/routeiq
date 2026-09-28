@@ -8,7 +8,10 @@
  * another connection is still writing an order and an order file without a depot (an app request
  * that started before the deploy and commits after the migration started). The migration's lock
  * step must wait for that write and then fill it in: without the lock, its backfill cannot see the
- * row, and SET NOT NULL fails on it (P3018, then P3009 on every later deploy).
+ * row, and SET NOT NULL fails on it (P3018, then P3009 on every later deploy). The database has a
+ * statement_timeout and a lock_timeout of 1 s meanwhile, and the writer holds on for 2.5 s: the
+ * migration must turn the timeouts off before its lock step, or the wait is cancelled (57014).
+ * Migrations added after it are not applied (./folders.ts).
  * It checks every filled-in depot, the history-only depots, the audit rows and NOT NULL, and
  * that running the migration's SQL a second time changes nothing.
  *
@@ -28,6 +31,7 @@ import path from 'node:path';
 import { PrismaClient } from '@prisma/client';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { DEFAULT_MIGRATION_TEST_DB_NAME, migrationTestDbName } from './db-name';
+import { migrationFoldersBefore } from './folders';
 
 const ADMIN_URL = process.env.MIGRATION_TEST_DB_ADMIN_URL ?? '';
 // Checked in beforeAll (migrationTestDbName), before anything is dropped.
@@ -37,6 +41,8 @@ const LAST_BEFORE = '20260930093000_master_data_no_orphans';
 const WEB = path.join(__dirname, '../..');
 const MIGRATIONS = path.join(WEB, 'prisma', 'migrations');
 const PRISMA_CLI = path.join(WEB, 'node_modules', 'prisma', 'build', 'index.js');
+/** How long the writer keeps its locks once the migration is seen running: longer than the 1 s timeouts set on the database. */
+const HOLD_MS = 2500;
 
 function dbUrl(name: string): string {
   const u = new URL(ADMIN_URL);
@@ -234,10 +240,9 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     );
     mkdirSync(path.join(tmp, 'migrations'), { recursive: true });
     cpSync(path.join(MIGRATIONS, 'migration_lock.toml'), path.join(tmp, 'migrations', 'migration_lock.toml'));
-    const folders = readdirSync(MIGRATIONS).filter((f) => /^\d{14}_/.test(f)).sort();
-    expect(folders).toContain(LAST_BEFORE);
-    expect(folders.at(-1)).toBe(NEW);
-    for (const f of folders.filter((f) => f <= LAST_BEFORE)) cpSync(path.join(MIGRATIONS, f), path.join(tmp, 'migrations', f), { recursive: true });
+    // Every folder up to LAST_BEFORE; NEW must come right after it. Later migrations may follow NEW:
+    // they are not applied here (./folders.ts).
+    for (const f of migrationFoldersBefore(readdirSync(MIGRATIONS), LAST_BEFORE, NEW)) cpSync(path.join(MIGRATIONS, f), path.join(tmp, 'migrations', f), { recursive: true });
 
     const first = prisma(['migrate', 'deploy']);
     firstDeploy = { status: first.status ?? -1, out: `${first.stdout}${first.stderr}` };
@@ -248,11 +253,16 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
 
     // The new migration, while another connection (an app request that started before the deploy)
     // has read "Order" and written an order file and an order without a depot, not yet committed.
-    // It keeps its locks until the migration is seen running, then 1.5 s longer, and commits: the
+    // It keeps its locks until the migration is seen running, then HOLD_MS longer, and commits: the
     // migration's lock step must wait for it instead of failing, and only then fill in the depots,
     // so it sees these rows too. Without the lock step the backfill runs past the uncommitted rows
     // and SET NOT NULL then waits for the commit and fails on them.
+    // The database also has a statement_timeout and a lock_timeout of 1 s (as ALTER DATABASE or
+    // ALTER ROLE can set them): the migration must turn them off before its lock step starts, so a
+    // wait longer than 1 s never cancels it (A5 second review: 57014, P3018, then P3009).
     cpSync(path.join(MIGRATIONS, NEW), path.join(tmp, 'migrations', NEW), { recursive: true });
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" SET statement_timeout = '1s'`);
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" SET lock_timeout = '1s'`);
     let reading!: () => void;
     const readDone = new Promise<void>((r) => (reading = r));
     const holder = db.$transaction(
@@ -279,7 +289,7 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
           }
           await sleep(50);
         }
-        await sleep(1500);
+        await sleep(HOLD_MS);
         heldMs = Date.now() - t0;
         releasedAt = Date.now();
       },
@@ -288,6 +298,8 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     await readDone;
     const [second] = await Promise.all([deployAsync().then((r) => ((deployedAt = Date.now()), r)), holder]);
     secondDeploy = second;
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" RESET statement_timeout`);
+    await admin.$executeRawUnsafe(`ALTER DATABASE "${DB_NAME}" RESET lock_timeout`);
   }, 300_000);
 
   afterAll(async () => {
@@ -303,16 +315,19 @@ describe.skipIf(!ADMIN_URL)(`migration ${NEW} on real PostgreSQL`, () => {
     }
   }, 120_000);
 
-  it('applies with prisma migrate deploy while a request is still writing an order without a depot (the lock step waits, then fills it in)', async () => {
+  it('applies with prisma migrate deploy while a request is still writing an order without a depot, on a database with 1 s timeouts (the lock step waits, then fills it in)', async () => {
     expect(firstDeploy.status).toBe(0);
-    // The migration was running while the writer still held "Order" (and 1.5 s more): it waited.
+    // Without the lock step: P3018 (23502, "depotId" contains null values), and P3009 on every later
+    // deploy. With the timeout turned off only inside the lock step: P3018 (57014, "canceling
+    // statement due to statement timeout"), the same.
+    expect(secondDeploy.status, secondDeploy.out).toBe(0);
+    expect(secondDeploy.out).toContain(NEW);
+    // The migration was running while the writer still held "Order" (and 2.5 s more): it waited,
+    // longer than the database's statement_timeout and lock_timeout of 1 s.
     expect(migrationSeenWhileHeld).toBe(true);
-    expect(heldMs).toBeGreaterThanOrEqual(1400);
+    expect(heldMs).toBeGreaterThanOrEqual(HOLD_MS - 100);
     // It could only finish after the writer committed.
     expect(deployedAt).toBeGreaterThan(releasedAt);
-    expect(secondDeploy.out).toContain(NEW);
-    // Without the lock step: P3018 (23502, "depotId" contains null values), and P3009 on every later deploy.
-    expect(secondDeploy.status, secondDeploy.out).toBe(0);
     // The rows written while the migration started got a depot too (step d: TB's only active depot).
     expect(await q(`SELECT "id", "depotId" FROM "Order" WHERE "id" = 'O_INFLIGHT' UNION ALL SELECT "id", "depotId" FROM "UploadBatch" WHERE "id" = 'B_INFLIGHT' ORDER BY 1`)).toEqual([
       { id: 'B_INFLIGHT', depotId: 'TB_D1' },

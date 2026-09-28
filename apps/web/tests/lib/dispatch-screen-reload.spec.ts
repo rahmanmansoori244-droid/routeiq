@@ -14,7 +14,7 @@
  *    need loads.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { Host, elements, typeName } from './hook-host';
+import { Host, elements, textOf, typeName } from './hook-host';
 import { fixture, ORDERS, PRODUCTS } from './plan-detail-fixture';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { pinUrl } from '@/lib/dispatch/driver-links';
@@ -98,6 +98,24 @@ describe("ADD LOCATION on the day screen judges the saved pin with the company's
   it('the dialog gets the area the day was read with (before: none, so a saved pin outside it looked exact)', async () => {
     const t = await mountDay('PLANNED');
     expect(t.dialog('LocationDialog').props.serviceArea).toEqual(AREA);
+  });
+});
+
+describe("a planned customer whose location is not usable any more (owner's location rule, A5 second review)", () => {
+  it('the day says the plan is out of date and why, and RE-PLAN is on (before: "The plan is up to date with all orders", RE-PLAN off)', async () => {
+    const t = await mountDay('PLANNED');
+    const els = () => elements(t.host.tree);
+    const button = () => els().find((e) => e.props?.['data-testid'] === 'optimize-btn');
+    const banner = () => els().find((e) => e.props?.['data-testid'] === 'plan-outdated');
+    // Control: up to date.
+    expect(banner()).toBeUndefined();
+    expect(button().props.disabled).toBe(true);
+
+    answers.day = { ...day('PLANNED'), outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 1 } };
+    t.dialog('LocationDialog').props.onSaved(); // any refresh of the day
+    await t.host.settle();
+    expect(textOf(banner())).toContain('the location of 1 customer(s) on planned loads can no longer be used (drop the pin on each one, or RE-PLAN to leave their orders unserved)');
+    expect(button().props.disabled).toBe(false);
   });
 });
 

@@ -9,6 +9,7 @@ import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
 import { fileAgreesWithSaved, pointsElsewhereText, readImportedPair, type ImportedPair } from '@/lib/dispatch/import-location';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
 import { clientIp } from '@/lib/client-ip';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
@@ -28,7 +29,9 @@ import { clientIp } from '@/lib/client-ip';
 // existing one keeps its saved point when the file's pair points at the same place (within the
 // file's own precision); when the file points elsewhere (A5 review: the customer moved, or one of
 // the two is wrong) its saved point stays on the map but is marked LOW, so it is not planned until a
-// dispatcher drops the pin. A location a dispatcher verified is never changed (F05).
+// dispatcher drops the pin. A kept saved point that is itself not usable (LOW, or outside the area,
+// and never confirmed) is listed as not used, with its own warning (A5 second review). A location a
+// dispatcher verified is never changed (F05).
 
 interface ImportError {
   row: number;
@@ -42,11 +45,14 @@ interface LocationNotSaved {
   branchCode: string | null;
   reason: string;
   /**
-   * What the customer has: SAVED_LOCATION = it exists and keeps its saved point (confirmed, or the file
-   * points at the same place); SAVED_LOCATION_NEEDS_PIN = the file points elsewhere, so its saved point
-   * (never confirmed) is marked LOW and not used until the pin is placed by hand; null = it has none.
+   * What the customer has: SAVED_LOCATION = it exists and keeps its saved point, which is usable
+   * (confirmed, or the file points at the same place); SAVED_LOCATION_NEEDS_PIN = the file points
+   * elsewhere, so its saved point (never confirmed) is marked LOW and not used until the pin is placed
+   * by hand; SAVED_LOCATION_NOT_USABLE = it keeps its saved point, but that point is itself not usable
+   * (LOW, or outside the delivery area, and never confirmed: `locationBlocksDelivery`), so it is not
+   * used until the pin is placed by hand (A5 second review; it is not marked again); null = it has none.
    */
-  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null;
+  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | 'SAVED_LOCATION_NOT_USABLE' | null;
 }
 
 interface CustomerRow {
@@ -217,7 +223,7 @@ export async function POST(req: Request) {
 
   // Existing customers, matched case-insensitively (twins resolve like the order intake).
   const existingRows = await db.customer.findMany({
-    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
+    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
   });
   const twins = new Map<string, typeof existingRows>();
   for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
@@ -232,6 +238,9 @@ export async function POST(req: Request) {
   // Customers whose saved point (never confirmed) the file contradicts: marked LOW at commit, only if
   // still unverified and still at the point compared here.
   const needsPin = new Map<string, { lat: number; lng: number }>();
+  // Customers that keep a saved point which is itself not usable (A5 second review): listed as such,
+  // never marked again, and counted in their own warning.
+  const keptNotUsable = new Set<string>();
   const notExactByRow = new Map(notExact.map((n) => [n.row, n.pair]));
   for (const v of valid) {
     const pair = notExactByRow.get(v.row);
@@ -244,7 +253,9 @@ export async function POST(req: Request) {
     }
     const saved = { lat: m.lat, lng: m.lng };
     if (m.locationVerified || fileAgreesWithSaved(pair, saved)) {
-      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: 'SAVED_LOCATION' });
+      const usable = !locationBlocksDelivery(m, area);
+      if (!usable) keptNotUsable.add(m.id);
+      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason, kept: usable ? 'SAVED_LOCATION' : 'SAVED_LOCATION_NOT_USABLE' });
     } else {
       needsPin.set(m.id, saved);
       locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason: `${reason} ${pointsElsewhereText(pair, saved)}`, kept: 'SAVED_LOCATION_NEEDS_PIN' });
@@ -255,9 +266,16 @@ export async function POST(req: Request) {
       `${locationsNotSaved.length} location(s) in the file are not exact and were not saved. Set them on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file: use at least 4 decimals, and in Excel format the lat and lng cells as text.`,
     );
   }
+  // What happens to their orders is what the system enforces: not planned (planning leaves them
+  // unserved) and not sent out (LOCK, LOADING and DISPATCH refuse their loads, plan-service
+  // locationGate). A load already on the road is not called back (A5 second review).
+  const untilPin = 'Their orders are not planned or sent out until then. Drop the pin on each one (ADD LOCATION on Daily dispatch, or Set location on the customer page).';
   if (needsPin.size) {
+    warnings.push(`${needsPin.size} saved location(s) ${dryRun || errors.length > 0 ? 'will not be' : 'are not'} used until the pin is placed by hand: the file points somewhere else. ${untilPin}`);
+  }
+  if (keptNotUsable.size) {
     warnings.push(
-      `${needsPin.size} saved location(s) ${dryRun || errors.length > 0 ? 'will not be' : 'are not'} used until the pin is placed by hand: the file points somewhere else. Nothing is delivered to them until then. Drop the pin on each one (ADD LOCATION on Daily dispatch, or Set location on the customer page).`,
+      `${keptNotUsable.size} saved location(s) are not used until the pin is placed by hand: the saved location is not exact or is outside the delivery area, and nobody confirmed it. ${untilPin}`,
     );
   }
   for (const v of valid) {
@@ -377,7 +395,12 @@ export async function POST(req: Request) {
     action: 'CREATE',
     entity: 'Customer',
     entityId: null,
-    afterJson: { bulkImport: { fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length, savedLocationsMarkedLow: markedLow } } as never,
+    afterJson: {
+      bulkImport: {
+        fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length,
+        savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size,
+      },
+    } as never,
     ip,
   });
 

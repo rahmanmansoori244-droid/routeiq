@@ -16,7 +16,7 @@ interface LocationNotSaved {
   code: string;
   branchCode: string | null;
   reason: string;
-  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | null;
+  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | 'SAVED_LOCATION_NOT_USABLE' | null;
 }
 interface ImportResult {
   fileName: string;
@@ -35,14 +35,21 @@ interface ImportResult {
   locationsNotSaved?: LocationNotSaved[];
 }
 
-/** One listed row: why its location is not saved, then what the customer has now (or will have after the import). */
+/**
+ * One listed row: why its location is not saved, then what the customer has now (or will have after
+ * the import). "Not planned or sent out" is what the system enforces (planning and LOCK / LOADING /
+ * DISPATCH refuse a customer without a usable location, A5 second review).
+ */
 export function locationNotSavedLine(l: LocationNotSaved, dryRun: boolean): string {
+  const untilPin = 'its orders are not planned or sent out until someone drops the pin on the map.';
   const after =
     l.kept === 'SAVED_LOCATION'
       ? 'The location it already has is kept.'
       : l.kept === 'SAVED_LOCATION_NEEDS_PIN'
-        ? `Its saved location ${dryRun ? 'will no longer be' : 'is no longer'} used: nothing is delivered to it until someone drops the pin on the map.`
-        : 'It has no location until you set one.';
+        ? `Its saved location ${dryRun ? 'will no longer be' : 'is no longer'} used: ${untilPin}`
+        : l.kept === 'SAVED_LOCATION_NOT_USABLE'
+          ? `Its saved location is not exact or is outside the delivery area, so it is not used either: ${untilPin}`
+          : 'It has no location until you set one.';
   return `${l.reason} ${after}`;
 }
 

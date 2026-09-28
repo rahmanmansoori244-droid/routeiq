@@ -10,6 +10,7 @@ import {
   describeWindows,
   effectiveAttrs,
   inactiveCustomerIssue,
+  locationBlocksDelivery,
   parseServiceArea,
   type CustomerIssue,
   type TypeProfileLike,
@@ -68,8 +69,15 @@ export interface DayOutdated {
   inactiveOrders: number;
   masterChanged: number;
   trucksChanged: number;
+  /**
+   * Customers on PLANNED loads whose location is not usable any more (`locationBlocksDelivery`, the
+   * planner's test): a saved point an import marked LOW after planning, or one now outside the
+   * delivery area. Their loads cannot be locked (plan-service locationGate); RE-PLAN leaves their
+   * orders unserved, or plans them again once the pin is placed (owner's location rule, A5 second review).
+   */
+  locationBlocked: number;
 }
-export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 });
+export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 });
 
 /** PR9: an order of this day brought forward from an earlier day (badge "Carried over from 26 Sep"). */
 export interface CarriedInOrder {
@@ -200,6 +208,13 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     inactiveOpen.set(o.customerId, g);
   }
   for (const g of inactiveOpen.values()) outdated.inactiveOrders += g.onPlannedLoads;
+  // Owner's location rule (A5 second review): an active customer on a PLANNED load whose location
+  // is not usable now (a deactivated one is counted above; its location no longer matters).
+  const blockedOnPlanned = new Set<string>();
+  for (const o of orders) {
+    if (o.customer.active && onPlannedLoad.has(o.id) && openCasesOf.has(o.id) && locationBlocksDelivery(o.customer, area)) blockedOnPlanned.add(o.customerId);
+  }
+  outdated.locationBlocked = blockedOnPlanned.size;
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
   // plan was made, and trucks with PLANNED loads whose capacity or payload was corrected since. The
   // plan keeps what it was planned with; a re-plan adopts the new data.
@@ -380,8 +395,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * The plan in use is out of date without a new order waiting: open cases on it whose case
      * weight was entered or corrected since, orders of customers deactivated since that are still
      * on planned loads, customers on planned loads whose pin or receiving hours were corrected
-     * (masterChanged) and trucks with planned loads whose capacity or payload was corrected
-     * (trucksChanged). RE-PLAN applies them all.
+     * (masterChanged), trucks with planned loads whose capacity or payload was corrected
+     * (trucksChanged) and customers on planned loads whose location is not usable any more
+     * (locationBlocked). RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
     trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },
