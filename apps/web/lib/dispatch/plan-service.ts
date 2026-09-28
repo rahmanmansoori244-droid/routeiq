@@ -24,12 +24,14 @@ import {
   coordStatus,
   customerIssues,
   effectiveAttrs,
+  locationBlocksDelivery,
   parsePriorityWeights,
   parseServiceArea,
   routingProviderFor,
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
+import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
@@ -71,6 +73,8 @@ import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
 import {
+  distanceM,
+  PIN_MOVED_M,
   readPlanInputs,
   readStopSnapshot,
   readTruckSnapshot,
@@ -170,19 +174,16 @@ const ORDER_INCLUDE = {
   lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, active: true } } } },
 } as const;
 
-/** Orders belonging to a plan: same delivery date and depot. Legacy orders without a depot
- * are included only when the tenant has exactly one active depot (unambiguous). An order brought
- * forward to a later day (PR9, carriedToOrderId set) no longer belongs to its own day: it is not
- * open, unserved or pending there (the plan versions that hold it keep it: frozen loads stay in
- * scope through their assignments, see buildDispatchRequest). */
-export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, db: Db = prisma): Promise<Prisma.OrderWhereInput> {
-  const depots = await db.depot.count({ where: { tenantId, active: true } });
-  return {
-    tenantId,
-    deliveryDate: runDate,
-    carriedToOrderId: null,
-    OR: depots <= 1 ? [{ depotId }, { depotId: null }] : [{ depotId }],
-  };
+/** Orders belonging to a plan: same delivery date and depot. Every order has a depot (owner rule,
+ * audit PR A5: "Order"."depotId" is NOT NULL since migration 20260930120000; before it, orders
+ * without a depot were included when the tenant had one active depot, and the migration gave them
+ * that depot). An order brought forward to a later day (PR9, carriedToOrderId set) no longer
+ * belongs to its own day: it is not open, unserved or pending there (the plan versions that hold
+ * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest).
+ * `_db`: the client the caller reads with (audit A4: the plan detail reads in one snapshot). The
+ * scope needs no read since A5 (the depot count is gone), so it is not used. */
+export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, _db: Db = prisma): Promise<Prisma.OrderWhereInput> {
+  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, depotId };
 }
 
 /**
@@ -199,6 +200,7 @@ function toPlanningCustomer(c: {
   priority: number; priorityConfirmed: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean;
   customerType: string | null; hardWindowStartMin: number | null; hardWindowEndMin: number | null;
   prefWindowStartMin: number | null; prefWindowEndMin: number | null; locationVerified: boolean; createdFromUpload: boolean;
+  geocodeConfidence?: string | null;
 }): CustomerForPlanning {
   return { ...c };
 }
@@ -334,8 +336,8 @@ export async function buildDispatchRequest(
       : { o, lines, cases: o.totalCases, kg: orderKg, partial };
     openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
   }
-  // Orders on frozen loads that today's order query no longer returns (e.g. a legacy order
-  // without a depot once a second depot exists) stay in scope, so the plan still reconciles.
+  // Orders on frozen loads that today's order query no longer returns (e.g. an order brought
+  // forward to a later day after it was loaded) stay in scope, so the plan still reconciles.
   const inScope = new Set([...frozenOrderIds, ...[...openByCustomer.values()].flat().map((x) => x.o.id)]);
   for (const id of frozenLoadOrderIds) if (!inScope.has(id)) frozenOrderIds.push(id);
 
@@ -426,7 +428,9 @@ export async function buildDispatchRequest(
       continue;
     }
     const cs = coordStatus(c.lat, c.lng, area);
-    const locBad = cs === 'MISSING' || cs === 'INVALID' || (cs === 'OUTSIDE_AREA' && !c.locationVerified);
+    // Never planned without a usable location (owner's rule, audit PR A5): none, 0,0 or out of
+    // range, outside the area and never confirmed, or a LOW reading never confirmed.
+    const locBad = locationBlocksDelivery(c, area);
     if (locBad) {
       const code: UnservedReasonCode = cs === 'MISSING' ? 'MISSING_COORDINATES' : 'INVALID_LOCATION';
       const issue = customerIssues(c, eff, area).find((i) => i.blocking);
@@ -2004,6 +2008,9 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // Completed are never refused (a load that left keeps its orders: they are never carried).
   // Also a load of today whose orders were brought forward to tomorrow in the evening.
   if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
+  // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
+  // location is not usable now (a saved point marked LOW by an import after planning, ...).
+  if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   const updated = await tx.planLoad.update({
     where: { id: loadId },
@@ -2044,6 +2051,186 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/** Why LOCK, LOADING and DISPATCH refuse a load holding a customer without a usable location (locationGate). */
+export const LOCATION_GATE_RULE = 'A load cannot be locked, loaded or dispatched while a customer on it has no correct location.';
+
+const DROP_THE_PIN = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
+
+/**
+ * What to do about a load refused by locationGate, by the load's status: drop the pin, then RE-PLAN
+ * so the stops go to the new pins - a locked or loading load is put back to Planned first, because a
+ * stop keeps the pin it was planned with until a re-plan (A5 third review: "then try again" sent a
+ * locked load out with its stop still at the old point); or go without them - a re-plan leaves
+ * their orders unserved.
+ */
+export function noLocationLoadRemedy(status: string): string {
+  if (status === 'PLANNED') return `${DROP_THE_PIN}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`;
+  if (status === 'LOADING') {
+    return `${DROP_THE_PIN}. Then put this load Back to locked, Unlock it (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or do that now, and take their cases off the truck, to leave their orders unserved.`;
+  }
+  return `${DROP_THE_PIN}. Then unlock this load (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or unlock it and RE-PLAN now to leave their orders unserved.`;
+}
+
+/** What to do about a load refused because a stop still goes to a point that was replaced when it was not usable. */
+export function replacedPinRemedy(status: string): string {
+  if (status === 'PLANNED') return 'RE-PLAN so the stops go to the new pins.';
+  if (status === 'LOADING') return 'Put this load Back to locked, then Unlock it (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
+  return 'Unlock this load (put it back to Planned), then RE-PLAN so the stops go to the new pins.';
+}
+
+/** A customer's point as a location change recorded it before the change (CUSTOMER_LOCATION_SET beforeJson). */
+function replacedPoint(json: unknown): { lat: number; lng: number; locationVerified: boolean; geocodeConfidence: string | null } | null {
+  if (!json || typeof json !== 'object') return null;
+  const b = json as Record<string, unknown>;
+  if (typeof b.lat !== 'number' || typeof b.lng !== 'number') return null;
+  return { lat: b.lat, lng: b.lng, locationVerified: b.verified === true, geocodeConfidence: typeof b.confidence === 'string' ? b.confidence : null };
+}
+
+/** The point a location change set (CUSTOMER_LOCATION_SET afterJson), or null when the row does not say. */
+function setPoint(json: unknown): { lat: number; lng: number } | null {
+  if (!json || typeof json !== 'object') return null;
+  const a = json as Record<string, unknown>;
+  return typeof a.lat === 'number' && typeof a.lng === 'number' ? { lat: a.lat, lng: a.lng } : null;
+}
+
+/**
+ * The customers of `stops` whose stop is still planned at a point that was NOT usable when a new
+ * pin replaced it (A5 third review): the stop's planned pin (stopSnapshotJson) is more than
+ * PIN_MOVED_M from the customer's point now, and the recorded location change (CUSTOMER_LOCATION_SET:
+ * a pin or reading saved in ADD LOCATION or Set location, or a customer import that wrote a new pair
+ * over it) that last moved the customer off exactly that point did so while the point blocked
+ * delivery (`locationBlocksDelivery`: LOW or outside the area and never confirmed, 0,0). The stop, its
+ * links and the driver's texts still go to the planned point until a re-plan. An ordinary correction
+ * of a usable point is not refused: the sheets show the planned stop with the new pin noted (frozen
+ * plan facts, owner default, F08).
+ * A5 fourth review: only the change that replaced the planned point counts. A change that confirmed
+ * the point where it was moves nothing, and of the changes off the point only the newest is the one
+ * that replaced it (an older one was undone when the customer came back to it). Before, any recorded
+ * "before" at the planned point while it was flagged refused the load, so an ordinary correction of a
+ * point confirmed where it was got "its old point, which was not usable" and a locked load was sent
+ * through unlock and RE-PLAN. Changes made in the same millisecond count as the newest together
+ * (refused when one of them blocked). A move off a usable point by a customer import writes no row;
+ * the newest recorded change then stands for it, which can only refuse more, never less.
+ * A5 fifth review: "the planned point" is its place, PIN_MOVED_M around it - the distance at which
+ * this gate (above) and the sheets' "New pin" note count a pin as the same place. A change counts
+ * when it started there and moved the customer out of it; one that ended there too (a flagged point
+ * confirmed where it is: its coordinates typed, or a hand pin a few metres off, which is the only way
+ * a pin can confirm it - a pin exactly on a flagged saved point is refused, PIN_REQUIRED) moved
+ * nothing. Before, a change had to start exactly at the planned point (within 5 cm): the correction
+ * of such a pin was never counted, so the older flagged row refused an ordinary correction.
+ */
+async function stopsAtReplacedPoints(
+  tx: Tx,
+  tenantId: string,
+  stops: { customerId: string; stopSnapshotJson: unknown }[],
+  customers: Map<string, { lat: number | null; lng: number | null }>,
+  area: ServiceArea,
+): Promise<Set<string>> {
+  const moved = new Map<string, { lat: number; lng: number }[]>();
+  for (const s of stops) {
+    const snap = readStopSnapshot(s.stopSnapshotJson);
+    const now = customers.get(s.customerId);
+    if (!snap || snap.lat === null || snap.lng === null || !now || now.lat === null || now.lng === null) continue;
+    const planned = { lat: snap.lat, lng: snap.lng };
+    if (distanceM(planned, { lat: now.lat, lng: now.lng }) <= PIN_MOVED_M) continue;
+    moved.set(s.customerId, [...(moved.get(s.customerId) ?? []), planned]);
+  }
+  const out = new Set<string>();
+  if (!moved.size) return out;
+  const changes = await tx.auditLog.findMany({
+    where: { tenantId, entity: 'Customer', action: 'CUSTOMER_LOCATION_SET', entityId: { in: [...moved.keys()] } },
+    select: { entityId: true, beforeJson: true, afterJson: true, createdAt: true },
+  });
+  // Per customer and planned point: the newest change that moved the customer out of that point's
+  // place, and whether it (or one made in the same millisecond) did so while the point it started
+  // from blocked delivery.
+  const newest = new Map<string, { at: number; blocked: boolean }>();
+  for (const ch of changes) {
+    const before = replacedPoint(ch.beforeJson);
+    const planned = ch.entityId ? moved.get(ch.entityId) : undefined;
+    if (!before || !planned) continue;
+    const after = setPoint(ch.afterJson);
+    const at = ch.createdAt.getTime();
+    const blocked = locationBlocksDelivery(before, area);
+    planned.forEach((p, i) => {
+      if (distanceM(p, before) > PIN_MOVED_M) return; // started elsewhere
+      if (after && distanceM(p, after) <= PIN_MOVED_M) return; // ended there too: nothing moved out
+      const key = `${ch.entityId}\u0000${i}`;
+      const seen = newest.get(key);
+      if (!seen || at > seen.at) newest.set(key, { at, blocked });
+      else if (at === seen.at && blocked) seen.blocked = true;
+    });
+  }
+  for (const [key, { blocked }] of newest) if (blocked) out.add(key.slice(0, key.indexOf('\u0000')));
+  return out;
+}
+
+/**
+ * Owner's location rule (audit PR A5, "no item will be delivered without location"), A5 second
+ * review: LOCK, LOADING and DISPATCH of a load are refused with 409 LOCATION_REQUIRED while a
+ * customer of one of its stops has no usable location NOW - the planner's own test
+ * (`locationBlocksDelivery`, with the company's delivery area) on the customer as it is at this
+ * moment, not on the stop's planned pin. A stop was planned with a usable location, but a customer
+ * import can mark that saved point LOW afterwards (the file points elsewhere), and a changed delivery
+ * area can put it outside; "Use instead" and a failed re-plan's copy can then hold it too. Stepping
+ * back (unlock, back to locked) and Completed are never refused. Verified points, and HIGH or MEDIUM
+ * points inside the area, pass as before (NMWC's locked loads are not affected).
+ * A5 third review: once the pin is dropped the customer passes, but the stop still goes to the point
+ * it was planned with. A stop planned at a point that was replaced while it was not usable is
+ * refused too (409 STOP_PIN_REPLACED, `stopsAtReplacedPoints`), until a re-plan gives it the new pin.
+ * Read without a relation filter (the customers by id), like carriedOrdersGate.
+ */
+async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
+  const rows = await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true, stopSnapshotJson: true } });
+  const orderIds = [...new Set(rows.map((a) => a.orderId))];
+  if (!orderIds.length) return;
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, customerId: true } });
+  const customerOf = new Map(orders.map((o) => [o.id, o.customerId]));
+  const customerIds = [...new Set(orders.map((o) => o.customerId))];
+  if (!customerIds.length) return;
+  const customers = await tx.customer.findMany({
+    where: { tenantId, id: { in: customerIds } },
+    select: { id: true, code: true, branchCode: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true },
+    orderBy: [{ code: 'asc' }, { branchCode: 'asc' }],
+  });
+  if (!customers.length) return;
+  // The company's delivery area, as planning reads it (tenantServiceArea, here in the transaction).
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { serviceAreaJson: true } });
+  const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
+  const area = parseServiceArea(cfg?.serviceAreaJson, tenant?.country);
+  const nameOf = (c: { code: string; branchCode: string | null }) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
+  const list = (names: string[]) => `${names.slice(0, 8).join(', ')}${names.length > 8 ? ', ...' : ''}`;
+  const blocked = customers.filter((c) => locationBlocksDelivery(c, area));
+  if (blocked.length) {
+    const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+    const names = blocked.map(nameOf);
+    const who = blocked.length === 1 ? '1 customer on this load has' : `${blocked.length} customers on this load have`;
+    throw new PlanError(
+      `${truck?.code ?? 'Truck'} L${load.loadNo}: ${who} no usable location: ${list(names)}. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy(load.status)}`,
+      409,
+      { code: 'LOCATION_REQUIRED', customerIds: blocked.map((c) => c.id), customers: names },
+    );
+  }
+  const stops = rows.flatMap((a) => {
+    const customerId = customerOf.get(a.orderId);
+    return customerId ? [{ customerId, stopSnapshotJson: a.stopSnapshotJson }] : [];
+  });
+  const replaced = await stopsAtReplacedPoints(tx, tenantId, stops, new Map(customers.map((c) => [c.id, c])), area);
+  if (!replaced.size) return;
+  const stale = customers.filter((c) => replaced.has(c.id));
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  const names = stale.map(nameOf);
+  const what =
+    stale.length === 1
+      ? `the stop for ${names[0]} still goes to its old point, which was not usable. A new pin was placed after this load was planned.`
+      : `the stops for ${list(names)} still go to their old points, which were not usable. New pins were placed after this load was planned.`;
+  throw new PlanError(`${truck?.code ?? 'Truck'} L${load.loadNo}: ${what} ${LOCATION_GATE_RULE} ${replacedPinRemedy(load.status)}`, 409, {
+    code: 'STOP_PIN_REPLACED',
+    customerIds: stale.map((c) => c.id),
+    customers: names,
+  });
 }
 
 /**

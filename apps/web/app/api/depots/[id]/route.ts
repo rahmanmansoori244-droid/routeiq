@@ -4,7 +4,7 @@ import { depotHoursProblem, depotPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
-import { DEPOT_REF_COUNT, depotDeleteOutcome, depotReferenceText, type DepotRefCounts } from '@/lib/master-data-delete';
+import { DEPOT_REF_COUNT, depotDeleteOutcome, depotReferenceText, historyOnlyDepotMessage, type DepotRefCounts } from '@/lib/master-data-delete';
 
 interface Params { params: { id: string } }
 
@@ -19,6 +19,9 @@ export const PATCH = (req: Request, { params }: Params) =>
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.depot.findUnique({ where: { id: params.id } }));
       const input = await parseBody(r, depotPatchSchema);
+      // Owner rule (audit PR A5): the history-only depot keeps the orders and files that had no
+      // depot. Made active it would be offered for new files and plans at a made-up place.
+      if (before.historyOnly && input.active === true) return fail({ code: 'DEPOT_HISTORY_ONLY', message: historyOnlyDepotMessage(before.code) }, 422);
       const hours = depotHoursProblem({ ...before, ...input });
       if (hours) return fail(hours, 400);
       const after = await db.depot.update({ where: { id: params.id }, data: input });

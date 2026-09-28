@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { guardSpreadsheet, safeDecodeRange, sameSheetList, WorkbookRefusedError } from './workbook-guard';
+import { guardSpreadsheet, idFileFormatsCells, safeDecodeRange, sameSheetList, sheetjsReader, WorkbookRefusedError } from './workbook-guard';
 
 /**
  * Upload limits (owner decision 16, audit E2): 10 MB per file and 50,000 rows on the sheet that is
@@ -93,6 +93,20 @@ export interface ParseOptions {
   isDataSheet?: (headers: string[]) => boolean;
   /** What the rows are, for messages: "order" -> "order rows". */
   rowsWord?: string;
+  /**
+   * Excel: columns (header names, any case) whose number cells keep the decimals the cell shows. A
+   * number holds no trailing zeros (23.5850 is the number 23.585), but a cell formatted to show 4
+   * decimals shows "23.5850": for these columns a cell whose number format shows more decimals than
+   * the number has reads as the text it shows ("23.5850"; 23.58 in the same format "23.5800"). A
+   * cell showing fewer decimals than the number has keeps the number's own. Used for the customer
+   * import's lat / lng, whose decimals decide whether a location is exact (audit PR A5); the import
+   * counts one zero at the end at most, whatever the file (A5 fifth review, `countedText` in
+   * lib/dispatch/location-input: 23.5800 is 3 decimals - the padding is not precision). CSV text,
+   * also a CSV sent as Excel: the text in the file, as it is written. Only the sheet that is read,
+   * and in it the one column per name the rows keep, are looked at; each number format is tried
+   * once per upload, at most MAX_SHOWN_FORMATS of them (see shownSources and ShownFormats).
+   */
+  decimalTextColumns?: string[];
 }
 
 /**
@@ -145,7 +159,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
     /\.xlsx?$/i.test(file.name);
 
   if (isExcel) {
-    const sheets = parseExcelSheets(new Uint8Array(await file.arrayBuffer()));
+    const { sheets, showDecimals } = readWorkbook(new Uint8Array(await file.arrayBuffer()), opts.decimalTextColumns);
     const pick = pickSheet(sheets, opts);
     // The row limit is for the sheet that is read: a large sheet that is not read (a customer
     // list next to the orders) is only named in the warning, never a reason to refuse the file.
@@ -154,6 +168,10 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
     if (pick.rows.length > MAX_ROWS) {
       throw new Error(`Too many rows: ${pick.rows.length}${where}. Max ${MAX_ROWS}.`);
     }
+    // The decimals the decimal columns' cells show, on the sheet that is read only (A5 fourth
+    // review: every sheet's were worked out, also those of the sheets that are not read).
+    const chosen = sheets.find((s) => s.rows === pick.rows);
+    if (chosen) showDecimals(chosen);
     return { fileName, fileType: 'xlsx', rows: pick.rows, warnings: pick.warnings, ...(pick.name ? { sheetName: pick.name } : {}) };
   }
 
@@ -219,8 +237,24 @@ export function pickSheet(
  * chart, dialog or macro sheet (lib/workbook-guard), one with more than MAX_SHEETS sheets, and one
  * whose sheet list SheetJS reads otherwise than the guard. Before any sheet is turned into rows it
  * refuses a sheet wider than MAX_COLS and sheets that span more than MAX_CELLS cells.
+ * The decimal columns (ParseOptions.decimalTextColumns) are parseUpload's alone: it works them out on
+ * the sheet it reads only (readWorkbook).
  */
 export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
+  return readWorkbook(bytes).sheets;
+}
+
+/** What a decimal column's kept cells hold: a reference to each cell's number format, or a CSV cell's own text. */
+type ShownMode = 'format' | 'text';
+
+/**
+ * parseExcelSheets, with the decimal columns (ParseOptions.decimalTextColumns): `showDecimals` puts
+ * the decimals their number cells show into one sheet's rows. What a cell shows is kept while the
+ * file is read (shownSources: a reference, nothing formatted); parseUpload calls `showDecimals` on
+ * the sheet it reads, and on no other (A5 fourth review: every sheet's cells were formatted, also
+ * those of the sheets that are not read).
+ */
+function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { sheets: ParsedSheet[]; showDecimals: (sheet: ParsedSheet) => void } {
   // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
   // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
   // given a Buffer it takes views.
@@ -254,9 +288,16 @@ export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
   // The guard counted the parts these sheets read (lib/workbook-guard, sheetReads) for the sheet
   // list it read; SheetJS must have read the same list.
   sameSheetList(sheetNames, names);
-  const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false });
+  const decimalCols = new Set(decimalTextColumns.map((c) => c.trim().toLowerCase()));
+  const shownRead = decimalCols.size ? shownTextRead(buf) : {};
+  const mode: ShownMode | null = 'cellNF' in shownRead ? 'format' : 'cellText' in shownRead ? 'text' : null;
+  const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false, ...shownRead });
   const out: ParsedSheet[] = [];
+  const shownOf = new Map<ParsedSheet, { columns: ShownColumn[]; rowNums: (number | undefined)[] }>();
   for (const { name, sheet, range, clamped } of sheetRanges(wb)) {
+    // Where the decimal columns' number cells are and what they show (nothing is formatted), taken
+    // before the sheet is turned into rows, which are then read exactly as without these columns.
+    const columns = mode ? shownSources(sheet, range, decimalCols, mode) : [];
     // raw: true keeps real numbers (no "1,234" display strings) and returns date cells as
     // Excel serials, which the order intake converts; display text would depend on locale.
     const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true, ...(clamped ? { range } : {}) });
@@ -266,9 +307,199 @@ export function parseExcelSheets(bytes: Uint8Array): ParsedSheet[] {
     // named. (Before the A1 review it was kept as "cut", so a blank formatted first sheet was
     // read instead of the data sheet and refused with "Too many rows".)
     if (rows.length) {
-      out.push({ name, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) });
+      const parsed: ParsedSheet = { name, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) };
+      out.push(parsed);
+      // sheet_to_json gives each row the sheet row it was read from (not enumerable).
+      if (columns.length) shownOf.set(parsed, { columns, rowNums: rows.map((r) => (r as { __rowNum__?: number }).__rowNum__) });
     }
   }
+  const formats = new ShownFormats();
+  const showDecimals = (sheet: ParsedSheet) => {
+    const shown = shownOf.get(sheet);
+    if (!shown) return;
+    shownOf.delete(sheet);
+    sheet.rows.forEach((row, i) => {
+      const at = shown.rowNums[i];
+      if (at === undefined) return;
+      for (const { name, byRow } of shown.columns) {
+        const source = byRow.get(at);
+        const had = row[name];
+        if (source === undefined || had === undefined) continue;
+        // The row holds the number cell's value as text (normalizeKeys), which reads back as it.
+        const value = Number(had);
+        if (String(value) !== had) continue;
+        const kept = withShownDecimals(value, mode === 'text' ? source : formats.shown(source, value));
+        if (typeof kept === 'string') row[name] = kept;
+      }
+    });
+  };
+  return { sheets: out, showDecimals };
+}
+
+/**
+ * A number cell as the text it shows when that text is the same number with more decimals (trailing
+ * zeros: 23.585 shown as "23.5850"); else the number itself (a cell showing fewer decimals than the
+ * number has, a date, text). For a number format the text comes from ShownFormats; for CSV sent as
+ * Excel it is the text in the file.
+ */
+export function withShownDecimals(value: unknown, shown: unknown): unknown {
+  if (typeof value !== 'number' || typeof shown !== 'string') return value;
+  const t = shown.trim();
+  if (!/^[-+]?\d+\.\d+$/.test(t) || Number(t) !== value) return value;
+  return decimalPlaces(t) > decimalPlaces(String(value)) ? t : value;
+}
+
+const decimalPlaces = (x: string) => (x.includes('.') ? x.length - x.indexOf('.') - 1 : 0);
+
+/**
+ * Longest number format a decimal column's cell is read with; a cell with a longer one counts the
+ * decimals its number has: a location that then has too few is not saved, and someone drops the
+ * customer's pin on the map instead. Each format is tried once per upload (ShownFormats), so its
+ * length no longer sets a cost per cell; the cap keeps that one try short.
+ */
+export const MAX_SHOWN_FORMAT = 64;
+
+/**
+ * Most different number formats tried in one upload's decimal columns (A5 fourth review). A real
+ * customer file has one or two (a column in "0.0000", another in General); a cell in any further
+ * format counts the decimals its number has (a location that then has too few is not saved).
+ */
+export const MAX_SHOWN_FORMATS = 20;
+
+/**
+ * The number formats met in one upload's decimal columns, each tried once (A5 fourth review: SheetJS
+ * parses a format again for every cell it formats, and a 64-character format it cannot apply took
+ * about 50 microseconds a cell, so 50,000 rows of lat / lng on ten sheets blocked the app for 40 s).
+ * A format is tried on the number 1 (-1 for a negative number): when it shows "1.0000" (a sign, 1, a
+ * point and zeros, padding trimmed) it shows 4 decimals, and a number with fewer is shown with
+ * trailing zeros: 23.585 in a cell formatted 0.0000 reads "23.5850" (the number cannot tell 23.5850
+ * from 23.585, and 1 in 10 real 4-decimal coordinates ends in 0), 23.58 "23.5800". The customer
+ * import counts one of those zeros at most (A5 fifth review: this rule was here, for number formats
+ * only, and a CSV saved from the same cells read "23.5800" as 4 decimals), so a rough point formatted
+ * to show 4 decimals stays not exact in any file. Anything else (a date, a percentage, text around
+ * the number, a scale, a condition, a format SheetJS cannot apply) adds nothing: the number's own
+ * decimals count. At most MAX_SHOWN_FORMATS formats are tried in one upload.
+ */
+class ShownFormats {
+  private readonly positive = new Map<string, number | null>();
+  private readonly negative = new Map<string, number | null>();
+  private tried = 0;
+
+  /** The text a number cell in format `z` shows (see above); undefined when it adds nothing. */
+  shown(z: string, value: number): string | undefined {
+    if (!Number.isFinite(value) || value === 0) return undefined;
+    const cache = value < 0 ? this.negative : this.positive;
+    let zeros = cache.get(z);
+    if (zeros === undefined) {
+      zeros = null;
+      if (this.tried < MAX_SHOWN_FORMATS) {
+        this.tried += 1;
+        zeros = zerosShown(z, value < 0 ? -1 : 1);
+      }
+      cache.set(z, zeros);
+    }
+    if (!zeros) return undefined;
+    const own = String(value);
+    if (/e/i.test(own)) return undefined;
+    const places = decimalPlaces(own);
+    return zeros > places ? `${own}${places ? '' : '.'}${'0'.repeat(zeros - places)}` : undefined;
+  }
+}
+
+/** How many decimals format `z` always shows (the zeros it shows 1 or -1 with), or null when it is not a plain number format. */
+function zerosShown(z: string, probe: 1 | -1): number | null {
+  // A format with a condition ("[>=100]0.00;0.0000") shows numbers differently by their size.
+  if (/\[\s*[<>=]/.test(z)) return null;
+  let text: string;
+  try {
+    text = String(XLSX.SSF.format(z, probe)).trim();
+  } catch {
+    return null; // a format SheetJS cannot apply
+  }
+  const m = /^([-+]?)1(?:\.(0+))?$/.exec(text);
+  if (!m || (m[1] === '-') !== (probe < 0)) return null;
+  return m[2]?.length ?? 0;
+}
+
+/**
+ * The read options that keep what the decimal columns' cells show (ParseOptions.decimalTextColumns)
+ * on top of the read above; shownSources takes it off every cell again before the rows are read,
+ * so the rows are read exactly as without them. An .xlsx or .xls: cellNF, each cell keeps its
+ * number format (a reference; cellText stays false and nothing is formatted while the file is
+ * read). Text read as CSV: cellText, each cell keeps its own text, which SheetJS's CSV reader has
+ * anyway and formats nothing to make (Chrome and Edge send a .csv as application/vnd.ms-excel on a
+ * PC with Excel installed, so a CSV that Excel saved with "23.5850" comes this way). A file that
+ * begins with "ID" goes through SheetJS's SYLK reader first, which formats a value when a format
+ * record came before it (and throws where a format cannot be applied); such a file - never a CSV -
+ * counts the numbers' own decimals (idFileFormatsCells). A CSV whose first header is "ID" is read
+ * with its text like any other (A5 fifth review: every "ID;" file was, so a semicolon CSV lost its
+ * trailing zeros only when the browser sent it as Excel).
+ */
+function shownTextRead(buf: Buffer): { cellNF: true } | { cellText: true } | Record<string, never> {
+  const reader = sheetjsReader(buf);
+  if (reader !== 'text' && reader !== 'text-ws' && reader !== 'text-utf16') return { cellNF: true };
+  if (buf[0] === 0x49 && buf[1] === 0x44 && idFileFormatsCells(buf)) return {};
+  return { cellText: true };
+}
+
+/** A decimal column of a sheet: its name in the rows, and what its number cells show (format or text) by sheet row. */
+interface ShownColumn {
+  name: string;
+  byRow: Map<number, string>;
+}
+
+/** A number format worth trying on a decimal column's cell: not General (it never shows more decimals than the number has), at most MAX_SHOWN_FORMAT characters. */
+const formatToTry = (z: string) => z.length <= MAX_SHOWN_FORMAT && z !== 'General' && !/^general$/i.test(z);
+
+/**
+ * The decimal columns of a sheet (ParseOptions.decimalTextColumns) and what their number cells show:
+ * a CSV cell its own text, any other a reference to its number format (formatToTry); nothing is
+ * formatted here. A column is matched on the key sheet_to_json gives it, trimmed and in any case,
+ * and of the columns that match one name only the LAST is kept: normalizeKeys folds "lat", "LAT"
+ * and "lat " into one "lat", which holds the last one's value (A5 fourth review: all of them were
+ * formatted). Then every cell's number format and text are taken off, so sheet_to_json reads the
+ * sheet exactly as it does without these columns (A1: headers named as before, no date format
+ * applied to a number, no other cell formatted).
+ */
+function shownSources(sheet: XLSX.WorkSheet, range: XLSX.Range, decimalCols: Set<string>, mode: ShownMode): ShownColumn[] {
+  const cellAt = (r: number, c: number) => sheet[XLSX.utils.encode_cell({ r, c })] as XLSX.CellObject | undefined;
+  const bare = (cell: XLSX.CellObject) => {
+    if (cell.z !== undefined) cell.z = undefined;
+    if (cell.w !== undefined) cell.w = undefined;
+  };
+  const top = range.s.r;
+  // The header keys as sheet_to_json makes them: the header cell as text ("__EMPTY" when there is
+  // none); a name met before gets "_1", "_2", ...
+  const seen: Record<string, number> = {};
+  const lastColumn = new Map<string, number>();
+  for (let c = range.s.c; c <= range.e.c; ++c) {
+    const head = cellAt(top, c);
+    if (head) bare(head);
+    const name = head ? XLSX.utils.format_cell(head) : '__EMPTY';
+    let key = name;
+    let n = seen[name] || 0;
+    if (!n) seen[name] = 1;
+    else {
+      do key = `${name}_${n++}`;
+      while (seen[key]);
+      seen[name] = n;
+      seen[key] = 1;
+    }
+    const folded = key.trim().toLowerCase();
+    if (decimalCols.has(folded)) lastColumn.set(folded, c);
+  }
+  const out: ShownColumn[] = [];
+  for (const [name, c] of lastColumn) {
+    const byRow = new Map<number, string>();
+    for (let r = top + 1; r <= range.e.r; ++r) {
+      const cell = cellAt(r, c);
+      if (cell?.t !== 'n') continue;
+      const source = mode === 'text' ? cell.w : cell.z;
+      if (typeof source === 'string' && (mode === 'text' || formatToTry(source))) byRow.set(r, source);
+    }
+    if (byRow.size) out.push({ name, byRow });
+  }
+  for (const k of Object.keys(sheet)) if (!k.startsWith('!')) bare(sheet[k] as XLSX.CellObject);
   return out;
 }
 

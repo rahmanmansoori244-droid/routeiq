@@ -189,6 +189,27 @@ function loopCount(from: number, to: number): number {
  * as CSV a short file refused here.
  */
 function idFileReader(b: Uint8Array): 'text' | 'other' {
+  return replayIdFile(b).reader;
+}
+
+/**
+ * Whether SheetJS's SYLK reader, on a file that begins with "ID" and that it reads as CSV in the end
+ * (idFileReader 'text'), formats a cell before it gives up: a value (K field) after a format record
+ * gave it a number format. Only then does reading with `cellText` differ in the SYLK pass (it formats
+ * that value, and a format SheetJS cannot apply throws there, which read_wb_ID does not catch). A
+ * CSV whose first header is "ID" never does (A5 fifth review: such a CSV sent as Excel is read with
+ * its cells' own text, like any other CSV). Counted by the same replay as idFileReader, up to the same
+ * record or field; a file it refuses counts as formatting.
+ */
+export function idFileFormatsCells(b: Uint8Array): boolean {
+  const r = replayIdFile(b);
+  return r.reader !== 'text' || r.formatsCells;
+}
+
+/** idFileReader's replay: how SheetJS reads the file, and whether its SYLK reader formats a value first. */
+function replayIdFile(b: Uint8Array): { reader: 'text' | 'other'; formatsCells: boolean } {
+  let formatsCells = false;
+  const reader = (r: 'text' | 'other') => ({ reader: r, formatsCells });
   const text = Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('latin1');
   const RECORD_BREAK = /[\n\r]+/g;
   let steps = 0;
@@ -201,14 +222,14 @@ function idFileReader(b: Uint8Array): 'text' | 'other' {
     const brk = RECORD_BREAK.exec(text);
     const record = text.slice(pos, brk ? brk.index : text.length).trim();
     pos = brk ? RECORD_BREAK.lastIndex : text.length + 1;
-    if (++steps > SYLK_MAX_STEPS) return 'other';
+    if (++steps > SYLK_MAX_STEPS) return reader('other');
     if (record === '') continue; // SheetJS skips empty records
-    if (records > 0 && record.includes('\u001b')) return 'other';
+    if (records > 0 && record.includes('\u001b')) return reader('other');
     records++;
     // The record type is the first field: up to the first ";" that is not part of ";;".
     const sep = record.indexOf(';');
     const type = sep < 0 ? record : record[sep + 1] === ';' ? null : record.slice(0, sep);
-    if (type === null || !SYLK_RECORD_TYPES.has(type)) return 'text'; // SYLK bad record: CSV
+    if (type === null || !SYLK_RECORD_TYPES.has(type)) return reader('text'); // SYLK bad record: CSV
     if (type === 'P' && sep > 0 && record[sep + 1] === 'P') formats.push(record.slice(3).replace(/;;/g, ';').length);
     const codes = SYLK_FIELD_CODES[type];
     if (!codes) continue; // ID, E, B, O, W, P, NN: no field is refused, no costly step
@@ -218,7 +239,7 @@ function idFileReader(b: Uint8Array): 'text' | 'other' {
     for (let i = 1; i < fields.length; i++) {
       const field = fields[i]!;
       const code = field.charAt(0);
-      if (code === '' || !codes.includes(code)) return 'text'; // SYLK bad record: CSV
+      if (code === '' || !codes.includes(code)) return reader('text'); // SYLK bad record: CSV
       const n = parseInt(field.slice(1), 10);
       if (code === 'Y' && n > rows) {
         steps += n - rows; // the sheet grows to row n, one array per row (Infinity never ends)
@@ -234,18 +255,19 @@ function idFileReader(b: Uint8Array): 'text' | 'other' {
       } else if (code === 'X' && type === 'F') {
         columnSet = true;
       }
-      if (steps > SYLK_MAX_STEPS) return 'other';
+      if (steps > SYLK_MAX_STEPS) return reader('other');
     }
     if (type === 'C' && value) {
+      if ((format ?? 0) > 0) formatsCells = true; // SheetJS formats it when it reads with cellText
       steps += format ?? 0; // and the value is formatted with it once
       format = null;
     }
     if (type === 'F' && !columnSet) format = null;
-    if (steps > SYLK_MAX_STEPS) return 'other';
+    if (steps > SYLK_MAX_STEPS) return reader('other');
   }
   // Every record is SYLK: SheetJS reads the file as SYLK. "ID" alone makes an empty workbook with
   // no work (as before this guard it is left to SheetJS, which reads no rows from it).
-  return records <= 1 ? 'text' : 'other';
+  return reader(records <= 1 ? 'text' : 'other');
 }
 export function sheetjsReader(b: Uint8Array): SheetjsReader {
   const n = [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];

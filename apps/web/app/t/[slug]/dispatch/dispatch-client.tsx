@@ -18,6 +18,7 @@ import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import type { ServiceArea } from '@/lib/dispatch/location-input';
 
 interface Issue {
   code: string;
@@ -30,6 +31,7 @@ interface IssueCustomer extends EditableCustomer {
   lat: number | null;
   lng: number | null;
   locationVerified: boolean;
+  geocodeConfidence?: string | null;
   orders: number;
   cases: number;
   issues: Issue[];
@@ -59,8 +61,11 @@ interface Day {
   productsWithoutWeight: WeightGap[];
   /** Lines whose product's case weight was entered or corrected since: applied at the next optimize. */
   weightsToApply?: WeightGap[];
-  /** The plan in use is out of date without a new order: weights changed, customers deactivated. */
-  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number };
+  /**
+   * The plan in use is out of date without a new order: weights changed, customers deactivated,
+   * master data corrected, or customers on planned loads whose location is not usable any more.
+   */
+  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number; locationBlocked?: number };
   plan: null | {
     id: string;
     version: number;
@@ -82,6 +87,8 @@ interface Day {
   carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
   trucks: { active: number; capacityCases: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
+  /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
+  serviceArea: ServiceArea;
 }
 interface Validation {
   totalRows: number;
@@ -353,9 +360,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 };
   const planOutdated =
-    !!day.plan?.chosen && (outdated.weightCases > 0 || outdated.inactiveOrders > 0 || (outdated.masterChanged ?? 0) > 0 || (outdated.trucksChanged ?? 0) > 0);
+    !!day.plan?.chosen &&
+    (outdated.weightCases > 0 ||
+      outdated.inactiveOrders > 0 ||
+      (outdated.masterChanged ?? 0) > 0 ||
+      (outdated.trucksChanged ?? 0) > 0 ||
+      (outdated.locationBlocked ?? 0) > 0);
   // Every order is already on a locked, loading or dispatched load, or was brought forward to a
   // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
   // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
@@ -564,6 +576,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               outdated.inactiveOrders ? `${outdated.inactiveOrders} of its order(s) on planned loads had their customer deactivated` : '',
               outdated.masterChanged ? `the location or receiving hours of ${outdated.masterChanged} customer(s) on planned loads were changed (master data changed since optimization)` : '',
               outdated.trucksChanged ? `the capacity or payload of ${outdated.trucksChanged} truck(s) with planned loads was changed` : '',
+              // Owner's location rule (A5 second review): their loads cannot be locked meanwhile.
+              outdated.locationBlocked
+                ? `the location of ${outdated.locationBlocked} customer(s) on planned loads can no longer be used (drop the pin on each one, or RE-PLAN to leave their orders unserved)`
+                : '',
             ]
               .filter(Boolean)
               .join(', and ')}
@@ -605,7 +621,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         </Step>
       ) : null}
 
-      <LocationDialog open={locOpen} onOpenChange={setLocOpen} customer={locFor} depot={{ lat: day.depot.lat, lng: day.depot.lng }} onSaved={afterCustomerSaved} />
+      <LocationDialog
+        open={locOpen}
+        onOpenChange={setLocOpen}
+        customer={locFor}
+        depot={{ lat: day.depot.lat, lng: day.depot.lng }}
+        serviceArea={day.serviceArea}
+        onSaved={afterCustomerSaved}
+      />
       <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={afterCustomerSaved} />
     </div>
   );
@@ -648,9 +671,16 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
       {c.inactive ? (
         <p className="mt-1 text-xs font-medium text-red-700">{c.issues.find((i) => i.code === 'CUSTOMER_INACTIVE')?.message}</p>
       ) : (
-        <p className="mt-1 text-xs">
-          Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
-        </p>
+        <>
+          <p className="mt-1 text-xs">
+            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
+          </p>
+          {needsLoc ? (
+            <p className="text-xs text-red-700" data-testid={`location-issue-${c.code}`}>
+              {c.issues.find((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION')?.message}
+            </p>
+          ) : null}
+        </>
       )}
       {c.issues
         .filter((i) => !i.blocking && i.code !== 'NEW_CUSTOMER')

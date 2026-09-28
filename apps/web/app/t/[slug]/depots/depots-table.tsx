@@ -83,16 +83,26 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
                 <TableCell className="text-right font-mono text-xs">{d.lng.toFixed(4)}</TableCell>
                 <TableCell className="text-right">{d._count?.trucks ?? 0}</TableCell>
                 <TableCell>
-                  {d.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
+                  {/* Audit PR A5: the depot that keeps orders and files that had no depot. */}
+                  {d.historyOnly ? (
+                    <Badge variant="secondary">History only</Badge>
+                  ) : d.active ? (
+                    <Badge variant="success">Active</Badge>
+                  ) : (
+                    <Badge variant="secondary">Inactive</Badge>
+                  )}
                 </TableCell>
                 {canManage ? (
                   <TableCell className="flex gap-1">
                     <Button size="icon" variant="ghost" aria-label="Edit" onClick={() => setEditing(d)}>
                       <Pencil className="h-4 w-4" />
                     </Button>
-                    <Button size="icon" variant="ghost" aria-label="Delete" onClick={() => setConfirming(d)}>
-                      <Trash2 className="h-4 w-4 text-destructive" />
-                    </Button>
+                    {/* It always has orders, so Delete could only deactivate it again: not offered. */}
+                    {d.historyOnly ? null : (
+                      <Button size="icon" variant="ghost" aria-label="Delete" onClick={() => setConfirming(d)}>
+                        <Trash2 className="h-4 w-4 text-destructive" />
+                      </Button>
+                    )}
                   </TableCell>
                 ) : null}
               </TableRow>

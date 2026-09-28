@@ -40,13 +40,12 @@ export const LIVE_PLAN_IN_USE = Prisma.sql`rp.id = (
 /**
  * The orders of plan rp, as a SQL condition on "Order" o - the same scope as `ordersInScopeWhere`
  * (plan-service.ts), the orders the plan's reconciliation checks: same tenant and delivery date,
- * the plan's depot, and orders without a depot (legacy) only when the tenant has one active depot.
- * One plan per depot and day, so every case is counted once (review of PR3: the whole day of the
- * tenant was counted once per depot plan, so cost per case was 1/N of the truth with N depots).
+ * and the plan's depot (every order has one: owner rule, audit PR A5). One plan per depot and day,
+ * so every case is counted once (review of PR3: the whole day of the tenant was counted once per
+ * depot plan, so cost per case was 1/N of the truth with N depots).
  */
 export const PLAN_ORDERS_IN_SCOPE = Prisma.sql`o."tenantId" = rp."tenantId" AND o."deliveryDate" = rp."runDate"
-        AND (o."depotId" = rp."depotId"
-          OR (o."depotId" IS NULL AND (SELECT COUNT(*) FROM "Depot" d WHERE d."tenantId" = rp."tenantId" AND d.active) <= 1))`;
+        AND o."depotId" = rp."depotId"`;
 
 /**
  * PR9: the orders of plan rp that were brought forward to a later day since (carriedToOrderId): they

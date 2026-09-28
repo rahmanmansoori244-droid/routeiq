@@ -5,22 +5,25 @@ import { canPlan } from '@/lib/rbac';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { Button } from '@/components/ui/button';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomersClient } from './customers-client';
 
 export const metadata = { title: 'Customers — RouteIQ' };
 export const dynamic = 'force-dynamic';
 
 export default async function CustomersPage({ params }: { params: { slug: string } }) {
-  const { db, user } = await getCurrentTenant(params.slug);
+  const { db, user, tenant } = await getCurrentTenant(params.slug);
   const canEdit = canPlan(user.role);
 
-  const [customers, regions] = await Promise.all([
+  const [customers, regions, serviceArea] = await Promise.all([
     db.customer.findMany({
       orderBy: [{ active: 'desc' }, { code: 'asc' }],
       include: { region: { select: { id: true, code: true, name: true } } },
       take: 1000,
     }),
     db.region.findMany({ orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),
+    // The company's delivery area: a saved point outside it that nobody confirmed needs a pin.
+    tenantServiceArea(tenant.id),
   ]);
 
   if (customers.length === 0) {
@@ -73,7 +76,7 @@ export default async function CustomersPage({ params }: { params: { slug: string
         ) : null
       }
     >
-      <CustomersClient slug={params.slug} initial={customers} regions={regions} canEdit={canEdit} />
+      <CustomersClient slug={params.slug} initial={customers} regions={regions} canEdit={canEdit} serviceArea={serviceArea} />
     </PageShell>
   );
 }

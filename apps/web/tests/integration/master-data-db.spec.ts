@@ -163,7 +163,7 @@ describe('3. customer import vs a pin verified meanwhile (F05)', () => {
     const target = await prisma.customer.findFirstOrThrow({ where: { tenantId, code: `K${N - 1}` } });
     as('PLANNER');
     const fd = new FormData();
-    fd.set('file', new File([csv([['code', 'name', 'priority', 'lat', 'lng'], ...Array.from({ length: N }, (_, i) => [`K${i}`, `K${i}`, 3, '23.7', '58.5'])])], 'customers.csv', { type: 'text/csv' }));
+    fd.set('file', new File([csv([['code', 'name', 'priority', 'lat', 'lng'], ...Array.from({ length: N }, (_, i) => [`K${i}`, `K${i}`, 3, '23.7001', '58.5001'])])], 'customers.csv', { type: 'text/csv' }));
 
     let importDone: Promise<{ status: number; body: any }> | null = null;
     await prisma.$transaction(
@@ -192,7 +192,7 @@ describe('3. customer import vs a pin verified meanwhile (F05)', () => {
     const after = await prisma.customer.findUniqueOrThrow({ where: { id: target.id } });
     expect(after).toMatchObject({ lat: 23.8123, lng: 58.7123, locationVerified: true, locationVerifiedById: adminId, locationSource: 'MAP_PIN' });
     const other = await prisma.customer.findFirstOrThrow({ where: { tenantId, code: 'K0' } });
-    expect(other).toMatchObject({ lat: 23.7, lng: 58.5, locationSource: 'IMPORT' });
+    expect(other).toMatchObject({ lat: 23.7001, lng: 58.5001, locationSource: 'IMPORT' });
   });
 });
 

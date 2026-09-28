@@ -46,7 +46,10 @@ import {
   chooseScenario,
   createInitialPlan,
   createNextVersion,
+  LOCATION_GATE_RULE,
+  noLocationLoadRemedy,
   PlanError,
+  replacedPinRemedy,
   updateLoad,
 } from '@/lib/dispatch/plan-service';
 import { driverClashes, isHandSetDriver } from '@/lib/dispatch/load-state';
@@ -404,6 +407,233 @@ describe('load changes on a version without an applied plan (F03 / L14)', () => 
     expect(isLockBusy({ code: 'P2002' })).toBe(false);
     expect(isLockBusy(new Error('boom'))).toBe(false);
     expect(isLockBusy(null)).toBe(false);
+  });
+});
+
+describe("load changes and the owner's location rule (audit PR A5, second review)", () => {
+  // The customer of O1 (on LOCKED L1) and O2 (on PLANNED L2), as it is NOW: the gate reads it by id.
+  const customerNow = (over: Record<string, unknown>) => {
+    tables.customer = [{ id: 'c', tenantId: T, code: 'C1', branchCode: null, lat: 23.6111, lng: 58.4111, locationVerified: false, geocodeConfidence: 'HIGH', ...over }];
+  };
+
+  it('a saved point marked LOW after planning: LOCK, LOADING and DISPATCH are refused (409 LOCATION_REQUIRED) and nothing changes', async () => {
+    seedAppliedPlan();
+    customerNow({ geocodeConfidence: 'LOW' });
+    const lock = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+    // Before: locked (and then dispatched) to the point the import had said was not usable.
+    expect(lock).toBeInstanceOf(PlanError);
+    expect(lock).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED', customerIds: ['c'], customers: ['C1'] } });
+    expect(lock.message).toBe(`T01 L2: 1 customer on this load has no usable location: C1. ${LOCATION_GATE_RULE} ${noLocationLoadRemedy('PLANNED')}`);
+    for (const to of ['LOADING', 'DISPATCHED'] as const) {
+      const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+      expect(e, to).toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+      expect(e.message).toContain(noLocationLoadRemedy('LOCKED'));
+    }
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOCKED', 'PLANNED']);
+    expect(tables.auditLog).toEqual([]);
+    // The way back is never refused.
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+  });
+
+  it.each([
+    ['a point outside the delivery area, never confirmed', { lat: 24.7136, lng: 46.6753 }],
+    ['no coordinates', { lat: null, lng: null, geocodeConfidence: 'MISSING' }],
+    ['the point 0,0', { lat: 0, lng: 0 }],
+  ])('a customer with %s is refused the same way', async (_what, over) => {
+    seedAppliedPlan();
+    customerNow(over);
+    await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+  });
+
+  it.each([
+    ['a HIGH point not confirmed yet (an import, like the demo customers)', { geocodeConfidence: 'HIGH' }],
+    ['a MEDIUM point not confirmed yet', { geocodeConfidence: 'MEDIUM' }],
+    ['a LOW point confirmed by a dispatcher', { geocodeConfidence: 'LOW', locationVerified: true }],
+    ['a point outside the delivery area, confirmed', { lat: 24.7136, lng: 46.6753, locationVerified: true }],
+  ])('control: a customer with %s is locked and dispatched as before', async (_what, over) => {
+    seedAppliedPlan();
+    customerNow(over);
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+  });
+
+  it('the remedy says what to do for the load as it is: drop the pin, then RE-PLAN (a locked or loading load unlocked first); or go without them', () => {
+    const pin = "Drop the pin on each one's exact location (ADD LOCATION on Daily dispatch, or Set location on the customer page)";
+    expect(noLocationLoadRemedy('PLANNED')).toBe(`${pin}, then RE-PLAN. Or RE-PLAN now to leave their orders unserved.`);
+    // A5 third review. Before: "then try again", and trying again sent the load out with the stop
+    // still at the old point (a stop keeps the pin it was planned with until a re-plan).
+    expect(noLocationLoadRemedy('LOCKED')).toBe(
+      `${pin}. Then unlock this load (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or unlock it and RE-PLAN now to leave their orders unserved.`,
+    );
+    expect(noLocationLoadRemedy('LOADING')).toBe(
+      `${pin}. Then put this load Back to locked, Unlock it (put it back to Planned) and RE-PLAN, so the stops go to the new pins. Or do that now, and take their cases off the truck, to leave their orders unserved.`,
+    );
+    for (const s of ['PLANNED', 'LOCKED', 'LOADING']) expect(noLocationLoadRemedy(s)).not.toMatch(/try again/);
+  });
+
+  // A5 third review: the dispatcher follows the refusal ("drop the pin") and tries again. The customer
+  // is usable now, but the stop was planned at the point that was flagged: its pin, route link and
+  // WhatsApp text still go there until a re-plan.
+  describe('a stop still planned at a point that was not usable when a new pin replaced it', () => {
+    const P1 = { lat: 23.6111, lng: 58.4111 };
+    const snapshot = (at: { lat: number; lng: number } | null) => ({ v: 1, customerId: 'c', code: 'C1', branchCode: null, name: 'C1', customerType: null, address: null, accessNotes: null, hardStartMin: null, hardEndMin: null, prefStartMin: null, prefEndMin: null, serviceMin: 20, priority: 3, source: 'PLAN', capturedAt: '2026-09-26T18:00:00.000Z', ...(at ?? { lat: null, lng: null }) });
+    /** Both stops planned at P1; the customer now at `now`; one location change replaced `before`. */
+    function seedReplaced(now: Record<string, unknown>, before: Record<string, unknown> | null, planned: { lat: number; lng: number } | null = P1) {
+      seedAppliedPlan();
+      for (const a of tables.routeAssignment!) a.stopSnapshotJson = planned ? snapshot(planned) : null;
+      customerNow({ lat: 23.64, lng: 58.44, locationVerified: true, geocodeConfidence: 'HIGH', ...now });
+      if (before) {
+        tables.auditLog!.push({ id: 'AU1', tenantId: T, userId: 'u1', action: 'CUSTOMER_LOCATION_SET', entity: 'Customer', entityId: 'c', beforeJson: before, afterJson: { lat: 23.64, lng: 58.44, source: 'MAP_PIN', confidence: 'HIGH', check: 'HAND_PIN' }, createdAt: new Date() });
+      }
+    }
+
+    it.each([
+      ['an import had marked it LOW', { ...P1, verified: false, confidence: 'LOW' }],
+      ['it was outside the delivery area, never confirmed', { lat: 24.7136, lng: 46.6753, verified: false, confidence: 'HIGH' }],
+    ])('%s: LOCK, LOADING and DISPATCH are refused (409 STOP_PIN_REPLACED) until a re-plan', async (_what, before) => {
+      const planned = { lat: before.lat, lng: before.lng };
+      seedReplaced({}, before, planned);
+      const lock = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+      // Before: locked (and then loaded and dispatched) with the stop at the flagged point.
+      expect(lock).toBeInstanceOf(PlanError);
+      expect(lock).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customerIds: ['c'], customers: ['C1'] } });
+      expect(lock.message).toBe(`T01 L2: the stop for C1 still goes to its old point, which was not usable. A new pin was placed after this load was planned. ${LOCATION_GATE_RULE} ${replacedPinRemedy('PLANNED')}`);
+      for (const to of ['LOADING', 'DISPATCHED'] as const) {
+        const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+        expect(e, to).toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+        expect(e.message).toContain(replacedPinRemedy('LOCKED'));
+      }
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOCKED', 'PLANNED']);
+      // The way back is never refused.
+      await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+      expect(row('planLoad', 'L1').status).toBe('PLANNED');
+    });
+
+    it('the remedy: RE-PLAN, after unlocking a locked or loading load', () => {
+      expect(replacedPinRemedy('PLANNED')).toBe('RE-PLAN so the stops go to the new pins.');
+      expect(replacedPinRemedy('LOCKED')).toBe('Unlock this load (put it back to Planned), then RE-PLAN so the stops go to the new pins.');
+      expect(replacedPinRemedy('LOADING')).toBe('Put this load Back to locked, then Unlock it (put it back to Planned), then RE-PLAN so the stops go to the new pins.');
+    });
+
+    it.each([
+      // A2's "New pin" path (owner default, frozen plan facts): an ordinary correction of a point that was usable.
+      ['an ordinary correction of a usable point (HIGH, not confirmed)', {}, { ...P1, verified: false, confidence: 'HIGH' }, P1],
+      ['an ordinary correction of a confirmed point', {}, { ...P1, verified: true, confidence: 'LOW' }, P1],
+      ['the new pin within 50 m of the planned one', { lat: 23.6113, lng: 58.4112 }, { ...P1, verified: false, confidence: 'LOW' }, P1],
+      ['a flagged point that is not the planned one', {}, { lat: 23.5, lng: 58.3, verified: false, confidence: 'LOW' }, P1],
+      ['no location change recorded', {}, null, P1],
+      ['a stop planned before snapshots existed (it shows the live pin)', {}, { ...P1, verified: false, confidence: 'LOW' }, null],
+    ])('control: %s is locked and dispatched as before', async (_what, now, before, planned) => {
+      seedReplaced(now, before, planned);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+    });
+
+    // A5 fourth review: only the change that moved the customer off the planned point counts. A
+    // change that confirmed the point where it was (a dispatcher typing its own coordinates, read as
+    // exact; the ADD LOCATION dialog allows it) moves nothing, and an older change off the point is
+    // not the one that replaced it. Before: any row whose "before" was the planned point while it was
+    // flagged refused the load, so an ordinary correction of a confirmed point was refused with
+    // "its old point, which was not usable" and a locked load was sent through unlock and RE-PLAN.
+    const NOW = { lat: 23.64, lng: 58.44 };
+    const R = { lat: 23.62, lng: 58.42 };
+    const flagged = { verified: false, confidence: 'LOW' };
+    const confirmed = { verified: true, confidence: 'HIGH' };
+    /** Location changes of customer c, oldest first: [before, after]; `sameMs`: all made in the same millisecond. */
+    function history(changes: [Record<string, unknown>, Record<string, unknown>][], sameMs = false) {
+      tables.auditLog = changes.map(([before, after], i) => ({
+        id: `AU${i + 1}`, tenantId: T, userId: 'u1', action: 'CUSTOMER_LOCATION_SET', entity: 'Customer', entityId: 'c',
+        beforeJson: { source: 'IMPORT', ...before }, afterJson: { source: 'MAP_PIN', confidence: 'HIGH', check: 'HAND_PIN', ...after },
+        createdAt: new Date(Date.UTC(2026, 8, 26, 18, sameMs ? 0 : i)),
+      }));
+    }
+    // A hand pin a few metres from the planned point (P1 + about 3 m, about 44 m, about 61 m north).
+    const P1_3M = { lat: 23.61113, lng: 58.4111 };
+    const P1_44M = { lat: 23.6115, lng: 58.4111 };
+    const P1_61M = { lat: 23.61165, lng: 58.4111 };
+
+    it.each([
+      [
+        // Also a usable point planned, then flagged by a customer file (which writes no row), then this.
+        'a flagged point confirmed where it was (its coordinates typed), then corrected by hand',
+        [[{ ...P1, ...flagged }, { ...P1, source: 'MANUAL_LATLNG', check: 'READING' }], [{ ...P1, ...confirmed, source: 'MANUAL_LATLNG' }, NOW]],
+      ],
+      [
+        'a flagged point replaced, set back by hand, then corrected by hand',
+        [[{ ...P1, ...flagged }, R], [{ ...R, ...confirmed }, P1], [{ ...P1, ...confirmed }, NOW]],
+      ],
+      // A5 fifth review: a pin dropped exactly on a flagged saved point is refused (PIN_REQUIRED), so a
+      // hand pin confirms it a few metres off; the gate counts that pin as the same place (within 50 m),
+      // and so does this. Before: its later correction was refused as "its old point, which was not
+      // usable" (the change off the pin did not start exactly at the planned point, so the older
+      // flagged row decided).
+      [
+        'a flagged point confirmed by a hand pin about 3 m off, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_3M], [{ ...P1_3M, ...confirmed }, NOW]],
+      ],
+      [
+        'a flagged point confirmed by a hand pin about 44 m off, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_44M], [{ ...P1_44M, ...confirmed }, NOW]],
+      ],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('control: %s is locked and dispatched as before', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+    });
+
+    it.each([
+      [
+        'confirmed where it was, flagged again by a customer file, then replaced',
+        [[{ ...P1, ...flagged }, { ...P1, check: 'READING' }], [{ ...P1, ...flagged }, NOW]],
+      ],
+      [
+        'corrected once while usable, set back, flagged, then replaced',
+        [[{ ...P1, ...confirmed }, R], [{ ...R, ...confirmed }, { ...P1, source: 'IMPORT', check: 'IMPORT' }], [{ ...P1, ...flagged }, NOW]],
+      ],
+      // A pin more than 50 m from the flagged point is not the same place: the change that moved the
+      // customer there was made while the point was flagged, whatever came after it.
+      [
+        'a flagged point replaced by a hand pin about 61 m away, then corrected by hand',
+        [[{ ...P1, ...flagged }, P1_61M], [{ ...P1_61M, ...confirmed }, NOW]],
+      ],
+      ['a flagged point replaced by a hand pin about 3 km away', [[{ ...P1, ...flagged }, NOW]]],
+      // The planned point's place is PIN_MOVED_M around it: a flagged point about 33 m from it (the
+      // saved point moved a little after planning, then a file flagged it) is the same place.
+      ['a flagged point about 33 m from the planned one, replaced by a hand pin about 3 km away', [[{ lat: 23.6114, lng: 58.4111, ...flagged }, NOW]]],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('still refused: %s (the newest change off the planned point was made while it was flagged)', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes);
+      await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+      await expect(updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+    });
+
+    // A5 fifth review: a change that left the customer at the planned point's place (a flagged point
+    // confirmed where it is, typed or by a hand pin a few metres off) moved nothing, so it never
+    // decides, also when a correction was recorded in the same millisecond. Before: the fourth
+    // review's "confirmed where it was" skip was reached by no test (removing it left every test
+    // green), and changes of the same millisecond were refused when one of them blocked.
+    it.each([
+      ['confirmed by its coordinates typed', [[{ ...P1, ...flagged }, { ...P1, source: 'MANUAL_LATLNG', check: 'READING' }], [{ ...P1, ...confirmed, source: 'MANUAL_LATLNG' }, NOW]]],
+      ['confirmed by a hand pin about 3 m off', [[{ ...P1, ...flagged }, P1_3M], [{ ...P1_3M, ...confirmed }, NOW]]],
+    ] as [string, [Record<string, unknown>, Record<string, unknown>][]][])('control: a flagged point %s, then corrected by hand in the same millisecond, is locked and loaded', async (_what, changes) => {
+      seedReplaced({}, null);
+      history(changes, true);
+      await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+      expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOADING', 'LOCKED']);
+    });
+
+    it('still refused in the same millisecond: a flagged point replaced by a pin 3 km away, whatever else was recorded then', async () => {
+      seedReplaced({}, null);
+      history([[{ ...P1, ...flagged }, P1_3M], [{ ...P1, ...flagged }, NOW]], true);
+      await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED' } });
+    });
   });
 });
 

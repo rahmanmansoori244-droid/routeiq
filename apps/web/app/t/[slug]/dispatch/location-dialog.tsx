@@ -10,6 +10,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { api } from './client-api';
 import { createLocationRequests, type LocationRequests } from './location-requests';
+import { notExactMessage, type ServiceArea } from '@/lib/dispatch/location-input';
+import { savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -25,11 +27,28 @@ interface ParseResult {
   resolvedUrl?: string;
 }
 
+export const UNREAD_PIN_TEXT = "This could not be read. Drop the pin on the customer's exact location, then save.";
+
 interface Props {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  customer: { customerId: string; code: string; branchCode: string | null; name: string; lat: number | null; lng: number | null } | null;
+  customer: {
+    customerId: string;
+    code: string;
+    branchCode: string | null;
+    name: string;
+    lat: number | null;
+    lng: number | null;
+    /** How exact the saved point is (owner's location rule): only an exact one can be saved again as it is. */
+    locationVerified?: boolean;
+    geocodeConfidence?: string | null;
+  } | null;
   depot: { lat: number; lng: number };
+  /**
+   * The company's delivery area (Settings; Oman + UAE by default), as the server checks it: a saved
+   * pin outside it that no dispatcher confirmed is not saved again as it is (A5 review).
+   */
+  serviceArea: ServiceArea;
   onSaved: () => void;
 }
 
@@ -45,8 +64,17 @@ interface Props {
  * A point read earlier is out of date once the text in the box is no longer the text it was read
  * from (audit F06, residual): the preview is greyed with "Text changed - press Read", and Save waits
  * for a Read of the text on screen. A pin the dispatcher drops by hand is the point and can be saved.
+ *
+ * The owner's location rule (27 Sep 2026, audit PR A5): "locations should always be correct". A
+ * reading that is not exact (`needsPin`: LOW, and the MEDIUM ones - map centre, fewer than 4
+ * decimals, degrees and minutes only, swapped, outside the area) or that could not be read is never
+ * saved as read: Save stays off until the dispatcher drops or drags the pin by hand. The customer's
+ * saved pin, shown when the dialog opens, can be saved again as it is only when it is exact:
+ * verified, or HIGH and inside the company's delivery area (`savedPointProblem`, the server's own
+ * test, with the reason as the note: not exact, outside the area, or latitude and longitude swapped).
+ * The server checks all of this again (PUT /api/customers/:id/location).
  */
-export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }: Props) {
+export function LocationDialog({ open, onOpenChange, customer, depot, serviceArea, onSaved }: Props) {
   const [input, setInput] = useState('');
   const [parse, setParse] = useState<ParseResult | null>(null);
   // The text the point on screen was read from: saved as the location's input, never other text typed since.
@@ -126,8 +154,26 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
         : typed
           ? 'Text changed - press Read. The point shown is from the earlier text.'
           : 'Text cleared - paste it again and press Read, or drop the pin on the map.';
+  // A reading that is not exact, or not read: only a pin placed by hand can be saved (owner's rule).
   const needsConfirmation = !!parse && (parse.needsPin || !parse.ok);
-  const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved || (parse?.ok ?? false));
+  // Nothing read and no hand pin: Save would store the customer's saved pin as it is.
+  const savedAsIs = !!pin && !pinMoved && readFrom === null;
+  // Why that saved pin cannot be saved as it is (null = it can): the server's test, with the company's area.
+  const savedProblem = savedAsIs && customer ? savedPointProblem(customer, serviceArea) : null;
+  const savedNotExact = savedProblem !== null;
+  const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved) && !savedNotExact;
+  // What to do, in the owner's words (not while the text on screen waits for a Read: that note says it).
+  // A pair padded with zeros says why first (owner decision of 28 Sep 2026: only one zero at the end
+  // counts, and the text on screen looks like 4 decimals); the server's 422 says the same.
+  const pinNote = pinMoved || textUnread || reading
+    ? null
+    : needsConfirmation
+      ? parse?.ok
+        ? notExactMessage(parse)
+        : UNREAD_PIN_TEXT
+      : savedProblem;
+  // The preview's notes, without one the note above already says.
+  const previewWarnings = parse ? parse.warnings.filter((w) => !pinNote?.startsWith(w)) : [];
 
   async function save() {
     // The same rule as the button (a click that reaches a disabled button saves nothing either).
@@ -138,10 +184,18 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
     const target = customer;
     const source = pinMoved || !parse?.ok ? 'MAP_PIN' : parse?.source ?? 'MANUAL_LATLNG';
     // The saved input is the text the point was read from, never text that was not read (a pin
-    // dropped by hand without a Read is stored as "map pin").
+    // dropped by hand without a Read is stored as "map pin"). With it goes the address a short link
+    // led to at that Read, so the server reads the same text again without opening the link.
     const r = await api(`/api/customers/${target.customerId}/location`, {
       method: 'PUT',
-      json: { lat: pin.lat, lng: pin.lng, source, input: readFrom ?? undefined, confirmOutsideArea: outsideConfirm || undefined },
+      json: {
+        lat: pin.lat,
+        lng: pin.lng,
+        source,
+        input: readFrom ?? undefined,
+        resolvedUrl: readFrom !== null ? parse?.resolvedUrl : undefined,
+        confirmOutsideArea: outsideConfirm || undefined,
+      },
     });
     if (!reqs.answered(ticket)) {
       // Closed, or opened for another customer, while saving: say what happened to this customer
@@ -206,6 +260,11 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
                 {unreadNote}
               </p>
             ) : null}
+            {pinNote ? (
+              <p className="text-xs font-semibold text-red-700" data-testid="location-pin-required">
+                {pinNote}
+              </p>
+            ) : null}
           </div>
           {parse ? (
             <div
@@ -222,12 +281,12 @@ export function LocationDialog({ open, onOpenChange, customer, depot, onSaved }:
               {parse.ok ? (
                 <p>
                   Found <b>{parse.lat?.toFixed(6)}, {parse.lng?.toFixed(6)}</b> ({parse.confidence?.toLowerCase()} confidence).
-                  {parse.needsPin ? ' Check the pin on the map and move it if needed.' : ''}
+                  {parse.needsPin ? ' Not exact: drop the pin on the map by hand.' : ''}
                 </p>
               ) : (
                 <p>{parse.error}</p>
               )}
-              {parse.warnings.map((w) => (
+              {previewWarnings.map((w) => (
                 <p key={w} className={`text-xs ${textUnread ? '' : 'text-amber-800'}`}>
                   {w}
                 </p>

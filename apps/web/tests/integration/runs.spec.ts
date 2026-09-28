@@ -34,6 +34,7 @@ async function seedOrders(tenantId: string, seeded: SeededIds, count = 6): Promi
       data: {
         tenantId,
         customerId: cust,
+        depotId: seeded.depotId,
         deliveryDate: tomorrow,
         totalCases: 5,
         totalWeightKg: 60,

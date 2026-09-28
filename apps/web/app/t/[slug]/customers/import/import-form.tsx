@@ -10,6 +10,14 @@ import { Badge } from '@/components/ui/badge';
 import { errorMessage } from '@/lib/error-message';
 
 interface ImportError { row: number; message: string }
+/** A row whose location is not exact: not saved (owner's location rule, audit PR A5). */
+interface LocationNotSaved {
+  row: number;
+  code: string;
+  branchCode: string | null;
+  reason: string;
+  kept: 'SAVED_LOCATION' | 'SAVED_LOCATION_NEEDS_PIN' | 'SAVED_LOCATION_NOT_USABLE' | null;
+}
 interface ImportResult {
   fileName: string;
   totalRows: number;
@@ -23,6 +31,51 @@ interface ImportResult {
   creates?: number;
   updates?: number;
   confirmedServiceChanges?: { code: string; branchCode: string | null; from: number; to: number }[];
+  /** Rows whose location is not exact: not saved (owner's location rule, audit PR A5). */
+  locationsNotSaved?: LocationNotSaved[];
+}
+
+/**
+ * One listed row: why its location is not saved, then what the customer has now (or will have after
+ * the import). "Not planned or sent out" is what the system enforces (planning and LOCK / LOADING /
+ * DISPATCH refuse a customer without a usable location, A5 second review).
+ */
+export function locationNotSavedLine(l: LocationNotSaved, dryRun: boolean): string {
+  const untilPin = 'its orders are not planned or sent out until someone drops the pin on the map.';
+  const after =
+    l.kept === 'SAVED_LOCATION'
+      ? 'The location it already has is kept.'
+      : l.kept === 'SAVED_LOCATION_NEEDS_PIN'
+        ? `Its saved location ${dryRun ? 'will no longer be' : 'is no longer'} used: ${untilPin}`
+        : l.kept === 'SAVED_LOCATION_NOT_USABLE'
+          ? `Its saved location is not exact or is outside the delivery area, so it is not used either: ${untilPin}`
+          : 'It has no location until you set one.';
+  return `${l.reason} ${after}`;
+}
+
+/**
+ * The result box's words above the listed rows (A5 fifth review): what to do about the rows whose
+ * customer has no usable location after the import (`needPin`), and, apart, the rows whose customer
+ * keeps a usable saved location, which is planned and sent out as before (`kept`). Before, every
+ * listed row was told to be set on the map, with "No item is delivered without a correct location".
+ * `notYet`: Validate only, or a file with errors (nothing is saved yet).
+ */
+export function locationsNotSavedSummary(
+  list: LocationNotSaved[],
+  notYet: boolean,
+): { needPin: { heading: string; advice: string } | null; kept: string | null } {
+  const kept = list.filter((l) => l.kept === 'SAVED_LOCATION').length;
+  const needPin = list.length - kept;
+  return {
+    needPin: needPin
+      ? {
+          heading: `${needPin} location(s) are not exact, so they are ${notYet ? 'not going to be' : 'not'} saved. No item is delivered without a correct location.`,
+          advice:
+            'Set each one on the map (ADD LOCATION on Daily dispatch, or Set location on the customer page), or fix the file and import it again: type or paste each coordinate with all the decimals it really has (at least 4); if Excel drops a trailing zero, format the lat and lng columns as Text before typing or pasting.',
+        }
+      : null,
+    kept: kept ? `${kept} location(s) are not exact, but each of these customers keeps the location it already has, which is used as before: nothing to do.` : null,
+  };
 }
 
 export function CustomerImportForm({ slug }: { slug: string }) {
@@ -126,7 +179,35 @@ export function CustomerImportForm({ slug }: { slug: string }) {
               {result.creates !== undefined ? <Badge variant="outline">{result.creates} new</Badge> : null}
               {result.updates !== undefined ? <Badge variant="outline">{result.updates} updated</Badge> : null}
               {result.confirmedServiceChanges?.length ? <Badge variant="warning">{result.confirmedServiceChanges.length} confirmed service time(s) change</Badge> : null}
+              {result.locationsNotSaved?.length ? <Badge variant="warning">{result.locationsNotSaved.length} location(s) not exact</Badge> : null}
             </div>
+            {result.locationsNotSaved && result.locationsNotSaved.length > 0 ? (
+              <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-xs" data-testid="locations-not-saved">
+                {(() => {
+                  const summary = locationsNotSavedSummary(result.locationsNotSaved, !!result.dryRun || result.errorRows > 0);
+                  return (
+                    <>
+                      {summary.needPin ? (
+                        <>
+                          <p className="mb-1 font-medium text-amber-900">{summary.needPin.heading}</p>
+                          <p className="mb-2 text-amber-900">{summary.needPin.advice}</p>
+                        </>
+                      ) : null}
+                      {summary.kept ? <p className="mb-2 text-amber-900">{summary.kept}</p> : null}
+                    </>
+                  );
+                })()}
+                <ul className="space-y-1">
+                  {result.locationsNotSaved.slice(0, 50).map((l) => (
+                    <li key={l.row}>
+                      <span className="font-mono">Row {l.row}</span> {l.code}
+                      {l.branchCode ? ` / ${l.branchCode}` : ''}: {locationNotSavedLine(l, !!result.dryRun || result.errorRows > 0)}
+                    </li>
+                  ))}
+                </ul>
+                {result.locationsNotSaved.length > 50 ? <p className="mt-2 text-muted-foreground">…and {result.locationsNotSaved.length - 50} more.</p> : null}
+              </div>
+            ) : null}
             {result.errors && result.errors.length > 0 ? (
               <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs">
                 <p className="mb-2 font-medium text-destructive">Errors (must fix before import):</p>

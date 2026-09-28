@@ -303,6 +303,8 @@ async function main() {
         uploadedById: uploaderId,
         uploadedAt: new Date(),
         deliveryDate,
+        // Every order file and order has a depot (owner rule, audit PR A5).
+        depotId: depot.id,
         status: UploadBatchStatus.CONFIRMED,
         totalRows: rows.length,
         validRows: rows.length,
@@ -346,6 +348,7 @@ async function main() {
         data: {
           tenantId,
           customerId: customer.id,
+          depotId: depot.id,
           deliveryDate,
           totalCases,
           totalWeightKg,

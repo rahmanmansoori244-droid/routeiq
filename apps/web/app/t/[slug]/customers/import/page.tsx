@@ -42,8 +42,11 @@ export default async function CustomerImportPage({ params }: { params: { slug: s
             <Field name="branch_code" hint="Blank rows count as the main branch." />
             <Field name="region_code" hint="Must match an existing region code." />
             <Field name="address" />
-            <Field name="lat" hint="-90 to 90; leave blank to fix on the map later." />
-            <Field name="lng" hint="-180 to 180." />
+            <Field
+              name="lat"
+              hint="At least 4 decimals, inside the delivery area. Type or paste each coordinate with all the decimals it really has; if Excel drops a trailing zero, format the column as Text before typing or pasting. Leave blank to set the location on the map later."
+            />
+            <Field name="lng" hint="At least 4 decimals. A pair that is not exact is not saved: the row is imported without it and listed after the check." />
             <Field name="priority" required hint="Integer 1-5 (1 = highest)." />
             <Field name="avg_service_time_min" hint="Minutes. Default 10." />
             <Field name="payment_type" required hint="cash | credit | prepaid" />

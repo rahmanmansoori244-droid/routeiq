@@ -6,6 +6,10 @@
  * as the timetable check). A weight entered or corrected since makes the plan out of date (RE-PLAN
  * on, "applied at the next OPTIMIZE or RE-PLAN"), exactly when the check blocks the PLANNED load it
  * now overloads (CAPACITY_KG_NEW_WEIGHT) - the day screen no longer says "up to date" meanwhile.
+ *
+ * Also (owner's location rule, A5 second review): a customer on a PLANNED load whose location is not
+ * usable any more (a saved point an import marked LOW after planning) makes the plan out of date
+ * (`outdated.locationBlocked`), so RE-PLAN is offered; its load cannot be locked meanwhile.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -119,7 +123,7 @@ describe('day overview: case weights of a split order partly on a frozen load (P
   });
 
   it('`outdated` has exactly the keys of UP_TO_DATE on every path (the integration specs compare against it)', async () => {
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0 });
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());
@@ -145,5 +149,47 @@ describe('day overview: where the unloading time comes from (audit F07)', () => 
     expect((await day()).customers[0]).toMatchObject({ serviceMin: 10, serviceSource: 'CUSTOMER' });
     state.orders = [{ ...order(10), customer: { ...customer, serviceTimeConfirmed: false } }];
     expect((await day()).customers[0]).toMatchObject({ serviceSource: 'DEFAULT' });
+  });
+});
+
+describe("day overview: a customer on a PLANNED load whose location is not usable any more (owner's location rule, A5 second review)", () => {
+  // O1 with a known weight (nothing else out of date), and its customer as it is now.
+  const known = (over: Record<string, unknown>, active = true) => ({
+    ...order(10),
+    customer: { ...customer, active, ...over },
+    lines: [{ id: 'ln1', cases: 1000, weightKg: 10000, weightFromMaster: false, product: { code: 'P1', name: 'Water', weightPerCaseKg: 10 } }],
+  });
+  const on = (status: string) => [{ orderId: 'O1', portionLinesJson: null, portionWeightKg: null, stopSnapshotJson: null, load: { status } }];
+
+  it('a saved point marked LOW after planning makes the plan out of date, so RE-PLAN is offered (before: "up to date")', async () => {
+    state.orders = [known({ locationVerified: false, geocodeConfidence: 'LOW' })];
+    state.assignments = on('PLANNED');
+    const d = await day();
+    expect(d.outdated).toEqual({ ...UP_TO_DATE, locationBlocked: 1 });
+    expect(d.customers[0]).toMatchObject({ blocking: true });
+  });
+
+  it('also a point outside the delivery area that nobody confirmed (for example after the area was changed)', async () => {
+    state.orders = [known({ locationVerified: false, geocodeConfidence: 'HIGH', lat: 24.7136, lng: 46.6753 })];
+    state.assignments = on('PLANNED');
+    expect((await day()).outdated.locationBlocked).toBe(1);
+  });
+
+  it('not counted: on a LOCKED load (a re-plan keeps it; locking on is refused instead), a usable point, a deactivated customer', async () => {
+    state.orders = [known({ locationVerified: false, geocodeConfidence: 'LOW' })];
+    state.assignments = on('LOCKED');
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
+    for (const over of [
+      { locationVerified: false, geocodeConfidence: 'HIGH' },
+      { locationVerified: false, geocodeConfidence: 'MEDIUM' },
+      { locationVerified: true, geocodeConfidence: 'LOW' },
+    ]) {
+      state.orders = [known(over)];
+      state.assignments = on('PLANNED');
+      expect((await day()).outdated, JSON.stringify(over)).toEqual(UP_TO_DATE);
+    }
+    state.orders = [known({ locationVerified: false, geocodeConfidence: 'LOW' }, false)];
+    state.assignments = on('PLANNED');
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, inactiveOrders: 1 });
   });
 });

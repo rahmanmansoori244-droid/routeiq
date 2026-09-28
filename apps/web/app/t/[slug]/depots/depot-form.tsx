@@ -26,6 +26,8 @@ export interface DepotRow {
   lng: number;
   address: string | null;
   active: boolean;
+  /** Audit PR A5: keeps only the orders and files that had no depot; it can never be made active. */
+  historyOnly?: boolean;
   /** Depot hours, minutes from midnight (null = 00:00 / 24:00). */
   openMin?: number | null;
   closeMin?: number | null;
@@ -54,9 +56,14 @@ interface FormState {
 
 const blank: FormState = { code: '', name: '', lat: 23.5859, lng: 58.4059, address: '', openAt: '', closeAt: '', active: true };
 
+/** Shown instead of the Active switch on the history-only depot (audit PR A5). */
+export const HISTORY_ONLY_NOTE =
+  'History only: this depot keeps the orders and order files that had no depot. It is never used for new orders or plans, so it cannot be made active.';
+
 export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, onSaved }: Props) {
   const [form, setForm] = useState<FormState>(blank);
   const [pending, startTransition] = useTransition();
+  const historyOnly = mode === 'edit' && !!depot?.historyOnly;
 
   useEffect(() => {
     if (open) {
@@ -100,7 +107,8 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
       address: form.address,
       openMin,
       closeMin,
-      active: form.active,
+      // The history-only depot has no Active switch: its state is never sent (audit PR A5).
+      ...(historyOnly ? {} : { active: form.active }),
     };
     startTransition(async () => {
       const url = mode === 'create' ? '/api/depots' : `/api/depots/${depot!.id}`;
@@ -182,16 +190,22 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
               No truck leaves before the depot opens or comes back after it closes. Empty = open all day.
             </p>
           </div>
-          <div className="flex items-center justify-between rounded-md border px-3 py-2">
-            <Label htmlFor="active" className="text-sm">
-              Active
-            </Label>
-            <Switch
-              id="active"
-              checked={form.active}
-              onCheckedChange={(v) => setForm({ ...form, active: v })}
-            />
-          </div>
+          {historyOnly ? (
+            <p className="rounded-md border px-3 py-2 text-sm text-muted-foreground" data-testid="depot-history-only">
+              {HISTORY_ONLY_NOTE}
+            </p>
+          ) : (
+            <div className="flex items-center justify-between rounded-md border px-3 py-2">
+              <Label htmlFor="active" className="text-sm">
+                Active
+              </Label>
+              <Switch
+                id="active"
+                checked={form.active}
+                onCheckedChange={(v) => setForm({ ...form, active: v })}
+              />
+            </div>
+          )}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>
               Cancel

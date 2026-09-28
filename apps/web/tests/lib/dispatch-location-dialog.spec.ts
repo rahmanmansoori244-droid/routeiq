@@ -40,10 +40,13 @@ vi.mock('sonner', () => ({
 vi.mock('next/dynamic', () => ({ default: () => function PinMapStub() { return null; } }));
 
 import { LocationDialog } from '@/app/t/[slug]/dispatch/location-dialog';
+import { DEFAULT_SERVICE_AREA, parseLocationInput } from '@/lib/dispatch/location-input';
+import { WHOLE_WORLD } from '@/lib/dispatch/customer-attrs';
 
 const A = { customerId: 'cust-A', code: 'A001', branchCode: null, name: 'Customer A (Seeb)', lat: null, lng: null };
 const B = { customerId: 'cust-B', code: 'B001', branchCode: null, name: 'Customer B (Barka)', lat: null, lng: null };
-const B_PINNED = { ...B, lat: 23.6786, lng: 57.8859 };
+// An exact saved point (a HIGH import, not confirmed yet): it can be saved again as it is.
+const B_PINNED = { ...B, lat: 23.6786, lng: 57.8859, locationVerified: false, geocodeConfidence: 'HIGH' };
 const A_LINK = 'https://maps.app.goo.gl/AAAAshortA';
 const ok = (data: unknown) => ({ ok: true, status: 200, data, error: null, errorBody: null });
 const parsed = (lat: number, lng: number, source = 'GOOGLE_MAPS_URL') => ok({ ok: true, lat, lng, source, confidence: 'HIGH', needsPin: false, warnings: [] });
@@ -59,6 +62,8 @@ function setup() {
     open: false,
     customer: null,
     depot: { lat: 23.58, lng: 58.4 },
+    // The company's delivery area (the day screen and the customer page pass it): Oman + UAE.
+    serviceArea: DEFAULT_SERVICE_AREA,
     onSaved: saved,
     onOpenChange: (v: boolean) => host.render({ open: v }),
   });
@@ -217,17 +222,19 @@ describe('LocationDialog (audit F06)', () => {
     t.openFor(A);
     t.type(A_LINK);
     t.read();
-    t.type('23.6100, 58.4100');
+    // 4 decimals with one zero at the end: exact (a padded "23.6100, 58.4100" is not since the
+    // owner decision of 28 Sep 2026, so the server would not answer it as below).
+    t.type('23.6150, 58.4150');
     expect(calls[0].init.signal?.aborted).toBe(true);
     expect(t.readBtn().props.disabled).toBe(false);
     calls[0].resolve(parsed(23.6703, 58.1889));
     await t.host.settle();
     expect(t.found()).toBe('');
     t.read();
-    calls[1].resolve(parsed(23.61, 58.41, 'MANUAL_LATLNG'));
+    calls[1].resolve(parsed(23.615, 58.415, 'MANUAL_LATLNG'));
     await t.host.settle();
     t.save();
-    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.61, lng: 58.41, source: 'MANUAL_LATLNG', input: '23.6100, 58.4100' });
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.615, lng: 58.415, source: 'MANUAL_LATLNG', input: '23.6150, 58.4150' });
   });
 
   it('scenario 3: text changed after a Read - the preview is out of date and Save waits for a Read of the new text', async () => {
@@ -414,5 +421,178 @@ describe('LocationDialog (audit F06)', () => {
     await t.host.settle();
     expect(t.host.props.open).toBe(false);
     expect(t.saved).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
+  const pinRequired = (t: ReturnType<typeof setup>) => textOf(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'location-pin-required') ?? null);
+
+  it.each([
+    ['LOW (whole degrees)', "23°N 58°E", '23.000000, 58.000000'],
+    ['MEDIUM (fewer than 4 decimals)', '23.58, 58.40', '23.580000, 58.400000'],
+    ['MEDIUM (map centre only)', 'https://www.google.com/maps/@23.5859,58.4059,17z', '23.585900, 58.405900'],
+    ['MEDIUM (swapped)', '58.4059, 23.5859', '23.585900, 58.405900'],
+  ] as const)('a reading that is not exact, %s: Save stays off until the pin is placed by hand', async (_what, text, at) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    // What POST /api/locations/parse answers: the parser's own reading and warnings.
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
+    await t.host.settle();
+    expect(t.found()).toContain(at);
+    // A5 fourth review: nothing on screen asks to "confirm the pin" or to "move the pin if needed"
+    // (before: the parser's notes did, next to the note below, while Save stayed off).
+    expect(textOf(t.previewBox())).not.toMatch(/confirm|if needed|check the point/i);
+    // Before: Save was on and stored the reading as read (source GOOGLE_MAPS_URL), marked verified.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This reading is not exact. Drop the pin on the customer's exact location, then save.");
+    t.save();
+    expect(t.puts()).toEqual([]);
+    // The dispatcher drops the pin on the customer: that point is saved, as a hand pin, with the text it came from.
+    t.dropPin(23.581234, 58.401234);
+    expect(pinRequired(t)).toBe('');
+    expect(t.saveBtn().props.disabled).toBe(false);
+    t.save();
+    expect(t.puts()).toHaveLength(1);
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.581234, lng: 58.401234, source: 'MAP_PIN', input: text });
+  });
+
+  it('a reading that could not be read also needs a hand pin', async () => {
+    const t = setup();
+    t.openFor(B_PINNED);
+    t.type('https://www.google.com/maps/place/Lulu+Hypermarket');
+    t.read();
+    calls[0].resolve(ok({ ok: false, needsPin: true, warnings: [], error: 'This Google Maps link does not contain coordinates (it only names a place). Drop a pin on the map instead.' }));
+    await t.host.settle();
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This could not be read. Drop the pin on the customer's exact location, then save.");
+    t.dropPin(23.6787, 57.886);
+    expect(t.saveBtn().props.disabled).toBe(false);
+  });
+
+  // Owner decision of 28 Sep 2026, "Same rule everywhere": of the zeros at the end of a typed or
+  // pasted coordinate only one counts, as in the customer import.
+  it.each([
+    ['4 decimals ending in 00', '23.5800, 58.4100', '23.580000, 58.410000'],
+    ['6 decimals ending in 0000', '23.580000, 58.410000', '23.580000, 58.410000'],
+    ['a link with the pair as text', 'https://maps.google.com/?q=23.5800,58.4100', '23.580000, 58.410000'],
+  ] as const)('a pair padded with zeros (%s) is not exact: the note says why, and only a hand pin is saved', async (_what, text, at) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
+    await t.host.settle();
+    expect(t.found()).toContain(at);
+    // Before: "(high confidence)", Save on, and the rough point stored as a verified reading.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("Fewer than 4 decimals (only one zero at the end counts). Drop the pin on the customer's exact location.");
+    // Said once: the preview does not repeat the reason under the note.
+    expect(textOf(t.previewBox())).not.toContain('only one zero');
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.580123, 58.410456);
+    expect(pinRequired(t)).toBe('');
+    // The note is gone with the hand pin; the preview keeps the reason.
+    expect(textOf(t.previewBox())).toContain('Fewer than 4 decimals (only one zero at the end counts).');
+    t.save();
+    expect(t.puts()).toHaveLength(1);
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.580123, lng: 58.410456, source: 'MAP_PIN', input: text });
+  });
+
+  it.each([
+    ['4 decimals, one zero at the end', '23.5850, 58.4105', 23.585, 58.4105],
+    ['6 decimals', '23.585912, 58.405934', 23.585912, 58.405934],
+    ['6 decimals ending in 00 (5 count)', '23.585900, 58.405900', 23.5859, 58.4059],
+  ] as const)('control: %s still reads exact and is saved as read', async (_what, text, lat, lng) => {
+    const t = setup();
+    t.openFor(A);
+    t.type(text);
+    t.read();
+    calls[0].resolve(ok(parseLocationInput(text, DEFAULT_SERVICE_AREA)));
+    await t.host.settle();
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat, lng, source: 'MANUAL_LATLNG', input: text });
+  });
+
+  it.each([
+    ['a MEDIUM import', { locationVerified: false, geocodeConfidence: 'MEDIUM' }],
+    ['a LOW reading', { locationVerified: false, geocodeConfidence: 'LOW' }],
+    ['a point of unknown quality', { locationVerified: false, geocodeConfidence: null }],
+  ])("the customer's saved pin is not saved again as it is when it is not exact (%s)", (_what, quality) => {
+    const t = setup();
+    const c = { ...B_PINNED, ...quality };
+    t.openFor(c);
+    expect(t.pinText()).toContain(`${c.lat.toFixed(6)}, ${c.lng.toFixed(6)}`);
+    // Before: Save stored this point as a hand pin, verified HIGH, although nobody placed it.
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe("This saved location is not exact. Drop the pin on the customer's exact location, then save.");
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.6788, 57.8861);
+    expect(t.saveBtn().props.disabled).toBe(false);
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.6788, lng: 57.8861, source: 'MAP_PIN' });
+  });
+
+  it.each([
+    ['HIGH, not confirmed yet', { locationVerified: false, geocodeConfidence: 'HIGH' }],
+    ['confirmed by a dispatcher', { locationVerified: true, geocodeConfidence: 'HIGH' }],
+    // "23.6780, 57.8850" was read as exact (4 decimals) and is stored as 23.678, 57.885.
+    // Before: the stored number was read again as text, 3 decimals, "not exact" (about 1 in 5 points).
+    ['HIGH, the stored numbers ending in 0 (23.6780, 57.8850)', { locationVerified: false, geocodeConfidence: 'HIGH', lat: 23.678, lng: 57.885 }],
+  ])("control: an exact saved pin (%s) can be saved again as it is", (_what, quality) => {
+    const t = setup();
+    const c = { ...B_PINNED, ...quality };
+    t.openFor(c);
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: c.lat, lng: c.lng, source: 'MAP_PIN' });
+  });
+
+  it.each([
+    ['outside the delivery area', 24.7136, 46.6753, "This saved location is outside the delivery area and was never confirmed. Drop the pin on the customer's exact location, then save."],
+    ['with latitude and longitude swapped', 58.4059, 23.5859, "This saved location has latitude and longitude swapped. Drop the pin on the customer's exact location, then save."],
+  ])('a saved HIGH pin %s, never confirmed: Save stays off with the reason, until the pin is placed by hand', (_what, lat, lng, reason) => {
+    const t = setup();
+    t.openFor({ ...B_PINNED, lat, lng });
+    // Before: the dialog judged it with no area (Save on, no note); the server then refused it as "not exact".
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(pinRequired(t)).toBe(reason);
+    t.save();
+    expect(t.puts()).toEqual([]);
+    t.dropPin(23.5859, 58.4059);
+    expect(pinRequired(t)).toBe('');
+    expect(t.saveBtn().props.disabled).toBe(false);
+  });
+
+  it("the company's own area decides: with no area check (a company outside Oman/UAE) the same saved pin can be saved as it is", () => {
+    const t = setup();
+    t.host.render({ serviceArea: WHOLE_WORLD });
+    t.openFor({ ...B_PINNED, lat: 24.7136, lng: 46.6753 });
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(pinRequired(t)).toBe('');
+  });
+
+  it('Save sends the address a short link led to at the Read, so the server reads the same text again without opening it', async () => {
+    const t = setup();
+    t.openFor(A);
+    t.type(A_LINK);
+    t.read();
+    const resolvedUrl = 'https://www.google.com/maps/place/A/data=!3d23.6703!4d58.1889';
+    calls[0].resolve(ok({ ok: true, lat: 23.6703, lng: 58.1889, source: 'GOOGLE_MAPS_URL', confidence: 'HIGH', needsPin: false, warnings: [], resolvedUrl }));
+    await t.host.settle();
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.6703, lng: 58.1889, source: 'GOOGLE_MAPS_URL', input: A_LINK, resolvedUrl });
+    // A hand pin with no Read sends neither text nor address.
+    const u = setup();
+    u.openFor(B);
+    u.dropPin(23.68, 57.89);
+    u.save();
+    expect(u.puts().at(-1)!.init.json.resolvedUrl).toBeUndefined();
   });
 });

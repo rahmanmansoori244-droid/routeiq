@@ -2,6 +2,8 @@ import { withTenantApi, ok, fail, notFoundIfNull } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
+import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
 
 interface Params { params: { id: string } }
 
@@ -28,6 +30,26 @@ export const POST = (req: Request, { params }: Params) =>
       if (run.status !== 'READY') return fail(`Run status is ${run.status}, must be READY.`, 409);
       if (!run.chosenScenarioId) return fail('Pick a scenario before dispatching.', 400);
       if (run._count.routes === 0) return fail('No routes to dispatch.', 400);
+      // No item is delivered without a location (owner's rule, audit PR A5). Daily dispatch plans are
+      // checked load by load: planning leaves such an order unserved (buildDispatchRequest), and LOCK,
+      // LOADING and DISPATCH refuse a load whose customer lost its usable location after planning
+      // (plan-service locationGate). A legacy run from the previous planner is checked here, with the
+      // customers as they are now and the same test (locationBlocksDelivery).
+      const area = await tenantServiceArea(user.tenantId);
+      const stops = await prisma.routeAssignment.findMany({
+        where: { runId: run.id },
+        select: { order: { select: { customer: { select: { code: true, branchCode: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true } } } } },
+      });
+      const noLocation = [...new Set(stops.map((s) => s.order.customer).filter((c) => locationBlocksDelivery(c, area)).map((c) => (c.branchCode ? `${c.code} / ${c.branchCode}` : c.code)))];
+      if (noLocation.length) {
+        return fail(
+          {
+            code: 'LOCATION_REQUIRED',
+            error: `${noLocation.length} customer(s) on this run have no correct location: ${noLocation.slice(0, 10).join(', ')}${noLocation.length > 10 ? ', ...' : ''}. Nothing was dispatched. Set their locations (Set location on the customer page), then dispatch again.`,
+          },
+          409,
+        );
+      }
 
       const dispatched = await prisma.$transaction(async (tx) => {
         // Atomic status transition: a concurrent dispatch races to here and
