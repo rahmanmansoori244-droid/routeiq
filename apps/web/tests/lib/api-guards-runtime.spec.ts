@@ -8,6 +8,8 @@
  * - admin password reset (the reset path without email): TENANT_ADMIN only, never a platform admin
  *   or yourself, one transaction (hash, reset links retired, audit row without a hash), sessions end;
  * - new issue: deleting a driver used on a load deactivates it instead (PlanLoad.driverId kept);
+ *   audit F20 (27 Sep): every driver is deactivated, never deleted, and the trucks that keep them
+ *   as default driver are named; audit F26: an emptied phone is cleared, a field left out is kept;
  * - DISABLE: the retired driver-app routes answer 410 without touching the database.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +40,7 @@ const db = {
   driver: { findUnique: vi.fn(), update: vi.fn(), delete: vi.fn(), create: vi.fn(), findMany: vi.fn() },
   planLoad: { count: vi.fn() },
   driverShift: { count: vi.fn() },
+  truck: { findMany: vi.fn() },
 };
 vi.mock('@/lib/tenant', () => ({ tenantDb: () => db }));
 
@@ -273,6 +276,7 @@ describe('drivers (F13 and the dispatched-load driver)', () => {
     db.driver.findUnique.mockResolvedValue({ id: 'd1', code: 'D1', active: true });
     db.planLoad.count.mockResolvedValue(3);
     db.driverShift.count.mockResolvedValue(0);
+    db.truck.findMany.mockResolvedValue([]);
     db.driver.update.mockResolvedValue({ id: 'd1', code: 'D1', active: false });
     const route = await import('@/app/api/drivers/[id]/route');
     const res = await route.DELETE(send('/api/drivers/d1', 'DELETE'), { params: { id: 'd1' } });
@@ -282,15 +286,54 @@ describe('drivers (F13 and the dispatched-load driver)', () => {
     expect(db.driver.update.mock.calls[0]?.[0]).toMatchObject({ data: { active: false } });
   });
 
-  it('DELETE of a driver never used anywhere really deletes it', async () => {
+  it('audit F20: a driver never used anywhere is deactivated too, never deleted (no count can race with dispatch)', async () => {
     db.driver.findUnique.mockResolvedValue({ id: 'd2', code: 'D2', active: true });
     db.planLoad.count.mockResolvedValue(0);
     db.driverShift.count.mockResolvedValue(0);
-    db.driver.delete.mockResolvedValue({});
+    db.truck.findMany.mockResolvedValue([]);
+    db.driver.update.mockResolvedValue({ id: 'd2', code: 'D2', active: false });
     const route = await import('@/app/api/drivers/[id]/route');
     const res = await route.DELETE(send('/api/drivers/d2', 'DELETE'), { params: { id: 'd2' } });
-    expect((await res.json()).data).toEqual({ deleted: true });
-    expect(db.driver.delete).toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect((await res.json()).data).toMatchObject({ softDeleted: true, driver: { active: false }, defaultOfTrucks: [] });
+    expect(db.driver.delete).not.toHaveBeenCalled();
+    expect(db.driver.update.mock.calls[0]?.[0]).toMatchObject({ data: { active: false }, select: PUBLIC });
+  });
+
+  it("audit F20: deactivating keeps the trucks' default driver and names those trucks (never cleared silently)", async () => {
+    db.driver.findUnique.mockResolvedValue({ id: 'd3', code: 'D3', active: true });
+    db.planLoad.count.mockResolvedValue(0);
+    db.truck.findMany.mockResolvedValue([{ code: 'T1' }, { code: 'T7' }]);
+    db.driver.update.mockResolvedValue({ id: 'd3', code: 'D3', active: false });
+    const route = await import('@/app/api/drivers/[id]/route');
+    const body = (await (await route.DELETE(send('/api/drivers/d3', 'DELETE'), { params: { id: 'd3' } })).json()).data;
+    expect(body.defaultOfTrucks).toEqual(['T1', 'T7']);
+    expect(body.warning).toContain('default driver of trucks T1, T7');
+    // Only the driver row changes: no truck is written.
+    expect(db.driver.update).toHaveBeenCalledTimes(1);
+    expect(db.truck.findMany.mock.calls[0]?.[0]).toMatchObject({ where: { defaultDriverId: 'd3' } });
+    // The Active switch (PATCH active: false) says the same.
+    db.driver.update.mockReset();
+    db.driver.update.mockResolvedValue({ id: 'd3', code: 'D3', active: false });
+    const patched = (await (await route.PATCH(send('/api/drivers/d3', 'PATCH', { active: false }), { params: { id: 'd3' } })).json()).data;
+    expect(patched.warning).toContain('default driver of trucks T1, T7');
+  });
+
+  it('audit F26: an emptied or null phone clears it; a field left out is not written', async () => {
+    const route = await import('@/app/api/drivers/[id]/route');
+    for (const phone of ['', null, '   ']) {
+      db.driver.findUnique.mockResolvedValue({ id: 'd1', code: 'D1', phone: '+968 9123 4567', active: true });
+      db.driver.update.mockReset();
+      db.driver.update.mockResolvedValue({ id: 'd1', code: 'D1', phone: null, active: true });
+      // Exactly what the driver form sends after the phone box is emptied.
+      const res = await route.PATCH(send('/api/drivers/d1', 'PATCH', { code: 'D1', name: 'Old Driver', phone, active: true }), { params: { id: 'd1' } });
+      expect(res.status).toBe(200);
+      expect(db.driver.update.mock.calls[0]?.[0].data).toEqual({ code: 'D1', name: 'Old Driver', phone: null, active: true });
+    }
+    db.driver.update.mockReset();
+    db.driver.update.mockResolvedValue({ id: 'd1', code: 'D1', name: 'N' });
+    await route.PATCH(send('/api/drivers/d1', 'PATCH', { name: 'N' }), { params: { id: 'd1' } });
+    expect(db.driver.update.mock.calls[0]?.[0].data).toEqual({ name: 'N' });
   });
 });
 

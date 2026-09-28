@@ -57,6 +57,8 @@ The complete matrix is checked in and enforced by `apps/web/tests/lib/api-role-m
 | **Reset stuck plan** (`POST /api/runs/:id/reset-stuck`, audit PR4, owner decision 17) | SUPERVISOR. Recorded as `PLAN_RESET` (who, the plan, its job, an optional note) |
 | `GET /api/health` (readiness) and `GET /api/health/live` (liveness) | public: reason codes and plain sentences only, never a URL, a token or a solver answer |
 
+The audit of 27 Sep 2026, PR A2, changed no role. `PATCH /api/customers/:id` (PLANNER) takes the unloading minutes and the receiving hours as JSON numbers only: a string such as "" or "10 min" is refused (400), never turned into 0; `avgServiceTimeMin: null` puts the customer back on the default time. The Excel and PDF exports choose the dispatch or the legacy generator by `isDispatchPlan` (same company only), not by the load count; the PDF of a dispatch plan without loads is 404 `NO_LOADS`.
+
 ## 5. Secrets and credentials
 
 - **Password reset** (`lib/password-reset.ts`): in production the link is sent only through Resend (`RESEND_API_KEY`, verified `RESEND_FROM`); without it **nothing is sent and nothing about the link is logged** (only the user id). Links use `AUTH_URL`, else `NEXTAUTH_URL`; production refuses to build one without either. Issuing a link retires older ones; a reset consumes the token, sets the password and retires the user's other links in one transaction, and ends every open session of that user (`pwf`). `/api/health` reports `email: configured | not_configured`.
@@ -77,7 +79,7 @@ The complete matrix is checked in and enforced by `apps/web/tests/lib/api-role-m
 
 Owner decision (Sep 2026). `/api/driver/{login,manifest,ping,stop,shift/end}`, `POST /api/drivers/:id/pin` and `GET /api/runs/:id/live` answer **410 Gone** before any authentication or database work (`lib/driver-app.ts`). `/driver` shows a notice and clears the old sign-in data from the phone; the Set-PIN and Live buttons are gone. **Driver sheets (PDF), WhatsApp messages and the driver per load are unchanged.** The data (`DriverShift`, `TruckLocation`, `DeliveryProof`) is kept; dropping it is a later contract migration. Re-enabling the app would first need the review's F12 / F14 / PIN fixes and multi-load support.
 
-Deleting a driver who is on any load (or a legacy shift) now **deactivates** the driver instead, so dispatched and completed loads keep their driver.
+Deleting a driver who is on any load (or a legacy shift) now **deactivates** the driver instead, so dispatched and completed loads keep their driver. Since the audit PR "Intake and master data" (27 Sep 2026, F20) **every** driver is deactivated, never deleted: PR1's "never used, so delete" branch counted the driver's loads first, and a dispatch between that count and the delete erased the driver from the dispatched load. The trucks that have the driver as default keep them (the answer names those trucks), and the database refuses to delete a driver still on a load or set as a truck's default (migration `20260930093000_master_data_no_orphans`, `ON DELETE NO ACTION`). Depots follow the same rule: one that anything refers to is deactivated, never deleted (F03).
 
 Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempotent, runs at deploy): ends every ACTIVE driver-app shift, clears every `Driver.accessPinHash`, removes the credential-hash keys from `AuditLog` JSON, and writes one `SECURITY_CLEANUP` audit row per affected tenant with the counts.
 
@@ -142,7 +144,7 @@ Migration `20260926090000_retire_driver_app_scrub_secrets` (data only, idempoten
 | F15 / F23 role gates (users, audit, config, job debug, runs GET) | Section 4 |
 | L16 (part) job debug for another run was a 500 | Section 4 (404). The late-order part is a later PR |
 | F12, F14, driver PIN issues | Moot: the driver app is retired (section 6) |
-| Driver hard delete erased the driver on dispatched loads | Section 6 |
+| Driver hard delete erased the driver on dispatched loads | Section 6 (completed in the audit PR "Intake and master data": drivers are never deleted) |
 | `smoke-driver-flow.ts` residue | Script deleted; clean-up in section 7 |
 | F22 public OSRM default | Section 5 (minimal) in PR1; PR5 completed it: route-geometries through the solver, `lib/road-routing.ts` deleted, 409 for dispatch plans. The docs no longer suggest the public demo server even for local demos |
 | Verification follow-up: the documented "invite / temporary-password" and "deactivate and invite again" reset paths did not exist (409) | Section 5 (admin password reset on the Users screen; `/forgot` says when email reset is unavailable) |

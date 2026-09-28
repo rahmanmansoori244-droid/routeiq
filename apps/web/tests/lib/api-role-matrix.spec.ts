@@ -11,6 +11,18 @@
  * - an admin password reset (a new one-time password for a user) is TENANT_ADMIN, like invites.
  * - PR9: "Bring forward" (POST /api/dispatch/carry-over) is PLANNER, like confirming a file and a
  *   late order; its preview (GET) is readable by every role, like the day overview.
+ * - Audit PR A2 (27 Sep 2026) changed three routes, not their roles: PATCH /api/customers/[id]
+ *   (PLANNER; avgServiceTimeMin null = back to the default, JSON numbers only), GET
+ *   /api/runs/[id]/export/excel and /export/pdf (ANY; chosen by isDispatchPlan, PDF 404 NO_LOADS
+ *   for a dispatch plan without loads).
+ * - Audit PR "Intake and master data" (27 Sep 2026): behaviour changed, roles unchanged, on
+ *   DELETE /api/depots/[id] (deactivates once anything refers to the depot), PATCH /api/depots/[id]
+ *   (deactivation warning), DELETE and PATCH /api/drivers/[id] (always deactivates; names the trucks
+ *   it stays default of; phone can be cleared), POST /api/regions and PATCH /api/regions/[id]
+ *   (no depot / clear the depot), and the POST / PATCH of customers, depots, drivers and trucks
+ *   (an empty optional text or reference clears it; a field left out is unchanged),
+ *   POST /api/customers/import (verified pins kept under concurrency), POST /api/orders/upload and
+ *   POST /api/orders/[batchId]/confirm (merged rows; depot and old-merge re-checks).
  * - audit PR4 (F09, owner decision 17): "Reset stuck plan" (POST /api/runs/[id]/reset-stuck) is
  *   SUPERVISOR and above; (F15) GET /api/health/live (liveness) is public like /api/health.
  */

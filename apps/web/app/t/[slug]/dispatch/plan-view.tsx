@@ -379,19 +379,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           {d.run.chosenScenario ? <Badge variant="secondary">{d.run.chosenScenario === 'RECOMMENDED' ? 'RECOMMENDED PLAN' : `${d.run.chosenScenario} (alternative)`}</Badge> : null}
         </div>
         <div className="flex flex-wrap gap-2">
+          {/* The dispatch workbook for every dispatch plan, also one in which every order is unserved
+              (no load): its UNSERVED, RECONCILIATION and ASSUMPTIONS sheets matter most then (audit F16). */}
+          {d.isDispatchPlan || d.loads.length ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
+                <Download className="mr-1 h-4 w-4" /> Export Excel
+              </a>
+            </Button>
+          ) : null}
+          {/* Driver sheets only: one per load, so none without loads. */}
           {d.loads.length ? (
-            <>
-              <Button asChild variant="outline" size="sm">
-                <a href={`/api/runs/${runId}/export/excel`} data-testid="export-excel">
-                  <Download className="mr-1 h-4 w-4" /> Export Excel
-                </a>
-              </Button>
-              <Button asChild variant="outline" size="sm">
-                <a href={`/api/runs/${runId}/export/pdf`} target="_blank" rel="noreferrer" data-testid="export-driver-pdf" title="One printable sheet per truck load, for the drivers">
-                  <FileText className="mr-1 h-4 w-4" /> Driver sheets (PDF)
-                </a>
-              </Button>
-            </>
+            <Button asChild variant="outline" size="sm">
+              <a href={`/api/runs/${runId}/export/pdf`} target="_blank" rel="noreferrer" data-testid="export-driver-pdf" title="One printable sheet per truck load, for the drivers">
+                <FileText className="mr-1 h-4 w-4" /> Driver sheets (PDF)
+              </a>
+            </Button>
           ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>

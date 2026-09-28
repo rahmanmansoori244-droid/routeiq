@@ -5,6 +5,7 @@ import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { DepotsTable } from './depots-table';
 import { AddDepotButton } from './add-depot-button';
+import { DEPOT_REF_COUNT } from '@/lib/master-data-delete';
 
 export const metadata = { title: 'Depots — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -16,7 +17,8 @@ export default async function DepotsPage({ params }: { params: { slug: string } 
 
   const depots = await db.depot.findMany({
     orderBy: [{ active: 'desc' }, { code: 'asc' }],
-    include: { _count: { select: { trucks: true, regions: true } } },
+    // Every reference, so the delete dialog says what will happen (audit F03).
+    include: { _count: { select: DEPOT_REF_COUNT } },
   });
 
   return (
