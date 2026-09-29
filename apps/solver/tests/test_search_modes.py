@@ -7,6 +7,7 @@ improving, reports why it stopped, and can be cancelled (caller gone) or stopped
 plan found so far)."""
 from __future__ import annotations
 
+import math
 import socket
 import threading
 import time
@@ -127,6 +128,59 @@ def test_thorough_budget_chain_fits_the_cap_and_never_searches_less_than_quick()
     assert ds.rec_limit_sec("THOROUGH", 20, 40, 2, 40) == ds.rec_limit_sec("QUICK", 20, 40, 2) == 20
     assert ds.rec_limit_sec("THOROUGH", 150, 60, 2, 60) == ds.rec_limit_sec("QUICK", 150, 60, 2) == 40
     assert ds.rec_limit_sec("THOROUGH", 2, 118, 0, 120) == 118 - ds.REC_OVERHEAD_SEC - 36
+
+
+@pytest.mark.parametrize("matrix_sec", [1.0, None])  # a quick matrix, and the slowest (its whole budget)
+def test_a_cap_below_20_min_shrinks_the_tail_in_proportion_and_keeps_the_alternatives(matrix_sec):
+    """Review of the long-search PR: under ~7 min the 30% bound cut the tail, but the alternatives were
+    still charged the full load re-check reserve (115 s), so they were always skipped and a third of
+    the cap went unused. Now the alternatives and the re-check shrink together (never below QUICK's
+    times): once the recommended plan has searched its limit, the alternatives always get their share.
+    At the 20-min default nothing changes."""
+    for n in (5, 30, 60, 120, 150, 175, 200, 300, 400, 600):
+        t = ds.auto_time_limit(n)
+        assert ds.thorough_tail(t, 2, ds.THOROUGH_MAX_SEC) == ds.thorough_tail(t, 2), n
+        assert ds.thorough_tail(t, 2).total == ds.thorough_tail_sec(t, 2), n
+        quick_alt = max(2, t // 2)
+        quick_repack = ds._repack_cap_sec(t, False)
+        for cap in range(60, 3601, 15):
+            matrix = ds.matrix_budget_sec(cap) if matrix_sec is None else matrix_sec
+            left = cap - matrix
+            tail = ds.thorough_tail(t, 2, cap)
+            limit = ds.rec_limit_sec("THOROUGH", t, left, 2, cap)
+            # Never less than QUICK anywhere (T1), and the parts add up.
+            assert limit >= min(t, int(left) - ds.REC_OVERHEAD_SEC), (n, cap)
+            assert tail.alt_sec >= quick_alt and tail.repack_cap >= quick_repack, (n, cap, tail)
+            assert tail.stage_sec == math.ceil(tail.repack_cap * 3 + ds.STAGE_GRACE_SEC + 5), (n, cap, tail)
+            assert tail.total == tail.alt_sec + ds.ALT_GRACE_SEC + tail.stage_sec, (n, cap, tail)
+            # The tail is at most 30% of a smaller cap, unless QUICK's own times need more.
+            floor = quick_alt + ds.ALT_GRACE_SEC + math.ceil(quick_repack * 3 + ds.STAGE_GRACE_SEC + 5)
+            assert tail.total <= max(int(0.3 * cap), floor, 0) or tail == ds.thorough_tail(t, 2), (n, cap, tail)
+            if limit > t:  # RECOMMENDED searched longer than QUICK: the tail was kept free for the rest
+                # _run_scenarios after RECOMMENDED used its whole limit (+5 s of process overhead).
+                after = left - limit - 5
+                room = int(after) - ds.ALT_GRACE_SEC - tail.stage_sec
+                assert room >= tail.alt_sec, (n, cap, limit, tail, room)
+
+
+def test_thorough_with_a_small_cap_still_returns_every_option(monkeypatch):
+    """Review of the long-search PR: THOROUGH_MAX_SEC=150 or 300 returned the recommended plan only,
+    "time budget used up by the recommended plan; alternatives skipped", although QUICK returns all
+    three. A 90 s cap on a small day (a quick search limit of 2 s) keeps them, inside the cap."""
+    monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
+    monkeypatch.setenv("THOROUGH_MAX_SEC", "90")
+    stops, trucks = nmwc_day(20)
+    r = req(stops, trucks, time_limit_sec=2, search_mode="THOROUGH", scenarios=ALL)
+    t0 = time.perf_counter()
+    resp = optimize_dispatch(r)
+    assert time.perf_counter() - t0 < 90 + 8
+    assert [s.name for s in resp.scenarios] == ALL, [w for s in resp.scenarios for w in s.warnings]
+    assert not any("skipped" in w for w in rec(resp).warnings), rec(resp).warnings
+    s = resp.search
+    assert s.mode == "THOROUGH" and s.cap_sec == 90 and s.used_sec <= 90 + 5, s
+    assert s.limit_sec > 2, s  # longer than QUICK's 2 s
+    for sc in resp.scenarios:
+        assert_reconciled(r, sc)
 
 
 def test_stall_rule():
@@ -337,12 +391,18 @@ def test_a_caller_that_disconnects_cancels_the_solve_and_frees_the_slot(live_sol
     monkeypatch.setattr(main, "optimize_dispatch", solve_until_cancelled)
     with pytest.raises(httpx.TimeoutException):
         httpx.post(f"{url}/optimize-dispatch", json=_body(), headers={"X-Solver-Token": TOKEN}, timeout=1.5)
-    # The client gave up and closed its connection: the solve is cancelled, the slot comes back.
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not main._DISPATCH_SLOTS.acquire(blocking=False):
+    # The client gave up and closed its connection: the solve is cancelled, the slot comes back -
+    # within a few seconds (the disconnect poll is 0.2 s here), not only eventually.
+    gave_up = time.monotonic()
+    freed_after = None
+    while time.monotonic() - gave_up < 10:
+        if main._DISPATCH_SLOTS.acquire(blocking=False):
+            freed_after = time.monotonic() - gave_up
+            main._DISPATCH_SLOTS.release()
+            break
         time.sleep(0.1)
-    else:
-        main._DISPATCH_SLOTS.release()
+    assert freed_after is not None, "the slot was never freed"
+    assert freed_after < 3, freed_after
     assert seen["control"].cancelled.is_set()
     assert "closed the connection" in seen["control"].why
     assert main._RUNNING == {}

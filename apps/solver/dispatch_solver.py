@@ -230,30 +230,64 @@ def _thorough_alt_sec(time_limit: int) -> int:
     return max(max(2, time_limit // 2), THOROUGH_ALT_MIN_SEC)
 
 
-def _stage_reserve_sec(time_limit: float, thorough: bool) -> int:
-    """Kept free for the post-solve stage: three sources in one round, and its grace."""
-    return int(math.ceil(_repack_cap_sec(time_limit, thorough) * 3 + STAGE_GRACE_SEC + 5))
+@dataclass(frozen=True)
+class ThoroughTail:
+    """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap, and how it is used."""
+
+    alt_sec: int  # each alternative's search limit (0 without alternatives)
+    repack_cap: float  # each CP-SAT solve of the load re-check
+    stage_sec: int  # kept free for the load re-check (post-solve stage): three sources in one round, and its grace
+    total: int  # alternatives + their grace (when asked for) + the re-check
+
+    @staticmethod
+    def of(alt_sec: int, repack_cap: float, n_alternatives: int) -> "ThoroughTail":
+        stage = int(math.ceil(round(repack_cap * 3, 6) + STAGE_GRACE_SEC + 5))
+        alt = alt_sec if n_alternatives else 0
+        return ThoroughTail(alt, repack_cap, stage, (alt + ALT_GRACE_SEC if n_alternatives else 0) + stage)
 
 
-def thorough_tail_sec(time_limit: int, n_alternatives: int) -> int:
-    """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap - the alternatives
-    (in parallel) with their grace, then the load re-check with its grace."""
-    alts = _thorough_alt_sec(time_limit) + ALT_GRACE_SEC if n_alternatives else 0
-    return alts + _stage_reserve_sec(time_limit, True)
+def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None) -> ThoroughTail:
+    """THOROUGH's tail: the alternatives (in parallel, warm-started) with their grace, then the load
+    re-check with its grace - at least 60 s per alternative and 30 s per CP-SAT solve. A ``cap`` below
+    20 min where that is more than 30% of the cap shrinks the alternatives' and the re-check's times
+    in proportion to fit 30%, never below QUICK's own (half the limit; min(15, max(3, limit / 2))).
+    Review of the long-search PR: only the total used to be cut, while the alternatives were still
+    charged the full re-check reserve, so under ~7 min they were always skipped and up to a third
+    of the cap went unused."""
+    alt_full = _thorough_alt_sec(time_limit)
+    repack_full = _repack_cap_sec(time_limit, True)
+    full = ThoroughTail.of(alt_full, repack_full, n_alternatives)
+    budget = int(0.3 * cap) if cap is not None else full.total
+    if full.total <= budget:
+        return full
+    quick_alt, quick_repack = max(2, time_limit // 2), _repack_cap_sec(time_limit, False)
+    grace = ALT_GRACE_SEC if n_alternatives else 0
+    # The alternatives' share of what the graces leave; the re-check gets the rest (three solves);
+    # neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
+    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + 3 * repack_full)
+    alt = max(quick_alt, int(alt_full * share)) if n_alternatives else 0
+    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / 3)
+    repack = min(repack_full, max(quick_repack, math.floor(rest * 10) / 10))
+    stage = ThoroughTail.of(0, repack, 0).stage_sec
+    if n_alternatives:
+        alt = max(quick_alt, min(alt, budget - grace - stage))
+    return ThoroughTail.of(alt, repack, n_alternatives)
+
+
+def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None) -> int:
+    """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap (thorough_tail)."""
+    return thorough_tail(time_limit, n_alternatives, cap).total
 
 
 def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None) -> int:
     """RECOMMENDED's search limit with ``left`` seconds of the request budget left. QUICK: exactly as
     before - the automatic limit, shortened only when a slow road matrix ate the budget. THOROUGH:
-    everything up to the tail (thorough_tail_sec; at most 30% of a ``cap`` set below 20 min, where
-    the alternatives and the re-check then get what is left), never less than QUICK."""
+    everything up to the tail (thorough_tail: the alternatives and the load re-check, in proportion
+    to a ``cap`` set below 20 min), never less than QUICK."""
     quick = max(1, min(time_limit, int(left) - REC_OVERHEAD_SEC))
     if mode != "THOROUGH":
         return quick
-    tail = thorough_tail_sec(time_limit, n_alternatives)
-    if cap is not None:
-        tail = min(tail, int(0.3 * cap))
-    return max(quick, int(left) - REC_OVERHEAD_SEC - tail)
+    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap))
 
 
 class SolveControl:
@@ -1717,6 +1751,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     if workers is None and control is not None:
         _STOP_FLAG = control.stop_requested  # in-process searches see a stop request too
     stopped = False
+    # THOROUGH: the alternatives' and the load re-check's times, the ones RECOMMENDED's limit keeps free.
+    tail = thorough_tail(time_limit, len(alt_names), thorough_cap_sec(req.config)) if thorough else None
     try:
         warm = None
         if "RECOMMENDED" in names:
@@ -1733,8 +1769,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch)
             warm = results["RECOMMENDED"].loads or None
         stopped = thorough and control is not None and control.stop_requested.is_set()
-        if thorough:
-            alt_limit = _thorough_alt_sec(time_limit) if warm else time_limit
+        if tail is not None:
+            alt_limit = tail.alt_sec if warm else time_limit
         else:
             alt_limit = max(2, time_limit // 2) if warm else time_limit
         grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
@@ -1745,8 +1781,9 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             log.info("search stopped on request; alternatives skipped")
         if alt_names:
             # Never run past the request budget: shorten the alternatives, or skip them. THOROUGH
-            # also keeps the load re-check's time free (it has one deadline, the cap).
-            room = int(budget_end - time.monotonic()) - grace - (_stage_reserve_sec(time_limit, True) if thorough else 0)
+            # also keeps the load re-check's time free (it has one deadline, the cap) - the same
+            # time the tail kept for it, so the alternatives get the rest of the tail.
+            room = int(budget_end - time.monotonic()) - grace - (tail.stage_sec if tail is not None else 0)
             if room < 2:
                 skipped.extend(alt_names)
                 alt_names = []
@@ -1790,7 +1827,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 log.warning("worker processes unavailable (%s); load re-check in-process", exc)
         # THOROUGH: longer CP-SAT solves in the load re-check (QUICK's after a stop request).
         stopped = stopped or (thorough and control is not None and control.stop_requested.is_set())
-        stage_kw = {"repack_cap": _repack_cap_sec(time_limit, not stopped)} if thorough else {}
+        stage_kw = {"repack_cap": _repack_cap_sec(time_limit, False) if stopped else tail.repack_cap} if tail is not None else {}
         try:
             _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
         except SolveAborted:
