@@ -6,7 +6,9 @@
  *    on the real build: scripts/check-build-output.ts);
  *  - side item: browser source maps are not made unless they are uploaded to Sentry, and then
  *    deleted after the upload; none may be left in .next/static;
- *  - Node 22 LTS is pinned the same way everywhere (engines, .nvmrc, .node-version, CI).
+ *  - Node 22 LTS is pinned the same way everywhere (engines, .nvmrc, .node-version, CI);
+ *  - (audit P5) `pnpm build` makes the upload parser bundle, and the CI build check fails without
+ *    a good one.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -14,7 +16,7 @@ import Module, { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { browserSourceMaps, buildOutputProblems, findServerActionDirectives, serverActionIds } from '@/scripts/build-guards';
+import { browserSourceMaps, buildOutputProblems, findServerActionDirectives, serverActionIds, uploadParserProblems, uploadParserSmokeProblem } from '@/scripts/build-guards';
 
 const WEB = path.resolve(__dirname, '../..');
 const REPO = path.resolve(WEB, '../..');
@@ -131,7 +133,8 @@ describe('Sentry never leaves browser source maps in the build (side item)', () 
     // A local build with a (failing) Sentry upload: Sentry deleted the *.js.map files and left
     // two .css.map files in .next/static/css. The build script now ends with this removal.
     const pkg = JSON.parse(readFileSync(path.join(WEB, 'package.json'), 'utf8')) as { scripts: Record<string, string> };
-    expect(pkg.scripts.build).toBe('prisma generate && next build && node scripts/remove-public-source-maps.mjs');
+    // Audit P5 added the upload parser step (after `next build`, which empties .next, and before the map removal).
+    expect(pkg.scripts.build).toBe('prisma generate && next build && node scripts/build-upload-parser.mjs && node scripts/remove-public-source-maps.mjs');
     const next = path.join(tmp, 'build-with-maps');
     for (const d of ['static/chunks/app', 'static/css', 'server/app']) mkdirSync(path.join(next, d), { recursive: true });
     for (const f of ['static/chunks/app/page-1.js', 'static/chunks/app/page-1.js.map', 'static/css/a.css', 'static/css/a.css.map', 'server/app/page.js.map']) {
@@ -177,6 +180,85 @@ describe('the CI build check (scripts/check-build-output.ts)', () => {
       '.next/server/server-reference-manifest.json is missing: run `next build` first',
       '.next/static is missing: run `next build` first',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// The upload parser bundle (audit P5): `next start` forks .next/upload-parser/parse.cjs
+// ---------------------------------------------------------------------------------------
+
+describe('the upload parser bundle (audit P5)', () => {
+  const builder = createRequire(__filename)(path.join(WEB, 'scripts', 'upload-parser-build.cjs')) as {
+    buildUploadParser(outDir: string): { file: string; inputs: string[] };
+    inputProblems(inputs: string[]): string[];
+  };
+  const OK_INPUTS = [
+    '../../node_modules/.pnpm/papaparse@5.5.3/node_modules/papaparse/papaparse.js',
+    '../../node_modules/.pnpm/xlsx@0.20.2/node_modules/xlsx/xlsx.mjs',
+    'lib/csv.ts',
+    'lib/dispatch/order-headers.ts',
+    'lib/upload-errors.ts',
+    'lib/upload-limits.ts',
+    'lib/upload-parse/child.ts',
+    'lib/upload-parse/handler.ts',
+    'lib/upload-parse/protocol.ts',
+    'lib/workbook-guard.ts',
+  ];
+  function builtApp(name: string, opts: { bundle?: boolean; inputs?: string[]; map?: boolean } = {}) {
+    const app = path.join(tmp, name);
+    const dir = path.join(app, '.next', 'upload-parser');
+    mkdirSync(dir, { recursive: true });
+    if (opts.bundle !== false) writeFileSync(path.join(dir, 'parse.cjs'), '');
+    writeFileSync(path.join(dir, 'stamp.json'), JSON.stringify({ inputs: Object.fromEntries((opts.inputs ?? OK_INPUTS).map((i) => [i, '1:1'])) }));
+    if (opts.map) writeFileSync(path.join(dir, 'parse.cjs.map'), '{}');
+    return app;
+  }
+  const problems = (app: string) => uploadParserProblems(app).map((p) => p.split(path.sep).join('/'));
+
+  it('`pnpm build` bundles it with esbuild into a file plain node runs; it reads a file as `next start` runs it', async () => {
+    const out = builder.buildUploadParser(path.join(tmp, 'parser-build'));
+    expect(builder.inputProblems(out.inputs)).toEqual([]);
+    // SheetJS's ESM build, as Next.js bundles it for the web and vitest loads it (not xlsx.js and its codepages).
+    expect(out.inputs.filter((i) => /node_modules/.test(i)).map((i) => i.replace(/.*node_modules\//, '')).sort()).toEqual(['papaparse/papaparse.js', 'xlsx/xlsx.mjs']);
+    expect(readFileSync(out.file, 'utf8')).not.toMatch(/sourceMappingURL/);
+    expect(await uploadParserSmokeProblem(out.file)).toBeNull();
+  }, 120_000);
+
+  it('the bundle may hold only the parser, SheetJS (xlsx.mjs) and Papa Parse', () => {
+    expect(builder.inputProblems(OK_INPUTS)).toEqual([]);
+    expect(builder.inputProblems(OK_INPUTS.map((i) => i.replace('xlsx.mjs', 'xlsx.js')))).toEqual([
+      'SheetJS is xlsx.js, not xlsx.mjs (the build Next.js and the tests use)',
+    ]);
+    expect(builder.inputProblems([...OK_INPUTS, 'lib/db.ts', '../../node_modules/.pnpm/@prisma+client@5.22.0/node_modules/@prisma/client/index.js'])).toEqual([
+      'a module the parser must not hold: lib/db.ts',
+      'a package the parser must not hold: ../../node_modules/.pnpm/@prisma+client@5.22.0/node_modules/@prisma/client/index.js',
+    ]);
+    expect(builder.inputProblems(OK_INPUTS.filter((i) => !i.includes('xlsx')))).toEqual(['SheetJS (xlsx.mjs) is not in the bundle']);
+  });
+
+  it('the CI build check fails when the bundle is missing, holds something else or has a source map; it passes a good one', () => {
+    expect(problems(builtApp('parser-ok'))).toEqual([]);
+    expect(problems(builtApp('parser-missing', { bundle: false }))).toEqual([
+      '.next/upload-parser/parse.cjs is missing: run `pnpm build` (its step scripts/build-upload-parser.mjs makes it); without it every upload is refused',
+    ]);
+    expect(problems(builtApp('parser-cjs-sheetjs', { inputs: OK_INPUTS.map((i) => i.replace('xlsx.mjs', 'xlsx.js')) }))).toEqual([
+      'upload parser: SheetJS is xlsx.js, not xlsx.mjs (the build Next.js and the tests use)',
+    ]);
+    expect(problems(builtApp('parser-map', { map: true }))).toEqual(['source map beside the upload parser: .next/upload-parser/parse.cjs.map']);
+  });
+
+  it('the CI build check runs the bundle: one that does not answer the rows fails it', async () => {
+    const standIn = (mode: string) => path.join(WEB, 'tests', 'fixtures', 'upload-parser', `${mode}.cjs`);
+    expect(await uploadParserSmokeProblem(standIn('crash'))).toMatch(/^the upload parser ended without an answer \(exit 7/);
+    expect(await uploadParserSmokeProblem(standIn('garbage'), 5_000)).toMatch(/did not answer|ended without an answer/);
+    expect(await uploadParserSmokeProblem(standIn('echo'))).toMatch(/^the upload parser answered /);
+    expect(await uploadParserSmokeProblem(standIn('busy'), 1_000)).toBe('the upload parser did not answer within 1000 ms');
+  }, 60_000);
+
+  it('check-build-output.ts runs these checks after the others', () => {
+    const src = readFileSync(path.join(WEB, 'scripts', 'check-build-output.ts'), 'utf8');
+    expect(src).toMatch(/\.\.\.uploadParserProblems\(web\)/);
+    expect(src).toMatch(/await uploadParserSmokeProblem\(path\.join\(web, '\.next', 'upload-parser', 'parse\.cjs'\)\)/);
   });
 });
 
