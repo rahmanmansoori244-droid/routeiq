@@ -37,6 +37,7 @@ import {
 import { jobMessage } from '@/lib/jobs/dispatch-job';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, solverRules } from '@/lib/dispatch/workbook';
+import { manifestKgNote } from '@/lib/dispatch/weights';
 
 const T = 'tA';
 const DAY = new Date('2026-09-27T00:00:00Z');
@@ -404,5 +405,30 @@ describe('audit E3 through getPlanDetail: each load sheet weighs what the load w
     ]);
     // The part keeps the 15 kg per case it was planned with (not the line's 10 kg now: 200 kg).
     expect(manifest('L3')).toEqual([['TAN', 20, 300]]);
+  });
+
+  it('an older version whose orders were re-weighed after it was made says so under its manifest, as its Excel sheet does (A6 second review)', async () => {
+    seed();
+    // Kept for the record: a re-plan made v3 after O2's case weight was corrected from 10 to 10.5 kg,
+    // and re-weighed O2 (not frozen). This version's T01 L1 was planned at 400 kg.
+    Object.assign(tables.runPlan[0], { status: 'SUPERSEDED', supersededAt: new Date() });
+    const o2 = tables.order.find((o) => o.id === 'O2')!;
+    o2.lines = [{ ...o2.lines[0], weightKg: 420 }];
+    o2.totalWeightKg = 420;
+    const d = (await getPlanDetail(T, 'P'))!;
+    const l2 = d.loads.find((l) => l.id === 'L2')!;
+    expect([l2.weightKg, l2.manifest.map((m) => m.weightKg)]).toEqual([400, [420]]);
+    expect(manifestKgNote(l2)).toBe('The load was planned at 400 kg. Order weights changed since planning, so the products add up to 420 kg.');
+    expect(d.loads.filter((l) => l.id !== 'L2').map(manifestKgNote)).toEqual([null, null]);
+    // The Excel flags the same load, and only it.
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const flagged = wb.worksheets.filter((ws) => {
+      let hit = false;
+      ws.eachRow((row) => row.eachCell((c) => void (hit ||= c.text.includes('MISMATCH: load records 400 kg (order weights changed since planning)'))));
+      return hit;
+    });
+    expect(flagged.map((ws) => ws.name)).toEqual(['T01 - L1']);
   });
 });

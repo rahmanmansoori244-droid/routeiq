@@ -621,8 +621,81 @@ def test_a_stop_no_load_has_room_for_gets_the_weight_reason_not_replan():
         "Not planned: no load or free trip has room for its 1,600 kg (the most room left on a load that takes its "
         "10 cases is 1,400 kg)."), u.reason_message
     assert "Re-plan to search again" not in u.reason_message
+    # A6 second review: every stop of this day has the same priority, so none was "left out first".
+    assert "lowest priorities first" not in u.reason_message, u.reason_message
     assert not any("no check proves they are impossible" in w for w in sc.warnings), sc.warnings
     assert_reconciled(r, sc)
+
+
+def _plan_of(r: DispatchRequest, packing: list[tuple[str, list[str]]]):
+    """A plan as the route search could leave it, for _no_room_reason: (truck id, stop ids) per load."""
+    from types import SimpleNamespace as NS
+
+    by_id = {s.stop_id: s for s in r.stops}
+    return [NS(truck_id=tid, stops=[NS(stop_id=k, cases=by_id[k].demand_cases, kg=by_id[k].demand_kg) for k in ids])
+            for tid, ids in packing]
+
+
+def test_the_no_room_reason_needs_a_proof_not_just_the_loads_the_search_made():
+    """A6 second review: "no load or free trip has room" looked only at the loads the route search
+    made. 1,000 + 1,500 + 1,500 + 1,000 + 1,000 kg of P1 on 2 trucks x 1 load of 3,000 kg fit
+    exactly ({1,500, 1,500} and {1,000, 1,000, 1,000}), but the search packs {1,000, 1,500} twice:
+    500 kg of room on each load, and the fifth stop read "... (lowest priorities first). Add a
+    truck" on a day with no lower priority, and the plan lost its "no check proves they are
+    impossible" warning. The reason is now given only when a check proves that no packing of the
+    stops of its priority or higher carries it: more of them over half the biggest truck than there
+    are trips (no two share a load), or more than all trips carry together."""
+    import dispatch_solver as ds
+
+    two = [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)]
+    r = req([stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=kg, priority=1)
+             for i, kg in enumerate((1000, 1500, 1500, 1000, 1000))], two)
+    prio = {s.stop_id: s.priority for s in r.stops}
+    loads = _plan_of(r, [("T01", ["S0", "S1"]), ("T02", ["S2", "S3"])])
+    assert ds._no_room_reason(r.stops[4], ds._truck_days(r), loads, prio) is None
+
+    # The control: 3 x 1,600 kg on the same trucks. No two of them share a load, however packed.
+    big = req([stop(f"B{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=1600, priority=1) for i in range(3)], two)
+    big_loads = _plan_of(big, [("T01", ["B0"]), ("T02", ["B1"])])
+    msg = ds._no_room_reason(big.stops[2], ds._truck_days(big), big_loads, {f"B{i}": 1 for i in range(3)})
+    assert msg == ("Not planned: no load or free trip has room for its 1,600 kg (the most room left on a load that takes "
+                   "its 10 cases is 1,400 kg). This P1 stop was left out. Add a truck or raise the loads-per-truck limit."), msg
+    # "(lowest priorities first)" only on a day whose lower-priority stops were left out too.
+    msg = ds._no_room_reason(big.stops[2], ds._truck_days(big), big_loads, {"B0": 1, "B1": 1, "B2": 1, "L5": 5})
+    assert "This P1 stop was left out (lowest priorities first). Add a truck" in msg, msg
+
+    # By cases: 3 x 60 cases on 2 trucks of 100 cases.
+    many = req([stop(f"C{i}", 23.60 + i * 0.001, 58.45, cases=60, demand_kg=10, priority=2) for i in range(3)],
+               [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)])
+    msg = ds._no_room_reason(many.stops[2], ds._truck_days(many), _plan_of(many, [("T01", ["C0"]), ("T02", ["C1"])]),
+                             {f"C{i}": 2 for i in range(3)})
+    assert msg is not None and msg.startswith(
+        "Not planned: no load or free trip has room for its 60 cases (the most room left is 40 cases)."), msg
+    # 40 + 40 + 60 + 60 cases: the room is spread over two loads, but {60, 40} twice carries all four.
+    spread = req([stop(f"D{i}", 23.60 + i * 0.001, 58.45, cases=c, demand_kg=10, priority=2) for i, c in enumerate((40, 60, 40, 60))],
+                 [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)])
+    loads = _plan_of(spread, [("T01", ["D0", "D2"]), ("T02", ["D1"])])
+    assert ds._no_room_reason(spread.stops[3], ds._truck_days(spread), loads, {f"D{i}": 2 for i in range(4)}) is None
+
+
+def test_a_p1_stop_another_packing_could_carry_keeps_the_search_reason_and_warning():
+    """A6 second review, end to end: the day above through the optimizer (all three options). The
+    route search may leave the fifth P1 stop out (an older limit, recorded as a follow-up: no stage
+    moves single stops between full trips); if it does, the stop keeps the search's own reason, "Re-plan
+    to search again", and the plan warns that no check proves it impossible."""
+    stops = [stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=kg, priority=1)
+             for i, kg in enumerate((1000, 1500, 1500, 1000, 1000))]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)],
+            scenarios=ALL_SCENARIOS)
+    for sc in optimize_dispatch(r).scenarios:
+        assert len(sc.unserved) <= 1, (sc.name, sc.unserved)
+        for u in sc.unserved:
+            msg = u.reason_message
+            assert "no load or free trip has room" not in msg and "lowest priorities first" not in msg, (sc.name, msg)
+            assert "found no truck, trip or time slot for this P1 stop" in msg, (sc.name, msg)
+        if sc.unserved:
+            assert any("no check proves they are impossible" in w for w in sc.warnings), (sc.name, sc.warnings)
+        assert_reconciled(r, sc)
 
 
 def test_a_stop_left_out_for_its_window_is_not_told_it_is_its_weight():

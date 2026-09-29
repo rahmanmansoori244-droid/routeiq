@@ -75,6 +75,34 @@ export function payloadTenths(kg: number): number {
  */
 export const KG_ROUNDING_TOL = 0.5;
 
+/** kg as the plan screen shows them: to 0.1 kg, like the load's own kg (896.8, never 897; 2,303.6). */
+export function kgText(kg: number): string {
+  return kg.toLocaleString('en-US', { maximumFractionDigits: 1 });
+}
+
+/** A loading manifest's kg: its product lines added up, to 0.1 kg (the plan screen and the Excel). */
+export function manifestKgOf(manifest: readonly { weightKg: number }[]): number {
+  return Math.round(manifest.reduce((a, m) => a + m.weightKg, 0) * 10) / 10;
+}
+
+/** The manifest's kg differ from the load's recorded kg by more than rounding (KG_ROUNDING_TOL). */
+export function manifestKgDiffers(manifestKg: number, loadKg: number): boolean {
+  return Math.abs(manifestKg - loadKg) > KG_ROUNDING_TOL;
+}
+
+/**
+ * The plan screen's line under a load's manifest when its products no longer add up to the load's
+ * kg (A6 second review; the Excel load sheet says "MISMATCH: load records N kg (order weights
+ * changed since planning)"). The products carry each order's kg now, the load the kg it was
+ * planned with: only an older version, kept for the record, whose orders a later re-plan re-weighed
+ * (a corrected product weight) can differ. null when they agree.
+ */
+export function manifestKgNote(l: { manifest: readonly { weightKg: number }[]; weightKg: number }): string | null {
+  const productsKg = manifestKgOf(l.manifest);
+  if (!manifestKgDiffers(productsKg, l.weightKg)) return null;
+  return `The load was planned at ${kgText(l.weightKg)} kg. Order weights changed since planning, so the products add up to ${kgText(productsKg)} kg.`;
+}
+
 /** Tolerance used when comparing an order's kg with the sum of its lines' kg (float sums). */
 export function kgTolerance(totalKg: number): number {
   return 0.5 + 0.001 * Math.abs(totalKg);

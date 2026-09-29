@@ -9,7 +9,9 @@ import {
   groupUnknownWeights,
   intakeLineWeight,
   kgTenths,
+  kgText,
   lineWeightStatus,
+  manifestKgNote,
   masterLineKg,
   orderUsesLineWeights,
   payloadTenths,
@@ -126,6 +128,24 @@ describe('kgTenths / payloadTenths (the optimizer weighs in 0.1 kg, audit F08)',
     expect([7 * 9.3, 999.1, 1001.8, 999.14, 999.15, 0.05, 0.04, 0, 3000].map(kgTenths)).toEqual([651, 9991, 10018, 9991, 9992, 1, 0, 0, 30000]);
     expect([3000, 2998.5, 3000.07, 0].map(payloadTenths)).toEqual([30000, 29985, 30000, 0]);
     expect(roundKg(65.10000000000001)).toBe(65.1);
+  });
+});
+
+describe("the plan screen's loading manifest kg (A6 second review)", () => {
+  it('kgText shows kg to 0.1 kg, as the load weighs them (an 896.8 kg load read "897 kg")', () => {
+    expect([896.8, 2303.6, 3000, 65.10000000000001, 0, 1234567.04].map(kgText)).toEqual(['896.8', '2,303.6', '3,000', '65.1', '0', '1,234,567']);
+  });
+
+  it("says so when an older version's products no longer add up to the load's kg (order weights changed since planning)", () => {
+    // The verifiers' superseded T01 L1: products re-weighed to 2,313.8 kg on a load planned at 2,303.6 kg.
+    const load = { weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 771.6 }] };
+    expect(manifestKgNote(load)).toBe(
+      'The load was planned at 2,303.6 kg. Order weights changed since planning, so the products add up to 2,313.8 kg.',
+    );
+    // Within rounding (the dispatch check's 0.5 kg) and equal: no note.
+    expect(manifestKgNote({ weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 761.8 }] })).toBeNull();
+    expect(manifestKgNote({ weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 761.4 }] })).toBeNull();
+    expect(manifestKgNote({ weightKg: 0, manifest: [] })).toBeNull();
   });
 });
 

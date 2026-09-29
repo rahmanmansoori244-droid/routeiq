@@ -18,7 +18,7 @@ import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './c
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from './time';
 import { carriedStopText } from './carry-view';
-import { KG_ROUNDING_TOL } from './weights';
+import { KG_ROUNDING_TOL, manifestKgDiffers, manifestKgOf } from './weights';
 import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
@@ -685,7 +685,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     r++;
   });
   const manifestCases = sum(l.manifest.map((x) => x.cases));
-  const manifestKg = Math.round(sum(l.manifest.map((x) => x.weightKg)) * 10) / 10;
+  const manifestKg = manifestKgOf(l.manifest);
   totalRow(
     ws,
     r,
@@ -805,7 +805,7 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     tableRow(ws, r++, [code, e.name, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), e.kg], intFmts);
   }
   const perLoad = d.loads.map((l) => sum(l.manifest.map((x) => x.cases)));
-  const kgPerLoad = d.loads.map((l) => Math.round(sum(l.manifest.map((x) => x.weightKg)) * 10) / 10);
+  const kgPerLoad = d.loads.map((l) => manifestKgOf(l.manifest));
   const skuKg = Math.round(sum([...skus.values()].map((e) => e.kg)) * 10) / 10;
   const loadsKg = Math.round(sum(d.loads.map((l) => l.weightKg)) * 10) / 10;
   totalRow(ws, r++, ['TOTAL', `${skus.size} SKUs`, ...perLoad, sum(perLoad), skuKg], intFmts);
@@ -819,11 +819,6 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     sum(perLoad) === sum(d.loads.map((l) => l.cases)) ? 'OK' : 'MISMATCH',
     manifestKgDiffers(skuKg, loadsKg) ? 'MISMATCH' : 'OK',
   ]);
-}
-
-/** The loading manifest's kg differs from the load's recorded kg by more than rounding (KG_ROUNDING_TOL). */
-function manifestKgDiffers(manifestKg: number, loadKg: number): boolean {
-  return Math.abs(manifestKg - loadKg) > KG_ROUNDING_TOL;
 }
 
 function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {

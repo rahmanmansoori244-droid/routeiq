@@ -360,6 +360,32 @@ def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads:
     return any(s.demand_cases <= rc and kg_units(s.demand_kg) <= rk for s in left for rc, rk in rooms)
 
 
+def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[PlannedStop]) -> bool:
+    """Whether a sound check proves that no packing of the usable trips carries the stop together
+    with `kept` (the stops of its priority or higher the plan serves). The room left on each load
+    says only that THIS packing has none (A6 second review: 1,000 + 1,500 + 1,500 + 1,000 + 1,000 kg
+    on 2 trucks x 1 load of 3,000 kg fit as {1,500, 1,500} and {1,000 x 3}, but the route search
+    packed {1,000, 1,500} twice). Two checks, in cases and in kg (0.1 kg units, no margin):
+    - they are more than all usable trips carry together;
+    - more of them are over half the biggest truck than there are usable trips (no two such stops
+      share a load, whatever the packing: 3 x 1,600 kg on 2 x 3,000 kg).
+    Times and hours are not checked: a check that passes proves the stop cannot go, one that fails
+    proves nothing."""
+    if not usable_tds:
+        return True
+    trips = sum(td.trips_left for td in usable_tds)
+
+    def proven(sizes: list[float], caps: list[tuple[float, int]]) -> bool:
+        biggest = max(c for c, _ in caps)
+        return sum(sizes) > sum(c * n for c, n in caps) or sum(2 * x > biggest for x in sizes) > trips
+
+    if proven([st.cases for st in kept] + [s.demand_cases], [(td.max_cases, td.trips_left) for td in usable_tds]):
+        return True
+    # kg bounds every packing only when every usable truck has a payload (0 = kg not limited).
+    return all(td.max_kg_units > 0 for td in usable_tds) and proven(
+        [kg_units(st.kg) for st in kept] + [kg_units(s.demand_kg)], [(td.max_kg_units, td.trips_left) for td in usable_tds])
+
+
 def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
                     priority_of: dict[str, int]) -> str | None:
     """The true reason a stop that no load and no free trip has room for is left out (audit F08
@@ -367,17 +393,24 @@ def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[Pla
     search again", as if more search time could serve it). The room on a load counts only its stops
     of the same or a higher priority (A6 review): strict priorities drop lower ones first, so a stop
     left out by TIME while P5 stops fill the loads is not "left out for its weight". None when some
-    load or free trip has room for it that way, by cases AND kg: then nothing proves it could not go,
-    and the time-limited search's own reason (and its warning) stays."""
-    rooms = _rooms(usable_tds, loads, lambda st: priority_of[st.stop_id] <= s.priority)
+    load or free trip has room for it that way, by cases AND kg, or when no check proves that another
+    packing of those stops could not carry it (A6 second review, `_no_packing_fits`): then nothing
+    proves it could not go, and the time-limited search's own reason (and its warning) stays."""
+    def same_or_higher(st: PlannedStop) -> bool:
+        return priority_of[st.stop_id] <= s.priority
+
+    rooms = _rooms(usable_tds, loads, same_or_higher)
     u = kg_units(s.demand_kg)
     if any(s.demand_cases <= rc and u <= rk for rc, rk in rooms):
         return None
-    # "Lowest priorities first" only when no lower-priority stop rides on the plan.
+    if not _no_packing_fits(s, usable_tds, [st for ld in loads for st in ld.stops if same_or_higher(st)]):
+        return None
+    # "Lowest priorities first" only when the day has lower-priority stops and none of them rides.
     lower_served = any(priority_of[st.stop_id] > s.priority for ld in loads for st in ld.stops)
+    lower_on_day = any(p > s.priority for p in priority_of.values())
     even, left = (", even with every lower-priority stop taken off", "then the most room") if lower_served else (
         "", "the most room left")
-    tail = (f" This P{s.priority} stop was left out{'' if lower_served else ' (lowest priorities first)'}. "
+    tail = (f" This P{s.priority} stop was left out{' (lowest priorities first)' if lower_on_day and not lower_served else ''}. "
             "Add a truck or raise the loads-per-truck limit.")
     by_cases = [rk for rc, rk in rooms if s.demand_cases <= rc]
     if by_cases:  # its cases fit somewhere, its weight does not
@@ -1087,7 +1120,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                                                        short_cases, short_kg)))
         elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of)) is not None:
             # No load of this plan and no free trip has room for it (cases or kg), even without
-            # its lower-priority stops: say so, not "re-plan to search again" (audit F08 verifiers).
+            # its lower-priority stops, and a check proves no other packing could carry it (A6
+            # second review): say so, not "re-plan to search again" (audit F08 verifiers).
             # The code stays (a reason code is a database enum); the words are what the dispatcher reads.
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", no_room))
         else:

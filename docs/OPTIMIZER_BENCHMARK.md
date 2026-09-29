@@ -436,7 +436,9 @@ synthetic points or approximate real pins. Every option of every run (RECOMMENDE
 
 **Caveat on this run.** Other work used the same PC during both versions' runs (the load sampler logged 100 % CPU almost all the
 time; three optimizer research jobs and another branch's build ran alongside). OR-Tools' searches are time-limited, so their plans
-depend on free CPU. The two runs of a version agree on most days, not on S05 (both versions) and the branch's S01, so the
+depend on free CPU. The two runs of a version give the same plan on S02 and S04 (both versions), on S01, S03 and the real day
+for main, and on S04b for the branch. They differ a little on the branch's S03 (0.2 km) and main's S04b (0.1 km), and more on
+S05 (both versions), the branch's S01 and the branch's real day (6 trucks, 556.14 OMR against 5 trucks, 543.03 OMR). So the
 controlled replay of 10.2 was added to tell the code from the machine.
 
 ### 10.1 The web API runs (harness and real day, two runs per version)
@@ -472,8 +474,12 @@ E5 follow-up below). Re-plans count their new loads only here.
 
 ### 10.3 Verdict
 
-- **Priority service: never worse.** Every day, in every run of both versions and in the replays, serves exactly the same orders
-  per priority (P1 to P5) and leaves the same ones unserved for the same reasons. Nothing to explain or fix under owner decision 26.
+- **Priority service: never worse.** Every day, in every run of both versions, serves the same number of orders per priority (P1
+  to P5) and leaves the same number unserved per priority and reason; the replays store the unserved count per priority only, and
+  it is the same too. The orders themselves are the same on every day but S03: there both versions leave out 61 P4 orders, and 5
+  of them differ (main leaves out 5 P4 orders the branch serves, and the branch 5 others that main serves). The branch then carries
+  4 cases more (3,492 against 3,488). Both runs of each version leave out the same orders. Nothing to explain or fix under owner
+  decision 26 (corrected by the second A6 review: this line said "exactly the same orders").
 - **Cost: lower or equal on six of seven days, the seventh inside the search's variation.** In the replays the branch is cheaper
   on S01 (-3.1 %), S02 (-0.4 %), S03 (-0.2 %), the S04 re-plan (-2.0 %), the S04b re-plan (-15.7 %: one truck and one load fewer)
   and the real day (-0.4 %), and 0.5 % dearer on S05 (same trucks and loads, 15 km more). S05 is the day on which main's own two
@@ -514,6 +520,24 @@ The review of the branch changed the solver in two ways, and neither changes a p
 So the tables of 10.1 and 10.2 stand for the reviewed branch. The web changes of the review (the depot note's distances, the
 manifest's kg on screen, the day out of date for older planned loads on a moved depot pin, the ASSUMPTIONS rows of older plans)
 change what is shown, not what is planned.
+
+### 10.5 After the second A6 review (no re-run needed)
+
+The second review changed the solver once, and it does not change a plan either:
+
+- **The "no room" reason needs a proof.** A stop gets "no load or free trip has room ..." only when a check also proves that no
+  other packing of the stops of its priority or higher could carry it (together they are more than all trips carry, or more of
+  them are over half the biggest truck than there are trips). Otherwise it keeps the search's own reason and the plan's warning.
+  This decides words and a warning only, and 10.4 found no such reason in any stored answer, so nothing on these days changes.
+- **"Lowest priorities first"** is said only on a day that has lower-priority stops.
+
+The web change (a note under an older version's loading manifest when a later re-plan re-weighed its orders) is shown, not
+planned. The tables of 10.1 and 10.2 stand; only the wording of 10.3's priority line and of the caveat above was corrected.
+
+The review also recorded an older limit, on main as on the branch: on a tight day where every trip is used, the route search can
+leave a stop out although another packing carries every stop (1,000 + 1,500 + 1,500 + 1,000 + 1,000 kg on two 3,000 kg trucks
+with one load each). It does not appear on these days, since NMWC's trucks do several trips. It is a follow-up in the handbook's
+7.5.
 
 ## Sources
 
