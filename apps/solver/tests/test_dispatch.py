@@ -545,6 +545,80 @@ def test_weight_bound_shortage_over_several_loads_warns_nothing():
     assert_reconciled(r, sc)
 
 
+# --------------------------------------------------------------------------------------
+# WEIGHTS IN 0.1 KG (audit F08, owner decision 15: no hidden rounding margin)
+# --------------------------------------------------------------------------------------
+
+ALL_SCENARIOS = ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"]
+
+
+def test_kg_units_round_to_the_nearest_tenth_and_payloads_down():
+    from dispatch_models import kg_text, kg_units, payload_units
+
+    assert kg_units(7 * 9.3) == 651  # 65.10000000000001: float noise never costs a kg
+    assert [kg_units(x) for x in (999.1, 1001.8, 999.14, 999.15, 0.05, 0.04, 0, 3000)] == [9991, 10018, 9991, 9992, 1, 0, 0, 30000]
+    assert [payload_units(x) for x in (3000, 2998.5, 3000.07, 0)] == [30000, 29985, 30000, 0]
+    assert [kg_text(x) for x in (3000, 3000.1, 1998.2, 65.10000000000001, 1234567)] == ["3,000", "3,000.1", "1,998.2", "65.1", "1,234,567"]
+
+
+def test_a_load_that_weighs_exactly_the_payload_fits_in_every_scenario():
+    """Audit F08 (verified with the full optimizer): 999.1 + 999.1 + 1,001.8 = 3,000.0 kg on a
+    3,000 kg truck with one load. Each stop was rounded UP to a whole kg (3,002 kg) and one stop was
+    left out as "low priority" in all three options. Now all three go, in one load of 3,000.0 kg."""
+    stops = [stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=kg) for i, kg in enumerate((999.1, 999.1, 1001.8))]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=3000, max_trips=1)], scenarios=ALL_SCENARIOS)
+    resp = optimize_dispatch(r)
+    assert [s.name for s in resp.scenarios] == ALL_SCENARIOS
+    for sc in resp.scenarios:
+        assert served_ids(sc) == {"S0", "S1", "S2"}, (sc.name, sc.unserved)
+        assert [ld.kg for ld in sc.loads] == [3000.0]
+        assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", (sc.name, sc.feasibility)
+        assert_reconciled(r, sc)
+
+
+def test_a_tenth_of_a_kg_over_the_payload_is_left_out_for_its_weight():
+    """The control: 3,000.1 kg on 3,000 kg of loads. One stop stays out, with the weight shortage
+    in its reason to the tenth (it read "3,000 kg requested vs 3,000 kg")."""
+    stops = [stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=kg) for i, kg in enumerate((999.1, 999.1, 1001.9))]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=3000, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert len(sc.unserved) == 1 and all(ld.kg <= 3000 for ld in sc.loads)
+    msg = sc.unserved[0].reason_message
+    assert "Fleet capacity shortage by weight: 3,000.1 kg requested vs 3,000 kg" in msg, msg
+    assert "Re-plan" not in msg
+    assert sc.feasibility.status == "VERIFIED"
+
+
+def test_float_noise_and_fractional_payloads_do_not_block_a_load():
+    """7 x 9.3 kg is 65.10000000000001 in floating point (rounded up: 66 kg); a payload of 2,998.5 kg
+    was floored to 2,998 kg. Both loads weigh exactly their payload and are planned whole."""
+    noisy = [stop("N0", 23.60, 58.45, cases=7, demand_kg=7 * 9.3), stop("N1", 23.601, 58.45, cases=5, demand_kg=34.9)]
+    sc = rec(optimize_dispatch(req(noisy, [truck("T01", cap=100, capacity_kg=100, max_trips=1)])))
+    assert served_ids(sc) == {"N0", "N1"} and [ld.kg for ld in sc.loads] == [100.0], sc.unserved
+    halves = [stop(f"H{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=999.5) for i in range(3)]
+    sc = rec(optimize_dispatch(req(halves, [truck("T01", cap=100, capacity_kg=2998.5, max_trips=1)])))
+    assert served_ids(sc) == {"H0", "H1", "H2"} and [ld.kg for ld in sc.loads] == [2998.5], sc.unserved
+    assert sc.feasibility.status == "VERIFIED"
+
+
+def test_a_stop_no_load_has_room_for_gets_the_weight_reason_not_replan():
+    """Audit F08 verifiers: a stop left out for its weight said "the optimizer found no truck, trip
+    or time slot ... Re-plan to search again". 3 x 1,600 kg on 2 trucks x 1 load of 3,000 kg: the
+    fleet has 6,000 kg (no shortage), but each load keeps only 1,400 kg of room. The reason says so."""
+    stops = [stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=1600) for i in range(3)]
+    r = req(stops, [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert len(sc.loads) == 2 and len(sc.unserved) == 1
+    u = sc.unserved[0]
+    assert u.reason_code == "SOLVER_DROPPED_LOW_PRIORITY"
+    assert u.reason_message.startswith(
+        "Not planned: no load or free trip has room for its 1,600 kg (the most room left on a load that takes its "
+        "10 cases is 1,400 kg)."), u.reason_message
+    assert "Re-plan to search again" not in u.reason_message
+    assert not any("no check proves they are impossible" in w for w in sc.warnings), sc.warnings
+    assert_reconciled(r, sc)
+
+
 def test_no_plan_reason_is_in_plain_words():
     """PR6: the search's raw status code (ROUTING_FAIL_TIMEOUT ...) never reaches an unserved reason."""
     import dispatch_solver as ds

@@ -9,7 +9,8 @@ bug or a fallback path shows up as a violation instead of a timetable no truck c
 Rules (all times in whole minutes, as the scenario reports them; TOL_MIN absorbs the rounding of
 seconds to minutes in dispatch_solver._min_of):
 
-* capacity: a load's cases (and kg, when the truck has a payload) from the request's stops;
+* capacity: a load's cases (and kg, when the truck has a payload) from the request's stops; kg in
+  0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
 * hard receiving windows: service starts inside the window;
 * travel: each service start is at least the previous departure + the drive time (matrix), and
   the truck is back no earlier than the last departure + the drive back;
@@ -38,6 +39,9 @@ from dispatch_models import (
     DispatchStop,
     FeasibilityReport,
     FeasibilityViolation,
+    kg_text,
+    kg_units,
+    payload_units,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -46,7 +50,6 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger("routeiq.dispatch.feasibility")
 
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
-KG_TOL = 0.05
 CHECK_VERSION = 1
 
 
@@ -141,16 +144,19 @@ def check_scenario(
                     add("UNKNOWN_STOP", f"Stop {st.stop_id} on {code} load {lno} is not in the request.", truck_id=tid,
                         load_no=lno, stop_id=st.stop_id)
             cases = sum(s.demand_cases for s in known if s is not None)
-            kg = sum(s.demand_kg for s in known if s is not None)
+            # In 0.1 kg units, each stop to the nearest unit, against the payload rounded down: the
+            # engine's own rule, with no margin either way (audit F08).
+            kg_u = sum(kg_units(s.demand_kg) for s in known if s is not None)
+            cap_u = payload_units(t.capacity_kg)
             if ld.cases != cases:
                 add("LOAD_TOTALS", f"{code} load {lno} records {ld.cases} cases but its stops add up to {cases}.",
                     truck_id=tid, load_no=lno)
             if cases > t.capacity_cases:
                 add("CAPACITY_CASES", f"{code} load {lno} carries {cases} cases; the truck takes {t.capacity_cases}.",
                     truck_id=tid, load_no=lno, short=cases - t.capacity_cases)
-            if t.capacity_kg > 0 and kg > t.capacity_kg + KG_TOL:
-                add("CAPACITY_KG", f"{code} load {lno} weighs {kg:.0f} kg; the truck's payload is {t.capacity_kg:.0f} kg.",
-                    truck_id=tid, load_no=lno, short=kg - t.capacity_kg)
+            if cap_u > 0 and kg_u > cap_u:
+                add("CAPACITY_KG", f"{code} load {lno} weighs {kg_text(kg_u / 10)} kg; the truck's payload is {kg_text(cap_u / 10)} kg.",
+                    truck_id=tid, load_no=lno, short=(kg_u - cap_u) / 10)
 
             # Departure: after the truck is ready (turnaround) and inside its day. On a plan made on
             # its delivery day loading starts no earlier than then: the later of the two counts.

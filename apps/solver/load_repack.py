@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable
 
 import costing
-from dispatch_models import DAY_MIN, DispatchStop
+from dispatch_models import DAY_MIN, DispatchStop, kg_units
 
 if TYPE_CHECKING:  # pragma: no cover
     from dispatch_solver import TruckDay
@@ -118,7 +118,9 @@ class Pricing:
     trucks: dict[int, TruckPrice]
     span: int = 0  # per second of paid truck day (driver), for the search models (integer)
     overtime: int = 0  # per second of truck day beyond overtime_after_s ...
-    overtime_after_s: int | None = None  # ... counted from the first departure (frozen: first frozen one)
+    # ... counted from the first departure (frozen: first frozen one; its new loads pay only the
+    # overtime after their last frozen return too, overtime_bound_s - audit E4).
+    overtime_after_s: int | None = None
     pref: int = 0  # per second outside a preferred window
     early: dict[int, int] = field(default_factory=dict)  # priority -> per second after shift start
     shift_start_s: int = 0
@@ -173,6 +175,20 @@ class Day:
         return m + self.D[prev][0]
 
 
+def overtime_bound_s(td: "TruckDay", overtime_after_s: int) -> int | None:
+    """When NEW loads of a truck with frozen (locked / loading / dispatched) loads start paying
+    overtime: the later of its day start (first frozen departure) + ``overtime_after_s`` and its
+    last frozen return. Audit E4, owner decision 14 (count only new cost): the overtime the frozen
+    loads already work was charged again by the search models, so a truck already out in overtime
+    looked dearer than opening an idle one. The canonical cost (costing.truck_day_costs) and so
+    every reported cost already counted it this way. None for a truck without frozen loads (its
+    day starts at its first new departure)."""
+    if td.shift_anchor_s is None:
+        return None
+    bound = td.shift_anchor_s + overtime_after_s
+    return bound if td.frozen_return_s is None else max(bound, td.frozen_return_s)
+
+
 def _hs(s: DispatchStop) -> int:
     return (s.hard_start_min or 0) * 60
 
@@ -193,7 +209,7 @@ class Facts:
     lo: int  # earliest departure that needs no waiting on the road
     hi: int  # latest departure that meets every hard window
     cases: int
-    kg: float
+    kg_units: int  # 0.1 kg units, each stop to the nearest unit (dispatch_models.kg_units, audit F08)
     metres: int
     gap: int  # turnaround before this load departs, after the truck's previous load
 
@@ -219,7 +235,7 @@ def facts(day: Day, load: Load) -> Facts:
     return Facts(
         stops=tuple(load), off=tuple(off), d=t,
         lo=max(_hs(s) - o for s, o in zip(ss, off)), hi=min(_he(s) - o for s, o in zip(ss, off)),
-        cases=sum(s.demand_cases for s in ss), kg=sum(s.demand_kg for s in ss), metres=day.metres(load),
+        cases=sum(s.demand_cases for s in ss), kg_units=sum(kg_units(s.demand_kg) for s in ss), metres=day.metres(load),
         gap=day.gap_s(sum(s.demand_cases for s in ss)),
     )
 
@@ -245,9 +261,15 @@ def _first_departure_s(day: Day, td: "TruckDay", f: Facts) -> int:
     return first
 
 
+def fits_truck(f: Facts, td: "TruckDay") -> bool:
+    """The load's cases and kg fit the truck: kg in 0.1 kg units against the payload rounded down,
+    with no margin either way (audit F08)."""
+    return f.cases <= td.max_cases and (td.max_kg_units <= 0 or f.kg_units <= td.max_kg_units)
+
+
 def depart_range(day: Day, f: Facts, td: "TruckDay") -> tuple[int, int] | None:
     """Departure interval of this load on this truck (None: it can never go on it)."""
-    if f.cases > td.max_cases or (td.max_kg > 0 and f.kg > td.max_kg + 0.01):
+    if not fits_truck(f, td):
         return None
     first = _first_departure_s(day, td, f)
     if not f.waits:
@@ -356,11 +378,12 @@ def time_truck(day: Day, td: "TruckDay", loads: list[Load], pricing: Pricing) ->
     obj.SetCoefficient(first, obj.GetCoefficient(first) - paid_first - _TIE + 1e-6)  # ties: earliest day
     if pricing.overtime and pricing.overtime_after_s is not None:
         u = lp.NumVar(0, inf, "ot")
-        if td.shift_anchor_s is None:  # u - last + first >= -after
+        bound = overtime_bound_s(td, pricing.overtime_after_s)
+        if bound is None:  # u - last + first >= -after
             c = lp.Constraint(-pricing.overtime_after_s, inf)
             c.SetCoefficient(first, 1)
-        else:
-            c = lp.Constraint(-(td.shift_anchor_s + pricing.overtime_after_s), inf)
+        else:  # only new overtime (audit E4): u >= last - max(anchor + after, last frozen return)
+            c = lp.Constraint(-bound, inf)
         c.SetCoefficient(u, 1)
         c.SetCoefficient(last, -1)
         obj.SetCoefficient(u, pricing.overtime)
@@ -422,8 +445,7 @@ def time_plan(day: Day, plan: Plan, pricing: Pricing) -> TimedPlan | None:
         if td is None or len(loads) > td.trips_left:
             return None
         for l in loads:
-            f = facts(day, l)
-            if f.cases > td.max_cases or (td.max_kg > 0 and f.kg > td.max_kg + 0.01):
+            if not fits_truck(facts(day, l), td):
                 return None
         timed = time_truck(day, td, loads, pricing)
         if timed is None:
@@ -618,11 +640,14 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
             cost_terms.append(pricing.span * sp)
         if pricing.overtime and pricing.overtime_after_s is not None:
             ot = m.NewIntVar(0, HORIZON_S, "")
-            if td.shift_anchor_s is None:
+            bound = overtime_bound_s(td, pricing.overtime_after_s)
+            if bound is None:
                 m.Add(ot >= en - st - pricing.overtime_after_s).OnlyEnforceIf(used)
                 m.Add(ot >= busy - gmax * used - pricing.overtime_after_s)
             else:
-                m.Add(ot >= en - td.shift_anchor_s - pricing.overtime_after_s).OnlyEnforceIf(used)
+                # Only NEW overtime (audit E4, owner decision 14): after the later of the day start +
+                # overtime_after and the last frozen return, as costing.truck_day_costs counts it.
+                m.Add(ot >= en - bound).OnlyEnforceIf(used)
             cost_terms.append(pricing.overtime * ot)
 
     # Preferred windows / early arrival: convex in the load's departure (hinges), paid only
@@ -648,9 +673,15 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
 
     served_terms = [w * v for k, w in optional.items() for v in covering.get(k, [])]
     deadline = t0 + time_limit
+
+    def left(share: float = 1.0) -> float:
+        # The phases' limits come out of this solve's own limit (the job's share of its budget):
+        # no floor pushes a phase past it (audit E5; the floors were 0.5 s each).
+        return max(0.05, (deadline - time.perf_counter()) * share)
+
     if served_terms:
         m.Maximize(sum(served_terms))
-        solver.parameters.max_time_in_seconds = max(0.5, (deadline - time.perf_counter()) * 0.4)
+        solver.parameters.max_time_in_seconds = left(0.4)
         st1 = _solve_until_stalled(solver, m, solver.parameters.max_time_in_seconds)
         if st1 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
             m.Add(sum(served_terms) >= int(round(solver.ObjectiveValue())))
@@ -662,7 +693,7 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
                     m.AddHint(ej, solver.Value(ej))
             hinted = True
     m.Minimize(sum(cost_terms))
-    solver.parameters.max_time_in_seconds = max(0.5, deadline - time.perf_counter())
+    solver.parameters.max_time_in_seconds = left()
     status = _solve_until_stalled(solver, m, solver.parameters.max_time_in_seconds)
     name = solver.StatusName(status)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
@@ -679,8 +710,13 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
 
 def _solve_until_stalled(solver, model, limit: float):
     """Solve, but stop once no better plan has been found for a quarter of the limit (at least
-    1 s). On the real day CP-SAT had its final plan after 1-3 s and spent the rest of a 10 s
-    limit tightening the bound (3-6% gap), which does not change the plan."""
+    1 s) AFTER THE FIRST ONE. On the real day CP-SAT had its final plan after 1-3 s and spent the
+    rest of a 10 s limit tightening the bound (3-6% gap), which does not change the plan.
+
+    Audit E5: the stall clock used to start before the first solution, so a search whose first
+    answer needed longer than the stall time was stopped with none (UNKNOWN) - on a tight synthetic
+    day in 3 of 12 solves. Until the first solution only the solver's own time limit
+    (``max_time_in_seconds``, set by the caller from the job's budget) stops it."""
     import threading  # noqa: PLC0415
 
     from ortools.sat.python import cp_model  # noqa: PLC0415
@@ -688,7 +724,7 @@ def _solve_until_stalled(solver, model, limit: float):
     class Progress(cp_model.CpSolverSolutionCallback):
         def __init__(self) -> None:
             super().__init__()
-            self.last = time.perf_counter()
+            self.last: float | None = None  # no solution yet
 
         def on_solution_callback(self) -> None:
             self.last = time.perf_counter()
@@ -699,7 +735,7 @@ def _solve_until_stalled(solver, model, limit: float):
 
     def watch() -> None:
         while not done.wait(0.1):
-            if time.perf_counter() - cb.last > stall:
+            if cb.last is not None and time.perf_counter() - cb.last > stall:
                 solver.StopSearch()
                 return
 
@@ -874,6 +910,13 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
         try:
             res = repack(day, goal_pricing, pool, carried, opt, src.plan, limit)
             notes.append(f"{src.name}: {goal} repack {res.status} in {res.seconds:.1f}s")
+            if res.plan is None:
+                # Audit E5: no answer (UNKNOWN, out of time). A repack never makes a plan worse: the
+                # plan it started from stays a candidate of this job whenever it times exactly.
+                kept = add(src.name, plan_of(src.plan))
+                log.warning("repack %s after %.1fs (limit %.1fs) for %s/%s: %s", res.status, res.seconds, limit, src.name, goal,
+                            "kept the plan it started from" if kept else
+                            "the plan it started from breaks the exact loading time between loads")
             ok = res.plan is not None and add(f"{src.name}+repack:{goal}", res.plan)
         except Exception as exc:  # noqa: BLE001 - a failed repack only loses this candidate
             log.warning("repack %s/%s failed: %s", src.name, goal, exc)
@@ -893,6 +936,9 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
             notes.append(f"{src.name}: {goal} fit repack {res.status} in {res.seconds:.1f}s")
             if res.plan is not None:
                 add(f"{src.name}+fit:{goal}", res.plan)
+            else:
+                log.warning("fit repack %s after %.1fs (limit %.1fs) for %s/%s: no fitting plan from these loads",
+                            res.status, res.seconds, limit, src.name, goal)
         except Exception as exc:  # noqa: BLE001
             log.warning("fit repack %s/%s failed: %s", src.name, goal, exc)
             notes.append(f"{src.name}: {goal} fit repack failed ({exc})")
