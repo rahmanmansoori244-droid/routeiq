@@ -16,6 +16,10 @@ Date: 2026-09-24 · Branch: `nmwc-dispatch-mvp` · Related: [OPTIMIZER_DESIGN.md
 - **Fixed on 25 Sep 2026 (see §8):** on NMWC's real day the engine planned far too many trucks (13 trucks / 21 loads /
   754 OMR where 5 trucks / 14 loads / ~490 OMR were feasible). An exact post-solve step now re-assigns whole loads to trucks
   (CP-SAT, `load_repack.py`), priorities are strict, and loading / unloading time can follow the cases.
+- **Long searches, 29 Sep 2026 (see §10):** a THOROUGH mode searches up to 20 minutes and stops early once the search stops
+  improving (max(300 s, half the time searched so far) without a better plan). On NMWC-sized days the search keeps
+  improving for most of the 20 minutes, so THOROUGH usually runs close to its cap; production-mode runs gave 3-11% lower
+  objective than QUICK (the real day: one truck and three loads fewer, about 41 OMR a day less operating cost).
 
 ## 2. What the MVP must support
 
@@ -407,6 +411,102 @@ better on both shapes, so PR5 keeps the owner's rule (the driver is paid for the
 **Follow-up** (not in PR5): measure again on NMWC's real re-planned days once production has plans with locked loads. If the
 late-order case shows up there, one search without the start bound can be added as an extra candidate: the post-solve score
 already prices every candidate on the whole-day model, so it would only be chosen when it is cheaper.
+
+## 10. Long searches: THOROUGH mode and its stopping rule (29 Sep 2026)
+
+Owner request: *"make sure the solver is giving an optimal solution even if it runs for 20 mins."* Owner decision: *night
+plans long, day re-plans quick*. The engine now has two search modes (`config.search_mode`; handbook 2.7 and 4.9):
+
+- **QUICK**: the automatic search time by day size (§8, PR7), exactly as before.
+- **THOROUGH**: the whole request may take up to `THOROUGH_MAX_SEC` (1,200 s). RECOMMENDED searches until a tail kept for the
+  alternatives and the load re-check, and **stops early once it stops improving**: when its best plan has not improved for
+  **max(300 s, 0.5 × the time searched so far)**, never before QUICK's time for the day.
+
+No search proves the plan is the best possible one: guided local search computes no bound, so the screens say how long it
+searched and why it stopped, never "optimal", and no gap is stated.
+
+Measured with the local harness (`.dev/bench`, used read-only: its instances and cached matrices, with this branch's solver
+first on `sys.path`; scratch scripts outside the repo). Machine as in §9 (AMD Ryzen 7 7445HS, 6 cores / 12 threads, OR-Tools
+9.15.6755, Python 3.12.13), **heavily loaded**: 5 runs in parallel plus other work (CPU at 75-100%), so absolute times are
+pessimistic, roughly × 2. Only aggregate numbers of the real day (real80: NMWC's day of 26 Sep, 83 stops) are given.
+
+### 10.1 How long does the search keep improving? (1,200 s traces)
+
+RECOMMENDED alone, in-process, 1,200 s, every improving solution recorded (time, objective). "Above its end" = how much worse
+the best plan found by then was than the best plan found in 1,200 s, in OMR of the search objective (money plus preference
+penalties; 1,000 OMR or more means stops were still unserved).
+
+| run | stops | QUICK time | last improvement | longest time without improvement (from) | above its end at 20 s / 60 s / 300 s / 600 s (OMR) |
+|---|---|---|---|---|---|
+| syn60_s1 | 60 | 20 s | 721 s | 501 s (721 s) | 6.3 / 6.3 / 0.7 / 0.1 |
+| syn150_s1 | 150 | 50 s | 321 s | 885 s (321 s) | 17.0 / 7.5 / 4.2 / 0.0 |
+| syn150_s2 | 150 | 50 s | 448 s | 759 s (448 s) | 106.4 / 70.2 / 19.6 / 0.0 |
+| syn150_s3 | 150 | 50 s | 710 s | 516 s (710 s) | 78.5 / 53.6 / 28.2 / 5.4 |
+| syn300_s1, run 1 | 300 | 150 s | 881 s | 329 s (881 s) | 65,000 / 40,048 / 1,015 / 3.6 |
+| syn300_s1, run 2 | 300 | 150 s | 741 s | 485 s (741 s) | 64,993 / 40,001 / 10.5 / 1.9 |
+| real80, run 1 | 83 | 20 s | 702 s | 509 s (702 s) | 220.2 / 185.1 / 152.0 / 29.6 |
+| real80, run 2 | 83 | 20 s | 1,142 s | 428 s (709 s) | 245.0 / 210.2 / 176.8 / 55.7 |
+| real80 (straight-line matrix) | 83 | 20 s | 1,094 s | 311 s (476 s) | 206.3 / 148.6 / 67.8 / 32.7 |
+
+The searches keep finding improvements well past 10 minutes, after long quiet stretches (real80 was quiet for 428-509 s and
+then improved again). The search is deterministic (§5), so two runs of one instance differ only in how far the loaded machine
+let it get.
+
+### 10.2 Which stopping rule?
+
+Each rule replayed on the nine traces above, and on the 18 older 120-600 s traces of the 25 Sep engine benchmark
+(`.dev/bench/ortools/results/runs.jsonl`, read-only). "Loss" = search objective at the stop minus at the end of the run.
+
+| rule: stop after this long without improvement | 1,200 s traces: runs that lost / worst loss | older traces: runs that lost / worst loss | time saved, 1,200 s traces (mean) |
+|---|---|---|---|
+| max(90 s, 15% of the time searched) (first proposal) | 9 of 9 / 176.8 OMR (real80 stopped at 278 s) | 5 of 18 / 117.6 OMR | 74% |
+| max(180 s, 33%) | 5 of 9 / 32.7 OMR | 2 of 18 / 117.6 OMR | 39% |
+| max(240 s, 50%) | 2 of 9 / 19.6 OMR (syn150_s2 stopped 3 s before a better plan) | 0 of 18 | 19% |
+| **max(300 s, 50%)** (chosen) | **0 of 9** | **0 of 18** | 8% |
+| max(360 s, 50%) | 0 of 9 | 0 of 18 | 8% |
+
+Only rules that wait at least 300 s and half the search so far lost nothing, anywhere. The chosen rule stops the small
+syn150 days at 642 s and 896 s; the real day and the 300-stop day run to the cap. So **THOROUGH usually uses most of the 20
+minutes on NMWC-sized days**; stopping early mainly saves time on days that are easy for the search. The values can be tuned
+without a release: `THOROUGH_STALL_SEC`, `THOROUGH_STALL_SHARE`.
+
+**How the stop is made.** An at-solution callback records the best objective and, when the rule says so, calls
+`Solver.FinishCurrentSearch()`: probes on syn60_s1 and real80 ended the search within 13 ms and 2 ms of the solution that
+triggered it, returning the best plan found (objective equal to the best recorded). A `CustomLimit` (checked by OR-Tools on
+every search node) was measured and rejected: it was called 35,000-110,000 times a second and cost 3-12% of the solutions
+found in 30 s (real80: 592 and 579 solutions without it, 537 and 534 with it; syn150_s1: 488 and 487 against 478 and 468;
+throttling the check inside it did not help, the call itself is the cost). The callback is called only for accepted solutions
+(16 a second on real80, 1-2 a second at 300 stops), so the stop check costs nothing measurable.
+
+### 10.3 What it buys: QUICK against THOROUGH, as production runs them
+
+All three options, worker pool, load re-check, the same cached matrices. THOROUGH with the 1,200 s cap and the chosen rule;
+QUICK with its automatic time. Objective = the RECOMMENDED objective after the load re-check (OMR).
+
+| day | QUICK: trucks / loads / km / op. cost / objective, wall | THOROUGH: trucks / loads / km / op. cost / objective, wall (stop) | objective |
+|---|---|---|---|
+| real80 (83 stops) | 6 / 17 / 1,101 / 544.6 / 573.1, 63 s | 5 / 14 / 985 / 503.5 / 525.8, 1,101 s (cap; last improvement 696 s) | -8.3% |
+| syn150_s2 (150 stops) | 8 / 11 / 828 / 494.3 / 531.9, 85 s | 8 / 12 / 805 / 484.7 / 517.8, 1,061 s (cap; last improvement 516 s) | -2.7% |
+| syn300_s1 (300 stops) | 12 / 25 / 1,779 / 954.6 / 1,078.4, 274 s | 12 / 24 / 1,672 / 908.6 / 957.7, 1,101 s (cap; last improvement 966 s) | -11.2% |
+
+Every plan served every stop and passed the independent timetable check (VERIFIED). The whole THOROUGH request took
+1,061-1,101 s, inside the 1,200 s cap, with RECOMMENDED's search limit at 969-984 s (the rest: the road matrix, the
+alternatives, the load re-check). On the real day THOROUGH found one truck and three loads fewer, about 41 OMR a day less
+operating cost. QUICK on the real day has also found 5 trucks / 14 loads on a lighter-loaded machine (§8.3: objective 531-534):
+QUICK's 20 s depend on how fast the machine is at that moment, THOROUGH's result much less.
+
+RECOMMENDED alone (in-process, the load re-check on its own plan only): QUICK against the 1,200 s traces of §10.1 gave
+objective -13.3% on the real day (QUICK 7 trucks / 21 loads, 608 objective, against 5 / 14, 525-529), -14.6% on its
+straight-line variant, -1.5% to -3.1% on the synthetic 60- and 150-stop days, and on syn300_s1 QUICK left 7 and 10 stops
+unserved where 1,200 s served all (the QUICK runs shared the machine with three 20-minute runs: pessimistic).
+
+**QUICK unchanged.** QUICK sends the same search parameters, time limits and budgets as before (pytest
+`test_search_modes.py`: the limits and budgets of the old formulas over a grid, the OR-Tools parameters of a QUICK solve, and
+nothing attached to its search), and its report says `TIME_LIMIT`.
+
+**Open.** No trace is longer than 1,200 s. The Railway solver's CPU is not known (handbook 7.5): at 1 vCPU a THOROUGH search
+next to a QUICK one shares the core, which lowers both searches' quality (their limits are wall-clock), never their deadlines.
+Re-measure on the production solver once it runs THOROUGH plans (the saved search reports hold the best objective over time).
 
 ## Sources
 

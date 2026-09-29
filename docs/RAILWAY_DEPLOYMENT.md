@@ -110,6 +110,53 @@ Later, as a separate change, move `web` from Nixpacks to Railpack:
 - Fix the root `packageManager` (`pnpm@9.0.0`, while the lockfile is built with pnpm 9.15).
 - Source: <https://railpack.com/languages/node>.
 
+## Long searches (THOROUGH mode, 29 Sep 2026)
+
+The planner can now search up to 20 minutes (owner request 29 Sep 2026; handbook 2.7, 4.9). What to set and check when this
+change is deployed:
+
+- **Migration** `20261001090000_run_job_search_mode_heartbeat` (pre-deploy step): adds two nullable columns to `RunJob`
+  (`searchMode`, `heartbeatAt`). No rewrite, no backfill; the previous version keeps serving and ignores them. Rollback: the
+  previous code runs on top of it unchanged.
+- **Deploy order:** the solver first. A new web talking to the old solver still works (the old solver ignores
+  `search_mode` and searches QUICK; a THOROUGH choice then just behaves like QUICK); a new solver with the old web gets no mode
+  (QUICK).
+- **Variables** (names only):
+  - `THOROUGH_MAX_SEC` on **web and solver**, the same value (default 1200 = 20 min; 10 to 3600). The web sends it with each
+    THOROUGH request and waits it + 2 minutes; the solver uses the lower of the two.
+  - `NEXT_MANUAL_SIG_HANDLE=1` on **web** (recommended). On a redeploy Railway sends SIGTERM; with this set, the web fails its
+    optimizations in progress at once with *"The server was restarted (an update) during this optimization. Nothing was saved
+    - optimize again."* (at most 8 s of writes), then exits. Without it Next.js exits at once and those writes may not land:
+    the jobs are then failed by their heartbeat within about 6 minutes (shown as lost after 2).
+  - Optional on the solver: `THOROUGH_STALL_SEC` (300) and `THOROUGH_STALL_SHARE` (0.5), the early-stop rule; leave them unset
+    unless re-measured (`docs/OPTIMIZER_BENCHMARK.md` §10).
+  - Keep web's `SOLVER_MAX_CONCURRENT` at 2 or more (with 1, a THOROUGH search holds the only slot for up to 20 minutes).
+- **What happens to a 20-minute search on a redeploy.**
+  - *Web redeploys:* the job fails at once (with `NEXT_MANUAL_SIG_HANDLE=1`) or by its heartbeat within minutes, never stuck; the
+    plan can be optimized again (a re-plan version keeps the previous plan). The solver sees the connection close and cancels that
+    solve within about a second, so its slot frees for the new web.
+  - *Solver redeploys:* the running solve is cut when the old container stops; the web gets a reset connection and fails the job
+    with *"The route optimizer stopped during the search (it was restarted or updated). Nothing was saved - optimize again."*,
+    retryable. Railway's drain time before it stops the old container is not known here (open: check the service's deploy
+    settings); a solve longer than it is lost either way. Avoid solver deploys during the evening planning.
+  - Railway's healthchecks run at deploy time only and do not touch a running solve.
+- **Signal delivery (to verify on staging).** The web start command is `pnpm --filter @routeiq/web start`. Whether pnpm passes
+  SIGTERM on to the `next start` process is not verified. Check once: start a THOROUGH optimization, redeploy web, and see the
+  job end at once with the "server was restarted" message (not after about 6 minutes with "No sign of life"). If it does not,
+  start the web with `node` directly (for example `pnpm --filter @routeiq/web exec next start`), which receives the signal.
+- **Solver CPU during long solves.** A THOROUGH solve holds one solver slot and, for most of its 20 minutes, one CPU core (the
+  recommended plan's search); the alternatives and the load re-check add two more processes for about two minutes at the end.
+  The solver service's vCPU is not recorded (handbook 7.5). With 1 vCPU a Quick re-plan running next to a Thorough search shares
+  the core: both still end on time (their limits are wall-clock) but find somewhat worse plans. Once the vCPU is known, 2 or more
+  cores are recommended, with `SOLVER_MAX_CONCURRENT=3` on web and `MAX_CONCURRENT_DISPATCH=3` on the solver.
+- **The connection.** `SOLVER_URL` must be the solver's **private** address (`http://solver.railway.internal:<port>`), never a
+  public domain: a public edge may cut requests long before 20 minutes. The web holds one connection per solve for up to 22
+  minutes with TCP keepalive every 30 s; whether Railway's private network keeps an idle 20-minute connection is to be confirmed
+  on staging with a THOROUGH run (the keepalive packets keep it from looking idle).
+- **Verify after the deploy:** optimize tomorrow's day with **Thorough** once; the plan screen shows *Searching for the best plan
+  - up to 20 min ...*, and afterwards *Thorough search: searched N min ...*; `GET /api/runs/:id/status` shows the job with
+  `searchMode` and a `heartbeatAt` that moves every 30 s while it runs.
+
 ## Private networking notes
 
 - Service addresses are `<service>.railway.internal`. This environment resolves over **IPv4 and IPv6**.
