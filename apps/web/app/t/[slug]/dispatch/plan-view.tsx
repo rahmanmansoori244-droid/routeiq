@@ -19,9 +19,9 @@ import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import {
-  defaultModeForDay,
   fmtSearchTime,
   optimizeStartedText,
+  searchModeNow,
   searchPollMs,
   searchProgressText,
   searchResultText,
@@ -327,17 +327,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   /**
    * Quick or Thorough for a re-plan of this plan (null = cancelled). Thorough is suggested for a plan
-   * made before its delivery day, Quick on the day itself (search-mode.ts).
+   * made before its delivery day, Quick on the day itself (search-mode.ts) - by the clock when asked:
+   * a plan screen left open across midnight must not suggest Thorough on the delivery day (skeptic
+   * review of the long-search PR).
    */
   function askSearchMode(note?: string): Promise<SearchMode | null> {
     if (!d) return Promise.resolve(null);
     const stops = new Set([...d.loads.flatMap((l) => l.stops.map((s) => s.customerId)), ...d.unserved.map((u) => u.customerId)]).size + (d.pendingOrders ?? 0);
+    const { defaultMode, deliveryDay } = searchModeNow(d.run.runDate, { timezone: d.timezone, today: today ?? d.today }, new Date());
     return searchChoice.ask({
       verb: 'Re-plan',
-      defaultMode: d.searchModeDefault ?? defaultModeForDay(d.run.runDate, today ?? d.today ?? d.run.runDate),
+      defaultMode,
       stops: stops || null,
       capSec: d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT,
-      deliveryDay: d.run.runDate === (today ?? d.today),
+      deliveryDay,
       note: note ?? 'Locked and dispatched loads stay exactly as they are.',
     });
   }
@@ -423,8 +426,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
   // "Searching for the best plan - up to 20 min, stops early when it stops improving - 6 min so far".
   const progress = running && d.job ? searchProgressText(d.job, now, d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT) : null;
-  // How the plan in use was searched (Quick / Thorough, how long, why it stopped).
-  const searched = searchResultText(d.search ?? null);
+  // How the plan in use was searched (Quick / Thorough, how long, why it stopped); an alternative in
+  // use: its own search, after the recommended plan's (skeptic review of the long-search PR).
+  const searched = searchResultText(d.search ?? null, d.searchOption ?? null);
   // Replaced by a newer version: status SUPERSEDED, or supersededAt set (review F07).
   const superseded = isSupersededRun(d.run);
   // "Road km (3 legs estimated)" when some legs could not be routed on roads (review F18).

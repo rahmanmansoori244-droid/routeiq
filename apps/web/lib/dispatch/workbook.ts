@@ -22,7 +22,7 @@ import { KG_ROUNDING_TOL } from './weights';
 import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
-import { searchAssumptions, searchResultText } from './search-mode';
+import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption, type SearchReport } from './search-mode';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -407,10 +407,14 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
       .map(([k, v]) => `${k} ${v}`)
       .join(', ');
     kv('Loads by status', byStatus || '—');
-    // The search's own status code in plain words (never "ROUTING_PARTIAL_SUCCESS_...").
-    if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · searched ${s.solver.timeSec} s`);
-    // Quick / Thorough: how long the recommended plan was searched and why it stopped (never "optimal").
-    const how = searchResultText(s.solver?.search ?? d.search ?? null);
+    // The search's own status code in plain words (never "ROUTING_PARTIAL_SUCCESS_..."). The time is
+    // the option's optimizer time (its search, and the load re-check when that re-planned it), not its
+    // search: the next row says how it was searched (skeptic review of the long-search PR).
+    if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · optimizer time ${s.solver.timeSec} s`);
+    // Quick / Thorough: how the plan in use was searched and why it stopped (never "optimal"); an
+    // alternative in use: its own search, after the recommended plan's.
+    const searched = searchOfPlan(d);
+    const how = searchResultText(searched.report, searched.option);
     if (how) kv('Search time', how);
   }
 
@@ -969,11 +973,24 @@ export interface AssumptionConfig {
 }
 
 /**
+ * How the plan in use was searched: the search report (always the recommended plan's search) and,
+ * when an alternative is in use, that option with its own search limit - from the stored summary
+ * (the option applied), else the plan data. Skeptic review of the long-search PR: an alternative in
+ * use was described with the recommended plan's search.
+ */
+export function searchOfPlan(d: Pick<PlanDetail, 'search' | 'searchOption' | 'summary'>): { report: SearchReport | null; option: SearchOption | null } {
+  const solver = d.summary?.solver;
+  if (solver?.search) return { report: solver.search, option: searchOptionOf(solver.scenario, solver.limitSec) };
+  return { report: d.search ?? null, option: d.searchOption ?? null };
+}
+
+/**
  * The ASSUMPTIONS rows plus how the plan in use was searched (Quick / Thorough, how long, why it
  * stopped, what that means - search-mode.ts), when the plan has a search report.
  */
-export function withSearchAssumptions(d: Pick<PlanDetail, 'search' | 'summary'>, rows: Record<string, string>): Record<string, string> {
-  return { ...rows, ...searchAssumptions(d.summary?.solver?.search ?? d.search ?? null) };
+export function withSearchAssumptions(d: Pick<PlanDetail, 'search' | 'searchOption' | 'summary'>, rows: Record<string, string>): Record<string, string> {
+  const { report, option } = searchOfPlan(d);
+  return { ...rows, ...searchAssumptions(report, option) };
 }
 
 /**

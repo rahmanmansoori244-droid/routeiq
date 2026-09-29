@@ -478,6 +478,16 @@ found in 30 s (real80: 592 and 579 solutions without it, 537 and 534 with it; sy
 throttling the check inside it did not help, the call itself is the cost). The callback is called only for accepted solutions
 (16 a second on real80, 1-2 a second at 300 stops), so the stop check costs nothing measurable.
 
+**The progress points are a score, not money (skeptic review of the long-search PR).** The report keeps up to 12 points of
+the best search objective over time. That objective holds a large penalty (1,000 OMR or more on real days) for every stop the
+plan has not planned yet, so on a short day the first points are in the thousands: `nmwc_day(40)` with 2 trucks went
+7,145 → 1,128 while the stops left out went 7 → 1, and a 40-stop day that ends with every stop served (about 170 OMR)
+started at 7,226. The Excel sheet had called these figures "in the currency". Each point now also carries the number of stops
+not planned yet, counted in the callback on each improvement (the stops whose successor is themselves). Measured in-process,
+THOROUGH, 20 s searches, the callback's whole time with and without the count: 200 stops 0.125 s against 0.018 s over 390
+improvements (about 0.3 ms each); 350 stops 0.041 s against 0.005 s over 96 (about 0.4 ms each). That is under 0.6% of the
+search; QUICK has no callback at all.
+
 ### 10.3 What it buys: QUICK against THOROUGH, as production runs them
 
 All three options, worker pool, load re-check, the same cached matrices. THOROUGH with the 1,200 s cap and the chosen rule;

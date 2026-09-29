@@ -83,8 +83,13 @@ export interface DailySummary {
   distanceIsEstimated: boolean;
   distanceProvider: string;
   warnings: string[];
-  /** `search`: how the recommended plan was searched (Quick / Thorough); absent before search modes. */
-  solver: { engine: string; scenario: string; status: string; timeSec: number; search?: SearchReport } | null;
+  /**
+   * `search`: how the recommended plan was searched (Quick / Thorough); absent before search modes.
+   * `limitSec`: the option's own search limit - an alternative in use searched that long after the
+   * recommended plan's search, for its own goal (search-mode.ts, searchOptionOf). `timeSec`: the
+   * option's optimizer time (its search and, when it re-checked the plan, the load re-check).
+   */
+  solver: { engine: string; scenario: string; status: string; timeSec: number; limitSec?: number; search?: SearchReport } | null;
   /**
    * The applied plan's driver notes (planDrivers in load-state.ts; absent when none): the trips that
    * lost or changed the driver they had before it, and the hand-set drivers whose trip it does not

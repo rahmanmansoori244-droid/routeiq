@@ -83,6 +83,23 @@ export function defaultModeForDay(runDateIso: string, todayIso: string): SearchM
 }
 
 /**
+ * The OPTIMIZE / RE-PLAN confirmation's default and its "the plan is for today" flag, from the clock
+ * when the dispatcher presses the button - never from when the screen loaded. A day or plan screen
+ * left open across midnight does not reload by itself when nothing runs: from the loaded data it
+ * suggested Thorough on the delivery day, said the plan was for a later day and left out the "for
+ * today" warning (skeptic review of the long-search PR). `zone.timezone`: the company's (the day and
+ * plan data carry it); without it (older data) the loaded `today`, as before.
+ */
+export function searchModeNow(
+  runDateIso: string,
+  zone: { timezone?: string | null; today?: string | null },
+  now: Date,
+): { defaultMode: SearchMode; deliveryDay: boolean } {
+  const today = zone.timezone ? localDateIso(now, zoneOf(zone.timezone)) : (zone.today ?? runDateIso);
+  return { defaultMode: defaultModeForDay(runDateIso, today), deliveryDay: runDateIso === today };
+}
+
+/**
  * About how long a QUICK optimization of `nStops` stops takes in all: the recommended plan's
  * automatic search, the alternatives (half of it, in parallel) and the load re-check.
  */
@@ -172,16 +189,60 @@ export function searchPollMs(
 }
 
 /**
+ * The option in use when it is not the recommended plan (MIN_TRUCKS, MIN_DISTANCE). The search report
+ * stored with every option is the RECOMMENDED search's (the optimizer reports that one only). An
+ * alternative is searched after it, for its own goal, up to its own time limit (the option's
+ * time_limit_sec) and with no early stop - so the recommended plan's "searched 12 min, stopped when
+ * it stopped improving" is never its own (skeptic review of the long-search PR).
+ */
+export interface SearchOption {
+  name: string;
+  /** Its own search's time limit in seconds; null when not stored. */
+  limitSec?: number | null;
+}
+
+/** The option in use as a SearchOption; null for RECOMMENDED (its search is the report itself). */
+export function searchOptionOf(name: string | null | undefined, limitSec: number | null | undefined): SearchOption | null {
+  return name && name !== 'RECOMMENDED' ? { name, limitSec: limitSec ?? null } : null;
+}
+
+/** What an alternative searches for, in plain words. */
+const OPTION_GOAL: Record<string, string> = { MIN_TRUCKS: 'the fewest trucks', MIN_DISTANCE: 'the fewest km' };
+
+/** The recommended plan's search in a few words, for an alternative's line. */
+function recommendedSearchBrief(r: SearchReport): string {
+  const searched = fmtSearchTime(r.search_sec);
+  if (r.stop_reason === 'NO_PLAN') return `${modeName(r.mode)}: ${searched}, no plan found`;
+  if (r.mode !== 'THOROUGH') return `Quick: ${searched}, the automatic time for a day of this size`;
+  switch (r.stop_reason) {
+    case 'CONVERGED':
+      return `Thorough: ${searched} of up to ${fmtSearchTime(r.cap_sec)}; stopped when it stopped improving`;
+    case 'CAP':
+      return `Thorough: ${searched}, all the time allowed`;
+    case 'STOPPED':
+      return `Thorough: stopped early after ${searched} by a supervisor`;
+    default:
+      return `Thorough: ${searched}`;
+  }
+}
+
+/**
  * One line on how the applied plan was searched, for the plan screen, the Excel SUMMARY and the
  * ASSUMPTIONS sheet. Honest: how long it searched and why it stopped; never "optimal", no gap
- * (none is known).
+ * (none is known). `option`: the alternative in use (searchOptionOf) - its own search, after the
+ * recommended plan's.
  */
-export function searchResultText(r: SearchReport | null | undefined): string | null {
+export function searchResultText(r: SearchReport | null | undefined, option?: SearchOption | null): string | null {
   if (!r) return null;
   const searched = fmtSearchTime(r.search_sec);
   // Either mode: nothing was searched, or the search found no plan (skeptic review of the long-search PR).
   if (r.stop_reason === 'NOT_SEARCHED') {
     return `${modeName(r.mode)} search not run: no order could be planned with these trucks and hours, so there was nothing to search (see the unserved orders for why).`;
+  }
+  if (option) {
+    const goal = OPTION_GOAL[option.name] ? ` (${OPTION_GOAL[option.name]})` : '';
+    const upTo = option.limitSec && option.limitSec > 0 ? ` for up to ${fmtSearchTime(option.limitSec)}` : '';
+    return `The ${option.name.replace('_', ' ')} option is in use. It searched${upTo} for its own goal${goal}, after the recommended plan's search (${recommendedSearchBrief(r)}).`;
   }
   if (r.stop_reason === 'NO_PLAN') {
     const allowed = r.mode === 'THOROUGH' ? ` (up to ${fmtSearchTime(r.cap_sec)} allowed)` : '';
@@ -206,22 +267,29 @@ export function searchResultText(r: SearchReport | null | undefined): string | n
   }
 }
 
-/** The ASSUMPTIONS rows of how the plan was searched (the workbook). */
-export function searchAssumptions(r: SearchReport | null | undefined): Record<string, string> {
-  const line = searchResultText(r);
+/**
+ * The ASSUMPTIONS rows of how the plan was searched (the workbook). `option`: the alternative in use
+ * - its line, and no progress row (the points are the recommended plan's search).
+ */
+export function searchAssumptions(r: SearchReport | null | undefined, option?: SearchOption | null): Record<string, string> {
+  const line = searchResultText(r, option);
   if (!r || !line) return {};
-  // No plan was searched or found: "the best one the search found" would not be true.
-  if (r.stop_reason === 'NOT_SEARCHED' || r.stop_reason === 'NO_PLAN') return { 'Route search': line };
+  // No plan was searched or found: "the best one the search found" would not be true. An alternative
+  // in use has a plan of its own (searched after a recommended search that found none).
+  if (r.stop_reason === 'NOT_SEARCHED' || (r.stop_reason === 'NO_PLAN' && !option)) return { 'Route search': line };
   const out: Record<string, string> = {
     'Route search': line,
     'Route search - what it means':
       'The plan is the best one the search found in that time, not a proven best: no lower bound is computed, so how far it could still be from the best possible plan is not known.',
   };
   const pts = r.best_over_time ?? [];
-  if (r.mode === 'THOROUGH' && pts.length > 1) {
+  if (r.mode === 'THOROUGH' && pts.length > 1 && !option) {
+    // The search's own score, not money: it holds a large penalty for each stop the plan had not
+    // planned yet (1,000 OMR or more), so a short day's first points are in the thousands (skeptic
+    // review of the long-search PR). The optimizer counts those stops with each point.
     out['Route search - progress'] =
-      pts.map(([t, v]) => `${fmtSearchTime(t)}: ${v.toFixed(0)}`).join('; ') +
-      " (search score of the best plan so far, in the currency: the optimizer's own cost, before the final load re-check)";
+      pts.map(([t, v, left]) => `${fmtSearchTime(t)}: ${v.toFixed(0)}${left ? ` (${left} stop${left === 1 ? '' : 's'} not planned yet)` : ''}`).join('; ') +
+      " - the search's own score of the best plan so far, not money: the plan's cost and preferences plus a large penalty for every stop not planned yet, before the final load re-check.";
   }
   return out;
 }

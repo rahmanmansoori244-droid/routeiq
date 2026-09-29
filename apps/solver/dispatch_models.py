@@ -439,10 +439,11 @@ class SearchReport(BaseModel):
     # stops the search at that moment of the search.
     last_improvement_sec: float | None = None
     stall_sec: float | None = None
-    # THOROUGH: at most 12 (seconds into the search, search objective in OMR) points of the best plan
-    # found so far. The search objective is the route search's own cost (money, preferences and any
-    # unserved-stop penalty), before the final load re-check.
-    best_over_time: list[tuple[float, float]] = Field(default_factory=list)
+    # THOROUGH: at most 12 (seconds into the search, search objective, stops not planned yet) points of
+    # the best plan found so far. The search objective is the route search's own score, not money: its
+    # cost and preferences plus a large penalty (1,000 OMR or more on real days) for each stop not planned yet, before
+    # the final load re-check. Reports from before the count have two values per point.
+    best_over_time: list[tuple[float, float, int] | tuple[float, float]] = Field(default_factory=list)
     solutions: int | None = None
 
 

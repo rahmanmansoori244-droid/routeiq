@@ -205,12 +205,38 @@ def test_stall_rule_env(monkeypatch):
 
 def test_report_keeps_at_most_twelve_points_first_and_last():
     w = ds._SearchWatch(routing=None, rule=ds.StallRule(1, 1, 0), flag=None)
-    w.points = [(float(i), 10_000_000 - i * 1000) for i in range(200)]
+    w.points = [(float(i), 10_000_000 - i * 1000, max(0, 3 - i)) for i in range(200)]
     w.last = 199.0
     rep = w.report()
     assert 2 <= len(rep["points"]) <= 12
-    assert rep["points"][0] == (0.0, 100.0) and rep["points"][-1] == (199.0, round((10_000_000 - 199_000) / 1e5, 2))
+    assert rep["points"][0] == (0.0, 100.0, 3) and rep["points"][-1] == (199.0, round((10_000_000 - 199_000) / 1e5, 2), 0)
     assert [p[0] for p in rep["points"]] == sorted(p[0] for p in rep["points"])
+
+
+@pytest.mark.parametrize("fleet", ["short", "roomy"])
+def test_progress_points_count_the_stops_not_planned_yet(fleet, monkeypatch):
+    """Skeptic review of the long-search PR: the points are the search's own score, which includes a
+    large penalty (1,000 OMR or more) for each stop not planned yet, yet the Excel sheet called them
+    money. Each point now carries how many stops the best plan so far had not planned, so the sheet
+    can say why an early score is in the thousands. A short fleet ends with stops left out; a roomy
+    one plans every stop by the end."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.setenv("THOROUGH_MAX_SEC", "60")
+    monkeypatch.setenv("THOROUGH_STALL_SEC", "1")
+    monkeypatch.setenv("THOROUGH_STALL_SHARE", "0")
+    stops, trucks = nmwc_day(30 if fleet == "short" else 12)
+    r = req(stops, trucks[:1] if fleet == "short" else trucks, time_limit_sec=2, search_mode="THOROUGH")
+    resp = optimize_dispatch(r)
+    pts = resp.search.best_over_time
+    assert pts and all(len(p) == 3 and isinstance(p[2], int) and p[2] >= 0 for p in pts), pts
+    # The search's last best plan: the count is that plan's (the load re-check may change it later).
+    if fleet == "short":
+        assert pts[-1][2] > 0 and rec(resp).unserved, pts
+        assert pts[-1][1] >= 1000 * pts[-1][2], pts  # the score holds the penalties: not money
+    else:
+        assert pts[-1][2] == 0, pts
+    # A report stored before the count existed still validates.
+    assert SearchReport.model_validate({**resp.search.model_dump(mode="json"), "best_over_time": [[0.5, 900.12]]}).best_over_time == [(0.5, 900.12)]
 
 
 def test_report_of_a_search_that_saw_no_plan_claims_no_stall():
@@ -374,6 +400,47 @@ def test_stop_request_returns_the_best_plan_found_so_far(parallel, monkeypatch):
     assert sc.status == "OPTIMIZED"
     assert any("stopped early" in w for w in sc.warnings), sc.warnings
     assert_reconciled(r, sc)
+
+
+@pytest.mark.parametrize("case", ["thorough", "stopped", "quick"])
+def test_load_recheck_time_per_mode(case, monkeypatch):
+    """Skeptic review of the long-search PR: THOROUGH's longer load re-check (each CP-SAT solve up to
+    the tail's repack cap: 30 s at the 20-min cap) and QUICK's re-check after a stop had no test - a
+    _run_scenarios that dropped either still passed. The stage is spied on: THOROUGH passes the tail's
+    cap, a THOROUGH stopped early QUICK's own cap, and QUICK passes none (the stage then uses QUICK's
+    min(15, max(3, limit / 2)), exactly as before)."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.delenv("THOROUGH_MAX_SEC", raising=False)
+    monkeypatch.setenv("THOROUGH_STALL_SEC", "1")
+    monkeypatch.setenv("THOROUGH_STALL_SHARE", "0")
+    seen: list = []
+    real = ds._post_solve
+
+    def spy(*a, **kw):
+        seen.append(kw.get("repack_cap"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(ds, "_post_solve", spy)
+    stops, trucks = nmwc_day(10)
+    t = 2
+    r = req(stops, trucks, time_limit_sec=t, search_mode="QUICK" if case == "quick" else "THOROUGH")
+    control = SolveControl()
+    if case == "stopped":
+        control.request_stop()
+    resp = optimize_dispatch(r, control=control)
+    if case == "thorough":
+        want = ds.thorough_tail(t, 0, ds.THOROUGH_MAX_SEC).repack_cap
+        assert want == 30 and want > ds._repack_cap_sec(t, False)  # the longer re-check at the 20-min cap
+        assert resp.search.stop_reason == "CONVERGED"
+    elif case == "stopped":
+        want = ds._repack_cap_sec(t, False)
+        assert resp.search.stop_reason == "STOPPED"
+    else:
+        want = None
+        assert resp.search.stop_reason == "TIME_LIMIT"
+    assert seen == [want], (case, seen)
+    assert rec(resp).status == "OPTIMIZED"
+    assert_reconciled(r, rec(resp))
 
 
 def test_stop_is_ignored_by_a_quick_solve(monkeypatch):

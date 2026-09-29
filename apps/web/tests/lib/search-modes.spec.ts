@@ -19,6 +19,8 @@ import {
   searchAssumptions,
   searchChoices,
   searchLeadMin,
+  searchModeNow,
+  searchOptionOf,
   searchPollMs,
   searchProgressText,
   searchResultText,
@@ -59,6 +61,22 @@ describe('the mode by day (company timezone)', () => {
   it('the screens apply the same rule from the company today they show', () => {
     expect(defaultModeForDay('2026-09-30', '2026-09-29')).toBe('THOROUGH');
     expect(defaultModeForDay('2026-09-29', '2026-09-29')).toBe('QUICK');
+  });
+
+  it('the confirmation reads the clock when the button is pressed, not when the screen loaded (skeptic review: a screen left open across midnight)', () => {
+    // Loaded at 23:50 in Muscat on the 29th for the 30th; pressed at 07:30 on the 30th without a reload.
+    const loaded = { timezone: MUSCAT, today: '2026-09-29' };
+    const evening = new Date('2026-09-29T19:50:00Z');
+    const morning = new Date('2026-09-30T03:30:00Z');
+    expect(searchModeNow('2026-09-30', loaded, evening)).toEqual({ defaultMode: 'THOROUGH', deliveryDay: false });
+    expect(searchModeNow('2026-09-30', loaded, morning)).toEqual({ defaultMode: 'QUICK', deliveryDay: true });
+    expect(searchModeNow('2026-09-30', loaded, morning).defaultMode).toBe(defaultSearchMode('2026-09-30', MUSCAT, morning));
+    // The company's timezone, not the browser's: 20:30 UTC on the 29th is the 30th in Muscat.
+    expect(searchModeNow('2026-09-30', { timezone: MUSCAT }, new Date('2026-09-29T20:30:00Z'))).toEqual({ defaultMode: 'QUICK', deliveryDay: true });
+    expect(searchModeNow('2026-09-30', { timezone: 'UTC' }, new Date('2026-09-29T20:30:00Z'))).toEqual({ defaultMode: 'THOROUGH', deliveryDay: false });
+    // Data without a timezone (an older payload): the loaded today, as before.
+    expect(searchModeNow('2026-09-30', { today: '2026-09-29' }, morning)).toEqual({ defaultMode: 'THOROUGH', deliveryDay: false });
+    expect(searchModeNow('2026-09-30', {}, morning)).toEqual({ defaultMode: 'QUICK', deliveryDay: true });
   });
 
   it("the dispatcher's choice wins on any day; a start that names none searches QUICK, as before", () => {
@@ -214,7 +232,7 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     const rows = searchAssumptions(report({}));
     expect(Object.keys(rows)).toEqual(['Route search', 'Route search - what it means', 'Route search - progress']);
     expect(rows['Route search - what it means']).toMatch(/not a proven best: no lower bound is computed/);
-    expect(rows['Route search - progress']).toMatch(/^0 s: 612; 2 min: 540; 7 min: 525 \(search score/);
+    expect(rows['Route search - progress']).toMatch(/^0 s: 612; 2 min: 540; 7 min: 525 - the search's own score/);
     expect(searchAssumptions(null)).toEqual({});
     expect(Object.keys(searchAssumptions(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', best_over_time: [] })))).toEqual(['Route search', 'Route search - what it means']);
     for (const r of ['CONVERGED', 'CAP', 'STOPPED', 'TIME_LIMIT', 'NOT_SEARCHED', 'NO_PLAN'] as const) {
@@ -223,6 +241,58 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
         expect(text).not.toMatch(/\boptimal\b|\boptimum\b|is the best possible/i);
       }
     }
+  });
+
+  it('the progress row is a score, not money: each point says how many stops were not planned yet (skeptic review)', () => {
+    // A short fleet: the first plans leave stops out, each costing the score a large penalty.
+    const pts: [number, number, number][] = [
+      [0, 28069.57, 10],
+      [0.4, 25064.26, 7],
+      [2.2, 23111.35, 1],
+      [65, 193.14, 0],
+    ];
+    const row = searchAssumptions(report({ best_over_time: pts }))['Route search - progress'];
+    expect(row).toBe(
+      "0 s: 28070 (10 stops not planned yet); 0 s: 25064 (7 stops not planned yet); 2 s: 23111 (1 stop not planned yet); 1 min: 193 - the search's own score of the best plan so far, not money: the plan's cost and preferences plus a large penalty for every stop not planned yet, before the final load re-check.",
+    );
+    expect(row).not.toMatch(/in the currency|OMR/);
+    // A report stored before the count existed: the points alone, with the same explanation.
+    expect(searchAssumptions(report({ best_over_time: [[0, 612.4], [120, 540.2]] }))['Route search - progress']).toMatch(
+      /^0 s: 612; 2 min: 540 - the search's own score of the best plan so far, not money: .* a large penalty for every stop not planned yet/,
+    );
+  });
+
+  it('an alternative in use: its own search after the recommended one, never the recommended search as its own (skeptic review)', () => {
+    // RECOMMENDED converged after 12 min; MIN_TRUCKS then searched its own 60 s limit, with no early stop.
+    const rec = report({ search_sec: 720, last_improvement_sec: 360, stall_sec: 360 });
+    const minTrucks = searchOptionOf('MIN_TRUCKS', 60)!;
+    expect(minTrucks).toEqual({ name: 'MIN_TRUCKS', limitSec: 60 });
+    expect(searchOptionOf('RECOMMENDED', 985)).toBeNull();
+    expect(searchOptionOf(null, 60)).toBeNull();
+    const line = searchResultText(rec, minTrucks)!;
+    expect(line).toBe(
+      "The MIN TRUCKS option is in use. It searched for up to 1 min for its own goal (the fewest trucks), after the recommended plan's search (Thorough: 12 min of up to 20 min; stopped when it stopped improving).",
+    );
+    // The recommended plan's stop and last improvement are never stated as this option's.
+    expect(line).not.toMatch(/^Thorough search|best plan was last improved|no better plan for/);
+    expect(searchResultText(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', search_sec: 20.4, best_over_time: [] }), { name: 'MIN_DISTANCE', limitSec: 10 })).toBe(
+      "The MIN DISTANCE option is in use. It searched for up to 10 s for its own goal (the fewest km), after the recommended plan's search (Quick: 20 s, the automatic time for a day of this size).",
+    );
+    expect(searchResultText(report({ stop_reason: 'CAP', search_sec: 1110 }), { name: 'MIN_TRUCKS', limitSec: null })).toBe(
+      "The MIN TRUCKS option is in use. It searched for its own goal (the fewest trucks), after the recommended plan's search (Thorough: 19 min, all the time allowed).",
+    );
+    // The recommended search found no plan: the option searched after it all the same.
+    expect(searchResultText(report({ search_sec: 1.1, stop_reason: 'NO_PLAN', best_over_time: [] }), minTrucks)).toBe(
+      "The MIN TRUCKS option is in use. It searched for up to 1 min for its own goal (the fewest trucks), after the recommended plan's search (Thorough: 1 s, no plan found).",
+    );
+    // Nothing searched at all: the same for every option.
+    expect(searchResultText(report({ search_sec: 0, stop_reason: 'NOT_SEARCHED' }), minTrucks)).toBe(searchResultText(report({ search_sec: 0, stop_reason: 'NOT_SEARCHED' })));
+    // The ASSUMPTIONS rows: the option's line and what it means; the recommended plan's progress is left out.
+    const rows = searchAssumptions(rec, minTrucks);
+    expect(Object.keys(rows)).toEqual(['Route search', 'Route search - what it means']);
+    expect(rows['Route search']).toBe(line);
+    expect(Object.keys(searchAssumptions(report({ search_sec: 1.1, stop_reason: 'NO_PLAN' }), minTrucks))).toEqual(['Route search', 'Route search - what it means']);
+    for (const text of [line, ...Object.values(rows)]) expect(text).not.toMatch(/\boptimal\b|\boptimum\b|is the best possible/i);
   });
 
   it('the job message of a queued start', () => {

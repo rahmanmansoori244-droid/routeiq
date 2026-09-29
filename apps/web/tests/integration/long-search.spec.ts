@@ -7,7 +7,9 @@
  *  and heartbeat, the janitor leaves it alone -> the plan is saved with how it was searched (mode,
  *  time, why it stopped) on the plan, the job message, the summary and the Excel ASSUMPTIONS ->
  *  a Thorough plan for today times its new loads from the end of its search (review of the
- *  long-search PR) -> a Quick re-plan searches the automatic time.
+ *  long-search PR) -> a Quick re-plan searches the automatic time -> "Use instead" MIN_TRUCKS says
+ *  that option's own search, after the recommended plan's, on the plan and in the Excel (skeptic
+ *  review; on the Thorough version too when its cap left time for the alternatives).
  *
  * Runs only when the web app's THOROUGH_MAX_SEC is small (CI sets 60 s): with the real 20 minutes
  * it would take 20 minutes. Requires RATE_LIMITS_DISABLED=1 like the other suites.
@@ -21,6 +23,7 @@ let depotId = '';
 let deliveryDate = '';
 let capSec = 1200;
 let runId = '';
+let quickRunId = '';
 
 function isoPlus(days: number) {
   const d = new Date(Date.now() + 4 * 3600_000); // Muscat
@@ -32,6 +35,52 @@ const j = (body: unknown) => ({ method: 'POST', headers: { 'content-type': 'appl
 const json = async <T = any>(res: Response): Promise<T> => (await res.json()) as T;
 const planOf = async (id: string) => (await json(await fetchWith(t.cookieJar, `${BASE}/api/runs/${id}/plan`))).data;
 const running = (p: any) => p.run.status === 'OPTIMIZING' || p.job?.status === 'RUNNING' || p.job?.status === 'QUEUED';
+
+/**
+ * "Use instead" MIN_TRUCKS on version `id`, then back to RECOMMENDED: the plan data, the stored
+ * summary and the Excel describe the option's own search, after the recommended plan's (`mode`), and
+ * leave out the recommended plan's progress points (skeptic review of the long-search PR). False when
+ * the version has no MIN_TRUCKS plan to apply.
+ */
+async function alternativeInUse(id: string, mode: 'Thorough' | 'Quick'): Promise<boolean> {
+  const before = await planOf(id);
+  const min = before.scenarios.find((s: any) => s.name === 'MIN_TRUCKS' && s.status === 'OPTIMIZED');
+  const rec = before.scenarios.find((s: any) => s.name === 'RECOMMENDED');
+  if (!min || !rec) return false;
+  expect(before.searchOption).toBeNull();
+  const use = async (scenarioId: string) => expect((await fetchWith(t.cookieJar, `${BASE}/api/runs/${id}/choose-scenario`, j({ scenarioId }))).status).toBe(200);
+  await use(min.id);
+  try {
+    const p = await planOf(id);
+    expect(p.run.chosenScenario).toBe('MIN_TRUCKS');
+    expect(p.search).toEqual(before.search); // still the recommended plan's report ...
+    expect(p.searchOption).toMatchObject({ name: 'MIN_TRUCKS' }); // ... with the option's own search next to it
+    expect(p.searchOption.limitSec).toBeGreaterThan(0);
+    const run = await prisma.runPlan.findUniqueOrThrow({ where: { id } });
+    expect((run.summaryJson as any).solver).toMatchObject({ scenario: 'MIN_TRUCKS', limitSec: p.searchOption.limitSec });
+    const x = await fetchWith(t.cookieJar, `${BASE}/api/runs/${id}/export/excel`);
+    expect(x.status).toBe(200);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Buffer.from(await x.arrayBuffer()) as never);
+    const rows = (name: string) => {
+      const out: string[] = [];
+      wb.getWorksheet(name)!.eachRow((row) => out.push(row.values ? String((row.values as unknown[]).slice(1).join(' | ')) : ''));
+      return out;
+    };
+    const line = new RegExp(
+      `^The MIN TRUCKS option is in use\\. It searched for up to \\d+ (s|min) for its own goal \\(the fewest trucks\\), after the recommended plan's search \\(${mode}: `,
+    );
+    expect(rows('SUMMARY').find((v) => v.startsWith('Search time | '))?.replace('Search time | ', '')).toMatch(line);
+    expect(rows('SUMMARY').find((v) => v.startsWith('Route search | '))).toMatch(/MIN_TRUCKS option · optimizer time /);
+    const assumptions = rows('ASSUMPTIONS');
+    expect(assumptions.find((v) => v.startsWith('Route search | '))?.replace('Route search | ', '')).toMatch(line);
+    expect(assumptions.some((v) => v.startsWith('Route search - progress'))).toBe(false);
+  } finally {
+    await use(rec.id); // back to RECOMMENDED
+  }
+  expect((await planOf(id)).searchOption).toBeNull();
+  return true;
+}
 
 async function callJanitor() {
   const tok = process.env.JANITOR_TOKEN || process.env.SOLVER_TOKEN;
@@ -159,7 +208,19 @@ describe('long searches end to end', () => {
     wb.getWorksheet('ASSUMPTIONS')!.eachRow((row) => values.push(row.values ? String((row.values as unknown[]).slice(1).join(' | ')) : ''));
     expect(values.some((v) => v.startsWith('Route search | Thorough search: searched'))).toBe(true);
     expect(values.some((v) => v.startsWith('Route search - what it means | ') && v.includes('not a proven best'))).toBe(true);
+    // The progress is a score, not money (skeptic review): never "in the currency".
+    const progress = values.find((v) => v.startsWith('Route search - progress | '));
+    if (progress) expect(progress).toMatch(/not money: .* a large penalty for every stop not planned yet/);
+    expect(values.some((v) => v.includes('in the currency'))).toBe(false);
+    // Each point counts the stops the plan had not planned yet (the optimizer sends three values).
+    for (const pt of p.search.best_over_time) expect(pt).toHaveLength(3);
   }, 600_000);
+
+  it('THOROUGH: an alternative in use says how IT was searched, not the recommended plan (skeptic review of the long-search PR)', async (ctx) => {
+    if (!runId) ctx.skip();
+    // A cap of a minute (CI) leaves a small day no time for the alternatives: nothing to apply then.
+    if (!(await alternativeInUse(runId, 'Thorough'))) ctx.skip();
+  }, 120_000);
 
   it('THOROUGH on the delivery day: no new load leaves before the plan exists + the turnaround (review of the long-search PR)', async (ctx) => {
     if (capSec > 120) ctx.skip(); // the web app searches up to its real 20 minutes: not in a test
@@ -239,5 +300,11 @@ describe('long searches end to end', () => {
     expect(p.run.status).toBe('READY');
     expect(p.search).toMatchObject({ mode: 'QUICK', stop_reason: 'TIME_LIMIT' });
     expect(p.job.searchMode).toBe('QUICK');
+    quickRunId = next;
   }, 300_000);
+
+  it('QUICK: an alternative in use says how IT was searched, not the recommended plan (skeptic review of the long-search PR)', async (ctx) => {
+    if (!quickRunId) ctx.skip();
+    expect(await alternativeInUse(quickRunId, 'Quick')).toBe(true); // QUICK always searches the alternatives
+  }, 120_000);
 });

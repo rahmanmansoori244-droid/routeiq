@@ -288,8 +288,8 @@ export interface StartOptions extends OptimizeOverrides {
 
 /**
  * The mode a start searches with: the one asked for, else QUICK. The owner's rule (Thorough before
- * the delivery day, Quick on it) is the screens' pre-selected choice (searchModeDefault on the day
- * and plan data, search-mode.ts); an API caller that sends no mode - a script, an older screen -
+ * the delivery day, Quick on it) is the screens' pre-selected choice (searchModeNow at the press,
+ * search-mode.ts); an API caller that sends no mode - a script, an older screen -
  * keeps the QUICK search it always had.
  */
 export function requestedSearchMode(requested: SearchMode | null | undefined): SearchMode {

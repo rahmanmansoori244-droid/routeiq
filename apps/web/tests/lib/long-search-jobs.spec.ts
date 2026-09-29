@@ -33,14 +33,18 @@ vi.mock('@/lib/jobs/dispatch-job', async (orig) => {
     }),
   };
 });
-/** What the fake optimizer was sent (the real job's call), and how it answers. */
-const solverFake = vi.hoisted(() => ({ sent: [] as Record<string, any>[] }));
+/**
+ * What the fake optimizer was sent (the real job's call), and how it answers: with `hold` set, the
+ * call stays open until that promise settles (a long search in progress).
+ */
+const solverFake = vi.hoisted(() => ({ sent: [] as Record<string, any>[], hold: null as Promise<void> | null }));
 vi.mock('@/lib/solver-client', async (orig) => {
   const real = await orig<typeof import('@/lib/solver-client')>();
   return {
     ...real,
     callDispatchSolver: vi.fn(async (req: Record<string, any>) => {
       solverFake.sent.push(JSON.parse(JSON.stringify(req)));
+      if (solverFake.hold) await solverFake.hold;
       throw new real.SolverError('fake optimizer: no plan in this test', 0, null);
     }),
   };
@@ -131,6 +135,7 @@ function seed(runDate: string, job?: { status: string; startedAt?: Date | null; 
 beforeEach(() => {
   scheduled.args = [];
   solverFake.sent = [];
+  solverFake.hold = null;
   build.runDateIso = null;
   activeDispatchJobs.clear();
   // These tests state the default 20-minute cap. CI runs the unit suite with THOROUGH_MAX_SEC=60 (set
@@ -390,6 +395,96 @@ describe('shutdown: the jobs of a stopping process fail at once, retryable', () 
     expect(tables.auditLog.map((a) => a.action)).toEqual(['OPTIMIZE_FAILED']);
     expect(await failJobsForShutdown()).toBe(1); // still registered here; a second pass changes nothing
     expect(tables.auditLog).toHaveLength(1);
+  });
+
+  // Skeptic review of the long-search PR: the tests above fill the process's job list by hand, so a job
+  // that never registered itself still passed them all. These drive the REAL scheduleDispatchOptimize.
+  const g = globalThis as unknown as { __routeiqInflight: Map<string, Promise<unknown>> };
+  async function until(ok: () => boolean) {
+    for (let i = 0; i < 400 && !ok(); i++) await new Promise((r) => setTimeout(r, 5));
+    expect(ok()).toBe(true);
+  }
+  /** A THOROUGH job of plan P for tomorrow, started for real, its optimizer call held open. */
+  async function searching() {
+    seed('2026-09-30');
+    let finish!: () => void;
+    solverFake.hold = new Promise<void>((r) => (finish = r));
+    const res = await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    expect(res.body).toMatchObject({ queued: false });
+    const job = scheduled.args[0];
+    expect(scheduled.real!(job)).toBe(true);
+    await until(() => solverFake.sent.length === 1); // RUNNING: the optimizer call is open
+    expect(row('runJob', job.runJobId).status).toBe('RUNNING');
+    return { job, finish };
+  }
+  /** The call ends (the connection closed with the process): the job leaves the process's list. */
+  async function ended(finish: () => void, runJobId: string) {
+    finish();
+    await g.__routeiqInflight.get('P');
+    await until(() => activeDispatchJobs.size === 0);
+    expect(row('runJob', runJobId)).toMatchObject({ status: 'FAILED', message: SHUTDOWN_MESSAGE }); // failed once, not again
+    expect(tables.auditLog.filter((a) => a.action === 'OPTIMIZE_FAILED')).toHaveLength(1);
+    expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  }
+
+  it('a real job registers itself while it searches: shutdown fails it, and when it ends the process holds nothing', async () => {
+    const { job, finish } = await searching();
+    expect([...activeDispatchJobs.keys()]).toEqual([job.runJobId]);
+    expect(await failJobsForShutdown()).toBe(1);
+    expect(row('runJob', job.runJobId)).toMatchObject({ status: 'FAILED', message: SHUTDOWN_MESSAGE });
+    expect(row('runPlan', 'P').status).toBe('FAILED');
+    await ended(finish, job.runJobId);
+  });
+
+  it('a real job waiting for a solver slot is registered too: shutdown fails it, and it never starts afterwards', async () => {
+    seed('2026-09-30');
+    // Another company's THOROUGH solve holds the slot: this start waits in the queue.
+    const blocker = solveAdmission.reserve('OTHER', 'x', 'THOROUGH');
+    try {
+      const res = await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: 'THOROUGH' });
+      expect(res.body).toMatchObject({ queued: true });
+      const job = scheduled.args[0];
+      scheduled.real!(job);
+      await until(() => activeDispatchJobs.has(job.runJobId));
+      expect(row('runJob', job.runJobId).status).toBe('QUEUED');
+      expect(await failJobsForShutdown()).toBe(1);
+      expect(row('runJob', job.runJobId)).toMatchObject({ status: 'FAILED', message: SHUTDOWN_MESSAGE });
+      expect(row('runPlan', 'P').status).toBe('FAILED');
+      // The slot frees: the failed job does not start, and leaves the process.
+      if (blocker.ok) blocker.ticket.release();
+      await ended(() => undefined, job.runJobId);
+      expect(solverFake.sent).toHaveLength(0);
+    } finally {
+      if (blocker.ok) blocker.ticket.release();
+    }
+  });
+
+  it('instrumentation.ts installs the handler in the Node.js server: a SIGTERM fails the running job', async () => {
+    vi.doMock('@/sentry.server.config', () => ({}));
+    vi.doMock('@/lib/startup-checks', () => ({ configProblems: () => [] }));
+    vi.doMock('@/lib/jobs/janitor-loop', () => ({ startJanitor: vi.fn() }));
+    vi.stubEnv('NEXT_RUNTIME', 'nodejs');
+    vi.stubEnv('NEXT_MANUAL_SIG_HANDLE', ''); // Next.js exits by itself here: the handler must not exit
+    (globalThis as { __routeiqShutdownHandler?: boolean }).__routeiqShutdownHandler = undefined;
+    const before = { term: process.listeners('SIGTERM'), int: process.listeners('SIGINT') };
+    const { register } = await import('@/instrumentation');
+    await register();
+    const added = (sig: 'SIGTERM' | 'SIGINT') => process.listeners(sig).filter((l) => !before[sig === 'SIGTERM' ? 'term' : 'int'].includes(l));
+    try {
+      expect(added('SIGTERM')).toHaveLength(1);
+      expect(added('SIGINT')).toHaveLength(1);
+      const { job, finish } = await searching();
+      process.emit('SIGTERM', 'SIGTERM');
+      await until(() => row('runJob', job.runJobId).status === 'FAILED');
+      expect(row('runJob', job.runJobId).message).toBe(SHUTDOWN_MESSAGE);
+      expect(row('runPlan', 'P').status).toBe('FAILED');
+      await ended(finish, job.runJobId);
+    } finally {
+      for (const sig of ['SIGTERM', 'SIGINT'] as const) for (const l of added(sig)) process.removeListener(sig, l as never);
+      vi.doUnmock('@/sentry.server.config');
+      vi.doUnmock('@/lib/startup-checks');
+      vi.doUnmock('@/lib/jobs/janitor-loop');
+    }
   });
 
   it('with NEXT_MANUAL_SIG_HANDLE it owns the exit: the jobs first, then exit(0)', async () => {

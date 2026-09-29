@@ -17,7 +17,7 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
-import { defaultModeForDay, optimizeStartedText, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
+import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
@@ -55,8 +55,13 @@ interface Day {
   tomorrow: string;
   /** Thorough's cap in seconds (THOROUGH_MAX_SEC). */
   thoroughMaxSec?: number;
-  /** The OPTIMIZE / RE-PLAN choice pre-selected: THOROUGH before the delivery day, QUICK on it. */
+  /**
+   * The OPTIMIZE / RE-PLAN choice pre-selected when the day was read: THOROUGH before the delivery
+   * day, QUICK on it. The confirmation works it out again from the clock (searchModeNow, `timezone`).
+   */
   searchModeDefault?: 'QUICK' | 'THOROUGH';
+  /** The company's timezone (tenant settings). */
+  timezone?: string;
   cutoff: string;
   depots: { id: string; code: string; name: string; lat: number; lng: number }[];
   depot: { id: string; code: string; name: string; lat: number; lng: number } | null;
@@ -316,15 +321,18 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     // Orders brought forward from earlier days are added like late orders (PR9).
     const reason = day.pending.late || day.pending.carried ? 'LATE_ORDER' : 'REOPTIMIZE';
     // Quick or Thorough (owner decision 29 Sep 2026): Thorough is suggested for a plan made before
-    // its delivery day, Quick on the day itself. Cancel starts nothing.
+    // its delivery day, Quick on the day itself - by the clock at the press, not when the day was
+    // loaded (a screen left open across midnight; skeptic review of the long-search PR). Cancel
+    // starts nothing.
     const capSec = day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
     const stops = day.orders.customers || null;
+    const { defaultMode, deliveryDay } = searchModeNow(day.date, { timezone: day.timezone, today: day.today }, new Date());
     const searchMode = await searchChoice.ask({
       verb: replanning ? 'Re-plan' : 'Optimize',
-      defaultMode: day.searchModeDefault ?? defaultModeForDay(day.date, day.today),
+      defaultMode,
       stops,
       capSec,
-      deliveryDay: day.date === day.today,
+      deliveryDay,
       note: replanning ? 'Locked and dispatched loads stay exactly as they are.' : undefined,
     });
     if (!searchMode) return;

@@ -11,7 +11,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ExcelJS from 'exceljs';
-import { resetDb, tables } from './fake-plan-db';
+import { resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -35,8 +35,10 @@ import {
   type OptionFacts,
 } from '@/lib/dispatch/plan-options';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
-import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook } from '@/lib/dispatch/workbook';
+import { getPlanDetail, type PlanDetail } from '@/lib/dispatch/plan-detail';
+import { buildDispatchWorkbook, withSearchAssumptions } from '@/lib/dispatch/workbook';
+import { chooseScenario } from '@/lib/dispatch/plan-service';
+import { searchResultText } from '@/lib/dispatch/search-mode';
 
 const T = 'tA';
 const DAY = new Date('2026-09-27T00:00:00Z');
@@ -312,5 +314,75 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     const texts: string[] = [];
     wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
     expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved');
+  });
+});
+
+describe('an alternative in use says how IT was searched (skeptic review of the long-search PR)', () => {
+  // The response's search report, stored with every option (persistDispatchResult): always the
+  // recommended plan's search - here THOROUGH, stopped after 12 min when it stopped improving.
+  const SEARCH = {
+    mode: 'THOROUGH', cap_sec: 1200, limit_sec: 985, search_sec: 720, used_sec: 800, stop_reason: 'CONVERGED', last_improvement_sec: 360, stall_sec: 360,
+    best_over_time: [[0.4, 612.4, 0], [360, 525.3, 0]], solutions: 9000,
+  };
+  const REC_LINE = 'Thorough search: searched 12 min (up to 20 min allowed); stopped when it stopped improving (no better plan for 6 min). The best plan was last improved after 6 min.';
+  const MIN_LINE =
+    "The MIN TRUCKS option is in use. It searched for up to 1 min for its own goal (the fewest trucks), after the recommended plan's search (Thorough: 12 min of up to 20 min; stopped when it stopped improving).";
+  function seedSearched() {
+    seed();
+    Object.assign(tables.scenarioResult[0].detailsJson, { search: SEARCH, time_limit_sec: 985, solver_time_sec: 760 });
+    // MIN_TRUCKS searched its own 60 s limit after it (no early stop), then the load re-check: 75 s.
+    Object.assign(tables.scenarioResult[1].detailsJson, { search: SEARCH, time_limit_sec: 60, solver_time_sec: 75 });
+  }
+  async function sheets(d: PlanDetail) {
+    const buf = await buildDispatchWorkbook(d, {
+      tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: withSearchAssumptions(d, {}),
+    });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const rowsOf = (name: string) => {
+      const out: string[][] = [];
+      wb.getWorksheet(name)!.eachRow((r) => out.push([1, 2, 3].map((c) => r.getCell(c).text)));
+      return out;
+    };
+    return { summary: rowsOf('SUMMARY'), assumptions: rowsOf('ASSUMPTIONS') };
+  }
+
+  it('RECOMMENDED in use: its own search, with the progress', async () => {
+    seedSearched();
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.searchOption).toBeNull();
+    expect(searchResultText(d.search, d.searchOption)).toBe(REC_LINE);
+    const { assumptions } = await sheets(d);
+    expect(assumptions.find((r) => r[0] === 'Route search')?.[1]).toBe(REC_LINE);
+    expect(assumptions.some((r) => r[0] === 'Route search - progress')).toBe(true);
+  });
+
+  it('"Use instead" MIN_TRUCKS: the plan screen, the stored summary and the Excel give its own search, after the recommended one', async () => {
+    seedSearched();
+    await chooseScenario(T, 'P', 'sc2', 'u1');
+    // The summary keeps the option's own search limit next to the report.
+    expect(row('runPlan', 'P').summaryJson.solver).toMatchObject({ scenario: 'MIN_TRUCKS', timeSec: 75, limitSec: 60, search: { stop_reason: 'CONVERGED', search_sec: 720 } });
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.run.chosenScenario).toBe('MIN_TRUCKS');
+    expect(d.searchOption).toEqual({ name: 'MIN_TRUCKS', limitSec: 60 });
+    // The plan screen's line (plan-view.tsx: searchResultText(d.search, d.searchOption)).
+    expect(searchResultText(d.search, d.searchOption)).toBe(MIN_LINE);
+    const { summary, assumptions } = await sheets(d);
+    // SUMMARY: the option's optimizer time is not called its search, and the search line is its own.
+    expect(summary.find((r) => r[0] === 'Route search')?.[2]).toBe('MIN_TRUCKS option · optimizer time 75 s');
+    expect(summary.find((r) => r[0] === 'Search time')?.[1]).toBe(MIN_LINE);
+    // ASSUMPTIONS: the same line; the recommended plan's progress is not shown as this option's.
+    expect(assumptions.find((r) => r[0] === 'Route search')?.[1]).toBe(MIN_LINE);
+    expect(assumptions.some((r) => r[0] === 'Route search - progress')).toBe(false);
+    for (const r of [...summary, ...assumptions]) expect(r.join(' ')).not.toContain(REC_LINE);
+  });
+
+  it('a summary saved before the option limit was kept: its own search without a time', async () => {
+    seedSearched();
+    await chooseScenario(T, 'P', 'sc2', 'u1');
+    delete row('runPlan', 'P').summaryJson.solver.limitSec;
+    const d = (await getPlanDetail(T, 'P'))!;
+    const { summary } = await sheets(d);
+    expect(summary.find((r) => r[0] === 'Search time')?.[1]).toMatch(/^The MIN TRUCKS option is in use\. It searched for its own goal \(the fewest trucks\), after the recommended plan's search/);
   });
 });

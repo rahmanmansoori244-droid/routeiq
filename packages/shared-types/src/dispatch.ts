@@ -149,8 +149,12 @@ export interface SearchReport {
   stop_reason: 'TIME_LIMIT' | 'CONVERGED' | 'CAP' | 'STOPPED' | 'NOT_SEARCHED' | 'NO_PLAN';
   last_improvement_sec?: number | null;
   stall_sec?: number | null;
-  /** At most 12 [seconds into the search, search objective in OMR] points of the best plan so far. */
-  best_over_time?: [number, number][];
+  /**
+   * At most 12 [seconds into the search, search score, stops not planned yet] points of the best plan
+   * so far. The score is not money: the plan's cost and preferences plus a large penalty (1,000 OMR
+   * or more on real days) for each stop not planned yet. Reports from before the count have two values.
+   */
+  best_over_time?: [number, number, number?][];
   solutions?: number | null;
 }
 

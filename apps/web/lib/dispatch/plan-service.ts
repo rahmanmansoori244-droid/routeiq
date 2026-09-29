@@ -907,7 +907,11 @@ export interface ScenarioDetails extends DispatchScenario {
   scope: PlanScope;
   /** What the optimization was computed with (F08); absent on options stored before it existed. */
   inputs?: PlanInputs;
-  /** How the recommended plan was searched (the response's search report); absent before search modes. */
+  /**
+   * How the RECOMMENDED plan was searched (the response's search report, stored with every option);
+   * absent before search modes. An alternative's own search is its time_limit_sec, after that one:
+   * the screens and the Excel say so (search-mode.ts searchOptionOf).
+   */
   search?: SearchReport | null;
 }
 
@@ -1479,6 +1483,9 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       scenario: d.name,
       status: d.solver_status,
       timeSec: d.solver_time_sec,
+      // The option's own search limit: an alternative in use searched that long after the
+      // recommended plan (skeptic review of the long-search PR: its search is not the report's).
+      ...(typeof d.time_limit_sec === 'number' ? { limitSec: d.time_limit_sec } : {}),
       // Quick / Thorough, how long the recommended plan was searched and why it stopped.
       ...(d.search ? { search: d.search } : {}),
     },

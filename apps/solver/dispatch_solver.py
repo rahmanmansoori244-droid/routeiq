@@ -345,16 +345,22 @@ class _SearchWatch:
     on NMWC days, improving or not): Solver.FinishCurrentSearch() then ends the search within
     milliseconds and it returns its best plan. A CustomLimit was measured too: OR-Tools calls it
     35,000-110,000 times a second, which cost 3-12% of the search's solutions
-    (docs/OPTIMIZER_BENCHMARK.md section 10). The time limit stays the backstop."""
+    (docs/OPTIMIZER_BENCHMARK.md section 10). The time limit stays the backstop.
 
-    def __init__(self, routing, rule: StallRule | None, flag) -> None:
+    Each point of the best objective over time also counts the stops that plan had not planned yet
+    (``stops``: the stops' routing indices; an unplanned stop is its own successor). The objective
+    holds a large penalty for each of them (1,000 OMR or more on real days), so a score in the thousands
+    is not money (skeptic review of the long-search PR). Counted on improvements only."""
+
+    def __init__(self, routing, rule: StallRule | None, flag, stops: list[int] | None = None) -> None:
         self.routing = routing
         self.rule = rule
         self.flag = flag
+        self.stops = list(stops or [])
         self.t0 = time.perf_counter()
         self.best: int | None = None
         self.last = 0.0
-        self.points: list[tuple[float, int]] = []
+        self.points: list[tuple[float, int, int]] = []
         self.solutions = 0
         self.reason: str | None = None
         self.ended_at: float | None = None
@@ -365,7 +371,8 @@ class _SearchWatch:
         t = time.perf_counter() - self.t0
         if self.best is None or value < self.best:
             self.best, self.last = value, t
-            self.points.append((t, value))
+            nxt = self.routing.NextVar
+            self.points.append((t, value, sum(1 for i in self.stops if nxt(i).Value() == i)))
         if self.reason is not None:
             return
         stop = self.flag is not None and self.flag.is_set()
@@ -391,18 +398,20 @@ class _SearchWatch:
             "last_improvement_sec": round(self.last, 1) if self.points else None,
             # No plan seen, no stall to report ("no better plan for 5 min" after a 1 s search).
             "stall_sec": round(self.rule.stall_sec(elapsed), 1) if self.rule is not None and self.points else None,
-            "points": [(round(t, 1), round(v / COST_SCALE, 2)) for t, v in pts],
+            "points": [(round(t, 1), round(v / COST_SCALE, 2), left) for t, v, left in pts],
             "solutions": self.solutions,
         }
 
 
-def _watch_search(name: str, cfg: DispatchConfig, n_stops: int, routing) -> None:
+def _watch_search(name: str, cfg: DispatchConfig, n_stops: int, routing, manager=None) -> None:
     """THOROUGH only - a QUICK search gets nothing attached and runs exactly as before. RECOMMENDED
-    gets the stall rule (never before QUICK's time for the day); the alternatives only the stop flag."""
+    gets the stall rule (never before QUICK's time for the day); the alternatives only the stop flag.
+    ``manager``: the stops are nodes 1..n_stops (_solve_scenario), counted on each progress point."""
     if cfg.search_mode != "THOROUGH":
         return
     rule = stall_rule(cfg.time_limit_sec or auto_time_limit(n_stops)) if name == "RECOMMENDED" else None
-    watch = _SearchWatch(routing, rule, _STOP_FLAG)
+    stops = [manager.NodeToIndex(k + 1) for k in range(n_stops)] if manager is not None else None
+    watch = _SearchWatch(routing, rule, _STOP_FLAG, stops)
     # The callback is kept on the watch (and the watch in _WATCHES) for the whole search.
     watch.callback = watch.on_solution
     routing.AddAtSolutionCallback(watch.callback)
@@ -1069,7 +1078,7 @@ def _solve_scenario(
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     params.time_limit.seconds = max(1, int(time_limit))
     params.log_search = False
-    _watch_search(name, cfg, len(stops), routing)  # THOROUGH only: stop once it stops improving
+    _watch_search(name, cfg, len(stops), routing, manager)  # THOROUGH only: stop once it stops improving
 
     assignment = None
     if warm_start:
