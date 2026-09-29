@@ -9,8 +9,8 @@
  * - shutdown: the jobs of a stopping process fail at once, retryable, with a plain message.
  * The janitor's SQL (5 min after the last heartbeat) is in tests/integration/janitor.spec.ts.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -21,9 +21,10 @@ vi.mock('@/lib/audit', async () => {
   const m = await import('./fake-plan-db');
   return { audit: vi.fn(async (input: Record<string, unknown>, tx?: Record<string, any>) => (tx ?? m.fakePrisma).auditLog.create({ data: { ...input } })) };
 });
-const scheduled = vi.hoisted(() => ({ args: [] as Record<string, any>[] }));
+const scheduled = vi.hoisted(() => ({ args: [] as Record<string, any>[], real: null as null | ((args: any) => boolean) }));
 vi.mock('@/lib/jobs/dispatch-job', async (orig) => {
   const real = await orig<typeof import('@/lib/jobs/dispatch-job')>();
+  scheduled.real = real.scheduleDispatchOptimize;
   return {
     ...real,
     scheduleDispatchOptimize: vi.fn((args: Record<string, any>) => {
@@ -32,21 +33,57 @@ vi.mock('@/lib/jobs/dispatch-job', async (orig) => {
     }),
   };
 });
-function builtFor() {
+/** What the fake optimizer was sent (the real job's call), and how it answers. */
+const solverFake = vi.hoisted(() => ({ sent: [] as Record<string, any>[] }));
+vi.mock('@/lib/solver-client', async (orig) => {
+  const real = await orig<typeof import('@/lib/solver-client')>();
   return {
-    request: { run_id: 'P', tenant_id: 'tA', stops: [{ stop_id: 'O2' }], trucks: [{ id: 'T1', capacity_kg: 0 }], config: { scenarios: ['RECOMMENDED'] } as Record<string, unknown> },
+    ...real,
+    callDispatchSolver: vi.fn(async (req: Record<string, any>) => {
+      solverFake.sent.push(JSON.parse(JSON.stringify(req)));
+      throw new real.SolverError('fake optimizer: no plan in this test', 0, null);
+    }),
+  };
+});
+/** The request is built for this delivery day at the start's clock (a plan for it made on the day moves its times). */
+const build = vi.hoisted(() => ({ runDateIso: null as string | null }));
+function builtFor(now: Date = new Date()) {
+  // The same-day rule exactly as buildDispatchRequest applies it (plan-service sameDayBasis): 06:00
+  // first departure, 30 min turnaround, 0.04 min per case, 800-case trucks.
+  const basis = build.runDateIso
+    ? sameDayBasis({ runDateIso: build.runDateIso, timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 30, depotCloseMin: null, loading: { perCase: 0.04, exampleCases: 800 } }, 360, now)
+    : undefined;
+  const t = basis?.timing;
+  return {
+    request: {
+      run_id: 'P',
+      tenant_id: 'tA',
+      stops: [{ stop_id: 'O2' }],
+      trucks: [{ id: 'T1', capacity_kg: 0 }],
+      config: {
+        scenarios: ['RECOMMENDED'],
+        ...(basis ? { shift_start_min: t?.planFrom?.fromMin ?? 360 } : {}),
+        ...(typeof t?.loadingFromMin === 'number' ? { loading_from_min: t.loadingFromMin } : {}),
+      } as Record<string, unknown>,
+    },
     preDrops: [],
     scope: { orderIds: ['O2'], frozenOrderIds: [], orderPriority: {}, frozenLoadIds: [], frozenLoadOrderIds: [] },
     blocking: [],
-    warnings: [],
+    warnings: t?.warning ? [t.warning] : [],
     unknownWeights: [],
     weightChanges: { lines: [], orders: [] },
-    settings: { timezone: 'Asia/Muscat' },
+    settings: { timezone: 'Asia/Muscat', planFrom: t?.planFrom ?? null, loadingFromMin: t?.loadingFromMin ?? null },
+    ...(basis ? { sameDay: basis } : {}),
   };
 }
 vi.mock('@/lib/dispatch/plan-service', async (orig) => {
   const real = await orig<typeof import('@/lib/dispatch/plan-service')>();
-  return { ...real, buildDispatchRequest: vi.fn(async () => builtFor()), isLegacyPlan: vi.fn(async () => false), pendingLateOrderIds: vi.fn(async () => []) };
+  return {
+    ...real,
+    buildDispatchRequest: vi.fn(async (_t: string, _r: string, _s: unknown, o?: { now?: Date }) => builtFor(o?.now)),
+    isLegacyPlan: vi.fn(async () => false),
+    pendingLateOrderIds: vi.fn(async () => []),
+  };
 });
 
 import { JOB_LOST_AFTER_MS, jobRunningText, lastSignOfLife, resetStuckPlan, stuckPlanState } from '@/lib/dispatch/stuck-plan';
@@ -56,6 +93,8 @@ import { solveAdmission } from '@/lib/dispatch/solve-admission';
 import { stopSearch } from '@/lib/dispatch/stop-search';
 import { activeDispatchJobs } from '@/lib/jobs/dispatch-job';
 import { failJobsForShutdown, installShutdownHandler, SHUTDOWN_MESSAGE } from '@/lib/jobs/shutdown';
+import { sameDayBasis } from '@/lib/dispatch/plan-service';
+import { optimizeStartedText } from '@/lib/dispatch/search-mode';
 
 const T = 'tA';
 const NOW = new Date('2026-09-29T15:00:00Z'); // 19:00 in Muscat
@@ -91,7 +130,13 @@ function seed(runDate: string, job?: { status: string; startedAt?: Date | null; 
 
 beforeEach(() => {
   scheduled.args = [];
+  solverFake.sent = [];
+  build.runDateIso = null;
   activeDispatchJobs.clear();
+});
+// Every slot a start took goes back to the process-wide admission, also when a test failed.
+afterEach(() => {
+  for (const a of scheduled.args) a.ticket?.release();
 });
 
 describe('a start stores its search mode', () => {
@@ -121,6 +166,119 @@ describe('a start stores its search mode', () => {
       scheduled.args.at(-1)!.ticket.release();
     }
     expect(solveAdmission.snapshot().running).toBe(0);
+  });
+});
+
+describe('a same-day THOROUGH is timed from the end of its search, never from the button press (review of the long-search PR)', () => {
+  const MIN_1900 = 19 * 60; // NOW in Muscat
+  const g = globalThis as unknown as { __routeiqInflight: Map<string, Promise<unknown>> };
+
+  it('the start: no new load before now + the cap + the turnaround, loading from the end of the search; QUICK and tomorrow as before', async () => {
+    seed('2026-09-29');
+    build.runDateIso = '2026-09-29';
+    const res = await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    expect(res.status).toBe(202);
+    const cfg = tables.runJob[0].requestJson.config;
+    expect(cfg.shift_start_min).toBeGreaterThanOrEqual(MIN_1900 + 1200 / 60 + 30);
+    expect(cfg).toMatchObject({ search_mode: 'THOROUGH', shift_start_min: 1190, loading_from_min: 1160 }); // 19:50, 19:20
+    expect(scheduled.args[0].built.warnings[0]).toMatch(/^Planned from 19:50 \(now 19:00 \+ up to 20 min Thorough search \+ 30 min preparation\): the plan is for today and cannot be used before its search ends/);
+    expect(tables.auditLog.find((a) => a.action === 'OPTIMIZE_STARTED')?.afterJson).toMatchObject({ planFromMin: 1190, loadingFromMin: 1160 });
+    scheduled.args[0].ticket.release();
+
+    seed('2026-09-29');
+    await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: 'QUICK' });
+    expect(tables.runJob[0].requestJson.config).toMatchObject({ search_mode: 'QUICK', shift_start_min: 1170, loading_from_min: 1140 }); // as before
+    expect(scheduled.args[1].built.warnings[0]).toMatch(/^Planned from 19:30 \(now 19:00 \+ 30 min preparation\): the plan is for today, so/);
+    scheduled.args[1].ticket.release();
+
+    seed('2026-09-30');
+    build.runDateIso = '2026-09-30';
+    await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    const tomorrow = tables.runJob[0].requestJson.config;
+    expect(tomorrow.shift_start_min).toBe(360);
+    expect('loading_from_min' in tomorrow).toBe(false);
+    scheduled.args[2].ticket.release();
+    expect(solveAdmission.snapshot().running).toBe(0);
+  });
+
+  for (const mode of ['THOROUGH', 'QUICK'] as const) {
+    it(`the job: ${mode === 'THOROUGH' ? 'after 25 minutes in the queue it is timed from when it really starts' : 'QUICK is sent exactly as it was built, however long it waited'}`, async () => {
+      seed('2026-09-29');
+      build.runDateIso = '2026-09-29';
+      // Another company's solve of the same mode holds the slot this start needs: it queues.
+      const blockers = [solveAdmission.reserve('OTHER', 'x', mode), ...(mode === 'QUICK' ? [solveAdmission.reserve('THIRD', 'y', mode)] : [])];
+      const freeBlockers = () => blockers.forEach((b) => b.ok && b.ticket.release());
+      let args!: Record<string, any>;
+      let built = '';
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(NOW);
+        const res = await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: NOW, searchMode: mode });
+        expect(res.body).toMatchObject({ queued: true });
+        args = scheduled.args[0];
+        built = JSON.stringify(args.built.request.config);
+        vi.setSystemTime(new Date(NOW.getTime() + 25 * 60_000)); // 19:25: the slot frees
+        scheduled.real!(args);
+        freeBlockers();
+        await g.__routeiqInflight.get('P');
+        for (let i = 0; i < 20 && row('runJob', tables.runJob[0].id).status !== 'FAILED'; i++) await new Promise((r) => setTimeout(r, 5));
+      } finally {
+        vi.useRealTimers();
+        freeBlockers();
+      }
+      expect(solverFake.sent).toHaveLength(1);
+      const sent = solverFake.sent[0].config;
+      const job = row('runJob', tables.runJob[0].id);
+      expect(job.startedAt).toEqual(new Date(NOW.getTime() + 25 * 60_000));
+      if (mode === 'THOROUGH') {
+        expect(sent).toMatchObject({ shift_start_min: 1215, loading_from_min: 1185 }); // 19:25 + 20 + 30; 19:25 + 20
+        expect(job.requestJson.config).toMatchObject({ shift_start_min: 1215, loading_from_min: 1185 }); // what was sent is what is stored
+        expect(args.built.warnings[0]).toMatch(/^Planned from 20:15 \(now 19:25 \+ up to 20 min Thorough search/);
+        expect(args.built.settings).toMatchObject({ planFrom: { fromMin: 1215 }, loadingFromMin: 1185 });
+      } else {
+        expect(JSON.stringify(sent)).toBe(built);
+        expect(sent).toMatchObject({ shift_start_min: 1170, loading_from_min: 1140 });
+      }
+      expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+    }, 20_000);
+  }
+});
+
+describe('two dispatchers at once: a choice that was not applied is never reported as applied (review of the long-search PR)', () => {
+  it('a start while a job runs answers with that job and its own mode, flagged as already running; the toast says the choice was not applied', async () => {
+    seed('2026-09-30');
+    const b = await startDispatchOptimize(T, 'P', { id: 'uB' }, null, { now: NOW, searchMode: 'QUICK' });
+    expect(b.body).toMatchObject({ searchMode: 'QUICK', queued: false });
+    expect(b.body.alreadyRunning).toBeUndefined();
+    const a = await startDispatchOptimize(T, 'P', { id: 'uA' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    expect(a).toMatchObject({ status: 202, body: { runJobId: b.body.runJobId, status: 'QUEUED', searchMode: 'QUICK', alreadyRunning: true } });
+    expect(tables.runJob).toHaveLength(1);
+    expect(optimizeStartedText(a.body, 'THOROUGH', 1200, 10)).toBe(
+      'An optimization (Quick) was already running for this plan, so your choice (Thorough) was not applied. When it ends, re-plan with Thorough if needed.',
+    );
+    expect(optimizeStartedText({ ...a.body, searchMode: 'THOROUGH' }, 'THOROUGH', 1200, 10)).toBe(
+      'An optimization (Thorough) is already running for this plan; nothing new was started. The plan is saved when it ends.',
+    );
+    // The usual answers, from the server's mode.
+    expect(optimizeStartedText(b.body, 'QUICK', 1200, 80)).toBe('Optimizing (Quick): usually about 1 min for this day.');
+    expect(optimizeStartedText({ queued: false, searchMode: 'THOROUGH' }, 'THOROUGH', 1200, 80)).toMatch(/^Optimizing \(Thorough\): up to 20 min, stops early/);
+    expect(optimizeStartedText({ queued: true, searchMode: 'QUICK' }, 'QUICK', 1200, 80)).toMatch(/^Queued: other optimizations are running/);
+
+    // A job from before search modes (no mode stored) searched QUICK.
+    seed('2026-09-30', { status: 'RUNNING', startedAt: ago(60_000), heartbeatAt: ago(5_000), searchMode: null });
+    const c = await startDispatchOptimize(T, 'P', { id: 'uA' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    expect(c.body).toMatchObject({ runJobId: 'J1', status: 'RUNNING', searchMode: 'QUICK', alreadyRunning: true });
+  });
+
+  it('the same answer when the other start wins inside the start transaction', async () => {
+    seed('2026-09-30', { status: 'QUEUED', searchMode: 'QUICK' });
+    // The job appears between the first look and the locked read (the other start committed then).
+    const spy = vi.spyOn(fakePrisma.runJob, 'findFirst').mockResolvedValueOnce(null as never);
+    const a = await startDispatchOptimize(T, 'P', { id: 'uA' }, null, { now: NOW, searchMode: 'THOROUGH' });
+    spy.mockRestore();
+    expect(a).toMatchObject({ status: 202, body: { runJobId: 'J1', status: 'QUEUED', searchMode: 'QUICK', alreadyRunning: true } });
+    expect(tables.runJob).toHaveLength(1);
+    expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
   });
 });
 

@@ -15,6 +15,11 @@ export interface SearchModeQuestion {
   stops: number | null;
   /** Thorough's cap in seconds (the server's THOROUGH_MAX_SEC). */
   capSec: number;
+  /**
+   * The plan is for today (company timezone): the Thorough choice says the plan cannot be used
+   * before its search ends, so its new loads are timed from then.
+   */
+  deliveryDay?: boolean;
   /** A line above the choice (e.g. what a re-plan keeps). */
   note?: string;
 }
@@ -44,7 +49,7 @@ export function useSearchModeChoice(): { ask: (q: SearchModeQuestion) => Promise
 
 function SearchModeDialog({ question, onDone }: { question: SearchModeQuestion; onDone: (mode: SearchMode | null) => void }) {
   const [mode, setMode] = useState<SearchMode>(question.defaultMode);
-  const choices = searchChoices(question.defaultMode, question.stops, question.capSec);
+  const choices = searchChoices(question.defaultMode, question.stops, question.capSec, !!question.deliveryDay);
   return (
     <Dialog open onOpenChange={(open) => (open ? null : onDone(null))}>
       <DialogContent data-testid="search-mode-dialog">

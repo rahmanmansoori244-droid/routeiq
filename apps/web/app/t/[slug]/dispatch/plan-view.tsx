@@ -18,7 +18,17 @@ import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/co
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
-import { defaultModeForDay, fmtSearchTime, searchPollMs, searchProgressText, searchResultText, THOROUGH_MAX_SEC_DEFAULT, type SearchMode } from '@/lib/dispatch/search-mode';
+import {
+  defaultModeForDay,
+  fmtSearchTime,
+  optimizeStartedText,
+  searchPollMs,
+  searchProgressText,
+  searchResultText,
+  THOROUGH_MAX_SEC_DEFAULT,
+  type SearchMode,
+  type StartedAnswer,
+} from '@/lib/dispatch/search-mode';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
@@ -327,6 +337,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       defaultMode: d.searchModeDefault ?? defaultModeForDay(d.run.runDate, today ?? d.today ?? d.run.runDate),
       stops: stops || null,
       capSec: d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT,
+      deliveryDay: d.run.runDate === (today ?? d.today),
       note: note ?? 'Locked and dispatched loads stay exactly as they are.',
     });
   }
@@ -345,10 +356,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       async () => {
         let overrides: OptimizeOverrides = {};
         for (;;) {
-          const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, {
+          const r = await api<{ runId: string; version?: number; reason?: string } & StartedAnswer>(`/api/runs/${runId}/replan`, {
             method: 'POST',
             json: { reason, expect, searchMode, ...overrides },
           });
+          if (r.ok && r.data?.alreadyRunning) {
+            // A version with no plan yet is optimized in place: another dispatcher's job may already
+            // run for it, with its own mode - never reported as this choice.
+            const text = optimizeStartedText(r.data, searchMode, capSec, null);
+            if (r.data.searchMode !== searchMode) toast.warning(text);
+            else toast.success(text);
+            await onChanged?.(r.data.runId);
+            return;
+          }
           if (r.ok && r.data) {
             const how =
               r.data.reason === 'LATE_ORDER'

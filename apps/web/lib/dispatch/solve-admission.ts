@@ -12,12 +12,15 @@
  *   slot; waiting solves start fewest-running first, then in the order they were queued (below).
  *   A start beyond the caps is not refused: its job is created and waits in the queue until a
  *   slot frees.
- * - Fair queue: a company may have at most 2 solves waiting. One more is refused with 429 and
- *   Retry-After, for that company only. The shared queue holds 10: once it is full, a company that
- *   already has a solve waiting is refused with 503 "optimizer busy" until there is room, but a
- *   company with nothing waiting is always queued - other companies filling the queue never lock it
- *   out (review of PR3: five sign-up companies with 2 waiting each got NMWC a 503). Only an
- *   absolute cap of 200 waiting (process memory) refuses every start that would wait.
+ * - Fair queue: a company may have at most 2 solves of each search mode waiting (2 QUICK and 2
+ *   THOROUGH; review of the long-search PR: waiting THOROUGH solves, each up to 20 minutes, took the
+ *   places of a same-day QUICK re-plan). One more of that mode is refused with 429 and Retry-After,
+ *   for that company only, naming the mode. The shared queue holds 10: once it is full, a company
+ *   that already has a solve of that mode waiting is refused with 503 "optimizer busy" until there
+ *   is room, but a company with nothing of that mode waiting is always queued - other companies
+ *   filling the queue never lock it out (review of PR3: five sign-up companies with 2 waiting each
+ *   got NMWC a 503). Only an absolute cap of 200 waiting (process memory) refuses every start that
+ *   would wait.
  * - Slot order: a freed slot goes to the waiting solve of the company with the fewest solves
  *   running; among those, first come first served - the solve queued first, whether or not its
  *   company ever ran one (a new company never jumps ahead of one already waiting); so FIFO within
@@ -71,7 +74,7 @@ export interface AdmissionLimits {
   maxQueue: number;
   /** Absolute cap on waiting solves (process memory): past it every start that would wait gets 503. */
   queueHardCap: number;
-  /** Solves of one company waiting for a slot. */
+  /** Solves of one company and one search mode waiting for a slot. */
   tenantQueue: number;
   windowMs: number;
 }
@@ -180,17 +183,22 @@ export class SolveAdmission {
     const fits = this.fitsNow({ tenantId, mode }, this.running);
     if (!fits) {
       // Past its own queue cap a company is refused alone: the shared queue stays open to others.
-      const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId).length;
+      // Counted per mode (review of the long-search PR): THOROUGH solves wait up to 20 minutes each,
+      // and must never take the places of a same-day QUICK re-plan.
+      const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId && q.mode === mode).length;
       if (mineWaiting >= this.limits.tenantQueue) {
+        const thorough = mode === 'THOROUGH';
         return this.deny(
           429,
           'SOLVE_QUEUE_TENANT',
-          `Your company already has ${mineWaiting} optimization(s) waiting for the route optimizer. Try again once one of them has started.`,
-          120,
+          `Your company already has ${mineWaiting} ${thorough ? 'Thorough' : 'Quick'} optimization(s) waiting for the route optimizer. Try again once one of them has started${
+            thorough ? ' (a Thorough search takes up to 20 minutes), or choose Quick' : ''
+          }.`,
+          thorough ? 600 : 120,
         );
       }
-      // A full shared queue refuses only a company that already has a solve waiting: one with
-      // nothing waiting is queued, so other companies filling the queue never lock it out. The
+      // A full shared queue refuses only a company that already has a solve of this mode waiting:
+      // one with nothing waiting is queued, so other companies filling the queue never lock it out. The
       // queue grows by at most one solve per company past maxQueue; queueHardCap bounds memory.
       if ((mineWaiting > 0 && this.queue.length >= this.limits.maxQueue) || this.queue.length >= this.limits.queueHardCap) {
         return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans. Try again in a few minutes.', 120);

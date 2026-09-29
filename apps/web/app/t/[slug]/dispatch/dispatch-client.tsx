@@ -17,7 +17,7 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
-import { defaultModeForDay, fmtSearchTime, quickExpectedSec, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT } from '@/lib/dispatch/search-mode';
+import { defaultModeForDay, optimizeStartedText, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
@@ -324,6 +324,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       defaultMode: day.searchModeDefault ?? defaultModeForDay(day.date, day.today),
       stops,
       capSec,
+      deliveryDay: day.date === day.today,
       note: replanning ? 'Locked and dispatched loads stay exactly as they are.' : undefined,
     });
     if (!searchMode) return;
@@ -336,19 +337,16 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       let reached = true;
       for (;;) {
         const r = replanning
-          ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, searchMode, ...overrides } })
-          : await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', {
+          ? await api<{ runId: string } & StartedAnswer>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, searchMode, ...overrides } })
+          : await api<{ runId: string } & StartedAnswer>('/api/dispatch/plan', {
               method: 'POST',
               json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, searchMode, ...overrides },
             });
         if (r.ok) {
-          toast.success(
-            r.data?.queued
-              ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.'
-              : searchMode === 'THOROUGH'
-                ? `Optimizing (Thorough): up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving. You can leave this page; the plan is saved when the search ends.`
-                : `Optimizing (Quick): ${stops ? `usually about ${fmtSearchTime(quickExpectedSec(stops))}` : 'usually a minute or two'} for this day.`,
-          );
+          // From the server's answer: a job another dispatcher already started keeps its own mode.
+          const text = optimizeStartedText(r.data, searchMode, capSec, stops);
+          if (r.data?.alreadyRunning && r.data.searchMode !== searchMode) toast.warning(text);
+          else toast.success(text);
           break;
         }
         const more = askOverride(r.errorBody, replanning ? 'Re-plan' : 'Optimize', { canEditProducts });

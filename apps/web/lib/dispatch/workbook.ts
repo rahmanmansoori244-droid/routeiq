@@ -963,6 +963,8 @@ export interface AssumptionConfig {
   planFrom?: PlanFrom | null;
   /** Stored with a plan (PlanSettings, PR8 review): made on its delivery day at this time; loading starts then. */
   loadingFromMin?: number | null;
+  /** Stored with a plan (PlanSettings): a same-day THOROUGH search counted before the loads (minutes). */
+  searchLeadMin?: number | null;
   priorityWeightsJson?: unknown;
 }
 
@@ -1018,7 +1020,7 @@ export function tenantAssumptions(
     ...(cfg.planFrom
       ? { 'Planned from (plan made on the delivery day)': planFromAssumption(cfg.planFrom, cfg.loadingMinPerCase) }
       : typeof cfg.loadingFromMin === 'number' && (cfg.loadingMinPerCase ?? 0) > 0
-        ? { 'Loading from (plan made on the delivery day)': loadingFromAssumption(cfg.loadingFromMin, cfg.reloadMinutes, cfg.loadingMinPerCase ?? 0) }
+        ? { 'Loading from (plan made on the delivery day)': loadingFromAssumption(cfg.loadingFromMin, cfg.reloadMinutes, cfg.loadingMinPerCase ?? 0, cfg.searchLeadMin ?? 0) }
         : {}),
     'Driver shift maximum (h:mm)': fmtDuration(cfg.driverShiftMaxMinutes),
     'Depot reload time between loads': `${cfg.reloadMinutes} min`,

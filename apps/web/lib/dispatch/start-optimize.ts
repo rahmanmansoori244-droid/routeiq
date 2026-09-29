@@ -11,13 +11,14 @@ import {
   pendingLateOrderIds,
   PlanError,
   planErrorBody,
+  retimeSameDay,
   type BuiltRequest,
 } from './plan-service';
 import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from './intake-server';
 import { isLockBusy, lockRunForWrite, PLAN_BUSY_MESSAGE, setLockTimeout } from './plan-locks';
 import { isSupersededRun } from './plan-status';
 import { solveAdmission, type AdmissionDenied, type SolveTicket } from './solve-admission';
-import { queuedMessage, thoroughMaxSec, type SearchMode } from './search-mode';
+import { queuedMessage, searchLeadMin, thoroughMaxSec, type SearchMode } from './search-mode';
 import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
 
@@ -206,8 +207,20 @@ async function prerequisites(tenantId: string, runId: string, built: BuiltReques
  */
 async function activeJobAnswer(runId: string): Promise<StartResult | null> {
   const active = await prisma.runJob.findFirst({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } }, orderBy: { attemptNo: 'desc' } });
-  if (active) return { status: 202, body: { runJobId: active.id, status: active.status, runId } };
-  return null;
+  return active ? alreadyRunning(runId, active) : null;
+}
+
+/**
+ * 202 with the job already running for the version (another dispatcher's start, or a double click),
+ * whose own mode is kept: `alreadyRunning` and `searchMode` let the screen say that this start's
+ * choice was not applied, instead of "Optimizing (Thorough)" for a Quick job (review of the
+ * long-search PR). A job from before search modes searched QUICK.
+ */
+function alreadyRunning(runId: string, job: { id: string; status: string; searchMode?: string | null }): StartResult {
+  return {
+    status: 202,
+    body: { runJobId: job.id, status: job.status, runId, searchMode: job.searchMode === 'THOROUGH' ? 'THOROUGH' : 'QUICK', alreadyRunning: true },
+  };
 }
 
 /**
@@ -368,6 +381,10 @@ export async function startDispatchOptimize(
     const mode = ticket?.searchMode ?? requestedSearchMode(opts.searchMode);
     const capSec = thoroughMaxSec();
     applySearchMode(built, mode, capSec);
+    // A THOROUGH plan for today cannot be used before its search ends (up to the cap): its new loads
+    // count from now + the cap, never from the button press (review of the long-search PR). The job
+    // times them again when it really starts, after any wait for a slot. QUICK: exactly as built.
+    if (mode === 'THOROUGH') retimeSameDay(built, opts.now ?? new Date(), searchLeadMin(capSec));
 
     if (!ticket) {
       const adm = solveAdmission.reserve(tenantId, user.id, mode);
@@ -385,10 +402,10 @@ export async function startDispatchOptimize(
           await lockIntake(tx, tenantId);
           await setLockTimeout(tx);
           const locked = await lockRunForWrite(tx, tenantId, runId, { allow: START_FROM, allowOptimizing: true });
-          const jobsNow = await tx.runJob.findMany({ where: { runId }, select: { id: true, status: true, attemptNo: true }, orderBy: { attemptNo: 'desc' } });
-          // Another start won the race: answer with its job, start nothing.
+          const jobsNow = await tx.runJob.findMany({ where: { runId }, select: { id: true, status: true, attemptNo: true, searchMode: true }, orderBy: { attemptNo: 'desc' } });
+          // Another start won the race: answer with its job (and its mode), start nothing.
           const running = jobsNow.find((j) => j.status === 'QUEUED' || j.status === 'RUNNING');
-          if (running) throw new StartRefused({ status: 202, body: { runJobId: running.id, status: running.status, runId } });
+          if (running) throw new StartRefused(alreadyRunning(runId, running));
           // Audit F09: OPTIMIZING with no job in progress is a stuck plan, never a 202 for a dead job.
           if (locked.status === 'OPTIMIZING') throw new StartRefused(PLAN_STUCK);
           if (inUse(locked, jobsNow.length > 0, !!opts.freshVersion)) throw new StartRefused(NEW_VERSION_REQUIRED);

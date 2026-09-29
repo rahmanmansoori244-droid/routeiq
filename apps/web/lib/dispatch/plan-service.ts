@@ -67,7 +67,7 @@ import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } 
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, DEFAULT_TZ, isoOf, todayIso } from './time';
-import { loadingFromWarning, planDayNowMin, planFromWarning, sameDayPlanFrom, type PlanFrom } from './plan-from';
+import { sameDayTiming, type PlanFrom, type SameDayInput, type SameDayTiming } from './plan-from';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
@@ -163,6 +163,61 @@ export interface BuiltRequest {
   weightChanges: WeightChanges;
   /** The tenant settings this request was built with (kept with every option for the ASSUMPTIONS sheet, F08). */
   settings?: PlanSettings;
+  /**
+   * What the same-day times were computed from (plan-from.ts), so a THOROUGH start and its job can
+   * time them again from the end of the search (retimeSameDay). Absent on unit-test stubs.
+   */
+  sameDay?: SameDayBasis;
+}
+
+/** The inputs of a request's same-day times, and the times it carries now (BuiltRequest.sameDay). */
+export interface SameDayBasis {
+  input: SameDayInput;
+  /** The first departure the request sends when the plan does not start from now (the setting). */
+  baseShiftStartMin: number;
+  timing: SameDayTiming;
+}
+
+/** The same-day times of a request built at `now` (buildDispatchRequest; tests build stubs with it). */
+export function sameDayBasis(input: SameDayInput, baseShiftStartMin: number, now: Date): SameDayBasis {
+  return { input, baseShiftStartMin, timing: sameDayTiming(input, now) };
+}
+
+/**
+ * A same-day THOROUGH plan cannot be used before its search ends (review of the long-search PR): time
+ * its new loads again as a plan made at `now` whose search takes up to `searchMin` minutes - the
+ * first departure (config.shift_start_min), loading (config.loading_from_min), the plan warning and
+ * the settings kept with it (ASSUMPTIONS). The start calls it with the press + the cap, and the job
+ * again when it really starts (after any wait for a solver slot). A plan for a later day changes only
+ * when its job starts on the delivery day itself (after midnight): loading then starts when its search
+ * ends. True when anything changed. QUICK never calls it: its request stays exactly as built.
+ */
+export function retimeSameDay(built: BuiltRequest, now: Date, searchMin: number): boolean {
+  const basis = built.sameDay;
+  const cfg = built.request?.config;
+  if (!basis || !cfg) return false;
+  const was = basis.timing;
+  const next = sameDayTiming(basis.input, now, searchMin, { wasSameDay: was.loadingFromMin !== null });
+  const shiftStart = next.planFrom ? next.planFrom.fromMin : basis.baseShiftStartMin;
+  const changed =
+    (cfg.shift_start_min ?? basis.baseShiftStartMin) !== shiftStart ||
+    (cfg.loading_from_min ?? null) !== next.loadingFromMin ||
+    was.warning !== next.warning ||
+    was.searchMin !== next.searchMin;
+  if (!changed) return false;
+  cfg.shift_start_min = shiftStart;
+  if (next.loadingFromMin !== null) cfg.loading_from_min = next.loadingFromMin;
+  else delete cfg.loading_from_min;
+  const at = was.warning ? built.warnings.indexOf(was.warning) : -1;
+  if (at >= 0) built.warnings.splice(at, 1, ...(next.warning ? [next.warning] : []));
+  else if (next.warning) built.warnings.unshift(next.warning);
+  if (built.settings) {
+    built.settings.planFrom = next.planFrom;
+    built.settings.loadingFromMin = next.loadingFromMin;
+    built.settings.searchLeadMin = next.searchMin || null;
+  }
+  basis.timing = next;
+  return true;
 }
 
 export interface WeightChanges {
@@ -595,21 +650,22 @@ export async function buildDispatchRequest(
   // locked / dispatched loads' return + turnaround; those loads keep their times.
   const now = opts.now ?? new Date();
   const firstDepartureMin = Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0);
-  const planFrom = sameDayPlanFrom(
-    { runDateIso: isoOf(run.runDate), timezone: cfg.timezone, firstDepartureMin, prepMin: cfg.reloadMinutes },
-    now,
-  );
   // PR8 review: on its delivery day loading starts now too. Sent as loading_from_min, so every new
   // load - on a truck standing at the depot as on one coming back - leaves no earlier than now +
   // turnaround + loading per case x its cases (the optimizer, its check and the dispatch gate).
-  const loadingFromMin = planDayNowMin(isoOf(run.runDate), cfg.timezone, now);
-  const loading = { perCase: cfg.loadingMinPerCase, exampleCases: Math.max(0, ...trucks.map((t) => t.capacityCases)) };
-  const loadingNote = !planFrom && loadingFromMin !== null ? loadingFromWarning(loadingFromMin, cfg.reloadMinutes, firstDepartureMin, loading) : null;
-  const warnings: string[] = [
-    ...(planFrom ? [planFromWarning(planFrom, run.depot.closeMin, loading)] : []),
-    ...(loadingNote ? [loadingNote] : []),
-    ...settingProblems.warnings,
-  ];
+  // Built as QUICK (from now); a THOROUGH start times them again from the end of its search
+  // (retimeSameDay), which is why the inputs are kept with the request (BuiltRequest.sameDay).
+  const sameDayIn: SameDayInput = {
+    runDateIso: isoOf(run.runDate),
+    timezone: cfg.timezone,
+    firstDepartureMin,
+    prepMin: cfg.reloadMinutes,
+    depotCloseMin: run.depot.closeMin,
+    loading: { perCase: cfg.loadingMinPerCase, exampleCases: Math.max(0, ...trucks.map((t) => t.capacityCases)) },
+  };
+  const timing = sameDayTiming(sameDayIn, now);
+  const { planFrom, loadingFromMin } = timing;
+  const warnings: string[] = [...(timing.warning ? [timing.warning] : []), ...settingProblems.warnings];
   // Review F19: the most stops one optimization supports; more is refused here with a clear
   // message rather than by the optimizer (422).
   if (stopList.length > MAX_DISPATCH_STOPS) {
@@ -629,6 +685,7 @@ export async function buildDispatchRequest(
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
   }
   const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
+  const baseShiftStartMin = plannerConfig.shift_start_min ?? cfg.shiftStartMin;
   if (planFrom) plannerConfig.shift_start_min = planFrom.fromMin;
   if (loadingFromMin !== null) plannerConfig.loading_from_min = loadingFromMin;
   if (routing.outsideCoverage) {
@@ -671,6 +728,7 @@ export async function buildDispatchRequest(
     unknownWeights,
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
+    sameDay: { input: sameDayIn, baseShiftStartMin, timing },
   };
 }
 

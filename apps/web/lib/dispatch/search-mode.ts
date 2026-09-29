@@ -52,6 +52,15 @@ export function solverWaitMs(mode: SearchMode | null | undefined, capSec: number
   return ((capSec && capSec > 0 ? capSec : THOROUGH_MAX_SEC_DEFAULT) + THOROUGH_WAIT_MARGIN_SEC) * 1000;
 }
 
+/**
+ * THOROUGH's cap in whole minutes: how long a same-day THOROUGH plan may not exist yet after its
+ * search started, so its new loads count from then + this (plan-service retimeSameDay; review of the
+ * long-search PR). The solver answers within the cap, everything included.
+ */
+export function searchLeadMin(capSec: number | null | undefined): number {
+  return Math.ceil((capSec && capSec > 0 ? capSec : THOROUGH_MAX_SEC_DEFAULT) / 60);
+}
+
 /** The longest a job of this mode can take, in whole minutes (for the texts that promise it). */
 export function jobMaxMinutes(mode: SearchMode | null | undefined, capSec: number | null | undefined = null): number {
   return Math.ceil(solverWaitMs(mode, capSec) / 60_000);
@@ -100,15 +109,20 @@ export interface SearchChoice {
 
 /**
  * The OPTIMIZE / RE-PLAN confirmation: both modes with the expected time. `stops`: the stops (or
- * open orders) of the day, for QUICK's estimate; null when unknown.
+ * open orders) of the day, for QUICK's estimate; null when unknown. `deliveryDay`: the plan is for
+ * today in the company's timezone - a Thorough plan then cannot be used before its search ends, and
+ * its new loads are timed from then (review of the long-search PR): the choice says so.
  */
-export function searchChoices(defaultMode: SearchMode, stops: number | null, capSec: number = THOROUGH_MAX_SEC_DEFAULT): SearchChoice[] {
+export function searchChoices(defaultMode: SearchMode, stops: number | null, capSec: number = THOROUGH_MAX_SEC_DEFAULT, deliveryDay = false): SearchChoice[] {
   const quick = stops && stops > 0 ? `usually about ${fmtSearchTime(quickExpectedSec(stops))}` : 'usually a minute or two';
+  const today = deliveryDay
+    ? ` This plan is for today: it cannot be used before the search ends, so its new loads leave no earlier than now + up to ${fmtSearchTime(capSec)} of search + the turnaround, and the plan's loads cannot be locked or dispatched until then.`
+    : '';
   return [
     {
       mode: 'THOROUGH',
       label: `Thorough - up to ${fmtSearchTime(capSec)}`,
-      detail: `Searches up to ${fmtSearchTime(capSec)} for a better plan and stops early once the plan stops improving. Best for a plan made before its delivery day (the evening plan for tomorrow).`,
+      detail: `Searches up to ${fmtSearchTime(capSec)} for a better plan and stops early once the plan stops improving. Best for a plan made before its delivery day (the evening plan for tomorrow).${today}`,
       recommended: defaultMode === 'THOROUGH',
     },
     {
@@ -200,6 +214,36 @@ export function searchAssumptions(r: SearchReport | null | undefined): Record<st
       " (search score of the best plan so far, in the currency: the optimizer's own cost, before the final load re-check)";
   }
   return out;
+}
+
+/** What an OPTIMIZE / RE-PLAN start answered (its 202 body), as far as the toast needs it. */
+export interface StartedAnswer {
+  /** Waiting for a solver slot. */
+  queued?: boolean;
+  /** The mode the job searches with - the job's own when one was already running. */
+  searchMode?: SearchMode | string | null;
+  /** A job was already running for the plan (another dispatcher's start): nothing new started. */
+  alreadyRunning?: boolean;
+}
+
+const modeName = (m: SearchMode | string | null | undefined) => (m === 'THOROUGH' ? 'Thorough' : 'Quick');
+
+/**
+ * The toast after OPTIMIZE: from the server's answer, never from the local choice alone - a job
+ * already running for the plan (another dispatcher pressed first) keeps its own mode, and the
+ * dispatcher is told that their choice was not applied (review of the long-search PR).
+ */
+export function optimizeStartedText(a: StartedAnswer | null | undefined, chosen: SearchMode, capSec: number, stops: number | null): string {
+  if (a?.alreadyRunning) {
+    const running = a.searchMode === 'THOROUGH' ? 'THOROUGH' : 'QUICK';
+    return running === chosen
+      ? `An optimization (${modeName(running)}) is already running for this plan; nothing new was started. The plan is saved when it ends.`
+      : `An optimization (${modeName(running)}) was already running for this plan, so your choice (${modeName(chosen)}) was not applied. When it ends, re-plan with ${modeName(chosen)} if needed.`;
+  }
+  if (a?.queued) return 'Queued: other optimizations are running. This plan starts as soon as one finishes.';
+  return (a?.searchMode ?? chosen) === 'THOROUGH'
+    ? `Optimizing (Thorough): up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving. You can leave this page; the plan is saved when the search ends.`
+    : `Optimizing (Quick): ${stops ? `usually about ${fmtSearchTime(quickExpectedSec(stops))}` : 'usually a minute or two'} for this day.`;
 }
 
 /** "Waiting ... (Thorough: up to 20 min)" - the job message a start writes. */

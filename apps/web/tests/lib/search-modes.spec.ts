@@ -8,7 +8,7 @@
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   defaultModeForDay,
   defaultSearchMode,
@@ -18,6 +18,7 @@ import {
   quickExpectedSec,
   searchAssumptions,
   searchChoices,
+  searchLeadMin,
   searchPollMs,
   searchProgressText,
   searchResultText,
@@ -26,7 +27,7 @@ import {
   type SearchReport,
 } from '@/lib/dispatch/search-mode';
 import { SolveAdmission, type AdmissionLimits, type SolveTicket } from '@/lib/dispatch/solve-admission';
-import { postJsonLong, SolverError, solverCallFailure, SOLVER_KEEPALIVE_MS } from '@/lib/solver-client';
+import { callDispatchSolver, postJsonLong, SolverError, solverCallFailure, SOLVER_KEEPALIVE_MS } from '@/lib/solver-client';
 import { autoTimeLimitSec } from '@/lib/planner-bounds';
 import { requestedSearchMode } from '@/lib/dispatch/start-optimize';
 
@@ -112,6 +113,20 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     for (const c of [...night, ...searchChoices('QUICK', 400, 600)]) {
       expect(c.label + c.detail).not.toMatch(OPTIMAL);
     }
+  });
+
+  it('on the delivery day the Thorough choice says the plan cannot be used before its search ends (review of the long-search PR)', () => {
+    const today = searchChoices('QUICK', 83, 1200, true).find((c) => c.mode === 'THOROUGH')!;
+    expect(today.detail).toMatch(
+      /This plan is for today: it cannot be used before the search ends, so its new loads leave no earlier than now \+ up to 20 min of search \+ the turnaround, and the plan's loads cannot be locked or dispatched until then\.$/,
+    );
+    expect(today.detail).not.toMatch(OPTIMAL);
+    expect(searchChoices('THOROUGH', 83, 1200).find((c) => c.mode === 'THOROUGH')!.detail).not.toMatch(/for today/);
+    expect(searchChoices('QUICK', 83, 1200, true).find((c) => c.mode === 'QUICK')!.detail).toBe(searchChoices('QUICK', 83, 1200).find((c) => c.mode === 'QUICK')!.detail);
+    expect(searchLeadMin(1200)).toBe(20);
+    expect(searchLeadMin(60)).toBe(1);
+    expect(searchLeadMin(90)).toBe(2);
+    expect(searchLeadMin(null)).toBe(20);
   });
 
   it("QUICK's estimate follows the automatic search time", () => {
@@ -243,6 +258,54 @@ describe('the solver call', () => {
   });
 });
 
+describe('callDispatchSolver waits as long as the mode needs (review of the long-search PR: only solverWaitMs was tested)', () => {
+  let server: http.Server;
+  let base = '';
+  const env = { url: process.env.SOLVER_URL, token: process.env.SOLVER_TOKEN };
+  beforeAll(async () => {
+    server = http.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ run_id: JSON.parse(body).run_id, scenarios: [], warnings: [] }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    process.env.SOLVER_URL = base;
+    process.env.SOLVER_TOKEN = 'unit-test-token';
+  });
+  afterAll(async () => {
+    process.env.SOLVER_URL = env.url;
+    process.env.SOLVER_TOKEN = env.token;
+    if (env.url === undefined) delete process.env.SOLVER_URL;
+    if (env.token === undefined) delete process.env.SOLVER_TOKEN;
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  /** The timers the call armed (ms), from a spy on setTimeout. */
+  async function armedFor(config: Record<string, unknown> | undefined): Promise<number[]> {
+    const spy = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      const r = await callDispatchSolver({ run_id: 'r1', stops: [], trucks: [], ...(config ? { config } : {}) } as never);
+      expect(r.run_id).toBe('r1');
+      return spy.mock.calls.map((c) => Number(c[1]));
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  it('THOROUGH: the cap + 2 minutes (22 min for 20); QUICK and a request without a mode: 600 s', async () => {
+    expect(await armedFor({ search_mode: 'THOROUGH', max_search_sec: 1200 })).toContain(1_320_000);
+    expect(await armedFor({ search_mode: 'THOROUGH', max_search_sec: 60 })).toContain(180_000);
+    const quick = await armedFor({ search_mode: 'QUICK', max_search_sec: null });
+    expect(quick).toContain(600_000);
+    expect(quick).not.toContain(1_320_000);
+    expect(await armedFor(undefined)).toContain(600_000);
+  });
+});
+
 describe('solve admission per mode', () => {
   const LIMITS: AdmissionLimits = { userPerHour: 100, tenantPerHour: 100, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, queueHardCap: 200, tenantQueue: 2, windowMs: 3_600_000 };
   const gate = (over: Partial<AdmissionLimits> = {}) => new SolveAdmission({ ...LIMITS, ...over }, () => 1_000_000, () => true);
@@ -309,6 +372,49 @@ describe('solve admission per mode', () => {
     expect(ok(a.reserve('A', 'u2', 'THOROUGH')).waiting).toBe(false);
     expect(ok(a.reserve('B', 'v1', 'THOROUGH')).waiting).toBe(true);
     expect(ok(a.reserve('B', 'v2', 'QUICK')).waiting).toBe(false);
+  });
+
+  it('waiting THOROUGH solves never use up the queue places of a same-day QUICK (review of the long-search PR)', () => {
+    // NMWC: tomorrow's THOROUGH runs, two more THOROUGH plans wait (one per company at a time).
+    const a = gate();
+    ok(a.reserve('NMWC', 'u1', 'THOROUGH'));
+    expect(ok(a.reserve('NMWC', 'u1', 'THOROUGH')).waiting).toBe(true);
+    expect(ok(a.reserve('NMWC', 'u1', 'THOROUGH')).waiting).toBe(true);
+    const depotA = ok(a.reserve('NMWC', 'u2', 'QUICK'));
+    expect(depotA.waiting).toBe(false);
+    // Today's re-plan of depot B waits for depot A's QUICK - it is queued, never refused.
+    const depotB = a.reserve('NMWC', 'u3', 'QUICK');
+    expect(depotB.ok && depotB.ticket.waiting).toBe(true);
+    expect(a.snapshot()).toMatchObject({ running: 2, waiting: 3 });
+    // Another company's QUICK holds the second slot: NMWC's first QUICK is queued too.
+    const b = gate();
+    ok(b.reserve('NMWC', 'u1', 'THOROUGH'));
+    ok(b.reserve('NMWC', 'u1', 'THOROUGH'));
+    ok(b.reserve('NMWC', 'u1', 'THOROUGH'));
+    ok(b.reserve('OTHER', 'v1', 'QUICK'));
+    const first = b.reserve('NMWC', 'u2', 'QUICK');
+    expect(first.ok && first.ticket.waiting).toBe(true);
+  });
+
+  it('the company queue cap counts each mode on its own, and the refusal names the mode', () => {
+    const a = gate();
+    ok(a.reserve('NMWC', 'u1', 'THOROUGH'));
+    ok(a.reserve('NMWC', 'u1', 'THOROUGH'));
+    ok(a.reserve('NMWC', 'u1', 'THOROUGH'));
+    const third = a.reserve('NMWC', 'u1', 'THOROUGH');
+    expect(third).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT' });
+    if (third.ok) throw new Error('not refused');
+    expect(third.error).toBe(
+      'Your company already has 2 Thorough optimization(s) waiting for the route optimizer. Try again once one of them has started (a Thorough search takes up to 20 minutes), or choose Quick.',
+    );
+    expect(third.retryAfterSec).toBe(600);
+    // QUICK has its own places: two QUICK wait behind two running (another company's and NMWC's own).
+    ok(a.reserve('NMWC', 'u2', 'QUICK'));
+    expect(ok(a.reserve('NMWC', 'u2', 'QUICK')).waiting).toBe(true);
+    expect(ok(a.reserve('NMWC', 'u2', 'QUICK')).waiting).toBe(true);
+    const quick = a.reserve('NMWC', 'u2', 'QUICK');
+    expect(quick).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT', retryAfterSec: 120 });
+    if (!quick.ok) expect(quick.error).toBe('Your company already has 2 Quick optimization(s) waiting for the route optimizer. Try again once one of them has started.');
   });
 
   it('the queue position counts only what starts before it', () => {

@@ -21,12 +21,12 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
 import { trackInflight, whenIdle } from './optimize-job';
-import { applyScenario, applyWeightChanges, persistDispatchResult, type BuiltRequest } from '../dispatch/plan-service';
+import { applyScenario, applyWeightChanges, persistDispatchResult, retimeSameDay, type BuiltRequest } from '../dispatch/plan-service';
 import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
-import { fmtSearchTime, searchResultText } from '../dispatch/search-mode';
+import { fmtSearchTime, searchLeadMin, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
 
 /**
@@ -98,9 +98,20 @@ async function runJob(args: DispatchJobArgs) {
         ? ' - Quick'
         : '';
   const now = new Date();
+  // A THOROUGH plan for today is timed from when its search really starts (after any wait for a
+  // solver slot, up to 20 minutes behind another THOROUGH) + its cap: never from the button press
+  // (review of the long-search PR). The stored request is what is sent. QUICK: sent as built.
+  const retimed = cfg?.search_mode === 'THOROUGH' && retimeSameDay(built, now, searchLeadMin(cfg.max_search_sec));
   const started = await prisma.runJob.updateMany({
     where: { id: runJobId, status: 'QUEUED' },
-    data: { status: 'RUNNING', startedAt: now, heartbeatAt: now, progressPct: 20, message: `Optimizing ${built.request.stops.length} stops${how}` },
+    data: {
+      status: 'RUNNING',
+      startedAt: now,
+      heartbeatAt: now,
+      progressPct: 20,
+      message: `Optimizing ${built.request.stops.length} stops${how}`,
+      ...(retimed ? { requestJson: built.request as never } : {}),
+    },
   });
   if (started.count !== 1) {
     console.warn('dispatch optimize: job no longer QUEUED, not started', { runId, runJobId });

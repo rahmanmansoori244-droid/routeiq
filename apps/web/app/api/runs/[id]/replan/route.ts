@@ -13,7 +13,7 @@ const schema = z.object({
   allowMissingWeights: z.boolean().optional(),
   /** The day and depot on the dispatcher's screen: a plan of another day answers 409 DAY_MISMATCH. */
   expect: z.object({ date: isoDateSchema, depotId: z.string().min(1) }).optional(),
-  /** Quick or Thorough (absent: Thorough before the delivery day, Quick on it; search-mode.ts). */
+  /** Quick or Thorough (absent: QUICK, as before search modes; the screens pre-select by day - requestedSearchMode, search-mode.ts). */
   searchMode: searchModeSchema.optional(),
 });
 

@@ -6,7 +6,8 @@
  *  the day offers THOROUGH for tomorrow -> OPTIMIZE (Thorough) -> the job RUNS with its mode, start
  *  and heartbeat, the janitor leaves it alone -> the plan is saved with how it was searched (mode,
  *  time, why it stopped) on the plan, the job message, the summary and the Excel ASSUMPTIONS ->
- *  a Quick re-plan searches the automatic time.
+ *  a Thorough plan for today times its new loads from the end of its search (review of the
+ *  long-search PR) -> a Quick re-plan searches the automatic time.
  *
  * Runs only when the web app's THOROUGH_MAX_SEC is small (CI sets 60 s): with the real 20 minutes
  * it would take 20 minutes. Requires RATE_LIMITS_DISABLED=1 like the other suites.
@@ -158,6 +159,55 @@ describe('long searches end to end', () => {
     wb.getWorksheet('ASSUMPTIONS')!.eachRow((row) => values.push(row.values ? String((row.values as unknown[]).slice(1).join(' | ')) : ''));
     expect(values.some((v) => v.startsWith('Route search | Thorough search: searched'))).toBe(true);
     expect(values.some((v) => v.startsWith('Route search - what it means | ') && v.includes('not a proven best'))).toBe(true);
+  }, 600_000);
+
+  it('THOROUGH on the delivery day: no new load leaves before the plan exists + the turnaround (review of the long-search PR)', async (ctx) => {
+    if (capSec > 120) ctx.skip(); // the web app searches up to its real 20 minutes: not in a test
+    const muscatMin = (d: Date) => (d.getUTCHours() * 60 + d.getUTCMinutes() + 240) % 1440;
+    // Late in the Muscat evening the depot (open 05:00-23:00) cannot send anything more today.
+    if (muscatMin(new Date()) > 21 * 60) ctx.skip();
+    const today = isoPlus(0);
+    const d = dmy(today);
+    const rows = [['SO No', 'SO Date', 'Req. Delivery Date', 'Customer Code', 'Branch', 'Customer Name', 'Item Code', 'Item Description', 'Qty (Cases)', 'Net Value', 'CM']];
+    ['C101', 'C103', 'C105'].forEach((code, i) => rows.push([`SOT-${i + 1}`, d, d, code, '', `Grocery ${code}`, 'TAN-500-24', '', String(15 + i * 5), '40', '6']));
+    const fd = new FormData();
+    fd.set('file', new Blob([rows.map((r) => r.join(',')).join('\n')], { type: 'text/csv' }), 'today.csv');
+    fd.set('depotId', depotId);
+    const up = await fetchWith(t.cookieJar, `${BASE}/api/orders/upload`, { method: 'POST', body: fd });
+    expect(up.status, await up.clone().text()).toBe(200);
+    const batch = await prisma.uploadBatch.findFirstOrThrow({ where: { tenantId: t.tenantId, fileName: 'today.csv' } });
+    // Orders for today are late (after the evening cutoff): the reason is asked for.
+    const confirmed = await fetchWith(t.cookieJar, `${BASE}/api/orders/${batch.id}/confirm`, j({ lateReason: 'Test: same-day order' }));
+    expect(confirmed.status, await confirmed.clone().text()).toBe(200);
+
+    const pressMin = muscatMin(new Date());
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/plan`, j({ date: today, depotId, optimize: true, searchMode: 'THOROUGH' }));
+    expect(r.status).toBe(202);
+    const sameDayRun = (await json(r)).data.runId as string;
+    // The request: new loads from the press + the cap (whole minutes) + the 30 min turnaround; loading from the end of the search.
+    const lead = Math.ceil(capSec / 60);
+    const first = await prisma.runJob.findFirstOrThrow({ where: { runId: sameDayRun }, orderBy: { attemptNo: 'desc' } });
+    const sent = (first.requestJson as any).config;
+    expect(sent.shift_start_min).toBeGreaterThanOrEqual(pressMin + lead + 30);
+    expect(sent.loading_from_min).toBeGreaterThanOrEqual(pressMin + lead);
+
+    let p: any;
+    const deadline = Date.now() + (capSec + 150) * 1000;
+    for (;;) {
+      p = await planOf(sameDayRun);
+      if (!running(p)) break;
+      if (Date.now() > deadline) throw new Error('the same-day thorough search did not end within its cap');
+      await new Promise((res) => setTimeout(res, 2000));
+    }
+    expect(p.run.status).toBe('READY');
+    const job = await prisma.runJob.findUniqueOrThrow({ where: { id: first.id } });
+    // What was sent is what is stored (the job times it again when it really starts).
+    const stored = (job.requestJson as any).config;
+    expect(stored.shift_start_min).toBeGreaterThanOrEqual(muscatMin(job.startedAt!) + lead + 30);
+    const savedMin = muscatMin(job.finishedAt!);
+    expect(p.loads.length).toBeGreaterThan(0);
+    for (const l of p.loads) expect(l.departMin, `${l.truckCode} L${l.loadNo}`).toBeGreaterThanOrEqual(savedMin + 30 - 1);
+    expect(p.warnings.some((w: string) => /^Planned from \d\d:\d\d \(now \d\d:\d\d \+ up to \d+ min Thorough search \+ 30 min preparation\)/.test(w))).toBe(true);
   }, 600_000);
 
   it('QUICK: a re-plan searches the automatic time and says so', async (ctx) => {
