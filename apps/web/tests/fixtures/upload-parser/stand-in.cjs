@@ -9,6 +9,8 @@
 //   echo.cjs    - answers one row with what it was started with: its environment's names, its Node flags
 //   flood.cjs   - sends pieces of rows of 1 MB each without end, whatever the web process's limit
 //                 on the answer (lib/upload-parse/protocol.ts: MAX_RESULT_BYTES); only a kill stops it
+//   wide.cjs    - sends one row of 250,000 keys (each its own text, the value "1") and its reply: a row
+//                 wider than any file within the upload caps gives (MAX_COLS, P5 second review)
 const v8 = require('node:v8');
 
 module.exports = function standIn(mode) {
@@ -41,6 +43,20 @@ module.exports = function standIn(mode) {
         process.send({ kind: 'rows', bytes: v8.serialize({ texts, cells }) }, undefined, undefined, (err) => (err ? undefined : setImmediate(next)));
       };
       return next();
+    }
+    if (mode === 'wide') {
+      const n = 250_000;
+      const texts = ['1'];
+      const cells = new Uint32Array(1 + 2 * n);
+      cells[0] = n;
+      for (let c = 0; c < n; c++) {
+        texts.push(`k${c}`);
+        cells[1 + 2 * c] = c + 1;
+        cells[2 + 2 * c] = 0;
+      }
+      process.send({ kind: 'rows', bytes: v8.serialize({ texts, cells }) });
+      const reply = { ok: true, parsed: { fileName: 'wide', fileType: 'csv', rows: [], warnings: [] } };
+      return process.send({ kind: 'reply', bytes: v8.serialize(reply), pieces: 1 }, () => process.exit(0));
     }
     throw new Error(`unknown stand-in mode ${mode}`);
   });

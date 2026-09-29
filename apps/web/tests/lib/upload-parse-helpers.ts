@@ -13,8 +13,9 @@ import { setUploadParseTestOverrides, uploadParseState } from '@/lib/upload-pars
 const WEB = path.resolve(__dirname, '../..');
 const g = globalThis as { __routeiqUploadParseInProcess?: unknown };
 
-/** The stand-in parser processes of tests/fixtures/upload-parser (busy, crash, silent, garbage, hog, echo, flood). */
-export const standIn = (mode: 'busy' | 'crash' | 'silent' | 'garbage' | 'hog' | 'echo' | 'flood') => path.join(WEB, 'tests', 'fixtures', 'upload-parser', `${mode}.cjs`);
+/** The stand-in parser processes of tests/fixtures/upload-parser (busy, crash, silent, garbage, hog, echo, flood, wide). */
+export const standIn = (mode: 'busy' | 'crash' | 'silent' | 'garbage' | 'hog' | 'echo' | 'flood' | 'wide') =>
+  path.join(WEB, 'tests', 'fixtures', 'upload-parser', `${mode}.cjs`);
 
 /**
  * How much more of this process's JavaScript heap is in use, after a full garbage collection, while

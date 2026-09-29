@@ -112,6 +112,9 @@ const tooManyCells = (cells: number, max: number, remedy: string) =>
   new WorkbookRefusedError(
     `This file is too large to read: it has about ${cells.toLocaleString('en-US')} cells (rows x columns); at most ${max.toLocaleString('en-US')} can be read. ${remedy}`,
   );
+/** A CSV with more than `max` cells: sent as Excel (counted here from its separators), or as text (lib/csv, its values). */
+export const tooManyTextCells = (cells: number, max: number) =>
+  tooManyCells(cells, max, 'Split the file, or remove the columns you do not need, and upload again.');
 const tooManyLinks = (cells: number, max: number) =>
   new WorkbookRefusedError(
     `This workbook has links over ${Number.isFinite(cells) ? `${cells.toLocaleString('en-US')} cells` : 'more cells than a sheet has'}; at most ${max.toLocaleString('en-US')} can be read. ` +
@@ -413,7 +416,7 @@ function checkDelimitedText(b: Buffer, maxCells: number): void {
     const c = text.charCodeAt(i);
     if (c === 0x2c || c === 0x09 || c === 0x3b || c === 0x7c || c === 0x0a || c === 0x0d || c === own) cells++;
   }
-  if (cells > maxCells) throw tooManyCells(cells, maxCells, 'Split the file, or remove the columns you do not need, and upload again.');
+  if (cells > maxCells) throw tooManyTextCells(cells, maxCells);
 }
 
 function checkLinkCells(cells: number, max: number): void {

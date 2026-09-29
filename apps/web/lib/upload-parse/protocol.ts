@@ -17,11 +17,20 @@
  *    much memory". The web process counts the bytes before it turns them into objects and stops the
  *    parser past the same limit;
  *  - the pieces are cut by size as well as by cells.
+ *
+ * A byte limit does not bound the rows the web process builds (P5 second review): a row of a million
+ * keys was a 16 MB answer, far under the limit, and one object of a million keys, built in one go
+ * (1-2 s blocked, 70-130 MB held). So the rows are bounded by the upload caps too: no row of more
+ * than MAX_COLS keys and no more than MAX_CELLS cells in all. parseUpload gives no more (lib/csv;
+ * since that review a CSV sent as text too); the parser stops before it would send more, and the
+ * web process checks both before it builds a row. Past either, the file is refused "needs too much
+ * memory", like an answer past the byte limit.
  */
 import { deserialize, serialize } from 'node:v8';
 import type { ParsedFile } from '../csv';
 import type { CanonicalField } from '../dispatch/order-headers';
 import { MultipleSheetsError, WorkbookRefusedError, type SheetSummary } from '../upload-errors';
+import { MAX_CELLS, MAX_COLS } from '../upload-limits';
 
 /** What an upload is for, as data (lib/upload-parse/handler turns it into parseUpload's options). */
 export interface ParseSpec {
@@ -89,17 +98,23 @@ export function isParseReply(m: unknown): m is ParseReply {
 /**
  * The answer as the parser process sends it, in order:
  *  - `rows`: a piece of rows, as bytes (v8.serialize of a RowsPiece). At most ROWS_PIECE_CELLS
- *    cells, and cut once its new texts pass about PIECE_BYTES (a row is never cut);
+ *    cells, and cut once its new texts pass about PIECE_BYTES (a row is never cut, and has at most
+ *    MAX_COLS cells);
  *  - `reply`: the reply itself (its rows empty) as bytes, and how many pieces came before it;
- *  - or, instead of the rest, `too-large`: the next message would take the answer past its limit, so
- *    nothing more is sent.
+ *  - or, instead of the rest, `too-large`: the answer would pass a limit, so nothing more is sent.
+ *    `what` names it: the next message would take the answer past its limit in bytes (`count`: the
+ *    bytes it would then be), the next row has more than MAX_COLS cells (`count`: its cells), or
+ *    it would take the rows past MAX_CELLS cells (`count`: the cells they would then have).
  * The web process turns each piece into rows as it arrives, a piece at a time, so it answers other
  * requests in between: one message of 2.5 million cells took it 0.7-1.8 s in one go on a busy PC.
  */
 export type ParseMessage =
   | { kind: 'rows'; bytes: Uint8Array }
   | { kind: 'reply'; bytes: Uint8Array; pieces: number }
-  | { kind: 'too-large'; bytes: number; limit: number };
+  | { kind: 'too-large'; what: AnswerLimit; count: number; limit: number };
+
+/** What an answer that is too large passes: its limit in bytes, MAX_COLS cells in a row, or MAX_CELLS cells in all. */
+export type AnswerLimit = 'bytes' | 'columns' | 'cells';
 
 /**
  * A piece of rows: the texts not sent before (they get the next numbers, from 0 for the answer's
@@ -118,7 +133,8 @@ export const PIECE_BYTES = 4 * 1024 * 1024;
  * The most an answer may be, in bytes as sent: 128 MB. Every text is sent once, so what a file within
  * the upload caps sends is about its own text (at most 50 MB unpacked, 10 MB for a CSV) and 8 bytes a
  * cell (2.5 million cells at most, 20 MB): far below. A file past it is refused "needs too much
- * memory", like one past the parser's heap cap.
+ * memory", like one past the parser's heap cap. It bounds the bytes, not the rows made of them: the
+ * rows are bounded by MAX_COLS and MAX_CELLS (see above).
  */
 export const MAX_RESULT_BYTES = 128 * 1024 * 1024;
 
@@ -142,7 +158,7 @@ export function* answerMessages(reply: ParseReply, opts: AnswerOptions = {}): Ge
   function* message(bytes: Uint8Array, kind: 'rows' | 'reply'): Generator<ParseMessage, void, undefined> {
     if (sent + bytes.byteLength > limit) {
       stopped = true;
-      yield { kind: 'too-large', bytes: sent + bytes.byteLength, limit };
+      yield { kind: 'too-large', what: 'bytes', count: sent + bytes.byteLength, limit };
       return;
     }
     sent += bytes.byteLength;
@@ -163,6 +179,7 @@ export function* answerMessages(reply: ParseReply, opts: AnswerOptions = {}): Ge
     let textBytes = 0;
     let cells: number[] = [];
     let cellCount = 0;
+    let allCells = 0;
     const ref = (v: unknown): number => {
       if (typeof v === 'string') {
         const at = numberOf.get(v);
@@ -185,6 +202,19 @@ export function* answerMessages(reply: ParseReply, opts: AnswerOptions = {}): Ge
     };
     for (const row of rows) {
       const keys = Object.keys(row);
+      // The upload caps (P5 second review): checked before anything of this row is sent.
+      const over: ParseMessage | null =
+        keys.length > MAX_COLS
+          ? { kind: 'too-large', what: 'columns', count: keys.length, limit: MAX_COLS }
+          : allCells + keys.length > MAX_CELLS
+            ? { kind: 'too-large', what: 'cells', count: allCells + keys.length, limit: MAX_CELLS }
+            : null;
+      if (over) {
+        stopped = true;
+        yield over;
+        return;
+      }
+      allCells += keys.length;
       if (cellCount > 0 && cellCount + keys.length > ROWS_PIECE_CELLS) {
         yield* message(piece(), 'rows');
         if (stopped) return;
@@ -223,31 +253,39 @@ export function replyMessages(reply: ParseReply, opts: AnswerOptions = {}): Pars
 }
 
 /**
- * The answer would pass its limit: the parser said so and stopped (`by` parser), or the web process
- * counted more (`by` web). The file is refused "needs too much memory".
+ * The answer would pass a limit (`what`: its bytes, MAX_COLS cells in a row, MAX_CELLS cells in all):
+ * the parser said so and stopped (`by` parser), or the web process counted more (`by` web); `count`
+ * is what was counted. The file is refused "needs too much memory".
  */
 export class AnswerTooLargeError extends Error {
   constructor(
     readonly by: 'parser' | 'web',
-    readonly bytes: number,
+    readonly what: AnswerLimit,
+    readonly count: number,
     readonly limit: number,
   ) {
-    super(`the parser process's answer would pass ${limit} bytes (${by === 'parser' ? 'the parser stopped' : 'counted in the web process'})`);
+    const passed = what === 'bytes' ? `${limit} bytes` : what === 'columns' ? `${limit} cells in a row` : `${limit} cells`;
+    super(`the parser process's answer would pass ${passed} (${by === 'parser' ? 'the parser stopped' : 'counted in the web process'})`);
     this.name = 'AnswerTooLargeError';
   }
 }
+
+const ANSWER_LIMITS: ReadonlySet<unknown> = new Set<AnswerLimit>(['bytes', 'columns', 'cells']);
 
 const SOMETHING_ELSE = 'the parser process sent something else than a parse result';
 
 /**
  * Puts the answer back together from the parser's messages, in the order they came. Counts their
- * bytes before it turns them into objects: past `maxResultBytes` it throws AnswerTooLargeError.
+ * bytes before it turns them into objects: past `maxResultBytes` it throws AnswerTooLargeError. So
+ * it does, before a row is built, for a row of more than MAX_COLS cells and for a row that would take
+ * the rows past MAX_CELLS cells (P5 second review).
  */
 export class ReplyCollector {
   private rows: ParsedFile['rows'] = [];
   private texts: unknown[] = [];
   private pieces = 0;
   private bytes = 0;
+  private cells = 0;
 
   constructor(private readonly maxResultBytes: number = MAX_RESULT_BYTES) {}
 
@@ -263,11 +301,16 @@ export class ReplyCollector {
 
   /** The whole reply once its last message came; null before; throws on a message it does not know. */
   add(m: unknown): ParseReply | null {
-    const msg = m as { kind?: unknown; bytes?: unknown; pieces?: unknown } | null;
-    if (msg?.kind === 'too-large') throw new AnswerTooLargeError('parser', typeof msg.bytes === 'number' ? msg.bytes : NaN, this.maxResultBytes);
+    const msg = m as { kind?: unknown; bytes?: unknown; pieces?: unknown; what?: unknown; count?: unknown } | null;
+    if (msg?.kind === 'too-large') {
+      // The limit is this process's own; the parser's words are only what it counted.
+      const what = ANSWER_LIMITS.has(msg.what) ? (msg.what as AnswerLimit) : 'bytes';
+      const limit = what === 'columns' ? MAX_COLS : what === 'cells' ? MAX_CELLS : this.maxResultBytes;
+      throw new AnswerTooLargeError('parser', what, typeof msg.count === 'number' ? msg.count : NaN, limit);
+    }
     if ((msg?.kind !== 'rows' && msg?.kind !== 'reply') || !(msg.bytes instanceof Uint8Array)) throw new Error(SOMETHING_ELSE);
     this.bytes += msg.bytes.byteLength;
-    if (this.bytes > this.maxResultBytes) throw new AnswerTooLargeError('web', this.bytes, this.maxResultBytes);
+    if (this.bytes > this.maxResultBytes) throw new AnswerTooLargeError('web', 'bytes', this.bytes, this.maxResultBytes);
     let data: unknown;
     try {
       data = deserialize(msg.bytes);
@@ -301,16 +344,23 @@ export class ReplyCollector {
     for (let i = 0; i < cells.length; ) {
       const n = cells[i++]!;
       if (i + 2 * n > cells.length) throw new Error(SOMETHING_ELSE);
-      const row: Record<string, string> = {};
+      // The upload caps, before the row is built (P5 second review).
+      if (n > MAX_COLS) throw new AnswerTooLargeError('web', 'columns', n, MAX_COLS);
+      if (this.cells + n > MAX_CELLS) throw new AnswerTooLargeError('web', 'cells', this.cells + n, MAX_CELLS);
+      this.cells += n;
+      const entries: [string, string][] = [];
       for (let c = 0; c < n; c++) {
         const key = text(cells[i++]);
         const value = text(cells[i++]) as string;
         if (typeof key !== 'string') throw new Error(SOMETHING_ELSE);
-        // As the parser's row had it (an own "__proto__" too, which an assignment would not make).
-        if (key === '__proto__') Object.defineProperty(row, key, { value, enumerable: true, writable: true, configurable: true });
-        else row[key] = value;
+        entries.push([key, value]);
       }
-      this.rows.push(row);
+      // As the parser's row had it: Object.fromEntries defines each key as an own property in turn (an
+      // own "__proto__" too, which an assignment would not make; a key met again keeps its place and
+      // takes the later value). And V8 keeps such an object compact, where a row that gets its keys one
+      // at a time becomes a hash table past about 16 keys (P5 second review: 50,000 rows of 49 columns
+      // held 151 MB here, now 21 MB, on Node 22 and 24).
+      this.rows.push(Object.fromEntries(entries) as Record<string, string>);
     }
   }
 }

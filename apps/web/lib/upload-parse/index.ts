@@ -15,7 +15,9 @@
  *  - its environment has no secrets (no DATABASE_URL, no tokens), and it inherits no Node flags.
  * The web process only sends the bytes and receives the rows, so it keeps answering meanwhile. The
  * answer is bounded here too (P5 review, protocol.ts): each text crosses once, and an answer of more
- * than MAX_RESULT_BYTES (128 MB) is refused "needs too much memory".
+ * than MAX_RESULT_BYTES (128 MB) is refused "needs too much memory"; so is one with a row of more
+ * than MAX_COLS cells or more than MAX_CELLS cells in all (P5 second review), checked before a row
+ * is built here.
  *
  * Why a process and not a worker thread (the assessment said worker thread): a worker's heap cap
  * does not always end only the worker. With a legal 0.22 MB upload (50,000 rows x 49 columns) and a
@@ -32,7 +34,7 @@ import { NextResponse } from 'next/server';
 import type { ParsedFile } from '../csv';
 import { fileRefusal } from '../upload-limits';
 import { MAX_WAITING, parserEntry, QUEUE_WAIT_MS, uploadParseConfig, uploadParserStartupProblem, type UploadParseConfig } from './config';
-import { AnswerTooLargeError, answerMessages, decodeError, MAX_RESULT_BYTES, ReplyCollector, type ParseReply, type ParseRequest, type ParseSpec } from './protocol';
+import { AnswerTooLargeError, answerMessages, decodeError, MAX_RESULT_BYTES, ReplyCollector, type AnswerLimit, type ParseReply, type ParseRequest, type ParseSpec } from './protocol';
 
 export type { ParseSpec } from './protocol';
 
@@ -100,8 +102,10 @@ interface LastRun {
   pieces: number;
   bytes: number;
   maxRssKB: number | undefined;
-  /** The answer would have passed its limit: the parser said so and stopped, or this process counted more. */
+  /** The answer would have passed a limit: the parser said so and stopped, or this process counted more. */
   tooLarge?: 'parser' | 'web';
+  /** Which: its bytes, MAX_COLS cells in a row, MAX_CELLS cells in all (P5 second review). */
+  over?: AnswerLimit;
 }
 let lastRun: LastRun | null = null;
 /**
@@ -203,14 +207,18 @@ interface ChildRun {
 }
 
 /**
- * The refusal for an answer that could not be put together (protocol.ts): too large, "needs too much
- * memory" (the parser stopped before its limit, or this process counted more); anything else, "the
- * reader stopped".
+ * The refusal for an answer that could not be put together (protocol.ts): too large (its bytes, a
+ * row of more than MAX_COLS cells, more than MAX_CELLS cells), "needs too much memory" (the parser
+ * stopped before the limit, or this process counted more); anything else, "the reader stopped".
  */
 function answerRefusal(err: unknown, pid: number | undefined, collector: ReplyCollector): UploadParseRefused {
   if (err instanceof AnswerTooLargeError) {
-    lastRun = { pid, pieces: collector.piecesReceived, bytes: collector.bytesReceived, maxRssKB: undefined, tooLarge: err.by };
-    log('warn', `parser process ${pid ?? '-'}: its answer would pass ${mb(err.limit)} MB (${err.by === 'parser' ? 'it stopped' : `${mb(err.bytes)} MB counted here`}): out of memory`);
+    lastRun = { pid, pieces: collector.piecesReceived, bytes: collector.bytesReceived, maxRssKB: undefined, tooLarge: err.by, over: err.what };
+    const passes =
+      err.what === 'bytes'
+        ? `would pass ${mb(err.limit)} MB (${err.by === 'parser' ? 'it stopped' : `${mb(err.count)} MB counted here`})`
+        : `would pass ${err.limit.toLocaleString('en-US')} cells${err.what === 'columns' ? ' in a row' : ''} (${err.count.toLocaleString('en-US')}${err.by === 'parser' ? ', it stopped' : ' counted here'})`;
+    log('warn', `parser process ${pid ?? '-'}: its answer ${passes}: out of memory`);
     return new UploadParseRefused('UPLOAD_OUT_OF_MEMORY');
   }
   log('error', `parser process ${pid ?? '-'}: ${(err as Error).message}`);

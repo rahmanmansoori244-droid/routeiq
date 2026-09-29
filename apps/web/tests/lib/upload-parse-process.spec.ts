@@ -12,12 +12,16 @@
  *  - nothing is left behind: no process, no slot, no timer, after thousands of parses too (the long
  *    run is .dev work; here a few dozen);
  *  - the answer is bounded in this process (P5 review): each text crosses once, and an answer of more
- *    than MAX_RESULT_BYTES is refused "needs too much memory", by the parser and by this process.
+ *    than MAX_RESULT_BYTES is refused "needs too much memory", by the parser and by this process;
+ *  - so are the rows made of it (P5 second review): a CSV sent as text has the column and cell caps
+ *    (lib/csv), and no row of more than MAX_COLS keys, or more than MAX_CELLS cells in all, crosses:
+ *    the parser stops before it, and this process refuses it before it builds the row.
  * The stand-in parsers are in tests/fixtures/upload-parser.
  */
 import { readFileSync } from 'node:fs';
+import { serialize } from 'node:v8';
 import { describe, expect, it } from 'vitest';
-import { parseUpload } from '@/lib/csv';
+import { MAX_CELLS, MAX_COLS, parseUpload } from '@/lib/csv';
 import { MAX_WAITING, parserEntry, QUEUE_WAIT_MS, uploadParseConfig, uploadParseConfigProblems, uploadParserStartupProblem } from '@/lib/upload-parse/config';
 import { checkUploadParser, lastUploadParse, parseUploadIsolated, setUploadParseTestOverrides, UPLOAD_REFUSALS, UploadParseRefused, uploadParseState } from '@/lib/upload-parse';
 import { MAX_RESULT_BYTES, PIECE_BYTES, replyMessages, ReplyCollector, ROWS_PIECE_CELLS, type ParseReply } from '@/lib/upload-parse/protocol';
@@ -224,6 +228,18 @@ describe('the rows come back in pieces (protocol)', () => {
     expect(replyMessages({ ok: false, error: { kind: 'error', name: 'Error', message: 'x' } })).toHaveLength(1);
   });
 
+  it('a row comes back as the parser had it: its keys in order, an own "__proto__" as a plain key, the same prototype (P5 second review)', () => {
+    const row = JSON.parse('{"b":"1","__proto__":"x","a":"2"}') as Record<string, string>;
+    const reply: ParseReply = { ok: true, parsed: { fileName: 'f.csv', fileType: 'csv', rows: [row], warnings: [] } };
+    const c = new ReplyCollector();
+    let got: ParseReply | null = null;
+    for (const m of replyMessages(reply)) got = c.add(structuredClone(m));
+    const back = (got as { parsed: { rows: Record<string, string>[] } }).parsed.rows[0]!;
+    expect(Object.keys(back)).toEqual(['b', '__proto__', 'a']);
+    expect(Object.getPrototypeOf(back)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(back, '__proto__')).toEqual({ value: 'x', enumerable: true, writable: true, configurable: true });
+  });
+
   it('pieces are cut by size too, and a text the answer holds many times crosses once (P5 review)', () => {
     // 300 rows of 100,000 characters each of their own (30 MB): in pieces of at most about PIECE_BYTES.
     const long: ParseReply = { ok: true, parsed: { fileName: 'f.csv', fileType: 'csv', rows: Array.from({ length: 300 }, (_, r) => ({ note: String(r).padEnd(100_000, 'z') })), warnings: [] } };
@@ -294,6 +310,76 @@ describe('the answer is bounded in this process, whatever the file (P5 review)',
 
   it('the limit is MAX_RESULT_BYTES (128 MB), which no file within the upload caps comes near', () => {
     expect(MAX_RESULT_BYTES).toBe(128 * 1024 * 1024);
+  });
+});
+
+/** What `fn` throws (null when it throws nothing). */
+function thrown(fn: () => unknown): unknown {
+  try {
+    fn();
+    return null;
+  } catch (err) {
+    return err;
+  }
+}
+
+describe('a row wider than the column cap, or more cells than the cell cap, never reaches this process (P5 second review)', () => {
+  it('the parser refuses a CSV of one row of 1,000,000 columns (9.4 MB): this process holds almost nothing and is not blocked', async () => {
+    // Before: the parser read it (7-9 s) and this process built one row of a million keys in one go,
+    // 1.0-1.4 s blocked and 71 MB held; the answer, 16 MB, was far under MAX_RESULT_BYTES.
+    const cols = 1_000_000;
+    const text = `${Array.from({ length: cols }, (_, c) => `c${c}`).join(',')}\n${Array(cols).fill('1').join(',')}\n`;
+    const file = new File([text], 'wide.csv', { type: 'text/csv' });
+    expect(file.size).toBeLessThan(10 * 1024 * 1024);
+    const { result, heldMB } = await heapHeldBy(() => longestStall(() => outcome(parseUploadIsolated(file))));
+    expect(result.result).toEqual({
+      error: expect.objectContaining({ class: 'WorkbookRefusedError', message: expect.stringMatching(/^This file has 1,000,000 columns; at most 200 can be read\./) }),
+    });
+    expect(heldMB).toBeLessThan(16);
+    expect(result.stallMs).toBeLessThan(1_000);
+  });
+
+  it('protocol: the parser sends no row of more than MAX_COLS keys and no more than MAX_CELLS cells; this process checks both before it builds a row', () => {
+    const reply = (rows: Record<string, string>[]): ParseReply => ({ ok: true, parsed: { fileName: 'f.csv', fileType: 'csv', rows, warnings: [] } });
+    const row = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, c) => [`h${c}`, '1']));
+    // Columns: a row of MAX_COLS keys crosses; at a row of one more the answer stops, with nothing of it sent.
+    expect(replyMessages(reply([row(MAX_COLS)])).map((m) => m.kind)).toEqual(['rows', 'reply']);
+    expect(replyMessages(reply([row(3), row(MAX_COLS + 1), row(3)]))).toEqual([{ kind: 'too-large', what: 'columns', count: MAX_COLS + 1, limit: MAX_COLS }]);
+    // Cells: 25,000 rows of 100 keys (MAX_CELLS) cross; with one cell more the answer stops before it.
+    const full = Array.from({ length: MAX_CELLS / 100 }, () => row(100));
+    const messages = replyMessages(reply(full));
+    const whole = new ReplyCollector();
+    let got: ParseReply | null = null;
+    for (const m of messages) got = whole.add(m);
+    expect(got?.ok && got.parsed.rows.length).toBe(MAX_CELLS / 100);
+    const over = replyMessages(reply([...full, row(1)]));
+    expect(over.at(-1)).toEqual({ kind: 'too-large', what: 'cells', count: MAX_CELLS + 1, limit: MAX_CELLS });
+    expect(over.filter((m) => m.kind === 'reply')).toEqual([]);
+    // This process: a piece with a row of MAX_COLS + 1 cells, or one cell past MAX_CELLS, is refused before the row is built.
+    const piece = (texts: string[], cells: number[]) => ({ kind: 'rows', bytes: serialize({ texts, cells: Uint32Array.from(cells) }) });
+    const keys = Array.from({ length: MAX_COLS + 1 }, (_, c) => `h${c}`);
+    const wideRow = [MAX_COLS + 1, ...keys.flatMap((_, c) => [c + 1, 0])];
+    expect(thrown(() => new ReplyCollector().add(piece(['1', ...keys], wideRow)))).toMatchObject({ name: 'AnswerTooLargeError', by: 'web', what: 'columns' });
+    const past = new ReplyCollector();
+    for (const m of messages.filter((m) => m.kind === 'rows')) past.add(m);
+    expect(thrown(() => past.add(piece([], [1, 0, 1])))).toMatchObject({ name: 'AnswerTooLargeError', by: 'web', what: 'cells' });
+  });
+
+  it('the rows of a legal file at the caps are compact here: 50,000 rows of 49 columns hold under 48 MB (151 MB when a row was built one key at a time)', async () => {
+    // V8 stores an object that gets more than about 16 keys one at a time as a hash table: 3 KB a row here.
+    const text = [Array.from({ length: 49 }, (_, c) => `h${c}`).join(','), ...Array.from({ length: 50_000 }, () => Array(49).fill('1').join(','))].join('\n');
+    const { result, heldMB } = await heapHeldBy(() => parseUploadIsolated(new File([text], 'legal-wide.csv', { type: 'text/csv' })));
+    expect(result.rows).toHaveLength(50_000);
+    expect(Object.keys(result.rows[49_999]!)).toHaveLength(49);
+    expect(heldMB).toBeLessThan(48);
+  });
+
+  it('a parser that sends a row of 250,000 keys anyway is refused "needs too much memory" before the row is built here', async () => {
+    setUploadParseTestOverrides({ entry: standIn('wide') });
+    const { result, heldMB } = await heapHeldBy(() => outcome(parseUploadIsolated(tiny())));
+    expect(result).toEqual(refusal('UPLOAD_OUT_OF_MEMORY'));
+    expect(lastUploadParse()).toMatchObject({ tooLarge: 'web', over: 'columns', pieces: 0 });
+    expect(heldMB).toBeLessThan(16);
   });
 });
 

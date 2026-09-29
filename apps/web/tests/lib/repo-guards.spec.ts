@@ -485,6 +485,16 @@ describe('the web process never reads an upload itself (audit P5)', () => {
     }
   });
 
+  it('the handbook describes tests/setup.ts as it is: uploads read in the test process unless a spec starts the parser (P5 second review: "an empty placeholder")', () => {
+    const REPO = path.resolve(APPS, '..');
+    const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+    expect(readFileSync(path.join(WEB, 'tests', 'setup.ts'), 'utf8')).toMatch(/__routeiqUploadParseInProcess\s*=/);
+    const vitest = handbook.split('\n').find((l) => l.startsWith('**Vitest configuration**')) ?? '';
+    // Only the matching words are printed on a failure, not the whole paragraph.
+    expect(/placeholder/i.exec(vitest)?.[0] ?? null).toBeNull();
+    expect(vitest.includes('`__routeiqUploadParseInProcess`') && vitest.includes('`useRealUploadParser()`')).toBe(true);
+  });
+
   it('the three upload routes read the file through parseUploadIsolated and answer its refusals', () => {
     for (const r of ['app/api/orders/upload/route.ts', 'app/api/customers/import/route.ts', 'app/api/runs/[id]/baseline/route.ts']) {
       const src = readFileSync(path.join(WEB, r), 'utf8');
