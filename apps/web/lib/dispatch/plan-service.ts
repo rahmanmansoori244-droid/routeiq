@@ -1773,22 +1773,6 @@ export async function getOrCreatePlan(tenantId: string, depotId: string, dateIso
 const REPLAN_FROM: readonly RunStatus[] = ['DRAFT', 'READY', 'FAILED', 'DISPATCHED'];
 
 /**
- * New plan version for a late order / re-plan (copy-forward, review F03). One transaction, under
- * the day lock and then the parent's row lock:
- *
- * - the child copies EVERY load of the parent (PLANNED ones too; carriedFromLoadId = the parent
- *   load) with its assignments, the parent's CHOSEN option with its unserved orders (not the
- *   alternatives: they were computed around the parent's loads), and the plan facts (summary,
- *   reconciliation, order counts). Its status follows its loads (READY, or DISPATCHED when every
- *   load is out);
- * - the parent becomes SUPERSEDED (kept read-only for traceability).
- *
- * So the new version is a usable copy of the previous plan from the start: if its optimization
- * then fails (solver error, timeout, a deploy during the solve), the day keeps a plan that can be
- * locked and dispatched. A successful optimization replaces the copied PLANNED loads and the
- * copied option (persistDispatchResult + applyScenario); frozen loads are never touched.
- */
-/**
  * Audit E1: the depot pin a load planned before load origins were kept was planned from - an earlier
  * copy's origin if one has it, else the depot the version that first planned it was optimized from
  * (the root of its carriedFromLoadId chain; its option's inputs). Null when that is not known.
@@ -1818,6 +1802,22 @@ async function plannedOriginOf(
   return origin;
 }
 
+/**
+ * New plan version for a late order / re-plan (copy-forward, review F03). One transaction, under
+ * the day lock and then the parent's row lock:
+ *
+ * - the child copies EVERY load of the parent (PLANNED ones too; carriedFromLoadId = the parent
+ *   load) with its assignments, the parent's CHOSEN option with its unserved orders (not the
+ *   alternatives: they were computed around the parent's loads), and the plan facts (summary,
+ *   reconciliation, order counts). Its status follows its loads (READY, or DISPATCHED when every
+ *   load is out);
+ * - the parent becomes SUPERSEDED (kept read-only for traceability).
+ *
+ * So the new version is a usable copy of the previous plan from the start: if its optimization
+ * then fails (solver error, timeout, a deploy during the solve), the day keeps a plan that can be
+ * locked and dispatched. A successful optimization replaces the copied PLANNED loads and the
+ * copied option (persistDispatchResult + applyScenario); frozen loads are never touched.
+ */
 export async function createNextVersion(
   tenantId: string,
   parentRunId: string,

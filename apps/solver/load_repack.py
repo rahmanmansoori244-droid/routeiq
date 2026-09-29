@@ -676,8 +676,15 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
 
     def left(share: float = 1.0) -> float:
         # The phases' limits come out of this solve's own limit (the job's share of its budget):
-        # no floor pushes a phase past it (audit E5; the floors were 0.5 s each).
+        # no fixed floor pushes a phase past it (audit E5; the floors were 0.5 s each, also when the
+        # solve had used its time).
         return max(0.05, (deadline - time.perf_counter()) * share)
+
+    # Phase 2 always keeps a real chance to reproduce the hinted plan: when phase 1 ran past its 40 %
+    # (CP-SAT's presolve on a loaded machine), it still gets 60 % of the limit, at most 0.5 s. A
+    # phase 2 of a few hundredths of a second returned no plan (UNKNOWN) and lost phase 1's work.
+    # The overrun is bounded (at most 0.5 s per solve) and comes out of the next source's share.
+    phase2_min = min(0.5, 0.6 * time_limit)
 
     if served_terms:
         m.Maximize(sum(served_terms))
@@ -693,7 +700,7 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
                     m.AddHint(ej, solver.Value(ej))
             hinted = True
     m.Minimize(sum(cost_terms))
-    solver.parameters.max_time_in_seconds = left()
+    solver.parameters.max_time_in_seconds = max(left(), phase2_min)
     status = _solve_until_stalled(solver, m, solver.parameters.max_time_in_seconds)
     name = solver.StatusName(status)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):

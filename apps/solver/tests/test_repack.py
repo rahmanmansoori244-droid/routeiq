@@ -948,6 +948,8 @@ def test_a_repack_with_no_answer_keeps_the_plan_it_started_from(monkeypatch, cap
 def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch):
     """Audit E5, keeping the budget honest: both CP-SAT phases end by the solve's own limit (the
     job's share of its budget). Each had a 0.5 s floor, which pushed a short solve past it."""
+    from ortools.sat.python import cp_model  # noqa: F401 - imported before the clock starts (repack imports it)
+
     calls: list[tuple[float, float]] = []
     orig = LR._solve_until_stalled
 
@@ -965,4 +967,30 @@ def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch):
     assert len(calls) == 2, calls
     for at, limit in calls:
         assert at + limit <= t0 + 0.3 + 0.05, (at - t0, limit)
+    assert res.plan is not None
+
+
+def test_repack_phase_two_keeps_a_real_chance_when_phase_one_overran(monkeypatch):
+    """When phase 1 runs past the solve's limit (CP-SAT's presolve on a loaded machine), phase 2
+    still gets 60 % of the limit, at most 0.5 s, not a few hundredths of a second that end with no
+    plan (seen once in the A6 benchmark: a 0.6 s repack UNKNOWN)."""
+    from ortools.sat.python import cp_model
+
+    limits: list[float] = []
+    orig = LR._solve_until_stalled
+
+    def slow_phase_one(solver, model, limit):
+        limits.append(limit)
+        if len(limits) == 1:
+            time.sleep(0.6)  # past the whole 0.5 s limit
+            return cp_model.UNKNOWN
+        return orig(solver, model, limit)
+
+    monkeypatch.setattr(LR, "_solve_until_stalled", slow_phase_one)
+    stops = [stop(f"S{i}", 23.585 + 0.05 * math.sin(i), 58.39 + 0.05 * math.cos(i), cases=40) for i in range(6)]
+    r = req(stops, [truck(f"T{i}", cap=100, fixed_cost=30, cost_per_km=0.1) for i in range(3)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    res = LR.repack(day, pricing, [(i,) for i in range(6)], set(range(3)), {k: 1 for k in range(3, 6)}, None, time_limit=0.5)
+    assert len(limits) == 2 and limits[1] == pytest.approx(0.3), limits
     assert res.plan is not None
