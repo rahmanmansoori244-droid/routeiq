@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import importlib
+import inspect
 
 import pytest
 from fastapi import HTTPException
@@ -40,7 +42,7 @@ def test_check_token_without_configuration_is_500(monkeypatch):
     assert exc.value.status_code == 500
 
 
-@pytest.mark.parametrize("endpoint", ["optimize_dispatch_endpoint", "route_geometry_endpoint", "optimize_endpoint"])
+@pytest.mark.parametrize("endpoint", ["optimize_dispatch_endpoint", "stop_dispatch_endpoint", "route_geometry_endpoint", "optimize_endpoint"])
 def test_every_protected_endpoint_goes_through_check_token(configured, monkeypatch, endpoint):
     calls = []
 
@@ -49,8 +51,13 @@ def test_every_protected_endpoint_goes_through_check_token(configured, monkeypat
         raise HTTPException(status_code=401, detail="Invalid solver token")
 
     monkeypatch.setattr(main, "_check_token", spy)
+    fn = getattr(main, endpoint)
     with pytest.raises(HTTPException) as exc:
-        getattr(main, endpoint)(None, x_solver_token="sent-token")
+        if inspect.iscoroutinefunction(fn):
+            # /optimize-dispatch is async since long searches (it watches its caller): (request, body).
+            asyncio.run(fn(None, None, x_solver_token="sent-token"))
+        else:
+            fn(None, x_solver_token="sent-token")
     assert exc.value.status_code == 401
     assert calls == ["sent-token"]
 
