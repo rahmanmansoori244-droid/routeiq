@@ -235,6 +235,11 @@ describe('checkDispatchReadiness', () => {
     const r = await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: failed }).f);
     expect(r).toMatchObject({ status: 'degraded', reason: 'SOLVER_WORKERS_FAILED', routing: { provider: 'OSRM', status: 'up' } });
     expect(r.message).toMatch(/^The route optimizer could not start its worker processes recently/);
+    // Both cases the signal covers (review): a refused optimization, or only a skipped load re-check
+    // (the plan itself was returned) - and that it clears by itself.
+    expect(r.message).toContain('an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped');
+    expect(r.message).toContain('or by itself 15 minutes after the failure');
+    expect(r.message).not.toMatch(/so it refused optimizations/);
     expect(overallReadiness('up', r)).toEqual({ status: 'degraded', httpStatus: 200 });
     const recovered = await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: { ...READY_BODY, workers: { status: 'ok' } } }).f);
     expect(recovered).toMatchObject({ status: 'ready', reason: 'OK' });
@@ -312,7 +317,7 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
   });
 
   it('rule 22: a solver whose worker processes could not start recently is 200 degraded SOLVER_WORKERS_FAILED (the administrator is alerted), never its details', async () => {
-    solverAnswers({ status: 200, body: { ...READY_BODY, ok: false, workers: { status: 'failed', failed_at: '2026-09-30T02:00:00+00:00', cause: 'OSError: [Errno 11] Resource temporarily unavailable' } } });
+    solverAnswers({ status: 200, body: { ...READY_BODY, ok: false, workers: { status: 'failed', failed_at: '2026-09-30T02:00:00+00:00', cause: 'BlockingIOError: [Errno 11] Resource temporarily unavailable' } } });
     const res = await health();
     const body = await res.json();
     expect(res.status).toBe(200);

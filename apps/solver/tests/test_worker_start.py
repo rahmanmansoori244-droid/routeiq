@@ -13,7 +13,7 @@ import logging
 import multiprocessing.queues as mpq
 import threading
 import time
-from multiprocessing.context import BaseContext, SpawnContext
+from multiprocessing.context import BaseContext, SpawnContext, SpawnProcess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -67,9 +67,110 @@ def _no_search_here(monkeypatch) -> list:
     return ran
 
 
-def _day(scenarios=("RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"), **cfg):
+def _day(scenarios=("RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"), time_limit_sec=2, **cfg):
     stops, trucks = nmwc_day(20)
-    return req(stops, trucks, time_limit_sec=2, scenarios=list(scenarios), **cfg)
+    return req(stops, trucks, time_limit_sec=time_limit_sec, scenarios=list(scenarios), **cfg)
+
+
+def _process_starts_refused(monkeypatch, *, after: int | None = None) -> dict:
+    """multiprocessing's spawn Process.start raises OSError (EAGAIN: the process limit) from its
+    (after + 1)-th call on, or once state["refuse"] is set. A Pool then has its first processes but
+    cannot start a replacement: its worker-handler thread dies with that error."""
+    real = SpawnProcess._Popen
+    state = {"refuse": False, "starts": 0}
+
+    def popen(process_obj):
+        state["starts"] += 1
+        if state["refuse"] or (after is not None and state["starts"] > after):
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable (test: the process limit)")
+        return real(process_obj)
+
+    monkeypatch.setattr(SpawnProcess, "_Popen", staticmethod(popen))
+    return state
+
+
+def _pools_made(monkeypatch) -> list:
+    """Every _Workers made from now on (to check that its processes and threads all stopped)."""
+    made: list = []
+    real = ds._Workers.__init__
+
+    def init(self, *a, **k):
+        made.append(self)
+        real(self, *a, **k)
+
+    monkeypatch.setattr(ds._Workers, "__init__", init)
+    return made
+
+
+def _all_stopped(made: list) -> None:
+    """Each pool was really cleaned up, not just given up on: no worker process alive, and Pool's
+    three helper threads ended."""
+    for w in made:
+        pool = getattr(w, "pool", None)
+        if pool is None:
+            continue
+        assert [p.pid for p in pool._pool if p.is_alive()] == []
+        assert not pool._worker_handler.is_alive() and not pool._task_handler.is_alive()
+        assert not pool._result_handler.is_alive()
+
+
+def _kill_a_worker_during_recommended(monkeypatch, which: str, before_kill=None) -> dict:
+    """While RECOMMENDED searches in one of the pool's two worker processes, kill (as the
+    out-of-memory killer would) RECOMMENDED's own worker ("busy") or the other one ("idle": it
+    waits for a task holding the task queue's read lock). The killer learns which process runs
+    RECOMMENDED from the pool's start reports (a blocking read, shared with the solve's own reads
+    under one lock). Returns {"pid", "at"} once it has killed."""
+    real_submit = ds._Workers.submit
+    real_started = ds._Workers.started
+    beacon = threading.Lock()
+    done: dict = {}
+
+    def started(self):
+        with beacon:
+            return real_started(self)
+
+    def kill(w, token):
+        with beacon:
+            while token not in w._pid_of:  # blocks until the next task reports its start
+                tok, pid = w._beacon.get()
+                w._pid_of[tok] = pid
+        rec_pid = w._pid_of[token]
+        time.sleep(1.0)  # RECOMMENDED is searching
+        victim = next(p for p in list(w.pool._pool) if (p.pid == rec_pid) == (which == "busy"))
+        if before_kill is not None:
+            before_kill()
+        victim.kill()
+        done.update(pid=victim.pid, at=time.monotonic())
+
+    def submit(self, fn, arg, name):
+        token, fut = real_submit(self, fn, arg, name)
+        if name == "RECOMMENDED" and not done:
+            threading.Thread(target=kill, args=(self, token), daemon=True).start()
+        return token, fut
+
+    monkeypatch.setattr(ds._Workers, "started", started)
+    monkeypatch.setattr(ds._Workers, "submit", submit)
+    return done
+
+
+def _within(seconds: float, fn) -> dict:
+    """fn() in a thread: {"value" | "error", "at"} (when it returned), or a failed test when it has
+    not returned after ``seconds`` - the hang these tests catch (the thread is then left behind)."""
+    out: dict = {}
+
+    def run():
+        try:
+            out["value"] = fn()
+        except BaseException as exc:  # noqa: BLE001
+            out["error"] = exc
+        out["at"] = time.monotonic()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        pytest.fail(f"no answer within {seconds:g} s: it hangs")
+    return out
 
 
 def test_a_pool_that_cannot_start_refuses_within_seconds_and_searches_nothing(monkeypatch, caplog):
@@ -113,6 +214,188 @@ def test_workers_that_die_while_starting_refuse_after_the_start_wait(monkeypatch
     assert "within 3 s" in exc.value.cause
     assert ran == []
     assert ds.WORKER_HEALTH.status()["status"] == "failed"
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_workers_that_die_while_starting_with_no_replacement_refuse_within_seconds(monkeypatch, caplog):
+    """(review) The out-of-memory / process-limit case itself: the pool's two processes die while
+    starting, and no replacement can start (OSError EAGAIN), so Pool's worker-handler thread dies.
+    Closing that pool used to wait forever (its task handler never got the stop sentinel): no 503,
+    no ERROR line, the slot held for good. Now: refused within the start wait, the administrator
+    alerted, and the pool really cleaned up."""
+    monkeypatch.setenv("ROUTEIQ_TEST_WORKER_START_EXIT", "1")
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "3")
+    _process_starts_refused(monkeypatch, after=2)  # the pool's two processes start; no replacement can
+    pools = _pools_made(monkeypatch)
+    ran = _no_search_here(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    t0 = time.monotonic()
+    out = _within(45, lambda: optimize_dispatch(_day(search_mode="THOROUGH", max_search_sec=1200)))
+    assert isinstance(out.get("error"), WorkersUnavailable), out
+    assert out["at"] - t0 < 3 + 8, out["at"] - t0
+    assert ran == []
+    assert ds.WORKER_HEALTH.status()["status"] == "failed"
+    errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1 and errors[0].startswith("WORKERS_UNAVAILABLE run=r:"), errors
+    assert len(pools) == 1
+    _all_stopped(pools)
+
+
+# --------------------------------------------------------------------------------------
+# The pool dies during a solve (rule 22: "the process pool fails to start or dies")
+# --------------------------------------------------------------------------------------
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_recommended_worker_killed_with_no_replacement_answers_503_within_seconds(monkeypatch, caplog):
+    """(review) RECOMMENDED searches in worker A. A is killed (the out-of-memory killer picks the
+    biggest process) and the pool cannot start a replacement (the process limit), so its
+    worker-handler thread dies. The lost plan was noticed, but closing the pool then waited
+    forever (its idle sibling held the task queue's lock and was never told to stop): no answer,
+    the slot and the running entry held for good, /ready still ok. Now: 503 WORKERS_UNAVAILABLE
+    within seconds of the kill, the slot back, /ready failed, every worker process stopped."""
+    import main
+
+    monkeypatch.setattr(main, "SOLVER_TOKEN", TOKEN)
+    monkeypatch.setattr(main, "_DISPATCH_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.delenv("OSRM_URL", raising=False)
+    starts = _process_starts_refused(monkeypatch)
+    killed = _kill_a_worker_during_recommended(monkeypatch, "busy", before_kill=lambda: starts.update(refuse=True))
+    pools = _pools_made(monkeypatch)
+    caplog.set_level(logging.WARNING)
+    client = TestClient(main.app)
+    headers = {"X-Solver-Token": TOKEN}
+    body = _day(time_limit_sec=8).model_dump(mode="json")
+
+    out = _within(60, lambda: client.post("/optimize-dispatch", json=body, headers=headers))
+    r = out["value"]
+    assert killed, "the worker was never killed"
+    assert out["at"] - killed["at"] < 10, out["at"] - killed["at"]
+    assert r.status_code == 503, r.text
+    assert r.json() == {"detail": PLANNER_UNAVAILABLE_MSG, "code": "WORKERS_UNAVAILABLE"}
+    assert r.headers["retry-after"] == "60"
+    assert main._DISPATCH_SLOTS._value == 1 and main._RUNNING == {}
+    ready = client.get("/ready", headers=headers).json()
+    assert ready["ok"] is False and ready["workers"]["status"] == "failed"
+    alerts = [m.getMessage() for m in caplog.records if m.levelno == logging.ERROR and m.name == "routeiq.dispatch"]
+    assert any(a.startswith("WORKERS_UNAVAILABLE run=r:") for a in alerts), alerts
+    _all_stopped(pools)
+
+
+def test_idle_worker_killed_during_recommended_keeps_the_plan_within_seconds(monkeypatch):
+    """(review) RECOMMENDED searches in worker A; the idle worker B, waiting for a task and holding
+    the task queue's read lock, is killed. The pool starts a replacement, but no worker can take a
+    task again: RECOMMENDED finished, the alternatives never started, and closing the pool then
+    waited forever - the finished plan never came back. Now the stuck pool is noticed within
+    SOLVER_WORKER_START_SEC (not at the alternatives' deadline), the alternatives are skipped, the
+    load re-check gets fresh workers, and the recommended plan comes back re-checked."""
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "3")
+    monkeypatch.setenv("SOLVER_ALT_GRACE_SEC", "120")  # the alternatives' own deadline is minutes away
+    killed = _kill_a_worker_during_recommended(monkeypatch, "idle")
+    pools = _pools_made(monkeypatch)
+    r = _day(time_limit_sec=6)
+
+    out = _within(120, lambda: optimize_dispatch(r))
+    assert killed, "the worker was never killed"
+    assert "value" in out, out.get("error")
+    assert out["at"] - killed["at"] < 60, out["at"] - killed["at"]
+    resp = out["value"]
+    sc = rec(resp)
+    assert sc.status == "OPTIMIZED"
+    assert_reconciled(r, sc)
+    assert [s.name for s in resp.scenarios] == ["RECOMMENDED"]
+    assert any("MIN_TRUCKS, MIN_DISTANCE were skipped" in w for w in sc.warnings), sc.warnings
+    assert not any("not re-checked" in w for w in sc.warnings), sc.warnings  # the fresh workers re-checked it
+    assert len(pools) == 2  # the stuck one, and the load re-check's
+    _all_stopped(pools)
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_a_pool_killed_during_the_road_matrix_refuses_a_thorough_plan_within_seconds(monkeypatch, caplog):
+    """(review) The pool starts before the road matrix, which may take up to 90 s, and every worker
+    is idle meanwhile. Killed then (one of them held the task queue's read lock), the pool starts
+    replacements that can never take a task: RECOMMENDED waited for its deadline - for a thorough
+    plan the whole 20-minute cap - and got a misleading 504. Now: WorkersUnavailable (503) within
+    SOLVER_WORKER_START_SEC of the search's start."""
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "3")
+    pools = _pools_made(monkeypatch)
+    real_matrix = ds.resolve_matrix
+    searched: dict = {}
+
+    def matrix(*a, **k):
+        for w in pools:
+            procs = list(w.pool._pool)
+            for p in procs:
+                p.kill()
+            for p in procs:
+                p.join(10)
+        searched["at"] = time.monotonic()
+        return real_matrix(*a, **k)
+
+    monkeypatch.setattr(ds, "resolve_matrix", matrix)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    out = _within(90, lambda: optimize_dispatch(_day(search_mode="THOROUGH", max_search_sec=1200)))
+    assert isinstance(out.get("error"), WorkersUnavailable), out
+    assert out["at"] - searched["at"] < 3 + 12, out["at"] - searched["at"]
+    assert ds.WORKER_HEALTH.status()["status"] == "failed"
+    assert any(m.getMessage().startswith("WORKERS_UNAVAILABLE run=r:") for m in caplog.records if m.levelno == logging.ERROR)
+    _all_stopped(pools)
+
+
+def _take_and_die(lock) -> None:
+    lock.acquire()
+    import os
+
+    os._exit(0)
+
+
+def test_a_queue_lock_left_held_by_a_dead_process_is_given_back():
+    """What lets close() finish after killing the workers: a multiprocessing lock (a semaphore, no
+    owner) that a killed process held stays held for good; _free_lock_of_dead gives it back, and
+    leaves a free lock free."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    lock = ctx.Lock()
+    ds._free_lock_of_dead(lock)  # free: stays free
+    assert lock.acquire(False)
+    lock.release()
+    p = ctx.Process(target=_take_and_die, args=(lock,))
+    p.start()
+    p.join(60)
+    assert p.exitcode == 0
+    assert not lock.acquire(False)  # held by a dead process
+    ds._free_lock_of_dead(lock)
+    assert lock.acquire(False)
+    lock.release()
+    ds._free_lock_of_dead(None)  # Windows' result queue has no write lock
+
+
+def test_closing_a_pool_is_bounded_and_alerts_when_its_cleanup_hangs(monkeypatch, caplog):
+    """Whatever else stops Pool.terminate() from finishing, the request thread waits at most
+    POOL_CLOSE_SEC for it: the answer is not held back, and the administrator gets the ERROR line
+    and /ready failed. The cleanup goes on in the background."""
+    monkeypatch.setattr(ds, "POOL_CLOSE_SEC", 1.0)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    w = ds._Workers(1, run_id="r")
+    real_terminate = w.pool.terminate
+    release = threading.Event()
+    w.pool.terminate = lambda: release.wait(60) and real_terminate()
+    try:
+        t0 = time.perf_counter()
+        assert w.close() is False
+        assert time.perf_counter() - t0 < 5
+        errors = [m.getMessage() for m in caplog.records if m.levelno == logging.ERROR]
+        assert len(errors) == 1 and errors[0].startswith("WORKERS_UNAVAILABLE run=r:") and "did not stop" in errors[0], errors
+        assert ds.WORKER_HEALTH.status()["status"] == "failed"
+        w.close()  # a second call does nothing: no wait, no second alert
+        assert time.perf_counter() - t0 < 5
+        assert len([m for m in caplog.records if m.levelno == logging.ERROR]) == 1
+    finally:
+        release.set()
+    for t in threading.enumerate():
+        if t.name == "routeiq-pool-close":
+            t.join(10)
+    _all_stopped([w])
 
 
 def test_the_in_process_fallback_only_when_explicitly_allowed(monkeypatch, caplog):
@@ -165,7 +448,10 @@ def test_load_recheck_without_workers_keeps_the_recommended_plan(monkeypatch):
     assert sc.status == "OPTIMIZED"
     assert_reconciled(r, sc)
     assert stage_here == []
-    assert any("the optimizer could not start its worker processes" in w for w in sc.warnings), sc.warnings
+    # The dispatcher's note in plain words (review: "worker processes" is not); the cause is logged.
+    assert any("Loads were not re-checked for fewer trucks (the planner was short of resources)" in w
+               for w in sc.warnings), sc.warnings
+    assert not any("worker process" in w for w in sc.warnings), sc.warnings
     assert "MIN_TRUCKS" not in [s.name for s in resp.scenarios]
     assert ds.WORKER_HEALTH.status()["status"] == "failed"
 
@@ -253,3 +539,54 @@ def test_startup_warning_for_the_in_process_fallback(monkeypatch):
     monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
     text = main.inprocess_fallback_warning()
     assert "on Railway (production)" in text and "remove it from any deployed solver" in text
+
+
+_RAILWAY_VARS = ("RAILWAY_ENVIRONMENT_ID", "RAILWAY_PROJECT_ID", "RAILWAY_ENVIRONMENT_NAME", "RAILWAY_ENVIRONMENT")
+
+
+def test_startup_warnings_are_logged_an_error_on_railway(monkeypatch, caplog):
+    """(review) The startup line is the only guard against SOLVER_ALLOW_INPROCESS_FALLBACK=1 (or
+    SOLVER_PARALLEL=0) on a deployed solver, and the Railway doc's "verify after the deploy" step
+    reads it: it must be logged, as an ERROR on Railway and a WARNING elsewhere - not only worded."""
+    import main
+
+    for k in _RAILWAY_VARS + ("SOLVER_PARALLEL", "SOLVER_ALLOW_INPROCESS_FALLBACK"):
+        monkeypatch.delenv(k, raising=False)
+    caplog.set_level(logging.DEBUG, logger="routeiq.api")
+
+    def logged() -> list[tuple[int, str]]:
+        caplog.clear()
+        main.log_startup_warnings()
+        return [(m.levelno, m.getMessage()) for m in caplog.records if m.name == "routeiq.api"]
+
+    assert logged() == []
+    monkeypatch.setenv("SOLVER_ALLOW_INPROCESS_FALLBACK", "1")
+    [(level, text)] = logged()
+    assert level == logging.WARNING and text.startswith("SOLVER_ALLOW_INPROCESS_FALLBACK=1 is set outside a deployment")
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+    [(level, text)] = logged()
+    assert level == logging.ERROR and text.startswith("SOLVER_ALLOW_INPROCESS_FALLBACK=1 is set on Railway (production)")
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    assert [(lv, t.split(" is set")[0]) for lv, t in logged()] == [
+        (logging.ERROR, "SOLVER_PARALLEL=0"), (logging.ERROR, "SOLVER_ALLOW_INPROCESS_FALLBACK=1")]
+    monkeypatch.delenv("SOLVER_ALLOW_INPROCESS_FALLBACK")
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT_NAME")
+    [(level, text)] = logged()
+    assert level == logging.WARNING and text.startswith("SOLVER_PARALLEL=0 is set outside a deployment")
+
+
+def test_the_solver_logs_its_startup_warnings_when_it_starts(monkeypatch):
+    """main.py runs log_startup_warnings() when it is imported (uvicorn's start): a fresh process
+    with the fallback set on Railway writes the ERROR line to its log."""
+    import os
+    import subprocess
+    import sys
+
+    env = {k: v for k, v in os.environ.items() if k not in _RAILWAY_VARS + ("SOLVER_PARALLEL",)}
+    env.update(SOLVER_ALLOW_INPROCESS_FALLBACK="1", RAILWAY_ENVIRONMENT_NAME="production")
+    solver_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    done = subprocess.run([sys.executable, "-c", "import main"], cwd=solver_dir, env=env, capture_output=True,
+                          text=True, timeout=120)
+    assert done.returncode == 0, done.stderr
+    lines = [ln for ln in done.stderr.splitlines() if "SOLVER_ALLOW_INPROCESS_FALLBACK=1 is set" in ln]
+    assert len(lines) == 1 and " ERROR routeiq.api: SOLVER_ALLOW_INPROCESS_FALLBACK=1 is set on Railway" in lines[0], done.stderr

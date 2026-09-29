@@ -181,6 +181,13 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
   searched and nothing is saved. The dispatcher reads *"The planner is busy or restarting - try again in a minute. Nothing was
   changed."*; the plan in use stays as it was (a failed re-plan keeps the previous plan, locked loads included), and pressing
   the button again works as soon as the solver can start processes again. There is no automatic retry.
+- **When the processes stop during a search** (for example the out-of-memory killer ends one, and no replacement can start;
+  or a process ends while it waits for work and leaves the others unable to take any), the solver notices within seconds - at
+  most `SOLVER_WORKER_START_SEC` for processes that stop taking work - instead of at the search's deadline (20 minutes for a
+  Thorough plan). If the recommended plan was not found yet, the optimization is refused the same way (503
+  `WORKERS_UNAVAILABLE`, the same message). If it was, it is kept: the other options are skipped and its loads are re-checked
+  with fresh processes, or re-timed exactly when those cannot start either (below). Closing a broken set of processes never
+  holds the answer for more than about 10 s.
 - **Variables** (names only; none is needed in production):
   - `SOLVER_ALLOW_INPROCESS_FALLBACK` on the solver: **never set it on Railway.** `1` brings back the old in-process fallback,
     for local development and tests only. When it is set the solver logs an **error** at startup on Railway (a warning
@@ -190,9 +197,14 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
 - **What the alert looks like.** Three signals, all on each refusal:
   - The **solver log** has one ERROR line that starts with `WORKERS_UNAVAILABLE`, for example:
     `ERROR routeiq.dispatch: WORKERS_UNAVAILABLE run=<plan id>: the solver could not start its worker processes for the search
-    (OSError: [Errno 11] Resource temporarily unavailable). Nothing is searched inside the API process (rule 22). If this
-    repeats, check the solver service's memory and process limits and restart it.`, followed by
-    `ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start (...)`.
+    (BlockingIOError: [Errno 11] Resource temporarily unavailable). Nothing is searched inside the API process (rule 22). If
+    this repeats, check the solver service's memory and process limits and restart it.`, followed by
+    `ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start or
+    stopped working (...)`. The text in brackets is the cause and depends on the error: `BlockingIOError: [Errno 11] Resource
+    temporarily unavailable` at the process limit, `OSError: [Errno 12] Cannot allocate memory` when memory is short. When the
+    processes stop during a search the line says `the solver's worker processes stopped working during the search (...)`
+    instead, and `a worker pool did not stop within 10 s ...` when closing them hung. **Alert on the `WORKERS_UNAVAILABLE`
+    prefix, never on the cause text.**
   - The **web log** has one line that starts with `ALERT WORKERS_UNAVAILABLE:` naming the plan and the job, and the plan's audit
     log has an `OPTIMIZE_FAILED` row whose error carries `code: WORKERS_UNAVAILABLE`.
   - **`GET /api/health`** on web answers 200 with `ok: false`, `status: degraded` and `dispatch.reason: SOLVER_WORKERS_FAILED`
@@ -203,9 +215,11 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
   solver restart or a memory spike needs nothing: the dispatcher tries again in a minute. If it repeats, restart the solver
   service; if it keeps happening, raise the service's memory or lower `MAX_CONCURRENT_DISPATCH` (each solve uses up to three
   processes).
-- **The load re-check after an alternative overran** needs fresh worker processes too. If they cannot start, the solver keeps
-  the recommended plan it already found and re-times it exactly (a few milliseconds) instead of refusing, with a note on the
-  plan and the same ERROR line and `/ready` signal.
+- **The load re-check after an alternative overran** (or after the processes stopped, above) needs fresh worker processes too.
+  If they cannot start, the solver keeps the recommended plan it already found and re-times it exactly (a few milliseconds)
+  instead of refusing, with the note *"Loads were not re-checked for fewer trucks (the planner was short of resources)"* on
+  the plan and the same ERROR line and `/ready` signal. The web records no failed job and no `ALERT` line then (the plan was
+  returned), so `/api/health`'s `SOLVER_WORKERS_FAILED` and the solver's ERROR line are the only signs.
 - **Verify after the deploy:** the solver's startup log has no `SOLVER_ALLOW_INPROCESS_FALLBACK` error, `GET /api/health`
   is `ready`, and an optimization works as usual.
 

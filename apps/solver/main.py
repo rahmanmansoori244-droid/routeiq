@@ -95,12 +95,17 @@ def inprocess_fallback_warning() -> str | None:
             "development and tests only; remove it from any deployed solver.")
 
 
-_PARALLEL_WARNING = solver_parallel_warning()
-if _PARALLEL_WARNING:
-    (log.error if _on_railway() else log.warning)(_PARALLEL_WARNING)
-_FALLBACK_WARNING = inprocess_fallback_warning()
-if _FALLBACK_WARNING:
-    (log.error if _on_railway() else log.warning)(_FALLBACK_WARNING)
+def log_startup_warnings() -> None:
+    """At startup (below, when uvicorn imports this module): one line per development-only switch
+    that is set - SOLVER_PARALLEL=0, SOLVER_ALLOW_INPROCESS_FALLBACK=1 - an ERROR on Railway, a
+    WARNING elsewhere. The only guard against either on a deployed solver: RAILWAY_DEPLOYMENT.md's
+    "verify after the deploy" step reads this line (test_worker_start.py)."""
+    for warning in (solver_parallel_warning(), inprocess_fallback_warning()):
+        if warning:
+            (log.error if _on_railway() else log.warning)(warning)
+
+
+log_startup_warnings()
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -224,11 +229,12 @@ async def optimize_dispatch_endpoint(
                 tg.cancel_scope.cancel()
         exc = outcome.get("error")
         if isinstance(exc, WorkersUnavailable):
-            # Rule 22: no worker processes, so nothing was searched (never inside this process). A
-            # plain answer within seconds; the web keeps the previous plan and alerts (its job fails
-            # with this text, audited). Its own code tells it apart from "Solver busy" above.
-            log.error("optimize-dispatch run=%s refused (503 WORKERS_UNAVAILABLE): worker processes could not start (%s)",
-                      req.run_id, exc.cause)
+            # Rule 22: the worker processes could not start, or their pool broke during the search
+            # (never a search inside this process). A plain answer within seconds; the web keeps the
+            # previous plan and alerts (its job fails with this text, audited). Its own code tells it
+            # apart from "Solver busy" above.
+            log.error("optimize-dispatch run=%s refused (503 WORKERS_UNAVAILABLE): worker processes could not start or "
+                      "stopped working (%s)", req.run_id, exc.cause)
             return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code},
                                 headers={"Retry-After": "60"})
         if isinstance(exc, SolveAborted):

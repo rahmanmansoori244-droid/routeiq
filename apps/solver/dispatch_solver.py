@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -149,6 +150,13 @@ THOROUGH_REPACK_CAP_SEC = 30
 WORKER_START_SEC = 30
 WORKER_ALERT_SEC = 900
 PLANNER_UNAVAILABLE_MSG = "The planner is busy or restarting - try again in a minute."
+# Rule 22 (review): the longest a request waits for a worker pool to close. CPython's Pool.terminate
+# can wait forever on a pool that broke (see _stop_pool_processes); past this the cleanup goes on
+# in a background thread and the administrator is alerted, and the answer is not held back.
+POOL_CLOSE_SEC = 10.0
+# Why the loads were not re-checked when the load re-check could not get worker processes (rule
+# 22): the dispatcher's note on the plan, in plain words; the technical cause is in the ERROR line.
+NO_WORKERS_NOTE = "the planner was short of resources"
 
 
 # The automatic search time between 120 and 200 stops (PR7, T1): straight lines through these
@@ -1709,17 +1717,34 @@ def _tracked(token: str, fn, arg):
     return fn(arg)
 
 
+_ALERT_ADVICE = "If this repeats, check the solver service's memory and process limits and restart it."
+
+
+def _workers_alert(run_id: str, happened: str, cause: str, *, nothing_searched: bool = True) -> None:
+    """Rule 22: tell the administrator. /ready reports the workers as failed (WORKER_HEALTH, the
+    web's /api/health: degraded) and one ERROR line starts with the stable code WORKERS_UNAVAILABLE
+    (alert on the code, not on the cause text, which depends on the error)."""
+    WORKER_HEALTH.failed(cause)
+    log.error("WORKERS_UNAVAILABLE run=%s: %s (%s).%s %s", run_id, happened, cause,
+              " Nothing is searched inside the API process (rule 22)." if nothing_searched else "", _ALERT_ADVICE)
+
+
 class _Workers:
     """A spawn Pool with what the waits need, without Pool's private attributes where possible:
     its size (stored here, not read from Pool._processes) and which worker process runs which task
     (each task reports its pid when it starts). Worker pids come from Pool's private worker list;
-    when that is gone, pids() is None and deaths are only seen at the deadline."""
+    when that is gone, pids() is None and deaths are only seen at the deadline.
 
-    def __init__(self, size: int, control: SolveControl | None = None):
+    Rule 22 (review): broken() says when the pool can no longer run tasks (the waits then stop at
+    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC."""
+
+    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search"):
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
         self.size = max(1, int(size))
+        self.run_id = run_id
+        self.what = what  # "search" or "load re-check", for the administrator's log lines
         self._beacon = ctx.SimpleQueue()
         # The solve's "stop now" flag, seen by every THOROUGH search in these workers (_watch_search).
         # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
@@ -1735,26 +1760,70 @@ class _Workers:
         if stop_flag is not None:
             control.attach(stop_flag)  # type: ignore[union-attr]
         self._pid_of: dict[str, int] = {}
+        self._tasks: dict[str, object] = {}  # token -> AsyncResult of each task not seen finished yet
         self._seq = 0
         self._warned = False
         self._closed = False
+        self._close_ok = True
+        self._proved = False  # check_started saw a task run (before that, _start_workers alerts)
+        self._broken: str | None = None
 
     def check_started(self, timeout: float) -> None:
         """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
         whose processes die while starting (Pool starts them again and again, and a task would wait
-        for its deadline - up to the whole THOROUGH cap). A cancelled control: SolveAborted."""
+        for its deadline - up to the whole THOROUGH cap), at once when no replacement can start
+        (broken()). A cancelled control: SolveAborted."""
         kind, value = _await_all(self, {"start": self.submit(_ping, None, "start")}, time.monotonic() + timeout)["start"]
         if kind == "ok":
+            self._proved = True
             return
         if kind == "timeout":
             raise RuntimeError(f"no worker process ran a task within {timeout:g} s (they may be dying while starting)")
+        if kind == "broken":
+            raise RuntimeError(str(value))
         raise RuntimeError(f"the first worker task {'lost its process' if kind == 'lost' else 'failed'}: {value}")
 
     def submit(self, fn, arg, name: str):
         """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
         self._seq += 1
         token = f"{name}#{self._seq}"
-        return token, self.pool.apply_async(_tracked, (token, fn, arg))
+        fut = self.pool.apply_async(_tracked, (token, fn, arg))
+        self._tasks[token] = fut
+        return token, fut
+
+    def busy(self, live: frozenset[int]) -> int:
+        """How many worker processes are running a task now: tasks that reported their start (see
+        started()) in a process still alive (``live``, from pids()) and have not finished."""
+        for tok in [t for t, fut in self._tasks.items() if fut.ready()]:  # type: ignore[attr-defined]
+            del self._tasks[tok]
+        return sum(1 for tok in self._tasks if self._pid_of.get(tok) in live)
+
+    def broken(self, settle: float = 0.0) -> str | None:
+        """Rule 22 (review): why this pool can no longer run new tasks, or None. Pool's worker-handler
+        thread replaces every worker process that dies; when it cannot (Process.start raised: out of
+        memory, the process limit) that thread dies, and no process is ever replaced again. Also set
+        by _await_all when no process takes a task although one is free (mark_broken). ``settle``:
+        after a worker died, wait up to that long for the handler's attempt to replace it."""
+        if self._broken is None and not self._closed:
+            handler = getattr(self.pool, "_worker_handler", None)
+            try:
+                if handler is not None and settle > 0 and handler.is_alive():
+                    handler.join(settle)
+                if handler is not None and not handler.is_alive():
+                    self.mark_broken("a worker process stopped and no replacement could start: out of memory or the "
+                                     "process limit?")
+            except Exception:  # noqa: BLE001 - Pool internals changed: the deadlines still hold
+                pass
+        return self._broken
+
+    def mark_broken(self, cause: str) -> str:
+        """Record that the pool broke (the first cause stays). A pool that had run a task alerts the
+        administrator here; a new one does in _start_workers, which then refuses the solve."""
+        if self._broken is None:
+            self._broken = cause
+            if self._proved:
+                _workers_alert(self.run_id, f"the solver's worker processes stopped working during the {self.what}", cause)
+        return self._broken
 
     def started(self) -> dict[str, int]:
         """token -> pid of every task that has started so far."""
@@ -1775,51 +1844,140 @@ class _Workers:
                 log.warning("worker pool internals unavailable: a dead worker is only noticed at its deadline")
             return None
 
-    def close(self) -> None:
-        """Stop the workers (and any task still running past its deadline). Safe to call twice."""
+    def close(self) -> bool:
+        """Stop the workers (and any task still running past its deadline). Safe to call twice.
+
+        Rule 22 (review): bounded. CPython's Pool.terminate() waited forever on a pool that broke
+        (_stop_pool_processes), which held the request - its answer, its slot - for good. The worker
+        processes are now stopped first, then terminate() runs in a background thread for at most
+        POOL_CLOSE_SEC. False when it did not finish in that time: the administrator is alerted
+        (an ERROR line, /ready) and the cleanup goes on in the background."""
         if self._closed:
-            return
+            return self._close_ok
         self._closed = True
-        self.pool.terminate()
-        self.pool.join()
+        pool = self.pool
+        _stop_pool_processes(pool)
+        finished = threading.Event()
+
+        def cleanup() -> None:
+            try:
+                pool.terminate()
+                pool.join()
+            except Exception as exc:  # noqa: BLE001 - nothing to do about it but say so
+                log.warning("run=%s worker pool cleanup failed: %s", self.run_id, exc)
+            finally:
+                finished.set()
+
+        threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True).start()
+        self._close_ok = finished.wait(POOL_CLOSE_SEC)
+        if not self._close_ok:
+            _workers_alert(self.run_id, f"a worker pool did not stop within {POOL_CLOSE_SEC:g} s after the {self.what} "
+                           "and is left to stop in the background", "Pool.terminate() did not return", nothing_searched=False)
         try:
             self._beacon.close()
         except Exception:  # noqa: BLE001
             pass
+        return self._close_ok
+
+
+def _stop_pool_processes(pool) -> None:
+    """Rule 22 (review): let Pool.terminate() finish on a pool that broke. CPython's terminate()
+    waits forever when (1) Pool's worker-handler thread died - it could not start a replacement
+    process (out of memory, the process limit) - so its task-handler thread never gets the stop
+    sentinel (terminate waits in task_handler.join()), or (2) a worker process died while it waited
+    for a task, holding the task queue's read lock (terminate first takes that lock). So, first:
+    the worker handler is told to stop (as terminate does first: no replacement starts behind our
+    back), every worker process is killed, the stop sentinel a dead handler never sent is sent, and
+    the queue locks a dead worker left held are released (the task queue's read lock; on Linux also
+    the result queue's write lock, held while a worker sends a result: killing the workers first
+    must not create a new way to hang). Best effort on Pool's private attributes; close() bounds
+    whatever still waits."""
+    import multiprocessing.pool as mpp
+
+    handler = getattr(pool, "_worker_handler", None)
+    try:
+        if handler is not None and handler.is_alive():
+            handler._state = mpp.TERMINATE
+            pool._change_notifier.put(None)  # wakes it: it stops without starting a replacement
+            handler.join(1.0)
+    except Exception:  # noqa: BLE001
+        pass
+    procs = list(getattr(pool, _POOL_ATTR, None) or [])
+    for p in procs:
+        try:
+            if p.exitcode is None:
+                p.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    end = time.monotonic() + 3.0
+    for p in procs:
+        try:
+            p.join(max(0.0, end - time.monotonic()))
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        if handler is not None and not handler.is_alive():
+            pool._taskqueue.put(None)  # a second sentinel after a normal stop is harmless
+            pool._task_handler.join(1.0)  # it sends its own sentinels and ends (unless a queue is stuck)
+    except Exception:  # noqa: BLE001
+        pass
+    if procs and all(p.exitcode is not None for p in procs):
+        # Every worker process is dead, so none of them can hold a lock legitimately: the task
+        # queue's read lock (an idle worker holds it while it waits for a task) and, on Linux, the
+        # result queue's write lock (held while a worker sends a result; Windows has none).
+        for owner, name in ((getattr(pool, "_inqueue", None), "_rlock"), (getattr(pool, "_outqueue", None), "_wlock")):
+            try:
+                _free_lock_of_dead(getattr(owner, name, None))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _free_lock_of_dead(lock) -> None:
+    """A multiprocessing lock that a killed process held stays held for good (a semaphore has no
+    owner): give it back for it. Only for locks no live process uses any more (_stop_pool_processes)."""
+    if lock is None:
+        return
+    if lock.acquire(False):
+        lock.release()  # it was free: taken and given back
+    else:
+        lock.release()  # held by a dead process, which never gives it back
 
 
 def _start_workers(size: int, control: SolveControl | None, run_id: str, what: str) -> _Workers | None:
     """Rule 22: a worker pool that has run its first task, or no search at all.
 
     A pool that cannot start (an OSError: out of memory, the process limit) or whose first task
-    does not run within worker_start_sec() is closed again and the solve is refused:
-    WorkersUnavailable (main.py: 503 "The planner is busy or restarting - try again in a minute"),
-    with an ERROR line for the administrator and /ready reporting the workers as failed. Nothing is
-    searched inside the API process. Only with SOLVER_ALLOW_INPROCESS_FALLBACK=1 (development and
-    tests) is None returned instead: the caller then solves in-process, as before rule 22."""
+    does not run within worker_start_sec() - or at once, when its processes die and no replacement
+    can start - is closed again and the solve is refused: WorkersUnavailable (main.py: 503 "The
+    planner is busy or restarting - try again in a minute"), with an ERROR line for the
+    administrator and /ready reporting the workers as failed, both before the pool is closed (the
+    alert stays even if closing misbehaves). Nothing is searched inside the API process. Only with
+    SOLVER_ALLOW_INPROCESS_FALLBACK=1 (development and tests) is None returned instead: the caller
+    then solves in-process, as before rule 22."""
     workers: _Workers | None = None
     try:
-        workers = _Workers(size, control)
+        workers = _Workers(size, control, run_id=run_id, what=what)
         workers.check_started(worker_start_sec())
     except SolveAborted:
         if workers is not None:
             workers.close()
         raise  # cancelled while waiting: the caller is gone
     except Exception as exc:  # noqa: BLE001 - every way a pool fails to start
+        cause = f"{type(exc).__name__}: {exc}"
+        fallback = inprocess_fallback_allowed()
+        if fallback:
+            WORKER_HEALTH.failed(cause)
+            log.warning("run=%s worker processes unavailable for the %s (%s); SOLVER_ALLOW_INPROCESS_FALLBACK=1: "
+                        "running it inside the API process (development and tests only)", run_id, what, cause)
+        else:
+            _workers_alert(run_id, f"the solver could not start its worker processes for the {what}", cause)
         if workers is not None:
             try:
                 workers.close()
             except Exception:  # noqa: BLE001
                 pass
-        cause = f"{type(exc).__name__}: {exc}"
-        WORKER_HEALTH.failed(cause)
-        if inprocess_fallback_allowed():
-            log.warning("run=%s worker processes unavailable for the %s (%s); SOLVER_ALLOW_INPROCESS_FALLBACK=1: "
-                        "running it inside the API process (development and tests only)", run_id, what, cause)
+        if fallback:
             return None
-        log.error("WORKERS_UNAVAILABLE run=%s: the solver could not start its worker processes for the %s (%s). "
-                  "Nothing is searched inside the API process (rule 22). If this repeats, check the solver "
-                  "service's memory and process limits and restart it.", run_id, what, cause)
         raise WorkersUnavailable(cause) from exc
     WORKER_HEALTH.started()
     return workers
@@ -1829,14 +1987,22 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
                control: SolveControl | None = None) -> dict[str, tuple[str, object]]:
     """Wait for several pool tasks (name -> (token, AsyncResult)), in completion order, until
     ``deadline``. Returns name -> ("ok", value) | ("error", exception) | ("lost", None) (its worker
-    process died) | ("timeout", None). A dead worker loses only the task it was running: a sibling
-    that is still computing is never aborted because another worker died (review L23). A task
-    whose worker died before it could report its start is only noticed at the deadline.
-    ``control`` cancelled (the caller is gone): SolveAborted within half a second."""
+    process died) | ("broken", cause) (the pool can no longer run it, below) | ("timeout", None).
+    A dead worker loses only the task it was running: a sibling that is still computing is never
+    aborted because another worker died (review L23). ``control`` cancelled (the caller is gone):
+    SolveAborted within half a second.
+
+    Rule 22 (review): a broken pool is noticed at once, not at the deadline (for a thorough plan
+    the 20-minute cap). A task that has not started, or lost its process, is "broken" when the pool
+    can no longer start a replacement process (_Workers.broken), or when it has waited to start for
+    worker_start_sec() while a worker process was free: a worker that died waiting for a task left
+    the task queue locked, and no process can take a task again. A task still running in a live
+    worker process goes on."""
     out: dict[str, tuple[str, object]] = {}
     pending = dict(jobs)
     base = workers.pids()
     control = control if control is not None else getattr(workers, "control", None)
+    free_since: float | None = None  # since when a task waits to start while a worker is free
     while pending:
         if control is not None and control.cancelled.is_set():
             raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
@@ -1856,23 +2022,51 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
             break
         next(iter(pending.values()))[1].wait(min(0.5, remaining))  # type: ignore[attr-defined]
         now = workers.pids()
-        if base is None or now is None or now == base:
-            continue
-        dead = base - now
         started = workers.started()
+        lost_now: list[str] = []
+        if base is not None and now is not None and now != base:
+            dead = base - now
+            for name, (tok, fut) in list(pending.items()):
+                if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
+                    out[name] = ("lost", None)
+                    del pending[name]
+                    lost_now.append(name)
+            base = now
+        cause = workers.broken(settle=0.5 if lost_now else 0.0)
+        if cause is None and now is not None:
+            waiting = any(tok not in started and not fut.ready() for tok, fut in pending.values())  # type: ignore[attr-defined]
+            if waiting and workers.busy(now) < workers.size:
+                free_since = time.monotonic() if free_since is None else free_since
+                if time.monotonic() - free_since >= worker_start_sec():
+                    cause = workers.mark_broken(
+                        f"no worker process took a task for {worker_start_sec():g} s although one was free: a worker "
+                        "process that died may have left the task queue locked")
+            else:
+                free_since = None
+        if cause is None:
+            continue
+        for name in lost_now:
+            out[name] = ("broken", cause)
         for name, (tok, fut) in list(pending.items()):
-            if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
-                out[name] = ("lost", None)
+            pid = started.get(tok)
+            if not fut.ready() and (pid is None or (now is not None and pid not in now)):  # type: ignore[attr-defined]
+                out[name] = ("broken", cause)
                 del pending[name]
-        base = now
     return out
 
 
+# How the log says why a pool task was not run (_await_all's "lost" and "broken").
+_NOT_RUN = {"lost": "lost its worker", "broken": "could not run, the worker pool broke"}
+
+
 def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, what: str):
-    """Wait for one pool task; fail fast when ITS worker process dies (e.g. out of memory)."""
+    """Wait for one pool task; fail fast when ITS worker process dies (e.g. out of memory), and with
+    rule 22's WorkersUnavailable (503) when the pool broke (_await_all)."""
     kind, value = _await_all(workers, {what: job}, deadline)[what]
     if kind == "ok":
         return value
+    if kind == "broken":
+        raise WorkersUnavailable(str(value))
     if kind == "error":
         raise value  # type: ignore[misc]
     if kind == "lost":
@@ -1986,7 +2180,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     overran = True
                     log.warning("alternative %s exceeded %ss; skipped", name, alt_limit + grace)
                 else:
-                    log.warning("alternative %s %s (%s); skipped", name, "lost its worker" if kind == "lost" else "failed", value)
+                    log.warning("alternative %s %s (%s); skipped", name, _NOT_RUN.get(kind, "failed"), value)
         else:
             for j in jobs:
                 try:
@@ -1994,10 +2188,12 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
                     skipped.append(j[0])
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
-        if overran and workers is not None:
+        if workers is not None and (overran or workers.broken()):
             # A skipped alternative still runs in its worker (a stuck OR-Tools call does not stop
-            # on request): the post-solve jobs would queue behind it and time out, and RECOMMENDED
-            # would lose its load re-check. Give the stage fresh workers.
+            # on request), or the pool broke (rule 22: no process can take a task any more): the
+            # post-solve jobs would queue behind it and time out, and RECOMMENDED would lose its
+            # load re-check. Give the stage fresh workers. Closing the old pool is bounded; when it
+            # does not finish, the stage still starts (or the plans are re-timed, below).
             workers.close()
             workers = None
             try:
@@ -2014,8 +2210,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
         stage_kw = {"repack_cap": _repack_cap_sec(time_limit, False) if stopped else tail.repack_cap} if tail is not None else {}
         try:
             if no_stage_workers:
-                _retime_fallback(req, solvable, tds, mx, drops, results, "the optimizer could not start its worker processes",
-                                 skip=staged)
+                # The dispatcher's note in plain words; the technical cause is in the ERROR line.
+                _retime_fallback(req, solvable, tds, mx, drops, results, NO_WORKERS_NOTE, skip=staged)
             else:
                 _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
         except SolveAborted:
@@ -2252,7 +2448,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             if kind == "ok":
                 outputs[g] = value  # type: ignore[assignment]
             else:
-                log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out"}.get(kind, "failed"),
+                log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out",
+                                                      "broken": _NOT_RUN["broken"]}.get(kind, "failed"),
                             f": {value}" if value is not None else "")
     stage_sec = time.monotonic() - t0
     if "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
