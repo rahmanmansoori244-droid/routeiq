@@ -88,6 +88,29 @@ export const INTAKE_BUSY = {
   code: 'INTAKE_BUSY',
 } as const;
 
+/**
+ * The answer when checking an order file failed for a reason that is not the file's (the database,
+ * a bug): 500, nothing saved. The details go only to the server log (before, the route answered
+ * Prisma's own text, file paths and code lines included; third review of audit P5).
+ */
+export const INTAKE_CHECK_FAILED =
+  'RouteIQ could not check this file. Nothing was saved. Try again in a moment. If it happens again, tell your administrator.';
+
+/**
+ * PostgreSQL takes at most 32,767 bind parameters in one query, and Prisma does not split an `in`
+ * list that comes with other conditions (it fails with P2035 or P2029). An order file may hold
+ * 50,000 rows, so a list that grows with the file is asked for in parts of this many values (third
+ * review of audit P5: a file of 32,766 or more sales orders was refused with Prisma's text).
+ */
+export const IN_LIST_PART = 10_000;
+
+/** `values` in order, in parts of at most `size` (see IN_LIST_PART). */
+export function inParts<T>(values: readonly T[], size = IN_LIST_PART): T[][] {
+  const parts: T[][] = [];
+  for (let i = 0; i < values.length; i += size) parts.push(values.slice(i, i + size));
+  return parts;
+}
+
 /** An order file that cannot be linked to a depot (owner rule, audit PR A5): 422, nothing saved. */
 export class DepotRequired extends Error {
   readonly status = 422;
@@ -233,20 +256,25 @@ export async function validateIntake(
   const products = await db.product.findMany({ select: { id: true, code: true, name: true, active: true, weightPerCaseKg: true } });
   const dates = [...new Set(norm.lines.map((l) => l.deliveryDate))];
   const already = await confirmedLineMap(prisma, tenantId, dates);
-  // The same sales orders confirmed for other delivery dates (warning only).
+  // The same sales orders confirmed for other delivery dates (warning only). Asked for in parts
+  // (IN_LIST_PART), and the file's own dates are left out here rather than in the query, so no
+  // query passes PostgreSQL's 32,767 bind parameters however many sales orders or dates the file has.
   const fileSos = [...new Set(norm.lines.map((l) => normSalesOrder(l.salesOrderNo)).filter((s): s is string => !!s))];
   const custById = new Map(customers.map((c) => [c.id, c]));
   const otherDates = new Map<string, string[]>();
-  if (fileSos.length) {
+  const fileDates = new Set(dates);
+  for (const part of inParts(fileSos)) {
     const keys = await prisma.intakeLineKey.findMany({
-      where: { tenantId, salesOrderNorm: { in: fileSos }, deliveryDate: { notIn: dates.map(dateOnly) } },
+      where: { tenantId, salesOrderNorm: { in: part } },
       select: { salesOrderNorm: true, customerId: true, deliveryDate: true },
     });
     for (const k of keys) {
+      const date = isoOf(k.deliveryDate);
+      if (fileDates.has(date)) continue;
       const c = custById.get(k.customerId);
       if (!c) continue;
       const key = `${k.salesOrderNorm}|${customerKey(c.code, c.branchKey)}`;
-      otherDates.set(key, [...(otherDates.get(key) ?? []), isoOf(k.deliveryDate)]);
+      otherDates.set(key, [...(otherDates.get(key) ?? []), date]);
     }
   }
   const res = resolveOrderLines(norm, customers, products, already, { confirmedOnOtherDates: otherDates });
@@ -447,7 +475,11 @@ export async function confirmIntake(
     const pid = l.productId ?? newProductIds.get(l.productCode.toUpperCase());
     if (!cid || !pid) throw new Error(`Row ${l.row}: customer/product could not be created.`);
     const k = `${cid}|${l.deliveryDate}`;
-    groups.set(k, [...(groups.get(k) ?? []), { ...l, cid, pid }]);
+    // Added to the group's list in place: copying the list for every line took 5-40 s for one
+    // customer's 40,000 lines, and the confirm's transaction has 60 s (third review of audit P5).
+    const group = groups.get(k);
+    if (group) group.push({ ...l, cid, pid });
+    else groups.set(k, [{ ...l, cid, pid }]);
   }
   const customers = await tx.customer.findMany({
     where: { tenantId, id: { in: [...new Set([...groups.values()].map((g) => g[0].cid))] } },
