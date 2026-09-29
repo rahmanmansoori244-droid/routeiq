@@ -6,12 +6,15 @@ FastAPI service, deployed separately from the web app. Every endpoint except `/h
 |---|---|---|
 | `GET /health` | — | Railway health check |
 | `POST /optimize-dispatch` | **OR-Tools** (`dispatch_solver.py` + `load_repack.py`) | NMWC daily dispatch planner: cases+kg capacity, hard + preferred windows, strict P1–P5 priorities, multi-load trucks (depot reload visits, turnaround per case), frozen locked/dispatched loads, RECOMMENDED + MIN_TRUCKS + MIN_DISTANCE; after the routing search a CP-SAT step re-assigns whole loads to trucks and every plan is timed exactly |
+| `POST /optimize-dispatch/stop` | — | a running THOROUGH solve (`config.search_mode`) returns the best plan found so far; 404 when none of that plan and company runs here, 409 for a QUICK solve |
 | `POST /route-geometry` | OSRM | road polyline for a load (straight lines when unavailable) |
 | `POST /optimize` | PyVRP (`solver.py`) | legacy v1 three-scenario solver, kept for comparison only |
 
 Road distance comes from `providers.py`: OSRM when `OSRM_URL` (or the request's `osrm_url`) is set, and otherwise Haversine × multiplier labelled as estimated. There is no silent public default; see `../../docs/OSRM_SETUP.md`. Each matrix cell knows whether it is a road or an estimated leg (a pair OSRM could not route, a point more than `OSRM_MAX_SNAP_M` from any road); the truck factor `road_time_factor` applies to road cells only, and the response says `distance_quality` ROAD / MIXED / ESTIMATED with `estimated_legs` per load. Road routing has a deadline: `MATRIX_BUDGET_SEC` (default min(90 s, 20% of `SOLVER_BUDGET_SEC`)); after it the whole matrix is estimated, with a "road routing too slow" warning. `OSRM_TABLE_TILE` (default 90 coordinates per `/table` call; production can raise it up to the OSRM server's `--max-table-size`, 1000 in `infra/osrm`, so a day needs one call) and `OSRM_PARALLEL` (default 2, max 4 calls at once) tune the calls. At most 600 stops per request (422 above).
 
 Costs (`costing.py`, one model for the score and the report): the driver is paid for the WHOLE truck day, from the first departure (or first frozen departure) to the last return, turnarounds and waiting included; overtime after `overtime_after_min` from that first departure is added on top. Each load carries its share (the paid time from the truck's previous return to its own return), so frozen loads + new loads = the day.
+
+Search modes (29 Sep 2026): `config.search_mode` QUICK (default) searches the automatic time by day size within `SOLVER_BUDGET_SEC` (540 s), as before; THOROUGH gives the whole request up to `THOROUGH_MAX_SEC` (1200 s; `config.max_search_sec` may only lower it) and stops the recommended plan's search once it has not improved for max(`THOROUGH_STALL_SEC` 300 s, `THOROUGH_STALL_SHARE` 0.5 × the time searched so far). The response's `search` says how it searched and why it stopped. A request whose caller disconnects is cancelled within about a second (its worker processes stop, its slot frees). See `../../docs/OPTIMIZER_BENCHMARK.md` §10 and the handbook's 4.9.
 
 ## Local dev
 ```bash
