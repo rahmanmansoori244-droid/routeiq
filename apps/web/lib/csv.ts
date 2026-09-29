@@ -1,43 +1,52 @@
 import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
-import { guardSpreadsheet, idFileFormatsCells, safeDecodeRange, sameSheetList, sheetjsReader, WorkbookRefusedError } from './workbook-guard';
+import { MultipleSheetsError, sheetList } from './upload-errors';
+import { fileRefusal, MAX_CELLS, MAX_COLS } from './upload-limits';
+import { guardSpreadsheet, idFileFormatsCells, safeDecodeRange, sameSheetList, sheetjsReader, tooManyTextCells, WorkbookRefusedError } from './workbook-guard';
+
+// Kept here as well, so `@/lib/csv` still has them (one class: `instanceof` holds either way).
+export { MultipleSheetsError } from './upload-errors';
+export { MAX_FILE_BYTES } from './upload-limits';
 
 /**
  * Upload limits (owner decision 16, audit E2): 10 MB per file and 50,000 rows on the sheet that is
  * read, as before; a workbook may unpack to at most 50 MB and have at most 10 sheets. The A1
  * review added caps that NMWC's real files (about 15 columns, a few thousand rows) are far from:
- * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 50 columns), links over
+ * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 49 columns), links over
  * 200,000 cells, 10,000 comments; the A1 v3 review 1,000 metadata entries of each kind and 1,000
- * comment authors. An upload read as Excel must be an .xlsx, an old .xls or CSV text; web pages,
- * XML, OpenDocument, .xlsb and other formats are refused (lib/workbook-guard). Since the A1 v4
+ * comment authors. Since the P5 second review a CSV sent as text (read by Papa Parse, not SheetJS)
+ * has the column and cell caps too (parseCsv, checkCsvCells). An upload read as Excel must be an
+ * .xlsx, an old .xls or CSV text; web pages, XML, OpenDocument, .xlsb and other formats are
+ * refused (lib/workbook-guard). Since the A1 v4
  * review a part SheetJS reads more than once (for another sheet, another spelling of its name, an
  * external link listed again) counts again against these caps, two sheets that read one worksheet
  * part are refused, and so is a workbook with a chart, dialog or macro sheet.
  *
- * What these limits do and do not do. The file is parsed in the web process, on the event loop,
- * synchronously: while a file is parsed no other request is answered, and nothing can stop the
- * parse once it has started. (Until 27 Sep 2026 a 10 s "parse timeout" was armed here. It could
- * never fire: its timer can only run after the parse has finished. It is gone.) The limits bound
- * how much work one upload can cause - a file is checked (lib/workbook-guard) before SheetJS reads
- * it, at most READ_ROWS rows of each sheet are turned into cells, and the ranges are checked before
- * any sheet is turned into rows - but they do not isolate it, and a file just under them still
- * blocks the app for seconds. Measured on the maintainer's machine (times vary by about a third
- * from run to run): an .xlsx of 50,000 rows x 49 columns (0.19 MB, 37 MB unpacked) 9-10 s and
- * 1 GB of memory (before A1 v4, ten sheets naming that one part took ten times as long); the same rows as CSV sent as Excel 7-11 s and 1.2 GB; ten sheets of 50,000 rows
- * 5-6 s; NMWC's shape at the row limit (50,000 rows x 15 columns) about 2.5 s. Parsing in a worker
- * thread with a memory cap and a timeout that really stops it is audit PR 5.
+ * What these limits do and do not do. They bound how much work one upload can cause - a file is
+ * checked (lib/workbook-guard) before SheetJS reads it, at most READ_ROWS rows of each sheet are
+ * turned into cells, and the ranges are checked before any sheet is turned into rows - but a file
+ * just under them still takes seconds and up to about 1 GB. Measured on the maintainer's machine
+ * when this ran in the web process (A1; times vary by about a third from run to run): an .xlsx of
+ * 50,000 rows x 49 columns (0.19 MB, 37 MB unpacked) 9-10 s and 1 GB of memory; the same rows as
+ * CSV sent as Excel 7-11 s and 1.2 GB; ten sheets of 50,000 rows 5-6 s; NMWC's shape at the row
+ * limit (50,000 rows x 15 columns) about 2.5 s. So since audit P5 this code never runs in the web
+ * process for an upload: the routes call parseUploadIsolated (lib/upload-parse), which runs
+ * parseUpload in a separate, short-lived process with a memory cap and a time limit that really
+ * stop it (the process is killed), while the web process keeps answering. parseUpload itself is
+ * unchanged by P5 (the P5 second review added the CSV caps): synchronous once the file is in
+ * memory, and nothing inside it can stop it.
  */
-export const MAX_FILE_BYTES = 10 * 1024 * 1024;
 export const MAX_ROWS = 50_000;
 /** Total size of all parts of an .xlsx once unpacked, measured by unpacking (lib/workbook-guard). */
 export const MAX_UNPACKED_BYTES = 50 * 1024 * 1024;
 export const MAX_SHEETS = 10;
 /** Parts (files inside the .xlsx zip); a real workbook has well under 100. */
 export const MAX_ZIP_PARTS = 1_000;
-/** Columns of one sheet (from the first to the last column holding a cell); NMWC's files have about 15. */
-export const MAX_COLS = 200;
-/** Cells (rows x columns) of all sheets' ranges together: e.g. 50,000 rows of 50 columns. */
-export const MAX_CELLS = 2_500_000;
+/**
+ * Columns of one sheet or CSV line (200), and cells of all sheets or CSV lines together (2,500,000):
+ * in lib/upload-limits, which the web process checks the parser's answer against too.
+ */
+export { MAX_CELLS, MAX_COLS };
 /** Cells all hyperlinks together may cover; SheetJS makes a cell object for each. */
 export const MAX_LINK_CELLS = 200_000;
 /** Comments (notes) in a workbook; SheetJS's time for many on one cell grows with the square. */
@@ -59,12 +68,6 @@ export const MAX_PEOPLE = 1_000;
  * when it is the sheet that is read (see parseUpload), never cut short without a word.
  */
 export const READ_ROWS = MAX_ROWS + 100;
-
-const ALLOWED_TYPES = new Set([
-  'text/csv',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-]);
 
 export interface ParsedFile {
   fileName: string;
@@ -109,32 +112,6 @@ export interface ParseOptions {
   decimalTextColumns?: string[];
 }
 
-/**
- * A workbook with the rows of this upload on more than one sheet (scenario test S04: Orders +
- * LateOrder). Nothing is read: each sheet must be uploaded as its own file, so each is checked
- * (and, for late orders, confirmed with its reason) on its own.
- */
-export class MultipleSheetsError extends Error {
-  readonly code = 'MULTIPLE_SHEETS';
-  constructor(
-    public readonly sheets: { name: string; rows: number; truncated?: boolean }[],
-    rowsWord = '',
-  ) {
-    const what = rowsWord ? `${rowsWord} rows` : 'rows with these columns';
-    super(
-      `This workbook has ${what} on ${sheets.length} sheets: ${sheetList(sheets)}. Nothing was read. ` +
-        'Upload each sheet as its own file (save it as a separate workbook or CSV), so each one is checked and confirmed on its own.',
-    );
-    this.name = 'MultipleSheetsError';
-  }
-}
-
-const rowCount = (n: number) => `${n.toLocaleString('en-US')} row${n === 1 ? '' : 's'}`;
-function sheetList(sheets: { name: string; rows: number; truncated?: boolean }[]): string {
-  // A sheet that goes on past READ_ROWS was not read to its end: its count is a floor.
-  return sheets.map((s) => `"${s.name}" (${rowCount(s.rows)}${s.truncated ? ' or more' : ''})`).join(', ');
-}
-
 /** Refusal of a sheet (or CSV) that goes on past READ_ROWS; `rows` = the data rows read. */
 function tooManyRowsCut(rows: number, where: string, what: 'sheet' | 'file'): Error {
   if (rows > MAX_ROWS) return new Error(`Too many rows: more than ${MAX_ROWS}${where}. Max ${MAX_ROWS}.`);
@@ -144,13 +121,14 @@ function tooManyRowsCut(rows: number, where: string, what: 'sheet' | 'file'): Er
   );
 }
 
+/**
+ * Reads an uploaded file. Synchronous once the file is in memory: an upload route never calls it
+ * itself but through parseUploadIsolated (lib/upload-parse), which runs it in the parser process.
+ */
 export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<ParsedFile> {
-  if (file.size > MAX_FILE_BYTES) {
-    throw new Error(`File too large (max ${MAX_FILE_BYTES / 1024 / 1024} MB).`);
-  }
-  if (file.type && !ALLOWED_TYPES.has(file.type)) {
-    throw new Error(`Unsupported file type: ${file.type}. Use CSV or XLSX.`);
-  }
+  // Size and type (lib/upload-limits): the web process checks them too, before the file is sent.
+  const refused = fileRefusal(file);
+  if (refused) throw new Error(refused);
 
   const fileName = sanitizeFileName(file.name);
   const isExcel =
@@ -182,12 +160,14 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
   if (result.rows.length > MAX_ROWS) {
     throw new Error(`Too many rows: ${result.rows.length}. Max ${MAX_ROWS}.`);
   }
+  // After the row limit, so a file refused for its rows is refused as before.
+  checkCsvCells(result.rows, result.header);
   if (result.errors.length) {
     for (const e of result.errors.slice(0, 5)) {
       warnings.push(`CSV parse warning at row ${e.row}: ${e.message}`);
     }
   }
-  return { fileName, fileType: 'csv', rows: result.rows, warnings };
+  return { fileName, fileType: 'csv', rows: result.rows.map(normalizeKeys), warnings };
 }
 
 /**
@@ -573,7 +553,28 @@ function goesPastReadRows(sheet: XLSX.WorkSheet): boolean {
   return XLSX.utils.decode_range(ref).e.r >= READ_ROWS - 1;
 }
 
-function parseCsv(text: string): { rows: Record<string, string>[]; errors: Papa.ParseError[]; truncated: boolean } {
+/**
+ * Lines a CSV's header is looked for in before the file is parsed (parseCsv): the header is the
+ * first of them that is not blank.
+ */
+const HEADER_LINES = 10;
+
+/**
+ * A CSV sent as text (Papa Parse; a CSV sent as Excel goes to SheetJS): its rows as Papa makes them
+ * (normalizeKeys comes after the checks), the width of its header, Papa's warnings, and whether it
+ * goes on past READ_ROWS rows. A header wider than MAX_COLS is refused (P5 second review: a CSV had
+ * no column or cell cap, so a row of a million columns, a 7.6 MB file, was read and sent to the web
+ * process as one object of a million keys). The rows are checked by checkCsvCells.
+ */
+function parseCsv(text: string): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean } {
+  // The header first, before Papa makes an object with a key for every header name for each row,
+  // and renames repeated names one by one (a 2.9 MB header of 1.5 million repeated names took it
+  // 3.4 s). The same Papa over the first lines only, with no row objects, reads them as the parse
+  // below does (the same delimiter and line break it guesses from the whole text, the same blank
+  // lines skipped), so the first line it keeps is that parse's header. A header after more blank
+  // lines than that is checked once the file is parsed.
+  const first = Papa.parse<string[]>(text, { skipEmptyLines: 'greedy', preview: HEADER_LINES }).data[0];
+  if (first && first.length > MAX_COLS) throw tooManyCsvColumns(first.length);
   // Synchronous: Papa parses a string in one go. `preview` stops it after READ_ROWS rows (empty
   // lines count towards it); meta.truncated says that it stopped there.
   const res = Papa.parse<Record<string, unknown>>(text, {
@@ -582,7 +583,37 @@ function parseCsv(text: string): { rows: Record<string, string>[]; errors: Papa.
     preview: READ_ROWS,
     transformHeader: (h) => h.trim().toLowerCase(),
   });
-  return { rows: res.data.map(normalizeKeys), errors: res.errors, truncated: !!res.meta.truncated };
+  const header = res.meta.fields?.length ?? 0;
+  if (header > MAX_COLS) throw tooManyCsvColumns(header);
+  return { rows: res.data, header, errors: res.errors, truncated: !!res.meta.truncated };
+}
+
+/**
+ * The rows of a CSV sent as text against the caps (P5 second review), after the row limit: a row of
+ * more than MAX_COLS values, or more than MAX_CELLS cells with the header's, is refused. A row with
+ * more values than its header keeps the extra ones in one list (Papa's "__parsed_extra", joined into
+ * one text by normalizeKeys): each of them counts. Every value is counted as it is in the file, empty
+ * ones too (a CSV saved from Excel writes the empty columns after the data on every line; SheetJS,
+ * reading the same text sent as Excel, drops them).
+ */
+function checkCsvCells(rows: Record<string, unknown>[], header: number): void {
+  let cells = header;
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i]!;
+    const extra = row.__parsed_extra;
+    const values = Object.keys(row).length + (Array.isArray(extra) ? extra.length - 1 : 0);
+    if (values > MAX_COLS) throw tooManyCsvColumns(values, i + 2);
+    cells += values;
+  }
+  if (cells > MAX_CELLS) throw tooManyTextCells(cells, MAX_CELLS);
+}
+
+/** A CSV whose header (or row `row`, the header being row 1) has more than MAX_COLS values. */
+function tooManyCsvColumns(columns: number, row?: number): WorkbookRefusedError {
+  return new WorkbookRefusedError(
+    `${row === undefined ? 'This file has' : `Row ${row} of this file has`} ${columns.toLocaleString('en-US')} columns; at most ${MAX_COLS} can be read. ` +
+      'Delete the columns you do not need (also empty columns after your data) and upload again.',
+  );
 }
 
 function normalizeKeys(row: Record<string, unknown>): Record<string, string> {

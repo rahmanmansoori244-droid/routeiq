@@ -1,4 +1,13 @@
-// Placeholder Vitest setup. Phase 0 has no tests yet; the
-// tests/tenant-isolation.spec.ts mandated by CLAUDE.md §13 is wired in Phase 1
-// once tenant-scoped models start being read/written by feature code.
-export {};
+// Vitest setup, run before every spec file.
+//
+// Uploads (audit P5): the routes read a file in a separate parser process (lib/upload-parse). Under
+// the tests it is read in THIS process by default, so the specs that watch or replace SheetJS
+// (vi.mock / vi.spyOn on 'xlsx') see the read, as before. The same request and answer objects are
+// used, and the answer is copied as it would cross the process boundary. The module is imported
+// only when a file is read, so a spec's vi.mock('xlsx') applies to it. lib/upload-parse honours
+// this outside production only. Specs that test the real process turn it off
+// (tests/lib/upload-parse-helpers.ts: useRealUploadParser()).
+import type { ParseReply, ParseRequest } from '@/lib/upload-parse/protocol';
+
+(globalThis as { __routeiqUploadParseInProcess?: (req: ParseRequest) => Promise<ParseReply> }).__routeiqUploadParseInProcess = async (req) =>
+  (await import('@/lib/upload-parse/handler')).handleParseRequest(req);

@@ -1,13 +1,15 @@
 import { inflateRawSync } from 'node:zlib';
 import * as XLSX from 'xlsx';
+import { WorkbookRefusedError } from './upload-errors';
 
 /**
  * Checks on an uploaded spreadsheet BEFORE SheetJS reads it (audit E2 quick fix, 27 Sep 2026, and
  * the A1 review fixes).
  *
- * SheetJS reads a file in the web process, on the event loop, and nothing can stop it once it has
- * started. It picks its reader from the file's first bytes, not from its name, and several of its
- * readers do far more work than the file's size suggests:
+ * SheetJS reads a file synchronously, and nothing inside it can stop it once it has started (since
+ * audit P5 in the upload parser process, lib/upload-parse, never in the web process). It picks its
+ * reader from the file's first bytes, not from its name, and several of its readers do far more
+ * work than the file's size suggests:
  *  - an .xlsx is a zip archive whose parts SheetJS unpacks by the sizes in the zip headers (a 606 KB
  *    file that unpacks to 200 MB blocked it for more than 3 minutes);
  *  - a hyperlink over a range makes one cell object for every cell of the range, whatever
@@ -39,18 +41,14 @@ import * as XLSX from 'xlsx';
  *    idFileReader), so an order or customer CSV with a leading "ID" column - which a Windows
  *    browser sends as application/vnd.ms-excel - is read, not refused.
  *
- * This bounds the work of one upload; it does not isolate it. A file under the caps is still parsed
- * on the event loop (see lib/csv.ts for what the worst one costs). Parsing in a worker thread with
- * a memory cap and a timeout that really stops it is audit PR 5.
+ * This bounds the work of one upload. The isolation is audit P5's: the file is read in a separate,
+ * short-lived process with a memory cap and a time limit that kill it (lib/upload-parse; lib/csv.ts
+ * has what the worst file under the caps costs), so the web process keeps answering.
  */
 
-/** Refusal of an upload with a message for the dispatcher (the routes answer 400 with it). */
-export class WorkbookRefusedError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'WorkbookRefusedError';
-  }
-}
+// Refusal of an upload with a message for the dispatcher (the routes answer 400 with it). Defined
+// in lib/upload-errors (no dependencies), so the web process rebuilds it from the parser's answer.
+export { WorkbookRefusedError };
 
 export interface SpreadsheetLimits {
   /** Largest total size of all parts once unpacked. */
@@ -114,6 +112,9 @@ const tooManyCells = (cells: number, max: number, remedy: string) =>
   new WorkbookRefusedError(
     `This file is too large to read: it has about ${cells.toLocaleString('en-US')} cells (rows x columns); at most ${max.toLocaleString('en-US')} can be read. ${remedy}`,
   );
+/** A CSV with more than `max` cells: sent as Excel (counted here from its separators), or as text (lib/csv, its values). */
+export const tooManyTextCells = (cells: number, max: number) =>
+  tooManyCells(cells, max, 'Split the file, or remove the columns you do not need, and upload again.');
 const tooManyLinks = (cells: number, max: number) =>
   new WorkbookRefusedError(
     `This workbook has links over ${Number.isFinite(cells) ? `${cells.toLocaleString('en-US')} cells` : 'more cells than a sheet has'}; at most ${max.toLocaleString('en-US')} can be read. ` +
@@ -415,7 +416,7 @@ function checkDelimitedText(b: Buffer, maxCells: number): void {
     const c = text.charCodeAt(i);
     if (c === 0x2c || c === 0x09 || c === 0x3b || c === 0x7c || c === 0x0a || c === 0x0d || c === own) cells++;
   }
-  if (cells > maxCells) throw tooManyCells(cells, maxCells, 'Split the file, or remove the columns you do not need, and upload again.');
+  if (cells > maxCells) throw tooManyTextCells(cells, maxCells);
 }
 
 function checkLinkCells(cells: number, max: number): void {
