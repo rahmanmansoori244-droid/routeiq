@@ -15,6 +15,8 @@ export interface PlanMapLoad {
   loadNo: number;
   colorIdx: number;
   stops: { sequence: number; lat: number | null; lng: number | null; label: string }[];
+  /** Audit E1: the depot pin the load was planned from, when not the plan's depot (a moved depot). */
+  origin?: { lat: number; lng: number } | null;
 }
 
 interface Props {
@@ -59,7 +61,7 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale
   // answer asked for other content is never drawn (it shows as loading until the new answer is in),
   // and an answer whose rows are for other content than the loads shown (the server's plan moved on
   // after this screen loaded it) is caught by answerIsStale: those loads are drawn straight.
-  const shapeKey = useMemo(() => loads.map((l) => `${l.id}:${l.stops.map((s) => `${s.lat},${s.lng}`).join(';')}`).join('|'), [loads]);
+  const shapeKey = useMemo(() => loads.map((l) => `${l.id}:${l.origin ? `${l.origin.lat},${l.origin.lng}>` : ''}${l.stops.map((s) => `${s.lat},${s.lng}`).join(';')}`).join('|'), [loads]);
   const contentKey = `${runId}|${shapeKey}`;
   const [shapes, setShapes] = useState<{ key: string; geo: GeoState }>({ key: contentKey, geo: GEO_LOADING });
   const geo = shapes.key === contentKey ? shapes.geo : GEO_LOADING;
@@ -167,6 +169,13 @@ export function PlanMap({ runId, depot, loads, unserved, selectedLoadId, onStale
       for (const id of Object.keys(m.getStyle().sources ?? {})) if (id.startsWith('load-')) m.removeSource(id);
       const bounds = new maplibregl.LngLatBounds([depot.lng, depot.lat], [depot.lng, depot.lat]);
       markers.current.push(new maplibregl.Marker({ color: '#0f172a' }).setLngLat([depot.lng, depot.lat]).setPopup(new maplibregl.Popup().setText(depot.name)).addTo(m));
+      // Audit E1: a load planned from a depot pin moved since starts and ends there: marked, and in view.
+      const origins = new Map<string, { lat: number; lng: number }>();
+      for (const l of loads) if (l.origin && (l.origin.lat !== depot.lat || l.origin.lng !== depot.lng)) origins.set(`${l.origin.lat},${l.origin.lng}`, l.origin);
+      for (const o of origins.values()) {
+        bounds.extend([o.lng, o.lat]);
+        markers.current.push(new maplibregl.Marker({ color: '#64748b', scale: 0.8 }).setLngLat([o.lng, o.lat]).setPopup(new maplibregl.Popup().setText('Depot pin these loads were planned from (the depot moved since)')).addTo(m));
+      }
       const lines = new Map(linesToDraw(geo, loads, depotAt).map((x) => [x.loadId, x] as const));
       for (const l of loads) {
         const dim = selectedLoadId && selectedLoadId !== l.id;

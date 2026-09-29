@@ -272,6 +272,8 @@ describe('snapshots (F08)', () => {
     await chooseScenario(T, 'P', 'sc1', 'u1');
     const l = tables.planLoad[0];
     expect(l.truckSnapshotJson).toMatchObject({ code: 'T01', capacityCases: 120, capacityWeightKg: 1500, source: 'PLAN' });
+    // Audit E1: the depot pin the load is planned from, kept with it.
+    expect(l.truckSnapshotJson.origin).toEqual({ depotId: 'D1', lat: 23.58, lng: 58.39 });
     expect(l.truckSnapshotJson.rules).toMatchObject({ reloadMin: 20, loadingMinPerCase: 0.1, maxTrips: 2, shiftMaxMin: 600 });
     const a = tables.routeAssignment[0];
     expect(a.stopSnapshotJson).toMatchObject({ lat: 23.61, lng: 58.41, hardStartMin: 420, hardEndMin: 720, serviceMin: 25, priority: 1, source: 'PLAN' });
@@ -294,6 +296,31 @@ describe('snapshots (F08)', () => {
     expect(stops.find((a) => a.orderId === 'O3')!.stopSnapshotJson).toBe(Prisma.DbNull);
     // The copy has its own timetable check.
     expect(readFeasibility(row('runPlan', child.id).feasibilityJson)?.ok).toBe(true);
+  });
+
+  it('audit E1: a locked load keeps the depot pin it was planned from through every re-plan, and says the depot moved', async () => {
+    seed();
+    row('scenarioResult', 'sc1').detailsJson = details({ inputs });
+    row('planLoad', 'L1').status = 'LOCKED'; // its snapshot is from before origins were kept (no origin)
+    tables.depot[0] = { ...tables.depot[0], lat: 23.6 }; // the depot pin moved ~2.2 km after planning
+    const { child } = await createNextVersion(T, 'P', 'REOPTIMIZE', null, 'u1');
+    const l1 = tables.planLoad.find((l) => l.runId === child.id && l.carriedFromLoadId === 'L1')!;
+    // Stamped with the depot the version that planned it was optimized from, not the moved pin.
+    expect(l1.truckSnapshotJson).toEqual({ ...truckSnap('T01'), origin: { depotId: 'D1', lat: 23.58, lng: 58.39 } });
+    // The next re-plan copies it verbatim.
+    const { child: grand } = await createNextVersion(T, child.id, 'REOPTIMIZE', null, 'u1');
+    const l1Again = tables.planLoad.find((l) => l.runId === grand.id && l.carriedFromLoadId === l1.id)!;
+    expect(l1Again.truckSnapshotJson).toEqual(l1.truckSnapshotJson);
+    // The newest version's option was optimized from the new pin; the locked copy keeps the old one.
+    const sc = tables.scenarioResult.find((s) => s.runId === grand.id)!;
+    sc.detailsJson = { ...(sc.detailsJson as Record<string, unknown>), inputs: { ...inputs, depot: { ...inputs.depot, lat: 23.6 } } };
+    const d = (await getPlanDetail(T, grand.id))!;
+    expect(d.run.depot).toMatchObject({ lat: 23.6, lng: 58.39 });
+    const locked = d.loads.find((l) => l.id === l1Again.id)!;
+    expect(locked.origin).toEqual({ lat: 23.58, lng: 58.39 });
+    expect(locked.masterChanged.map((c) => c.kind)).toEqual(['DEPOT']);
+    expect(d.warnings).toContain("Depot moved since planning: T01 L1 start and end at the depot pin they were planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.");
+    expect(d.warnings.some((w) => w.startsWith('Truck capacity changed'))).toBe(false);
   });
 
   it('PR5 on PR3 and PR4 (rebase): the copy also carries each load cost breakdown and its hand-set driver; a load costed the earlier way copies as SQL NULL', async () => {

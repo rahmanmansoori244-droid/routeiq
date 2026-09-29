@@ -3,7 +3,7 @@ import { callRouteGeometry } from '@/lib/solver-client';
 import { prisma } from '@/lib/db';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchDetails } from '@/lib/dispatch/plan-service';
-import { readPlanInputs, readStopSnapshot } from '@/lib/dispatch/snapshots';
+import { readLoadOrigin, readPlanInputs, readStopSnapshot, readTruckSnapshot } from '@/lib/dispatch/snapshots';
 import { resolveLoadGeometries, roadShapeCache, routingOffReason, type LoadPath } from '@/lib/dispatch/load-geometry';
 import { loadPath } from '@/lib/dispatch/load-path';
 
@@ -18,7 +18,9 @@ interface Params { params: { id: string } }
 // rows planned before snapshots existed use today's customer pin. Each row carries `pointsKey`, the
 // fingerprint of its path, built by the same `loadPath` the map uses on the stops it shows
 // (getPlanDetail: one stop per sequence at its first order's planned pin, the plan's depot), so the
-// map can tell when its plan is behind this answer.
+// map can tell when its plan is behind this answer. Audit E1: each load starts and ends at the depot
+// pin it was planned from (its truck snapshot's origin; getPlanDetail's DetailLoad.origin), so a
+// locked or dispatched load is never redrawn from a depot pin moved since.
 export const GET = (req: Request, { params }: Params) =>
   withTenantApi(async (_r, { db, user }) => {
     const run = await db.runPlan.findUnique({ where: { id: params.id }, include: { depot: true } });
@@ -49,7 +51,8 @@ export const GET = (req: Request, { params }: Params) =>
         stops.set(a.sequenceInTruck, snap ? { lat: snap.lat, lng: snap.lng } : a.order.customer);
       }
       const inOrder = [...stops.entries()].sort(([x], [y]) => x - y).map(([, c]) => c);
-      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: loadPath(depot, inOrder) };
+      const origin = readLoadOrigin(readTruckSnapshot(l.truckSnapshotJson)) ?? depot;
+      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: loadPath({ lat: origin.lat, lng: origin.lng }, inOrder) };
     });
     const rows = await resolveLoadGeometries(paths, {
       call: offReason ? null : (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }),

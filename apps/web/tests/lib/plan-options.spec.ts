@@ -167,6 +167,32 @@ describe('N1: what each option gains', () => {
     expect(earlyStarts(loads, [1, 2], (s) => prio[s.stop_id] ?? null)).toEqual({ S1: 400, S3: 500 });
   });
 
+  it('audit F22: an option that breaks the timing rules is never called cheaper or better, and nothing is compared with it', () => {
+    // The verifiers' case: MIN TRUCKS serves one more order for 20 OMR less, but its timetable is VIOLATED.
+    const rec = facts({ name: 'RECOMMENDED', dayCost: 100, unserved: 1, signature: 'R', feasibility: 'VERIFIED' });
+    const bad = facts({ name: 'MIN_TRUCKS', dayCost: 80, unserved: 0, signature: 'M', feasibility: 'VIOLATED', violations: 3 });
+    let t = optionTradeoffs([rec, bad]);
+    expect(t.MIN_TRUCKS).toEqual({ text: 'Breaks the timing rules (3 problems): it cannot be dispatched. Re-plan, or use another option.', versus: null, gains: [], givesUp: [] });
+    expect(t.RECOMMENDED.text).toBe('Every different option breaks the timing rules.');
+    for (const x of Object.values(t)) expect(x.text).not.toMatch(/cheaper|more order|no gain/);
+    // With a third option that keeps the rules, RECOMMENDED is compared with that one only.
+    const ok = facts({ name: 'MIN_DISTANCE', dayCost: 90, km: 380, unserved: 1, signature: 'D', feasibility: 'VERIFIED' });
+    t = optionTradeoffs([rec, bad, ok]);
+    expect(t.RECOMMENDED.versus).toBe('MIN_DISTANCE');
+    expect(t.MIN_DISTANCE.text).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+    expect(t.MIN_TRUCKS.gains).toEqual([]);
+    // UNVERIFIED (the check could not run) is not dispatchable either; an option from before the check (null) is compared as before.
+    t = optionTradeoffs([rec, { ...bad, feasibility: 'UNVERIFIED' }]);
+    expect(t.MIN_TRUCKS.text).toBe('Its timing could not be checked, so it cannot be dispatched. Re-plan, or use another option.');
+    t = optionTradeoffs([rec, { ...bad, feasibility: null }]);
+    expect(t.MIN_TRUCKS.text).toMatch(/^vs RECOMMENDED: 1 more order served/);
+    expect(t.MIN_TRUCKS.gains).toContain('20.0 OMR cheaper');
+    // RECOMMENDED itself broken: it says so, and no alternative is praised against it.
+    t = optionTradeoffs([{ ...rec, feasibility: 'VIOLATED', violations: 1 }, { ...bad, feasibility: 'VERIFIED' }]);
+    expect(t.RECOMMENDED.text).toBe('Breaks the timing rules (1 problem): it cannot be dispatched. Re-plan, or use another option.');
+    expect(t.MIN_TRUCKS.text).toBe('');
+  });
+
   it('the plan signature ignores load order in the list but not the stop order', () => {
     const a = [newLoad('T1', 1, [['S1', 400], ['S2', 420]]), newLoad('T2', 1, [['S3', 500]])];
     expect(planSignature([...a].reverse())).toBe(planSignature(a));
@@ -281,12 +307,29 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     expect(at).toBeGreaterThan(0);
     const rec = rows.findIndex((r, i) => i > at && r[0] === 'RECOMMENDED (in use)');
     expect(rows[rec][1]).toBe('2 trucks · 3 loads (2 new)');
-    expect(rows[rec][2]).toBe('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preference cost 5.0 · 0 unserved');
+    expect(rows[rec][2]).toBe('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preference cost 5.0 · 0 unserved · timing VERIFIED');
     expect(rows[rec + 1][2]).toBe(d.scenarios[0].tradeoff);
     const min = rows.findIndex((r, i) => i > at && r[0] === 'MIN TRUCKS');
     expect(rows[min][1]).toBe('2 trucks · 2 loads (1 new)');
-    expect(rows[min][2]).toBe('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved');
+    expect(rows[min][2]).toBe('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved · timing VERIFIED');
     expect(rows[min + 1][2]).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+  });
+
+  it('audit F22: an option whose timetable is VIOLATED says so on screen and in the Excel, never "cheaper"', async () => {
+    seed();
+    const min = tables.scenarioResult[1];
+    min.detailsJson = { ...(min.detailsJson as Record<string, unknown>), feasibility: { status: 'VIOLATED', timing: 'ESTIMATED', violations: [{ code: 'TURNAROUND', message: 'x' }, { code: 'TURNAROUND', message: 'y' }] } };
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.scenarios[1].tradeoff).toBe('Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.');
+    expect(d.scenarios[0].tradeoff).toBe('Every different option breaks the timing rules.');
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const texts: string[] = [];
+    wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
+    expect(texts).toContain('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved · timing VIOLATED');
+    expect(texts).toContain('Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.');
+    expect(texts.some((x) => /cheaper/.test(x))).toBe(false);
   });
 
   it('options saved by an optimizer without the preference parts show their preferred hours as such, on screen and in the Excel', async () => {
@@ -311,6 +354,6 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
     const texts: string[] = [];
     wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
-    expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved');
+    expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved · timing VERIFIED');
   });
 });

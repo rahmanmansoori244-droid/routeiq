@@ -433,7 +433,9 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
           : sc.preferredHoursCost !== null
             ? `preferred hours only ${sc.preferredHoursCost.toFixed(1)} (older optimizer: early delivery not reported)`
             : 'preference cost —';
-      kv(name, `${sc.trucksUsed} trucks · ${loadsText}`, undefined, `${kmText} · ${costText} · ${prefText} · ${sc.unservedOrders} unserved`);
+      // Audit F22: the option's own timing check, so an option that breaks the rules reads as such.
+      const timingText = sc.feasibility ? ` · timing ${sc.feasibility.status}` : '';
+      kv(name, `${sc.trucksUsed} trucks · ${loadsText}`, undefined, `${kmText} · ${costText} · ${prefText} · ${sc.unservedOrders} unserved${timingText}`);
       if (sc.tradeoff) {
         put(ws, r, 3, sc.tradeoff);
         r++;
@@ -660,14 +662,21 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     r++;
   });
   const manifestCases = sum(l.manifest.map((x) => x.cases));
+  const manifestKg = Math.round(sum(l.manifest.map((x) => x.weightKg)) * 10) / 10;
   totalRow(
     ws,
     r,
-    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, sum(l.manifest.map((x) => x.weightKg)), ''],
+    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, manifestKg, ''],
     [undefined, undefined, undefined, undefined, FMT_INT, FMT_KG],
   );
   ws.mergeCells(r, 3, r, 4);
-  if (manifestCases !== l.cases) put(ws, r, 8, `MISMATCH: load records ${l.cases} cases`).font = { bold: true };
+  // Audit E3: the sheet's kg is the load's kg (the lines share the kg each order was planned with).
+  // Only a plan whose orders were re-weighed after it was made (an older version) can differ: say so.
+  const manifestProblems = [
+    ...(manifestCases !== l.cases ? [`MISMATCH: load records ${l.cases} cases`] : []),
+    ...(manifestKgDiffers(manifestKg, l.weightKg) ? [`MISMATCH: load records ${l.weightKg} kg (order weights changed since planning)`] : []),
+  ];
+  if (manifestProblems.length) put(ws, r, 8, manifestProblems.join('; ')).font = { bold: true };
   r += 2;
 
   // DELIVERY ROUTE - driver's sequence.
@@ -680,13 +689,16 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   ws.pageSetup.printTitlesRow = `${r}:${r}`;
   r++;
   const depot = d.run.depot;
-  const depotMap = `https://www.google.com/maps/search/?api=1&query=${depot.lat},${depot.lng}`;
+  // Audit E1: the depot pin this load was planned from (a load kept from before the depot moved keeps it).
+  const from = l.origin ?? depot;
+  const depotMap = `https://www.google.com/maps/search/?api=1&query=${from.lat},${from.lng}`;
   const fmts = [FMT_INT, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_KG, undefined, undefined, FMT_KM, FMT_KM];
   tableRow(
     ws,
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (depart)`, '', '', fmtHhmm(l.departMin), '', '', null, null, null, '', '', null, 0,
-      { text: 'Map', hyperlink: depotMap }, `Departure ${fmtHhmm(l.departMin)}`, '', ''],
+      { text: 'Map', hyperlink: depotMap },
+      `Departure ${fmtHhmm(l.departMin)}${(l.masterChanged ?? []).filter((c) => c.kind === 'DEPOT').map((c) => ` · ${c.text}`).join('')}`, '', ''],
     fmts,
   );
   let running = 0;
@@ -770,9 +782,25 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     tableRow(ws, r++, [code, e.name, ...e.perLoad.map((v) => (v ? v : null)), sum(e.perLoad), e.kg], intFmts);
   }
   const perLoad = d.loads.map((l) => sum(l.manifest.map((x) => x.cases)));
-  totalRow(ws, r++, ['TOTAL', `${skus.size} SKUs`, ...perLoad, sum(perLoad), sum([...skus.values()].map((e) => e.kg))], intFmts);
-  tableRow(ws, r++, ['Load cases (plan)', 'from the load record', ...d.loads.map((l) => l.cases), sum(d.loads.map((l) => l.cases)), null], intFmts);
-  tableRow(ws, r, ['Check', '', ...d.loads.map((l, i) => (perLoad[i] === l.cases ? 'OK' : 'MISMATCH')), sum(perLoad) === sum(d.loads.map((l) => l.cases)) ? 'OK' : 'MISMATCH', '']);
+  const kgPerLoad = d.loads.map((l) => Math.round(sum(l.manifest.map((x) => x.weightKg)) * 10) / 10);
+  const skuKg = Math.round(sum([...skus.values()].map((e) => e.kg)) * 10) / 10;
+  const loadsKg = Math.round(sum(d.loads.map((l) => l.weightKg)) * 10) / 10;
+  totalRow(ws, r++, ['TOTAL', `${skus.size} SKUs`, ...perLoad, sum(perLoad), skuKg], intFmts);
+  tableRow(ws, r++, ['Load cases (plan)', 'from the load record (kg: the loads\' kg)', ...d.loads.map((l) => l.cases), sum(d.loads.map((l) => l.cases)), loadsKg], intFmts);
+  // Audit E3: kg checked too, per load and in total (the same words as the cases check).
+  const check = (casesOk: boolean, kgOk: boolean) => (casesOk && kgOk ? 'OK' : casesOk ? 'MISMATCH (kg)' : 'MISMATCH');
+  tableRow(ws, r, [
+    'Check',
+    '',
+    ...d.loads.map((l, i) => check(perLoad[i] === l.cases, !manifestKgDiffers(kgPerLoad[i], l.weightKg))),
+    sum(perLoad) === sum(d.loads.map((l) => l.cases)) ? 'OK' : 'MISMATCH',
+    manifestKgDiffers(skuKg, loadsKg) ? 'MISMATCH' : 'OK',
+  ]);
+}
+
+/** The loading manifest's kg differs from the load's recorded kg by more than rounding (KG_ROUNDING_TOL). */
+function manifestKgDiffers(manifestKg: number, loadKg: number): boolean {
+  return Math.abs(manifestKg - loadKg) > KG_ROUNDING_TOL;
 }
 
 function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {
@@ -1028,8 +1056,13 @@ export function tenantAssumptions(
       cfg.overtimeCostPerHour > 0
         ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour${
             earlier ? " (priced in the optimizer's search only; not included in this plan's load costs or operating cost)" : ' on top of the driver cost'
-          }${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}`
+          }${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}${
+            // Audit E4 (owner decision 14): only new cost counts when choosing a truck.
+            earlier ? '' : '; overtime already worked by locked or dispatched loads is not counted again for new loads'
+          }`
         : 'not costed',
+    // Audit F08 (owner decision 15): how weights are compared, with no hidden margin.
+    Weights: 'each order to the nearest 0.1 kg, checked against each truck\'s payload with no margin (a load may weigh exactly the payload)',
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} ${cur} per minute outside the preferred window (soft)`,
     'Road time factor (truck vs car)': noRoadLegs
       ? `not used in this plan: every distance is a straight-line estimate, timed at the average speed for estimates (the x${cfg.roadTimeFactor} setting applies to road legs only)`

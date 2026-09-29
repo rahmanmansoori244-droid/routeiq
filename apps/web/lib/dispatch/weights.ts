@@ -46,6 +46,28 @@ export interface OrderWeightChange {
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
 /**
+ * Weights to the optimizer and on stored loads are whole units of 0.1 kg (audit F08, owner decision
+ * 15: no hidden rounding margin). One rule on both sides: each order (or split portion) is rounded
+ * to the NEAREST 0.1 kg, exactly as the solver's kg_units does (floor(kg x 10 + 0.5), the same
+ * floating-point steps in both languages), and a payload is rounded DOWN to 0.1 kg (payload_units).
+ * So the kg the optimizer planned a load with, the load's stored kg and the dispatch check's kg are
+ * the same sum of the same tenths.
+ */
+export function kgTenths(kg: number): number {
+  return kg > 0 ? Math.floor(kg * 10 + 0.5) : 0;
+}
+
+/** kg rounded to the nearest 0.1 kg (kgTenths / 10). */
+export function roundKg(kg: number): number {
+  return kgTenths(kg) / 10;
+}
+
+/** A payload in 0.1 kg units, rounded down (the solver's payload_units); 0 = no payload. */
+export function payloadTenths(kg: number): number {
+  return kg > 0 ? Math.floor(kg * 10 + 1e-6) : 0;
+}
+
+/**
  * The one tolerance for comparing a load's stored kg (a sum of order and portion kg, each kept to
  * 0.1 kg) with a payload or with the optimizer's own kg: applyScenario's kg cross-check, the
  * dispatch check's CAPACITY_KG (feasibility.ts) and the workbook's Kg check. Rounding can never

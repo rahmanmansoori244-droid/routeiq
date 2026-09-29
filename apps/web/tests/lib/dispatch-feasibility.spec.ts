@@ -213,6 +213,15 @@ const truckSnap = {
 };
 
 describe('feasibilityInputFromRows', () => {
+  it('weighs each whole order to 0.1 kg, the unit the optimizer planned and the load was stored with (audit F08)', () => {
+    const order = { totalCases: 40, totalWeightKg: 999.14, customer: { code: 'C1', branchCode: null, name: 'x' }, lines: [{ id: 'ln1', cases: 40, weightKg: 999.14, product: { weightPerCaseKg: 0 } }] };
+    const base = row({ truckSnapshotJson: { ...truckSnap, capacityWeightKg: 2997.3 }, weightKg: 2997.3 });
+    const three = { ...base, assignments: ['o1', 'o2', 'o3'].map((orderId, i) => ({ ...base.assignments[0], orderId, sequenceInTruck: i + 1, order })) };
+    const inp = feasibilityInputFromRows([three], 'sc1', undefined, null);
+    expect(inp.loads[0].stops.map((s) => s.kg)).toEqual([999.1, 999.1, 999.1]);
+    expect(checkPlanFeasibility(inp).violations.filter((v) => v.code === 'CAPACITY_KG')).toEqual([]);
+  });
+
   it('takes the truck and rules the load was planned with (snapshot), never the truck now', () => {
     const inp = feasibilityInputFromRows([row({ truckSnapshotJson: truckSnap })], 'sc1', undefined, null);
     expect(inp.loads[0]).toMatchObject({ truckCode: 'T01', capacity: { cases: 100, kg: 1000 }, rules: RULES });

@@ -278,6 +278,43 @@ describe('buildDispatchWorkbook', () => {
     expect(find(a, (t) => t.includes('counted once'))).toBeTruthy();
   });
 
+  it('the loading manifest kg is the load kg, and a load whose orders were re-weighed since says so (audit E3)', async () => {
+    const d = fixture();
+    const wb = await render(d);
+    const used = new Set<string>(Object.values(SHEETS).map((s) => s.toLowerCase()));
+    for (const l of d.loads) {
+      const ws = sheet(wb, loadSheetName(l.truckCode, l.loadNo, used));
+      const total = find(ws, (t) => t === 'TOTAL', 2, find(ws, (t) => t === 'LOADING MANIFEST', 1)!.row)!;
+      expect(ws.getCell(total.row, 6).value).toBe(Math.round(l.weightKg * 10) / 10);
+      expect(text(ws.getCell(total.row, 8))).toBe('');
+    }
+    // An older version: the load was stored at 5 kg more than its orders weigh now.
+    d.loads[0] = { ...d.loads[0], weightKg: d.loads[0].weightKg + 5 };
+    const again = await render(d);
+    expect(find(sheet(again, 'T01 - L1'), (t) => t.includes('kg (order weights changed since planning)'))).toBeTruthy();
+    const sku = sheet(again, SHEETS.skuSummary);
+    const check = find(sku, (t) => t === 'Check', 1)!;
+    expect(text(sku.getCell(check.row, 3))).toBe('MISMATCH (kg)');
+    expect(text(sku.getCell(check.row, 4))).toBe('OK');
+    expect(text(sku.getCell(check.row, 3 + d.loads.length + 1))).toBe('MISMATCH');
+  });
+
+  it('audit E1: a load planned from a depot pin moved since links to that pin, with the note', async () => {
+    const d = fixture();
+    const text2 = "Depot moved since planning: this load starts and ends at the depot pin it was planned from (2.5 km from the depot's pin now).";
+    d.loads[0] = { ...d.loads[0], origin: { lat: 23.56, lng: 58.38 }, masterChanged: [{ kind: 'DEPOT', text: text2, newLat: 23.58, newLng: 58.4, movedM: 2500 }] };
+    const wb = await render(d);
+    const l1 = sheet(wb, 'T01 - L1');
+    const depotRows = cells(l1).filter((c) => c.col === 2 && c.text === 'DEPOT').map((c) => c.row);
+    for (const r of depotRows) expect((l1.getCell(r, 17).value as ExcelJS.CellHyperlinkValue).hyperlink).toBe('https://www.google.com/maps/search/?api=1&query=23.56,58.38');
+    expect(find(l1, (t) => t.includes(text2))).toBeTruthy();
+    const l2 = sheet(wb, 'T01 - L2');
+    for (const r of cells(l2).filter((c) => c.col === 2 && c.text === 'DEPOT').map((c) => c.row)) {
+      expect((l2.getCell(r, 17).value as ExcelJS.CellHyperlinkValue).hyperlink).toBe('https://www.google.com/maps/search/?api=1&query=23.58,58.4');
+    }
+    expect(depotRows).toHaveLength(2); // departure and return
+  });
+
   it('flags a load whose manifest does not match its recorded cases', async () => {
     const d = fixture();
     d.loads[0] = { ...d.loads[0], cases: d.loads[0].cases + 1 };
@@ -510,6 +547,9 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     const opts = { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false };
     const now = tenantAssumptions(cfg, opts);
     expect(now['Driver cost']).toMatch(/per hour of the whole truck day/);
+    // Audit E4 / F08: only new overtime counts for new loads; weights are checked to 0.1 kg with no margin.
+    expect(now.Overtime).toMatch(/; overtime already worked by locked or dispatched loads is not counted again for new loads$/);
+    expect(now.Weights).toBe("each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)");
     expect(now['Road time factor (truck vs car)']).toBe('x1.25 on road travel times (not on estimated legs)');
     const old = tenantAssumptions(cfg, { ...opts, rules: 'EARLIER' });
     expect(old['Driver cost']).toMatch(/^2\.5 OMR per hour of each load's time on the road/);

@@ -10,6 +10,7 @@
  * cut only when it does not fit). The last part is the remainder, which the optimizer can
  * combine with other customers.
  */
+import { kgTenths, payloadTenths, roundKg } from './weights';
 
 export interface OpenLine {
   lineId: string;
@@ -50,9 +51,9 @@ export interface PortionRecord {
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
-/** Fits one truck of `cap`? (tiny tolerance for float kg sums) */
+/** Fits one truck of `cap`? In 0.1 kg units, the optimizer's rule (weights.ts kgTenths / payloadTenths, audit F08). */
 export function fitsCapacity(cases: number, kg: number, cap: PartCapacity): boolean {
-  return cases <= cap.cases && (cap.kg === null || kg <= cap.kg + 1e-6);
+  return cases <= cap.cases && (cap.kg === null || !(cap.kg > 0) || kgTenths(kg) <= payloadTenths(cap.kg));
 }
 
 /**
@@ -116,7 +117,7 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
  * heavier than the payload must show its real weight so it is not planned onto that truck.
  */
 export function partDemandKg(part: { lineId: string; cases: number }[], kgPerCase: Map<string, number>): number {
-  return r1(part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0));
+  return roundKg(part.reduce((a, x) => a + x.cases * (kgPerCase.get(x.lineId) ?? 0), 0));
 }
 
 /**
@@ -168,8 +169,8 @@ export function choosePartCapacity(
   const usable = fleet.filter((t) => t.cases > 0);
   if (!usable.length) return null;
   const carries = (t: FleetTruck, c: FleetTruck) => t.cases >= c.cases && (t.kg === null || (c.kg !== null && t.kg >= c.kg));
-  // Compared on the whole-kg payload the part is sized for (see the floor below).
-  const carriesHeaviestCase = (c: FleetTruck) => c.kg === null || !(c.kg > 0) || Math.floor(c.kg) + 1e-6 >= maxCaseKg;
+  // Compared on the payload the part is sized for, in 0.1 kg (see below).
+  const carriesHeaviestCase = (c: FleetTruck) => c.kg === null || !(c.kg > 0) || payloadTenths(c.kg) >= kgTenths(maxCaseKg);
   const candidates = usable.some(carriesHeaviestCase) ? usable.filter(carriesHeaviestCase) : usable;
   const ranked = candidates.map((c) => {
     const parts = Math.max(Math.ceil(cases / c.cases), c.kg !== null && c.kg > 0 ? Math.ceil(kg / c.kg) : 1);
@@ -187,9 +188,9 @@ export function choosePartCapacity(
       a.c.code.localeCompare(b.c.code),
   );
   const best = ranked[0].c;
-  // Whole kilograms: the optimizer compares loads in whole kg, so a part filled to a fractional
-  // payload could otherwise miss the very truck it was sized for.
-  return { cap: { cases: best.cases, kg: best.kg !== null && best.kg > 0 ? Math.floor(best.kg) : null }, truckCode: best.code };
+  // The payload rounded down to 0.1 kg, as the optimizer compares it (audit F08: it compared in
+  // whole kg, so parts were sized for the payload floored to a whole kg - a hidden margin).
+  return { cap: { cases: best.cases, kg: best.kg !== null && best.kg > 0 ? payloadTenths(best.kg) / 10 : null }, truckCode: best.code };
 }
 
 /**
@@ -270,6 +271,49 @@ export function rowLines<L extends { id: string; cases: number; weightKg: number
     const l = byId.get(p.lineId);
     return l && p.cases > 0 ? [{ ...l, cases: p.cases, weightKg: l.cases > 0 ? r1((l.weightKg * p.cases) / l.cases) : 0 }] : [];
   });
+}
+
+/**
+ * The SKU lines a plan row carries, each with its share of the row's PLANNED kg (audit E3): what the
+ * loading manifests and the Excel loading sheet show, so they add up exactly to the stop's and the
+ * load's kg. `rowKg` is the row's kg as planned (its portion's kg, else the order's kg, to 0.1 kg).
+ * It is shared over the lines, in 0.1 kg with the largest remainders, by (in this order):
+ * - the case weight each line was planned with, when the portion kept it (a product weight
+ *   corrected since - the verifiers' 300 kg load showed 200 kg on its loading sheet);
+ * - else, for an order weighed at order level (`orderLevel`: every line 0 kg, or lines that do not
+ *   add up to the order), per case - as the planner spreads it (they showed 0 kg);
+ * - else the lines' own kg.
+ * rowLines spread the lines' CURRENT kg pro rata and ignored both.
+ */
+export function rowLinesKg<L extends { id: string; cases: number; weightKg: number }>(lines: L[], portionJson: unknown, rowKg: number, orderLevel: boolean): L[] {
+  const pl = readPortionLines(portionJson);
+  const byId = new Map(lines.map((l) => [l.id, l]));
+  const rows: { l: L; cases: number }[] = pl
+    ? pl.flatMap((p) => {
+        const l = byId.get(p.lineId);
+        return l && p.cases > 0 ? [{ l, cases: p.cases }] : [];
+      })
+    : lines.map((l) => ({ l, cases: l.cases }));
+  const kept = readPortionLineKg(portionJson);
+  const perCase = rows.map((r) => r.cases);
+  const ownKg = rows.map((r) => (r.l.cases > 0 ? (r.l.weightKg * r.cases) / r.l.cases : 0));
+  const sum = (xs: number[]) => xs.reduce((a, v) => a + v, 0);
+  const basis = [kept ? rows.map((r) => (kept.get(r.l.id) ?? 0) * r.cases) : null, orderLevel ? perCase : ownKg, perCase].find(
+    (b): b is number[] => !!b && sum(b) > 0,
+  );
+  const total = kgTenths(rowKg);
+  if (!basis || total <= 0) return rows.map((r) => ({ ...r.l, cases: r.cases, weightKg: 0 }));
+  const whole = sum(basis);
+  const exact = basis.map((b) => (b * total) / whole);
+  const units = exact.map((e) => Math.floor(e + 1e-9));
+  let left = total - sum(units);
+  const byRemainder = exact.map((e, i) => ({ i, rem: e - units[i] })).sort((a, b) => b.rem - a.rem || a.i - b.i);
+  for (const { i } of byRemainder) {
+    if (left <= 0) break;
+    units[i] += 1;
+    left--;
+  }
+  return rows.map((r, i) => ({ ...r.l, cases: r.cases, weightKg: units[i] / 10 }));
 }
 
 /**

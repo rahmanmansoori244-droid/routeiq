@@ -29,6 +29,11 @@ export const GEO_LOADING: GeoState = { status: 'loading' };
 export interface MapLoadStops {
   id: string;
   stops: { lat: number | null; lng: number | null }[];
+  /**
+   * Audit E1: the depot pin this load was planned from (DetailLoad.origin), when it is not the plan's
+   * depot: its line starts and ends there, as the road-shapes route routes it (the same pointsKey).
+   */
+  origin?: Depot | null;
 }
 
 type Depot = { lat: number; lng: number };
@@ -40,6 +45,11 @@ export interface LoadLine {
   dashed: boolean;
   /** Why it is dashed, when the server said: none when the answer has no row for the stops shown. */
   reason?: EstimateReason;
+}
+
+/** Where a load starts and ends: its own planned origin, else the plan's depot (audit E1). */
+export function originOf(l: Pick<MapLoadStops, 'origin'>, depot: Depot): Depot {
+  return l.origin ?? depot;
 }
 
 /** Depot -> located stops in order -> depot, as straight segments. */
@@ -54,7 +64,7 @@ export function straightTour(depot: Depot, stops: MapLoadStops['stops']): LngLat
 function rowFor(rows: ReadonlyMap<string, GeoRow>, l: MapLoadStops, depot: Depot): GeoRow | null {
   const row = rows.get(l.id);
   if (!row) return null;
-  if (row.pointsKey !== undefined && row.pointsKey !== loadPathKey(loadPath(depot, l.stops))) return null;
+  if (row.pointsKey !== undefined && row.pointsKey !== loadPathKey(loadPath(originOf(l, depot), l.stops))) return null;
   return row;
 }
 
@@ -71,11 +81,11 @@ export function linesToDraw(geo: GeoState, loads: MapLoadStops[], depot: Depot):
   const rows = rowsById(geo);
   const out: LoadLine[] = [];
   for (const l of loads) {
-    if (distinctPoints(loadPath(depot, l.stops)) < 2) continue;
+    if (distinctPoints(loadPath(originOf(l, depot), l.stops)) < 2) continue;
     const row = rowFor(rows, l, depot);
     const has = !!row && Array.isArray(row.coordinates) && row.coordinates.length >= 2;
     if (has && !row.estimated) out.push({ loadId: l.id, coordinates: row.coordinates, dashed: false });
-    else out.push({ loadId: l.id, coordinates: has ? row.coordinates : straightTour(depot, l.stops), dashed: true, ...(row?.estimated && row.reason ? { reason: row.reason } : {}) });
+    else out.push({ loadId: l.id, coordinates: has ? row.coordinates : straightTour(originOf(l, depot), l.stops), dashed: true, ...(row?.estimated && row.reason ? { reason: row.reason } : {}) });
   }
   return out;
 }

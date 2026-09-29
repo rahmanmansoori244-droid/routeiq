@@ -969,6 +969,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             truckCode: l.truckCode,
             loadNo: l.loadNo,
             colorIdx: colorIdx.get(l.truckId) ?? 0,
+            // Audit E1: drawn from the depot pin the load was planned from.
+            origin: l.origin,
             stops: l.stops.map((st) => ({ sequence: st.sequence, lat: st.lat, lng: st.lng, label: `${st.customerName} (${st.cases} cs${st.split ? `, part ${st.split.part}/${st.split.parts}` : ''})` })),
           }))}
           unserved={[]}
