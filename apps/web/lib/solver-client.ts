@@ -3,15 +3,29 @@ import https from 'node:https';
 import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
 import { QUICK_SOLVER_WAIT_MS, solverWaitMs } from '@/lib/dispatch/search-mode';
+import { PLANNER_UNAVAILABLE_MESSAGE, WORKERS_UNAVAILABLE } from '@/lib/planner-unavailable';
 import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from '@/lib/solver-env';
 
 export class SolverError extends Error {
   readonly status: number;
   readonly responseBody: unknown;
-  constructor(message: string, status: number, responseBody: unknown) {
+  /** The optimizer's own refusal code, when it sent one (e.g. WORKERS_UNAVAILABLE, rule 22). */
+  readonly code?: string;
+  constructor(message: string, status: number, responseBody: unknown, code?: string) {
     super(message);
     this.status = status;
     this.responseBody = responseBody;
+    if (code) this.code = code;
+  }
+}
+
+/** The `code` of a solver answer body ({ detail, code }), if it has one. */
+function answerCode(text: string): string | undefined {
+  try {
+    const j = JSON.parse(text) as { code?: unknown };
+    return typeof j?.code === 'string' ? j.code : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -136,6 +150,8 @@ export async function callDispatchSolver(req: DispatchRequest): Promise<Dispatch
     throw new SolverError('The route optimizer is being updated. Try again in a minute.', 404, res.text);
   }
   if (res.status === 503) {
+    // Rule 22: the optimizer could not start its worker processes (it refuses instead of freezing).
+    if (answerCode(res.text) === WORKERS_UNAVAILABLE) throw new SolverError(PLANNER_UNAVAILABLE_MESSAGE, 503, res.text, WORKERS_UNAVAILABLE);
     // The solver runs at most MAX_CONCURRENT_DISPATCH solves at once (apps/solver/main.py).
     throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, res.text);
   }

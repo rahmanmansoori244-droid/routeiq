@@ -20,6 +20,7 @@
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
+import { plannerUnavailableAlert, WORKERS_UNAVAILABLE } from '../planner-unavailable';
 import { trackInflight, whenIdle } from './optimize-job';
 import { applyScenario, applyWeightChanges, persistDispatchResult, retimeSameDay, type BuiltRequest } from '../dispatch/plan-service';
 import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
@@ -299,10 +300,15 @@ async function markStale(args: DispatchJobArgs, e: StaleJobError) {
  * the plan 2 minutes after it) - a plan is never left OPTIMIZING behind an ended job.
  */
 export async function failJob(args: DispatchJobArgs, err: unknown) {
+  // The optimizer's own refusal code, when it sent one (rule 22: WORKERS_UNAVAILABLE), is kept on
+  // the job and in the OPTIMIZE_FAILED audit row, so an administrator can find every refusal.
+  const code = err instanceof SolverError ? err.code : undefined;
   const errorJson =
     err instanceof SolverError
-      ? { reason: 'SOLVER_ERROR', message: err.message, status: err.status, responseBody: err.responseBody }
+      ? { reason: 'SOLVER_ERROR', message: err.message, status: err.status, responseBody: err.responseBody, ...(code ? { code } : {}) }
       : { reason: 'UNKNOWN', message: (err as Error)?.message ?? String(err) };
+  // Rule 22: the optimizer could not start its worker processes - an administrator must look.
+  if (code === WORKERS_UNAVAILABLE) console.error(plannerUnavailableAlert(args.runId, args.runJobId));
   console.error('dispatch optimize failed', errorJson);
   try {
     await prisma.$transaction(async (tx) => {

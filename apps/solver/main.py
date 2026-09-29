@@ -4,11 +4,13 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
 
 * ``POST /optimize-dispatch`` - NMWC daily dispatch planner (OR-Tools): time windows,
   P1-P5 priorities, multi-load trucks, frozen (locked/dispatched) loads, road distance. A solve
-  whose caller disconnects (the web app restarted) is cancelled and frees its slot.
+  whose caller disconnects (the web app restarted) is cancelled and frees its slot. A solve whose
+  worker processes cannot start is refused within seconds with 503 WORKERS_UNAVAILABLE (rule 22).
 * ``POST /optimize-dispatch/stop`` - a THOROUGH solve returns the best plan found so far.
 * ``POST /route-geometry``    - road polyline for a load via the configured OSRM.
 * ``GET  /ready``             - dispatch readiness for the web's /api/health: proves the token is
-  set on both sides and matches, without running an optimization (audit F15).
+  set on both sides and matches, without running an optimization (audit F15), and reports a
+  recent failed worker start (rule 22).
 * ``POST /optimize``          - legacy v1 three-scenario PyVRP solver (kept for comparison).
 """
 
@@ -25,8 +27,10 @@ import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 
+from fastapi.responses import JSONResponse
+
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
-from dispatch_solver import SolveAborted, SolveControl, optimize_dispatch
+from dispatch_solver import WORKER_HEALTH, SolveAborted, SolveControl, WorkersUnavailable, optimize_dispatch
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
 from solver import optimize
@@ -78,9 +82,25 @@ def solver_parallel_warning() -> str | None:
             "remove it from any deployed solver.")
 
 
+def inprocess_fallback_warning() -> str | None:
+    """Rule 22: SOLVER_ALLOW_INPROCESS_FALLBACK=1 brings back the old fallback - a worker pool that
+    cannot start makes the solve run inside the API process with no deadline, freezing the API for
+    the whole search (20 minutes and more for a thorough one). Without it such a solve is refused at
+    once with 503 "The planner is busy or restarting". Returns the startup warning, or None."""
+    if os.environ.get("SOLVER_ALLOW_INPROCESS_FALLBACK", "") != "1":
+        return None
+    where = "on Railway (production)" if _on_railway() else "outside a deployment"
+    return (f"SOLVER_ALLOW_INPROCESS_FALLBACK=1 is set {where}: when the worker processes cannot start, a solve runs "
+            "inside the API process with no deadline and the planner stops answering until it ends. Use it for local "
+            "development and tests only; remove it from any deployed solver.")
+
+
 _PARALLEL_WARNING = solver_parallel_warning()
 if _PARALLEL_WARNING:
     (log.error if _on_railway() else log.warning)(_PARALLEL_WARNING)
+_FALLBACK_WARNING = inprocess_fallback_warning()
+if _FALLBACK_WARNING:
+    (log.error if _on_railway() else log.warning)(_FALLBACK_WARNING)
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -132,14 +152,21 @@ def ready_endpoint(
     missing; 500 "Solver not configured" = this service has no SOLVER_TOKEN; 200 = an optimize
     would be accepted. It never solves, takes no dispatch slot and reads no request body; the
     routing status is the cached one /health reports.
+
+    Rule 22: ``workers`` says how the last worker pool start went. After a failed one (the solve was
+    refused with 503 "The planner is busy or restarting") it is "failed" and ``ok`` is false - until
+    a pool starts again, or WORKER_ALERT_SEC later - so the web's /api/health answers "degraded"
+    (SOLVER_WORKERS_FAILED) and monitoring alerts an administrator.
     """
     _check_token(x_solver_token)
+    workers = WORKER_HEALTH.status()
     return {
-        "ok": True,
+        "ok": workers["status"] == "ok",
         "service": "routeiq-solver",
         "version": app.version,
         "max_concurrent_dispatch": MAX_CONCURRENT_DISPATCH,
         "routing": routing_status(),
+        "workers": workers,
     }
 
 
@@ -196,6 +223,14 @@ async def optimize_dispatch_endpoint(
             finally:
                 tg.cancel_scope.cancel()
         exc = outcome.get("error")
+        if isinstance(exc, WorkersUnavailable):
+            # Rule 22: no worker processes, so nothing was searched (never inside this process). A
+            # plain answer within seconds; the web keeps the previous plan and alerts (its job fails
+            # with this text, audited). Its own code tells it apart from "Solver busy" above.
+            log.error("optimize-dispatch run=%s refused (503 WORKERS_UNAVAILABLE): worker processes could not start (%s)",
+                      req.run_id, exc.cause)
+            return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code},
+                                headers={"Retry-After": "60"})
         if isinstance(exc, SolveAborted):
             log.error("optimize-dispatch run=%s aborted: %s", req.run_id, exc)
             raise HTTPException(status_code=504, detail=str(exc)) from None

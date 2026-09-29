@@ -136,6 +136,20 @@ THOROUGH_STALL_SHARE = 0.5
 THOROUGH_ALT_MIN_SEC = 60
 THOROUGH_REPACK_CAP_SEC = 30
 
+# Rule 22 (owner decision, audit policy 22): the worker processes are started, and proven to run a
+# task, before the road matrix is fetched. A pool that cannot start (an OSError: out of memory, the
+# process limit) or whose first task does not run within WORKER_START_SEC (its processes die while
+# starting) refuses the solve at once: WorkersUnavailable, which main.py answers with 503 and
+# PLANNER_UNAVAILABLE_MSG. Nothing is then searched inside the API process: that used to freeze
+# the whole API with no deadline for the length of the search (20 minutes and more for THOROUGH).
+# Env SOLVER_WORKER_START_SEC overrides the wait; SOLVER_ALLOW_INPROCESS_FALLBACK=1 keeps the old
+# in-process fallback for development and tests only. After a failed start, /ready reports the
+# workers as failed for WORKER_ALERT_SEC (or until a pool starts again): the web's /api/health is
+# then "degraded" with SOLVER_WORKERS_FAILED.
+WORKER_START_SEC = 30
+WORKER_ALERT_SEC = 900
+PLANNER_UNAVAILABLE_MSG = "The planner is busy or restarting - try again in a minute."
+
 
 # The automatic search time between 120 and 200 stops (PR7, T1): straight lines through these
 # (stops, seconds) points. Up to 120 stops 20 s, from 200 to LARGE_DAY_STOPS 150 s, above 240 s.
@@ -1484,28 +1498,44 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
             "The search is time-limited, so check the unserved orders; planning by depot or area keeps days smaller."
         )
 
-    coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
-    mx = resolve_matrix(
-        coords,
-        provider=cfg.distance_provider,
-        osrm_url=cfg.osrm_url,
-        haversine_multiplier=cfg.haversine_multiplier,
-        avg_speed_kmh=cfg.avg_speed_kmh,
-        road_time_factor=cfg.road_time_factor,
-        osrm_client=osrm_client,
-        deadline=started + matrix_budget_sec(budget),
-    )
-    log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
-             req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
-    keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)
-    drops += window_drops
-    if len(keep) != len(solvable):
-        solvable, mx = _submatrix(solvable, keep, mx)
+    # Rule 22: the worker processes first, before the road matrix (which may take up to 90 s): a
+    # solver that cannot start them refuses within seconds (WorkersUnavailable -> 503), and nothing
+    # is searched inside the API process. None: SOLVER_PARALLEL=0, nothing to search, or the
+    # in-process fallback allowed for development (SOLVER_ALLOW_INPROCESS_FALLBACK=1).
+    workers: _Workers | None = None
+    if solvable and _parallel():
+        # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
+        # worker a stuck alternative starved the next one, which then hit the same deadline
+        # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
+        # quality, never the deadline. RECOMMENDED runs first in one of them.
+        workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
+                                 "search")
+    try:
+        coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
+        mx = resolve_matrix(
+            coords,
+            provider=cfg.distance_provider,
+            osrm_url=cfg.osrm_url,
+            haversine_multiplier=cfg.haversine_multiplier,
+            avg_speed_kmh=cfg.avg_speed_kmh,
+            road_time_factor=cfg.road_time_factor,
+            osrm_client=osrm_client,
+            deadline=started + matrix_budget_sec(budget),
+        )
+        log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
+                 req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
+        keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)
+        drops += window_drops
+        if len(keep) != len(solvable):
+            solvable, mx = _submatrix(solvable, keep, mx)
 
-    time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
-    state: dict = {}
-    scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
-                               control=control, state=state)
+        time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
+        state: dict = {}
+        scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
+                                   control=control, state=state, workers=workers)
+    finally:
+        if workers is not None:
+            workers.close()  # already closed by _run_scenarios when it ran; a no-op then
     for sc in scenarios:
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
@@ -1577,6 +1607,70 @@ class SolveAborted(RuntimeError):
     """The recommended plan could not be computed (worker died or ran out of time)."""
 
 
+class WorkersUnavailable(RuntimeError):
+    """Rule 22: the solver could not start its worker processes, so nothing was searched. main.py
+    answers 503 (Retry-After 60, code WORKERS_UNAVAILABLE) with PLANNER_UNAVAILABLE_MSG; the web
+    keeps the previous plan and the dispatcher tries again. ``cause`` is the technical reason (logs
+    and /ready only)."""
+
+    code = "WORKERS_UNAVAILABLE"
+
+    def __init__(self, cause: str):
+        super().__init__(PLANNER_UNAVAILABLE_MSG)
+        self.cause = cause
+
+
+def _parallel() -> bool:
+    """False only with SOLVER_PARALLEL=0 (tests and local debugging: every search in-process)."""
+    return os.environ.get("SOLVER_PARALLEL", "1") != "0"
+
+
+def inprocess_fallback_allowed() -> bool:
+    """SOLVER_ALLOW_INPROCESS_FALLBACK=1: a worker pool that cannot start makes the solve run inside
+    the API process, as before rule 22 (no deadline; the API does not answer meanwhile). Development
+    and tests only; main.py logs a warning at startup when it is set (an error on Railway)."""
+    return os.environ.get("SOLVER_ALLOW_INPROCESS_FALLBACK", "") == "1"
+
+
+def worker_start_sec() -> float:
+    """How long a new worker pool may take to run its first task (env SOLVER_WORKER_START_SEC)."""
+    return _env_num("SOLVER_WORKER_START_SEC", WORKER_START_SEC, lo=1, hi=600)
+
+
+class _WorkerHealth:
+    """How the last worker pool start of this solver process went, for /ready (rule 22): "failed"
+    from a failed start until a later start succeeds, or WORKER_ALERT_SEC after it."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._failed_mono: float | None = None
+        self._failed_at = ""
+        self._cause = ""
+
+    def failed(self, cause: str) -> None:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            self._failed_mono = time.monotonic()
+            self._failed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._cause = cause[:300]
+
+    def started(self) -> None:
+        with self._lock:
+            self._failed_mono = None
+
+    def status(self) -> dict:
+        with self._lock:
+            if self._failed_mono is not None and time.monotonic() - self._failed_mono < WORKER_ALERT_SEC:
+                return {"status": "failed", "failed_at": self._failed_at, "cause": self._cause}
+            return {"status": "ok"}
+
+
+WORKER_HEALTH = _WorkerHealth()
+
+
 # ---------------------------------------------------------------------------------------------
 # Worker processes (review L23)
 # ---------------------------------------------------------------------------------------------
@@ -1592,8 +1686,16 @@ _BEACON = None
 
 def _worker_init(beacon, stop_flag=None) -> None:
     global _BEACON, _STOP_FLAG
+    # Test hook (rule 22): every worker process dies while starting, so the pool never runs a task.
+    if os.environ.get("ROUTEIQ_TEST_WORKER_START_EXIT") == "1":
+        os._exit(3)
     _BEACON = beacon
     _STOP_FLAG = stop_flag
+
+
+def _ping(_arg=None) -> int:
+    """A new pool's first task (_Workers.check_started): proves a worker process runs tasks."""
+    return os.getpid()
 
 
 def _tracked(token: str, fn, arg):
@@ -1622,13 +1724,31 @@ class _Workers:
         # The solve's "stop now" flag, seen by every THOROUGH search in these workers (_watch_search).
         # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
         self.control = control
-        stop_flag = ctx.Event() if control is not None else None
+        try:
+            stop_flag = ctx.Event() if control is not None else None
+            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, stop_flag))
+        except BaseException:
+            # Nothing left behind by a failed start (rule 22; audit finding: the queue made above used
+            # to stay open). Pool itself stops the worker processes it had started.
+            self._beacon.close()
+            raise
         if stop_flag is not None:
             control.attach(stop_flag)  # type: ignore[union-attr]
-        self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, stop_flag))
         self._pid_of: dict[str, int] = {}
         self._seq = 0
         self._warned = False
+        self._closed = False
+
+    def check_started(self, timeout: float) -> None:
+        """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
+        whose processes die while starting (Pool starts them again and again, and a task would wait
+        for its deadline - up to the whole THOROUGH cap). A cancelled control: SolveAborted."""
+        kind, value = _await_all(self, {"start": self.submit(_ping, None, "start")}, time.monotonic() + timeout)["start"]
+        if kind == "ok":
+            return
+        if kind == "timeout":
+            raise RuntimeError(f"no worker process ran a task within {timeout:g} s (they may be dying while starting)")
+        raise RuntimeError(f"the first worker task {'lost its process' if kind == 'lost' else 'failed'}: {value}")
 
     def submit(self, fn, arg, name: str):
         """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
@@ -1656,8 +1776,53 @@ class _Workers:
             return None
 
     def close(self) -> None:
-        self.pool.terminate()  # stops any task still running past its deadline
+        """Stop the workers (and any task still running past its deadline). Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        self.pool.terminate()
         self.pool.join()
+        try:
+            self._beacon.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _start_workers(size: int, control: SolveControl | None, run_id: str, what: str) -> _Workers | None:
+    """Rule 22: a worker pool that has run its first task, or no search at all.
+
+    A pool that cannot start (an OSError: out of memory, the process limit) or whose first task
+    does not run within worker_start_sec() is closed again and the solve is refused:
+    WorkersUnavailable (main.py: 503 "The planner is busy or restarting - try again in a minute"),
+    with an ERROR line for the administrator and /ready reporting the workers as failed. Nothing is
+    searched inside the API process. Only with SOLVER_ALLOW_INPROCESS_FALLBACK=1 (development and
+    tests) is None returned instead: the caller then solves in-process, as before rule 22."""
+    workers: _Workers | None = None
+    try:
+        workers = _Workers(size, control)
+        workers.check_started(worker_start_sec())
+    except SolveAborted:
+        if workers is not None:
+            workers.close()
+        raise  # cancelled while waiting: the caller is gone
+    except Exception as exc:  # noqa: BLE001 - every way a pool fails to start
+        if workers is not None:
+            try:
+                workers.close()
+            except Exception:  # noqa: BLE001
+                pass
+        cause = f"{type(exc).__name__}: {exc}"
+        WORKER_HEALTH.failed(cause)
+        if inprocess_fallback_allowed():
+            log.warning("run=%s worker processes unavailable for the %s (%s); SOLVER_ALLOW_INPROCESS_FALLBACK=1: "
+                        "running it inside the API process (development and tests only)", run_id, what, cause)
+            return None
+        log.error("WORKERS_UNAVAILABLE run=%s: the solver could not start its worker processes for the %s (%s). "
+                  "Nothing is searched inside the API process (rule 22). If this repeats, check the solver "
+                  "service's memory and process limits and restart it.", run_id, what, cause)
+        raise WorkersUnavailable(cause) from exc
+    WORKER_HEALTH.started()
+    return workers
 
 
 def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline: float,
@@ -1716,7 +1881,8 @@ def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, w
 
 
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None, *,
-                   control: SolveControl | None = None, state: dict | None = None) -> list[DispatchScenario]:
+                   control: SolveControl | None = None, state: dict | None = None,
+                   workers: _Workers | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -1730,18 +1896,23 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     far" (the alternatives are skipped, the re-check runs as QUICK's). ``state`` receives
     RECOMMENDED's search limit, search time, status and its THOROUGH watch report (SearchReport).
 
-    Every scenario runs in a worker process. OR-Tools holds the GIL for the whole search, so a
-    solve inside the API process froze it completely - /health, /route-geometry and every other
-    request - for up to four minutes; threads would not run scenarios concurrently either.
+    Every scenario runs in a worker process of ``workers``, the pool optimize_dispatch started (and
+    proved to run a task) before the road matrix, rule 22. OR-Tools holds the GIL for the whole
+    search, so a solve inside the API process froze it completely - /health, /route-geometry and
+    every other request - for up to four minutes (20 and more for THOROUGH); threads would not run
+    scenarios concurrently either. This function closes the pool when it ends.
 
     Safety net: alternatives are optional. Each worker gets a hard wall-clock deadline; a worker
     that overruns (OR-Tools occasionally ignores its own time limit inside internal restores),
     fails, dies or would run past the request's time budget is terminated / not started and the
     alternative is skipped with a warning. The RECOMMENDED plan is never lost because of an
-    alternative. Every returned scenario carries its feasibility report (_build_scenario).
+    alternative. Every returned scenario carries its feasibility report (_build_scenario). When
+    the fresh workers for the load re-check cannot start, the plans found are kept, re-timed
+    exactly (_retime_fallback, milliseconds): no CP-SAT solve runs in the API process.
 
-    SOLVER_PARALLEL=0 solves everything in-process WITHOUT any deadline or time budget: for local
-    development and tests only (main.py logs a warning at startup when it is set).
+    ``workers`` None solves everything in-process WITHOUT any deadline or time budget: nothing to
+    search, SOLVER_PARALLEL=0, or SOLVER_ALLOW_INPROCESS_FALLBACK=1 after a failed pool start - for
+    local development and tests only (main.py logs a warning at startup when either is set).
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -1751,17 +1922,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     state = state if state is not None else {}
     results: dict[str, DispatchScenario] = {}
     alt_names = [n for n in names if n != "RECOMMENDED"]
-    workers: _Workers | None = None
-    if solvable and os.environ.get("SOLVER_PARALLEL", "1") != "0":
-        try:
-            # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
-            # worker a stuck alternative starved the next one, which then hit the same deadline
-            # without ever starting. OR-Tools limits are wall-clock, so sharing a core only
-            # lowers quality, never the deadline. RECOMMENDED runs first in one of them, so the
-            # alternatives' workers have finished starting by the time they are needed.
-            workers = _Workers(max(1, len(alt_names)), control)
-        except Exception as exc:  # noqa: BLE001 - e.g. restricted environments without processes
-            log.warning("worker processes unavailable (%s); solving in-process", exc)
+    no_stage_workers = False  # rule 22: the load re-check's fresh workers could not start
     skipped: list[str] = []
     staged: set[str] = set()  # scenarios the post-solve stage replaced by an exactly timed plan
     stop_flag_before = _STOP_FLAG
@@ -1840,14 +2001,23 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             workers.close()
             workers = None
             try:
-                workers = _Workers(len(_stage_goals(results)), control)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("worker processes unavailable (%s); load re-check in-process", exc)
+                # None: the in-process fallback is allowed (development and tests only).
+                workers = _start_workers(len(_stage_goals(results)), control, req.run_id, "load re-check")
+            except WorkersUnavailable:
+                # Rule 22: never a CP-SAT solve in the API process. Failing the request would throw
+                # the finished recommended plan away: it is kept, re-timed exactly (below).
+                no_stage_workers = True
+                log.warning("run=%s load re-check skipped (no worker processes); the plans found are kept and "
+                            "re-timed exactly", req.run_id)
         # THOROUGH: longer CP-SAT solves in the load re-check (QUICK's after a stop request).
         stopped = stopped or (thorough and control is not None and control.stop_requested.is_set())
         stage_kw = {"repack_cap": _repack_cap_sec(time_limit, False) if stopped else tail.repack_cap} if tail is not None else {}
         try:
-            _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
+            if no_stage_workers:
+                _retime_fallback(req, solvable, tds, mx, drops, results, "the optimizer could not start its worker processes",
+                                 skip=staged)
+            else:
+                _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
         except SolveAborted:
             raise  # cancelled: the caller is gone, nothing to fall back to
         except Exception as exc:  # noqa: BLE001 - the search's own plans stay valid

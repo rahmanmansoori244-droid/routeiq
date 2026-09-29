@@ -49,7 +49,7 @@ Follow-ups:
    - Since stabilization PR4 (feasibility gate): `FEASIBILITY_GATE` on web stays **unset** (the gate is enforced). `warn` is an emergency switch only (trucks whose times break a rule can then be dispatched; audited); see `docs/admin.md`. The PR4 migration `20260927090000_plan_snapshots_feasibility` only adds three nullable JSONB columns.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
    - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools processes, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
-   - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set).
+   - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
    - Wait until the solver deployment is **Active** before anyone plans.
@@ -166,6 +166,48 @@ change is deployed:
 - **Verify after the deploy:** optimize tomorrow's day with **Thorough** once; the plan screen shows *Searching for the best plan
   - up to 20 min ...*, and afterwards *Thorough search: searched N min ...*; `GET /api/runs/:id/status` shows the job with
   `searchMode` and a `heartbeatAt` that moves every 30 s while it runs.
+
+## The planner cannot start its worker processes (rule 22, 30 Sep 2026)
+
+The owner's rule 22 (audit policy 22): when the solver cannot start its worker processes, it stops within seconds and says
+so, instead of freezing. Every search runs in a separate worker process. Before this change, a solver that could not start
+them (out of memory, a process limit) ran the whole search inside its own API process with no deadline: the planner then
+answered nothing else (health checks, other companies' plans) for the length of the search, up to 20 minutes and more for a
+Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have the details.
+
+- **What happens now.** The solver starts its worker processes first, before it fetches road distances, and checks that one
+  of them runs a task within `SOLVER_WORKER_START_SEC` (default 30 s; it takes about half a second when healthy). If they
+  cannot start, the optimization is refused at once with HTTP 503 (`Retry-After: 60`, code `WORKERS_UNAVAILABLE`). Nothing is
+  searched and nothing is saved. The dispatcher reads *"The planner is busy or restarting - try again in a minute. Nothing was
+  changed."*; the plan in use stays as it was (a failed re-plan keeps the previous plan, locked loads included), and pressing
+  the button again works as soon as the solver can start processes again. There is no automatic retry.
+- **Variables** (names only; none is needed in production):
+  - `SOLVER_ALLOW_INPROCESS_FALLBACK` on the solver: **never set it on Railway.** `1` brings back the old in-process fallback,
+    for local development and tests only. When it is set the solver logs an **error** at startup on Railway (a warning
+    elsewhere).
+  - `SOLVER_WORKER_START_SEC` on the solver: optional (default 30, 1 to 600). How long a new pool may take to run its first
+    task before the optimization is refused. Leave it unset unless the solver's start-up is measured to be slower.
+- **What the alert looks like.** Three signals, all on each refusal:
+  - The **solver log** has one ERROR line that starts with `WORKERS_UNAVAILABLE`, for example:
+    `ERROR routeiq.dispatch: WORKERS_UNAVAILABLE run=<plan id>: the solver could not start its worker processes for the search
+    (OSError: [Errno 11] Resource temporarily unavailable). Nothing is searched inside the API process (rule 22). If this
+    repeats, check the solver service's memory and process limits and restart it.`, followed by
+    `ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start (...)`.
+  - The **web log** has one line that starts with `ALERT WORKERS_UNAVAILABLE:` naming the plan and the job, and the plan's audit
+    log has an `OPTIMIZE_FAILED` row whose error carries `code: WORKERS_UNAVAILABLE`.
+  - **`GET /api/health`** on web answers 200 with `ok: false`, `status: degraded` and `dispatch.reason: SOLVER_WORKERS_FAILED`
+    while the solver's `/ready` reports the failed start: until a later optimization starts the processes again, or 15 minutes
+    after the failure. A deploy is not blocked by it.
+  Railway has no alerting set up in this repository: point log alerts at `WORKERS_UNAVAILABLE` and monitoring at `ok: false`.
+- **What to do when it fires.** Look at the solver service's memory and CPU graphs and its deploy logs. One refusal during a
+  solver restart or a memory spike needs nothing: the dispatcher tries again in a minute. If it repeats, restart the solver
+  service; if it keeps happening, raise the service's memory or lower `MAX_CONCURRENT_DISPATCH` (each solve uses up to three
+  processes).
+- **The load re-check after an alternative overran** needs fresh worker processes too. If they cannot start, the solver keeps
+  the recommended plan it already found and re-times it exactly (a few milliseconds) instead of refusing, with a note on the
+  plan and the same ERROR line and `/ready` signal.
+- **Verify after the deploy:** the solver's startup log has no `SOLVER_ALLOW_INPROCESS_FALLBACK` error, `GET /api/health`
+  is `ready`, and an optimization works as usual.
 
 ## Private networking notes
 
