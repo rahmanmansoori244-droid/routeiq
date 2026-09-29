@@ -531,9 +531,11 @@ machine:
 QUICK on the same day: all three options in 44-47 s. What stays unused is the margins (the 20 s before the alternatives,
 their 20 s grace, the re-check's 20 + 5 s grace and whatever part of its time it does not need), as at 20 minutes (§10.3:
 1,061-1,101 s of 1,200). A pytest checks the arithmetic for every cap from 60 s to 60 min and every day size (the
-alternatives always get their share once RECOMMENDED searched longer than QUICK), and a 90 s cap end to end. Below about
-QUICK's whole time (2 min for days up to 120 stops, 4 min at 175, 5 min at 300, 7 min above 350) THOROUGH searches no
-longer than QUICK and may still skip the alternatives: production keeps 10 minutes or more (default 20). The stall rule is
+alternatives always get their share once RECOMMENDED searched longer than QUICK), and a 90 s cap end to end. Below a cap
+of about 2-2.5 min for days up to 120 stops, 4.5-5.5 min at 175, 5.5-7 min from 200 to 350 and 8-9.5 min above 350 (the
+higher figure with the slowest road matrix: the smallest cap at which `rec_limit_sec` gives RECOMMENDED more than QUICK's
+limit, for every day size; skeptic review - the figures here were lower) THOROUGH searches no longer than QUICK and may
+still skip the alternatives: production keeps 10 minutes or more (default 20). The stall rule is
 unchanged: with a cap under about 9 minutes the recommended search rarely runs 5 minutes without improving, so it usually
 ends at its limit and says so ("all the time allowed").
 

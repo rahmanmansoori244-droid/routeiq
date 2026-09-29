@@ -125,8 +125,9 @@ change is deployed:
   - `THOROUGH_MAX_SEC` on **web and solver**, the same value (default 1200 = 20 min; accepted from 10 to 3600, but keep it at
     600 or more in production). The web sends it with each THOROUGH request and waits it + 2 minutes; the solver uses the lower
     of the two. Below 20 min the alternatives and the load re-check shrink in proportion (never below Quick's times); below
-    about Quick's whole time (2 min for days up to 120 stops, 4 min at 175, 5 min at 300, 7 min above 350) Thorough searches no
-    longer than Quick and may skip the alternatives. A same-day Thorough plan's new loads count from its start + this value.
+    a cap of about 2-2.5 min for days up to 120 stops, 4.5-5.5 min at 175, 5.5-7 min from 200 to 350 and 8-9.5 min above 350
+    (the higher figure with the slowest road matrix) Thorough searches no longer than Quick and may skip the alternatives. A
+    same-day Thorough plan's new loads count from its start + this value. The refusal of a third waiting Thorough states it too.
     CI sets 60 (tests only).
   - `NEXT_MANUAL_SIG_HANDLE=1` on **web** (recommended). On a redeploy Railway sends SIGTERM; with this set, the web fails its
     optimizations in progress at once with *"The server was restarted (an update) during this optimization. Nothing was saved
