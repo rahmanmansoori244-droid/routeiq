@@ -502,7 +502,11 @@ unserved where 1,200 s served all (the QUICK runs shared the machine with three 
 
 **QUICK unchanged.** QUICK sends the same search parameters, time limits and budgets as before (pytest
 `test_search_modes.py`: the limits and budgets of the old formulas over a grid, the OR-Tools parameters of a QUICK solve, and
-nothing attached to its search), and its report says `TIME_LIMIT`.
+nothing attached to its search), and its report says `TIME_LIMIT`. On the harness, the solver before this change (`3451f4d`)
+and after it, alternated twice, all three options in-process: the same OR-Tools calls (parallel cheapest insertion + guided
+local search, 20 s for RECOMMENDED and 10 s for each alternative, on both days); syn60_s1 objective 254.5 / 254.5 before and
+255.0 / 254.5 after; the real day 574.1 / 537.3 before and 569.3 / 562.3 after (5-6 trucks, 14-17 loads either way: the
+real day's 20 s search depends on the machine's load at that moment, as in §8.4).
 
 **Open.** No trace is longer than 1,200 s. The Railway solver's CPU is not known (handbook 7.5): at 1 vCPU a THOROUGH search
 next to a QUICK one shares the core, which lowers both searches' quality (their limits are wall-clock), never their deadlines.
