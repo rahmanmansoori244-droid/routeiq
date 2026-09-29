@@ -535,6 +535,24 @@ describe('frozen plan facts and unverified times on the sheet (review F08 / F04)
     expect(whatsappText({ ...d.run, status: 'SUPERSEDED' }, d.loads[1], 2).split('\n').slice(0, 2)).toEqual([REPLACED_LINE, TIMES_NOT_VERIFIED_LINE]);
   });
 
+  it('audit E1: a load planned from a depot pin moved since routes from and back to that pin, and says so (sheet and WhatsApp)', () => {
+    const d = fixture();
+    const OLD = { lat: 23.56, lng: 58.38 };
+    const note = { kind: 'DEPOT' as const, text: "Depot moved since planning: this load starts and ends at the depot pin it was planned from (2.5 km from the depot's pin now).", newLat: 23.58, newLng: 58.4, movedM: 2500 };
+    d.loads[0] = { ...d.loads[0], origin: OLD, masterChanged: [note] };
+    const m = driverPackModel(d, OPTS);
+    const url = m.sheets[0].route.links[0].url;
+    expect(url).toContain(`origin=${coordText(OLD.lat, OLD.lng)}`);
+    expect(url).toContain(`destination=${coordText(OLD.lat, OLD.lng)}`);
+    expect(m.sheets[0].badges).toContain('DEPOT MOVED SINCE PLANNING: ROUTE FROM THE PLANNED DEPOT PIN');
+    // Loads planned from the depot where it is: the depot's pin, no badge.
+    expect(m.sheets[1].route.links[0].url).toContain(`origin=${coordText(d.run.depot.lat, d.run.depot.lng)}`);
+    expect(m.sheets[1].badges.some((b) => b.startsWith('DEPOT MOVED'))).toBe(false);
+    const text = whatsappText(d.run, d.loads[0], 2).split('\n');
+    expect(text).toContain(`! ${note.text}`);
+    expect(text.find((x) => x.startsWith('Route'))).toContain(`origin=${coordText(OLD.lat, OLD.lng)}`);
+  });
+
   it('marks the sheets of a truck whose times are not verified, and only those', async () => {
     const d = changedAndUnverified();
     const m = driverPackModel(d, OPTS);

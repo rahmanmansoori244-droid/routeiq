@@ -157,6 +157,8 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     stops,
     manifest: aggregateSkus(stops.flatMap((s) => s.skus)),
     truckSnapshot: true,
+    // The fixture's depot (run.depot): planned from where the depot is.
+    origin: { lat: 23.58, lng: 58.4 },
     masterChanged: [],
     timing: { status: 'VERIFIED', ok: true },
     carriedAway: 0,

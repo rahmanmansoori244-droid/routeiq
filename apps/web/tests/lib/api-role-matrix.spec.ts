@@ -32,6 +32,12 @@
  *   PATCH /api/depots/[id] (422 DEPOT_HISTORY_ONLY: the history-only depot is never made active),
  *   POST /api/trucks, PATCH /api/trucks/[id], POST /api/regions and PATCH /api/regions/[id]
  *   (422 DEPOT_HISTORY_ONLY: never on the history-only depot).
+ * - Audit PR A6 "Solver and plan-output accuracy": behaviour changed, roles unchanged, on
+ *   GET /api/runs/[id]/load-geometry (each load routed from the depot pin it was planned from),
+ *   GET /api/runs/[id]/plan (loads carry `origin`; options that break the timing rules are never
+ *   described as cheaper), GET /api/dispatch/day (`outdated.depotMoved`), the Excel and PDF exports
+ *   (loading-sheet kg = load kg; the planned depot pin) and POST /api/runs/[id]/replan (the copies
+ *   keep each load's planned depot pin).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';

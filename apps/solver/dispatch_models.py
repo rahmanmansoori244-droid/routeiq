@@ -5,6 +5,7 @@ MIDNIGHT of the delivery day (06:30 -> 390). Money is OMR. Distances in the resp
 """
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -33,6 +34,34 @@ DAY_MIN = 24 * 60
 # Largest day one optimization supports (review F19): the road matrix, the search and the
 # post-solve stage are sized for it. More stops answer 422; the web checks it first.
 MAX_STOPS = 600
+
+
+# Weights (audit F08, owner decision 15: no hidden rounding margin). Every kg comparison of the
+# engine - the route search's Kg dimension, the prefilters, the repack, the timing, the shortage
+# reasons and the independent check - is made in whole units of 0.1 kg, so a load that weighs
+# exactly the payload fits it. Before, each stop was rounded UP to a whole kg and the payload DOWN:
+# 999.1 + 999.1 + 1001.8 = 3,000.0 kg was left out of a 3,000 kg truck, and float noise (7 x 9.3 kg
+# = 65.10000000000001) cost another kg. The web sends every order's kg already to 0.1 kg.
+# Each scenario reports the unit (DispatchScenario.weight_unit_kg).
+WEIGHT_UNIT_KG = 0.1
+
+
+def kg_units(kg: float) -> int:
+    """A stop's (or load's) kg in 0.1 kg units, to the NEAREST unit: 65.10000000000001 -> 651,
+    999.14 -> 9991, 0.05 -> 1. The same rule as the web's kgTenths (Math.round(kg x 10))."""
+    return int(math.floor(kg * 10 + 0.5)) if kg > 0 else 0
+
+
+def payload_units(kg: float) -> int:
+    """A truck's payload in 0.1 kg units, rounded DOWN (never more than the truck may carry; a
+    whole-kg or 0.1 kg payload is exact): 3000 -> 30000, 2998.5 -> 29985. 0 = no payload set."""
+    return int(math.floor(kg * 10 + 1e-6)) if kg > 0 else 0
+
+
+def kg_text(kg: float) -> str:
+    """kg for a message: whole kg without decimals ("3,000"), else one decimal ("3,000.1")."""
+    u = kg_units(kg) if kg >= 0 else -kg_units(-kg)
+    return f"{u // 10:,}" if u % 10 == 0 else f"{u / 10:,.1f}"
 
 
 class DispatchDepot(BaseModel):
@@ -390,6 +419,12 @@ class DispatchScenario(BaseModel):
     # around (PR7). None from a solver before them.
     frozen_trucks: int | None = None
     frozen_loads: int | None = None
+    # The weight and overtime rules this plan was made with (audit A6 review), so an export states
+    # only rules its plan was built with. None from a solver before them: its route search rounded
+    # each stop UP to a whole kg and the payload down, and charged overtime that locked or
+    # dispatched loads already work again for new loads.
+    weight_unit_kg: float | None = None  # WEIGHT_UNIT_KG: every kg check in 0.1 kg units, no margin (F08)
+    new_overtime_only: bool | None = None  # True: only new overtime counts when choosing a truck (E4)
 
 
 class DispatchResponse(BaseModel):

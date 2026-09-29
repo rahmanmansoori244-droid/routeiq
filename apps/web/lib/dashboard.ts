@@ -149,7 +149,9 @@ export function rollupRows(rows: RawRunRow[], date: string): DayStats {
     ? Math.round((validUtilRows.reduce((a, r) => a + Number(r.avg_util ?? 0), 0) / validUtilRows.length) * 10) / 10
     : 0;
   const totalCases = rows.reduce((a, r) => a + Number(r.cases_total ?? 0), 0);
-  totals.costPerCase = totalCases > 0 ? Math.round((totals.cost / totalCases) * 100) / 100 : 0;
+  // Rounded once, at the precision the dashboard shows it (3 decimals, audit F23): rounded to 2 and
+  // then shown with 3, 0.045 read "0.050" and its day-to-day change was off by up to 0.005.
+  totals.costPerCase = totalCases > 0 ? Math.round((totals.cost / totalCases) * 1000) / 1000 : 0;
   return totals;
 }
 

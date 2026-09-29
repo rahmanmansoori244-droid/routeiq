@@ -22,7 +22,7 @@ vi.mock('@/lib/db', () => ({
   },
 }));
 
-import { getDashboardData, LIVE_PLAN_IN_USE, PLAN_ORDERS_IN_SCOPE } from '@/lib/dashboard';
+import { getDashboardData, LIVE_PLAN_IN_USE, PLAN_ORDERS_IN_SCOPE, rollupRows, type RawRunRow } from '@/lib/dashboard';
 
 const flat = (s: Prisma.Sql) => s.sql.replace(/\s+/g, ' ').trim();
 
@@ -72,5 +72,20 @@ describe('dashboard: cost per case counts every case once (review of PR3: 1/N wi
     const range = captured.filter((q) => q.includes('AS cases_total'));
     expect(range).toHaveLength(3);
     for (const q of range) expect(q).toContain(`FROM "Order" o WHERE ${sql} ) AS case_totals`);
+  });
+});
+
+describe('dashboard: cost per case is rounded once, at the 3 decimals it is shown with (audit F23)', () => {
+  const day = (cost: number, cases: number): RawRunRow => ({
+    date: '2026-09-27', run_count: 1n, trucks_used: 1n, distance_km: 10, cost, avg_util: 50, orders_total: 1n, orders_unserved: 0n, cases_total: cases,
+  });
+
+  it('900 OMR over 20,000 cases is 0.045 (it showed 0.050), and 0.0449 / 0.0451 both read 0.045 with no change between them', () => {
+    expect(rollupRows([day(900, 20_000)], '2026-09-27').costPerCase).toBe(0.045);
+    expect(rollupRows([day(900, 20_000)], '2026-09-27').costPerCase.toFixed(3)).toBe('0.045');
+    const a = rollupRows([day(449, 10_000)], '2026-09-27').costPerCase;
+    const b = rollupRows([day(451, 10_000)], '2026-09-28').costPerCase;
+    expect([a, b, b - a]).toEqual([0.045, 0.045, 0]);
+    expect(rollupRows([day(6, 100)], '2026-09-27').costPerCase).toBe(0.06);
   });
 });

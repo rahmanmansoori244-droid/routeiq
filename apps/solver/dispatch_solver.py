@@ -18,7 +18,9 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
   own delivery day sends ``loading_from_min`` (when it was made): loading cannot start before it,
   so a truck's first new load leaves no earlier than it + the turnaround of that load, on a truck
   standing at the depot as on one coming back (``TruckDay.ready_s``).
-* Hard constraints: capacity in cases AND kg (when the truck has a payload), hard customer
+* Hard constraints: capacity in cases AND kg (when the truck has a payload; kg in whole 0.1 kg
+  units, each stop to the nearest unit and the payload rounded down - no hidden margin, audit
+  F08), hard customer
   receiving windows (service must START inside the window), depot open hours, truck
   availability, trip linking, shift limit.
 * Objective (single integer, 1 unit = 0.00001 OMR) built hierarchically by magnitude:
@@ -54,6 +56,7 @@ import math
 import os
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -64,6 +67,7 @@ import load_repack as LR
 from dispatch_models import (
     DAY_MIN,
     MAX_STOPS,
+    WEIGHT_UNIT_KG,
     DispatchConfig,
     DispatchRequest,
     DispatchResponse,
@@ -78,6 +82,9 @@ from dispatch_models import (
     PreferencePenalties,
     TruckDayCostOut,
     UnservedStop,
+    kg_text,
+    kg_units,
+    payload_units,
 )
 from providers import MatrixResult, matrix_quality, resolve_matrix
 
@@ -193,6 +200,13 @@ class TruckDay:
     frozen_return_s: int | None = None
     # config.loading_from_min (a plan made on its delivery day): loading cannot start before it.
     loading_from_s: int | None = None
+    # The payload in 0.1 kg units (payload_units; 0 = unconstrained): what every kg check compares
+    # with (audit F08). Derived from max_kg when not given.
+    max_kg_units: int = -1
+
+    def __post_init__(self) -> None:
+        if self.max_kg_units < 0:
+            self.max_kg_units = payload_units(self.max_kg)
 
     @property
     def usable(self) -> bool:
@@ -276,7 +290,7 @@ def _approx_gap_s(cfg: DispatchConfig, td: TruckDay) -> int:
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
     if stop.demand_cases > td.max_cases:
         return False
-    if td.max_kg > 0 and stop.demand_kg > td.max_kg:
+    if td.max_kg_units > 0 and kg_units(stop.demand_kg) > td.max_kg_units:
         return False
     return True
 
@@ -308,31 +322,103 @@ def _shortage_reason(priority: int, demand_cases: int, cap_cases: int, demand_kg
     short of (scenario test S03: a weight-bound day was explained in cases only)."""
     tail = f" Lower priorities are left out first (this is P{priority})."
     if short_kg and not short_cases:
-        return (f"Fleet capacity shortage by weight: {demand_kg:,.0f} kg requested vs {cap_kg:,.0f} kg across all "
+        return (f"Fleet capacity shortage by weight: {kg_text(demand_kg)} kg requested vs {kg_text(cap_kg)} kg across all "
                 f"available loads (the {demand_cases} cases would fit by count; the weight does not)." + tail)
     if short_kg and short_cases:
         tighter = "weight" if demand_kg * cap_cases > demand_cases * cap_kg else "the case count"
-        return (f"Fleet capacity shortage: {demand_cases} cases / {demand_kg:,.0f} kg requested vs {cap_cases} cases / "
-                f"{cap_kg:,.0f} kg across all available loads; {tighter} is the tighter limit today." + tail)
+        return (f"Fleet capacity shortage: {demand_cases} cases / {kg_text(demand_kg)} kg requested vs {cap_cases} cases / "
+                f"{kg_text(cap_kg)} kg across all available loads; {tighter} is the tighter limit today." + tail)
     return f"Fleet capacity shortage: {demand_cases} cases requested vs {cap_cases} cases across all available loads." + tail
 
 
-def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> bool:
-    """Whether any of the unserved stops fits, by cases AND by kg, the room left on a load of the
-    plan or on a load slot a truck did not use (a full truck's room). False: every unserved stop
-    is bigger than the room left anywhere, so a fleet shortage explains all of it, however many
-    loads the room is spread over."""
+def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad],
+           takes_room: Callable[[PlannedStop], bool] | None = None) -> list[tuple[int, float]]:
+    """The room left on each load of the plan and on each load slot a truck did not use (a full
+    truck's room): (cases, kg in 0.1 kg units; inf when the truck has no payload). takes_room: which
+    planned stops count as taking room (all by default; _no_room_reason counts only the stops of the
+    same or a higher priority, since strict priorities drop lower ones first)."""
     by_truck: dict[str, list[PlannedLoad]] = {}
     for ld in loads:
         by_truck.setdefault(ld.truck_id, []).append(ld)
     rooms: list[tuple[int, float]] = []
     for td in usable_tds:
         mine = by_truck.get(td.truck.id, [])
-        kg_cap = td.max_kg if td.max_kg > 0 else math.inf
-        rooms += [(td.max_cases - ld.cases, kg_cap - ld.kg) for ld in mine]
+        kg_cap = td.max_kg_units if td.max_kg_units > 0 else math.inf
+        for ld in mine:
+            taken = ld.stops if takes_room is None else [st for st in ld.stops if takes_room(st)]
+            rooms.append((td.max_cases - sum(st.cases for st in taken), kg_cap - sum(kg_units(st.kg) for st in taken)))
         rooms += [(td.max_cases, kg_cap)] * max(0, td.trips_left - len(mine))
-    # Load kg are rounded to 0.1 kg: a stop within 0.05 kg of the room counts as fitting (warns).
-    return any(s.demand_cases <= rc and s.demand_kg <= rk + 0.05 for s in left for rc, rk in rooms)
+    return rooms
+
+
+def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> bool:
+    """Whether any of the unserved stops fits, by cases AND by kg, the room left on a load of the
+    plan or on a load slot a truck did not use (a full truck's room). False: every unserved stop
+    is bigger than the room left anywhere, so a fleet shortage explains all of it, however many
+    loads the room is spread over. In 0.1 kg units, with no margin (audit F08)."""
+    rooms = _rooms(usable_tds, loads)
+    return any(s.demand_cases <= rc and kg_units(s.demand_kg) <= rk for s in left for rc, rk in rooms)
+
+
+def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[PlannedStop]) -> bool:
+    """Whether a sound check proves that no packing of the usable trips carries the stop together
+    with `kept` (the stops of its priority or higher the plan serves). The room left on each load
+    says only that THIS packing has none (A6 second review: 1,000 + 1,500 + 1,500 + 1,000 + 1,000 kg
+    on 2 trucks x 1 load of 3,000 kg fit as {1,500, 1,500} and {1,000 x 3}, but the route search
+    packed {1,000, 1,500} twice). Two checks, in cases and in kg (0.1 kg units, no margin):
+    - they are more than all usable trips carry together;
+    - more of them are over half the biggest truck than there are usable trips (no two such stops
+      share a load, whatever the packing: 3 x 1,600 kg on 2 x 3,000 kg).
+    Times and hours are not checked: a check that passes proves the stop cannot go, one that fails
+    proves nothing."""
+    if not usable_tds:
+        return True
+    trips = sum(td.trips_left for td in usable_tds)
+
+    def proven(sizes: list[float], caps: list[tuple[float, int]]) -> bool:
+        biggest = max(c for c, _ in caps)
+        return sum(sizes) > sum(c * n for c, n in caps) or sum(2 * x > biggest for x in sizes) > trips
+
+    if proven([st.cases for st in kept] + [s.demand_cases], [(td.max_cases, td.trips_left) for td in usable_tds]):
+        return True
+    # kg bounds every packing only when every usable truck has a payload (0 = kg not limited).
+    return all(td.max_kg_units > 0 for td in usable_tds) and proven(
+        [kg_units(st.kg) for st in kept] + [kg_units(s.demand_kg)], [(td.max_kg_units, td.trips_left) for td in usable_tds])
+
+
+def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
+                    priority_of: dict[str, int]) -> str | None:
+    """The true reason a stop that no load and no free trip has room for is left out (audit F08
+    verifiers: such a stop said "the optimizer found no truck, trip or time slot ... Re-plan to
+    search again", as if more search time could serve it). The room on a load counts only its stops
+    of the same or a higher priority (A6 review): strict priorities drop lower ones first, so a stop
+    left out by TIME while P5 stops fill the loads is not "left out for its weight". None when some
+    load or free trip has room for it that way, by cases AND kg, or when no check proves that another
+    packing of those stops could not carry it (A6 second review, `_no_packing_fits`): then nothing
+    proves it could not go, and the time-limited search's own reason (and its warning) stays."""
+    def same_or_higher(st: PlannedStop) -> bool:
+        return priority_of[st.stop_id] <= s.priority
+
+    rooms = _rooms(usable_tds, loads, same_or_higher)
+    u = kg_units(s.demand_kg)
+    if any(s.demand_cases <= rc and u <= rk for rc, rk in rooms):
+        return None
+    if not _no_packing_fits(s, usable_tds, [st for ld in loads for st in ld.stops if same_or_higher(st)]):
+        return None
+    # "Lowest priorities first" only when the day has lower-priority stops and none of them rides.
+    lower_served = any(priority_of[st.stop_id] > s.priority for ld in loads for st in ld.stops)
+    lower_on_day = any(p > s.priority for p in priority_of.values())
+    even, left = (", even with every lower-priority stop taken off", "then the most room") if lower_served else (
+        "", "the most room left")
+    tail = (f" This P{s.priority} stop was left out{' (lowest priorities first)' if lower_on_day and not lower_served else ''}. "
+            "Add a truck or raise the loads-per-truck limit.")
+    by_cases = [rk for rc, rk in rooms if s.demand_cases <= rc]
+    if by_cases:  # its cases fit somewhere, its weight does not
+        return (f"Not planned: no load or free trip has room for its {kg_text(u / 10)} kg{even} ({left} on a load "
+                f"that takes its {s.demand_cases} cases is {kg_text(max(0.0, max(by_cases)) / 10)} kg)." + tail)
+    most = max((rc for rc, _ in rooms), default=0)
+    return (f"Not planned: no load or free trip has room for its {s.demand_cases} cases{even} ({left} is "
+            f"{max(0, most)} cases)." + tail)
 
 
 def _day_hhmm(m: int) -> str:
@@ -390,10 +476,10 @@ def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[Dispatch
     for s in req.stops:
         if not any(_fits_capacity(s, td) for td in usable):
             max_c = max(td.max_cases for td in usable)
-            kg_trucks = [td.max_kg for td in usable if td.max_kg > 0]
+            kg_trucks = [td.max_kg_units for td in usable if td.max_kg_units > 0]
             detail = f"{s.demand_cases} cases vs largest truck {max_c} cases"
-            if kg_trucks and s.demand_kg > max(kg_trucks):
-                detail += f"; {s.demand_kg:.0f} kg vs largest payload {max(kg_trucks):.0f} kg"
+            if kg_trucks and kg_units(s.demand_kg) > max(kg_trucks):
+                detail += f"; {kg_text(s.demand_kg)} kg vs largest payload {kg_text(max(kg_trucks) / 10)} kg"
             drops.append(_unserved(s, "EXCEEDS_ANY_TRUCK_CAPACITY",
                                    f"Order is larger than any available truck ({detail}). Split it or use a bigger truck."))
             continue
@@ -559,8 +645,10 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     """A scenario's objective prices for the post-solve stage, in objective units and with the
     same weights as its OR-Tools model (arc, fixed, span, soft-bound costs). One deliberate
     difference: overtime counts from the truck's FIRST ACTUAL departure, exactly as the plan
-    reports it (the routing model can only bound the return time from the shift start). The exact
-    OMR rates ride along, so the RECOMMENDED score's money equals the reported costs (costing.py)."""
+    reports it (the routing model can only bound the return time from the shift start). On a truck
+    with frozen loads both count only NEW overtime, after the later of its day start + overtime_after
+    and its last frozen return (load_repack.overtime_bound_s, audit E4). The exact OMR rates ride
+    along, so the RECOMMENDED score's money equals the reported costs (costing.py)."""
     cfg = req.config
     w = SCENARIOS[name]
     trucks = {
@@ -709,11 +797,14 @@ def _solve_scenario(
 
     add_capacity("Cases", [0] + [s.demand_cases for s in stops] + [0] * len(reload_owner),
                  [td.truck.capacity_cases for td in vehicles])
-    kg_active = any(td.max_kg > 0 for td in vehicles) and any(s.demand_kg > 0 for s in stops)
+    # Kg in 0.1 kg units, each stop to the nearest unit, the payload rounded down (audit F08): a load
+    # that weighs exactly the payload fits it. A truck without a payload gets room for the whole day.
+    demand_u = [kg_units(s.demand_kg) for s in stops]
+    kg_active = any(td.max_kg_units > 0 for td in vehicles) and any(demand_u)
     if kg_active:
-        big = 10**7
-        add_capacity("Kg", [0] + [int(math.ceil(s.demand_kg)) for s in stops] + [0] * len(reload_owner),
-                     [int(math.floor(td.max_kg)) if td.max_kg > 0 else big for td in vehicles])
+        unlimited = sum(demand_u) + 1
+        add_capacity("Kg", [0] + demand_u + [0] * len(reload_owner),
+                     [td.max_kg_units if td.max_kg_units > 0 else unlimited for td in vehicles])
 
     # --- time -----------------------------------------------------------------------------
     transit = [[(service_s[i] + mx.duration_s[locs[i]][locs[j]]) if i != j else 0 for j in range(N)] for i in range(N)]
@@ -765,8 +856,14 @@ def _solve_scenario(
             if td.frozen_return_s is not None:
                 tdim.SetCumulVarSoftUpperBound(start, td.frozen_return_s, time_coeff)
         if ot_coeff and cfg.overtime_after_min is not None:
-            anchor = td.shift_anchor_s if td.shift_anchor_s is not None else td.earliest_depart_s
-            tdim.SetCumulVarSoftUpperBound(end, anchor + cfg.overtime_after_min * 60, ot_coeff)
+            # Audit E4 (owner decision 14): only NEW overtime costs. A truck with frozen loads pays
+            # overtime for its new loads after the later of its day start + overtime_after and its
+            # last frozen return (costing.truck_day_costs): the overtime its locked or dispatched
+            # loads already work is not charged again, so it does not look dearer than an idle truck.
+            bound = LR.overtime_bound_s(td, cfg.overtime_after_min * 60)
+            if bound is None:
+                bound = td.earliest_depart_s + cfg.overtime_after_min * 60
+            tdim.SetCumulVarSoftUpperBound(end, bound, ot_coeff)
 
     params = pywrapcp.DefaultRoutingSearchParameters()
     params.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PARALLEL_CHEAPEST_INSERTION
@@ -891,7 +988,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         for tl in timed[idx]:
             depart_s = tl.depart_s
             prev_node, prev_dep = 0, depart_s
-            cum_m, cases, kg, seq, est_legs = 0, 0, 0.0, 0, 0
+            cum_m, cases, kg, seq, est_legs = 0, 0, 0, 0, 0  # kg in 0.1 kg units (audit F08)
             stops_out: list[PlannedStop] = []
             for k, start_s in zip(tl.stops, tl.starts):
                 s = stops[k]
@@ -905,7 +1002,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 dep_s = start_s + s.service_min * 60
                 cum_m += leg_m
                 cases += s.demand_cases
-                kg += s.demand_kg
+                kg += kg_units(s.demand_kg)
                 seq += 1
                 hs = (s.hard_start_min or 0) * 60
                 he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
@@ -930,7 +1027,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                     arrival_min=arrival_min, service_start_min=start_min,
                     departure_min=start_min + s.service_min, wait_min=max(0, start_min - arrival_min),
                     leg_km=round(leg_m / 1000.0, 2), cum_km=round(cum_m / 1000.0, 2), leg_min=int(round(leg_s / 60)),
-                    cases=s.demand_cases, kg=round(s.demand_kg, 1),
+                    cases=s.demand_cases, kg=kg_units(s.demand_kg) / 10,
                     hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok, leg_estimated=leg_est,
                 ))
                 prev_node, prev_dep = node, dep_s
@@ -951,7 +1048,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             load_no += 1
             util_parts = [cases / t.capacity_cases if t.capacity_cases else 0.0]
             if t.capacity_kg > 0:
-                util_parts.append(kg / t.capacity_kg)
+                util_parts.append(kg / 10 / t.capacity_kg)
             depart_min, return_min = _min_of(tl.depart_s), _min_of(return_s)
             # To the baisa, and the parts add up exactly to the load's total (= its exact money
             # rounded once): the loads then add up to the truck days and the scenario within the
@@ -963,7 +1060,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             mine.append(PlannedLoad(
                 truck_id=t.id, load_no=load_no, depart_min=depart_min,
                 return_min=return_min, distance_km=round(km, 2), duration_min=return_min - depart_min,
-                cases=cases, kg=round(kg, 1), utilization_pct=round(100.0 * max(util_parts), 1),
+                cases=cases, kg=kg / 10, utilization_pct=round(100.0 * max(util_parts), 1),
                 fuel_litres=round(c.fuel_litres, 1) if c.fuel_litres is not None else None, fuel_cost=parts["fuel"],
                 distance_cost=parts["distance"], time_cost=parts["time"], fixed_cost=parts["fixed"],
                 total_cost=load_total,
@@ -990,12 +1087,15 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     demand_cases = sum(s.demand_cases for s in stops)
     # Weight bounds the day too when every usable truck has a payload (0 = kg not limited): a day
     # can be short of kg while the cases would fit (scenario test S03), and is then explained in kg.
-    kg_bound = bool(usable_tds) and all(td.max_kg > 0 for td in usable_tds)
-    total_cap_kg = sum(td.max_kg * td.trips_left for td in usable_tds) if kg_bound else 0.0
-    demand_kg = sum(s.demand_kg for s in stops)
+    # In 0.1 kg units, no margin (audit F08): 3,000.1 kg on 3,000 kg of loads is short.
+    kg_bound = bool(usable_tds) and all(td.max_kg_units > 0 for td in usable_tds)
+    total_cap_u = sum(td.max_kg_units * td.trips_left for td in usable_tds) if kg_bound else 0
+    demand_u = sum(kg_units(s.demand_kg) for s in stops)
+    total_cap_kg, demand_kg = total_cap_u / 10, demand_u / 10
     short_cases = demand_cases > total_cap_cases
-    short_kg = kg_bound and demand_kg > total_cap_kg + 0.05
+    short_kg = kg_bound and demand_u > total_cap_u
     shortage = short_cases or short_kg
+    priority_of = {st.stop_id: st.priority for st in stops}
     unserved_penalty = 0.0
     open_drops = 0
     left_cases = 0
@@ -1018,6 +1118,12 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
                                       _shortage_reason(s.priority, demand_cases, total_cap_cases, demand_kg, total_cap_kg,
                                                        short_cases, short_kg)))
+        elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of)) is not None:
+            # No load of this plan and no free trip has room for it (cases or kg), even without
+            # its lower-priority stops, and a check proves no other packing could carry it (A6
+            # second review): say so, not "re-plan to search again" (audit F08 verifiers).
+            # The code stays (a reason code is a database enum); the words are what the dispatcher reads.
+            unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", no_room))
         else:
             # Never claimed impossible: no prefilter ruled this stop out, and the search is a
             # time-limited heuristic (it always ends on its limit, whatever status it reports).
@@ -1038,22 +1144,22 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             "they are impossible. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
     left = [s for k, s in enumerate(stops) if k not in served]
-    left_kg = sum(s.demand_kg for s in left)
+    left_u = sum(kg_units(s.demand_kg) for s in left)
     short_by_cases = demand_cases - total_cap_cases
-    short_by_kg = demand_kg - total_cap_kg
+    short_by_u = demand_u - total_cap_u
     # The shortage explains leaving out about what the trucks are short of - in cases or in kg,
     # whichever is short - plus one order that does not split. Or: no unserved stop fits the room
     # left on any load (or on a load a truck did not use). Whole stops leave some room on EVERY
     # load, so over several loads the unserved amount can pass "short + one order" although no
     # re-plan can serve more (PR6 review: 6 loads each 116 kg short of full, every unserved stop 336 kg).
     explained = (short_cases and left_cases <= short_by_cases + max((s.demand_cases for s in left), default=0)) or (
-        short_kg and left_kg <= short_by_kg + max((s.demand_kg for s in left), default=0.0)) or (
+        short_kg and left_u <= short_by_u + max((kg_units(s.demand_kg) for s in left), default=0)) or (
         shortage and not _fits_room_left(left, usable_tds, loads))
     if shortage and not explained:
         # Not everything: the rest did not fit by time, hours or the search's limit.
         what = " and ".join(
-            ([f"{short_by_cases} cases"] if short_cases else []) + ([f"{short_by_kg:,.0f} kg"] if short_kg else []))
-        left_kg_text = f" ({left_kg:,.0f} kg)" if kg_bound else ""
+            ([f"{short_by_cases} cases"] if short_cases else []) + ([f"{kg_text(short_by_u / 10)} kg"] if short_kg else []))
+        left_kg_text = f" ({kg_text(left_u / 10)} kg)" if kg_bound else ""
         warnings.append(
             f"The trucks are {what} short today, but {left_cases} cases{left_kg_text} are unserved: more than the "
             "shortage alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
@@ -1095,6 +1201,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         preference_penalties=PreferencePenalties(window=round(comp["window"], 3), early=round(comp["early"], 3),
                                                  continuity=round(comp["continuity"], 3)),
         estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
+        # The rules this plan was made with (audit A6 review; the ASSUMPTIONS sheet states them).
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
     )
     _assert_reconciled(req, sc)
     exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
@@ -1126,6 +1234,7 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult, tds: list
         # No load, so no timetable that could break a rule.
         feasibility=FeasibilityReport(status="VERIFIED", timing="EXACT", checked_at_version=FZ.CHECK_VERSION),
         cost_policy=costing.COST_POLICY, cost_version=costing.COST_VERSION, paid_driver_min=0, estimated_legs=0,
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
     )
 
 

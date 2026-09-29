@@ -116,6 +116,10 @@ export const REPLACED_LINE = '*REPLACED BY A NEWER PLAN - DO NOT USE. Ask the di
 export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' | 'returnMin' | 'cases'> & {
   /** The truck-day's timetable check (review F04); not ok = the message says TIMES NOT VERIFIED. */
   timing?: DetailLoad['timing'];
+  /** Audit E1: the depot pin the load was planned from (the route starts and ends there); absent = the plan's depot. */
+  origin?: DetailLoad['origin'];
+  /** Load-level changes after planning: a DEPOT change is printed (the depot moved since planning). */
+  masterChanged?: DetailLoad['masterChanged'];
   stops: (Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'> & {
     /** Customer data corrected after planning (review F08): printed under the stop, like the PDF sheet. */
     masterChanged?: DetailStop['masterChanged'];
@@ -134,13 +138,16 @@ export const TIMES_NOT_VERIFIED_LINE = '*TIMES NOT VERIFIED - check with the dis
  */
 export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number, opts: { tenantName?: string } = {}): string {
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
-  const route = routeLinks(plan.depot, stops);
+  // Audit E1: from and back to the depot pin the load was planned from, with the note when it moved.
+  const route = routeLinks(load.origin ?? plan.depot, stops);
+  const depotMoved = (load.masterChanged ?? []).find((c) => c.kind === 'DEPOT');
   const lines = [
     ...(isSupersededRun({ status: plan.status ?? '', supersededAt: plan.supersededAt }) ? [REPLACED_LINE] : []),
     ...(load.timing && !load.timing.ok ? [TIMES_NOT_VERIFIED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
+    ...(depotMoved ? [`! ${depotMoved.text}`] : []),
     '',
   ];
   for (const s of stops) {
