@@ -37,7 +37,8 @@ export default async function HelpPage({ params }: { params: { slug: string } })
             </Step>
             <Step n={3} icon={Wand2} title="OPTIMIZE">
               Builds the recommended plan on road distances: capacity, receiving hours and priorities are respected, and trucks can make several loads.
-              About half a minute to a minute for a normal day.
+              Choose Thorough (up to 20 minutes, stops early when the plan stops improving; suggested for tomorrow&apos;s plan) or Quick (about half a
+              minute to a minute for a normal day; suggested on the delivery day, so trucks are not held).
             </Step>
             <Step n={4} icon={ListChecks} title="Review">
               Per truck load: loading manifest (cases per product), delivery sequence with ETAs, km, utilisation and cost. Every order is either planned

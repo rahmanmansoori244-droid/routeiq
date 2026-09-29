@@ -105,8 +105,8 @@ export interface AfterLateOrderDeps {
   warn(message: string): void;
   /** Where a missing case weight gets fixed, for the user's role (weightFixText). */
   weightFix: string;
-  /** Asks "Re-plan now?"; true = yes. */
-  confirmReplan(): boolean;
+  /** Asks "Re-plan now?" (with Quick or Thorough, the plan screen's dialog); true = yes. */
+  confirmReplan(): boolean | Promise<boolean>;
   /** Re-plan with the late order (reloads the day when it ends, also after a refusal). */
   replan(): Promise<void>;
   /** Reload the plan and the day, so the late order shows as waiting. */
@@ -122,7 +122,7 @@ export async function afterLateOrderSaved(res: LateOrderSaved, deps: AfterLateOr
     await deps.refresh();
     return;
   }
-  if (deps.confirmReplan()) {
+  if (await deps.confirmReplan()) {
     await deps.replan();
     return;
   }

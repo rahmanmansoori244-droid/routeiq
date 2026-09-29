@@ -17,7 +17,10 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
+import { defaultModeForDay, fmtSearchTime, quickExpectedSec, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { useSearchModeChoice } from './search-mode-dialog';
+import { useTicker } from './use-ticker';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
 
 interface Issue {
@@ -50,6 +53,10 @@ interface Day {
   /** The company's today (tenant timezone). */
   today: string;
   tomorrow: string;
+  /** Thorough's cap in seconds (THOROUGH_MAX_SEC). */
+  thoroughMaxSec?: number;
+  /** The OPTIMIZE / RE-PLAN choice pre-selected: THOROUGH before the delivery day, QUICK on it. */
+  searchModeDefault?: 'QUICK' | 'THOROUGH';
   cutoff: string;
   depots: { id: string; code: string; name: string; lat: number; lng: number }[];
   depot: { id: string; code: string; name: string; lat: number; lng: number } | null;
@@ -71,7 +78,8 @@ interface Day {
     version: number;
     status: string;
     chosen: boolean;
-    job: { status: string; message: string | null; progressPct: number } | null;
+    /** startedAt / searchMode: the progress line of a running search (search-mode.ts). */
+    job: { status: string; message: string | null; progressPct: number; startedAt?: string | null; searchMode?: string | null } | null;
     /** Loads of the plan per status (PLANNED, LOCKED, LOADING, DISPATCHED, COMPLETED). */
     loadsByStatus?: Record<string, number>;
     /** PR9: the same without loads that never left and hold only orders brought forward to a later day. */
@@ -133,6 +141,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const [editFor, setEditFor] = useState<IssueCustomer | null>(null);
   const [editOpen, setEditOpen] = useState(false);
   const [optimizing, setOptimizing] = useState(false);
+  // Quick or Thorough, asked before every OPTIMIZE / RE-PLAN (owner decision 29 Sep 2026).
+  const searchChoice = useSearchModeChoice();
   // An action of the plan below (a load change, Lock all, Use instead, Re-plan) is running: Step 3
   // waits for it, and the plan's actions wait for Step 3's request (one action at a time, F07).
   const [planBusy, setPlanBusy] = useState(false);
@@ -194,9 +204,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   // still on its way (a slow link or a busy server), so requests do not pile up - but never more
   // than a few ticks in a row, in case that request hangs.
   const skippedTicks = useRef(0);
+  // The progress line ("6 min so far") ticks between reloads while a search runs.
+  const now = useTicker(day?.plan?.job?.status === 'RUNNING', 5_000);
   useEffect(() => {
     const running = day?.plan?.status === 'OPTIMIZING' || day?.plan?.job?.status === 'RUNNING' || day?.plan?.job?.status === 'QUEUED';
     if (!running) return;
+    // Every 3 s; every 10 s once a thorough search has run a minute (up to 20 min of reloads).
     const t = setInterval(() => {
       if (loader.pendingKey() === dayKey(date, depotId) && skippedTicks.current < 5) {
         skippedTicks.current++;
@@ -204,7 +217,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       }
       skippedTicks.current = 0;
       void refresh();
-    }, 3000);
+    }, searchPollMs(day?.plan?.job, 3000, new Date()));
     return () => clearInterval(t);
   }, [day, refresh, loader, date, depotId]);
 
@@ -302,6 +315,18 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     const planId = day.plan?.id;
     // Orders brought forward from earlier days are added like late orders (PR9).
     const reason = day.pending.late || day.pending.carried ? 'LATE_ORDER' : 'REOPTIMIZE';
+    // Quick or Thorough (owner decision 29 Sep 2026): Thorough is suggested for a plan made before
+    // its delivery day, Quick on the day itself. Cancel starts nothing.
+    const capSec = day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
+    const stops = day.orders.customers || null;
+    const searchMode = await searchChoice.ask({
+      verb: replanning ? 'Re-plan' : 'Optimize',
+      defaultMode: day.searchModeDefault ?? defaultModeForDay(day.date, day.today),
+      stops,
+      capSec,
+      note: replanning ? 'Locked and dispatched loads stay exactly as they are.' : undefined,
+    });
+    if (!searchMode) return;
     // Busy until the day shows the result (the job, or the day as it is after a refusal), and
     // never stuck: api() never rejects, and the flag is cleared in finally (review of PR3).
     setOptimizing(true);
@@ -311,10 +336,19 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       let reached = true;
       for (;;) {
         const r = replanning
-          ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } })
-          : await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', { method: 'POST', json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, ...overrides } });
+          ? await api<{ runId: string; queued?: boolean }>(`/api/runs/${planId}/replan`, { method: 'POST', json: { reason, expect, searchMode, ...overrides } })
+          : await api<{ runId: string; queued?: boolean }>('/api/dispatch/plan', {
+              method: 'POST',
+              json: { date: expect.date, depotId: expect.depotId, optimize: true, expect, searchMode, ...overrides },
+            });
         if (r.ok) {
-          toast.success(r.data?.queued ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.' : 'Optimizing… this takes up to a minute for a normal day.');
+          toast.success(
+            r.data?.queued
+              ? 'Queued: other optimizations are running. This plan starts as soon as one finishes.'
+              : searchMode === 'THOROUGH'
+                ? `Optimizing (Thorough): up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving. You can leave this page; the plan is saved when the search ends.`
+                : `Optimizing (Quick): ${stops ? `usually about ${fmtSearchTime(quickExpectedSec(stops))}` : 'usually a minute or two'} for this day.`,
+          );
           break;
         }
         const more = askOverride(r.errorBody, replanning ? 'Re-plan' : 'Optimize', { canEditProducts });
@@ -440,6 +474,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     <div className="space-y-5">
       {pickers}
       {loadFailed}
+      {searchChoice.dialog}
 
       {/* STEP 1 */}
       <Step n={1} title="Upload orders" done={day.orders.count > 0} summary={`${day.orders.count} orders · ${day.orders.customers} customers · ${day.orders.cases.toLocaleString()} cases${day.orders.late ? ` · ${day.orders.late} late` : ''}`}>
@@ -550,7 +585,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         done={!!day.plan?.chosen && day.pending.count === 0 && !planOutdated && !running}
         summary={
           running
-            ? `Optimizing… ${day.plan?.job?.message ?? ''}`
+            ? (day.plan?.job ? searchProgressText(day.plan.job, now, day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT) : null) ?? `Optimizing… ${day.plan?.job?.message ?? ''}`
             : day.plan?.chosen
               ? `Plan version ${day.plan.version} ${lastFailed ? 'in use: the last optimization failed, the previous plan was kept' : 'ready'}${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
               : 'Not optimized yet'

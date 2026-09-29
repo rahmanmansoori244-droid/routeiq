@@ -18,8 +18,11 @@ import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/co
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { defaultModeForDay, fmtSearchTime, searchPollMs, searchProgressText, searchResultText, THOROUGH_MAX_SEC_DEFAULT, type SearchMode } from '@/lib/dispatch/search-mode';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
+import { useSearchModeChoice } from './search-mode-dialog';
+import { useTicker } from './use-ticker';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
@@ -31,6 +34,10 @@ const STATUS_VARIANT: Record<string, 'outline' | 'secondary' | 'warning' | 'succ
   DISPATCHED: 'success',
   COMPLETED: 'default',
 };
+
+/** Asked before "Use the best plan found so far" (a thorough search stopped early). */
+const STOP_SEARCH_CONFIRM =
+  'Stop the thorough search now and use the best plan found so far? The search ends at the next plan it finds, the alternative options are skipped, and the plan is checked and saved in about a minute. This is recorded in the audit log.';
 
 /** Asked before "Reset stuck plan" (audit F09). */
 const STUCK_RESET_CONFIRM =
@@ -155,9 +162,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     if (!d) return;
     const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
     if (!running) return;
-    const t = setInterval(() => void load(), 2500);
+    // Every 2.5 s; every 10 s once a thorough search has run a minute (it may take 20 minutes).
+    const t = setInterval(() => void load(), searchPollMs(d.job, 2500, new Date()));
     return () => clearInterval(t);
   }, [d, load]);
+  // The progress line ("6 min so far") ticks between reloads.
+  const now = useTicker(d?.job?.status === 'RUNNING', 5_000);
+  // Quick or Thorough, asked before every Re-plan (owner decision 29 Sep 2026).
+  const searchChoice = useSearchModeChoice();
 
   const colorIdx = useMemo(() => {
     const m = new Map<string, number>();
@@ -284,22 +296,67 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     );
   }
 
-  function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE') {
+  /**
+   * "Use the best plan found so far" (supervisors and above, audited): a running thorough search
+   * ends at the next plan it finds; the job then checks and saves that plan as usual.
+   */
+  function stopSearch() {
+    if (!window.confirm(STOP_SEARCH_CONFIRM)) return;
+    return runPlanAction(
+      lock,
+      'stop-search',
+      async () => {
+        const r = await api<{ message?: string }>(`/api/runs/${runId}/stop-search`, { method: 'POST', json: {} });
+        if (r.ok) toast.success(r.data?.message ?? 'Stopping the search: the best plan found so far is saved in about a minute.');
+        else toast.error(r.error ?? 'Could not stop the search.');
+        await load();
+      },
+      failed,
+    );
+  }
+
+  /**
+   * Quick or Thorough for a re-plan of this plan (null = cancelled). Thorough is suggested for a plan
+   * made before its delivery day, Quick on the day itself (search-mode.ts).
+   */
+  function askSearchMode(note?: string): Promise<SearchMode | null> {
+    if (!d) return Promise.resolve(null);
+    const stops = new Set([...d.loads.flatMap((l) => l.stops.map((s) => s.customerId)), ...d.unserved.map((u) => u.customerId)]).size + (d.pendingOrders ?? 0);
+    return searchChoice.ask({
+      verb: 'Re-plan',
+      defaultMode: d.searchModeDefault ?? defaultModeForDay(d.run.runDate, today ?? d.today ?? d.run.runDate),
+      stops: stops || null,
+      capSec: d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT,
+      note: note ?? 'Locked and dispatched loads stay exactly as they are.',
+    });
+  }
+
+  // The mode chosen with "Late order saved. Re-plan now?" (one dialog for both).
+  const lateOrderMode = useRef<SearchMode | null>(null);
+
+  async function replan(reason: 'LATE_ORDER' | 'REOPTIMIZE', preset?: SearchMode) {
+    const searchMode = preset ?? (await askSearchMode());
+    if (!searchMode) return;
     const expect = d ? { date: d.run.runDate, depotId: d.run.depot.id } : undefined;
+    const capSec = d?.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT;
     return runPlanAction(
       lock,
       'replan',
       async () => {
         let overrides: OptimizeOverrides = {};
         for (;;) {
-          const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, { method: 'POST', json: { reason, expect, ...overrides } });
+          const r = await api<{ runId: string; version?: number; reason?: string; queued?: boolean }>(`/api/runs/${runId}/replan`, {
+            method: 'POST',
+            json: { reason, expect, searchMode, ...overrides },
+          });
           if (r.ok && r.data) {
             const how =
               r.data.reason === 'LATE_ORDER'
                 ? 'Late order added; the other orders stay on their trucks where possible.'
                 : 'Full re-optimize: orders may move to other trucks.';
+            const long = searchMode === 'THOROUGH' ? ` Thorough search: up to ${fmtSearchTime(capSec)}, stops early when the plan stops improving.` : '';
             toast.success(
-              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
+              `Plan version ${r.data.version ?? ''} is ${r.data.queued ? 'queued behind other optimizations' : 'being optimized'}. ${how}${long} Locked and dispatched loads are kept; if the optimization fails, the previous plan stays in use.`,
             );
             await onChanged?.(r.data.runId);
             return;
@@ -344,6 +401,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const s = d.summary;
   const rec = d.reconciliation;
   const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
+  // "Searching for the best plan - up to 20 min, stops early when it stops improving - 6 min so far".
+  const progress = running && d.job ? searchProgressText(d.job, now, d.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT) : null;
+  // How the plan in use was searched (Quick / Thorough, how long, why it stopped).
+  const searched = searchResultText(d.search ?? null);
   // Replaced by a newer version: status SUPERSEDED, or supersededAt set (review F07).
   const superseded = isSupersededRun(d.run);
   // "Road km (3 legs estimated)" when some legs could not be routed on roads (review F18).
@@ -424,6 +485,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </div>
       </div>
 
+      {searchChoice.dialog}
+      {searched && !running ? (
+        <p className="text-xs text-muted-foreground" data-testid="search-result">
+          {searched}
+        </p>
+      ) : null}
       {err ? (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-3 text-sm" data-testid="plan-reload-error">
           <AlertTriangle className="h-4 w-4 text-red-700" />
@@ -438,8 +505,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       ) : null}
       {running ? (
         <div className="rounded-md border bg-muted/40 p-3 text-sm" data-testid="optimizing">
-          Optimizing… {d.job?.message ?? ''} ({d.job?.progressPct ?? 0}%)
+          {progress ? (
+            <span data-testid="search-progress">{progress}.</span>
+          ) : (
+            <>
+              Optimizing… {d.job?.message ?? ''} ({d.job?.progressPct ?? 0}%)
+            </>
+          )}
           {applied ? ' Until the new plan is saved, the loads below are the previous plan (kept if the optimization fails).' : ''}
+          {canResetStuck && d.job?.status === 'RUNNING' && d.job?.searchMode === 'THOROUGH' && !d.stuck ? (
+            <div className="mt-2">
+              <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void stopSearch()} data-testid="stop-search-btn">
+                Use the best plan found so far
+              </Button>
+            </div>
+          ) : null}
           {d.stuck ? (
             <div className="mt-2 flex flex-wrap items-center gap-2 text-amber-800" data-testid="plan-stuck">
               <AlertTriangle className="h-4 w-4" />
@@ -1007,9 +1087,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           void afterLateOrderSaved(res, {
             warn: (m) => toast.warning(m),
             weightFix: weightFixText(canEditProducts),
-            confirmReplan: () => window.confirm('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.'),
+            // "Re-plan now?" and Quick or Thorough in one dialog (Cancel = not now).
+            confirmReplan: async () => {
+              lateOrderMode.current = await askSearchMode('Late order saved. Re-plan now? Locked and dispatched loads stay exactly as they are.');
+              return lateOrderMode.current !== null;
+            },
             replan: async () => {
-              await replan('LATE_ORDER');
+              await replan('LATE_ORDER', lateOrderMode.current ?? undefined);
             },
             refresh: async () => {
               await runPlanAction(
