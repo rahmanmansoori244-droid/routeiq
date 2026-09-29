@@ -179,6 +179,14 @@ export function searchPollMs(
 export function searchResultText(r: SearchReport | null | undefined): string | null {
   if (!r) return null;
   const searched = fmtSearchTime(r.search_sec);
+  // Either mode: nothing was searched, or the search found no plan (skeptic review of the long-search PR).
+  if (r.stop_reason === 'NOT_SEARCHED') {
+    return `${modeName(r.mode)} search not run: no order could be planned with these trucks and hours, so there was nothing to search (see the unserved orders for why).`;
+  }
+  if (r.stop_reason === 'NO_PLAN') {
+    const allowed = r.mode === 'THOROUGH' ? ` (up to ${fmtSearchTime(r.cap_sec)} allowed)` : '';
+    return `${modeName(r.mode)} search: searched ${searched}${allowed} and found no plan with these trucks and limits.`;
+  }
   if (r.mode !== 'THOROUGH') return `Quick search: ${searched}, the automatic time for a day of this size.`;
   const last = r.last_improvement_sec != null ? ` The best plan was last improved after ${fmtSearchTime(r.last_improvement_sec)}.` : '';
   switch (r.stop_reason) {
@@ -202,6 +210,8 @@ export function searchResultText(r: SearchReport | null | undefined): string | n
 export function searchAssumptions(r: SearchReport | null | undefined): Record<string, string> {
   const line = searchResultText(r);
   if (!r || !line) return {};
+  // No plan was searched or found: "the best one the search found" would not be true.
+  if (r.stop_reason === 'NOT_SEARCHED' || r.stop_reason === 'NO_PLAN') return { 'Route search': line };
   const out: Record<string, string> = {
     'Route search': line,
     'Route search - what it means':

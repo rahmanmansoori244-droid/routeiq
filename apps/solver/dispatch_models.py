@@ -422,7 +422,9 @@ class SearchReport(BaseModel):
     stop_reason: TIME_LIMIT = QUICK, the automatic time by day size; CONVERGED = THOROUGH, stopped
     once it had not improved for stall_sec (or the search ended by itself); CAP = THOROUGH, the
     time limit (cap_sec for the whole request) was reached while it was still improving; STOPPED =
-    a supervisor asked for the best plan found so far."""
+    a supervisor asked for the best plan found so far. Either mode: NOT_SEARCHED = no search ran
+    (every stop was left out before it: RECOMMENDED is NOTHING_TO_PLAN); NO_PLAN = the search ended
+    without any plan (RECOMMENDED is NO_SOLUTION)."""
 
     mode: Literal["QUICK", "THOROUGH"]
     # The whole request's time budget: THOROUGH its cap; QUICK the solver's request budget.
@@ -432,7 +434,7 @@ class SearchReport(BaseModel):
     # The recommended plan's search, and the whole request (road matrix, searches, load re-check).
     search_sec: float
     used_sec: float
-    stop_reason: Literal["TIME_LIMIT", "CONVERGED", "CAP", "STOPPED"]
+    stop_reason: Literal["TIME_LIMIT", "CONVERGED", "CAP", "STOPPED", "NOT_SEARCHED", "NO_PLAN"]
     # THOROUGH: when the best plan was last improved (seconds into the search), and the stall that
     # stops the search at that moment of the search.
     last_improvement_sec: float | None = None

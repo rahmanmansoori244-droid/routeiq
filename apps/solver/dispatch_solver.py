@@ -389,7 +389,8 @@ class _SearchWatch:
         return {
             "reason": self.reason,
             "last_improvement_sec": round(self.last, 1) if self.points else None,
-            "stall_sec": round(self.rule.stall_sec(elapsed), 1) if self.rule is not None else None,
+            # No plan seen, no stall to report ("no better plan for 5 min" after a 1 s search).
+            "stall_sec": round(self.rule.stall_sec(elapsed), 1) if self.rule is not None and self.points else None,
             "points": [(round(t, 1), round(v / COST_SCALE, 2)) for t, v in pts],
             "solutions": self.solutions,
         }
@@ -416,8 +417,15 @@ def _searched(args) -> tuple[DispatchScenario, dict | None]:
     return sc, (watch.report() if watch is not None else None)
 
 
-def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int) -> str:
-    """Why RECOMMENDED's search stopped (SearchReport.stop_reason)."""
+def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, status: str | None = None) -> str:
+    """Why RECOMMENDED's search stopped (SearchReport.stop_reason). ``status``: RECOMMENDED's own.
+    In either mode, no search (every stop left out before it: NOTHING_TO_PLAN) is NOT_SEARCHED and a
+    search that found no plan (NO_SOLUTION) is NO_PLAN - never "stopped when it stopped improving"
+    nor QUICK's "automatic time" (skeptic review of the long-search PR)."""
+    if status == "NOTHING_TO_PLAN":
+        return "NOT_SEARCHED"
+    if status == "NO_SOLUTION":
+        return "NO_PLAN"
     if mode != "THOROUGH":
         return "TIME_LIMIT"
     if watch and watch.get("reason"):
@@ -436,7 +444,7 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         limit_sec=limit,
         search_sec=round(search_sec, 1),
         used_sec=round(time.monotonic() - started, 1),
-        stop_reason=_stop_reason(mode, watch, search_sec, limit),  # type: ignore[arg-type]
+        stop_reason=_stop_reason(mode, watch, search_sec, limit, state.get("status")),  # type: ignore[arg-type]
         last_improvement_sec=(watch or {}).get("last_improvement_sec"),
         stall_sec=(watch or {}).get("stall_sec"),
         best_over_time=list((watch or {}).get("points") or []),
@@ -1711,7 +1719,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     (_watch_search) - and the alternatives and the load re-check then get THOROUGH's longer times,
     shortened to what is left. ``control``: cancel (SolveAborted) or "use the best plan found so
     far" (the alternatives are skipped, the re-check runs as QUICK's). ``state`` receives
-    RECOMMENDED's search limit, search time and its THOROUGH watch report (SearchReport).
+    RECOMMENDED's search limit, search time, status and its THOROUGH watch report (SearchReport).
 
     Every scenario runs in a worker process. OR-Tools holds the GIL for the whole search, so a
     solve inside the API process froze it completely - /health, /route-geometry and every other
@@ -1766,7 +1774,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
                 results["RECOMMENDED"], watch = _await_worker(workers, workers.submit(_searched, job, "RECOMMENDED"),
                                                               deadline, "recommended plan")
-            state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch)
+            state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch,
+                         status=results["RECOMMENDED"].status)
             warm = results["RECOMMENDED"].loads or None
         stopped = thorough and control is not None and control.stop_requested.is_set()
         if tail is not None:

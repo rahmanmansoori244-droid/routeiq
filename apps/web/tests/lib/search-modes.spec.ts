@@ -26,7 +26,7 @@ import {
   thoroughMaxSec,
   type SearchReport,
 } from '@/lib/dispatch/search-mode';
-import { SolveAdmission, type AdmissionLimits, type SolveTicket } from '@/lib/dispatch/solve-admission';
+import { defaultAdmissionLimits, SolveAdmission, type AdmissionLimits, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { callDispatchSolver, postJsonLong, SolverError, solverCallFailure, SOLVER_KEEPALIVE_MS } from '@/lib/solver-client';
 import { autoTimeLimitSec } from '@/lib/planner-bounds';
 import { requestedSearchMode } from '@/lib/dispatch/start-optimize';
@@ -186,6 +186,30 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     expect(searchResultText(null)).toBeNull();
   });
 
+  it('nothing searched, or no plan found: never "stopped when it stopped improving" nor "the automatic time" (skeptic review)', () => {
+    // Every order was left out before the search (no truck can carry it, its hours cannot be reached).
+    const none = { search_sec: 0, last_improvement_sec: null, stall_sec: null, best_over_time: [], solutions: null };
+    expect(searchResultText(report({ ...none, stop_reason: 'NOT_SEARCHED' }))).toBe(
+      'Thorough search not run: no order could be planned with these trucks and hours, so there was nothing to search (see the unserved orders for why).',
+    );
+    expect(searchResultText(report({ ...none, mode: 'QUICK', stop_reason: 'NOT_SEARCHED' }))).toBe(
+      'Quick search not run: no order could be planned with these trucks and hours, so there was nothing to search (see the unserved orders for why).',
+    );
+    // The search ran and ended without any plan.
+    expect(searchResultText(report({ ...none, search_sec: 1.1, stop_reason: 'NO_PLAN' }))).toBe(
+      'Thorough search: searched 1 s (up to 20 min allowed) and found no plan with these trucks and limits.',
+    );
+    expect(searchResultText(report({ ...none, mode: 'QUICK', search_sec: 2, stop_reason: 'NO_PLAN' }))).toBe(
+      'Quick search: searched 2 s and found no plan with these trucks and limits.',
+    );
+    // The ASSUMPTIONS sheet: the line only - "the best one the search found" would be untrue.
+    for (const stop_reason of ['NOT_SEARCHED', 'NO_PLAN'] as const) {
+      const rows = searchAssumptions(report({ ...none, stop_reason }));
+      expect(Object.keys(rows)).toEqual(['Route search']);
+      expect(rows['Route search']).toBe(searchResultText(report({ ...none, stop_reason })));
+    }
+  });
+
   it('the ASSUMPTIONS rows: the result, what it means (no gap is known) and the progress', () => {
     const rows = searchAssumptions(report({}));
     expect(Object.keys(rows)).toEqual(['Route search', 'Route search - what it means', 'Route search - progress']);
@@ -193,7 +217,7 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     expect(rows['Route search - progress']).toMatch(/^0 s: 612; 2 min: 540; 7 min: 525 \(search score/);
     expect(searchAssumptions(null)).toEqual({});
     expect(Object.keys(searchAssumptions(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', best_over_time: [] })))).toEqual(['Route search', 'Route search - what it means']);
-    for (const r of ['CONVERGED', 'CAP', 'STOPPED', 'TIME_LIMIT'] as const) {
+    for (const r of ['CONVERGED', 'CAP', 'STOPPED', 'TIME_LIMIT', 'NOT_SEARCHED', 'NO_PLAN'] as const) {
       for (const text of [searchResultText(report({ stop_reason: r })), ...Object.values(searchAssumptions(report({ stop_reason: r })))]) {
         // "best possible plan" appears only to say it is NOT claimed ("how far it could still be from ...").
         expect(text).not.toMatch(/\boptimal\b|\boptimum\b|is the best possible/i);
@@ -405,7 +429,7 @@ describe('solve admission per mode', () => {
     expect(third).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT' });
     if (third.ok) throw new Error('not refused');
     expect(third.error).toBe(
-      'Your company already has 2 Thorough optimization(s) waiting for the route optimizer. Try again once one of them has started (a Thorough search takes up to 20 minutes), or choose Quick.',
+      'Your company already has 2 Thorough optimization(s) waiting for the route optimizer. Try again once one of them has started (a Thorough search takes up to 20 min), or choose Quick.',
     );
     expect(third.retryAfterSec).toBe(600);
     // QUICK has its own places: two QUICK wait behind two running (another company's and NMWC's own).
@@ -415,6 +439,41 @@ describe('solve admission per mode', () => {
     const quick = a.reserve('NMWC', 'u2', 'QUICK');
     expect(quick).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT', retryAfterSec: 120 });
     if (!quick.ok) expect(quick.error).toBe('Your company already has 2 Quick optimization(s) waiting for the route optimizer. Try again once one of them has started.');
+  });
+
+  it('the Thorough refusal states the THOROUGH cap in use, and its Retry-After follows it (skeptic review)', () => {
+    for (const [cap, said, retry] of [
+      [3600, '1 h 0 min', 600],
+      [600, '10 min', 600],
+      [60, '1 min', 60],
+    ] as const) {
+      const a = gate({ thoroughCapSec: cap });
+      for (let i = 0; i < 3; i++) ok(a.reserve('NMWC', 'u1', 'THOROUGH')); // one runs, two wait
+      const refused = a.reserve('NMWC', 'u1', 'THOROUGH');
+      expect(refused).toMatchObject({ ok: false, status: 429, code: 'SOLVE_QUEUE_TENANT', retryAfterSec: retry });
+      if (!refused.ok) expect(refused.error).toContain(`(a Thorough search takes up to ${said}), or choose Quick.`);
+    }
+    // The process-wide gate takes the cap from THOROUGH_MAX_SEC, like the start and the dialog.
+    expect(defaultAdmissionLimits({ THOROUGH_MAX_SEC: '3600' } as unknown as NodeJS.ProcessEnv).thoroughCapSec).toBe(3600);
+    expect(defaultAdmissionLimits({ THOROUGH_MAX_SEC: '60' } as unknown as NodeJS.ProcessEnv).thoroughCapSec).toBe(60);
+    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv).thoroughCapSec).toBe(1200);
+  });
+
+  it('a full shared queue refuses per mode: a THOROUGH waiting never gets the first QUICK of its company a 503 (skeptic review)', () => {
+    const a = gate({ maxQueue: 4 });
+    ok(a.reserve('S1', 'x', 'QUICK'));
+    ok(a.reserve('S2', 'y', 'QUICK')); // both slots taken
+    expect(ok(a.reserve('NMWC', 'u1', 'THOROUGH')).waiting).toBe(true); // tomorrow's plan waits
+    ok(a.reserve('S3', 'z', 'QUICK'));
+    ok(a.reserve('S3', 'z', 'QUICK'));
+    ok(a.reserve('S4', 'w', 'QUICK'));
+    expect(a.snapshot().waiting).toBe(4); // the shared queue is full
+    // NMWC has nothing QUICK waiting: its same-day re-plan is queued, not refused.
+    const sameDay = a.reserve('NMWC', 'u2', 'QUICK');
+    expect(sameDay.ok && sameDay.ticket.waiting).toBe(true);
+    // Now it has one of each waiting: a second of either mode gets 503 until there is room.
+    expect(a.reserve('NMWC', 'u2', 'QUICK')).toMatchObject({ ok: false, status: 503, code: 'SOLVER_BUSY' });
+    expect(a.reserve('NMWC', 'u1', 'THOROUGH')).toMatchObject({ ok: false, status: 503, code: 'SOLVER_BUSY' });
   });
 
   it('the queue position counts only what starts before it', () => {

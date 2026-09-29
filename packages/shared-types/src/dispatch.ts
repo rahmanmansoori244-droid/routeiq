@@ -137,6 +137,8 @@ export type SearchMode = 'QUICK' | 'THOROUGH';
  * of optimality: no bound is computed, so no gap is known. stop_reason: TIME_LIMIT = QUICK (the
  * automatic time); CONVERGED = THOROUGH stopped once it stopped improving; CAP = THOROUGH reached
  * its time limit while still improving; STOPPED = a supervisor used the best plan found so far.
+ * Either mode: NOT_SEARCHED = no search ran (every stop was left out before it); NO_PLAN = the search
+ * ended without any plan.
  */
 export interface SearchReport {
   mode: SearchMode;
@@ -144,7 +146,7 @@ export interface SearchReport {
   limit_sec: number;
   search_sec: number;
   used_sec: number;
-  stop_reason: 'TIME_LIMIT' | 'CONVERGED' | 'CAP' | 'STOPPED';
+  stop_reason: 'TIME_LIMIT' | 'CONVERGED' | 'CAP' | 'STOPPED' | 'NOT_SEARCHED' | 'NO_PLAN';
   last_improvement_sec?: number | null;
   stall_sec?: number | null;
   /** At most 12 [seconds into the search, search objective in OMR] points of the best plan so far. */

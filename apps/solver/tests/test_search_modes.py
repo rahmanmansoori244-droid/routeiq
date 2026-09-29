@@ -18,7 +18,7 @@ import pytest
 import dispatch_solver as ds
 from dispatch_models import DispatchConfig, SearchReport
 from dispatch_solver import SolveAborted, SolveControl, optimize_dispatch
-from tests.test_dispatch import assert_reconciled, nmwc_day, rec, req
+from tests.test_dispatch import assert_reconciled, nmwc_day, rec, req, truck
 
 ALL = ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"]
 
@@ -213,6 +213,76 @@ def test_report_keeps_at_most_twelve_points_first_and_last():
     assert [p[0] for p in rep["points"]] == sorted(p[0] for p in rep["points"])
 
 
+def test_report_of_a_search_that_saw_no_plan_claims_no_stall():
+    """A watch that never saw a plan (the search failed before its first one) reports no stall:
+    "no better plan for 5 min" after a search of about a second would be untrue."""
+    w = ds._SearchWatch(routing=None, rule=ds.stall_rule(5), flag=None)
+    rep = w.report()
+    assert rep == {"reason": None, "last_improvement_sec": None, "stall_sec": None, "points": [], "solutions": 0}
+    assert ds._stop_reason("THOROUGH", rep, 1.1, 985, "NO_SOLUTION") == "NO_PLAN"
+    assert ds._stop_reason("THOROUGH", None, 0.0, 985, "NOTHING_TO_PLAN") == "NOT_SEARCHED"
+    assert ds._stop_reason("QUICK", None, 0.0, 5, "NOTHING_TO_PLAN") == "NOT_SEARCHED"
+    assert ds._stop_reason("QUICK", None, 2.0, 2, "NO_SOLUTION") == "NO_PLAN"
+    # A search that found a plan: as before.
+    assert ds._stop_reason("QUICK", None, 2.0, 2, "OPTIMIZED") == "TIME_LIMIT"
+    assert ds._stop_reason("THOROUGH", {"reason": "CONVERGED", "solutions": 9}, 400.0, 985, "OPTIMIZED") == "CONVERGED"
+
+
+# --------------------------------------------------------------------------------------
+# Nothing searched, or no plan found: never "stopped when it stopped improving"
+# --------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode,cause", [("THOROUGH", "capacity"), ("THOROUGH", "hours"), ("QUICK", "capacity")])
+def test_nothing_to_search_is_reported_as_not_searched(mode, cause, monkeypatch):
+    """Every stop is left out before the search (no truck can carry it, or its hours cannot be
+    reached): no search runs, so the report says NOT_SEARCHED - not CONVERGED (THOROUGH) and not
+    QUICK's "automatic time for a day of this size" (skeptic review of the long-search PR)."""
+    monkeypatch.delenv("THOROUGH_MAX_SEC", raising=False)
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    stops, trucks = nmwc_day(6)
+    if cause == "capacity":
+        trucks = [truck("T01", cap=1)]
+    else:
+        stops = [s.model_copy(update={"hard_start_min": 0, "hard_end_min": 1}) for s in stops]
+    r = req(stops, trucks, time_limit_sec=None, search_mode=mode, scenarios=ALL)
+    resp = optimize_dispatch(r)
+    assert {sc.status for sc in resp.scenarios} == {"NOTHING_TO_PLAN"}
+    s = resp.search
+    assert s.mode == mode and s.stop_reason == "NOT_SEARCHED", s
+    assert s.search_sec == 0.0 and s.stall_sec is None and s.last_improvement_sec is None
+    assert s.best_over_time == [] and not s.solutions
+    assert_reconciled(r, rec(resp))
+
+
+@pytest.mark.parametrize("mode", ["QUICK", "THOROUGH"])
+def test_a_search_that_found_no_plan_says_so(mode, monkeypatch):
+    """RECOMMENDED's search ends without any plan (NO_SOLUTION - seen once in the benchmark as
+    ROUTING_FAIL after 0.25 s): the report says NO_PLAN, with no stall and no progress points."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.delenv("THOROUGH_MAX_SEC", raising=False)
+    from ortools.constraint_solver import pywrapcp as real
+
+    class Model(real.RoutingModel):
+        def SolveWithParameters(self, params, *a):  # noqa: N802
+            return None  # the search found no first plan
+
+    class Proxy:
+        RoutingModel = Model
+
+        def __getattr__(self, item):
+            return getattr(real, item)
+
+    monkeypatch.setattr(ds, "pywrapcp", Proxy())
+    stops, trucks = nmwc_day(12)
+    r = req(stops, trucks, time_limit_sec=2, search_mode=mode)
+    resp = optimize_dispatch(r)
+    assert rec(resp).status == "NO_SOLUTION"
+    s = resp.search
+    assert s.mode == mode and s.stop_reason == "NO_PLAN", s
+    assert s.stall_sec is None and s.last_improvement_sec is None and s.best_over_time == []
+    assert_reconciled(r, rec(resp))
+
+
 # --------------------------------------------------------------------------------------
 # THOROUGH: end to end
 # --------------------------------------------------------------------------------------
@@ -334,6 +404,8 @@ def test_search_report_is_part_of_the_response_contract():
                      stop_reason="CONVERGED", last_improvement_sec=406.0, stall_sec=406.2,
                      best_over_time=[(0.5, 900.12), (406.0, 612.5)], solutions=12000)
     assert SearchReport.model_validate(s.model_dump(mode="json")) == s
+    for why in ("TIME_LIMIT", "CONVERGED", "CAP", "STOPPED", "NOT_SEARCHED", "NO_PLAN"):
+        assert SearchReport(mode="QUICK", cap_sec=540, limit_sec=5, search_sec=0.0, used_sec=0.1, stop_reason=why).stop_reason == why
 
 
 # --------------------------------------------------------------------------------------
