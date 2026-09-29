@@ -945,9 +945,15 @@ def test_a_repack_with_no_answer_keeps_the_plan_it_started_from(monkeypatch, cap
         assert_plan_rules(r, sc)
 
 
-def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch):
-    """Audit E5, keeping the budget honest: both CP-SAT phases end by the solve's own limit (the
-    job's share of its budget). Each had a 0.5 s floor, which pushed a short solve past it."""
+@pytest.mark.parametrize("slow_phase_one", [0.0, 0.2])
+def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch, slow_phase_one):
+    """Audit E5, keeping the budget honest: phase 1 ends by the solve's own limit (the job's share
+    of its budget), and phase 2 too, unless phase 1 left it less than its floor (60 % of the limit,
+    at most 0.5 s): then phase 2 runs up to that floor past the limit (E5 follow-up). Each phase had
+    a fixed 0.5 s floor, which pushed a short solve past its limit. Each phase's limit is checked
+    against the rule from the moment it started, so a slow phase 1 (CP-SAT's presolve on a busy
+    machine, here a 0.2 s pause) does not fail it (A6 third review: the old check, that both phases
+    end by the limit, failed at random under load)."""
     from ortools.sat.python import cp_model  # noqa: F401 - imported before the clock starts (repack imports it)
 
     calls: list[tuple[float, float]] = []
@@ -955,6 +961,8 @@ def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch):
 
     def record(solver, model, limit):
         calls.append((time.perf_counter(), limit))
+        if len(calls) == 1:
+            time.sleep(slow_phase_one)
         return orig(solver, model, limit)
 
     monkeypatch.setattr(LR, "_solve_until_stalled", record)
@@ -965,8 +973,18 @@ def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch):
     t0 = time.perf_counter()
     res = LR.repack(day, pricing, [(i,) for i in range(6)], set(range(3)), {k: 1 for k in range(3, 6)}, None, time_limit=0.3)
     assert len(calls) == 2, calls
-    for at, limit in calls:
-        assert at + limit <= t0 + 0.3 + 0.05, (at - t0, limit)
+    deadline, floor = t0 + 0.3, min(0.5, 0.6 * 0.3)
+    (at1, lim1), (at2, lim2) = calls
+    # Each limit was taken a moment before its phase started, and repack's own clock starts just
+    # after t0: a limit may be a little MORE than the rule at its start, never less.
+    rule1 = max(0.05, 0.4 * (deadline - at1))  # 40 % of the time left
+    rule2 = max(deadline - at2, floor)  # the rest of the time, at least the floor
+    assert rule1 - 1e-9 <= lim1 <= rule1 + 0.05, (at1 - t0, lim1)
+    assert rule2 - 1e-9 <= lim2 <= rule2 + 0.05, (at2 - t0, lim2)
+    assert at1 + lim1 <= max(deadline, at1 + 0.05) + 0.05, (at1 - t0, lim1)  # phase 1 ends by the limit
+    assert at2 + lim2 <= max(deadline, at2 + floor) + 0.05, (at2 - t0, lim2)  # phase 2 by the limit or its floor
+    if slow_phase_one:
+        assert lim2 == pytest.approx(floor), (at2 - t0, lim2)  # less than the floor was left
     assert res.plan is not None
 
 

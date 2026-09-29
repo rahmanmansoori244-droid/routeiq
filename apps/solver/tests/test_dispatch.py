@@ -742,6 +742,32 @@ def test_the_weight_reason_counts_only_stops_of_its_priority_or_higher():
     assert_reconciled(r, sc)
 
 
+def test_the_weight_reason_takes_the_lower_priority_stop_off_every_load():
+    """A6 third review: the test above cannot tell whether the room counts only the stops of the
+    same or a higher priority, since the route search puts its P5 stop on one load and the other load
+    has 1,400 kg of room either way. Here each load carries a P5 stop beside a P1 stop (a packing the
+    search could leave), so the most room with every lower-priority stop taken off is 1,400 kg by kg
+    and 40 cases by cases. Counting the P5 stops gave 1,300 kg and 10 cases."""
+    import dispatch_solver as ds
+
+    two = [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)]
+    by_kg = req([stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=1600, priority=1) for i in range(3)]
+                + [stop(f"L{i}", 23.605 + i * 0.001, 58.45, cases=1, demand_kg=100, priority=5) for i in range(2)], two)
+    loads = _plan_of(by_kg, [("T01", ["S0", "L0"]), ("T02", ["S1", "L1"])])
+    msg = ds._no_room_reason(by_kg.stops[2], ds._truck_days(by_kg), loads, {s.stop_id: s.priority for s in by_kg.stops})
+    assert msg == ("Not planned: no load or free trip has room for its 1,600 kg, even with every lower-priority stop taken off "
+                   "(then the most room on a load that takes its 10 cases is 1,400 kg). This P1 stop was left out. "
+                   "Add a truck or raise the loads-per-truck limit."), msg
+
+    by_cases = req([stop(f"C{i}", 23.60 + i * 0.001, 58.45, cases=60, demand_kg=10, priority=2) for i in range(3)]
+                   + [stop(f"L{i}", 23.605 + i * 0.001, 58.45, cases=30, demand_kg=10, priority=5) for i in range(2)], two)
+    loads = _plan_of(by_cases, [("T01", ["C0", "L0"]), ("T02", ["C1", "L1"])])
+    msg = ds._no_room_reason(by_cases.stops[2], ds._truck_days(by_cases), loads, {s.stop_id: s.priority for s in by_cases.stops})
+    assert msg is not None and msg.startswith(
+        "Not planned: no load or free trip has room for its 60 cases, even with every lower-priority stop taken off "
+        "(then the most room is 40 cases)."), msg
+
+
 def test_no_plan_reason_is_in_plain_words():
     """PR6: the search's raw status code (ROUTING_FAIL_TIMEOUT ...) never reaches an unserved reason."""
     import dispatch_solver as ds

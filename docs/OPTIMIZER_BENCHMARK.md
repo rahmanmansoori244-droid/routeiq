@@ -539,6 +539,18 @@ leave a stop out although another packing carries every stop (1,000 + 1,500 + 1,
 with one load each). It does not appear on these days, since NMWC's trucks do several trips. It is a follow-up in the handbook's
 7.5.
 
+### 10.6 After the third A6 review (no re-run needed)
+
+The third review changed tests only, not the optimizer or the web:
+
+- **The repack's phase-limit test** now checks each phase's time limit from the moment the phase started: phase 1 ends by the
+  solve's limit, and phase 2 does too unless phase 1 ran long, when it still gets 60 % of the limit (at most 0.5 s). The old test
+  failed at random on a busy machine; the repack itself is unchanged.
+- **Two new tests** pin rules that were already in the code: the "no room" reason counts only the stops of the same or a higher
+  priority, and two options with the same plan beside a broken one are not "the same plan as the other options".
+
+No plan can change, so the tables of 10.1 and 10.2 stand.
+
 ## Sources
 
 - OR-Tools repository and licence (Apache-2.0): https://github.com/google/or-tools · releases: https://github.com/google/or-tools/releases

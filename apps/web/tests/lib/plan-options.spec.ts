@@ -194,6 +194,24 @@ describe('N1: what each option gains', () => {
     expect(t.MIN_TRUCKS.text).toBe('');
   });
 
+  it('audit F22 (A6 third review): two rule-keeping options with the same plan beside a broken different plan are not "the same plan as the other options"', () => {
+    // RECOMMENDED and MIN TRUCKS keep the rules and are one plan; MIN DISTANCE is another plan and breaks them.
+    const rec = facts({ name: 'RECOMMENDED', signature: 'R', feasibility: 'VERIFIED' });
+    const minTrucks = { ...rec, name: 'MIN_TRUCKS' };
+    for (const feasibility of ['VIOLATED', 'UNVERIFIED'] as const) {
+      const bad = facts({ name: 'MIN_DISTANCE', signature: 'D', dayCost: 150, km: 300, feasibility, violations: 2 });
+      const t = optionTradeoffs([rec, minTrucks, bad]);
+      expect(t.RECOMMENDED.text).toBe('Every different option breaks the timing rules.');
+      expect(t.MIN_TRUCKS).toEqual({ text: 'Same plan as RECOMMENDED', versus: 'RECOMMENDED', gains: [], givesUp: [] });
+      expect(t.MIN_DISTANCE.text).toBe(
+        feasibility === 'VIOLATED'
+          ? 'Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.'
+          : 'Its timing could not be checked, so it cannot be dispatched. Re-plan, or use another option.',
+      );
+      for (const x of Object.values(t)) expect(x.text).not.toContain('Same plan as the other options');
+    }
+  });
+
   it('the plan signature ignores load order in the list but not the stop order', () => {
     const a = [newLoad('T1', 1, [['S1', 400], ['S2', 420]]), newLoad('T2', 1, [['S3', 500]])];
     expect(planSignature([...a].reverse())).toBe(planSignature(a));
