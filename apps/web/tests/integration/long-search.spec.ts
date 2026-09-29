@@ -163,6 +163,7 @@ describe('long searches end to end', () => {
 
   it('THOROUGH on the delivery day: no new load leaves before the plan exists + the turnaround (review of the long-search PR)', async (ctx) => {
     if (capSec > 120) ctx.skip(); // the web app searches up to its real 20 minutes: not in a test
+    const FIRST_DEPARTURE_MIN = 6 * 60; // the tenant's shift start (06:00; the depot opens at 05:00)
     const muscatMin = (d: Date) => (d.getUTCHours() * 60 + d.getUTCMinutes() + 240) % 1440;
     // Late in the Muscat evening the depot (open 05:00-23:00) cannot send anything more today.
     if (muscatMin(new Date()) > 21 * 60) ctx.skip();
@@ -207,7 +208,21 @@ describe('long searches end to end', () => {
     const savedMin = muscatMin(job.finishedAt!);
     expect(p.loads.length).toBeGreaterThan(0);
     for (const l of p.loads) expect(l.departMin, `${l.truckCode} L${l.loadNo}`).toBeGreaterThanOrEqual(savedMin + 30 - 1);
-    expect(p.warnings.some((w: string) => /^Planned from \d\d:\d\d \(now \d\d:\d\d \+ up to \d+ min Thorough search \+ 30 min preparation\)/.test(w))).toBe(true);
+    const plannedFrom = p.warnings.some((w: string) => /^Planned from \d\d:\d\d \(now \d\d:\d\d \+ up to \d+ min Thorough search \+ 30 min preparation\)/.test(w));
+    if (stored.shift_start_min > FIRST_DEPARTURE_MIN) {
+      // Planned from its start + the cap + the turnaround, and it says so.
+      expect(stored.shift_start_min).toBeLessThanOrEqual(muscatMin(job.startedAt!) + lead + 30 + 1);
+      expect(plannedFrom).toBe(true);
+    } else {
+      // Before about 05:30 in Muscat, now + the search + the turnaround is still before the 06:00 first
+      // departure: the loads keep their usual start and no "Planned from" line is due, but the loading
+      // still counts from the end of the search (skeptic review: this case failed every night from 00:00
+      // to 05:29 Muscat, 20:00-01:29 UTC).
+      expect(muscatMin(job.startedAt!) + lead + 30).toBeLessThanOrEqual(FIRST_DEPARTURE_MIN + 1);
+      expect(stored.shift_start_min).toBe(FIRST_DEPARTURE_MIN);
+      expect(stored.loading_from_min).toBeGreaterThanOrEqual(muscatMin(job.startedAt!) + lead);
+      expect(p.warnings.some((w: string) => /^Planned from /.test(w))).toBe(false);
+    }
   }, 600_000);
 
   it('QUICK: a re-plan searches the automatic time and says so', async (ctx) => {

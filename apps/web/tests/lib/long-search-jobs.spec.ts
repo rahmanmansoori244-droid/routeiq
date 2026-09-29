@@ -133,10 +133,14 @@ beforeEach(() => {
   solverFake.sent = [];
   build.runDateIso = null;
   activeDispatchJobs.clear();
+  // These tests state the default 20-minute cap. CI runs the unit suite with THOROUGH_MAX_SEC=60 (set
+  // for the integration suite in the same job): unset here, so every start uses the default.
+  vi.stubEnv('THOROUGH_MAX_SEC', '');
 });
 // Every slot a start took goes back to the process-wide admission, also when a test failed.
 afterEach(() => {
   for (const a of scheduled.args) a.ticket?.release();
+  vi.unstubAllEnvs();
 });
 
 describe('a start stores its search mode', () => {
@@ -217,8 +221,13 @@ describe('a same-day THOROUGH is timed from the end of its search, never from th
         expect(res.body).toMatchObject({ queued: true });
         args = scheduled.args[0];
         built = JSON.stringify(args.built.request.config);
-        vi.setSystemTime(new Date(NOW.getTime() + 25 * 60_000)); // 19:25: the slot frees
+        // The job is scheduled at the press (19:00), as the start does, and waits in the queue for its
+        // slot: a job that took its times before that wait would be timed from the press (skeptic review).
         scheduled.real!(args);
+        await new Promise((r) => setTimeout(r, 5));
+        expect(solverFake.sent).toHaveLength(0);
+        expect(row('runJob', tables.runJob[0].id).status).toBe('QUEUED');
+        vi.setSystemTime(new Date(NOW.getTime() + 25 * 60_000)); // 19:25: the slot frees
         freeBlockers();
         await g.__routeiqInflight.get('P');
         for (let i = 0; i < 20 && row('runJob', tables.runJob[0].id).status !== 'FAILED'; i++) await new Promise((r) => setTimeout(r, 5));
