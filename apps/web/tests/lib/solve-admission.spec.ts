@@ -28,7 +28,7 @@ function solve(a: SolveAdmission, tenant: string, user: string) {
 
 describe('defaults', () => {
   it('15 per user and 30 per company per hour; SOLVER_MAX_CONCURRENT in total and one less per company; a shared queue of 10 (200 at most), 2 per company', () => {
-    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, queueHardCap: 200, tenantQueue: 2, windowMs: 3_600_000 });
+    expect(defaultAdmissionLimits({} as NodeJS.ProcessEnv)).toEqual({ userPerHour: 15, tenantPerHour: 30, tenantConcurrent: 1, globalConcurrent: 2, maxQueue: 10, queueHardCap: 200, tenantQueue: 2, windowMs: 3_600_000, thoroughCapSec: 1200 });
     const env = (v: string) => ({ SOLVER_MAX_CONCURRENT: v }) as unknown as NodeJS.ProcessEnv;
     expect(defaultAdmissionLimits(env('3'))).toMatchObject({ globalConcurrent: 3, tenantConcurrent: 2 });
     expect(defaultAdmissionLimits(env('1'))).toMatchObject({ globalConcurrent: 1, tenantConcurrent: 1 });

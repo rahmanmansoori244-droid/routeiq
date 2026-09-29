@@ -15,7 +15,8 @@
  * - Fair queue: a company may have at most 2 solves of each search mode waiting (2 QUICK and 2
  *   THOROUGH; review of the long-search PR: waiting THOROUGH solves, each up to 20 minutes, took the
  *   places of a same-day QUICK re-plan). One more of that mode is refused with 429 and Retry-After,
- *   for that company only, naming the mode. The shared queue holds 10: once it is full, a company
+ *   for that company only, naming the mode (and for THOROUGH the cap in use, THOROUGH_MAX_SEC, which
+ *   also sets its Retry-After, at most 10 minutes). The shared queue holds 10: once it is full, a company
  *   that already has a solve of that mode waiting is refused with 503 "optimizer busy" until there
  *   is room, but a company with nothing of that mode waiting is always queued - other companies
  *   filling the queue never lock it out (review of PR3: five sign-up companies with 2 waiting each
@@ -55,6 +56,7 @@
  */
 import type { SearchMode } from '@routeiq/shared-types';
 import { rateLimitBypass } from '../rate-limit';
+import { fmtSearchTime, THOROUGH_MAX_SEC_DEFAULT, thoroughMaxSec } from './search-mode';
 
 export interface AdmissionLimits {
   userPerHour: number;
@@ -77,6 +79,12 @@ export interface AdmissionLimits {
   /** Solves of one company and one search mode waiting for a slot. */
   tenantQueue: number;
   windowMs: number;
+  /**
+   * The THOROUGH cap in use (THOROUGH_MAX_SEC, search-mode.ts thoroughMaxSec; default 20 min), for
+   * the refusal's text and Retry-After: a waiting THOROUGH starts at the latest when a running one
+   * ends, up to this long after it started.
+   */
+  thoroughCapSec?: number;
 }
 
 function envInt(name: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
@@ -100,6 +108,7 @@ export function defaultAdmissionLimits(env: NodeJS.ProcessEnv = process.env): Ad
     queueHardCap: 200,
     tenantQueue: 2,
     windowMs: 60 * 60_000,
+    thoroughCapSec: thoroughMaxSec(env),
   };
 }
 
@@ -188,13 +197,15 @@ export class SolveAdmission {
       const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId && q.mode === mode).length;
       if (mineWaiting >= this.limits.tenantQueue) {
         const thorough = mode === 'THOROUGH';
+        // The cap in use, never a fixed "20 minutes" (skeptic review): THOROUGH_MAX_SEC may be 10 s to 60 min.
+        const capSec = this.limits.thoroughCapSec ?? THOROUGH_MAX_SEC_DEFAULT;
         return this.deny(
           429,
           'SOLVE_QUEUE_TENANT',
           `Your company already has ${mineWaiting} ${thorough ? 'Thorough' : 'Quick'} optimization(s) waiting for the route optimizer. Try again once one of them has started${
-            thorough ? ' (a Thorough search takes up to 20 minutes), or choose Quick' : ''
+            thorough ? ` (a Thorough search takes up to ${fmtSearchTime(capSec)}), or choose Quick` : ''
           }.`,
-          thorough ? 600 : 120,
+          thorough ? Math.min(capSec, 600) : 120,
         );
       }
       // A full shared queue refuses only a company that already has a solve of this mode waiting:
