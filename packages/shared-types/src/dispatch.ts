@@ -309,6 +309,14 @@ export interface DispatchScenario {
   /** Of trucks_used, the trucks with frozen loads, and the frozen loads the plan was made around (PR7); absent from an older solver. */
   frozen_trucks?: number | null;
   frozen_loads?: number | null;
+  /**
+   * The weight and overtime rules the plan was made with (audit A6 review); absent from a solver
+   * before them (its route search rounded each stop up to a whole kg and charged overtime already
+   * worked by locked or dispatched loads again). 0.1: every kg check in 0.1 kg units, no margin.
+   */
+  weight_unit_kg?: number | null;
+  /** true: only new overtime counts when the optimizer chooses a truck (audit E4). */
+  new_overtime_only?: boolean | null;
 }
 
 export interface DispatchResponse {

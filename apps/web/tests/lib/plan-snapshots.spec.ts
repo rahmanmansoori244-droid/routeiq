@@ -167,10 +167,32 @@ describe('masterChangedNotes', () => {
     d.loads[1] = { ...d.loads[1], masterChanged: [moved] }; // PLANNED
     const notes = masterChangedNotes(d.loads);
     expect(notes).toEqual([
-      "Depot moved since planning: T01 L1 start and end at the depot pin they were planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.",
-      "Depot moved since planning: T01 L2 are still planned from the old depot pin (2.2 km from the depot's pin now). Re-plan to plan them from the new pin.",
+      "Depot moved since planning: T01 L1 starts and ends at the depot pin it was planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.",
+      "Depot moved since planning: T01 L2 is still planned from the old depot pin (2.2 km from the depot's pin now). Re-plan to plan it from the new pin.",
     ]);
     expect(notes.some((n) => n.startsWith('Truck capacity changed'))).toBe(false);
+    // Two loads kept from the same pin: one figure, in the plural.
+    d.loads[2] = { ...d.loads[2], status: 'DISPATCHED', masterChanged: [moved] };
+    expect(masterChangedNotes(d.loads)[0]).toBe(
+      `Depot moved since planning: T01 L1, ${d.loads[2].truckCode} L1 start and end at the depot pin they were planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.`,
+    );
+  });
+
+  it("A6 review: loads kept from different depot pins each give their own distance, whatever the order of the loads", () => {
+    const d = fixture();
+    const live = { lat: 23.6, lng: 58.4 };
+    const long = d.loads[2].truckCode;
+    const at = (lat: number) => ({ origin: { lat, lng: 58.4 }, masterChanged: [depotMovedChange({ lat, lng: 58.4 }, live)!] });
+    d.loads[0] = { ...d.loads[0], ...at(23.55) }; // LOCKED, planned from pin A: 5.6 km from the pin now
+    d.loads[2] = { ...d.loads[2], status: 'DISPATCHED', ...at(23.58) }; // planned from pin B: 2.2 km
+    d.loads[1] = { ...d.loads[1], ...at(23.61) }; // PLANNED from pin C: 1.1 km
+    const kept = `Depot moved since planning: T01 L1 (5.6 km), ${long} L1 (2.2 km) start and end at the depot pins they were planned from (distance from the depot's pin now). Locked and dispatched loads keep them.`;
+    const planned = "Depot moved since planning: T01 L2 is still planned from the old depot pin (1.1 km from the depot's pin now). Re-plan to plan it from the new pin.";
+    expect(masterChangedNotes(d.loads)).toEqual([kept, planned]);
+    expect(masterChangedNotes([...d.loads].reverse())).toEqual([
+      `Depot moved since planning: ${long} L1 (2.2 km), T01 L1 (5.6 km) start and end at the depot pins they were planned from (distance from the depot's pin now). Locked and dispatched loads keep them.`,
+      planned,
+    ]);
   });
 });
 
@@ -202,6 +224,11 @@ describe('load origin: the depot pin a load was planned from (audit E1, owner de
     const loads = [{ truckId: 't1', truckSnapshotJson: withOrigin, live }, { truckId: 't2', truckSnapshotJson: snap, live }];
     expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1 });
     expect(plannedLoadsMasterChanged([], loads, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 0 });
+    // A6 review: a load planned before origins were kept (t2) was planned from the pin its option was
+    // optimized from - the plan screen's rule (readLoadOrigin ?? the option's inputs.depot), so the
+    // day and the plan notes agree.
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 2 });
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1 });
   });
 });
 

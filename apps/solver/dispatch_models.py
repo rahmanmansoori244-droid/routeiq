@@ -42,6 +42,9 @@ MAX_STOPS = 600
 # exactly the payload fits it. Before, each stop was rounded UP to a whole kg and the payload DOWN:
 # 999.1 + 999.1 + 1001.8 = 3,000.0 kg was left out of a 3,000 kg truck, and float noise (7 x 9.3 kg
 # = 65.10000000000001) cost another kg. The web sends every order's kg already to 0.1 kg.
+# Each scenario reports the unit (DispatchScenario.weight_unit_kg).
+WEIGHT_UNIT_KG = 0.1
+
 
 def kg_units(kg: float) -> int:
     """A stop's (or load's) kg in 0.1 kg units, to the NEAREST unit: 65.10000000000001 -> 651,
@@ -416,6 +419,12 @@ class DispatchScenario(BaseModel):
     # around (PR7). None from a solver before them.
     frozen_trucks: int | None = None
     frozen_loads: int | None = None
+    # The weight and overtime rules this plan was made with (audit A6 review), so an export states
+    # only rules its plan was built with. None from a solver before them: its route search rounded
+    # each stop UP to a whole kg and the payload down, and charged overtime that locked or
+    # dispatched loads already work again for new loads.
+    weight_unit_kg: float | None = None  # WEIGHT_UNIT_KG: every kg check in 0.1 kg units, no margin (F08)
+    new_overtime_only: bool | None = None  # True: only new overtime counts when choosing a truck (E4)
 
 
 class DispatchResponse(BaseModel):

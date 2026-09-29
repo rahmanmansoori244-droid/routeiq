@@ -40,7 +40,7 @@ export default async function HelpPage({ params }: { params: { slug: string } })
               About half a minute to a minute for a normal day.
             </Step>
             <Step n={4} icon={ListChecks} title="Review">
-              Per truck load: loading manifest (cases per product), delivery sequence with ETAs, km, utilisation and cost. Every order is either planned
+              Per truck load: loading manifest (cases and kg per product), delivery sequence with ETAs, km, utilisation and cost. Every order is either planned
               or listed as unserved with a reason, and cases always reconcile.
             </Step>
             <Step n={5} icon={Lock} title="Lock, export, dispatch">

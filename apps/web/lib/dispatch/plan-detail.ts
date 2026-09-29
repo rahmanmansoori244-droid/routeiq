@@ -236,6 +236,10 @@ export interface PlanDetail {
     chosen: boolean;
     /** The optimizer's own timetable check of this option (null: an option from before the check existed). */
     feasibility: { status: string; timing: string; violations: number } | null;
+    /** The kg unit every weight check of this option used (0.1, audit F08); null: an optimizer before it (whole kg, rounded up). */
+    weightUnitKg: number | null;
+    /** true: only new overtime counted when this option chose trucks (audit E4); null: an optimizer before it. */
+    newOvertimeOnly: boolean | null;
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
@@ -690,6 +694,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         tradeoff: tradeoffs[s.name]?.text || null,
         chosen: s.id === run.chosenScenarioId,
         feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
+        weightUnitKg: typeof d.weight_unit_kg === 'number' ? d.weight_unit_kg : null,
+        newOvertimeOnly: typeof d.new_overtime_only === 'boolean' ? d.new_overtime_only : null,
       };
     }),
     loads: detailLoads,
@@ -758,19 +764,22 @@ async function stuckOf(
  * what it was planned with (sheets included); nothing switches silently. A PLANNED load adopts the
  * change at the next re-plan; a locked one must be unlocked first (a dispatched one keeps it).
  */
-export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode' | 'loadNo' | 'stops' | 'masterChanged'>[]): string[] {
+export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode' | 'loadNo' | 'stops' | 'masterChanged' | 'origin'>[]): string[] {
   const stops: string[] = [];
   const frozen: string[] = [];
   const trucks: string[] = [];
-  const depotPlanned: string[] = [];
-  const depotKept: string[] = [];
-  let depotFar = '';
+  const depotPlanned: DepotMovedLoad[] = [];
+  const depotKept: DepotMovedLoad[] = [];
   for (const l of loads) {
     if (l.masterChanged.some((c) => c.kind !== 'DEPOT')) trucks.push(`${l.truckCode} L${l.loadNo}`);
     const depot = l.masterChanged.find((c) => c.kind === 'DEPOT');
     if (depot) {
-      (l.status === 'PLANNED' ? depotPlanned : depotKept).push(`${l.truckCode} L${l.loadNo}`);
-      if (typeof depot.movedM === 'number') depotFar = depot.movedM >= 1000 ? `${(depot.movedM / 1000).toFixed(1)} km` : `${depot.movedM} m`;
+      // Each load its own distance: loads kept through two depot moves were planned from different pins (A6 review).
+      (l.status === 'PLANNED' ? depotPlanned : depotKept).push({
+        label: `${l.truckCode} L${l.loadNo}`,
+        far: typeof depot.movedM === 'number' ? (depot.movedM >= 1000 ? `${(depot.movedM / 1000).toFixed(1)} km` : `${depot.movedM} m`) : null,
+        pin: l.origin ? `${l.origin.lat},${l.origin.lng}` : '',
+      });
     }
     for (const s of l.stops) {
       if (!s.masterChanged.some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) continue;
@@ -787,14 +796,33 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
   }
   if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
   // Audit E1 (owner decision 13): its own sentence, never "truck capacity changed".
-  const far = depotFar ? ` (${depotFar} from the depot's pin now)` : '';
-  if (depotKept.length) {
-    out.push(`Depot moved since planning: ${depotKept.join(', ')} start and end at the depot pin they were planned from${far}. Locked and dispatched loads keep it.`);
-  }
-  if (depotPlanned.length) {
-    out.push(`Depot moved since planning: ${depotPlanned.join(', ')} are still planned from the old depot pin${far}. Re-plan to plan them from the new pin.`);
-  }
+  if (depotKept.length) out.push(depotMovedSentence(depotKept, true));
+  if (depotPlanned.length) out.push(depotMovedSentence(depotPlanned, false));
   return out;
+}
+
+/** A load whose depot pin moved since it was planned: its label, how far (null: unknown) and the pin it was planned from. */
+type DepotMovedLoad = { label: string; far: string | null; pin: string };
+
+/**
+ * The plan's "Depot moved since planning" sentence for the kept (locked, dispatched) or the PLANNED
+ * loads. One distance when every load gives the same one; else each load its own, after its label
+ * (A6 review: the last load's distance was printed for all). Singular words for one load.
+ */
+function depotMovedSentence(items: DepotMovedLoad[], kept: boolean): string {
+  const one = items.length === 1;
+  const fars = new Set(items.map((i) => i.far));
+  const sameFar = fars.size === 1;
+  const onePin = new Set(items.map((i) => i.pin)).size === 1;
+  const list = items.map((i) => (sameFar || !i.far ? i.label : `${i.label} (${i.far})`)).join(', ');
+  const [only] = [...fars];
+  const far = sameFar ? (only ? ` (${only} from the depot's pin now)` : '') : " (distance from the depot's pin now)";
+  const pin = onePin ? 'pin' : 'pins';
+  if (kept) {
+    const verb = one ? 'starts and ends at the depot pin it was' : `start and end at the depot ${pin} they were`;
+    return `Depot moved since planning: ${list} ${verb} planned from${far}. Locked and dispatched loads keep ${onePin ? 'it' : 'them'}.`;
+  }
+  return `Depot moved since planning: ${list} ${one ? 'is' : 'are'} still planned from the old depot ${pin}${far}. Re-plan to plan ${one ? 'it' : 'them'} from the new pin.`;
 }
 
 type OutdatedLoad = {

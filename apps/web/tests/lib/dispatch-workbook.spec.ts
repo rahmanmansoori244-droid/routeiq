@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
 import { fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
@@ -31,6 +31,7 @@ function scenarioRow(): PlanDetail['scenarios'][number] {
     id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, frozenLoads: 0, totalKm: 10, dayKm: 10,
     totalDurationMin: 100, operatingCost: 50, dayOperatingCost: 50, costVersion: 2, estimatedLegs: 0, avgUtilizationPct: 50, unservedOrders: 0,
     distanceIsEstimated: false, provider: 'OSRM', objective: null, preference: null, preferenceCost: null, preferredHoursCost: null, tradeoff: null, chosen: false, feasibility: null,
+    weightUnitKg: null, newOvertimeOnly: null,
   };
 }
 
@@ -558,6 +559,37 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(old['Road time factor (truck vs car)']).toMatch(/including legs it could not route \(earlier rule\)/);
     expect(old['Default service time']).toMatch(/earlier rule/);
     expect(tenantAssumptions(cfg, { ...opts, rules: 'MIXED' })['Driver cost']).toMatch(/whole truck day.*loads kept from an earlier plan keep their earlier cost/);
+  });
+
+  it('states the 0.1 kg weights and the new-overtime rule only for a plan whose optimizer made it with them (A6 review)', () => {
+    const cfg = {
+      timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 360, driverShiftMaxMinutes: 600, reloadMinutes: 30,
+      maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 2.5, overtimeAfterMin: 540, overtimeCostPerHour: 4,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+      defaultServiceTimeMin: 10, osrmConfigured: false,
+    };
+    const opts = { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false };
+    // A plan the optimizer before A6 made (cost version 2, no rules in its option): the whole-day
+    // costs are current, but its weights and overtime were handled the earlier way.
+    const before = { ...scenarioRow(), chosen: true };
+    expect(solverRules({ scenarios: [before] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
+    const beforeRows = tenantAssumptions(cfg, { ...opts, rules: 'CURRENT', solverRules: solverRules({ scenarios: [before] }) });
+    expect(beforeRows.Weights).toBe(
+      'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
+    );
+    expect(beforeRows.Overtime).toBe('after 9:00 from the first departure, +4 OMR per hour on top of the driver cost');
+    // Made with them: the option says so.
+    const now = { ...before, weightUnitKg: 0.1, newOvertimeOnly: true };
+    expect(solverRules({ scenarios: [{ ...before, chosen: false }, now] })).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+    const nowRows = tenantAssumptions(cfg, { ...opts, solverRules: solverRules({ scenarios: [now] }) });
+    expect(nowRows.Weights).toBe("each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)");
+    expect(nowRows.Overtime).toMatch(/; overtime already worked by locked or dispatched loads is not counted again for new loads$/);
+    // A plan costed the earlier way (before the whole-day costs) never states the new rules either.
+    const earlier = tenantAssumptions(cfg, { ...opts, rules: 'EARLIER', solverRules: solverRules({ scenarios: [{ ...before, costVersion: null }] }) });
+    expect(earlier.Weights).toMatch(/^earlier rule: /);
+    expect(earlier.Overtime).not.toMatch(/not counted again/);
+    // No option at all: nothing says which rules made it, so the earlier wording.
+    expect(solverRules({ scenarios: [] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
   });
 
   it('road km with some estimated legs is labelled so (review F18)', async () => {

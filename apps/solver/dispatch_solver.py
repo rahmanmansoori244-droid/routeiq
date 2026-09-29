@@ -56,6 +56,7 @@ import math
 import os
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
@@ -66,6 +67,7 @@ import load_repack as LR
 from dispatch_models import (
     DAY_MIN,
     MAX_STOPS,
+    WEIGHT_UNIT_KG,
     DispatchConfig,
     DispatchRequest,
     DispatchResponse,
@@ -329,9 +331,12 @@ def _shortage_reason(priority: int, demand_cases: int, cap_cases: int, demand_kg
     return f"Fleet capacity shortage: {demand_cases} cases requested vs {cap_cases} cases across all available loads." + tail
 
 
-def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> list[tuple[int, float]]:
+def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad],
+           takes_room: Callable[[PlannedStop], bool] | None = None) -> list[tuple[int, float]]:
     """The room left on each load of the plan and on each load slot a truck did not use (a full
-    truck's room): (cases, kg in 0.1 kg units; inf when the truck has no payload)."""
+    truck's room): (cases, kg in 0.1 kg units; inf when the truck has no payload). takes_room: which
+    planned stops count as taking room (all by default; _no_room_reason counts only the stops of the
+    same or a higher priority, since strict priorities drop lower ones first)."""
     by_truck: dict[str, list[PlannedLoad]] = {}
     for ld in loads:
         by_truck.setdefault(ld.truck_id, []).append(ld)
@@ -339,7 +344,9 @@ def _rooms(usable_tds: list[TruckDay], loads: list[PlannedLoad]) -> list[tuple[i
     for td in usable_tds:
         mine = by_truck.get(td.truck.id, [])
         kg_cap = td.max_kg_units if td.max_kg_units > 0 else math.inf
-        rooms += [(td.max_cases - ld.cases, kg_cap - kg_units(ld.kg)) for ld in mine]
+        for ld in mine:
+            taken = ld.stops if takes_room is None else [st for st in ld.stops if takes_room(st)]
+            rooms.append((td.max_cases - sum(st.cases for st in taken), kg_cap - sum(kg_units(st.kg) for st in taken)))
         rooms += [(td.max_cases, kg_cap)] * max(0, td.trips_left - len(mine))
     return rooms
 
@@ -353,23 +360,31 @@ def _fits_room_left(left: list[DispatchStop], usable_tds: list[TruckDay], loads:
     return any(s.demand_cases <= rc and kg_units(s.demand_kg) <= rk for s in left for rc, rk in rooms)
 
 
-def _no_room_reason(s: DispatchStop, rooms: list[tuple[int, float]]) -> str | None:
+def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
+                    priority_of: dict[str, int]) -> str | None:
     """The true reason a stop that no load and no free trip has room for is left out (audit F08
     verifiers: such a stop said "the optimizer found no truck, trip or time slot ... Re-plan to
-    search again", as if more search time could serve it). None when some load or free trip of the
-    plan has room for it by cases AND kg: then nothing proves it could not go, and the time-limited
-    search's own reason stays."""
+    search again", as if more search time could serve it). The room on a load counts only its stops
+    of the same or a higher priority (A6 review): strict priorities drop lower ones first, so a stop
+    left out by TIME while P5 stops fill the loads is not "left out for its weight". None when some
+    load or free trip has room for it that way, by cases AND kg: then nothing proves it could not go,
+    and the time-limited search's own reason (and its warning) stays."""
+    rooms = _rooms(usable_tds, loads, lambda st: priority_of[st.stop_id] <= s.priority)
     u = kg_units(s.demand_kg)
     if any(s.demand_cases <= rc and u <= rk for rc, rk in rooms):
         return None
-    tail = (f" This P{s.priority} stop was left out (lowest priorities first). "
+    # "Lowest priorities first" only when no lower-priority stop rides on the plan.
+    lower_served = any(priority_of[st.stop_id] > s.priority for ld in loads for st in ld.stops)
+    even, left = (", even with every lower-priority stop taken off", "then the most room") if lower_served else (
+        "", "the most room left")
+    tail = (f" This P{s.priority} stop was left out{'' if lower_served else ' (lowest priorities first)'}. "
             "Add a truck or raise the loads-per-truck limit.")
     by_cases = [rk for rc, rk in rooms if s.demand_cases <= rc]
     if by_cases:  # its cases fit somewhere, its weight does not
-        return (f"Not planned: no load or free trip has room for its {kg_text(u / 10)} kg (the most room left on a load "
+        return (f"Not planned: no load or free trip has room for its {kg_text(u / 10)} kg{even} ({left} on a load "
                 f"that takes its {s.demand_cases} cases is {kg_text(max(0.0, max(by_cases)) / 10)} kg)." + tail)
     most = max((rc for rc, _ in rooms), default=0)
-    return (f"Not planned: no load or free trip has room for its {s.demand_cases} cases (the most room left is "
+    return (f"Not planned: no load or free trip has room for its {s.demand_cases} cases{even} ({left} is "
             f"{max(0, most)} cases)." + tail)
 
 
@@ -1047,7 +1062,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     short_cases = demand_cases > total_cap_cases
     short_kg = kg_bound and demand_u > total_cap_u
     shortage = short_cases or short_kg
-    rooms = _rooms(usable_tds, loads)
+    priority_of = {st.stop_id: st.priority for st in stops}
     unserved_penalty = 0.0
     open_drops = 0
     left_cases = 0
@@ -1070,10 +1085,10 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
                                       _shortage_reason(s.priority, demand_cases, total_cap_cases, demand_kg, total_cap_kg,
                                                        short_cases, short_kg)))
-        elif (no_room := _no_room_reason(s, rooms)) is not None:
-            # No load of this plan and no free trip has room for it (cases or kg): say so, not
-            # "re-plan to search again" (audit F08 verifiers). The code stays (a reason code is a
-            # database enum); the words are what the dispatcher reads.
+        elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of)) is not None:
+            # No load of this plan and no free trip has room for it (cases or kg), even without
+            # its lower-priority stops: say so, not "re-plan to search again" (audit F08 verifiers).
+            # The code stays (a reason code is a database enum); the words are what the dispatcher reads.
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", no_room))
         else:
             # Never claimed impossible: no prefilter ruled this stop out, and the search is a
@@ -1152,6 +1167,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         preference_penalties=PreferencePenalties(window=round(comp["window"], 3), early=round(comp["early"], 3),
                                                  continuity=round(comp["continuity"], 3)),
         estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
+        # The rules this plan was made with (audit A6 review; the ASSUMPTIONS sheet states them).
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
     )
     _assert_reconciled(req, sc)
     exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
@@ -1183,6 +1200,7 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult, tds: list
         # No load, so no timetable that could break a rule.
         feasibility=FeasibilityReport(status="VERIFIED", timing="EXACT", checked_at_version=FZ.CHECK_VERSION),
         cost_policy=costing.COST_POLICY, cost_version=costing.COST_VERSION, paid_driver_min=0, estimated_legs=0,
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
     )
 
 

@@ -1203,6 +1203,9 @@ function LoadActions({
   return <div className="flex flex-wrap gap-1">{out}</div>;
 }
 
+/** kg on the loading manifest, to 0.1 kg like the load's own kg (896.8, not 897). */
+const manifestKg = (kg: number) => kg.toLocaleString('en-US', { maximumFractionDigits: 1 });
+
 function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
   return (
     <div className="grid gap-4 lg:grid-cols-3">
@@ -1215,13 +1218,16 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td className="py-1 pr-2 font-mono">{m.productCode}</td>
                 <td className="py-1 pr-2">{m.productName}</td>
                 <td className="py-1 text-right font-semibold">{m.cases}</td>
+                {/* Audit E3 (A6 review): each product's kg, which add up to the load's kg. */}
+                <td className="py-1 pl-2 text-right text-muted-foreground">{manifestKg(m.weightKg)} kg</td>
               </tr>
             ))}
             <tr>
               <td colSpan={2} className="py-1 font-semibold">
-                TOTAL ({Math.round(l.weightKg)} kg)
+                TOTAL
               </td>
               <td className="py-1 text-right font-semibold">{l.cases}</td>
+              <td className="py-1 pl-2 text-right font-semibold">{manifestKg(l.weightKg)} kg</td>
             </tr>
           </tbody>
         </table>

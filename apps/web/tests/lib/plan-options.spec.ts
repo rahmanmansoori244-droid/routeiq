@@ -36,7 +36,7 @@ import {
 } from '@/lib/dispatch/plan-options';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, solverRules } from '@/lib/dispatch/workbook';
 
 const T = 'tA';
 const DAY = new Date('2026-09-27T00:00:00Z');
@@ -315,6 +315,16 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     expect(rows[min + 1][2]).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
   });
 
+  it('A6 review: each option carries the weight and overtime rules its optimizer reported (none from an older one)', async () => {
+    seed();
+    const rec = tables.scenarioResult[0];
+    rec.detailsJson = { ...(rec.detailsJson as Record<string, unknown>), weight_unit_kg: 0.1, new_overtime_only: true };
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.scenarios[0]).toMatchObject({ name: 'RECOMMENDED', weightUnitKg: 0.1, newOvertimeOnly: true });
+    expect(d.scenarios[1]).toMatchObject({ name: 'MIN_TRUCKS', weightUnitKg: null, newOvertimeOnly: null });
+    expect(solverRules(d)).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+  });
+
   it('audit F22: an option whose timetable is VIOLATED says so on screen and in the Excel, never "cheaper"', async () => {
     seed();
     const min = tables.scenarioResult[1];
@@ -355,5 +365,44 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     const texts: string[] = [];
     wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
     expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved · timing VERIFIED');
+  });
+});
+
+describe('audit E3 through getPlanDetail: each load sheet weighs what the load weighs (A6 review)', () => {
+  /**
+   * The verifiers' two shapes, through getPlanDetail (the helper alone passed while getPlanDetail
+   * could still call the old rowLines): O2 is weighed at order level (lines of 24 and 16 cases at
+   * 0 kg, the order 400 kg); O3 is a LOCKED split part of 20 cases planned at 15 kg per case (300 kg)
+   * while its line now says 10 kg per case. O1 on the dispatched K1 is the control.
+   */
+  function seedWeights() {
+    seed();
+    const o2 = tables.order.find((o) => o.id === 'O2')!;
+    o2.lines = [
+      { id: 'O2-a', cases: 24, weightKg: 0, weightFromMaster: false, salesOrderNo: 'SO-O2', product: { code: 'TAN', name: 'Tanuf', weightPerCaseKg: 0 } },
+      { id: 'O2-b', cases: 16, weightKg: 0, weightFromMaster: false, salesOrderNo: 'SO-O2', product: { code: 'MAI', name: 'Masafi', weightPerCaseKg: 0 } },
+    ];
+    Object.assign(tables.planLoad.find((l) => l.id === 'L3')!, { status: 'LOCKED', cases: 20, weightKg: 300 });
+    Object.assign(tables.routeAssignment.find((a) => a.id === 'A3')!, {
+      plannedLoadCases: 20, portionCases: 20, portionWeightKg: 300, portionLinesJson: [{ lineId: 'O3-l', cases: 20, kgPerCase: 15 }],
+    });
+  }
+
+  it("each load's manifest kg and each stop's SKU kg equal the load's and the row's kg", async () => {
+    seedWeights();
+    const d = (await getPlanDetail(T, 'P'))!;
+    const kg = (xs: { weightKg: number }[]) => Math.round(xs.reduce((a, x) => a + x.weightKg, 0) * 10) / 10;
+    const byId = Object.fromEntries(d.loads.map((l) => [l.id, [l.weightKg, kg(l.manifest)]]));
+    expect(byId).toEqual({ K1: [400, 400], L2: [400, 400], L3: [300, 300] });
+    for (const l of d.loads) for (const st of l.stops) expect(kg(st.skus), `${l.id} stop ${st.sequence}`).toBe(st.weightKg);
+    const manifest = (id: string) =>
+      d.loads.find((l) => l.id === id)!.manifest.map((m) => [m.productCode, m.cases, m.weightKg]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    // Order-level weights are spread per case (24 : 16), not left at 0 kg.
+    expect(manifest('L2')).toEqual([
+      ['MAI', 16, 160],
+      ['TAN', 24, 240],
+    ]);
+    // The part keeps the 15 kg per case it was planned with (not the line's 10 kg now: 200 kg).
+    expect(manifest('L3')).toEqual([['TAN', 20, 300]]);
   });
 });

@@ -574,6 +574,12 @@ def test_a_load_that_weighs_exactly_the_payload_fits_in_every_scenario():
         assert [ld.kg for ld in sc.loads] == [3000.0]
         assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED", (sc.name, sc.feasibility)
         assert_reconciled(r, sc)
+        # A6 review: each option says which weight and overtime rules made it (the ASSUMPTIONS
+        # sheet states them only then; an older solver's plans say nothing).
+        assert (sc.weight_unit_kg, sc.new_overtime_only) == (0.1, True), sc.name
+    # Also a day with nothing to plan.
+    empty = rec(optimize_dispatch(req([], [truck("T01", cap=100, capacity_kg=3000)])))
+    assert (empty.weight_unit_kg, empty.new_overtime_only) == (0.1, True)
 
 
 def test_a_tenth_of_a_kg_over_the_payload_is_left_out_for_its_weight():
@@ -615,6 +621,50 @@ def test_a_stop_no_load_has_room_for_gets_the_weight_reason_not_replan():
         "Not planned: no load or free trip has room for its 1,600 kg (the most room left on a load that takes its "
         "10 cases is 1,400 kg)."), u.reason_message
     assert "Re-plan to search again" not in u.reason_message
+    assert not any("no check proves they are impossible" in w for w in sc.warnings), sc.warnings
+    assert_reconciled(r, sc)
+
+
+def test_a_stop_left_out_for_its_window_is_not_told_it_is_its_weight():
+    """A6 review: the weight reason counted the room taken by LOWER-priority stops, which strict
+    priorities would drop first. Two P1 stops with the same 08:00-08:15 window about 70 minutes
+    apart, two P5 stops next to the depot, T01 (1 trip) and T02 (1 trip, from 09:00): one P1 stop
+    cannot go by TIME. With both P5 stops on the loads, the weight reason said "no load ... has room
+    for its 1,000 kg ... (lowest priorities first)", although taking the P5 stops off serves it no
+    better (6,000 kg on 6,000 kg of loads, no shortage). It keeps the search's own reason and warning."""
+    win = dict(priority=1, hard_start_min=hm("08:00"), hard_end_min=hm("08:15"))
+    stops = [stop("Z1", 23.75, 58.39, cases=10, demand_kg=1000, **win),
+             stop("Z2", 23.42, 58.39, cases=10, demand_kg=1000, **win),
+             stop("W", 23.586, 58.391, cases=10, demand_kg=1500, priority=5),
+             stop("V", 23.587, 58.392, cases=10, demand_kg=2500, priority=5)]
+    trucks = [truck("T01", cap=500, capacity_kg=3000, max_trips=1),
+              truck("T02", cap=500, capacity_kg=3000, max_trips=1, available_from_min=hm("09:00"))]
+    r = req(stops, trucks, shift_start_min=hm("06:00"))
+    sc = rec(optimize_dispatch(r))
+    left = [u for u in sc.unserved if u.stop_id in ("Z1", "Z2")]
+    assert len(left) == 1 and {"W", "V"} & served_ids(sc), (sc.unserved, served_ids(sc))
+    msg = left[0].reason_message
+    assert "no load or free trip has room" not in msg and "lowest priorities first" not in msg, msg
+    assert "found no truck, trip or time slot for this P1 stop" in msg, msg
+    assert any("no check proves they are impossible" in w for w in sc.warnings), sc.warnings
+    assert_reconciled(r, sc)
+
+
+def test_the_weight_reason_counts_only_stops_of_its_priority_or_higher():
+    """A6 review, the control: 3 x 1,600 kg P1 and a 100 kg P5 on 2 trucks x 1 load of 3,000 kg.
+    Taking the P5 stop off still leaves 1,400 kg of room, so the weight reason stays; it gives that
+    room (not the 1,300 kg left beside the P5 stop) and does not say "lowest priorities first"."""
+    stops = [stop(f"S{i}", 23.60 + i * 0.001, 58.45, cases=10, demand_kg=1600, priority=1) for i in range(3)]
+    stops.append(stop("L5", 23.605, 58.45, cases=1, demand_kg=100, priority=5))
+    r = req(stops, [truck("T01", cap=100, capacity_kg=3000, max_trips=1), truck("T02", cap=100, capacity_kg=3000, max_trips=1)])
+    sc = rec(optimize_dispatch(r))
+    assert "L5" in served_ids(sc) and len(sc.unserved) == 1, (served_ids(sc), sc.unserved)
+    msg = sc.unserved[0].reason_message
+    assert msg.startswith(
+        "Not planned: no load or free trip has room for its 1,600 kg, even with every lower-priority stop taken off "
+        "(then the most room on a load that takes its 10 cases is 1,400 kg). This P1 stop was left out. "
+        "Add a truck or raise the loads-per-truck limit."), msg
+    assert "lowest priorities first" not in msg
     assert not any("no check proves they are impossible" in w for w in sc.warnings), sc.warnings
     assert_reconciled(r, sc)
 

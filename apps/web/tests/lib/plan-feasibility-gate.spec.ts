@@ -319,7 +319,7 @@ describe('snapshots (F08)', () => {
     const locked = d.loads.find((l) => l.id === l1Again.id)!;
     expect(locked.origin).toEqual({ lat: 23.58, lng: 58.39 });
     expect(locked.masterChanged.map((c) => c.kind)).toEqual(['DEPOT']);
-    expect(d.warnings).toContain("Depot moved since planning: T01 L1 start and end at the depot pin they were planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.");
+    expect(d.warnings).toContain("Depot moved since planning: T01 L1 starts and ends at the depot pin it was planned from (2.2 km from the depot's pin now). Locked and dispatched loads keep it.");
     expect(d.warnings.some((w) => w.startsWith('Truck capacity changed'))).toBe(false);
   });
 

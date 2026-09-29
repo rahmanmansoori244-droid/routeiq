@@ -318,6 +318,12 @@ export function plannedLoadsMasterChanged(
   stops: { customerId: string; stopSnapshotJson: unknown; live: LiveStopFacts }[],
   loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number } | null }[],
   depotNow?: { lat: number; lng: number } | null,
+  /**
+   * The depot pin the plan's option was optimized from (its inputs.depot): the origin of a load
+   * whose snapshot keeps none (planned before origins were kept) - the plan screen's rule, so the
+   * day is out of date exactly when the plan notes say "still planned from the old depot pin" (A6 review).
+   */
+  plannedFrom?: { lat: number; lng: number } | null,
 ): { customers: number; trucks: number; depotMoved: number } {
   const customers = new Set<string>();
   for (const s of stops) {
@@ -331,7 +337,7 @@ export function plannedLoadsMasterChanged(
     const snap = readTruckSnapshot(l.truckSnapshotJson);
     if (snap && l.live && truckMasterChanges(snap, l.live).length) trucks.add(l.truckId);
     // Audit E1: a PLANNED load still drawn from a depot pin moved since: a re-plan uses the new pin.
-    if (depotNow && depotMovedChange(readLoadOrigin(snap), depotNow)) depotMoved++;
+    if (depotNow && depotMovedChange(readLoadOrigin(snap) ?? plannedFrom ?? null, depotNow)) depotMoved++;
   }
   return { customers: customers.size, trucks: trucks.size, depotMoved };
 }

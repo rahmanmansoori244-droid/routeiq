@@ -552,7 +552,7 @@ describe('frozen plan facts (review F08)', () => {
       const kept = p.loads.find((l: any) => l.id === copy.id);
       expect(kept.origin).toEqual({ lat: DEPOT.lat, lng: DEPOT.lng });
       expect(kept.masterChanged.map((c: any) => c.kind)).toContain('DEPOT');
-      expect(p.warnings.some((w: string) => /^Depot moved since planning: .* start and end at the depot pin they were planned from \(2\.2 km from the depot's pin now\)\. Locked and dispatched loads keep it\.$/.test(w))).toBe(true);
+      expect(p.warnings.some((w: string) => /^Depot moved since planning: .* (starts and ends at the depot pin it was|start and end at the depot pin they were) planned from \(2\.2 km from the depot's pin now\)\. Locked and dispatched loads keep it\.$/.test(w))).toBe(true);
       const fresh = p.loads.filter((l: any) => l.status === 'PLANNED');
       expect(fresh.length).toBeGreaterThan(0);
       for (const l of fresh) {

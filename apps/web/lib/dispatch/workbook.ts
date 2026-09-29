@@ -104,6 +104,29 @@ export function planRules(d: Pick<PlanDetail, 'summary' | 'loads' | 'scenarios'>
   return costed === d.loads.length && summaryCostBasis(d.summary) === 'TRUCK_DAY_SPAN' ? 'CURRENT' : 'MIXED';
 }
 
+/**
+ * The weight and overtime rules of the optimizer that made a plan (audit A6 review), read from the
+ * option in use (else any option: a version's options come from one optimizer run). An option from
+ * an optimizer before them carries neither: its route search rounded each stop up to a whole kg
+ * and charged overtime already worked by locked or dispatched loads again. The ASSUMPTIONS sheet
+ * states the new rules only for a plan made with them, so a re-exported older plan is described
+ * by the rules it was built with.
+ */
+export interface SolverRules {
+  /** Every kg check to 0.1 kg with no margin (audit F08). */
+  weightsToTenthKg: boolean;
+  /** Only new overtime counted when choosing a truck (audit E4, owner decision 14). */
+  newOvertimeOnly: boolean;
+}
+
+export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
+  const option = d.scenarios.find((s) => s.chosen) ?? d.scenarios[0];
+  return {
+    weightsToTenthKg: option?.weightUnitKg === 0.1,
+    newOvertimeOnly: option?.newOvertimeOnly === true,
+  };
+}
+
 const WHOLE_DAY_NOTE =
   "Driver cost: the driver is paid for the whole truck day - first departure (or first locked departure) to last return, depot turnaround and waiting included - with overtime after the configured hours on top. Each load carries the paid time from its truck's previous return to its own return; the fixed truck cost is on the truck's first load (see TRUCK DAYS).";
 
@@ -1007,6 +1030,8 @@ export function tenantAssumptions(
     outsideCoverage?: boolean;
     /** The rules the plan was made with (planRules); default CURRENT. */
     rules?: PlanRules;
+    /** The optimizer's weight and overtime rules the plan was made with (solverRules); default: today's. */
+    solverRules?: SolverRules;
     /** Legs of the plan on straight-line estimates although it used road routing (review F18). */
     estimatedLegs?: number;
     /** Whether any load of the plan has a fuel figure (its truck has a km per litre); undefined = unknown. */
@@ -1017,6 +1042,7 @@ export function tenantAssumptions(
   const cur = opts.currency;
   const rules = opts.rules ?? 'CURRENT';
   const earlier = rules === 'EARLIER';
+  const solver = opts.solverRules ?? { weightsToTenthKg: true, newOvertimeOnly: true };
   const outsideCoverage = cfg.outsideCoverage ?? opts.outsideCoverage ?? false;
   // A plan with no road leg at all (straight-line provider, or every leg estimated) never used the
   // road time factor: it is timed at the estimate speed (scenario tests: HAVERSINE plans still
@@ -1057,12 +1083,16 @@ export function tenantAssumptions(
         ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour${
             earlier ? " (priced in the optimizer's search only; not included in this plan's load costs or operating cost)" : ' on top of the driver cost'
           }${cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes ? ' (never reached: at or after the shift maximum)' : ''}${
-            // Audit E4 (owner decision 14): only new cost counts when choosing a truck.
-            earlier ? '' : '; overtime already worked by locked or dispatched loads is not counted again for new loads'
+            // Audit E4 (owner decision 14): only new cost counts when choosing a truck - stated
+            // only for a plan whose optimizer says it chose that way (A6 review).
+            !earlier && solver.newOvertimeOnly ? '; overtime already worked by locked or dispatched loads is not counted again for new loads' : ''
           }`
         : 'not costed',
-    // Audit F08 (owner decision 15): how weights are compared, with no hidden margin.
-    Weights: 'each order to the nearest 0.1 kg, checked against each truck\'s payload with no margin (a load may weigh exactly the payload)',
+    // Audit F08 (owner decision 15): how weights are compared, with no hidden margin; an older
+    // optimizer's plan keeps the rule it was made with (A6 review).
+    Weights: solver.weightsToTenthKg
+      ? "each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)"
+      : 'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} ${cur} per minute outside the preferred window (soft)`,
     'Road time factor (truck vs car)': noRoadLegs
       ? `not used in this plan: every distance is a straight-line estimate, timed at the average speed for estimates (the x${cfg.roadTimeFactor} setting applies to road legs only)`

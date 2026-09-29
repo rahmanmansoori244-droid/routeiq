@@ -20,7 +20,7 @@ import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
-import { plannedLoadsMasterChanged } from './snapshots';
+import { plannedLoadsMasterChanged, readPlanInputs } from './snapshots';
 
 export interface IssueCustomer {
   customerId: string;
@@ -242,10 +242,14 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
         select: { truckId: true, truckSnapshotJson: true, truck: { select: { capacityCases: true, capacityWeightKg: true } } },
       })
     : [];
+  // A load planned before origins were kept was planned from the pin its option was optimized
+  // from, as the plan screen reads it (plan-detail: readLoadOrigin ?? inputs.depot; A6 review).
+  const optimizedFrom = readPlanInputs(d?.inputs)?.depot ?? null;
   const changed = plannedLoadsMasterChanged(
     plannedStops,
     plannedLoads.map((l) => ({ truckId: l.truckId, truckSnapshotJson: l.truckSnapshotJson, live: l.truck })),
     { lat: depot.lat, lng: depot.lng },
+    optimizedFrom ? { lat: optimizedFrom.lat, lng: optimizedFrom.lng } : null,
   );
   outdated.masterChanged = changed.customers;
   outdated.trucksChanged = changed.trucks;

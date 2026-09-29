@@ -497,6 +497,24 @@ E5 follow-up below). Re-plans count their new loads only here.
   kg. These synthetic days have no product weight corrected after planning and no order weighed at order level, so E3's change is
   shown by its unit tests, not here.
 
+### 10.4 After the A6 review (no re-run needed)
+
+The review of the branch changed the solver in two ways, and neither changes a plan:
+
+- **The "no room" reason counts only stops of the same or a higher priority.** It decides the words of an unserved stop and
+  whether the plan warns "no check proves they are impossible"; the route search, the repack, the timing and the choice between
+  plans are the same code. It can only turn a "no load or free trip has room ..." reason into the search's own reason, or reword
+  it. No stored answer of the branch has such a reason: in both of its web runs, on every day (S01-S05, S04b and the
+  real day), the stored reasons are the web's own checks (a missing location, a deactivated customer, an order heavier than
+  any truck), S03's unreachable window and fleet shortage (the shortage reason is decided before the "no room" one), and none on
+  the real day (every order served). No stop has the search's own "found no truck, trip or time slot" reason either.
+- **Each option reports the rules it was made with** (`weight_unit_kg` 0.1, `new_overtime_only`), which only the ASSUMPTIONS
+  sheet reads.
+
+So the tables of 10.1 and 10.2 stand for the reviewed branch. The web changes of the review (the depot note's distances, the
+manifest's kg on screen, the day out of date for older planned loads on a moved depot pin, the ASSUMPTIONS rows of older plans)
+change what is shown, not what is planned.
+
 ## Sources
 
 - OR-Tools repository and licence (Apache-2.0): https://github.com/google/or-tools · releases: https://github.com/google/or-tools/releases
