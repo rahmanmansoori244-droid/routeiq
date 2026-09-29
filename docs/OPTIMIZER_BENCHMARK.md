@@ -408,6 +408,95 @@ better on both shapes, so PR5 keeps the owner's rule (the driver is paid for the
 late-order case shows up there, one search without the start bound can be added as an extra candidate: the post-solve score
 already prices every candidate on the whole-day model, so it would only be chosen when it is cheaper.
 
+## 10. Audit PR A6 (29 Sep 2026): solver and plan-output accuracy, main vs the branch
+
+A6 changes what the optimizer compares and chooses: weights in 0.1 kg with no hidden margin (F08), only new overtime for a
+truck with locked loads (E4), and a load repack that never gives up before its first answer (E5); the rest of A6 is output only
+(loading-sheet kg, option wording, cost per case, the depot origin of locked loads). The assessment asked for a comparison on
+the five synthetic scenario days and one real day, **priority service first, then cost** (owner decision 26).
+
+**Method.** Same machine as §5 (AMD Ryzen 7 7445HS, 12 threads, 31 GB RAM, Windows 11; Python 3.12.13, OR-Tools 9.15.6755),
+each version with its own web app (Next.js dev server) and solver (production worker pool), on its own database, one version at
+a time: **main** `3451f4d` (web :3011, solver :8011, database `routeiq_p6_base` migrated with main's migrations) first, then
+**the branch** (web :3009, solver :8009). Every day was run **twice per version** in fresh companies set up through the web API:
+
+- the five synthetic days S01-S05 (plus S04b, S04's balanced variant) of the scenario harness (`.dev/scenarios/harness-final`,
+  the order files `S01_Orders.xlsx` ... `S05_Orders.xlsx`, delivery 4-8 Oct 2026; straight-line distances x 1.3 at 40 km/h),
+  from a copy with two changes made for both versions alike: OPTIMIZE passes "optimize anyway" for missing locations (A5 refuses
+  S01's one customer without a location otherwise), and S04 uploads its Orders sheet alone (the two-sheet workbook is refused
+  since B2). S04 and S04b plan a morning (v1), lock and dispatch its loads, add late orders and re-plan (v2);
+- the real NMWC day: the 28 Sep order file (373 lines, 80 customers, 46 products, 13 trucks, NMWC's rates and settings),
+  moved to 15 Oct 2026 for both versions (a future day, so the same-day "plan from now" rule does not apply), through a copy of
+  `.dev/realdata/run-test.mjs` that writes only its own folder.
+
+Every figure is the plan in use (RECOMMENDED), read back from `GET /api/runs/:id/plan` and the job's stored optimizer
+response: orders served per priority, unserved orders with their reason codes, trucks, loads, km and cost of the whole day, the
+option's own timing check and the optimizer's time (search + post-solve stage). No customer names; km and costs are estimates on
+synthetic points or approximate real pins. Every option of every run (RECOMMENDED, MIN TRUCKS, MIN DISTANCE) was VERIFIED too.
+
+**Caveat on this run.** Other work used the same PC during both versions' runs (the load sampler logged 100 % CPU almost all the
+time; three optimizer research jobs and another branch's build ran alongside). OR-Tools' searches are time-limited, so their plans
+depend on free CPU. The two runs of a version agree on most days, not on S05 (both versions) and the branch's S01, so the
+controlled replay of 10.2 was added to tell the code from the machine.
+
+### 10.1 The web API runs (harness and real day, two runs per version)
+
+Each cell of a run is trucks / loads / km / cost in OMR for the whole day (a re-plan: the kept loads included). Every plan passed its own timing check (VERIFIED).
+
+| Day | Orders served P1 · P2 · P3 · P4 · P5 (every run) | Unserved (reason) | main run 1: trucks / loads / km / OMR | main run 2 | branch run 1 | branch run 2 | Timing | Optimizer s (main; branch) |
+|---|---|---|---|---|---|---|---|---|
+| S01 normal day, Muscat | 5/5 · 23/23 · 94/94 · 59/60 · 18/18 | 1 (1 MISSING_COORDINATES) | 7 / 11 / 565.8 / 242.90 | 7 / 11 / 565.8 / 242.90 | 7 / 12 / 529.6 / 238.56 | 6 / 12 / 477.2 / 207.26 | VERIFIED | 163, 168; 156, 162 |
+| S02 heavy day, Sohar (split deliveries) | 9/10 · 15/15 · 93/93 · 50/50 · 27/27 | 1 (1 EXCEEDS_ANY_TRUCK_CAPACITY) | 7 / 20 / 483.7 / 233.05 | 7 / 20 / 483.7 / 233.05 | 7 / 20 / 461.7 / 230.40 | 7 / 20 / 461.7 / 230.40 | VERIFIED | 188, 180; 188, 181 |
+| S03 weight-bound shortage, Salalah | 12/13 · 24/24 · 64/64 · 9/70 · 0/69 | 131 (1 HARD_WINDOW_INFEASIBLE, 130 SOLVER_DROPPED_LOW_PRIORITY) | 6 / 6 / 340.7 / 190.88 | 6 / 6 / 340.7 / 190.88 | 6 / 6 / 337.5 / 190.50 | 6 / 6 / 337.3 / 190.48 | VERIFIED | 172, 165; 159, 153 |
+| S04 re-plan with locked + dispatched loads, Nizwa | 11/11 · 40/40 · 114/115 · 46/47 · 17/17 | 2 (2 MISSING_COORDINATES) | 6 / 11 / 452.4 / 204.30 | 6 / 11 / 452.4 / 204.30 | 6 / 11 / 427.4 / 201.29 | 6 / 11 / 427.4 / 201.29 | VERIFIED | 144, 140; 136, 128 |
+| S04b the same, balanced locked loads | 11/11 · 40/40 · 114/115 · 46/47 · 17/17 | 2 (2 MISSING_COORDINATES) | 7 / 12 / 508.8 / 236.05 | 7 / 12 / 508.7 / 236.05 | 6 / 11 / 479.3 / 207.52 | 6 / 11 / 479.3 / 207.52 | VERIFIED | 146, 142; 137, 132 |
+| S05 data problems, Muscat | 9/9 · 42/42 · 158/158 · 94/96 · 35/35 | 2 (2 INVALID_CUSTOMER) | 11 / 19 / 1,134.0 / 411.07 | 12 / 18 / 1,290.1 / 454.82 | 11 / 18 / 1,320.5 / 433.47 | 12 / 16 / 675.2 / 381.03 | VERIFIED | 186, 178; 172, 164 |
+| Real NMWC day (28 Sep orders) | 0/0 · 26/26 · 51/51 · 3/3 · 0/0 | 0 | 6 / 17 / 1,172.3 / 595.63 | 6 / 17 / 1,172.3 / 595.63 | 6 / 14 / 1,011.3 / 556.14 | 5 / 14 / 997.2 / 543.03 | VERIFIED | 50, 51; 51, 43 |
+
+### 10.2 The same requests replayed back to back (controlled)
+
+Because the machine's load changed between the versions' runs, each day's stored optimizer request from run 1 (main's request
+on main's solver, the branch's request on the branch's solver: the same orders, the web of each version) was also solved again
+in-process (`SOLVER_PARALLEL=0`), one after the other, day by day, at the same load, with the branch's final code (including the
+E5 follow-up below). Re-plans count their new loads only here.
+
+| Day | Unserved stops by priority (main = branch) | main: trucks / loads / km / OMR | branch: trucks / loads / km / OMR | Cost change | Timing | Optimizer s (main; branch) |
+|---|---|---|---|---|---|---|
+| S01 normal day | none | 7 / 11 / 565.8 / 242.90 | 7 / 12 / 503.3 / 235.40 | -3.1 % | VERIFIED | 158; 155 |
+| S02 heavy day | none | 7 / 20 / 470.3 / 231.44 | 7 / 20 / 461.7 / 230.40 | -0.4 % | VERIFIED | 189; 170 |
+| S03 weight-bound shortage | P1 1, P4 61, P5 69 | 6 / 6 / 340.7 / 190.88 | 6 / 6 / 337.3 / 190.48 | -0.2 % | VERIFIED | 155; 154 |
+| S04 re-plan (new loads) | none | 6 / 9 / 414.7 / 149.76 | 6 / 9 / 389.7 / 146.76 | -2.0 % | VERIFIED | 129; 129 |
+| S04b re-plan (new loads) | none | 7 / 10 / 468.5 / 181.22 | 6 / 9 / 439.0 / 152.68 | -15.7 % | VERIFIED | 132; 133 |
+| S05 data problems | none | 11 / 16 / 692.3 / 358.08 | 11 / 16 / 707.1 / 359.85 | +0.5 % | VERIFIED | 180; 173 |
+| Real NMWC day | none | 5 / 14 / 1,003.1 / 545.04 | 5 / 14 / 997.2 / 543.03 | -0.4 % | VERIFIED | 45; 47 |
+
+### 10.3 Verdict
+
+- **Priority service: never worse.** Every day, in every run of both versions and in the replays, serves exactly the same orders
+  per priority (P1 to P5) and leaves the same ones unserved for the same reasons. Nothing to explain or fix under owner decision 26.
+- **Cost: lower or equal on six of seven days, the seventh inside the search's variation.** In the replays the branch is cheaper
+  on S01 (-3.1 %), S02 (-0.4 %), S03 (-0.2 %), the S04 re-plan (-2.0 %), the S04b re-plan (-15.7 %: one truck and one load fewer)
+  and the real day (-0.4 %), and 0.5 % dearer on S05 (same trucks and loads, 15 km more). S05 is the day on which main's own two
+  web runs differed by 10.6 % (411 and 455 OMR), so 0.5 % is the time-limited search finding another plan, not a rule. Over all
+  seven replayed days the branch costs 1,858.6 OMR against 1,899.3 OMR (-2.1 %).
+- **Why the plans differ.** The web runs had overtime unpriced on the synthetic days and no locked loads on the real day, so E4
+  (only new overtime) does not act here; its effect is shown by the unit tests (a locked truck in overtime gets the new load for
+  about 3 OMR instead of an idle truck for 6 OMR). The loads of these days are mostly case-bound, so F08's exact weights change the
+  route search's arithmetic more than its choices: the search follows a different path and, on S04b, consistently finds a plan
+  with one load and one truck fewer. The real day's large gap in the web runs (595.6 against 556.1 and 543.0 OMR) is mostly the
+  machine: replayed back to back, main's request gives 545.0 OMR and the branch's 543.0.
+- **Time.** The optimizer's own time is within 3 s of main's on every day and lower on most (its search limits did not change;
+  E5 lets a repack run until its first answer, inside the same stage budget); the web runs' wall times moved with the machine's load. No solve came near the 540 s request budget.
+- **E5 in practice.** In the branch's first real-day run one repack was given 0.6 s and ended UNKNOWN: its phase 1 ran past its
+  40 % on the loaded machine and phase 2 was left a few hundredths of a second (the plan it started from stayed a candidate, and the
+  day's plan came from another source's repack). The follow-up gives phase 2 at least 60 % of the solve's limit, at most 0.5 s
+  (`load_repack.repack`, test `test_repack_phase_two_keeps_a_real_chance_when_phase_one_overran`); the replays ran with it and no
+  repack ended without an answer. Main's logs show no UNKNOWN repack on these days either (its watchdog problem needs a first answer
+  later than 1 s, as on the verifiers' tight 300-stop day).
+- **Loading sheets.** In every saved workbook checked (S02, S03, both versions) each load sheet's manifest kg equals the load's
+  kg. These synthetic days have no product weight corrected after planning and no order weighed at order level, so E3's change is
+  shown by its unit tests, not here.
+
 ## Sources
 
 - OR-Tools repository and licence (Apache-2.0): https://github.com/google/or-tools · releases: https://github.com/google/or-tools/releases
