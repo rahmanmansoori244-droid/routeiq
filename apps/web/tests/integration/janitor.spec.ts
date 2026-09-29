@@ -136,6 +136,49 @@ describe('orphan janitor', () => {
     expect(await prisma.scenarioResult.findUnique({ where: { id: scenario.id } })).not.toBeNull();
   });
 
+  // Long searches (owner request 29 Sep 2026): a job's process writes heartbeatAt every 30 s. A
+  // THOROUGH search running for 20 minutes - here, or in the previous container during a deploy -
+  // keeps it fresh and is never reaped; a job whose heartbeat stopped 5 minutes ago is.
+  it('never reaps a 20-minute thorough search whose heartbeat is fresh (running or waiting)', async () => {
+    const { h, run } = await optimizingRun('jan-thorough');
+    const job = await prisma.runJob.create({
+      data: { tenantId: h.tenantId, runId: run.id, attemptNo: 1, status: 'RUNNING', progressPct: 20, createdById: h.userId, searchMode: 'THOROUGH' },
+    });
+    await prisma.runPlan.update({ where: { id: run.id }, data: { currentJobId: job.id } });
+    await prisma.$executeRawUnsafe(
+      `UPDATE "RunJob" SET "startedAt" = NOW() - INTERVAL '20 minutes', "createdAt" = NOW() - INTERVAL '21 minutes', "heartbeatAt" = NOW() - INTERVAL '20 seconds' WHERE id = $1`,
+      job.id,
+    );
+    const { run: run2, h: h2 } = await optimizingRun('jan-thorough-q');
+    const waiting = await prisma.runJob.create({
+      data: { tenantId: h2.tenantId, runId: run2.id, attemptNo: 1, status: 'QUEUED', createdById: h2.userId, searchMode: 'THOROUGH' },
+    });
+    await prisma.$executeRawUnsafe(`UPDATE "RunJob" SET "createdAt" = NOW() - INTERVAL '25 minutes', "heartbeatAt" = NOW() - INTERVAL '10 seconds' WHERE id = $1`, waiting.id);
+
+    await callJanitor();
+
+    expect((await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } })).status).toBe('RUNNING');
+    expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('OPTIMIZING');
+    expect((await prisma.runJob.findUniqueOrThrow({ where: { id: waiting.id } })).status).toBe('QUEUED');
+  });
+
+  it('reaps a job 5 minutes after its last heartbeat, however recently it started, with a plain message', async () => {
+    const { h, run } = await optimizingRun('jan-beat');
+    const job = await prisma.runJob.create({
+      data: { tenantId: h.tenantId, runId: run.id, attemptNo: 1, status: 'RUNNING', progressPct: 20, createdById: h.userId, searchMode: 'THOROUGH' },
+    });
+    await prisma.runPlan.update({ where: { id: run.id }, data: { currentJobId: job.id } });
+    await prisma.$executeRawUnsafe(`UPDATE "RunJob" SET "startedAt" = NOW() - INTERVAL '6 minutes', "heartbeatAt" = NOW() - INTERVAL '5 minutes 30 seconds' WHERE id = $1`, job.id);
+
+    await callJanitor();
+
+    const after = await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } });
+    expect(after.status).toBe('FAILED');
+    expect(after.message).toBe('No sign of life for 5 minutes: the server running this optimization stopped (a restart or an update). Nothing was saved - optimize again.');
+    expect((after.errorJson as { reason?: string } | null)?.reason).toBe('STUCK');
+    expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('FAILED');
+  });
+
   it('never fails a plan that another job took over (currentJobId differs)', async () => {
     const { h, run } = await optimizingRun('jan-other');
     const stuck = await prisma.runJob.create({

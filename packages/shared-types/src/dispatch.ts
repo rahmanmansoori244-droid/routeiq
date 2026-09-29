@@ -120,6 +120,36 @@ export interface DispatchConfig {
   road_time_factor?: number;
   time_limit_sec?: number | null;
   scenarios?: DispatchScenarioName[];
+  /**
+   * How long to search (owner decision 29 Sep 2026, "night plans long, day re-plans quick"). QUICK
+   * (default): the automatic time by day size, as before. THOROUGH: the whole request takes up to
+   * max_search_sec (at most the solver's THOROUGH_MAX_SEC, 20 min) and the search stops early once
+   * it stops improving. Solvers without the fields search QUICK.
+   */
+  search_mode?: SearchMode;
+  max_search_sec?: number | null;
+}
+
+export type SearchMode = 'QUICK' | 'THOROUGH';
+
+/**
+ * How the recommended plan was searched (apps/solver dispatch_models.SearchReport). Never a claim
+ * of optimality: no bound is computed, so no gap is known. stop_reason: TIME_LIMIT = QUICK (the
+ * automatic time); CONVERGED = THOROUGH stopped once it stopped improving; CAP = THOROUGH reached
+ * its time limit while still improving; STOPPED = a supervisor used the best plan found so far.
+ */
+export interface SearchReport {
+  mode: SearchMode;
+  cap_sec: number;
+  limit_sec: number;
+  search_sec: number;
+  used_sec: number;
+  stop_reason: 'TIME_LIMIT' | 'CONVERGED' | 'CAP' | 'STOPPED';
+  last_improvement_sec?: number | null;
+  stall_sec?: number | null;
+  /** At most 12 [seconds into the search, search objective in OMR] points of the best plan so far. */
+  best_over_time?: [number, number][];
+  solutions?: number | null;
 }
 
 export interface DispatchRequest {
@@ -321,4 +351,6 @@ export interface DispatchResponse {
   distance_quality?: 'ROAD' | 'MIXED' | 'ESTIMATED' | null;
   scenarios: DispatchScenario[];
   warnings: string[];
+  /** How the recommended plan was searched; absent from an older solver. */
+  search?: SearchReport | null;
 }

@@ -56,7 +56,7 @@ export interface PlanLoading {
 }
 
 /** A usable IANA timezone: the company's, or Asia/Muscat when it is empty or unknown to the runtime. */
-function zoneOf(tz: string | null | undefined): string {
+export function zoneOf(tz: string | null | undefined): string {
   if (!tz) return DEFAULT_TZ;
   try {
     new Intl.DateTimeFormat('en-GB', { timeZone: tz });

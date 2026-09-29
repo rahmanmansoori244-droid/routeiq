@@ -15,6 +15,7 @@ import type {
   DispatchScenarioName,
   DispatchStop,
   DispatchTruck,
+  SearchReport,
 } from '@routeiq/shared-types';
 import { prisma } from '../db';
 import { audit } from '../audit';
@@ -848,6 +849,8 @@ export interface ScenarioDetails extends DispatchScenario {
   scope: PlanScope;
   /** What the optimization was computed with (F08); absent on options stored before it existed. */
   inputs?: PlanInputs;
+  /** How the recommended plan was searched (the response's search report); absent before search modes. */
+  search?: SearchReport | null;
 }
 
 export async function persistDispatchResult(
@@ -902,6 +905,7 @@ export async function persistDispatchResult(
       response_warnings: [...built.warnings, ...resp.warnings],
       scope: built.scope,
       ...(inputs ? { inputs } : {}),
+      ...(resp.search ? { search: resp.search } : {}),
     };
     const row = await tx.scenarioResult.create({
       data: {
@@ -1412,7 +1416,14 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,
     distanceProvider: d.matrix_provider,
-    solver: { engine: d.engine, scenario: d.name, status: d.solver_status, timeSec: d.solver_time_sec },
+    solver: {
+      engine: d.engine,
+      scenario: d.name,
+      status: d.solver_status,
+      timeSec: d.solver_time_sec,
+      // Quick / Thorough, how long the recommended plan was searched and why it stopped.
+      ...(d.search ? { search: d.search } : {}),
+    },
   });
   const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}) };
   let change = null;

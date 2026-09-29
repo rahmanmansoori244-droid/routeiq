@@ -23,7 +23,8 @@ import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
-import type { PreferencePenalties } from '@routeiq/shared-types';
+import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
+import { defaultSearchMode, thoroughMaxSec } from './search-mode';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
@@ -238,7 +239,25 @@ export interface PlanDetail {
    */
   isDispatchPlan?: boolean;
   versions: { id: string; version: number; status: string; reason: string; reasonNote: string | null; createdAt: string; changeText: string | null }[];
-  job: { id: string; status: string; message: string | null; progressPct: number; startedAt: string | null; finishedAt: string | null } | null;
+  job: {
+    id: string;
+    status: string;
+    message: string | null;
+    progressPct: number;
+    startedAt: string | null;
+    finishedAt: string | null;
+    /** QUICK or THOROUGH; null on jobs from before search modes. */
+    searchMode?: string | null;
+  } | null;
+  /**
+   * How the applied plan was searched (Quick / Thorough, how long, why it stopped); null for a plan
+   * from before search modes or without an applied plan.
+   */
+  search?: SearchReport | null;
+  /** Thorough's cap in seconds (THOROUGH_MAX_SEC): the Re-plan choice and the progress line. */
+  thoroughMaxSec?: number;
+  /** The Re-plan choice pre-selected: THOROUGH before the plan's delivery day, QUICK on it. */
+  searchModeDefault?: SearchMode;
   warnings: string[];
   /**
    * Orders of the day that the applied plan does not contain yet (uploaded or recorded after it).
@@ -689,8 +708,19 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       changeText: (v.changeSummaryJson as { text?: string } | null)?.text ?? null,
     })),
     job: job
-      ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct, startedAt: job.startedAt?.toISOString() ?? null, finishedAt: job.finishedAt?.toISOString() ?? null }
+      ? {
+          id: job.id,
+          status: job.status,
+          message: job.message,
+          progressPct: job.progressPct,
+          startedAt: job.startedAt?.toISOString() ?? null,
+          finishedAt: job.finishedAt?.toISOString() ?? null,
+          searchMode: job.searchMode ?? null,
+        }
       : null,
+    search: chosenDetails?.search ?? null,
+    thoroughMaxSec: thoroughMaxSec(),
+    searchModeDefault: defaultSearchMode(isoOf(run.runDate), cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
     warnings: legacyChosen
       ? ['This plan was made by the previous optimizer (May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
       : chosenDetails
@@ -727,7 +757,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
 async function stuckOf(
   db: DetailDb,
   run: { id: string; status: string; currentJobId: string | null },
-  latest: { id: string; status: string; createdAt: Date; startedAt: Date | null } | null,
+  latest: { id: string; status: string; createdAt: Date; startedAt: Date | null; heartbeatAt?: Date | null } | null,
   live: boolean,
   now: Date,
 ): Promise<StuckState | null> {

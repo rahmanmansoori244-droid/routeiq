@@ -1,8 +1,9 @@
 /**
  * Orphan janitor — CLAUDE.md §7 plus driver-shift cleanup.
  *
- * Marks any RunJob RUNNING (or still QUEUED) longer than any real
- * optimization (STUCK_JOB_MS, 15 min) as FAILED with reason STUCK and rolls
+ * Marks any RunJob RUNNING (or still QUEUED) whose process is gone - no
+ * heartbeat for 5 min (STALE_HEARTBEAT_MS); a job from before heartbeats
+ * 15 min after it started (STUCK_JOB_MS) - as FAILED with reason STUCK and rolls
  * its parent RunPlan to FAILED. This is the safety net for jobs orphaned by
  * container restarts (the in-memory `inflight` map disappears with the
  * process; the DB row is left dangling).

@@ -30,6 +30,9 @@ export const GET = (req: Request, { params }: Params) =>
             startedAt: true,
             finishedAt: true,
             createdAt: true,
+            // Long searches: QUICK or THOROUGH, and the last sign of life of the process running it.
+            searchMode: true,
+            heartbeatAt: true,
           },
         })
       : null;

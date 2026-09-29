@@ -17,6 +17,7 @@ import {
 } from './customer-attrs';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
+import { defaultSearchMode, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
@@ -112,6 +113,10 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     today: todayIso(cfg.timezone),
     tomorrow: tomorrowIso(cfg.timezone),
     timezone: cfg.timezone,
+    // Thorough's cap (THOROUGH_MAX_SEC), for the OPTIMIZE / RE-PLAN choice and the progress line,
+    // and the choice pre-selected there: THOROUGH before the delivery day, QUICK on it.
+    thoroughMaxSec: thoroughMaxSec(),
+    searchModeDefault: defaultSearchMode(date, cfg.timezone, new Date()),
     cutoff: fmtHhmm(cfg.planningCutoffMin),
     depots,
     depot,
@@ -323,7 +328,17 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       status: plan.status,
       reason: plan.reason,
       chosen: !!plan.chosenScenarioId,
-      job: job ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct } : null,
+      job: job
+        ? {
+            id: job.id,
+            status: job.status,
+            message: job.message,
+            progressPct: job.progressPct,
+            // For the progress line ("Searching ... - 6 min so far"): when it got a solver slot, and its mode.
+            startedAt: job.startedAt?.toISOString() ?? null,
+            searchMode: job.searchMode ?? null,
+          }
+        : null,
       loadsByStatus: Object.fromEntries(loads.map((g) => [g.status, g._count._all])),
       /** Loads by status without the ones that never left and hold only orders brought forward (PR9). */
       loadsOfDay: Object.fromEntries(ofDay.map((g) => [g.status, g._count._all])),

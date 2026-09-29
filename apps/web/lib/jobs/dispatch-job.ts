@@ -26,7 +26,30 @@ import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-lo
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
+import { fmtSearchTime, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
+
+/**
+ * Every 30 s while a job waits for a solver slot or for the optimizer, its row's heartbeatAt is
+ * written: the plan screen's stuck check calls a job lost only 2 minutes after its last heartbeat
+ * (stuck-plan.ts) and the janitor fails it 5 minutes after (optimize-job.ts), so a 20-minute
+ * THOROUGH search is never taken for a lost job, and a job whose process died is found quickly.
+ */
+export const HEARTBEAT_MS = 30_000;
+
+/** The jobs this process is running, by job id: the shutdown handler fails them (shutdown.ts). */
+const g = globalThis as unknown as { __routeiqActiveJobs?: Map<string, DispatchJobArgs> };
+export const activeDispatchJobs: Map<string, DispatchJobArgs> = (g.__routeiqActiveJobs ??= new Map());
+
+function startHeartbeat(runJobId: string): () => void {
+  const beat = () =>
+    prisma.runJob
+      .updateMany({ where: { id: runJobId, status: { in: ['QUEUED', 'RUNNING'] } }, data: { heartbeatAt: new Date() } })
+      .catch((err) => console.warn('dispatch optimize: heartbeat not written', { runJobId, err: (err as Error)?.message }));
+  const t = setInterval(() => void beat(), HEARTBEAT_MS);
+  t.unref?.();
+  return () => clearInterval(t);
+}
 
 export interface DispatchJobArgs {
   runId: string;
@@ -44,10 +67,17 @@ export interface DispatchJobArgs {
  * when the job ends, whatever the outcome.
  */
 export function scheduleDispatchOptimize(args: DispatchJobArgs): boolean {
-  const start = () =>
-    runJob(args)
+  const start = () => {
+    activeDispatchJobs.set(args.runJobId, args);
+    const stopHeartbeat = startHeartbeat(args.runJobId);
+    return runJob(args)
       .catch((err) => failJob(args, err))
-      .finally(() => args.ticket?.release());
+      .finally(() => {
+        stopHeartbeat();
+        activeDispatchJobs.delete(args.runJobId);
+        args.ticket?.release();
+      });
+  };
   if (trackInflight(args.runId, start)) return true;
   // The previous job of this version is still finishing (its promise leaves the in-flight map a
   // moment after its commit): start right after it instead of leaving this job QUEUED.
@@ -60,9 +90,17 @@ async function runJob(args: DispatchJobArgs) {
   const { runId, runJobId, tenantId, userId, built } = args;
   // Queued behind other solves (solve admission): wait for a free slot.
   if (args.ticket?.waiting) await args.ticket.ready();
+  const cfg = built.request?.config;
+  const how =
+    cfg?.search_mode === 'THOROUGH'
+      ? ` - Thorough: up to ${fmtSearchTime(cfg.max_search_sec ?? 1200)}, stops early when it stops improving`
+      : cfg?.search_mode === 'QUICK'
+        ? ' - Quick'
+        : '';
+  const now = new Date();
   const started = await prisma.runJob.updateMany({
     where: { id: runJobId, status: 'QUEUED' },
-    data: { status: 'RUNNING', startedAt: new Date(), progressPct: 20, message: `Optimizing ${built.request.stops.length} stops` },
+    data: { status: 'RUNNING', startedAt: now, heartbeatAt: now, progressPct: 20, message: `Optimizing ${built.request.stops.length} stops${how}` },
   });
   if (started.count !== 1) {
     console.warn('dispatch optimize: job no longer QUEUED, not started', { runId, runJobId });
@@ -70,6 +108,8 @@ async function runJob(args: DispatchJobArgs) {
   }
   let resp;
   try {
+    // A connection the optimizer reset (it restarted), our own wait running out and the like come
+    // back as SolverError in plain words (solverCallFailure): the job fails, the plan can be retried.
     resp = await callDispatchSolver(built.request);
   } catch (err) {
     throw err instanceof SolverError ? err : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);
@@ -117,8 +157,11 @@ async function runJob(args: DispatchJobArgs) {
             progressPct: 100,
             finishedAt: new Date(),
             // The plan's driver notes (a trip that lost or changed its driver, a hand-set driver whose
-            // trip the plan does not have) are counted in the message: never silent.
-            message: jobMessage(recommended, built.preDrops.length, driverChanges.length, kept),
+            // trip the plan does not have) are counted in the message: never silent. A THOROUGH
+            // search also says how long it searched and why it stopped.
+            message: [jobMessage(recommended, built.preDrops.length, driverChanges.length, kept), resp.search?.mode === 'THOROUGH' ? searchResultText(resp.search) : null]
+              .filter(Boolean)
+              .join(' '),
           },
         });
         if (done.count !== 1) throw new StaleJobError('the job changed while its plan was being saved');
@@ -135,6 +178,10 @@ async function runJob(args: DispatchJobArgs) {
               engine: resp.engine,
               provider: resp.matrix_provider,
               estimated: resp.distance_is_estimated,
+              // How the recommended plan was searched (mode, time, why it stopped); absent from an older solver.
+              search: resp.search
+                ? { mode: resp.search.mode, searchSec: resp.search.search_sec, usedSec: resp.search.used_sec, stopReason: resp.search.stop_reason }
+                : null,
               scenarios: resp.scenarios.map((s) => ({
                 name: s.name,
                 status: s.solver_status,
@@ -224,7 +271,8 @@ async function markStale(args: DispatchJobArgs, e: StaleJobError) {
       );
     }, FAIL_TX);
   } catch (writeErr) {
-    // Nothing was written: the job stays RUNNING and the janitor fails it after 15 minutes.
+    // Nothing was written: the job stays RUNNING, its heartbeat stops with this promise, and the
+    // janitor fails it 5 minutes after its last heartbeat (optimize-job.ts).
     console.error('dispatch markStale: could not record the stale result', writeErr);
   }
 }
@@ -235,9 +283,9 @@ async function markStale(args: DispatchJobArgs, e: StaleJobError) {
  * the job FAILED (only while still QUEUED or RUNNING), its plan FAILED (only while OPTIMIZING with
  * this job as current: never over READY or SUPERSEDED) and the OPTIMIZE_FAILED audit row commit
  * together or not at all. If this write itself fails, nothing changed: the job is still in
- * progress in the database with no live process, and the janitor fails job and plan together
- * 15 minutes after it started (or a supervisor resets the plan) - a plan is never left OPTIMIZING
- * behind an ended job.
+ * progress in the database with no live process (its heartbeat stops with this promise), and the
+ * janitor fails job and plan together 5 minutes after its last heartbeat (or a supervisor resets
+ * the plan 2 minutes after it) - a plan is never left OPTIMIZING behind an ended job.
  */
 export async function failJob(args: DispatchJobArgs, err: unknown) {
   const errorJson =

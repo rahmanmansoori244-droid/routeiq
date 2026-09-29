@@ -14,8 +14,13 @@
  *   OPTIMIZE and Re-plan while a plan is OPTIMIZING, so for a dispatcher it is the janitor or a
  *   supervisor's Reset stuck plan that puts the plan back; the screen text says so.)
  * - resetStuckPlan: the supervisor's "Reset stuck plan" (owner decision 17: SUPERVISOR and above,
- *   audited PLAN_RESET). Also for a job lost by a server restart that the janitor would only fail
- *   after 15 minutes. Never for a job still running in this web process.
+ *   audited PLAN_RESET). Also for a job lost by a server restart, before the janitor fails it (5
+ *   minutes after its last heartbeat). Never for a job still running in this web process.
+ *
+ * Long searches (owner decision 29 Sep 2026): a job's process writes RunJob.heartbeatAt every 30 s
+ * while the job waits or runs (lib/jobs/dispatch-job.ts). A job counts as lost only 2 minutes after
+ * its LAST SIGN OF LIFE (heartbeat, else start, else creation), so a THOROUGH search running for 20
+ * minutes - in this process or, during a deploy, in the previous one - is never shown as lost.
  *
  * A re-plan version put back to FAILED keeps the copy of the previous plan it holds: its loads
  * stay usable (locked, loaded, dispatched), exactly as after any failed re-plan.
@@ -24,6 +29,7 @@ import type { Prisma, RunJobStatus } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { isLockBusy, lockPlanRow, setLockTimeout } from './plan-locks';
+import { jobMaxMinutes, thoroughMaxSec } from './search-mode';
 
 type Tx = Prisma.TransactionClient;
 
@@ -32,7 +38,8 @@ export const isActiveJob = (s: string) => s === 'QUEUED' || s === 'RUNNING';
 
 /**
  * A QUEUED or RUNNING job that this web process is not running counts as lost (the server
- * restarted during it) only after this long: a job created a moment ago may still be starting.
+ * restarted during it) only this long after its last sign of life (lastSignOfLife): a job created
+ * a moment ago may still be starting, and a job heartbeating in another process is alive.
  */
 export const JOB_LOST_AFTER_MS = 2 * 60_000;
 
@@ -43,6 +50,14 @@ export interface StuckJobFacts {
   status: RunJobStatus | string;
   createdAt: Date;
   startedAt: Date | null;
+  /** Written every 30 s by the process running the job; null on jobs from before heartbeats. */
+  heartbeatAt?: Date | null;
+  searchMode?: string | null;
+}
+
+/** The latest of the job's heartbeat, start and creation. */
+export function lastSignOfLife(job: Pick<StuckJobFacts, 'createdAt' | 'startedAt' | 'heartbeatAt'>): Date {
+  return new Date(Math.max(job.createdAt.getTime(), job.startedAt?.getTime() ?? 0, job.heartbeatAt?.getTime() ?? 0));
 }
 
 export interface StuckState {
@@ -65,7 +80,7 @@ const TEXT: Record<StuckKind, string> = {
   NO_JOB:
     'This plan is marked as optimizing, but no optimization is running for it. RouteIQ resets it by itself within a minute (a supervisor can press Reset stuck plan to do it now); then optimize or re-plan again.',
   JOB_LOST:
-    'This optimization stopped without a result (the server restarted while it ran). A supervisor can reset the plan now; otherwise RouteIQ fails it 15 minutes after it started.',
+    'This optimization stopped without a result (the server restarted while it ran). A supervisor can reset the plan now; otherwise RouteIQ fails it by itself within a few minutes.',
 };
 
 /**
@@ -82,8 +97,7 @@ export function stuckPlanState(
   if (run.status !== 'OPTIMIZING') return null;
   if (currentJob && isActiveJob(currentJob.status)) {
     if (live) return null;
-    const since = (currentJob.startedAt ?? currentJob.createdAt).getTime();
-    if (now.getTime() - since < JOB_LOST_AFTER_MS) return null;
+    if (now.getTime() - lastSignOfLife(currentJob).getTime() < JOB_LOST_AFTER_MS) return null;
     return { kind: 'JOB_LOST', resettable: true, text: TEXT.JOB_LOST };
   }
   // Rows from before every start recorded its job: a plan without a current job is live while any
@@ -110,7 +124,7 @@ async function readUnderLock(tx: Tx, tenantId: string, runId: string): Promise<P
   const job = run.currentJobId
     ? await tx.runJob.findFirst({
         where: { id: run.currentJobId, runId },
-        select: { id: true, status: true, createdAt: true, startedAt: true, finishedAt: true },
+        select: { id: true, status: true, createdAt: true, startedAt: true, finishedAt: true, heartbeatAt: true, searchMode: true },
       })
     : null;
   const otherActiveJob = (await tx.runJob.count({ where: { runId, status: { in: ACTIVE } } })) > 0;
@@ -137,8 +151,8 @@ export async function repairEndedJobPlan(
         const f = await readUnderLock(tx, tenantId, runId);
         if (!f) return false;
         const state = stuckPlanState(f.run, f.job, f.otherActiveJob, false);
-        // Only a definitely ended job: a lost QUEUED / RUNNING job is the janitor's (after 15 min)
-        // or a supervisor's (Reset stuck plan) to fail.
+        // Only a definitely ended job: a lost QUEUED / RUNNING job is the janitor's (5 min after its
+        // last heartbeat) or a supervisor's (Reset stuck plan) to fail.
         if (!state || state.kind === 'JOB_LOST') return false;
         const moved = await tx.runPlan.updateMany({ where: { id: runId, tenantId, status: 'OPTIMIZING', currentJobId: f.run.currentJobId }, data: { status: 'FAILED' } });
         if (moved.count !== 1) return false;
@@ -177,6 +191,18 @@ export interface ResetResult {
 }
 
 /**
+ * Refusing "Reset stuck plan" for a job this server is running: it ends by itself - at most 10
+ * minutes after it starts for a Quick search, the Thorough cap + 2 minutes for a Thorough one.
+ */
+export function jobRunningText(searchMode: string | null | undefined): string {
+  const mode = searchMode === 'THOROUGH' ? 'THOROUGH' : 'QUICK';
+  const max = jobMaxMinutes(mode, mode === 'THOROUGH' ? thoroughMaxSec() : null);
+  return `The optimization is still running (or waiting for a free optimizer) on the server, and it ends by itself - at most ${max} minutes after it starts${
+    mode === 'THOROUGH' ? ' (a thorough search)' : ''
+  }. Reset the plan only if it is still shown as optimizing after that.`;
+}
+
+/**
  * "Reset stuck plan" (owner decision 17): a SUPERVISOR or above puts a plan stuck on "optimizing"
  * back to FAILED, so it can be optimized or re-planned again. In one transaction under the plan
  * row lock: its lost job (QUEUED / RUNNING, not running in this web process, older than
@@ -208,16 +234,16 @@ export async function resetStuckPlan(
           if (live) {
             return {
               status: 409,
-              body: {
-                error:
-                  'The optimization is still running (or waiting for a free optimizer) on the server, and it ends by itself - at most 10 minutes after it starts. Reset the plan only if it is still shown as optimizing after that.',
-                code: 'JOB_RUNNING',
-              },
+              body: { error: jobRunningText(f.job?.searchMode), code: 'JOB_RUNNING' },
             };
           }
           return {
             status: 409,
-            body: { error: 'The optimization started less than 2 minutes ago and may still be starting. Wait a moment, then try again.', code: 'JOB_STARTING' },
+            body: {
+              error:
+                'The optimization showed a sign of life less than 2 minutes ago: it may still be starting, or still running on the server (during an update, on the previous one). Wait a moment, then try again.',
+              code: 'JOB_STARTING',
+            },
           };
         }
         let jobFailed = false;

@@ -57,6 +57,9 @@ export function isRealIsoDate(s: string): boolean {
 /** Delivery / plan date in API bodies: must round-trip, so it never rolls into another day. */
 export const isoDateSchema = z.string().refine(isRealIsoDate, 'Use a real date as YYYY-MM-DD');
 
+/** Quick or Thorough on an OPTIMIZE / RE-PLAN (lib/dispatch/search-mode.ts). */
+export const searchModeSchema = z.enum(['QUICK', 'THOROUGH']);
+
 /** Longest unloading time one stop can have: the optimizer's limit (lib/dispatch/service-time). */
 export { MAX_SERVICE_MIN };
 

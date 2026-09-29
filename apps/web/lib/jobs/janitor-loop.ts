@@ -2,8 +2,9 @@
  * In-process janitor. Production has no cron service calling /api/cron/janitor, so without
  * this a job orphaned by a restart (every push to main redeploys web) would keep its plan
  * OPTIMIZING forever and block that depot and day. Web runs as one replica, and the reaper
- * only touches jobs older than any real optimization, so a job still running in the previous
- * container during a zero-downtime deploy is never failed.
+ * only touches jobs whose process stopped writing their heartbeat 5 minutes ago (jobs from before
+ * heartbeats: 15 minutes after they started), so a job still running in the previous container
+ * during a zero-downtime deploy - even a 20-minute thorough search - is never failed.
  */
 import { reapStuckJobs } from './optimize-job';
 import { reapStaleShifts } from './shift-janitor';

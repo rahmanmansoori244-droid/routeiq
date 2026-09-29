@@ -22,6 +22,7 @@ import { KG_ROUNDING_TOL } from './weights';
 import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
+import { searchAssumptions, searchResultText } from './search-mode';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -408,6 +409,9 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     kv('Loads by status', byStatus || '—');
     // The search's own status code in plain words (never "ROUTING_PARTIAL_SUCCESS_...").
     if (s.solver) kv('Route search', solverStatusText(s.solver.status), undefined, `${s.solver.scenario} option · searched ${s.solver.timeSec} s`);
+    // Quick / Thorough: how long the recommended plan was searched and why it stopped (never "optimal").
+    const how = searchResultText(s.solver?.search ?? d.search ?? null);
+    if (how) kv('Search time', how);
   }
 
   if (d.scenarios.length > 1) {
@@ -960,6 +964,14 @@ export interface AssumptionConfig {
   /** Stored with a plan (PlanSettings, PR8 review): made on its delivery day at this time; loading starts then. */
   loadingFromMin?: number | null;
   priorityWeightsJson?: unknown;
+}
+
+/**
+ * The ASSUMPTIONS rows plus how the plan in use was searched (Quick / Thorough, how long, why it
+ * stopped, what that means - search-mode.ts), when the plan has a search report.
+ */
+export function withSearchAssumptions(d: Pick<PlanDetail, 'search' | 'summary'>, rows: Record<string, string>): Record<string, string> {
+  return { ...rows, ...searchAssumptions(d.summary?.solver?.search ?? d.search ?? null) };
 }
 
 /**

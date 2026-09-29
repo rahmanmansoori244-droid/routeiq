@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
-import { isoDateSchema } from '@/lib/schemas';
+import { isoDateSchema, searchModeSchema } from '@/lib/schemas';
 import { getOrCreatePlan } from '@/lib/dispatch/plan-service';
 import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { startResponse } from '@/lib/dispatch/start-response';
@@ -13,6 +13,8 @@ const schema = z.object({
   allowMissingWeights: z.boolean().optional(),
   /** The day and depot on the dispatcher's screen: must be the ones asked for (409 DAY_MISMATCH). */
   expect: z.object({ date: isoDateSchema, depotId: z.string().min(1) }).optional(),
+  /** Quick or Thorough (absent: Thorough before the delivery day, Quick on it; search-mode.ts). */
+  searchMode: searchModeSchema.optional(),
 });
 
 // POST /api/dispatch/plan - get (or create version 1 of) the plan for a depot + date, and
@@ -30,6 +32,7 @@ export const POST = withTenantApi(
     const res = await startDispatchOptimize(user.tenantId, run.id, user, ip, {
       allowMissingLocations: input.allowMissingLocations,
       allowMissingWeights: input.allowMissingWeights,
+      searchMode: input.searchMode,
     });
     return startResponse(res, { runId: run.id, version: run.version }, { runId: run.id });
   },

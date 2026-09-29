@@ -39,6 +39,10 @@ jobs:
       SIGNUP_MODE: open
       # Lets tests/integration/auth.spec.ts check that sign-up never grants SUPER_ADMIN.
       SUPER_ADMIN_EMAILS: platform-admin@routeiq-ci.test
+      # A THOROUGH search may take this long (web and solver read it; production: 1200 = 20 min).
+      # tests/integration/long-search.spec.ts runs a THOROUGH optimization end to end only when
+      # it is small.
+      THOROUGH_MAX_SEC: '60'
     steps:
       - uses: actions/checkout@v4
 

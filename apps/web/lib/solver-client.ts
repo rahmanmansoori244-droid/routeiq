@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import type { DispatchRequest, DispatchResponse } from '@routeiq/shared-types';
 import type { RouteGeometryReply } from '@/lib/dispatch/load-geometry';
+import { QUICK_SOLVER_WAIT_MS, solverWaitMs } from '@/lib/dispatch/search-mode';
 import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from '@/lib/solver-env';
 
 export class SolverError extends Error {
@@ -14,14 +15,17 @@ export class SolverError extends Error {
   }
 }
 
-// The solver answers within its SOLVER_BUDGET_SEC (540 s, road routing at most 90 s of it); 600 s
-// leaves the margin (budget 540 s < this wait < the janitor 15 min).
-export const DISPATCH_TIMEOUT_MS = 600_000;
+// QUICK: the solver answers within its SOLVER_BUDGET_SEC (540 s, road routing at most 90 s of it);
+// 600 s leaves the margin. THOROUGH: its cap + 2 minutes (lib/dispatch/search-mode.ts, solverWaitMs).
+export const DISPATCH_TIMEOUT_MS = QUICK_SOLVER_WAIT_MS;
+/** TCP keepalive on the solver connection: a 20-minute silent request must not look idle to the network. */
+export const SOLVER_KEEPALIVE_MS = 30_000;
 
 /**
  * POST JSON and wait up to `timeoutMs` for the answer. Plain `fetch` cannot be used for long
  * solves: Node's fetch (undici) gives up after 300 s without response headers, whatever the
- * AbortController says, and the solver sends nothing until the whole plan is ready.
+ * AbortController says, and the solver sends nothing until the whole plan is ready. Its own
+ * connection (no shared agent, so no agent idle timeout applies) with TCP keepalive every 30 s.
  */
 export function postJsonLong(
   urlStr: string,
@@ -35,7 +39,11 @@ export function postJsonLong(
     let timer: NodeJS.Timeout | undefined;
     const req = mod.request(
       u,
-      { method: 'POST', headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } },
+      {
+        method: 'POST',
+        agent: false,
+        headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      },
       (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (c: Buffer) => chunks.push(c));
@@ -50,12 +58,45 @@ export function postJsonLong(
       },
     );
     timer = setTimeout(() => req.destroy(new Error(`no answer after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+    req.on('socket', (s) => s.setKeepAlive(true, SOLVER_KEEPALIVE_MS));
     req.on('error', (e) => {
       clearTimeout(timer);
       reject(e);
     });
     req.end(body);
   });
+}
+
+/**
+ * A failed solver call (no HTTP answer) in plain words: a reset connection is the optimizer being
+ * restarted or updated mid-search; a refused one is the optimizer not up; our own timer is no answer
+ * in time. Nothing was saved in every case, and the plan can be optimized again.
+ */
+export function solverCallFailure(err: unknown, waitMs: number): SolverError {
+  if (err instanceof SolverError) return err;
+  const e = err as { code?: string; message?: string } | null;
+  const code = String(e?.code ?? '');
+  const msg = String(e?.message ?? err ?? '');
+  if (/^no answer after/.test(msg)) {
+    return new SolverError(
+      `The route optimizer did not answer within ${Math.round(waitMs / 60_000)} minutes. Nothing was saved - optimize again (Quick takes less time).`,
+      0,
+      { cause: msg },
+    );
+  }
+  if (code === 'ECONNRESET' || code === 'EPIPE' || /socket hang up/i.test(msg)) {
+    return new SolverError(
+      'The route optimizer stopped during the search (it was restarted or updated). Nothing was saved - optimize again.',
+      0,
+      { cause: code || msg },
+    );
+  }
+  if (code === 'ECONNREFUSED' || code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return new SolverError('The route optimizer cannot be reached right now (it may be restarting). Nothing was saved - try again in a minute.', 0, {
+      cause: code,
+    });
+  }
+  return new SolverError(`Solver call failed: ${msg}`, 0, null);
 }
 
 /**
@@ -74,7 +115,14 @@ export async function callDispatchSolver(req: DispatchRequest): Promise<Dispatch
   // Third review of audit PR4: say why, instead of node:http's "Invalid character in header
   // content" or a 401 for a token sent as other bytes than the solver holds (lib/solver-env.ts).
   if (!tokenCanBeSent(token)) throw new SolverError(`${TOKEN_CANNOT_BE_SENT}. An administrator must copy it again as plain text.`, 0, null);
-  const res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), DISPATCH_TIMEOUT_MS);
+  // THOROUGH waits for its cap + 2 minutes; QUICK 600 s as before.
+  const waitMs = solverWaitMs(req.config?.search_mode, req.config?.max_search_sec);
+  let res: { status: number; text: string };
+  try {
+    res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), waitMs);
+  } catch (err) {
+    throw solverCallFailure(err, waitMs);
+  }
   if (res.status >= 300 && res.status < 400) {
     // An http-to-https edge or a proxy in front of the solver: /api/health says SOLVER_URL_REDIRECTS.
     throw new SolverError(
@@ -103,6 +151,39 @@ export async function callDispatchSolver(req: DispatchRequest): Promise<Dispatch
     throw new SolverError(detail ?? `Solver returned HTTP ${res.status}`, res.status, res.text);
   }
   return JSON.parse(res.text) as DispatchResponse;
+}
+
+/** What the optimizer said to "use the best plan found so far". */
+export type StopSearchReply = 'STOPPING' | 'NOT_RUNNING' | 'NOT_STOPPABLE' | 'FAILED';
+
+/**
+ * "Use the best plan found so far" (THOROUGH): POST /optimize-dispatch/stop. The running solve ends
+ * its search at the next plan it finds, skips the alternatives and re-checks the loads with QUICK's
+ * time; the job then saves that plan as usual. Never throws.
+ */
+export async function callStopSearch(runId: string, tenantId: string): Promise<StopSearchReply> {
+  const { url, token } = solverEnv();
+  if (!url || !token || !solverUrlUsable(url) || !tokenCanBeSent(token)) return 'FAILED';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch(`${url}/optimize-dispatch/stop`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'X-Solver-Token': token },
+      body: JSON.stringify({ run_id: runId, tenant_id: tenantId }),
+      signal: ctrl.signal,
+      cache: 'no-store',
+      redirect: 'manual',
+    });
+    if (res.ok) return 'STOPPING';
+    if (res.status === 404) return 'NOT_RUNNING';
+    if (res.status === 409) return 'NOT_STOPPABLE';
+    return 'FAILED';
+  } catch {
+    return 'FAILED';
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const GEOMETRY_TIMEOUT_MS = 15_000;

@@ -32,6 +32,9 @@
  *   PATCH /api/depots/[id] (422 DEPOT_HISTORY_ONLY: the history-only depot is never made active),
  *   POST /api/trucks, PATCH /api/trucks/[id], POST /api/regions and PATCH /api/regions/[id]
  *   (422 DEPOT_HISTORY_ONLY: never on the history-only depot).
+ * - Long searches (owner request 29 Sep 2026): POST /api/runs/[id]/stop-search ("Use the best plan
+ *   found so far") is SUPERVISOR and above; the optimize / re-plan routes take an optional
+ *   searchMode (roles unchanged).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -112,6 +115,7 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'SUPERVISOR',
+  'POST /api/runs/[id]/stop-search': 'SUPERVISOR',
   'GET /api/runs/[id]/route-geometries': 'ANY',
   'PATCH /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'DELETE /api/runs/[id]/routes/[assignmentId]': 'PLANNER',

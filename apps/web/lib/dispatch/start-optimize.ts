@@ -17,6 +17,7 @@ import { INTAKE_BUSY, isTransactionTimeout, lockIntake } from './intake-server';
 import { isLockBusy, lockRunForWrite, PLAN_BUSY_MESSAGE, setLockTimeout } from './plan-locks';
 import { isSupersededRun } from './plan-status';
 import { solveAdmission, type AdmissionDenied, type SolveTicket } from './solve-admission';
+import { queuedMessage, thoroughMaxSec, type SearchMode } from './search-mode';
 import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
 
@@ -265,6 +266,32 @@ export interface StartOptions extends OptimizeOverrides {
   expect?: ExpectedDay;
   /** The time the plan is made (default: the clock now; see buildDispatchRequest). Tests fix it here. */
   now?: Date;
+  /**
+   * Quick or Thorough: the dispatcher's choice on the confirmation, pre-selected THOROUGH for a plan
+   * made before its delivery day and QUICK on it (owner decision 29 Sep 2026). Absent: QUICK.
+   */
+  searchMode?: SearchMode;
+}
+
+/**
+ * The mode a start searches with: the one asked for, else QUICK. The owner's rule (Thorough before
+ * the delivery day, Quick on it) is the screens' pre-selected choice (searchModeDefault on the day
+ * and plan data, search-mode.ts); an API caller that sends no mode - a script, an older screen -
+ * keeps the QUICK search it always had.
+ */
+export function requestedSearchMode(requested: SearchMode | null | undefined): SearchMode {
+  return requested === 'THOROUGH' ? 'THOROUGH' : 'QUICK';
+}
+
+/**
+ * The request asks for this mode: config.search_mode always, and THOROUGH's cap as max_search_sec
+ * (the solver's own THOROUGH_MAX_SEC is the ceiling). An older solver ignores both (QUICK).
+ */
+export function applySearchMode(built: BuiltRequest, mode: SearchMode, capSec: number = thoroughMaxSec()): void {
+  const cfg = built.request?.config;
+  if (!cfg) return; // not a complete request (unit-test stubs)
+  cfg.search_mode = mode;
+  cfg.max_search_sec = mode === 'THOROUGH' ? capSec : null;
 }
 
 /**
@@ -335,9 +362,15 @@ export async function startDispatchOptimize(
     const built = opts.prebuilt ?? (await buildDispatchRequest(tenantId, runId, undefined, { now: opts.now }));
     const refused = gate(built, opts, 'optimizing') ?? (await prerequisites(tenantId, runId, built, !!run.chosenScenarioId));
     if (refused) return refused;
+    // Quick or Thorough: the dispatcher's choice (the screens always send it, pre-selected by the
+    // plan's day); a caller that sends none gets QUICK, exactly as before search modes. A ticket
+    // reserved by the re-plan was reserved for its mode, which it passes on.
+    const mode = ticket?.searchMode ?? requestedSearchMode(opts.searchMode);
+    const capSec = thoroughMaxSec();
+    applySearchMode(built, mode, capSec);
 
     if (!ticket) {
-      const adm = solveAdmission.reserve(tenantId, user.id);
+      const adm = solveAdmission.reserve(tenantId, user.id, mode);
       if (!adm.ok) return admissionRefused(adm);
       ticket = adm.ticket;
     }
@@ -384,9 +417,12 @@ export async function startDispatchOptimize(
               runId,
               attemptNo: (jobsNow[0]?.attemptNo ?? 0) + 1,
               status: 'QUEUED',
-              message: waiting ? `Waiting: ${ticket!.position()} optimization(s) ahead` : 'Queued',
+              message: queuedMessage(mode, capSec, waiting ? ticket!.position() : null),
               createdById: user.id,
               requestJson: built.request as never,
+              searchMode: mode,
+              // Alive from the start: the stuck-plan check and the janitor read it (dispatch-job.ts).
+              heartbeatAt: new Date(),
             },
           });
           await tx.runPlan.update({ where: { id: runId }, data: { status: 'OPTIMIZING', currentJobId: created.id } });
@@ -413,6 +449,10 @@ export async function startDispatchOptimize(
                 // PR8 review: made on the delivery day at this time - loading of new loads starts then.
                 loadingFromMin: built.settings?.loadingFromMin ?? null,
                 queued: waiting,
+                // Quick or Thorough (owner decision 29 Sep 2026), and whether the dispatcher chose it.
+                searchMode: mode,
+                searchModeChosen: !!opts.searchMode,
+                maxSearchSec: mode === 'THOROUGH' ? capSec : null,
               } as never,
               ip,
             },
@@ -435,7 +475,10 @@ export async function startDispatchOptimize(
     ticket.commit();
     handedOff = true;
     scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket });
-    return { status: 202, body: { runJobId: job.id, status: 'QUEUED', runId, queued: ticket.waiting } };
+    return {
+      status: 202,
+      body: { runJobId: job.id, status: 'QUEUED', runId, queued: ticket.waiting, searchMode: mode, maxSearchSec: mode === 'THOROUGH' ? capSec : null },
+    };
   } finally {
     if (!handedOff) ticket?.release();
   }
@@ -462,6 +505,7 @@ export async function replan(
   overrides: OptimizeOverrides = {},
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
+  searchMode?: SearchMode,
 ): Promise<StartResult> {
   const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!found) return { status: 404, body: { error: 'Plan not found' } };
@@ -475,7 +519,7 @@ export async function replan(
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
-    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now });
+    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now, searchMode });
   }
   if (run.status === 'OPTIMIZING' || (await activeJobAnswer(runId))) {
     return { status: 409, body: { error: 'An optimization is running for this plan. Wait for it to finish.', code: 'OPTIMIZING' } };
@@ -490,8 +534,9 @@ export async function replan(
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
   // trucks) whichever button started it; only with nothing late waiting is it a full re-optimize.
   const effectiveReason = reason === 'REOPTIMIZE' && (await pendingLateOrderIds(tenantId, run)).length ? 'LATE_ORDER' : reason;
-  // Admission before the version exists: a 429 must never leave a new version behind.
-  const adm = solveAdmission.reserve(tenantId, user.id);
+  // Admission before the version exists: a 429 must never leave a new version behind. Reserved for
+  // the search mode the new version's start then uses (the ticket carries it).
+  const adm = solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
   if (!adm.ok) return admissionRefused(adm);
   let child;
   try {
@@ -505,7 +550,7 @@ export async function replan(
     throw e;
   }
   // The ticket is handed over: startDispatchOptimize releases it on any answer that starts no job.
-  const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now });
+  const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now, searchMode });
   return {
     status: res.status,
     headers: res.headers,
