@@ -16,6 +16,7 @@ import { fork } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { ReplyCollector, type ParseReply } from '../lib/upload-parse/protocol';
 
 /** Skipped at any depth: dependencies and build output. */
 const SKIP_DIRS = new Set(['node_modules', '.next', '.turbo']);
@@ -157,7 +158,8 @@ export function uploadParserSmokeProblem(bundle: string, timeoutMs = 30_000): Pr
     });
     let stderr = '';
     let finished = false;
-    const rows: unknown[] = [];
+    // The answer is put together as the web process does it (lib/upload-parse/protocol.ts).
+    const collector = new ReplyCollector();
     const done = (problem: string | null) => {
       if (finished) return;
       finished = true;
@@ -167,11 +169,19 @@ export function uploadParserSmokeProblem(bundle: string, timeoutMs = 30_000): Pr
     };
     const timer = setTimeout(() => done(`the upload parser did not answer within ${timeoutMs} ms`), timeoutMs);
     child.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString('utf8')).slice(-2_000)));
-    child.on('message', (m: { kind?: string; rows?: unknown[]; reply?: { ok?: boolean; parsed?: { fileType?: string } } }) => {
-      if (m.kind === 'rows') rows.push(...(m.rows ?? []));
-      else if (m.kind === 'reply') {
-        const ok = m.reply?.ok === true && m.reply.parsed?.fileType === 'csv' && JSON.stringify(rows) === JSON.stringify([{ code: 'C1', name: 'One' }]);
-        done(ok ? null : `the upload parser answered ${JSON.stringify(m).slice(0, 300)}`);
+    child.on('message', (m: { kind?: unknown }) => {
+      // Messages of another kind are not an answer: it still has to come.
+      if (m?.kind !== 'rows' && m?.kind !== 'reply' && m?.kind !== 'too-large') return;
+      let reply: ParseReply | null;
+      try {
+        reply = collector.add(m);
+      } catch (err) {
+        done(`the upload parser answered something that could not be read: ${(err as Error).message}`);
+        return;
+      }
+      if (reply) {
+        const ok = reply.ok === true && reply.parsed.fileType === 'csv' && JSON.stringify(reply.parsed.rows) === JSON.stringify([{ code: 'C1', name: 'One' }]);
+        done(ok ? null : `the upload parser answered ${JSON.stringify(reply).slice(0, 300)}`);
       }
     });
     child.on('error', (err) => done(`the upload parser could not be started: ${err.message}`));

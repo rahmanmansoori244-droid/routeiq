@@ -7,6 +7,10 @@
 //   garbage.cjs - answers something that is not a parse result
 //   hog.cjs     - allocates until its heap cap is reached (V8 aborts: "heap out of memory")
 //   echo.cjs    - answers one row with what it was started with: its environment's names, its Node flags
+//   flood.cjs   - sends pieces of rows of 1 MB each without end, whatever the web process's limit
+//                 on the answer (lib/upload-parse/protocol.ts: MAX_RESULT_BYTES); only a kill stops it
+const v8 = require('node:v8');
+
 module.exports = function standIn(mode) {
   process.once('message', () => {
     if (mode === 'busy') for (;;);
@@ -19,9 +23,24 @@ module.exports = function standIn(mode) {
     }
     if (mode === 'echo') {
       const row = { env: Object.keys(process.env).sort().join(','), execArgv: process.execArgv.join(' '), pid: String(process.pid) };
-      const reply = { ok: true, parsed: { fileName: 'echo', fileType: 'csv', rows: [row], warnings: [] } };
-      process.send({ kind: 'rows', rows: [row] });
-      return process.send({ kind: 'reply', reply: { ...reply, parsed: { ...reply.parsed, rows: [] } }, pieces: 1 }, () => process.exit(0));
+      // As lib/upload-parse/protocol.ts sends it: the texts, then the row as the numbers of its key and value texts.
+      const texts = Object.entries(row).flat();
+      const cells = Uint32Array.from([Object.keys(row).length, ...texts.map((_, i) => i)]);
+      process.send({ kind: 'rows', bytes: v8.serialize({ texts, cells }) });
+      const reply = { ok: true, parsed: { fileName: 'echo', fileType: 'csv', rows: [], warnings: [] } };
+      return process.send({ kind: 'reply', bytes: v8.serialize(reply), pieces: 1 }, () => process.exit(0));
+    }
+    if (mode === 'flood') {
+      // Piece i: one row { big: <1 MB of text, its own> } (the protocol's texts and cells).
+      let i = 0;
+      const next = () => {
+        const texts = i === 0 ? ['big'] : [];
+        texts.push(String(i).padEnd(1 << 20, 'x'));
+        const cells = Uint32Array.from([1, 0, i + 1]);
+        i += 1;
+        process.send({ kind: 'rows', bytes: v8.serialize({ texts, cells }) }, undefined, undefined, (err) => (err ? undefined : setImmediate(next)));
+      };
+      return next();
     }
     throw new Error(`unknown stand-in mode ${mode}`);
   });

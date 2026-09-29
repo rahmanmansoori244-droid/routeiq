@@ -5,14 +5,30 @@
  */
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { afterAll, afterEach, beforeAll, expect } from 'vitest';
 import { setUploadParseTestOverrides, uploadParseState } from '@/lib/upload-parse';
 
 const WEB = path.resolve(__dirname, '../..');
 const g = globalThis as { __routeiqUploadParseInProcess?: unknown };
 
-/** The stand-in parser processes of tests/fixtures/upload-parser (busy, crash, silent, garbage, hog, echo). */
-export const standIn = (mode: 'busy' | 'crash' | 'silent' | 'garbage' | 'hog' | 'echo') => path.join(WEB, 'tests', 'fixtures', 'upload-parser', `${mode}.cjs`);
+/** The stand-in parser processes of tests/fixtures/upload-parser (busy, crash, silent, garbage, hog, echo, flood). */
+export const standIn = (mode: 'busy' | 'crash' | 'silent' | 'garbage' | 'hog' | 'echo' | 'flood') => path.join(WEB, 'tests', 'fixtures', 'upload-parser', `${mode}.cjs`);
+
+/**
+ * How much more of this process's JavaScript heap is in use, after a full garbage collection, while
+ * `fn`'s result is kept than before it ran (V8's collector is switched on for this, as --expose-gc).
+ */
+export async function heapHeldBy<T>(fn: () => Promise<T>): Promise<{ result: T; heldMB: number }> {
+  setFlagsFromString('--expose-gc');
+  const gc = runInNewContext('gc') as () => void;
+  gc();
+  const before = process.memoryUsage().heapUsed;
+  const result = await fn();
+  gc();
+  return { result, heldMB: (process.memoryUsage().heapUsed - before) / 1024 / 1024 };
+}
 
 /** Builds the development parser bundle if a source changed (as the first upload would). */
 export function buildParserBundle(): string {

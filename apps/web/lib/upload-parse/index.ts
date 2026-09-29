@@ -13,7 +13,9 @@
  *  - at most UPLOAD_PARSE_CONCURRENCY run at once; a further upload waits up to QUEUE_WAIT_MS, then
  *    gets 503 "busy, try again in a moment";
  *  - its environment has no secrets (no DATABASE_URL, no tokens), and it inherits no Node flags.
- * The web process only sends the bytes and receives the rows, so it keeps answering meanwhile.
+ * The web process only sends the bytes and receives the rows, so it keeps answering meanwhile. The
+ * answer is bounded here too (P5 review, protocol.ts): each text crosses once, and an answer of more
+ * than MAX_RESULT_BYTES (128 MB) is refused "needs too much memory".
  *
  * Why a process and not a worker thread (the assessment said worker thread): a worker's heap cap
  * does not always end only the worker. With a legal 0.22 MB upload (50,000 rows x 49 columns) and a
@@ -30,7 +32,7 @@ import { NextResponse } from 'next/server';
 import type { ParsedFile } from '../csv';
 import { fileRefusal } from '../upload-limits';
 import { MAX_WAITING, parserEntry, QUEUE_WAIT_MS, uploadParseConfig, uploadParserStartupProblem, type UploadParseConfig } from './config';
-import { decodeError, replyMessages, ReplyCollector, type ParseReply, type ParseRequest, type ParseSpec } from './protocol';
+import { AnswerTooLargeError, answerMessages, decodeError, MAX_RESULT_BYTES, ReplyCollector, type ParseReply, type ParseRequest, type ParseSpec } from './protocol';
 
 export type { ParseSpec } from './protocol';
 
@@ -92,9 +94,21 @@ const g = globalThis as unknown as {
 const state: ParseState = g.__routeiqUploadParses ?? { active: 0, waiting: [], children: new Set() };
 g.__routeiqUploadParses = state;
 
-let lastRun: { pid: number | undefined; pieces: number; maxRssKB: number | undefined } | null = null;
-/** The last parser process that answered: its pid, the pieces of rows it sent, its peak memory (tests, diagnostics). */
-export function lastUploadParse() {
+interface LastRun {
+  pid: number | undefined;
+  /** Pieces of rows and bytes of the answer received. */
+  pieces: number;
+  bytes: number;
+  maxRssKB: number | undefined;
+  /** The answer would have passed its limit: the parser said so and stopped, or this process counted more. */
+  tooLarge?: 'parser' | 'web';
+}
+let lastRun: LastRun | null = null;
+/**
+ * The last parser process that answered or was refused for too large an answer: its pid, the pieces
+ * and bytes of the answer received, its peak memory (tests, diagnostics).
+ */
+export function lastUploadParse(): LastRun | null {
   return lastRun;
 }
 
@@ -108,9 +122,11 @@ interface TestOverrides {
   entry?: string | null;
   queueWaitMs?: number;
   maxWaiting?: number;
+  /** A smaller limit on the parser's answer than MAX_RESULT_BYTES. */
+  maxResultBytes?: number;
 }
 let testOverrides: TestOverrides = {};
-/** Tests only (refused in production): another parser entry, a shorter queue wait. Null resets. */
+/** Tests only (refused in production): another parser entry, a shorter queue wait, a smaller answer limit. Null resets. */
 export function setUploadParseTestOverrides(o: TestOverrides | null): void {
   if (process.env.NODE_ENV === 'production') throw new Error('setUploadParseTestOverrides is for tests only');
   testOverrides = o ?? {};
@@ -186,6 +202,21 @@ interface ChildRun {
   pid: number | undefined;
 }
 
+/**
+ * The refusal for an answer that could not be put together (protocol.ts): too large, "needs too much
+ * memory" (the parser stopped before its limit, or this process counted more); anything else, "the
+ * reader stopped".
+ */
+function answerRefusal(err: unknown, pid: number | undefined, collector: ReplyCollector): UploadParseRefused {
+  if (err instanceof AnswerTooLargeError) {
+    lastRun = { pid, pieces: collector.piecesReceived, bytes: collector.bytesReceived, maxRssKB: undefined, tooLarge: err.by };
+    log('warn', `parser process ${pid ?? '-'}: its answer would pass ${mb(err.limit)} MB (${err.by === 'parser' ? 'it stopped' : `${mb(err.bytes)} MB counted here`}): out of memory`);
+    return new UploadParseRefused('UPLOAD_OUT_OF_MEMORY');
+  }
+  log('error', `parser process ${pid ?? '-'}: ${(err as Error).message}`);
+  return new UploadParseRefused('UPLOAD_CRASHED');
+}
+
 function runInChild(req: ParseRequest, cfg: UploadParseConfig, release: () => void): Promise<ChildRun> {
   const entry = testOverrides.entry !== undefined ? testOverrides.entry : parserEntry();
   if (!entry) {
@@ -244,22 +275,20 @@ function runInChild(req: ParseRequest, cfg: UploadParseConfig, release: () => vo
       stderr = (stderr + chunk.toString('utf8')).slice(-STDERR_TAIL);
     });
     child.stderr?.on('error', () => {}); // a broken pipe of a killed process is not the web's problem
-    // The rows come in pieces (protocol.ts), each turned into objects as it arrives.
-    const collector = new ReplyCollector();
+    // The rows come in pieces (protocol.ts), each counted, then turned into objects as it arrives;
+    // an answer past its limit is refused and its process killed (settle).
+    const collector = new ReplyCollector(req.maxResultBytes);
     child.on('message', (m: unknown) => {
       if (settled) return;
       let reply: ParseReply | null;
       try {
         reply = collector.add(m);
       } catch (err) {
-        settle(() => {
-          log('error', `parser process ${pid}: ${(err as Error).message}`);
-          reject(new UploadParseRefused('UPLOAD_CRASHED'));
-        });
+        settle(() => reject(answerRefusal(err, pid, collector)));
         return;
       }
       if (reply) {
-        lastRun = { pid, pieces: collector.piecesReceived, maxRssKB: reply.maxRssKB };
+        lastRun = { pid, pieces: collector.piecesReceived, bytes: collector.bytesReceived, maxRssKB: reply.maxRssKB };
         settle(() => resolve({ reply: reply!, pid }));
       }
     });
@@ -320,14 +349,21 @@ export async function parseUploadIsolated(file: File, spec: ParseSpec = {}): Pro
   // runInChild frees the slot when its process is gone; until the file is handed to it, this does.
   let handedOver = false;
   try {
-    const req: ParseRequest = { name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()), spec };
+    const maxResultBytes = testOverrides.maxResultBytes ?? MAX_RESULT_BYTES;
+    const req: ParseRequest = { name: file.name, type: file.type, bytes: new Uint8Array(await file.arrayBuffer()), spec, maxResultBytes };
     const inProcess = process.env.NODE_ENV !== 'production' ? g.__routeiqUploadParseInProcess : undefined;
     if (inProcess) {
-      // As the answer crosses the process boundary: in the same pieces, each a structured copy.
-      const collector = new ReplyCollector();
+      // As the answer crosses the process boundary: the same messages, each a structured copy.
+      const collector = new ReplyCollector(maxResultBytes);
       let whole: ParseReply | null = null;
-      for (const m of replyMessages(await inProcess(structuredClone(req)))) whole = collector.add(structuredClone(m));
-      reply = whole!;
+      const answer = await inProcess(structuredClone(req));
+      try {
+        for (const m of answerMessages(answer, { maxResultBytes })) whole = collector.add(structuredClone(m));
+      } catch (err) {
+        throw answerRefusal(err, undefined, collector);
+      }
+      if (!whole) throw answerRefusal(new Error('the answer ended before its reply'), undefined, collector);
+      reply = whole;
     } else {
       handedOver = true;
       const run = await runInChild(req, cfg, release);

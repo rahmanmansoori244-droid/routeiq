@@ -10,17 +10,19 @@
  *  - at most UPLOAD_PARSE_CONCURRENCY run at once; a further upload waits briefly, then gets 503;
  *  - the parser gets no secrets and none of this process's Node flags;
  *  - nothing is left behind: no process, no slot, no timer, after thousands of parses too (the long
- *    run is .dev work; here a few dozen).
+ *    run is .dev work; here a few dozen);
+ *  - the answer is bounded in this process (P5 review): each text crosses once, and an answer of more
+ *    than MAX_RESULT_BYTES is refused "needs too much memory", by the parser and by this process.
  * The stand-in parsers are in tests/fixtures/upload-parser.
  */
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parseUpload } from '@/lib/csv';
 import { MAX_WAITING, parserEntry, QUEUE_WAIT_MS, uploadParseConfig, uploadParseConfigProblems, uploadParserStartupProblem } from '@/lib/upload-parse/config';
-import { checkUploadParser, parseUploadIsolated, setUploadParseTestOverrides, UPLOAD_REFUSALS, UploadParseRefused, uploadParseState } from '@/lib/upload-parse';
-import { replyMessages, ReplyCollector, ROWS_PIECE_CELLS, type ParseReply } from '@/lib/upload-parse/protocol';
-import { allGone, longestStall, outcome, processGone, standIn, useRealUploadParser } from './upload-parse-helpers';
-import { denseSheet, workbook, xlsxFile } from './zip-fixtures';
+import { checkUploadParser, lastUploadParse, parseUploadIsolated, setUploadParseTestOverrides, UPLOAD_REFUSALS, UploadParseRefused, uploadParseState } from '@/lib/upload-parse';
+import { MAX_RESULT_BYTES, PIECE_BYTES, replyMessages, ReplyCollector, ROWS_PIECE_CELLS, type ParseReply } from '@/lib/upload-parse/protocol';
+import { allGone, heapHeldBy, longestStall, outcome, processGone, standIn, useRealUploadParser } from './upload-parse-helpers';
+import { denseSheet, rawSheet, workbook, xlsxFile } from './zip-fixtures';
 
 useRealUploadParser();
 
@@ -220,6 +222,78 @@ describe('the rows come back in pieces (protocol)', () => {
     expect(() => new ReplyCollector().add({ hello: 1 })).toThrow(/something else/);
     // An error reply is one message.
     expect(replyMessages({ ok: false, error: { kind: 'error', name: 'Error', message: 'x' } })).toHaveLength(1);
+  });
+
+  it('pieces are cut by size too, and a text the answer holds many times crosses once (P5 review)', () => {
+    // 300 rows of 100,000 characters each of their own (30 MB): in pieces of at most about PIECE_BYTES.
+    const long: ParseReply = { ok: true, parsed: { fileName: 'f.csv', fileType: 'csv', rows: Array.from({ length: 300 }, (_, r) => ({ note: String(r).padEnd(100_000, 'z') })), warnings: [] } };
+    const pieces = [...replyMessages(long)].filter((m) => m.kind === 'rows');
+    expect(pieces.length).toBeGreaterThan(5);
+    for (const m of pieces) expect((m as { bytes: Uint8Array }).bytes.byteLength).toBeLessThanOrEqual(PIECE_BYTES + 200_000);
+    // 50,000 cells of one 4,096-character text: it crosses once (it used to cross 50,000 times, 200 MB).
+    const same = 'x'.repeat(4_096);
+    const shared: ParseReply = { ok: true, parsed: { fileName: 'f.xlsx', fileType: 'xlsx', rows: Array.from({ length: 50_000 }, () => ({ note: same })), warnings: [], sheetName: 'S' } };
+    const messages = [...replyMessages(shared)];
+    expect(messages.reduce((n, m) => n + ('bytes' in m && typeof m.bytes === 'object' ? m.bytes.byteLength : 0), 0)).toBeLessThan(1024 * 1024);
+    const c = new ReplyCollector();
+    let whole: ParseReply | null = null;
+    for (const m of messages) whole = c.add(structuredClone(m));
+    expect(whole).toEqual(shared);
+  });
+});
+
+/**
+ * A workbook whose one sheet has a header row and `rows` rows of one cell that shows the one shared
+ * string (xl/sharedStrings.xml) of `length` characters: 50,000 cells of 4,096 characters is a 6 KB
+ * file within every cap (the P5 review's file).
+ */
+function sharedStringBook(rows: number, length: number): Buffer {
+  const sst = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="${rows}" uniqueCount="1"><si><t>${'x'.repeat(length)}</t></si></sst>`;
+  return workbook(
+    { Notes: rawSheet(`<row><c t="inlineStr"><is><t>note</t></is></c></row>${'<row><c t="s"><v>0</v></c></row>'.repeat(rows)}`) },
+    [{ name: 'xl/sharedStrings.xml', data: Buffer.from(sst) }],
+    [{ part: '/xl/sharedStrings.xml', type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml' }],
+  );
+}
+
+describe('the answer is bounded in this process, whatever the file (P5 review)', () => {
+  it('50,000 cells that show one 4,096-character text: this process holds the text once, as parseUpload did here', async () => {
+    const bytes = sharedStringBook(50_000, 4_096);
+    expect(bytes.length).toBeLessThan(10_000);
+    const { result, heldMB } = await heapHeldBy(() => parseUploadIsolated(xlsxFile(bytes, 'notes.xlsx')));
+    expect(result.rows).toHaveLength(50_000);
+    // Each cell used to come back as its own copy: about 200 MB held here (cells x 4 KB), from a 6 KB file.
+    expect(heldMB).toBeLessThan(32);
+    expect(lastUploadParse()?.bytes).toBeLessThan(1024 * 1024);
+    expect(result).toEqual(await parseUpload(xlsxFile(bytes, 'notes.xlsx')));
+  });
+
+  it('an answer larger than the limit is refused "needs too much memory": the parser stops before it', async () => {
+    // 2,000 rows of 1,000 characters each of their own: about 2 MB of text, over a 1 MB limit.
+    const text = ['code,note', ...Array.from({ length: 2_000 }, (_, i) => `C${i},${String(i).padEnd(1_000, 'y')}`)].join('\n');
+    const file = () => new File([text], 'notes.csv', { type: 'text/csv' });
+    setUploadParseTestOverrides({ maxResultBytes: 1024 * 1024 });
+    expect(await outcome(parseUploadIsolated(file()))).toEqual(refusal('UPLOAD_OUT_OF_MEMORY'));
+    expect(lastUploadParse()).toMatchObject({ tooLarge: 'parser' });
+    expect(lastUploadParse()!.bytes).toBeLessThanOrEqual(1024 * 1024);
+    // Under the limit (the default) the same file is read.
+    setUploadParseTestOverrides(null);
+    expect((await parseUploadIsolated(file())).rows).toHaveLength(2_000);
+  });
+
+  it('a parser that sends more anyway is stopped here at the limit: the same refusal, and its process is killed', async () => {
+    setUploadParseTestOverrides({ entry: standIn('flood'), maxResultBytes: 3 * 1024 * 1024 });
+    const pending = outcome(parseUploadIsolated(tiny()));
+    const pid = await runningParser();
+    expect(await pending).toEqual(refusal('UPLOAD_OUT_OF_MEMORY'));
+    // Pieces of 1 MB against a 3 MB limit: the third is counted, found too much and never read.
+    expect(lastUploadParse()).toMatchObject({ tooLarge: 'web', pieces: 2 });
+    await allGone();
+    expect(processGone(pid)).toBe(true);
+  });
+
+  it('the limit is MAX_RESULT_BYTES (128 MB), which no file within the upload caps comes near', () => {
+    expect(MAX_RESULT_BYTES).toBe(128 * 1024 * 1024);
   });
 });
 
