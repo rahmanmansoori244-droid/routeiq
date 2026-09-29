@@ -3,7 +3,7 @@ import { auth } from '@/lib/auth';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { hasRole, fail, ok } from '@/lib/api';
-import { parseUpload } from '@/lib/csv';
+import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '@/lib/upload-parse';
 import { normalizeBranchKey } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/client-ip';
@@ -34,8 +34,11 @@ export async function POST(req: Request, { params }: Params) {
 
   let parsed;
   try {
-    parsed = await parseUpload(file);
+    // Read in the parser process (audit P5, lib/upload-parse).
+    parsed = await parseUploadIsolated(file);
   } catch (err) {
+    // Too long, too much memory, the reader stopped, or busy (503): nothing was saved.
+    if (err instanceof UploadParseRefused) return uploadRefusedResponse(err);
     return fail((err as Error).message, 400);
   }
 

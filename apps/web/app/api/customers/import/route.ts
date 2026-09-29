@@ -3,7 +3,7 @@ import type { Prisma } from '@prisma/client';
 import { auth } from '@/lib/auth';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
-import { parseUpload } from '@/lib/csv';
+import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '@/lib/upload-parse';
 import { MAX_SERVICE_MIN, normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
@@ -14,7 +14,8 @@ import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
 import { samePoint } from '@/lib/dispatch/location-input';
 import { clientIp } from '@/lib/client-ip';
 
-// Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard.
+// Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard; the file is read in the parser process
+// (audit P5, lib/upload-parse).
 //
 // Columns: code, name and priority are required. Every other column is written only when the
 // file has it AND the cell is not blank: a re-import without a column never erases what the
@@ -111,8 +112,10 @@ export async function POST(req: Request) {
   try {
     // lat / lng from Excel: the decimals the cell shows count (23.5850, not the number 23.585), a
     // number format adding one zero at most (23.58 shown as 23.5800 is 23.580: A5 fourth review).
-    parsed = await parseUpload(file, { decimalTextColumns: ['lat', 'lng'] });
+    parsed = await parseUploadIsolated(file, { decimalTextColumns: ['lat', 'lng'] });
   } catch (err) {
+    // Too long, too much memory, the reader stopped, or busy (503): nothing was saved.
+    if (err instanceof UploadParseRefused) return uploadRefusedResponse(err);
     return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
   }
 

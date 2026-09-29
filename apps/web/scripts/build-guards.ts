@@ -12,7 +12,9 @@
  * Used by tests/lib/build-hardening.spec.ts (source) and scripts/check-build-output.ts (CI, after
  * `next build`).
  */
+import { fork } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 /** Skipped at any depth: dependencies and build output. */
@@ -103,4 +105,77 @@ export function browserSourceMaps(nextDir: string): string[] {
   };
   visit(staticDir);
   return out;
+}
+
+// ---------------------------------------------------------------------------------------------
+// The upload parser (audit P5)
+// ---------------------------------------------------------------------------------------------
+
+/** What scripts/upload-parser-build.cjs finds wrong with a bundle's inputs (the one list of what it may hold). */
+function parserInputProblems(inputs: string[]): string[] {
+  const builder = createRequire(__filename)(path.join(__dirname, 'upload-parser-build.cjs')) as { inputProblems(inputs: string[]): string[] };
+  return builder.inputProblems(inputs);
+}
+
+/**
+ * Everything wrong with the upload parser bundle of a built app (empty = passes): `next start` forks
+ * <webDir>/.next/upload-parser/parse.cjs for each upload (lib/upload-parse), so without it every
+ * upload is refused. It must be there, built only from the parser's own modules, SheetJS's ESM build
+ * and Papa Parse (its stamp.json), with no source map beside it. Separate from buildOutputProblems,
+ * whose findings the tests pin.
+ */
+export function uploadParserProblems(webDir: string): string[] {
+  const rel = (p: string) => path.relative(webDir, p);
+  const dir = path.join(webDir, '.next', 'upload-parser');
+  const bundle = path.join(dir, 'parse.cjs');
+  if (!existsSync(bundle)) {
+    return [`${rel(bundle)} is missing: run \`pnpm build\` (its step scripts/build-upload-parser.mjs makes it); without it every upload is refused`];
+  }
+  const problems: string[] = [];
+  const stampPath = path.join(dir, 'stamp.json');
+  try {
+    const stamp = JSON.parse(readFileSync(stampPath, 'utf8')) as { inputs?: Record<string, unknown> };
+    for (const p of parserInputProblems(Object.keys(stamp.inputs ?? {}))) problems.push(`upload parser: ${p}`);
+  } catch {
+    problems.push(`${rel(stampPath)} is missing or unreadable: build the upload parser again`);
+  }
+  for (const name of readdirSync(dir)) if (name.endsWith('.map')) problems.push(`source map beside the upload parser: ${rel(path.join(dir, name))}`);
+  return problems;
+}
+
+/**
+ * Runs the parser bundle once as `next start` does (forked, with a heap cap, no secrets) on a
+ * two-line CSV. Null when it answered the right rows; else what went wrong.
+ */
+export function uploadParserSmokeProblem(bundle: string, timeoutMs = 30_000): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = fork(bundle, [], {
+      execArgv: ['--max-old-space-size=256'],
+      env: { NODE_ENV: 'production', ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) },
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      serialization: 'advanced',
+    });
+    let stderr = '';
+    let finished = false;
+    const rows: unknown[] = [];
+    const done = (problem: string | null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      resolve(problem);
+    };
+    const timer = setTimeout(() => done(`the upload parser did not answer within ${timeoutMs} ms`), timeoutMs);
+    child.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString('utf8')).slice(-2_000)));
+    child.on('message', (m: { kind?: string; rows?: unknown[]; reply?: { ok?: boolean; parsed?: { fileType?: string } } }) => {
+      if (m.kind === 'rows') rows.push(...(m.rows ?? []));
+      else if (m.kind === 'reply') {
+        const ok = m.reply?.ok === true && m.reply.parsed?.fileType === 'csv' && JSON.stringify(rows) === JSON.stringify([{ code: 'C1', name: 'One' }]);
+        done(ok ? null : `the upload parser answered ${JSON.stringify(m).slice(0, 300)}`);
+      }
+    });
+    child.on('error', (err) => done(`the upload parser could not be started: ${err.message}`));
+    child.on('exit', (code, signal) => setTimeout(() => done(`the upload parser ended without an answer (exit ${code}, signal ${signal}): ${stderr.trim()}`), 500));
+    child.send({ name: 'check.csv', type: 'text/csv', bytes: new Uint8Array(Buffer.from('code,name\nC1,One\n')), spec: {} });
+  });
 }

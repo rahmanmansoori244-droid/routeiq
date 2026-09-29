@@ -4,6 +4,7 @@
  */
 import { rateLimitConfigProblem } from './rate-limit';
 import { TOKEN_CANNOT_BE_SENT, URL_EXPECTED, URL_NOT_USABLE, solverEnv, solverUrlUsable, tokenCanBeSent } from './solver-env';
+import { uploadParseConfigProblems } from './upload-parse/config';
 
 export interface ConfigProblem {
   level: 'error' | 'warn';
@@ -21,6 +22,8 @@ export function configProblems(env: NodeJS.ProcessEnv = process.env): ConfigProb
         'FEASIBILITY_GATE=warn: trucks whose times break a planning rule (loading time between loads, receiving hours, payload, shift) can be locked and dispatched. Emergency switch only - remove it to enforce the check again.',
     });
   }
+  // Audit P5: the upload parser settings (a value that is not usable falls back to its default).
+  for (const message of uploadParseConfigProblems(env)) out.push({ level: 'warn', message });
   if (env.NODE_ENV !== 'production') return out;
 
   // Audit F15: without these every optimization fails; /api/health answers 503 for the same reason.
