@@ -122,12 +122,17 @@ change is deployed:
   `search_mode` and searches QUICK; a THOROUGH choice then just behaves like QUICK); a new solver with the old web gets no mode
   (QUICK).
 - **Variables** (names only):
-  - `THOROUGH_MAX_SEC` on **web and solver**, the same value (default 1200 = 20 min; 10 to 3600). The web sends it with each
-    THOROUGH request and waits it + 2 minutes; the solver uses the lower of the two.
+  - `THOROUGH_MAX_SEC` on **web and solver**, the same value (default 1200 = 20 min; accepted from 10 to 3600, but keep it at
+    600 or more in production). The web sends it with each THOROUGH request and waits it + 2 minutes; the solver uses the lower
+    of the two. Below 20 min the alternatives and the load re-check shrink in proportion (never below Quick's times); below
+    about Quick's whole time (2 min for days up to 120 stops, 4 min at 175, 5 min at 300, 7 min above 350) Thorough searches no
+    longer than Quick and may skip the alternatives. A same-day Thorough plan's new loads count from its start + this value.
+    CI sets 60 (tests only).
   - `NEXT_MANUAL_SIG_HANDLE=1` on **web** (recommended). On a redeploy Railway sends SIGTERM; with this set, the web fails its
     optimizations in progress at once with *"The server was restarted (an update) during this optimization. Nothing was saved
     - optimize again."* (at most 8 s of writes), then exits. Without it Next.js exits at once and those writes may not land:
-    the jobs are then failed by their heartbeat within about 6 minutes (shown as lost after 2).
+    the jobs are then failed by their heartbeat within about 6 minutes (shown as lost after 2). Nothing in the repository sets
+    it: set it on the service. The dispatcher guide says both cases.
   - Optional on the solver: `THOROUGH_STALL_SEC` (300) and `THOROUGH_STALL_SHARE` (0.5), the early-stop rule; leave them unset
     unless re-measured (`docs/OPTIMIZER_BENCHMARK.md` §10).
   - Keep web's `SOLVER_MAX_CONCURRENT` at 2 or more (with 1, a THOROUGH search holds the only slot for up to 20 minutes).
@@ -144,6 +149,10 @@ change is deployed:
   SIGTERM on to the `next start` process is not verified. Check once: start a THOROUGH optimization, redeploy web, and see the
   job end at once with the "server was restarted" message (not after about 6 minutes with "No sign of life"). If it does not,
   start the web with `node` directly (for example `pnpm --filter @routeiq/web exec next start`), which receives the signal.
+  Also check how long Railway waits between SIGTERM and killing the old container (a review of the long-search PR read that
+  Railway's `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` defaults to 0, not verified here): the shutdown handler needs up to 8 s for its
+  writes, so set it to 10 or more if the check shows the jobs failing by heartbeat instead. Until both are verified the dispatcher
+  guide says the job fails "at once where the server is set up for it, otherwise within a few minutes".
 - **Solver CPU during long solves.** A THOROUGH solve holds one solver slot and, for most of its 20 minutes, one CPU core (the
   recommended plan's search); the alternatives and the load re-check add two more processes for about two minutes at the end.
   The solver service's vCPU is not recorded (handbook 7.5). With 1 vCPU a Quick re-plan running next to a Thorough search shares

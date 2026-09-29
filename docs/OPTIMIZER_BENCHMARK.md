@@ -512,6 +512,39 @@ real day's 20 s search depends on the machine's load at that moment, as in §8.4
 next to a QUICK one shares the core, which lowers both searches' quality (their limits are wall-clock), never their deadlines.
 Re-measure on the production solver once it runs THOROUGH plans (the saved search reports hold the best objective over time).
 
+### 10.4 Review of the long-search PR: caps below 20 minutes, and same-day plans
+
+**Caps below 20 minutes.** The tail RECOMMENDED leaves free (the alternatives + 20 s grace + the load re-check: 195 s for
+days up to 120 stops) was cut to 30% of a smaller cap, but the alternatives were still charged the full re-check reserve
+(115 s). Under about 7 minutes they were therefore always skipped, and the recommended plan was the only option.
+`thorough_tail` now shrinks the alternatives' limit and the re-check's time per CP-SAT solve together, in proportion, never
+below QUICK's (half the search limit; min(15, max(3, limit / 2))), and `_run_scenarios` keeps exactly the re-check time the
+tail kept. Synthetic 60-stop day (`nmwc_day(60)`), all three options, worker pool, straight-line matrix, the maintainer's
+machine:
+
+| cap | before: options, RECOMMENDED limit, time used | after: options, RECOMMENDED limit, alternatives' limit, time used |
+|---|---|---|
+| 150 s | RECOMMENDED only ("alternatives skipped"), 83-84 s, 97-113 s | all three, 44 s, 10 s, 58 s |
+| 300 s | RECOMMENDED only ("alternatives skipped"), 188-189 s, 194-198 s | all three, 189 s, 15 s, 209 s |
+| 1,200 s | unchanged (the tail is below 30% of the cap: 60 s alternatives, 30 s per re-check solve) | unchanged |
+
+QUICK on the same day: all three options in 44-47 s. What stays unused is the margins (the 20 s before the alternatives,
+their 20 s grace, the re-check's 20 + 5 s grace and whatever part of its time it does not need), as at 20 minutes (§10.3:
+1,061-1,101 s of 1,200). A pytest checks the arithmetic for every cap from 60 s to 60 min and every day size (the
+alternatives always get their share once RECOMMENDED searched longer than QUICK), and a 90 s cap end to end. Below about
+QUICK's whole time (2 min for days up to 120 stops, 4 min at 175, 5 min at 300, 7 min above 350) THOROUGH searches no
+longer than QUICK and may still skip the alternatives: production keeps 10 minutes or more (default 20). The stall rule is
+unchanged: with a cap under about 9 minutes the recommended search rarely runs 5 minutes without improving, so it usually
+ends at its limit and says so ("all the time allowed").
+
+**Same-day plans.** A same-day plan starts from now (turnaround and loading counted from the button press). A THOROUGH search
+first takes up to its cap: the review measured a small synthetic same-day day that converged after about 6 minutes (the plan
+existed at 14:58 for a 14:52 press, its first load planned at 15:25: 7 of the 30 preparation minutes gone), and the real day
+takes 1,061-1,101 s (§10.3: about 18 minutes gone); queued behind another THOROUGH, departures were planned before the plan
+existed. A same-day THOROUGH is now timed from the start of its search + the cap (the job re-times it when it really gets its
+slot): at 1,200 s, no new load before start + 20 min + the turnaround. That is conservative when the search stops early (the
+loads could have left up to about 15 minutes sooner); QUICK, the suggested choice on the delivery day, is unchanged.
+
 ## Sources
 
 - OR-Tools repository and licence (Apache-2.0): https://github.com/google/or-tools · releases: https://github.com/google/or-tools/releases
