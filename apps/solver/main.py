@@ -31,6 +31,7 @@ from fastapi.responses import JSONResponse
 
 from dispatch_models import DispatchRequest, DispatchResponse, GeometryRequest, GeometryResponse
 from dispatch_solver import WORKER_HEALTH, SolveAborted, SolveControl, WorkersUnavailable, optimize_dispatch
+import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
 from solver import optimize
@@ -106,6 +107,8 @@ def log_startup_warnings() -> None:
 
 
 log_startup_warnings()
+# The second route search (PyVRP): on or off, and why - read by RAILWAY_DEPLOYMENT.md's check.
+log.info(pyvrp_candidate.startup_line())
 
 
 _ROUTING_CACHE: dict = {"at": 0.0, "value": None}
@@ -174,6 +177,8 @@ def ready_endpoint(
         "max_concurrent_dispatch": MAX_CONCURRENT_DISPATCH,
         "routing": routing_status(),
         "workers": workers,
+        # The second route search (PyVRP): enabled, version, effective CPUs and why not. Never affects ok.
+        "pyvrp": pyvrp_candidate.status(),
     }
 
 
@@ -266,7 +271,8 @@ def stop_dispatch_endpoint(
     x_solver_token: Annotated[str | None, Header(alias="X-Solver-Token")] = None,
 ) -> dict:
     """"Use the best plan found so far": a running THOROUGH solve ends its search at the next
-    solution it finds (usually within a second), skips the alternatives and re-checks the loads with
+    solution it finds (usually within a second) - its second route search (PyVRP) too, whose best
+    plan so far is still judged - skips the alternatives and re-checks the loads with
     QUICK's time; its /optimize-dispatch request then answers as usual (stop_reason STOPPED).
     404: no solve of this plan (and company) is running here; 409: a QUICK solve (not stoppable)."""
     _check_token(x_solver_token)
