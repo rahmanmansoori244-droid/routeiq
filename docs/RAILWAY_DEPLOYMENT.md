@@ -246,9 +246,10 @@ never worse than the engine alone would have chosen from the same search. See `d
     engine alone; no redeploy of the web is needed.
   - `SOLVER_PYVRP_MIN_CPUS` (default 2): the CPU gate. Below it the second search switches itself off (`CPU_GATE`).
   - Optional: `SOLVER_PYVRP_SEED` (1), `SOLVER_PYVRP_STOP_GRACE_SEC` (10). Never set `SOLVER_PYVRP_MAX_ITERS` or
-    `SOLVER_PYVRP_STALL_ITERS` on Railway (tests and development only).
+    `SOLVER_PYVRP_STALL_SEC` / `SOLVER_PYVRP_STALL_SHARE` on Railway (tests and development only).
 - **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
-  search time; Thorough: until the load re-check's reserve, unless it stops improving earlier), and its own load re-check job
+  search time; Thorough: while the engine searches, then until its last better plan is max(30 s, 10% of its search time)
+  old, at most until the load re-check's reserve), and its own load re-check job
   beside the engine's. CPU-seconds per solve roughly double (measured in §12). Memory: about 100 MB more per running solve on
   normal days (numpy and PyVRP in the process, the day's matrices), more on 600-stop days with plan continuity (the model then
   leaves continuity out above 64 MB of matrices). The solver service has **24 vCPU / 24 GB** (owner, 30 Sep 2026): at
@@ -258,12 +259,13 @@ never worse than the engine alone would have chosen from the same search. See `d
   cannot start, fails, dies or hangs, the solve goes on with the engine alone and one log line says why (`pyvrp run=<id>
   skipped: ...` / `failed: ...`). Only a hung PyVRP costs time: at most `SOLVER_PYVRP_STOP_GRACE_SEC` on a Quick solve.
 - **Deploy order:** solver first; the web may follow at any time (every new field is additive; an old web ignores them, and
-  a new web shows the second-search sentence only when the solver reports it).
+  the second search's note is one of the plan's own warnings; an old web shows the new status `SECOND_SEARCH` as the code
+  itself, a new web as "plan from the second route search").
 - **Verify after the deploy:** the solver's startup log has the line `PyVRP second search: on for every search (pyvrp 0.14.0,
   effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token, or through the web's
   `/api/health`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
   container really gets. One Quick optimization of a normal day: the solver log shows `pyvrp run=<id> done: stop=SEARCH_END ...`
-  and the plan's job message may end with *"A second route search found this plan; ..."*.
+  and, when its plan was used, the option carries the note *"A second route search found a better plan for this option ..."*.
 - **Rollback:** set `SOLVER_PYVRP=off` (no code change). A full rollback to the previous solver image also works: the web
   treats a missing `search.pyvrp` as "no second search".
 

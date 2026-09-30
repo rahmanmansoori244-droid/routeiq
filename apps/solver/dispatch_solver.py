@@ -2313,8 +2313,8 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
                tail: ThoroughTail | None, budget_end: float) -> None:
     """Start the second search (after RECOMMENDED was submitted: the engine never queues behind it,
     critique C4). QUICK: until the engine's searches end (search_over), backstop the planned search
-    time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, its own stall, a stop or
-    a cancel."""
+    time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, a stop, a cancel or - once
+    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC)."""
     if not pv.active or pv.args is not None:
         return
     if not solvable:
@@ -2329,7 +2329,8 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
         planned = rec_limit + (max(2, time_limit // 2) + ALT_GRACE_SEC if n_alt else 0)
         runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit) - now)
     settings = PV.PvSettings(mode="THOROUGH" if tail is not None else "QUICK", seed=PV.seed(), max_runtime=max(1.0, runtime),
-                             min_sec=float(time_limit), stall_iters=PV.stall_iters(), max_iters=PV.max_iters())
+                             min_sec=float(time_limit), stall_floor_sec=PV.stall_floor_sec(), stall_share=PV.stall_share(),
+                             max_iters=PV.max_iters())
     pv.args = (req, solvable, tds, mx, settings)
     pv.report.update(status="NOT_CHOSEN", reason=None, seed=settings.seed)
     if pv.workers is not None:
@@ -2340,9 +2341,11 @@ def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float,
                 control: SolveControl | None) -> None:
     """The second search's answer, collected before the engine's pool may be closed (critique C5)
     and never later than ``budget_end - stage_need``, so the engine's load re-check keeps its time.
-    QUICK (or after a stop): it is told the engine's searches are over and answers within about a
-    second (SOLVER_PYVRP_STOP_GRACE_SEC at most). A worker that died - even before this wait - is LOST
-    at once; one that does not answer is TIMEOUT, and only its own process is stopped."""
+    It is told the engine's searches are over. QUICK (or after a stop): it answers within about a
+    second (SOLVER_PYVRP_STOP_GRACE_SEC at most). THOROUGH: it answers once its timed stall is reached
+    (at once when it has not improved for that long) or at its reserve, never past ``limit``. A worker
+    that died - even before this wait - is LOST at once; one that does not answer is TIMEOUT, and only
+    its own process is stopped."""
     if pv.args is None or not pv.active:
         return
     if pv.inprocess:
@@ -2353,12 +2356,9 @@ def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float,
     else:
         now = time.monotonic()
         limit = budget_end - stage_need
-        if thorough and not stopped:
-            deadline = limit
-        else:
-            if pv.workers.search_over is not None:  # type: ignore[union-attr]
-                pv.workers.search_over.set()  # type: ignore[union-attr]
-            deadline = min(now + PV.stop_grace_sec(), limit)
+        if pv.workers.search_over is not None:  # type: ignore[union-attr]
+            pv.workers.search_over.set()  # type: ignore[union-attr]
+        deadline = limit if thorough and not stopped else min(now + PV.stop_grace_sec(), limit)
         kind, value = _await_all(pv.workers, {"PYVRP": pv.job}, max(deadline, now), control)["PYVRP"]  # type: ignore[arg-type]
         if kind != "ok":
             reason = {"lost": "LOST", "broken": "LOST", "timeout": "TIMEOUT"}.get(kind, "FAILED")
@@ -2738,7 +2738,9 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     kept apart from the engine's (critique of the PyVRP spec): the engine's sources, their repair
     weights, budget and jobs are exactly as without it, and its own stage job (pyvrp_candidate.
     stage_in_worker) runs in its own process, never longer than the engine's. Its candidates join the
-    pick after the engine's, and a tie keeps the engine's plan. So each option is never worse on its
+    pick after the engine's; a tie keeps the engine's plan, and so does a gain the dispatcher's note
+    could not show (_goal_measure: under 1 OMR or 1 km, no fewer trucks or loads, no more service).
+    An option rescued from no plan gets the status SECOND_SEARCH. So each option is never worse on its
     own goal than the engine alone would have chosen from the same search. A plan from it that fails
     the independent check is replaced by the engine's (a WARNING line). An option whose own search
     found no plan (NO_SOLUTION) takes the second search's best plan for its goal."""
@@ -2873,13 +2875,20 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         # other options' plans are not offered to it, as without the second search).
         best, lost = pick(name, cands if name in raw else pvc, own)
         ref, ref_lost = pick(name, eng, own) if name in raw else (None, False)
+        if (best is not None and ref is not None and best.source.startswith("PYVRP")
+                and _goal_gain(name, ref.score, best.score, len(served(best)) - len(served(ref))) is None):
+            # Better only by less than the note can show (under 1 OMR or 1 km, same trucks and loads):
+            # the engine's own plan is kept (review: "529 -> 529 OMR" was called a better plan).
+            best, lost = ref, ref_lost
         new = None
         while best is not None:
             timing_drops = own_carried - served(best) if lost else set()
             from_pv = best.source.startswith("PYVRP")
             try:
                 new = _build_scenario(
-                    name, req, solvable, tds, mx, best.plan, values, use_margin, drops, solver_status=sc.solver_status,
+                    name, req, solvable, tds, mx, best.plan, values, use_margin, drops,
+                    # A rescued option has its own status: never the failed search's "no plan found".
+                    solver_status="SECOND_SEARCH" if name in rescue else sc.solver_status,
                     elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
                     objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
                     exact_timing=True,
@@ -2920,7 +2929,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 "loading time." + (f" {len(added)} stop(s) the route search had left out are planned instead." if added else "")
             )
         if best.source.startswith("PYVRP"):
-            new.warnings.append(_second_search_note(name in rescue, ref, best, served(ref) if ref else set(), served_now))
+            new.warnings.append(_second_search_note(name, name in rescue, ref, best, served(ref) if ref else set(), served_now))
             pv.report["chosen_for"] = [*pv.report.get("chosen_for", []), name]  # type: ignore[union-attr]
         elif timing_drops:
             pass
@@ -2944,22 +2953,70 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             pv.report.update(status="NOT_CHOSEN", reason="NOT_BETTER")  # type: ignore[union-attr]
 
 
-def _second_search_note(rescued: bool, ref: LR.Candidate | None, best: LR.Candidate, ref_served: set[int],
+MIN_SHOWN_GAIN_OMR = 1.0  # the second search's plan must be better by at least this much on the option's goal ...
+MIN_SHOWN_GAIN_KM = 1.0  # ... (or plan more, or use fewer trucks / loads) to be used: a gain the note can show
+
+
+def _shown(a: float, b: float, fmt: str, min_gain: float) -> bool:
+    """``b`` is lower than ``a`` by at least ``min_gain``, and still lower once both are printed."""
+    return a - b >= min_gain and format(b, fmt) != format(a, fmt)
+
+
+def _goal_measure(name: str, r: LR.Score, b: LR.Score, more: int) -> tuple[str, str] | None:
+    """(plain words, the figure it names) for how ``b`` (the second search's plan) beats ``r`` (the
+    engine's final plan) on the option's own goal (_GOALS) - service first, then km for MIN_DISTANCE,
+    trucks, loads and operating cost for MIN_TRUCKS, the total cost with the customer time preferences
+    for RECOMMENDED - or None when the gain is not one the dispatcher can see."""
+    if b.unserved != r.unserved:
+        if b.unserved > r.unserved:
+            return None
+        return (f"{more} more stop(s) planned", "") if more > 0 else ("more of the higher-priority stops planned", "")
+    if name == "MIN_DISTANCE":
+        km_r, km_b = r.metres / 1000, b.metres / 1000
+        return (f"fewer km, {km_r:,.1f} -> {km_b:,.1f} km", "km") if _shown(km_r, km_b, ",.1f", MIN_SHOWN_GAIN_KM) else None
+    if name == "MIN_TRUCKS":
+        if b.trucks != r.trucks:
+            return (f"fewer trucks, {r.trucks} -> {b.trucks}", "trucks") if b.trucks < r.trucks else None
+        if b.loads != r.loads:
+            return (f"fewer loads, {r.loads} -> {b.loads}", "loads") if b.loads < r.loads else None
+        o_r, o_b = r.operating / COST_SCALE, b.operating / COST_SCALE
+        return ((f"a lower operating cost, {o_r:,.0f} -> {o_b:,.0f} OMR", "operating")
+                if _shown(o_r, o_b, ",.0f", MIN_SHOWN_GAIN_OMR) else None)
+    c_r, c_b = r.cost / COST_SCALE, b.cost / COST_SCALE
+    return ((f"a lower total cost including the customer time preferences, {c_r:,.0f} -> {c_b:,.0f} OMR", "")
+            if _shown(c_r, c_b, ",.0f", MIN_SHOWN_GAIN_OMR) else None)
+
+
+def _goal_gain(name: str, r: LR.Score, b: LR.Score, more: int) -> str | None:
+    """The second search's gain on the option's goal in plain words; None: not a better plan."""
+    m = _goal_measure(name, r, b, more)
+    return m[0] if m else None
+
+
+def _second_search_note(name: str, rescued: bool, ref: LR.Candidate | None, best: LR.Candidate, ref_served: set[int],
                         served_now: set[int]) -> str:
-    """The dispatcher's note on an option whose plan came from the second search (decision D4), in
+    """The one dispatcher's note on an option whose plan came from the second search (decision D4), in
     plain words. Compared with the engine's own final plan for that option - its best candidate
     after the load re-check - never with the raw search plan (critique C8: the re-check alone often
-    saves trucks)."""
+    saves trucks). "Better" names the option's own goal only; trucks, loads, km and operating cost
+    follow neutrally, when they changed."""
     checked = "It passed the planner's own checks, timing and costs."
     if rescued:
         return f"The main route search found no plan for this option; this plan comes from a second route search. {checked}"
     if ref is None:
         return f"This plan comes from a second route search: the main search's plan could not be timed exactly. {checked}"
-    more = len(served_now) - len(ref_served)
-    return (f"A second route search found a better plan for this option than the main search: {ref.score.trucks} -> "
-            f"{best.score.trucks} trucks, {ref.score.loads} -> {best.score.loads} loads, {ref.score.operating / COST_SCALE:.0f} -> "
-            f"{best.score.operating / COST_SCALE:.0f} OMR operating cost"
-            + (f", {more} more stop(s) planned" if more > 0 else "") + f". {checked}")
+    m = _goal_measure(name, ref.score, best.score, len(served_now) - len(ref_served))
+    if m is None:  # not reached: such a plan is not chosen (_post_solve)
+        return f"This plan comes from a second route search. {checked}"
+    r, b = ref.score, best.score
+    figures = [("trucks", f"trucks {r.trucks} -> {b.trucks}", r.trucks != b.trucks),
+               ("loads", f"loads {r.loads} -> {b.loads}", r.loads != b.loads),
+               ("km", f"km {r.metres / 1000:,.1f} -> {b.metres / 1000:,.1f}", f"{r.metres / 1000:,.1f}" != f"{b.metres / 1000:,.1f}"),
+               ("operating", f"operating cost {r.operating / COST_SCALE:,.0f} -> {b.operating / COST_SCALE:,.0f} OMR",
+                f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
+    also = [text for key, text, changed in figures if changed and key != m[1]]
+    return (f"A second route search found a better plan for this option than the main search: {m[0]}."
+            + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
 
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:

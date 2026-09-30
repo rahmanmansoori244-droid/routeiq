@@ -24,6 +24,11 @@ const TEXT: Record<string, { short: string; long: string }> = {
   ROUTING_INVALID: { short: 'could not search', long: "The route search could not start with this day's data." },
   ROUTING_NOT_SOLVED: { short: 'not searched', long: 'The route search did not run.' },
   NOT_RUN: { short: 'no route search needed', long: 'No route search was needed (nothing to plan with the trucks available).' },
+  // The solver's own code: the main route search found no plan for this option, the second one did.
+  SECOND_SEARCH: {
+    short: 'plan from the second route search',
+    long: "The main route search found no plan in the time allowed; this plan comes from a second route search, checked, timed and costed with the planner's own rules.",
+  },
 };
 
 /**
@@ -36,7 +41,7 @@ export function withPlainSolverCodes(text: string | null): string | null {
 
 /** The search ended with a plan (whether or not it ran to its limit). */
 export function isPlanFoundStatus(code: string | null | undefined): boolean {
-  return ['ROUTING_SUCCESS', 'ROUTING_PARTIAL_SUCCESS_LOCAL_OPTIMUM_NOT_REACHED', 'ROUTING_OPTIMAL'].includes((code ?? '').trim().toUpperCase());
+  return ['ROUTING_SUCCESS', 'ROUTING_PARTIAL_SUCCESS_LOCAL_OPTIMUM_NOT_REACHED', 'ROUTING_OPTIMAL', 'SECOND_SEARCH'].includes((code ?? '').trim().toUpperCase());
 }
 
 /** Plain words for a route-search status code; `short` for table cells. Unknown codes are returned as they are. */

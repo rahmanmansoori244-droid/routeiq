@@ -73,10 +73,13 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
   - The re-check also tries to place orders the route search left out on free trucks or loads. When it does, the note ends with *"this also plans 2 stop(s) the route search had left out"*: loads and cost can then go up, because more is delivered.
   - **A second route search.** RouteIQ runs a second route search beside the main one, on the same orders, trucks and
     hours. Its plan goes through exactly the same checks, timing and costs as the main search's, and it is used for an option
-    only when it is better for that option's goal (serving the higher priorities first, then cost); when both are equal the main
-    search's plan is kept. Such an option carries the note *"A second route search found a better plan for this option than the
-    main search: 6 -> 5 trucks, 17 -> 14 loads, 545 -> 498 OMR operating cost. It passed the planner's own checks, timing and
-    costs."*, and the search line on the plan and in the job message ends with *"A second route search found this plan; ..."*.
+    only when it is clearly better for that option's goal (serving the higher priorities first; then, for Recommended, at
+    least 1 OMR less total cost with the customer time preferences; for Min Distance at least 1 km less; for Min Trucks a
+    truck or a load less, or 1 OMR less operating cost). Otherwise the main search's plan is kept. Such an option carries one
+    note that says what got better for its goal, and shows the other figures that changed, for example *"A second route search
+    found a better plan for this option than the main search: fewer km, 978.1 -> 974.2 km. Also changed: trucks 5 -> 6, loads
+    14 -> 15, operating cost 529 -> 541 OMR. It passed the planner's own checks, timing and costs."* When the main search found
+    no plan for an option and the second one did, its search status reads "plan from the second route search".
     Nothing else changes: review, lock, export and dispatch the plan as usual. It cannot see the early-arrival preference for
     P1/P2 customers (Settings), so its plans may deliver them a little later inside their receiving hours when that saves more
     than the preference is worth; the plan's cost already counts that preference.

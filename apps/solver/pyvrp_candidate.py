@@ -51,10 +51,14 @@ from dispatch_models import DispatchRequest, DispatchStop, kg_units
 log = logging.getLogger("routeiq.dispatch")
 
 VERSION = "0.14.0"  # requirements.txt pins exactly this (test_pyvrp_version_is_pinned)
-# PyVRP restarts its search after 150,000 iterations without improvement (its default). THOROUGH:
-# it stops once two such periods passed without a better plan - never before QUICK's time for the
-# day - or at the load re-check's reserve (decision D3), a stop request or a cancel.
-STALL_ITERS = 300_000
+# THOROUGH: while the engine searches, the second search goes on (it costs no waiting). Once the
+# engine's searches ended, it stops when its last better plan is older than max(STALL_FLOOR_SEC,
+# STALL_SHARE x its search time) - never before QUICK's time for the day - or at the load re-check's
+# reserve (decision D3), a stop request or a cancel. Timed, not counted in iterations: 300,000
+# iterations without a better plan (the first rule) took 29-87 minutes at the measured 57-171
+# iterations/s, so it never triggered and every Thorough solve waited until the reserve.
+STALL_FLOOR_SEC = 30.0
+STALL_SHARE = 0.1
 FLAG_CHECK_SEC = 0.25  # the stop flags are read at most this often (a multiprocessing Event costs a lock)
 INT62 = 2**62  # PyVRP's costs are int64: every penalised cost must stay below this (section 7)
 DEFAULT_MAX_PENALTY = 100_000.0  # pyvrp.PenaltyParams().max_penalty
@@ -102,13 +106,22 @@ def max_iters() -> int | None:
     return n if n > 0 else None
 
 
-def stall_iters() -> int:
-    """THOROUGH: iterations without a better plan before PyVRP stops (SOLVER_PYVRP_STALL_ITERS)."""
+def _env_float(name: str, default: float, lo: float, hi: float) -> float:
     try:
-        n = int(os.environ.get("SOLVER_PYVRP_STALL_ITERS", ""))
+        v = float(os.environ.get(name, ""))
     except ValueError:
-        return STALL_ITERS
-    return n if n > 0 else STALL_ITERS
+        return default
+    return v if lo <= v <= hi else default
+
+
+def stall_floor_sec() -> float:
+    """THOROUGH: the shortest stall, in seconds, once the engine's searches ended (SOLVER_PYVRP_STALL_SEC)."""
+    return _env_float("SOLVER_PYVRP_STALL_SEC", STALL_FLOOR_SEC, 0.1, 3600.0)
+
+
+def stall_share() -> float:
+    """THOROUGH: the stall's share of the search time so far (SOLVER_PYVRP_STALL_SHARE)."""
+    return _env_float("SOLVER_PYVRP_STALL_SHARE", STALL_SHARE, 0.0, 10.0)
 
 
 def stop_grace_sec() -> float:
@@ -416,31 +429,34 @@ class PvSettings:
     seed: int
     max_runtime: float  # seconds from the job's start: the backstop (THOROUGH: the re-check reserve)
     min_sec: float  # THOROUGH: never stops on its stall before QUICK's time for the day
-    stall_iters: int = STALL_ITERS
+    stall_floor_sec: float = STALL_FLOOR_SEC
+    stall_share: float = STALL_SHARE
     max_iters: int | None = None
 
 
 class Stopper:
     """PyVRP's stopping criterion: called once per iteration with the best feasible cost. Stops on
-    the backstop time, the iteration limit (tests), THOROUGH's stall, and - read at most every
-    FLAG_CHECK_SEC - the pool's "search over" flag (the engine's searches ended) or, THOROUGH only,
-    its stop flag (a stop request or a cancel; a QUICK solve is not stoppable, a cancel kills it)."""
+    the backstop time, the iteration limit (tests) and - read at most every FLAG_CHECK_SEC - the
+    pool's "search over" flag (the engine's searches ended) or, THOROUGH only, its stop flag (a stop
+    request or a cancel; a QUICK solve is not stoppable, a cancel kills it). QUICK stops as soon as
+    the engine's searches ended; THOROUGH then stops on its timed stall (STALL_FLOOR_SEC)."""
 
-    def __init__(self, s: PvSettings, started: float, stop_flag=None, search_over=None):
+    def __init__(self, s: PvSettings, started: float, stop_flag=None, search_over=None, clock=time.perf_counter):
         self.s = s
         self.started = started
         self.stop_flag = stop_flag
         self.search_over = search_over
+        self.clock = clock
+        self.engine_done = False
         self.next_check = 0.0
         self.iters = 0
         self.best: float | None = None
-        self.last_iter = 0
         self.last_sec: float | None = None
         self.points: list[tuple[float, float]] = []
         self.reason: str | None = None
 
     def __call__(self, best_cost) -> bool:
-        now = time.perf_counter()
+        now = self.clock()
         self.iters += 1
         t = now - self.started
         try:
@@ -448,21 +464,25 @@ class Stopper:
         except TypeError:
             feasible = False
         if feasible and (self.best is None or best_cost < self.best):
-            self.best, self.last_iter, self.last_sec = best_cost, self.iters, t
+            self.best, self.last_sec = best_cost, t
             self.points.append((round(t, 1), round(float(best_cost) / 100_000, 2)))
         if self.s.max_iters is not None and self.iters >= self.s.max_iters:
             return self._end("ITERATIONS")
         if t >= self.s.max_runtime:
             return self._end("CAP" if self.s.mode == "THOROUGH" else "MAX_RUNTIME")
-        if (self.s.mode == "THOROUGH" and t >= self.s.min_sec and self.best is not None
-                and self.iters - self.last_iter >= self.s.stall_iters):
-            return self._end("CONVERGED")
         if now >= self.next_check:
             self.next_check = now + FLAG_CHECK_SEC
             if self.s.mode == "THOROUGH" and self.stop_flag is not None and self.stop_flag.is_set():
                 return self._end("STOPPED")
             if self.search_over is not None and self.search_over.is_set():
-                return self._end("SEARCH_END")
+                if self.s.mode != "THOROUGH":
+                    return self._end("SEARCH_END")
+                self.engine_done = True
+        if self.engine_done and t >= self.s.min_sec:
+            # Its timed stall, once the engine's searches ended; no feasible plan yet: from its start.
+            last = self.last_sec if self.last_sec is not None else 0.0
+            if t - last >= max(self.s.stall_floor_sec, self.s.stall_share * t):
+                return self._end("CONVERGED")
         return False
 
     def _end(self, why: str) -> bool:

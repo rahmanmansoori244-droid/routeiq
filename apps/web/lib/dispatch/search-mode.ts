@@ -227,29 +227,12 @@ function recommendedSearchBrief(r: SearchReport): string {
 }
 
 /**
- * One sentence when the plan of `optionName` (RECOMMENDED by default) came from the second route
- * search (PyVRP; decision D4), in either mode; null otherwise or from a solver without it. The
- * planner's own checks, timing and costs judged that plan like any other.
- */
-export function secondSearchText(r: SearchReport | null | undefined, optionName = 'RECOMMENDED'): string | null {
-  const p = r?.pyvrp;
-  if (!p || p.status !== 'CHOSEN' || !(p.chosen_for ?? []).includes(optionName)) return null;
-  return 'A second route search found this plan; the planner checked, timed and costed it with its own rules.';
-}
-
-/**
  * One line on how the applied plan was searched, for the plan screen, the Excel SUMMARY and the
  * ASSUMPTIONS sheet. Honest: how long it searched and why it stopped; never "optimal", no gap
  * (none is known). `option`: the alternative in use (searchOptionOf) - its own search, after the
- * recommended plan's. When that plan came from the second route search, one sentence says so.
+ * recommended plan's.
  */
 export function searchResultText(r: SearchReport | null | undefined, option?: SearchOption | null): string | null {
-  const line = searchLine(r, option);
-  const second = secondSearchText(r, option?.name ?? 'RECOMMENDED');
-  return line && second ? `${line} ${second}` : line;
-}
-
-function searchLine(r: SearchReport | null | undefined, option?: SearchOption | null): string | null {
   if (!r) return null;
   const searched = fmtSearchTime(r.search_sec);
   // Either mode: nothing was searched, or the search found no plan (skeptic review of the long-search PR).

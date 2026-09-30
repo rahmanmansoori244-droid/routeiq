@@ -405,19 +405,86 @@ def test_options_with_no_plan_are_rescued_by_the_second_search(inprocess, monkey
     monkeypatch.setattr(ds, "_scenario_worker", real)
     for sc in resp.scenarios:
         assert sc.status == "OPTIMIZED" and sc.feasibility.status == "VERIFIED", sc.name
-        assert any(w.startswith("The main route search found no plan for this option") for w in sc.warnings)
+        # Its own status, not the failed search's "no plan found in the time allowed" (plan screen, Excel).
+        assert sc.solver_status == "SECOND_SEARCH", sc.name
+        # One note (decision D4).
+        assert [w for w in sc.warnings if "second route search" in w] == [
+            "The main route search found no plan for this option; this plan comes from a second route search. "
+            "It passed the planner's own checks, timing and costs."]
     assert resp.search.pyvrp.status == "CHOSEN" and sorted(resp.search.pyvrp.chosen_for) == sorted(ALL3)
     assert resp.search.stop_reason != "NO_PLAN"
 
 
-def test_the_note_compares_with_the_engines_final_plan():
-    ref = LR.Candidate("RECOMMENDED+repack:RECOMMENDED", {}, LR.Score(0, 0, trucks=6, loads=17, metres=0, operating=54_500_000))
-    best = LR.Candidate("PYVRP+repack:RECOMMENDED", {}, LR.Score(0, 0, trucks=5, loads=14, metres=0, operating=49_800_000))
-    note = ds._second_search_note(False, ref, best, {1, 2}, {1, 2})
-    assert note.startswith("A second route search found a better plan for this option than the main search: 6 -> 5 trucks, "
-                           "17 -> 14 loads, 545 -> 498 OMR operating cost.")
-    assert "PyVRP" not in note  # plain words for dispatchers
-    assert ds._second_search_note(True, None, best, set(), {1}).startswith("The main route search found no plan")
+def _cand(source, *, cost, trucks, loads, km, omr, unserved=0):
+    return LR.Candidate(source, {}, LR.Score(unserved, round(cost * ds.COST_SCALE), trucks=trucks, loads=loads,
+                                             metres=round(km * 1000), operating=round(omr * ds.COST_SCALE)))
+
+
+def test_the_note_names_the_options_own_goal_and_compares_with_the_engines_final_plan():
+    """The note compares with the engine's final plan for the option (critique C8) on that option's
+    own goal: "better" only for the goal's measure; the other figures are neutral and only shown when
+    they changed. Plain words: no PyVRP."""
+    tail = " It passed the planner's own checks, timing and costs."
+    # RECOMMENDED is judged on the total cost with the customer time preferences, not the operating cost.
+    ref = _cand("RECOMMENDED+repack:RECOMMENDED", cost=546, trucks=6, loads=17, km=990, omr=545)
+    best = _cand("PYVRP+repack:RECOMMENDED", cost=499, trucks=5, loads=14, km=990, omr=498)
+    assert ds._second_search_note("RECOMMENDED", False, ref, best, {1, 2}, {1, 2}) == (
+        "A second route search found a better plan for this option than the main search: a lower total cost "
+        "including the customer time preferences, 546 -> 499 OMR. Also changed: trucks 6 -> 5, loads 17 -> 14, "
+        "operating cost 545 -> 498 OMR." + tail)
+    # Fewer preference penalties, more operating cost: the OMR going up is not called better.
+    pref = _cand("PYVRP+repack:RECOMMENDED", cost=540, trucks=6, loads=17, km=990, omr=549)
+    assert ds._second_search_note("RECOMMENDED", False, ref, pref, {1}, {1}) == (
+        "A second route search found a better plan for this option than the main search: a lower total cost "
+        "including the customer time preferences, 546 -> 540 OMR. Also changed: operating cost 545 -> 549 OMR." + tail)
+    # MIN_DISTANCE (real80 Quick): fewer km with one truck more - the km are the goal, the trucks neutral.
+    ref = _cand("MIN_DISTANCE+repack:RECOMMENDED", cost=530, trucks=5, loads=14, km=978.1, omr=529)
+    best = _cand("PYVRP+repack:RECOMMENDED", cost=542, trucks=6, loads=15, km=974.2, omr=541)
+    assert ds._second_search_note("MIN_DISTANCE", False, ref, best, {1}, {1}) == (
+        "A second route search found a better plan for this option than the main search: fewer km, 978.1 -> 974.2 km. "
+        "Also changed: trucks 5 -> 6, loads 14 -> 15, operating cost 529 -> 541 OMR." + tail)
+    # MIN_TRUCKS: trucks, then loads, then the operating cost; nothing else changed: no "Also changed".
+    ref = _cand("MIN_TRUCKS", cost=530, trucks=5, loads=14, km=978.1, omr=529)
+    best = _cand("PYVRP+repack:MIN_TRUCKS", cost=530, trucks=5, loads=13, km=978.1, omr=529)
+    assert ds._second_search_note("MIN_TRUCKS", False, ref, best, {1}, {1}) == (
+        "A second route search found a better plan for this option than the main search: fewer loads, 14 -> 13." + tail)
+    # More stops planned comes first, whatever the goal.
+    more = _cand("PYVRP", cost=530, trucks=5, loads=14, km=978.1, omr=529)
+    ref_more = _cand("MIN_TRUCKS", cost=530, trucks=5, loads=14, km=978.1, omr=529, unserved=5)
+    assert ds._second_search_note("MIN_TRUCKS", False, ref_more, more, {1}, {1, 2, 3}).startswith(
+        "A second route search found a better plan for this option than the main search: 2 more stop(s) planned.")
+    note = ds._second_search_note("RECOMMENDED", True, None, best, set(), {1})
+    assert note.startswith("The main route search found no plan") and "PyVRP" not in note
+
+
+def test_a_gain_too_small_to_show_is_not_a_better_plan():
+    """Case 3 of the review: one cost unit (0.00001 OMR) printed "529 -> 529 OMR". A gain the note cannot
+    show (under 1 OMR, 1 km, or equal trucks / loads) is no gain: the engine's plan is kept."""
+    ref = _cand("RECOMMENDED", cost=529.01, trucks=5, loads=14, km=978.1, omr=529)
+    for name, best in [("RECOMMENDED", _cand("PYVRP", cost=529.00999, trucks=5, loads=14, km=978.1, omr=529)),
+                       ("RECOMMENDED", _cand("PYVRP", cost=528.2, trucks=4, loads=12, km=900, omr=520)),
+                       ("MIN_DISTANCE", _cand("PYVRP", cost=500, trucks=4, loads=12, km=977.3, omr=499)),
+                       ("MIN_TRUCKS", _cand("PYVRP", cost=528.6, trucks=5, loads=14, km=978.1, omr=528.6))]:
+        assert ds._goal_gain(name, ref.score, best.score, 0) is None, (name, best.score)
+    assert ds._goal_gain("MIN_DISTANCE", ref.score, _cand("PYVRP", cost=600, trucks=6, loads=15, km=977.0, omr=600).score, 0) \
+        == "fewer km, 978.1 -> 977.0 km"
+
+
+def test_a_gain_too_small_to_show_keeps_the_engines_plan(deterministic_repack, monkeypatch):
+    """In the load re-check: the second search offering the engine's own final RECOMMENDED plan one cost
+    unit cheaper wins the goal's sort but not the note's threshold - every option keeps the engine's plan."""
+    r = _days()["nmwc20s1"]
+    prepared = _raw_engine(r)
+    tds, solvable, drops, mx, _raw = prepared
+    _res, e_pick, _eng, _ = _stage(r, prepared, None, monkeypatch)
+    timed = e_pick["RECOMMENDED"][0]
+    ctx = ds._stage_ctx(r, solvable, tds, mx, drops)
+    sc = LR.score(ctx.day, ctx.rec_pricing, timed)
+    fake = LR.Candidate("PYVRP", timed, LR.Score(sc.unserved, sc.cost - 1, sc.trucks, sc.loads, sc.metres, sc.operating))
+    monkeypatch.setattr(PV, "stage_in_worker", lambda job: ([fake], ["PYVRP: injected"]))
+    res, _, _, report = _stage(r, prepared, LR.plan_of(timed), monkeypatch)
+    assert report == {"status": "NOT_CHOSEN", "reason": "NOT_BETTER", "chosen_for": []}
+    assert not any("second route search" in w for s in res.values() for w in s.warnings)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -531,9 +598,50 @@ def test_second_search_is_collected_before_a_stuck_alternative_closes_the_pool(w
     _stopped(made)
 
 
+def test_thorough_stall_is_timed_and_counts_only_after_the_engines_searches(monkeypatch):
+    """Production defaults (no env). The old rule, 300,000 iterations without a better plan, could never
+    trigger (29-87 min at the measured 57-171 iterations/s): every Thorough solve waited for it until
+    the load re-check's reserve. Now: while the engine searches, the second search never stops on its
+    stall (it costs no waiting); once the engine's searches ended, it stops when its last better plan is
+    older than max(30 s, 10% of its search time) - never before QUICK's time for the day."""
+    for name in ("SOLVER_PYVRP_STALL_SEC", "SOLVER_PYVRP_STALL_SHARE", "SOLVER_PYVRP_STALL_ITERS"):
+        monkeypatch.delenv(name, raising=False)
+    assert (PV.stall_floor_sec(), PV.stall_share()) == (PV.STALL_FLOOR_SEC, PV.STALL_SHARE) == (30.0, 0.1)
+    clock = [0.0]
+
+    def run(calls, over_at=None, min_sec=20.0, mode="THOROUGH"):
+        over = threading.Event()
+        st = PV.Stopper(PV.PvSettings(mode=mode, seed=1, max_runtime=1200.0, min_sec=min_sec), 0.0, None, over,
+                        clock=lambda: clock[0])
+        for t, cost in calls:
+            clock[0] = t
+            if over_at is not None and t >= over_at:
+                over.set()
+            if st(cost):
+                return t, st.reason
+        return None, None
+
+    # Best plan at 1 s, then nothing better for 10 minutes: the engine still searches, so no stop.
+    assert run([(1.0, 100)] + [(1.0 + k, 100) for k in range(1, 600)]) == (None, None)
+    # The engine ends at 600 s: stalled for 599 s > max(30, 60) s -> stops at once.
+    assert run([(1.0, 100)] + [(1.0 + k, 100) for k in range(1, 601)], over_at=600.0) == (600.0, "CONVERGED")
+    # Last better plan at 590 s, engine ends at 600 s: stops once 590 s is max(30, 10%) behind it (656 s).
+    calls = [(float(k), 1000 - k) for k in range(1, 591)] + [(float(k), 410) for k in range(591, 700)]
+    assert run(calls, over_at=600.0) == (656.0, "CONVERGED")
+    # Engine ended at 1 s, best plan at 1 s: stalled at 31 s, but never before QUICK's time for the day.
+    assert run([(float(k), 100) for k in range(1, 100)], over_at=1.0) == (31.0, "CONVERGED")
+    assert run([(float(k), 100) for k in range(1, 100)], over_at=1.0, min_sec=60.0) == (60.0, "CONVERGED")
+    # No feasible plan at all when the engine ended: counted from its start.
+    assert run([(float(k), PV.INT62) for k in range(1, 100)], over_at=40.0) == (40.0, "CONVERGED")
+    # The reserve is the backstop while it keeps improving.
+    assert run([(float(k), 5000 - k) for k in range(1, 1300)], over_at=600.0) == (1200.0, "CAP")
+    # QUICK: the engine's end stops it at once.
+    assert run([(1.0, 100), (2.0, 100)], over_at=2.0, mode="QUICK") == (2.0, "SEARCH_END")
+
+
 def test_thorough_pyvrp_stops_on_its_stall_rule_and_within_the_cap(workers, monkeypatch):
     monkeypatch.setenv("THOROUGH_STALL_SEC", "0.5")
-    monkeypatch.setenv("SOLVER_PYVRP_STALL_ITERS", "2000")
+    monkeypatch.setenv("SOLVER_PYVRP_STALL_SEC", "1")
     resp = ds.optimize_dispatch(req(*nmwc_day(20), scenarios=["RECOMMENDED"], time_limit_sec=2, search_mode="THOROUGH",
                                     max_search_sec=60))
     p = resp.search.pyvrp

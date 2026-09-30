@@ -27,7 +27,7 @@ import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-lo
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
-import { fmtSearchTime, searchLeadMin, searchResultText, secondSearchText } from '../dispatch/search-mode';
+import { fmtSearchTime, searchLeadMin, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
 
 /**
@@ -171,8 +171,7 @@ async function runJob(args: DispatchJobArgs) {
             // The plan's driver notes (a trip that lost or changed its driver, a hand-set driver whose
             // trip the plan does not have) are counted in the message: never silent. A THOROUGH
             // search also says how long it searched and why it stopped.
-            // The second route search's sentence in either mode (a QUICK plan has no search line).
-            message: [jobMessage(recommended, built.preDrops.length, driverChanges.length, kept), resp.search?.mode === 'THOROUGH' ? searchResultText(resp.search) : secondSearchText(resp.search)]
+            message: [jobMessage(recommended, built.preDrops.length, driverChanges.length, kept), resp.search?.mode === 'THOROUGH' ? searchResultText(resp.search) : null]
               .filter(Boolean)
               .join(' '),
           },
