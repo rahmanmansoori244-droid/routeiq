@@ -8,10 +8,15 @@ import {
   describeUnknownWeights,
   groupUnknownWeights,
   intakeLineWeight,
+  kgTenths,
+  kgText,
   lineWeightStatus,
+  manifestKgNote,
   masterLineKg,
   orderUsesLineWeights,
+  payloadTenths,
   resolveOrderLineWeights,
+  roundKg,
   type WeightOrderIn,
 } from '@/lib/dispatch/weights';
 import { loadKgFromRefs } from '@/lib/dispatch/plan-service';
@@ -107,6 +112,40 @@ describe('loadKgFromRefs (PlanLoad.weightKg from its assignments)', () => {
     const scope = { portions: { 'O1~1': { orderId: 'O1', lines: [{ lineId: 'a', cases: 1 }], cases: 1, weightKg: 120, part: 1, parts: 2 } } };
     expect(loadKgFromRefs(['O1~1', 'O2'], scope, new Map([['O1', 240], ['O2', 38.44]]))).toBe(158.4);
     expect(loadKgFromRefs(['O9'], scope, new Map())).toBe(0);
+  });
+
+  it('rounds each order to 0.1 kg and adds the tenths, as the optimizer does (audit F08)', () => {
+    // Three orders of 999.14 kg: 999.1 each as sent to the optimizer = 2,997.3 kg (the exact sum 2,997.42 rounded once would say 2,997.4).
+    const kg = new Map([['A', 999.14], ['B', 999.14], ['C', 999.14]]);
+    expect(loadKgFromRefs(['A', 'B', 'C'], { portions: {} }, kg)).toBe(2997.3);
+    // Float noise never adds a tenth: 7 x 9.3 kg = 65.10000000000001.
+    expect(loadKgFromRefs(['N'], { portions: {} }, new Map([['N', 7 * 9.3]]))).toBe(65.1);
+  });
+});
+
+describe('kgTenths / payloadTenths (the optimizer weighs in 0.1 kg, audit F08)', () => {
+  it('rounds an order to the nearest 0.1 kg and a payload down, exactly like the solver (kg_units / payload_units)', () => {
+    expect([7 * 9.3, 999.1, 1001.8, 999.14, 999.15, 0.05, 0.04, 0, 3000].map(kgTenths)).toEqual([651, 9991, 10018, 9991, 9992, 1, 0, 0, 30000]);
+    expect([3000, 2998.5, 3000.07, 0].map(payloadTenths)).toEqual([30000, 29985, 30000, 0]);
+    expect(roundKg(65.10000000000001)).toBe(65.1);
+  });
+});
+
+describe("the plan screen's loading manifest kg (A6 second review)", () => {
+  it('kgText shows kg to 0.1 kg, as the load weighs them (an 896.8 kg load read "897 kg")', () => {
+    expect([896.8, 2303.6, 3000, 65.10000000000001, 0, 1234567.04].map(kgText)).toEqual(['896.8', '2,303.6', '3,000', '65.1', '0', '1,234,567']);
+  });
+
+  it("says so when an older version's products no longer add up to the load's kg (order weights changed since planning)", () => {
+    // The verifiers' superseded T01 L1: products re-weighed to 2,313.8 kg on a load planned at 2,303.6 kg.
+    const load = { weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 771.6 }] };
+    expect(manifestKgNote(load)).toBe(
+      'The load was planned at 2,303.6 kg. Order weights changed since planning, so the products add up to 2,313.8 kg.',
+    );
+    // Within rounding (the dispatch check's 0.5 kg) and equal: no note.
+    expect(manifestKgNote({ weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 761.8 }] })).toBeNull();
+    expect(manifestKgNote({ weightKg: 2303.6, manifest: [{ weightKg: 1542.2 }, { weightKg: 761.4 }] })).toBeNull();
+    expect(manifestKgNote({ weightKg: 0, manifest: [] })).toBeNull();
   });
 });
 

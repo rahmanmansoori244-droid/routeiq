@@ -17,16 +17,21 @@ interface State {
   orders: unknown[];
   assignments: unknown[];
   scope: string[];
+  /** PLANNED loads of the plan in use (truckSnapshotJson), and the inputs its option was optimized from. */
+  plannedLoads: unknown[];
+  inputs?: unknown;
 }
-const state: State = { orders: [], assignments: [], scope: [] };
+const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [] };
 
 vi.mock('@/lib/db', () => ({
   prisma: {
     tenant: { findUnique: async () => ({ country: 'OM' }) },
     order: { findMany: async () => state.orders },
     routeAssignment: { findMany: async () => state.assignments },
-    scenarioResult: { findUnique: async () => ({ id: 'sc1', detailsJson: { scope: { orderIds: state.scope, frozenOrderIds: [] } } }) },
-    planLoad: { findMany: async () => [] },
+    scenarioResult: {
+      findUnique: async () => ({ id: 'sc1', detailsJson: { scope: { orderIds: state.scope, frozenOrderIds: [] }, ...(state.inputs ? { inputs: state.inputs } : {}) } }),
+    },
+    planLoad: { findMany: async () => state.plannedLoads },
   },
 }));
 vi.mock('@/lib/tenant', () => ({
@@ -78,6 +83,8 @@ async function day() {
 
 beforeEach(() => {
   state.scope = ['O1'];
+  state.plannedLoads = [];
+  state.inputs = undefined;
 });
 
 describe('day overview: case weights of a split order partly on a frozen load (PR4 review)', () => {
@@ -123,7 +130,8 @@ describe('day overview: case weights of a split order partly on a frozen load (P
   });
 
   it('`outdated` has exactly the keys of UP_TO_DATE on every path (the integration specs compare against it)', async () => {
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 });
+    // depotMoved: audit A6 (E1), PLANNED loads still drawn from a depot pin moved since.
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());
@@ -191,5 +199,31 @@ describe("day overview: a customer on a PLANNED load whose location is not usabl
     state.orders = [known({ locationVerified: false, geocodeConfidence: 'LOW' }, false)];
     state.assignments = on('PLANNED');
     expect((await day()).outdated).toEqual({ ...UP_TO_DATE, inactiveOrders: 1 });
+  });
+});
+
+describe('day overview: a PLANNED load planned before origins were kept, on a depot pin moved since (audit E1, A6 review)', () => {
+  // The depot's pin now is 23.6, 58.4 (the tenantDb mock). The load's truck snapshot is shaped as
+  // before this release: no origin. The option in use says which pin the version was optimized from.
+  const snapNoOrigin = { v: 1, code: 'T01', capacityCases: 600, capacityWeightKg: 0, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z' };
+  const inputsFrom = (lat: number) => ({ v: 1, depot: { id: 'D1', lat, lng: 58.4 }, config: {}, stops: {}, trucks: {} });
+  const plannedLoad = { truckId: 't1', truckSnapshotJson: snapNoOrigin, truck: { capacityCases: 600, capacityWeightKg: 0 } };
+
+  it('is out of date, as its plan notes say (it is still planned from the old pin): RE-PLAN is offered', async () => {
+    state.orders = [];
+    state.assignments = [];
+    state.plannedLoads = [plannedLoad];
+    state.inputs = inputsFrom(23.58); // optimized from a pin ~2.2 km south of today's
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, depotMoved: 1 });
+  });
+
+  it('not when the option was optimized from the pin as it is now, or when nothing says where it was planned from', async () => {
+    state.orders = [];
+    state.assignments = [];
+    state.plannedLoads = [plannedLoad];
+    state.inputs = inputsFrom(23.6);
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
+    state.inputs = undefined; // an option from before inputs were kept: the plan notes use the live pin too
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
   });
 });

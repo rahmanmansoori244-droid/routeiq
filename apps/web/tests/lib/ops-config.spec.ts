@@ -60,6 +60,17 @@ describe('startup configuration checks', () => {
     expect(configProblems(env({ NODE_ENV: 'development' }))).toEqual([]);
   });
 
+  it('audit P5: an upload parser setting that is not usable is named (its default is used), in production and outside it', () => {
+    const ok = { NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' };
+    expect(configProblems(env({ ...ok, UPLOAD_WORKER_MAX_HEAP_MB: '768', UPLOAD_PARSE_TIMEOUT_MS: '20000', UPLOAD_PARSE_CONCURRENCY: '1' }))).toEqual([]);
+    expect(configProblems(env({ ...ok, UPLOAD_PARSE_TIMEOUT_MS: '15s' }))).toEqual([
+      { level: 'warn', message: 'UPLOAD_PARSE_TIMEOUT_MS="15s" is not a whole number from 250 to 600000: the default 15000 is used.' },
+    ]);
+    expect(configProblems(env({ NODE_ENV: 'development', UPLOAD_WORKER_MAX_HEAP_MB: '32' })).map((p) => p.message)).toEqual([
+      'UPLOAD_WORKER_MAX_HEAP_MB="32" is not a whole number from 64 to 16384: the default 512 is used.',
+    ]);
+  });
+
   it('reports RATE_LIMITS_DISABLED on a production server as an error', () => {
     const p = configProblems(env({ NODE_ENV: 'production', RATE_LIMITS_DISABLED: '1', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' }));
     expect(p).toHaveLength(1);

@@ -189,4 +189,17 @@ describe('plan screen (plan-view.tsx)', () => {
     }
     expect(planScreen).toMatch(/const retry = \(\) => \{\s*void load\(\);\s*if \(!drivers\.length\) void loadDrivers\(\);/);
   });
+
+  it("the loading manifest shows each product's kg and the TOTAL to 0.1 kg, and says so when they do not add up (A6 reviews)", () => {
+    // kgText and manifestKgNote are unit-tested in dispatch-weights.spec.ts (896.8 kg reads "896.8").
+    const start = planScreen.indexOf('function LoadDetail(');
+    const manifest = planScreen.slice(start, planScreen.indexOf('Delivery route', start));
+    expect(manifest).toContain('{kgText(m.weightKg)} kg</td>'); // each product's kg
+    expect(manifest).toContain('{kgText(l.weightKg)} kg</td>'); // the TOTAL, to 0.1 kg
+    expect(manifest).not.toMatch(/Math\.round\(l\.weightKg\)/); // it read "TOTAL (897 kg)" for 896.8 kg
+    // An older version whose orders were re-weighed after it was made: the note under the TOTAL.
+    expect(manifest).toContain('const kgNote = manifestKgNote(l);');
+    expect(manifest).toMatch(/\{kgNote \? \(\s*<p [^>]*data-testid=\{`manifest-kg-note-\$\{l\.truckCode\}-\$\{l\.loadNo\}`\}>\s*\{kgNote\}\s*<\/p>/);
+    expect(planScreen).toMatch(/import \{ kgText, manifestKgNote \} from '@\/lib\/dispatch\/weights';/);
+  });
 });

@@ -457,9 +457,11 @@ describe('frozen plan facts (review F08)', () => {
     expect(rows.map((x) => x.loadId).sort()).toEqual(p.loads.map((l: any) => l.id).sort());
     for (const l of p.loads) {
       const row = rows.find((x) => x.loadId === l.id)!;
-      expect(row.pointsKey, `${l.truckCode} L${l.loadNo}`).toBe(loadPathKey(loadPath(p.run.depot, l.stops)));
+      // Audit E1: each load from the depot pin it was planned from (here: where the depot is).
+      expect(l.origin).toEqual({ lat: p.run.depot.lat, lng: p.run.depot.lng });
+      expect(row.pointsKey, `${l.truckCode} L${l.loadNo}`).toBe(loadPathKey(loadPath(l.origin, l.stops)));
     }
-    const onScreen = p.loads.map((l: any) => ({ id: l.id, stops: l.stops }));
+    const onScreen = p.loads.map((l: any) => ({ id: l.id, stops: l.stops, origin: l.origin }));
     expect(answerIsStale({ status: 'ready', rows }, onScreen, p.run.depot)).toBe(false);
     const locked = p.loads.find((l: any) => l.id === lockedId);
     expect(loadPath(p.run.depot, locked.stops)).toContainEqual([planned!.lat, planned!.lng]);
@@ -529,6 +531,46 @@ describe('frozen plan facts (review F08)', () => {
     // The re-planned PLANNED loads use the corrected master data (their own new snapshots).
     for (const l of p.loads.filter((x: any) => x.status === 'PLANNED')) expect(l.truckSnapshot).toBe(true);
     runV2 = next;
+  });
+
+  it('28a (audit E1) the depot pin moved: a re-plan keeps the locked load on the pin it was planned from, says so, and plans new loads from the new pin', async () => {
+    const lockedNow = await prisma.planLoad.findFirstOrThrow({ where: { runId: runV2, status: 'LOCKED' } });
+    const oldOrigin = (lockedNow.truckSnapshotJson as any).origin;
+    expect(oldOrigin).toMatchObject({ depotId, lat: DEPOT.lat, lng: DEPOT.lng });
+    // The depot's pin is corrected ~2.2 km north.
+    const moved = await patch(`${BASE}/api/depots/${depotId}`, { lat: DEPOT.lat + 0.02, lng: DEPOT.lng });
+    expect(moved.status).toBe(200);
+    try {
+      const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/replan`, j({ reason: 'REOPTIMIZE' }));
+      expect(rp.status).toBe(202);
+      const next = (await json(rp)).data.runId;
+      await waitForPlan(next);
+      const copy = await prisma.planLoad.findFirstOrThrow({ where: { runId: next, carriedFromLoadId: lockedNow.id } });
+      expect((copy.truckSnapshotJson as any).origin).toEqual(oldOrigin); // copied verbatim
+      const p = await plan(next);
+      expect(p.run.depot).toMatchObject({ lat: DEPOT.lat + 0.02, lng: DEPOT.lng }); // the new option was optimized from the new pin
+      const kept = p.loads.find((l: any) => l.id === copy.id);
+      expect(kept.origin).toEqual({ lat: DEPOT.lat, lng: DEPOT.lng });
+      expect(kept.masterChanged.map((c: any) => c.kind)).toContain('DEPOT');
+      expect(p.warnings.some((w: string) => /^Depot moved since planning: .* (starts and ends at the depot pin it was|start and end at the depot pin they were) planned from \(2\.2 km from the depot's pin now\)\. Locked and dispatched loads keep it\.$/.test(w))).toBe(true);
+      const fresh = p.loads.filter((l: any) => l.status === 'PLANNED');
+      expect(fresh.length).toBeGreaterThan(0);
+      for (const l of fresh) {
+        expect(l.origin).toEqual({ lat: DEPOT.lat + 0.02, lng: DEPOT.lng });
+        expect(l.masterChanged.some((c: any) => c.kind === 'DEPOT')).toBe(false);
+      }
+      // The road shapes route each load from its own origin: the map's rows match the screen.
+      const r = await fetchWith(t.cookieJar, `${BASE}/api/runs/${next}/load-geometry`);
+      const rows = (await json(r)).data as GeoRow[];
+      expect(rows.find((x) => x.loadId === kept.id)!.pointsKey).toBe(loadPathKey(loadPath(kept.origin, kept.stops)));
+      expect(answerIsStale({ status: 'ready', rows }, p.loads.map((l: any) => ({ id: l.id, stops: l.stops, origin: l.origin })), p.run.depot)).toBe(false);
+      // The day screen is up to date: only locked loads keep the old pin.
+      const day = await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/day?date=${deliveryDate}&depotId=${depotId}`));
+      expect(day.data.outdated.depotMoved).toBe(0);
+      runV2 = next;
+    } finally {
+      await patch(`${BASE}/api/depots/${depotId}`, { lat: DEPOT.lat, lng: DEPOT.lng });
+    }
   });
 
   it('29 a re-plan of a version whose rows have no snapshots (made before they existed) succeeds: SQL NULL is copied', async () => {

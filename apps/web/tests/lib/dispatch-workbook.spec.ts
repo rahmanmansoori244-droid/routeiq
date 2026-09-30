@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, kgCheck, loadSheetName, planRules, SHEETS, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
 import { fixture, LONG_TRUCK } from './plan-detail-fixture';
 
 const META: WorkbookMeta = {
@@ -31,6 +31,7 @@ function scenarioRow(): PlanDetail['scenarios'][number] {
     id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, frozenLoads: 0, totalKm: 10, dayKm: 10,
     totalDurationMin: 100, operatingCost: 50, dayOperatingCost: 50, costVersion: 2, estimatedLegs: 0, avgUtilizationPct: 50, unservedOrders: 0,
     distanceIsEstimated: false, provider: 'OSRM', objective: null, preference: null, preferenceCost: null, preferredHoursCost: null, tradeoff: null, chosen: false, feasibility: null,
+    weightUnitKg: null, newOvertimeOnly: null,
   };
 }
 
@@ -278,6 +279,43 @@ describe('buildDispatchWorkbook', () => {
     expect(find(a, (t) => t.includes('counted once'))).toBeTruthy();
   });
 
+  it('the loading manifest kg is the load kg, and a load whose orders were re-weighed since says so (audit E3)', async () => {
+    const d = fixture();
+    const wb = await render(d);
+    const used = new Set<string>(Object.values(SHEETS).map((s) => s.toLowerCase()));
+    for (const l of d.loads) {
+      const ws = sheet(wb, loadSheetName(l.truckCode, l.loadNo, used));
+      const total = find(ws, (t) => t === 'TOTAL', 2, find(ws, (t) => t === 'LOADING MANIFEST', 1)!.row)!;
+      expect(ws.getCell(total.row, 6).value).toBe(Math.round(l.weightKg * 10) / 10);
+      expect(text(ws.getCell(total.row, 8))).toBe('');
+    }
+    // An older version: the load was stored at 5 kg more than its orders weigh now.
+    d.loads[0] = { ...d.loads[0], weightKg: d.loads[0].weightKg + 5 };
+    const again = await render(d);
+    expect(find(sheet(again, 'T01 - L1'), (t) => t.includes('kg (order weights changed since planning)'))).toBeTruthy();
+    const sku = sheet(again, SHEETS.skuSummary);
+    const check = find(sku, (t) => t === 'Check', 1)!;
+    expect(text(sku.getCell(check.row, 3))).toBe('MISMATCH (kg)');
+    expect(text(sku.getCell(check.row, 4))).toBe('OK');
+    expect(text(sku.getCell(check.row, 3 + d.loads.length + 1))).toBe('MISMATCH');
+  });
+
+  it('audit E1: a load planned from a depot pin moved since links to that pin, with the note', async () => {
+    const d = fixture();
+    const text2 = "Depot moved since planning: this load starts and ends at the depot pin it was planned from (2.5 km from the depot's pin now).";
+    d.loads[0] = { ...d.loads[0], origin: { lat: 23.56, lng: 58.38 }, masterChanged: [{ kind: 'DEPOT', text: text2, newLat: 23.58, newLng: 58.4, movedM: 2500 }] };
+    const wb = await render(d);
+    const l1 = sheet(wb, 'T01 - L1');
+    const depotRows = cells(l1).filter((c) => c.col === 2 && c.text === 'DEPOT').map((c) => c.row);
+    for (const r of depotRows) expect((l1.getCell(r, 17).value as ExcelJS.CellHyperlinkValue).hyperlink).toBe('https://www.google.com/maps/search/?api=1&query=23.56,58.38');
+    expect(find(l1, (t) => t.includes(text2))).toBeTruthy();
+    const l2 = sheet(wb, 'T01 - L2');
+    for (const r of cells(l2).filter((c) => c.col === 2 && c.text === 'DEPOT').map((c) => c.row)) {
+      expect((l2.getCell(r, 17).value as ExcelJS.CellHyperlinkValue).hyperlink).toBe('https://www.google.com/maps/search/?api=1&query=23.58,58.4');
+    }
+    expect(depotRows).toHaveLength(2); // departure and return
+  });
+
   it('flags a load whose manifest does not match its recorded cases', async () => {
     const d = fixture();
     d.loads[0] = { ...d.loads[0], cases: d.loads[0].cases + 1 };
@@ -510,6 +548,9 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     const opts = { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false };
     const now = tenantAssumptions(cfg, opts);
     expect(now['Driver cost']).toMatch(/per hour of the whole truck day/);
+    // Audit E4 / F08: only new overtime counts for new loads; weights are checked to 0.1 kg with no margin.
+    expect(now.Overtime).toMatch(/; overtime already worked by locked or dispatched loads is not counted again for new loads$/);
+    expect(now.Weights).toBe("each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)");
     expect(now['Road time factor (truck vs car)']).toBe('x1.25 on road travel times (not on estimated legs)');
     const old = tenantAssumptions(cfg, { ...opts, rules: 'EARLIER' });
     expect(old['Driver cost']).toMatch(/^2\.5 OMR per hour of each load's time on the road/);
@@ -518,6 +559,37 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(old['Road time factor (truck vs car)']).toMatch(/including legs it could not route \(earlier rule\)/);
     expect(old['Default service time']).toMatch(/earlier rule/);
     expect(tenantAssumptions(cfg, { ...opts, rules: 'MIXED' })['Driver cost']).toMatch(/whole truck day.*loads kept from an earlier plan keep their earlier cost/);
+  });
+
+  it('states the 0.1 kg weights and the new-overtime rule only for a plan whose optimizer made it with them (A6 review)', () => {
+    const cfg = {
+      timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 360, driverShiftMaxMinutes: 600, reloadMinutes: 30,
+      maxTripsPerTruck: 3, fuelPricePerLitre: 0.25, driverCostPerHour: 2.5, overtimeAfterMin: 540, overtimeCostPerHour: 4,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+      defaultServiceTimeMin: 10, osrmConfigured: false,
+    };
+    const opts = { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false };
+    // A plan the optimizer before A6 made (cost version 2, no rules in its option): the whole-day
+    // costs are current, but its weights and overtime were handled the earlier way.
+    const before = { ...scenarioRow(), chosen: true };
+    expect(solverRules({ scenarios: [before] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
+    const beforeRows = tenantAssumptions(cfg, { ...opts, rules: 'CURRENT', solverRules: solverRules({ scenarios: [before] }) });
+    expect(beforeRows.Weights).toBe(
+      'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
+    );
+    expect(beforeRows.Overtime).toBe('after 9:00 from the first departure, +4 OMR per hour on top of the driver cost');
+    // Made with them: the option says so.
+    const now = { ...before, weightUnitKg: 0.1, newOvertimeOnly: true };
+    expect(solverRules({ scenarios: [{ ...before, chosen: false }, now] })).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+    const nowRows = tenantAssumptions(cfg, { ...opts, solverRules: solverRules({ scenarios: [now] }) });
+    expect(nowRows.Weights).toBe("each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)");
+    expect(nowRows.Overtime).toMatch(/; overtime already worked by locked or dispatched loads is not counted again for new loads$/);
+    // A plan costed the earlier way (before the whole-day costs) never states the new rules either.
+    const earlier = tenantAssumptions(cfg, { ...opts, rules: 'EARLIER', solverRules: solverRules({ scenarios: [{ ...before, costVersion: null }] }) });
+    expect(earlier.Weights).toMatch(/^earlier rule: /);
+    expect(earlier.Overtime).not.toMatch(/not counted again/);
+    // No option at all: nothing says which rules made it, so the earlier wording.
+    expect(solverRules({ scenarios: [] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
   });
 
   it('road km with some estimated legs is labelled so (review F18)', async () => {

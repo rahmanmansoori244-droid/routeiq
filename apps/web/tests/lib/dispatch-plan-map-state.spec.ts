@@ -77,6 +77,20 @@ describe('linesToDraw', () => {
     expect(linesToDraw(ready({ loadId: 'L1', estimated: false, coordinates: ROAD1 }), [L1], DEPOT)[0].dashed).toBe(false);
   });
 
+  it('audit E1: a load planned from a depot pin moved since is drawn from that pin, and its road shape still matches', () => {
+    const OLD = { lat: 23.58, lng: 58.39 };
+    const kept: MapLoadStops = { ...L1, origin: OLD };
+    // The road-shapes route builds its path from the load's origin: the same fingerprint as the map's.
+    const row = { loadId: 'L1', estimated: false, coordinates: ROAD1, pointsKey: loadPathKey(loadPath(OLD, L1.stops)) };
+    expect(linesToDraw(ready(row), [kept], DEPOT)).toEqual([{ loadId: 'L1', coordinates: ROAD1, dashed: false }]);
+    expect(answerIsStale(ready(row), [kept], DEPOT)).toBe(false);
+    // Drawn straight: from and back to the old pin, never the plan's depot.
+    expect(linesToDraw({ status: 'failed' }, [kept], DEPOT)[0].coordinates).toEqual(straightTour(OLD, L1.stops));
+    expect(straightTour(OLD, L1.stops)[0]).toEqual([58.39, 23.58]);
+    // A row routed from the plan's depot is for other content than this load.
+    expect(answerIsStale(ready({ ...row, pointsKey: keyOf(L1) }), [kept], DEPOT)).toBe(true);
+  });
+
   it('a dashed line keeps the reason the server gave for that load, and only that', () => {
     const straight2: [number, number][] = [[58.4, 23.6], [58.5, 23.7], [58.4, 23.6]];
     const lines = linesToDraw(ready({ loadId: 'L2', estimated: true, coordinates: straight2, reason: 'NOT_ROUTABLE', pointsKey: keyOf(L2) }), [L1, L2], DEPOT);

@@ -192,7 +192,13 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         trips: n,
         status: l.status,
         carried: l.carried,
-        badges: [BADGE[l.status] ?? l.status, ...(l.carried ? ['KEPT FROM PREVIOUS VERSION'] : []), ...(l.timing && !l.timing.ok ? ['TIMES NOT VERIFIED'] : [])],
+        badges: [
+          BADGE[l.status] ?? l.status,
+          ...(l.carried ? ['KEPT FROM PREVIOUS VERSION'] : []),
+          ...(l.timing && !l.timing.ok ? ['TIMES NOT VERIFIED'] : []),
+          // Audit E1: the route below starts and ends at the depot pin the load was planned from.
+          ...(l.masterChanged.some((c) => c.kind === 'DEPOT') ? ['DEPOT MOVED SINCE PLANNING: ROUTE FROM THE PLANNED DEPOT PIN'] : []),
+        ],
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
         depart: fmtHhmm(l.departMin),
@@ -206,7 +212,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
           total,
           matchesLoad: total === l.cases,
         },
-        route: routeLinks(d.run.depot, stops),
+        route: routeLinks(l.origin ?? d.run.depot, stops),
         stops: stops.map((s) => sheetStop(d, l, s, t)),
         returnText:
           `Return to depot ${depot.code} ~${fmtHhmm(l.returnMin)}` +

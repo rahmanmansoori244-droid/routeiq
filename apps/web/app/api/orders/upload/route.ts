@@ -3,17 +3,19 @@ import { auth } from '@/lib/auth';
 import { tenantDb } from '@/lib/tenant';
 import { audit } from '@/lib/audit';
 import { hasRole } from '@/lib/api';
-import { MultipleSheetsError, parseUpload } from '@/lib/csv';
+import { MultipleSheetsError } from '@/lib/upload-errors';
+import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '@/lib/upload-parse';
 import { prisma } from '@/lib/db';
-import { DepotRequired, findSameConfirmedFile, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
-import { isOrderSheet, type CanonicalField } from '@/lib/dispatch/order-intake';
+import { DepotRequired, findSameConfirmedFile, INTAKE_CHECK_FAILED, legacyRowsHash, validateIntake } from '@/lib/dispatch/intake-server';
+import type { CanonicalField } from '@/lib/dispatch/order-intake';
 import { dateOnly } from '@/lib/dispatch/time';
 import { isRealIsoDate } from '@/lib/schemas';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/client-ip';
 
-// 10 MB / 50k rows / content-type guard (lib/csv). Unknown customers and products are NOT
-// errors here: they are listed and created on confirm, then completed by the dispatcher.
+// 10 MB / 50k rows / content-type guard (lib/csv), the file read in the parser process (audit P5,
+// lib/upload-parse). Unknown customers and products are NOT errors here: they are listed and
+// created on confirm, then completed by the dispatcher.
 
 export async function POST(req: Request) {
   const session = await auth();
@@ -46,8 +48,11 @@ export async function POST(req: Request) {
   const extraAliases = (colMap?.orderColumnMapJson ?? {}) as Partial<Record<CanonicalField, string[]>>;
   let parsed;
   try {
-    parsed = await parseUpload(file, { isDataSheet: (headers) => isOrderSheet(headers, extraAliases), rowsWord: 'order' });
+    // The order sheet is the one with the order columns (isOrderSheet, the company's aliases too).
+    parsed = await parseUploadIsolated(file, { orderSheet: { extraAliases }, rowsWord: 'order' });
   } catch (err) {
+    // Too long, too much memory, the reader stopped, or busy (503): nothing was saved.
+    if (err instanceof UploadParseRefused) return uploadRefusedResponse(err);
     if (err instanceof MultipleSheetsError) {
       return NextResponse.json({ data: null, error: { code: err.code, message: err.message, sheets: err.sheets } }, { status: 400 });
     }
@@ -61,7 +66,10 @@ export async function POST(req: Request) {
     // Owner rule (audit PR A5): every order file is for one depot. No active depot, or no choice
     // among two or more, or a chosen depot that is not active: 422, nothing is saved.
     if (err instanceof DepotRequired) return NextResponse.json({ data: null, error: err.body() }, { status: err.status });
-    return NextResponse.json({ data: null, error: (err as Error).message }, { status: 400 });
+    // Anything else is not the file's fault (the database, a bug): plain words and 500, nothing
+    // saved; Prisma's text (file paths, code lines) goes only to the server log.
+    console.error('[orders-upload] checking the file failed', err);
+    return NextResponse.json({ data: null, error: { code: 'CHECK_FAILED', message: INTAKE_CHECK_FAILED } }, { status: 500 });
   }
   // File-level notes (CSV parse warnings, workbook sheets not read) are kept with the check, so
   // the upload page shows them too, not only the answer.

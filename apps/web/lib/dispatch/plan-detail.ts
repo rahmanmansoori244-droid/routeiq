@@ -10,6 +10,8 @@ import type { ChangeSummary, DailySummary } from './summary';
 import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { checkPlanFeasibility, feasibilityGateMode, type PlanFeasibility, type TruckTiming } from './feasibility';
 import {
+  depotMovedChange,
+  readLoadOrigin,
   readPlanInputs,
   readStopSnapshot,
   readTruckSnapshot,
@@ -21,11 +23,11 @@ import {
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
-import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, splitPartLabels } from './split';
+import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
 import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } from './search-mode';
-import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
+import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, roundKg } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
@@ -130,7 +132,13 @@ export interface DetailLoad {
   manifest: { productCode: string; productName: string; cases: number; weightKg: number }[];
   /** The truck code and capacities above are the ones the load was planned with (false: today's truck). */
   truckSnapshot: boolean;
-  /** Truck capacity changed since planning. */
+  /**
+   * Audit E1 (owner decision 13): the depot pin this load starts from and returns to - the one it was
+   * planned from (its truck snapshot; the option's depot for loads planned before it was kept). The
+   * map, the road shapes, the route links, WhatsApp text and sheets draw the load from here.
+   */
+  origin: { lat: number; lng: number };
+  /** Truck capacity changed since planning; the depot pin moved since planning (kind DEPOT). */
   masterChanged: MasterChange[];
   /** The timetable check of this load's truck-day (review F04); null = the version has no applied plan. */
   timing: { status: TruckTiming; ok: boolean } | null;
@@ -229,6 +237,10 @@ export interface PlanDetail {
     chosen: boolean;
     /** The optimizer's own timetable check of this option (null: an option from before the check existed). */
     feasibility: { status: string; timing: string; violations: number } | null;
+    /** The kg unit every weight check of this option used (0.1, audit F08); null: an optimizer before it (whole kg, rounded up). */
+    weightUnitKg: number | null;
+    /** true: only new overtime counted when this option chose trucks (audit E4); null: an optimizer before it. */
+    newOvertimeOnly: boolean | null;
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
@@ -393,11 +405,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const o = a.order;
       const c = o.customer;
       const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10 });
-      // A split portion carries only some cases of some lines of the order.
-      const lines = rowLines(o.lines, a.portionLinesJson);
+      // A split portion carries only some cases of some lines of the order. The row weighs what it was
+      // planned with (to 0.1 kg, like its load: audit F08), and its SKU lines share exactly that kg
+      // (audit E3: the loading sheet's kg must be the load's kg).
       if (a.portionLinesJson !== null) withPortion.add(a.sequenceInTruck);
       const cases = a.portionCases ?? o.totalCases;
-      const weightKg = a.portionWeightKg ?? o.totalWeightKg;
+      const weightKg = roundKg(a.portionWeightKg ?? o.totalWeightKg);
+      const lines = rowLinesKg(o.lines, a.portionLinesJson, weightKg, !orderUsesLineWeights(o));
       const skus = lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const s = stops.get(a.sequenceInTruck);
@@ -485,6 +499,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       portionStops.push({ stop: s, customerId: s.customerId, portion: withPortion.has(s.sequence), departMin: l.departMin, truckCode: l.truck.code, sequence: s.sequence });
     }
     const ts = readTruckSnapshot(l.truckSnapshotJson);
+    // Audit E1: the depot pin the load was planned from, and a note when the depot's pin moved since.
+    const origin = readLoadOrigin(ts) ?? depotPoint;
+    const depotMoved = depotMovedChange(origin, { lat: run.depot.lat, lng: run.depot.lng });
     return {
       id: l.id,
       truckId: l.truckId,
@@ -514,7 +531,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       stops: stopList,
       manifest: aggregateSkus(stopList.flatMap((s) => s.skus)),
       truckSnapshot: !!ts,
-      masterChanged: ts ? truckMasterChanges(ts, l.truck) : [],
+      origin: { lat: origin.lat, lng: origin.lng },
+      masterChanged: [...(ts ? truckMasterChanges(ts, l.truck) : []), ...(depotMoved ? [depotMoved] : [])],
       timing: null,
       carriedAway: carriedAwayOrders.size,
     };
@@ -651,6 +669,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       unserved: s.unservedCount,
       signature: newLoads ? planSignature(newLoads) : s.id,
       earlyStarts: newLoads ? earlyStarts(newLoads, early, priorityOfStop) : {},
+      // Audit F22: an option that breaks the timing rules is never described as cheaper or better.
+      feasibility: d.feasibility?.status ?? null,
+      violations: d.feasibility?.violations?.length ?? 0,
     };
     return { s, d, frozenLoads: frozen.length, frozenCost, dayKm, trucksUsed, pref, facts };
   });
@@ -703,6 +724,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         tradeoff: tradeoffs[s.name]?.text || null,
         chosen: s.id === run.chosenScenarioId,
         feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
+        weightUnitKg: typeof d.weight_unit_kg === 'number' ? d.weight_unit_kg : null,
+        newOvertimeOnly: typeof d.new_overtime_only === 'boolean' ? d.new_overtime_only : null,
       };
     }),
     loads: detailLoads,
@@ -784,12 +807,23 @@ async function stuckOf(
  * what it was planned with (sheets included); nothing switches silently. A PLANNED load adopts the
  * change at the next re-plan; a locked one must be unlocked first (a dispatched one keeps it).
  */
-export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode' | 'loadNo' | 'stops' | 'masterChanged'>[]): string[] {
+export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode' | 'loadNo' | 'stops' | 'masterChanged' | 'origin'>[]): string[] {
   const stops: string[] = [];
   const frozen: string[] = [];
   const trucks: string[] = [];
+  const depotPlanned: DepotMovedLoad[] = [];
+  const depotKept: DepotMovedLoad[] = [];
   for (const l of loads) {
-    if (l.masterChanged.length) trucks.push(`${l.truckCode} L${l.loadNo}`);
+    if (l.masterChanged.some((c) => c.kind !== 'DEPOT')) trucks.push(`${l.truckCode} L${l.loadNo}`);
+    const depot = l.masterChanged.find((c) => c.kind === 'DEPOT');
+    if (depot) {
+      // Each load its own distance: loads kept through two depot moves were planned from different pins (A6 review).
+      (l.status === 'PLANNED' ? depotPlanned : depotKept).push({
+        label: `${l.truckCode} L${l.loadNo}`,
+        far: typeof depot.movedM === 'number' ? (depot.movedM >= 1000 ? `${(depot.movedM / 1000).toFixed(1)} km` : `${depot.movedM} m`) : null,
+        pin: l.origin ? `${l.origin.lat},${l.origin.lng}` : '',
+      });
+    }
     for (const s of l.stops) {
       if (!s.masterChanged.some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) continue;
       const label = `${s.customerCode}${s.branchCode ? `/${s.branchCode}` : ''} (${l.truckCode} L${l.loadNo})`;
@@ -804,7 +838,34 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
     out.push(`Location or receiving hours changed after these locked or dispatched loads were planned: ${frozen.join(', ')}. Their sheets show the planned stop with the change noted; unlock and re-plan to adopt it (not possible once a load has left).`);
   }
   if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
+  // Audit E1 (owner decision 13): its own sentence, never "truck capacity changed".
+  if (depotKept.length) out.push(depotMovedSentence(depotKept, true));
+  if (depotPlanned.length) out.push(depotMovedSentence(depotPlanned, false));
   return out;
+}
+
+/** A load whose depot pin moved since it was planned: its label, how far (null: unknown) and the pin it was planned from. */
+type DepotMovedLoad = { label: string; far: string | null; pin: string };
+
+/**
+ * The plan's "Depot moved since planning" sentence for the kept (locked, dispatched) or the PLANNED
+ * loads. One distance when every load gives the same one; else each load its own, after its label
+ * (A6 review: the last load's distance was printed for all). Singular words for one load.
+ */
+function depotMovedSentence(items: DepotMovedLoad[], kept: boolean): string {
+  const one = items.length === 1;
+  const fars = new Set(items.map((i) => i.far));
+  const sameFar = fars.size === 1;
+  const onePin = new Set(items.map((i) => i.pin)).size === 1;
+  const list = items.map((i) => (sameFar || !i.far ? i.label : `${i.label} (${i.far})`)).join(', ');
+  const [only] = [...fars];
+  const far = sameFar ? (only ? ` (${only} from the depot's pin now)` : '') : " (distance from the depot's pin now)";
+  const pin = onePin ? 'pin' : 'pins';
+  if (kept) {
+    const verb = one ? 'starts and ends at the depot pin it was' : `start and end at the depot ${pin} they were`;
+    return `Depot moved since planning: ${list} ${verb} planned from${far}. Locked and dispatched loads keep ${onePin ? 'it' : 'them'}.`;
+  }
+  return `Depot moved since planning: ${list} ${one ? 'is' : 'are'} still planned from the old depot ${pin}${far}. Re-plan to plan ${one ? 'it' : 'them'} from the new pin.`;
 }
 
 type OutdatedLoad = {

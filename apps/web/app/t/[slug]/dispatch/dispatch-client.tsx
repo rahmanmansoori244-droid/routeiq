@@ -77,7 +77,7 @@ interface Day {
    * The plan in use is out of date without a new order: weights changed, customers deactivated,
    * master data corrected, or customers on planned loads whose location is not usable any more.
    */
-  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number; locationBlocked?: number };
+  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number; locationBlocked?: number; depotMoved?: number };
   plan: null | {
     id: string;
     version: number;
@@ -400,14 +400,15 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0 };
   const planOutdated =
     !!day.plan?.chosen &&
     (outdated.weightCases > 0 ||
       outdated.inactiveOrders > 0 ||
       (outdated.masterChanged ?? 0) > 0 ||
       (outdated.trucksChanged ?? 0) > 0 ||
-      (outdated.locationBlocked ?? 0) > 0);
+      (outdated.locationBlocked ?? 0) > 0 ||
+      (outdated.depotMoved ?? 0) > 0);
   // Every order is already on a locked, loading or dispatched load, or was brought forward to a
   // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
   // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
@@ -617,6 +618,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               outdated.inactiveOrders ? `${outdated.inactiveOrders} of its order(s) on planned loads had their customer deactivated` : '',
               outdated.masterChanged ? `the location or receiving hours of ${outdated.masterChanged} customer(s) on planned loads were changed (master data changed since optimization)` : '',
               outdated.trucksChanged ? `the capacity or payload of ${outdated.trucksChanged} truck(s) with planned loads was changed` : '',
+              // Audit E1: locked and dispatched loads keep the pin they were planned from; RE-PLAN moves the rest.
+              outdated.depotMoved ? `the depot pin was moved (${outdated.depotMoved} planned load(s) still start from the old pin)` : '',
               // Owner's location rule (A5 second review): their loads cannot be locked meanwhile.
               outdated.locationBlocked
                 ? `the location of ${outdated.locationBlocked} customer(s) on planned loads can no longer be used (drop the pin on each one, or RE-PLAN to leave their orders unserved)`

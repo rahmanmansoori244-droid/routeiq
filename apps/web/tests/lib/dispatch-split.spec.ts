@@ -15,6 +15,7 @@ import {
   readPortionLineKg,
   readPortionLines,
   rowLines,
+  rowLinesKg,
   splitIntoParts,
   splitPartLabels,
   type OpenLine,
@@ -31,6 +32,14 @@ describe('fitsCapacity', () => {
     expect(fitsCapacity(50, 1000.0000001, { cases: 100, kg: 1000 })).toBe(true); // float sums
     expect(fitsCapacity(50, 1001, { cases: 100, kg: 1000 })).toBe(false);
     expect(fitsCapacity(50, 99_999, { cases: 100, kg: null })).toBe(true);
+  });
+
+  it('compares in 0.1 kg like the optimizer (audit F08): exactly the payload fits, 0.1 kg more does not', () => {
+    expect(fitsCapacity(3, 999.1 + 999.1 + 1001.8, { cases: 100, kg: 3000 })).toBe(true);
+    expect(fitsCapacity(3, 3000.1, { cases: 100, kg: 3000 })).toBe(false);
+    expect(fitsCapacity(7, 7 * 9.3, { cases: 100, kg: 65.1 })).toBe(true); // 65.10000000000001
+    expect(fitsCapacity(3, 2998.5, { cases: 100, kg: 2998.5 })).toBe(true);
+    expect(fitsCapacity(3, 3000.04, { cases: 100, kg: 3000 })).toBe(true); // 3,000.0 to the tenth, as the optimizer sees it
   });
 });
 
@@ -155,8 +164,9 @@ describe('choosePartCapacity', () => {
     expect(r?.cap).toEqual({ cases: 400, kg: 10_000 });
   });
 
-  it('floors the payload to whole kg and ignores trucks without capacity', () => {
-    expect(choosePartCapacity(300, 3000, [T('A', 120, 2500.7), T('Z', 0, null)])).toEqual({ cap: { cases: 120, kg: 2500 }, truckCode: 'A' });
+  it('sizes parts for the payload rounded down to 0.1 kg, not to whole kg (audit F08), and ignores trucks without capacity', () => {
+    expect(choosePartCapacity(300, 3000, [T('A', 120, 2500.7), T('Z', 0, null)])).toEqual({ cap: { cases: 120, kg: 2500.7 }, truckCode: 'A' });
+    expect(choosePartCapacity(300, 3000, [T('A', 120, 2500.75)])?.cap.kg).toBe(2500.7);
     expect(choosePartCapacity(300, 0, [T('Z', 0, null)])).toBeNull();
   });
 
@@ -171,9 +181,10 @@ describe('choosePartCapacity', () => {
     expect(choosePartCapacity(20, 2400, fleet)?.truckCode).toBe('SMALL');
   });
 
-  it('uses the whole-kg payload when checking the heaviest case, and falls back when no truck can carry it', () => {
-    // 999.7 kg floors to 999: a 999.5 kg case does not fit that part size.
-    expect(choosePartCapacity(10, 5000, [T('A', 50, 999.7), T('B', 50, 1200)], 999.5)?.truckCode).toBe('B');
+  it('checks the heaviest case against the payload in 0.1 kg, and falls back when no truck can carry it', () => {
+    // 999.7 kg carries a 999.5 kg case (it floored to 999 kg before audit F08); a 999.8 kg case needs B.
+    expect(choosePartCapacity(10, 5000, [T('A', 50, 999.7), T('B', 50, 1200)], 999.5)?.truckCode).toBe('A');
+    expect(choosePartCapacity(10, 5000, [T('A', 50, 999.7), T('B', 50, 1200)], 999.8)?.truckCode).toBe('B');
     // Nothing carries a 5 t case: every truck stays a candidate (the planner pre-drops such cases).
     expect(choosePartCapacity(10, 50_000, [T('A', 50, 1000), T('B', 50, 2000)], 5000)).not.toBeNull();
   });
@@ -274,5 +285,37 @@ describe('portionMoney', () => {
   it('falls back to the order value pro rata when a line has no value, and stays null when the order has none', () => {
     expect(portionMoney(1100, 200, [lines[0], { id: 'b', cases: 100, value: null }], [{ lineId: 'a', cases: 100 }])).toBe(550);
     expect(portionMoney(null, 200, lines, [{ lineId: 'a', cases: 100 }])).toBeNull();
+  });
+});
+
+describe('rowLinesKg: the loading sheet weighs what the load weighs (audit E3)', () => {
+  const kgOf = (xs: { weightKg: number }[]) => Math.round(xs.reduce((a, x) => a + x.weightKg, 0) * 10) / 10;
+
+  it('a partly frozen order re-weighed since (10 -> 15 kg a case): its planned part keeps 15 kg a case, 300 kg like its load', () => {
+    // The line still says 10 kg a case (it is shared with the frozen part, so it was never re-weighed).
+    const lines = [{ id: 'ln1', cases: 40, weightKg: 400, sku: 'W' }];
+    const portion = [{ lineId: 'ln1', cases: 20, kgPerCase: 15 }];
+    expect(rowLines(lines, portion)[0].weightKg).toBe(200); // what the sheet showed
+    const out = rowLinesKg(lines, portion, 300, false);
+    expect(out).toEqual([{ id: 'ln1', cases: 20, weightKg: 300, sku: 'W' }]);
+  });
+
+  it('an order weighed at order level (every line 0 kg): the order kg per case, not 0 kg', () => {
+    const lines = [{ id: 'a', cases: 12, weightKg: 0 }, { id: 'b', cases: 8, weightKg: 0 }];
+    expect(rowLines(lines, null).map((l) => l.weightKg)).toEqual([0, 0]); // what the sheet showed
+    expect(rowLinesKg(lines, null, 240, true).map((l) => l.weightKg)).toEqual([144, 96]);
+  });
+
+  it('control: lines with their own kg keep them; shares always add up exactly to the row kg in 0.1 kg', () => {
+    const lines = [{ id: 'a', cases: 10, weightKg: 124 }, { id: 'b', cases: 5, weightKg: 40.5 }];
+    expect(rowLinesKg(lines, null, 164.5, false).map((l) => l.weightKg)).toEqual([124, 40.5]);
+    const thirds = [{ id: 'a', cases: 1, weightKg: 0 }, { id: 'b', cases: 1, weightKg: 0 }, { id: 'c', cases: 1, weightKg: 0 }];
+    const out = rowLinesKg(thirds, null, 10, true);
+    expect(out.map((l) => l.weightKg)).toEqual([3.4, 3.3, 3.3]);
+    expect(kgOf(out)).toBe(10);
+    // A part planned before the case weights were kept: its own kg shared by the lines' kg.
+    const old = rowLinesKg([{ id: 'a', cases: 10, weightKg: 100 }, { id: 'b', cases: 10, weightKg: 300 }], [{ lineId: 'a', cases: 5 }, { lineId: 'b', cases: 5 }], 200.1, false);
+    expect(old.map((l) => [l.cases, l.weightKg])).toEqual([[5, 50], [5, 150.1]]);
+    expect(rowLinesKg([{ id: 'a', cases: 10, weightKg: 0 }], null, 0, false)).toEqual([{ id: 'a', cases: 10, weightKg: 0 }]);
   });
 });

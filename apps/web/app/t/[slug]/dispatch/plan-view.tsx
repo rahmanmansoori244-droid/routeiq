@@ -29,6 +29,7 @@ import {
   type SearchMode,
   type StartedAnswer,
 } from '@/lib/dispatch/search-mode';
+import { kgText, manifestKgNote } from '@/lib/dispatch/weights';
 import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
@@ -1073,6 +1074,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             truckCode: l.truckCode,
             loadNo: l.loadNo,
             colorIdx: colorIdx.get(l.truckId) ?? 0,
+            // Audit E1: drawn from the depot pin the load was planned from.
+            origin: l.origin,
             stops: l.stops.map((st) => ({ sequence: st.sequence, lat: st.lat, lng: st.lng, label: `${st.customerName} (${st.cases} cs${st.split ? `, part ${st.split.part}/${st.split.parts}` : ''})` })),
           }))}
           unserved={[]}
@@ -1310,6 +1313,8 @@ function LoadActions({
 }
 
 function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
+  // A6 second review: an older version whose orders a later re-plan re-weighed says so (as its Excel sheet does).
+  const kgNote = manifestKgNote(l);
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div>
@@ -1321,16 +1326,24 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td className="py-1 pr-2 font-mono">{m.productCode}</td>
                 <td className="py-1 pr-2">{m.productName}</td>
                 <td className="py-1 text-right font-semibold">{m.cases}</td>
+                {/* Audit E3 (A6 review): each product's kg, which add up to the load's kg (to 0.1 kg). */}
+                <td className="py-1 pl-2 text-right text-muted-foreground">{kgText(m.weightKg)} kg</td>
               </tr>
             ))}
             <tr>
               <td colSpan={2} className="py-1 font-semibold">
-                TOTAL ({Math.round(l.weightKg)} kg)
+                TOTAL
               </td>
               <td className="py-1 text-right font-semibold">{l.cases}</td>
+              <td className="py-1 pl-2 text-right font-semibold">{kgText(l.weightKg)} kg</td>
             </tr>
           </tbody>
         </table>
+        {kgNote ? (
+          <p className="mt-1 text-xs text-amber-700" data-testid={`manifest-kg-note-${l.truckCode}-${l.loadNo}`}>
+            {kgNote}
+          </p>
+        ) : null}
       </div>
       <div className="lg:col-span-2">
         <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Delivery route</p>

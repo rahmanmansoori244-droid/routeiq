@@ -111,6 +111,26 @@ export interface OptionFacts {
   signature: string;
   /** earlyStarts(): stop id -> service start of the early priorities. */
   earlyStarts: Record<string, number>;
+  /**
+   * The optimizer's own timetable check of the option (audit F22): VIOLATED or UNVERIFIED = it
+   * breaks the timing rules or could not be checked, so it cannot be dispatched. Null / absent: an
+   * option saved before the check existed, compared as before.
+   */
+  feasibility?: 'VERIFIED' | 'VIOLATED' | 'UNVERIFIED' | null;
+  /** How many timing problems the check found (VIOLATED). */
+  violations?: number;
+}
+
+/** The option breaks the timing rules, or its timing could not be checked: it cannot be dispatched (F22). */
+export function breaksTimingRules(o: Pick<OptionFacts, 'feasibility'>): boolean {
+  return o.feasibility === 'VIOLATED' || o.feasibility === 'UNVERIFIED';
+}
+
+/** What the options table says of an option that breaks the timing rules, instead of any trade-off (F22). */
+export function brokenOptionText(o: Pick<OptionFacts, 'feasibility' | 'violations'>): string {
+  if (o.feasibility === 'UNVERIFIED') return 'Its timing could not be checked, so it cannot be dispatched. Re-plan, or use another option.';
+  const n = o.violations ?? 0;
+  return `Breaks the timing rules${n > 0 ? ` (${n} problem${n === 1 ? '' : 's'})` : ''}: it cannot be dispatched. Re-plan, or use another option.`;
 }
 
 export interface OptionTradeoff {
@@ -166,13 +186,20 @@ function sentence(versus: string, gains: string[], givesUp: string[]): string {
  * The trade-off line of every option, by name (N1). RECOMMENDED is compared with the cheapest
  * option that is a different plan; each alternative with RECOMMENDED. Identical plans say so.
  * `early` names the early priorities ("P1/P2").
+ *
+ * Audit F22: an option that breaks the timing rules (its check VIOLATED or UNVERIFIED) gets no
+ * trade-off at all - never "cheaper" or "1 more order served", which it only is on paper - but
+ * brokenOptionText. It is never the option another one is compared with either, so RECOMMENDED is
+ * not shown as "no gain" against it. Options saved before the check (null) are compared as before.
  */
 export function optionTradeoffs(options: readonly OptionFacts[], early = 'P1/P2'): Record<string, OptionTradeoff> {
   const out: Record<string, OptionTradeoff> = {};
-  const usable = options.filter((o) => o.usable);
+  const broken = options.filter((o) => o.usable && breaksTimingRules(o));
+  for (const o of broken) out[o.name] = { text: brokenOptionText(o), versus: null, gains: [], givesUp: [] };
+  const usable = options.filter((o) => o.usable && !breaksTimingRules(o));
   const rec = usable.find((o) => o.name === 'RECOMMENDED') ?? null;
   const same = (o: OptionFacts) => (x: OptionFacts) => x !== o && x.signature === o.signature;
-  if (usable.length > 1 && usable.every((o) => o.signature === usable[0].signature)) {
+  if (!broken.length && usable.length > 1 && usable.every((o) => o.signature === usable[0].signature)) {
     for (const o of usable) out[o.name] = { text: 'Same plan as the other options', versus: null, gains: [], givesUp: [] };
     return out;
   }
@@ -184,7 +211,8 @@ export function optionTradeoffs(options: readonly OptionFacts[], early = 'P1/P2'
     if (o === rec) {
       const others = usable.filter((x) => x !== rec && x.signature !== rec.signature);
       if (!others.length) {
-        out[o.name] = { text: '', versus: null, gains: [], givesUp: [] };
+        const text = broken.length ? 'Every different option breaks the timing rules.' : '';
+        out[o.name] = { text, versus: null, gains: [], givesUp: [] };
         continue;
       }
       // The cheapest different plan: what the dispatcher would otherwise pick on cost.

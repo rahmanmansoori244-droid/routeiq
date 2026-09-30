@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 127.0.0.1",
-    "build": "prisma generate && next build && node scripts/remove-public-source-maps.mjs",
+    "build": "prisma generate && next build && node scripts/build-upload-parser.mjs && node scripts/remove-public-source-maps.mjs",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
@@ -71,6 +71,7 @@
     "@types/react": "18.3.3",
     "@types/react-dom": "18.3.0",
     "autoprefixer": "^10.4.19",
+    "esbuild": "^0.27.7",
     "eslint": "^8.57.0",
     "eslint-config-next": "14.2.5",
     "postcss": "^8.4.38",

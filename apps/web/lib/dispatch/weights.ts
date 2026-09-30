@@ -46,12 +46,62 @@ export interface OrderWeightChange {
 const r3 = (v: number) => Math.round(v * 1000) / 1000;
 
 /**
+ * Weights to the optimizer and on stored loads are whole units of 0.1 kg (audit F08, owner decision
+ * 15: no hidden rounding margin). One rule on both sides: each order (or split portion) is rounded
+ * to the NEAREST 0.1 kg, exactly as the solver's kg_units does (floor(kg x 10 + 0.5), the same
+ * floating-point steps in both languages), and a payload is rounded DOWN to 0.1 kg (payload_units).
+ * So the kg the optimizer planned a load with, the load's stored kg and the dispatch check's kg are
+ * the same sum of the same tenths.
+ */
+export function kgTenths(kg: number): number {
+  return kg > 0 ? Math.floor(kg * 10 + 0.5) : 0;
+}
+
+/** kg rounded to the nearest 0.1 kg (kgTenths / 10). */
+export function roundKg(kg: number): number {
+  return kgTenths(kg) / 10;
+}
+
+/** A payload in 0.1 kg units, rounded down (the solver's payload_units); 0 = no payload. */
+export function payloadTenths(kg: number): number {
+  return kg > 0 ? Math.floor(kg * 10 + 1e-6) : 0;
+}
+
+/**
  * The one tolerance for comparing a load's stored kg (a sum of order and portion kg, each kept to
  * 0.1 kg) with a payload or with the optimizer's own kg: applyScenario's kg cross-check, the
  * dispatch check's CAPACITY_KG (feasibility.ts) and the workbook's Kg check. Rounding can never
  * block a load the optimizer filled to its payload; a real overload is always far above it.
  */
 export const KG_ROUNDING_TOL = 0.5;
+
+/** kg as the plan screen shows them: to 0.1 kg, like the load's own kg (896.8, never 897; 2,303.6). */
+export function kgText(kg: number): string {
+  return kg.toLocaleString('en-US', { maximumFractionDigits: 1 });
+}
+
+/** A loading manifest's kg: its product lines added up, to 0.1 kg (the plan screen and the Excel). */
+export function manifestKgOf(manifest: readonly { weightKg: number }[]): number {
+  return Math.round(manifest.reduce((a, m) => a + m.weightKg, 0) * 10) / 10;
+}
+
+/** The manifest's kg differ from the load's recorded kg by more than rounding (KG_ROUNDING_TOL). */
+export function manifestKgDiffers(manifestKg: number, loadKg: number): boolean {
+  return Math.abs(manifestKg - loadKg) > KG_ROUNDING_TOL;
+}
+
+/**
+ * The plan screen's line under a load's manifest when its products no longer add up to the load's
+ * kg (A6 second review; the Excel load sheet says "MISMATCH: load records N kg (order weights
+ * changed since planning)"). The products carry each order's kg now, the load the kg it was
+ * planned with: only an older version, kept for the record, whose orders a later re-plan re-weighed
+ * (a corrected product weight) can differ. null when they agree.
+ */
+export function manifestKgNote(l: { manifest: readonly { weightKg: number }[]; weightKg: number }): string | null {
+  const productsKg = manifestKgOf(l.manifest);
+  if (!manifestKgDiffers(productsKg, l.weightKg)) return null;
+  return `The load was planned at ${kgText(l.weightKg)} kg. Order weights changed since planning, so the products add up to ${kgText(productsKg)} kg.`;
+}
 
 /** Tolerance used when comparing an order's kg with the sum of its lines' kg (float sums). */
 export function kgTolerance(totalKg: number): number {

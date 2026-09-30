@@ -36,9 +36,10 @@ import {
 } from '@/lib/dispatch/plan-options';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
 import { getPlanDetail, type PlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, withSearchAssumptions } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, solverRules, withSearchAssumptions } from '@/lib/dispatch/workbook';
 import { chooseScenario } from '@/lib/dispatch/plan-service';
 import { searchResultText } from '@/lib/dispatch/search-mode';
+import { manifestKgNote } from '@/lib/dispatch/weights';
 
 const T = 'tA';
 const DAY = new Date('2026-09-27T00:00:00Z');
@@ -169,6 +170,50 @@ describe('N1: what each option gains', () => {
     expect(earlyStarts(loads, [1, 2], (s) => prio[s.stop_id] ?? null)).toEqual({ S1: 400, S3: 500 });
   });
 
+  it('audit F22: an option that breaks the timing rules is never called cheaper or better, and nothing is compared with it', () => {
+    // The verifiers' case: MIN TRUCKS serves one more order for 20 OMR less, but its timetable is VIOLATED.
+    const rec = facts({ name: 'RECOMMENDED', dayCost: 100, unserved: 1, signature: 'R', feasibility: 'VERIFIED' });
+    const bad = facts({ name: 'MIN_TRUCKS', dayCost: 80, unserved: 0, signature: 'M', feasibility: 'VIOLATED', violations: 3 });
+    let t = optionTradeoffs([rec, bad]);
+    expect(t.MIN_TRUCKS).toEqual({ text: 'Breaks the timing rules (3 problems): it cannot be dispatched. Re-plan, or use another option.', versus: null, gains: [], givesUp: [] });
+    expect(t.RECOMMENDED.text).toBe('Every different option breaks the timing rules.');
+    for (const x of Object.values(t)) expect(x.text).not.toMatch(/cheaper|more order|no gain/);
+    // With a third option that keeps the rules, RECOMMENDED is compared with that one only.
+    const ok = facts({ name: 'MIN_DISTANCE', dayCost: 90, km: 380, unserved: 1, signature: 'D', feasibility: 'VERIFIED' });
+    t = optionTradeoffs([rec, bad, ok]);
+    expect(t.RECOMMENDED.versus).toBe('MIN_DISTANCE');
+    expect(t.MIN_DISTANCE.text).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+    expect(t.MIN_TRUCKS.gains).toEqual([]);
+    // UNVERIFIED (the check could not run) is not dispatchable either; an option from before the check (null) is compared as before.
+    t = optionTradeoffs([rec, { ...bad, feasibility: 'UNVERIFIED' }]);
+    expect(t.MIN_TRUCKS.text).toBe('Its timing could not be checked, so it cannot be dispatched. Re-plan, or use another option.');
+    t = optionTradeoffs([rec, { ...bad, feasibility: null }]);
+    expect(t.MIN_TRUCKS.text).toMatch(/^vs RECOMMENDED: 1 more order served/);
+    expect(t.MIN_TRUCKS.gains).toContain('20.0 OMR cheaper');
+    // RECOMMENDED itself broken: it says so, and no alternative is praised against it.
+    t = optionTradeoffs([{ ...rec, feasibility: 'VIOLATED', violations: 1 }, { ...bad, feasibility: 'VERIFIED' }]);
+    expect(t.RECOMMENDED.text).toBe('Breaks the timing rules (1 problem): it cannot be dispatched. Re-plan, or use another option.');
+    expect(t.MIN_TRUCKS.text).toBe('');
+  });
+
+  it('audit F22 (A6 third review): two rule-keeping options with the same plan beside a broken different plan are not "the same plan as the other options"', () => {
+    // RECOMMENDED and MIN TRUCKS keep the rules and are one plan; MIN DISTANCE is another plan and breaks them.
+    const rec = facts({ name: 'RECOMMENDED', signature: 'R', feasibility: 'VERIFIED' });
+    const minTrucks = { ...rec, name: 'MIN_TRUCKS' };
+    for (const feasibility of ['VIOLATED', 'UNVERIFIED'] as const) {
+      const bad = facts({ name: 'MIN_DISTANCE', signature: 'D', dayCost: 150, km: 300, feasibility, violations: 2 });
+      const t = optionTradeoffs([rec, minTrucks, bad]);
+      expect(t.RECOMMENDED.text).toBe('Every different option breaks the timing rules.');
+      expect(t.MIN_TRUCKS).toEqual({ text: 'Same plan as RECOMMENDED', versus: 'RECOMMENDED', gains: [], givesUp: [] });
+      expect(t.MIN_DISTANCE.text).toBe(
+        feasibility === 'VIOLATED'
+          ? 'Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.'
+          : 'Its timing could not be checked, so it cannot be dispatched. Re-plan, or use another option.',
+      );
+      for (const x of Object.values(t)) expect(x.text).not.toContain('Same plan as the other options');
+    }
+  });
+
   it('the plan signature ignores load order in the list but not the stop order', () => {
     const a = [newLoad('T1', 1, [['S1', 400], ['S2', 420]]), newLoad('T2', 1, [['S3', 500]])];
     expect(planSignature([...a].reverse())).toBe(planSignature(a));
@@ -283,12 +328,39 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     expect(at).toBeGreaterThan(0);
     const rec = rows.findIndex((r, i) => i > at && r[0] === 'RECOMMENDED (in use)');
     expect(rows[rec][1]).toBe('2 trucks · 3 loads (2 new)');
-    expect(rows[rec][2]).toBe('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preference cost 5.0 · 0 unserved');
+    expect(rows[rec][2]).toBe('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preference cost 5.0 · 0 unserved · timing VERIFIED');
     expect(rows[rec + 1][2]).toBe(d.scenarios[0].tradeoff);
     const min = rows.findIndex((r, i) => i > at && r[0] === 'MIN TRUCKS');
     expect(rows[min][1]).toBe('2 trucks · 2 loads (1 new)');
-    expect(rows[min][2]).toBe('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved');
+    expect(rows[min][2]).toBe('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved · timing VERIFIED');
     expect(rows[min + 1][2]).toMatch(/^vs RECOMMENDED: 10\.0 OMR cheaper/);
+  });
+
+  it('A6 review: each option carries the weight and overtime rules its optimizer reported (none from an older one)', async () => {
+    seed();
+    const rec = tables.scenarioResult[0];
+    rec.detailsJson = { ...(rec.detailsJson as Record<string, unknown>), weight_unit_kg: 0.1, new_overtime_only: true };
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.scenarios[0]).toMatchObject({ name: 'RECOMMENDED', weightUnitKg: 0.1, newOvertimeOnly: true });
+    expect(d.scenarios[1]).toMatchObject({ name: 'MIN_TRUCKS', weightUnitKg: null, newOvertimeOnly: null });
+    expect(solverRules(d)).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+  });
+
+  it('audit F22: an option whose timetable is VIOLATED says so on screen and in the Excel, never "cheaper"', async () => {
+    seed();
+    const min = tables.scenarioResult[1];
+    min.detailsJson = { ...(min.detailsJson as Record<string, unknown>), feasibility: { status: 'VIOLATED', timing: 'ESTIMATED', violations: [{ code: 'TURNAROUND', message: 'x' }, { code: 'TURNAROUND', message: 'y' }] } };
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.scenarios[1].tradeoff).toBe('Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.');
+    expect(d.scenarios[0].tradeoff).toBe('Every different option breaks the timing rules.');
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const texts: string[] = [];
+    wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
+    expect(texts).toContain('32.0 km (new 22.0) · day cost 70.0 OMR (new 40.0) · preference cost 10.0 · 0 unserved · timing VIOLATED');
+    expect(texts).toContain('Breaks the timing rules (2 problems): it cannot be dispatched. Re-plan, or use another option.');
+    expect(texts.some((x) => /cheaper/.test(x))).toBe(false);
   });
 
   it('options saved by an optimizer without the preference parts show their preferred hours as such, on screen and in the Excel', async () => {
@@ -313,7 +385,71 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
     const texts: string[] = [];
     wb.getWorksheet('SUMMARY')!.eachRow((row) => texts.push(row.getCell(3).text));
-    expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved');
+    expect(texts).toContain('40.0 km (new 30.0) · day cost 80.0 OMR (new 50.0) · preferred hours only 1.5 (older optimizer: early delivery not reported) · 0 unserved · timing VERIFIED');
+  });
+});
+
+describe('audit E3 through getPlanDetail: each load sheet weighs what the load weighs (A6 review)', () => {
+  /**
+   * The verifiers' two shapes, through getPlanDetail (the helper alone passed while getPlanDetail
+   * could still call the old rowLines): O2 is weighed at order level (lines of 24 and 16 cases at
+   * 0 kg, the order 400 kg); O3 is a LOCKED split part of 20 cases planned at 15 kg per case (300 kg)
+   * while its line now says 10 kg per case. O1 on the dispatched K1 is the control.
+   */
+  function seedWeights() {
+    seed();
+    const o2 = tables.order.find((o) => o.id === 'O2')!;
+    o2.lines = [
+      { id: 'O2-a', cases: 24, weightKg: 0, weightFromMaster: false, salesOrderNo: 'SO-O2', product: { code: 'TAN', name: 'Tanuf', weightPerCaseKg: 0 } },
+      { id: 'O2-b', cases: 16, weightKg: 0, weightFromMaster: false, salesOrderNo: 'SO-O2', product: { code: 'MAI', name: 'Masafi', weightPerCaseKg: 0 } },
+    ];
+    Object.assign(tables.planLoad.find((l) => l.id === 'L3')!, { status: 'LOCKED', cases: 20, weightKg: 300 });
+    Object.assign(tables.routeAssignment.find((a) => a.id === 'A3')!, {
+      plannedLoadCases: 20, portionCases: 20, portionWeightKg: 300, portionLinesJson: [{ lineId: 'O3-l', cases: 20, kgPerCase: 15 }],
+    });
+  }
+
+  it("each load's manifest kg and each stop's SKU kg equal the load's and the row's kg", async () => {
+    seedWeights();
+    const d = (await getPlanDetail(T, 'P'))!;
+    const kg = (xs: { weightKg: number }[]) => Math.round(xs.reduce((a, x) => a + x.weightKg, 0) * 10) / 10;
+    const byId = Object.fromEntries(d.loads.map((l) => [l.id, [l.weightKg, kg(l.manifest)]]));
+    expect(byId).toEqual({ K1: [400, 400], L2: [400, 400], L3: [300, 300] });
+    for (const l of d.loads) for (const st of l.stops) expect(kg(st.skus), `${l.id} stop ${st.sequence}`).toBe(st.weightKg);
+    const manifest = (id: string) =>
+      d.loads.find((l) => l.id === id)!.manifest.map((m) => [m.productCode, m.cases, m.weightKg]).sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    // Order-level weights are spread per case (24 : 16), not left at 0 kg.
+    expect(manifest('L2')).toEqual([
+      ['MAI', 16, 160],
+      ['TAN', 24, 240],
+    ]);
+    // The part keeps the 15 kg per case it was planned with (not the line's 10 kg now: 200 kg).
+    expect(manifest('L3')).toEqual([['TAN', 20, 300]]);
+  });
+
+  it('an older version whose orders were re-weighed after it was made says so under its manifest, as its Excel sheet does (A6 second review)', async () => {
+    seed();
+    // Kept for the record: a re-plan made v3 after O2's case weight was corrected from 10 to 10.5 kg,
+    // and re-weighed O2 (not frozen). This version's T01 L1 was planned at 400 kg.
+    Object.assign(tables.runPlan[0], { status: 'SUPERSEDED', supersededAt: new Date() });
+    const o2 = tables.order.find((o) => o.id === 'O2')!;
+    o2.lines = [{ ...o2.lines[0], weightKg: 420 }];
+    o2.totalWeightKg = 420;
+    const d = (await getPlanDetail(T, 'P'))!;
+    const l2 = d.loads.find((l) => l.id === 'L2')!;
+    expect([l2.weightKg, l2.manifest.map((m) => m.weightKg)]).toEqual([400, [420]]);
+    expect(manifestKgNote(l2)).toBe('The load was planned at 400 kg. Order weights changed since planning, so the products add up to 420 kg.');
+    expect(d.loads.filter((l) => l.id !== 'L2').map(manifestKgNote)).toEqual([null, null]);
+    // The Excel flags the same load, and only it.
+    const buf = await buildDispatchWorkbook(d, { tenantName: 'NMWC', currency: 'OMR', generatedAt: new Date('2026-09-27T05:00:00Z'), generatedBy: 'Planner', assumptions: {} });
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buf as unknown as ExcelJS.Buffer);
+    const flagged = wb.worksheets.filter((ws) => {
+      let hit = false;
+      ws.eachRow((row) => row.eachCell((c) => void (hit ||= c.text.includes('MISMATCH: load records 400 kg (order weights changed since planning)'))));
+      return hit;
+    });
+    expect(flagged.map((ws) => ws.name)).toEqual(['T01 - L1']);
   });
 });
 

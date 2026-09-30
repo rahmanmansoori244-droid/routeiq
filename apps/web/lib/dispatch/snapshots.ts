@@ -147,11 +147,25 @@ export interface StopSnapshot extends Omit<StopFacts, 'lat' | 'lng' | 'serviceMi
   capturedAt: string;
 }
 
+/** The depot pin a load starts from and returns to, as it was planned (audit E1). */
+export interface LoadOrigin {
+  depotId: string;
+  lat: number;
+  lng: number;
+}
+
 export interface TruckSnapshot extends TruckFacts {
   v: number;
   rules: PlanRules | null;
   source: 'PLAN' | 'MASTER';
   capturedAt: string;
+  /**
+   * Audit E1 (owner decision 13): the depot pin the load was planned from. A locked or dispatched
+   * load keeps it through every re-plan (the snapshot is copied unchanged), so a depot pin moved
+   * since never redraws it; the plan says "Depot moved since planning" instead. Absent on loads
+   * planned before it was kept (a re-plan then stamps the depot of the version that planned them).
+   */
+  origin?: LoadOrigin;
 }
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x === 'object' && !Array.isArray(x);
@@ -162,6 +176,14 @@ export function readStopSnapshot(json: unknown): StopSnapshot | null {
 
 export function readTruckSnapshot(json: unknown): TruckSnapshot | null {
   return isObj(json) && typeof json.v === 'number' && typeof json.capacityCases === 'number' ? (json as unknown as TruckSnapshot) : null;
+}
+
+/** The depot pin a load was planned from (TruckSnapshot.origin), or null when its snapshot has none. */
+export function readLoadOrigin(snap: TruckSnapshot | null): LoadOrigin | null {
+  const o = snap?.origin as unknown;
+  if (!isObj(o) || typeof o.depotId !== 'string' || typeof o.lat !== 'number' || typeof o.lng !== 'number') return null;
+  if (!Number.isFinite(o.lat) || !Number.isFinite(o.lng)) return null;
+  return { depotId: o.depotId, lat: o.lat, lng: o.lng };
 }
 
 export function readPlanInputs(json: unknown): PlanInputs | null {
@@ -194,7 +216,7 @@ export function rulesFrom(
 // "Changed after planning"
 // ---------------------------------------------------------------------------------------
 
-export type MasterChangeKind = 'LOCATION' | 'HOURS' | 'NAME' | 'ADDRESS' | 'CAPACITY';
+export type MasterChangeKind = 'LOCATION' | 'HOURS' | 'NAME' | 'ADDRESS' | 'CAPACITY' | 'DEPOT';
 
 export interface MasterChange {
   kind: MasterChangeKind;
@@ -301,7 +323,14 @@ export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): 
 export function plannedLoadsMasterChanged(
   stops: { customerId: string; stopSnapshotJson: unknown; live: LiveStopFacts }[],
   loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number } | null }[],
-): { customers: number; trucks: number } {
+  depotNow?: { lat: number; lng: number } | null,
+  /**
+   * The depot pin the plan's option was optimized from (its inputs.depot): the origin of a load
+   * whose snapshot keeps none (planned before origins were kept) - the plan screen's rule, so the
+   * day is out of date exactly when the plan notes say "still planned from the old depot pin" (A6 review).
+   */
+  plannedFrom?: { lat: number; lng: number } | null,
+): { customers: number; trucks: number; depotMoved: number } {
   const customers = new Set<string>();
   for (const s of stops) {
     const snap = readStopSnapshot(s.stopSnapshotJson);
@@ -309,11 +338,34 @@ export function plannedLoadsMasterChanged(
     if (stopMasterChanges(snap, s.live).some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) customers.add(s.customerId);
   }
   const trucks = new Set<string>();
+  let depotMoved = 0;
   for (const l of loads) {
     const snap = readTruckSnapshot(l.truckSnapshotJson);
     if (snap && l.live && truckMasterChanges(snap, l.live).length) trucks.add(l.truckId);
+    // Audit E1: a PLANNED load still drawn from a depot pin moved since: a re-plan uses the new pin.
+    if (depotNow && depotMovedChange(readLoadOrigin(snap) ?? plannedFrom ?? null, depotNow)) depotMoved++;
   }
-  return { customers: customers.size, trucks: trucks.size };
+  return { customers: customers.size, trucks: trucks.size, depotMoved };
+}
+
+/**
+ * Audit E1 (owner decision 13): the depot's pin now is more than PIN_MOVED_M from the pin the load
+ * was planned from. The load keeps its planned origin (a locked or dispatched load for good; a
+ * planned one until the next re-plan), and says so. Not the customer-pin rule of audit A5, where the
+ * driver gets the new pin: here the load's times and km were planned from the old one.
+ */
+export function depotMovedChange(origin: { lat: number; lng: number } | null, live: { lat: number; lng: number }): MasterChange | null {
+  if (!origin) return null;
+  const moved = distanceM(origin, live);
+  if (!(moved > PIN_MOVED_M)) return null;
+  const far = moved >= 1000 ? `${(moved / 1000).toFixed(1)} km` : `${Math.round(moved)} m`;
+  return {
+    kind: 'DEPOT',
+    text: `Depot moved since planning: this load starts and ends at the depot pin it was planned from (${far} from the depot's pin now).`,
+    newLat: live.lat,
+    newLng: live.lng,
+    movedM: Math.round(moved),
+  };
 }
 
 /** What changed on the truck since the load was planned (capacity / payload only). */

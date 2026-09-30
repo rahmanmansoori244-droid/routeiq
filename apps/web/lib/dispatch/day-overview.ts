@@ -21,7 +21,7 @@ import { defaultSearchMode, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
-import { plannedLoadsMasterChanged } from './snapshots';
+import { plannedLoadsMasterChanged, readPlanInputs } from './snapshots';
 
 export interface IssueCustomer {
   customerId: string;
@@ -77,8 +77,13 @@ export interface DayOutdated {
    * orders unserved, or plans them again once the pin is placed (owner's location rule, A5 second review).
    */
   locationBlocked: number;
+  /**
+   * Audit E1: PLANNED loads still drawn from a depot pin that was moved after the plan was made. Locked
+   * and dispatched loads keep their planned origin (owner decision 13); RE-PLAN plans the rest from the new pin.
+   */
+  depotMoved: number;
 }
-export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0 });
+export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0 });
 
 /** PR9: an order of this day brought forward from an earlier day (badge "Carried over from 26 Sep"). */
 export interface CarriedInOrder {
@@ -242,12 +247,18 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
         select: { truckId: true, truckSnapshotJson: true, truck: { select: { capacityCases: true, capacityWeightKg: true } } },
       })
     : [];
+  // A load planned before origins were kept was planned from the pin its option was optimized
+  // from, as the plan screen reads it (plan-detail: readLoadOrigin ?? inputs.depot; A6 review).
+  const optimizedFrom = readPlanInputs(d?.inputs)?.depot ?? null;
   const changed = plannedLoadsMasterChanged(
     plannedStops,
     plannedLoads.map((l) => ({ truckId: l.truckId, truckSnapshotJson: l.truckSnapshotJson, live: l.truck })),
+    { lat: depot.lat, lng: depot.lng },
+    optimizedFrom ? { lat: optimizedFrom.lat, lng: optimizedFrom.lng } : null,
   );
   outdated.masterChanged = changed.customers;
   outdated.trucksChanged = changed.trucks;
+  outdated.depotMoved = changed.depotMoved;
   for (const o of orders) {
     const c = o.customer;
     const cur = byCustomer.get(c.id);
@@ -411,8 +422,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * weight was entered or corrected since, orders of customers deactivated since that are still
      * on planned loads, customers on planned loads whose pin or receiving hours were corrected
      * (masterChanged), trucks with planned loads whose capacity or payload was corrected
-     * (trucksChanged) and customers on planned loads whose location is not usable any more
-     * (locationBlocked). RE-PLAN applies them all.
+     * (trucksChanged), customers on planned loads whose location is not usable any more
+     * (locationBlocked) and planned loads drawn from a depot pin moved since (depotMoved, audit E1).
+     * RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
     trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },

@@ -56,8 +56,11 @@ import { MAX_SERVICE_MIN, stopService } from './service-time';
 import {
   groupUnknownWeights,
   KG_ROUNDING_TOL,
+  kgTenths,
   orderUsesLineWeights,
+  payloadTenths,
   resolveOrderLineWeights,
+  roundKg,
   type LineWeightChange,
   type OrderWeightChange,
   type UnknownWeight,
@@ -76,12 +79,14 @@ import { copyRowData } from './prisma-copy';
 import {
   distanceM,
   PIN_MOVED_M,
+  readLoadOrigin,
   readPlanInputs,
   readStopSnapshot,
   readTruckSnapshot,
   rulesFrom,
   SNAPSHOT_VERSION,
   usableWindow,
+  type LoadOrigin,
   type PlanInputs,
   type PlanRules,
   type PlanSettings,
@@ -387,9 +392,11 @@ export async function buildDispatchRequest(
       frozenOrderIds.push(o.id); // every case is already on frozen loads
       continue;
     }
+    // Each order (or its open part) to the nearest 0.1 kg, the unit the optimizer, the stored loads and
+    // the dispatch check all add up (weights.ts kgTenths, audit F08).
     const open: OpenOrder = partial
-      ? { o, lines: lines.filter((l) => l.cases > 0), cases, kg: Math.round(lines.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10, partial }
-      : { o, lines, cases: o.totalCases, kg: orderKg, partial };
+      ? { o, lines: lines.filter((l) => l.cases > 0), cases, kg: roundKg(lines.reduce((a, l) => a + l.cases * l.kgPerCase, 0)), partial }
+      : { o, lines, cases: o.totalCases, kg: roundKg(orderKg), partial };
     openByCustomer.set(o.customerId, [...(openByCustomer.get(o.customerId) ?? []), open]);
   }
   // Orders on frozen loads that today's order query no longer returns (e.g. an order brought
@@ -417,7 +424,7 @@ export async function buildDispatchRequest(
   // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint.
   const usableTrucks = pool.filter((t) => t.cases > 0);
   const maxPayloadKg = usableTrucks.length && usableTrucks.every((t) => t.kg !== null) ? Math.max(...usableTrucks.map((t) => t.kg as number)) : null;
-  const tooHeavy = (l: OpenLine) => maxPayloadKg !== null && l.kgPerCase > maxPayloadKg + 1e-6;
+  const tooHeavy = (l: OpenLine) => maxPayloadKg !== null && kgTenths(l.kgPerCase) > payloadTenths(maxPayloadKg);
   const heavyMessage = (lines: OpenLine[]) =>
     [...new Map(lines.map((l) => [lineInfo.get(l.lineId)?.productCode ?? '?', l.kgPerCase])).entries()]
       .map(([code, kg]) => `One case of ${code} weighs ${Math.round(kg * 10) / 10} kg, more than any truck payload (${Math.round(maxPayloadKg ?? 0)} kg) - check the product weight.`)
@@ -516,7 +523,7 @@ export async function buildDispatchRequest(
         orderId: x.o.id,
         lines: heavy.map((l) => ({ lineId: l.lineId, cases: l.cases })),
         cases: heavy.reduce((a, l) => a + l.cases, 0),
-        weightKg: Math.round(heavy.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10,
+        weightKg: roundKg(heavy.reduce((a, l) => a + l.cases * l.kgPerCase, 0)),
         part: null,
         parts: null,
       };
@@ -529,7 +536,7 @@ export async function buildDispatchRequest(
           o: x.o,
           lines: rest,
           cases: rest.reduce((a, l) => a + l.cases, 0),
-          kg: Math.round(rest.reduce((a, l) => a + l.cases * l.kgPerCase, 0) * 10) / 10,
+          kg: roundKg(rest.reduce((a, l) => a + l.cases * l.kgPerCase, 0)),
           partial: true,
         });
       }
@@ -548,7 +555,8 @@ export async function buildDispatchRequest(
     const pref = usableWindow(eff.prefStart, eff.prefEnd);
     if (!hard.ok || !pref.ok) badWindows.push(label);
     const totalCases = live.reduce((a, x) => a + x.cases, 0);
-    const totalKg = live.reduce((a, x) => a + x.kg, 0);
+    // Added up in 0.1 kg units: exactly the sum the optimizer and the stored load get (no float drift).
+    const totalKg = live.reduce((a, x) => a + kgTenths(x.kg), 0) / 10;
     const late = live.some((x) => x.o.isLate);
     const serviceMin = eff.serviceMin; // + unloading time per case (stopService)
     const serviceOf = (cases: number, total?: number) => {
@@ -1238,15 +1246,16 @@ export async function chooseScenario(tenantId: string, runId: string, scenarioId
 }
 
 /**
- * Kg of a load from the orders it carries: a split portion's own kg, else the order's total.
- * Rounded to 0.1 kg like every stored weight.
+ * Kg of a load from the orders it carries: a split portion's own kg, else the order's total, each
+ * to the nearest 0.1 kg and added up in 0.1 kg units - the optimizer's own sum (audit F08), so a
+ * load planned exactly to its payload is stored at exactly its payload.
  */
 export function loadKgFromRefs(refs: string[], scope: Pick<PlanScope, 'portions'>, orderKg: Map<string, number>): number {
-  const kg = refs.reduce((a, ref) => {
+  const tenths = refs.reduce((a, ref) => {
     const { orderId, portion } = resolveOrderRef(scope, ref);
-    return a + (portion ? portion.weightKg : (orderKg.get(orderId) ?? 0));
+    return a + kgTenths(portion ? portion.weightKg : (orderKg.get(orderId) ?? 0));
   }, 0);
-  return Math.round(kg * 10) / 10;
+  return tenths / 10;
 }
 
 /**
@@ -1272,7 +1281,7 @@ async function snapshotSource(
     ? null
     : {
         cfg: await tx.tenantConfig.findUnique({ where: { tenantId } }),
-        depot: await tx.depot.findFirst({ where: { id: depotId, tenantId }, select: { openMin: true, closeMin: true } }),
+        depot: await tx.depot.findFirst({ where: { id: depotId, tenantId }, select: { id: true, lat: true, lng: true, openMin: true, closeMin: true } }),
         profiles: new Map<string, TypeProfileLike>((await tx.customerTypeProfile.findMany({ where: { tenantId } })).map((p) => [p.customerType, p])),
       };
   const liveById = new Map(liveTrucks.map((t) => [t.id, t]));
@@ -1293,7 +1302,13 @@ async function snapshotSource(
             facts,
           )
         : null;
-    return { v: SNAPSHOT_VERSION, ...facts, rules, source: planned ? 'PLAN' : 'MASTER', capturedAt };
+    // Audit E1 (owner decision 13): the depot pin the load is planned from, kept with it for good.
+    const origin: LoadOrigin | undefined = inputs
+      ? { depotId: inputs.depot.id, lat: inputs.depot.lat, lng: inputs.depot.lng }
+      : legacy?.depot
+        ? { depotId: legacy.depot.id, lat: legacy.depot.lat, lng: legacy.depot.lng }
+        : undefined;
+    return { v: SNAPSHOT_VERSION, ...facts, rules, source: planned ? 'PLAN' : 'MASTER', capturedAt, ...(origin ? { origin } : {}) };
   };
   const stop = (st: { stop_id: string; customer_id: string; service_start_min: number; departure_min: number }): StopSnapshot => {
     const c = customers.get(st.customer_id);
@@ -1654,7 +1669,8 @@ export function feasibilityInputFromRows(
           sequence: a.sequenceInTruck,
           label: snap ? snap.name || snap.code : c.name || c.code,
           cases: a.portionCases ?? a.order.totalCases,
-          kg: a.portionWeightKg ?? a.order.totalWeightKg,
+          // To 0.1 kg per row, as the load was planned and stored (loadKgFromRefs, audit F08).
+          kg: roundKg(a.portionWeightKg ?? a.order.totalWeightKg),
           kgUnknown: unknownKg.unknown,
           ...(unknownKg.kgNow > 0 ? { unknownKgNow: unknownKg.kgNow } : {}),
           etaMin: a.etaMin,
@@ -1833,6 +1849,36 @@ export async function getOrCreatePlan(tenantId: string, depotId: string, dateIso
 const REPLAN_FROM: readonly RunStatus[] = ['DRAFT', 'READY', 'FAILED', 'DISPATCHED'];
 
 /**
+ * Audit E1: the depot pin a load planned before load origins were kept was planned from - an earlier
+ * copy's origin if one has it, else the depot the version that first planned it was optimized from
+ * (the root of its carriedFromLoadId chain; its option's inputs). Null when that is not known.
+ */
+async function plannedOriginOf(
+  tx: Tx,
+  tenantId: string,
+  load: { runId: string; carriedFromLoadId: string | null },
+  cache: Map<string, LoadOrigin | null>,
+): Promise<LoadOrigin | null> {
+  let cur = load;
+  for (let hops = 0; cur.carriedFromLoadId; hops++) {
+    if (hops >= 100) return null;
+    const prev = await tx.planLoad.findFirst({ where: { id: cur.carriedFromLoadId, tenantId }, select: { runId: true, carriedFromLoadId: true, truckSnapshotJson: true } });
+    if (!prev) return null;
+    const kept = readLoadOrigin(readTruckSnapshot(prev.truckSnapshotJson));
+    if (kept) return kept;
+    cur = prev;
+  }
+  if (cache.has(cur.runId)) return cache.get(cur.runId) ?? null;
+  const run = await tx.runPlan.findFirst({ where: { id: cur.runId, tenantId }, select: { chosenScenarioId: true } });
+  const chosen = run?.chosenScenarioId ? await tx.scenarioResult.findFirst({ where: { id: run.chosenScenarioId, runId: cur.runId }, select: { detailsJson: true } }) : null;
+  const raw: unknown = chosen?.detailsJson;
+  const inputs = isDispatchDetails(raw) ? readPlanInputs(raw.inputs) : null;
+  const origin = inputs ? { depotId: inputs.depot.id, lat: inputs.depot.lat, lng: inputs.depot.lng } : null;
+  cache.set(cur.runId, origin);
+  return origin;
+}
+
+/**
  * New plan version for a late order / re-plan (copy-forward, review F03). One transaction, under
  * the day lock and then the parent's row lock:
  *
@@ -1905,10 +1951,20 @@ export async function createNextVersion(
         // they are never read as evidence.
         const newLoadId = new Map<string, string>();
         const assignmentRows: Prisma.RouteAssignmentCreateManyInput[] = [];
+        const originCache = new Map<string, LoadOrigin | null>();
         for (const l of loads) {
           const { assignments, ...row } = l;
+          // Audit E1: the copy keeps the depot pin its load was planned from (its snapshot, verbatim).
+          // A load planned before the pin was kept gets the depot of the version that planned it,
+          // so a depot pin moved since never redraws it; a load with no snapshot stays as it was.
+          const snap = readTruckSnapshot(row.truckSnapshotJson);
+          const origin = snap && !readLoadOrigin(snap) ? await plannedOriginOf(tx, tenantId, l, originCache) : null;
           const copy = await tx.planLoad.create({
-            data: copyRowData('PlanLoad', row, ['id', 'runId', 'createdAt', 'carriedFromLoadId'], { runId: child.id, carriedFromLoadId: l.id }) as Prisma.PlanLoadUncheckedCreateInput,
+            data: copyRowData('PlanLoad', row, ['id', 'runId', 'createdAt', 'carriedFromLoadId'], {
+              runId: child.id,
+              carriedFromLoadId: l.id,
+              ...(snap && origin ? { truckSnapshotJson: { ...snap, origin } as unknown as Prisma.InputJsonValue } : {}),
+            }) as Prisma.PlanLoadUncheckedCreateInput,
           });
           newLoadId.set(l.id, copy.id);
           for (const a of assignments) {

@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetExcel } from '@/lib/exports/excel';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, planRules, tenantAssumptions, withSearchAssumptions } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, planRules, solverRules, tenantAssumptions, withSearchAssumptions } from '@/lib/dispatch/workbook';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
@@ -54,6 +54,8 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       outsideCoverage: planned ? undefined : cfg ? routingProviderFor(cfg, tenant?.country).outsideCoverage : false,
       // A plan costed before the whole-truck-day costs is described by the rules it was made with.
       rules: planRules(detail),
+      // And the weight and overtime rules its optimizer reported (audit A6 review): an older plan's are the earlier ones.
+      solverRules: solverRules(detail),
       // Only settings the plan used are stated as used (PR6): road legs for the road time factor,
       // estimated legs for the estimate speed, trucks with a km per litre for the fuel price.
       estimatedLegs: detail.summary?.estimatedLegs ?? detail.loads.reduce((a, l) => a + (l.cost?.estimatedLegs ?? 0), 0),

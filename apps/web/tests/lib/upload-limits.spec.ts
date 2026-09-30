@@ -37,7 +37,13 @@ vi.mock('xlsx', async (importOriginal) => {
   const real = await importOriginal<typeof import('xlsx')>();
   return { ...real, read: vi.fn(real.read), utils: { ...real.utils, sheet_to_json: vi.fn(real.utils.sheet_to_json) } };
 });
+// Papa Parse as it is, with its calls recorded (the P5 second review's CSV checks).
+vi.mock('papaparse', async (importOriginal) => {
+  const real = (await importOriginal<{ default: typeof import('papaparse') }>()).default;
+  return { default: { ...real, parse: vi.fn(real.parse) } };
+});
 
+import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { MAX_CELLS, MAX_COLS, MAX_COMMENTS, MAX_LINK_CELLS, MAX_METADATA, MAX_PEOPLE, MAX_ROWS, MAX_SHEETS, MAX_ZIP_PARTS, READ_ROWS, parseExcelSheets, parseUpload } from '@/lib/csv';
 import { checkWorkbookZip } from '@/lib/workbook-guard';
@@ -70,9 +76,11 @@ import {
 
 const readSpy = vi.mocked(XLSX.read);
 const toJsonSpy = vi.mocked(XLSX.utils.sheet_to_json);
+const papaSpy = vi.mocked(Papa.parse);
 afterEach(() => {
   readSpy.mockClear();
   toJsonSpy.mockClear();
+  papaSpy.mockClear();
   vi.restoreAllMocks();
 });
 
@@ -1100,5 +1108,68 @@ describe('A5 fifth review: a file that begins with "ID", read for the customer i
     expect(performance.now() - t0).toBeLessThan(2_000);
     expect(cellTextReads()).toBe(0);
     expect(parsed.rows.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// P5 second review: a CSV sent as text (read by Papa Parse, not SheetJS) had no column or cell cap.
+// One row of a million columns (a 7.6 MB file) was read, came back to the web process as one object
+// of a million keys, held 70-130 MB there and blocked it for 1-2 s; 1,000 rows of 4,000 columns
+// held 188 MB. A1's caps apply to it now, with the words of the Excel path.
+// ---------------------------------------------------------------------------------------------
+
+describe('P5 second review: a CSV sent as text has the column and cell caps too', () => {
+  const csv = (text: string) => new File([text], 'orders.csv', { type: 'text/csv' });
+  const fields = (n: number, value: (c: number) => string) => Array.from({ length: n }, (_, c) => value(c)).join(',');
+  const WIDE = (n: number, row?: number) =>
+    `${row === undefined ? 'This file has' : `Row ${row} of this file has`} ${n.toLocaleString('en-US')} columns; at most 200 can be read. ` +
+    'Delete the columns you do not need (also empty columns after your data) and upload again.';
+  const CELLS = (n: number) =>
+    `This file is too large to read: it has about ${n.toLocaleString('en-US')} cells (rows x columns); at most 2,500,000 can be read. Split the file, or remove the columns you do not need, and upload again.`;
+  /** Papa parses that make row objects (header: true). */
+  const rowParses = () => papaSpy.mock.calls.filter(([, o]) => (o as { header?: boolean } | undefined)?.header === true).length;
+
+  it(`a header of ${MAX_COLS} columns is read; ${MAX_COLS + 1} are refused, naming the width`, async () => {
+    const wide = (n: number) => csv(`${fields(n, (c) => `h${c}`)}\n${fields(n, () => '1')}\n`);
+    expect(Object.keys((await parseUpload(wide(MAX_COLS))).rows[0]!)).toHaveLength(MAX_COLS);
+    expect(await refusal(parseUpload(wide(MAX_COLS + 1)))).toBe(WIDE(MAX_COLS + 1));
+  });
+
+  it('a header of 1,500,000 columns (2.9 MB) is refused from its first line, before Papa makes a row object', async () => {
+    // Before: Papa renamed the repeated names ("a", "a_1", ...) for seconds and the file was read.
+    const file = csv(`${fields(1_500_000, () => 'a')}\n`);
+    expect(await refusal(parseUpload(file))).toBe(WIDE(1_500_000));
+    expect(rowParses()).toBe(0);
+  });
+
+  it('the same refusal when blank lines come before the header (found once the file is parsed)', async () => {
+    expect(await refusal(parseUpload(csv(`${'\n'.repeat(12)}${fields(MAX_COLS + 5, (c) => `h${c}`)}\nx\n`)))).toBe(WIDE(MAX_COLS + 5));
+  });
+
+  it(`a row with more than ${MAX_COLS} values is refused with its row number (the header is row 1); up to ${MAX_COLS} it is read as before`, async () => {
+    expect(await refusal(parseUpload(csv(`code,cases\nC1,2\n${fields(MAX_COLS + 1, () => 'x')}\nC3,4\n`)))).toBe(WIDE(MAX_COLS + 1, 3));
+    // A row of 1,000,000 values under a narrow header (Papa keeps the extra ones in one list).
+    expect(await refusal(parseUpload(csv(`code,cases\n${fields(1_000_000, () => '1')}\n`)))).toBe(WIDE(1_000_000, 2));
+    const read = await parseUpload(csv(`code,cases\nC1,2\n${fields(MAX_COLS, () => 'x')}\n`));
+    expect(read.rows).toHaveLength(2);
+    expect(read.warnings).toEqual([`CSV parse warning at row 1: Too many fields: expected 2 fields but parsed ${MAX_COLS}`]);
+  });
+
+  it(`more than ${MAX_CELLS.toLocaleString('en-US')} cells in all are refused with the words of a CSV sent as Excel; exactly that many are read`, async () => {
+    // 100 columns: the header and 24,999 rows are 2,500,000 cells; one row more is 2,500,100.
+    const body = (rows: number) => csv([fields(100, (c) => `h${c}`), ...Array.from({ length: rows }, () => fields(100, () => '1'))].join('\n'));
+    expect((await parseUpload(body(24_999))).rows).toHaveLength(24_999);
+    expect(await refusal(parseUpload(body(25_000)))).toBe(CELLS(2_500_100));
+  });
+
+  it('the row limit is checked first, as before: 50,001 rows of 50 columns are still "Too many rows"', async () => {
+    const body = [fields(50, (c) => `h${c}`), ...Array.from({ length: MAX_ROWS + 1 }, () => fields(50, () => '1'))].join('\n');
+    expect(await refusal(parseUpload(csv(body)))).toBe('Too many rows: 50001. Max 50000.');
+  });
+
+  it('empty columns after the data count: a CSV saved with 250 columns, 2 of them used, is refused as text (sent as Excel, SheetJS drops them and reads it)', async () => {
+    const text = `code,cases${','.repeat(248)}\nC1,2${','.repeat(248)}\n`;
+    expect(await refusal(parseUpload(csv(text)))).toBe(WIDE(250));
+    expect((await parseUpload(asExcel(text, 'orders.csv'))).rows).toEqual([{ code: 'C1', cases: '2' }]);
   });
 });

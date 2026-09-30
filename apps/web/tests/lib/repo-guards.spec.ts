@@ -360,9 +360,11 @@ describe('the handbook names every audit PR that is in it at the top (A1 v4 revi
     const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
     const status = handbook.split('\n').find((l) => l.startsWith('- **Audit of 27 Sep 2026.**')) ?? '';
     const review = handbook.slice(handbook.indexOf('### 7.4 '), handbook.indexOf('### 7.5 '));
-    // "**Audit of 27 Sep 2026, PR A2 ...", "**Audit of 27 Sep 2026, PR 3 ..." (A3), "**Audit A1 ...".
-    const prs = new Set([...review.matchAll(/^\*\*Audit (?:of 27 Sep 2026, PR A?(\d+)|A(\d+)) /gm)].map((m) => `A${m[1] ?? m[2]}`));
-    expect(prs.size).toBeGreaterThanOrEqual(3);
+    // "**Audit of 27 Sep 2026, PR A2 ...", "**Audit of 27 Sep 2026, PR 3 ..." (A3), "**Audit A1 ...",
+    // "**Audit P5 ..." (assessment PR 5; "A5" was already the owner-rules PR).
+    const prs = new Set([...review.matchAll(/^\*\*Audit (?:of 27 Sep 2026, PR A?(\d+)|A(\d+)|(P\d+)) /gm)].map((m) => m[3] ?? `A${m[1] ?? m[2]}`));
+    expect(prs.size).toBeGreaterThanOrEqual(4);
+    expect(prs.has('P5')).toBe(true);
     for (const pr of prs) expect([pr, status.includes(`**${pr} `)]).toEqual([pr, true]);
   });
 });
@@ -449,5 +451,54 @@ describe('the handbook counts what is on disk and lists every spec in 5.3 (fourt
     expect(specs('lib').filter((f) => !named(unit, f))).toEqual([]);
     expect(specs('integration').filter((f) => !named(integration, f))).toEqual([]);
     allAre(counts(unit, /^\*\*Web unit specs\*\* \(`apps\/web\/tests\/lib\/`, (\d+) files/gm), specs('lib').length);
+  });
+});
+
+describe('the web process never reads an upload itself (audit P5)', () => {
+  const rel = (f: string) => path.relative(WEB, f).split(path.sep).join('/');
+  const code = () => [
+    ...walk(path.join(WEB, 'app'), /\.(ts|tsx)$/),
+    ...walk(path.join(WEB, 'lib'), /\.(ts|tsx)$/),
+    ...walk(path.join(WEB, 'components'), /\.(ts|tsx)$/),
+    path.join(WEB, 'middleware.ts'),
+    path.join(WEB, 'instrumentation.ts'),
+  ];
+  /** The modules a file imports as values (an `import type` brings no code in). */
+  const valueImports = (src: string) =>
+    [...src.matchAll(/^\s*(?:import|export)\s+(?!type\s)(?:[^'";]*?\sfrom\s+)?['"]([^'"]+)['"]/gm), ...src.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]!);
+
+  it('only lib/csv.ts and lib/workbook-guard.ts load SheetJS or Papa Parse', () => {
+    const offenders = code().filter((f) => valueImports(readFileSync(f, 'utf8')).some((m) => m === 'xlsx' || m === 'papaparse')).map(rel);
+    expect(offenders.sort()).toEqual(['lib/csv.ts', 'lib/workbook-guard.ts']);
+  });
+
+  it('only the parser process (lib/upload-parse/handler.ts) loads lib/csv, where parseUpload is', () => {
+    const csv = /^(@\/lib\/csv|(\.\.?\/)+csv)$/;
+    const offenders = code().filter((f) => valueImports(readFileSync(f, 'utf8')).some((m) => csv.test(m))).map(rel);
+    expect(offenders).toEqual(['lib/upload-parse/handler.ts']);
+  });
+
+  it('what the web process loads of lib/upload-parse brings in no parser code', () => {
+    for (const f of ['lib/upload-parse/index.ts', 'lib/upload-parse/config.ts', 'lib/upload-parse/protocol.ts', 'lib/upload-errors.ts', 'lib/upload-limits.ts']) {
+      const imports = valueImports(readFileSync(path.join(WEB, f), 'utf8'));
+      expect([f, imports.filter((m) => /(^|\/)(csv|workbook-guard|handler|child|order-intake)$|^(xlsx|papaparse)$/.test(m))]).toEqual([f, []]);
+    }
+  });
+
+  it('the handbook describes tests/setup.ts as it is: uploads read in the test process unless a spec starts the parser (P5 second review: "an empty placeholder")', () => {
+    const REPO = path.resolve(APPS, '..');
+    const handbook = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+    expect(readFileSync(path.join(WEB, 'tests', 'setup.ts'), 'utf8')).toMatch(/__routeiqUploadParseInProcess\s*=/);
+    const vitest = handbook.split('\n').find((l) => l.startsWith('**Vitest configuration**')) ?? '';
+    // Only the matching words are printed on a failure, not the whole paragraph.
+    expect(/placeholder/i.exec(vitest)?.[0] ?? null).toBeNull();
+    expect(vitest.includes('`__routeiqUploadParseInProcess`') && vitest.includes('`useRealUploadParser()`')).toBe(true);
+  });
+
+  it('the three upload routes read the file through parseUploadIsolated and answer its refusals', () => {
+    for (const r of ['app/api/orders/upload/route.ts', 'app/api/customers/import/route.ts', 'app/api/runs/[id]/baseline/route.ts']) {
+      const src = readFileSync(path.join(WEB, r), 'utf8');
+      expect([r, /await parseUploadIsolated\(file\b/.test(src), /if \(err instanceof UploadParseRefused\) return uploadRefusedResponse\(err\);/.test(src)]).toEqual([r, true, true]);
+    }
   });
 });

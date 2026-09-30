@@ -816,3 +816,199 @@ def test_min_trucks_uses_the_trucks_already_out(monkeypatch):
         assert sc.trucks_used == len({ld.truck_id for ld in sc.loads} | {"F1", "F2"}), (sc.name, sc.trucks_used)
         assert (sc.frozen_trucks, sc.frozen_loads) == (2, 2)
         assert_plan_rules(r, sc)
+
+
+# --------------------------------------------------------------------------------------
+# OVERTIME ALREADY WORKED IS NOT CHARGED AGAIN (audit E4, owner decision 14)
+# --------------------------------------------------------------------------------------
+
+def overtime_day(frozen_return: str = "18:00", overtime_cost: float = 4.0):
+    """Truck A is out on a locked load 06:00 -> ``frozen_return`` (overtime after 9 h: from 15:00);
+    idle truck B costs 6 OMR to open. One small new stop near the depot. Only A's NEW overtime
+    (after its frozen return) is a cost of the new load: ~0.8 h x 4 OMR = ~3.1 OMR < 6 OMR."""
+    stops = [stop("N", 23.595, 58.40, cases=10, service_min=10)]
+    a = truck("A", fixed_cost=6.0, frozen_trips=[FrozenTrip(load_no=1, depart_min=hm("06:00"), return_min=hm(frozen_return), cases=100)])
+    return req(stops, [a, truck("B", fixed_cost=6.0)], shift_start_min=hm("06:00"), shift_max_min=14 * 60,
+               overtime_after_min=9 * 60, overtime_cost_per_hour=overtime_cost, driver_cost_per_hour=0.0, reload_min=30,
+               pref_window_penalty_per_min=0.0, early_preference_per_min={p: 0.0 for p in range(1, 6)}, time_limit_sec=2)
+
+
+def test_overtime_bound_counts_only_new_overtime():
+    r = overtime_day("18:00")
+    a, b = ds._truck_days(r)
+    assert LR.overtime_bound_s(a, 9 * 3600) == hm("18:00") * 60  # not 15:00: 06:00-18:00 was paid by the locked load
+    assert LR.overtime_bound_s(ds._truck_days(overtime_day("14:00"))[0], 9 * 3600) == hm("15:00") * 60
+    assert LR.overtime_bound_s(b, 9 * 3600) is None
+
+
+@pytest.mark.parametrize("frozen_return", ["16:00", "18:00"])
+def test_a_truck_already_in_overtime_is_not_charged_its_old_overtime_again(frozen_return, monkeypatch):
+    """Audit E4, confirmed end to end: the repack charged truck A overtime from 15:00 (the ~3 h its
+    locked load already worked: ~15 OMR) and the route search did the same, so they opened idle B
+    for 6 OMR although A costs ~3 OMR (the reported cost was right). Now the repack, the raw route
+    search and the final plan all put the new load on A."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    r = overtime_day(frozen_return)
+    tds = ds._truck_days(r)
+    ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
+    day, pricing = ctx.day, ctx.rec_pricing
+    on_a, on_b = LR.time_plan(day, {0: [(0,)]}, pricing), LR.time_plan(day, {1: [(0,)]}, pricing)
+    cost_a, cost_b = LR.score(day, pricing, on_a).operating, LR.score(day, pricing, on_b).operating
+    assert cost_b == 6 * ds.COST_SCALE and cost_a < cost_b, (cost_a, cost_b)
+    res = LR.repack(day, pricing, [(0,)], {0}, {}, None, 5.0)
+    assert res.plan == {0: [(0,)]}, res
+    raw = spy_raw(monkeypatch)
+    sc = rec(optimize_dispatch(r))
+    assert [ld.truck_id for ld in raw["RECOMMENDED"].loads] == ["A"]
+    assert [ld.truck_id for ld in sc.loads] == ["A"] and sc.operating_cost == pytest.approx(cost_a / ds.COST_SCALE, abs=0.01)
+    assert sc.operating_cost < 6.0
+    assert_plan_rules(r, sc)
+
+
+@pytest.mark.parametrize("frozen_return,overtime_cost", [("14:00", 4.0), ("18:00", 0.0)])
+def test_new_load_stays_on_the_truck_already_out_without_old_overtime(frozen_return, overtime_cost, monkeypatch):
+    """Controls: back before the overtime starts (14:00), or overtime not priced: A was chosen
+    before too, and still is, at no extra cost but its own overtime."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    raw = spy_raw(monkeypatch)
+    sc = rec(optimize_dispatch(overtime_day(frozen_return, overtime_cost)))
+    assert [ld.truck_id for ld in raw["RECOMMENDED"].loads] == ["A"]
+    assert [ld.truck_id for ld in sc.loads] == ["A"] and sc.operating_cost < 6.0
+
+
+# --------------------------------------------------------------------------------------
+# THE REPACK NEVER GIVES UP BEFORE ITS FIRST ANSWER (audit E5)
+# --------------------------------------------------------------------------------------
+
+class _SlowFirstSolution:
+    """A stand-in CP-SAT solver whose first solution comes after ``first_at`` seconds and which
+    then stops at its limit (or when told to): what the watchdog sees on a hard model."""
+
+    def __init__(self, first_at: float, limit: float):
+        self.first_at, self.limit, self.stopped = first_at, limit, False
+
+    def StopSearch(self):
+        self.stopped = True
+
+    def Solve(self, model, cb):
+        from ortools.sat.python import cp_model
+
+        t0, found = time.perf_counter(), False
+        while not self.stopped and time.perf_counter() - t0 < self.limit:
+            if not found and time.perf_counter() - t0 >= self.first_at:
+                cb.on_solution_callback()
+                found = True
+            time.sleep(0.01)
+        return cp_model.FEASIBLE if found else cp_model.UNKNOWN
+
+
+def test_the_stall_watchdog_waits_for_the_first_solution():
+    """Audit E5: the stall clock (a quarter of the limit, at least 1 s) started before the first
+    solution, so a first answer at 1.5 s of a 4 s limit was stopped at ~1.1 s with none (UNKNOWN).
+    Now the solve gets its answer, and the watchdog still stops it once nothing better comes."""
+    from ortools.sat.python import cp_model
+
+    s = _SlowFirstSolution(first_at=1.5, limit=4.0)
+    t0 = time.perf_counter()
+    assert LR._solve_until_stalled(s, None, 4.0) == cp_model.FEASIBLE
+    took = time.perf_counter() - t0
+    # Stopped by the watchdog about 1 s after the first solution (not at the 4 s limit).
+    assert s.stopped and 2.4 <= took < 3.5, took
+    # No solution at all: only the solver's own limit ends the search.
+    s = _SlowFirstSolution(first_at=99, limit=1.6)
+    t0 = time.perf_counter()
+    assert LR._solve_until_stalled(s, None, 1.6) == cp_model.UNKNOWN
+    assert not s.stopped and time.perf_counter() - t0 >= 1.55
+
+
+def test_a_repack_with_no_answer_keeps_the_plan_it_started_from(monkeypatch, caplog):
+    """Audit E5: a repack that ends without an answer (UNKNOWN) never makes the plan worse: the
+    plan it started from stays a candidate of every goal's job, with a WARNING in the log."""
+    from ortools.sat.python import cp_model
+
+    stops, trucks = half_load_day(n=12)
+    r = req(stops, trucks, time_limit_sec=2, scenarios=["RECOMMENDED", "MIN_TRUCKS"])
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    monkeypatch.setattr(LR, "_solve_until_stalled", lambda solver, model, limit: cp_model.UNKNOWN)
+    stage: list = []
+    orig = LR.build_candidates
+    monkeypatch.setattr(LR, "build_candidates", lambda **kw: stage.append((kw["goal"], orig(**kw))) or stage[-1][1])
+    with caplog.at_level(logging.WARNING, logger="routeiq.dispatch.repack"):
+        resp = optimize_dispatch(r)
+    by_goal = dict(stage)
+    assert set(by_goal) == {"RECOMMENDED", "MIN_TRUCKS"}
+    # MIN_TRUCKS' job does not time the raw plans itself: its candidates are the plans its repacks started from.
+    assert by_goal["MIN_TRUCKS"][0] and all("+" not in c.source for c in by_goal["MIN_TRUCKS"][0])
+    assert any("repack UNKNOWN" in m and "kept the plan it started from" in m for m in caplog.messages), caplog.messages
+    for sc in resp.scenarios:
+        assert sc.status == "OPTIMIZED" and sc.feasibility.status == "VERIFIED"
+        assert_plan_rules(r, sc)
+
+
+@pytest.mark.parametrize("slow_phase_one", [0.0, 0.2])
+def test_repack_phase_limits_stay_inside_the_solve_limit(monkeypatch, slow_phase_one):
+    """Audit E5, keeping the budget honest: phase 1 ends by the solve's own limit (the job's share
+    of its budget), and phase 2 too, unless phase 1 left it less than its floor (60 % of the limit,
+    at most 0.5 s): then phase 2 runs up to that floor past the limit (E5 follow-up). Each phase had
+    a fixed 0.5 s floor, which pushed a short solve past its limit. Each phase's limit is checked
+    against the rule from the moment it started, so a slow phase 1 (CP-SAT's presolve on a busy
+    machine, here a 0.2 s pause) does not fail it (A6 third review: the old check, that both phases
+    end by the limit, failed at random under load)."""
+    from ortools.sat.python import cp_model  # noqa: F401 - imported before the clock starts (repack imports it)
+
+    calls: list[tuple[float, float]] = []
+    orig = LR._solve_until_stalled
+
+    def record(solver, model, limit):
+        calls.append((time.perf_counter(), limit))
+        if len(calls) == 1:
+            time.sleep(slow_phase_one)
+        return orig(solver, model, limit)
+
+    monkeypatch.setattr(LR, "_solve_until_stalled", record)
+    stops = [stop(f"S{i}", 23.585 + 0.05 * math.sin(i), 58.39 + 0.05 * math.cos(i), cases=40) for i in range(6)]
+    r = req(stops, [truck(f"T{i}", cap=100, fixed_cost=30, cost_per_km=0.1) for i in range(3)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    t0 = time.perf_counter()
+    res = LR.repack(day, pricing, [(i,) for i in range(6)], set(range(3)), {k: 1 for k in range(3, 6)}, None, time_limit=0.3)
+    assert len(calls) == 2, calls
+    deadline, floor = t0 + 0.3, min(0.5, 0.6 * 0.3)
+    (at1, lim1), (at2, lim2) = calls
+    # Each limit was taken a moment before its phase started, and repack's own clock starts just
+    # after t0: a limit may be a little MORE than the rule at its start, never less.
+    rule1 = max(0.05, 0.4 * (deadline - at1))  # 40 % of the time left
+    rule2 = max(deadline - at2, floor)  # the rest of the time, at least the floor
+    assert rule1 - 1e-9 <= lim1 <= rule1 + 0.05, (at1 - t0, lim1)
+    assert rule2 - 1e-9 <= lim2 <= rule2 + 0.05, (at2 - t0, lim2)
+    assert at1 + lim1 <= max(deadline, at1 + 0.05) + 0.05, (at1 - t0, lim1)  # phase 1 ends by the limit
+    assert at2 + lim2 <= max(deadline, at2 + floor) + 0.05, (at2 - t0, lim2)  # phase 2 by the limit or its floor
+    if slow_phase_one:
+        assert lim2 == pytest.approx(floor), (at2 - t0, lim2)  # less than the floor was left
+    assert res.plan is not None
+
+
+def test_repack_phase_two_keeps_a_real_chance_when_phase_one_overran(monkeypatch):
+    """When phase 1 runs past the solve's limit (CP-SAT's presolve on a loaded machine), phase 2
+    still gets 60 % of the limit, at most 0.5 s, not a few hundredths of a second that end with no
+    plan (seen once in the A6 benchmark: a 0.6 s repack UNKNOWN)."""
+    from ortools.sat.python import cp_model
+
+    limits: list[float] = []
+    orig = LR._solve_until_stalled
+
+    def slow_phase_one(solver, model, limit):
+        limits.append(limit)
+        if len(limits) == 1:
+            time.sleep(0.6)  # past the whole 0.5 s limit
+            return cp_model.UNKNOWN
+        return orig(solver, model, limit)
+
+    monkeypatch.setattr(LR, "_solve_until_stalled", slow_phase_one)
+    stops = [stop(f"S{i}", 23.585 + 0.05 * math.sin(i), 58.39 + 0.05 * math.cos(i), cases=40) for i in range(6)]
+    r = req(stops, [truck(f"T{i}", cap=100, fixed_cost=30, cost_per_km=0.1) for i in range(3)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    res = LR.repack(day, pricing, [(i,) for i in range(6)], set(range(3)), {k: 1 for k in range(3, 6)}, None, time_limit=0.5)
+    assert len(limits) == 2 and limits[1] == pytest.approx(0.3), limits
+    assert res.plan is not None
