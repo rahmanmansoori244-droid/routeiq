@@ -731,76 +731,97 @@ and prototype: `.dev/bench/pyvrp-enh/SPEC.md` (with the two skeptic reviews' cor
   the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads.
 - **When it stops.** QUICK: when the engine's searches end (the alternatives are in), within about 0.3 s; the answer is
   awaited at most `SOLVER_PYVRP_STOP_GRACE_SEC` (10 s) and never past the engine's stage reserve. THOROUGH (decision D3):
-  until the load re-check's reserve, or earlier after 300,000 iterations without a better plan (two of PyVRP's own restart
-  periods; P10's 5-minute stall rule would have stopped it before its late gains on syn150), a stop request or a cancel.
-  Its answer is always collected before the engine's pool may be closed.
+  while the engine searches, it searches too (that costs no waiting); once the engine's searches ended, it stops when its
+  last better plan is older than max(30 s, 10% of its search time so far) - at once when it has not improved for that long,
+  never before QUICK's time for the day - or at the load re-check's reserve, a stop request or a cancel
+  (`SOLVER_PYVRP_STALL_SEC` / `SOLVER_PYVRP_STALL_SHARE`, development only). The first rule, 300,000 iterations without a
+  better plan, never triggered: at the measured 57-171 iterations/s that is 29-87 minutes, so every Thorough solve waited for
+  it until the reserve. Its answer is always collected before the engine's pool may be closed.
 - **The judge.** Its plan is checked (indices, each stop at most once, loads per truck, cases and kg per load: otherwise
   INVALID_PLAN), then enters the post-solve stage as one more source. The engine's own sources, repair weights, time budget
   and stage jobs are built exactly as without it; the second search's repack (RECOMMENDED's prices, and MIN_TRUCKS' when that
   option exists) runs as a separate job in its own process, with at most the engine's job budget, so a repack of it that
   overruns or dies only loses its own candidates. Its candidates join the pick after the engine's; a tie keeps the option's
-  own source, then any engine source. A pick of it that is not VERIFIED is replaced by the engine's (a WARNING line). An
-  option whose own search found no plan takes the second search's best plan for its goal.
+  own source, then any engine source, and so does a gain too small to show: its plan is used only when it plans more, or
+  on the option's own goal saves at least 1 OMR (Recommended: the total cost with the customer time preferences), 1 km (Min
+  Distance), or a truck, a load or 1 OMR of operating cost (Min Trucks). A pick of it that is not VERIFIED is replaced by
+  the engine's (a WARNING line). An option whose own search found no plan takes the second search's best plan for its goal,
+  with the status `SECOND_SEARCH` ("plan from the second route search"), not the failed search's "no plan found".
 - **The promise, precisely.** For every option, the chosen plan is never worse on that option's goal (unserved priority value
   first, then cost) than the plan the engine alone would have chosen **from the same search**. It is not a promise against a
   separate engine-only run: the second search takes CPU from the engine's own search, which matters only on a machine short of
   cores (the CPU gate keeps it off below `SOLVER_PYVRP_MIN_CPUS`, 2; Railway's solver has 24 vCPU). CP-SAT repacks are
   time-limited, so the test of the promise makes them deterministic (one worker, no clock-driven stall stop) on days where
   every repack ends OPTIMAL (`test_hybrid_never_worse_than_engine_alone_on_the_same_seed`, five days).
-- **What the dispatcher sees** (decision D4): on an option whose plan came from it, *"A second route search found a better
-  plan for this option than the main search: 6 -> 5 trucks, 17 -> 14 loads, 545 -> 498 OMR operating cost. It passed the
-  planner's own checks, timing and costs."* (compared with the engine's own final plan for that option, after its load
-  re-check); and one sentence after the search line, in either mode. `SearchReport.pyvrp` holds the details (status, reason,
-  iterations, stop reason, chosen_for).
+- **What the dispatcher sees** (decision D4): one note, on the option whose plan came from it, compared with the engine's
+  own final plan for that option (after its load re-check). "Better" names the option's own goal only; trucks, loads, km and
+  operating cost follow neutrally, when they changed. Min Distance: *"A second route search found a better plan for this
+  option than the main search: fewer km, 978.1 -> 974.2 km. Also changed: trucks 5 -> 6, loads 14 -> 15, operating cost 529
+  -> 541 OMR. It passed the planner's own checks, timing and costs."* Recommended names *"a lower total cost including the
+  customer time preferences"*; Min Trucks fewer trucks, fewer loads or a lower operating cost. The search line and the job
+  message add nothing. `SearchReport.pyvrp` holds the details (status, reason, iterations, stop reason, chosen_for).
 
 ### 12.2 Measured: engine alone against engine + PyVRP (same seed, back to back)
 
-Conditions: this branch (long search + PR 6 merged), the production worker pool (`SOLVER_PARALLEL` unset), PyVRP seed 1,
-the same cached road matrices, each row off then on back to back, one solve at a time, on the shared 6-core / 12-thread
-development PC (other work running; CPU counts the solver process and every worker process). Quick at the automatic limit
-(20 s at real80 / syn60 / the 100-customer public instances, 50 s at syn150, 150 s at syn300); real80 Thorough with a
-300 s cap. RECOMMENDED (OMR) is the recommended plan's objective (operating cost + preference penalties; nothing unserved on
-any row). real80: aggregates only. Harness: `bench_pv.py` (kept with the bench material, not in the repo).
+Conditions (rerun after the review fixes: the goal-based pick and note, the timed Thorough stall): this branch (long
+search + PR 6 merged), the production worker pool (`SOLVER_PARALLEL` unset), PyVRP seed 1, the same cached road matrices,
+one of our solves at a time, on the shared 6-core / 12-thread development PC. The Quick rows up to 150 stops and the public
+rows ran as three off/on pairs with the order alternating (off-on, on-off, off-on); syn300 and real80 Thorough ran once
+each (single samples). **The machine was not idle for every run:** another session's solver test suite ran from about
+13:27 to 14:02, during the public rows of the first pair, all of the second pair, syn150 to rc201 of the third pair, and
+the syn300 and Thorough rows (the harness logs how many Python processes were running when each run started). So the
+Wall and CPU columns come from a partly loaded machine. CPU counts the solver process and every worker process. Quick at
+the automatic limit (20 s at real80 / syn60 / the 100-customer public instances, 50 s at syn150, 150 s at syn300); real80
+Thorough with a 300 s cap. RECOMMENDED (OMR) is the recommended plan's objective (operating cost + preference penalties;
+nothing unserved on any row); the median run's plan is shown, with the range over the runs. real80: aggregates only.
+Harness: `bench_pv.py` (kept with the bench material, not in the repo).
 
-| Day | Mode | PyVRP | Served P1/P2/P3/P4/P5 | Unserved | Trucks | Loads | km | RECOMMENDED (OMR) | Change | VERIFIED | Wall (s) | CPU (s) | Second search |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| real80 | Quick | off | 0/29/51/3/0 | 0 | 5 | 14 | 978.1 | 529.01 |  | VERIFIED | 56.3 | 92.6 | SKIPPED (OFF) |
-| real80 | Quick | on | 0/29/51/3/0 | 0 | 5 | 14 | 974.2 | 529.15 | +0.03% | VERIFIED | 54.9 | 126.4 | CHOSEN (Recommended, Min Trucks, Min Distance) |
-| syn60_s1 | Quick | off | 5/11/14/17/13 | 0 | 4 | 5 | 443.7 | 254.54 |  | VERIFIED | 31.5 | 42.0 | SKIPPED (OFF) |
-| syn60_s1 | Quick | on | 5/11/14/17/13 | 0 | 3 | 6 | 446.8 | 238.56 | -6.28% | VERIFIED | 31.9 | 73.0 | CHOSEN (Recommended, Min Trucks) |
-| syn150_s1 | Quick | off | 11/24/43/32/40 | 0 | 8 | 9 | 805.3 | 506.00 |  | VERIFIED | 78.0 | 104.6 | SKIPPED (OFF) |
-| syn150_s1 | Quick | on | 11/24/43/32/40 | 0 | 7 | 10 | 756.7 | 490.43 | -3.08% | VERIFIED | 84.0 | 193.5 | CHOSEN (Recommended, Min Trucks) |
-| syn300_s1 | Quick | off | 15/47/90/65/83 | 0 | 12 | 24 | 1,833.4 | 1,027.74 |  | VERIFIED | 257.9 | 363.0 | SKIPPED (OFF) |
-| syn300_s1 | Quick | on | 15/47/90/65/83 | 0 | 12 | 24 | 1,504.7 | 920.27 | -10.46% | VERIFIED | 252.8 | 604.6 | CHOSEN (Recommended, Min Trucks, Min Distance) |
-| real80_thorough | Thorough 300 s | off | 0/29/51/3/0 | 0 | 5 | 14 | 966.5 | 526.48 |  | VERIFIED | 215.6 | 240.7 | SKIPPED (OFF) |
-| real80_thorough | Thorough 300 s | on | 0/29/51/3/0 | 0 | 5 | 14 | 960.8 | 522.46 | -0.76% | VERIFIED | 261.1 | 502.8 | CHOSEN (Recommended, Min Trucks, Min Distance) |
-| X-n101-k25 | Quick | off | 0/0/100/0/0 | 0 | 27 | 27 | 29,375.0 | 293.75 |  | VERIFIED | 21.3 | 21.0 | SKIPPED (OFF); 27 veh |
-| X-n101-k25 | Quick | on | 0/0/100/0/0 | 0 | 26 | 26 | 27,591.0 | 275.91 | -6.07% | VERIFIED | 21.5 | 41.5 | CHOSEN (Recommended); 26 veh |
-| r108 | Quick | off | 0/0/100/0/0 | 0 | 10 | 10 | 967.8 | 1,159.68 |  | VERIFIED | 21.2 | 20.8 | SKIPPED (OFF); 10 veh |
-| r108 | Quick | on | 0/0/100/0/0 | 0 | 9 | 9 | 964.5 | 1,044.64 | -9.92% | VERIFIED | 21.4 | 41.1 | CHOSEN (Recommended); 9 veh |
-| rc201 | Quick | off | 0/0/100/0/0 | 0 | 4 | 4 | 1,443.8 | 522.44 |  | VERIFIED | 21.4 | 21.0 | SKIPPED (OFF); 4 veh |
-| rc201 | Quick | on | 0/0/100/0/0 | 0 | 4 | 4 | 1,413.5 | 522.14 | -0.06% | VERIFIED | 21.3 | 41.1 | CHOSEN (Recommended); 4 veh |
+| Day | Mode | PyVRP | Runs | Served P1/P2/P3/P4/P5 | Unserved | Trucks | Loads | km | RECOMMENDED (OMR), median (range) | Change | VERIFIED | Wall (s), median (range) | CPU (s), median | Second search |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| real80 | Quick | off | 3 | 0/29/51/3/0 | 0 | 5 | 14 | 979.8 | 534.16 (532.05-571.74) |  | VERIFIED | 50.9 (47.0-52.3) | 82.7 | SKIPPED (OFF) |
+| real80 | Quick | on | 3 | 0/29/51/3/0 | 0 | 5 | 14 | 974.2 | 529.15 (529.15-529.15) | -0.94% | VERIFIED | 53.1 (46.9-53.8) | 121.8 | CHOSEN 3/3 (Recommended, Min Trucks, Min Distance) |
+| syn60_s1 | Quick | off | 3 | 5/11/14/17/13 | 0 | 4 | 5 | 443.7 | 254.54 (254.54-254.54) |  | VERIFIED | 31.7 (31.6-32.5) | 41.9 | SKIPPED (OFF) |
+| syn60_s1 | Quick | on | 3 | 5/11/14/17/13 | 0 | 3 | 6 | 446.8 | 238.56 (237.92-238.56) | -6.28% | VERIFIED | 32.4 (31.8-33.0) | 73.1 | CHOSEN 3/3 (Recommended, Min Trucks) |
+| syn150_s1 | Quick | off | 3 | 11/24/43/32/40 | 0 | 8 | 9 | 805.3 | 506.00 (506.00-506.00) |  | VERIFIED | 77.5 (77.2-77.8) | 103.3 | SKIPPED (OFF) |
+| syn150_s1 | Quick | on | 3 | 11/24/43/32/40 | 0 | 7 | 10 | 756.7 | 490.43 (485.13-490.43) | -3.08% | VERIFIED | 84.7 (78.1-85.2) | 192.5 | CHOSEN 3/3 (Recommended, Min Trucks) |
+| syn300_s1 | Quick | off | 1 | 15/47/90/65/83 | 0 | 12 | 24 | 1,835.3 | 1,027.34 |  | VERIFIED | 249.9 | 346.0 | SKIPPED (OFF) |
+| syn300_s1 | Quick | on | 1 | 15/47/90/65/83 | 0 | 12 | 24 | 1,501.7 | 921.63 | -10.29% | VERIFIED | 248.7 | 586.4 | CHOSEN 1/1 (Recommended, Min Trucks, Min Distance) |
+| real80_thorough | Thorough 300 s | off | 1 | 0/29/51/3/0 | 0 | 5 | 14 | 969.7 | 527.51 |  | VERIFIED | 224.7 | 258.1 | SKIPPED (OFF) |
+| real80_thorough | Thorough 300 s | on | 1 | 0/29/51/3/0 | 0 | 5 | 14 | 964.8 | 523.38 | -0.78% | VERIFIED | 223.1 | 471.7 | CHOSEN 1/1 (Recommended, Min Trucks, Min Distance); stop CONVERGED |
+| X-n101-k25 | Quick | off | 3 | 0/0/100/0/0 | 0 | 27 | 27 | 29,375.0 | 293.75 (293.75-293.75) |  | VERIFIED | 21.4 (21.4-21.5) | 21.0 | SKIPPED (OFF); 27 veh |
+| X-n101-k25 | Quick | on | 3 | 0/0/100/0/0 | 0 | 26 | 26 | 27,591.0 | 275.91 (275.91-275.91) | -6.07% | VERIFIED | 21.7 (21.6-21.7) | 41.2 | CHOSEN 3/3 (Recommended); 26 veh |
+| r108 | Quick | off | 3 | 0/0/100/0/0 | 0 | 10 | 10 | 967.8 | 1,159.68 (1,159.68-1,159.68) |  | VERIFIED | 21.4 (21.4-21.4) | 20.7 | SKIPPED (OFF); 10 veh |
+| r108 | Quick | on | 3 | 0/0/100/0/0 | 0 | 9 | 9 | 964.5 | 1,044.64 (1,044.64-1,044.64) | -9.92% | VERIFIED | 21.6 (21.5-21.8) | 41.1 | CHOSEN 3/3 (Recommended); 9 veh |
+| rc201 | Quick | off | 3 | 0/0/100/0/0 | 0 | 4 | 4 | 1,443.8 | 522.44 (522.44-522.44) |  | VERIFIED | 21.3 (21.3-21.3) | 20.9 | SKIPPED (OFF); 4 veh |
+| rc201 | Quick | on | 3 | 0/0/100/0/0 | 0 | 4 | 4 | 1,443.8 | 522.44 (522.44-522.44) | 0.00% | VERIFIED | 21.3 (21.3-21.7) | 41.0 | NOT_CHOSEN 3/3 (NOT_BETTER); 4 veh |
 
-- **Priority service never dropped:** every row serves exactly the same stops per priority with the second search on, and
+- **Priority service never dropped:** every run serves exactly the same stops per priority with the second search on, and
   nothing is unserved. Every option of every run is VERIFIED by the independent check.
-- **Better or equal on every row:** -6.3% (syn60, one truck fewer), -3.1% (syn150, one truck fewer), -10.5% (syn300,
-  329 km less), -0.8% on real80 Thorough (a new best on this day: 522.46 OMR, at most 6.0% above the proven bound 492.79 OMR,
-  the lower bound computed in the PyVRP study, `.dev/bench/bounds/`), and on the public instances X-n101-k25 at its proven optimum (27,591; 26 vehicles instead of 27, gap 6.47% -> 0.0%),
-  r108 with 9 vehicles instead of 10 (the best-known count; distance gap 0.37%) and rc201 gap 2.62% -> 0.47%.
-- **real80 Quick +0.03%** is the engine's own run-to-run spread, not a loss: the two rows are two separate engine searches
-  (real80 Quick has ranged 529-574 OMR over this month's runs). In the "on" run the second search's plan was chosen for all
-  three options because it beat what the engine had found in that same run, as the promise says (§12.1).
-- **Time:** the answer came as fast as before on Quick (wall -5 s to +6 s; the stage adds the second search's repack in its
-  own process, in parallel). Thorough used 261 s of its 300 s cap (engine alone: 216 s, it had converged): decision D3 lets
-  the second search run until the load re-check's reserve.
-- **CPU:** 1.4-2.1x the CPU-seconds of the engine alone (one more busy process during the search, and its repack). On
+- **Never worse, run by run:** in all 20 off/on pairs the "on" run's recommended plan costs the same or less than the "off"
+  run's. Medians: -0.9% (real80 Quick; its engine alone ranged 532-572 OMR over three runs, the second search's plan was
+  529.15 every time), -6.3% (syn60, one truck fewer), -3.1% (syn150, one truck fewer), -10.3% (syn300, 334 km less), -0.8%
+  on real80 Thorough, and on the public instances X-n101-k25 at its proven optimum (27,591; 26 vehicles instead of 27, gap
+  6.47% -> 0.0%) and r108 with 9 vehicles instead of 10 (the best-known count; distance gap 0.37%). rc201 is now equal: the
+  second search's plan had been only 0.30 OMR better in the first measurement (522.14 against 522.44), and a gain under 1 OMR
+  no longer replaces the engine's plan (§12.1). The first measurement's real80 Quick row (+0.03%, 529.01 -> 529.15) was a
+  worse row between two separate engine searches; the promise (§12.1) holds within one run, where the second search's plan
+  is judged against the engine's own final plan.
+- **Time:** Quick answers about as fast as before: median wall -1.2 s to +7.2 s against the engine alone per row (syn150 the
+  largest, +7.2 s: the second search's repack runs in its own process beside the engine's). Thorough: 223.1 s with the
+  second search against 224.7 s without (the first measurement took 261 s against 216 s). The second search now stopped on
+  its timed stall (CONVERGED after 203.5 s, its last better plan at 106.3 s) instead of waiting until the load re-check's
+  reserve. The engine alone did not converge on this day: its RECOMMENDED search ran its full 189 s limit (stop CAP) in both
+  runs. The first measurement's summary wrongly said it had converged.
+- **CPU:** 1.5-2.0x the CPU-seconds of the engine alone (one more busy process during the search, and its repack). On
   Railway's 24 vCPU solver this is not a constraint.
-- **What changed in the plans:** the second search's plans use fewer trucks or fewer km, and on days with preferred windows
-  deliver some P1/P2 customers later inside their hard windows (the early-arrival preference it cannot see is priced by the
-  judge, so these plans still win on the full objective). The dispatcher note compares with the engine's own final plan,
-  for example syn150 *"8 -> 7 trucks, 9 -> 10 loads, 480 -> 446 OMR operating cost"*.
-- Single samples on a loaded machine; the prototype's paired runs (spec §3, 46 rows, and the skeptics' 19 paired runs) gave
-  the same direction with the engine's plan never better than the hybrid.
+- **What changed in the plans:** the second search's plans use fewer trucks or fewer km. On days with preferred windows they
+  deliver some P1/P2 customers later inside their hard windows: the early-arrival preference it cannot see is priced by the
+  judge, so these plans still win on the full objective. The dispatcher note names the option's goal, for example syn150
+  Recommended *"a lower total cost including the customer time preferences, 506 -> 490 OMR. Also changed: trucks 8 -> 7,
+  loads 9 -> 10, km 805.3 -> 756.7, operating cost 480 -> 446 OMR"*, and Min Distance on syn300 *"fewer km, 1,782.7 ->
+  1,501.7 km"*.
+- Limits: three pairs (or one) per row, on a partly loaded machine, and one seed. The prototype's paired runs (spec §3, 46
+  rows, and the skeptics' 19 paired runs) point the same way, with the engine's plan never better than the hybrid.
 
 ## Sources
 
