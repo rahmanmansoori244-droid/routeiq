@@ -9,7 +9,9 @@ Date: 2026-09-24 · Branch: `nmwc-dispatch-mvp` · Related: [OPTIMIZER_DESIGN.md
   priorities, several loads per truck, frozen loads) inside the existing Python solver, with no licence fee.
 - **Distances come from a self-hosted OSRM** (Oman / GCC extract, URL set per tenant or through `OSRM_URL`). Haversine stays
   as a fallback that is labelled "estimated".
-- **PyVRP**: keep it only behind the legacy `/optimize` endpoint, then remove it once the web app no longer calls that endpoint.
+- **PyVRP** (changed 30 Sep 2026, §12): pinned at **0.14.0**, it now runs as the dispatch engine's **second search**. It
+  searches the same day in a process of its own, and its best plan is one more candidate that the engine's own checks, exact
+  timing and cost score judge. The legacy `/optimize` endpoint stays (ported to 0.14).
 - **VROOM, Timefold, Google Route Optimization API**: not adopted. Revisit only if one of the triggers in §7 appears.
 - **Fixed after the first measurements (see §5a):** at about 300 stops the automatic time limit was too short, and a
   warm-started alternative could stall past its time limit. Both are fixed and re-measured.
@@ -702,6 +704,103 @@ takes 1,061-1,101 s (§11.3: about 18 minutes gone); queued behind another THORO
 existed. A same-day THOROUGH is now timed from the start of its search + the cap (the job re-times it when it really gets its
 slot): at 1,200 s, no new load before start + 20 min + the turnaround. That is conservative when the search stops early (the
 loads could have left up to about 15 minutes sooner); QUICK, the suggested choice on the delivery day, is unchanged.
+
+## 12. A second search: PyVRP (30 Sep 2026)
+
+Owner direction: *"enhance our model by using techniques from the best open-source solver on the standard public sets. We
+don't need to invent something new now."* PyVRP's published solver (iterated local search, the library as released, default
+parameters) now searches every day beside the engine's own RECOMMENDED search. It adds no new search algorithm. Build spec
+and prototype: `.dev/bench/pyvrp-enh/SPEC.md` (with the two skeptic reviews' corrections, all applied here).
+
+### 12.1 How it works
+
+- **Where.** `apps/solver/pyvrp_candidate.py`. PyVRP runs in a one-process worker pool of its own, started after rule 22's
+  check of the engine's pool and never part of it: if it cannot start, the solve goes on with the engine alone
+  (SKIPPED / NO_PROCESS). It is submitted right after RECOMMENDED, so the engine never waits behind it.
+- **The model.** The same day the engine searches (after its prefilters), with every price from the engine's own
+  functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows, truck hours
+  (frozen loads, same-day loading), loads per truck as reload depots with the search's turnaround, the shift maximum, driver
+  pay for the truck day and overtime past `overtime_after_min` (only new overtime on trucks with frozen loads), km per rate
+  class, trip cost per load, plan continuity per truck, and every stop optional with the engine's own strict-priority drop
+  penalty as its prize. Nothing holds a time of day: shift start, shift maximum, overtime threshold, depot and truck hours
+  come from the request (Settings). The owner's day, 07:00-18:00 with 18:00 the latest return and overtime as set, is
+  expressed by the depot or truck closing time (a test checks it).
+- **What it cannot see** (the judge prices all of them exactly): the early-arrival preference of P1/P2 (so its plans may
+  deliver them later inside their hard windows when that saves more money than the preference is worth); preferred windows
+  (tightened into the hard window when they carry a price and the two overlap, "prefhard"); the loading time per case of
+  the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads.
+- **When it stops.** QUICK: when the engine's searches end (the alternatives are in), within about 0.3 s; the answer is
+  awaited at most `SOLVER_PYVRP_STOP_GRACE_SEC` (10 s) and never past the engine's stage reserve. THOROUGH (decision D3):
+  until the load re-check's reserve, or earlier after 300,000 iterations without a better plan (two of PyVRP's own restart
+  periods; P10's 5-minute stall rule would have stopped it before its late gains on syn150), a stop request or a cancel.
+  Its answer is always collected before the engine's pool may be closed.
+- **The judge.** Its plan is checked (indices, each stop at most once, loads per truck, cases and kg per load: otherwise
+  INVALID_PLAN), then enters the post-solve stage as one more source. The engine's own sources, repair weights, time budget
+  and stage jobs are built exactly as without it; the second search's repack (RECOMMENDED's prices, and MIN_TRUCKS' when that
+  option exists) runs as a separate job in its own process, with at most the engine's job budget, so a repack of it that
+  overruns or dies only loses its own candidates. Its candidates join the pick after the engine's; a tie keeps the option's
+  own source, then any engine source. A pick of it that is not VERIFIED is replaced by the engine's (a WARNING line). An
+  option whose own search found no plan takes the second search's best plan for its goal.
+- **The promise, precisely.** For every option, the chosen plan is never worse on that option's goal (unserved priority value
+  first, then cost) than the plan the engine alone would have chosen **from the same search**. It is not a promise against a
+  separate engine-only run: the second search takes CPU from the engine's own search, which matters only on a machine short of
+  cores (the CPU gate keeps it off below `SOLVER_PYVRP_MIN_CPUS`, 2; Railway's solver has 24 vCPU). CP-SAT repacks are
+  time-limited, so the test of the promise makes them deterministic (one worker, no clock-driven stall stop) on days where
+  every repack ends OPTIMAL (`test_hybrid_never_worse_than_engine_alone_on_the_same_seed`, five days).
+- **What the dispatcher sees** (decision D4): on an option whose plan came from it, *"A second route search found a better
+  plan for this option than the main search: 6 -> 5 trucks, 17 -> 14 loads, 545 -> 498 OMR operating cost. It passed the
+  planner's own checks, timing and costs."* (compared with the engine's own final plan for that option, after its load
+  re-check); and one sentence after the search line, in either mode. `SearchReport.pyvrp` holds the details (status, reason,
+  iterations, stop reason, chosen_for).
+
+### 12.2 Measured: engine alone against engine + PyVRP (same seed, back to back)
+
+Conditions: this branch (long search + PR 6 merged), the production worker pool (`SOLVER_PARALLEL` unset), PyVRP seed 1,
+the same cached road matrices, each row off then on back to back, one solve at a time, on the shared 6-core / 12-thread
+development PC (other work running; CPU counts the solver process and every worker process). Quick at the automatic limit
+(20 s at real80 / syn60 / the 100-customer public instances, 50 s at syn150, 150 s at syn300); real80 Thorough with a
+300 s cap. RECOMMENDED (OMR) is the recommended plan's objective (operating cost + preference penalties; nothing unserved on
+any row). real80: aggregates only. Harness: `bench_pv.py` (kept with the bench material, not in the repo).
+
+| Day | Mode | PyVRP | Served P1/P2/P3/P4/P5 | Unserved | Trucks | Loads | km | RECOMMENDED (OMR) | Change | VERIFIED | Wall (s) | CPU (s) | Second search |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| real80 | Quick | off | 0/29/51/3/0 | 0 | 5 | 14 | 978.1 | 529.01 |  | VERIFIED | 56.3 | 92.6 | SKIPPED (OFF) |
+| real80 | Quick | on | 0/29/51/3/0 | 0 | 5 | 14 | 974.2 | 529.15 | +0.03% | VERIFIED | 54.9 | 126.4 | CHOSEN (Recommended, Min Trucks, Min Distance) |
+| syn60_s1 | Quick | off | 5/11/14/17/13 | 0 | 4 | 5 | 443.7 | 254.54 |  | VERIFIED | 31.5 | 42.0 | SKIPPED (OFF) |
+| syn60_s1 | Quick | on | 5/11/14/17/13 | 0 | 3 | 6 | 446.8 | 238.56 | -6.28% | VERIFIED | 31.9 | 73.0 | CHOSEN (Recommended, Min Trucks) |
+| syn150_s1 | Quick | off | 11/24/43/32/40 | 0 | 8 | 9 | 805.3 | 506.00 |  | VERIFIED | 78.0 | 104.6 | SKIPPED (OFF) |
+| syn150_s1 | Quick | on | 11/24/43/32/40 | 0 | 7 | 10 | 756.7 | 490.43 | -3.08% | VERIFIED | 84.0 | 193.5 | CHOSEN (Recommended, Min Trucks) |
+| syn300_s1 | Quick | off | 15/47/90/65/83 | 0 | 12 | 24 | 1,833.4 | 1,027.74 |  | VERIFIED | 257.9 | 363.0 | SKIPPED (OFF) |
+| syn300_s1 | Quick | on | 15/47/90/65/83 | 0 | 12 | 24 | 1,504.7 | 920.27 | -10.46% | VERIFIED | 252.8 | 604.6 | CHOSEN (Recommended, Min Trucks, Min Distance) |
+| real80_thorough | Thorough 300 s | off | 0/29/51/3/0 | 0 | 5 | 14 | 966.5 | 526.48 |  | VERIFIED | 215.6 | 240.7 | SKIPPED (OFF) |
+| real80_thorough | Thorough 300 s | on | 0/29/51/3/0 | 0 | 5 | 14 | 960.8 | 522.46 | -0.76% | VERIFIED | 261.1 | 502.8 | CHOSEN (Recommended, Min Trucks, Min Distance) |
+| X-n101-k25 | Quick | off | 0/0/100/0/0 | 0 | 27 | 27 | 29,375.0 | 293.75 |  | VERIFIED | 21.3 | 21.0 | SKIPPED (OFF); 27 veh |
+| X-n101-k25 | Quick | on | 0/0/100/0/0 | 0 | 26 | 26 | 27,591.0 | 275.91 | -6.07% | VERIFIED | 21.5 | 41.5 | CHOSEN (Recommended); 26 veh |
+| r108 | Quick | off | 0/0/100/0/0 | 0 | 10 | 10 | 967.8 | 1,159.68 |  | VERIFIED | 21.2 | 20.8 | SKIPPED (OFF); 10 veh |
+| r108 | Quick | on | 0/0/100/0/0 | 0 | 9 | 9 | 964.5 | 1,044.64 | -9.92% | VERIFIED | 21.4 | 41.1 | CHOSEN (Recommended); 9 veh |
+| rc201 | Quick | off | 0/0/100/0/0 | 0 | 4 | 4 | 1,443.8 | 522.44 |  | VERIFIED | 21.4 | 21.0 | SKIPPED (OFF); 4 veh |
+| rc201 | Quick | on | 0/0/100/0/0 | 0 | 4 | 4 | 1,413.5 | 522.14 | -0.06% | VERIFIED | 21.3 | 41.1 | CHOSEN (Recommended); 4 veh |
+
+- **Priority service never dropped:** every row serves exactly the same stops per priority with the second search on, and
+  nothing is unserved. Every option of every run is VERIFIED by the independent check.
+- **Better or equal on every row:** -6.3% (syn60, one truck fewer), -3.1% (syn150, one truck fewer), -10.5% (syn300,
+  329 km less), -0.8% on real80 Thorough (a new best on this day: 522.46 OMR, at most 6.0% above the proven bound 492.79 OMR,
+  the lower bound computed in the PyVRP study, `.dev/bench/bounds/`), and on the public instances X-n101-k25 at its proven optimum (27,591; 26 vehicles instead of 27, gap 6.47% -> 0.0%),
+  r108 with 9 vehicles instead of 10 (the best-known count; distance gap 0.37%) and rc201 gap 2.62% -> 0.47%.
+- **real80 Quick +0.03%** is the engine's own run-to-run spread, not a loss: the two rows are two separate engine searches
+  (real80 Quick has ranged 529-574 OMR over this month's runs). In the "on" run the second search's plan was chosen for all
+  three options because it beat what the engine had found in that same run, as the promise says (§12.1).
+- **Time:** the answer came as fast as before on Quick (wall -5 s to +6 s; the stage adds the second search's repack in its
+  own process, in parallel). Thorough used 261 s of its 300 s cap (engine alone: 216 s, it had converged): decision D3 lets
+  the second search run until the load re-check's reserve.
+- **CPU:** 1.4-2.1x the CPU-seconds of the engine alone (one more busy process during the search, and its repack). On
+  Railway's 24 vCPU solver this is not a constraint.
+- **What changed in the plans:** the second search's plans use fewer trucks or fewer km, and on days with preferred windows
+  deliver some P1/P2 customers later inside their hard windows (the early-arrival preference it cannot see is priced by the
+  judge, so these plans still win on the full objective). The dispatcher note compares with the engine's own final plan,
+  for example syn150 *"8 -> 7 trucks, 9 -> 10 loads, 480 -> 446 OMR operating cost"*.
+- Single samples on a loaded machine; the prototype's paired runs (spec §3, 46 rows, and the skeptics' 19 paired runs) gave
+  the same direction with the engine's plan never better than the hybrid.
 
 ## Sources
 

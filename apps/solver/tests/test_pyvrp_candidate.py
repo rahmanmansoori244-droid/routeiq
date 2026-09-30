@@ -496,13 +496,7 @@ def test_rule22_unchanged_with_pyvrp_on(workers, monkeypatch):
     _stopped(made)
 
 
-@pytest.mark.parametrize("hook,status,reason", [
-    ("ROUTEIQ_TEST_FAIL_PYVRP", "FAILED", "FAILED"),
-    ("ROUTEIQ_TEST_KILL_PYVRP", "FAILED", "LOST"),
-    ("ROUTEIQ_TEST_HANG_PYVRP", "FAILED", "TIMEOUT"),
-    ("ROUTEIQ_TEST_PYVRP_IMPORT_FAIL", "FAILED", "IMPORT_FAILED"),
-    ("ROUTEIQ_TEST_KILL_PYVRP_STAGE", "NOT_CHOSEN", "STAGE_FAILED"),
-])
+@pytest.mark.parametrize("hook,status,reason", [("ROUTEIQ_TEST_FAIL_PYVRP", "FAILED", "FAILED"), ("ROUTEIQ_TEST_KILL_PYVRP", "FAILED", "LOST"), ("ROUTEIQ_TEST_HANG_PYVRP", "FAILED", "TIMEOUT"), ("ROUTEIQ_TEST_PYVRP_IMPORT_FAIL", "FAILED", "IMPORT_FAILED"), ("ROUTEIQ_TEST_KILL_PYVRP_STAGE", "NOT_CHOSEN", "STAGE_FAILED")])  # noqa: E501 - one line: the handbook guard sizes it
 def test_pyvrp_failure_modes_keep_the_engine_plan(hook, status, reason, workers, monkeypatch, caplog):
     """Each failure loses only the second search: every option is the engine's, re-checked (no
     "not re-checked" note: its stage job is apart from the engine's, critique C4), one log line says

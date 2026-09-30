@@ -49,7 +49,7 @@ Follow-ups:
    - Since stabilization PR4 (feasibility gate): `FEASIBILITY_GATE` on web stays **unset** (the gate is enforced). `warn` is an emergency switch only (trucks whose times break a rule can then be dispatched; audited); see `docs/admin.md`. The PR4 migration `20260927090000_plan_snapshots_feasibility` only adds three nullable JSONB columns.
    - Since audit P5 (each uploaded file is read in its own short-lived process): optional `UPLOAD_WORKER_MAX_HEAP_MB` (default 512), `UPLOAD_PARSE_TIMEOUT_MS` (default 15000) and `UPLOAD_PARSE_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** while files are read, the web service needs its own memory plus, for each file read at once, about the heap cap + 150 MB: with the defaults up to about 1.3 GB more (NMWC's real files need about 60-70 MB each). The web process itself also holds the rows of each file being handled: at most 200 cells a row and 2,500,000 cells per file, kept compact (since the P5 second review; the parser's 128 MB answer cap alone did not bound them). Measured: 20-26 MB for the largest legal files, well under 1 MB for NMWC's files; so with two files at once, about 50 MB more at most. This does not bound the upload request itself (P5 third review): the web process reads a whole request body before the 10 MB check, about twice its size in memory, even without a session (a 300 MB request: 500-620 MB more). Unless something in front of the web service caps request bodies (not recorded in the repo), one very large request can take the web service to its memory limit; the cap is an owner question (handbook 7.5). Before the deploy, check the web service's memory limit and its usage in Railway (web → Metrics); if the limit is lower, raise it, or set `UPLOAD_PARSE_CONCURRENCY=1`. The build also makes `apps/web/.next/upload-parser/parse.cjs` (the file reader), and the start command must run in `apps/web`, as `pnpm --filter @routeiq/web start` does. After the deploy the web log shows `[upload-parse] the file reader works (startup check)`; a `[config]` error about the upload file reader means every upload is refused: redeploy with the build command above. No migration; rollback is a redeploy of the previous commit.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
-   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools processes, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
+   - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools worker processes plus 1 for the PyVRP second search, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
    - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
@@ -231,6 +231,41 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
   returned), so `/api/health`'s `SOLVER_WORKERS_FAILED` and the solver's ERROR line are the only signs.
 - **Verify after the deploy:** the solver's startup log has no `SOLVER_ALLOW_INPROCESS_FALLBACK` error, `GET /api/health`
   is `ready`, and an optimization works as usual.
+
+## The second route search: PyVRP (30 Sep 2026)
+
+Every solve now runs a second route search (PyVRP 0.14.0) beside the engine's own, in one more worker process. Its plan is one
+more candidate of the load re-check: the planner's own checks, exact timing and cost score judge it, so an option's plan is
+never worse than the engine alone would have chosen from the same search. See `docs/OPTIMIZER_BENCHMARK.md` §12.
+
+- **Dependency:** `pyvrp==0.14.0`, pinned exactly (0.14 changed the Model API; the legacy `/optimize` is ported). The
+  Dockerfile's `python:3.11-slim` gets a manylinux wheel: no compiler, no new system package. A broken pyvrp install stops the
+  whole solver from starting (the legacy `solver.py` imports it), so a failed build is seen at deploy time.
+- **Variables** (solver only, names only; none needed on web):
+  - `SOLVER_PYVRP`: `on` (default), `off` (or `0`), or `thorough` (Thorough solves only). Switching it off gives exactly the
+    engine alone; no redeploy of the web is needed.
+  - `SOLVER_PYVRP_MIN_CPUS` (default 2): the CPU gate. Below it the second search switches itself off (`CPU_GATE`).
+  - Optional: `SOLVER_PYVRP_SEED` (1), `SOLVER_PYVRP_STOP_GRACE_SEC` (10). Never set `SOLVER_PYVRP_MAX_ITERS` or
+    `SOLVER_PYVRP_STALL_ITERS` on Railway (tests and development only).
+- **CPU and memory per solve.** One more busy process while the searches run (Quick: the whole search, about 1.5 x the day's
+  search time; Thorough: until the load re-check's reserve, unless it stops improving earlier), and its own load re-check job
+  beside the engine's. CPU-seconds per solve roughly double (measured in §12). Memory: about 100 MB more per running solve on
+  normal days (numpy and PyVRP in the process, the day's matrices), more on 600-stop days with plan continuity (the model then
+  leaves continuity out above 64 MB of matrices). The solver service has **24 vCPU / 24 GB** (owner, 30 Sep 2026): at
+  `MAX_CONCURRENT_DISPATCH=2` a solve uses at most 4 worker processes + 2 CP-SAT threads per stage job, far inside it.
+  `MAX_CONCURRENT_DISPATCH=3` (and `SOLVER_MAX_CONCURRENT=3` on web) also fits.
+- **It is optional.** Its process is started after the rule-22 check of the engine's own processes and never decides it: if it
+  cannot start, fails, dies or hangs, the solve goes on with the engine alone and one log line says why (`pyvrp run=<id>
+  skipped: ...` / `failed: ...`). Only a hung PyVRP costs time: at most `SOLVER_PYVRP_STOP_GRACE_SEC` on a Quick solve.
+- **Deploy order:** solver first; the web may follow at any time (every new field is additive; an old web ignores them, and
+  a new web shows the second-search sentence only when the solver reports it).
+- **Verify after the deploy:** the solver's startup log has the line `PyVRP second search: on for every search (pyvrp 0.14.0,
+  effective CPUs N, min 2)` (or `off (...)` with the reason); `GET /ready` (with the solver token, or through the web's
+  `/api/health`) has `"pyvrp": {"enabled": true, "version": "0.14.0", "effective_cpus": N, ...}`, and N is the vCPU count the
+  container really gets. One Quick optimization of a normal day: the solver log shows `pyvrp run=<id> done: stop=SEARCH_END ...`
+  and the plan's job message may end with *"A second route search found this plan; ..."*.
+- **Rollback:** set `SOLVER_PYVRP=off` (no code change). A full rollback to the previous solver image also works: the web
+  treats a missing `search.pyvrp` as "no second search".
 
 ## Private networking notes
 
