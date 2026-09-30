@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from importlib.metadata import version
 
 import numpy as np
@@ -178,6 +179,54 @@ def test_prefhard_tightens_only_with_a_price_and_a_nonempty_intersection():
         cl = {s.stop_id: c for s, c in zip(solvable, PV.build_model(r, solvable, tds, mx).clients)}
         assert (cl["A"]["tw_early"], cl["A"]["tw_late"]) == (want_a[0] * 60, want_a[1] * 60)
         assert (cl["B"]["tw_early"], cl["B"]["tw_late"]) == (hm("07:00") * 60, hm("08:00") * 60)  # empty: hard kept
+
+
+BREAK = dict(break_min=60, break_start_from_min=hm("12:00"), break_start_to_min=hm("14:00"))
+
+
+def test_finish_rule_windows_end_at_the_latest_start_as_in_the_engine():
+    """Planning rules (FINISH, unloading finished by closing): the hard window ends at closing - stop
+    time and a priced preferred end at the preferred end - stop time (load_repack.latest_start_s /
+    pref_end_bound_s, the one meaning in the search, the repack, the LP timing and the check). START
+    keeps the closing time. Before the merge fix the second search let unloading run past closing."""
+    a = stop("A", 23.60, 58.40, hard_start_min=hm("07:00"), hard_end_min=hm("12:00"), service_min=30)
+    b = stop("B", 23.61, 58.41, hard_start_min=hm("07:00"), hard_end_min=hm("16:00"), pref_start_min=hm("09:00"),
+             pref_end_min=hm("11:00"), service_min=20)
+    for rule, want_a, want_b in (("FINISH", hm("11:30"), hm("10:40")), ("START", hm("12:00"), hm("11:00"))):
+        r = req([a, b], [truck("T")], window_rule=rule, pref_window_penalty_per_min=0.05)
+        tds, solvable, _, mx = _prepared(r)
+        cl = {s.stop_id: c for s, c in zip(solvable, PV.build_model(r, solvable, tds, mx).clients)}
+        assert (cl["A"]["tw_early"], cl["A"]["tw_late"]) == (hm("07:00") * 60, want_a * 60), rule
+        assert (cl["B"]["tw_early"], cl["B"]["tw_late"]) == (hm("09:00") * 60, want_b * 60), rule  # prefhard
+        for s in solvable:
+            assert cl[s.stop_id]["tw_late"] <= LR.latest_start_s(s, rule)
+
+
+def test_break_due_truck_days_keep_the_breaks_length_free_as_the_engines_search():
+    """The driver break: like the engine's route search (search-only margin), a truck-day that may
+    need the break (DUE) keeps its length free of the shift - the route's span, or its latest return
+    when frozen loads anchor the shift or the depot closes first. load_repack places the break
+    exactly afterwards; a truck-day that needs none keeps the whole shift."""
+    stops, trucks = nmwc_day(20)
+    frozen = [FrozenTrip(load_no=1, depart_min=hm("07:00"), return_min=hm("09:30"), cases=90)]
+    fleet = [trucks[0].model_copy(update={"frozen_trips": frozen}), trucks[1]]
+    hours = dict(shift_start_min=hm("07:00"), shift_max_min=11 * 60, overtime_after_min=8 * 60, overtime_cost_per_hour=4.0,
+                 reload_min=30)
+    for close, brk in (("18:00", BREAK), ("17:00", BREAK), ("18:00", {})):
+        r = req(stops, fleet, **hours, **brk)
+        r = r.model_copy(update={"depot": DispatchDepot(id="d", lat=DEPOT.lat, lng=DEPOT.lng, close_min=hm(close))})
+        tds, solvable, _, mx = _prepared(r)
+        m = PV.build_model(r, solvable, tds, mx)
+        f, g = _vt(m, 0), _vt(m, 1)
+        margin = 3600 if brk else 0
+        assert [td.break_state for td in tds] == (["DUE", "DUE"] if brk else ["OFF", "OFF"])
+        # No frozen loads: the span (overtime included) is the shift minus the break; the latest
+        # return moves in only when the depot closes before the shift ends.
+        assert g["shift_duration"] == 8 * 3600 and g["shift_duration"] + g["max_overtime"] == 11 * 3600 - margin, close
+        want_g = hm(close) * 60 - (margin if close == "17:00" else 0)
+        assert g["tw_late"] == want_g, close
+        # Frozen loads (the shift runs from their first departure at 07:00): the latest return moves in.
+        assert f["tw_late"] == min(hm(close), hm("07:00") + 11 * 60) * 60 - margin, close
 
 
 def test_model_prices_an_engine_plan_within_one_percent():
@@ -372,7 +421,53 @@ def test_unverified_pyvrp_pick_falls_back_to_the_engine(monkeypatch, caplog):
         assert not any("second route search" in w for w in sc.warnings)
 
 
-@pytest.mark.parametrize("bad", ["duplicate", "over-capacity", "too-many-loads", "breaks-a-window"])
+def test_the_judge_holds_the_second_search_to_the_break_and_finish_rules(deterministic_repack, monkeypatch, caplog):
+    """Planning rules: the second search's plan enters the same judge as the engine's - timed exactly
+    (the driver break placed by the LP timing), repacked break-aware, checked by
+    feasibility.check_scenario (BREAK, unloading finished by closing). Its stage candidates hold every
+    rule; the same plan without its break never reaches the dispatcher."""
+    stops, trucks = nmwc_day(20, seed=1)
+    r = req(stops, trucks[:3], scenarios=ALL3, driver_cost_per_hour=2.5, fuel_price_per_litre=0.26, window_rule="FINISH",
+            shift_start_min=hm("07:00"), **BREAK)
+    prepared = _raw_engine(r)
+    tds, solvable, drops, mx, _ = prepared
+    assert {td.break_state for td in tds} == {"DUE"}
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings()))
+    plan, why = PV.plan_of(out, tds, solvable)
+    assert why is None
+    ctx = ds._stage_ctx(r, solvable, tds, mx, drops)
+    job = dict(day=ctx.day, score_pricing=ctx.rec_pricing, plan=plan, gaps={td.idx: ds._approx_gap_s(r.config, td) for td in ctx.day.trucks},
+               goals=[("RECOMMENDED", ctx.rec_pricing)], optional=None, cap_s=5.0, budget_s=20.0, fit_weights=None)
+    cands, _ = PV.stage_in_worker(job)
+    assert cands
+    for c in cands:
+        for idx, loads in c.plan.items():
+            assert LR.timing_ok(ctx.day, ctx.day.by_idx[idx], loads), c.source
+            for tl in loads:
+                for k, start in zip(tl.stops, tl.starts):
+                    s = solvable[k]
+                    assert s.hard_end_min is None or start + s.service_min * 60 <= s.hard_end_min * 60  # finished by closing
+    held = next(c for c in cands if any(tl.brk is not None for loads in c.plan.values() for tl in loads))
+    sc = ds._build_scenario("RECOMMENDED", r, solvable, tds, mx, held.plan, ctx.values, ctx.use_margin, drops,
+                            solver_status="SECOND_SEARCH", elapsed=1, time_limit=1, objective_value=held.score.objective,
+                            exact_timing=True)
+    assert sc.feasibility.status == "VERIFIED", sc.feasibility.violations
+    assert sc.window_rule == "FINISH" and sc.break_rule is not None and sc.break_rule.length_min == 60
+    assert "PLANNED" in {td.break_status for td in sc.truck_days} and any(ld.driver_break for ld in sc.loads)
+    # The same plan without its break, better on paper: refused by the independent check (BREAK).
+    stripped = {idx: [replace(tl, brk=None) for tl in loads] for idx, loads in held.plan.items()}
+    fake = LR.Candidate("PYVRP", stripped, LR.Score(unserved=0, cost=1, trucks=1, loads=1, metres=1, operating=1))
+    monkeypatch.setattr(PV, "stage_in_worker", lambda job: ([fake], ["PYVRP: injected"]))
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    res, _, _, report = _stage(r, prepared, plan, monkeypatch)
+    assert "candidate failed the independent check" in caplog.text
+    assert report["status"] == "NOT_CHOSEN" and report["reason"] == "NOT_VERIFIED"
+    for name, s in res.items():
+        assert s.feasibility.status == "VERIFIED", (name, s.feasibility.violations)
+        assert not any("second route search" in w for w in s.warnings)
+
+
+@pytest.mark.parametrize("bad",["duplicate", "over-capacity", "too-many-loads", "breaks-a-window"])
 def test_a_bad_pyvrp_plan_never_wins(bad, inprocess, monkeypatch, caplog):
     stops = [stop("A", 23.59, 58.395, cases=40, hard_start_min=hm("06:00"), hard_end_min=hm("06:10")),
              stop("B", 23.62, 58.42, cases=40), stop("C", 23.64, 58.44, cases=40)]

@@ -38,7 +38,7 @@ vi.mock('@/lib/db', () => {
 });
 
 import { PATCH } from '@/app/api/tenant/config/route';
-import { overtimeSaveProblem } from '@/lib/settings-fields';
+import { DISPATCHER_SETTINGS_FIELDS, overtimeSaveProblem } from '@/lib/settings-fields';
 
 const patch = (body: unknown) => PATCH(new Request('http://localhost/api/tenant/config', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
 
@@ -115,8 +115,41 @@ describe('PATCH /api/tenant/config (review F21)', () => {
     expect(overtimeSaveProblem({ overtimeAfterMin: 480 }, { ...stored, overtimeAfterMin: 480 })).toBeNull();
   });
 
-  it('is TENANT_ADMIN only', async () => {
+  it('a cost rate is TENANT_ADMIN only: a SUPERVISOR is refused (403)', async () => {
     state.role = 'SUPERVISOR';
     expect((await patch({ config: { driverCostPerHour: 3 } })).status).toBe(403);
+  });
+});
+
+describe('PATCH /api/tenant/config as the dispatcher (PLANNER, owner decision 29 Sep 2026)', () => {
+  beforeEach(() => {
+    state.role = 'PLANNER';
+    Object.assign(state.config, { shiftStartMin: 360, driverBreakMinutes: 60, driverBreakFromMin: 720, driverBreakToMin: 840, osrmUrl: 'http://osrm.internal', overtimeCostPerHour: 1.5 });
+  });
+
+  it('saves the shift and the break (200), with an audit row', async () => {
+    const res = await patch({ config: { shiftStartMin: 420, driverShiftMaxMinutes: 660, driverBreakToMin: 810 } });
+    expect(res.status).toBe(200);
+    expect(state.updates).toEqual([{ model: 'config', data: { shiftStartMin: 420, driverShiftMaxMinutes: 660, driverBreakToMin: 810 } }]);
+    expect(state.audits).toHaveLength(1);
+    expect(state.audits[0]!.afterJson).toEqual({ tenant: {}, config: { shiftStartMin: 420, driverShiftMaxMinutes: 660, driverBreakToMin: 810 } });
+    expect((await patch({ config: { overtimeAfterMin: 600 } })).status).toBe(200);
+  });
+
+  it('gets back only the dispatcher fields: no cost rates, no routing address', async () => {
+    const body = await (await patch({ config: { driverBreakMinutes: 45 } })).json();
+    const conf = (body.data ?? body).config as Record<string, unknown>;
+    expect(Object.keys(conf).sort()).toEqual([...DISPATCHER_SETTINGS_FIELDS].sort());
+    expect(JSON.stringify(body)).not.toMatch(/driverCostPerHour|overtimeCostPerHour|osrmUrl|serviceAreaJson|fuelPricePerLitre/);
+  });
+
+  it('a save with a cost field is refused whole (403 ADMIN_ONLY_SETTING) and saves nothing', async () => {
+    const res = await patch({ config: { shiftStartMin: 420, driverCostPerHour: 3 } });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(JSON.stringify(body)).toContain('ADMIN_ONLY_SETTING');
+    expect(JSON.stringify(body)).toContain('the driver break');
+    expect(state.updates).toEqual([]);
+    expect(state.audits).toEqual([]);
   });
 });

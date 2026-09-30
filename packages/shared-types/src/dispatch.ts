@@ -43,6 +43,9 @@ export interface FrozenTrip {
   depart_min: number;
   return_min: number;
   cases?: number;
+  /** The driver break planned with this load (PlanLoad.breakJson); absent = none recorded. */
+  break_start_min?: number | null;
+  break_min?: number | null;
 }
 
 export interface DispatchTruck {
@@ -81,6 +84,9 @@ export interface DispatchStop {
   previous_truck_id?: string | null;
 }
 
+/** Receiving-hours rule: 'FINISH' = unloading finished by closing; 'START' = the earlier rule. */
+export type WindowRule = 'START' | 'FINISH';
+
 export interface DispatchConfig {
   shift_start_min?: number;
   shift_max_min?: number;
@@ -97,6 +103,30 @@ export interface DispatchConfig {
    * before the shift starts). Solvers without the field ignore it.
    */
   loading_from_min?: number | null;
+  /**
+   * Receiving hours (owner rule 29 Sep 2026). 'FINISH': unloading is finished by closing (service
+   * start + service_min <= hard_end_min; a preferred end means "finished by" too). 'START' / absent:
+   * the earlier rule, unloading only has to start by closing. hard_end_min stays the TRUE closing
+   * time; only the solver subtracts the stop time. Solvers without the field plan the earlier way
+   * and send no `window_rule` echo.
+   */
+  window_rule?: WindowRule;
+  /**
+   * The latest return (owner: "18:00 is the latest return"): every truck is back at the depot by
+   * this minute of the day, whenever it leaves (the tenant's first departure + shift maximum, also
+   * on a plan made on its delivery day). Absent: only the shift maximum from the first departure.
+   * Echoed as `latest_return_min` on each scenario.
+   */
+  latest_return_min?: number;
+  /**
+   * Driver break (owner rule 29-30 Sep 2026): one break of break_min per truck-day, STARTING
+   * between break_start_from_min and break_start_to_min; none for a truck-day back for good by the
+   * latest start or leaving for the first time at the earliest start or later. 0 / absent = none.
+   * Solvers without the fields plan no break and send no `break_rule` echo.
+   */
+  break_min?: number;
+  break_start_from_min?: number;
+  break_start_to_min?: number;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
   /**
@@ -249,7 +279,23 @@ export interface PlannedLoad {
   overtime_min?: number | null;
   /** Legs of this load (return included) whose distance is an estimate. */
   estimated_legs?: number | null;
+  /** The driver break planned with this load; absent / null = none on this load. */
+  driver_break?: PlannedBreak | null;
 }
+
+/**
+ * A driver break. DEPOT: at the depot before the load leaves (it may overlap the reload and
+ * loading). ROAD: after unloading stop `after_sequence` (0 = on the way to stop 1; = the number of
+ * stops: on the way back), before the next unloading.
+ */
+export interface PlannedBreak {
+  start_min: number;
+  end_min: number;
+  where: 'DEPOT' | 'ROAD';
+  after_sequence?: number | null;
+}
+
+export type BreakStatus = 'PLANNED' | 'NOT_NEEDED' | 'IN_FROZEN_LOAD' | 'NOT_POSSIBLE';
 
 export interface UnservedStop {
   stop_id: string;
@@ -287,6 +333,9 @@ export interface TruckDayCost {
   driver_cost: number;
   overtime_cost: number;
   total_cost: number;
+  /** The truck-day's driver break; absent / null = no break rule (older solver, or none set). */
+  break_status?: BreakStatus | null;
+  break_start_min?: number | null;
 }
 
 /** Soft preferences in OMR-equivalent (not money). */
@@ -313,7 +362,8 @@ export type FeasibilityCode =
   | 'TRUCK_AVAILABILITY'
   | 'SHIFT_LIMIT'
   | 'TRIPS'
-  | 'FROZEN_OVERLAP';
+  | 'FROZEN_OVERLAP'
+  | 'BREAK';
 
 export interface FeasibilityViolation {
   code: FeasibilityCode;
@@ -380,6 +430,19 @@ export interface DispatchScenario {
   weight_unit_kg?: number | null;
   /** true: only new overtime counts when the optimizer chooses a truck (audit E4). */
   new_overtime_only?: boolean | null;
+  /**
+   * The receiving-hours rule the plan was made with (config.window_rule, echoed). Absent / null:
+   * a solver before it, so unloading only had to START by closing. The web takes the rule a load
+   * was planned with ONLY from this echo, never from what it asked for.
+   */
+  window_rule?: WindowRule | null;
+  /**
+   * The driver-break rule the plan was made with (echoed). Absent / null: no break was planned (a
+   * solver before the rule, or no break set). The web takes it ONLY from this echo.
+   */
+  break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
+  /** The latest return the plan was made with (echoed); absent / null: none. The web takes it ONLY from this echo. */
+  latest_return_min?: number | null;
 }
 
 export interface DispatchResponse {

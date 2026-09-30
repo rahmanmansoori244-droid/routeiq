@@ -41,6 +41,51 @@ export interface PlanRules {
    * absent: planned for a later day (or before the rule was kept).
    */
   loadingFromMin?: number | null;
+  /**
+   * Planning rules (owner decision 29 Sep 2026): 'FINISH' = the load was planned with unloading
+   * FINISHED by the end of each customer's receiving hours. Absent: the earlier rule (unloading had
+   * to start by closing). Set ONLY from the solver's echo (DispatchScenario.window_rule), never from
+   * what the web asked for, so a load planned by an older solver is never checked by a rule it was
+   * not planned with.
+   */
+  windowRule?: 'FINISH';
+  /**
+   * The driver-break rule the load was planned with (owner rule 29-30 Sep 2026), ONLY from the
+   * solver's echo (DispatchScenario.break_rule). Absent: planned without a break rule - such a load
+   * is never blocked for a missing break (it keeps its own rules).
+   */
+  break?: { lengthMin: number; startFromMin: number; startToMin: number };
+  /**
+   * The absolute latest return the load was planned with (owner: "18:00 is the latest return"),
+   * ONLY from the solver's echo (DispatchScenario.latest_return_min). Absent: planned without it.
+   */
+  latestReturnMin?: number;
+}
+
+/** The driver break planned with a load (PlanLoad.breakJson). */
+export interface LoadBreak {
+  v: 1;
+  startMin: number;
+  endMin: number;
+  lengthMin: number;
+  where: 'DEPOT' | 'ROAD';
+  /** ROAD: stops unloaded before it (0 = on the way to stop 1; = the number of stops: on the way back). */
+  afterSequence: number | null;
+}
+
+/** PlanLoad.breakJson from the solver's driver_break (null when the load holds none). */
+export function loadBreakJson(b: { start_min: number; end_min: number; where: 'DEPOT' | 'ROAD'; after_sequence?: number | null } | null | undefined): LoadBreak | null {
+  if (!b) return null;
+  return { v: 1, startMin: b.start_min, endMin: b.end_min, lengthMin: b.end_min - b.start_min, where: b.where, afterSequence: b.where === 'ROAD' ? (b.after_sequence ?? null) : null };
+}
+
+/** A stored breakJson, or null when absent or not in the v1 shape. */
+export function parseLoadBreak(json: unknown): LoadBreak | null {
+  if (!isObj(json) || json.v !== 1) return null;
+  const { startMin, endMin, where } = json as Record<string, unknown>;
+  if (typeof startMin !== 'number' || typeof endMin !== 'number' || (where !== 'DEPOT' && where !== 'ROAD')) return null;
+  const after = (json as Record<string, unknown>).afterSequence;
+  return { v: 1, startMin, endMin, lengthMin: endMin - startMin, where, afterSequence: typeof after === 'number' ? after : null };
 }
 
 export interface TruckFacts {
@@ -114,6 +159,15 @@ export interface PlanSettings {
    * none (QUICK, a later day, or settings stored before it was kept).
    */
   searchLeadMin?: number | null;
+  /**
+   * Planning rules asked for (owner decision 29 Sep 2026). 'FULL': every visit of a split delivery got
+   * the customer's full stop time (web-side). Absent: parts shared the stop time by cases (earlier).
+   */
+  splitStopTime?: 'FULL';
+  /** 'FINISH': the web asked for unloading finished by closing. What each load was planned with is its PlanRules.windowRule (the echo). */
+  windowRule?: 'FINISH';
+  /** The driver break the web asked for (0 = none). What each load was planned with is its PlanRules.break (the echo). */
+  driverBreak?: { lengthMin: number; startFromMin: number; startToMin: number };
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */
@@ -195,6 +249,12 @@ export function rulesFrom(
   config: Pick<DispatchConfig, 'shift_start_min' | 'shift_max_min' | 'reload_min' | 'loading_min_per_case' | 'max_trips_per_truck' | 'loading_from_min'>,
   depot: { openMin?: number | null; closeMin?: number | null; open_min?: number | null; close_min?: number | null },
   truck: { availableFromMin?: number | null; availableToMin?: number | null; maxTripsPerDay?: number | null },
+  /** The rules the solver REPORTED it planned with (the scenario echo); absent = earlier rules. */
+  echo?: {
+    window_rule?: string | null;
+    break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
+    latest_return_min?: number | null;
+  } | null,
 ): PlanRules {
   const close = depot.closeMin ?? depot.close_min ?? 1440;
   return {
@@ -209,6 +269,13 @@ export function rulesFrom(
     availableToMin: truck.availableToMin ?? null,
     // Only on a plan made on its delivery day, so the rules of every other plan stay as they were.
     ...(typeof config.loading_from_min === 'number' ? { loadingFromMin: config.loading_from_min } : {}),
+    // From the echo only (never config.window_rule, which is what was ASKED): absent keeps every
+    // older load's rules - and its feasibility hash - exactly as they were.
+    ...(echo?.window_rule === 'FINISH' ? { windowRule: 'FINISH' as const } : {}),
+    ...(echo?.break_rule && echo.break_rule.length_min > 0
+      ? { break: { lengthMin: echo.break_rule.length_min, startFromMin: echo.break_rule.start_from_min, startToMin: echo.break_rule.start_to_min } }
+      : {}),
+    ...(typeof echo?.latest_return_min === 'number' ? { latestReturnMin: echo.latest_return_min } : {}),
   };
 }
 

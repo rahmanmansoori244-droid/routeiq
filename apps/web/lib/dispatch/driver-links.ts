@@ -3,6 +3,7 @@
  * Maps directions, and the WhatsApp message a dispatcher sends per load. Pure (no react-pdf, no
  * database) so the plan screen, the driver sheets PDF and the tests share one version.
  */
+import { breakLine } from './break-text';
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
 import { isSupersededRun } from './plan-status';
@@ -120,9 +121,13 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
   origin?: DetailLoad['origin'];
   /** Load-level changes after planning: a DEPOT change is printed (the depot moved since planning). */
   masterChanged?: DetailLoad['masterChanged'];
+  /** The driver break planned with this load; absent / null = none on this load. */
+  break?: DetailLoad['break'];
   stops: (Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'> & {
     /** Customer data corrected after planning (review F08): printed under the stop, like the PDF sheet. */
     masterChanged?: DetailStop['masterChanged'];
+    /** When unloading is finished (the planned departure from the stop); absent = not shown. */
+    departureMin?: DetailStop['departureMin'];
   })[];
 };
 
@@ -150,15 +155,19 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     ...(depotMoved ? [`! ${depotMoved.text}`] : []),
     '',
   ];
+  const brk = load.break ?? null;
+  if (brk && (brk.where === 'DEPOT' || (brk.afterSequence ?? 0) === 0)) lines.push(breakLine(brk, stops.length));
   for (const s of stops) {
     const part = s.split ? ` · part ${s.split.part}/${s.split.parts}` : '';
-    lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)} ${stopTitle(s)} · ${s.cases} cs${part}`);
+    const until = s.departureMin !== null && s.departureMin !== undefined ? ` (unload until ${fmtHhmm(s.departureMin)})` : '';
+    lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)}${until} ${stopTitle(s)} · ${s.cases} cs${part}`);
     lines.push(pinUrl(s) ?? 'No location - call dispatcher');
     for (const c of s.masterChanged ?? []) {
       lines.push(`! ${c.text}`);
       const moved = c.kind === 'LOCATION' ? pinUrl({ lat: c.newLat ?? null, lng: c.newLng ?? null }) : null;
       if (moved) lines.push(`New pin - ask the dispatcher which one to use: ${moved}`);
     }
+    if (brk && brk.where === 'ROAD' && brk.afterSequence === s.sequence) lines.push(breakLine(brk, stops.length));
   }
   lines.push('');
   for (const r of route.links) lines.push(`${route.links.length === 1 ? 'Route' : `Route ${r.part}/${r.parts}`}: ${r.url}`);

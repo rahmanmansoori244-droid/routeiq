@@ -98,7 +98,7 @@ describe('copyRowData', () => {
     // PR4 (review F08) added the plan snapshots: found with no change to the copy code.
     expect([...jsonFieldsOf('RouteAssignment')].sort()).toEqual(['portionLinesJson', 'stopSnapshotJson']);
     // PR5 (review F17) added the load cost breakdown: copied NULL-safe by a re-plan the same way.
-    expect([...jsonFieldsOf('PlanLoad')].sort()).toEqual(['costJson', 'truckSnapshotJson']);
+    expect([...jsonFieldsOf('PlanLoad')].sort()).toEqual(['breakJson', 'costJson', 'truckSnapshotJson']);
     expect(jsonFieldsOf('RunPlan').has('feasibilityJson')).toBe(true);
     expect(jsonFieldsOf('ScenarioResult').has('detailsJson')).toBe(true);
     expect(jsonFieldsOf('PlanLoad').has('driverId')).toBe(false);

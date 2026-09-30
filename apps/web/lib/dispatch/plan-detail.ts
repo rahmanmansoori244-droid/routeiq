@@ -11,12 +11,14 @@ import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInS
 import { checkPlanFeasibility, feasibilityGateMode, type PlanFeasibility, type TruckTiming } from './feasibility';
 import {
   depotMovedChange,
+  parseLoadBreak,
   readLoadOrigin,
   readPlanInputs,
   readStopSnapshot,
   readTruckSnapshot,
   stopMasterChanges,
   truckMasterChanges,
+  type LoadBreak,
   type MasterChange,
   type PlanSettings,
 } from './snapshots';
@@ -147,6 +149,8 @@ export interface DetailLoad {
    * with them); always 0 on a load that left (what left was delivered, never carried).
    */
   carriedAway: number;
+  /** The driver break planned with this load (PlanLoad.breakJson); null = none on this load. */
+  break: LoadBreak | null;
 }
 
 export interface DetailUnserved {
@@ -241,6 +245,10 @@ export interface PlanDetail {
     weightUnitKg: number | null;
     /** true: only new overtime counted when this option chose trucks (audit E4); null: an optimizer before it. */
     newOvertimeOnly: boolean | null;
+    /** The receiving-hours rule this option was made with (the solver's echo); null: unloading only had to start by closing. */
+    windowRule?: 'FINISH' | null;
+    /** The driver-break rule this option was made with (the solver's echo); null: no break was planned. */
+    breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
@@ -535,6 +543,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       masterChanged: [...(ts ? truckMasterChanges(ts, l.truck) : []), ...(depotMoved ? [depotMoved] : [])],
       timing: null,
       carriedAway: carriedAwayOrders.size,
+      break: parseLoadBreak(l.breakJson),
     };
   });
 
@@ -627,7 +636,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
   const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, liveAtStart, clock.now ?? new Date()) : null;
   const live = !isSupersededRun(run);
-  const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
+  const rulesNote = live && chosenDetails ? plannerRulesNote(chosenDetails) : null;
+  const outdated = live && chosenDetails ? [...outdatedNotes(loads), ...(rulesNote ? [rulesNote] : [])] : [];
   let pendingOrders = 0;
   if (live && chosenDetails) {
     const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
@@ -726,6 +736,10 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         feasibility: d.feasibility ? { status: d.feasibility.status, timing: d.feasibility.timing, violations: d.feasibility.violations?.length ?? 0 } : null,
         weightUnitKg: typeof d.weight_unit_kg === 'number' ? d.weight_unit_kg : null,
         newOvertimeOnly: typeof d.new_overtime_only === 'boolean' ? d.new_overtime_only : null,
+        windowRule: d.window_rule === 'FINISH' ? 'FINISH' : null,
+        breakRule: d.break_rule && d.break_rule.length_min > 0
+          ? { lengthMin: d.break_rule.length_min, startFromMin: d.break_rule.start_from_min, startToMin: d.break_rule.start_to_min }
+          : null,
       };
     }),
     loads: detailLoads,
@@ -884,6 +898,21 @@ type OutdatedLoad = {
     };
   }[];
 };
+
+/**
+ * A plan asked for with the finish-by-closing rule (owner rule 29 Sep 2026) but made by a planner
+ * without it (the planner and the web are updated one after the other): its loads keep the earlier
+ * rule, which the solver's echo shows (DispatchScenario.window_rule absent). Null when it was
+ * planned with the rule, or never asked for it.
+ */
+export function plannerRulesNote(d: { window_rule?: string | null; break_rule?: unknown; inputs?: unknown }): string | null {
+  const cfg = readPlanInputs(d.inputs)?.config;
+  const missing: string[] = [];
+  if (cfg?.window_rule === 'FINISH' && d.window_rule !== 'FINISH') missing.push('that unloading must be finished by closing');
+  if ((cfg?.break_min ?? 0) > 0 && !d.break_rule) missing.push('the driver break');
+  if (!missing.length) return null;
+  return `Made by a planner without the rule${missing.length > 1 ? 's' : ''} ${missing.join(' and ')} (an update was being installed): these loads keep the earlier rules. Re-plan in a few minutes to use ${missing.length > 1 ? 'them' : 'it'}.`;
+}
 
 /**
  * What changed since the plan in use was made that a RE-PLAN would change on its PLANNED loads

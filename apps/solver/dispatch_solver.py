@@ -21,8 +21,18 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
 * Hard constraints: capacity in cases AND kg (when the truck has a payload; kg in whole 0.1 kg
   units, each stop to the nearest unit and the payload rounded down - no hidden margin, audit
   F08), hard customer
-  receiving windows (service must START inside the window), depot open hours, truck
+  receiving windows (config.window_rule FINISH: unloading FINISHED by closing, i.e. service starts
+  by closing - stop time; START, the earlier rule and the default: service STARTS inside the
+  window; load_repack.latest_start_s), depot open hours, truck
   availability, trip linking, shift limit.
+* Driver break (config.break_min, owner rule 29-30 Sep 2026): one break per truck-day, STARTING in
+  [break_start_from_min, break_start_to_min], on the road between two unloadings or at the depot
+  (it may overlap a reload), never while unloading, inside the shift. Needed (TruckDay.break_state
+  DUE) only when the day's first departure is before the window start and its last return after
+  the window end - by times, never by load status (_break_state). The route search stays
+  break-free and keeps the break's length free of the shift of a DUE truck (search-only margin);
+  load_repack places the break exactly (time_truck) and the CP-SAT repack models it (depot
+  interval + road-break variants); feasibility.check_scenario re-checks it (BREAK).
 * Objective (single integer, 1 unit = 0.00001 OMR) built hierarchically by magnitude:
     1+2. Service. Strict priorities (default): leaving a stop of priority p unserved costs
          SERVICE_BASE (1,000 OMR) x w_p with w_5 = 1 and w_p = 1 + sum_{q>p} n_q x w_q
@@ -70,6 +80,7 @@ from dispatch_models import (
     DAY_MIN,
     MAX_STOPS,
     WEIGHT_UNIT_KG,
+    BreakRule,
     DispatchConfig,
     DispatchRequest,
     DispatchResponse,
@@ -79,6 +90,7 @@ from dispatch_models import (
     DispatchTruck,
     FeasibilityReport,
     ObjectiveComponents,
+    PlannedBreak,
     PlannedLoad,
     PlannedStop,
     PreferencePenalties,
@@ -546,6 +558,18 @@ class TruckDay:
     # The payload in 0.1 kg units (payload_units; 0 = unconstrained): what every kg check compares
     # with (audit F08). Derived from max_kg when not given.
     max_kg_units: int = -1
+    # Driver break (config.break_min; _break_state). DUE: the new loads must hold the break unless
+    # the truck-day needs none (load_repack.time_truck / timing_ok / repack); OFF (no rule),
+    # NOT_NEEDED, IN_FROZEN_LOAD, NOT_POSSIBLE: nothing to plan. break_lo_s: the earliest start -
+    # the window start, the last frozen return and the time a same-day plan was made (idle time
+    # before the plan does not count); break_hi_s = break_to_s: the window end.
+    break_state: str = "OFF"
+    break_s: int = 0
+    break_lo_s: int = 0
+    break_hi_s: int = 0
+    break_from_s: int = 0
+    break_to_s: int = 0
+    break_note: str | None = None  # a warning for the dispatcher (NOT_POSSIBLE, too late for a break)
 
     def __post_init__(self) -> None:
         if self.max_kg_units < 0:
@@ -586,9 +610,13 @@ def _depot_close_min(req: DispatchRequest) -> int:
 
 def _truck_hours(req: DispatchRequest, t: DispatchTruck) -> tuple[int, int]:
     """The truck's time for new loads before its frozen loads are counted: from the day's start
-    (``_new_load_start_min``) or its own availability, to the depot closing or its own end."""
-    return (max(_new_load_start_min(req), t.available_from_min or 0),
-            min(_depot_close_min(req), t.available_to_min or DAY_MIN * 2))
+    (``_new_load_start_min``) or its own availability, to the depot closing, its own end or the
+    latest return (config.latest_return_min, an absolute time: 18:00 whenever the truck leaves)."""
+    cfg = req.config
+    latest = min(_depot_close_min(req), t.available_to_min or DAY_MIN * 2)
+    if cfg.latest_return_min is not None:
+        latest = min(latest, cfg.latest_return_min)
+    return max(_new_load_start_min(req), t.available_from_min or 0), latest
 
 
 def _truck_days(req: DispatchRequest) -> list[TruckDay]:
@@ -605,6 +633,9 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
             earliest = max(earliest, frozen_return + cfg.reload_min)
         if anchor is not None:
             latest = min(latest, anchor + cfg.shift_max_min)
+        brk = _break_state(cfg, t, frozen, earliest, latest)
+        if brk.pop("latest", None) is not None:
+            latest = min(latest, cfg.break_start_to_min)
         out.append(
             TruckDay(
                 truck=t,
@@ -618,9 +649,69 @@ def _truck_days(req: DispatchRequest) -> list[TruckDay]:
                 max_kg=t.capacity_kg,
                 frozen_return_s=frozen_return * 60 if frozen_return is not None else None,
                 loading_from_s=cfg.loading_from_min * 60 if cfg.loading_from_min is not None else None,
+                **brk,
             )
         )
     return out
+
+
+def break_rule(cfg: DispatchConfig) -> tuple[int, int, int] | None:
+    """(length, earliest start, latest start) in minutes of the driver break, or None: no break
+    (break_min 0, or settings that cannot work - break_rule_problem says which)."""
+    if cfg.break_min <= 0 or break_rule_problem(cfg):
+        return None
+    return cfg.break_min, cfg.break_start_from_min, cfg.break_start_to_min
+
+
+def break_rule_problem(cfg: DispatchConfig) -> str | None:
+    """Break settings that cannot work plan no break, with this warning (never a 422)."""
+    if cfg.break_min <= 0:
+        return None
+    if cfg.break_start_from_min > cfg.break_start_to_min:
+        return (f"No driver break was planned: the break may start from {_hhmm(cfg.break_start_from_min)}, which is after "
+                f"its latest start {_hhmm(cfg.break_start_to_min)}. Correct it in Settings.")
+    if cfg.break_min >= cfg.shift_max_min:
+        return (f"No driver break was planned: the {cfg.break_min}-min break is not shorter than the driver shift maximum "
+                f"({cfg.shift_max_min} min). Correct it in Settings.")
+    return None
+
+
+def _break_state(cfg: DispatchConfig, t: DispatchTruck, frozen: list, earliest: int, latest: int) -> dict:
+    """The driver-break fields of one truck-day (TruckDay.break_*), decided by TIMES only, never by
+    load status: a truck-day needs a break when its first departure (frozen loads included) is
+    before the window start and it is still out after the window end. "latest" in the result: new
+    loads must be back by the window end (the break can no longer be planned)."""
+    rule = break_rule(cfg)
+    if rule is None:
+        return {}
+    L, bf, bt = rule
+    out: dict = dict(break_s=L * 60, break_from_s=bf * 60, break_to_s=bt * 60, break_hi_s=bt * 60, break_lo_s=bf * 60)
+    code = t.code or t.id
+    if frozen:
+        trips = sorted(frozen, key=lambda f: f.depart_min)
+        anchor = trips[0].depart_min
+        last = max(f.return_min for f in frozen)
+        if any(f.break_start_min is not None for f in frozen):
+            return {**out, "break_state": "IN_FROZEN_LOAD"}
+        if anchor >= bf:
+            return {**out, "break_state": "NOT_NEEDED"}  # the day started at the window start or later
+        for a, b in zip(trips, trips[1:]):  # a depot gap between locked loads that holds the break
+            start = max(bf, a.return_min)
+            if start <= bt and start + L <= b.depart_min:
+                return {**out, "break_state": "IN_FROZEN_LOAD"}
+        if last > bt:
+            return {**out, "break_state": "NOT_POSSIBLE", "break_note": (
+                f"{code}: no driver break is recorded for its locked or dispatched loads ({_hhmm(anchor)}-{_hhmm(last)}), and "
+                "they run past the break window; no break can be added now.")}
+        lo = max(bf, last, cfg.loading_from_min or 0)
+        if lo > bt:
+            return {**out, "break_state": "NOT_NEEDED", "latest": bt, "break_note": (
+                f"{code}: its driver break can no longer start by {_hhmm(bt)} (the time before this plan does not count), "
+                "so it takes no new load after its locked or dispatched loads.")}
+        return {**out, "break_state": "DUE", "break_lo_s": lo * 60}
+    if earliest >= bf or latest <= bt:
+        return {**out, "break_state": "NOT_NEEDED"}  # starts at the window start or later / back by its end
+    return {**out, "break_state": "DUE", "break_lo_s": max(bf, cfg.loading_from_min or 0) * 60}
 
 
 def _approx_gap_s(cfg: DispatchConfig, td: TruckDay) -> int:
@@ -628,6 +719,21 @@ def _approx_gap_s(cfg: DispatchConfig, td: TruckDay) -> int:
     is unknown there, so loading is costed for 80% of a full truck. The final timing uses the
     exact ``reload_min + loading_min_per_case x cases`` of each load (load_repack)."""
     return int(round((cfg.reload_min + cfg.loading_min_per_case * td.max_cases * 0.8) * 60))
+
+
+def _search_day_end(td: TruckDay, first_s: int, shift_s: int) -> tuple[int, int]:
+    """(latest route end, longest route span) in seconds that the route searches give a truck-day
+    whose first new load may leave at ``first_s``. Driver break: the searches stay break-free
+    (breaks in the search found far fewer plans in the design runs); a truck-day that may need one
+    (DUE) keeps the break's length free of its shift, so the exact stages (load_repack) can insert
+    it. The span shrinks, and so does the latest return when frozen loads anchor the shift or the
+    depot closing / the truck's hours end the day before the shift does. The exact stages use the
+    true shift. One rule for the engine's search and the second search (pyvrp_candidate)."""
+    margin = td.break_s if td.break_state == "DUE" else 0
+    end_max = td.latest_return_s
+    if margin and (td.shift_anchor_s is not None or td.latest_return_s - td.earliest_depart_s < shift_s):
+        end_max = max(min(first_s, td.latest_return_s), td.latest_return_s - margin)
+    return max(td.earliest_depart_s, end_max), shift_s - margin
 
 
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
@@ -843,7 +949,16 @@ def _window_prefilter(
         out_s = mx.duration_s[0][node]
         back_s = mx.duration_s[node][0]
         hs = (s.hard_start_min or 0) * 60
-        he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+        he = LR.latest_start_s(s, cfg.window_rule)  # FINISH: closing - stop time
+        finish_rule = cfg.window_rule == "FINISH" and s.hard_end_min is not None
+        if finish_rule and he < hs:
+            # Unloading is longer than the receiving hours: it can never finish by closing. It
+            # must be dropped here - an empty time range fails the whole route model.
+            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE",
+                                   f"Unloading takes {s.service_min} min, but the receiving hours "
+                                   f"{_hhmm(s.hard_start_min or 0)}-{_hhmm(s.hard_end_min)} are only "
+                                   f"{s.hard_end_min - (s.hard_start_min or 0)} min long: it can never finish before closing."))
+            continue
         window_ok = False
         shift_ok = False
         # These are the only reasons presented as proof of impossibility: say when the proof
@@ -869,9 +984,14 @@ def _window_prefilter(
                 break
         if not window_ok:
             hw = f"{_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}"
-            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE",
-                                   f"No truck can reach this customer inside its receiving window {hw} "
-                                   f"(earliest possible arrival {_hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)}){est}."))
+            earliest = _hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)
+            if finish_rule:
+                msg = (f"No truck can reach this customer early enough to finish unloading ({s.service_min} min) "
+                       f"by closing ({_hhmm(s.hard_end_min)}): earliest possible arrival {earliest}{est}.")
+            else:
+                msg = (f"No truck can reach this customer inside its receiving window {hw} "
+                       f"(earliest possible arrival {earliest}){est}.")
+            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE", msg))
         elif not shift_ok:
             drops.append(_unserved(s, "SHIFT_LIMIT",
                                    f"A round trip to this customer does not fit inside the truck shift / depot hours{est}."))
@@ -1161,11 +1281,12 @@ def _solve_scenario(
     for k, s in enumerate(stops):
         idx = manager.NodeToIndex(k + 1)
         hs = (s.hard_start_min or 0) * 60
-        he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+        he = LR.latest_start_s(s, cfg.window_rule)  # FINISH: unloading finished by closing
+        assert hs <= he, f"stop {s.stop_id}: empty receiving window (the window prefilter drops it)"
         tdim.CumulVar(idx).SetRange(hs, min(he, HORIZON_S))
         early_coeff = 0 if not w.soft_prefs else int(round(cfg.early_preference_per_min.get(s.priority, 0.0) * COST_SCALE / 60.0))
         if s.pref_end_min is not None and pref_coeff > 0:
-            tdim.SetCumulVarSoftUpperBound(idx, s.pref_end_min * 60, pref_coeff + early_coeff)
+            tdim.SetCumulVarSoftUpperBound(idx, LR.pref_end_bound_s(s, cfg.window_rule), pref_coeff + early_coeff)
         elif early_coeff > 0:
             tdim.SetCumulVarSoftUpperBound(idx, cfg.shift_start_min * 60, early_coeff)
         if s.pref_start_min is not None and pref_coeff > 0:
@@ -1188,9 +1309,11 @@ def _solve_scenario(
         if td.ready_s is not None:  # frozen loads / same-day plan: + loading of the first new load
             first = max(first, td.ready_s + _approx_gap_s(cfg, td))
         tdim.CumulVar(start).SetRange(min(first, td.latest_return_s), td.latest_return_s)
-        tdim.CumulVar(end).SetRange(td.earliest_depart_s, td.latest_return_s)
+        # Driver break: a DUE truck-day keeps the break's length free of its shift (_search_day_end).
+        end_max, span_max = _search_day_end(td, first, shift_s)
+        tdim.CumulVar(end).SetRange(td.earliest_depart_s, end_max)
         if td.shift_anchor_s is None:
-            tdim.SetSpanUpperBoundForVehicle(shift_s, v)
+            tdim.SetSpanUpperBoundForVehicle(span_max, v)
         if time_coeff:
             # Driver pay = the whole truck day (costing.py): the route's span, and for a truck with
             # frozen loads also the time from its last frozen return to the first new departure
@@ -1334,7 +1457,9 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             prev_node, prev_dep = 0, depart_s
             cum_m, cases, kg, seq, est_legs = 0, 0, 0, 0, 0  # kg in 0.1 kg units (audit F08)
             stops_out: list[PlannedStop] = []
-            for k, start_s in zip(tl.stops, tl.starts):
+            road = tl.brk if (tl.brk is not None and tl.brk.where == "ROAD") else None
+            brk_len = td.break_s
+            for q, (k, start_s) in enumerate(zip(tl.stops, tl.starts)):
                 s = stops[k]
                 node = k + 1
                 served.add(k)
@@ -1343,15 +1468,26 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 leg_est = mx.leg_estimated(prev_node, node)
                 est_legs += int(leg_est)
                 arrival_s = prev_dep + leg_s
+                rest_s = 0  # break minutes spent standing at this customer before unloading
+                if road is not None and road.after == q:
+                    # The break on this leg: still on the way when it started -> arrives after it;
+                    # otherwise it arrived first and rested here (the break overlaps waiting).
+                    if road.start_s < arrival_s:
+                        arrival_s += brk_len
+                    else:
+                        rest_s = brk_len
                 dep_s = start_s + s.service_min * 60
                 cum_m += leg_m
                 cases += s.demand_cases
                 kg += kg_units(s.demand_kg)
                 seq += 1
                 hs = (s.hard_start_min or 0) * 60
-                he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+                # FINISH: the latest start is closing - stop time, and a preferred end means
+                # "finished by" (load_repack.latest_start_s / pref_end_bound_s: one meaning in the
+                # search, the repack, the LP timing and this report).
+                he = LR.latest_start_s(s, cfg.window_rule)
                 ps = s.pref_start_min * 60 if s.pref_start_min is not None else None
-                pe = s.pref_end_min * 60 if s.pref_end_min is not None else None
+                pe = LR.pref_end_bound_s(s, cfg.window_rule)
                 pref_ok = (ps is None or start_s >= ps) and (pe is None or start_s <= pe)
                 if not pref_ok:
                     dev = (max(0, ps - start_s) if ps is not None else 0) + (max(0, start_s - pe) if pe is not None else 0)
@@ -1369,7 +1505,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 stops_out.append(PlannedStop(
                     sequence=seq, stop_id=s.stop_id, order_ids=list(s.order_ids), customer_id=s.customer_id,
                     arrival_min=arrival_min, service_start_min=start_min,
-                    departure_min=start_min + s.service_min, wait_min=max(0, start_min - arrival_min),
+                    departure_min=start_min + s.service_min, wait_min=max(0, start_min - arrival_min - _min_of(rest_s)),
                     leg_km=round(leg_m / 1000.0, 2), cum_km=round(cum_m / 1000.0, 2), leg_min=int(round(leg_s / 60)),
                     cases=s.demand_cases, kg=kg_units(s.demand_kg) / 10,
                     hard_window_ok=hs <= start_s <= he, pref_window_ok=pref_ok, leg_estimated=leg_est,
@@ -1379,6 +1515,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             est_legs += int(mx.leg_estimated(prev_node, 0))
             cum_m += back_m
             return_s = prev_dep + mx.duration_s[prev_node][0]
+            if road is not None and road.after == len(tl.stops):
+                return_s += brk_len  # the break on the way back
             built.append((tl, stops_out, cum_m / 1000.0, cases, return_s, kg, back_m, est_legs))
         day_cost = costing.truck_day_costs(
             costing.TruckRates.from_truck(t), rates,
@@ -1411,9 +1549,10 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 return_leg_km=round(back_m / 1000.0, 2), stops=stops_out,
                 trip_cost=parts["trip"], driver_cost=parts["time"], overtime_cost=parts["overtime"],
                 driver_paid_min=_min_of(c.paid_s), paid_from_min=_min_of(c.paid_from_s), overtime_min=_min_of(c.overtime_s),
-                estimated_legs=est_legs,
+                estimated_legs=est_legs, driver_break=_planned_break(tl.brk, td),
             ))
         loads += mine
+        planned_brk = next((ld.driver_break for ld in mine if ld.driver_break is not None), None)
         truck_days.append(TruckDayCostOut(
             truck_id=t.id, loads=len(mine), frozen_loads=td.n_frozen,
             day_start_min=_min_of(day_cost.day_start_s), paid_from_min=_min_of(day_cost.paid_from_s),
@@ -1423,6 +1562,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             distance_cost=round(sum(l.distance_cost for l in mine), 3), fuel_cost=round(sum(l.fuel_cost for l in mine), 3),
             driver_cost=round(sum(l.driver_cost or 0 for l in mine), 3), overtime_cost=round(sum(l.overtime_cost or 0 for l in mine), 3),
             total_cost=round(sum(l.total_cost for l in mine), 3),
+            break_status=_break_status(td, planned_brk), break_start_min=planned_brk.start_min if planned_brk else None,
         ))
 
     unserved = list(pre_drops)
@@ -1434,6 +1574,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     priority_of = {st.stop_id: st.priority for st in stops}
     unserved_penalty = 0.0
     open_drops = 0
+    brk_words = " and the drivers' midday break" if break_rule(cfg) else ""
     left_cases = 0
     for k, s in enumerate(stops):
         if k in served:
@@ -1447,7 +1588,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         elif k in timing_drops:
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
                                       f"Not planned: once every load was timed with the loading time between loads "
-                                      f"({cfg.reload_min} min + {cfg.loading_min_per_case:g} min per case), the route search's "
+                                      f"({cfg.reload_min} min + {cfg.loading_min_per_case:g} min per case)"
+                                      f"{brk_words}, the route search's "
                                       f"loads no longer fitted the truck days and this P{s.priority} stop was left out "
                                       "(lowest priorities first). Re-plan, add a truck, or check the loading time."))
         elif shortage:
@@ -1474,6 +1616,9 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     loads.sort(key=lambda l: (code_of[l.truck_id], l.load_no))
     util = [ld.utilization_pct for ld in loads]
     warnings = list(mx.warnings) + list(extra_warnings or [])
+    warnings += [td.break_note for td in tds if td.break_note]
+    if (problem := break_rule_problem(cfg)) is not None:
+        warnings.append(problem)
     if open_drops:
         warnings.append(
             f"{open_drops} stop(s) could not be placed by the optimizer within its time limit; no check proves "
@@ -1538,10 +1683,13 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                                                  continuity=round(comp["continuity"], 3)),
         estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
         # The rules this plan was made with (audit A6 review; the ASSUMPTIONS sheet states them).
-        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True, window_rule=cfg.window_rule, break_rule=_break_echo(cfg),
+        latest_return_min=cfg.latest_return_min,
     )
     _assert_reconciled(req, sc)
-    exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
+    # Without loading per case the search's turnaround is exact - but its times never hold a driver
+    # break, so with the break rule only load_repack's timing is exact (the safety net re-times).
+    exact = exact_timing or (cfg.loading_min_per_case == 0 and break_rule(cfg) is None)
     sc.feasibility = FZ.safe_check(req, sc, solvable=stops, mx=mx, timing="EXACT" if exact else "ESTIMATED")
     return sc
 
@@ -1592,6 +1740,27 @@ def _empty_scenario(name, status, drops, time_limit, mx: MatrixResult, tds: list
         cost_policy=costing.COST_POLICY, cost_version=costing.COST_VERSION, paid_driver_min=0, estimated_legs=0,
         weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
     )
+
+
+def _break_echo(cfg: DispatchConfig) -> BreakRule | None:
+    rule = break_rule(cfg)
+    return BreakRule(length_min=rule[0], start_from_min=rule[1], start_to_min=rule[2]) if rule else None
+
+
+def _planned_break(brk: "LR.BreakAt | None", td: TruckDay) -> PlannedBreak | None:
+    if brk is None:
+        return None
+    start = _min_of(brk.start_s)
+    return PlannedBreak(start_min=start, end_min=start + td.break_s // 60, where=brk.where,  # type: ignore[arg-type]
+                        after_sequence=brk.after if brk.where == "ROAD" else None)
+
+
+def _break_status(td: TruckDay, planned: PlannedBreak | None) -> str | None:
+    if td.break_state == "OFF":
+        return None
+    if planned is not None:
+        return "PLANNED"
+    return "NOT_NEEDED" if td.break_state == "DUE" else td.break_state
 
 
 class ReconciliationError(AssertionError):
@@ -1691,6 +1860,9 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         if workers is not None:
             workers.close()  # likewise
     for sc in scenarios:
+        sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
+        sc.break_rule = _break_echo(cfg)
+        sc.latest_return_min = cfg.latest_return_min
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)
@@ -3012,9 +3184,11 @@ def _stage_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
 def _timed_from_scenario(sc: DispatchScenario, stop_idx: dict[str, int], truck_idx: dict[str, int]) -> LR.TimedPlan:
     out: LR.TimedPlan = {}
     for ld in sorted(sc.loads, key=lambda l: (l.truck_id, l.load_no)):
+        b = ld.driver_break
         out.setdefault(truck_idx[ld.truck_id], []).append(LR.TimedLoad(
             stops=tuple(stop_idx[st.stop_id] for st in ld.stops), depart_s=ld.depart_min * 60,
-            starts=tuple(st.service_start_min * 60 for st in ld.stops), return_s=ld.return_min * 60))
+            starts=tuple(st.service_start_min * 60 for st in ld.stops), return_s=ld.return_min * 60,
+            brk=LR.BreakAt(b.start_min * 60, b.where, b.after_sequence) if b is not None else None))
     return out
 
 
@@ -3050,7 +3224,7 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
     day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
                  shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
                  loading_s_per_case=cfg.loading_min_per_case * 60, values=values,
-                 frozen_trucks=frozenset(td.idx for td in tds if td.n_frozen))
+                 frozen_trucks=frozenset(td.idx for td in tds if td.n_frozen), window_rule=cfg.window_rule)
     return _StageCtx(req=req, solvable=solvable, tds=tds, mx=mx, drops=drops, values=values, value_warnings=value_warnings,
                      use_margin=use_margin, stop_idx={s.stop_id: k for k, s in enumerate(solvable)},
                      truck_idx={td.truck.id: td.idx for td in tds}, day=day,
@@ -3095,14 +3269,20 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
         log.warning("safety net unavailable: %s", exc)
         ctx = None
     for name, sc in raw.items():
-        if cfg.loading_min_per_case > 0 and ctx is not None and (sc.feasibility is None or sc.feasibility.timing != "EXACT"):
+        # The search's times are estimates with a loading time per case, and never hold a driver
+        # break: re-time them exactly then (review: with 0 min per case and the break rule too).
+        brk = break_rule(cfg) is not None
+        if (cfg.loading_min_per_case > 0 or brk) and ctx is not None and (
+                sc.feasibility is None or sc.feasibility.timing != "EXACT"):
             new = _retime(ctx, name, sc)
+            what = "the loading time between loads" + (" and the drivers' midday break" if brk else "")
             if new is not None:
-                new.warnings.append(msg + " Departure times were re-timed exactly with the loading time between loads.")
+                new.warnings.append(msg + f" Departure times were re-timed exactly with {what}.")
                 results[name] = new
                 continue
-            sc.warnings.append(msg + " Departure times use an estimated loading time between loads and could not be re-timed "
-                                     "exactly: check the timetable before dispatching, or re-plan.")
+            sc.warnings.append(msg + f" Its times do not hold {what} and could not be re-timed exactly: "
+                                     + ("the driver breaks could not be timed: re-plan." if brk else
+                                        "check the timetable before dispatching, or re-plan."))
             continue
         sc.warnings.append(msg)
 
@@ -3308,6 +3488,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 # No plan of this day could be timed exactly (not even this one): kept as found. Its
                 # feasibility report (built with the raw plan) lists what it breaks.
                 sc.warnings.append(
+                    "The driver breaks could not be timed for this plan: re-plan, or add a truck."
+                    if break_rule(cfg) is not None else
                     f"This plan does not leave the loading time of {cfg.loading_min_per_case:g} min per case between loads "
                     "everywhere; some later loads may be timed too early. Re-plan, add a truck, or check the loading time."
                     if cfg.loading_min_per_case > 0 else

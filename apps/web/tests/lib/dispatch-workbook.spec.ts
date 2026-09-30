@@ -572,7 +572,7 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     // A plan the optimizer before A6 made (cost version 2, no rules in its option): the whole-day
     // costs are current, but its weights and overtime were handled the earlier way.
     const before = { ...scenarioRow(), chosen: true };
-    expect(solverRules({ scenarios: [before] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
+    expect(solverRules({ scenarios: [before] })).toMatchObject({ weightsToTenthKg: false, newOvertimeOnly: false });
     const beforeRows = tenantAssumptions(cfg, { ...opts, rules: 'CURRENT', solverRules: solverRules({ scenarios: [before] }) });
     expect(beforeRows.Weights).toBe(
       'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
@@ -580,7 +580,7 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(beforeRows.Overtime).toBe('after 9:00 from the first departure, +4 OMR per hour on top of the driver cost');
     // Made with them: the option says so.
     const now = { ...before, weightUnitKg: 0.1, newOvertimeOnly: true };
-    expect(solverRules({ scenarios: [{ ...before, chosen: false }, now] })).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+    expect(solverRules({ scenarios: [{ ...before, chosen: false }, now] })).toMatchObject({ weightsToTenthKg: true, newOvertimeOnly: true });
     const nowRows = tenantAssumptions(cfg, { ...opts, solverRules: solverRules({ scenarios: [now] }) });
     expect(nowRows.Weights).toBe("each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)");
     expect(nowRows.Overtime).toMatch(/; overtime already worked by locked or dispatched loads is not counted again for new loads$/);
@@ -589,7 +589,7 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(earlier.Weights).toMatch(/^earlier rule: /);
     expect(earlier.Overtime).not.toMatch(/not counted again/);
     // No option at all: nothing says which rules made it, so the earlier wording.
-    expect(solverRules({ scenarios: [] })).toEqual({ weightsToTenthKg: false, newOvertimeOnly: false });
+    expect(solverRules({ scenarios: [] })).toMatchObject({ weightsToTenthKg: false, newOvertimeOnly: false });
   });
 
   it('road km with some estimated legs is labelled so (review F18)', async () => {

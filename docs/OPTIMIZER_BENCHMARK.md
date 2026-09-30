@@ -721,17 +721,20 @@ and prototype: `.dev/bench/pyvrp-enh/SPEC.md` (with the two skeptic reviews' cor
   solve kills, joins and releases it - with the engine's pools, their queues, locks and processes - before it returns:
   nothing is left for the garbage collector (CI, PR #50: a segmentation fault while it ran in the API's event loop).
 - **The model.** The same day the engine searches (after its prefilters), with every price from the engine's own
-  functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows, truck hours
-  (frozen loads, same-day loading), loads per truck as reload depots with the search's turnaround, the shift maximum, driver
+  functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows (with unloading
+  finished by closing, §13, the latest start is closing - stop time, as in the engine), truck hours (frozen loads,
+  same-day loading, the latest return), loads per truck as reload depots with the search's turnaround, the shift maximum
+  (a truck-day that may need the driver break keeps its length free, as the engine's own search), driver
   pay for the truck day and overtime past `overtime_after_min` (only new overtime on trucks with frozen loads), km per rate
   class, trip cost per load, plan continuity per truck, and every stop optional with the engine's own strict-priority drop
   penalty as its prize. Nothing holds a time of day: shift start, shift maximum, overtime threshold, depot and truck hours
   come from the request (Settings). The owner's day, 07:00-18:00 with 18:00 the latest return and overtime as set, is
-  expressed by the depot or truck closing time (a test checks it).
+  expressed by the depot or truck closing time (a test checks it) or, since §13, by the latest return in Settings.
 - **What it cannot see** (the judge prices all of them exactly): the early-arrival preference of P1/P2 (so its plans may
   deliver them later inside their hard windows when that saves more money than the preference is worth); preferred windows
   (tightened into the hard window when they carry a price and the two overlap, "prefhard"); the loading time per case of
-  the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads.
+  the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads; the
+  driver break itself (§13: the exact timing places it and the check holds this search's plans to it, as the engine's).
 - **When it stops.** QUICK: when the engine's searches end (the alternatives are in), within about 0.3 s; the answer is
   awaited at most `SOLVER_PYVRP_STOP_GRACE_SEC` (10 s) and never past the engine's stage reserve. THOROUGH (decision D3):
   while the engine searches, it searches too (that costs no waiting); once the engine's searches ended, it stops when its
@@ -825,6 +828,49 @@ Harness: `bench_pv.py` (kept with the bench material, not in the repo).
   1,501.7 km"*.
 - Limits: three pairs (or one) per row, on a partly loaded machine, and one seed. The prototype's paired runs (spec §3, 46
   rows, and the skeptics' 19 paired runs) point the same way, with the engine's plan never better than the hybrid.
+
+## 13. Planning rules: unloading finished by closing and the driver break (2 Oct 2026)
+
+Branch `planning-rules-break`, **every row on one build: f010a1d** (phase A, phase B and the review fixes), run back to back
+13:41-14:06 on 30 Sep, one solve at a time (another worktree's test suite was running on the machine meanwhile, so wall
+seconds are indicative). **Before** = production before the branch: unloading only has to start by closing, no break,
+split parts share the stop time, no absolute latest return. **Finish** = unloading finished by closing, the full stop time
+on every split part (real80) and the 18:00 latest return, but no break: it isolates the cost of the break. **After** =
+what production runs once the dispatcher sets the shift and the break: finish + full split stop time + 18:00 latest
+return + a 60-min break starting 12:00-14:00. All at the owner's shift (first departure 07:00, 11 h, back by 18:00),
+overtime as each instance has it. Quick auto limits, the three scenarios as production asks for them, RECOMMENDED
+reported; the harness runs in-process (`.dev/bench`, cached matrices), one run per cell (single runs: differences of a
+truck or a few percent can be search noise). Unserved shows the solver's reason code. real80 in aggregates only.
+
+| Instance | Config | Served P1 / P2 / P3 / P4 / P5 | Unserved (reason) | Trucks | Loads | km | OMR | Paid / overtime min | Timetable check | Truck-days with a break | Wall s (post-solve s) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| real80 | before | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 978.1 | 501.44 | 2,700 / 22 | VERIFIED | - | 69.1 (29.1) |
+| real80 | finish | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 986.5 | 519.70 (+3.6%) | 2,867 / 170 | VERIFIED | - | 54.3 (14.2) |
+| real80 | after | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 988.7 | 539.60 (+7.6%; +3.8% vs finish) | 3,051 / 349 | VERIFIED | 5 of 5 (4 at the depot during a reload, 1 on the road) | 64.0 (23.9) |
+| syn60_s1 | before | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 420.1 | 261.14 | 1,475 / 0 | VERIFIED (1 stop finishing after closing) | - | 40.9 (0.9) |
+| syn60_s1 | after | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 421.9 | 261.58 (+0.2%) | 1,479 / 0 | VERIFIED | 0 of 5 (all back by 14:00 or starting at 12:00+) | 41.0 (0.9) |
+| syn150_s1 | before | 11 / 24 / 43 / 32 / 40 (all) | 0 | 10 | 10 | 764.2 | 518.62 | 3,187 / 0 | VERIFIED | - | 101.8 (1.7) |
+| syn150_s1 | after | 11 / 24 / 43 / 32 / 40 (all) | 0 | 8 | 10 | 798.6 | 487.06 (-6.1%, search noise: 2 trucks fewer) | 3,478 / 2 | VERIFIED | 3 of 8 (on the road) | 102.9 (2.8) |
+| syn300_s1 | before | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 25 | 1,773.8 | 959.46 | 7,001 / 786 | VERIFIED (9 stops finishing after closing) | - | 332.9 (32.6) |
+| syn300_s1 | finish | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 26 | 1,754.2 | 956.60 (-0.3%) | 7,000 / 795 | VERIFIED | - | 323.8 (23.5) |
+| syn300_s1 | after | 15 / 47 / 89 / 65 / 83 | 1 P3 (SOLVER_DROPPED_LOW_PRIORITY) | 12 | 24 | 1,687.4 | 975.73 (+1.7%) | 7,455 / 976 | VERIFIED | 12 of 12 (9 on the road, 3 at the depot) | 348.5 (48.2) |
+
+What it shows:
+- Every plan is VERIFIED (the independent check re-derives the finish rule, the break and the 18:00 latest return); no
+  truck is back after 18:00 in any row, and no stop finishes unloading after closing under the rule (the earlier rule let
+  1 stop on syn60_s1 and 9 on syn300_s1 do so).
+- real80, split in two: the finish rule with the full stop time on its 6 split parts costs +3.6% (paid driver time
+  2,700 -> 2,867 min, overtime 22 -> 170 min); the break adds +3.8% more (paid 2,867 -> 3,051 min, overtime 170 -> 349
+  min: the break is paid and counts toward overtime). That is +184 paid min over 5 truck-days: the 4 breaks taken at the
+  depot overlap the 30-min reload and add at most 30 min each, the 1 on the road adds its full 60 min (4 x 30 + 60 = 180).
+  Same 5 trucks and 14 loads.
+- No P1 or P2 stop is lost anywhere. syn300_s1 is a tight day (every truck-day is bound by the shift): the finish rule
+  alone still serves everything; with the break 1 P3 stop is left out (SOLVER_DROPPED_LOW_PRIORITY: the search dropped it
+  as the cheapest to leave out). The owner decides whether that is acceptable; a THOROUGH search is the lever on such a day.
+- Speed: post-solve seconds are of the same order before and after on every instance (0.9-2.8 s on syn60_s1 and syn150_s1,
+  24-29 s on real80, 33-48 s on syn300_s1, where the break-aware CP-SAT model also runs because the break-free proposals
+  cannot hold the breaks: +16 s wall). A first version that always solved the break-aware model took 33 s of post-solve
+  on syn150_s1 (now 2.8 s).
 
 ## Sources
 

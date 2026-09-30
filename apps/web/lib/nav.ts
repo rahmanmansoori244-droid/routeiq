@@ -27,6 +27,8 @@ export interface NavItem {
 
 const ALL_ROLES: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'PLANNER', 'SUPERVISOR', 'VIEWER'];
 const ADMIN_ONLY: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN'];
+// Settings: the dispatcher changes the driver shift there (owner decision 29 Sep 2026); the rest is admin-only.
+const DISPATCHER_UP: Role[] = ['SUPER_ADMIN', 'TENANT_ADMIN', 'SUPERVISOR', 'PLANNER'];
 
 export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/dispatch`, label: 'Daily dispatch', icon: Route, rolesAllowed: ALL_ROLES },
@@ -41,7 +43,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/runs`, label: 'Plan history', icon: ListChecks, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/audit`, label: 'Audit log', icon: History, rolesAllowed: ADMIN_ONLY },
   { href: (s) => `/t/${s}/users`, label: 'Users', icon: UserCog, rolesAllowed: ADMIN_ONLY },
-  { href: (s) => `/t/${s}/settings`, label: 'Settings', icon: Settings, rolesAllowed: ADMIN_ONLY },
+  { href: (s) => `/t/${s}/settings`, label: 'Settings', icon: Settings, rolesAllowed: DISPATCHER_UP },
   { href: (s) => `/t/${s}/help`, label: 'Help', icon: LifeBuoy, rolesAllowed: ALL_ROLES },
 ];
 

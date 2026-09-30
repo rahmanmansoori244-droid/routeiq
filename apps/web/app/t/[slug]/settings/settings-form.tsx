@@ -15,7 +15,7 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { changedFields, overtimeSaveProblem, type EditableConfig } from '@/lib/settings-fields';
+import { breakSaveProblem, changedFields, overtimeSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 
 interface TenantFields {
@@ -51,7 +51,19 @@ const SOURCE_TEXT: Record<EffectiveRow['source'], string> = {
  * bounds the optimizer accepts, saved field by field. The page sends the fields it changed and
  * the values it showed; a save that would overwrite another admin's newer change is refused (409).
  */
-export function SettingsForm({ initial, effective, profiles }: { initial: Initial; effective: EffectiveRow[]; profiles: TypeProfileRow[] }) {
+export function SettingsForm({
+  initial,
+  effective,
+  profiles,
+  scope = 'ADMIN',
+}: {
+  initial: Initial;
+  effective: EffectiveRow[];
+  profiles: TypeProfileRow[];
+  /** DISPATCHER: only the driver shift card (the API refuses every other field for that role). */
+  scope?: 'ADMIN' | 'DISPATCHER';
+}) {
+  const admin = scope === 'ADMIN';
   const router = useRouter();
   const [pending, startSave] = useTransition();
   const [baseline, setBaseline] = useState(initial);
@@ -69,6 +81,7 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
   // As the API: only a save that changes the threshold or the shift maximum is held to the rule; a
   // stored threshold after a lowered shift maximum is shown as a warning and other fields still save.
   const overtimeBlocks = overtimeSaveProblem(configDiff.changes, c) !== null;
+  const breakProblem = breakSaveProblem(configDiff.changes, c);
 
   function save() {
     if (invalid.length) {
@@ -77,6 +90,10 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
     }
     if (overtimeBlocks) {
       toast.error('Overtime after must be at most the driver shift maximum.');
+      return;
+    }
+    if (breakProblem) {
+      toast.error(breakProblem);
       return;
     }
     startSave(async () => {
@@ -133,6 +150,54 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
 
   return (
     <div className="space-y-6">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Driver shift</CardTitle>
+          <CardDescription>
+            When trucks may leave, when they must be back at the latest, and the drivers' midday break. The dispatcher can change these; every change is in the audit log.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC(withFirstDeparture(c, v))} hint="No truck leaves the depot before this time. A plan made on the delivery day itself starts later: from now + the turnaround between loads. Changing it keeps the latest return; the shift maximum follows." changed={'shiftStartMin' in configDiff.changes} />
+          <TimeField
+            id="latestReturn"
+            label="Latest return"
+            value={c.shiftStartMin + c.driverShiftMaxMinutes}
+            onChange={(v) => setC({ ...c, driverShiftMaxMinutes: v - c.shiftStartMin })}
+            hint="Every truck is back at the depot by this time, whenever it leaves. It sets the shift maximum below."
+            changed={'driverShiftMaxMinutes' in configDiff.changes}
+          />
+          {num('driverShiftMaxMinutes', 'Driver shift maximum', { step: 15, unit: 'min', hint: `First departure to last return of a truck (${hm(c.driverShiftMaxMinutes)} h).` })}
+          {num('overtimeAfterMin', 'Overtime after', { step: 15, unit: 'min', hint: `From the first departure (${hm(c.overtimeAfterMin)} h). At most the shift maximum.` })}
+          {overtimeBlocks ? (
+            <p className="text-sm text-destructive md:col-span-2" role="alert">
+              Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h): set it at most to the shift maximum.
+            </p>
+          ) : overtimeAfterShift ? (
+            <p className="text-sm text-amber-700 md:col-span-2" data-testid="overtime-after-shift">
+              Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h), so overtime is never costed. Set it at
+              most to the shift maximum. Other settings still save.
+            </p>
+          ) : admin && c.overtimeCostPerHour > 0 && c.overtimeAfterMin === c.driverShiftMaxMinutes ? (
+            <p className="text-sm text-amber-700 md:col-span-2">Overtime starts at the shift maximum, so it is never reached.</p>
+          ) : null}
+          {num('driverBreakMinutes', 'Driver break', {
+            step: 5,
+            unit: 'min',
+            hint: 'One break per truck-day that works through midday, taken between stops or at the depot (it may overlap reloading), never while unloading. It is inside the shift maximum and paid. Truck-days back for good by the latest start, or leaving for the first time at the earliest start or later, get none. 0 = no break.',
+          })}
+          <TimeField id="driverBreakFromMin" label="Break may start from" value={c.driverBreakFromMin} onChange={(v) => setC({ ...c, driverBreakFromMin: v })} changed={'driverBreakFromMin' in configDiff.changes} />
+          <TimeField id="driverBreakToMin" label="Break must start by" value={c.driverBreakToMin} onChange={(v) => setC({ ...c, driverBreakToMin: v })} changed={'driverBreakToMin' in configDiff.changes} />
+          {breakProblem ? (
+            <p className="text-sm text-destructive md:col-span-2" role="alert">
+              {breakProblem}
+            </p>
+          ) : null}
+        </CardContent>
+      </Card>
+
+      {admin ? (
+        <>
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Company</CardTitle>
@@ -193,8 +258,6 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC({ ...c, shiftStartMin: v })} hint="No truck leaves the depot before this time. A plan made on the delivery day itself starts later: from now + the turnaround between loads." changed={'shiftStartMin' in configDiff.changes} />
-          {num('driverShiftMaxMinutes', 'Driver shift maximum', { step: 15, unit: 'min', hint: `First departure to last return of a truck (${hm(c.driverShiftMaxMinutes)} h).` })}
           {num('reloadMinutes', 'Turnaround between loads', { step: 5, unit: 'min', hint: 'Fixed time at the depot between two loads of a truck (paperwork, queue). Also the preparation time of a plan made on the delivery day: no new load leaves before now + this + its loading time.' })}
           {num('loadingMinPerCase', 'Loading per case of the next load', { step: 0.01, unit: 'min', hint: 'Added to the turnaround: 0.04 = 44 min for 1,100 cases. On a plan made on the delivery day it counts from now for every truck, also one standing at the depot.' })}
           {num('serviceMinPerCase', 'Unloading per case', { step: 0.01, unit: 'min', hint: "Added to each customer's service time: 0.05 = 55 min for 1,100 cases." })}
@@ -242,22 +305,9 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {num('driverCostPerHour', 'Driver cost per hour', { step: 0.1, unit: cur })}
-          {num('overtimeAfterMin', 'Overtime after', { step: 15, unit: 'min', hint: `From the first departure (${hm(c.overtimeAfterMin)} h). At most the shift maximum.` })}
           {num('overtimeCostPerHour', 'Overtime cost per hour', { step: 0.1, unit: cur, hint: 'On top of the driver cost, for each hour after the overtime threshold.' })}
           {num('fuelPricePerLitre', 'Fuel price per litre', { step: 0.005, unit: cur, hint: '0 = fuel is not costed separately. Fuel use comes from each truck\'s km per litre.' })}
-          {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: the planner avoids arriving outside preferred hours. Hard windows are never broken.' })}
-          {overtimeBlocks ? (
-            <p className="text-sm text-destructive md:col-span-2" role="alert">
-              Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h): set it at most to the shift maximum.
-            </p>
-          ) : overtimeAfterShift ? (
-            <p className="text-sm text-amber-700 md:col-span-2" data-testid="overtime-after-shift">
-              Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h), so overtime is never costed. Set it at
-              most to the shift maximum. Other settings still save.
-            </p>
-          ) : c.overtimeCostPerHour > 0 && c.overtimeAfterMin === c.driverShiftMaxMinutes ? (
-            <p className="text-sm text-amber-700 md:col-span-2">Overtime starts at the shift maximum, so it is never reached.</p>
-          ) : null}
+          {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: a penalty per minute that unloading starts before the preferred start or finishes after the preferred end. Receiving hours are never broken.' })}
         </CardContent>
       </Card>
 
@@ -290,6 +340,8 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
           {num('avgSpeedKmh', 'Average speed (estimates)', { step: 1, unit: 'km/h' })}
         </CardContent>
       </Card>
+        </>
+      ) : null}
 
       <div className="sticky bottom-2 z-10 flex items-center justify-end gap-3 rounded-md border bg-background/95 p-2 shadow-sm">
         <span className="text-xs text-muted-foreground" data-testid="settings-dirty">
@@ -310,6 +362,8 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
         </Button>
       </div>
 
+      {admin ? (
+        <>
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Effective planner values</CardTitle>
@@ -382,6 +436,8 @@ export function SettingsForm({ initial, effective, profiles }: { initial: Initia
           )}
         </CardContent>
       </Card>
+        </>
+      ) : null}
     </div>
   );
 }

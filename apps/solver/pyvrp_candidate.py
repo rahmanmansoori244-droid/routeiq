@@ -26,15 +26,19 @@ The model (all prices from the engine's own functions, in its units: 1 unit = 0.
               order (client k = solvable[k], matrix node k + 1)
   vehicles    one VehicleType per group of interchangeable usable trucks
   hard        cases and 0.1 kg units per load (dispatch_models.kg_units, TruckDay.max_kg_units),
-              hard receiving windows, truck hours (TruckDay: frozen return, same-day loading),
-              loads per truck (max_reloads = trips_left - 1), shift maximum (maximum route duration)
+              hard receiving windows (config.window_rule FINISH: the latest start is closing - stop
+              time, load_repack.latest_start_s), truck hours (TruckDay: frozen return, same-day
+              loading, the latest return), loads per truck (max_reloads = trips_left - 1), shift
+              maximum (maximum route duration; a truck-day that may need the driver break keeps its
+              length free, as the engine's search: dispatch_solver._search_day_end)
   costs       fixed + first trip, km per rate class, trip cost on each reload, driver pay per second
               of the truck day, overtime past overtime_after_min, plan continuity per truck
   priorities  every stop optional; prize = the engine's own drop penalty (strict priorities)
 Not expressible in PyVRP (the judge prices them exactly afterwards): preferred windows (tightened
 into the hard window when they carry a price: "prefhard"), the P1/P2 early-arrival preference,
-the loading time per case of the next load (80% of a full truck, as the engine's own search), and
-the driver-pay anchor of trucks with frozen loads.
+the loading time per case of the next load (80% of a full truck, as the engine's own search), the
+driver-pay anchor of trucks with frozen loads, and the driver break itself (the exact timing places
+it, the break-aware repack and feasibility.check_scenario hold every plan of this search to it).
 """
 from __future__ import annotations
 
@@ -299,10 +303,13 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     clients, n_tight = [], 0
     for k, s in enumerate(solvable):
         hs = (s.hard_start_min or 0) * 60
-        he = min((s.hard_end_min if s.hard_end_min is not None else ds.DAY_MIN * 2) * 60, horizon)
+        # config.window_rule FINISH: unloading finished by closing, so the latest START is closing -
+        # stop time, and a preferred end means "finished by" (the engine's one meaning of both).
+        he = min(LR.latest_start_s(s, cfg.window_rule), horizon)
         if prefhard and (s.pref_start_min is not None or s.pref_end_min is not None):
+            pe = LR.pref_end_bound_s(s, cfg.window_rule)
             a = max(hs, s.pref_start_min * 60 if s.pref_start_min is not None else hs)
-            b = min(he, s.pref_end_min * 60 if s.pref_end_min is not None else he)
+            b = min(he, pe if pe is not None else he)
             if a <= b:
                 hs, he = a, b
                 n_tight += 1
@@ -327,8 +334,11 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
         gap = ds._approx_gap_s(cfg, td)
         first = td.earliest_depart_s if td.ready_s is None else max(td.earliest_depart_s, td.ready_s + gap)
         kg_cap = (td.max_kg_units if td.max_kg_units > 0 else no_kg) if kg_active else None
+        # Driver break: as in the engine's search, a DUE truck-day keeps the break's length free of
+        # its shift (span and latest return); the exact timing places the break afterwards.
+        end_s, span_s = ds._search_day_end(td, first, shift_s)
         key = (td.max_cases, kg_cap, km_key, trip_units, int(round(fixed * ds.COST_SCALE)), min(first, td.latest_return_s),
-               td.latest_return_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, t.id if continuity else None)
+               end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None)
         groups.setdefault(key, []).append(td)
 
     prof_of: dict[tuple, int] = {}
@@ -336,7 +346,7 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     vtypes: list[dict] = []
     type_trucks: list[list[int]] = []
     for key, members in groups.items():
-        cases, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, cont_id = key
+        cases, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id = key
         pkey = (km_key, trip_units, cont_id)
         if pkey not in prof_of:
             M = np.rint(D * km_key / 1000.0).astype(np.int64)  # the engine: int(round(d * key / 1000)) per arc
@@ -350,11 +360,11 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
             np.fill_diagonal(full, 0)
             prof_of[pkey] = len(dist)
             dist.append(full)
-        if anchor is None:
-            if ot_coeff and cfg.overtime_after_min is not None and cfg.overtime_after_min * 60 < shift_s:
-                nominal, max_ot = cfg.overtime_after_min * 60, shift_s - cfg.overtime_after_min * 60
+        if anchor is None:  # the longest route: the shift maximum (less a DUE truck's break)
+            if ot_coeff and cfg.overtime_after_min is not None and cfg.overtime_after_min * 60 < span_s:
+                nominal, max_ot = cfg.overtime_after_min * 60, span_s - cfg.overtime_after_min * 60
             else:
-                nominal, max_ot = shift_s, 0
+                nominal, max_ot = span_s, 0
         else:
             # Frozen loads: the window already ends at anchor + shift maximum; only NEW overtime
             # counts (audit E4, load_repack.overtime_bound_s). Approximate: PyVRP counts from its own
@@ -616,9 +626,11 @@ def plan_of(result: dict, tds: list, solvable: list[DispatchStop]) -> tuple[LR.P
 
 
 def _asap(day: LR.Day, plan: LR.Plan, gaps: dict[int, int]) -> LR.TimedPlan:
-    """A timetable when the exact timing finds none (only with loading time per case, which the
-    model approximates like the engine's search): every load as early as the truck allows, with the
-    search's turnaround. The stage's fit repack then repairs it, as it repairs the engine's raw plans."""
+    """A timetable when the exact timing finds none (with loading time per case, which the model
+    approximates like the engine's search, or a driver break it cannot place): every load as early
+    as the truck allows, with the search's turnaround and no break. Only a hint: the stage's repacks
+    (break-aware when needed) and fit repack repair it, as they repair the engine's raw plans, and
+    every candidate is timed again exactly (load_repack.time_plan, the break included)."""
     out: LR.TimedPlan = {}
     for idx, loads in plan.items():
         td = day.by_idx[idx]

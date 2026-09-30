@@ -15,6 +15,7 @@
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
 import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './costs';
+import { breakLine, breakPlace, breakTimes } from './break-text';
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from './time';
 import { carriedStopText } from './carry-view';
@@ -118,6 +119,10 @@ export interface SolverRules {
   weightsToTenthKg: boolean;
   /** Only new overtime counted when choosing a truck (audit E4, owner decision 14). */
   newOvertimeOnly: boolean;
+  /** Unloading finished by closing (owner rule 29 Sep 2026); absent/false = it only had to start by closing. */
+  finishByClosing?: boolean;
+  /** The driver break the plan was made with (the solver's echo); absent/null = none planned. */
+  breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
 }
 
 export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
@@ -125,6 +130,8 @@ export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
   return {
     weightsToTenthKg: option?.weightUnitKg === 0.1,
     newOvertimeOnly: option?.newOvertimeOnly === true,
+    finishByClosing: option?.windowRule === 'FINISH',
+    breakRule: option?.breakRule ?? null,
   };
 }
 
@@ -606,7 +613,11 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
     return;
   }
   for (const t of rows) {
+    const withBreak = d.loads.find((x) => x.truckId === t.truckId && x.break);
     const note = [
+      withBreak?.break
+        ? `driver break ${breakTimes(withBreak.break)} ${withBreak.break.where === 'DEPOT' ? `at the depot before load ${withBreak.loadNo}` : `on the road, load ${withBreak.loadNo}`} (inside the truck day, paid)`
+        : '',
       t.basis === 'MIXED_LEGACY' ? `${t.earlier.toFixed(3)} ${cur} from loads costed the earlier way (no depot time or overtime)` : '',
       t.paidVsSpanMin ? `paid time differs from the truck day by ${t.paidVsSpanMin} min: a locked load keeps the share it was planned with` : '',
     ]
@@ -633,10 +644,10 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
 
 // Delivery-route table columns (1-based), shared by the header block and the route rows.
 const ROUTE_HEADS = [
-  'Seq', 'Customer code', 'Branch', 'Customer name', 'Priority', 'Type', 'ETA', 'Service start', 'Window', 'Service min',
+  'Seq', 'Customer code', 'Branch', 'Customer name', 'Priority', 'Type', 'ETA', 'Unloading', 'Window', 'Service min',
   'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Notes', 'Changed after planning', 'Received by (sign)',
 ];
-const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 9, 24, 8, 8, 10, 44, 20, 9, 10, 8, 40, 30, 18];
+const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 12, 24, 8, 8, 10, 44, 20, 9, 10, 8, 40, 30, 18];
 
 function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: DetailLoad, name: string) {
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 2 }], pageSetup: { ...LANDSCAPE } });
@@ -678,11 +689,17 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     put(ws, 4 + i, 6, k).font = { bold: true };
     put(ws, 4 + i, 9, v, f).alignment = { horizontal: 'left' };
   });
+  if (l.break) {
+    put(ws, 10, 1, 'Driver break').font = { bold: true };
+    put(ws, 10, 4, `${breakTimes(l.break)} ${breakPlace(l.break, l.stops.length)} (${l.break.lengthMin} min, never while unloading)`);
+  }
 
   // LOADING MANIFEST - what the warehouse puts on the truck.
   let r = 11;
   section(ws, r, 'LOADING MANIFEST');
-  put(ws, r, 4, 'Load exactly these cases; tick each line when loaded.').font = GREY;
+  put(ws, r, 4, `Load exactly these cases; tick each line when loaded.${
+    l.break?.where === 'DEPOT' ? ` The driver's break is ${breakTimes(l.break)} at the depot; loading continues meanwhile.` : ''
+  }`).font = GREY;
   r++;
   headRow(ws, r, ['#', 'SKU code', 'Description', '', 'Cases', 'Kg', 'Loaded']);
   ws.mergeCells(r, 3, r, 4);
@@ -732,6 +749,11 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       `Departure ${fmtHhmm(l.departMin)}${(l.masterChanged ?? []).filter((c) => c.kind === 'DEPOT').map((c) => ` · ${c.text}`).join('')}`, '', ''],
     fmts,
   );
+  // The driver break as its own row, where it is taken (never while unloading).
+  const breakRow = (row: number) =>
+    tableRow(ws, row, ['', 'BREAK', '', `Driver break ${l.break!.lengthMin} min`, '', '', fmtHhmm(l.break!.startMin), breakTimes(l.break!), '', null, null, null, '', '', null, null, '',
+      breakLine(l.break!, l.stops.length), '', ''], fmts);
+  if (l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0)) breakRow(r++);
   let running = 0;
   for (const s of l.stops) {
     running += s.legKm;
@@ -753,12 +775,13 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       r++,
       [
         s.sequence, s.customerCode, s.branchCode ?? '', s.customerName, `P${s.priority}`, s.customerType ?? '', fmtHhmm(s.etaMin),
-        fmtHhmm(s.serviceStartMin), s.window, s.serviceMin, s.cases, s.weightKg, skuText(s.skus), uniq(s.salesOrders).join(', '),
+        s.departureMin !== null ? `${fmtHhmm(s.serviceStartMin)}-${fmtHhmm(s.departureMin)}` : fmtHhmm(s.serviceStartMin), s.window, s.serviceMin, s.cases, s.weightKg, skuText(s.skus), uniq(s.salesOrders).join(', '),
         s.legKm, s.cumulativeKm ?? running, s.mapsUrl ? { text: 'Map', hyperlink: s.mapsUrl } : '', notes.join('; '),
         s.masterChanged.map((c) => c.text).join('; '), '',
       ],
       fmts,
     );
+    if (l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === s.sequence) breakRow(r++);
   }
   tableRow(
     ws,
@@ -1119,6 +1142,13 @@ export function tenantAssumptions(
     Weights: solver.weightsToTenthKg
       ? "each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)"
       : 'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
+    // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.
+    'Receiving hours': solver.finishByClosing
+      ? 'unloading must be finished by the end of the receiving hours'
+      : 'earlier rule: unloading had to start by closing and could run past it',
+    'Driver break': solver.breakRule
+      ? `${solver.breakRule.lengthMin} min, starting between ${fmtHhmm(solver.breakRule.startFromMin)} and ${fmtHhmm(solver.breakRule.startToMin)}, between stops or at the depot (it may overlap reloading and loading), never while unloading; inside the ${fmtDuration(cfg.driverShiftMaxMinutes)} shift maximum; paid driver time. Truck-days back for good by ${fmtHhmm(solver.breakRule.startToMin)}, or leaving for the first time at ${fmtHhmm(solver.breakRule.startFromMin)} or later, have none`
+      : 'not planned',
     'Preferred window penalty': `${cfg.prefWindowPenaltyPerMin} ${cur} per minute outside the preferred window (soft)`,
     'Road time factor (truck vs car)': noRoadLegs
       ? `not used in this plan: every distance is a straight-line estimate, timed at the average speed for estimates (the x${cfg.roadTimeFactor} setting applies to road legs only)`

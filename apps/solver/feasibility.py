@@ -11,7 +11,9 @@ seconds to minutes in dispatch_solver._min_of):
 
 * capacity: a load's cases (and kg, when the truck has a payload) from the request's stops; kg in
   0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
-* hard receiving windows: service starts inside the window;
+* hard receiving windows: service starts at or after opening, and unloading is finished by
+  closing (departure <= closing) under config.window_rule FINISH; under START (the earlier rule,
+  the default) service starts inside the window;
 * travel: each service start is at least the previous departure + the drive time (matrix), and
   the truck is back no earlier than the last departure + the drive back;
 * unloading: departure - service start == the service time that was sent;
@@ -23,7 +25,10 @@ seconds to minutes in dispatch_solver._min_of):
   every return before the depot closes and the truck's availability ends; first departure (the
   first frozen one when there is one) -> last return within the shift maximum;
 * loads per truck: frozen + new <= max trips; new loads never overlap a frozen one and carry the
-  load numbers after it.
+  load numbers after it;
+* driver break (config.break_min > 0, _check_break): a truck-day whose first departure is before
+  the break window and whose last return is after it holds one break of break_min, starting in the
+  window, at the depot between loads or on the road between two unloadings - never over one.
 
 Violation messages are for the dispatcher: plain words, clock times, minutes short.
 """
@@ -50,7 +55,7 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger("routeiq.dispatch.feasibility")
 
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
-CHECK_VERSION = 1
+CHECK_VERSION = 2  # 2: the receiving-hours rule FINISH (unloading finished by closing) and the driver break
 
 
 def _hhmm(m: float | int | None) -> str:
@@ -75,6 +80,9 @@ def check_scenario(
     """Check ``sc`` against ``req``. ``solvable`` + ``mx``: the matrix the scenario was planned on
     (node 0 = depot, node k + 1 = solvable[k]); without them drive times are not re-checked."""
     cfg = req.config
+    # Receiving hours: FINISH = unloading finished by closing (re-derived here on purpose, not
+    # load_repack.latest_start_s: this is the independent check).
+    finish_rule = cfg.window_rule == "FINISH"
     trucks = {t.id: t for t in req.trucks}
     stops = {s.stop_id: s for s in req.stops}
     node_of = {s.stop_id: k + 1 for k, s in enumerate(solvable)} if (solvable is not None and mx is not None) else None
@@ -198,7 +206,11 @@ def check_scenario(
                 if s is not None:
                     hs = s.hard_start_min or 0
                     he = s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2
-                    if not (hs <= st.service_start_min <= he) or not st.hard_window_ok:
+                    if finish_rule and s.hard_end_min is not None and st.departure_min > he:
+                        add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} finishes unloading at {_hhmm(st.departure_min)}, "
+                                           f"after its receiving hours end ({_hhmm(s.hard_end_min)}).",
+                            truck_id=tid, load_no=lno, stop_id=st.stop_id, short=st.departure_min - he)
+                    elif not (hs <= st.service_start_min <= he) or not st.hard_window_ok:
                         add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} is served at {_hhmm(st.service_start_min)}, outside its "
                                            f"receiving hours {_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}.",
                             truck_id=tid, load_no=lno, stop_id=st.stop_id,
@@ -217,14 +229,94 @@ def check_scenario(
             if ld.return_min > depot_close + TOL_MIN:
                 add("DEPOT_CLOSE", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the depot closes ({_hhmm(depot_close)}).",
                     truck_id=tid, load_no=lno, short=ld.return_min - depot_close)
+            if cfg.latest_return_min is not None and ld.return_min > cfg.latest_return_min + TOL_MIN:
+                add("SHIFT_LIMIT", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the latest return "
+                                   f"({_hhmm(cfg.latest_return_min)}).",
+                    truck_id=tid, load_no=lno, short=ld.return_min - cfg.latest_return_min)
             if ld.return_min > avail_to + TOL_MIN:
                 add("TRUCK_AVAILABILITY", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the truck's availability ends "
                                           f"({_hhmm(avail_to)}).", truck_id=tid, load_no=lno, short=ld.return_min - avail_to)
             prev_return, prev_what = ld.return_min, f"load {lno}"
 
+        _check_break(cfg, code, tid, frozen, loads, drive_min, add)
+
     status = "VIOLATED" if out else "VERIFIED"
     return FeasibilityReport(status=status, timing="EXACT" if timing == "EXACT" else "ESTIMATED", violations=out,  # type: ignore[arg-type]
                              checked_at_version=CHECK_VERSION, travel_checked=node_of is not None)
+
+
+def _check_break(cfg, code: str, tid: str, frozen: list, loads: list, drive_min, add) -> None:
+    """BREAK: the driver break of one truck-day, re-derived from the request and the emitted minutes
+    (config.break_min > 0). Needed when the day's first departure (frozen loads included) is before
+    the window start and its last return after the window end. Held by a recorded break of a frozen
+    load, a depot gap of at least the break that starts inside the window (between two loads; after
+    a frozen load only from the time the plan was made), or a declared break of a new load. Frozen
+    loads that ran through the window with none recorded are a warning of the plan, not a violation
+    (they were planned before the rule)."""
+    L, bf, bt = cfg.break_min, cfg.break_start_from_min, cfg.break_start_to_min
+    if L <= 0 or bf > bt or L >= cfg.shift_max_min:
+        return  # no break rule (the solver plans none and says why)
+    trips = sorted(frozen, key=lambda f: f.depart_min)
+    seq = [(f.depart_min, f.return_min, True) for f in trips] + [(ld.depart_min, ld.return_min, False) for ld in loads]
+    frozen_done = any(f.break_start_min is not None for f in trips) or any(
+        max(bf, a.return_min) <= bt and max(bf, a.return_min) + L <= b.depart_min for a, b in zip(trips, trips[1:]))
+    declared = [ld for ld in loads if ld.driver_break is not None]
+    window = f"to start between {_hhmm(bf)} and {_hhmm(bt)}"
+    if len(declared) > 1:
+        add("BREAK", f"Truck {code} has {len(declared)} driver breaks planned; it takes one.", truck_id=tid,
+            load_no=declared[1].load_no)
+    if frozen_done and declared:
+        add("BREAK", f"Truck {code} load {declared[0].load_no} plans a second driver break: its locked or dispatched loads "
+                     "already hold one.", truck_id=tid, load_no=declared[0].load_no)
+    last_frozen = max((f.return_min for f in trips), default=None)
+    for ld in declared:
+        b, lno = ld.driver_break, ld.load_no
+        where = f"Truck {code} load {lno}: the driver break {_hhmm(b.start_min)}-{_hhmm(b.end_min)}"
+        if not bf - TOL_MIN <= b.start_min <= bt + TOL_MIN:
+            add("BREAK", f"{where} starts outside its window ({window}).", truck_id=tid, load_no=lno)
+        if b.end_min - b.start_min < L:
+            add("BREAK", f"{where} is shorter than {L} min.", truck_id=tid, load_no=lno, short=L - (b.end_min - b.start_min))
+        if last_frozen is not None and b.start_min < last_frozen - TOL_MIN:
+            add("BREAK", f"{where} starts before its locked or dispatched loads are back ({_hhmm(last_frozen)}).",
+                truck_id=tid, load_no=lno)
+        if b.where == "DEPOT":
+            before = [r for d, r, _ in seq if r <= ld.depart_min + TOL_MIN and d < ld.depart_min]
+            prev_frozen = not any(not fz and d < ld.depart_min for d, _, fz in seq)
+            if before and b.start_min < max(before) - TOL_MIN:
+                add("BREAK", f"{where} at the depot starts before the truck is back ({_hhmm(max(before))}).",
+                    truck_id=tid, load_no=lno)
+            if prev_frozen and cfg.loading_from_min is not None and b.start_min < cfg.loading_from_min - TOL_MIN:
+                add("BREAK", f"{where} at the depot starts before this plan was made ({_hhmm(cfg.loading_from_min)}): "
+                             "time already spent does not count.", truck_id=tid, load_no=lno)
+            if b.start_min + L > ld.depart_min + TOL_MIN:
+                add("BREAK", f"{where} at the depot ends after the load leaves ({_hhmm(ld.depart_min)}).", truck_id=tid,
+                    load_no=lno, short=b.start_min + L - ld.depart_min)
+            continue
+        i, m = b.after_sequence, len(ld.stops)
+        if i is None or not 0 <= i <= m:
+            add("BREAK", f"{where} is not placed between two stops.", truck_id=tid, load_no=lno)
+            continue
+        a = ld.depart_min if i == 0 else ld.stops[i - 1].departure_min
+        z = ld.stops[i].service_start_min if i < m else ld.return_min
+        if b.start_min < a - TOL_MIN or b.start_min + L > z + TOL_MIN:
+            add("BREAK", f"{where} overlaps unloading or leaves the leg it is on ({_hhmm(a)}-{_hhmm(z)}).",
+                truck_id=tid, load_no=lno)
+        leg = drive_min(ld.stops[i - 1].stop_id if i > 0 else None, ld.stops[i].stop_id if i < m else None)
+        if leg is not None and z - a < leg + L - TOL_MIN:
+            add("BREAK", f"{where} does not fit on its leg: the drive takes {leg:.0f} min and the leg only "
+                         f"{z - a} min.", truck_id=tid, load_no=lno, short=leg + L - (z - a))
+    first = min(d for d, _, _ in seq)
+    last = max(r for _, r, _ in seq)
+    if declared or frozen_done or not (first < bf and last > bt):
+        return
+    for (d0, r0, fz0), (d1, _r1, fz1) in zip(seq, seq[1:]):
+        start = max(bf, r0, cfg.loading_from_min or 0) if (fz0 and not fz1) else max(bf, r0)
+        if start <= bt + TOL_MIN and start + L <= d1 + TOL_MIN:
+            return  # a depot gap that holds the break
+    if trips and trips[0].depart_min < bf and max(f.return_min for f in trips) > bt:
+        return  # frozen loads without a recorded break run through the window: a warning, not a violation
+    add("BREAK", f"Truck {code} works {_hhmm(first)}-{_hhmm(last)} through midday without the {L}-min driver break "
+                 f"({window}).", truck_id=tid)
 
 
 def safe_check(req: DispatchRequest, sc: DispatchScenario, **kw) -> FeasibilityReport:

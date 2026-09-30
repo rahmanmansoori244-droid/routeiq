@@ -16,6 +16,9 @@ export interface TenantPlannerConfig {
   driverShiftMaxMinutes: number;
   overtimeAfterMin: number;
   overtimeCostPerHour: number;
+  driverBreakMinutes: number;
+  driverBreakFromMin: number;
+  driverBreakToMin: number;
   reloadMinutes: number;
   loadingMinPerCase: number;
   serviceMinPerCase: number;
@@ -76,6 +79,9 @@ export const SETTING_LABELS: Record<ConfigBoundKey, string> = {
   shiftStartMin: 'First departure',
   driverShiftMaxMinutes: 'Driver shift maximum',
   overtimeAfterMin: 'Overtime after',
+  driverBreakMinutes: 'Driver break',
+  driverBreakFromMin: 'Break may start from',
+  driverBreakToMin: 'Break must start by',
   overtimeCostPerHour: 'Overtime cost per hour',
   reloadMinutes: 'Turnaround between loads',
   loadingMinPerCase: 'Loading minutes per case',
@@ -104,6 +110,12 @@ export function plannerSettingProblems(cfg: TenantPlannerConfig): { blocking: st
     warnings.push(
       `${SETTING_LABELS.overtimeAfterMin} (${fmtHhmm(cfg.overtimeAfterMin)} h) is after the ${SETTING_LABELS.driverShiftMaxMinutes.toLowerCase()} (${fmtHhmm(cfg.driverShiftMaxMinutes)} h), so overtime is never costed. Check Settings.`,
     );
+  }
+  if (cfg.driverBreakMinutes > 0 && cfg.driverBreakFromMin > cfg.driverBreakToMin) {
+    warnings.push(`The driver break may start from ${fmtHhmm(cfg.driverBreakFromMin)}, after its latest start ${fmtHhmm(cfg.driverBreakToMin)}: no break is planned. Check Settings.`);
+  }
+  if (cfg.driverBreakMinutes > 0 && cfg.driverBreakMinutes >= cfg.driverShiftMaxMinutes) {
+    warnings.push(`The driver break (${cfg.driverBreakMinutes} min) is not shorter than the driver shift maximum: no break is planned. Check Settings.`);
   }
   return { blocking, warnings };
 }
@@ -160,6 +172,9 @@ export function dispatchConfigFromTenant(
     config: {
       shift_start_min: cfg.shiftStartMin,
       shift_max_min: cfg.driverShiftMaxMinutes,
+      // Owner: "18:00 is the latest return" - an absolute time from the tenant's own first
+      // departure, kept when a same-day plan moves shift_start_min to now + turnaround.
+      latest_return_min: cfg.shiftStartMin + cfg.driverShiftMaxMinutes,
       overtime_after_min: cfg.overtimeAfterMin,
       overtime_cost_per_hour: cfg.overtimeCostPerHour,
       reload_min: cfg.reloadMinutes,
@@ -171,6 +186,14 @@ export function dispatchConfigFromTenant(
       strict_priorities: true,
       priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
       pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
+      // Owner rule (29 Sep 2026), not a setting: unloading is finished by the end of the receiving
+      // hours. Each load keeps the rule the solver REPORTS it planned with (PlanRules.windowRule).
+      window_rule: 'FINISH',
+      // Driver break (owner rule 29-30 Sep 2026; 0 = none). Each load keeps the break rule the
+      // solver REPORTS it planned with (PlanRules.break), never what was asked.
+      break_min: cfg.driverBreakMinutes,
+      break_start_from_min: cfg.driverBreakFromMin,
+      break_start_to_min: cfg.driverBreakToMin,
       use_margin: true,
       distance_provider: routing.provider,
       osrm_url: cfg.osrmUrl ?? null,
@@ -210,7 +233,21 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       source: 'SETTING',
       note: `a plan made on the delivery day itself starts from now + ${cfg.reloadMinutes} min (the turnaround between loads) when that is later, and each new load also waits for its loading per case from now; locked, loading and dispatched loads keep their times`,
     },
-    { label: 'Driver shift maximum', value: `${hm(cfg.driverShiftMaxMinutes)} h`, source: 'SETTING', note: 'first departure to last return of a truck' },
+    {
+      label: 'Driver shift maximum',
+      value: `${hm(cfg.driverShiftMaxMinutes)} h`,
+      source: 'SETTING',
+      note: `first departure to last return of a truck: leaving at ${fmtHhmm(cfg.shiftStartMin)}, it is back by ${fmtHhmm(cfg.shiftStartMin + cfg.driverShiftMaxMinutes)} at the latest${cfg.driverBreakMinutes > 0 ? ' (the driver break is included)' : ''}`,
+    },
+    {
+      label: 'Driver break',
+      value: cfg.driverBreakMinutes > 0 ? `${cfg.driverBreakMinutes} min, starting ${fmtHhmm(cfg.driverBreakFromMin)}-${fmtHhmm(cfg.driverBreakToMin)}` : 'none',
+      source: 'SETTING',
+      note:
+        cfg.driverBreakMinutes > 0
+          ? `one per truck-day that works through midday, between stops or at the depot (it may overlap reloading), never while unloading; inside the shift and paid. None for a truck-day back for good by ${fmtHhmm(cfg.driverBreakToMin)} or leaving for the first time at ${fmtHhmm(cfg.driverBreakFromMin)} or later`
+          : 'no driver break is planned (set its length in Settings)',
+    },
     {
       label: 'Driver cost',
       value: `${cfg.driverCostPerHour} ${currency} per hour`,
@@ -233,12 +270,23 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       label: 'Unloading time',
       value: `customer's own time (default ${cfg.defaultServiceTimeMin} min) + ${cfg.serviceMinPerCase} min per case`,
       source: 'SETTING',
-      note: 'a confirmed customer time wins, then its customer type, then the default',
+      note: "a confirmed customer time wins, then its customer type, then the default; each truck visit of a split delivery gets the customer's full time plus the per-case time of its own cases",
+    },
+    {
+      label: 'Receiving hours',
+      value: 'unloading must be finished by the end of the receiving hours',
+      source: 'PLANNER',
+      note: 'a customer whose unloading takes longer than its receiving hours cannot be planned',
     },
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
     { label: 'Fuel price', value: cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${currency} per litre` : '0 (fuel not costed separately)', source: 'SETTING' },
-    { label: 'Preferred-window penalty', value: `${cfg.prefWindowPenaltyPerMin} ${currency} per minute outside`, source: 'SETTING', note: 'soft: hard windows are never broken' },
+    {
+      label: 'Preferred-window penalty',
+      value: `${cfg.prefWindowPenaltyPerMin} ${currency} per minute outside`,
+      source: 'SETTING',
+      note: 'soft: per minute that unloading starts before the preferred start or finishes after the preferred end; receiving hours are never broken',
+    },
     {
       label: 'Distances',
       value: routing.provider === 'OSRM' ? 'road distances (OSRM)' : 'straight-line estimates, labelled Estimated km',

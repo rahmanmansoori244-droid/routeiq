@@ -162,6 +162,7 @@ export function load(id: string, truckId: string, truckCode: string, loadNo: num
     masterChanged: [],
     timing: { status: 'VERIFIED', ok: true },
     carriedAway: 0,
+    break: null,
   };
 }
 

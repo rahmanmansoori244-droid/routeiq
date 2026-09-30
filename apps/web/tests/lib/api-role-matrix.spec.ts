@@ -128,7 +128,7 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/status': 'ANY',
   'POST /api/runs/[id]/unlock': 'SUPERVISOR',
   'GET /api/tenant/config': 'TENANT_ADMIN',
-  'PATCH /api/tenant/config': 'TENANT_ADMIN',
+  'PATCH /api/tenant/config': 'PLANNER', // the dispatcher saves the driver shift only (adminOnlyFields)
   'GET /api/trucks': 'ANY',
   'POST /api/trucks': 'TENANT_ADMIN',
   'GET /api/trucks/[id]': 'ANY',

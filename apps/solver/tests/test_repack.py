@@ -272,7 +272,8 @@ def _day_for(r):
     values, _ = ds._service_values(r.stops, r.config, False)
     day = LR.Day(stops=r.stops, trucks=[t for t in tds if t.usable], D=mx.distance_m, T=mx.duration_s,
                  shift_max_s=r.config.shift_max_min * 60, reload_s=r.config.reload_min * 60,
-                 loading_s_per_case=r.config.loading_min_per_case * 60, values=values)
+                 loading_s_per_case=r.config.loading_min_per_case * 60, values=values,
+                 window_rule=r.config.window_rule)
     return day, tds
 
 
