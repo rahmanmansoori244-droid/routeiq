@@ -81,7 +81,7 @@ const MESSAGES: Record<DispatchReason, string> = {
     "SOLVER_URL answers with a redirect, and an optimization does not follow one: plans cannot be optimized. Set SOLVER_URL to the solver's own address (on Railway, its private address).",
   SOLVER_READY_UNSUPPORTED: 'The route optimizer is an older version without the readiness check: the token could not be verified.',
   SOLVER_WORKERS_FAILED:
-    'The route optimizer could not start its worker processes recently, or they stopped during an optimization: an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped. This clears when a later optimization starts them, or by itself 15 minutes after the failure. If it repeats, check the solver service\'s memory and process limits and restart it.',
+    'The route optimizer could not start its worker processes recently, or they stopped during an optimization: an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped. This stays for at least 5 minutes, even if optimizations work again meanwhile, and clears by itself 15 minutes after the failure, or sooner once an optimization starts them again after those 5 minutes. If it repeats, check the solver service\'s memory and process limits and restart it.',
   SOLVER_ERROR: 'The route optimizer, or a proxy in front of it, answered the readiness check with an error.',
 };
 

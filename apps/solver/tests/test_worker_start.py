@@ -27,13 +27,11 @@ TOKEN = "unit-test-solver-token"
 
 @pytest.fixture(autouse=True)
 def _production_defaults(monkeypatch):
-    """Production settings: worker processes, no in-process fallback; a fresh worker health."""
+    """Production settings: worker processes, no in-process fallback. (conftest.py gives every test
+    a fresh worker health.)"""
     monkeypatch.delenv("SOLVER_PARALLEL", raising=False)
     monkeypatch.delenv("SOLVER_ALLOW_INPROCESS_FALLBACK", raising=False)
     monkeypatch.delenv("SOLVER_WORKER_START_SEC", raising=False)
-    ds.WORKER_HEALTH.started()
-    yield
-    ds.WORKER_HEALTH.started()
 
 
 def _pools_fail(monkeypatch, *, after: int = 0) -> dict:
@@ -87,6 +85,31 @@ def _process_starts_refused(monkeypatch, *, after: int | None = None) -> dict:
 
     monkeypatch.setattr(SpawnProcess, "_Popen", staticmethod(popen))
     return state
+
+
+def _process_starts_counted(monkeypatch) -> dict:
+    """Counts multiprocessing's spawn process starts (each worker process a Pool starts, or starts
+    to replace one that died): state["n"]; state["seen"] is set at each one."""
+    real = SpawnProcess._Popen
+    state = {"n": 0, "seen": threading.Event()}
+
+    def popen(process_obj):
+        state["n"] += 1
+        state["seen"].set()
+        return real(process_obj)
+
+    monkeypatch.setattr(SpawnProcess, "_Popen", staticmethod(popen))
+    return state
+
+
+def _ready(monkeypatch) -> dict:
+    """The solver's GET /ready, as the web's /api/health reads it."""
+    import main
+
+    monkeypatch.setattr(main, "SOLVER_TOKEN", TOKEN)
+    r = TestClient(main.app).get("/ready", headers={"X-Solver-Token": TOKEN})
+    assert r.status_code == 200, r.text
+    return r.json()
 
 
 def _pools_made(monkeypatch) -> list:
@@ -221,18 +244,19 @@ def test_workers_that_die_while_starting_with_no_replacement_refuse_within_secon
     """(review) The out-of-memory / process-limit case itself: the pool's two processes die while
     starting, and no replacement can start (OSError EAGAIN), so Pool's worker-handler thread dies.
     Closing that pool used to wait forever (its task handler never got the stop sentinel): no 503,
-    no ERROR line, the slot held for good. Now: refused within the start wait, the administrator
-    alerted, and the pool really cleaned up."""
+    no ERROR line, the slot held for good. Now: refused at once - the dead worker handler is seen,
+    long before the start wait runs out (20 s here, so the two cannot be confused) - the
+    administrator alerted, and the pool really cleaned up."""
     monkeypatch.setenv("ROUTEIQ_TEST_WORKER_START_EXIT", "1")
-    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "3")
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "20")
     _process_starts_refused(monkeypatch, after=2)  # the pool's two processes start; no replacement can
     pools = _pools_made(monkeypatch)
     ran = _no_search_here(monkeypatch)
     caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
     t0 = time.monotonic()
-    out = _within(45, lambda: optimize_dispatch(_day(search_mode="THOROUGH", max_search_sec=1200)))
+    out = _within(60, lambda: optimize_dispatch(_day(search_mode="THOROUGH", max_search_sec=1200)))
     assert isinstance(out.get("error"), WorkersUnavailable), out
-    assert out["at"] - t0 < 3 + 8, out["at"] - t0
+    assert out["at"] - t0 < 10, out["at"] - t0  # about 2 s; the start wait would be 20 s
     assert ran == []
     assert ds.WORKER_HEALTH.status()["status"] == "failed"
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
@@ -281,17 +305,22 @@ def test_recommended_worker_killed_with_no_replacement_answers_503_within_second
     _all_stopped(pools)
 
 
-def test_idle_worker_killed_during_recommended_keeps_the_plan_within_seconds(monkeypatch):
+def test_idle_worker_killed_during_recommended_keeps_the_plan_within_seconds(monkeypatch, caplog):
     """(review) RECOMMENDED searches in worker A; the idle worker B, waiting for a task and holding
     the task queue's read lock, is killed. The pool starts a replacement, but no worker can take a
     task again: RECOMMENDED finished, the alternatives never started, and closing the pool then
     waited forever - the finished plan never came back. Now the stuck pool is noticed within
     SOLVER_WORKER_START_SEC (not at the alternatives' deadline), the alternatives are skipped, the
-    load re-check gets fresh workers, and the recommended plan comes back re-checked."""
+    load re-check gets fresh workers, and the recommended plan comes back re-checked.
+
+    The administrator is still told (second review): the ERROR line, and /ready failed after the
+    solve. The load re-check's fresh pool starts seconds after the alert and used to clear /ready
+    at once, so monitoring polling the web's /api/health never saw the pool that broke."""
     monkeypatch.setenv("SOLVER_WORKER_START_SEC", "3")
     monkeypatch.setenv("SOLVER_ALT_GRACE_SEC", "120")  # the alternatives' own deadline is minutes away
     killed = _kill_a_worker_during_recommended(monkeypatch, "idle")
     pools = _pools_made(monkeypatch)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
     r = _day(time_limit_sec=6)
 
     out = _within(120, lambda: optimize_dispatch(r))
@@ -307,6 +336,12 @@ def test_idle_worker_killed_during_recommended_keeps_the_plan_within_seconds(mon
     assert not any("not re-checked" in w for w in sc.warnings), sc.warnings  # the fresh workers re-checked it
     assert len(pools) == 2  # the stuck one, and the load re-check's
     _all_stopped(pools)
+    alerts = [m.getMessage() for m in caplog.records if m.levelno == logging.ERROR]
+    assert len(alerts) == 1 and alerts[0].startswith(
+        "WORKERS_UNAVAILABLE run=r: the solver's worker processes stopped working during the search"), alerts
+    assert ds.WORKER_HEALTH.status()["status"] == "failed"
+    ready = _ready(monkeypatch)
+    assert ready["ok"] is False and ready["workers"]["status"] == "failed", ready
 
 
 @pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
@@ -398,6 +433,121 @@ def test_closing_a_pool_is_bounded_and_alerts_when_its_cleanup_hangs(monkeypatch
     _all_stopped([w])
 
 
+def test_a_pool_that_starts_soon_after_a_failure_does_not_clear_the_alert(monkeypatch, caplog):
+    """(second review) A pool did not close in time: the ERROR line and /ready failed. A second
+    later the next pool starts fine - this solve's load re-check, or another company's solve - and
+    that start used to clear /ready at once, so monitoring polling the web's /api/health every few
+    minutes never saw the failure. It stays reported for at least WORKER_ALERT_MIN_SEC (5 minutes)
+    whatever pools start meanwhile; only a pool that starts after that clears it before
+    WORKER_ALERT_SEC."""
+    monkeypatch.setattr(ds, "POOL_CLOSE_SEC", 1.0)
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    w = ds._Workers(1, run_id="r")
+    real_terminate = w.pool.terminate
+    release = threading.Event()
+    w.pool.terminate = lambda: release.wait(60) and real_terminate()
+    try:
+        assert w.close() is False
+    finally:
+        release.set()
+    fresh = ds._start_workers(1, None, "r", "load re-check")
+    assert fresh is not None and fresh.close() is True
+    errors = [m.getMessage() for m in caplog.records if m.levelno == logging.ERROR]
+    assert len(errors) == 1 and "did not stop within 1 s" in errors[0], errors
+    assert ds.WORKER_HEALTH.status()["status"] == "failed"
+    ready = _ready(monkeypatch)
+    assert ready["ok"] is False and ready["workers"]["status"] == "failed", ready
+    assert ready["workers"]["cause"] == "Pool.terminate() did not return"
+
+    # Past the minimum window (made 0 here), a pool that starts is a recovery: /ready is ok again.
+    assert ds.WORKER_ALERT_MIN_SEC == 300
+    monkeypatch.setattr(ds, "WORKER_ALERT_MIN_SEC", 0)
+    later = ds._start_workers(1, None, "r2", "search")
+    assert later is not None and later.close() is True
+    assert ds.WORKER_HEALTH.status() == {"status": "ok"}
+    assert _ready(monkeypatch)["ok"] is True
+    for t in threading.enumerate():
+        if t.name == "routeiq-pool-close":
+            t.join(10)
+    _all_stopped([w, fresh, later])
+
+
+def test_closing_a_pool_starts_no_replacement_process(monkeypatch):
+    """(second review) close() first tells Pool's worker handler to stop, then kills the worker
+    processes. In the other order the handler replaces each worker as it is killed: a new process
+    started at the end of every solve, and - in the out-of-memory or process-limit case rule 22 is
+    for - more attempts to start processes while cleaning up. Checked on a healthy pool, and on one
+    whose idle worker was killed (the handler replaced it; the replacement must not be replaced)."""
+    starts = _process_starts_counted(monkeypatch)
+    w = ds._start_workers(2, None, "r", "search")
+    assert w is not None and starts["n"] == 2
+    starts["n"] = 0
+    assert w.close() is True
+    assert starts["n"] == 0, f"{starts['n']} replacement process(es) started while the pool was being closed"
+    _all_stopped([w])
+
+    broken = ds._start_workers(2, None, "r", "search")
+    assert broken is not None
+    starts["seen"].clear()
+    victim = broken.pool._pool[0]
+    victim.kill()
+    victim.join(10)
+    assert starts["seen"].wait(15), "the pool never replaced its killed worker"
+    starts["n"] = 0
+    assert broken.close() is True
+    assert starts["n"] == 0, f"{starts['n']} replacement process(es) started while the pool was being closed"
+    _all_stopped([broken])
+
+
+def test_a_task_queued_behind_a_busy_worker_is_not_a_broken_pool(monkeypatch, caplog):
+    """(second review) _await_all calls a pool broken when a task has waited to start for
+    SOLVER_WORKER_START_SEC while a worker was free - never while every worker is busy (busy()).
+    That is common in production: RECOMMENDED + MIN_TRUCKS get a 1-worker pool and two load
+    re-check jobs, and a THOROUGH re-check job can run 30 s, the default start wait. Here: a
+    1-worker pool, a 1 s start wait, a 4 s task and a quick one queued behind it. Both finish, and
+    nobody is alerted."""
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    w = ds._start_workers(1, None, "r", "load re-check")  # started with the default wait (a cold start)
+    assert w is not None
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "1")
+    try:
+        jobs = {"slow": w.submit(time.sleep, 4, "slow"), "quick": w.submit(ds._ping, None, "quick")}
+        t0 = time.monotonic()
+        out = ds._await_all(w, jobs, t0 + 30)
+    finally:
+        assert w.close() is True
+    assert out["slow"] == ("ok", None), out
+    assert out["quick"][0] == "ok", out
+    assert time.monotonic() - t0 < 25
+    assert [m.getMessage() for m in caplog.records if m.levelno >= logging.ERROR] == []
+    assert ds.WORKER_HEALTH.status() == {"status": "ok"}
+    _all_stopped([w])
+
+
+def test_the_alert_is_written_before_the_failed_pool_is_closed(monkeypatch, caplog):
+    """(second review) A pool that did not start: _start_workers writes the ERROR line and /ready's
+    failed status before it closes that pool, so the alert exists even when closing misbehaves
+    (closing can take about 15 s: its own waits plus POOL_CLOSE_SEC)."""
+    monkeypatch.setenv("ROUTEIQ_TEST_WORKER_START_EXIT", "1")
+    monkeypatch.setenv("SOLVER_WORKER_START_SEC", "2")
+    caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
+    pools = _pools_made(monkeypatch)
+    seen: list = []
+    real_close = ds._Workers.close
+
+    def close(self):
+        alerted = any(m.levelno == logging.ERROR and m.getMessage().startswith("WORKERS_UNAVAILABLE run=r:")
+                      for m in caplog.records)
+        seen.append((ds.WORKER_HEALTH.status()["status"], alerted))
+        return real_close(self)
+
+    monkeypatch.setattr(ds._Workers, "close", close)
+    with pytest.raises(WorkersUnavailable):
+        ds._start_workers(2, None, "r", "search")
+    assert seen == [("failed", True)], seen
+    _all_stopped(pools)
+
+
 def test_the_in_process_fallback_only_when_explicitly_allowed(monkeypatch, caplog):
     """SOLVER_ALLOW_INPROCESS_FALLBACK=1 (development and tests): the old behaviour, a plan solved
     inside this process, with a warning. Unset (production): refused, as above."""
@@ -478,14 +628,23 @@ def test_a_started_pool_is_proved_and_closes_once(monkeypatch):
 
 
 def test_worker_health_expires_and_clears(monkeypatch):
+    """/ready's failed status lasts WORKER_ALERT_SEC (15 minutes) after the last failure, or until a
+    pool starts WORKER_ALERT_MIN_SEC (5 minutes) or more after it (second review: a pool that starts
+    within those 5 minutes clears nothing)."""
     ds.WORKER_HEALTH.failed("OSError: test")
     s = ds.WORKER_HEALTH.status()
     assert s["status"] == "failed" and s["cause"] == "OSError: test" and s["failed_at"]
+    ds.WORKER_HEALTH.started()  # a pool started seconds later: still reported
+    assert ds.WORKER_HEALTH.status()["status"] == "failed"
     monkeypatch.setattr(ds, "WORKER_ALERT_SEC", 0)
     assert ds.WORKER_HEALTH.status() == {"status": "ok"}
     monkeypatch.setattr(ds, "WORKER_ALERT_SEC", 900)
     assert ds.WORKER_HEALTH.status()["status"] == "failed"
+    monkeypatch.setattr(ds, "WORKER_ALERT_MIN_SEC", 0)  # the minimum window is over
     ds.WORKER_HEALTH.started()  # a pool started again
+    assert ds.WORKER_HEALTH.status() == {"status": "ok"}
+    ds.WORKER_HEALTH.failed("OSError: again")
+    ds.WORKER_HEALTH.reset()  # tests start from a clean state
     assert ds.WORKER_HEALTH.status() == {"status": "ok"}
 
 
@@ -517,12 +676,18 @@ def test_over_http_a_plain_503_the_slot_comes_back_ready_alerts_and_a_retry_work
     ready = client.get("/ready", headers=headers).json()
     assert ready["ok"] is False and ready["workers"]["status"] == "failed"
 
-    # The processes can start again (the solver recovered): the dispatcher's retry works, and
-    # /ready is back to ok.
+    # The processes can start again (the solver recovered): the dispatcher's retry works. /ready
+    # still reports the failure a few seconds old (second review: it stays for WORKER_ALERT_MIN_SEC,
+    # so monitoring sees it) ...
     state["fail"] = False
     again = client.post("/optimize-dispatch", json=body, headers=headers)
     assert again.status_code == 200, again.text
     assert again.json()["scenarios"][0]["status"] == "OPTIMIZED"
+    ready = client.get("/ready", headers=headers).json()
+    assert ready["ok"] is False and ready["workers"]["status"] == "failed"
+    # ... and an optimization that starts its processes after that window clears it.
+    monkeypatch.setattr(ds, "WORKER_ALERT_MIN_SEC", 0)
+    assert client.post("/optimize-dispatch", json=body, headers=headers).status_code == 200
     ready = client.get("/ready", headers=headers).json()
     assert ready["ok"] is True and ready["workers"] == {"status": "ok"}
 

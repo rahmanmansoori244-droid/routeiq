@@ -158,10 +158,12 @@ def ready_endpoint(
     would be accepted. It never solves, takes no dispatch slot and reads no request body; the
     routing status is the cached one /health reports.
 
-    Rule 22: ``workers`` says how the last worker pool start went. After a failed one (the solve was
-    refused with 503 "The planner is busy or restarting") it is "failed" and ``ok`` is false - until
-    a pool starts again, or WORKER_ALERT_SEC later - so the web's /api/health answers "degraded"
-    (SOLVER_WORKERS_FAILED) and monitoring alerts an administrator.
+    Rule 22: ``workers`` says whether the worker processes failed recently. After a failed pool
+    start (the solve was refused with 503 "The planner is busy or restarting"), a pool that broke
+    during a solve, or one that did not close, it is "failed" and ``ok`` is false - for
+    WORKER_ALERT_SEC (15 minutes), or until a pool starts WORKER_ALERT_MIN_SEC (5 minutes) or more
+    after the failure; a pool that starts sooner clears nothing - so the web's /api/health answers
+    "degraded" (SOLVER_WORKERS_FAILED) and monitoring alerts an administrator.
     """
     _check_token(x_solver_token)
     workers = WORKER_HEALTH.status()

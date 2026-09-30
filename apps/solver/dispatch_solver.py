@@ -144,11 +144,15 @@ THOROUGH_REPACK_CAP_SEC = 30
 # PLANNER_UNAVAILABLE_MSG. Nothing is then searched inside the API process: that used to freeze
 # the whole API with no deadline for the length of the search (20 minutes and more for THOROUGH).
 # Env SOLVER_WORKER_START_SEC overrides the wait; SOLVER_ALLOW_INPROCESS_FALLBACK=1 keeps the old
-# in-process fallback for development and tests only. After a failed start, /ready reports the
-# workers as failed for WORKER_ALERT_SEC (or until a pool starts again): the web's /api/health is
-# then "degraded" with SOLVER_WORKERS_FAILED.
+# in-process fallback for development and tests only. After a failed start (or a pool that broke),
+# /ready reports the workers as failed for WORKER_ALERT_SEC, or until a pool starts at least
+# WORKER_ALERT_MIN_SEC after the failure: the web's /api/health is then "degraded" with
+# SOLVER_WORKERS_FAILED. Second review: a pool that starts sooner - the load re-check's fresh one,
+# seconds after the pool broke, or another company's solve - used to clear it at once, so
+# monitoring that polls /api/health every few minutes never saw the failure.
 WORKER_START_SEC = 30
 WORKER_ALERT_SEC = 900
+WORKER_ALERT_MIN_SEC = 300
 PLANNER_UNAVAILABLE_MSG = "The planner is busy or restarting - try again in a minute."
 # Rule 22 (review): the longest a request waits for a worker pool to close. CPython's Pool.terminate
 # can wait forever on a pool that broke (see _stop_pool_processes); past this the cleanup goes on
@@ -1646,8 +1650,9 @@ def worker_start_sec() -> float:
 
 
 class _WorkerHealth:
-    """How the last worker pool start of this solver process went, for /ready (rule 22): "failed"
-    from a failed start until a later start succeeds, or WORKER_ALERT_SEC after it."""
+    """Whether this solver process's worker pools failed recently, for /ready (rule 22): "failed"
+    from a failed start (or a pool that broke, or did not close) until WORKER_ALERT_SEC after the
+    last failure, or until a pool starts at least WORKER_ALERT_MIN_SEC after it (started())."""
 
     def __init__(self) -> None:
         import threading
@@ -1666,6 +1671,15 @@ class _WorkerHealth:
             self._cause = cause[:300]
 
     def started(self) -> None:
+        """A pool started and ran its first task. That is a recovery only WORKER_ALERT_MIN_SEC or
+        more after the last failure (second review): sooner, it is usually the same solve's load
+        re-check or another company's solve, and clearing then hid the failure from monitoring."""
+        with self._lock:
+            if self._failed_mono is not None and time.monotonic() - self._failed_mono >= WORKER_ALERT_MIN_SEC:
+                self._failed_mono = None
+
+    def reset(self) -> None:
+        """Forget any failure (tests: each one starts from a clean state)."""
         with self._lock:
             self._failed_mono = None
 
@@ -1722,8 +1736,9 @@ _ALERT_ADVICE = "If this repeats, check the solver service's memory and process 
 
 def _workers_alert(run_id: str, happened: str, cause: str, *, nothing_searched: bool = True) -> None:
     """Rule 22: tell the administrator. /ready reports the workers as failed (WORKER_HEALTH, the
-    web's /api/health: degraded) and one ERROR line starts with the stable code WORKERS_UNAVAILABLE
-    (alert on the code, not on the cause text, which depends on the error)."""
+    web's /api/health: degraded) and one ERROR line whose message starts with the stable code
+    WORKERS_UNAVAILABLE (after the log format's timestamp, level and logger name: alert on a
+    line that contains the code, not on the cause text, which depends on the error)."""
     WORKER_HEALTH.failed(cause)
     log.error("WORKERS_UNAVAILABLE run=%s: %s (%s).%s %s", run_id, happened, cause,
               " Nothing is searched inside the API process (rule 22)." if nothing_searched else "", _ALERT_ADVICE)

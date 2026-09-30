@@ -238,7 +238,11 @@ describe('checkDispatchReadiness', () => {
     // Both cases the signal covers (review): a refused optimization, or only a skipped load re-check
     // (the plan itself was returned) - and that it clears by itself.
     expect(r.message).toContain('an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped');
-    expect(r.message).toContain('or by itself 15 minutes after the failure');
+    expect(r.message).toContain('clears by itself 15 minutes after the failure');
+    // Second review: a pool that starts seconds later (the same plan's load re-check, another
+    // company's solve) no longer clears it, so monitoring polling every few minutes sees it.
+    expect(r.message).toContain('stays for at least 5 minutes, even if optimizations work again meanwhile');
+    expect(r.message).not.toMatch(/clears when a later optimization starts them/);
     expect(r.message).not.toMatch(/so it refused optimizations/);
     expect(overallReadiness('up', r)).toEqual({ status: 'degraded', httpStatus: 200 });
     const recovered = await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: { ...READY_BODY, workers: { status: 'ok' } } }).f);

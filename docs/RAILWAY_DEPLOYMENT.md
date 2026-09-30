@@ -184,10 +184,13 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
 - **When the processes stop during a search** (for example the out-of-memory killer ends one, and no replacement can start;
   or a process ends while it waits for work and leaves the others unable to take any), the solver notices within seconds - at
   most `SOLVER_WORKER_START_SEC` for processes that stop taking work - instead of at the search's deadline (20 minutes for a
-  Thorough plan). If the recommended plan was not found yet, the optimization is refused the same way (503
-  `WORKERS_UNAVAILABLE`, the same message). If it was, it is kept: the other options are skipped and its loads are re-checked
-  with fresh processes, or re-timed exactly when those cannot start either (below). Closing a broken set of processes never
-  holds the answer for more than about 10 s.
+  Thorough plan). The optimization is refused the same way (503 `WORKERS_UNAVAILABLE`, the same message) only when the
+  recommended plan's own search cannot go on: the process running it stopped and no replacement can start, or its search
+  could not start at all (for example every process stopped while the road distances were fetched). When another process
+  stops while the recommended search is running, that search goes on and the recommended plan is kept: the other options are
+  skipped and its loads are re-checked with fresh processes, or re-timed exactly when those cannot start either (below). So a
+  process that stops during a search does not always mean a refused optimization: look for the ERROR line (below). Closing a
+  broken set of processes never holds the answer for more than about 10 s.
 - **Variables** (names only; none is needed in production):
   - `SOLVER_ALLOW_INPROCESS_FALLBACK` on the solver: **never set it on Railway.** `1` brings back the old in-process fallback,
     for local development and tests only. When it is set the solver logs an **error** at startup on Railway (a warning
@@ -195,22 +198,27 @@ Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have
   - `SOLVER_WORKER_START_SEC` on the solver: optional (default 30, 1 to 600). How long a new pool may take to run its first
     task before the optimization is refused. Leave it unset unless the solver's start-up is measured to be slower.
 - **What the alert looks like.** Three signals, all on each refusal:
-  - The **solver log** has one ERROR line that starts with `WORKERS_UNAVAILABLE`, for example:
-    `ERROR routeiq.dispatch: WORKERS_UNAVAILABLE run=<plan id>: the solver could not start its worker processes for the search
+  - The **solver log** has an ERROR line from `routeiq.dispatch` that contains `WORKERS_UNAVAILABLE` (on a refusal, a second
+    one from `routeiq.api` follows). Like every solver log line it starts with the time, the level and the logger name, and
+    the code comes after them, for example:
+    `2026-09-30 02:00:00,123 ERROR routeiq.dispatch: WORKERS_UNAVAILABLE run=<plan id>: the solver could not start its worker processes for the search
     (BlockingIOError: [Errno 11] Resource temporarily unavailable). Nothing is searched inside the API process (rule 22). If
     this repeats, check the solver service's memory and process limits and restart it.`, followed by
-    `ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start or
+    `2026-09-30 02:00:00,125 ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start or
     stopped working (...)`. The text in brackets is the cause and depends on the error: `BlockingIOError: [Errno 11] Resource
     temporarily unavailable` at the process limit, `OSError: [Errno 12] Cannot allocate memory` when memory is short. When the
     processes stop during a search the line says `the solver's worker processes stopped working during the search (...)`
-    instead, and `a worker pool did not stop within 10 s ...` when closing them hung. **Alert on the `WORKERS_UNAVAILABLE`
-    prefix, never on the cause text.**
+    instead, and `a worker pool did not stop within 10 s ...` when closing them hung. **Alert on any solver log line that
+    contains `WORKERS_UNAVAILABLE` (a substring match), never on the cause text.** A rule that only matches lines that start
+    with the code never fires for the solver, because of the time in front.
   - The **web log** has one line that starts with `ALERT WORKERS_UNAVAILABLE:` naming the plan and the job, and the plan's audit
     log has an `OPTIMIZE_FAILED` row whose error carries `code: WORKERS_UNAVAILABLE`.
   - **`GET /api/health`** on web answers 200 with `ok: false`, `status: degraded` and `dispatch.reason: SOLVER_WORKERS_FAILED`
-    while the solver's `/ready` reports the failed start: until a later optimization starts the processes again, or 15 minutes
-    after the failure. A deploy is not blocked by it.
-  Railway has no alerting set up in this repository: point log alerts at `WORKERS_UNAVAILABLE` and monitoring at `ok: false`.
+    while the solver's `/ready` reports the failure: at least 5 minutes, even if optimizations work again meanwhile, so
+    monitoring that checks every few minutes sees it; then until an optimization starts the processes again, or at most 15
+    minutes after the failure. A deploy is not blocked by it.
+  Railway has no alerting set up in this repository: point log alerts at lines containing `WORKERS_UNAVAILABLE` and
+  monitoring at `ok: false`.
 - **What to do when it fires.** Look at the solver service's memory and CPU graphs and its deploy logs. One refusal during a
   solver restart or a memory spike needs nothing: the dispatcher tries again in a minute. If it repeats, restart the solver
   service; if it keeps happening, raise the service's memory or lower `MAX_CONCURRENT_DISPATCH` (each solve uses up to three

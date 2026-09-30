@@ -16,3 +16,14 @@ def _disable_osrm_by_default(monkeypatch):
     want to exercise OSRM can re-enable it inside the test body."""
     import distance
     monkeypatch.setattr(distance, "OSRM_URL", "")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_worker_health():
+    """Rule 22: /ready's worker status is process-wide, and a failure stays reported for minutes
+    whatever pools start meanwhile (WORKER_ALERT_MIN_SEC): one test's broken pool must not make a
+    later test's /ready fail."""
+    import dispatch_solver
+    dispatch_solver.WORKER_HEALTH.reset()
+    yield
+    dispatch_solver.WORKER_HEALTH.reset()
