@@ -41,6 +41,14 @@ export interface PlanRules {
    * absent: planned for a later day (or before the rule was kept).
    */
   loadingFromMin?: number | null;
+  /**
+   * Planning rules (owner decision 29 Sep 2026): 'FINISH' = the load was planned with unloading
+   * FINISHED by the end of each customer's receiving hours. Absent: the earlier rule (unloading had
+   * to start by closing). Set ONLY from the solver's echo (DispatchScenario.window_rule), never from
+   * what the web asked for, so a load planned by an older solver is never checked by a rule it was
+   * not planned with.
+   */
+  windowRule?: 'FINISH';
 }
 
 export interface TruckFacts {
@@ -114,6 +122,13 @@ export interface PlanSettings {
    * none (QUICK, a later day, or settings stored before it was kept).
    */
   searchLeadMin?: number | null;
+  /**
+   * Planning rules asked for (owner decision 29 Sep 2026). 'FULL': every visit of a split delivery got
+   * the customer's full stop time (web-side). Absent: parts shared the stop time by cases (earlier).
+   */
+  splitStopTime?: 'FULL';
+  /** 'FINISH': the web asked for unloading finished by closing. What each load was planned with is its PlanRules.windowRule (the echo). */
+  windowRule?: 'FINISH';
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */
@@ -195,6 +210,8 @@ export function rulesFrom(
   config: Pick<DispatchConfig, 'shift_start_min' | 'shift_max_min' | 'reload_min' | 'loading_min_per_case' | 'max_trips_per_truck' | 'loading_from_min'>,
   depot: { openMin?: number | null; closeMin?: number | null; open_min?: number | null; close_min?: number | null },
   truck: { availableFromMin?: number | null; availableToMin?: number | null; maxTripsPerDay?: number | null },
+  /** The rules the solver REPORTED it planned with (the scenario echo); absent = earlier rules. */
+  echo?: { window_rule?: string | null } | null,
 ): PlanRules {
   const close = depot.closeMin ?? depot.close_min ?? 1440;
   return {
@@ -209,6 +226,9 @@ export function rulesFrom(
     availableToMin: truck.availableToMin ?? null,
     // Only on a plan made on its delivery day, so the rules of every other plan stay as they were.
     ...(typeof config.loading_from_min === 'number' ? { loadingFromMin: config.loading_from_min } : {}),
+    // From the echo only (never config.window_rule, which is what was ASKED): absent keeps every
+    // older load's rules - and its feasibility hash - exactly as they were.
+    ...(echo?.window_rule === 'FINISH' ? { windowRule: 'FINISH' as const } : {}),
   };
 }
 

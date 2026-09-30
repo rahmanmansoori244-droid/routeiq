@@ -36,8 +36,9 @@ Load model used by the repack
 -----------------------------
 A load visiting stops k1..km in order has no-wait offsets off_i (departure -> service start at
 stop i), a no-wait duration d (departure -> return) and a departure interval [lo, hi] in which no
-stop waits and every hard window holds: lo = max_i(hard_start_i - off_i), hi = min_i(hard_end_i -
-off_i). Departing before lo only moves the waiting onto the road (return = max(e, lo) + d), so
+stop waits and every hard window holds: lo = max_i(hard_start_i - off_i), hi = min_i(latest_i -
+off_i), latest_i = the latest service start (latest_start_s: closing - stop time when unloading
+must be finished by closing, config.window_rule FINISH; closing under the earlier START rule). Departing before lo only moves the waiting onto the road (return = max(e, lo) + d), so
 the repack departs in [lo, hi]. When lo > hi the load must wait on the road; it then departs at
 hi (the latest time that still meets every window) and occupies the truck until lo + d. Before
 a load departs the truck needs its turnaround (reload + loading of THIS load's cases) after the
@@ -159,6 +160,8 @@ class Day:
     # Truck idx of every truck with frozen (locked / loading / dispatched) loads today, usable for
     # new loads or not: they are physical trucks of the day whatever a plan adds (score().trucks).
     frozen_trucks: frozenset[int] = field(default_factory=frozenset)
+    # config.window_rule: "FINISH" = unloading finished by closing (latest_start_s).
+    window_rule: str = "START"
 
     def __post_init__(self) -> None:
         self.by_idx = {td.idx: td for td in self.trucks}
@@ -193,8 +196,30 @@ def _hs(s: DispatchStop) -> int:
     return (s.hard_start_min or 0) * 60
 
 
-def _he(s: DispatchStop) -> int:
-    return s.hard_end_min * 60 if s.hard_end_min is not None else NO_END_S
+def latest_start_s(s: DispatchStop, rule: str | None) -> int:
+    """The latest service start that meets the stop's receiving hours, in seconds. Under
+    config.window_rule "FINISH" unloading must be FINISHED by closing (closing - stop time);
+    otherwise ("START", the earlier rule) it must only start by closing. No closing time = open
+    until the end of the horizon. The ONE place this rule lives: the route search, the prefilter,
+    the repack, the LP timing, timing_ok and the output all call it (feasibility.py re-derives
+    it on purpose, as the independent check)."""
+    if s.hard_end_min is None:
+        return NO_END_S
+    he = s.hard_end_min * 60
+    return he - s.service_min * 60 if rule == "FINISH" else he
+
+
+def pref_end_bound_s(s: DispatchStop, rule: str | None) -> int | None:
+    """The service start after which a preferred window costs: the preferred end, or under
+    "FINISH" the preferred end minus the stop time (unloading finished by then), never below 0."""
+    if s.pref_end_min is None:
+        return None
+    pe = s.pref_end_min * 60
+    return max(0, pe - s.service_min * 60) if rule == "FINISH" else pe
+
+
+def _he(day: "Day", s: DispatchStop) -> int:
+    return latest_start_s(s, day.window_rule)
 
 
 # --------------------------------------------------------------------------------------------
@@ -234,7 +259,7 @@ def facts(day: Day, load: Load) -> Facts:
     ss = [day.stops[k] for k in load]
     return Facts(
         stops=tuple(load), off=tuple(off), d=t,
-        lo=max(_hs(s) - o for s, o in zip(ss, off)), hi=min(_he(s) - o for s, o in zip(ss, off)),
+        lo=max(_hs(s) - o for s, o in zip(ss, off)), hi=min(_he(day, s) - o for s, o in zip(ss, off)),
         cases=sum(s.demand_cases for s in ss), kg_units=sum(kg_units(s.demand_kg) for s in ss), metres=day.metres(load),
         gap=day.gap_s(sum(s.demand_cases for s in ss)),
     )
@@ -292,7 +317,7 @@ def _soft_cost(day: Day, pricing: Pricing, k: int, start_s: int) -> int:
     early = pricing.early.get(s.priority, 0)
     c = 0
     if s.pref_end_min is not None and pricing.pref > 0:
-        c += (pricing.pref + early) * max(0, start_s - s.pref_end_min * 60)
+        c += (pricing.pref + early) * max(0, start_s - pref_end_bound_s(s, day.window_rule))
     elif early > 0:
         c += early * max(0, start_s - pricing.shift_start_s)
     if s.pref_start_min is not None and pricing.pref > 0:
@@ -338,7 +363,7 @@ def time_truck(day: Day, td: "TruckDay", loads: list[Load], pricing: Pricing) ->
         ts, prev, prev_svc, prev_t = [], 0, 0, None
         for i, k in enumerate(load):
             s = day.stops[k]
-            t = lp.NumVar(_hs(s), min(_he(s), HORIZON_S), f"t{j}_{i}")
+            t = lp.NumVar(_hs(s), min(_he(day, s), HORIZON_S), f"t{j}_{i}")
             if i == 0:
                 c = lp.Constraint(day.T[0][k + 1], day.T[0][k + 1])  # leave just in time
                 c.SetCoefficient(t, 1)
@@ -402,7 +427,7 @@ def _soft_terms(day: Day, pricing: Pricing, k: int) -> Iterable[tuple[int, int, 
     s = day.stops[k]
     early = pricing.early.get(s.priority, 0)
     if s.pref_end_min is not None and pricing.pref > 0:
-        yield pricing.pref + early, s.pref_end_min * 60, 1
+        yield pricing.pref + early, pref_end_bound_s(s, day.window_rule), 1
     elif early > 0:
         yield early, pricing.shift_start_s, 1
     if s.pref_start_min is not None and pricing.pref > 0:
@@ -424,7 +449,7 @@ def timing_ok(day: Day, td: "TruckDay", loads: list[TimedLoad]) -> bool:
         prev, t = 0, tl.depart_s
         for k, start in zip(tl.stops, tl.starts):
             s = day.stops[k]
-            if start < t + day.T[prev][k + 1] or not _hs(s) <= start <= _he(s):
+            if start < t + day.T[prev][k + 1] or not _hs(s) <= start <= _he(day, s):
                 return False
             t = start + s.service_min * 60
             prev = k + 1

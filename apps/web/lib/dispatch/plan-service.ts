@@ -559,8 +559,8 @@ export async function buildDispatchRequest(
     const totalKg = live.reduce((a, x) => a + kgTenths(x.kg), 0) / 10;
     const late = live.some((x) => x.o.isLate);
     const serviceMin = eff.serviceMin; // + unloading time per case (stopService)
-    const serviceOf = (cases: number, total?: number) => {
-      const s = stopService(serviceMin, cfg.serviceMinPerCase, cases, total);
+    const serviceOf = (cases: number) => {
+      const s = stopService(serviceMin, cfg.serviceMinPerCase, cases);
       if (s.capped) longStops.push(`${label} needs ${s.neededMin} min`);
       return s.min;
     };
@@ -611,8 +611,8 @@ export async function buildDispatchRequest(
           demand_cases: cases,
           // The true kg, never capped at the payload the part was sized for (F01).
           demand_kg: partDemandKg(part, kgPerCase),
-          // Unloading time follows the part's share of the delivery (at least a few minutes).
-          service_min: serviceOf(cases, totalCases),
+          // Each visit gets the full stop time + the per-case time of its own cases (owner rule).
+          service_min: serviceOf(cases),
           previous_truck_id: previousTruckOf(part.map((x) => x.lineId)),
           margin: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'marginValue', r.lines))),
           revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
@@ -781,6 +781,10 @@ export function planSettingsOf(
     outsideCoverage: routing.outsideCoverage,
     planFrom,
     loadingFromMin,
+    // Owner rules (29 Sep 2026) as ASKED: the rule each load was planned with comes from the solver's
+    // echo (PlanRules.windowRule); the split stop time is web-side, so it is recorded here.
+    splitStopTime: 'FULL',
+    windowRule: 'FINISH',
   };
 }
 
@@ -1294,12 +1298,13 @@ async function snapshotSource(
     if (!facts) return null;
     const cfg = legacy?.cfg;
     const rules = inputs
-      ? rulesFrom(inputs.config, inputs.depot, facts)
+      ? rulesFrom(inputs.config, inputs.depot, facts, d)
       : cfg
         ? rulesFrom(
             { shift_start_min: cfg.shiftStartMin, shift_max_min: cfg.driverShiftMaxMinutes, reload_min: cfg.reloadMinutes, loading_min_per_case: cfg.loadingMinPerCase, max_trips_per_truck: cfg.maxTripsPerTruck },
             { openMin: legacy?.depot?.openMin ?? 0, closeMin: legacy?.depot?.closeMin ?? 1440 },
             facts,
+            d,
           )
         : null;
     // Audit E1 (owner decision 13): the depot pin the load is planned from, kept with it for good.

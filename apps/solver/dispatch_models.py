@@ -145,6 +145,12 @@ class DispatchConfig(BaseModel):
     # the shift). None (a plan for a later day): the first load of the day is loaded before the
     # shift starts, as before. Optional and additive: an older web never sends it.
     loading_from_min: int | None = Field(default=None, ge=0, le=DAY_MIN)
+    # Receiving hours (owner rule 29 Sep 2026). "FINISH": unloading is finished by closing
+    # (service start + service_min <= hard_end_min), and a preferred end means "finished by" too.
+    # "START": unloading only has to start by closing (the earlier rule; the default, so an older
+    # web that sends nothing is planned exactly as before). The web sends the TRUE closing time;
+    # only the solver subtracts the stop time (load_repack.latest_start_s).
+    window_rule: Literal["START", "FINISH"] = "START"
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
@@ -433,6 +439,9 @@ class DispatchScenario(BaseModel):
     # dispatched loads already work again for new loads.
     weight_unit_kg: float | None = None  # WEIGHT_UNIT_KG: every kg check in 0.1 kg units, no margin (F08)
     new_overtime_only: bool | None = None  # True: only new overtime counts when choosing a truck (E4)
+    # The receiving-hours rule this plan was made with (config.window_rule, echoed on every
+    # scenario). None from a solver before it: unloading only had to START by closing.
+    window_rule: Literal["START", "FINISH"] | None = None
 
 
 class DispatchResponse(BaseModel):

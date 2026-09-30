@@ -1,6 +1,6 @@
 /**
  * Unloading time sent to the optimizer: the customer's service time plus the tenant's
- * "unloading minutes per case"; split-delivery parts get a proportional share of the base.
+ * "unloading minutes per case"; every split-delivery part gets the FULL base (owner rule 29 Sep 2026).
  */
 import { describe, expect, it } from 'vitest';
 import { MAX_SERVICE_MIN, stopService, stopServiceMin } from '@/lib/dispatch/service-time';
@@ -17,20 +17,21 @@ describe('stopServiceMin', () => {
     expect(stopServiceMin(12, 0.03, 45)).toBe(13); // 12 + 1.35
   });
 
-  it('keeps the proportional base (at least 5 min) for a split-delivery part plus its own cases', () => {
+  it('gives every split-delivery part the full base plus the per-case time of its own cases', () => {
     // 1,100-case customer with a 30 min base: a 935-case part and a 165-case part.
-    expect(stopServiceMin(30, 0, 935, 1100)).toBe(26); // round(30 x 935 / 1100) = 26 (old behaviour)
-    expect(stopServiceMin(30, 0, 165, 1100)).toBe(5); // round(4.5) = 5, and never below 5
-    expect(stopServiceMin(30, 0.05, 935, 1100)).toBe(Math.round(26 + 46.75));
-    expect(stopServiceMin(30, 0.05, 165, 1100)).toBe(Math.round(5 + 8.25));
-    expect(stopServiceMin(10, 0, 10, 1000)).toBe(5);
+    expect(stopServiceMin(30, 0, 935)).toBe(30); // was round(30 x 935 / 1100) = 26
+    expect(stopServiceMin(30, 0, 165)).toBe(30); // was 5
+    expect(stopServiceMin(30, 0.05, 935)).toBe(Math.round(30 + 46.75));
+    expect(stopServiceMin(30, 0.05, 165)).toBe(Math.round(30 + 8.25));
+    // An explicit 0 min base stays 0 on every part (no 5 min minimum any more).
+    expect(stopServiceMin(0, 0, 10)).toBe(0);
+    expect(stopServiceMin(0, 0.05, 100)).toBe(5);
   });
 
   it('never exceeds what the optimizer accepts, and ignores nonsense inputs', () => {
     expect(stopServiceMin(60, 1, 5000)).toBe(MAX_SERVICE_MIN);
     expect(stopServiceMin(900, 0, 10)).toBe(MAX_SERVICE_MIN);
     expect(stopServiceMin(-5, -1, 100)).toBe(0);
-    expect(stopServiceMin(20, 0.1, 30, 0)).toBe(23); // no total: the whole base
   });
 });
 
@@ -41,7 +42,8 @@ describe('stopService (cap reported)', () => {
     expect(stopService(MAX_SERVICE_MIN, 0, 10)).toEqual({ min: MAX_SERVICE_MIN, capped: false, neededMin: MAX_SERVICE_MIN });
   });
 
-  it('a split part gets its share of the real base time', () => {
-    expect(stopService(600, 0, 50, 100)).toEqual({ min: 300, capped: false, neededMin: 300 });
+  it('a split part gets the full base time, capped like any stop', () => {
+    expect(stopService(600, 0, 50)).toEqual({ min: MAX_SERVICE_MIN, capped: true, neededMin: 600 });
+    expect(stopService(35, 0, 200)).toEqual({ min: 35, capped: false, neededMin: 35 });
   });
 });

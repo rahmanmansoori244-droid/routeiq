@@ -13,7 +13,10 @@
  *   made, read from the plan's rows) are reported as KG_UNKNOWN (a warning: the dispatcher
  *   accepted them explicitly at optimize, review F02) - unless a case weight entered since shows
  *   the load is over its payload, which blocks like any overload (CAPACITY_KG_NEW_WEIGHT);
- * - service starts inside the hard receiving window, and the stored "within hours" flag;
+ * - service starts inside the hard receiving window, and the stored "within hours" flag; a load
+ *   planned under the finish-by-closing rule (PlanRules.windowRule 'FINISH', owner rule 29 Sep 2026)
+ *   must also FINISH unloading by closing. A load planned before it keeps its own earlier rule, so it
+ *   is never blocked after the fact;
  * - turnaround: each load leaves after the previous load's return + reload + loading time per
  *   case x its cases (the rules the later load was planned with); a load planned on its delivery
  *   day also after the time the plan was made + that turnaround, on a truck standing at the depot
@@ -179,6 +182,7 @@ export function inputHash(input: FeasibilityInput): string {
             l.rules.shiftStartMin, l.rules.shiftMaxMin, l.rules.reloadMin, l.rules.loadingMinPerCase, l.rules.maxTrips, l.rules.depotOpenMin, l.rules.depotCloseMin, l.rules.availableFromMin, l.rules.availableToMin,
             // Only when set, so the hash of every plan made without it is unchanged.
             ...(typeof l.rules.loadingFromMin === 'number' ? [l.rules.loadingFromMin] : []),
+            ...(l.rules.windowRule === 'FINISH' ? ['FINISH'] : []),
           ]
         : null,
       [...l.stops]
@@ -272,6 +276,16 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
         const outside =
           s.hardWindowOk === false ||
           (start !== null && ((hs !== undefined && hs !== null && start < hs) || (he !== undefined && he !== null && start > he)));
+        // Planned under the finish-by-closing rule: unloading must be FINISHED by closing.
+        const finishedLate =
+          !outside && l.rules?.windowRule === 'FINISH' && he !== undefined && he !== null && s.departureMin !== null && s.departureMin > he + TOL_MIN;
+        if (finishedLate) {
+          v({
+            ...at(l),
+            code: 'HARD_WINDOW',
+            message: `${code} load ${l.loadNo}: ${s.label} finishes unloading at ${hhmm(s.departureMin!)}, after its receiving hours end (${hhmm(he!)}).`,
+          });
+        }
         if (outside) {
           const w = hs !== undefined || he !== undefined ? ` ${hs === null || hs === undefined ? '--:--' : hhmm(hs)}-${he === null || he === undefined ? '--:--' : hhmm(he)}` : '';
           v({ ...at(l), code: 'HARD_WINDOW', message: `${code} load ${l.loadNo}: ${s.label} is served at ${start === null ? '--:--' : hhmm(start)}, outside its receiving hours${w}.` });

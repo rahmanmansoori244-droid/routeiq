@@ -21,7 +21,9 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
 * Hard constraints: capacity in cases AND kg (when the truck has a payload; kg in whole 0.1 kg
   units, each stop to the nearest unit and the payload rounded down - no hidden margin, audit
   F08), hard customer
-  receiving windows (service must START inside the window), depot open hours, truck
+  receiving windows (config.window_rule FINISH: unloading FINISHED by closing, i.e. service starts
+  by closing - stop time; START, the earlier rule and the default: service STARTS inside the
+  window; load_repack.latest_start_s), depot open hours, truck
   availability, trip linking, shift limit.
 * Objective (single integer, 1 unit = 0.00001 OMR) built hierarchically by magnitude:
     1+2. Service. Strict priorities (default): leaving a stop of priority p unserved costs
@@ -831,7 +833,16 @@ def _window_prefilter(
         out_s = mx.duration_s[0][node]
         back_s = mx.duration_s[node][0]
         hs = (s.hard_start_min or 0) * 60
-        he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+        he = LR.latest_start_s(s, cfg.window_rule)  # FINISH: closing - stop time
+        finish_rule = cfg.window_rule == "FINISH" and s.hard_end_min is not None
+        if finish_rule and he < hs:
+            # Unloading is longer than the receiving hours: it can never finish by closing. It
+            # must be dropped here - an empty time range fails the whole route model.
+            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE",
+                                   f"Unloading takes {s.service_min} min, but the receiving hours "
+                                   f"{_hhmm(s.hard_start_min or 0)}-{_hhmm(s.hard_end_min)} are only "
+                                   f"{s.hard_end_min - (s.hard_start_min or 0)} min long: it can never finish before closing."))
+            continue
         window_ok = False
         shift_ok = False
         # These are the only reasons presented as proof of impossibility: say when the proof
@@ -857,9 +868,14 @@ def _window_prefilter(
                 break
         if not window_ok:
             hw = f"{_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}"
-            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE",
-                                   f"No truck can reach this customer inside its receiving window {hw} "
-                                   f"(earliest possible arrival {_hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)}){est}."))
+            earliest = _hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)
+            if finish_rule:
+                msg = (f"No truck can reach this customer early enough to finish unloading ({s.service_min} min) "
+                       f"by closing ({_hhmm(s.hard_end_min)}): earliest possible arrival {earliest}{est}.")
+            else:
+                msg = (f"No truck can reach this customer inside its receiving window {hw} "
+                       f"(earliest possible arrival {earliest}){est}.")
+            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE", msg))
         elif not shift_ok:
             drops.append(_unserved(s, "SHIFT_LIMIT",
                                    f"A round trip to this customer does not fit inside the truck shift / depot hours{est}."))
@@ -1149,11 +1165,12 @@ def _solve_scenario(
     for k, s in enumerate(stops):
         idx = manager.NodeToIndex(k + 1)
         hs = (s.hard_start_min or 0) * 60
-        he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+        he = LR.latest_start_s(s, cfg.window_rule)  # FINISH: unloading finished by closing
+        assert hs <= he, f"stop {s.stop_id}: empty receiving window (the window prefilter drops it)"
         tdim.CumulVar(idx).SetRange(hs, min(he, HORIZON_S))
         early_coeff = 0 if not w.soft_prefs else int(round(cfg.early_preference_per_min.get(s.priority, 0.0) * COST_SCALE / 60.0))
         if s.pref_end_min is not None and pref_coeff > 0:
-            tdim.SetCumulVarSoftUpperBound(idx, s.pref_end_min * 60, pref_coeff + early_coeff)
+            tdim.SetCumulVarSoftUpperBound(idx, LR.pref_end_bound_s(s, cfg.window_rule), pref_coeff + early_coeff)
         elif early_coeff > 0:
             tdim.SetCumulVarSoftUpperBound(idx, cfg.shift_start_min * 60, early_coeff)
         if s.pref_start_min is not None and pref_coeff > 0:
@@ -1337,9 +1354,12 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                 kg += kg_units(s.demand_kg)
                 seq += 1
                 hs = (s.hard_start_min or 0) * 60
-                he = (s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2) * 60
+                # FINISH: the latest start is closing - stop time, and a preferred end means
+                # "finished by" (load_repack.latest_start_s / pref_end_bound_s: one meaning in the
+                # search, the repack, the LP timing and this report).
+                he = LR.latest_start_s(s, cfg.window_rule)
                 ps = s.pref_start_min * 60 if s.pref_start_min is not None else None
-                pe = s.pref_end_min * 60 if s.pref_end_min is not None else None
+                pe = LR.pref_end_bound_s(s, cfg.window_rule)
                 pref_ok = (ps is None or start_s >= ps) and (pe is None or start_s <= pe)
                 if not pref_ok:
                     dev = (max(0, ps - start_s) if ps is not None else 0) + (max(0, start_s - pe) if pe is not None else 0)
@@ -1534,7 +1554,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
                                                  continuity=round(comp["continuity"], 3)),
         estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
         # The rules this plan was made with (audit A6 review; the ASSUMPTIONS sheet states them).
-        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True,
+        weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True, window_rule=cfg.window_rule,
     )
     _assert_reconciled(req, sc)
     exact = exact_timing or cfg.loading_min_per_case == 0  # without loading per case the search's turnaround is exact
@@ -1658,6 +1678,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         if workers is not None:
             workers.close()  # already closed by _run_scenarios when it ran; a no-op then
     for sc in scenarios:
+        sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)
@@ -2445,7 +2466,7 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
     day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
                  shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
                  loading_s_per_case=cfg.loading_min_per_case * 60, values=values,
-                 frozen_trucks=frozenset(td.idx for td in tds if td.n_frozen))
+                 frozen_trucks=frozenset(td.idx for td in tds if td.n_frozen), window_rule=cfg.window_rule)
     return _StageCtx(req=req, solvable=solvable, tds=tds, mx=mx, drops=drops, values=values, value_warnings=value_warnings,
                      use_margin=use_margin, stop_idx={s.stop_id: k for k, s in enumerate(solvable)},
                      truck_idx={td.truck.id: td.idx for td in tds}, day=day,

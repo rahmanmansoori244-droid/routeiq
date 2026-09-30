@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
+import { withTenantApi, ok, parseBody, fail, hasRole } from '@/lib/api';
 import { overtimeSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
+import { adminOnlyFields, DISPATCHER_SETTINGS_FIELDS } from '@/lib/settings-fields';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
 
@@ -45,12 +46,29 @@ const settingsPatchSchema = z
 
 const same = (a: unknown, b: unknown) => (typeof a === 'number' && typeof b === 'number' ? Math.abs(a - b) < 1e-9 : (a ?? null) === (b ?? null));
 
+/**
+ * A company admin saves any setting. The dispatcher (PLANNER role and up, owner decision 29 Sep
+ * 2026) saves only the driver shift (DISPATCHER_SETTINGS_FIELDS) and gets back only those fields:
+ * the cost rates and the routing address stay admin data. Both are audited the same way.
+ */
 export const PATCH = withTenantApi(
   async (req, { user, ip }) => {
     const input = await parseBody(req, settingsPatchSchema);
     const tenantPatch = input.tenant ?? {};
     const configPatch = input.config ?? {};
     if (!Object.keys(tenantPatch).length && !Object.keys(configPatch).length) return fail('Nothing to update', 400);
+    const admin = hasRole(user.role, 'TENANT_ADMIN');
+    const refused = admin ? [] : adminOnlyFields(tenantPatch, configPatch);
+    if (refused.length) {
+      return fail(
+        {
+          error: `Only a company admin can change ${refused.join(', ')}. A dispatcher can change the driver shift: first departure, shift maximum (latest return) and overtime after. Nothing was saved.`,
+          code: 'ADMIN_ONLY_SETTING',
+          fields: refused,
+        },
+        403,
+      );
+    }
 
     const result = await prisma.$transaction(async (tx) => {
       // The row lock orders concurrent saves: the second one sees the first one's values.
@@ -100,7 +118,17 @@ export const PATCH = withTenantApi(
       afterJson: { tenant: pick(result.after as never, tKeys), config: pick(result.after?.config as never, cKeys) } as never,
       ip,
     });
-    return ok(result.after);
+    if (admin) return ok(result.after);
+    // The dispatcher gets back only the fields they may change (no cost rates, no routing address).
+    const after = result.after;
+    const conf = after?.config as unknown as Record<string, unknown> | undefined;
+    return ok({
+      name: after?.name,
+      country: after?.country,
+      currency: after?.currency,
+      primaryUnit: after?.primaryUnit,
+      config: Object.fromEntries(DISPATCHER_SETTINGS_FIELDS.map((k) => [k, conf?.[k] ?? null])),
+    });
   },
-  { role: 'TENANT_ADMIN' },
+  { role: 'PLANNER' },
 );

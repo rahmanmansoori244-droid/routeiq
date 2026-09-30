@@ -11,7 +11,9 @@ seconds to minutes in dispatch_solver._min_of):
 
 * capacity: a load's cases (and kg, when the truck has a payload) from the request's stops; kg in
   0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
-* hard receiving windows: service starts inside the window;
+* hard receiving windows: service starts at or after opening, and unloading is finished by
+  closing (departure <= closing) under config.window_rule FINISH; under START (the earlier rule,
+  the default) service starts inside the window;
 * travel: each service start is at least the previous departure + the drive time (matrix), and
   the truck is back no earlier than the last departure + the drive back;
 * unloading: departure - service start == the service time that was sent;
@@ -50,7 +52,7 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger("routeiq.dispatch.feasibility")
 
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
-CHECK_VERSION = 1
+CHECK_VERSION = 2  # 2: the receiving-hours rule FINISH (unloading finished by closing)
 
 
 def _hhmm(m: float | int | None) -> str:
@@ -75,6 +77,9 @@ def check_scenario(
     """Check ``sc`` against ``req``. ``solvable`` + ``mx``: the matrix the scenario was planned on
     (node 0 = depot, node k + 1 = solvable[k]); without them drive times are not re-checked."""
     cfg = req.config
+    # Receiving hours: FINISH = unloading finished by closing (re-derived here on purpose, not
+    # load_repack.latest_start_s: this is the independent check).
+    finish_rule = cfg.window_rule == "FINISH"
     trucks = {t.id: t for t in req.trucks}
     stops = {s.stop_id: s for s in req.stops}
     node_of = {s.stop_id: k + 1 for k, s in enumerate(solvable)} if (solvable is not None and mx is not None) else None
@@ -198,7 +203,11 @@ def check_scenario(
                 if s is not None:
                     hs = s.hard_start_min or 0
                     he = s.hard_end_min if s.hard_end_min is not None else DAY_MIN * 2
-                    if not (hs <= st.service_start_min <= he) or not st.hard_window_ok:
+                    if finish_rule and s.hard_end_min is not None and st.departure_min > he:
+                        add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} finishes unloading at {_hhmm(st.departure_min)}, "
+                                           f"after its receiving hours end ({_hhmm(s.hard_end_min)}).",
+                            truck_id=tid, load_no=lno, stop_id=st.stop_id, short=st.departure_min - he)
+                    elif not (hs <= st.service_start_min <= he) or not st.hard_window_ok:
                         add("HARD_WINDOW", f"{code} load {lno}: {st.stop_id} is served at {_hhmm(st.service_start_min)}, outside its "
                                            f"receiving hours {_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}.",
                             truck_id=tid, load_no=lno, stop_id=st.stop_id,

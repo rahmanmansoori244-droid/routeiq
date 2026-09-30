@@ -81,6 +81,9 @@ export interface DispatchStop {
   previous_truck_id?: string | null;
 }
 
+/** Receiving-hours rule: 'FINISH' = unloading finished by closing; 'START' = the earlier rule. */
+export type WindowRule = 'START' | 'FINISH';
+
 export interface DispatchConfig {
   shift_start_min?: number;
   shift_max_min?: number;
@@ -97,6 +100,14 @@ export interface DispatchConfig {
    * before the shift starts). Solvers without the field ignore it.
    */
   loading_from_min?: number | null;
+  /**
+   * Receiving hours (owner rule 29 Sep 2026). 'FINISH': unloading is finished by closing (service
+   * start + service_min <= hard_end_min; a preferred end means "finished by" too). 'START' / absent:
+   * the earlier rule, unloading only has to start by closing. hard_end_min stays the TRUE closing
+   * time; only the solver subtracts the stop time. Solvers without the field plan the earlier way
+   * and send no `window_rule` echo.
+   */
+  window_rule?: WindowRule;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
   /**
@@ -353,6 +364,12 @@ export interface DispatchScenario {
   weight_unit_kg?: number | null;
   /** true: only new overtime counts when the optimizer chooses a truck (audit E4). */
   new_overtime_only?: boolean | null;
+  /**
+   * The receiving-hours rule the plan was made with (config.window_rule, echoed). Absent / null:
+   * a solver before it, so unloading only had to START by closing. The web takes the rule a load
+   * was planned with ONLY from this echo, never from what it asked for.
+   */
+  window_rule?: WindowRule | null;
 }
 
 export interface DispatchResponse {

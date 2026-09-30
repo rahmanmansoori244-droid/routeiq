@@ -627,7 +627,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const job = await db.runJob.findFirst({ where: { runId }, orderBy: { attemptNo: 'desc' } });
   const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, liveAtStart, clock.now ?? new Date()) : null;
   const live = !isSupersededRun(run);
-  const outdated = live && chosenDetails ? outdatedNotes(loads) : [];
+  const rulesNote = live && chosenDetails ? plannerRulesNote(chosenDetails) : null;
+  const outdated = live && chosenDetails ? [...outdatedNotes(loads), ...(rulesNote ? [rulesNote] : [])] : [];
   let pendingOrders = 0;
   if (live && chosenDetails) {
     const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
@@ -884,6 +885,18 @@ type OutdatedLoad = {
     };
   }[];
 };
+
+/**
+ * A plan asked for with the finish-by-closing rule (owner rule 29 Sep 2026) but made by a planner
+ * without it (the planner and the web are updated one after the other): its loads keep the earlier
+ * rule, which the solver's echo shows (DispatchScenario.window_rule absent). Null when it was
+ * planned with the rule, or never asked for it.
+ */
+export function plannerRulesNote(d: { window_rule?: string | null; inputs?: unknown }): string | null {
+  const asked = readPlanInputs(d.inputs)?.config?.window_rule;
+  if (asked !== 'FINISH' || d.window_rule === 'FINISH') return null;
+  return 'Made by a planner without the rule that unloading must be finished by closing (an update was being installed): on these loads unloading only had to start by closing. Re-plan in a few minutes to use the rule.';
+}
 
 /**
  * What changed since the plan in use was made that a RE-PLAN would change on its PLANNED loads

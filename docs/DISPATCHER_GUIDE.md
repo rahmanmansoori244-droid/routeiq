@@ -101,7 +101,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
   - **Route search** says in words how the optimizer's search ended (see *Plan options*).
 
 ## Times not verified
-Before a load is locked, loaded or dispatched, RouteIQ checks its truck's whole day: every load leaves only after the truck is back and loaded again (turnaround + loading minutes per case), every customer is served inside its receiving hours, no load is over the truck's cases or kg, and the day fits the shift and depot hours. The optimizer checks the same when it makes the plan (column **Timing checked** under **Plan options**).
+Before a load is locked, loaded or dispatched, RouteIQ checks its truck's whole day: every load leaves only after the truck is back and loaded again (turnaround + loading minutes per case), every customer's unloading is finished by the end of its receiving hours (loads planned before this rule keep the earlier rule: unloading had to start by closing), no load is over the truck's cases or kg, and the day fits the shift and depot hours. The optimizer checks the same when it makes the plan (column **Timing checked** under **Plan options**).
 - When a truck's day breaks a rule, the plan shows a **red box** with the reasons (for example *T01 load 2 leaves at 08:34, but the truck needs 50 min to reload and load 40 cases: ready 08:54*), the load rows say **Times not verified**, and **Lock**, **Loading** and **Dispatch** are off for that truck. Other trucks are not affected.
 - Click **Re-plan** in the red box: the new version gets times that keep every rule (locked and dispatched loads stay as they are).
 - If the problem is on a load that is already **locked** or **loading**, Re-plan alone does not fix it: a re-plan keeps that load exactly as it is. The red box names the load and says so. Put it back to Planned first (**Back to locked** if it is loading, then **Unlock**), then click **Re-plan**. If later loads of the same truck are locked too (for example after **Lock all loads**), they go back first, latest first: the red box lists them in that order, for example *put loads T01 L2, T01 L1 back to Planned first, in this order*. While every problem is on such a load, the red box's **Re-plan** is greyed out with the same list, because a re-plan would change none of them. This also applies when Re-plan is greyed out because every order is on a locked load.
@@ -229,6 +229,14 @@ An order is brought forward **once**: after that it leaves the list, and clickin
 ## Changing date or depot
 While the new day loads, the screen shows *Loading ...* and its buttons are off; if it cannot be loaded, you see the error and **Try again** instead of the previous day. Everything you do (upload, confirm, optimize) is always for the day on the screen. If you change the date while a lock, OPTIMIZE, **Add … lines to the day** or a save is still running, it finishes for the day you started it on, and the screen then shows the date you picked. A **Check file** that finishes after you changed the date is not shown: check the file again for the day on screen. After **Add … lines to the day**, a file for another delivery date moves the screen to that date, unless you picked another date meanwhile.
 
+## Driver shift (Settings, dispatchers and admins)
+Dispatchers open **Settings** for the **Driver shift** card only; everything else there is changed by a company admin. Every change is in the audit log.
+- **First departure:** no truck leaves before this time. A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*).
+- **Latest return:** a truck leaving at the first departure is back at the depot by this time. It sets the **Driver shift maximum** (first departure to last return), and the other way round.
+- **Overtime after:** from the first departure; at most the shift maximum.
+
+**After this update is installed, set the company shift once:** First departure **07:00**, Latest return **18:00** (shift maximum 11 h). Leave **Overtime after** as it is. Plans already made keep the times they were made with.
+
 ## Settings (company admins)
 Settings shows only what the planner uses, each with its unit and allowed range, and an **Effective planner values** table that says what the next optimization uses and where each value comes from. Saving sends only what you changed; if another admin changed the same setting since you opened the page, nothing is saved and you are asked to reload.
 - **Costs:** driver cost per hour (paid for the whole truck day), overtime after (at most the shift maximum) and per hour (on top), fuel price per litre, preferred-window penalty. Truck costs (fixed per day, per load, per km, km per litre), max loads and availability are set per truck under **Trucks**; depot opening hours under **Depots**.
@@ -237,11 +245,12 @@ Settings shows only what the planner uses, each with its unit and allowed range,
 - **Overtime after** must be at most the shift maximum when you change either of them. If an older setting breaks this, the page shows a note, and other settings still save.
 
 ### Dispatch timing (Settings → Daily dispatch: timing)
-Set these to what the depot and drivers really do; every load is timed with them.
-- **First departure:** no truck leaves before this time (e.g. 07:30). A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*).
+Set these to what the depot and drivers really do; every load is timed with them. The first departure and the shift are on the **Driver shift** card.
+
+**Receiving hours:** unloading must be finished by the end of a customer's receiving hours. A customer whose unloading takes longer than its receiving hours is not planned (*Unloading takes 90 min, but the receiving hours 06:00-07:00 are only 60 min long*): correct the hours or the unloading time. Preferred hours work the same way: a penalty per minute that unloading starts before the preferred start or finishes after the preferred end.
 - **Turnaround between loads (minutes):** fixed depot time between two loads of one truck (paperwork, queue). Default 30. It is also the preparation time of a plan made during the delivery day: no new load leaves before now + this + its loading time.
 - **Loading minutes per case:** added to the turnaround for every case of the next load. 0.04 = 44 min extra for a 1,100-case load. Default 0. The first load of a day planned the day before is loaded before the first departure; on a plan made during the delivery day, loading counts from now for every truck, also one standing at the depot.
-- **Unloading minutes per case:** added to each customer's service time for every case delivered. 0.05 = 55 min extra for a 1,100-case drop. Default 0. A split delivery part gets its share of the customer's time plus its own cases.
+- **Unloading minutes per case:** added to each customer's service time for every case delivered. 0.05 = 55 min extra for a 1,100-case drop. Default 0. Each truck visit of a split delivery gets the customer's full unloading time plus the time of its own cases.
 - **Max loads per truck per day:** default 3; a truck's own limit wins when it has one.
 
 Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep their times.

@@ -171,6 +171,9 @@ export function dispatchConfigFromTenant(
       strict_priorities: true,
       priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
       pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
+      // Owner rule (29 Sep 2026), not a setting: unloading is finished by the end of the receiving
+      // hours. Each load keeps the rule the solver REPORTS it planned with (PlanRules.windowRule).
+      window_rule: 'FINISH',
       use_margin: true,
       distance_provider: routing.provider,
       osrm_url: cfg.osrmUrl ?? null,
@@ -210,7 +213,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       source: 'SETTING',
       note: `a plan made on the delivery day itself starts from now + ${cfg.reloadMinutes} min (the turnaround between loads) when that is later, and each new load also waits for its loading per case from now; locked, loading and dispatched loads keep their times`,
     },
-    { label: 'Driver shift maximum', value: `${hm(cfg.driverShiftMaxMinutes)} h`, source: 'SETTING', note: 'first departure to last return of a truck' },
+    {
+      label: 'Driver shift maximum',
+      value: `${hm(cfg.driverShiftMaxMinutes)} h`,
+      source: 'SETTING',
+      note: `first departure to last return of a truck: leaving at ${fmtHhmm(cfg.shiftStartMin)}, it is back by ${fmtHhmm(cfg.shiftStartMin + cfg.driverShiftMaxMinutes)} at the latest`,
+    },
     {
       label: 'Driver cost',
       value: `${cfg.driverCostPerHour} ${currency} per hour`,
@@ -233,12 +241,23 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       label: 'Unloading time',
       value: `customer's own time (default ${cfg.defaultServiceTimeMin} min) + ${cfg.serviceMinPerCase} min per case`,
       source: 'SETTING',
-      note: 'a confirmed customer time wins, then its customer type, then the default',
+      note: "a confirmed customer time wins, then its customer type, then the default; each truck visit of a split delivery gets the customer's full time plus the per-case time of its own cases",
+    },
+    {
+      label: 'Receiving hours',
+      value: 'unloading must be finished by the end of the receiving hours',
+      source: 'PLANNER',
+      note: 'a customer whose unloading takes longer than its receiving hours cannot be planned',
     },
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
     { label: 'Fuel price', value: cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${currency} per litre` : '0 (fuel not costed separately)', source: 'SETTING' },
-    { label: 'Preferred-window penalty', value: `${cfg.prefWindowPenaltyPerMin} ${currency} per minute outside`, source: 'SETTING', note: 'soft: hard windows are never broken' },
+    {
+      label: 'Preferred-window penalty',
+      value: `${cfg.prefWindowPenaltyPerMin} ${currency} per minute outside`,
+      source: 'SETTING',
+      note: 'soft: per minute that unloading starts before the preferred start or finishes after the preferred end; receiving hours are never broken',
+    },
     {
       label: 'Distances',
       value: routing.provider === 'OSRM' ? 'road distances (OSRM)' : 'straight-line estimates, labelled Estimated km',

@@ -30,6 +30,22 @@ export const SETTINGS_FIELDS = [
 export type SettingsField = (typeof SETTINGS_FIELDS)[number];
 export type EditableConfig = Pick<TenantConfig, SettingsField>;
 
+/**
+ * The settings the dispatcher (PLANNER role and up) may change on Settings (owner decision 29 Sep
+ * 2026): the driver shift - first departure, the shift maximum (the latest return is first
+ * departure + shift maximum) and when overtime starts. Every other setting (cost rates, routing,
+ * the company) stays company-admin data. Every save is in the audit log.
+ */
+export const DISPATCHER_SETTINGS_FIELDS = ['shiftStartMin', 'driverShiftMaxMinutes', 'overtimeAfterMin'] as const satisfies readonly SettingsField[];
+export type DispatcherField = (typeof DISPATCHER_SETTINGS_FIELDS)[number];
+export type DispatcherConfig = Pick<TenantConfig, DispatcherField>;
+
+/** The fields of a settings save that only a company admin may change (empty: a dispatcher may save it). */
+export function adminOnlyFields(tenantPatch: Record<string, unknown>, configPatch: Record<string, unknown>): string[] {
+  const allowed = new Set<string>(DISPATCHER_SETTINGS_FIELDS);
+  return [...Object.keys(tenantPatch), ...Object.keys(configPatch).filter((k) => !allowed.has(k))];
+}
+
 export const TENANT_FIELDS = ['name', 'country', 'currency', 'primaryUnit'] as const;
 export type TenantField = (typeof TENANT_FIELDS)[number];
 
