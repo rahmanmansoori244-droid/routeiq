@@ -714,9 +714,12 @@ and prototype: `.dev/bench/pyvrp-enh/SPEC.md` (with the two skeptic reviews' cor
 
 ### 12.1 How it works
 
-- **Where.** `apps/solver/pyvrp_candidate.py`. PyVRP runs in a one-process worker pool of its own, started after rule 22's
-  check of the engine's pool and never part of it: if it cannot start, the solve goes on with the engine alone
-  (SKIPPED / NO_PROCESS). It is submitted right after RECOMMENDED, so the engine never waits behind it.
+- **Where.** `apps/solver/pyvrp_candidate.py`. PyVRP runs in a worker process of its own (one spawn process and its
+  pipes, no pool: `dispatch_solver._PvProcess`), started after rule 22's check of the engine's pool and never part of
+  it: if it cannot start, the solve goes on with the engine alone (SKIPPED / NO_PROCESS). It is submitted right after
+  RECOMMENDED, so the engine never waits behind it. It answers with plain Python data only (an error as text), and the
+  solve kills, joins and releases it - with the engine's pools, their queues, locks and processes - before it returns:
+  nothing is left for the garbage collector (CI, PR #50: a segmentation fault while it ran in the API's event loop).
 - **The model.** The same day the engine searches (after its prefilters), with every price from the engine's own
   functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows (with unloading
   finished by closing, §13, the latest start is closing - stop time, as in the engine), truck hours (frozen loads,

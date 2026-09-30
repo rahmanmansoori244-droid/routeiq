@@ -16,11 +16,13 @@ SOLVER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_importing_the_api_does_not_load_pyvrp():
+    """Nor numpy, which only the second search's model needs (pyvrp_candidate.build_model, in its own
+    worker process): the API process keeps the native libraries it had before PR #50."""
     code = textwrap.dedent(
         """
         import sys
         import main  # noqa: F401 - the API module, as uvicorn loads it
-        loaded = sorted(m for m in sys.modules if m == "pyvrp" or m.startswith("pyvrp."))
+        loaded = sorted(m for m in sys.modules if m.split(".")[0] in ("pyvrp", "numpy"))
         print("LOADED=" + ",".join(loaded))
         """
     )

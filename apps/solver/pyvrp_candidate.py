@@ -15,8 +15,10 @@ then cost), than the plan the engine alone would have chosen FROM THE SAME SEARC
 promise against a separate engine-only run: on a machine short of CPU the second search takes CPU
 from the engine's own search (the CPU gate below keeps it off on one core).
 
-Nothing here imports pyvrp at module level: the model is built and searched in the worker process
-(the API process builds no PyVRP model; it does import pyvrp through the legacy solver.py).
+Nothing here imports pyvrp or numpy at module level: the model is built and searched in the second
+search's own worker process (dispatch_solver._PvProcess), which answers with plain Python data only.
+The API process loads neither native library (tests/test_api_process_no_pyvrp.py; the legacy
+solver.py imports pyvrp lazily, only when its /optimize runs).
 
 The model (all prices from the engine's own functions, in its units: 1 unit = 0.00001 OMR):
   locations   0 = depot; 1..R = "reload depots" at the depot's place, one per distinct search
@@ -46,11 +48,13 @@ import math
 import os
 import time
 from dataclasses import dataclass, field
-
-import numpy as np
+from typing import TYPE_CHECKING
 
 import load_repack as LR
 from dispatch_models import DispatchRequest, DispatchStop, kg_units
+
+if TYPE_CHECKING:  # numpy is imported where the model is built, in the worker process only
+    import numpy as np
 
 log = logging.getLogger("routeiq.dispatch")
 
@@ -63,7 +67,7 @@ VERSION = "0.14.0"  # requirements.txt pins exactly this (test_pyvrp_version_is_
 # iterations/s, so it never triggered and every Thorough solve waited until the reserve.
 STALL_FLOOR_SEC = 30.0
 STALL_SHARE = 0.1
-FLAG_CHECK_SEC = 0.25  # the stop flags are read at most this often (a multiprocessing Event costs a lock)
+FLAG_CHECK_SEC = 0.25  # the stop flags (pipes, dispatch_solver._PipeFlag) are polled at most this often
 INT62 = 2**62  # PyVRP's costs are int64: every penalised cost must stay below this (section 7)
 DEFAULT_MAX_PENALTY = 100_000.0  # pyvrp.PenaltyParams().max_penalty
 # Plan continuity needs one distance profile per truck; above this many MB of profiles the PyVRP
@@ -269,6 +273,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     """``solvable`` / ``mx``: exactly what the engine's search sees (mx node 0 = depot, node k + 1 =
     solvable[k]); ``tds``: every TruckDay (only the usable ones become vehicles). Raises ValueError
     with nothing to model and ModelTooLarge past the 64-bit bound."""
+    import numpy as np  # noqa: PLC0415 - never in the API process (see the module's docstring)
+
     import dispatch_solver as ds  # noqa: PLC0415 - dispatch_solver imports this module
 
     cfg = req.config

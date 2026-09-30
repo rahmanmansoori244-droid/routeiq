@@ -364,11 +364,20 @@ class SolveControl:
         self._raise_flags()
 
     def attach(self, flag) -> None:
-        """A worker pool's multiprocessing Event: set now if a stop was already asked for."""
+        """A worker pool's or process's "stop now" flag (anything with set()): set now if a stop was
+        already asked for. Its owner detaches it when it closes."""
         with self._lock:
             self._flags.append(flag)
         if self.stop_requested.is_set() or self.cancelled.is_set():
             self._raise_flags()
+
+    def detach(self, flag) -> None:
+        """A closed pool's or process's flag: never raised again, and no longer kept alive by this
+        control (CI, PR #50: the control outlives its solve in main.py, and every pool's multiprocessing
+        Event it kept - 5 semaphores each - was then freed by the garbage collector in the event-loop
+        thread). Waits for a _raise_flags that is running."""
+        with self._lock:
+            self._flags = [f for f in self._flags if f is not flag]
 
     def _raise_flags(self) -> None:
         with self._lock:
@@ -1808,17 +1817,21 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     # is searched inside the API process. None: SOLVER_PARALLEL=0, nothing to search, or the
     # in-process fallback allowed for development (SOLVER_ALLOW_INPROCESS_FALLBACK=1).
     workers: _Workers | None = None
-    if solvable and _parallel():
-        # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
-        # worker a stuck alternative starved the next one, which then hit the same deadline
-        # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
-        # quality, never the deadline. RECOMMENDED runs first in one of them.
-        workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
-                                 "search")
-    # The second route search (PyVRP): its own optional process, after rule 22's proof (a machine
-    # that cannot start it still solves). Not waited for here.
-    pv = _pv_start(req, solvable, control, workers is not None)
+    pv: _PvRun | None = None
+    # CI (PR #50): every worker pool and process of this solve is closed - its processes joined, its
+    # pipes and locks released - in the finally below, in this thread, whatever happens after it
+    # started (the second search's start included). Nothing is left for the garbage collector.
     try:
+        if solvable and _parallel():
+            # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
+            # worker a stuck alternative starved the next one, which then hit the same deadline
+            # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
+            # quality, never the deadline. RECOMMENDED runs first in one of them.
+            workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
+                                     "search")
+        # The second route search (PyVRP): its own optional process, after rule 22's proof (a machine
+        # that cannot start it still solves). Not waited for here.
+        pv = _pv_start(req, solvable, control, workers is not None)
         coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
         mx = resolve_matrix(
             coords,
@@ -1842,9 +1855,10 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
                                    control=control, state=state, workers=workers, pv=pv)
     finally:
+        if pv is not None:
+            pv.close()  # already closed by _run_scenarios when it ran; a no-op then
         if workers is not None:
-            workers.close()  # already closed by _run_scenarios when it ran; a no-op then
-        pv.close()
+            workers.close()  # likewise
     for sc in scenarios:
         sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
         sc.break_rule = _break_echo(cfg)
@@ -2040,7 +2054,7 @@ def _worker_init(beacon, stop_flag=None, search_over=None) -> None:
     _BEACON = beacon
     _STOP_FLAG = stop_flag
     _SEARCH_OVER = search_over
-    if search_over is not None:  # the second search's own pool (_pv_start): optional, so taken first
+    if search_over is not None:  # the second search's own process (_PvProcess): optional, so taken first
         _prefer_as_oom_victim(SECOND_SEARCH_OOM_SCORE_ADJ)
 
 
@@ -2073,6 +2087,36 @@ def _workers_alert(run_id: str, happened: str, cause: str, *, nothing_searched: 
               " Nothing is searched inside the API process (rule 22)." if nothing_searched else "", _ALERT_ADVICE)
 
 
+class _Task:
+    """One pool task, as the waits see it: ready(), get(), wait(). The pool's own AsyncResult never
+    leaves _Workers: close() cuts every task loose, so a frame or a traceback that still holds one (an
+    exception's, which main.py keeps) keeps nothing of the pool alive. An AsyncResult references the
+    Pool, its task cache and its queues; one that never finished is even a cycle with the Pool, which
+    only the garbage collector frees (CI, PR #50)."""
+
+    __slots__ = ("_ar",)
+
+    def __init__(self, ar) -> None:
+        self._ar = ar
+
+    def ready(self) -> bool:
+        ar = self._ar
+        return ar is not None and ar.ready()
+
+    def get(self):
+        ar = self._ar
+        if ar is None:
+            raise RuntimeError("the worker pool was closed")
+        return ar.get()
+
+    def wait(self, timeout: float) -> None:
+        ar = self._ar
+        if ar is not None:
+            ar.wait(timeout)
+        else:  # closed (_await_all stops at its next check)
+            time.sleep(max(0.0, min(timeout, 0.5)))
+
+
 class _Workers:
     """A spawn Pool with what the waits need, without Pool's private attributes where possible:
     its size (stored here, not read from Pool._processes) and which worker process runs which task
@@ -2080,42 +2124,52 @@ class _Workers:
     when that is gone, pids() is None and deaths are only seen at the deadline.
 
     Rule 22 (review): broken() says when the pool can no longer run tasks (the waits then stop at
-    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC."""
+    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC.
 
-    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search",
-                 search_over: bool = False):
+    CI (PR #50, a segmentation fault while the garbage collector ran in the API's event-loop thread):
+    everything the pool made - its queues' pipes and locks, its worker processes, the stop flag, the
+    tasks' results - is closed and released by close(), in the thread that calls it, before the solve
+    returns; after close() this object holds nothing of multiprocessing, so nothing is left for the
+    garbage collector even when a traceback keeps it."""
+
+    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search"):
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
         self.size = max(1, int(size))
         self.run_id = run_id
-        self.what = what  # "search", "load re-check" or "second search", for the administrator's log lines
-        self._beacon = ctx.SimpleQueue()
+        self.what = what  # "search" or "load re-check", for the administrator's log lines
+        self.pool = None
         # The solve's "stop now" flag, seen by every THOROUGH search in these workers (_watch_search).
         # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
         self.control = control
-        # The second search's pool: "the engine's searches are over" (pyvrp_candidate.Stopper).
-        self.search_over = None
+        self._stop_flag = None
+        self._beacon = ctx.SimpleQueue()
         try:
-            stop_flag = ctx.Event() if control is not None else None
-            self.search_over = ctx.Event() if search_over else None
-            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init,
-                                 initargs=(self._beacon, stop_flag, self.search_over))
-        except BaseException:
+            self._stop_flag = ctx.Event() if control is not None else None
+            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, self._stop_flag))
+        except BaseException as exc:
             # Nothing left behind by a failed start (rule 22; audit finding: the queue made above used
-            # to stay open). Pool itself stops the worker processes it had started.
+            # to stay open). Pool itself stops the worker processes it had started; the traceback is
+            # cut here so that it does not keep Pool's half-made queues alive (CI, PR #50).
             self._beacon.close()
-            raise
-        if stop_flag is not None:
-            control.attach(stop_flag)  # type: ignore[union-attr]
+            self._beacon = self._stop_flag = None
+            raise exc.with_traceback(None)  # noqa: B904 - the same exception, without Pool's frames
+        if self._stop_flag is not None:
+            control.attach(self._stop_flag)  # type: ignore[union-attr]
         self._pid_of: dict[str, int] = {}
-        self._tasks: dict[str, object] = {}  # token -> AsyncResult of each task not seen finished yet
+        self._tasks: dict[str, _Task] = {}  # token -> each task not seen finished yet
+        self._handles: list[_Task] = []  # every task given out (close() cuts them loose)
         self._seq = 0
         self._warned = False
         self._closed = False
         self._close_ok = True
         self._proved = False  # check_started saw a task run (before that, _start_workers alerts)
         self._broken: str | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def check_started(self, timeout: float) -> None:
         """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
@@ -2133,12 +2187,15 @@ class _Workers:
         raise RuntimeError(f"the first worker task {'lost its process' if kind == 'lost' else 'failed'}: {value}")
 
     def submit(self, fn, arg, name: str):
-        """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
+        """Start ``fn(arg)`` in a worker; returns (token, _Task)."""
+        if self._closed:
+            raise RuntimeError(f"the worker pool for the {self.what} was closed")
         self._seq += 1
         token = f"{name}#{self._seq}"
-        fut = self.pool.apply_async(_tracked, (token, fn, arg))
-        self._tasks[token] = fut
-        return token, fut
+        task = _Task(self.pool.apply_async(_tracked, (token, fn, arg)))  # type: ignore[union-attr]
+        self._tasks[token] = task
+        self._handles.append(task)
+        return token, task
 
     def busy(self, live: frozenset[int]) -> int:
         """How many worker processes are running a task now: tasks that reported their start (see
@@ -2177,7 +2234,7 @@ class _Workers:
     def started(self) -> dict[str, int]:
         """token -> pid of every task that has started so far."""
         try:
-            while not self._beacon.empty():
+            while self._beacon is not None and not self._beacon.empty():
                 token, pid = self._beacon.get()
                 self._pid_of[token] = pid
         except Exception:  # noqa: BLE001
@@ -2185,6 +2242,8 @@ class _Workers:
         return self._pid_of
 
     def pids(self) -> frozenset[int] | None:
+        if self._closed:
+            return frozenset()
         try:
             return frozenset(p.pid for p in getattr(self.pool, _POOL_ATTR))
         except (AttributeError, TypeError):
@@ -2194,18 +2253,29 @@ class _Workers:
             return None
 
     def close(self) -> bool:
-        """Stop the workers (and any task still running past its deadline). Safe to call twice.
+        """Stop the workers (and any task still running past its deadline), then release everything
+        the pool made. Safe to call twice.
 
         Rule 22 (review): bounded. CPython's Pool.terminate() waited forever on a pool that broke
         (_stop_pool_processes), which held the request - its answer, its slot - for good. The worker
-        processes are now stopped first, then terminate() runs in a background thread for at most
-        POOL_CLOSE_SEC. False when it did not finish in that time: the administrator is alerted
-        (an ERROR line, /ready) and the cleanup goes on in the background."""
+        processes are now stopped first, then terminate() and join() run in a helper thread for at
+        most POOL_CLOSE_SEC. False when they did not finish in that time: the administrator is
+        alerted (an ERROR line, /ready) and the cleanup goes on in the background.
+
+        CI (PR #50): once terminate() and join() returned, this thread (the one that waits) closes the
+        pool's queues and worker processes (_release_pool), cuts its tasks loose, closes the start
+        reports' queue and detaches the stop flag from the solve's control; the Pool and every lock
+        it made are then freed here, by reference counting, when this returns - never later by the
+        garbage collector in another thread. When the cleanup is left to the background, the helper
+        thread releases the pool the same way as soon as terminate() returns."""
         if self._closed:
             return self._close_ok
         self._closed = True
         pool = self.pool
-        _stop_pool_processes(pool)
+        procs = _stop_pool_processes(pool)
+        run_id = self.run_id
+        gate = threading.Lock()
+        state = {"done": False, "left": False}  # terminate() returned / the caller stopped waiting
         finished = threading.Event()
 
         def cleanup() -> None:
@@ -2213,23 +2283,97 @@ class _Workers:
                 pool.terminate()
                 pool.join()
             except Exception as exc:  # noqa: BLE001 - nothing to do about it but say so
-                log.warning("run=%s worker pool cleanup failed: %s", self.run_id, exc)
-            finally:
-                finished.set()
+                log.warning("run=%s worker pool cleanup failed: %s", run_id, exc)
+            with gate:
+                state["done"] = True
+                left = state["left"]
+            finished.set()
+            if left:  # the caller stopped waiting (POOL_CLOSE_SEC): released here, still explicitly
+                _release_pool(pool, procs)
 
-        threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True).start()
-        self._close_ok = finished.wait(POOL_CLOSE_SEC)
-        if not self._close_ok:
+        helper = threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True)
+        helper.start()
+        finished.wait(POOL_CLOSE_SEC)
+        with gate:
+            done = state["done"]
+            state["left"] = not done
+        if done:
+            helper.join(POOL_CLOSE_SEC)  # it has done its work: it ends at once
+            _release_pool(pool, procs)
+        self._close_ok = done
+        if not done:
             _workers_alert(self.run_id, f"a worker pool did not stop within {POOL_CLOSE_SEC:g} s after the {self.what} "
                            "and is left to stop in the background", "Pool.terminate() did not return", nothing_searched=False)
-        try:
-            self._beacon.close()
-        except Exception:  # noqa: BLE001
-            pass
+        self._forget()
         return self._close_ok
 
+    def _forget(self) -> None:
+        """close(): hold nothing of multiprocessing any more - the tasks' results, the start reports'
+        queue, the stop flag (detached from the solve's control, which outlives the solve in main.py)
+        and the pool itself."""
+        for task in self._handles:
+            task._ar = None
+        self._handles = []
+        self._tasks = {}
+        if self._beacon is not None:
+            try:
+                self._beacon.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._stop_flag is not None and self.control is not None:
+            self.control.detach(self._stop_flag)
+        self._beacon = self._stop_flag = None
+        self.pool = None
 
-def _stop_pool_processes(pool) -> None:
+
+def _release_pool(pool, procs: list) -> None:
+    """After Pool.terminate() and join() (_Workers.close): close what the Pool made, in this thread -
+    its three queues' pipes and its worker processes (their handles, and their place in
+    multiprocessing's list of children) - and forget its tasks that never finished: each is an
+    AsyncResult -> Pool -> task cache -> AsyncResult cycle that only the garbage collector would free,
+    in whatever thread it happens to run (CI, PR #50: the API's event-loop thread). The Pool, and every
+    lock it made, is then freed as soon as its owner drops it. Best effort on Pool's private
+    attributes, like _stop_pool_processes."""
+    import multiprocessing as mp
+
+    try:
+        pool._cache.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    for name in ("_inqueue", "_outqueue", "_change_notifier"):
+        try:
+            getattr(pool, name).close()
+        except Exception:  # noqa: BLE001
+            pass
+    workers: list = []
+    for p in [*procs, *list(getattr(pool, _POOL_ATTR, None) or [])]:
+        if not any(p is q for q in workers):
+            workers.append(p)
+    for p in workers:
+        _close_process(p)
+    try:
+        getattr(pool, _POOL_ATTR).clear()
+    except Exception:  # noqa: BLE001
+        pass
+    # Worker processes that died earlier and were replaced (no longer in the pool's list): forgotten
+    # by multiprocessing's list of children now, and so freed here.
+    mp.active_children()
+
+
+def _close_process(p) -> None:
+    """Process.close() on a process that has ended: its handles closed and multiprocessing's list of
+    children forgets it. A process still running (it could not be killed) is left as it is, with a
+    warning."""
+    try:
+        if p.exitcode is None and getattr(p, "_popen", None) is not None:
+            log.warning("worker process %s did not stop; its handles stay open", p.pid)
+            return
+        p.close()
+    except (ValueError, AttributeError):  # never started, or already closed
+        pass
+
+
+def _stop_pool_processes(pool) -> list:
     """Rule 22 (review): let Pool.terminate() finish on a pool that broke. CPython's terminate()
     waits forever when (1) Pool's worker-handler thread died - it could not start a replacement
     process (out of memory, the process limit) - so its task-handler thread never gets the stop
@@ -2240,7 +2384,7 @@ def _stop_pool_processes(pool) -> None:
     the queue locks a dead worker left held are released (the task queue's read lock; on Linux also
     the result queue's write lock, held while a worker sends a result: killing the workers first
     must not create a new way to hang). Best effort on Pool's private attributes; close() bounds
-    whatever still waits."""
+    whatever still waits. Returns the worker processes it stopped (_release_pool closes them)."""
     import multiprocessing.pool as mpp
 
     handler = getattr(pool, "_worker_handler", None)
@@ -2279,6 +2423,7 @@ def _stop_pool_processes(pool) -> None:
                 _free_lock_of_dead(getattr(owner, name, None))
             except Exception:  # noqa: BLE001
                 pass
+    return procs
 
 
 def _free_lock_of_dead(lock) -> None:
@@ -2355,6 +2500,10 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
     while pending:
         if control is not None and control.cancelled.is_set():
             raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+        if getattr(workers, "closed", False):  # its tasks were cut loose (close): none can finish now
+            for name in pending:
+                out[name] = ("broken", f"the worker pool for the {workers.what} was closed")
+            break
         for name, (_tok, fut) in list(pending.items()):
             if fut.ready():  # type: ignore[attr-defined]
                 try:
@@ -2435,24 +2584,249 @@ def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, w
 PV_MARGIN_SEC = 3.0
 
 
+class _PipeFlag:
+    """A "stop now" / "the engine's searches are over" flag for the second search's process, made of
+    one pipe: set() writes one byte, the process polls for it (_FlagReader). No lock and no semaphore
+    (a multiprocessing Event is five semaphores, and its set() waits on a lock that a killed process
+    may hold for good). set() may come from any thread (SolveControl: the stop endpoint, the event
+    loop on a cancel); close() from the solve's own thread, after SolveControl.detach."""
+
+    def __init__(self, ctx) -> None:
+        self.reader, self._writer = ctx.Pipe(duplex=False)
+        self._lock = threading.Lock()
+        self._set = False
+
+    def set(self) -> None:
+        with self._lock:
+            if self._set or self._writer is None:
+                return
+            self._set = True
+            try:
+                self._writer.send_bytes(b"1")
+            except OSError:  # the process is gone
+                pass
+
+    def drop_reader(self) -> None:
+        """After the process started (it has its own copy of the reading end)."""
+        reader, self.reader = self.reader, None
+        if reader is not None:
+            reader.close()
+
+    def close(self) -> None:
+        with self._lock:
+            writer, self._writer = self._writer, None
+        self.drop_reader()
+        if writer is not None:
+            writer.close()
+
+
+class _FlagReader:
+    """The second search's process's side of a _PipeFlag (pyvrp_candidate.Stopper calls is_set()):
+    set once a byte is there - or once the pipe ended, the API process gone."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._set = False
+
+    def is_set(self) -> bool:
+        if not self._set:
+            try:
+                self._set = bool(self._conn.poll())
+            except (EOFError, OSError):
+                self._set = True
+        return self._set
+
+
+def _pv_main(jobs, results, stop, over) -> None:
+    """The second search's process (_PvProcess): runs each (fn, arg) it receives on ``jobs`` and
+    answers on ``results`` with ("ok", value) or ("error", "Type: message") - an exception goes back
+    as text, so the API process never unpickles a class of this process's libraries (PyVRP, numpy) -
+    until the API process closes its end or kills it."""
+    _worker_init(None, _FlagReader(stop) if stop is not None else None, _FlagReader(over))
+    try:
+        while True:
+            try:
+                fn, arg = jobs.recv()
+            except (EOFError, OSError):
+                return
+            except Exception as exc:  # noqa: BLE001 - a job this process cannot read
+                answer: tuple = ("error", f"{type(exc).__name__}: {exc}")
+            else:
+                try:
+                    answer = ("ok", fn(arg))
+                except Exception as exc:  # noqa: BLE001 - its answer
+                    answer = ("error", f"{type(exc).__name__}: {exc}")
+            try:
+                results.send(answer)
+            except (EOFError, OSError):
+                return
+            except Exception as exc:  # noqa: BLE001 - the answer could not be pickled
+                results.send(("error", f"its answer could not be sent back: {type(exc).__name__}: {exc}"))
+    finally:
+        for conn in (jobs, results, stop, over):
+            if conn is not None:
+                conn.close()
+
+
+class _PvProcess:
+    """The second search's own worker: ONE spawn process and its pipes - no Pool, no queue, no lock,
+    no semaphore, no helper thread but the short one that hands a job over (CI, PR #50: a
+    segmentation fault while the garbage collector ran in the API's event-loop thread; the second
+    search used to be a second Pool, with three threads, three queues and two Events). One job at a
+    time: its search, then its own load re-check.
+
+    submit() hands a job over in a short thread: a job larger than a pipe's buffer would otherwise
+    hold the solve until the process has started. wait() reads the answer, or sees the process die,
+    the deadline or a cancel. close() kills the process and joins it, joins that thread, closes every
+    pipe and the process object and detaches its stop flag from the solve's control - in the calling
+    thread, before the solve returns. Afterwards this object holds nothing of multiprocessing."""
+
+    def __init__(self, control: SolveControl | None, *, run_id: str = "") -> None:
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        self.run_id = run_id
+        self.control = control
+        self.proc = None
+        self._jobs = self._results = None
+        # The solve's "stop now" (THOROUGH: a stop or a cancel) and "the engine's searches are over".
+        self.stop_flag: _PipeFlag | None = None
+        self.search_over: _PipeFlag | None = None
+        self._sender: threading.Thread | None = None
+        self._send_failed: list[str] = []  # why the job in hand could not be handed over
+        self._closed = False
+        ends: list = []  # the process's ends of the pipes: closed here once it has its own copies
+        try:
+            jobs_r, self._jobs = ctx.Pipe(duplex=False)
+            ends.append(jobs_r)
+            self._results, results_w = ctx.Pipe(duplex=False)
+            ends.append(results_w)
+            self.stop_flag = _PipeFlag(ctx) if control is not None else None
+            self.search_over = _PipeFlag(ctx)
+            stop_r = self.stop_flag.reader if self.stop_flag is not None else None
+            self.proc = ctx.Process(target=_pv_main, args=(jobs_r, results_w, stop_r, self.search_over.reader),
+                                    name="routeiq-second-search", daemon=True)
+            self.proc.start()
+        except BaseException as exc:
+            for conn in ends:
+                conn.close()
+            self._release()
+            raise exc.with_traceback(None)  # noqa: B904 - the same exception, without the frames holding the pipes
+        for conn in ends:
+            conn.close()
+        for flag in (self.stop_flag, self.search_over):
+            if flag is not None:
+                flag.drop_reader()
+        if self.stop_flag is not None:
+            control.attach(self.stop_flag)  # type: ignore[union-attr]
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def submit(self, fn, arg) -> None:
+        """Hand ``fn(arg)`` to the process; its answer comes with wait()."""
+        if self._closed or self._jobs is None:
+            raise RuntimeError("the second search's process was closed")
+        if self._sender is not None:
+            self._sender.join(POOL_CLOSE_SEC)  # the previous job was answered, so it was read long ago
+        failed: list[str] = []
+        self._send_failed = failed
+        jobs = self._jobs
+
+        def send() -> None:
+            try:
+                jobs.send((fn, arg))
+            except Exception as exc:  # noqa: BLE001 - the process is gone (broken pipe), or the job cannot be pickled
+                failed.append(f"{type(exc).__name__}: {exc}")
+
+        self._sender = threading.Thread(target=send, name="routeiq-second-search-send", daemon=True)
+        self._sender.start()
+
+    def wait(self, deadline: float, control: SolveControl | None) -> tuple[str, object]:
+        """The answer to the job in hand: ("ok", value) | ("error", text) | ("lost", None) (the
+        process died, even before this wait) | ("timeout", None) at ``deadline``. ``control``
+        cancelled: SolveAborted within half a second."""
+        from multiprocessing.connection import wait as ready
+
+        if self._closed or self._results is None or self.proc is None:
+            return "lost", None
+        while True:
+            if control is not None and control.cancelled.is_set():
+                raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+            try:
+                if self._results.poll():
+                    kind, value = self._results.recv()
+                    return str(kind), value
+            except (EOFError, OSError):
+                return "lost", None
+            except Exception as exc:  # noqa: BLE001 - an answer this process cannot read
+                return "error", f"{type(exc).__name__}: {exc}"
+            if self.proc.exitcode is not None:
+                return "lost", None
+            if self._send_failed:
+                return "error", f"the job could not be handed over: {self._send_failed[0]}"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout", None
+            ready([self._results, self.proc.sentinel], min(0.5, remaining))
+
+    def close(self) -> None:
+        """Kill the process (a running PyVRP search does not stop at once) and join it, join the
+        hand-over thread (it ends once the process is gone), then release everything. Bounded: about
+        2 x POOL_CLOSE_SEC at most. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        proc = self.proc
+        if proc is not None:
+            try:
+                if proc.exitcode is None:
+                    proc.kill()
+                proc.join(POOL_CLOSE_SEC)
+            except Exception as exc:  # noqa: BLE001 - never costs the engine's answer
+                log.warning("pyvrp run=%s its process could not be stopped: %s", self.run_id, exc)
+        if self._sender is not None:
+            self._sender.join(POOL_CLOSE_SEC)
+            if self._sender.is_alive():
+                log.warning("pyvrp run=%s the job hand-over did not end", self.run_id)
+        self._release()
+
+    def _release(self) -> None:
+        """Close every pipe and the process object, detach the stop flag from the solve's control:
+        nothing is left for the garbage collector."""
+        if self.stop_flag is not None and self.control is not None:
+            self.control.detach(self.stop_flag)
+        for flag in (self.stop_flag, self.search_over):
+            if flag is not None:
+                flag.close()
+        for conn in (self._jobs, self._results):
+            if conn is not None:
+                conn.close()
+        if self.proc is not None:
+            _close_process(self.proc)
+        self.proc = self._jobs = self._results = self._sender = None
+        self.stop_flag = self.search_over = None
+        self._send_failed = []
+
+
 @dataclass
 class _PvRun:
-    """The second route search of one solve. It runs in a one-process pool of its own, started after
-    rule 22's proof and never part of it (critique C2): a machine that cannot start it still solves
-    (SKIPPED / NO_PROCESS); a search or stage of it that fails, dies or hangs only loses its own
+    """The second route search of one solve. It runs in a process of its own (_PvProcess), started
+    after rule 22's proof and never part of it (critique C2): a machine that cannot start it still
+    solves (SKIPPED / NO_PROCESS); a search or stage of it that fails, dies or hangs only loses its own
     candidates. ``report`` becomes SearchReport.pyvrp."""
 
     report: dict
     run_id: str = ""
-    workers: _Workers | None = None
+    proc: _PvProcess | None = None
     inprocess: bool = False  # SOLVER_PARALLEL=0 (tests, development): after the engine's searches
-    job: tuple | None = None  # (token, AsyncResult) of its search
     args: tuple | None = None  # (req, solvable, tds, mx, PvSettings)
     plan: LR.Plan | None = None  # its checked plan, for the load re-check
 
     @property
     def active(self) -> bool:
-        return self.workers is not None or self.inprocess
+        return self.proc is not None or self.inprocess
 
     def fail(self, status: str, reason: str, detail: str = "") -> None:
         """SKIPPED / FAILED / NOT_CHOSEN with ``reason``: one log line, and its process stops."""
@@ -2465,12 +2839,12 @@ class _PvRun:
         self.inprocess = False
 
     def close(self) -> None:
-        if self.workers is not None:
-            workers, self.workers = self.workers, None
+        if self.proc is not None:
+            proc, self.proc = self.proc, None
             try:
-                workers.close()
-            except Exception:  # noqa: BLE001 - never costs the engine's answer
-                pass
+                proc.close()
+            except Exception as exc:  # noqa: BLE001 - never costs the engine's answer
+                log.warning("pyvrp run=%s closing its process failed: %s", self.run_id, exc)
 
 
 def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: SolveControl | None,
@@ -2488,7 +2862,7 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
         pv.fail("SKIPPED", "NOTHING_TO_PLAN")
     elif main_pool:
         try:
-            pv.workers = _Workers(1, control, run_id=req.run_id, what="second search", search_over=True)
+            pv.proc = _PvProcess(control, run_id=req.run_id)
         except Exception as exc:  # noqa: BLE001 - optional: the engine alone answers
             pv.fail("SKIPPED", "NO_PROCESS", f"{type(exc).__name__}: {exc}")
     elif not _parallel():
@@ -2528,8 +2902,8 @@ def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: i
                              max_iters=PV.max_iters())
     pv.args = (req, solvable, tds, mx, settings)
     pv.report.update(status="NOT_CHOSEN", reason=None, seed=settings.seed)
-    if pv.workers is not None:
-        pv.job = pv.workers.submit(PV.solve_in_worker, pv.args, "PYVRP")
+    if pv.proc is not None:
+        pv.proc.submit(PV.solve_in_worker, pv.args)
 
 
 def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float, budget_end: float,
@@ -2551,14 +2925,14 @@ def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float,
     else:
         now = time.monotonic()
         limit = budget_end - stage_need
-        if pv.workers.search_over is not None:  # type: ignore[union-attr]
-            pv.workers.search_over.set()  # type: ignore[union-attr]
+        proc: _PvProcess = pv.proc  # type: ignore[assignment]
+        if proc.search_over is not None:
+            proc.search_over.set()
         deadline = limit if thorough and not stopped else min(now + PV.stop_grace_sec(), limit)
-        kind, value = _await_all(pv.workers, {"PYVRP": pv.job}, max(deadline, now), control)["PYVRP"]  # type: ignore[arg-type]
+        kind, value = proc.wait(max(deadline, now), control)
         if kind != "ok":
-            reason = {"lost": "LOST", "broken": "LOST", "timeout": "TIMEOUT"}.get(kind, "FAILED")
-            detail = {"lost": "its worker process stopped", "broken": "its worker process stopped",
-                      "timeout": "it did not answer in time"}.get(kind, f"{type(value).__name__}: {value}")
+            reason = {"lost": "LOST", "timeout": "TIMEOUT"}.get(kind, "FAILED")
+            detail = {"lost": "its worker process stopped", "timeout": "it did not answer in time"}.get(kind, str(value))
             return pv.fail("FAILED", reason, detail)
         result = value  # type: ignore[assignment]
     r: dict = result  # type: ignore[assignment]
@@ -2999,10 +3373,10 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                     fit_weights=fit_weights)
             for g in goals}
     outputs: dict[str, tuple[list[LR.Candidate], list[str]]] = {}
-    pv_task = None
-    if pv_job is not None and pv.workers is not None:  # type: ignore[union-attr]
+    pv_proc: _PvProcess | None = pv.proc if pv_job is not None and pv is not None else None
+    if pv_proc is not None:
         # Its own process (idle since its search ended): starts now, beside the engine's jobs.
-        pv_task = pv.workers.submit(PV.stage_in_worker, pv_job, "stage:PYVRP")  # type: ignore[union-attr]
+        pv_proc.submit(PV.stage_in_worker, pv_job)
     pv_deadline = min(time.monotonic() + (pv_job["budget_s"] if pv_job else 0) + STAGE_GRACE_SEC, budget_end - 2)
     if pool is None:
         for g, job in jobs.items():
@@ -3025,8 +3399,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                                                       "broken": _NOT_RUN["broken"]}.get(kind, "failed"),
                             f": {value}" if value is not None else "")
     pv_out: tuple[list[LR.Candidate], list[str]] | None = None
-    if pv_task is not None:
-        kind, value = _await_all(pv.workers, {"PYVRP": pv_task}, max(pv_deadline, time.monotonic()))["PYVRP"]  # type: ignore[union-attr,arg-type]
+    if pv_proc is not None:
+        kind, value = pv_proc.wait(max(pv_deadline, time.monotonic()), pv_proc.control)
         if kind == "ok":
             pv_out = value  # type: ignore[assignment]
         else:
