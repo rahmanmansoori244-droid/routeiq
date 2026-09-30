@@ -24,6 +24,7 @@ import {
   searchPollMs,
   searchProgressText,
   searchResultText,
+  secondSearchText,
   solverWaitMs,
   thoroughMaxSec,
   type SearchReport,
@@ -293,6 +294,22 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     expect(rows['Route search']).toBe(line);
     expect(Object.keys(searchAssumptions(report({ search_sec: 1.1, stop_reason: 'NO_PLAN' }), minTrucks))).toEqual(['Route search', 'Route search - what it means']);
     for (const text of [line, ...Object.values(rows)]) expect(text).not.toMatch(/\boptimal\b|\boptimum\b|is the best possible/i);
+  });
+
+  it('a plan from the second route search says so in either mode, for the option it was chosen for (decision D4)', () => {
+    const second = 'A second route search found this plan; the planner checked, timed and costed it with its own rules.';
+    const quick = report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', search_sec: 20.4, best_over_time: [], pyvrp: { status: 'CHOSEN', chosen_for: ['RECOMMENDED', 'MIN_TRUCKS'] } });
+    // QUICK too (the job message used to add the search line for THOROUGH only).
+    expect(secondSearchText(quick)).toBe(second);
+    expect(searchResultText(quick)).toBe(`Quick search: 20 s, the automatic time for a day of this size. ${second}`);
+    expect(searchResultText(quick, { name: 'MIN_TRUCKS', limitSec: 10 })).toMatch(new RegExp(`its own goal \\(the fewest trucks\\).*\\. ${second}$`));
+    // Not for an option the engine's own plan won, nor when it was not chosen, nor from an older solver.
+    expect(searchResultText(quick, { name: 'MIN_DISTANCE', limitSec: 10 })).not.toContain('second route search');
+    for (const pyvrp of [{ status: 'NOT_CHOSEN' as const, chosen_for: [] }, { status: 'SKIPPED' as const, reason: 'OFF' }, undefined]) {
+      expect(secondSearchText(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', pyvrp }))).toBeNull();
+    }
+    expect(secondSearchText(null)).toBeNull();
+    expect(second).not.toMatch(/PyVRP|\boptimal\b/);
   });
 
   it('the job message of a queued start', () => {
