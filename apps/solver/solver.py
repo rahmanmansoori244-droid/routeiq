@@ -272,17 +272,20 @@ def _solve_one_scenario(
     # Locations: depot at index 0, then one per stop.
     # We use lat/lng × 1e6 as integer x/y purely for labelling — distances are
     # provided explicitly via edges below, so coordinate scale doesn't affect cost.
-    depot_loc = model.add_depot(
+    # PyVRP 0.14: depots and clients sit at a Location; edges join Locations.
+    depot_xy = model.add_location(
         x=int(req.depot.lat * 1_000_000),
         y=int(req.depot.lng * 1_000_000),
-        name=req.depot.id,
     )
+    depot_loc = model.add_depot(depot_xy, name=req.depot.id)
 
     clients: list = []
+    client_xy: list = []
     for s in solvable:
+        loc = model.add_location(x=int(s.lat * 1_000_000), y=int(s.lng * 1_000_000))
+        client_xy.append(loc)
         c = model.add_client(
-            x=int(s.lat * 1_000_000),
-            y=int(s.lng * 1_000_000),
+            loc,
             delivery=s.demand_cases,
             service_duration=s.service_time_min * 60,
             prize=drop_penalty(s.priority) * PRIZE_SCALE,
@@ -311,7 +314,7 @@ def _solve_one_scenario(
 
     # Edges — n × (n-1) directional edges. Distance in meters (cm/100), duration
     # in seconds. PyVRP requires explicit edges for every pair we want to allow.
-    all_locs = [depot_loc] + clients
+    all_locs = [depot_xy] + client_xy  # PyVRP 0.14: edges join Locations
     n_nodes = len(all_locs)
     for i in range(n_nodes):
         for j in range(n_nodes):
@@ -379,7 +382,8 @@ def _solve_one_scenario(
     for route in best.routes():
         vtype_idx = route.vehicle_type()
         truck = req.trucks[vtype_idx]
-        visits = list(route.visits())  # PyVRP returns 1-indexed (depot=0, clients=1..N)
+        # PyVRP 0.14: a route is a list of activities; client idx k is matrix node k + 1 (depot = 0).
+        visits = [a.idx + 1 for a in route if a.is_client()]
         if not visits:
             continue
         trucks_used += 1
