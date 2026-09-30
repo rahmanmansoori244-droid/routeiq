@@ -718,17 +718,20 @@ and prototype: `.dev/bench/pyvrp-enh/SPEC.md` (with the two skeptic reviews' cor
   check of the engine's pool and never part of it: if it cannot start, the solve goes on with the engine alone
   (SKIPPED / NO_PROCESS). It is submitted right after RECOMMENDED, so the engine never waits behind it.
 - **The model.** The same day the engine searches (after its prefilters), with every price from the engine's own
-  functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows, truck hours
-  (frozen loads, same-day loading), loads per truck as reload depots with the search's turnaround, the shift maximum, driver
+  functions, in its units: vehicle types of interchangeable trucks, cases and 0.1 kg units, hard windows (with unloading
+  finished by closing, §13, the latest start is closing - stop time, as in the engine), truck hours (frozen loads,
+  same-day loading, the latest return), loads per truck as reload depots with the search's turnaround, the shift maximum
+  (a truck-day that may need the driver break keeps its length free, as the engine's own search), driver
   pay for the truck day and overtime past `overtime_after_min` (only new overtime on trucks with frozen loads), km per rate
   class, trip cost per load, plan continuity per truck, and every stop optional with the engine's own strict-priority drop
   penalty as its prize. Nothing holds a time of day: shift start, shift maximum, overtime threshold, depot and truck hours
   come from the request (Settings). The owner's day, 07:00-18:00 with 18:00 the latest return and overtime as set, is
-  expressed by the depot or truck closing time (a test checks it).
+  expressed by the depot or truck closing time (a test checks it) or, since §13, by the latest return in Settings.
 - **What it cannot see** (the judge prices all of them exactly): the early-arrival preference of P1/P2 (so its plans may
   deliver them later inside their hard windows when that saves more money than the preference is worth); preferred windows
   (tightened into the hard window when they carry a price and the two overlap, "prefhard"); the loading time per case of
-  the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads.
+  the next load (80% of a full truck, as the engine's own search); the driver-pay anchor of trucks with frozen loads; the
+  driver break itself (§13: the exact timing places it and the check holds this search's plans to it, as the engine's).
 - **When it stops.** QUICK: when the engine's searches end (the alternatives are in), within about 0.3 s; the answer is
   awaited at most `SOLVER_PYVRP_STOP_GRACE_SEC` (10 s) and never past the engine's stage reserve. THOROUGH (decision D3):
   while the engine searches, it searches too (that costs no waiting); once the engine's searches ended, it stops when its

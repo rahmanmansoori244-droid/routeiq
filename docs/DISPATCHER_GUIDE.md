@@ -72,7 +72,8 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - After the route search, RouteIQ re-checks which truck carries each load, so trucks do two or three loads each where the day allows instead of many trucks doing one short load. When this changed the plan you see a note such as *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
   - The re-check also tries to place orders the route search left out on free trucks or loads. When it does, the note ends with *"this also plans 2 stop(s) the route search had left out"*: loads and cost can then go up, because more is delivered.
   - **A second route search.** RouteIQ runs a second route search beside the main one, on the same orders, trucks and
-    hours. Its plan goes through exactly the same checks, timing and costs as the main search's, and it is used for an option
+    hours. Its plan goes through exactly the same checks, timing and costs as the main search's (the driver break and
+    unloading finished by closing included), and it is used for an option
     only when it is clearly better for that option's goal (serving the higher priorities first; then, for Recommended, at
     least 1 OMR less total cost with the customer time preferences; for Min Distance at least 1 km less; for Min Trucks a
     truck or a load less, or 1 OMR less operating cost). Otherwise the main search's plan is kept. Such an option carries one

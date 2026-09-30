@@ -712,6 +712,21 @@ def _approx_gap_s(cfg: DispatchConfig, td: TruckDay) -> int:
     return int(round((cfg.reload_min + cfg.loading_min_per_case * td.max_cases * 0.8) * 60))
 
 
+def _search_day_end(td: TruckDay, first_s: int, shift_s: int) -> tuple[int, int]:
+    """(latest route end, longest route span) in seconds that the route searches give a truck-day
+    whose first new load may leave at ``first_s``. Driver break: the searches stay break-free
+    (breaks in the search found far fewer plans in the design runs); a truck-day that may need one
+    (DUE) keeps the break's length free of its shift, so the exact stages (load_repack) can insert
+    it. The span shrinks, and so does the latest return when frozen loads anchor the shift or the
+    depot closing / the truck's hours end the day before the shift does. The exact stages use the
+    true shift. One rule for the engine's search and the second search (pyvrp_candidate)."""
+    margin = td.break_s if td.break_state == "DUE" else 0
+    end_max = td.latest_return_s
+    if margin and (td.shift_anchor_s is not None or td.latest_return_s - td.earliest_depart_s < shift_s):
+        end_max = max(min(first_s, td.latest_return_s), td.latest_return_s - margin)
+    return max(td.earliest_depart_s, end_max), shift_s - margin
+
+
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
     if stop.demand_cases > td.max_cases:
         return False
@@ -1285,18 +1300,11 @@ def _solve_scenario(
         if td.ready_s is not None:  # frozen loads / same-day plan: + loading of the first new load
             first = max(first, td.ready_s + _approx_gap_s(cfg, td))
         tdim.CumulVar(start).SetRange(min(first, td.latest_return_s), td.latest_return_s)
-        # Driver break: the search stays break-free (breaks in the search found far fewer plans in
-        # the design runs); a truck-day that may need one keeps the break's length free of its
-        # shift, so the exact stages (load_repack) can insert it. The exact stages use the true shift.
-        margin = td.break_s if td.break_state == "DUE" else 0
-        end_max = td.latest_return_s
-        if margin and (td.shift_anchor_s is not None or td.latest_return_s - td.earliest_depart_s < shift_s):
-            # Frozen loads (the shift runs from their first departure), or the depot closing / the
-            # truck's hours end the day before the shift does: the latest return comes in instead.
-            end_max = max(min(first, td.latest_return_s), td.latest_return_s - margin)
-        tdim.CumulVar(end).SetRange(td.earliest_depart_s, max(td.earliest_depart_s, end_max))
+        # Driver break: a DUE truck-day keeps the break's length free of its shift (_search_day_end).
+        end_max, span_max = _search_day_end(td, first, shift_s)
+        tdim.CumulVar(end).SetRange(td.earliest_depart_s, end_max)
         if td.shift_anchor_s is None:
-            tdim.SetSpanUpperBoundForVehicle(shift_s - margin, v)
+            tdim.SetSpanUpperBoundForVehicle(span_max, v)
         if time_coeff:
             # Driver pay = the whole truck day (costing.py): the route's span, and for a truck with
             # frozen loads also the time from its last frozen return to the first new departure
