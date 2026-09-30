@@ -14,6 +14,7 @@ Endpoints (all but /health require the shared-secret X-Solver-Token header):
 * ``POST /optimize``          - legacy v1 three-scenario PyVRP solver (kept for comparison).
 """
 
+import faulthandler
 import hmac
 import logging
 import os
@@ -35,6 +36,12 @@ import pyvrp_candidate
 from models import OptimizeRequest, OptimizeResponse
 from providers import HaversineProvider, OSRMProvider, configured_osrm_url
 from solver import optimize
+
+# A crash in a C extension (a fatal signal: SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL) prints every
+# thread's Python stack to the log instead of the process vanishing without a trace (CI 30 Sep 2026:
+# the API process died mid-solve and its log said nothing). The worker processes inherit it.
+faulthandler.enable(all_threads=True)
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
 
 logging.basicConfig(
     level=logging.INFO,

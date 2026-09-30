@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import replace
@@ -766,6 +768,55 @@ def test_cancel_stops_pyvrp_and_its_worker_within_seconds(workers, monkeypatch):
     assert time.monotonic() - t0 < 3.0 + 1.0 + ds.POOL_CLOSE_SEC
     assert len(made) == 2
     _stopped(made)
+
+
+def test_the_second_search_worker_asks_to_be_the_first_oom_victim(monkeypatch, tmp_path):
+    """CI 30 Sep 2026: the solver's API process vanished mid-solve (no traceback; the resource
+    tracker's "leaked semaphore objects" line), right as the second search's worker started, and
+    every later solve failed. The second search is the optional process: when memory runs short the
+    kernel must take it (its plan is LOST, the engine's plans are used), never the API process. Its
+    worker raises its own oom_score_adj to the maximum at start; the engine's workers keep theirs."""
+    path = tmp_path / "oom_score_adj"
+    path.write_text("0\n", encoding="ascii")
+    monkeypatch.setattr(ds, "OOM_SCORE_ADJ_PATH", str(path))
+    for name in ("_BEACON", "_STOP_FLAG", "_SEARCH_OVER"):
+        monkeypatch.setattr(ds, name, getattr(ds, name))  # restored after the test
+    ds._worker_init(None, None, None)  # an engine worker
+    assert path.read_text(encoding="ascii").strip() == "0"
+    ds._worker_init(None, None, object())  # the second search's worker (its pool has search_over)
+    assert path.read_text(encoding="ascii").strip() == "1000"
+    # Best effort: no /proc (Windows, macOS) or a read-only one never stops the worker from starting.
+    monkeypatch.setattr(ds, "OOM_SCORE_ADJ_PATH", str(tmp_path / "missing" / "oom_score_adj"))
+    ds._worker_init(None, None, object())
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux: /proc/<pid>/oom_score_adj")
+def test_on_linux_the_second_search_worker_is_the_kernels_first_oom_victim():
+    """The real processes (CI runs this on Linux): the second search's worker process has
+    oom_score_adj 1000; an engine worker keeps the API process's value."""
+    parent = open("/proc/self/oom_score_adj", encoding="ascii").read().strip()
+    pools = [(ds._Workers(1, None, what="second search", search_over=True), "1000"), (ds._Workers(1, None), parent)]
+    try:
+        for w, want in pools:
+            kind, pid = ds._await_all(w, {"ping": w.submit(ds._ping, None, "ping")}, time.monotonic() + 60)["ping"]
+            assert kind == "ok", (kind, pid)
+            assert open(f"/proc/{pid}/oom_score_adj", encoding="ascii").read().strip() == want
+    finally:
+        for w, _ in pools:
+            w.close()
+
+
+def test_a_native_crash_of_the_solver_prints_every_threads_stack():
+    """The same CI failure left nothing to read: a process killed by a signal (a crash in a C
+    extension) prints no Python traceback. The API process enables faulthandler (every thread's
+    stack on SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL) and its worker processes inherit it
+    (PYTHONFAULTHANDLER). A fresh interpreter: pytest itself turns faulthandler on."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONFAULTHANDLER"}
+    code = "import faulthandler, os, main; print(faulthandler.is_enabled(), os.environ.get('PYTHONFAULTHANDLER'))"
+    out = subprocess.run([sys.executable, "-c", code], cwd=os.path.join(HERE, ".."), env=env, capture_output=True,
+                         text=True, timeout=180)
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert out.stdout.split() == ["True", "1"], out.stdout
 
 
 def test_cpu_gate(monkeypatch, inprocess):
