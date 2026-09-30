@@ -93,7 +93,7 @@ beforeAll(async () => {
   deliveryDate = isoPlus(1);
   await prisma.tenantConfig.update({
     where: { tenantId: t.tenantId },
-    data: { timezone: 'Asia/Muscat', planningCutoffMin: 23 * 60 + 59, shiftStartMin: 6 * 60, driverShiftMaxMinutes: 12 * 60, reloadMinutes: 30, maxTripsPerTruck: 3, distanceProvider: 'HAVERSINE', osrmUrl: null },
+    data: { timezone: 'Asia/Muscat', planningCutoffMin: 23 * 60 + 59, shiftStartMin: 6 * 60, driverShiftMaxMinutes: 17 * 60, /* latest return (start + length) 23:00 = the depot closing below: the same-day tests must not end at 18:00 (planning rules PR) */ reloadMinutes: 30, maxTripsPerTruck: 3, distanceProvider: 'HAVERSINE', osrmUrl: null },
   });
   const depot = await prisma.depot.create({ data: { tenantId: t.tenantId, code: 'MCT', name: 'Muscat depot', lat: 23.568, lng: 58.392, openMin: 300, closeMin: 1380 } });
   depotId = depot.id;
