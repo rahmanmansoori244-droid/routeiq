@@ -1,5 +1,5 @@
 """The second route search (PyVRP 0.14.0, pyvrp_candidate.py): its model, its safety rules, the
-never-worse guard of the load re-check, and its process (own pool, stop, cancel, failures).
+never-worse guard of the load re-check, and its process (its own, stop, cancel, failures).
 
 Critique-driven (SPEC.md review, 30 Sep 2026): the promise is "never worse than the engine alone FROM
 THE SAME SEARCH"; its process is optional (rule 22 refuses only when the engine's own workers cannot
@@ -490,30 +490,40 @@ def test_a_gain_too_small_to_show_keeps_the_engines_plan(deterministic_repack, m
 
 
 # ---------------------------------------------------------------------------------------------
-# Its process: pool, timing, stop, cancel, failures, rule 22, CPU gate
+# Its process: start, timing, stop, cancel, failures, rule 22, CPU gate
 # ---------------------------------------------------------------------------------------------
 
 def _pools(monkeypatch) -> list:
+    """Every engine pool (_Workers: its size) and second-search process (_PvProcess: "PV") made from
+    now on, in order."""
     made: list = []
-    real = ds._Workers.__init__
+    real, real_pv = ds._Workers.__init__, ds._PvProcess.__init__
 
     def init(self, *a, **k):
-        made.append((self, a, k))
+        made.append((self, a[0] if a else k.get("size")))
         real(self, *a, **k)
 
+    def init_pv(self, *a, **k):
+        made.append((self, "PV"))
+        real_pv(self, *a, **k)
+
     monkeypatch.setattr(ds._Workers, "__init__", init)
+    monkeypatch.setattr(ds._PvProcess, "__init__", init_pv)
     return made
 
 
 def _stopped(made) -> None:
-    for w, _a, _k in made:
-        pool = getattr(w, "pool", None)
-        if pool is not None:
-            assert [p.pid for p in pool._pool if p.is_alive()] == []
+    """Every pool and process closed and released (CI, PR #50): no child process, no pool thread."""
+    import multiprocessing as mp
+
+    for w, _kind in made:
+        assert w.closed and (w.pool if isinstance(w, ds._Workers) else w.proc) is None
+    assert mp.active_children() == []
+    assert [t.name for t in threading.enumerate() if t.is_alive() and ("_handle_" in t.name or t.name.startswith("routeiq-"))] == []
 
 
 def test_own_optional_process_and_quick_timing_unchanged(workers, monkeypatch):
-    """Off: exactly the engine's pool. On: one more pool of one process (never part of rule 22's),
+    """Off: exactly the engine's pool. On: one more process of its own (never part of rule 22's),
     RECOMMENDED's limit unchanged, the second search told to stop when the engine's searches end, and
     the answer within the off run's time + the load re-check's cap + 3 s."""
     stops, trucks = nmwc_day(20)
@@ -521,12 +531,12 @@ def test_own_optional_process_and_quick_timing_unchanged(workers, monkeypatch):
     monkeypatch.setenv("SOLVER_PYVRP", "off")
     made = _pools(monkeypatch)
     off = ds.optimize_dispatch(r)
-    assert [a[0] if a else k.get("size") for _w, a, k in made] == [2]
+    assert [kind for _w, kind in made] == [2]
     assert off.search.pyvrp.status == "SKIPPED" and off.search.pyvrp.reason == "OFF"
     monkeypatch.setenv("SOLVER_PYVRP", "on")
     made.clear()
     on = ds.optimize_dispatch(r)
-    assert [(a[0], k.get("search_over", False)) for _w, a, k in made] == [(2, False), (1, True)]
+    assert [kind for _w, kind in made] == [2, "PV"]
     assert on.search.limit_sec == off.search.limit_sec == 2
     p = on.search.pyvrp
     assert p.status in ("CHOSEN", "NOT_CHOSEN") and p.feasible and p.stop_reason == "SEARCH_END", p
@@ -537,14 +547,16 @@ def test_own_optional_process_and_quick_timing_unchanged(workers, monkeypatch):
 
 def test_second_search_that_cannot_start_never_refuses_the_solve(workers, monkeypatch, caplog):
     """Rule 22 refuses only when the engine's own workers cannot run (critique C2)."""
-    real = ds._Workers.__init__
+    from multiprocessing.context import SpawnProcess
 
-    def init(self, *a, search_over=False, **k):
-        if search_over:
+    real = SpawnProcess.start
+
+    def start(self):
+        if self.name == "routeiq-second-search":
             raise OSError(11, "Resource temporarily unavailable (test)")
-        real(self, *a, **k)
+        return real(self)
 
-    monkeypatch.setattr(ds._Workers, "__init__", init)
+    monkeypatch.setattr(SpawnProcess, "start", start)
     caplog.set_level(logging.WARNING, logger="routeiq.dispatch")
     resp = ds.optimize_dispatch(req(*nmwc_day(20), scenarios=ALL3, time_limit_sec=2))
     assert resp.search.pyvrp.status == "SKIPPED" and resp.search.pyvrp.reason == "NO_PROCESS"
@@ -561,7 +573,7 @@ def test_rule22_unchanged_with_pyvrp_on(workers, monkeypatch):
     with pytest.raises(ds.WorkersUnavailable):
         ds.optimize_dispatch(req(*nmwc_day(20), scenarios=ALL3))
     assert time.monotonic() - t0 < 15
-    assert [k.get("search_over", False) for _w, _a, k in made] == [False]  # the second search never started
+    assert [kind for _w, kind in made] == [2]  # the second search never started
     _stopped(made)
 
 
@@ -671,7 +683,7 @@ def test_cancel_stops_pyvrp_and_its_worker_within_seconds(workers, monkeypatch):
     with pytest.raises(ds.SolveAborted):
         ds.optimize_dispatch(req(*nmwc_day(30), scenarios=ALL3, time_limit_sec=30), control=control)
     assert time.monotonic() - t0 < 3.0 + 1.0 + ds.POOL_CLOSE_SEC
-    assert len(made) == 2
+    assert [kind for _w, kind in made] == [2, "PV"]
     _stopped(made)
 
 
@@ -688,7 +700,7 @@ def test_the_second_search_worker_asks_to_be_the_first_oom_victim(monkeypatch, t
         monkeypatch.setattr(ds, name, getattr(ds, name))  # restored after the test
     ds._worker_init(None, None, None)  # an engine worker
     assert path.read_text(encoding="ascii").strip() == "0"
-    ds._worker_init(None, None, object())  # the second search's worker (its pool has search_over)
+    ds._worker_init(None, None, object())  # the second search's worker (it has search_over)
     assert path.read_text(encoding="ascii").strip() == "1000"
     # Best effort: no /proc (Windows, macOS) or a read-only one never stops the worker from starting.
     monkeypatch.setattr(ds, "OOM_SCORE_ADJ_PATH", str(tmp_path / "missing" / "oom_score_adj"))
@@ -700,15 +712,18 @@ def test_on_linux_the_second_search_worker_is_the_kernels_first_oom_victim():
     """The real processes (CI runs this on Linux): the second search's worker process has
     oom_score_adj 1000; an engine worker keeps the API process's value."""
     parent = open("/proc/self/oom_score_adj", encoding="ascii").read().strip()
-    pools = [(ds._Workers(1, None, what="second search", search_over=True), "1000"), (ds._Workers(1, None), parent)]
+    second, engine = ds._PvProcess(None), ds._Workers(1, None)
     try:
-        for w, want in pools:
-            kind, pid = ds._await_all(w, {"ping": w.submit(ds._ping, None, "ping")}, time.monotonic() + 60)["ping"]
-            assert kind == "ok", (kind, pid)
-            assert open(f"/proc/{pid}/oom_score_adj", encoding="ascii").read().strip() == want
+        second.submit(ds._ping, None)
+        kind, pid = second.wait(time.monotonic() + 60, None)
+        assert kind == "ok", (kind, pid)
+        assert open(f"/proc/{pid}/oom_score_adj", encoding="ascii").read().strip() == "1000"
+        kind, pid = ds._await_all(engine, {"ping": engine.submit(ds._ping, None, "ping")}, time.monotonic() + 60)["ping"]
+        assert kind == "ok", (kind, pid)
+        assert open(f"/proc/{pid}/oom_score_adj", encoding="ascii").read().strip() == parent
     finally:
-        for w, _ in pools:
-            w.close()
+        second.close()
+        engine.close()
 
 
 def test_a_native_crash_of_the_solver_prints_every_threads_stack():
