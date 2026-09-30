@@ -172,6 +172,9 @@ export function dispatchConfigFromTenant(
     config: {
       shift_start_min: cfg.shiftStartMin,
       shift_max_min: cfg.driverShiftMaxMinutes,
+      // Owner: "18:00 is the latest return" - an absolute time from the tenant's own first
+      // departure, kept when a same-day plan moves shift_start_min to now + turnaround.
+      latest_return_min: cfg.shiftStartMin + cfg.driverShiftMaxMinutes,
       overtime_after_min: cfg.overtimeAfterMin,
       overtime_cost_per_hour: cfg.overtimeCostPerHour,
       reload_min: cfg.reloadMinutes,

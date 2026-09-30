@@ -258,3 +258,32 @@ def test_b12_identical_trucks_split_by_break_state():
     assert LR._identical_trucks(day, pricing)  # same state: interchangeable
     day.trucks[1].break_state = "NOT_NEEDED"
     assert not LR._identical_trucks(day, pricing)
+
+
+# --------------------------------------------------------------------------------------
+# Latest return (owner: "18:00 is the latest return"): an absolute cut-off, not first departure + shift
+# --------------------------------------------------------------------------------------
+
+def _late_stop_day(**cfg):
+    """One stop ~3 h away that receives only from 15:00: served, the truck is back about 19:00."""
+    s = far("L", 0.8, service_min=30, hard_start_min=hm("15:00"), hard_end_min=hm("20:00"))
+    base = dict(shift_start_min=hm("07:00"), shift_max_min=11 * 60, time_limit_sec=2, window_rule="FINISH", **BREAK)
+    base.update(cfg)
+    return req([s], [truck("T1")], **base)
+
+
+def test_latest_return_is_an_absolute_cut_off():
+    old = rec(optimize_dispatch(_late_stop_day()))
+    assert served_ids(old) == {"L"} and old.loads[0].return_min > hm("18:00")  # without it: back after 18:00
+    assert old.latest_return_min is None
+    new = rec(optimize_dispatch(_late_stop_day(latest_return_min=hm("18:00"))))
+    assert served_ids(new) == set() and new.latest_return_min == hm("18:00")
+    assert new.feasibility.status == "VERIFIED"
+
+
+def test_latest_return_holds_on_a_same_day_plan_and_is_checked():
+    r = _late_stop_day(latest_return_min=hm("18:00"), shift_start_min=hm("11:30"), loading_from_min=hm("11:00"))
+    assert ds._truck_days(r)[0].latest_return_s == hm("18:00") * 60
+    sc = rec(optimize_dispatch(_late_stop_day()))
+    late = FZ.check_scenario(_late_stop_day(latest_return_min=hm("18:00")), sc).violations
+    assert any(v.code == "SHIFT_LIMIT" and "latest return (18:00)" in v.message for v in late)

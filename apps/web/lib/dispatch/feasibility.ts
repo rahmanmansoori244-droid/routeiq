@@ -24,7 +24,10 @@
  *   unloadings, or a depot gap of at least the break that starts in the window (after a load made
  *   earlier, only from the time the plan was made: idle time before it does not count). A missing
  *   break is put on the latest planned load out during the window: a load that has left, or whose
- *   own rules have no break (planned before the rule), only warns - never blocked after the fact;
+ *   own rules have no break (planned before the rule), only warns - never blocked after the fact.
+ *   Locked, dispatched or pre-rule loads that already run through the window with no break (the
+ *   solver's NOT_POSSIBLE) only warn and never block a new load; the break position is read by
+ *   stop (one row per order), as the solver counts it;
  * - turnaround: each load leaves after the previous load's return + reload + loading time per
  *   case x its cases (the rules the later load was planned with); a load planned on its delivery
  *   day also after the time the plan was made + that turnaround, on a truck standing at the depot
@@ -202,6 +205,7 @@ export function inputHash(input: FeasibilityInput): string {
       // The driver break rule and the load's break, only when set: older plans keep their hash.
       ...(l.rules?.break ? [['BREAK_RULE', l.rules.break.lengthMin, l.rules.break.startFromMin, l.rules.break.startToMin]] : []),
       ...(l.break ? [['BREAK', l.break.startMin, l.break.endMin, l.break.where, l.break.afterSequence]] : []),
+      ...(typeof l.rules?.latestReturnMin === 'number' ? [['LATEST_RETURN', l.rules.latestReturnMin]] : []),
     ]);
   const solver = input.solver ? [input.solver.status, input.solver.timing, input.solver.violations.map((v) => [v.code, v.truck_id ?? null, v.load_no ?? null])] : null;
   return createHash('sha256').update(JSON.stringify({ v: FEASIBILITY_VERSION, s: input.scenarioId, solver, loads })).digest('hex');
@@ -377,6 +381,9 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       if (l.returnMin > r.depotCloseMin + TOL_MIN) {
         v({ ...at(l), code: 'DEPOT_CLOSE', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the depot closes (${hhmm(r.depotCloseMin)}).`, shortBy: l.returnMin - r.depotCloseMin });
       }
+      if (typeof r.latestReturnMin === 'number' && l.returnMin > r.latestReturnMin + TOL_MIN) {
+        v({ ...at(l), code: 'SHIFT_LIMIT', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the latest return (${hhmm(r.latestReturnMin)}).`, shortBy: l.returnMin - r.latestReturnMin });
+      }
       if (r.availableToMin !== null && l.returnMin > r.availableToMin + TOL_MIN) {
         v({ ...at(l), code: 'TRUCK_AVAILABILITY', message: `${code} load ${l.loadNo} is back at ${hhmm(l.returnMin)}, after the truck's availability ends (${hhmm(r.availableToMin)}).`, shortBy: l.returnMin - r.availableToMin });
       }
@@ -399,12 +406,15 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       // Precedence (review FIX 3): a load that has left warns (v); a load whose OWN rules have no
       // break was planned before the rule and only warns, locked or not; a locked or loading load
       // under the rule is flagged frozen (unlock first); a planned load under the rule blocks.
+      // warnOnly (the solver's NOT_POSSIBLE): no break can be added now - never blocks.
       const legacy = !target.rules?.break;
       v({
         ...at(target),
         code: 'BREAK',
-        ...(legacy ? { severity: 'WARN' as const } : {}),
-        message: brk.message + (legacy ? ' (planned before the driver break rule: shown, it does not block)' : ' Re-plan to add it.'),
+        ...(legacy || brk.warnOnly ? { severity: 'WARN' as const } : {}),
+        message:
+          brk.message +
+          (legacy ? ' (planned before the driver break rule: shown, it does not block)' : brk.warnOnly ? ' (shown, it does not block)' : ' Re-plan to add it.'),
       });
     }
   }
@@ -467,16 +477,20 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
 
 /**
  * The driver break of one truck-day (loads in load order), or null when it holds one or needs
- * none. The rule is the latest load's that has one (PlanRules.break, the solver's echo); a
- * recorded break is checked against the rule of the load that holds it.
+ * none. Whether the day needs one is judged by the latest load's rule that has one (PlanRules.break,
+ * the solver's echo); a recorded break by the rule of the load that holds it, and a depot gap by
+ * the rule of the load that leaves after it. `warnOnly`: loads a re-plan carries over (locked,
+ * loading, on the road) or planned before the rule already run through the window with no break,
+ * so no break can be added now (the solver's NOT_POSSIBLE): shown, never blocking a new load.
  */
-export function breakProblem(loads: FeasLoad[]): { target: FeasLoad; message: string } | null {
+export function breakProblem(loads: FeasLoad[]): { target: FeasLoad; message: string; warnOnly?: boolean } | null {
   const rule = [...loads].reverse().find((l) => l.rules?.break)?.rules?.break;
   if (!rule || rule.lengthMin <= 0 || !loads.length) return null;
   const code = loads[0].truckCode;
   const first = Math.min(...loads.map((l) => l.departMin));
   const last = Math.max(...loads.map((l) => l.returnMin));
-  const window = `to start between ${hhmm(rule.startFromMin)} and ${hhmm(rule.startToMin)}`;
+  const windowOf = (r: { startFromMin: number; startToMin: number }) => `to start between ${hhmm(r.startFromMin)} and ${hhmm(r.startToMin)}`;
+  const window = windowOf(rule);
   if (!(first < rule.startFromMin && last > rule.startToMin)) return null; // no break needed
   for (let i = 0; i < loads.length; i++) {
     const l = loads[i];
@@ -485,7 +499,7 @@ export function breakProblem(loads: FeasLoad[]): { target: FeasLoad; message: st
     const r = l.rules?.break ?? rule;
     const inWindow = b.startMin >= r.startFromMin - TOL_MIN && b.startMin <= r.startToMin + TOL_MIN && b.endMin - b.startMin >= r.lengthMin;
     if (!inWindow) {
-      return { target: l, message: `${code} load ${l.loadNo}: the driver break ${hhmm(b.startMin)}-${hhmm(b.endMin)} is not a ${r.lengthMin}-min break ${window}.` };
+      return { target: l, message: `${code} load ${l.loadNo}: the driver break ${hhmm(b.startMin)}-${hhmm(b.endMin)} is not a ${r.lengthMin}-min break ${windowOf(r)}.` };
     }
     if (b.where === 'DEPOT') {
       const prev = i > 0 ? loads[i - 1].returnMin : null;
@@ -495,21 +509,57 @@ export function breakProblem(loads: FeasLoad[]): { target: FeasLoad; message: st
       }
       return null;
     }
-    const stops = [...l.stops].sort((a, c) => a.sequence - c.sequence);
+    // after_sequence counts STOPS (the solver's), and a stop holds one row per order: group the
+    // rows by sequence - the stop is served from its first order's start to its last departure.
+    const seqs = [...new Set(l.stops.map((s) => s.sequence))].sort((a, c) => a - c);
+    const span = (seq: number | undefined, pick: 'serviceStartMin' | 'departureMin') => {
+      const vals = l.stops.filter((s) => s.sequence === seq).map((s) => s[pick]);
+      if (!vals.length || vals.some((x) => x === null)) return null;
+      return pick === 'serviceStartMin' ? Math.min(...(vals as number[])) : Math.max(...(vals as number[]));
+    };
     const k = b.afterSequence ?? -1;
-    const a = k === 0 ? l.departMin : stops[k - 1]?.departureMin;
-    const z = k === stops.length ? l.returnMin : stops[k]?.serviceStartMin;
-    if (k < 0 || k > stops.length || a === null || a === undefined || z === null || z === undefined || b.startMin < a - TOL_MIN || b.endMin > z + TOL_MIN) {
+    const a = k === 0 ? l.departMin : span(seqs[k - 1], 'departureMin');
+    const z = k === seqs.length ? l.returnMin : span(seqs[k], 'serviceStartMin');
+    if (k < 0 || k > seqs.length || a === null || z === null || b.startMin < a - TOL_MIN || b.endMin > z + TOL_MIN) {
       return { target: l, message: `${code} load ${l.loadNo}: the driver break ${hhmm(b.startMin)}-${hhmm(b.endMin)} overlaps unloading.` };
     }
     return null;
   }
-  // A depot gap between two loads that holds the break (after a load made earlier, only from the
-  // time the later load was planned: idle time before a plan does not count).
+  // A depot gap between two loads that holds the break, by the rule of the load that leaves after
+  // it (after a load made earlier, only from the time the later load was planned: idle time before
+  // a plan does not count).
   for (let i = 1; i < loads.length; i++) {
     const next = loads[i];
-    const start = Math.max(rule.startFromMin, loads[i - 1].returnMin, next.rules?.loadingFromMin ?? -Infinity);
-    if (start <= rule.startToMin + TOL_MIN && start + rule.lengthMin <= next.departMin + TOL_MIN) return null;
+    const r = next.rules?.break ?? rule;
+    const start = Math.max(r.startFromMin, loads[i - 1].returnMin, next.rules?.loadingFromMin ?? -Infinity);
+    if (start <= r.startToMin + TOL_MIN && start + r.lengthMin <= next.departMin + TOL_MIN) return null;
+  }
+  // Loads a re-plan cannot change (locked, loading, on the road) or planned before the rule that
+  // already run through the window: the solver finds no break possible (NOT_POSSIBLE) and plans
+  // the rest without one. Only a warning - unless those loads were planned under the rule and
+  // needed a break by their own rule, which unlocking and re-planning adds.
+  const old = loads.filter((l) => l.frozen || l.onRoad || !l.rules?.break);
+  if (old.length) {
+    const oFirst = Math.min(...old.map((l) => l.departMin));
+    const oLast = Math.max(...old.map((l) => l.returnMin));
+    if (oFirst < rule.startFromMin && oLast > rule.startToMin) {
+      const under = old.filter((l) => l.rules?.break);
+      const own = under.length ? under[under.length - 1].rules!.break! : null;
+      const ownNeeded =
+        !!own && Math.min(...under.map((l) => l.departMin)) < own.startFromMin && Math.max(...under.map((l) => l.returnMin)) > own.startToMin;
+      if (!ownNeeded) {
+        return {
+          target: old[old.length - 1],
+          warnOnly: true,
+          message: `${code}: no driver break is recorded for its loads planned earlier (${hhmm(oFirst)}-${hhmm(oLast)}), and they run past the break window (${window}); no break can be added now.`,
+        };
+      }
+      const target = [...under].reverse().find((l) => !l.onRoad) ?? under[under.length - 1];
+      return {
+        target,
+        message: `${code} works ${hhmm(first)}-${hhmm(last)} through midday without the ${own.lengthMin}-min driver break (${windowOf(own)}).`,
+      };
+    }
   }
   // The load out during the window that a re-plan can change: the latest planned one, else the latest.
   const during = loads.filter((l) => l.departMin < rule.startToMin + rule.lengthMin && l.returnMin > rule.startFromMin);

@@ -108,6 +108,14 @@ export function overtimeSaveProblem(
  * break must be shorter than the driver shift maximum. Only a save that changes one of them is
  * held to it.
  */
+/**
+ * A new First departure on Settings keeps the Latest return the dispatcher sees (it is not stored:
+ * first departure + shift maximum), so the shift maximum follows (owner: "18:00 is the latest return").
+ */
+export function withFirstDeparture<T extends { shiftStartMin: number; driverShiftMaxMinutes: number }>(c: T, shiftStartMin: number): T {
+  return { ...c, shiftStartMin, driverShiftMaxMinutes: c.shiftStartMin + c.driverShiftMaxMinutes - shiftStartMin };
+}
+
 export function breakSaveProblem(
   changed: Record<string, unknown>,
   merged: { driverBreakMinutes: number; driverBreakFromMin: number; driverBreakToMin: number; driverShiftMaxMinutes: number },

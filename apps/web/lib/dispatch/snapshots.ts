@@ -55,6 +55,11 @@ export interface PlanRules {
    * is never blocked for a missing break (it keeps its own rules).
    */
   break?: { lengthMin: number; startFromMin: number; startToMin: number };
+  /**
+   * The absolute latest return the load was planned with (owner: "18:00 is the latest return"),
+   * ONLY from the solver's echo (DispatchScenario.latest_return_min). Absent: planned without it.
+   */
+  latestReturnMin?: number;
 }
 
 /** The driver break planned with a load (PlanLoad.breakJson). */
@@ -245,7 +250,11 @@ export function rulesFrom(
   depot: { openMin?: number | null; closeMin?: number | null; open_min?: number | null; close_min?: number | null },
   truck: { availableFromMin?: number | null; availableToMin?: number | null; maxTripsPerDay?: number | null },
   /** The rules the solver REPORTED it planned with (the scenario echo); absent = earlier rules. */
-  echo?: { window_rule?: string | null; break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null } | null,
+  echo?: {
+    window_rule?: string | null;
+    break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
+    latest_return_min?: number | null;
+  } | null,
 ): PlanRules {
   const close = depot.closeMin ?? depot.close_min ?? 1440;
   return {
@@ -266,6 +275,7 @@ export function rulesFrom(
     ...(echo?.break_rule && echo.break_rule.length_min > 0
       ? { break: { lengthMin: echo.break_rule.length_min, startFromMin: echo.break_rule.start_from_min, startToMin: echo.break_rule.start_to_min } }
       : {}),
+    ...(typeof echo?.latest_return_min === 'number' ? { latestReturnMin: echo.latest_return_min } : {}),
   };
 }
 

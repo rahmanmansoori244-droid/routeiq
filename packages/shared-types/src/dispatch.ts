@@ -112,6 +112,13 @@ export interface DispatchConfig {
    */
   window_rule?: WindowRule;
   /**
+   * The latest return (owner: "18:00 is the latest return"): every truck is back at the depot by
+   * this minute of the day, whenever it leaves (the tenant's first departure + shift maximum, also
+   * on a plan made on its delivery day). Absent: only the shift maximum from the first departure.
+   * Echoed as `latest_return_min` on each scenario.
+   */
+  latest_return_min?: number;
+  /**
    * Driver break (owner rule 29-30 Sep 2026): one break of break_min per truck-day, STARTING
    * between break_start_from_min and break_start_to_min; none for a truck-day back for good by the
    * latest start or leaving for the first time at the earliest start or later. 0 / absent = none.
@@ -407,6 +414,8 @@ export interface DispatchScenario {
    * solver before the rule, or no break set). The web takes it ONLY from this echo.
    */
   break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
+  /** The latest return the plan was made with (echoed); absent / null: none. The web takes it ONLY from this echo. */
+  latest_return_min?: number | null;
 }
 
 export interface DispatchResponse {

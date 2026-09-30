@@ -229,6 +229,10 @@ def check_scenario(
             if ld.return_min > depot_close + TOL_MIN:
                 add("DEPOT_CLOSE", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the depot closes ({_hhmm(depot_close)}).",
                     truck_id=tid, load_no=lno, short=ld.return_min - depot_close)
+            if cfg.latest_return_min is not None and ld.return_min > cfg.latest_return_min + TOL_MIN:
+                add("SHIFT_LIMIT", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the latest return "
+                                   f"({_hhmm(cfg.latest_return_min)}).",
+                    truck_id=tid, load_no=lno, short=ld.return_min - cfg.latest_return_min)
             if ld.return_min > avail_to + TOL_MIN:
                 add("TRUCK_AVAILABILITY", f"{code} load {lno} is back at {_hhmm(ld.return_min)}, after the truck's availability ends "
                                           f"({_hhmm(avail_to)}).", truck_id=tid, load_no=lno, short=ld.return_min - avail_to)

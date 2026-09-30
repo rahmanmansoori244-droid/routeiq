@@ -598,9 +598,13 @@ def _depot_close_min(req: DispatchRequest) -> int:
 
 def _truck_hours(req: DispatchRequest, t: DispatchTruck) -> tuple[int, int]:
     """The truck's time for new loads before its frozen loads are counted: from the day's start
-    (``_new_load_start_min``) or its own availability, to the depot closing or its own end."""
-    return (max(_new_load_start_min(req), t.available_from_min or 0),
-            min(_depot_close_min(req), t.available_to_min or DAY_MIN * 2))
+    (``_new_load_start_min``) or its own availability, to the depot closing, its own end or the
+    latest return (config.latest_return_min, an absolute time: 18:00 whenever the truck leaves)."""
+    cfg = req.config
+    latest = min(_depot_close_min(req), t.available_to_min or DAY_MIN * 2)
+    if cfg.latest_return_min is not None:
+        latest = min(latest, cfg.latest_return_min)
+    return max(_new_load_start_min(req), t.available_from_min or 0), latest
 
 
 def _truck_days(req: DispatchRequest) -> list[TruckDay]:
@@ -1668,6 +1672,7 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         estimated_legs=sum(ld.estimated_legs or 0 for ld in loads),
         # The rules this plan was made with (audit A6 review; the ASSUMPTIONS sheet states them).
         weight_unit_kg=WEIGHT_UNIT_KG, new_overtime_only=True, window_rule=cfg.window_rule, break_rule=_break_echo(cfg),
+        latest_return_min=cfg.latest_return_min,
     )
     _assert_reconciled(req, sc)
     # Without loading per case the search's turnaround is exact - but its times never hold a driver
@@ -1816,6 +1821,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     for sc in scenarios:
         sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
         sc.break_rule = _break_echo(cfg)
+        sc.latest_return_min = cfg.latest_return_min
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)

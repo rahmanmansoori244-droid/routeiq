@@ -138,6 +138,11 @@ class DispatchStop(BaseModel):
 class DispatchConfig(BaseModel):
     shift_start_min: int = Field(default=6 * 60, ge=0, le=DAY_MIN)  # earliest first departure
     shift_max_min: int = Field(default=11 * 60, ge=30, le=DAY_MIN)  # first departure -> last return
+    # The latest return (owner: "18:00 is the latest return"): every truck is back at the depot by
+    # this minute of the day, whenever it leaves - on a plan made on its delivery day too (the web
+    # sends the tenant's first departure + shift maximum, never the "now + turnaround" start). None
+    # (an older web): only the shift maximum from the first departure, as before. Echoed.
+    latest_return_min: int | None = Field(default=None, ge=0, le=2 * DAY_MIN)
     overtime_after_min: int | None = Field(default=9 * 60, ge=0, le=DAY_MIN)  # soft, per truck day
     overtime_cost_per_hour: float = Field(default=4.0, ge=0)
     reload_min: int = Field(default=30, ge=0, le=240)  # depot turnaround between loads
@@ -490,6 +495,9 @@ class DispatchScenario(BaseModel):
     # The driver-break rule this plan was made with; None = no break was planned (a solver before
     # the rule, break_min 0, or settings that cannot work - see the warnings).
     break_rule: BreakRule | None = None
+    # The absolute latest return this plan was made with (config.latest_return_min, echoed); None =
+    # none (a solver before it, or an older web that sent none).
+    latest_return_min: int | None = None
 
 
 class DispatchResponse(BaseModel):

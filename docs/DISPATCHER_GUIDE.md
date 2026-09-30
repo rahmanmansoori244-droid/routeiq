@@ -231,8 +231,8 @@ While the new day loads, the screen shows *Loading ...* and its buttons are off;
 
 ## Driver shift (Settings, dispatchers and admins)
 Dispatchers open **Settings** for the **Driver shift** card only; everything else there is changed by a company admin. Every change is in the audit log.
-- **First departure:** no truck leaves before this time. A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*).
-- **Latest return:** a truck leaving at the first departure is back at the depot by this time. It sets the **Driver shift maximum** (first departure to last return), and the other way round.
+- **First departure:** no truck leaves before this time. A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*). Changing it keeps the **Latest return**; the shift maximum follows.
+- **Latest return:** every truck is back at the depot by this time, whenever it leaves (also a truck that leaves late, or on a plan made during the day). It sets the **Driver shift maximum** (first departure to last return), and the other way round. A load planned with it that comes back later is blocked at Lock, Loading and Dispatch.
 - **Overtime after:** from the first departure; at most the shift maximum.
 - **Driver break, Break may start from, Break must start by:** the drivers' midday break (see *Driver break*). 0 min = no break.
 

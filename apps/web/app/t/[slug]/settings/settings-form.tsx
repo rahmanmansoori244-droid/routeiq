@@ -15,7 +15,7 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { breakSaveProblem, changedFields, overtimeSaveProblem, type EditableConfig } from '@/lib/settings-fields';
+import { breakSaveProblem, changedFields, overtimeSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 
 interface TenantFields {
@@ -158,16 +158,17 @@ export function SettingsForm({
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC({ ...c, shiftStartMin: v })} hint="No truck leaves the depot before this time. A plan made on the delivery day itself starts later: from now + the turnaround between loads." changed={'shiftStartMin' in configDiff.changes} />
+          <TimeField id="shiftStartMin" label="First departure" value={c.shiftStartMin} onChange={(v) => setC(withFirstDeparture(c, v))} hint="No truck leaves the depot before this time. A plan made on the delivery day itself starts later: from now + the turnaround between loads. Changing it keeps the latest return; the shift maximum follows." changed={'shiftStartMin' in configDiff.changes} />
           <TimeField
             id="latestReturn"
             label="Latest return"
             value={c.shiftStartMin + c.driverShiftMaxMinutes}
             onChange={(v) => setC({ ...c, driverShiftMaxMinutes: v - c.shiftStartMin })}
-            hint="A truck leaving at the first departure is back at the depot by this time. It sets the shift maximum below."
+            hint="Every truck is back at the depot by this time, whenever it leaves. It sets the shift maximum below."
             changed={'driverShiftMaxMinutes' in configDiff.changes}
           />
           {num('driverShiftMaxMinutes', 'Driver shift maximum', { step: 15, unit: 'min', hint: `First departure to last return of a truck (${hm(c.driverShiftMaxMinutes)} h).` })}
+          {num('overtimeAfterMin', 'Overtime after', { step: 15, unit: 'min', hint: `From the first departure (${hm(c.overtimeAfterMin)} h). At most the shift maximum.` })}
           {overtimeBlocks ? (
             <p className="text-sm text-destructive md:col-span-2" role="alert">
               Overtime after ({hm(c.overtimeAfterMin)} h) is after the shift maximum ({hm(c.driverShiftMaxMinutes)} h): set it at most to the shift maximum.
@@ -304,7 +305,6 @@ export function SettingsForm({
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {num('driverCostPerHour', 'Driver cost per hour', { step: 0.1, unit: cur })}
-          {num('overtimeAfterMin', 'Overtime after', { step: 15, unit: 'min', hint: `From the first departure (${hm(c.overtimeAfterMin)} h). At most the shift maximum.` })}
           {num('overtimeCostPerHour', 'Overtime cost per hour', { step: 0.1, unit: cur, hint: 'On top of the driver cost, for each hour after the overtime threshold.' })}
           {num('fuelPricePerLitre', 'Fuel price per litre', { step: 0.005, unit: cur, hint: '0 = fuel is not costed separately. Fuel use comes from each truck\'s km per litre.' })}
           {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: a penalty per minute that unloading starts before the preferred start or finishes after the preferred end. Receiving hours are never broken.' })}

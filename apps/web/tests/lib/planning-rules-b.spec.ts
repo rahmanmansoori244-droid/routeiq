@@ -194,3 +194,88 @@ describe('driver break: what the driver reads', () => {
     expect(breakLine(brk(720, 'ROAD', 3), 3)).toBe('Break 12:00-13:00 on the way back to the depot');
   });
 });
+
+describe('driver break: the gate reads the break position by STOP, not by order row (review)', () => {
+  // Stop 1 holds two orders (one row each, same sequence), stop 2 one order.
+  const twoOrderStop = (over: Partial<FeasLoad>, s1: [number, number, number], s2: [number, number]) =>
+    load('L1', 1, 420, 960, {
+      stops: [
+        { orderId: 'oA', sequence: 1, label: 'A', cases: 5, kg: 50, kgUnknown: false, etaMin: s1[0], serviceStartMin: s1[0], departureMin: s1[1], hardWindowOk: true },
+        { orderId: 'oB', sequence: 1, label: 'A', cases: 5, kg: 50, kgUnknown: false, etaMin: s1[1], serviceStartMin: s1[1], departureMin: s1[2], hardWindowOk: true },
+        { orderId: 'oC', sequence: 2, label: 'C', cases: 10, kg: 100, kgUnknown: false, etaMin: s2[0], serviceStartMin: s2[0], departureMin: s2[1], hardWindowOk: true },
+      ],
+      ...over,
+    });
+
+  it('a road break between stop 1 (two orders, 11:40-12:25) and stop 2 (13:50) is accepted', () => {
+    expect(breaks([twoOrderStop({ break: brk(750, 'ROAD', 1) }, [700, 720, 745], [830, 860])])).toEqual([]);
+  });
+
+  it('a break that starts before the second order of stop 1 is unloaded still overlaps unloading', () => {
+    expect(breaks([twoOrderStop({ break: brk(740, 'ROAD', 1) }, [700, 720, 745], [830, 860])])[0].message).toContain('overlaps unloading');
+  });
+
+  it('a road break on the way back after the last stop is accepted', () => {
+    expect(breaks([twoOrderStop({ break: brk(720, 'ROAD', 2) }, [600, 620, 650], [680, 710])])).toEqual([]);
+  });
+});
+
+describe('driver break: loads the solver could not give a break never block a new load (review)', () => {
+  const old = (): PlanRules => {
+    const r = { ...RULES };
+    delete r.break;
+    return r;
+  };
+
+  it('a pre-rule locked load back at 14:10, then a load leaving before 15:00: a warning, no block', () => {
+    const loads = [load('L1', 1, 420, 850, { rules: old(), frozen: true }), load('L2', 2, 880, 1020)];
+    const v = breaks(loads);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ severity: 'WARN', loadNo: 1 });
+    expect(breakProblem(loads)?.target.id).toBe('L1');
+    expect(gate(loads).ok).toBe(true);
+  });
+
+  it('a load locked under a 12:00-14:00 window, back 13:55, after the window was cut to 13:30: a warning, no block', () => {
+    const cut = { ...RULES, break: { ...BREAK, startToMin: 810 } };
+    for (const depart of [865, 900]) {
+      const loads = [load('L1', 1, 420, 835, { frozen: true }), load('L2', 2, depart, 1020, { rules: cut })];
+      const v = breaks(loads);
+      expect(v).toHaveLength(1);
+      expect(v[0]).toMatchObject({ severity: 'WARN', loadNo: 1 });
+      expect(v[0].message).toContain('no break can be added now');
+      expect(gate(loads).ok).toBe(true);
+    }
+  });
+
+  it('a load locked under the rule that itself needed a break and has none still asks to unlock it', () => {
+    const v = breaks([load('L1', 1, 420, 960, { frozen: true }), load('L2', 2, 1000, 1080)]);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ severity: 'BLOCK', loadNo: 1, frozen: true });
+  });
+});
+
+describe('latest return: 18:00 whenever the truck leaves (owner, review)', () => {
+  const cfg = { shift_start_min: 420, shift_max_min: 660, reload_min: 30, loading_min_per_case: 0, max_trips_per_truck: 3 };
+  it('the request carries the tenant first departure + shift maximum; the rules take it from the echo only', () => {
+    const tenant = {
+      shiftStartMin: 420, driverShiftMaxMinutes: 660, overtimeAfterMin: 540, overtimeCostPerHour: 0, driverBreakMinutes: 60,
+      driverBreakFromMin: 720, driverBreakToMin: 840, reloadMinutes: 30, loadingMinPerCase: 0, serviceMinPerCase: 0,
+      maxTripsPerTruck: 3, splitDeliveries: true, defaultServiceTimeMin: 10, fuelPricePerLitre: 0, driverCostPerHour: 0,
+      prefWindowPenaltyPerMin: 0.05, priorityWeightsJson: null, distanceProvider: 'HAVERSINE', osrmUrl: null, distanceMultiplier: 1.3,
+      avgSpeedKmh: 40, roadTimeFactor: 1.25, timezone: 'Asia/Muscat', planningCutoffMin: 1080, dateOrder: 'DMY',
+    } satisfies TenantPlannerConfig;
+    expect(dispatchConfigFromTenant(tenant, 'Oman', ['RECOMMENDED']).config.latest_return_min).toBe(1080);
+    expect(rulesFrom(cfg, {}, {}, { latest_return_min: 1080 }).latestReturnMin).toBe(1080);
+    expect('latestReturnMin' in rulesFrom(cfg, {}, {}, {})).toBe(false);
+  });
+
+  it('a load back after the latest return it was planned with is blocked; one planned without it is not', () => {
+    const late = (rules: PlanRules) => gate([load('L1', 1, 750, 1110, { rules })]).violations.filter((v) => v.code === 'SHIFT_LIMIT');
+    const v = late({ ...RULES, latestReturnMin: 1080 });
+    expect(v).toHaveLength(1);
+    expect(v[0]).toMatchObject({ severity: 'BLOCK', shortBy: 30 });
+    expect(v[0].message).toBe('T01 load 1 is back at 18:30, after the latest return (18:00).');
+    expect(late(RULES)).toEqual([]);
+  });
+});

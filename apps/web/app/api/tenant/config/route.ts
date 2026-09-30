@@ -62,7 +62,7 @@ export const PATCH = withTenantApi(
     if (refused.length) {
       return fail(
         {
-          error: `Only a company admin can change ${refused.join(', ')}. A dispatcher can change the driver shift: first departure, shift maximum (latest return) and overtime after. Nothing was saved.`,
+          error: `Only a company admin can change ${refused.join(', ')}. A dispatcher can change the driver shift: first departure, shift maximum (latest return), overtime after and the driver break (length, earliest and latest start). Nothing was saved.`,
           code: 'ADMIN_ONLY_SETTING',
           fields: refused,
         },
