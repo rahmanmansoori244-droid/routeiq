@@ -258,6 +258,9 @@ never worse than the engine alone would have chosen from the same search. See `d
 - **It is optional.** Its process is started after the rule-22 check of the engine's own processes and never decides it: if it
   cannot start, fails, dies or hangs, the solve goes on with the engine alone and one log line says why (`pyvrp run=<id>
   skipped: ...` / `failed: ...`). Only a hung PyVRP costs time: at most `SOLVER_PYVRP_STOP_GRACE_SEC` on a Quick solve.
+  On Linux its worker process asks to be the kernel's first out-of-memory victim (`oom_score_adj` 1000): a solver short of
+  memory loses the second search (the engine's plans are used), never its API process. A crash of the API process or of a worker (a fatal signal
+  in a C extension) prints every thread's Python stack to the solver log (faulthandler).
 - **Deploy order:** solver first; the web may follow at any time (every new field is additive; an old web ignores them, and
   the second search's note is one of the plan's own warnings; an old web shows the new status `SECOND_SEARCH` as the code
   itself, a new web as "plan from the second route search").

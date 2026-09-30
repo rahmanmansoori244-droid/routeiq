@@ -1838,6 +1838,27 @@ _BEACON = None
 # then returns its best plan within a fraction of a second, pyvrp_candidate.Stopper).
 _SEARCH_OVER = None
 
+# Linux: how readily the kernel's out-of-memory killer takes this process (-1000..1000). The second
+# search's worker sets the maximum at start (CI 30 Sep 2026: the API process vanished, killed without
+# a traceback, as the second search's worker started - and every later solve failed). With it, a
+# machine or container short of memory loses the optional second search first (LOST: the engine's
+# plans are used), never the API process for it. Raising one's own value needs no privilege.
+OOM_SCORE_ADJ_PATH = "/proc/self/oom_score_adj"
+SECOND_SEARCH_OOM_SCORE_ADJ = 1000
+
+
+def _prefer_as_oom_victim(score: int) -> bool:
+    """This process asks to be the kernel's first out-of-memory victim; False where it cannot (no
+    /proc: Windows, macOS; a read-only /proc). Best effort: never stops a worker from starting."""
+    try:
+        if not os.path.exists(OOM_SCORE_ADJ_PATH):
+            return False
+        with open(OOM_SCORE_ADJ_PATH, "w", encoding="ascii") as f:
+            f.write(str(score))
+        return True
+    except OSError:
+        return False
+
 
 def _worker_init(beacon, stop_flag=None, search_over=None) -> None:
     global _BEACON, _STOP_FLAG, _SEARCH_OVER
@@ -1847,6 +1868,8 @@ def _worker_init(beacon, stop_flag=None, search_over=None) -> None:
     _BEACON = beacon
     _STOP_FLAG = stop_flag
     _SEARCH_OVER = search_over
+    if search_over is not None:  # the second search's own pool (_pv_start): optional, so taken first
+        _prefer_as_oom_victim(SECOND_SEARCH_OOM_SCORE_ADJ)
 
 
 def _ping(_arg=None) -> int:
