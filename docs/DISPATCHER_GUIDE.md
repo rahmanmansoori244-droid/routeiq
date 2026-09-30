@@ -101,7 +101,7 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
   - **Route search** says in words how the optimizer's search ended (see *Plan options*).
 
 ## Times not verified
-Before a load is locked, loaded or dispatched, RouteIQ checks its truck's whole day: every load leaves only after the truck is back and loaded again (turnaround + loading minutes per case), every customer's unloading is finished by the end of its receiving hours (loads planned before this rule keep the earlier rule: unloading had to start by closing), no load is over the truck's cases or kg, and the day fits the shift and depot hours. The optimizer checks the same when it makes the plan (column **Timing checked** under **Plan options**).
+Before a load is locked, loaded or dispatched, RouteIQ checks its truck's whole day: every load leaves only after the truck is back and loaded again (turnaround + loading minutes per case), every customer's unloading is finished by the end of its receiving hours (loads planned before this rule keep the earlier rule: unloading had to start by closing), no load is over the truck's cases or kg, the day fits the shift and depot hours, and a truck that works through midday has its driver break (see *Driver break*). The optimizer checks the same when it makes the plan (column **Timing checked** under **Plan options**).
 - When a truck's day breaks a rule, the plan shows a **red box** with the reasons (for example *T01 load 2 leaves at 08:34, but the truck needs 50 min to reload and load 40 cases: ready 08:54*), the load rows say **Times not verified**, and **Lock**, **Loading** and **Dispatch** are off for that truck. Other trucks are not affected.
 - Click **Re-plan** in the red box: the new version gets times that keep every rule (locked and dispatched loads stay as they are).
 - If the problem is on a load that is already **locked** or **loading**, Re-plan alone does not fix it: a re-plan keeps that load exactly as it is. The red box names the load and says so. Put it back to Planned first (**Back to locked** if it is loading, then **Unlock**), then click **Re-plan**. If later loads of the same truck are locked too (for example after **Lock all loads**), they go back first, latest first: the red box lists them in that order, for example *put loads T01 L2, T01 L1 back to Planned first, in this order*. While every problem is on such a load, the red box's **Re-plan** is greyed out with the same list, because a re-plan would change none of them. This also applies when Re-plan is greyed out because every order is on a locked load.
@@ -234,8 +234,21 @@ Dispatchers open **Settings** for the **Driver shift** card only; everything els
 - **First departure:** no truck leaves before this time. A plan made during the delivery day itself starts later: from now + the turnaround (see *Late orders*).
 - **Latest return:** a truck leaving at the first departure is back at the depot by this time. It sets the **Driver shift maximum** (first departure to last return), and the other way round.
 - **Overtime after:** from the first departure; at most the shift maximum.
+- **Driver break, Break may start from, Break must start by:** the drivers' midday break (see *Driver break*). 0 min = no break.
 
-**After this update is installed, set the company shift once:** First departure **07:00**, Latest return **18:00** (shift maximum 11 h). Leave **Overtime after** as it is. Plans already made keep the times they were made with.
+**After this update is installed, set the company shift once:** First departure **07:00**, Latest return **18:00** (shift maximum 11 h). Leave **Overtime after** as it is. Set **Driver break** to **60** min, **Break may start from 12:00**, **Break must start by 14:00** (the break is off until you do). Plans already made keep the times and rules they were made with.
+
+## Driver break
+
+One driver per truck per day gets one break (60 min by default), **starting** between 12:00 and 14:00.
+- RouteIQ plans it wherever the truck is at that time: between two stops (driving, or resting at a customer before or after unloading), or at the depot between two loads. Drivers do not load, so a depot break may run while the truck is being reloaded. It is **never** planned while unloading.
+- The break is inside the shift (an 11 h day includes it). It is paid driver time and counts toward overtime.
+- **No break is needed** for a truck that is back at the depot for good by 14:00, or whose first departure is at 12:00 or later.
+- Time already spent before a plan is made does not count: a truck that stood at the depot from 12:10 gets its break from the time the plan is made, and after 14:00 it takes no new load that day unless it has had its break.
+- The plan screen shows the break under the load (*break 12:40-13:40*) and as its own row between the stops (*Break 12:40-13:40 between stop 3 and stop 4*). Each stop also shows *unloading until* - when the truck must be finished there. The driver sheet, the Excel file and the WhatsApp message say the same.
+- **A truck that needs a break and has none cannot be locked, loaded or dispatched** (there is no override): re-plan. Loads planned before this rule keep the rules they were planned with and are never blocked for it; a locked load flagged for it must be put back to Planned first. A load that has already left only shows a warning.
+- If the locked or dispatched loads of a truck already run through 12:00-14:00 without a recorded break (planned before the rule), the plan says so; nothing can be added to them.
+
 
 ## Settings (company admins)
 Settings shows only what the planner uses, each with its unit and allowed range, and an **Effective planner values** table that says what the next optimization uses and where each value comes from. Saving sends only what you changed; if another admin changed the same setting since you opened the page, nothing is saved and you are asked to reload.

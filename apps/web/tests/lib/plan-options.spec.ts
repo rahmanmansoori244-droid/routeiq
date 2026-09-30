@@ -343,7 +343,7 @@ describe('the plan options of a re-plan with a dispatched load (getPlanDetail)',
     const d = (await getPlanDetail(T, 'P'))!;
     expect(d.scenarios[0]).toMatchObject({ name: 'RECOMMENDED', weightUnitKg: 0.1, newOvertimeOnly: true });
     expect(d.scenarios[1]).toMatchObject({ name: 'MIN_TRUCKS', weightUnitKg: null, newOvertimeOnly: null });
-    expect(solverRules(d)).toEqual({ weightsToTenthKg: true, newOvertimeOnly: true });
+    expect(solverRules(d)).toMatchObject({ weightsToTenthKg: true, newOvertimeOnly: true });
   });
 
   it('audit F22: an option whose timetable is VIOLATED says so on screen and in the Excel, never "cheaper"', async () => {

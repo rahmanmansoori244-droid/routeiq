@@ -277,8 +277,9 @@ describe('driver links', () => {
     expect(lines[0]).toBe('*Truck T01 - Trip 1 of 2*');
     expect(lines[1]).toBe('NMWC · Delivery 2026-09-25 · Plan v2');
     expect(lines[2]).toBe('Depart 06:00 · 2 stops · 110 cases');
-    const s1 = lines.indexOf('1. 06:40 Lulu Hypermarket Bausher (C001/B1) · 70 cs');
-    const s2 = lines.indexOf('2. 07:30 Al Fair Qurum (C002) · 40 cs');
+    // Phase B: each stop says when unloading must be finished.
+    const s1 = lines.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lulu Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
+    const s2 = lines.findIndex((x) => /^2\. 07:30 \(unload until \d\d:\d\d\) Al Fair Qurum \(C002\) · 40 cs$/.test(x));
     expect(s1).toBeGreaterThan(2);
     expect(s2).toBeGreaterThan(s1);
     expect(lines[s1 + 1]).toBe('https://www.google.com/maps/search/?api=1&query=23.5859,58.3829');
@@ -518,7 +519,7 @@ describe('frozen plan facts and unverified times on the sheet (review F08 / F04)
     const d = changedAndUnverified();
     const trips = tripsByTruck(d.loads);
     const l1 = whatsappText(d.run, d.loads[0], trips.get('t1')!).split('\n');
-    const at = l1.indexOf('1. 06:40 Lulu Hypermarket Bausher (C001/B1) · 70 cs');
+    const at = l1.findIndex((x) => /^1\. 06:40 \(unload until \d\d:\d\d\) Lulu Hypermarket Bausher \(C001\/B1\) · 70 cs$/.test(x));
     expect(at).toBeGreaterThan(0);
     // The planned pin stays the stop's pin (and the route's); the change and the new pin follow it.
     expect(l1[at + 1]).toBe(pinUrl({ lat: ORDERS[0].lat, lng: ORDERS[0].lng }));

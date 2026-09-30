@@ -234,6 +234,13 @@ model TenantConfig {
   fuelPricePerLitre       Float   @default(0) // OMR; 0 = fuel not costed separately
   driverCostPerHour       Float   @default(0)
   overtimeAfterMin        Int     @default(540)
+  // Driver break (owner rule 29-30 Sep 2026): one break per truck-day that works through midday,
+  // STARTING between driverBreakFromMin and driverBreakToMin (minutes from midnight), on the road
+  // between stops or at the depot (it may overlap reloading), never while unloading; inside the
+  // shift, paid. 0 = no break (the default: the dispatcher turns it on in Settings after deploy).
+  driverBreakMinutes      Int     @default(0)
+  driverBreakFromMin      Int     @default(720)
+  driverBreakToMin        Int     @default(840)
   overtimeCostPerHour     Float   @default(0)
   prefWindowPenaltyPerMin Float   @default(0.05)
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
@@ -739,6 +746,9 @@ model PlanLoad {
   /// turnaround / shift / depot hours): lib/dispatch/snapshots.ts. Null on loads planned before
   /// snapshots existed (the live truck is shown, labelled as such).
   truckSnapshotJson   Json?
+  // The driver break planned with this load (v1: startMin, endMin, lengthMin, where DEPOT | ROAD,
+  // afterSequence), or NULL. Copied with the load into every new version, so a locked load keeps it.
+  breakJson           Json?
   /// The load's cost breakdown under the one cost model (review F17, apps/solver/costing.py: the
   /// driver is paid for the whole truck day): fixed, trip, distance, fuel, driver share, overtime,
   /// paid minutes, estimated legs (lib/dispatch/costs.ts). Null on loads costed the earlier way

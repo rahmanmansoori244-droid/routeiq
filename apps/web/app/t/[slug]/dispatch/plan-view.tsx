@@ -18,6 +18,7 @@ import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/co
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
   fmtSearchTime,
   optimizeStartedText,
@@ -944,6 +945,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     </td>
                     <td className="p-2">
                       {hhmm(l.departMin)} → {hhmm(l.returnMin)}
+                      {l.break ? (
+                        <span className="block text-xs text-muted-foreground" data-testid="load-break">
+                          break {breakTimes(l.break)}
+                        </span>
+                      ) : null}
                     </td>
                     <td className="p-2">{l.stops.length}</td>
                     <td className="p-2">
@@ -1312,6 +1318,19 @@ function LoadActions({
   return <div className="flex flex-wrap gap-1">{out}</div>;
 }
 
+/** The driver break as a row of the stop table, where it is taken (never while unloading). */
+function BreakRow({ l }: { l: DetailLoad }) {
+  if (!l.break) return null;
+  return (
+    <tr className="border-b bg-muted/40" data-testid="break-row">
+      <td className="py-1">—</td>
+      <td colSpan={9}>
+        {breakLine(l.break, l.stops.length)} · driver break, {l.break.lengthMin} min
+      </td>
+    </tr>
+  );
+}
+
 function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
   // A6 second review: an older version whose orders a later re-plan re-weighed says so (as its Excel sheet does).
   const kgNote = manifestKgNote(l);
@@ -1369,8 +1388,10 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 DEPOT {depotCode} — depart {hhmm(l.departMin)}
               </td>
             </tr>
+            {l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0) ? <BreakRow l={l} /> : null}
             {l.stops.map((st) => (
-              <tr key={st.sequence} className="border-b align-top">
+              <Fragment key={st.sequence}>
+              <tr className="border-b align-top">
                 <td className="py-1">{st.sequence}</td>
                 <td>
                   {st.mapsUrl ? (
@@ -1411,6 +1432,7 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td>P{st.priority}</td>
                 <td className={st.hardWindowOk === false ? 'text-red-600' : ''}>
                   {hhmm(st.etaMin)}
+                  {st.departureMin !== null ? <span className="block text-muted-foreground">unloading until {hhmm(st.departureMin)}</span> : null}
                   {st.waitMin ? <span className="block text-muted-foreground">wait {st.waitMin}m</span> : null}
                 </td>
                 <td className={st.prefWindowOk === false ? 'text-amber-700' : ''}>{st.window}</td>
@@ -1420,6 +1442,8 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td>{st.legKm}</td>
                 <td>{st.cumulativeKm ?? '—'}</td>
               </tr>
+              {l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === st.sequence ? <BreakRow l={l} /> : null}
+              </Fragment>
             ))}
             <tr>
               <td className="py-1">—</td>

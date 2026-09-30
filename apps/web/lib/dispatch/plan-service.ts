@@ -78,6 +78,8 @@ import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
 import {
   distanceM,
+  loadBreakJson,
+  parseLoadBreak,
   PIN_MOVED_M,
   readLoadOrigin,
   readPlanInputs,
@@ -649,6 +651,8 @@ export async function buildDispatchRequest(
       depart_min: l.departMin,
       return_min: l.returnMin,
       cases: l.cases,
+      // The driver break planned with this locked / dispatched load: the solver plans no second one.
+      ...frozenBreak(l.breakJson),
     })),
   }));
 
@@ -753,6 +757,7 @@ export function planSettingsOf(
     loadingMinPerCase: number; serviceMinPerCase: number; maxTripsPerTruck: number; fuelPricePerLitre: number; driverCostPerHour: number;
     overtimeAfterMin: number; overtimeCostPerHour: number; prefWindowPenaltyPerMin: number; roadTimeFactor: number; distanceProvider: string;
     distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
+    driverBreakMinutes?: number; driverBreakFromMin?: number; driverBreakToMin?: number;
   },
   routing: { outsideCoverage: boolean } = { outsideCoverage: false },
   planFrom: PlanFrom | null = null,
@@ -785,7 +790,16 @@ export function planSettingsOf(
     // echo (PlanRules.windowRule); the split stop time is web-side, so it is recorded here.
     splitStopTime: 'FULL',
     windowRule: 'FINISH',
+    ...(cfg.driverBreakMinutes && cfg.driverBreakMinutes > 0
+      ? { driverBreak: { lengthMin: cfg.driverBreakMinutes, startFromMin: cfg.driverBreakFromMin ?? 720, startToMin: cfg.driverBreakToMin ?? 840 } }
+      : {}),
   };
+}
+
+/** FrozenTrip.break_* from a frozen load's breakJson (nothing when it holds none). */
+function frozenBreak(json: unknown): { break_start_min?: number; break_min?: number } {
+  const b = parseLoadBreak(json);
+  return b ? { break_start_min: b.startMin, break_min: b.lengthMin } : {};
 }
 
 /**
@@ -1145,6 +1159,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         // Per load (review F18): estimated when the whole matrix was, or any of its own legs is.
         distanceIsEstimated: d.distance_is_estimated || (ld.estimated_legs ?? 0) > 0,
         truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
+        // The driver break planned with this load (the solver's timetable), NULL when none.
+        breakJson: (loadBreakJson(ld.driver_break) ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull,
       },
     });
     let running = 0;
@@ -1579,6 +1595,8 @@ export interface FeasibilityRow {
   weightKg: number;
   carriedFromLoadId: string | null;
   truckSnapshotJson: unknown;
+  /** The driver break planned with the load (PlanLoad.breakJson); absent / null = none. */
+  breakJson?: unknown;
   /** The truck now: its code, and its capacity for the CAPACITY_CHANGED warning (absent = not read). */
   truck: { code: string; capacityCases?: number; capacityWeightKg?: number };
   assignments: {
@@ -1665,6 +1683,7 @@ export function feasibilityInputFromRows(
       capacity: ts ? { cases: ts.capacityCases, kg: ts.capacityWeightKg } : own && legacy ? legacy.capacity(l.truckId) : null,
       capacityNow: typeof t.capacityCases === 'number' && typeof t.capacityWeightKg === 'number' ? { cases: t.capacityCases, kg: t.capacityWeightKg } : null,
       rules: ts ? ts.rules : own && legacy ? legacy.rules(l.truckId) : null,
+      break: parseLoadBreak(l.breakJson),
       stops: l.assignments.map((a) => {
         const snap = readStopSnapshot(a.stopSnapshotJson);
         const c = a.order.customer;

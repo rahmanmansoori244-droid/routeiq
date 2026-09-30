@@ -703,6 +703,42 @@ existed. A same-day THOROUGH is now timed from the start of its search + the cap
 slot): at 1,200 s, no new load before start + 20 min + the turnaround. That is conservative when the search stops early (the
 loads could have left up to about 15 minutes sooner); QUICK, the suggested choice on the delivery day, is unchanged.
 
+## 12. Planning rules: unloading finished by closing and the driver break (2 Oct 2026)
+
+Branch `planning-rules-break` (phase A 432541c + phase B). **Before** = the rules off (unloading only has to start by
+closing, no break, split parts share the stop time); **after** = what production runs once the dispatcher sets the break:
+`window_rule` FINISH, a 60-min break starting 12:00-14:00, and on real80 the full stop time on every split part. Both at
+the owner's shift (first departure 07:00, 11 h, so back by 18:00), overtime as each instance has it. Quick auto limits,
+the three scenarios as production asks for them, RECOMMENDED reported; the harness runs in-process (`.dev/bench`, cached
+matrices), one run per cell (single runs: differences of a truck or a few percent can be search noise). real80 in
+aggregates only.
+
+| Instance | Config | Served P1 / P2 / P3 / P4 / P5 | Unserved (reason) | Trucks | Loads | km | OMR | Timetable check | Truck-days with a break | Wall s (post-solve s) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| real80 | before | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 979.9 | 501.67 | VERIFIED | - | 61.9 |
+| real80 | after | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 975.8 | 531.94 (+6.0%) | VERIFIED | 5 of 5 (all at the depot, during a reload) | 61.0 (21.0) |
+| syn60_s1 | before | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 420.1 | 261.14 | VERIFIED (1 stop finishing after closing) | - | 40.9 |
+| syn60_s1 | after | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 421.9 | 261.58 (+0.2%) | VERIFIED | 0 of 5 (all back by 14:00 or starting at 12:00+) | 40.9 (0.9) |
+| syn150_s1 | before | 11 / 24 / 43 / 32 / 40 (all) | 0 | 10 | 10 | 764.2 | 518.62 | VERIFIED | - | 101.1 |
+| syn150_s1 | after | 11 / 24 / 43 / 32 / 40 (all) | 0 | 8 | 10 | 798.6 | 487.06 (-6.1%, search noise) | VERIFIED | 3 of 8 (on the road) | 101.5 (1.4) |
+| syn300_s1 | before | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 25 | 1,698.8 | 929.29 | VERIFIED (12 stops finishing after closing) | - | 327.5 |
+| syn300_s1 | finish only | 15 / 47 / 89 / 65 / 83 | 1 (not placed) | 12 | 24 | 1,767.7 | 951.58 | VERIFIED | - | 318.3 (18.0) |
+| syn300_s1 | after | 15 / 47 / 89 / 65 / 80 | 4 (not placed) | 12 | 24 | 1,686.4 | 975.38 (+5.0%) | VERIFIED | 12 of 12 (10 on the road, 2 at the depot) | 373.7 (73.5) |
+
+What it shows:
+- Every plan is VERIFIED (the independent check re-derives the finish rule and the break), and no stop finishes
+  unloading after closing under the rule (the earlier rule let 1 stop on syn60_s1 and 12 on syn300_s1 do so).
+- Every truck-day that needs a break has one. On the real day all 5 truck-days take it at the depot while the truck is
+  reloaded, so it costs only the minutes beyond the turnaround: +6.0% cost, the paid driver time 2,701 -> 3,000 min and
+  overtime 20 -> 299 min (the break is paid and counts toward overtime), the same 5 trucks and 14 loads.
+- No P1 or P2 stop is lost anywhere. syn300_s1 is a tight day (every truck-day is bound by the shift): the finish rule
+  alone leaves 1 P3 out, and the break 3 P5 more. The owner decides whether that is acceptable; a THOROUGH search is the
+  lever on such a day.
+- Speed: on days where the breaks fit into the plans the break-free repack proposes (real80, syn60_s1, syn150_s1), the
+  post-solve stage is as fast as before (0.9-21 s; the break timing LPs take 0.03-0.45 s per job). On the tight day the
+  break-free proposals cannot hold the breaks, so the break-aware CP-SAT model runs as well: 73.5 s of post-solve, +46 s
+  wall. A first version that always solved the break-aware model took 33 s of post-solve on syn150_s1 (now 1.4 s).
+
 ## Sources
 
 - OR-Tools repository and licence (Apache-2.0): https://github.com/google/or-tools · releases: https://github.com/google/or-tools/releases

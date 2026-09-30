@@ -43,6 +43,9 @@ export interface FrozenTrip {
   depart_min: number;
   return_min: number;
   cases?: number;
+  /** The driver break planned with this load (PlanLoad.breakJson); absent = none recorded. */
+  break_start_min?: number | null;
+  break_min?: number | null;
 }
 
 export interface DispatchTruck {
@@ -108,6 +111,15 @@ export interface DispatchConfig {
    * and send no `window_rule` echo.
    */
   window_rule?: WindowRule;
+  /**
+   * Driver break (owner rule 29-30 Sep 2026): one break of break_min per truck-day, STARTING
+   * between break_start_from_min and break_start_to_min; none for a truck-day back for good by the
+   * latest start or leaving for the first time at the earliest start or later. 0 / absent = none.
+   * Solvers without the fields plan no break and send no `break_rule` echo.
+   */
+  break_min?: number;
+  break_start_from_min?: number;
+  break_start_to_min?: number;
   max_trips_per_truck?: number;
   fuel_price_per_litre?: number;
   /**
@@ -233,7 +245,23 @@ export interface PlannedLoad {
   overtime_min?: number | null;
   /** Legs of this load (return included) whose distance is an estimate. */
   estimated_legs?: number | null;
+  /** The driver break planned with this load; absent / null = none on this load. */
+  driver_break?: PlannedBreak | null;
 }
+
+/**
+ * A driver break. DEPOT: at the depot before the load leaves (it may overlap the reload and
+ * loading). ROAD: after unloading stop `after_sequence` (0 = on the way to stop 1; = the number of
+ * stops: on the way back), before the next unloading.
+ */
+export interface PlannedBreak {
+  start_min: number;
+  end_min: number;
+  where: 'DEPOT' | 'ROAD';
+  after_sequence?: number | null;
+}
+
+export type BreakStatus = 'PLANNED' | 'NOT_NEEDED' | 'IN_FROZEN_LOAD' | 'NOT_POSSIBLE';
 
 export interface UnservedStop {
   stop_id: string;
@@ -271,6 +299,9 @@ export interface TruckDayCost {
   driver_cost: number;
   overtime_cost: number;
   total_cost: number;
+  /** The truck-day's driver break; absent / null = no break rule (older solver, or none set). */
+  break_status?: BreakStatus | null;
+  break_start_min?: number | null;
 }
 
 /** Soft preferences in OMR-equivalent (not money). */
@@ -297,7 +328,8 @@ export type FeasibilityCode =
   | 'TRUCK_AVAILABILITY'
   | 'SHIFT_LIMIT'
   | 'TRIPS'
-  | 'FROZEN_OVERLAP';
+  | 'FROZEN_OVERLAP'
+  | 'BREAK';
 
 export interface FeasibilityViolation {
   code: FeasibilityCode;
@@ -370,6 +402,11 @@ export interface DispatchScenario {
    * was planned with ONLY from this echo, never from what it asked for.
    */
   window_rule?: WindowRule | null;
+  /**
+   * The driver-break rule the plan was made with (echoed). Absent / null: no break was planned (a
+   * solver before the rule, or no break set). The web takes it ONLY from this echo.
+   */
+  break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
 }
 
 export interface DispatchResponse {

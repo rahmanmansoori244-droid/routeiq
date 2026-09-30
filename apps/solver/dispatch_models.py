@@ -81,6 +81,11 @@ class FrozenTrip(BaseModel):
     depart_min: int = Field(ge=0, le=DAY_MIN * 2)
     return_min: int = Field(ge=0, le=DAY_MIN * 2)
     cases: int = 0
+    # The driver break planned with this load (on the road, or at the depot before it left); None
+    # = none recorded (made before the break rule, or the break was elsewhere). Optional and
+    # additive: an older web never sends it.
+    break_start_min: int | None = Field(default=None, ge=0, le=DAY_MIN * 2)
+    break_min: int | None = Field(default=None, ge=0, le=180)
 
 
 class DispatchTruck(BaseModel):
@@ -151,6 +156,17 @@ class DispatchConfig(BaseModel):
     # web that sends nothing is planned exactly as before). The web sends the TRUE closing time;
     # only the solver subtracts the stop time (load_repack.latest_start_s).
     window_rule: Literal["START", "FINISH"] = "START"
+    # Driver break (owner rule 29-30 Sep 2026): one break of break_min per truck-day (one driver
+    # per truck per day), STARTING between break_start_from_min and break_start_to_min, on the road
+    # between stops or at the depot (it may overlap a reload), never while unloading; inside the
+    # shift, paid, counting toward overtime. A truck-day needs none when it is back at the depot
+    # for good by break_start_to_min, or when its first departure is at break_start_from_min or
+    # later. 0 = no break (the default: an older web sends nothing). Settings that cannot work
+    # (from after to, or a break as long as the shift) plan no break and say so in a warning,
+    # never a 422 (dispatch_solver.break_rule).
+    break_min: int = Field(default=0, ge=0, le=180)
+    break_start_from_min: int = Field(default=720, ge=0, le=DAY_MIN)
+    break_start_to_min: int = Field(default=840, ge=0, le=DAY_MIN)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
@@ -257,6 +273,17 @@ class PlannedStop(BaseModel):
     leg_estimated: bool = False
 
 
+class PlannedBreak(BaseModel):
+    """The driver break planned with a load. DEPOT: at the depot before this load leaves (it may
+    overlap the reload and loading). ROAD: after unloading stop ``after_sequence`` (0 = on the way
+    to stop 1; = the number of stops: on the way back), before the next unloading."""
+
+    start_min: int
+    end_min: int
+    where: Literal["DEPOT", "ROAD"]
+    after_sequence: int | None = None
+
+
 class PlannedLoad(BaseModel):
     """One load. Costs follow costing.py (policy TRUCK_DAY_SPAN): total_cost = fixed_cost +
     trip_cost + distance_cost + fuel_cost + driver_cost + overtime_cost, where the driver and
@@ -291,6 +318,9 @@ class PlannedLoad(BaseModel):
     overtime_min: int | None = None
     # Legs of this load (the return included) whose distance is an estimate, not a road distance.
     estimated_legs: int | None = None
+    # The driver break planned with this load (None: none on this load). The stop after a ROAD
+    # break arrives after it when the break started on the way; wait_min never counts break minutes.
+    driver_break: PlannedBreak | None = None
 
 
 class UnservedStop(BaseModel):
@@ -333,6 +363,20 @@ class TruckDayCostOut(BaseModel):
     driver_cost: float
     overtime_cost: float
     total_cost: float
+    # The driver break of this truck-day (None: no break rule - an older solver, or break_min 0).
+    # PLANNED: on one of its new loads; NOT_NEEDED: back for good by the end of the break window,
+    # or first departure at its start or later; IN_FROZEN_LOAD: a locked or dispatched load holds
+    # it; NOT_POSSIBLE: its locked or dispatched loads run through the window with none recorded.
+    break_status: Literal["PLANNED", "NOT_NEEDED", "IN_FROZEN_LOAD", "NOT_POSSIBLE"] | None = None
+    break_start_min: int | None = None
+
+
+class BreakRule(BaseModel):
+    """The driver-break rule a plan was made with (the echo; config.break_*)."""
+
+    length_min: int
+    start_from_min: int
+    start_to_min: int
 
 
 class PreferencePenalties(BaseModel):
@@ -362,6 +406,7 @@ FeasibilityCode = Literal[
     "SHIFT_LIMIT",
     "TRIPS",
     "FROZEN_OVERLAP",
+    "BREAK",
 ]
 
 
@@ -442,6 +487,9 @@ class DispatchScenario(BaseModel):
     # The receiving-hours rule this plan was made with (config.window_rule, echoed on every
     # scenario). None from a solver before it: unloading only had to START by closing.
     window_rule: Literal["START", "FINISH"] | None = None
+    # The driver-break rule this plan was made with; None = no break was planned (a solver before
+    # the rule, break_min 0, or settings that cannot work - see the warnings).
+    break_rule: BreakRule | None = None
 
 
 class DispatchResponse(BaseModel):

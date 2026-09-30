@@ -15,7 +15,7 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { changedFields, overtimeSaveProblem, type EditableConfig } from '@/lib/settings-fields';
+import { breakSaveProblem, changedFields, overtimeSaveProblem, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 
 interface TenantFields {
@@ -81,6 +81,7 @@ export function SettingsForm({
   // As the API: only a save that changes the threshold or the shift maximum is held to the rule; a
   // stored threshold after a lowered shift maximum is shown as a warning and other fields still save.
   const overtimeBlocks = overtimeSaveProblem(configDiff.changes, c) !== null;
+  const breakProblem = breakSaveProblem(configDiff.changes, c);
 
   function save() {
     if (invalid.length) {
@@ -89,6 +90,10 @@ export function SettingsForm({
     }
     if (overtimeBlocks) {
       toast.error('Overtime after must be at most the driver shift maximum.');
+      return;
+    }
+    if (breakProblem) {
+      toast.error(breakProblem);
       return;
     }
     startSave(async () => {
@@ -149,7 +154,7 @@ export function SettingsForm({
         <CardHeader>
           <CardTitle className="text-base">Driver shift</CardTitle>
           <CardDescription>
-            When trucks may leave and when they must be back at the latest. The dispatcher can change these; every change is in the audit log.
+            When trucks may leave, when they must be back at the latest, and the drivers' midday break. The dispatcher can change these; every change is in the audit log.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -174,6 +179,18 @@ export function SettingsForm({
             </p>
           ) : admin && c.overtimeCostPerHour > 0 && c.overtimeAfterMin === c.driverShiftMaxMinutes ? (
             <p className="text-sm text-amber-700 md:col-span-2">Overtime starts at the shift maximum, so it is never reached.</p>
+          ) : null}
+          {num('driverBreakMinutes', 'Driver break', {
+            step: 5,
+            unit: 'min',
+            hint: 'One break per truck-day that works through midday, taken between stops or at the depot (it may overlap reloading), never while unloading. It is inside the shift maximum and paid. Truck-days back for good by the latest start, or leaving for the first time at the earliest start or later, get none. 0 = no break.',
+          })}
+          <TimeField id="driverBreakFromMin" label="Break may start from" value={c.driverBreakFromMin} onChange={(v) => setC({ ...c, driverBreakFromMin: v })} changed={'driverBreakFromMin' in configDiff.changes} />
+          <TimeField id="driverBreakToMin" label="Break must start by" value={c.driverBreakToMin} onChange={(v) => setC({ ...c, driverBreakToMin: v })} changed={'driverBreakToMin' in configDiff.changes} />
+          {breakProblem ? (
+            <p className="text-sm text-destructive md:col-span-2" role="alert">
+              {breakProblem}
+            </p>
           ) : null}
         </CardContent>
       </Card>

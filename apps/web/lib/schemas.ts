@@ -225,6 +225,9 @@ export const tenantConfigSchema = z
     shiftStartMin: bounded(CONFIG_BOUNDS.shiftStartMin),
     driverShiftMaxMinutes: bounded(CONFIG_BOUNDS.driverShiftMaxMinutes),
     overtimeAfterMin: bounded(CONFIG_BOUNDS.overtimeAfterMin),
+    driverBreakMinutes: bounded(CONFIG_BOUNDS.driverBreakMinutes),
+    driverBreakFromMin: bounded(CONFIG_BOUNDS.driverBreakFromMin),
+    driverBreakToMin: bounded(CONFIG_BOUNDS.driverBreakToMin),
     reloadMinutes: bounded(CONFIG_BOUNDS.reloadMinutes),
     loadingMinPerCase: bounded(CONFIG_BOUNDS.loadingMinPerCase),
     serviceMinPerCase: bounded(CONFIG_BOUNDS.serviceMinPerCase),
@@ -247,7 +250,7 @@ export const tenantConfigSchema = z
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
 
-export { overtimeProblem, overtimeSaveProblem } from './settings-fields';
+export { breakSaveProblem, overtimeProblem, overtimeSaveProblem } from './settings-fields';
 
 export const tenantSettingsSchema = z.object({
   name: z.string().trim().min(2).max(120),

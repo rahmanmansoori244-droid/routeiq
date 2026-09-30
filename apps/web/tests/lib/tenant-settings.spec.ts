@@ -33,6 +33,7 @@ const BASE_CFG: Record<string, any> = {
   reloadMinutes: 30, loadingMinPerCase: 0.04, serviceMinPerCase: 0.05, maxTripsPerTruck: 3, splitDeliveries: true,
   defaultServiceTimeMin: 10, timezone: 'Asia/Muscat', planningCutoffMin: 1080, fuelPricePerLitre: 0.26, driverCostPerHour: 2.5,
   overtimeAfterMin: 540, overtimeCostPerHour: 4, prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, osrmUrl: null,
+  driverBreakMinutes: 60, driverBreakFromMin: 720, driverBreakToMin: 840,
   priorityWeightsJson: null, orderColumnMapJson: null, dateOrder: 'DMY', serviceAreaJson: null,
   // Deprecated columns still in the database (read by nothing).
   labelEstimatedDistances: true, returnToDepot: true, solverTimeLimitSeconds: 30,
@@ -83,7 +84,7 @@ const CHANGED: Record<string, unknown> = {
   shiftStartMin: 300, driverShiftMaxMinutes: 600, overtimeAfterMin: 480, reloadMinutes: 45, loadingMinPerCase: 0.1, serviceMinPerCase: 0.2,
   defaultServiceTimeMin: 25, maxTripsPerTruck: 2, splitDeliveries: false, planningCutoffMin: 1020, dateOrder: 'MDY', fuelPricePerLitre: 0.3,
   driverCostPerHour: 3, overtimeCostPerHour: 6, prefWindowPenaltyPerMin: 0.2, distanceProvider: 'HAVERSINE', roadTimeFactor: 1.4,
-  distanceMultiplier: 1.5, avgSpeedKmh: 55,
+  distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
 };
 /** Read by the order intake, not by the optimizer request (checked against their consumer below). */
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder']);

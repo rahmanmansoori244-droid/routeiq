@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { withTenantApi, ok, parseBody, fail, hasRole } from '@/lib/api';
-import { overtimeSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
+import { breakSaveProblem, overtimeSaveProblem, tenantConfigSchema, tenantSettingsSchema } from '@/lib/schemas';
 import { adminOnlyFields, DISPATCHER_SETTINGS_FIELDS } from '@/lib/settings-fields';
 import { audit } from '@/lib/audit';
 import { prisma } from '@/lib/db';
@@ -86,6 +86,8 @@ export const PATCH = withTenantApi(
       // lowered shift maximum is a planner warning and must not block saving the company name.
       const overtime = overtimeSaveProblem(configPatch, { ...before.config, ...configPatch });
       if (overtime) return { status: 400 as const, error: overtime };
+      const brk = breakSaveProblem(configPatch, { ...before.config, ...configPatch });
+      if (brk) return { status: 400 as const, error: brk };
       if (Object.keys(tenantPatch).length) await tx.tenant.update({ where: { id: user.tenantId }, data: tenantPatch });
       if (Object.keys(configPatch).length) await tx.tenantConfig.update({ where: { tenantId: user.tenantId }, data: configPatch });
       const after = await tx.tenant.findUnique({ where: { id: user.tenantId }, include: { config: true } });

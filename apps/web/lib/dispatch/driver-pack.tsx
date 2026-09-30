@@ -23,6 +23,7 @@ import { coordText, pinUrl, routeLinks, tripsByTruck, type RoutePlan } from './d
 import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
 import { fmtHhmm } from './time';
 import { carriedStopText } from './carry-view';
+import { breakLine, breakTimes } from './break-text';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -47,6 +48,10 @@ export interface SheetStop {
    */
   carried: string | null;
   eta: string;
+  /** "unload until 07:15": when unloading must be finished (the planned departure); null = not known. */
+  until: string | null;
+  /** The driver break taken after unloading this stop ("Break 12:40-13:40 between stop 3 and stop 4"); null = none here. */
+  breakAfter: string | null;
   /** Receiving hours, one line each: "Receives 06:00–14:00", "Best 07:00–10:00" or "Any time". */
   hours: string[];
   /** The plan arrives outside the customer's hard receiving hours. */
@@ -79,6 +84,10 @@ export interface DriverSheet {
   driverPhone: string | null;
   depart: string;
   back: string;
+  /** The load's driver break ("12:40-13:40"); null = none on this load. */
+  breakTimes: string | null;
+  /** A break before the first stop (at the depot, or on the way to stop 1), printed above the stops; null = none. */
+  breakBefore: string | null;
   cases: number;
   capacityCases: number;
   kmLabel: 'Estimated km' | 'Road km';
@@ -154,6 +163,9 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     late: s.late,
     carried: carriedStopText(s),
     eta: fmtHhmm(s.etaMin),
+    until: s.departureMin !== null ? `unload until ${fmtHhmm(s.departureMin)}` : null,
+    breakAfter:
+      l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === s.sequence && s.sequence > 0 ? breakLine(l.break, l.stops.length) : null,
     hours: hoursLines(s.window),
     outsideHours: s.hardWindowOk === false,
     cases: s.cases,
@@ -203,6 +215,8 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         driverPhone: t.maybe(l.driverPhone),
         depart: fmtHhmm(l.departMin),
         back: fmtHhmm(l.returnMin),
+        breakTimes: l.break ? breakTimes(l.break) : null,
+        breakBefore: l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0) ? breakLine(l.break, stops.length) : null,
         cases: l.cases,
         capacityCases: l.truckCapacityCases,
         kmLabel: l.distanceIsEstimated ? 'Estimated km' : 'Road km',
@@ -216,7 +230,9 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         stops: stops.map((s) => sheetStop(d, l, s, t)),
         returnText:
           `Return to depot ${depot.code} ~${fmtHhmm(l.returnMin)}` +
-          (next ? ` - load trip ${next.loadNo} (planned departure ${fmtHhmm(next.departMin)}).` : ' - last trip of the day.'),
+          (next
+            ? ` - load trip ${next.loadNo} (${next.break?.where === 'DEPOT' ? `driver break ${breakTimes(next.break)} at the depot, ` : ''}planned departure ${fmtHhmm(next.departMin)}).`
+            : ' - last trip of the day.'),
         footerText: `${truckCode} trip ${l.loadNo} of ${n} · delivery ${d.run.runDate} · plan v${v} - this sheet is void if a newer plan version is issued`,
       };
       return { ...sheet, unprintable: head.lost || t.lost, timesNotVerified: !!l.timing && !l.timing.ok };
@@ -308,6 +324,15 @@ const s = StyleSheet.create({
 const CONTENT_WIDTH = 547;
 const W = { seq: 22, cust: 160, time: 80, cases: 88, so: 58, map: 62, sign: 77 };
 
+/** The driver break between two stop rows (or before the first stop). */
+function BreakRow({ text }: { text: string }) {
+  return (
+    <View style={s.tr} wrap={false}>
+      <T style={[s.cell, { width: CONTENT_WIDTH, fontFamily: BOLD, fontSize: 9 }]}>{`${text} - driver break, never while unloading`}</T>
+    </View>
+  );
+}
+
 function StopRow({ st }: { st: SheetStop }) {
   const meta = [st.customerCode, st.branchCode ? `branch ${st.branchCode}` : null, st.customerType, `P${st.priority}`].filter(Boolean).join(' · ');
   return (
@@ -345,6 +370,7 @@ function StopRow({ st }: { st: SheetStop }) {
       </View>
       <View style={[s.cell, { width: W.time }]}>
         <T style={{ fontFamily: BOLD, fontSize: 11 }}>{st.eta}</T>
+        {st.until ? <T style={[s.small, { fontSize: 7.5 }]}>{st.until}</T> : null}
         {st.hours.map((h) => (
           <T key={h} style={[s.small, { fontSize: 7 }]}>
             {h}
@@ -444,6 +470,8 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
               {sh.depart}
               <T style={s.b}>{'  '}Back ~</T>
               {sh.back}
+              {sh.breakTimes ? <T style={s.b}>{'  '}Break </T> : null}
+              {sh.breakTimes ?? ''}
             </T>
             <T style={s.fact}>
               <T style={s.b}>{sh.stops.length}</T> {sh.stops.length === 1 ? 'stop' : 'stops'} · <T style={s.b}>{sh.cases}</T> / {sh.capacityCases} cases · {sh.kmLabel} {sh.km}
@@ -492,12 +520,17 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
         <T style={[s.cell, { width: W.map }]}>Location</T>
         <T style={[s.cell, { width: W.sign }]}>Received</T>
       </View>
+      {sh.breakBefore ? <BreakRow text={sh.breakBefore} /> : null}
       {sh.stops.slice(0, -1).map((st) => (
-        <StopRow key={st.sequence} st={st} />
+        <React.Fragment key={st.sequence}>
+          <StopRow st={st} />
+          {st.breakAfter ? <BreakRow text={st.breakAfter} /> : null}
+        </React.Fragment>
       ))}
       {/* The last stop, the return line and the sign-off stay together: they never start a page alone. */}
       <View wrap={false}>
         {lastStop ? <StopRow st={lastStop} /> : null}
+        {lastStop?.breakAfter ? <BreakRow text={lastStop.breakAfter} /> : null}
         <T style={{ marginTop: 5, fontSize: 9, fontFamily: BOLD }}>{sh.returnText}</T>
         <View style={s.signOff}>
           <T>Loaded by: ________________</T>
