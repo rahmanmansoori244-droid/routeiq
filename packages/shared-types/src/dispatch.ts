@@ -186,6 +186,33 @@ export interface SearchReport {
    */
   best_over_time?: [number, number, number?][];
   solutions?: number | null;
+  /** The second route search (PyVRP); absent from a solver before it. */
+  pyvrp?: PyvrpReport | null;
+}
+
+/**
+ * What the second route search (PyVRP) did in a solve (apps/solver dispatch_models.PyvrpReport). Its
+ * plan is one more candidate of the load re-check, judged by the planner's own checks, timing and
+ * costs. status: CHOSEN = its plan is used by the options in chosen_for; NOT_CHOSEN = the engine's own
+ * plans were as good or better (or its plan was unusable: reason); SKIPPED = not run; FAILED = it
+ * failed. The plans are then the engine's alone. best_over_time: [seconds, score] - a score, not money.
+ */
+export interface PyvrpReport {
+  status: 'CHOSEN' | 'NOT_CHOSEN' | 'SKIPPED' | 'FAILED';
+  reason?: string | null;
+  version?: string | null;
+  seed?: number | null;
+  penalty_mode?: string | null;
+  search_sec?: number | null;
+  iterations?: number | null;
+  stop_reason?: string | null;
+  last_improvement_sec?: number | null;
+  feasible?: boolean | null;
+  routes?: number | null;
+  loads?: number | null;
+  missing?: number | null;
+  chosen_for?: string[];
+  best_over_time?: [number, number][];
 }
 
 export interface DispatchRequest {

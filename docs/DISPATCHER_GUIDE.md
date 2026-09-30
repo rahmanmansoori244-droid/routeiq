@@ -71,6 +71,18 @@ White cards are optional confirmations: priority (**P1 = highest**), customer ty
 - **Priorities are strict:** one order of a higher priority always wins over any number of lower-priority orders (one P2 is never left out to fit eleven P3s). When the trucks really cannot carry everything, P5 orders are left out first, then P4, and so on.
 - After the route search, RouteIQ re-checks which truck carries each load, so trucks do two or three loads each where the day allows instead of many trucks doing one short load. When this changed the plan you see a note such as *"Loads were re-assigned after the route search: 12 -> 5 trucks, 19 -> 14 loads, 720 -> 493 OMR operating cost."*
   - The re-check also tries to place orders the route search left out on free trucks or loads. When it does, the note ends with *"this also plans 2 stop(s) the route search had left out"*: loads and cost can then go up, because more is delivered.
+  - **A second route search.** RouteIQ runs a second route search beside the main one, on the same orders, trucks and
+    hours. Its plan goes through exactly the same checks, timing and costs as the main search's, and it is used for an option
+    only when it is clearly better for that option's goal (serving the higher priorities first; then, for Recommended, at
+    least 1 OMR less total cost with the customer time preferences; for Min Distance at least 1 km less; for Min Trucks a
+    truck or a load less, or 1 OMR less operating cost). Otherwise the main search's plan is kept. Such an option carries one
+    note that says what got better for its goal, and shows the other figures that changed, for example *"A second route search
+    found a better plan for this option than the main search: fewer km, 978.1 -> 974.2 km. Also changed: trucks 5 -> 6, loads
+    14 -> 15, operating cost 529 -> 541 OMR. It passed the planner's own checks, timing and costs."* When the main search found
+    no plan for an option and the second one did, its search status reads "plan from the second route search".
+    Nothing else changes: review, lock, export and dispatch the plan as usual. It cannot see the early-arrival preference for
+    P1/P2 customers (Settings), so its plans may deliver them a little later inside their receiving hours when that saves more
+    than the preference is worth; the plan's cost already counts that preference.
   - Every load is then timed with the exact loading time between loads (Settings → Daily dispatch: timing). The route search only estimates it, so on a tight day with very full loads its plan may not fit. The lowest priorities are then left out until it does, with the note *"... stop(s) the route search had planned are left out: with the loading time between loads ... its loads did not fit the truck days"*. Re-plan, add a truck, or check the loading time.
 
 ## 4. Review the plan

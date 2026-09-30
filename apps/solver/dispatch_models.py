@@ -545,8 +545,42 @@ class SearchReport(BaseModel):
     # the final load re-check. Reports from before the count have two values per point.
     best_over_time: list[tuple[float, float, int] | tuple[float, float]] = Field(default_factory=list)
     solutions: int | None = None
+    # The second route search (PyVRP), when this solver has it (pyvrp_candidate.py). None from a
+    # solver before it.
+    pyvrp: "PyvrpReport | None" = None
 
 
+class PyvrpReport(BaseModel):
+    """What the second route search (PyVRP) did in this solve. Its plan is one more candidate of the
+    load re-check, judged by the engine's own checks, timing and cost score.
+
+    status: CHOSEN = its plan (re-checked) is used by the options in ``chosen_for``; NOT_CHOSEN = it
+    ran, and the engine's own plans were as good or better (or its plan was unusable: ``reason``);
+    SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE); FAILED = it
+    failed (IMPORT_FAILED, FAILED, LOST, TIMEOUT). The plans are then the engine's alone.
+    best_over_time: at most 12 [seconds, PyVRP's score] points - a score, not money (it holds the
+    prize of every stop not planned yet)."""
+
+    status: Literal["CHOSEN", "NOT_CHOSEN", "SKIPPED", "FAILED"]
+    reason: str | None = None
+    version: str | None = None
+    seed: int | None = None
+    penalty_mode: str | None = None
+    search_sec: float | None = None
+    iterations: int | None = None
+    # SEARCH_END (told to stop when the engine's searches ended), CONVERGED, CAP, STOPPED,
+    # ITERATIONS (tests), MAX_RUNTIME (the backstop).
+    stop_reason: str | None = None
+    last_improvement_sec: float | None = None
+    feasible: bool | None = None
+    routes: int | None = None
+    loads: int | None = None
+    missing: int | None = None
+    chosen_for: list[str] = Field(default_factory=list)
+    best_over_time: list[tuple[float, float]] = Field(default_factory=list)
+
+
+SearchReport.model_rebuild()
 DispatchResponse.model_rebuild()
 
 

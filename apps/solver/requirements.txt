@@ -6,8 +6,11 @@ uvicorn[standard]==0.30.1
 python-dotenv>=1.0,<2
 # NMWC dispatch planning (/optimize-dispatch) runs on OR-Tools: hard + preferred time
 # windows, priority drop penalties, multi-load trucks via depot reloads, frozen loads.
-# PyVRP stays only for the legacy 3-scenario /optimize endpoint (kept for comparison).
-pyvrp>=0.13.0,<0.14  # 0.14 changed Model.add_depot(); legacy /optimize only
+# PyVRP is the dispatch engine's second search (its plans are judged by the engine's own
+# checks, timing and cost score; pyvrp_candidate.py) and runs the legacy 3-scenario
+# /optimize endpoint (kept for comparison). Pinned exactly: 0.14 changed the Model API
+# (add_location / add_depot(location) / add_client(location)), and a future release may again.
+pyvrp==0.14.0
 ortools>=9.10,<10  # NMWC dispatch engine (/optimize-dispatch)
 # Module B: Mapbox Directions Matrix HTTP client.
 httpx>=0.27,<0.30

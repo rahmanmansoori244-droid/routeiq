@@ -371,6 +371,10 @@ describe('Excel: the route search status in plain words; stored warnings once', 
     expect(solverStatusText('ROUTING_FAIL_TIMEOUT', 'short')).toBe('no plan found in the time allowed');
     expect(solverStatusText('SOMETHING_NEW')).toBe('SOMETHING_NEW');
     expect(solverStatusText('')).toBe('Not recorded.');
+    // An option the main search found no plan for, rescued by the second route search: a plan, not "no plan found".
+    expect(solverStatusText('SECOND_SEARCH', 'short')).toBe('plan from the second route search');
+    expect(solverStatusText('SECOND_SEARCH')).not.toMatch(/PyVRP|\boptimal\b/);
+    expect(isPlanFoundStatus('SECOND_SEARCH')).toBe(true);
     expect(isPlanFoundStatus('ROUTING_SUCCESS')).toBe(true);
     expect(isPlanFoundStatus('ROUTING_FAIL')).toBe(false);
     expect(withPlainSolverCodes('The optimizer found no feasible plan (ROUTING_FAIL_TIMEOUT).')).toBe('The optimizer found no feasible plan (no plan found in the time allowed).');
