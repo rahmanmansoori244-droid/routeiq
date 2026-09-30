@@ -65,6 +65,7 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 import costing
 import feasibility as FZ
 import load_repack as LR
+import pyvrp_candidate as PV
 from dispatch_models import (
     DAY_MIN,
     MAX_STOPS,
@@ -81,6 +82,7 @@ from dispatch_models import (
     PlannedLoad,
     PlannedStop,
     PreferencePenalties,
+    PyvrpReport,
     SearchReport,
     TruckDayCostOut,
     UnservedStop,
@@ -350,11 +352,20 @@ class SolveControl:
         self._raise_flags()
 
     def attach(self, flag) -> None:
-        """A worker pool's multiprocessing Event: set now if a stop was already asked for."""
+        """A worker pool's or process's "stop now" flag (anything with set()): set now if a stop was
+        already asked for. Its owner detaches it when it closes."""
         with self._lock:
             self._flags.append(flag)
         if self.stop_requested.is_set() or self.cancelled.is_set():
             self._raise_flags()
+
+    def detach(self, flag) -> None:
+        """A closed pool's or process's flag: never raised again, and no longer kept alive by this
+        control (CI, PR #50: the control outlives its solve in main.py, and every pool's multiprocessing
+        Event it kept - 5 semaphores each - was then freed by the garbage collector in the event-loop
+        thread). Waits for a _raise_flags that is running."""
+        with self._lock:
+            self._flags = [f for f in self._flags if f is not flag]
 
     def _raise_flags(self) -> None:
         with self._lock:
@@ -491,6 +502,7 @@ def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchRe
         stall_sec=(watch or {}).get("stall_sec"),
         best_over_time=list((watch or {}).get("points") or []),
         solutions=(watch or {}).get("solutions"),
+        pyvrp=PyvrpReport(**state["pyvrp"]) if state.get("pyvrp") else None,
     )
 
 
@@ -1415,17 +1427,9 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
 
     unserved = list(pre_drops)
     usable_tds = [td for td in tds if td.usable]
-    total_cap_cases = sum(td.truck.capacity_cases * td.trips_left for td in usable_tds)
-    demand_cases = sum(s.demand_cases for s in stops)
-    # Weight bounds the day too when every usable truck has a payload (0 = kg not limited): a day
-    # can be short of kg while the cases would fit (scenario test S03), and is then explained in kg.
-    # In 0.1 kg units, no margin (audit F08): 3,000.1 kg on 3,000 kg of loads is short.
-    kg_bound = bool(usable_tds) and all(td.max_kg_units > 0 for td in usable_tds)
-    total_cap_u = sum(td.max_kg_units * td.trips_left for td in usable_tds) if kg_bound else 0
-    demand_u = sum(kg_units(s.demand_kg) for s in stops)
+    total_cap_cases, total_cap_u, demand_cases, demand_u, kg_bound = _fleet_capacity(stops, tds)
     total_cap_kg, demand_kg = total_cap_u / 10, demand_u / 10
-    short_cases = demand_cases > total_cap_cases
-    short_kg = kg_bound and demand_u > total_cap_u
+    short_cases, short_kg = _fleet_shortage(stops, tds)
     shortage = short_cases or short_kg
     priority_of = {st.stop_id: st.priority for st in stops}
     unserved_penalty = 0.0
@@ -1542,6 +1546,26 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     return sc
 
 
+def _fleet_capacity(stops: list[DispatchStop], tds: list[TruckDay]) -> tuple[int, int, int, int, bool]:
+    """(cases the usable trucks can carry in their loads left, their 0.1 kg units, cases asked for,
+    0.1 kg units asked for, whether weight bounds the day). Weight bounds the day when every usable
+    truck has a payload (0 = kg not limited): a day can be short of kg while the cases would fit
+    (scenario test S03). In 0.1 kg units, no margin (audit F08): 3,000.1 kg on 3,000 kg is short."""
+    usable_tds = [td for td in tds if td.usable]
+    total_cap_cases = sum(td.truck.capacity_cases * td.trips_left for td in usable_tds)
+    kg_bound = bool(usable_tds) and all(td.max_kg_units > 0 for td in usable_tds)
+    total_cap_u = sum(td.max_kg_units * td.trips_left for td in usable_tds) if kg_bound else 0
+    return (total_cap_cases, total_cap_u, sum(s.demand_cases for s in stops), sum(kg_units(s.demand_kg) for s in stops),
+            kg_bound)
+
+
+def _fleet_shortage(stops: list[DispatchStop], tds: list[TruckDay]) -> tuple[bool, bool]:
+    """(short of cases, short of kg): the fleet-shortage test of _build_scenario, shared with the
+    second search's penalty rule (pyvrp_candidate.build_model)."""
+    cap_cases, cap_u, demand_cases, demand_u, kg_bound = _fleet_capacity(stops, tds)
+    return demand_cases > cap_cases, kg_bound and demand_u > cap_u
+
+
 def _frozen_truck_ids(tds: list[TruckDay]) -> set[str]:
     """Trucks that carry locked / loading / dispatched loads today, usable for new loads or not."""
     return {td.truck.id for td in tds if td.n_frozen}
@@ -1624,14 +1648,21 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
     # is searched inside the API process. None: SOLVER_PARALLEL=0, nothing to search, or the
     # in-process fallback allowed for development (SOLVER_ALLOW_INPROCESS_FALLBACK=1).
     workers: _Workers | None = None
-    if solvable and _parallel():
-        # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
-        # worker a stuck alternative starved the next one, which then hit the same deadline
-        # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
-        # quality, never the deadline. RECOMMENDED runs first in one of them.
-        workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
-                                 "search")
+    pv: _PvRun | None = None
+    # CI (PR #50): every worker pool and process of this solve is closed - its processes joined, its
+    # pipes and locks released - in the finally below, in this thread, whatever happens after it
+    # started (the second search's start included). Nothing is left for the garbage collector.
     try:
+        if solvable and _parallel():
+            # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
+            # worker a stuck alternative starved the next one, which then hit the same deadline
+            # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
+            # quality, never the deadline. RECOMMENDED runs first in one of them.
+            workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
+                                     "search")
+        # The second route search (PyVRP): its own optional process, after rule 22's proof (a machine
+        # that cannot start it still solves). Not waited for here.
+        pv = _pv_start(req, solvable, control, workers is not None)
         coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
         mx = resolve_matrix(
             coords,
@@ -1653,10 +1684,12 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
         state: dict = {}
         scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
-                                   control=control, state=state, workers=workers)
+                                   control=control, state=state, workers=workers, pv=pv)
     finally:
+        if pv is not None:
+            pv.close()  # already closed by _run_scenarios when it ran; a no-op then
         if workers is not None:
-            workers.close()  # already closed by _run_scenarios when it ran; a no-op then
+            workers.close()  # likewise
     for sc in scenarios:
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
@@ -1815,13 +1848,42 @@ _POOL_ATTR = "_pool"
 _BEACON = None
 
 
-def _worker_init(beacon, stop_flag=None) -> None:
-    global _BEACON, _STOP_FLAG
+# In the second search's worker process: set when the engine's searches have ended (QUICK: PyVRP
+# then returns its best plan within a fraction of a second, pyvrp_candidate.Stopper).
+_SEARCH_OVER = None
+
+# Linux: how readily the kernel's out-of-memory killer takes this process (-1000..1000). The second
+# search's worker sets the maximum at start (CI 30 Sep 2026: the API process vanished, killed without
+# a traceback, as the second search's worker started - and every later solve failed). With it, a
+# machine or container short of memory loses the optional second search first (LOST: the engine's
+# plans are used), never the API process for it. Raising one's own value needs no privilege.
+OOM_SCORE_ADJ_PATH = "/proc/self/oom_score_adj"
+SECOND_SEARCH_OOM_SCORE_ADJ = 1000
+
+
+def _prefer_as_oom_victim(score: int) -> bool:
+    """This process asks to be the kernel's first out-of-memory victim; False where it cannot (no
+    /proc: Windows, macOS; a read-only /proc). Best effort: never stops a worker from starting."""
+    try:
+        if not os.path.exists(OOM_SCORE_ADJ_PATH):
+            return False
+        with open(OOM_SCORE_ADJ_PATH, "w", encoding="ascii") as f:
+            f.write(str(score))
+        return True
+    except OSError:
+        return False
+
+
+def _worker_init(beacon, stop_flag=None, search_over=None) -> None:
+    global _BEACON, _STOP_FLAG, _SEARCH_OVER
     # Test hook (rule 22): every worker process dies while starting, so the pool never runs a task.
     if os.environ.get("ROUTEIQ_TEST_WORKER_START_EXIT") == "1":
         os._exit(3)
     _BEACON = beacon
     _STOP_FLAG = stop_flag
+    _SEARCH_OVER = search_over
+    if search_over is not None:  # the second search's own process (_PvProcess): optional, so taken first
+        _prefer_as_oom_victim(SECOND_SEARCH_OOM_SCORE_ADJ)
 
 
 def _ping(_arg=None) -> int:
@@ -1853,6 +1915,36 @@ def _workers_alert(run_id: str, happened: str, cause: str, *, nothing_searched: 
               " Nothing is searched inside the API process (rule 22)." if nothing_searched else "", _ALERT_ADVICE)
 
 
+class _Task:
+    """One pool task, as the waits see it: ready(), get(), wait(). The pool's own AsyncResult never
+    leaves _Workers: close() cuts every task loose, so a frame or a traceback that still holds one (an
+    exception's, which main.py keeps) keeps nothing of the pool alive. An AsyncResult references the
+    Pool, its task cache and its queues; one that never finished is even a cycle with the Pool, which
+    only the garbage collector frees (CI, PR #50)."""
+
+    __slots__ = ("_ar",)
+
+    def __init__(self, ar) -> None:
+        self._ar = ar
+
+    def ready(self) -> bool:
+        ar = self._ar
+        return ar is not None and ar.ready()
+
+    def get(self):
+        ar = self._ar
+        if ar is None:
+            raise RuntimeError("the worker pool was closed")
+        return ar.get()
+
+    def wait(self, timeout: float) -> None:
+        ar = self._ar
+        if ar is not None:
+            ar.wait(timeout)
+        else:  # closed (_await_all stops at its next check)
+            time.sleep(max(0.0, min(timeout, 0.5)))
+
+
 class _Workers:
     """A spawn Pool with what the waits need, without Pool's private attributes where possible:
     its size (stored here, not read from Pool._processes) and which worker process runs which task
@@ -1860,7 +1952,13 @@ class _Workers:
     when that is gone, pids() is None and deaths are only seen at the deadline.
 
     Rule 22 (review): broken() says when the pool can no longer run tasks (the waits then stop at
-    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC."""
+    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC.
+
+    CI (PR #50, a segmentation fault while the garbage collector ran in the API's event-loop thread):
+    everything the pool made - its queues' pipes and locks, its worker processes, the stop flag, the
+    tasks' results - is closed and released by close(), in the thread that calls it, before the solve
+    returns; after close() this object holds nothing of multiprocessing, so nothing is left for the
+    garbage collector even when a traceback keeps it."""
 
     def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search"):
         import multiprocessing as mp
@@ -1869,28 +1967,37 @@ class _Workers:
         self.size = max(1, int(size))
         self.run_id = run_id
         self.what = what  # "search" or "load re-check", for the administrator's log lines
-        self._beacon = ctx.SimpleQueue()
+        self.pool = None
         # The solve's "stop now" flag, seen by every THOROUGH search in these workers (_watch_search).
         # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
         self.control = control
+        self._stop_flag = None
+        self._beacon = ctx.SimpleQueue()
         try:
-            stop_flag = ctx.Event() if control is not None else None
-            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, stop_flag))
-        except BaseException:
+            self._stop_flag = ctx.Event() if control is not None else None
+            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, self._stop_flag))
+        except BaseException as exc:
             # Nothing left behind by a failed start (rule 22; audit finding: the queue made above used
-            # to stay open). Pool itself stops the worker processes it had started.
+            # to stay open). Pool itself stops the worker processes it had started; the traceback is
+            # cut here so that it does not keep Pool's half-made queues alive (CI, PR #50).
             self._beacon.close()
-            raise
-        if stop_flag is not None:
-            control.attach(stop_flag)  # type: ignore[union-attr]
+            self._beacon = self._stop_flag = None
+            raise exc.with_traceback(None)  # noqa: B904 - the same exception, without Pool's frames
+        if self._stop_flag is not None:
+            control.attach(self._stop_flag)  # type: ignore[union-attr]
         self._pid_of: dict[str, int] = {}
-        self._tasks: dict[str, object] = {}  # token -> AsyncResult of each task not seen finished yet
+        self._tasks: dict[str, _Task] = {}  # token -> each task not seen finished yet
+        self._handles: list[_Task] = []  # every task given out (close() cuts them loose)
         self._seq = 0
         self._warned = False
         self._closed = False
         self._close_ok = True
         self._proved = False  # check_started saw a task run (before that, _start_workers alerts)
         self._broken: str | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
 
     def check_started(self, timeout: float) -> None:
         """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
@@ -1908,12 +2015,15 @@ class _Workers:
         raise RuntimeError(f"the first worker task {'lost its process' if kind == 'lost' else 'failed'}: {value}")
 
     def submit(self, fn, arg, name: str):
-        """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
+        """Start ``fn(arg)`` in a worker; returns (token, _Task)."""
+        if self._closed:
+            raise RuntimeError(f"the worker pool for the {self.what} was closed")
         self._seq += 1
         token = f"{name}#{self._seq}"
-        fut = self.pool.apply_async(_tracked, (token, fn, arg))
-        self._tasks[token] = fut
-        return token, fut
+        task = _Task(self.pool.apply_async(_tracked, (token, fn, arg)))  # type: ignore[union-attr]
+        self._tasks[token] = task
+        self._handles.append(task)
+        return token, task
 
     def busy(self, live: frozenset[int]) -> int:
         """How many worker processes are running a task now: tasks that reported their start (see
@@ -1952,7 +2062,7 @@ class _Workers:
     def started(self) -> dict[str, int]:
         """token -> pid of every task that has started so far."""
         try:
-            while not self._beacon.empty():
+            while self._beacon is not None and not self._beacon.empty():
                 token, pid = self._beacon.get()
                 self._pid_of[token] = pid
         except Exception:  # noqa: BLE001
@@ -1960,6 +2070,8 @@ class _Workers:
         return self._pid_of
 
     def pids(self) -> frozenset[int] | None:
+        if self._closed:
+            return frozenset()
         try:
             return frozenset(p.pid for p in getattr(self.pool, _POOL_ATTR))
         except (AttributeError, TypeError):
@@ -1969,18 +2081,29 @@ class _Workers:
             return None
 
     def close(self) -> bool:
-        """Stop the workers (and any task still running past its deadline). Safe to call twice.
+        """Stop the workers (and any task still running past its deadline), then release everything
+        the pool made. Safe to call twice.
 
         Rule 22 (review): bounded. CPython's Pool.terminate() waited forever on a pool that broke
         (_stop_pool_processes), which held the request - its answer, its slot - for good. The worker
-        processes are now stopped first, then terminate() runs in a background thread for at most
-        POOL_CLOSE_SEC. False when it did not finish in that time: the administrator is alerted
-        (an ERROR line, /ready) and the cleanup goes on in the background."""
+        processes are now stopped first, then terminate() and join() run in a helper thread for at
+        most POOL_CLOSE_SEC. False when they did not finish in that time: the administrator is
+        alerted (an ERROR line, /ready) and the cleanup goes on in the background.
+
+        CI (PR #50): once terminate() and join() returned, this thread (the one that waits) closes the
+        pool's queues and worker processes (_release_pool), cuts its tasks loose, closes the start
+        reports' queue and detaches the stop flag from the solve's control; the Pool and every lock
+        it made are then freed here, by reference counting, when this returns - never later by the
+        garbage collector in another thread. When the cleanup is left to the background, the helper
+        thread releases the pool the same way as soon as terminate() returns."""
         if self._closed:
             return self._close_ok
         self._closed = True
         pool = self.pool
-        _stop_pool_processes(pool)
+        procs = _stop_pool_processes(pool)
+        run_id = self.run_id
+        gate = threading.Lock()
+        state = {"done": False, "left": False}  # terminate() returned / the caller stopped waiting
         finished = threading.Event()
 
         def cleanup() -> None:
@@ -1988,23 +2111,97 @@ class _Workers:
                 pool.terminate()
                 pool.join()
             except Exception as exc:  # noqa: BLE001 - nothing to do about it but say so
-                log.warning("run=%s worker pool cleanup failed: %s", self.run_id, exc)
-            finally:
-                finished.set()
+                log.warning("run=%s worker pool cleanup failed: %s", run_id, exc)
+            with gate:
+                state["done"] = True
+                left = state["left"]
+            finished.set()
+            if left:  # the caller stopped waiting (POOL_CLOSE_SEC): released here, still explicitly
+                _release_pool(pool, procs)
 
-        threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True).start()
-        self._close_ok = finished.wait(POOL_CLOSE_SEC)
-        if not self._close_ok:
+        helper = threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True)
+        helper.start()
+        finished.wait(POOL_CLOSE_SEC)
+        with gate:
+            done = state["done"]
+            state["left"] = not done
+        if done:
+            helper.join(POOL_CLOSE_SEC)  # it has done its work: it ends at once
+            _release_pool(pool, procs)
+        self._close_ok = done
+        if not done:
             _workers_alert(self.run_id, f"a worker pool did not stop within {POOL_CLOSE_SEC:g} s after the {self.what} "
                            "and is left to stop in the background", "Pool.terminate() did not return", nothing_searched=False)
-        try:
-            self._beacon.close()
-        except Exception:  # noqa: BLE001
-            pass
+        self._forget()
         return self._close_ok
 
+    def _forget(self) -> None:
+        """close(): hold nothing of multiprocessing any more - the tasks' results, the start reports'
+        queue, the stop flag (detached from the solve's control, which outlives the solve in main.py)
+        and the pool itself."""
+        for task in self._handles:
+            task._ar = None
+        self._handles = []
+        self._tasks = {}
+        if self._beacon is not None:
+            try:
+                self._beacon.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._stop_flag is not None and self.control is not None:
+            self.control.detach(self._stop_flag)
+        self._beacon = self._stop_flag = None
+        self.pool = None
 
-def _stop_pool_processes(pool) -> None:
+
+def _release_pool(pool, procs: list) -> None:
+    """After Pool.terminate() and join() (_Workers.close): close what the Pool made, in this thread -
+    its three queues' pipes and its worker processes (their handles, and their place in
+    multiprocessing's list of children) - and forget its tasks that never finished: each is an
+    AsyncResult -> Pool -> task cache -> AsyncResult cycle that only the garbage collector would free,
+    in whatever thread it happens to run (CI, PR #50: the API's event-loop thread). The Pool, and every
+    lock it made, is then freed as soon as its owner drops it. Best effort on Pool's private
+    attributes, like _stop_pool_processes."""
+    import multiprocessing as mp
+
+    try:
+        pool._cache.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    for name in ("_inqueue", "_outqueue", "_change_notifier"):
+        try:
+            getattr(pool, name).close()
+        except Exception:  # noqa: BLE001
+            pass
+    workers: list = []
+    for p in [*procs, *list(getattr(pool, _POOL_ATTR, None) or [])]:
+        if not any(p is q for q in workers):
+            workers.append(p)
+    for p in workers:
+        _close_process(p)
+    try:
+        getattr(pool, _POOL_ATTR).clear()
+    except Exception:  # noqa: BLE001
+        pass
+    # Worker processes that died earlier and were replaced (no longer in the pool's list): forgotten
+    # by multiprocessing's list of children now, and so freed here.
+    mp.active_children()
+
+
+def _close_process(p) -> None:
+    """Process.close() on a process that has ended: its handles closed and multiprocessing's list of
+    children forgets it. A process still running (it could not be killed) is left as it is, with a
+    warning."""
+    try:
+        if p.exitcode is None and getattr(p, "_popen", None) is not None:
+            log.warning("worker process %s did not stop; its handles stay open", p.pid)
+            return
+        p.close()
+    except (ValueError, AttributeError):  # never started, or already closed
+        pass
+
+
+def _stop_pool_processes(pool) -> list:
     """Rule 22 (review): let Pool.terminate() finish on a pool that broke. CPython's terminate()
     waits forever when (1) Pool's worker-handler thread died - it could not start a replacement
     process (out of memory, the process limit) - so its task-handler thread never gets the stop
@@ -2015,7 +2212,7 @@ def _stop_pool_processes(pool) -> None:
     the queue locks a dead worker left held are released (the task queue's read lock; on Linux also
     the result queue's write lock, held while a worker sends a result: killing the workers first
     must not create a new way to hang). Best effort on Pool's private attributes; close() bounds
-    whatever still waits."""
+    whatever still waits. Returns the worker processes it stopped (_release_pool closes them)."""
     import multiprocessing.pool as mpp
 
     handler = getattr(pool, "_worker_handler", None)
@@ -2054,6 +2251,7 @@ def _stop_pool_processes(pool) -> None:
                 _free_lock_of_dead(getattr(owner, name, None))
             except Exception:  # noqa: BLE001
                 pass
+    return procs
 
 
 def _free_lock_of_dead(lock) -> None:
@@ -2130,6 +2328,10 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
     while pending:
         if control is not None and control.cancelled.is_set():
             raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+        if getattr(workers, "closed", False):  # its tasks were cut loose (close): none can finish now
+            for name in pending:
+                out[name] = ("broken", f"the worker pool for the {workers.what} was closed")
+            break
         for name, (_tok, fut) in list(pending.items()):
             if fut.ready():  # type: ignore[attr-defined]
                 try:
@@ -2148,10 +2350,13 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
         now = workers.pids()
         started = workers.started()
         lost_now: list[str] = []
-        if base is not None and now is not None and now != base:
-            dead = base - now
+        if base is not None and now is not None:
+            # A task whose process is gone - during this wait, or before it began (critique of the
+            # PyVRP spec: a second search that died while RECOMMENDED was awaited used to be seen
+            # only at its deadline, as a timeout).
             for name, (tok, fut) in list(pending.items()):
-                if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
+                pid = started.get(tok)
+                if pid is not None and pid not in now and not fut.ready():  # type: ignore[attr-defined]
                     out[name] = ("lost", None)
                     del pending[name]
                     lost_now.append(name)
@@ -2198,9 +2403,388 @@ def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, w
     raise SolveAborted(f"The optimizer did not finish the {what} in time. Try again, or plan fewer stops at once.")
 
 
+# ---------------------------------------------------------------------------------------------
+# The second route search (PyVRP, pyvrp_candidate.py): its own optional process
+# ---------------------------------------------------------------------------------------------
+
+# THOROUGH: PyVRP's own backstop ends this long before the load re-check's reserve, so its answer is
+# in before the re-check starts.
+PV_MARGIN_SEC = 3.0
+
+
+class _PipeFlag:
+    """A "stop now" / "the engine's searches are over" flag for the second search's process, made of
+    one pipe: set() writes one byte, the process polls for it (_FlagReader). No lock and no semaphore
+    (a multiprocessing Event is five semaphores, and its set() waits on a lock that a killed process
+    may hold for good). set() may come from any thread (SolveControl: the stop endpoint, the event
+    loop on a cancel); close() from the solve's own thread, after SolveControl.detach."""
+
+    def __init__(self, ctx) -> None:
+        self.reader, self._writer = ctx.Pipe(duplex=False)
+        self._lock = threading.Lock()
+        self._set = False
+
+    def set(self) -> None:
+        with self._lock:
+            if self._set or self._writer is None:
+                return
+            self._set = True
+            try:
+                self._writer.send_bytes(b"1")
+            except OSError:  # the process is gone
+                pass
+
+    def drop_reader(self) -> None:
+        """After the process started (it has its own copy of the reading end)."""
+        reader, self.reader = self.reader, None
+        if reader is not None:
+            reader.close()
+
+    def close(self) -> None:
+        with self._lock:
+            writer, self._writer = self._writer, None
+        self.drop_reader()
+        if writer is not None:
+            writer.close()
+
+
+class _FlagReader:
+    """The second search's process's side of a _PipeFlag (pyvrp_candidate.Stopper calls is_set()):
+    set once a byte is there - or once the pipe ended, the API process gone."""
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+        self._set = False
+
+    def is_set(self) -> bool:
+        if not self._set:
+            try:
+                self._set = bool(self._conn.poll())
+            except (EOFError, OSError):
+                self._set = True
+        return self._set
+
+
+def _pv_main(jobs, results, stop, over) -> None:
+    """The second search's process (_PvProcess): runs each (fn, arg) it receives on ``jobs`` and
+    answers on ``results`` with ("ok", value) or ("error", "Type: message") - an exception goes back
+    as text, so the API process never unpickles a class of this process's libraries (PyVRP, numpy) -
+    until the API process closes its end or kills it."""
+    _worker_init(None, _FlagReader(stop) if stop is not None else None, _FlagReader(over))
+    try:
+        while True:
+            try:
+                fn, arg = jobs.recv()
+            except (EOFError, OSError):
+                return
+            except Exception as exc:  # noqa: BLE001 - a job this process cannot read
+                answer: tuple = ("error", f"{type(exc).__name__}: {exc}")
+            else:
+                try:
+                    answer = ("ok", fn(arg))
+                except Exception as exc:  # noqa: BLE001 - its answer
+                    answer = ("error", f"{type(exc).__name__}: {exc}")
+            try:
+                results.send(answer)
+            except (EOFError, OSError):
+                return
+            except Exception as exc:  # noqa: BLE001 - the answer could not be pickled
+                results.send(("error", f"its answer could not be sent back: {type(exc).__name__}: {exc}"))
+    finally:
+        for conn in (jobs, results, stop, over):
+            if conn is not None:
+                conn.close()
+
+
+class _PvProcess:
+    """The second search's own worker: ONE spawn process and its pipes - no Pool, no queue, no lock,
+    no semaphore, no helper thread but the short one that hands a job over (CI, PR #50: a
+    segmentation fault while the garbage collector ran in the API's event-loop thread; the second
+    search used to be a second Pool, with three threads, three queues and two Events). One job at a
+    time: its search, then its own load re-check.
+
+    submit() hands a job over in a short thread: a job larger than a pipe's buffer would otherwise
+    hold the solve until the process has started. wait() reads the answer, or sees the process die,
+    the deadline or a cancel. close() kills the process and joins it, joins that thread, closes every
+    pipe and the process object and detaches its stop flag from the solve's control - in the calling
+    thread, before the solve returns. Afterwards this object holds nothing of multiprocessing."""
+
+    def __init__(self, control: SolveControl | None, *, run_id: str = "") -> None:
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn")
+        self.run_id = run_id
+        self.control = control
+        self.proc = None
+        self._jobs = self._results = None
+        # The solve's "stop now" (THOROUGH: a stop or a cancel) and "the engine's searches are over".
+        self.stop_flag: _PipeFlag | None = None
+        self.search_over: _PipeFlag | None = None
+        self._sender: threading.Thread | None = None
+        self._send_failed: list[str] = []  # why the job in hand could not be handed over
+        self._closed = False
+        ends: list = []  # the process's ends of the pipes: closed here once it has its own copies
+        try:
+            jobs_r, self._jobs = ctx.Pipe(duplex=False)
+            ends.append(jobs_r)
+            self._results, results_w = ctx.Pipe(duplex=False)
+            ends.append(results_w)
+            self.stop_flag = _PipeFlag(ctx) if control is not None else None
+            self.search_over = _PipeFlag(ctx)
+            stop_r = self.stop_flag.reader if self.stop_flag is not None else None
+            self.proc = ctx.Process(target=_pv_main, args=(jobs_r, results_w, stop_r, self.search_over.reader),
+                                    name="routeiq-second-search", daemon=True)
+            self.proc.start()
+        except BaseException as exc:
+            for conn in ends:
+                conn.close()
+            self._release()
+            raise exc.with_traceback(None)  # noqa: B904 - the same exception, without the frames holding the pipes
+        for conn in ends:
+            conn.close()
+        for flag in (self.stop_flag, self.search_over):
+            if flag is not None:
+                flag.drop_reader()
+        if self.stop_flag is not None:
+            control.attach(self.stop_flag)  # type: ignore[union-attr]
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    def submit(self, fn, arg) -> None:
+        """Hand ``fn(arg)`` to the process; its answer comes with wait()."""
+        if self._closed or self._jobs is None:
+            raise RuntimeError("the second search's process was closed")
+        if self._sender is not None:
+            self._sender.join(POOL_CLOSE_SEC)  # the previous job was answered, so it was read long ago
+        failed: list[str] = []
+        self._send_failed = failed
+        jobs = self._jobs
+
+        def send() -> None:
+            try:
+                jobs.send((fn, arg))
+            except Exception as exc:  # noqa: BLE001 - the process is gone (broken pipe), or the job cannot be pickled
+                failed.append(f"{type(exc).__name__}: {exc}")
+
+        self._sender = threading.Thread(target=send, name="routeiq-second-search-send", daemon=True)
+        self._sender.start()
+
+    def wait(self, deadline: float, control: SolveControl | None) -> tuple[str, object]:
+        """The answer to the job in hand: ("ok", value) | ("error", text) | ("lost", None) (the
+        process died, even before this wait) | ("timeout", None) at ``deadline``. ``control``
+        cancelled: SolveAborted within half a second."""
+        from multiprocessing.connection import wait as ready
+
+        if self._closed or self._results is None or self.proc is None:
+            return "lost", None
+        while True:
+            if control is not None and control.cancelled.is_set():
+                raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+            try:
+                if self._results.poll():
+                    kind, value = self._results.recv()
+                    return str(kind), value
+            except (EOFError, OSError):
+                return "lost", None
+            except Exception as exc:  # noqa: BLE001 - an answer this process cannot read
+                return "error", f"{type(exc).__name__}: {exc}"
+            if self.proc.exitcode is not None:
+                return "lost", None
+            if self._send_failed:
+                return "error", f"the job could not be handed over: {self._send_failed[0]}"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return "timeout", None
+            ready([self._results, self.proc.sentinel], min(0.5, remaining))
+
+    def close(self) -> None:
+        """Kill the process (a running PyVRP search does not stop at once) and join it, join the
+        hand-over thread (it ends once the process is gone), then release everything. Bounded: about
+        2 x POOL_CLOSE_SEC at most. Safe to call twice."""
+        if self._closed:
+            return
+        self._closed = True
+        proc = self.proc
+        if proc is not None:
+            try:
+                if proc.exitcode is None:
+                    proc.kill()
+                proc.join(POOL_CLOSE_SEC)
+            except Exception as exc:  # noqa: BLE001 - never costs the engine's answer
+                log.warning("pyvrp run=%s its process could not be stopped: %s", self.run_id, exc)
+        if self._sender is not None:
+            self._sender.join(POOL_CLOSE_SEC)
+            if self._sender.is_alive():
+                log.warning("pyvrp run=%s the job hand-over did not end", self.run_id)
+        self._release()
+
+    def _release(self) -> None:
+        """Close every pipe and the process object, detach the stop flag from the solve's control:
+        nothing is left for the garbage collector."""
+        if self.stop_flag is not None and self.control is not None:
+            self.control.detach(self.stop_flag)
+        for flag in (self.stop_flag, self.search_over):
+            if flag is not None:
+                flag.close()
+        for conn in (self._jobs, self._results):
+            if conn is not None:
+                conn.close()
+        if self.proc is not None:
+            _close_process(self.proc)
+        self.proc = self._jobs = self._results = self._sender = None
+        self.stop_flag = self.search_over = None
+        self._send_failed = []
+
+
+@dataclass
+class _PvRun:
+    """The second route search of one solve. It runs in a process of its own (_PvProcess), started
+    after rule 22's proof and never part of it (critique C2): a machine that cannot start it still
+    solves (SKIPPED / NO_PROCESS); a search or stage of it that fails, dies or hangs only loses its own
+    candidates. ``report`` becomes SearchReport.pyvrp."""
+
+    report: dict
+    run_id: str = ""
+    proc: _PvProcess | None = None
+    inprocess: bool = False  # SOLVER_PARALLEL=0 (tests, development): after the engine's searches
+    args: tuple | None = None  # (req, solvable, tds, mx, PvSettings)
+    plan: LR.Plan | None = None  # its checked plan, for the load re-check
+
+    @property
+    def active(self) -> bool:
+        return self.proc is not None or self.inprocess
+
+    def fail(self, status: str, reason: str, detail: str = "") -> None:
+        """SKIPPED / FAILED / NOT_CHOSEN with ``reason``: one log line, and its process stops."""
+        self.report.update(status=status, reason=reason)
+        quiet = reason in ("OFF", "NOTHING_TO_PLAN")
+        (log.info if quiet else log.warning)("pyvrp run=%s %s: %s%s%s", self.run_id,
+                                            {"SKIPPED": "skipped", "FAILED": "failed"}.get(status, "not used"), reason,
+                                            f" ({detail})" if detail else "", "" if quiet else "; the engine's plans are used")
+        self.close()
+        self.inprocess = False
+
+    def close(self) -> None:
+        if self.proc is not None:
+            proc, self.proc = self.proc, None
+            try:
+                proc.close()
+            except Exception as exc:  # noqa: BLE001 - never costs the engine's answer
+                log.warning("pyvrp run=%s closing its process failed: %s", self.run_id, exc)
+
+
+def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: SolveControl | None,
+              main_pool: bool) -> _PvRun:
+    """The second search's switch, CPU gate and process (started before the road matrix, like the
+    engine's, but without waiting for it: it is optional). ``main_pool``: the engine's pool started
+    (worker processes); False with SOLVER_PARALLEL=0, when it runs in-process."""
+    on, why = PV.enabled(req.config.search_mode)
+    pv = _PvRun(report={"status": "SKIPPED", "reason": why, "version": PV.installed_version(), "seed": PV.seed(),
+                        "chosen_for": []}, run_id=req.run_id)
+    if not on:
+        detail = f"effective CPUs {PV.effective_cpus()} < {PV.min_cpus()}" if why == "CPU_GATE" else ""
+        pv.fail("SKIPPED", why or "OFF", detail)
+    elif not solvable:
+        pv.fail("SKIPPED", "NOTHING_TO_PLAN")
+    elif main_pool:
+        try:
+            pv.proc = _PvProcess(control, run_id=req.run_id)
+        except Exception as exc:  # noqa: BLE001 - optional: the engine alone answers
+            pv.fail("SKIPPED", "NO_PROCESS", f"{type(exc).__name__}: {exc}")
+    elif not _parallel():
+        pv.inprocess = True
+    else:
+        pv.fail("SKIPPED", "NO_PROCESS", "the worker processes are unavailable")
+    return pv
+
+
+def _quick_stage_need(time_limit: int) -> float:
+    """QUICK: what the engine's load re-check may need at most (three sources), kept free after the
+    second search's answer so that its budget is never cut by the wait (critique C3)."""
+    return min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2)) * 3 + STAGE_GRACE_SEC + 5
+
+
+def _pv_submit(pv: _PvRun, req, solvable, tds, mx, time_limit: int, rec_limit: int, n_alt: int,
+               tail: ThoroughTail | None, budget_end: float) -> None:
+    """Start the second search (after RECOMMENDED was submitted: the engine never queues behind it,
+    critique C4). QUICK: until the engine's searches end (search_over), backstop the planned search
+    time + ALT_GRACE_SEC; THOROUGH (D3): until the load re-check's reserve, a stop, a cancel or - once
+    the engine's searches ended - its timed stall (pyvrp_candidate.STALL_FLOOR_SEC)."""
+    if not pv.active or pv.args is not None:
+        return
+    if not solvable:
+        pv.fail("SKIPPED", "NOTHING_TO_PLAN")
+        return
+    now = time.monotonic()
+    if pv.inprocess:
+        runtime = float(rec_limit)
+    elif tail is not None:
+        runtime = budget_end - tail.stage_sec - PV_MARGIN_SEC - now
+    else:
+        planned = rec_limit + (max(2, time_limit // 2) + ALT_GRACE_SEC if n_alt else 0)
+        runtime = min(planned + ALT_GRACE_SEC, budget_end - _quick_stage_need(time_limit) - now)
+    settings = PV.PvSettings(mode="THOROUGH" if tail is not None else "QUICK", seed=PV.seed(), max_runtime=max(1.0, runtime),
+                             min_sec=float(time_limit), stall_floor_sec=PV.stall_floor_sec(), stall_share=PV.stall_share(),
+                             max_iters=PV.max_iters())
+    pv.args = (req, solvable, tds, mx, settings)
+    pv.report.update(status="NOT_CHOSEN", reason=None, seed=settings.seed)
+    if pv.proc is not None:
+        pv.proc.submit(PV.solve_in_worker, pv.args)
+
+
+def _pv_collect(pv: _PvRun, *, thorough: bool, stopped: bool, stage_need: float, budget_end: float,
+                control: SolveControl | None) -> None:
+    """The second search's answer, collected before the engine's pool may be closed (critique C5)
+    and never later than ``budget_end - stage_need``, so the engine's load re-check keeps its time.
+    It is told the engine's searches are over. QUICK (or after a stop): it answers within about a
+    second (SOLVER_PYVRP_STOP_GRACE_SEC at most). THOROUGH: it answers once its timed stall is reached
+    (at once when it has not improved for that long) or at its reserve, never past ``limit``. A worker
+    that died - even before this wait - is LOST at once; one that does not answer is TIMEOUT, and only
+    its own process is stopped."""
+    if pv.args is None or not pv.active:
+        return
+    if pv.inprocess:
+        try:
+            result = PV.solve_in_worker(pv.args)
+        except Exception as exc:  # noqa: BLE001
+            return pv.fail("FAILED", "FAILED", f"{type(exc).__name__}: {exc}")
+    else:
+        now = time.monotonic()
+        limit = budget_end - stage_need
+        proc: _PvProcess = pv.proc  # type: ignore[assignment]
+        if proc.search_over is not None:
+            proc.search_over.set()
+        deadline = limit if thorough and not stopped else min(now + PV.stop_grace_sec(), limit)
+        kind, value = proc.wait(max(deadline, now), control)
+        if kind != "ok":
+            reason = {"lost": "LOST", "timeout": "TIMEOUT"}.get(kind, "FAILED")
+            detail = {"lost": "its worker process stopped", "timeout": "it did not answer in time"}.get(kind, str(value))
+            return pv.fail("FAILED", reason, detail)
+        result = value  # type: ignore[assignment]
+    r: dict = result  # type: ignore[assignment]
+    pv.report.update({k: r.get(k) for k in ("version", "seed", "penalty_mode", "search_sec", "iterations", "stop_reason",
+                                            "last_improvement_sec", "feasible", "missing")})
+    pv.report.update(routes=r.get("routes_used"), loads=r.get("loads"), best_over_time=r.get("points") or [])
+    if r.get("summary"):
+        log.info("pyvrp run=%s model: %s", pv.run_id, " ".join(f"{k}={v}" for k, v in r["summary"].items()))
+    if r.get("status") != "OK":
+        return pv.fail(str(r.get("status")), str(r.get("reason")), str(r.get("error") or ""))
+    log.info("pyvrp run=%s done: stop=%s search=%ss iters=%s feasible=%s routes=%s loads=%s missing=%s last_improvement=%ss",
+             pv.run_id, r.get("stop_reason"), r.get("search_sec"), r.get("iterations"), "yes" if r.get("feasible") else "no",
+             r.get("routes_used"), r.get("loads"), r.get("missing"), r.get("last_improvement_sec"))
+    if not r.get("feasible"):
+        return pv.fail("NOT_CHOSEN", "NO_FEASIBLE_PLAN")
+    plan, why = PV.plan_of(r, pv.args[2], pv.args[1])
+    if plan is None:
+        return pv.fail("NOT_CHOSEN", why or "INVALID_PLAN")
+    pv.plan = plan
+
+
 def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None, *,
                    control: SolveControl | None = None, state: dict | None = None,
-                   workers: _Workers | None = None) -> list[DispatchScenario]:
+                   workers: _Workers | None = None, pv: _PvRun | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
@@ -2231,6 +2815,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     ``workers`` None solves everything in-process WITHOUT any deadline or time budget: nothing to
     search, SOLVER_PARALLEL=0, or SOLVER_ALLOW_INPROCESS_FALLBACK=1 after a failed pool start - for
     local development and tests only (main.py logs a warning at startup when either is set).
+
+    ``pv``: the second route search (PyVRP; _pv_start). It is submitted right after RECOMMENDED, in
+    its own process, and collected once the alternatives are in (_pv_collect); its plan is one more
+    source of the load re-check (_post_solve). ``state["pyvrp"]`` receives its report.
     """
     global _STOP_FLAG
     if budget_end is None:
@@ -2249,6 +2837,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     stopped = False
     # THOROUGH: the alternatives' and the load re-check's times, the ones RECOMMENDED's limit keeps free.
     tail = thorough_tail(time_limit, len(alt_names), thorough_cap_sec(req.config)) if thorough else None
+    pv = pv if pv is not None else _PvRun(report={"status": "SKIPPED", "reason": "OFF", "chosen_for": []})
+    state["pyvrp"] = pv.report
     try:
         warm = None
         if "RECOMMENDED" in names:
@@ -2258,10 +2848,12 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             job = ("RECOMMENDED", req, solvable, tds, mx, rec_limit, drops)
             if workers is None:
                 results["RECOMMENDED"], watch = _searched(job)
+                _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, len(alt_names), tail, budget_end)
             else:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
-                results["RECOMMENDED"], watch = _await_worker(workers, workers.submit(_searched, job, "RECOMMENDED"),
-                                                              deadline, "recommended plan")
+                rec_job = workers.submit(_searched, job, "RECOMMENDED")
+                _pv_submit(pv, req, solvable, tds, mx, time_limit, rec_limit, len(alt_names), tail, budget_end)
+                results["RECOMMENDED"], watch = _await_worker(workers, rec_job, deadline, "recommended plan")
             state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch,
                          status=results["RECOMMENDED"].status)
             warm = results["RECOMMENDED"].loads or None
@@ -2288,6 +2880,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             else:
                 alt_limit = min(alt_limit, room)
         jobs = [(n, req, solvable, tds, mx, alt_limit, drops, warm) for n in alt_names]
+        _pv_submit(pv, req, solvable, tds, mx, time_limit, alt_limit, len(alt_names), tail, budget_end)  # no RECOMMENDED asked for
         overran = False
         if jobs and workers is not None:
             deadline = time.monotonic() + alt_limit + grace
@@ -2312,6 +2905,10 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
                     skipped.append(j[0])
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
+        # The second search's answer, before the engine's pool may be closed below (critique C5).
+        _pv_collect(pv, thorough=thorough, stopped=thorough and control is not None and control.stop_requested.is_set(),
+                    stage_need=tail.stage_sec if tail is not None else _quick_stage_need(time_limit),
+                    budget_end=budget_end, control=control)
         if workers is not None and (overran or workers.broken()):
             # A skipped alternative still runs in its worker (a stuck OR-Tools call does not stop
             # on request), or the pool broke (rule 22: no process can take a task any more): the
@@ -2337,6 +2934,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 # The dispatcher's note in plain words; the technical cause is in the ERROR line.
                 _retime_fallback(req, solvable, tds, mx, drops, results, NO_WORKERS_NOTE, skip=staged)
             else:
+                if pv.plan:  # the second search's plan, when there is one to judge
+                    stage_kw["pv"] = pv
                 _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
         except SolveAborted:
             raise  # cancelled: the caller is gone, nothing to fall back to
@@ -2350,6 +2949,12 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
         _STOP_FLAG = stop_flag_before
         if workers is not None:
             workers.close()
+        pv.close()
+    if pv.plan and pv.report.get("status") == "NOT_CHOSEN" and pv.report.get("reason") is None:
+        pv.report.update(reason="NO_STAGE")  # the load re-check did not run (rule 22, out of time)
+    if state.get("status") == "NO_SOLUTION" and results.get("RECOMMENDED") and results["RECOMMENDED"].status == "OPTIMIZED":
+        # Rescued by the second search: the search report must not say "found no plan" (critique C8).
+        state["status"] = "OPTIMIZED"
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
@@ -2504,7 +3109,8 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
 
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
-                budget_end: float, done: set[str] | None = None, repack_cap: float | None = None) -> None:
+                budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
+                pv: "_PvRun | None" = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -2523,38 +3129,75 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     the raw plans get the safety net (_retime_fallback): re-timed exactly when possible, otherwise
     kept with a warning and a VIOLATED / VERIFIED feasibility report from the independent check.
     Every scenario it replaces is added to ``done``. ``repack_cap``: seconds per CP-SAT solve
-    (THOROUGH, _repack_cap_sec); None = QUICK's min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, limit / 2))."""
+    (THOROUGH, _repack_cap_sec); None = QUICK's min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, limit / 2)).
+
+    ``pv``: the second search (PyVRP) with its checked plan, or None. Its plan is one more source,
+    kept apart from the engine's (critique of the PyVRP spec): the engine's sources, their repair
+    weights, budget and jobs are exactly as without it, and its own stage job (pyvrp_candidate.
+    stage_in_worker) runs in its own process, never longer than the engine's. Its candidates join the
+    pick after the engine's; a tie keeps the engine's plan, and so does a gain the dispatcher's note
+    could not show (_goal_measure: under 1 OMR or 1 km, no fewer trucks or loads, no more service).
+    An option rescued from no plan gets the status SECOND_SEARCH. So each option is never worse on its
+    own goal than the engine alone would have chosen from the same search. A plan from it that fails
+    the independent check is replaced by the engine's (a WARNING line). An option whose own search
+    found no plan (NO_SOLUTION) takes the second search's best plan for its goal."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
-    if not raw or not solvable:
+    pv_plan = pv.plan if pv is not None else None
+    rescue = [n for n, sc in results.items() if sc.status == "NO_SOLUTION"] if pv_plan else []
+    if (not raw and not rescue) or not solvable:
         return
     cfg = req.config
     t0 = time.monotonic()
     ctx = _stage_ctx(req, solvable, tds, mx, drops)
     values, value_warnings, use_margin = ctx.values, ctx.value_warnings, ctx.use_margin
+    n_stops = len(solvable)
     sources = [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)) for n, sc in raw.items()]
     carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
-    left_out = set(range(len(solvable))) - set.intersection(*carried.values())
+    left_out = set(range(n_stops)) - set.intersection(*carried.values()) if carried else set()
     optional = _repair_weights(solvable, left_out, cfg) if left_out else None
     rec_pricing = ctx.rec_pricing
-    goals = _stage_goals(raw)
+    goals = _stage_goals(raw) if raw else []
     cap = repack_cap if repack_cap is not None else min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
+    fit_weights = _repair_weights(solvable, set(range(n_stops)), cfg)
 
     def fallback(why: str) -> None:
+        if pv_plan:
+            pv.report.update(status="NOT_CHOSEN", reason="NO_STAGE")  # type: ignore[union-attr]
         before = dict(results)
         _retime_fallback(req, solvable, tds, mx, drops, results, why, ctx=ctx)
         done.update(n for n in raw if results[n] is not before[n])
 
-    if job_budget < REPACK_MIN_SEC:
+    if sources and job_budget < REPACK_MIN_SEC:
         log.warning("post-solve stage skipped: request time budget used up")
         return fallback("out of time")
+    # The second search's own job: RECOMMENDED's prices, and MIN_TRUCKS' when that option has a plan
+    # or is rescued; never more time than the engine's job (they run side by side).
+    pv_job = None
+    if pv_plan:
+        pv_goals = ["RECOMMENDED"] + (["MIN_TRUCKS"] if "MIN_TRUCKS" in goals or "MIN_TRUCKS" in rescue else [])
+        pv_budget = min(cap * len(pv_goals), job_budget if sources else budget_end - t0 - STAGE_GRACE_SEC - 5)
+        if pv_budget >= REPACK_MIN_SEC:
+            pv_carried = {k for loads in pv_plan.values() for load in loads for k in load}
+            pv_job = dict(day=ctx.day, score_pricing=rec_pricing, plan=pv_plan,
+                          gaps={td.idx: _approx_gap_s(cfg, td) for td in ctx.day.trucks},
+                          goals=[(g, rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable)) for g in pv_goals],
+                          optional=_repair_weights(solvable, set(range(n_stops)) - pv_carried, cfg) or None,
+                          cap_s=cap, budget_s=pv_budget, fit_weights=fit_weights)
+        else:
+            pv.report.update(status="NOT_CHOSEN", reason="OUT_OF_TIME")  # type: ignore[union-attr]
     jobs = {g: dict(day=ctx.day, score_pricing=rec_pricing, goal=g,
                     goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
                     sources=sources, optional=optional, cap_s=cap, budget_s=job_budget, time_raw=g == "RECOMMENDED",
-                    fit_weights=_repair_weights(solvable, set(range(len(solvable))), cfg))
+                    fit_weights=fit_weights)
             for g in goals}
     outputs: dict[str, tuple[list[LR.Candidate], list[str]]] = {}
+    pv_proc: _PvProcess | None = pv.proc if pv_job is not None and pv is not None else None
+    if pv_proc is not None:
+        # Its own process (idle since its search ended): starts now, beside the engine's jobs.
+        pv_proc.submit(PV.stage_in_worker, pv_job)
+    pv_deadline = min(time.monotonic() + (pv_job["budget_s"] if pv_job else 0) + STAGE_GRACE_SEC, budget_end - 2)
     if pool is None:
         for g, job in jobs.items():
             try:
@@ -2566,7 +3209,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         deadline = min(time.monotonic() + rounds * job_budget + STAGE_GRACE_SEC, budget_end - 2)
         # In completion order: a MIN_TRUCKS job whose worker dies (out of memory) no longer costs
         # RECOMMENDED its exact re-check, nor the rest of the budget (review L23).
-        got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline)
+        got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline) if jobs else {}
         for g in goals:
             kind, value = got[g]
             if kind == "ok":
@@ -2575,42 +3218,105 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out",
                                                       "broken": _NOT_RUN["broken"]}.get(kind, "failed"),
                             f": {value}" if value is not None else "")
+    pv_out: tuple[list[LR.Candidate], list[str]] | None = None
+    if pv_proc is not None:
+        kind, value = pv_proc.wait(max(pv_deadline, time.monotonic()), pv_proc.control)
+        if kind == "ok":
+            pv_out = value  # type: ignore[assignment]
+        else:
+            log.warning("pyvrp run=%s stage %s%s; the engine's plans are used", req.run_id,
+                        {"lost": "lost its worker process", "timeout": "timed out"}.get(kind, "failed"),
+                        f": {value}" if value is not None else "")
+            pv.report.update(status="NOT_CHOSEN", reason="STAGE_FAILED")  # type: ignore[union-attr]
+            pv.close()  # type: ignore[union-attr]
+    elif pv_job is not None:
+        try:  # SOLVER_PARALLEL=0: in-process, after the engine's jobs
+            pv_out = PV.stage_in_worker(pv_job)
+        except Exception as exc:  # noqa: BLE001 - only the second search's candidates are lost
+            log.warning("pyvrp run=%s stage failed: %s; the engine's plans are used", req.run_id, exc)
+            pv.report.update(status="NOT_CHOSEN", reason="STAGE_FAILED")  # type: ignore[union-attr]
     stage_sec = time.monotonic() - t0
-    if "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
+    if sources and "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either
         return fallback("the check failed or ran out of time")
-    cands = [c for g in goals if g in outputs for c in outputs[g][0]]
+    eng = [c for g in goals if g in outputs for c in outputs[g][0]]
+    pvc = list(pv_out[0]) if pv_out else []
+    cands = eng + pvc  # the engine's first: a tie keeps the engine's plan
     log.info("post-solve run=%s %.1fs: %s", req.run_id, stage_sec,
-             "; ".join(n for g in goals if g in outputs for n in outputs[g][1]))
-    for name, sc in raw.items():
-        own = sum(v for k, v in enumerate(values) if k not in carried[name])
-        fits = [c for c in cands if c.score.unserved <= own]
-        lost = not fits and bool(cands)
+             "; ".join([n for g in goals if g in outputs for n in outputs[g][1]] + (list(pv_out[1]) if pv_out else [])))
+    if pv_plan and not pvc and pv.report.get("reason") is None:  # type: ignore[union-attr]
+        pv.report.update(status="NOT_CHOSEN", reason="NO_FEASIBLE_PLAN")  # type: ignore[union-attr]
+
+    def pick(name: str, pool_c: list[LR.Candidate], own: int) -> tuple[LR.Candidate | None, bool]:
+        """The option's best candidate for its goal among ``pool_c``: service first; a tie keeps the
+        option's own source, then any engine source before the second search's (critique C7)."""
+        fits = [c for c in pool_c if c.score.unserved <= own]
+        lost = not fits and bool(pool_c)
         if lost:
             # This search's plan breaks the exact loading time between loads (its own timing is
             # an estimate) and nothing serving as much fits the day: take the fitting plan that
             # keeps the most priority value, never departure times no truck can make.
-            fits = cands
+            fits = pool_c
         if not fits:
-            # No plan of this day could be timed exactly (not even this one): kept as found. Its
-            # feasibility report (built with the raw plan) lists what it breaks.
-            sc.warnings.append(
-                f"This plan does not leave the loading time of {cfg.loading_min_per_case:g} min per case between loads "
-                "everywhere; some later loads may be timed too early. Re-plan, add a truck, or check the loading time."
-                if cfg.loading_min_per_case > 0 else
-                "The final timing check failed for this plan; check load times before dispatching."
-            )
-            continue
+            return None, False
         goal = _GOALS[name]
-        best = min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name))
-        served_now = {k for loads in best.plan.values() for tl in loads for k in tl.stops}
-        added = served_now - carried[name]
-        timing_drops = carried[name] - served_now if lost else set()
-        new = _build_scenario(
-            name, req, solvable, tds, mx, best.plan, values, use_margin, drops, solver_status=sc.solver_status,
-            elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
-            objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
-            exact_timing=True,
-        )
+        return min(fits, key=lambda c: (goal(c.score), c.source.split("+")[0] != name, c.source.startswith("PYVRP"))), lost
+
+    def served(c: LR.Candidate) -> set[int]:
+        return {k for loads in c.plan.values() for tl in loads for k in tl.stops}
+
+    for name in list(raw) + rescue:
+        sc = results[name]
+        own_carried = carried.get(name, set())
+        own = sum(v for k, v in enumerate(values) if k not in own_carried)
+        # An option without a plan of its own is rescued only by the second search's plans (its
+        # other options' plans are not offered to it, as without the second search).
+        best, lost = pick(name, cands if name in raw else pvc, own)
+        ref, ref_lost = pick(name, eng, own) if name in raw else (None, False)
+        if (best is not None and ref is not None and best.source.startswith("PYVRP")
+                and _goal_gain(name, ref.score, best.score, len(served(best)) - len(served(ref))) is None):
+            # Better only by less than the note can show (under 1 OMR or 1 km, same trucks and loads):
+            # the engine's own plan is kept (review: "529 -> 529 OMR" was called a better plan).
+            best, lost = ref, ref_lost
+        new = None
+        while best is not None:
+            timing_drops = own_carried - served(best) if lost else set()
+            from_pv = best.source.startswith("PYVRP")
+            try:
+                new = _build_scenario(
+                    name, req, solvable, tds, mx, best.plan, values, use_margin, drops,
+                    # A rescued option has its own status: never the failed search's "no plan found".
+                    solver_status="SECOND_SEARCH" if name in rescue else sc.solver_status,
+                    elapsed=sc.solver_time_sec + stage_sec, time_limit=sc.time_limit_sec,
+                    objective_value=best.score.objective, extra_warnings=value_warnings, timing_drops=timing_drops,
+                    exact_timing=True,
+                )
+            except Exception:
+                if not from_pv:
+                    raise
+                log.exception("pyvrp run=%s %s: its plan could not be built", req.run_id, name)
+                new = None
+            if not from_pv or (new is not None and new.feasibility is not None and new.feasibility.status == "VERIFIED"):
+                break
+            # Belt and braces: never an unchecked plan from the second search.
+            log.warning("pyvrp run=%s %s: candidate failed the independent check (%d violations); the engine's plan is used",
+                        req.run_id, name, len(new.feasibility.violations) if new is not None and new.feasibility else 0)
+            pv.report.update(reason="NOT_VERIFIED")  # type: ignore[union-attr]
+            best, lost, new = ref, ref_lost, None
+            ref = None
+        if best is None or new is None:
+            if name in raw:
+                # No plan of this day could be timed exactly (not even this one): kept as found. Its
+                # feasibility report (built with the raw plan) lists what it breaks.
+                sc.warnings.append(
+                    f"This plan does not leave the loading time of {cfg.loading_min_per_case:g} min per case between loads "
+                    "everywhere; some later loads may be timed too early. Re-plan, add a truck, or check the loading time."
+                    if cfg.loading_min_per_case > 0 else
+                    "The final timing check failed for this plan; check load times before dispatching."
+                )
+            continue
+        served_now = served(best)
+        added = served_now - own_carried
+        timing_drops = own_carried - served_now if lost else set()
         changed = (new.trucks_used, new.trips) != (sc.trucks_used, sc.trips) or abs(new.operating_cost - sc.operating_cost) >= 0.5
         if timing_drops:
             new.warnings.append(
@@ -2619,6 +3325,11 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 "days, so the lowest priorities were left out (see Unserved orders). Re-plan, add a truck, or check the "
                 "loading time." + (f" {len(added)} stop(s) the route search had left out are planned instead." if added else "")
             )
+        if best.source.startswith("PYVRP"):
+            new.warnings.append(_second_search_note(name, name in rescue, ref, best, served(ref) if ref else set(), served_now))
+            pv.report["chosen_for"] = [*pv.report.get("chosen_for", []), name]  # type: ignore[union-attr]
+        elif timing_drops:
+            pass
         elif "+repack" in best.source and changed:
             new.warnings.append(
                 f"Loads were re-assigned after the route search: {sc.trucks_used} -> {new.trucks_used} trucks, "
@@ -2632,6 +3343,77 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                  new.operating_cost, len(added), len(timing_drops), best.source)
         results[name] = new
         done.add(name)
+    if pv_plan:
+        if pv.report.get("chosen_for"):  # type: ignore[union-attr]
+            pv.report.update(status="CHOSEN", reason=None)  # type: ignore[union-attr]
+        elif pv.report.get("reason") is None:  # type: ignore[union-attr]
+            pv.report.update(status="NOT_CHOSEN", reason="NOT_BETTER")  # type: ignore[union-attr]
+
+
+MIN_SHOWN_GAIN_OMR = 1.0  # the second search's plan must be better by at least this much on the option's goal ...
+MIN_SHOWN_GAIN_KM = 1.0  # ... (or plan more, or use fewer trucks / loads) to be used: a gain the note can show
+
+
+def _shown(a: float, b: float, fmt: str, min_gain: float) -> bool:
+    """``b`` is lower than ``a`` by at least ``min_gain``, and still lower once both are printed."""
+    return a - b >= min_gain and format(b, fmt) != format(a, fmt)
+
+
+def _goal_measure(name: str, r: LR.Score, b: LR.Score, more: int) -> tuple[str, str] | None:
+    """(plain words, the figure it names) for how ``b`` (the second search's plan) beats ``r`` (the
+    engine's final plan) on the option's own goal (_GOALS) - service first, then km for MIN_DISTANCE,
+    trucks, loads and operating cost for MIN_TRUCKS, the total cost with the customer time preferences
+    for RECOMMENDED - or None when the gain is not one the dispatcher can see."""
+    if b.unserved != r.unserved:
+        if b.unserved > r.unserved:
+            return None
+        return (f"{more} more stop(s) planned", "") if more > 0 else ("more of the higher-priority stops planned", "")
+    if name == "MIN_DISTANCE":
+        km_r, km_b = r.metres / 1000, b.metres / 1000
+        return (f"fewer km, {km_r:,.1f} -> {km_b:,.1f} km", "km") if _shown(km_r, km_b, ",.1f", MIN_SHOWN_GAIN_KM) else None
+    if name == "MIN_TRUCKS":
+        if b.trucks != r.trucks:
+            return (f"fewer trucks, {r.trucks} -> {b.trucks}", "trucks") if b.trucks < r.trucks else None
+        if b.loads != r.loads:
+            return (f"fewer loads, {r.loads} -> {b.loads}", "loads") if b.loads < r.loads else None
+        o_r, o_b = r.operating / COST_SCALE, b.operating / COST_SCALE
+        return ((f"a lower operating cost, {o_r:,.0f} -> {o_b:,.0f} OMR", "operating")
+                if _shown(o_r, o_b, ",.0f", MIN_SHOWN_GAIN_OMR) else None)
+    c_r, c_b = r.cost / COST_SCALE, b.cost / COST_SCALE
+    return ((f"a lower total cost including the customer time preferences, {c_r:,.0f} -> {c_b:,.0f} OMR", "")
+            if _shown(c_r, c_b, ",.0f", MIN_SHOWN_GAIN_OMR) else None)
+
+
+def _goal_gain(name: str, r: LR.Score, b: LR.Score, more: int) -> str | None:
+    """The second search's gain on the option's goal in plain words; None: not a better plan."""
+    m = _goal_measure(name, r, b, more)
+    return m[0] if m else None
+
+
+def _second_search_note(name: str, rescued: bool, ref: LR.Candidate | None, best: LR.Candidate, ref_served: set[int],
+                        served_now: set[int]) -> str:
+    """The one dispatcher's note on an option whose plan came from the second search (decision D4), in
+    plain words. Compared with the engine's own final plan for that option - its best candidate
+    after the load re-check - never with the raw search plan (critique C8: the re-check alone often
+    saves trucks). "Better" names the option's own goal only; trucks, loads, km and operating cost
+    follow neutrally, when they changed."""
+    checked = "It passed the planner's own checks, timing and costs."
+    if rescued:
+        return f"The main route search found no plan for this option; this plan comes from a second route search. {checked}"
+    if ref is None:
+        return f"This plan comes from a second route search: the main search's plan could not be timed exactly. {checked}"
+    m = _goal_measure(name, ref.score, best.score, len(served_now) - len(ref_served))
+    if m is None:  # not reached: such a plan is not chosen (_post_solve)
+        return f"This plan comes from a second route search. {checked}"
+    r, b = ref.score, best.score
+    figures = [("trucks", f"trucks {r.trucks} -> {b.trucks}", r.trucks != b.trucks),
+               ("loads", f"loads {r.loads} -> {b.loads}", r.loads != b.loads),
+               ("km", f"km {r.metres / 1000:,.1f} -> {b.metres / 1000:,.1f}", f"{r.metres / 1000:,.1f}" != f"{b.metres / 1000:,.1f}"),
+               ("operating", f"operating cost {r.operating / COST_SCALE:,.0f} -> {b.operating / COST_SCALE:,.0f} OMR",
+                f"{r.operating / COST_SCALE:,.0f}" != f"{b.operating / COST_SCALE:,.0f}")]
+    also = [text for key, text, changed in figures if changed and key != m[1]]
+    return (f"A second route search found a better plan for this option than the main search: {m[0]}."
+            + (f" Also changed: {', '.join(also)}." if also else "") + f" {checked}")
 
 
 def _submatrix(stops: list[DispatchStop], keep: list[int], mx: MatrixResult) -> tuple[list[DispatchStop], MatrixResult]:

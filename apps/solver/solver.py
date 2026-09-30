@@ -34,8 +34,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
-from pyvrp import Model, PenaltyParams, SolveParams
-from pyvrp.stop import MaxRuntime
+# PyVRP is imported lazily, inside the legacy solve only. The API process must never load
+# PyVRP's native library next to OR-Tools': on Linux the two in one process crashed the solver
+# with a segmentation fault (CI, PR #50). Only worker processes and this unused legacy path load it.
 
 from distance import build_matrices, haversine_km as _haversine_km  # noqa: F401 — re-exported below
 from models import (
@@ -75,11 +76,14 @@ PRIZE_SCALE = 100
 # dropping a priority-1 client. We raise the cap so capacity violation is always more
 # expensive than dropping; the solver then cleanly drops low-priority stops when it
 # can't fit them in the fleet.
-_PYVRP_PARAMS = SolveParams(
-    penalty=PenaltyParams(
-        max_penalty=10_000_000_000.0,
-    ),
-)
+_PYVRP_MAX_PENALTY = 10_000_000_000.0
+
+
+def _pyvrp_params():
+    """SolveParams for the legacy solve, built on first use (PyVRP is imported lazily)."""
+    from pyvrp import PenaltyParams, SolveParams  # noqa: PLC0415
+
+    return SolveParams(penalty=PenaltyParams(max_penalty=_PYVRP_MAX_PENALTY))
 
 
 # Re-export haversine_km from distance.py so existing imports (tests, callers)
@@ -266,23 +270,29 @@ def _solve_one_scenario(
     if n_stops == 0:
         return _empty_scenario(name, req), []
 
+    from pyvrp import Model  # noqa: PLC0415 - lazy, see the note at the imports
+    from pyvrp.stop import MaxRuntime  # noqa: PLC0415
+
     weights = adjusted_weights(name, req)
     model = Model()
 
     # Locations: depot at index 0, then one per stop.
     # We use lat/lng × 1e6 as integer x/y purely for labelling — distances are
     # provided explicitly via edges below, so coordinate scale doesn't affect cost.
-    depot_loc = model.add_depot(
+    # PyVRP 0.14: depots and clients sit at a Location; edges join Locations.
+    depot_xy = model.add_location(
         x=int(req.depot.lat * 1_000_000),
         y=int(req.depot.lng * 1_000_000),
-        name=req.depot.id,
     )
+    depot_loc = model.add_depot(depot_xy, name=req.depot.id)
 
     clients: list = []
+    client_xy: list = []
     for s in solvable:
+        loc = model.add_location(x=int(s.lat * 1_000_000), y=int(s.lng * 1_000_000))
+        client_xy.append(loc)
         c = model.add_client(
-            x=int(s.lat * 1_000_000),
-            y=int(s.lng * 1_000_000),
+            loc,
             delivery=s.demand_cases,
             service_duration=s.service_time_min * 60,
             prize=drop_penalty(s.priority) * PRIZE_SCALE,
@@ -311,7 +321,7 @@ def _solve_one_scenario(
 
     # Edges — n × (n-1) directional edges. Distance in meters (cm/100), duration
     # in seconds. PyVRP requires explicit edges for every pair we want to allow.
-    all_locs = [depot_loc] + clients
+    all_locs = [depot_xy] + client_xy  # PyVRP 0.14: edges join Locations
     n_nodes = len(all_locs)
     for i in range(n_nodes):
         for j in range(n_nodes):
@@ -326,7 +336,7 @@ def _solve_one_scenario(
             stop=MaxRuntime(max(1, time_limit_sec)),
             seed=42,
             display=False,
-            params=_PYVRP_PARAMS,
+            params=_pyvrp_params(),
         )
     except Exception as exc:  # noqa: BLE001 — surface as INFEASIBLE_ROUTE
         log.exception("PyVRP raised during solve for scenario %s: %s", name, exc)
@@ -379,7 +389,8 @@ def _solve_one_scenario(
     for route in best.routes():
         vtype_idx = route.vehicle_type()
         truck = req.trucks[vtype_idx]
-        visits = list(route.visits())  # PyVRP returns 1-indexed (depot=0, clients=1..N)
+        # PyVRP 0.14: a route is a list of activities; client idx k is matrix node k + 1 (depot = 0).
+        visits = [a.idx + 1 for a in route if a.is_client()]
         if not visits:
             continue
         trucks_used += 1

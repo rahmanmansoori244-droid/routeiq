@@ -140,6 +140,12 @@ jobs:
         working-directory: apps/solver
         run: tail -200 solver.log || true
 
+      - name: Show kernel out-of-memory kills on failure
+        if: failure()
+        run: |
+          free -m || true
+          sudo dmesg -T 2>/dev/null | grep -i -E "killed process|out of memory|oom" | tail -20 || true
+
   solver:
     name: Solver (pytest)
     runs-on: ubuntu-latest

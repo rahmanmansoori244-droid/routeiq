@@ -126,15 +126,14 @@ def _pools_made(monkeypatch) -> list:
 
 
 def _all_stopped(made: list) -> None:
-    """Each pool was really cleaned up, not just given up on: no worker process alive, and Pool's
-    three helper threads ended."""
+    """Each pool was really cleaned up, not just given up on: closed and released (it holds no Pool
+    any more, CI PR #50), no worker process alive in this process, and no Pool helper thread left."""
+    import multiprocessing as mp
+
     for w in made:
-        pool = getattr(w, "pool", None)
-        if pool is None:
-            continue
-        assert [p.pid for p in pool._pool if p.is_alive()] == []
-        assert not pool._worker_handler.is_alive() and not pool._task_handler.is_alive()
-        assert not pool._result_handler.is_alive()
+        assert w.closed and w.pool is None
+    assert mp.active_children() == []
+    assert [t.name for t in threading.enumerate() if t.is_alive() and "_handle_" in t.name] == []
 
 
 def _kill_a_worker_during_recommended(monkeypatch, which: str, before_kill=None) -> dict:

@@ -19,6 +19,14 @@ def _disable_osrm_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _second_search_off_by_default(monkeypatch):
+    """The second route search (PyVRP, on in production) is off unless a test switches it on
+    (test_pyvrp_candidate.py, and the parametrized end-to-end tests): every other test keeps its
+    exact behaviour and time."""
+    monkeypatch.setenv("SOLVER_PYVRP", "off")
+
+
+@pytest.fixture(autouse=True)
 def _fresh_worker_health():
     """Rule 22: /ready's worker status is process-wide, and a failure stays reported for minutes
     whatever pools start meanwhile (WORKER_ALERT_MIN_SEC): one test's broken pool must not make a

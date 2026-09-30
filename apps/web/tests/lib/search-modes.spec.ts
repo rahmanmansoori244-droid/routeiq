@@ -295,6 +295,12 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     for (const text of [line, ...Object.values(rows)]) expect(text).not.toMatch(/\boptimal\b|\boptimum\b|is the best possible/i);
   });
 
+  it('a plan from the second route search has one note, the plan\'s own warning: the search line adds none (decision D4)', () => {
+    const chosen = report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', search_sec: 20.4, best_over_time: [], pyvrp: { status: 'CHOSEN', chosen_for: ['RECOMMENDED'] } });
+    expect(searchResultText(chosen)).toBe('Quick search: 20 s, the automatic time for a day of this size.');
+    for (const text of Object.values(searchAssumptions(chosen))) expect(text).not.toContain('second route search');
+  });
+
   it('the job message of a queued start', () => {
     expect(queuedMessage('THOROUGH', 1200, null)).toBe('Queued. Thorough search: up to 20 min, stops early when it stops improving.');
     expect(queuedMessage('QUICK', 1200, 2)).toBe('Waiting: 2 optimization(s) ahead. Quick search.');
