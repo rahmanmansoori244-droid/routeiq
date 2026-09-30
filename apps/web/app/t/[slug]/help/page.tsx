@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { LifeBuoy, Upload, MapPin, Wand2, ListChecks, Lock, FileSpreadsheet, Clock } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
+import { fmtSearchTime, thoroughMaxSec } from '@/lib/dispatch/search-mode';
 import { PageShell } from '@/components/page-shell';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 
@@ -37,7 +38,9 @@ export default async function HelpPage({ params }: { params: { slug: string } })
             </Step>
             <Step n={3} icon={Wand2} title="OPTIMIZE">
               Builds the recommended plan on road distances: capacity, receiving hours and priorities are respected, and trucks can make several loads.
-              About half a minute to a minute for a normal day.
+              Choose Thorough (up to {fmtSearchTime(thoroughMaxSec())}, stops early when the plan stops improving; suggested for tomorrow&apos;s plan) or Quick (about half a
+              minute to a minute for a normal day; suggested on the delivery day, so trucks are not held). A Thorough plan made on the delivery day
+              times its new loads from the end of its search.
             </Step>
             <Step n={4} icon={ListChecks} title="Review">
               Per truck load: loading manifest (cases and kg per product), delivery sequence with ETAs, km, utilisation and cost. Every order is either planned

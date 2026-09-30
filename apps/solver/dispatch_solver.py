@@ -54,6 +54,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import threading
 import time
 from collections import Counter
 from collections.abc import Callable
@@ -80,6 +81,7 @@ from dispatch_models import (
     PlannedLoad,
     PlannedStop,
     PreferencePenalties,
+    SearchReport,
     TruckDayCostOut,
     UnservedStop,
     kg_text,
@@ -127,6 +129,46 @@ REPACK_MIN_SEC = 3
 STAGE_GRACE_SEC = 20
 ENGINE = "ortools-routing"
 
+# THOROUGH search (owner decision 29 Sep 2026: "night plans long, day re-plans quick"; see
+# docs/OPTIMIZER_BENCHMARK.md section 11 for the measurements behind these values). The whole
+# request - road matrix, every search, the load re-check - answers within the cap: env
+# THOROUGH_MAX_SEC (default 20 min); a request's config.max_search_sec may only lower it.
+THOROUGH_MAX_SEC = 1200
+# RECOMMENDED's search stops once its best plan has not improved for max(STALL_FLOOR_SEC,
+# STALL_SHARE x the time searched so far) - and never before QUICK's time for the day (T1).
+# Env THOROUGH_STALL_SEC / THOROUGH_STALL_SHARE override.
+THOROUGH_STALL_FLOOR_SEC = 300
+THOROUGH_STALL_SHARE = 0.5
+# The alternatives (warm-started from RECOMMENDED, in parallel) get at least this long, and the
+# load re-check (CP-SAT) this long per solve; both are kept free at the end of the cap.
+THOROUGH_ALT_MIN_SEC = 60
+THOROUGH_REPACK_CAP_SEC = 30
+
+# Rule 22 (owner decision, audit policy 22): the worker processes are started, and proven to run a
+# task, before the road matrix is fetched. A pool that cannot start (an OSError: out of memory, the
+# process limit) or whose first task does not run within WORKER_START_SEC (its processes die while
+# starting) refuses the solve at once: WorkersUnavailable, which main.py answers with 503 and
+# PLANNER_UNAVAILABLE_MSG. Nothing is then searched inside the API process: that used to freeze
+# the whole API with no deadline for the length of the search (20 minutes and more for THOROUGH).
+# Env SOLVER_WORKER_START_SEC overrides the wait; SOLVER_ALLOW_INPROCESS_FALLBACK=1 keeps the old
+# in-process fallback for development and tests only. After a failed start (or a pool that broke),
+# /ready reports the workers as failed for WORKER_ALERT_SEC, or until a pool starts at least
+# WORKER_ALERT_MIN_SEC after the failure: the web's /api/health is then "degraded" with
+# SOLVER_WORKERS_FAILED. Second review: a pool that starts sooner - the load re-check's fresh one,
+# seconds after the pool broke, or another company's solve - used to clear it at once, so
+# monitoring that polls /api/health every few minutes never saw the failure.
+WORKER_START_SEC = 30
+WORKER_ALERT_SEC = 900
+WORKER_ALERT_MIN_SEC = 300
+PLANNER_UNAVAILABLE_MSG = "The planner is busy or restarting - try again in a minute."
+# Rule 22 (review): the longest a request waits for a worker pool to close. CPython's Pool.terminate
+# can wait forever on a pool that broke (see _stop_pool_processes); past this the cleanup goes on
+# in a background thread and the administrator is alerted, and the answer is not held back.
+POOL_CLOSE_SEC = 10.0
+# Why the loads were not re-checked when the load re-check could not get worker processes (rule
+# 22): the dispatcher's note on the plan, in plain words; the technical cause is in the ERROR line.
+NO_WORKERS_NOTE = "the planner was short of resources"
+
 
 # The automatic search time between 120 and 200 stops (PR7, T1): straight lines through these
 # (stops, seconds) points. Up to 120 stops 20 s, from 200 to LARGE_DAY_STOPS 150 s, above 240 s.
@@ -161,6 +203,295 @@ def auto_time_limit(n_stops: int) -> int:
         if n_stops <= xb:
             return int(math.floor(ya + (yb - ya) * (n_stops - xa) / (xb - xa) + 0.5))
     return TIME_LIMIT_POINTS[-1][1]
+
+
+# ---------------------------------------------------------------------------------------------
+# Search modes (owner decision 29 Sep 2026): QUICK = the automatic time above, exactly as before;
+# THOROUGH = up to THOROUGH_MAX_SEC for the whole request, stopping once the search stops improving
+# ---------------------------------------------------------------------------------------------
+
+def _env_num(name: str, default: float, *, lo: float, hi: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    return value if lo <= value <= hi else default
+
+
+def thorough_cap_sec(cfg: DispatchConfig) -> int:
+    """THOROUGH: the whole request's time budget. The solver's THOROUGH_MAX_SEC (env, default 20
+    min) is the ceiling; a request's max_search_sec may only lower it."""
+    hard = int(_env_num("THOROUGH_MAX_SEC", THOROUGH_MAX_SEC, lo=10, hi=3600))
+    return min(hard, cfg.max_search_sec) if cfg.max_search_sec else hard
+
+
+@dataclass(frozen=True)
+class StallRule:
+    """Stop a search whose best plan has not improved for max(floor_sec, share x the time searched
+    so far) - never before min_sec, QUICK's time for the day (THOROUGH never searches less, T1).
+    The share makes the patience grow with the search: a plan last improved at minute 8 is given
+    until minute 16 (share 0.5) to improve again."""
+
+    min_sec: float
+    floor_sec: float
+    share: float
+
+    def stall_sec(self, elapsed: float) -> float:
+        return max(self.floor_sec, self.share * elapsed)
+
+    def should_stop(self, elapsed: float, last_improvement: float) -> bool:
+        return elapsed >= self.min_sec and elapsed - last_improvement >= self.stall_sec(elapsed)
+
+
+def stall_rule(min_sec: float) -> StallRule:
+    """The THOROUGH stall rule (env THOROUGH_STALL_SEC / THOROUGH_STALL_SHARE override the values)."""
+    return StallRule(min_sec=float(min_sec),
+                     floor_sec=_env_num("THOROUGH_STALL_SEC", THOROUGH_STALL_FLOOR_SEC, lo=0.1, hi=3600),
+                     share=_env_num("THOROUGH_STALL_SHARE", THOROUGH_STALL_SHARE, lo=0.0, hi=10.0))
+
+
+def _repack_cap_sec(time_limit: float, thorough: bool) -> float:
+    """Each CP-SAT solve of the post-solve stage: QUICK min(15, max(3, limit / 2)) as before;
+    THOROUGH at least THOROUGH_REPACK_CAP_SEC (the repack stops earlier when it stops improving)."""
+    quick = min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
+    return max(quick, THOROUGH_REPACK_CAP_SEC) if thorough else quick
+
+
+def _thorough_alt_sec(time_limit: int) -> int:
+    """THOROUGH alternatives (warm-started from RECOMMENDED): QUICK's half limit, at least
+    THOROUGH_ALT_MIN_SEC."""
+    return max(max(2, time_limit // 2), THOROUGH_ALT_MIN_SEC)
+
+
+@dataclass(frozen=True)
+class ThoroughTail:
+    """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap, and how it is used."""
+
+    alt_sec: int  # each alternative's search limit (0 without alternatives)
+    repack_cap: float  # each CP-SAT solve of the load re-check
+    stage_sec: int  # kept free for the load re-check (post-solve stage): three sources in one round, and its grace
+    total: int  # alternatives + their grace (when asked for) + the re-check
+
+    @staticmethod
+    def of(alt_sec: int, repack_cap: float, n_alternatives: int) -> "ThoroughTail":
+        stage = int(math.ceil(round(repack_cap * 3, 6) + STAGE_GRACE_SEC + 5))
+        alt = alt_sec if n_alternatives else 0
+        return ThoroughTail(alt, repack_cap, stage, (alt + ALT_GRACE_SEC if n_alternatives else 0) + stage)
+
+
+def thorough_tail(time_limit: int, n_alternatives: int, cap: float | None = None) -> ThoroughTail:
+    """THOROUGH's tail: the alternatives (in parallel, warm-started) with their grace, then the load
+    re-check with its grace - at least 60 s per alternative and 30 s per CP-SAT solve. A ``cap`` below
+    20 min where that is more than 30% of the cap shrinks the alternatives' and the re-check's times
+    in proportion to fit 30%, never below QUICK's own (half the limit; min(15, max(3, limit / 2))).
+    Review of the long-search PR: only the total used to be cut, while the alternatives were still
+    charged the full re-check reserve, so under ~7 min they were always skipped and up to a third
+    of the cap went unused."""
+    alt_full = _thorough_alt_sec(time_limit)
+    repack_full = _repack_cap_sec(time_limit, True)
+    full = ThoroughTail.of(alt_full, repack_full, n_alternatives)
+    budget = int(0.3 * cap) if cap is not None else full.total
+    if full.total <= budget:
+        return full
+    quick_alt, quick_repack = max(2, time_limit // 2), _repack_cap_sec(time_limit, False)
+    grace = ALT_GRACE_SEC if n_alternatives else 0
+    # The alternatives' share of what the graces leave; the re-check gets the rest (three solves);
+    # neither below QUICK's. When the re-check is at QUICK's, the alternatives give back the excess.
+    share = max(0, budget - grace - STAGE_GRACE_SEC - 5) / ((alt_full if n_alternatives else 0) + 3 * repack_full)
+    alt = max(quick_alt, int(alt_full * share)) if n_alternatives else 0
+    rest = max(0.0, (budget - alt - grace - STAGE_GRACE_SEC - 5) / 3)
+    repack = min(repack_full, max(quick_repack, math.floor(rest * 10) / 10))
+    stage = ThoroughTail.of(0, repack, 0).stage_sec
+    if n_alternatives:
+        alt = max(quick_alt, min(alt, budget - grace - stage))
+    return ThoroughTail.of(alt, repack, n_alternatives)
+
+
+def thorough_tail_sec(time_limit: int, n_alternatives: int, cap: float | None = None) -> int:
+    """THOROUGH: what RECOMMENDED's search leaves free at the end of the cap (thorough_tail)."""
+    return thorough_tail(time_limit, n_alternatives, cap).total
+
+
+def rec_limit_sec(mode: str, time_limit: int, left: float, n_alternatives: int, cap: float | None = None) -> int:
+    """RECOMMENDED's search limit with ``left`` seconds of the request budget left. QUICK: exactly as
+    before - the automatic limit, shortened only when a slow road matrix ate the budget. THOROUGH:
+    everything up to the tail (thorough_tail: the alternatives and the load re-check, in proportion
+    to a ``cap`` set below 20 min), never less than QUICK."""
+    quick = max(1, min(time_limit, int(left) - REC_OVERHEAD_SEC))
+    if mode != "THOROUGH":
+        return quick
+    return max(quick, int(left) - REC_OVERHEAD_SEC - thorough_tail_sec(time_limit, n_alternatives, cap))
+
+
+class SolveControl:
+    """A running solve's remote control (main.py keeps one per request).
+
+    cancel(): the caller is gone (the web app restarted mid-solve). The solve is abandoned at its
+    next check (within a second): SolveAborted, its worker processes stop, its slot frees.
+    request_stop(): a supervisor wants the best plan found so far. A THOROUGH search returns it at
+    its next check, the alternatives are skipped and the load re-check runs with QUICK's time."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self.cancelled = threading.Event()
+        self.stop_requested = threading.Event()
+        self.why = ""
+        self._flags: list = []  # the "stop now" flags of the solve's worker pools
+        self._lock = threading.Lock()
+
+    def cancel(self, why: str) -> None:
+        self.why = why
+        self.cancelled.set()
+        self._raise_flags()
+
+    def request_stop(self) -> None:
+        self.stop_requested.set()
+        self._raise_flags()
+
+    def attach(self, flag) -> None:
+        """A worker pool's multiprocessing Event: set now if a stop was already asked for."""
+        with self._lock:
+            self._flags.append(flag)
+        if self.stop_requested.is_set() or self.cancelled.is_set():
+            self._raise_flags()
+
+    def _raise_flags(self) -> None:
+        with self._lock:
+            for flag in self._flags:
+                try:
+                    flag.set()
+                except Exception:  # noqa: BLE001 - a pool already closed
+                    pass
+
+
+# In a worker process (or in-process with SOLVER_PARALLEL=0): the pool's "stop now" flag.
+_STOP_FLAG = None
+# The THOROUGH searches' watches in this process, by scenario (read by _searched).
+_WATCHES: dict = {}
+
+
+class _SearchWatch:
+    """THOROUGH: follows a search's best objective over time and ends the search once it stops
+    improving (StallRule, RECOMMENDED only) or when a stop is asked for. Both happen in OR-Tools'
+    at-solution callback, called for every solution the guided local search accepts (tens a second
+    on NMWC days, improving or not): Solver.FinishCurrentSearch() then ends the search within
+    milliseconds and it returns its best plan. A CustomLimit was measured too: OR-Tools calls it
+    35,000-110,000 times a second, which cost 3-12% of the search's solutions
+    (docs/OPTIMIZER_BENCHMARK.md section 11). The time limit stays the backstop.
+
+    Each point of the best objective over time also counts the stops that plan had not planned yet
+    (``stops``: the stops' routing indices; an unplanned stop is its own successor). The objective
+    holds a large penalty for each of them (1,000 OMR or more on real days), so a score in the thousands
+    is not money (skeptic review of the long-search PR). Counted on improvements only."""
+
+    def __init__(self, routing, rule: StallRule | None, flag, stops: list[int] | None = None) -> None:
+        self.routing = routing
+        self.rule = rule
+        self.flag = flag
+        self.stops = list(stops or [])
+        self.t0 = time.perf_counter()
+        self.best: int | None = None
+        self.last = 0.0
+        self.points: list[tuple[float, int, int]] = []
+        self.solutions = 0
+        self.reason: str | None = None
+        self.ended_at: float | None = None
+
+    def on_solution(self) -> None:
+        value = int(self.routing.CostVar().Max())
+        self.solutions += 1
+        t = time.perf_counter() - self.t0
+        if self.best is None or value < self.best:
+            self.best, self.last = value, t
+            nxt = self.routing.NextVar
+            self.points.append((t, value, sum(1 for i in self.stops if nxt(i).Value() == i)))
+        if self.reason is not None:
+            return
+        stop = self.flag is not None and self.flag.is_set()
+        if stop or (self.rule is not None and self.rule.should_stop(t, self.last)):
+            self.reason, self.ended_at = ("STOPPED" if stop else "CONVERGED"), t
+            self.routing.solver().FinishCurrentSearch()
+
+    def report(self) -> dict:
+        pts = self.points
+        if len(pts) > 12:
+            end = pts[-1][0]
+            keep = [pts[0]]
+            for k in range(1, 11):
+                upto = [p for p in pts if p[0] <= end * k / 11]
+                if upto and upto[-1] is not keep[-1]:
+                    keep.append(upto[-1])
+            if keep[-1] is not pts[-1]:
+                keep.append(pts[-1])
+            pts = keep
+        elapsed = self.ended_at if self.ended_at is not None else time.perf_counter() - self.t0
+        return {
+            "reason": self.reason,
+            "last_improvement_sec": round(self.last, 1) if self.points else None,
+            # No plan seen, no stall to report ("no better plan for 5 min" after a 1 s search).
+            "stall_sec": round(self.rule.stall_sec(elapsed), 1) if self.rule is not None and self.points else None,
+            "points": [(round(t, 1), round(v / COST_SCALE, 2), left) for t, v, left in pts],
+            "solutions": self.solutions,
+        }
+
+
+def _watch_search(name: str, cfg: DispatchConfig, n_stops: int, routing, manager=None) -> None:
+    """THOROUGH only - a QUICK search gets nothing attached and runs exactly as before. RECOMMENDED
+    gets the stall rule (never before QUICK's time for the day); the alternatives only the stop flag.
+    ``manager``: the stops are nodes 1..n_stops (_solve_scenario), counted on each progress point."""
+    if cfg.search_mode != "THOROUGH":
+        return
+    rule = stall_rule(cfg.time_limit_sec or auto_time_limit(n_stops)) if name == "RECOMMENDED" else None
+    stops = [manager.NodeToIndex(k + 1) for k in range(n_stops)] if manager is not None else None
+    watch = _SearchWatch(routing, rule, _STOP_FLAG, stops)
+    # The callback is kept on the watch (and the watch in _WATCHES) for the whole search.
+    watch.callback = watch.on_solution
+    routing.AddAtSolutionCallback(watch.callback)
+    _WATCHES[name] = watch
+
+
+def _searched(args) -> tuple[DispatchScenario, dict | None]:
+    """_scenario_worker, and the THOROUGH watch's report of that search (None for QUICK)."""
+    _WATCHES.pop(args[0], None)
+    sc = _scenario_worker(args)
+    watch = _WATCHES.pop(args[0], None)
+    return sc, (watch.report() if watch is not None else None)
+
+
+def _stop_reason(mode: str, watch: dict | None, search_sec: float, limit: int, status: str | None = None) -> str:
+    """Why RECOMMENDED's search stopped (SearchReport.stop_reason). ``status``: RECOMMENDED's own.
+    In either mode, no search (every stop left out before it: NOTHING_TO_PLAN) is NOT_SEARCHED and a
+    search that found no plan (NO_SOLUTION) is NO_PLAN - never "stopped when it stopped improving"
+    nor QUICK's "automatic time" (skeptic review of the long-search PR)."""
+    if status == "NOTHING_TO_PLAN":
+        return "NOT_SEARCHED"
+    if status == "NO_SOLUTION":
+        return "NO_PLAN"
+    if mode != "THOROUGH":
+        return "TIME_LIMIT"
+    if watch and watch.get("reason"):
+        return str(watch["reason"])
+    # Ended without the watch: on its time limit (the cap), or by itself before it.
+    return "CAP" if search_sec >= limit - 1 else "CONVERGED"
+
+
+def _search_report(mode: str, cap: int, state: dict, started: float) -> SearchReport:
+    watch = state.get("watch")
+    limit = int(state.get("limit") or 0)
+    search_sec = float(state.get("search_sec") or 0.0)
+    return SearchReport(
+        mode=mode,  # type: ignore[arg-type]
+        cap_sec=int(cap),
+        limit_sec=limit,
+        search_sec=round(search_sec, 1),
+        used_sec=round(time.monotonic() - started, 1),
+        stop_reason=_stop_reason(mode, watch, search_sec, limit, state.get("status")),  # type: ignore[arg-type]
+        last_improvement_sec=(watch or {}).get("last_improvement_sec"),
+        stall_sec=(watch or {}).get("stall_sec"),
+        best_over_time=list((watch or {}).get("points") or []),
+        solutions=(watch or {}).get("solutions"),
+    )
 
 
 @dataclass(frozen=True)
@@ -870,6 +1201,7 @@ def _solve_scenario(
     params.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
     params.time_limit.seconds = max(1, int(time_limit))
     params.log_search = False
+    _watch_search(name, cfg, len(stops), routing, manager)  # THOROUGH only: stop once it stops improving
 
     assignment = None
     if warm_start:
@@ -1274,42 +1606,65 @@ def matrix_budget_sec(budget: float) -> float:
     return max(1.0, min(MATRIX_BUDGET_CAP_SEC, MATRIX_BUDGET_SHARE * budget))
 
 
-def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResponse:
+def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveControl | None = None) -> DispatchResponse:
     started = time.monotonic()
     cfg = req.config
     tds = _truck_days(req)
     solvable, drops, warnings = _prefilter(req, tds)
-    budget = int(os.environ.get("SOLVER_BUDGET_SEC", SOLVER_BUDGET_SEC))
+    # QUICK: the request budget as before. THOROUGH: the cap, for everything (one deadline).
+    budget = thorough_cap_sec(cfg) if cfg.search_mode == "THOROUGH" else int(os.environ.get("SOLVER_BUDGET_SEC", SOLVER_BUDGET_SEC))
     if len(req.stops) > LARGE_DAY_STOPS:
         warnings.append(
             f"Large day: {len(req.stops)} stops in one optimization (the planner supports up to {MAX_STOPS}). "
             "The search is time-limited, so check the unserved orders; planning by depot or area keeps days smaller."
         )
 
-    coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
-    mx = resolve_matrix(
-        coords,
-        provider=cfg.distance_provider,
-        osrm_url=cfg.osrm_url,
-        haversine_multiplier=cfg.haversine_multiplier,
-        avg_speed_kmh=cfg.avg_speed_kmh,
-        road_time_factor=cfg.road_time_factor,
-        osrm_client=osrm_client,
-        deadline=started + matrix_budget_sec(budget),
-    )
-    log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
-             req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
-    keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)
-    drops += window_drops
-    if len(keep) != len(solvable):
-        solvable, mx = _submatrix(solvable, keep, mx)
+    # Rule 22: the worker processes first, before the road matrix (which may take up to 90 s): a
+    # solver that cannot start them refuses within seconds (WorkersUnavailable -> 503), and nothing
+    # is searched inside the API process. None: SOLVER_PARALLEL=0, nothing to search, or the
+    # in-process fallback allowed for development (SOLVER_ALLOW_INPROCESS_FALLBACK=1).
+    workers: _Workers | None = None
+    if solvable and _parallel():
+        # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
+        # worker a stuck alternative starved the next one, which then hit the same deadline
+        # without ever starting. OR-Tools limits are wall-clock, so sharing a core only lowers
+        # quality, never the deadline. RECOMMENDED runs first in one of them.
+        workers = _start_workers(max(1, len([n for n in cfg.scenarios if n != "RECOMMENDED"])), control, req.run_id,
+                                 "search")
+    try:
+        coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
+        mx = resolve_matrix(
+            coords,
+            provider=cfg.distance_provider,
+            osrm_url=cfg.osrm_url,
+            haversine_multiplier=cfg.haversine_multiplier,
+            avg_speed_kmh=cfg.avg_speed_kmh,
+            road_time_factor=cfg.road_time_factor,
+            osrm_client=osrm_client,
+            deadline=started + matrix_budget_sec(budget),
+        )
+        log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
+                 req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
+        keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)
+        drops += window_drops
+        if len(keep) != len(solvable):
+            solvable, mx = _submatrix(solvable, keep, mx)
 
-    time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
-    scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget)
+        time_limit = cfg.time_limit_sec or auto_time_limit(len(solvable))
+        state: dict = {}
+        scenarios = _run_scenarios(list(cfg.scenarios), req, solvable, tds, mx, time_limit, drops, started + budget,
+                                   control=control, state=state, workers=workers)
+    finally:
+        if workers is not None:
+            workers.close()  # already closed by _run_scenarios when it ran; a no-op then
     for sc in scenarios:
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)
+    search = _search_report(cfg.search_mode, budget, state, started)
+    log.info("dispatch run=%s search mode=%s limit=%ss searched=%.1fs used=%.1fs stop=%s last_improvement=%s",
+             req.run_id, search.mode, search.limit_sec, search.search_sec, search.used_sec, search.stop_reason,
+             search.last_improvement_sec)
 
     return DispatchResponse(
         run_id=req.run_id,
@@ -1319,6 +1674,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None) -> DispatchResp
         distance_quality=mx.quality,  # type: ignore[arg-type]
         scenarios=scenarios,
         warnings=warnings + list(mx.warnings),
+        search=search,
     )
 
 
@@ -1372,6 +1728,80 @@ class SolveAborted(RuntimeError):
     """The recommended plan could not be computed (worker died or ran out of time)."""
 
 
+class WorkersUnavailable(RuntimeError):
+    """Rule 22: the solver could not start its worker processes, so nothing was searched. main.py
+    answers 503 (Retry-After 60, code WORKERS_UNAVAILABLE) with PLANNER_UNAVAILABLE_MSG; the web
+    keeps the previous plan and the dispatcher tries again. ``cause`` is the technical reason (logs
+    and /ready only)."""
+
+    code = "WORKERS_UNAVAILABLE"
+
+    def __init__(self, cause: str):
+        super().__init__(PLANNER_UNAVAILABLE_MSG)
+        self.cause = cause
+
+
+def _parallel() -> bool:
+    """False only with SOLVER_PARALLEL=0 (tests and local debugging: every search in-process)."""
+    return os.environ.get("SOLVER_PARALLEL", "1") != "0"
+
+
+def inprocess_fallback_allowed() -> bool:
+    """SOLVER_ALLOW_INPROCESS_FALLBACK=1: a worker pool that cannot start makes the solve run inside
+    the API process, as before rule 22 (no deadline; the API does not answer meanwhile). Development
+    and tests only; main.py logs a warning at startup when it is set (an error on Railway)."""
+    return os.environ.get("SOLVER_ALLOW_INPROCESS_FALLBACK", "") == "1"
+
+
+def worker_start_sec() -> float:
+    """How long a new worker pool may take to run its first task (env SOLVER_WORKER_START_SEC)."""
+    return _env_num("SOLVER_WORKER_START_SEC", WORKER_START_SEC, lo=1, hi=600)
+
+
+class _WorkerHealth:
+    """Whether this solver process's worker pools failed recently, for /ready (rule 22): "failed"
+    from a failed start (or a pool that broke, or did not close) until WORKER_ALERT_SEC after the
+    last failure, or until a pool starts at least WORKER_ALERT_MIN_SEC after it (started())."""
+
+    def __init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._failed_mono: float | None = None
+        self._failed_at = ""
+        self._cause = ""
+
+    def failed(self, cause: str) -> None:
+        from datetime import datetime, timezone
+
+        with self._lock:
+            self._failed_mono = time.monotonic()
+            self._failed_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            self._cause = cause[:300]
+
+    def started(self) -> None:
+        """A pool started and ran its first task. That is a recovery only WORKER_ALERT_MIN_SEC or
+        more after the last failure (second review): sooner, it is usually the same solve's load
+        re-check or another company's solve, and clearing then hid the failure from monitoring."""
+        with self._lock:
+            if self._failed_mono is not None and time.monotonic() - self._failed_mono >= WORKER_ALERT_MIN_SEC:
+                self._failed_mono = None
+
+    def reset(self) -> None:
+        """Forget any failure (tests: each one starts from a clean state)."""
+        with self._lock:
+            self._failed_mono = None
+
+    def status(self) -> dict:
+        with self._lock:
+            if self._failed_mono is not None and time.monotonic() - self._failed_mono < WORKER_ALERT_SEC:
+                return {"status": "failed", "failed_at": self._failed_at, "cause": self._cause}
+            return {"status": "ok"}
+
+
+WORKER_HEALTH = _WorkerHealth()
+
+
 # ---------------------------------------------------------------------------------------------
 # Worker processes (review L23)
 # ---------------------------------------------------------------------------------------------
@@ -1385,9 +1815,18 @@ _POOL_ATTR = "_pool"
 _BEACON = None
 
 
-def _worker_init(beacon) -> None:
-    global _BEACON
+def _worker_init(beacon, stop_flag=None) -> None:
+    global _BEACON, _STOP_FLAG
+    # Test hook (rule 22): every worker process dies while starting, so the pool never runs a task.
+    if os.environ.get("ROUTEIQ_TEST_WORKER_START_EXIT") == "1":
+        os._exit(3)
     _BEACON = beacon
+    _STOP_FLAG = stop_flag
+
+
+def _ping(_arg=None) -> int:
+    """A new pool's first task (_Workers.check_started): proves a worker process runs tasks."""
+    return os.getpid()
 
 
 def _tracked(token: str, fn, arg):
@@ -1401,28 +1840,114 @@ def _tracked(token: str, fn, arg):
     return fn(arg)
 
 
+_ALERT_ADVICE = "If this repeats, check the solver service's memory and process limits and restart it."
+
+
+def _workers_alert(run_id: str, happened: str, cause: str, *, nothing_searched: bool = True) -> None:
+    """Rule 22: tell the administrator. /ready reports the workers as failed (WORKER_HEALTH, the
+    web's /api/health: degraded) and one ERROR line whose message starts with the stable code
+    WORKERS_UNAVAILABLE (after the log format's timestamp, level and logger name: alert on a
+    line that contains the code, not on the cause text, which depends on the error)."""
+    WORKER_HEALTH.failed(cause)
+    log.error("WORKERS_UNAVAILABLE run=%s: %s (%s).%s %s", run_id, happened, cause,
+              " Nothing is searched inside the API process (rule 22)." if nothing_searched else "", _ALERT_ADVICE)
+
+
 class _Workers:
     """A spawn Pool with what the waits need, without Pool's private attributes where possible:
     its size (stored here, not read from Pool._processes) and which worker process runs which task
     (each task reports its pid when it starts). Worker pids come from Pool's private worker list;
-    when that is gone, pids() is None and deaths are only seen at the deadline."""
+    when that is gone, pids() is None and deaths are only seen at the deadline.
 
-    def __init__(self, size: int):
+    Rule 22 (review): broken() says when the pool can no longer run tasks (the waits then stop at
+    once, _await_all), and close() never holds the request for more than about POOL_CLOSE_SEC."""
+
+    def __init__(self, size: int, control: SolveControl | None = None, *, run_id: str = "", what: str = "search"):
         import multiprocessing as mp
 
         ctx = mp.get_context("spawn")
         self.size = max(1, int(size))
+        self.run_id = run_id
+        self.what = what  # "search" or "load re-check", for the administrator's log lines
         self._beacon = ctx.SimpleQueue()
-        self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon,))
+        # The solve's "stop now" flag, seen by every THOROUGH search in these workers (_watch_search).
+        # Every wait on these workers also watches the control (cancelled: SolveAborted, _await_all).
+        self.control = control
+        try:
+            stop_flag = ctx.Event() if control is not None else None
+            self.pool = ctx.Pool(processes=self.size, initializer=_worker_init, initargs=(self._beacon, stop_flag))
+        except BaseException:
+            # Nothing left behind by a failed start (rule 22; audit finding: the queue made above used
+            # to stay open). Pool itself stops the worker processes it had started.
+            self._beacon.close()
+            raise
+        if stop_flag is not None:
+            control.attach(stop_flag)  # type: ignore[union-attr]
         self._pid_of: dict[str, int] = {}
+        self._tasks: dict[str, object] = {}  # token -> AsyncResult of each task not seen finished yet
         self._seq = 0
         self._warned = False
+        self._closed = False
+        self._close_ok = True
+        self._proved = False  # check_started saw a task run (before that, _start_workers alerts)
+        self._broken: str | None = None
+
+    def check_started(self, timeout: float) -> None:
+        """Rule 22: the pool runs a task within ``timeout`` seconds, or RuntimeError. Catches a pool
+        whose processes die while starting (Pool starts them again and again, and a task would wait
+        for its deadline - up to the whole THOROUGH cap), at once when no replacement can start
+        (broken()). A cancelled control: SolveAborted."""
+        kind, value = _await_all(self, {"start": self.submit(_ping, None, "start")}, time.monotonic() + timeout)["start"]
+        if kind == "ok":
+            self._proved = True
+            return
+        if kind == "timeout":
+            raise RuntimeError(f"no worker process ran a task within {timeout:g} s (they may be dying while starting)")
+        if kind == "broken":
+            raise RuntimeError(str(value))
+        raise RuntimeError(f"the first worker task {'lost its process' if kind == 'lost' else 'failed'}: {value}")
 
     def submit(self, fn, arg, name: str):
         """Start ``fn(arg)`` in a worker; returns (token, AsyncResult)."""
         self._seq += 1
         token = f"{name}#{self._seq}"
-        return token, self.pool.apply_async(_tracked, (token, fn, arg))
+        fut = self.pool.apply_async(_tracked, (token, fn, arg))
+        self._tasks[token] = fut
+        return token, fut
+
+    def busy(self, live: frozenset[int]) -> int:
+        """How many worker processes are running a task now: tasks that reported their start (see
+        started()) in a process still alive (``live``, from pids()) and have not finished."""
+        for tok in [t for t, fut in self._tasks.items() if fut.ready()]:  # type: ignore[attr-defined]
+            del self._tasks[tok]
+        return sum(1 for tok in self._tasks if self._pid_of.get(tok) in live)
+
+    def broken(self, settle: float = 0.0) -> str | None:
+        """Rule 22 (review): why this pool can no longer run new tasks, or None. Pool's worker-handler
+        thread replaces every worker process that dies; when it cannot (Process.start raised: out of
+        memory, the process limit) that thread dies, and no process is ever replaced again. Also set
+        by _await_all when no process takes a task although one is free (mark_broken). ``settle``:
+        after a worker died, wait up to that long for the handler's attempt to replace it."""
+        if self._broken is None and not self._closed:
+            handler = getattr(self.pool, "_worker_handler", None)
+            try:
+                if handler is not None and settle > 0 and handler.is_alive():
+                    handler.join(settle)
+                if handler is not None and not handler.is_alive():
+                    self.mark_broken("a worker process stopped and no replacement could start: out of memory or the "
+                                     "process limit?")
+            except Exception:  # noqa: BLE001 - Pool internals changed: the deadlines still hold
+                pass
+        return self._broken
+
+    def mark_broken(self, cause: str) -> str:
+        """Record that the pool broke (the first cause stays). A pool that had run a task alerts the
+        administrator here; a new one does in _start_workers, which then refuses the solve."""
+        if self._broken is None:
+            self._broken = cause
+            if self._proved:
+                _workers_alert(self.run_id, f"the solver's worker processes stopped working during the {self.what}", cause)
+        return self._broken
 
     def started(self) -> dict[str, int]:
         """token -> pid of every task that has started so far."""
@@ -1443,21 +1968,168 @@ class _Workers:
                 log.warning("worker pool internals unavailable: a dead worker is only noticed at its deadline")
             return None
 
-    def close(self) -> None:
-        self.pool.terminate()  # stops any task still running past its deadline
-        self.pool.join()
+    def close(self) -> bool:
+        """Stop the workers (and any task still running past its deadline). Safe to call twice.
+
+        Rule 22 (review): bounded. CPython's Pool.terminate() waited forever on a pool that broke
+        (_stop_pool_processes), which held the request - its answer, its slot - for good. The worker
+        processes are now stopped first, then terminate() runs in a background thread for at most
+        POOL_CLOSE_SEC. False when it did not finish in that time: the administrator is alerted
+        (an ERROR line, /ready) and the cleanup goes on in the background."""
+        if self._closed:
+            return self._close_ok
+        self._closed = True
+        pool = self.pool
+        _stop_pool_processes(pool)
+        finished = threading.Event()
+
+        def cleanup() -> None:
+            try:
+                pool.terminate()
+                pool.join()
+            except Exception as exc:  # noqa: BLE001 - nothing to do about it but say so
+                log.warning("run=%s worker pool cleanup failed: %s", self.run_id, exc)
+            finally:
+                finished.set()
+
+        threading.Thread(target=cleanup, name="routeiq-pool-close", daemon=True).start()
+        self._close_ok = finished.wait(POOL_CLOSE_SEC)
+        if not self._close_ok:
+            _workers_alert(self.run_id, f"a worker pool did not stop within {POOL_CLOSE_SEC:g} s after the {self.what} "
+                           "and is left to stop in the background", "Pool.terminate() did not return", nothing_searched=False)
+        try:
+            self._beacon.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return self._close_ok
 
 
-def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline: float) -> dict[str, tuple[str, object]]:
+def _stop_pool_processes(pool) -> None:
+    """Rule 22 (review): let Pool.terminate() finish on a pool that broke. CPython's terminate()
+    waits forever when (1) Pool's worker-handler thread died - it could not start a replacement
+    process (out of memory, the process limit) - so its task-handler thread never gets the stop
+    sentinel (terminate waits in task_handler.join()), or (2) a worker process died while it waited
+    for a task, holding the task queue's read lock (terminate first takes that lock). So, first:
+    the worker handler is told to stop (as terminate does first: no replacement starts behind our
+    back), every worker process is killed, the stop sentinel a dead handler never sent is sent, and
+    the queue locks a dead worker left held are released (the task queue's read lock; on Linux also
+    the result queue's write lock, held while a worker sends a result: killing the workers first
+    must not create a new way to hang). Best effort on Pool's private attributes; close() bounds
+    whatever still waits."""
+    import multiprocessing.pool as mpp
+
+    handler = getattr(pool, "_worker_handler", None)
+    try:
+        if handler is not None and handler.is_alive():
+            handler._state = mpp.TERMINATE
+            pool._change_notifier.put(None)  # wakes it: it stops without starting a replacement
+            handler.join(1.0)
+    except Exception:  # noqa: BLE001
+        pass
+    procs = list(getattr(pool, _POOL_ATTR, None) or [])
+    for p in procs:
+        try:
+            if p.exitcode is None:
+                p.kill()
+        except Exception:  # noqa: BLE001
+            pass
+    end = time.monotonic() + 3.0
+    for p in procs:
+        try:
+            p.join(max(0.0, end - time.monotonic()))
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        if handler is not None and not handler.is_alive():
+            pool._taskqueue.put(None)  # a second sentinel after a normal stop is harmless
+            pool._task_handler.join(1.0)  # it sends its own sentinels and ends (unless a queue is stuck)
+    except Exception:  # noqa: BLE001
+        pass
+    if procs and all(p.exitcode is not None for p in procs):
+        # Every worker process is dead, so none of them can hold a lock legitimately: the task
+        # queue's read lock (an idle worker holds it while it waits for a task) and, on Linux, the
+        # result queue's write lock (held while a worker sends a result; Windows has none).
+        for owner, name in ((getattr(pool, "_inqueue", None), "_rlock"), (getattr(pool, "_outqueue", None), "_wlock")):
+            try:
+                _free_lock_of_dead(getattr(owner, name, None))
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _free_lock_of_dead(lock) -> None:
+    """A multiprocessing lock that a killed process held stays held for good (a semaphore has no
+    owner): give it back for it. Only for locks no live process uses any more (_stop_pool_processes)."""
+    if lock is None:
+        return
+    if lock.acquire(False):
+        lock.release()  # it was free: taken and given back
+    else:
+        lock.release()  # held by a dead process, which never gives it back
+
+
+def _start_workers(size: int, control: SolveControl | None, run_id: str, what: str) -> _Workers | None:
+    """Rule 22: a worker pool that has run its first task, or no search at all.
+
+    A pool that cannot start (an OSError: out of memory, the process limit) or whose first task
+    does not run within worker_start_sec() - or at once, when its processes die and no replacement
+    can start - is closed again and the solve is refused: WorkersUnavailable (main.py: 503 "The
+    planner is busy or restarting - try again in a minute"), with an ERROR line for the
+    administrator and /ready reporting the workers as failed, both before the pool is closed (the
+    alert stays even if closing misbehaves). Nothing is searched inside the API process. Only with
+    SOLVER_ALLOW_INPROCESS_FALLBACK=1 (development and tests) is None returned instead: the caller
+    then solves in-process, as before rule 22."""
+    workers: _Workers | None = None
+    try:
+        workers = _Workers(size, control, run_id=run_id, what=what)
+        workers.check_started(worker_start_sec())
+    except SolveAborted:
+        if workers is not None:
+            workers.close()
+        raise  # cancelled while waiting: the caller is gone
+    except Exception as exc:  # noqa: BLE001 - every way a pool fails to start
+        cause = f"{type(exc).__name__}: {exc}"
+        fallback = inprocess_fallback_allowed()
+        if fallback:
+            WORKER_HEALTH.failed(cause)
+            log.warning("run=%s worker processes unavailable for the %s (%s); SOLVER_ALLOW_INPROCESS_FALLBACK=1: "
+                        "running it inside the API process (development and tests only)", run_id, what, cause)
+        else:
+            _workers_alert(run_id, f"the solver could not start its worker processes for the {what}", cause)
+        if workers is not None:
+            try:
+                workers.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if fallback:
+            return None
+        raise WorkersUnavailable(cause) from exc
+    WORKER_HEALTH.started()
+    return workers
+
+
+def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline: float,
+               control: SolveControl | None = None) -> dict[str, tuple[str, object]]:
     """Wait for several pool tasks (name -> (token, AsyncResult)), in completion order, until
     ``deadline``. Returns name -> ("ok", value) | ("error", exception) | ("lost", None) (its worker
-    process died) | ("timeout", None). A dead worker loses only the task it was running: a sibling
-    that is still computing is never aborted because another worker died (review L23). A task
-    whose worker died before it could report its start is only noticed at the deadline."""
+    process died) | ("broken", cause) (the pool can no longer run it, below) | ("timeout", None).
+    A dead worker loses only the task it was running: a sibling that is still computing is never
+    aborted because another worker died (review L23). ``control`` cancelled (the caller is gone):
+    SolveAborted within half a second.
+
+    Rule 22 (review): a broken pool is noticed at once, not at the deadline (for a thorough plan
+    the 20-minute cap). A task that has not started, or lost its process, is "broken" when the pool
+    can no longer start a replacement process (_Workers.broken), or when it has waited to start for
+    worker_start_sec() while a worker process was free: a worker that died waiting for a task left
+    the task queue locked, and no process can take a task again. A task still running in a live
+    worker process goes on."""
     out: dict[str, tuple[str, object]] = {}
     pending = dict(jobs)
     base = workers.pids()
+    control = control if control is not None else getattr(workers, "control", None)
+    free_since: float | None = None  # since when a task waits to start while a worker is free
     while pending:
+        if control is not None and control.cancelled.is_set():
+            raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
         for name, (_tok, fut) in list(pending.items()):
             if fut.ready():  # type: ignore[attr-defined]
                 try:
@@ -1474,23 +2146,51 @@ def _await_all(workers: _Workers, jobs: dict[str, tuple[str, object]], deadline:
             break
         next(iter(pending.values()))[1].wait(min(0.5, remaining))  # type: ignore[attr-defined]
         now = workers.pids()
-        if base is None or now is None or now == base:
-            continue
-        dead = base - now
         started = workers.started()
+        lost_now: list[str] = []
+        if base is not None and now is not None and now != base:
+            dead = base - now
+            for name, (tok, fut) in list(pending.items()):
+                if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
+                    out[name] = ("lost", None)
+                    del pending[name]
+                    lost_now.append(name)
+            base = now
+        cause = workers.broken(settle=0.5 if lost_now else 0.0)
+        if cause is None and now is not None:
+            waiting = any(tok not in started and not fut.ready() for tok, fut in pending.values())  # type: ignore[attr-defined]
+            if waiting and workers.busy(now) < workers.size:
+                free_since = time.monotonic() if free_since is None else free_since
+                if time.monotonic() - free_since >= worker_start_sec():
+                    cause = workers.mark_broken(
+                        f"no worker process took a task for {worker_start_sec():g} s although one was free: a worker "
+                        "process that died may have left the task queue locked")
+            else:
+                free_since = None
+        if cause is None:
+            continue
+        for name in lost_now:
+            out[name] = ("broken", cause)
         for name, (tok, fut) in list(pending.items()):
-            if not fut.ready() and started.get(tok) in dead:  # type: ignore[attr-defined]
-                out[name] = ("lost", None)
+            pid = started.get(tok)
+            if not fut.ready() and (pid is None or (now is not None and pid not in now)):  # type: ignore[attr-defined]
+                out[name] = ("broken", cause)
                 del pending[name]
-        base = now
     return out
 
 
+# How the log says why a pool task was not run (_await_all's "lost" and "broken").
+_NOT_RUN = {"lost": "lost its worker", "broken": "could not run, the worker pool broke"}
+
+
 def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, what: str):
-    """Wait for one pool task; fail fast when ITS worker process dies (e.g. out of memory)."""
+    """Wait for one pool task; fail fast when ITS worker process dies (e.g. out of memory), and with
+    rule 22's WorkersUnavailable (503) when the pool broke (_await_all)."""
     kind, value = _await_all(workers, {what: job}, deadline)[what]
     if kind == "ok":
         return value
+    if kind == "broken":
+        raise WorkersUnavailable(str(value))
     if kind == "error":
         raise value  # type: ignore[misc]
     if kind == "lost":
@@ -1498,61 +2198,89 @@ def _await_worker(workers: _Workers, job: tuple[str, object], deadline: float, w
     raise SolveAborted(f"The optimizer did not finish the {what} in time. Try again, or plan fewer stops at once.")
 
 
-def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None) -> list[DispatchScenario]:
+def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end: float | None = None, *,
+                   control: SolveControl | None = None, state: dict | None = None,
+                   workers: _Workers | None = None) -> list[DispatchScenario]:
     """RECOMMENDED is solved first with the full time budget. Alternatives are then warm-started
     from it with half the budget. Finally the post-solve stage (_post_solve) re-assigns the
     searches' loads and picks each scenario's plan from all of them, so unless it serves more,
     MIN_DISTANCE never drives more km and MIN_TRUCKS never uses more trucks than the
     recommendation.
 
-    Every scenario runs in a worker process. OR-Tools holds the GIL for the whole search, so a
-    solve inside the API process froze it completely - /health, /route-geometry and every other
-    request - for up to four minutes; threads would not run scenarios concurrently either.
+    THOROUGH (config.search_mode): the same steps inside one deadline, the cap (budget_end).
+    RECOMMENDED searches until thorough_tail_sec before it - or less, once it stops improving
+    (_watch_search) - and the alternatives and the load re-check then get THOROUGH's longer times,
+    shortened to what is left. ``control``: cancel (SolveAborted) or "use the best plan found so
+    far" (the alternatives are skipped, the re-check runs as QUICK's). ``state`` receives
+    RECOMMENDED's search limit, search time, status and its THOROUGH watch report (SearchReport).
+
+    Every scenario runs in a worker process of ``workers``, the pool optimize_dispatch started (and
+    proved to run a task) before the road matrix, rule 22. OR-Tools holds the GIL for the whole
+    search, so a solve inside the API process froze it completely - /health, /route-geometry and
+    every other request - for up to four minutes (20 and more for THOROUGH); threads would not run
+    scenarios concurrently either. This function closes the pool when it ends.
 
     Safety net: alternatives are optional. Each worker gets a hard wall-clock deadline; a worker
     that overruns (OR-Tools occasionally ignores its own time limit inside internal restores),
     fails, dies or would run past the request's time budget is terminated / not started and the
     alternative is skipped with a warning. The RECOMMENDED plan is never lost because of an
-    alternative. Every returned scenario carries its feasibility report (_build_scenario).
+    alternative. Every returned scenario carries its feasibility report (_build_scenario). When
+    the fresh workers for the load re-check cannot start, the plans found are kept, re-timed
+    exactly (_retime_fallback, milliseconds): no CP-SAT solve runs in the API process.
 
-    SOLVER_PARALLEL=0 solves everything in-process WITHOUT any deadline or time budget: for local
-    development and tests only (main.py logs a warning at startup when it is set).
+    ``workers`` None solves everything in-process WITHOUT any deadline or time budget: nothing to
+    search, SOLVER_PARALLEL=0, or SOLVER_ALLOW_INPROCESS_FALLBACK=1 after a failed pool start - for
+    local development and tests only (main.py logs a warning at startup when either is set).
     """
+    global _STOP_FLAG
     if budget_end is None:
         budget_end = time.monotonic() + SOLVER_BUDGET_SEC
+    mode = req.config.search_mode
+    thorough = mode == "THOROUGH"
+    state = state if state is not None else {}
     results: dict[str, DispatchScenario] = {}
     alt_names = [n for n in names if n != "RECOMMENDED"]
-    workers: _Workers | None = None
-    if solvable and os.environ.get("SOLVER_PARALLEL", "1") != "0":
-        try:
-            # One process per alternative (at most two), even on 1-2 vCPU servers: with a shared
-            # worker a stuck alternative starved the next one, which then hit the same deadline
-            # without ever starting. OR-Tools limits are wall-clock, so sharing a core only
-            # lowers quality, never the deadline. RECOMMENDED runs first in one of them, so the
-            # alternatives' workers have finished starting by the time they are needed.
-            workers = _Workers(max(1, len(alt_names)))
-        except Exception as exc:  # noqa: BLE001 - e.g. restricted environments without processes
-            log.warning("worker processes unavailable (%s); solving in-process", exc)
+    no_stage_workers = False  # rule 22: the load re-check's fresh workers could not start
     skipped: list[str] = []
     staged: set[str] = set()  # scenarios the post-solve stage replaced by an exactly timed plan
+    stop_flag_before = _STOP_FLAG
+    if workers is None and control is not None:
+        _STOP_FLAG = control.stop_requested  # in-process searches see a stop request too
+    stopped = False
+    # THOROUGH: the alternatives' and the load re-check's times, the ones RECOMMENDED's limit keeps free.
+    tail = thorough_tail(time_limit, len(alt_names), thorough_cap_sec(req.config)) if thorough else None
     try:
         warm = None
         if "RECOMMENDED" in names:
             # A slow road matrix eats into the budget: shorten the search rather than overrun it.
-            rec_limit = max(1, min(time_limit, int(budget_end - time.monotonic()) - REC_OVERHEAD_SEC))
+            rec_limit = rec_limit_sec(mode, time_limit, budget_end - time.monotonic(), len(alt_names),
+                                      thorough_cap_sec(req.config) if thorough else None)
             job = ("RECOMMENDED", req, solvable, tds, mx, rec_limit, drops)
             if workers is None:
-                results["RECOMMENDED"] = _scenario_worker(job)
+                results["RECOMMENDED"], watch = _searched(job)
             else:
                 deadline = min(time.monotonic() + rec_limit * 2 + REC_GRACE_SEC, budget_end)
-                results["RECOMMENDED"] = _await_worker(workers, workers.submit(_scenario_worker, job, "RECOMMENDED"),
-                                                       deadline, "recommended plan")
+                results["RECOMMENDED"], watch = _await_worker(workers, workers.submit(_searched, job, "RECOMMENDED"),
+                                                              deadline, "recommended plan")
+            state.update(limit=rec_limit, search_sec=results["RECOMMENDED"].solver_time_sec, watch=watch,
+                         status=results["RECOMMENDED"].status)
             warm = results["RECOMMENDED"].loads or None
-        alt_limit = max(2, time_limit // 2) if warm else time_limit
+        stopped = thorough and control is not None and control.stop_requested.is_set()
+        if tail is not None:
+            alt_limit = tail.alt_sec if warm else time_limit
+        else:
+            alt_limit = max(2, time_limit // 2) if warm else time_limit
         grace = int(os.environ.get("SOLVER_ALT_GRACE_SEC", ALT_GRACE_SEC))
+        if alt_names and stopped:
+            # "Use the best plan found so far": the recommended plan now, no more searching.
+            skipped.extend(alt_names)
+            alt_names = []
+            log.info("search stopped on request; alternatives skipped")
         if alt_names:
-            # Never run past the request budget: shorten the alternatives, or skip them.
-            room = int(budget_end - time.monotonic()) - grace
+            # Never run past the request budget: shorten the alternatives, or skip them. THOROUGH
+            # also keeps the load re-check's time free (it has one deadline, the cap) - the same
+            # time the tail kept for it, so the alternatives get the rest of the tail.
+            room = int(budget_end - time.monotonic()) - grace - (tail.stage_sec if tail is not None else 0)
             if room < 2:
                 skipped.extend(alt_names)
                 alt_names = []
@@ -1576,7 +2304,7 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                     overran = True
                     log.warning("alternative %s exceeded %ss; skipped", name, alt_limit + grace)
                 else:
-                    log.warning("alternative %s %s (%s); skipped", name, "lost its worker" if kind == "lost" else "failed", value)
+                    log.warning("alternative %s %s (%s); skipped", name, _NOT_RUN.get(kind, "failed"), value)
         else:
             for j in jobs:
                 try:
@@ -1584,18 +2312,34 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
                 except Exception as exc:  # noqa: BLE001 - an alternative never costs the recommended plan
                     skipped.append(j[0])
                     log.warning("alternative %s failed (%s); skipped", j[0], exc)
-        if overran and workers is not None:
+        if workers is not None and (overran or workers.broken()):
             # A skipped alternative still runs in its worker (a stuck OR-Tools call does not stop
-            # on request): the post-solve jobs would queue behind it and time out, and RECOMMENDED
-            # would lose its load re-check. Give the stage fresh workers.
+            # on request), or the pool broke (rule 22: no process can take a task any more): the
+            # post-solve jobs would queue behind it and time out, and RECOMMENDED would lose its
+            # load re-check. Give the stage fresh workers. Closing the old pool is bounded; when it
+            # does not finish, the stage still starts (or the plans are re-timed, below).
             workers.close()
             workers = None
             try:
-                workers = _Workers(len(_stage_goals(results)))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("worker processes unavailable (%s); load re-check in-process", exc)
+                # None: the in-process fallback is allowed (development and tests only).
+                workers = _start_workers(len(_stage_goals(results)), control, req.run_id, "load re-check")
+            except WorkersUnavailable:
+                # Rule 22: never a CP-SAT solve in the API process. Failing the request would throw
+                # the finished recommended plan away: it is kept, re-timed exactly (below).
+                no_stage_workers = True
+                log.warning("run=%s load re-check skipped (no worker processes); the plans found are kept and "
+                            "re-timed exactly", req.run_id)
+        # THOROUGH: longer CP-SAT solves in the load re-check (QUICK's after a stop request).
+        stopped = stopped or (thorough and control is not None and control.stop_requested.is_set())
+        stage_kw = {"repack_cap": _repack_cap_sec(time_limit, False) if stopped else tail.repack_cap} if tail is not None else {}
         try:
-            _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged)
+            if no_stage_workers:
+                # The dispatcher's note in plain words; the technical cause is in the ERROR line.
+                _retime_fallback(req, solvable, tds, mx, drops, results, NO_WORKERS_NOTE, skip=staged)
+            else:
+                _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
+        except SolveAborted:
+            raise  # cancelled: the caller is gone, nothing to fall back to
         except Exception as exc:  # noqa: BLE001 - the search's own plans stay valid
             log.exception("post-solve stage failed: %s", exc)
             # Only the scenarios the stage had not replaced yet: one it already re-timed exactly
@@ -1603,11 +2347,14 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             # from warning texts, review: exact-timing status never exposed per scenario).
             _retime_fallback(req, solvable, tds, mx, drops, results, "internal error", skip=staged)
     finally:
+        _STOP_FLAG = stop_flag_before
         if workers is not None:
             workers.close()
     rec = results.get("RECOMMENDED")
     if skipped and rec:
         rec.warnings.append(
+            f"Alternative plan(s) {', '.join(skipped)} were skipped: the search was stopped early to use the best plan found so far; the recommended plan is complete."
+            if stopped else
             f"Alternative plan(s) {', '.join(skipped)} were skipped (out of time, or they failed); the recommended plan is complete."
         )
     if rec:
@@ -1757,7 +2504,7 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
 
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
-                budget_end: float, done: set[str] | None = None) -> None:
+                budget_end: float, done: set[str] | None = None, repack_cap: float | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -1775,7 +2522,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     When the stage cannot run or check a plan (out of time, its job failed, died or timed out),
     the raw plans get the safety net (_retime_fallback): re-timed exactly when possible, otherwise
     kept with a warning and a VIOLATED / VERIFIED feasibility report from the independent check.
-    Every scenario it replaces is added to ``done``."""
+    Every scenario it replaces is added to ``done``. ``repack_cap``: seconds per CP-SAT solve
+    (THOROUGH, _repack_cap_sec); None = QUICK's min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, limit / 2))."""
     done = done if done is not None else set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED"}
     if not raw or not solvable:
@@ -1790,7 +2538,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     optional = _repair_weights(solvable, left_out, cfg) if left_out else None
     rec_pricing = ctx.rec_pricing
     goals = _stage_goals(raw)
-    cap = min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
+    cap = repack_cap if repack_cap is not None else min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
 
     def fallback(why: str) -> None:
@@ -1824,7 +2572,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             if kind == "ok":
                 outputs[g] = value  # type: ignore[assignment]
             else:
-                log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out"}.get(kind, "failed"),
+                log.warning("post-solve %s %s%s", g, {"lost": "lost its worker process", "timeout": "timed out",
+                                                      "broken": _NOT_RUN["broken"]}.get(kind, "failed"),
                             f": {value}" if value is not None else "")
     stage_sec = time.monotonic() - t0
     if "RECOMMENDED" not in outputs:  # the raw plans were not re-timed either

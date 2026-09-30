@@ -196,6 +196,14 @@ class DispatchConfig(BaseModel):
             raise ValueError("priority_weights must be positive")
         return self
 
+    # How long to search (owner decision 29 Sep 2026: "night plans long, day re-plans quick").
+    # QUICK (default): the automatic time by day size (dispatch_solver.auto_time_limit), exactly as
+    # before. THOROUGH: the whole request may take up to max_search_sec (at most the solver's own
+    # THOROUGH_MAX_SEC, 1200 s = 20 min); the recommended plan's search stops early once it stops
+    # improving (dispatch_solver.StallRule). Optional and additive: an older web never sends them.
+    search_mode: Literal["QUICK", "THOROUGH"] = "QUICK"
+    max_search_sec: int | None = Field(default=None, ge=10, le=3600)
+
 
 class DispatchRequest(BaseModel):
     run_id: str
@@ -438,6 +446,43 @@ class DispatchResponse(BaseModel):
     distance_quality: Literal["ROAD", "MIXED", "ESTIMATED"] | None = None
     scenarios: list[DispatchScenario]
     warnings: list[str] = Field(default_factory=list)
+    # How the recommended plan was searched (QUICK / THOROUGH). None from a solver before it.
+    search: SearchReport | None = None
+
+
+class SearchReport(BaseModel):
+    """How long the recommended plan was searched and why the search stopped (owner request 29 Sep
+    2026). Never a claim of optimality: GUIDED_LOCAL_SEARCH proves no bound, so no gap is given.
+
+    stop_reason: TIME_LIMIT = QUICK, the automatic time by day size; CONVERGED = THOROUGH, stopped
+    once it had not improved for stall_sec (or the search ended by itself); CAP = THOROUGH, the
+    time limit (cap_sec for the whole request) was reached while it was still improving; STOPPED =
+    a supervisor asked for the best plan found so far. Either mode: NOT_SEARCHED = no search ran
+    (every stop was left out before it: RECOMMENDED is NOTHING_TO_PLAN); NO_PLAN = the search ended
+    without any plan (RECOMMENDED is NO_SOLUTION)."""
+
+    mode: Literal["QUICK", "THOROUGH"]
+    # The whole request's time budget: THOROUGH its cap; QUICK the solver's request budget.
+    cap_sec: int
+    # The recommended plan's search time limit (seconds).
+    limit_sec: int
+    # The recommended plan's search, and the whole request (road matrix, searches, load re-check).
+    search_sec: float
+    used_sec: float
+    stop_reason: Literal["TIME_LIMIT", "CONVERGED", "CAP", "STOPPED", "NOT_SEARCHED", "NO_PLAN"]
+    # THOROUGH: when the best plan was last improved (seconds into the search), and the stall that
+    # stops the search at that moment of the search.
+    last_improvement_sec: float | None = None
+    stall_sec: float | None = None
+    # THOROUGH: at most 12 (seconds into the search, search objective, stops not planned yet) points of
+    # the best plan found so far. The search objective is the route search's own score, not money: its
+    # cost and preferences plus a large penalty (1,000 OMR or more on real days) for each stop not planned yet, before
+    # the final load re-check. Reports from before the count have two values per point.
+    best_over_time: list[tuple[float, float, int] | tuple[float, float]] = Field(default_factory=list)
+    solutions: int | None = None
+
+
+DispatchResponse.model_rebuild()
 
 
 class GeometryRequest(BaseModel):

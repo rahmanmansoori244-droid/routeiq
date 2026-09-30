@@ -19,6 +19,9 @@ export async function register() {
     }
     const { startJanitor } = await import('./lib/jobs/janitor-loop');
     startJanitor();
+    // A deploy stops this process: optimizations running in it are failed at once, retryable.
+    const { installShutdownHandler } = await import('./lib/jobs/shutdown');
+    installShutdownHandler();
   } else if (process.env.NEXT_RUNTIME === 'edge') {
     await import('./sentry.edge.config');
   }

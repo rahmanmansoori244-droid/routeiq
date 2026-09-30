@@ -43,7 +43,7 @@ def test_second_concurrent_dispatch_gets_503_and_the_slot_comes_back(monkeypatch
     entered = threading.Event()
     release = threading.Event()
 
-    def blocking_solve(_req):
+    def blocking_solve(_req, **_kw):
         entered.set()
         assert release.wait(20), "test did not release the first solve"
         raise SolveAborted("test: first solve released")
@@ -69,7 +69,7 @@ def test_second_concurrent_dispatch_gets_503_and_the_slot_comes_back(monkeypatch
     # Its slot was given back: the next solve is admitted again.
     calls = []
 
-    def quick_solve(_req):
+    def quick_solve(_req, **_kw):
         calls.append(1)
         raise SolveAborted("test: quick")
 

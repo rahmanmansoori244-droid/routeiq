@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { withTenantApi, parseBody } from '@/lib/api';
-import { isoDateSchema } from '@/lib/schemas';
+import { isoDateSchema, searchModeSchema } from '@/lib/schemas';
 import { replan } from '@/lib/dispatch/start-optimize';
 import { startResponse } from '@/lib/dispatch/start-response';
 
@@ -13,6 +13,8 @@ const schema = z.object({
   allowMissingWeights: z.boolean().optional(),
   /** The day and depot on the dispatcher's screen: a plan of another day answers 409 DAY_MISMATCH. */
   expect: z.object({ date: isoDateSchema, depotId: z.string().min(1) }).optional(),
+  /** Quick or Thorough (absent: QUICK, as before search modes; the screens pre-select by day - requestedSearchMode, search-mode.ts). */
+  searchMode: searchModeSchema.optional(),
 });
 
 // POST /api/runs/:id/replan - create plan version N+1 (a usable copy of this plan: locked,
@@ -32,6 +34,8 @@ export const POST = (req: Request, { params }: Params) =>
         ip,
         { allowMissingLocations: input.allowMissingLocations, allowMissingWeights: input.allowMissingWeights },
         input.expect,
+        {},
+        input.searchMode,
       );
       return startResponse(res);
     },

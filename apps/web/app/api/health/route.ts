@@ -23,7 +23,10 @@ async function checkDb(): Promise<'up' | 'down'> {
  *   is not plain ASCII, the solver refuses the token with 401, or the solver has no token) - a
  *   deploy with this fault fails its health check and the previous version keeps serving;
  * - 200 `degraded` (`ok: false`): the solver could not be asked (unreachable, timeout, an older
- *   solver, an error or a redirect in front of it) - alert, but do not block the deploy;
+ *   solver, an error or a redirect in front of it), or its worker processes could not start, or
+ *   stopped, recently (rule 22, `SOLVER_WORKERS_FAILED`: an optimization was refused, or a plan's
+ *   load re-check was skipped) - alert, but do not
+ *   block the deploy;
  * - 200 `ready` (`ok: true`).
  * It never starts an optimization. `routing` and `email` are informational and never change the
  * answer: without OSRM plans still work (distances labelled estimated) - alert on

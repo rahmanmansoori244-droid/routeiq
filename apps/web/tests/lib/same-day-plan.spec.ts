@@ -18,7 +18,7 @@ const fake = vi.hoisted(() => ({ prisma: {} as Record<string, any>, tdb: {} as R
 vi.mock('@/lib/db', () => ({ prisma: new Proxy({}, { get: (_t, k: string) => (k === 'then' ? undefined : fake.prisma[k]) }) }));
 vi.mock('@/lib/tenant', () => ({ tenantDb: () => fake.tdb }));
 
-import { buildDispatchRequest, planInputsOf } from '@/lib/dispatch/plan-service';
+import { buildDispatchRequest, planInputsOf, retimeSameDay } from '@/lib/dispatch/plan-service';
 import { fmtPlanTime, planFromAssumption, planFromWarning, sameDayPlanFrom } from '@/lib/dispatch/plan-from';
 import { checkPlanFeasibility, type FeasLoad } from '@/lib/dispatch/feasibility';
 import { rulesFrom, type PlanRules } from '@/lib/dispatch/snapshots';
@@ -356,5 +356,91 @@ describe('the plan says so: ASSUMPTIONS and Settings', () => {
     const rows = effectivePlannerValues(CFG as never, 'Oman', 'OMR');
     expect(rows.find((r) => r.label === 'First departure (earliest)')!.note).toMatch(/delivery day itself starts from now \+ 30 min \(the turnaround between loads\)/);
     expect(rows.find((r) => r.label === 'Turnaround between loads')!.note).toMatch(/preparation time of a plan made on the delivery day/);
+  });
+});
+
+describe('a same-day THOROUGH plan cannot be used before its search ends (review of the long-search PR)', () => {
+  const base = { runDateIso: DAY, timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 30 };
+  const AT_0515 = new Date(`${DAY}T01:15:00Z`);
+  const LOADING = { perCase: 0.04, exampleCases: 800 };
+
+  it('sameDayPlanFrom: new loads count from now + the search time + the preparation; without a search as before', () => {
+    expect(sameDayPlanFrom(base, AT_0900, 20)).toEqual({ nowMin: 540, prepMin: 30, fromMin: 590, searchMin: 20 });
+    expect(sameDayPlanFrom(base, AT_0900, 0)).toEqual({ nowMin: 540, prepMin: 30, fromMin: 570 });
+    expect(sameDayPlanFrom(base, AT_0900)).toEqual({ nowMin: 540, prepMin: 30, fromMin: 570 });
+    // 05:15 + 20 min search + 30 min = 06:05: after the 06:00 first departure (Quick: 05:45, nothing moves).
+    expect(sameDayPlanFrom(base, AT_0515, 20)).toEqual({ nowMin: 315, prepMin: 30, fromMin: 365, searchMin: 20 });
+    expect(sameDayPlanFrom(base, AT_0515)).toBeNull();
+    // Another day: nothing; never past the end of the delivery day.
+    expect(sameDayPlanFrom(base, DAY_BEFORE_0900, 20)).toBeNull();
+    expect(sameDayPlanFrom(base, new Date(`${DAY}T19:45:00Z`), 20)?.fromMin).toBe(1440);
+  });
+
+  it('the plan warning and the ASSUMPTIONS row say the loads wait for the search, in plain words', () => {
+    const p = sameDayPlanFrom(base, AT_0900, 20)!;
+    expect(planFromWarning(p, null, LOADING)).toBe(
+      'Planned from 09:50 (now 09:00 + up to 20 min Thorough search + 30 min preparation): the plan is for today and cannot be used before its search ends, so no new load leaves the depot before 09:50. Loading starts when the search ends, so each new load also waits for its own loading time, 0.04 min per case: a full 800-case truck leaves at 10:22 at the earliest. Locked, loading and dispatched loads keep their times; a truck still out leaves again only after it is back and turned around.',
+    );
+    expect(planFromAssumption(p, 0.04)).toBe(
+      '09:50 - planned on the delivery day at 09:00 with a Thorough search of up to 20 min: no new load leaves before the search ends + 30 min preparation (the turnaround between loads) + 0.04 min loading per case of that load. Locked, loading and dispatched loads keep their times.',
+    );
+    // Quick: the texts are exactly the ones from before.
+    expect(planFromWarning({ nowMin: 540, prepMin: 30, fromMin: 570 }, null)).toMatch(/^Planned from 09:30 \(now 09:00 \+ 30 min preparation\): the plan is for today, so no new load/);
+  });
+
+  it('retimeSameDay (a THOROUGH start): the first departure, loading, warning and settings move by the search time; QUICK and a later day never change', async () => {
+    const b = await buildDispatchRequest('TEN', 'R2', undefined, { now: AT_0900 });
+    const quick = JSON.stringify(b);
+    expect(retimeSameDay(b, AT_0900, 0)).toBe(false);
+    expect(JSON.stringify(b)).toBe(quick);
+
+    expect(retimeSameDay(b, AT_0900, 20)).toBe(true);
+    expect(b.request.config.shift_start_min).toBe(590); // 09:00 + 20 min search + 30 min turnaround
+    expect(b.request.config.loading_from_min).toBe(560); // loading starts when the search ends
+    expect(b.warnings.filter((w) => w.startsWith('Planned'))).toEqual([expect.stringMatching(/^Planned from 09:50 \(now 09:00 \+ up to 20 min Thorough search/)]);
+    expect(b.settings).toMatchObject({ planFrom: { nowMin: 540, prepMin: 30, fromMin: 590, searchMin: 20 }, loadingFromMin: 560, searchLeadMin: 20 });
+    expect(planInputsOf(b, 'job-1', AT_0900)!.config).toMatchObject({ shift_start_min: 590, loading_from_min: 560 });
+
+    // The job got its solver slot 25 minutes later (queued behind another Thorough): timed from then.
+    expect(retimeSameDay(b, new Date(AT_0900.getTime() + 25 * 60_000), 20)).toBe(true);
+    expect(b.request.config.shift_start_min).toBe(615);
+    expect(b.request.config.loading_from_min).toBe(585);
+    expect(b.warnings.filter((w) => w.startsWith('Planned'))).toEqual([expect.stringMatching(/^Planned from 10:15 \(now 09:25 \+ up to 20 min/)]);
+
+    // A plan for the next day: nothing changes (the first loads are loaded before the shift).
+    const next = await buildDispatchRequest('TEN', 'R2', undefined, { now: DAY_BEFORE_0900 });
+    const nextBefore = JSON.stringify(next);
+    expect(retimeSameDay(next, DAY_BEFORE_0900, 20)).toBe(false);
+    expect(JSON.stringify(next)).toBe(nextBefore);
+    // ... unless its job only starts after midnight, on the delivery day: loading then starts when its search ends.
+    expect(retimeSameDay(next, new Date('2026-10-04T20:30:00Z'), 20)).toBe(true); // 00:30 on the 5th
+    expect(next.request.config).toMatchObject({ shift_start_min: 360, loading_from_min: 50 });
+  });
+
+  it('a same-day plan whose job only starts after the delivery day ended plans nothing more that day (never 06:00 of a past day)', async () => {
+    const late = await buildDispatchRequest('TEN', 'R2', undefined, { now: new Date(`${DAY}T19:30:00Z`) }); // 23:30
+    expect(retimeSameDay(late, new Date(`${DAY}T20:10:00Z`), 20)).toBe(true); // 00:10 the next day
+    expect(late.request.config).toMatchObject({ shift_start_min: 1440, loading_from_min: 1440 });
+    expect(late.warnings[0]).toMatch(/no new load can leave today/);
+  });
+
+  it('before the first departure: the "Loading from" warning and ASSUMPTIONS row count the search too', async () => {
+    const early = await buildDispatchRequest('TEN', 'R2', undefined, { now: new Date(`${DAY}T00:00:00Z`) }); // 04:00
+    expect(retimeSameDay(early, new Date(`${DAY}T00:00:00Z`), 20)).toBe(true);
+    expect(early.request.config).toMatchObject({ shift_start_min: 360, loading_from_min: 260 }); // 04:00 + 20 min
+    // 04:20 + 30 min + 0.04 x 800 = 05:22: before 06:00, so no warning; the ASSUMPTIONS row says it.
+    expect(early.warnings.some((w) => w.startsWith('Planned'))).toBe(false);
+    const rows = tenantAssumptions(early.settings!, { currency: 'OMR', providerUsed: 'HAVERSINE', distanceIsEstimated: true });
+    expect(rows['Loading from (plan made on the delivery day)']).toBe(
+      '04:20 - planned on the delivery day at 04:00 with a Thorough search of up to 20 min: loading starts when the search ends, so no new load leaves before then + 30 min turnaround + 0.04 min per case of that load (nor before the first departure).',
+    );
+    wire({ cfg: { reloadMinutes: 10 } });
+    const tight = await buildDispatchRequest('TEN', 'R2', undefined, { now: new Date(`${DAY}T01:00:00Z`) }); // 05:00, 10 min turnaround
+    expect(retimeSameDay(tight, new Date(`${DAY}T01:00:00Z`), 20)).toBe(true);
+    // 05:00 + 20 + 10 = 05:30 (before 06:00: no "Planned from"), but a full truck: 05:30 + 32 min = 06:02.
+    expect(tight.warnings[0]).toBe(
+      'Planned on the delivery day at 05:00 with a Thorough search of up to 20 min: loading starts when the search ends (05:20 at the latest), so a new load leaves no earlier than then + 10 min turnaround + 0.04 min per case of its load - a full 800-case truck at 06:02, although the first departure is 06:00.',
+    );
+    expect(tight.request.config.loading_from_min).toBe(320);
   });
 });

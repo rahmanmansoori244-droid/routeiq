@@ -22,6 +22,12 @@
  * made early on the delivery day, before the first departure (05:15 for 06:00: a full truck may
  * leave after 06:00). A plan for a later day still loads its first loads before the shift starts.
  *
+ * A same-day THOROUGH search (search-mode.ts; review of the long-search PR) runs for up to its cap
+ * (20 min) before the plan exists, so "now" is not when its loads can start: they count from the end
+ * of the search at the latest - the job's real start (after any wait for a solver slot) + the cap
+ * (`searchMin`). Loading starts then too. QUICK (seconds to a couple of minutes, inside the
+ * preparation time) keeps counting from now, exactly as before.
+ *
  * Pure: no database; `now` is a parameter so tests can fix the clock.
  */
 import { DEFAULT_TZ, fmtHhmm, localDateIso, localMinutes } from './time';
@@ -33,8 +39,13 @@ export interface PlanFrom {
   nowMin: number;
   /** Preparation time added to now: the company's turnaround between loads. */
   prepMin: number;
-  /** No new load leaves the depot before this: now + preparation, at most 24:00. */
+  /** No new load leaves the depot before this: now (+ the search) + preparation, at most 24:00. */
   fromMin: number;
+  /**
+   * A same-day THOROUGH search of up to this many minutes runs before the plan exists: its loads
+   * count from its end. Absent: none (QUICK, and every plan stored before it was kept).
+   */
+  searchMin?: number;
 }
 
 export interface PlanFromInput {
@@ -56,7 +67,7 @@ export interface PlanLoading {
 }
 
 /** A usable IANA timezone: the company's, or Asia/Muscat when it is empty or unknown to the runtime. */
-function zoneOf(tz: string | null | undefined): string {
+export function zoneOf(tz: string | null | undefined): string {
   if (!tz) return DEFAULT_TZ;
   try {
     new Intl.DateTimeFormat('en-GB', { timeZone: tz });
@@ -76,18 +87,63 @@ export function planDayNowMin(runDateIso: string, timezone: string | null | unde
   return localDateIso(now, tz) === runDateIso ? localMinutes(now, tz) : null;
 }
 
+/** Whole minutes of search counted before a same-day plan's loads (0 = none). */
+const wholeMin = (m: number | null | undefined) => Math.max(0, Math.ceil(m || 0));
+
 /**
  * The start of a plan built at `now` for `runDateIso`, or null when nothing changes: the plan is
- * not for today in the company's timezone (a future day, or a past one), or now + preparation is
- * not later than the day's normal first departure.
+ * not for today in the company's timezone (a future day, or a past one), or now (+ `searchMin`, a
+ * same-day THOROUGH search) + preparation is not later than the day's normal first departure.
  */
-export function sameDayPlanFrom(input: PlanFromInput, now: Date): PlanFrom | null {
-  const nowMin = planDayNowMin(input.runDateIso, input.timezone, now);
+export function sameDayPlanFrom(input: PlanFromInput, now: Date, searchMin = 0): PlanFrom | null {
+  return planFromAt(input, planDayNowMin(input.runDateIso, input.timezone, now), searchMin);
+}
+
+function planFromAt(input: PlanFromInput, nowMin: number | null, searchMin: number): PlanFrom | null {
   if (nowMin === null) return null;
+  const search = wholeMin(searchMin);
   const prepMin = Math.max(0, Math.round(input.prepMin || 0));
-  const fromMin = Math.min(DAY_MIN, nowMin + prepMin);
+  const fromMin = Math.min(DAY_MIN, nowMin + search + prepMin);
   if (fromMin <= input.firstDepartureMin) return null;
-  return { nowMin, prepMin, fromMin };
+  return search ? { nowMin, prepMin, fromMin, searchMin: search } : { nowMin, prepMin, fromMin };
+}
+
+/** What a plan's first departure and loading depend on, beyond the clock (buildDispatchRequest). */
+export interface SameDayInput extends PlanFromInput {
+  /** The depot's closing time (null / 0 = open all day), for the warning. */
+  depotCloseMin?: number | null;
+  loading: PlanLoading;
+}
+
+/** A plan's same-day times at one moment: what the request, the warning and the settings carry. */
+export interface SameDayTiming {
+  /** The first departure moved to now (+ search) + preparation, or null (not today, or not later). */
+  planFrom: PlanFrom | null;
+  /** loading_from_min: when loading of new loads can start on the delivery day (null: another day). */
+  loadingFromMin: number | null;
+  /** The minutes of search counted before the loads (0 unless a same-day THOROUGH). */
+  searchMin: number;
+  /** The plan warning about it (planFromWarning or loadingFromWarning), or null. */
+  warning: string | null;
+}
+
+/**
+ * The same-day times of a plan made at `now` (the one rule for the start and the job): the first
+ * departure, loading_from_min and the warning, with `searchMin` minutes of THOROUGH search counted
+ * before the loads. `wasSameDay`: the plan was already for today when its request was built, so a
+ * job that only starts after the delivery day ended plans nothing more that day (24:00) - never from
+ * 06:00 of a day that is over.
+ */
+export function sameDayTiming(input: SameDayInput, now: Date, searchMin = 0, opts: { wasSameDay?: boolean } = {}): SameDayTiming {
+  let nowMin = planDayNowMin(input.runDateIso, input.timezone, now);
+  if (nowMin === null && opts.wasSameDay && localDateIso(now, zoneOf(input.timezone)) > input.runDateIso) nowMin = DAY_MIN;
+  if (nowMin === null) return { planFrom: null, loadingFromMin: null, searchMin: 0, warning: null };
+  const search = wholeMin(searchMin);
+  const planFrom = planFromAt(input, nowMin, search);
+  const warning = planFrom
+    ? planFromWarning(planFrom, input.depotCloseMin, input.loading)
+    : loadingFromWarning(nowMin, input.prepMin, input.firstDepartureMin, input.loading, search);
+  return { planFrom, loadingFromMin: Math.min(DAY_MIN, nowMin + search), searchMin: search, warning };
 }
 
 /** 570 -> "09:30"; 1440 -> "24:00" (the end of the delivery day, not the next day). */
@@ -108,15 +164,19 @@ export function planFromWarning(p: PlanFrom, depotCloseMin?: number | null, load
   const close = depotCloseMin && depotCloseMin > 0 ? depotCloseMin : DAY_MIN;
   const closed = p.fromMin >= close;
   const ex = exampleOf(loading);
+  const search = p.searchMin ?? 0;
   const load =
     !closed && loading && loading.perCase > 0
-      ? ` Loading starts now too, so each new load also waits for its own loading time, ${loading.perCase} min per case` +
+      ? ` ${search ? 'Loading starts when the search ends' : 'Loading starts now too'}, so each new load also waits for its own loading time, ${loading.perCase} min per case` +
         (ex ? `: a full ${ex}-case truck leaves at ${fmtHhmm(p.fromMin + loading.perCase * ex)} at the earliest.` : '.')
       : '';
   const tail = closed
     ? ` The depot closes at ${fmtPlanTime(close)}, so no new load can leave today: open orders stay unserved.`
     : ' Locked, loading and dispatched loads keep their times; a truck still out leaves again only after it is back and turned around.';
-  return `Planned from ${from} (now ${fmtHhmm(p.nowMin)} + ${p.prepMin} min preparation): the plan is for today, so no new load leaves the depot before ${from}.${load}${tail}`;
+  const why = search
+    ? `(now ${fmtHhmm(p.nowMin)} + up to ${search} min Thorough search + ${p.prepMin} min preparation): the plan is for today and cannot be used before its search ends`
+    : `(now ${fmtHhmm(p.nowMin)} + ${p.prepMin} min preparation): the plan is for today`;
+  return `Planned from ${from} ${why}, so no new load leaves the depot before ${from}.${load}${tail}`;
 }
 
 /**
@@ -124,14 +184,19 @@ export function planFromWarning(p: PlanFrom, depotCloseMin?: number | null, load
  * from"), when loading from now can still push a load past the first departure: e.g. at 05:15 with
  * a 06:00 first departure, 30 min turnaround and 0.04 min per case, a full 800-case truck leaves at
  * 06:17. Null when it cannot matter (no loading per case, or even the example load is ready in time).
+ * `searchMin`: a same-day THOROUGH search, after which loading starts.
  */
-export function loadingFromWarning(nowMin: number, prepMin: number, firstDepartureMin: number, loading: PlanLoading): string | null {
+export function loadingFromWarning(nowMin: number, prepMin: number, firstDepartureMin: number, loading: PlanLoading, searchMin = 0): string | null {
   const ex = exampleOf(loading);
   if (!(loading.perCase > 0) || !ex) return null;
-  const ready = nowMin + prepMin + loading.perCase * ex;
+  const search = wholeMin(searchMin);
+  const ready = nowMin + search + prepMin + loading.perCase * ex;
   if (ready <= firstDepartureMin) return null;
+  const when = search
+    ? `Planned on the delivery day at ${fmtHhmm(nowMin)} with a Thorough search of up to ${search} min: loading starts when the search ends (${fmtHhmm(nowMin + search)} at the latest), so a new load leaves no earlier than then`
+    : `Planned on the delivery day at ${fmtHhmm(nowMin)}: loading starts now, so a new load leaves no earlier than now`;
   return (
-    `Planned on the delivery day at ${fmtHhmm(nowMin)}: loading starts now, so a new load leaves no earlier than now + ${prepMin} min turnaround + ` +
+    `${when} + ${prepMin} min turnaround + ` +
     `${loading.perCase} min per case of its load - a full ${ex}-case truck at ${fmtHhmm(ready)}, although the first departure is ${fmtHhmm(firstDepartureMin)}.`
   );
 }
@@ -139,10 +204,22 @@ export function loadingFromWarning(nowMin: number, prepMin: number, firstDepartu
 /** The ASSUMPTIONS row of a same-day plan. `loadingMinPerCase`: counted from now too (PR8 review). */
 export function planFromAssumption(p: PlanFrom, loadingMinPerCase = 0): string {
   const loading = loadingMinPerCase > 0 ? ` + ${loadingMinPerCase} min loading per case of that load` : '';
-  return `${fmtPlanTime(p.fromMin)} - planned on the delivery day at ${fmtHhmm(p.nowMin)}: no new load leaves before now + ${p.prepMin} min preparation (the turnaround between loads)${loading}. Locked, loading and dispatched loads keep their times.`;
+  const search = p.searchMin ?? 0;
+  const made = search
+    ? `planned on the delivery day at ${fmtHhmm(p.nowMin)} with a Thorough search of up to ${search} min: no new load leaves before the search ends`
+    : `planned on the delivery day at ${fmtHhmm(p.nowMin)}: no new load leaves before now`;
+  return `${fmtPlanTime(p.fromMin)} - ${made} + ${p.prepMin} min preparation (the turnaround between loads)${loading}. Locked, loading and dispatched loads keep their times.`;
 }
 
-/** The ASSUMPTIONS row of a plan made on its delivery day before its first departure, with loading per case. */
-export function loadingFromAssumption(nowMin: number, prepMin: number, loadingMinPerCase: number): string {
-  return `${fmtHhmm(nowMin)} - planned on the delivery day: loading starts then, so no new load leaves before now + ${prepMin} min turnaround + ${loadingMinPerCase} min per case of that load (nor before the first departure).`;
+/**
+ * The ASSUMPTIONS row of a plan made on its delivery day before its first departure, with loading
+ * per case. `loadingFromMin`: when loading starts; `searchMin`: the same-day THOROUGH search before
+ * it (so the plan was made that much earlier).
+ */
+export function loadingFromAssumption(loadingFromMin: number, prepMin: number, loadingMinPerCase: number, searchMin = 0): string {
+  const search = wholeMin(searchMin);
+  const made = search
+    ? `planned on the delivery day at ${fmtHhmm(loadingFromMin - search)} with a Thorough search of up to ${search} min: loading starts when the search ends, so no new load leaves before then`
+    : 'planned on the delivery day: loading starts then, so no new load leaves before now';
+  return `${fmtHhmm(loadingFromMin)} - ${made} + ${prepMin} min turnaround + ${loadingMinPerCase} min per case of that load (nor before the first departure).`;
 }

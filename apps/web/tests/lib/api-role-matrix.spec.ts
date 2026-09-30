@@ -38,6 +38,9 @@
  *   described as cheaper), GET /api/dispatch/day (`outdated.depotMoved`), the Excel and PDF exports
  *   (loading-sheet kg = load kg; the planned depot pin) and POST /api/runs/[id]/replan (the copies
  *   keep each load's planned depot pin).
+ * - Long searches (owner request 29 Sep 2026): POST /api/runs/[id]/stop-search ("Use the best plan
+ *   found so far") is SUPERVISOR and above; the optimize / re-plan routes take an optional
+ *   searchMode (roles unchanged).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -118,6 +121,7 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
   'POST /api/runs/[id]/reset-stuck': 'SUPERVISOR',
+  'POST /api/runs/[id]/stop-search': 'SUPERVISOR',
   'GET /api/runs/[id]/route-geometries': 'ANY',
   'PATCH /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'DELETE /api/runs/[id]/routes/[assignmentId]': 'PLANNER',

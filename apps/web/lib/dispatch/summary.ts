@@ -10,6 +10,7 @@
  * driver is paid for the whole truck day, overtime on top). Loads costed the earlier way (saved
  * before that model) keep their stored cost and label the day MIXED_LEGACY.
  */
+import type { SearchReport } from '@routeiq/shared-types';
 import type { DriverNoteReason } from './load-state';
 import { costBasisOf, costTotals, type CostBasis, type CostTotals, type LoadCostBreakdown } from './costs';
 
@@ -82,7 +83,13 @@ export interface DailySummary {
   distanceIsEstimated: boolean;
   distanceProvider: string;
   warnings: string[];
-  solver: { engine: string; scenario: string; status: string; timeSec: number } | null;
+  /**
+   * `search`: how the recommended plan was searched (Quick / Thorough); absent before search modes.
+   * `limitSec`: the option's own search limit - an alternative in use searched that long after the
+   * recommended plan's search, for its own goal (search-mode.ts, searchOptionOf). `timeSec`: the
+   * option's optimizer time (its search and, when it re-checked the plan, the load re-check).
+   */
+  solver: { engine: string; scenario: string; status: string; timeSec: number; limitSec?: number; search?: SearchReport } | null;
   /**
    * The applied plan's driver notes (planDrivers in load-state.ts; absent when none): the trips that
    * lost or changed the driver they had before it, and the hand-set drivers whose trip it does not

@@ -14,8 +14,10 @@
  * - `ready`: everything works (HTTP 200, `ok: true`);
  * - `degraded`: nothing is known to be wrong, but the solver could not be asked (unreachable, timed
  *   out, an older solver without /ready, a 5xx, a 403 from a proxy in front of it - the solver itself
- *   never answers 403 -, or a redirect). HTTP 200 so a deploy is not blocked, `ok: false` so
- *   monitoring alerts;
+ *   never answers 403 -, or a redirect), or the solver reports that its worker processes could not
+ *   start, or stopped, recently (rule 22, SOLVER_WORKERS_FAILED: an optimization was refused, or
+ *   only a plan's load re-check was skipped). HTTP 200 so a deploy
+ *   is not blocked, `ok: false` so monitoring alerts;
  * - `not_ready`: a definite fault - the database is down, or dispatch is misconfigured (a URL or a
  *   token missing on the web, a URL no call can use, a token that cannot be sent, the solver
  *   answers 401, or the solver has no token itself). HTTP 503: the deploy gate fails and the
@@ -49,6 +51,7 @@ export type DispatchReason =
   | 'SOLVER_UNREACHABLE'
   | 'SOLVER_URL_REDIRECTS'
   | 'SOLVER_READY_UNSUPPORTED'
+  | 'SOLVER_WORKERS_FAILED'
   | 'SOLVER_ERROR';
 
 export type Routing = { provider: string; status: 'up' | 'down' | 'not_configured' } | null;
@@ -77,6 +80,8 @@ const MESSAGES: Record<DispatchReason, string> = {
   SOLVER_URL_REDIRECTS:
     "SOLVER_URL answers with a redirect, and an optimization does not follow one: plans cannot be optimized. Set SOLVER_URL to the solver's own address (on Railway, its private address).",
   SOLVER_READY_UNSUPPORTED: 'The route optimizer is an older version without the readiness check: the token could not be verified.',
+  SOLVER_WORKERS_FAILED:
+    'The route optimizer could not start its worker processes recently, or they stopped during an optimization: an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped. This stays for at least 5 minutes, even if optimizations work again meanwhile, and clears by itself 15 minutes after the failure, or sooner once an optimization starts them again after those 5 minutes. If it repeats, check the solver service\'s memory and process limits and restart it.',
   SOLVER_ERROR: 'The route optimizer, or a proxy in front of it, answered the readiness check with an error.',
 };
 
@@ -116,7 +121,7 @@ export async function checkDispatchReadiness(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
-  let body: { ok?: unknown; detail?: unknown; routing?: unknown } | null;
+  let body: { ok?: unknown; detail?: unknown; routing?: unknown; workers?: { status?: unknown } | null } | null;
   try {
     res = await fetchImpl(`${url}/ready`, {
       method: 'GET',
@@ -149,6 +154,10 @@ export async function checkDispatchReadiness(
   if (typeof body?.detail === 'string' && /not configured/i.test(body.detail)) return answer('misconfigured', 'SOLVER_NOT_CONFIGURED');
   // A solver deployed before /ready existed (web and solver deploy independently).
   if (res.status === 404 || res.status === 405) return answer('degraded', 'SOLVER_READY_UNSUPPORTED');
+  // Rule 22: the solver refused an optimization recently because its worker processes could not
+  // start. The token works, so it is not a misconfiguration: degraded (200, ok false), so
+  // monitoring alerts an administrator without blocking a deploy.
+  if (res.ok && body?.workers?.status === 'failed') return answer('degraded', 'SOLVER_WORKERS_FAILED', readRouting(body.routing));
   if (res.ok && body?.ok === true) return answer('ready', 'OK', readRouting(body.routing));
   return answer('degraded', 'SOLVER_ERROR');
 }

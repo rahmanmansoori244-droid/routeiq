@@ -4,7 +4,7 @@ import { prisma } from '@/lib/db';
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetExcel } from '@/lib/exports/excel';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { buildDispatchWorkbook, planRules, solverRules, tenantAssumptions } from '@/lib/dispatch/workbook';
+import { buildDispatchWorkbook, planRules, solverRules, tenantAssumptions, withSearchAssumptions } from '@/lib/dispatch/workbook';
 import { routingProviderFor } from '@/lib/dispatch/customer-attrs';
 import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 
@@ -46,7 +46,7 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
     generatedAt: new Date(),
     generatedBy: user.name || user.email,
     timezone: planned?.timezone ?? cfg?.timezone,
-    assumptions: tenantAssumptions(planned ?? cfg, {
+    assumptions: withSearchAssumptions(detail, tenantAssumptions(planned ?? cfg, {
       currency,
       providerUsed: detail.summary?.distanceProvider ?? detail.scenarios.find((s) => s.chosen)?.provider ?? null,
       distanceIsEstimated: detail.summary?.distanceIsEstimated ?? detail.loads.some((l) => l.distanceIsEstimated),
@@ -60,7 +60,7 @@ async function dispatchWorkbook(runId: string, { user, db }: AuthedContext) {
       // estimated legs for the estimate speed, trucks with a km per litre for the fuel price.
       estimatedLegs: detail.summary?.estimatedLegs ?? detail.loads.reduce((a, l) => a + (l.cost?.estimatedLegs ?? 0), 0),
       fuelCosted: detail.loads.length ? detail.loads.some((l) => l.fuelLitres !== null) : undefined,
-    }),
+    })),
     assumptionsSource: planned ? 'PLAN' : 'CURRENT',
   });
   // Depot codes are free text - keep the download filename header-safe.

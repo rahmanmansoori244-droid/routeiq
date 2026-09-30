@@ -840,6 +840,13 @@ model RunJob {
   startedAt    DateTime?    @db.Timestamptz(3)
   finishedAt   DateTime?    @db.Timestamptz(3)
   errorJson    Json?
+  /// QUICK or THOROUGH (owner decision 29 Sep 2026: night plans long, day re-plans quick). Null on
+  /// jobs from before search modes (they searched QUICK).
+  searchMode   String?
+  /// The last sign of life of the web process running this job: written every 30 s while it waits
+  /// for a solver slot or for the optimizer (lib/jobs/dispatch-job.ts). The stuck-plan check and
+  /// the janitor use it, so a 20-minute search is never taken for a lost job.
+  heartbeatAt  DateTime?    @db.Timestamptz(3)
 
   @@unique([runId, attemptNo])
   @@index([tenantId, status])

@@ -49,6 +49,7 @@ export const AUDIT_ACTIONS = {
   OPTIMIZE_SUCCEEDED: { label: 'Optimization finished' },
   OPTIMIZE_FAILED: { label: 'Optimization failed' },
   PLAN_RESET: { label: 'Stuck plan reset by a supervisor' },
+  SEARCH_STOPPED: { label: 'Thorough search stopped early (best plan so far used)' },
   SCENARIO_CHOSEN: { label: 'Plan option applied' },
   PLAN_VERSION_CREATED: { label: 'Plan version created (re-plan)' },
   ...LOAD_ACTIONS,

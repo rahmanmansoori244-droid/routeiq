@@ -25,7 +25,8 @@ import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
-import type { PreferencePenalties } from '@routeiq/shared-types';
+import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
+import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } from './search-mode';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, roundKg } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
@@ -250,7 +251,36 @@ export interface PlanDetail {
    */
   isDispatchPlan?: boolean;
   versions: { id: string; version: number; status: string; reason: string; reasonNote: string | null; createdAt: string; changeText: string | null }[];
-  job: { id: string; status: string; message: string | null; progressPct: number; startedAt: string | null; finishedAt: string | null } | null;
+  job: {
+    id: string;
+    status: string;
+    message: string | null;
+    progressPct: number;
+    startedAt: string | null;
+    finishedAt: string | null;
+    /** QUICK or THOROUGH; null on jobs from before search modes. */
+    searchMode?: string | null;
+  } | null;
+  /**
+   * How the applied plan was searched (Quick / Thorough, how long, why it stopped); null for a plan
+   * from before search modes or without an applied plan.
+   */
+  search?: SearchReport | null;
+  /**
+   * The alternative in use (MIN_TRUCKS, MIN_DISTANCE) and its own search limit: `search` is the
+   * recommended plan's search, and the alternative searched after it (searchResultText says so).
+   * null when RECOMMENDED is in use (skeptic review of the long-search PR).
+   */
+  searchOption?: SearchOption | null;
+  /** Thorough's cap in seconds (THOROUGH_MAX_SEC): the Re-plan choice and the progress line. */
+  thoroughMaxSec?: number;
+  /**
+   * The Re-plan choice pre-selected when the plan was read: THOROUGH before the plan's delivery day,
+   * QUICK on it. The screen works it out again from the clock when Re-plan is pressed (`timezone`).
+   */
+  searchModeDefault?: SearchMode;
+  /** The company's timezone: the Re-plan choice is worked out from the clock when it is asked (searchModeNow). */
+  timezone?: string;
   warnings: string[];
   /**
    * Orders of the day that the applied plan does not contain yet (uploaded or recorded after it).
@@ -712,8 +742,21 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       changeText: (v.changeSummaryJson as { text?: string } | null)?.text ?? null,
     })),
     job: job
-      ? { id: job.id, status: job.status, message: job.message, progressPct: job.progressPct, startedAt: job.startedAt?.toISOString() ?? null, finishedAt: job.finishedAt?.toISOString() ?? null }
+      ? {
+          id: job.id,
+          status: job.status,
+          message: job.message,
+          progressPct: job.progressPct,
+          startedAt: job.startedAt?.toISOString() ?? null,
+          finishedAt: job.finishedAt?.toISOString() ?? null,
+          searchMode: job.searchMode ?? null,
+        }
       : null,
+    search: chosenDetails?.search ?? null,
+    searchOption: chosenDetails?.search ? searchOptionOf(chosen?.name, chosenDetails.time_limit_sec) : null,
+    thoroughMaxSec: thoroughMaxSec(),
+    searchModeDefault: defaultSearchMode(isoOf(run.runDate), cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date()),
+    timezone: cfg?.timezone || DEFAULT_TZ,
     warnings: legacyChosen
       ? ['This plan was made by the previous optimizer (May 2026). Its routes are shown under Plan history; it cannot be re-planned.']
       : chosenDetails
@@ -750,7 +793,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
 async function stuckOf(
   db: DetailDb,
   run: { id: string; status: string; currentJobId: string | null },
-  latest: { id: string; status: string; createdAt: Date; startedAt: Date | null } | null,
+  latest: { id: string; status: string; createdAt: Date; startedAt: Date | null; heartbeatAt?: Date | null } | null,
   live: boolean,
   now: Date,
 ): Promise<StuckState | null> {

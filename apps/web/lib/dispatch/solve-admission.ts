@@ -12,12 +12,16 @@
  *   slot; waiting solves start fewest-running first, then in the order they were queued (below).
  *   A start beyond the caps is not refused: its job is created and waits in the queue until a
  *   slot frees.
- * - Fair queue: a company may have at most 2 solves waiting. One more is refused with 429 and
- *   Retry-After, for that company only. The shared queue holds 10: once it is full, a company that
- *   already has a solve waiting is refused with 503 "optimizer busy" until there is room, but a
- *   company with nothing waiting is always queued - other companies filling the queue never lock it
- *   out (review of PR3: five sign-up companies with 2 waiting each got NMWC a 503). Only an
- *   absolute cap of 200 waiting (process memory) refuses every start that would wait.
+ * - Fair queue: a company may have at most 2 solves of each search mode waiting (2 QUICK and 2
+ *   THOROUGH; review of the long-search PR: waiting THOROUGH solves, each up to 20 minutes, took the
+ *   places of a same-day QUICK re-plan). One more of that mode is refused with 429 and Retry-After,
+ *   for that company only, naming the mode (and for THOROUGH the cap in use, THOROUGH_MAX_SEC, which
+ *   also sets its Retry-After, at most 10 minutes). The shared queue holds 10: once it is full, a company
+ *   that already has a solve of that mode waiting is refused with 503 "optimizer busy" until there
+ *   is room, but a company with nothing of that mode waiting is always queued - other companies
+ *   filling the queue never lock it out (review of PR3: five sign-up companies with 2 waiting each
+ *   got NMWC a 503). Only an absolute cap of 200 waiting (process memory) refuses every start that
+ *   would wait.
  * - Slot order: a freed slot goes to the waiting solve of the company with the fewest solves
  *   running; among those, first come first served - the solve queued first, whether or not its
  *   company ever ran one (a new company never jumps ahead of one already waiting); so FIFO within
@@ -30,6 +34,18 @@
  *   companies running fewer can start first, and at its own cap its next solve waits for one of
  *   its own to end (third review of PR3: the docs promised more).
  * - The slot is held from the reservation until the job ends (success, failure or stale result).
+ * - Search modes (owner decision 29 Sep 2026, "night plans long, day re-plans quick"): every ticket
+ *   is QUICK or THOROUGH, and the company caps are counted per mode, so a QUICK solve never waits
+ *   behind a THOROUGH one (up to 20 minutes) - only behind other QUICK solves and the total. A
+ *   THOROUGH solve runs at most `thoroughConcurrent` at a time over all companies (default one less
+ *   than the total, at least 1) and one per company. With the default SOLVER_MAX_CONCURRENT=2: a
+ *   night plan searching thoroughly holds one slot, and a same-day re-plan of any plan still starts
+ *   at once in the other (it waits only while another QUICK solve holds it); a second THOROUGH
+ *   waits for the first. This relaxes "one company can never hold every slot" for exactly that
+ *   case (its THOROUGH + its QUICK); another company's solve then waits for that QUICK solve only,
+ *   and the next free slot goes to the company running fewer. With SOLVER_MAX_CONCURRENT=1 a
+ *   THOROUGH holds the only slot: run at least 2 (3 recommended, with the solver's
+ *   MAX_CONCURRENT_DISPATCH=3, once its CPUs are known).
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy
  * overlap two processes can each admit their own solves, so the solver also refuses more than
@@ -38,13 +54,19 @@
  * The quotas are off where every rate limit is off (NODE_ENV=test, or RATE_LIMITS_DISABLED=1 off
  * Railway - see rateLimitBypass); the concurrency caps and the queue caps always apply.
  */
+import type { SearchMode } from '@routeiq/shared-types';
 import { rateLimitBypass } from '../rate-limit';
+import { fmtSearchTime, THOROUGH_MAX_SEC_DEFAULT, thoroughMaxSec } from './search-mode';
 
 export interface AdmissionLimits {
   userPerHour: number;
   tenantPerHour: number;
-  /** Solves of one company running at the same time. */
+  /** QUICK solves of one company running at the same time. */
   tenantConcurrent: number;
+  /** THOROUGH solves running at the same time over all companies (default max(1, globalConcurrent - 1)). */
+  thoroughConcurrent?: number;
+  /** THOROUGH solves of one company running at the same time (default 1). */
+  tenantThoroughConcurrent?: number;
   /** Solves running at the same time over all companies. */
   globalConcurrent: number;
   /**
@@ -54,9 +76,15 @@ export interface AdmissionLimits {
   maxQueue: number;
   /** Absolute cap on waiting solves (process memory): past it every start that would wait gets 503. */
   queueHardCap: number;
-  /** Solves of one company waiting for a slot. */
+  /** Solves of one company and one search mode waiting for a slot. */
   tenantQueue: number;
   windowMs: number;
+  /**
+   * The THOROUGH cap in use (THOROUGH_MAX_SEC, search-mode.ts thoroughMaxSec; default 20 min), for
+   * the refusal's text and Retry-After: a waiting THOROUGH starts at the latest when a running one
+   * ends, up to this long after it started.
+   */
+  thoroughCapSec?: number;
 }
 
 function envInt(name: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
@@ -80,6 +108,7 @@ export function defaultAdmissionLimits(env: NodeJS.ProcessEnv = process.env): Ad
     queueHardCap: 200,
     tenantQueue: 2,
     windowMs: 60 * 60_000,
+    thoroughCapSec: thoroughMaxSec(env),
   };
 }
 
@@ -96,6 +125,8 @@ export interface AdmissionDenied {
 export interface SolveTicket {
   readonly tenantId: string;
   readonly userId: string;
+  /** QUICK or THOROUGH: the company caps are counted per mode. */
+  readonly searchMode: SearchMode;
   /** True while the ticket waits for a free solver slot. */
   readonly waiting: boolean;
   /** Resolves when the ticket holds a solver slot (immediately when one was free). */
@@ -116,6 +147,7 @@ export type AdmissionResult = { ok: true; ticket: SolveTicket } | AdmissionDenie
 interface TicketState {
   tenantId: string;
   userId: string;
+  mode: SearchMode;
   committed: boolean;
   released: boolean;
   running: boolean;
@@ -140,8 +172,11 @@ export class SolveAdmission {
     private readonly quotasOff: () => boolean = () => rateLimitBypass(),
   ) {}
 
-  /** Reserve a solve for this user. Synchronous, so two requests cannot both take the last slot. */
-  reserve(tenantId: string, userId: string): AdmissionResult {
+  /**
+   * Reserve a solve for this user. Synchronous, so two requests cannot both take the last slot.
+   * `mode`: QUICK (default) or THOROUGH - the company caps are counted per mode.
+   */
+  reserve(tenantId: string, userId: string, mode: SearchMode = 'QUICK'): AdmissionResult {
     const userKey = `u:${tenantId}:${userId}`;
     const tenantKey = `t:${tenantId}`;
     if (!this.quotasOff()) {
@@ -154,20 +189,27 @@ export class SolveAdmission {
         return this.deny(429, 'SOLVE_QUOTA_TENANT', `Your company started ${this.limits.tenantPerHour} optimizations in the last hour, the most allowed. Try again in ${minutes(overT)}.`, overT);
       }
     }
-    const fits = this.fits(tenantId);
+    const fits = this.fitsNow({ tenantId, mode }, this.running);
     if (!fits) {
       // Past its own queue cap a company is refused alone: the shared queue stays open to others.
-      const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId).length;
+      // Counted per mode (review of the long-search PR): THOROUGH solves wait up to 20 minutes each,
+      // and must never take the places of a same-day QUICK re-plan.
+      const mineWaiting = this.queue.filter((q) => q.tenantId === tenantId && q.mode === mode).length;
       if (mineWaiting >= this.limits.tenantQueue) {
+        const thorough = mode === 'THOROUGH';
+        // The cap in use, never a fixed "20 minutes" (skeptic review): THOROUGH_MAX_SEC may be 10 s to 60 min.
+        const capSec = this.limits.thoroughCapSec ?? THOROUGH_MAX_SEC_DEFAULT;
         return this.deny(
           429,
           'SOLVE_QUEUE_TENANT',
-          `Your company already has ${mineWaiting} optimization(s) waiting for the route optimizer. Try again once one of them has started.`,
-          120,
+          `Your company already has ${mineWaiting} ${thorough ? 'Thorough' : 'Quick'} optimization(s) waiting for the route optimizer. Try again once one of them has started${
+            thorough ? ` (a Thorough search takes up to ${fmtSearchTime(capSec)}), or choose Quick` : ''
+          }.`,
+          thorough ? Math.min(capSec, 600) : 120,
         );
       }
-      // A full shared queue refuses only a company that already has a solve waiting: one with
-      // nothing waiting is queued, so other companies filling the queue never lock it out. The
+      // A full shared queue refuses only a company that already has a solve of this mode waiting:
+      // one with nothing waiting is queued, so other companies filling the queue never lock it out. The
       // queue grows by at most one solve per company past maxQueue; queueHardCap bounds memory.
       if ((mineWaiting > 0 && this.queue.length >= this.limits.maxQueue) || this.queue.length >= this.limits.queueHardCap) {
         return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans. Try again in a few minutes.', 120);
@@ -175,7 +217,7 @@ export class SolveAdmission {
     }
     let resolve!: () => void;
     const promise = new Promise<void>((r) => (resolve = r));
-    const st: TicketState = { tenantId, userId, committed: false, released: false, running: false, seq: ++this.seq, resolve, promise };
+    const st: TicketState = { tenantId, userId, mode, committed: false, released: false, running: false, seq: ++this.seq, resolve, promise };
     if (!this.quotasOff()) {
       this.pending.set(userKey, (this.pending.get(userKey) ?? 0) + 1);
       this.pending.set(tenantKey, (this.pending.get(tenantKey) ?? 0) + 1);
@@ -186,13 +228,25 @@ export class SolveAdmission {
   }
 
   /** For tests and diagnostics. */
-  snapshot(): { running: number; waiting: number; runningByTenant: Record<string, number>; waitingByTenant: Record<string, number> } {
+  snapshot(): {
+    running: number;
+    waiting: number;
+    runningByTenant: Record<string, number>;
+    waitingByTenant: Record<string, number>;
+    runningThorough: number;
+  } {
     const count = (list: Iterable<TicketState>) => {
       const out: Record<string, number> = {};
       for (const s of list) out[s.tenantId] = (out[s.tenantId] ?? 0) + 1;
       return out;
     };
-    return { running: this.running.size, waiting: this.queue.length, runningByTenant: count(this.running), waitingByTenant: count(this.queue) };
+    return {
+      running: this.running.size,
+      waiting: this.queue.length,
+      runningByTenant: count(this.running),
+      waitingByTenant: count(this.queue),
+      runningThorough: [...this.running].filter((s) => s.mode === 'THOROUGH').length,
+    };
   }
 
   private ticketOf(st: TicketState, userKey: string, tenantKey: string): SolveTicket {
@@ -209,6 +263,7 @@ export class SolveAdmission {
     return {
       tenantId: st.tenantId,
       userId: st.userId,
+      searchMode: st.mode,
       get waiting() {
         return !st.running && !st.released;
       },
@@ -259,32 +314,44 @@ export class SolveAdmission {
     return oldest === undefined ? 60 : Math.max(1, Math.ceil((oldest + this.limits.windowMs - this.now()) / 1000));
   }
 
-  /** Solves running per company. */
-  private runningCounts(): Map<string, number> {
-    const n = new Map<string, number>();
-    for (const s of this.running) n.set(s.tenantId, (n.get(s.tenantId) ?? 0) + 1);
-    return n;
-  }
-
-  private fits(tenantId: string): boolean {
-    if (this.running.size >= this.limits.globalConcurrent) return false;
-    return (this.runningCounts().get(tenantId) ?? 0) < this.limits.tenantConcurrent;
+  /**
+   * Could a solve of this company and mode start next to `running`? The total cap; then per mode:
+   * QUICK - the company's QUICK solves under tenantConcurrent; THOROUGH - the THOROUGH solves of all
+   * companies under thoroughConcurrent and the company's under tenantThoroughConcurrent. A company's
+   * THOROUGH solve never counts against its QUICK cap, nor the other way round.
+   */
+  private fitsNow(st: { tenantId: string; mode: SearchMode }, running: Iterable<TicketState>): boolean {
+    let total = 0;
+    let thoroughAll = 0;
+    let sameCompanyAndMode = 0;
+    for (const r of running) {
+      total++;
+      if (r.mode === 'THOROUGH') thoroughAll++;
+      if (r.tenantId === st.tenantId && r.mode === st.mode) sameCompanyAndMode++;
+    }
+    if (total >= this.limits.globalConcurrent) return false;
+    if (st.mode !== 'THOROUGH') return sameCompanyAndMode < this.limits.tenantConcurrent;
+    const thoroughCap = this.limits.thoroughConcurrent ?? Math.max(1, this.limits.globalConcurrent - 1);
+    return thoroughAll < thoroughCap && sameCompanyAndMode < (this.limits.tenantThoroughConcurrent ?? 1);
   }
 
   /**
    * Index in `queue` of the ticket that gets the next free slot: the company with the fewest solves
-   * running (`counts`), then the ticket queued first - first come, first served, whether or not
-   * its company ever ran a solve (a new company never jumps ahead of one already waiting), so FIFO
-   * within a company. With `capped`, companies at their own concurrency cap are skipped (-1 when
-   * every waiting company is).
+   * running, then the ticket queued first - first come, first served, whether or not its company
+   * ever ran a solve (a new company never jumps ahead of one already waiting), so FIFO within a
+   * company. Tickets that cannot start next to `running` (their company or mode at its cap) are
+   * skipped (-1 when every waiting ticket is): a THOROUGH solve waiting for its turn never holds up
+   * a QUICK one queued after it.
    */
-  private nextIndex(queue: readonly TicketState[], counts: ReadonlyMap<string, number>, capped: boolean): number {
+  private nextIndex(queue: readonly TicketState[], running: readonly TicketState[]): number {
+    const counts = new Map<string, number>();
+    for (const r of running) counts.set(r.tenantId, (counts.get(r.tenantId) ?? 0) + 1);
     let best = -1;
     let bestRunning = Number.POSITIVE_INFINITY;
     let bestSeq = Number.POSITIVE_INFINITY;
     queue.forEach((st, i) => {
+      if (!this.fitsNow(st, running)) return;
       const n = counts.get(st.tenantId) ?? 0;
-      if (capped && n >= this.limits.tenantConcurrent) return;
       if (n < bestRunning || (n === bestRunning && st.seq < bestSeq)) {
         best = i;
         bestRunning = n;
@@ -296,31 +363,30 @@ export class SolveAdmission {
 
   /**
    * The waiting tickets in the order they would start (for position()): the running solves are
-   * assumed to end in the order they started, and each freed slot is given as pump() gives it.
+   * assumed to end in the order they started - QUICK ones before THOROUGH ones, which search up to
+   * 20 minutes - and each freed slot is given as pump() gives it.
    */
   private startOrder(): TicketState[] {
     const running = [...this.running];
-    const counts = this.runningCounts();
     const rest = [...this.queue];
     const order: TicketState[] = [];
     const fill = () => {
       while (running.length < this.limits.globalConcurrent && rest.length) {
-        const i = this.nextIndex(rest, counts, true);
+        const i = this.nextIndex(rest, running);
         if (i < 0) return;
         const [st] = rest.splice(i, 1);
         order.push(st!);
         running.push(st!);
-        counts.set(st!.tenantId, (counts.get(st!.tenantId) ?? 0) + 1);
       }
     };
     fill();
     while (rest.length) {
-      const ended = running.shift();
+      const quick = running.findIndex((r) => r.mode !== 'THOROUGH');
+      const [ended] = running.splice(quick >= 0 ? quick : 0, 1);
       if (!ended) {
-        order.push(...rest); // cannot happen (with nothing running every company fits); FIFO as a fallback
+        order.push(...rest); // cannot happen (with nothing running every solve fits); FIFO as a fallback
         break;
       }
-      counts.set(ended.tenantId, (counts.get(ended.tenantId) ?? 1) - 1);
       fill();
     }
     return order;
@@ -338,7 +404,7 @@ export class SolveAdmission {
    */
   private pump() {
     while (this.running.size < this.limits.globalConcurrent && this.queue.length) {
-      const i = this.nextIndex(this.queue, this.runningCounts(), true);
+      const i = this.nextIndex(this.queue, [...this.running]);
       if (i < 0) break;
       const [st] = this.queue.splice(i, 1);
       this.start(st!);

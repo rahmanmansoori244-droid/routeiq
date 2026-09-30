@@ -42,12 +42,24 @@ export async function whenIdle(runId: string): Promise<void> {
   for (let p = inflight.get(runId); p; p = inflight.get(runId)) await p.catch(() => undefined);
 }
 
-/** Longer than any job can legitimately run: the dispatch solver call (10 min max) plus saving the plan. */
+/**
+ * A job WITHOUT a heartbeat (started by a release before heartbeats: a QUICK search, 10 min at most)
+ * is failed this long after it started. Longer than it can legitimately run: the solver call plus
+ * saving the plan.
+ */
 export const STUCK_JOB_MS = 15 * 60 * 1000;
 
 /**
- * Orphan janitor — mark jobs RUNNING (or never started) for longer than any real optimization
- * as FAILED with reason STUCK, and put their plan back to FAILED so it can be optimized again.
+ * A job WITH a heartbeat (every 30 s while it waits or runs, lib/jobs/dispatch-job.ts) is failed
+ * this long after its last one: its process is gone (restart, deploy, crash, out of memory). A
+ * 20-minute THOROUGH search keeps its heartbeat going, so it is never failed for running long.
+ */
+export const STALE_HEARTBEAT_MS = 5 * 60 * 1000;
+
+/**
+ * Orphan janitor — mark jobs whose process is gone as FAILED with reason STUCK, and put their plan
+ * back to FAILED so it can be optimized again: a job with a heartbeat 5 minutes after its last one
+ * (STALE_HEARTBEAT_MS), a job from before heartbeats 15 minutes after it started (STUCK_JOB_MS).
  * Runs every 60 s inside the web process (instrumentation.ts) and from the cron route.
  *
  * Audit F09: each job is reaped in ONE transaction - the plan row lock (the order every plan
@@ -56,12 +68,13 @@ export const STUCK_JOB_MS = 15 * 60 * 1000;
  * plan OPTIMIZING behind a FAILED job again. Then repairStuckPlans puts back any plan stranded
  * that way before the fix.
  */
-export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reaped: number; repaired: number }> {
+export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS, heartbeatMs = STALE_HEARTBEAT_MS): Promise<{ reaped: number; repaired: number }> {
   // We use a Postgres-side NOW() comparison instead of passing a JS Date,
   // because RunJob.startedAt is a TIMESTAMP (no time zone) column — comparing
   // it against a JS Date via Prisma's serialized ISO string would mis-match
   // by however many hours separate the server's clock from UTC.
   const minutes = Math.max(1, Math.round(thresholdMs / 60000));
+  const beatSec = Math.max(1, Math.round(heartbeatMs / 1000));
   const stuck = await prisma.$queryRawUnsafe<
     Array<{
       id: string;
@@ -70,20 +83,27 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
       createdById: string;
       attemptNo: number;
       status: 'RUNNING' | 'QUEUED';
+      heartbeat: boolean;
     }>
   >(
     // Both sides are computed Postgres-side so the comparison stays in the
     // server's session timezone. (Prisma converts JS Dates to local-time
     // TIMESTAMPs when writing, so NOW() — also local — matches them. See
     // feedback_db_gotchas memory for context.)
-    // A QUEUED row normally turns RUNNING within milliseconds; one that stays QUEUED lost its
-    // process between creating the job and starting it.
-    `SELECT id, "runId", "tenantId", "createdById", "attemptNo", status::text AS status
+    // With a heartbeat: its process is gone once the heartbeat is older than $2 seconds, whether the
+    // job waited (QUEUED) or searched (RUNNING) - however long it has been running.
+    // Without one (a job from before heartbeats): a RUNNING job $1 minutes after it started; a
+    // QUEUED one (it normally turns RUNNING within milliseconds) $1 minutes after it was created.
+    `SELECT id, "runId", "tenantId", "createdById", "attemptNo", status::text AS status, ("heartbeatAt" IS NOT NULL) AS heartbeat
      FROM "RunJob"
-     WHERE (status = 'RUNNING' AND "startedAt" IS NOT NULL AND "startedAt" < NOW() - ($1::int || ' minutes')::interval)
-        OR (status = 'QUEUED' AND "createdAt" < NOW() - ($1::int || ' minutes')::interval)`,
+     WHERE status IN ('RUNNING', 'QUEUED') AND (
+           ("heartbeatAt" IS NOT NULL AND "heartbeatAt" < NOW() - ($2::int || ' seconds')::interval)
+        OR ("heartbeatAt" IS NULL AND status = 'RUNNING' AND "startedAt" IS NOT NULL AND "startedAt" < NOW() - ($1::int || ' minutes')::interval)
+        OR ("heartbeatAt" IS NULL AND status = 'QUEUED' AND "createdAt" < NOW() - ($1::int || ' minutes')::interval))`,
     minutes,
+    beatSec,
   );
+  const beatMin = Math.max(1, Math.round(beatSec / 60));
   let reaped = 0;
   for (const job of stuck) {
     // Skip jobs whose background promise is still tracked in-process. The
@@ -105,8 +125,13 @@ export async function reapStuckJobs(thresholdMs = STUCK_JOB_MS): Promise<{ reape
             data: {
               status: 'FAILED',
               finishedAt: new Date(),
-              message: `No result after ${minutes} minutes (the server restarted during the optimization). Optimize again.`,
-              errorJson: { reason: 'STUCK', message: `Job ${job.status} for more than ${minutes} minutes.` } as never,
+              message: job.heartbeat
+                ? `No sign of life for ${beatMin} minutes: the server running this optimization stopped (a restart or an update). Nothing was saved - optimize again.`
+                : `No result after ${minutes} minutes (the server restarted during the optimization). Optimize again.`,
+              errorJson: {
+                reason: 'STUCK',
+                message: job.heartbeat ? `Job ${job.status} with no heartbeat for more than ${beatMin} minutes.` : `Job ${job.status} for more than ${minutes} minutes.`,
+              } as never,
             },
           });
           if (flipped.count === 0) return false;
@@ -153,7 +178,8 @@ export const STUCK_PLAN_GRACE_MS = 60_000;
  * ended, or is missing) goes back to FAILED with an OPTIMIZE_FAILED audit row (reason STUCK_PLAN),
  * one transaction each (repairEndedJobPlan). These rows are what the old two-write janitor left
  * behind when its second write failed; the sweep also mends any found later. A plan whose current
- * job is still QUEUED or RUNNING is never touched here (reapStuckJobs fails it after 15 minutes).
+ * job is still QUEUED or RUNNING is never touched here (reapStuckJobs fails it once its process is
+ * gone: 5 minutes after its last heartbeat).
  */
 export async function repairStuckPlans(now: Date = new Date()): Promise<{ repaired: number }> {
   const plans = await prisma.runPlan.findMany({

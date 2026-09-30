@@ -230,6 +230,25 @@ describe('checkDispatchReadiness', () => {
     expect(configProblems(env({ ...prod, SOLVER_URL: 'http://routeiq-solver.railway.internal:8000' }))).toEqual([]);
   });
 
+  it('rule 22: the solver reports a recent failed worker start - degraded SOLVER_WORKERS_FAILED, routing kept; ready again once its workers start', async () => {
+    const failed = { ...READY_BODY, ok: false, workers: { status: 'failed', failed_at: '2026-09-30T02:00:00+00:00', cause: 'OSError: test' } };
+    const r = await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: failed }).f);
+    expect(r).toMatchObject({ status: 'degraded', reason: 'SOLVER_WORKERS_FAILED', routing: { provider: 'OSRM', status: 'up' } });
+    expect(r.message).toMatch(/^The route optimizer could not start its worker processes recently/);
+    // Both cases the signal covers (review): a refused optimization, or only a skipped load re-check
+    // (the plan itself was returned) - and that it clears by itself.
+    expect(r.message).toContain('an optimization was refused ("The planner is busy or restarting"), or a plan\'s load re-check was skipped');
+    expect(r.message).toContain('clears by itself 15 minutes after the failure');
+    // Second review: a pool that starts seconds later (the same plan's load re-check, another
+    // company's solve) no longer clears it, so monitoring polling every few minutes sees it.
+    expect(r.message).toContain('stays for at least 5 minutes, even if optimizations work again meanwhile');
+    expect(r.message).not.toMatch(/clears when a later optimization starts them/);
+    expect(r.message).not.toMatch(/so it refused optimizations/);
+    expect(overallReadiness('up', r)).toEqual({ status: 'degraded', httpStatus: 200 });
+    const recovered = await checkDispatchReadiness(ENV, fakeFetch({ status: 200, body: { ...READY_BODY, workers: { status: 'ok' } } }).f);
+    expect(recovered).toMatchObject({ status: 'ready', reason: 'OK' });
+  });
+
   it('overall: a misconfiguration or a database down is 503, degraded is 200', () => {
     const d = (status: 'ready' | 'degraded' | 'misconfigured') => ({ status, reason: 'OK' as const, message: '', routing: null });
     expect(overallReadiness('up', d('ready'))).toEqual({ status: 'ready', httpStatus: 200 });
@@ -299,6 +318,16 @@ describe('GET /api/health (readiness) and /api/health/live', () => {
     const res = await health();
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_ERROR' } });
+  });
+
+  it('rule 22: a solver whose worker processes could not start recently is 200 degraded SOLVER_WORKERS_FAILED (the administrator is alerted), never its details', async () => {
+    solverAnswers({ status: 200, body: { ...READY_BODY, ok: false, workers: { status: 'failed', failed_at: '2026-09-30T02:00:00+00:00', cause: 'BlockingIOError: [Errno 11] Resource temporarily unavailable' } } });
+    const res = await health();
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: false, status: 'degraded', solver: 'down', dispatch: { status: 'degraded', reason: 'SOLVER_WORKERS_FAILED' } });
+    expect(body.dispatch.message).toMatch(/could not start its worker processes/);
+    expect(JSON.stringify(body)).not.toContain('Errno');
   });
 
   it('third review of audit PR4: a SOLVER_TOKEN that cannot be sent is 503 not_ready, and the answer never shows it', async () => {

@@ -50,7 +50,7 @@ Follow-ups:
    - Since audit P5 (each uploaded file is read in its own short-lived process): optional `UPLOAD_WORKER_MAX_HEAP_MB` (default 512), `UPLOAD_PARSE_TIMEOUT_MS` (default 15000) and `UPLOAD_PARSE_CONCURRENCY` (default 2) on web; leave them unset unless the owner decides other values. **Memory:** while files are read, the web service needs its own memory plus, for each file read at once, about the heap cap + 150 MB: with the defaults up to about 1.3 GB more (NMWC's real files need about 60-70 MB each). The web process itself also holds the rows of each file being handled: at most 200 cells a row and 2,500,000 cells per file, kept compact (since the P5 second review; the parser's 128 MB answer cap alone did not bound them). Measured: 20-26 MB for the largest legal files, well under 1 MB for NMWC's files; so with two files at once, about 50 MB more at most. This does not bound the upload request itself (P5 third review): the web process reads a whole request body before the 10 MB check, about twice its size in memory, even without a session (a 300 MB request: 500-620 MB more). Unless something in front of the web service caps request bodies (not recorded in the repo), one very large request can take the web service to its memory limit; the cap is an owner question (handbook 7.5). Before the deploy, check the web service's memory limit and its usage in Railway (web → Metrics); if the limit is lower, raise it, or set `UPLOAD_PARSE_CONCURRENCY=1`. The build also makes `apps/web/.next/upload-parser/parse.cjs` (the file reader), and the start command must run in `apps/web`, as `pnpm --filter @routeiq/web start` does. After the deploy the web log shows `[upload-parse] the file reader works (startup check)`; a `[config]` error about the upload file reader means every upload is refused: redeploy with the build command above. No migration; rollback is a redeploy of the previous commit.
 3. **solver** redeploys from `main` with the new OR-Tools engine. `OSRM_URL` is already set.
    - Since stabilization PR3: optional `MAX_CONCURRENT_DISPATCH` on the solver (default 2; each solve uses up to 3 OR-Tools processes, more solves are refused with 503). Size it to the solver's vCPU after the deploy, together with the web's `SOLVER_MAX_CONCURRENT`; both 3 let one company run 2 solves at once.
-   - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set).
+   - Never set `SOLVER_PARALLEL` on the solver: `0` disables every deadline and the time budget (the solver logs an error at startup on Railway when it is set). The same for `SOLVER_ALLOW_INPROCESS_FALLBACK` (rule 22, see "The planner cannot start its worker processes" below).
    - Since stabilization PR4 the solver adds an optional `feasibility` report to every option. Deploy order does not matter: the web treats a missing report as "not checked by the optimizer" and blocks such a plan only on a concrete problem it finds itself.
    - Web and solver build independently. Until the new solver is live, an optimize answers "The route optimizer is being updated. Try again in a minute."
    - Wait until the solver deployment is **Active** before anyone plans.
@@ -110,6 +110,127 @@ Later, as a separate change, move `web` from Nixpacks to Railpack:
 - Node: Railpack reads `RAILPACK_NODE_VERSION`, `engines.node`, `.nvmrc` or `.node-version`; all say 22 since A1.
 - Fix the root `packageManager` (`pnpm@9.0.0`, while the lockfile is built with pnpm 9.15).
 - Source: <https://railpack.com/languages/node>.
+
+## Long searches (THOROUGH mode, 29 Sep 2026)
+
+The planner can now search up to 20 minutes (owner request 29 Sep 2026; handbook 2.7, 4.9). What to set and check when this
+change is deployed:
+
+- **Migration** `20261001090000_run_job_search_mode_heartbeat` (pre-deploy step): adds two nullable columns to `RunJob`
+  (`searchMode`, `heartbeatAt`). No rewrite, no backfill; the previous version keeps serving and ignores them. Rollback: the
+  previous code runs on top of it unchanged.
+- **Deploy order:** the solver first. A new web talking to the old solver still works (the old solver ignores
+  `search_mode` and searches QUICK; a THOROUGH choice then just behaves like QUICK); a new solver with the old web gets no mode
+  (QUICK).
+- **Variables** (names only):
+  - `THOROUGH_MAX_SEC` on **web and solver**, the same value (default 1200 = 20 min; accepted from 10 to 3600, but keep it at
+    600 or more in production). The web sends it with each THOROUGH request and waits it + 2 minutes; the solver uses the lower
+    of the two. Below 20 min the alternatives and the load re-check shrink in proportion (never below Quick's times); below
+    a cap of about 2-2.5 min for days up to 120 stops, 4.5-5.5 min at 175, 5.5-7 min from 200 to 350 and 8-9.5 min above 350
+    (the higher figure with the slowest road matrix) Thorough searches no longer than Quick and may skip the alternatives. A
+    same-day Thorough plan's new loads count from its start + this value. The refusal of a third waiting Thorough states it too.
+    CI sets 60 (tests only).
+  - `NEXT_MANUAL_SIG_HANDLE=1` on **web** (recommended). On a redeploy Railway sends SIGTERM; with this set, the web fails its
+    optimizations in progress at once with *"The server was restarted (an update) during this optimization. Nothing was saved
+    - optimize again."* (at most 8 s of writes), then exits. Without it Next.js exits at once and those writes may not land:
+    the jobs are then failed by their heartbeat within about 6 minutes (shown as lost after 2). Nothing in the repository sets
+    it: set it on the service. The dispatcher guide says both cases.
+  - Optional on the solver: `THOROUGH_STALL_SEC` (300) and `THOROUGH_STALL_SHARE` (0.5), the early-stop rule; leave them unset
+    unless re-measured (`docs/OPTIMIZER_BENCHMARK.md` §11).
+  - Keep web's `SOLVER_MAX_CONCURRENT` at 2 or more (with 1, a THOROUGH search holds the only slot for up to 20 minutes).
+- **What happens to a 20-minute search on a redeploy.**
+  - *Web redeploys:* the job fails at once (with `NEXT_MANUAL_SIG_HANDLE=1`) or by its heartbeat within minutes, never stuck; the
+    plan can be optimized again (a re-plan version keeps the previous plan). The solver sees the connection close and cancels that
+    solve within about a second, so its slot frees for the new web.
+  - *Solver redeploys:* the running solve is cut when the old container stops; the web gets a reset connection and fails the job
+    with *"The route optimizer stopped during the search (it was restarted or updated). Nothing was saved - optimize again."*,
+    retryable. Railway's drain time before it stops the old container is not known here (open: check the service's deploy
+    settings); a solve longer than it is lost either way. Avoid solver deploys during the evening planning.
+  - Railway's healthchecks run at deploy time only and do not touch a running solve.
+- **Signal delivery (to verify on staging).** The web start command is `pnpm --filter @routeiq/web start`. Whether pnpm passes
+  SIGTERM on to the `next start` process is not verified. Check once: start a THOROUGH optimization, redeploy web, and see the
+  job end at once with the "server was restarted" message (not after about 6 minutes with "No sign of life"). If it does not,
+  start the web with `node` directly (for example `pnpm --filter @routeiq/web exec next start`), which receives the signal.
+  Also check how long Railway waits between SIGTERM and killing the old container (a review of the long-search PR read that
+  Railway's `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` defaults to 0, not verified here): the shutdown handler needs up to 8 s for its
+  writes, so set it to 10 or more if the check shows the jobs failing by heartbeat instead. Until both are verified the dispatcher
+  guide says the job fails "at once where the server is set up for it, otherwise within a few minutes".
+- **Solver CPU during long solves.** A THOROUGH solve holds one solver slot and, for most of its 20 minutes, one CPU core (the
+  recommended plan's search); the alternatives and the load re-check add two more processes for about two minutes at the end.
+  The solver service's vCPU is not recorded (handbook 7.5). With 1 vCPU a Quick re-plan running next to a Thorough search shares
+  the core: both still end on time (their limits are wall-clock) but find somewhat worse plans. Once the vCPU is known, 2 or more
+  cores are recommended, with `SOLVER_MAX_CONCURRENT=3` on web and `MAX_CONCURRENT_DISPATCH=3` on the solver.
+- **The connection.** `SOLVER_URL` must be the solver's **private** address (`http://solver.railway.internal:<port>`), never a
+  public domain: a public edge may cut requests long before 20 minutes. The web holds one connection per solve for up to 22
+  minutes with TCP keepalive every 30 s; whether Railway's private network keeps an idle 20-minute connection is to be confirmed
+  on staging with a THOROUGH run (the keepalive packets keep it from looking idle).
+- **Verify after the deploy:** optimize tomorrow's day with **Thorough** once; the plan screen shows *Searching for the best plan
+  - up to 20 min ...*, and afterwards *Thorough search: searched N min ...*; `GET /api/runs/:id/status` shows the job with
+  `searchMode` and a `heartbeatAt` that moves every 30 s while it runs.
+
+## The planner cannot start its worker processes (rule 22, 30 Sep 2026)
+
+The owner's rule 22 (audit policy 22): when the solver cannot start its worker processes, it stops within seconds and says
+so, instead of freezing. Every search runs in a separate worker process. Before this change, a solver that could not start
+them (out of memory, a process limit) ran the whole search inside its own API process with no deadline: the planner then
+answered nothing else (health checks, other companies' plans) for the length of the search, up to 20 minutes and more for a
+Thorough one, and the only trace was one warning line. Handbook 2.7 and 4.9 have the details.
+
+- **What happens now.** The solver starts its worker processes first, before it fetches road distances, and checks that one
+  of them runs a task within `SOLVER_WORKER_START_SEC` (default 30 s; it takes about half a second when healthy). If they
+  cannot start, the optimization is refused at once with HTTP 503 (`Retry-After: 60`, code `WORKERS_UNAVAILABLE`). Nothing is
+  searched and nothing is saved. The dispatcher reads *"The planner is busy or restarting - try again in a minute. Nothing was
+  changed."*; the plan in use stays as it was (a failed re-plan keeps the previous plan, locked loads included), and pressing
+  the button again works as soon as the solver can start processes again. There is no automatic retry.
+- **When the processes stop during a search** (for example the out-of-memory killer ends one, and no replacement can start;
+  or a process ends while it waits for work and leaves the others unable to take any), the solver notices within seconds - at
+  most `SOLVER_WORKER_START_SEC` for processes that stop taking work - instead of at the search's deadline (20 minutes for a
+  Thorough plan). The optimization is refused the same way (503 `WORKERS_UNAVAILABLE`, the same message) only when the
+  recommended plan's own search cannot go on: the process running it stopped and no replacement can start, or its search
+  could not start at all (for example every process stopped while the road distances were fetched). When another process
+  stops while the recommended search is running, that search goes on and the recommended plan is kept: the other options are
+  skipped and its loads are re-checked with fresh processes, or re-timed exactly when those cannot start either (below). So a
+  process that stops during a search does not always mean a refused optimization: look for the ERROR line (below). Closing a
+  broken set of processes never holds the answer for more than about 10 s.
+- **Variables** (names only; none is needed in production):
+  - `SOLVER_ALLOW_INPROCESS_FALLBACK` on the solver: **never set it on Railway.** `1` brings back the old in-process fallback,
+    for local development and tests only. When it is set the solver logs an **error** at startup on Railway (a warning
+    elsewhere).
+  - `SOLVER_WORKER_START_SEC` on the solver: optional (default 30, 1 to 600). How long a new pool may take to run its first
+    task before the optimization is refused. Leave it unset unless the solver's start-up is measured to be slower.
+- **What the alert looks like.** Three signals, all on each refusal:
+  - The **solver log** has an ERROR line from `routeiq.dispatch` that contains `WORKERS_UNAVAILABLE` (on a refusal, a second
+    one from `routeiq.api` follows). Like every solver log line it starts with the time, the level and the logger name, and
+    the code comes after them, for example:
+    `2026-09-30 02:00:00,123 ERROR routeiq.dispatch: WORKERS_UNAVAILABLE run=<plan id>: the solver could not start its worker processes for the search
+    (BlockingIOError: [Errno 11] Resource temporarily unavailable). Nothing is searched inside the API process (rule 22). If
+    this repeats, check the solver service's memory and process limits and restart it.`, followed by
+    `2026-09-30 02:00:00,125 ERROR routeiq.api: optimize-dispatch run=<plan id> refused (503 WORKERS_UNAVAILABLE): worker processes could not start or
+    stopped working (...)`. The text in brackets is the cause and depends on the error: `BlockingIOError: [Errno 11] Resource
+    temporarily unavailable` at the process limit, `OSError: [Errno 12] Cannot allocate memory` when memory is short. When the
+    processes stop during a search the line says `the solver's worker processes stopped working during the search (...)`
+    instead, and `a worker pool did not stop within 10 s ...` when closing them hung. **Alert on any solver log line that
+    contains `WORKERS_UNAVAILABLE` (a substring match), never on the cause text.** A rule that only matches lines that start
+    with the code never fires for the solver, because of the time in front.
+  - The **web log** has one line that starts with `ALERT WORKERS_UNAVAILABLE:` naming the plan and the job, and the plan's audit
+    log has an `OPTIMIZE_FAILED` row whose error carries `code: WORKERS_UNAVAILABLE`.
+  - **`GET /api/health`** on web answers 200 with `ok: false`, `status: degraded` and `dispatch.reason: SOLVER_WORKERS_FAILED`
+    while the solver's `/ready` reports the failure: at least 5 minutes, even if optimizations work again meanwhile, so
+    monitoring that checks every few minutes sees it; then until an optimization starts the processes again, or at most 15
+    minutes after the failure. A deploy is not blocked by it.
+  Railway has no alerting set up in this repository: point log alerts at lines containing `WORKERS_UNAVAILABLE` and
+  monitoring at `ok: false`.
+- **What to do when it fires.** Look at the solver service's memory and CPU graphs and its deploy logs. One refusal during a
+  solver restart or a memory spike needs nothing: the dispatcher tries again in a minute. If it repeats, restart the solver
+  service; if it keeps happening, raise the service's memory or lower `MAX_CONCURRENT_DISPATCH` (each solve uses up to three
+  processes).
+- **The load re-check after an alternative overran** (or after the processes stopped, above) needs fresh worker processes too.
+  If they cannot start, the solver keeps the recommended plan it already found and re-times it exactly (a few milliseconds)
+  instead of refusing, with the note *"Loads were not re-checked for fewer trucks (the planner was short of resources)"* on
+  the plan and the same ERROR line and `/ready` signal. The web records no failed job and no `ALERT` line then (the plan was
+  returned), so `/api/health`'s `SOLVER_WORKERS_FAILED` and the solver's ERROR line are the only signs.
+- **Verify after the deploy:** the solver's startup log has no `SOLVER_ALLOW_INPROCESS_FALLBACK` error, `GET /api/health`
+  is `ready`, and an optimization works as usual.
 
 ## Private networking notes
 

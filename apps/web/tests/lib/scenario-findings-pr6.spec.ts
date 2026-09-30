@@ -351,7 +351,8 @@ describe('Excel: the route search status in plain words; stored warnings once', 
     expect(allText(s).some((t) => t.includes('ROUTING_'))).toBe(false);
     const row = valueOf(s, 'Route search');
     expect(String(row.value)).toMatch(/^Best plan found in the time allowed: the search stopped at its time limit/);
-    expect(row.note).toBe('RECOMMENDED option · searched 27.25 s');
+    // The option's optimizer time (search and load re-check): the "Search time" row says how it was searched.
+    expect(row.note).toBe('RECOMMENDED option · optimizer time 27.25 s');
   });
 
   it('a warning the solver returned twice is stored once', () => {

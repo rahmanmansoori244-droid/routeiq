@@ -108,6 +108,12 @@ export interface PlanSettings {
    * loading_from_min). Null / absent: a plan for a later day, or settings stored before it was kept.
    */
   loadingFromMin?: number | null;
+  /**
+   * A same-day THOROUGH search (review of the long-search PR): its minutes were counted before the
+   * plan's loads, so `loadingFromMin` is when the plan was made + these (plan-from.ts). Null / absent:
+   * none (QUICK, a later day, or settings stored before it was kept).
+   */
+  searchLeadMin?: number | null;
 }
 
 /** What one optimization was computed with (ScenarioDetails.inputs). */
