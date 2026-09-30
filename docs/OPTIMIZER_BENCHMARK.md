@@ -705,39 +705,46 @@ loads could have left up to about 15 minutes sooner); QUICK, the suggested choic
 
 ## 12. Planning rules: unloading finished by closing and the driver break (2 Oct 2026)
 
-Branch `planning-rules-break` (phase A 432541c + phase B). **Before** = the rules off (unloading only has to start by
-closing, no break, split parts share the stop time); **after** = what production runs once the dispatcher sets the break:
-`window_rule` FINISH, a 60-min break starting 12:00-14:00, and on real80 the full stop time on every split part. Both at
-the owner's shift (first departure 07:00, 11 h, so back by 18:00), overtime as each instance has it. Quick auto limits,
-the three scenarios as production asks for them, RECOMMENDED reported; the harness runs in-process (`.dev/bench`, cached
-matrices), one run per cell (single runs: differences of a truck or a few percent can be search noise). real80 in
-aggregates only.
+Branch `planning-rules-break`, **every row on one build: f010a1d** (phase A, phase B and the review fixes), run back to back
+13:41-14:06 on 30 Sep, one solve at a time (another worktree's test suite was running on the machine meanwhile, so wall
+seconds are indicative). **Before** = production before the branch: unloading only has to start by closing, no break,
+split parts share the stop time, no absolute latest return. **Finish** = unloading finished by closing, the full stop time
+on every split part (real80) and the 18:00 latest return, but no break: it isolates the cost of the break. **After** =
+what production runs once the dispatcher sets the shift and the break: finish + full split stop time + 18:00 latest
+return + a 60-min break starting 12:00-14:00. All at the owner's shift (first departure 07:00, 11 h, back by 18:00),
+overtime as each instance has it. Quick auto limits, the three scenarios as production asks for them, RECOMMENDED
+reported; the harness runs in-process (`.dev/bench`, cached matrices), one run per cell (single runs: differences of a
+truck or a few percent can be search noise). Unserved shows the solver's reason code. real80 in aggregates only.
 
-| Instance | Config | Served P1 / P2 / P3 / P4 / P5 | Unserved (reason) | Trucks | Loads | km | OMR | Timetable check | Truck-days with a break | Wall s (post-solve s) |
-|---|---|---|---|---|---|---|---|---|---|---|
-| real80 | before | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 979.9 | 501.67 | VERIFIED | - | 61.9 |
-| real80 | after | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 975.8 | 531.94 (+6.0%) | VERIFIED | 5 of 5 (all at the depot, during a reload) | 61.0 (21.0) |
-| syn60_s1 | before | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 420.1 | 261.14 | VERIFIED (1 stop finishing after closing) | - | 40.9 |
-| syn60_s1 | after | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 421.9 | 261.58 (+0.2%) | VERIFIED | 0 of 5 (all back by 14:00 or starting at 12:00+) | 40.9 (0.9) |
-| syn150_s1 | before | 11 / 24 / 43 / 32 / 40 (all) | 0 | 10 | 10 | 764.2 | 518.62 | VERIFIED | - | 101.1 |
-| syn150_s1 | after | 11 / 24 / 43 / 32 / 40 (all) | 0 | 8 | 10 | 798.6 | 487.06 (-6.1%, search noise) | VERIFIED | 3 of 8 (on the road) | 101.5 (1.4) |
-| syn300_s1 | before | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 25 | 1,698.8 | 929.29 | VERIFIED (12 stops finishing after closing) | - | 327.5 |
-| syn300_s1 | finish only | 15 / 47 / 89 / 65 / 83 | 1 (not placed) | 12 | 24 | 1,767.7 | 951.58 | VERIFIED | - | 318.3 (18.0) |
-| syn300_s1 | after | 15 / 47 / 89 / 65 / 80 | 4 (not placed) | 12 | 24 | 1,686.4 | 975.38 (+5.0%) | VERIFIED | 12 of 12 (10 on the road, 2 at the depot) | 373.7 (73.5) |
+| Instance | Config | Served P1 / P2 / P3 / P4 / P5 | Unserved (reason) | Trucks | Loads | km | OMR | Paid / overtime min | Timetable check | Truck-days with a break | Wall s (post-solve s) |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| real80 | before | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 978.1 | 501.44 | 2,700 / 22 | VERIFIED | - | 69.1 (29.1) |
+| real80 | finish | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 986.5 | 519.70 (+3.6%) | 2,867 / 170 | VERIFIED | - | 54.3 (14.2) |
+| real80 | after | - / 29 / 51 / 3 / - (all) | 0 | 5 | 14 | 988.7 | 539.60 (+7.6%; +3.8% vs finish) | 3,051 / 349 | VERIFIED | 5 of 5 (4 at the depot during a reload, 1 on the road) | 64.0 (23.9) |
+| syn60_s1 | before | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 420.1 | 261.14 | 1,475 / 0 | VERIFIED (1 stop finishing after closing) | - | 40.9 (0.9) |
+| syn60_s1 | after | 5 / 11 / 14 / 17 / 13 (all) | 0 | 5 | 5 | 421.9 | 261.58 (+0.2%) | 1,479 / 0 | VERIFIED | 0 of 5 (all back by 14:00 or starting at 12:00+) | 41.0 (0.9) |
+| syn150_s1 | before | 11 / 24 / 43 / 32 / 40 (all) | 0 | 10 | 10 | 764.2 | 518.62 | 3,187 / 0 | VERIFIED | - | 101.8 (1.7) |
+| syn150_s1 | after | 11 / 24 / 43 / 32 / 40 (all) | 0 | 8 | 10 | 798.6 | 487.06 (-6.1%, search noise: 2 trucks fewer) | 3,478 / 2 | VERIFIED | 3 of 8 (on the road) | 102.9 (2.8) |
+| syn300_s1 | before | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 25 | 1,773.8 | 959.46 | 7,001 / 786 | VERIFIED (9 stops finishing after closing) | - | 332.9 (32.6) |
+| syn300_s1 | finish | 15 / 47 / 90 / 65 / 83 (all) | 0 | 12 | 26 | 1,754.2 | 956.60 (-0.3%) | 7,000 / 795 | VERIFIED | - | 323.8 (23.5) |
+| syn300_s1 | after | 15 / 47 / 89 / 65 / 83 | 1 P3 (SOLVER_DROPPED_LOW_PRIORITY) | 12 | 24 | 1,687.4 | 975.73 (+1.7%) | 7,455 / 976 | VERIFIED | 12 of 12 (9 on the road, 3 at the depot) | 348.5 (48.2) |
 
 What it shows:
-- Every plan is VERIFIED (the independent check re-derives the finish rule and the break), and no stop finishes
-  unloading after closing under the rule (the earlier rule let 1 stop on syn60_s1 and 12 on syn300_s1 do so).
-- Every truck-day that needs a break has one. On the real day all 5 truck-days take it at the depot while the truck is
-  reloaded, so it costs only the minutes beyond the turnaround: +6.0% cost, the paid driver time 2,701 -> 3,000 min and
-  overtime 20 -> 299 min (the break is paid and counts toward overtime), the same 5 trucks and 14 loads.
+- Every plan is VERIFIED (the independent check re-derives the finish rule, the break and the 18:00 latest return); no
+  truck is back after 18:00 in any row, and no stop finishes unloading after closing under the rule (the earlier rule let
+  1 stop on syn60_s1 and 9 on syn300_s1 do so).
+- real80, split in two: the finish rule with the full stop time on its 6 split parts costs +3.6% (paid driver time
+  2,700 -> 2,867 min, overtime 22 -> 170 min); the break adds +3.8% more (paid 2,867 -> 3,051 min, overtime 170 -> 349
+  min: the break is paid and counts toward overtime). That is +184 paid min over 5 truck-days: the 4 breaks taken at the
+  depot overlap the 30-min reload and add at most 30 min each, the 1 on the road adds its full 60 min (4 x 30 + 60 = 180).
+  Same 5 trucks and 14 loads.
 - No P1 or P2 stop is lost anywhere. syn300_s1 is a tight day (every truck-day is bound by the shift): the finish rule
-  alone leaves 1 P3 out, and the break 3 P5 more. The owner decides whether that is acceptable; a THOROUGH search is the
-  lever on such a day.
-- Speed: on days where the breaks fit into the plans the break-free repack proposes (real80, syn60_s1, syn150_s1), the
-  post-solve stage is as fast as before (0.9-21 s; the break timing LPs take 0.03-0.45 s per job). On the tight day the
-  break-free proposals cannot hold the breaks, so the break-aware CP-SAT model runs as well: 73.5 s of post-solve, +46 s
-  wall. A first version that always solved the break-aware model took 33 s of post-solve on syn150_s1 (now 1.4 s).
+  alone still serves everything; with the break 1 P3 stop is left out (SOLVER_DROPPED_LOW_PRIORITY: the search dropped it
+  as the cheapest to leave out). The owner decides whether that is acceptable; a THOROUGH search is the lever on such a day.
+- Speed: post-solve seconds are of the same order before and after on every instance (0.9-2.8 s on syn60_s1 and syn150_s1,
+  24-29 s on real80, 33-48 s on syn300_s1, where the break-aware CP-SAT model also runs because the break-free proposals
+  cannot hold the breaks: +16 s wall). A first version that always solved the break-aware model took 33 s of post-solve
+  on syn150_s1 (now 2.8 s).
 
 ## Sources
 
