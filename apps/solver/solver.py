@@ -34,8 +34,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Iterable
 
-from pyvrp import Model, PenaltyParams, SolveParams
-from pyvrp.stop import MaxRuntime
+# PyVRP is imported lazily, inside the legacy solve only. The API process must never load
+# PyVRP's native library next to OR-Tools': on Linux the two in one process crashed the solver
+# with a segmentation fault (CI, PR #50). Only worker processes and this unused legacy path load it.
 
 from distance import build_matrices, haversine_km as _haversine_km  # noqa: F401 — re-exported below
 from models import (
@@ -75,11 +76,14 @@ PRIZE_SCALE = 100
 # dropping a priority-1 client. We raise the cap so capacity violation is always more
 # expensive than dropping; the solver then cleanly drops low-priority stops when it
 # can't fit them in the fleet.
-_PYVRP_PARAMS = SolveParams(
-    penalty=PenaltyParams(
-        max_penalty=10_000_000_000.0,
-    ),
-)
+_PYVRP_MAX_PENALTY = 10_000_000_000.0
+
+
+def _pyvrp_params():
+    """SolveParams for the legacy solve, built on first use (PyVRP is imported lazily)."""
+    from pyvrp import PenaltyParams, SolveParams  # noqa: PLC0415
+
+    return SolveParams(penalty=PenaltyParams(max_penalty=_PYVRP_MAX_PENALTY))
 
 
 # Re-export haversine_km from distance.py so existing imports (tests, callers)
@@ -266,6 +270,9 @@ def _solve_one_scenario(
     if n_stops == 0:
         return _empty_scenario(name, req), []
 
+    from pyvrp import Model  # noqa: PLC0415 - lazy, see the note at the imports
+    from pyvrp.stop import MaxRuntime  # noqa: PLC0415
+
     weights = adjusted_weights(name, req)
     model = Model()
 
@@ -329,7 +336,7 @@ def _solve_one_scenario(
             stop=MaxRuntime(max(1, time_limit_sec)),
             seed=42,
             display=False,
-            params=_PYVRP_PARAMS,
+            params=_pyvrp_params(),
         )
     except Exception as exc:  # noqa: BLE001 — surface as INFEASIBLE_ROUTE
         log.exception("PyVRP raised during solve for scenario %s: %s", name, exc)
