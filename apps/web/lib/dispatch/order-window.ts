@@ -114,14 +114,32 @@ export interface StopWindow {
   promised: OrderTime | null;
   /** Two orders of the customer have delivery times that do not overlap: the earliest is used. */
   conflict: boolean;
+  /**
+   * A time with one end only lies outside the customer's receiving hours (e.g. "Promised from 15:00"
+   * at a shop that closes at 14:00): the visit is planned with the promised time alone, and the plan
+   * warns.
+   */
+  outsideHours: boolean;
+}
+
+/** The part of [start, end] inside [lo, hi] (null = no limit), or null when nothing is left. */
+function clip(start: number | null, end: number | null, lo: number | null, hi: number | null): [number | null, number | null] | null {
+  const s = start === null ? lo : lo === null ? start : Math.max(start, lo);
+  const e = end === null ? hi : hi === null ? end : Math.min(end, hi);
+  return s !== null && e !== null && e <= s ? null : [s, e];
 }
 
 /**
  * The window a customer's stop is planned with. All open orders of one customer are delivered in
  * one visit, so when any of them has its own delivery time the visit is planned within it: within
  * all of them when several overlap; when they do not overlap, the one that ends first (and
- * `conflict` is set so the plan warns). It replaces the customer's receiving hours, hard and
- * preferred (an urgent delivery may be outside them: the dispatcher agreed it with the customer).
+ * `conflict` is set so the plan warns).
+ * A time with both ends (from all the orders together) replaces the customer's receiving hours, hard
+ * and preferred (an urgent delivery may be outside them: the dispatcher agreed it with the customer).
+ * A time with one end only ("Promised from 14:00", "Promised by 10:00") sets that end and keeps the
+ * customer's own hours on the open side - "from 14:00" is never after closing (the finish-by-closing
+ * rule), "by 10:00" never before opening - and its preferred hours inside what is left. When the
+ * two do not meet, the promised time alone is used and `outsideHours` is set so the plan warns.
  * No order with a delivery time: the customer's hours (`eff`) as they are.
  */
 export function stopWindowFor(
@@ -129,7 +147,7 @@ export function stopWindowFor(
   orders: readonly OrderTimeColumns[],
 ): StopWindow {
   const times = orders.map(orderTimeOf).filter((t): t is OrderTime => t !== null);
-  if (!times.length) return { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd, promised: null, conflict: false };
+  if (!times.length) return { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd, promised: null, conflict: false, outsideHours: false };
   const starts = times.map((t) => t.startMin).filter((m): m is number => m !== null);
   const ends = times.map((t) => t.endMin).filter((m): m is number => m !== null);
   let start = starts.length ? Math.max(...starts) : null;
@@ -144,11 +162,28 @@ export function stopWindowFor(
     used = [first];
   }
   const notes = [...new Set(used.map((t) => t.note).filter((n): n is string => !!n))];
+  let hard: [number | null, number | null] = [start, end];
+  let pref: [number | null, number | null] = [null, null];
+  let outsideHours = false;
+  if (start === null || end === null) {
+    // One end only: the promised end, and the customer's own hours on the open side.
+    const s = start ?? eff.hardStart;
+    const e = end ?? eff.hardEnd;
+    const kept: [number | null, number | null] | null = s !== null && e !== null && e <= s ? null : [s, e];
+    if (kept) {
+      hard = kept;
+      const p = eff.prefStart === null && eff.prefEnd === null ? null : clip(eff.prefStart, eff.prefEnd, kept[0], kept[1]);
+      if (p) pref = p;
+    } else {
+      outsideHours = true;
+    }
+  }
   return {
-    hardStart: start,
-    hardEnd: end,
-    prefStart: null,
-    prefEnd: null,
+    hardStart: hard[0],
+    hardEnd: hard[1],
+    prefStart: pref[0],
+    prefEnd: pref[1],
+    outsideHours,
     promised: {
       startMin: start,
       endMin: end,

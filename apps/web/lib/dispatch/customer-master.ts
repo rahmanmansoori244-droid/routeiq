@@ -9,10 +9,12 @@ import { OPEN } from './open-orders';
 import { tenantServiceArea } from './service-area';
 import { dateOnly, isoOf, todayIso } from './time';
 import type { TypeProfileLike } from './customer-attrs';
+import { customerKey, preferredCustomer } from './order-intake';
 import {
   buildWorklist,
   changedSince,
   changeSummary,
+  collectText,
   localStamp,
   MASTER_COLUMNS,
   masterValues,
@@ -28,6 +30,7 @@ const CUSTOMER_SELECT = {
   id: true,
   code: true,
   branchCode: true,
+  branchKey: true,
   name: true,
   lat: true,
   lng: true,
@@ -59,7 +62,7 @@ const CUSTOMER_SELECT = {
 
 type CustomerRow = Prisma.CustomerGetPayload<{ select: typeof CUSTOMER_SELECT }>;
 
-function toMaster(c: CustomerRow): MasterCustomer & { accessNotes: string | null } {
+function toMaster(c: CustomerRow): MasterCustomer & { accessNotes: string | null; branchKey: string } {
   return {
     ...c,
     regionCode: c.region?.code ?? null,
@@ -197,26 +200,57 @@ function aboutSheet(wb: ExcelJS.Workbook, lines: readonly string[]) {
 const IMPORT_RULES = [
   'Correct the first sheet and import it on Customers > Import: the columns marked "Imported back" are read; the others are for reading only.',
   'A blank cell keeps what the customer has. Only an admin can change a saved location: a dispatcher\'s import only fills in missing or unusable locations.',
-  'Receiving hours: when any of hard_from, hard_to, preferred_from, preferred_to is filled in, the four together are the customer\'s own hours (a blank one = no limit); they are confirmed by you unless hours_confirmed says no. open_all_day yes = any time (confirmed).',
+  'Receiving hours: when any of hard_from, hard_to, preferred_from, preferred_to is filled in, the four together are the customer\'s own hours (a blank one = no limit; 24:00 = the end of the day). Hours you enter or change are confirmed by you (write no in hours_confirmed to save them without confirming). If the hours already shown are right, write yes in hours_confirmed: left as they are with hours_confirmed blank, they stay not confirmed. open_all_day yes = any time (confirmed).',
   'Locations: at least 4 decimals, inside the delivery area; a location that is not exact is not saved (drop the pin on Daily dispatch or the customer page).',
 ];
 
 const WORKLIST_LEAD: readonly LeadColumn[] = [
   { key: 'missing', width: 26 },
+  { key: 'what_to_do', width: 60 },
   { key: 'first_delivery', width: 12 },
   { key: 'open_orders', width: 8 },
   { key: 'depots', width: 10 },
 ];
 
 function worklistRows(list: LoadedWorklist): Record<string, MasterValue>[] {
-  return list.rows.map((r) => ({
-    missing: r.missing,
-    first_delivery: r.firstDelivery,
-    open_orders: r.orders,
-    depots: r.depots.join(', '),
-    ...(list.master.get(r.customerId) ?? {}),
-  }));
+  return list.rows.map((r) => {
+    const values = list.master.get(r.customerId) ?? {};
+    return {
+      missing: r.missing,
+      what_to_do: collectText(r, values),
+      first_delivery: r.firstDelivery,
+      open_orders: r.orders,
+      depots: r.depots.join(', '),
+      ...values,
+    };
+  });
 }
+
+/**
+ * Older customers whose code (and branch) differ only in letter case ("C001" and "c001"): the import
+ * matches one of them (preferredCustomer, as the order intake), so only that one goes on the sheet that
+ * is imported back; the others are listed apart, for reading only (a second row with the same code
+ * would make the import refuse the whole file).
+ */
+function splitTwins<C extends { id: string; code: string; branchKey: string; active: boolean; lat: number | null; lng: number | null }>(
+  customers: readonly C[],
+): { main: C[]; twins: { c: C; importedAs: string }[] } {
+  const groups = new Map<string, C[]>();
+  for (const c of customers) groups.set(customerKey(c.code, c.branchKey), [...(groups.get(customerKey(c.code, c.branchKey)) ?? []), c]);
+  const keep = new Map<string, C>();
+  for (const [key, list] of groups) keep.set(key, list.length > 1 ? preferredCustomer([...list])! : list[0]!);
+  const main: C[] = [];
+  const twins: { c: C; importedAs: string }[] = [];
+  for (const c of customers) {
+    const kept = keep.get(customerKey(c.code, c.branchKey))!;
+    if (kept.id === c.id) main.push(c);
+    else twins.push({ c, importedAs: kept.code });
+  }
+  return { main, twins };
+}
+
+/** The name of the sheet of twins in the customer master. */
+export const TWINS_SHEET = 'Same code, other case';
 
 function perDaySheet(wb: ExcelJS.Workbook, list: LoadedWorklist) {
   const ws = wb.addWorksheet('Per depot and day', { views: [{ state: 'frozen', ySplit: 1 }] });
@@ -276,8 +310,9 @@ export async function buildMasterWorkbook(
     auditsOf.set(a.entityId, [...(auditsOf.get(a.entityId) ?? []), { action: a.action, createdAt: a.createdAt, userName: a.user?.name ?? null, beforeJson: a.beforeJson, afterJson: a.afterJson }]);
   }
   const customers = rows.map(toMaster);
-  const values = customers.map((c) => masterValues(c, ctx));
-  const changed = customers
+  const { main, twins } = splitTwins(customers);
+  const values = main.map((c) => masterValues(c, ctx));
+  const changed = main
     .map((c, i) => ({ c, v: values[i]!, s: changeSummary(c, auditsOf.get(c.id) ?? [], since) }))
     .filter((x) => x.s !== null)
     .sort((a, b) => b.s!.at.getTime() - a.s!.at.getTime())
@@ -289,13 +324,17 @@ export async function buildMasterWorkbook(
   customerSheet(wb, 'Customers', [], values);
   customerSheet(wb, label, [{ key: 'changed_at', width: 17 }, { key: 'changed_by', width: 18 }, { key: 'what_changed', width: 36 }], changed);
   customerSheet(wb, 'Still missing', WORKLIST_LEAD, worklistRows(list));
+  if (twins.length) customerSheet(wb, TWINS_SHEET, [{ key: 'imported_as', width: 12 }], twins.map((t) => ({ imported_as: t.importedAs, ...masterValues(t.c, ctx) })));
   aboutSheet(wb, [
     'Customer master',
-    `Every customer (${customers.length}), made by ${opts.generatedBy} on ${localStamp(now, ctx.timezone)} (company time).`,
+    `Every customer (${main.length}), made by ${opts.generatedBy} on ${localStamp(now, ctx.timezone)} (company time).`,
     `"${label}": customers created or changed since ${localStamp(since, ctx.timezone)} (${changed.length}), newest first.`,
     `"Still missing": customers with open orders from ${list.from} to ${list.to} that miss a usable location or their own confirmed receiving hours (${list.rows.length}).`,
+    ...(twins.length
+      ? [`"${TWINS_SHEET}": older customers (${twins.length}) whose code differs only in letter case from one on the Customers sheet. For reading only: the import updates the customer on the Customers sheet (imported_as).`]
+      : []),
     ...IMPORT_RULES,
   ]);
   const today = todayIso(ctx.timezone, now);
-  return { buffer: Buffer.from(await wb.xlsx.writeBuffer()), fileName: `customer-master-${today}.xlsx`, changed: changed.length, customers: customers.length, missing: list.rows.length };
+  return { buffer: Buffer.from(await wb.xlsx.writeBuffer()), fileName: `customer-master-${today}.xlsx`, changed: changed.length, customers: main.length, missing: list.rows.length };
 }

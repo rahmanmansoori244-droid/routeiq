@@ -40,6 +40,7 @@ import {
   DATA_GATE_RULE,
   dataGaps,
   dataGateRefusal,
+  deliveryTimeChangedRefusal,
   importedPriority,
   masterValues,
   readImportedHours,
@@ -83,6 +84,25 @@ const rowsOf = (ws: ExcelJS.Worksheet) => {
     out.push(Object.fromEntries(heads.map((h, i) => [h, r.getCell(i + 1).value])));
   });
   return out;
+};
+const importCsv = async (text: string) => {
+  const fd = new FormData();
+  fd.set('file', new File([text], 'customers.csv', { type: 'text/csv' }));
+  return answer(await customerImport(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd })));
+};
+/** Sets cells of the row of `code` on a sheet (by header). */
+const setCells = (ws: ExcelJS.Worksheet, code: string, values: Record<string, string | number | null>) => {
+  const heads = (ws.getRow(1).values as unknown[]).slice(1).map(String);
+  ws.eachRow((r, n) => {
+    if (n === 1 || r.getCell(heads.indexOf('code') + 1).value !== code) return;
+    for (const [k, v] of Object.entries(values)) r.getCell(heads.indexOf(k) + 1).value = v;
+  });
+};
+/** Every text of the "About this file" sheet, one string. */
+const aboutText = (wb: ExcelJS.Workbook) => {
+  const out: string[] = [];
+  wb.getWorksheet('About this file')!.eachRow((r) => r.eachCell((c) => void out.push(String(c.value))));
+  return out.join('\n');
 };
 const importXlsx = async (buf: Buffer, dryRun = false) => {
   const fd = new FormData();
@@ -139,12 +159,18 @@ describe('item 3: the loading gate words', () => {
       { customerId: 'A', deliveryStartMin: null, deliveryEndMin: null },
       { customerId: 'D', deliveryStartMin: null, deliveryEndMin: null },
     ]);
-    expect(dataGateRefusal({ truck: 'T01', loadNo: 2, status: 'PLANNED' }, gaps, 'Drop the pin.')).toBe(
-      `T01 L2: 2 customers on this load miss data needed before loading - A (Customer A): no delivery window; D (Corner Shop): no location and delivery window. ${DATA_GATE_RULE} Delivery window: ${windowGateRemedy('PLANNED')} Location: Drop the pin.`,
+    expect(dataGateRefusal({ truck: 'T01', loadNo: 2 }, gaps, 'Drop the pin.')).toBe(
+      `T01 L2: 2 customers on this load miss data needed before loading - A (Customer A): no delivery window; D (Corner Shop): no location and delivery window. ${DATA_GATE_RULE} Delivery window: ${windowGateRemedy()} Location: Drop the pin.`,
     );
-    // A locked load's orders keep their times: confirming the hours is the way, or unlock first.
-    expect(windowGateRemedy('LOCKED')).toMatch(/then try again\. To give an order a delivery time instead, unlock this load/);
-    expect(windowGateRemedy('LOADING')).not.toMatch(/unlock/);
+    // Only a planned load is refused for it (frozen loads are never judged again): never "unlock".
+    expect(windowGateRemedy()).toMatch(/confirmed with the customer.*then try again.*Or set a delivery time for the order under Delivery times \(step 2\), then RE-PLAN/);
+    expect(windowGateRemedy()).not.toMatch(/unlock/i);
+  });
+
+  it('a delivery time changed after planning: RE-PLAN first, naming the customers', () => {
+    expect(deliveryTimeChangedRefusal({ truck: 'T01', loadNo: 2 }, 3, [{ code: 'A', branchCode: 'B2', name: 'Shop A' }, { code: 'C', branchCode: null, name: 'Shop C' }])).toBe(
+      'T01 L2: the delivery times of 3 orders were set or changed after this plan was made (A / B2 (Shop A), C (Shop C)). RE-PLAN first, so the stop is planned with the new time and the plan, the Excel, the driver sheet and WhatsApp show it. Then lock the load.',
+    );
   });
 });
 
@@ -220,6 +246,27 @@ describe('item 4: GET /api/customers/data-to-collect', () => {
     ]);
     expect(rows[1]).toMatchObject({ lat: null, location_status: expect.stringMatching(/^Not usable: /), hours_confirmed: null, priority: 3, priority_confirmed: null });
   });
+
+  it('hours already shown that are right are confirmed with yes in hours_confirmed (each row and the About sheet say so); left blank, nothing changes', async () => {
+    Object.assign(row('customer', 'USABLE'), { hardWindowStartMin: 360, hardWindowEndMin: 840 });
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    const ws = wb.worksheets[0]!;
+    const rows = rowsOf(ws);
+    expect(rows.find((x) => x.code === 'USABLE')).toMatchObject({
+      hard_from: '06:00', hard_to: '14:00', hours_confirmed: null,
+      what_to_do: expect.stringMatching(/Hours shown are not confirmed.*write yes in hours_confirmed/),
+    });
+    expect(rows.find((x) => x.code === 'NONE')!.what_to_do).toMatch(/lat and lng/);
+    expect(aboutText(wb)).toMatch(/hours already shown are right, write yes in hours_confirmed/);
+    expect(aboutText(wb)).not.toMatch(/confirmed by you unless hours_confirmed says no/);
+    // Imported back as it is: the hours stay not confirmed (the customer stays on the list).
+    expect((await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()))).body.data).toMatchObject({ errorRows: 0, receivingHoursChanged: 0 });
+    expect(row('customer', 'USABLE').windowConfirmedAt).toBeNull();
+    // yes: confirmed by the importer.
+    setCells(ws, 'USABLE', { hours_confirmed: 'yes' });
+    expect((await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()))).body.data).toMatchObject({ errorRows: 0, receivingHoursChanged: 1 });
+    expect(row('customer', 'USABLE')).toMatchObject({ hardWindowStartMin: 360, hardWindowEndMin: 840, windowConfirmedById: 'u1' });
+  });
 });
 
 describe('item 6: the master row reads back as the same customer', () => {
@@ -249,6 +296,14 @@ describe('item 6: the master row reads back as the same customer', () => {
     });
     expect(masterValues(m({ windowConfirmedAt: AT }), ctx)).toMatchObject({ open_all_day: 'yes', hours_confirmed: 'yes', receiving_hours: 'Open all day (confirmed)' });
     expect(masterValues(m({ serviceTimeConfirmed: true, avgServiceTimeMin: 25 }), ctx)).toMatchObject({ avg_service_time_min: 25, payment_type: 'credit' });
+  });
+
+  it('hours ending at the end of the day are written 24:00 and read back as the same hours', () => {
+    const own = { hardWindowStartMin: 1080, hardWindowEndMin: 1440, prefWindowStartMin: 1200, prefWindowEndMin: 1440, windowConfirmedAt: AT };
+    const v = masterValues(m(own), ctx);
+    expect(v).toMatchObject({ hard_from: '18:00', hard_to: '24:00', preferred_from: '20:00', preferred_to: '24:00', hours_confirmed: 'yes' });
+    const cells = Object.fromEntries(['hard_from', 'hard_to', 'preferred_from', 'preferred_to', 'open_all_day', 'hours_confirmed'].map((k) => [k, String(v[k] ?? '')]));
+    expect(readImportedHours(cells, own)).toEqual({ ok: true, change: null });
   });
 });
 
@@ -352,14 +407,30 @@ describe('item 6: GET /api/customers/master and the import reading it back', () 
   });
 
   it('imported back as downloaded (by a dispatcher), it changes nothing: no customer written, no audit row', async () => {
+    // Hours to the end of the day; an exact point saved without a source (POST /api/customers); an
+    // older twin whose code differs only in letter case (listed apart, not imported).
+    Object.assign(row('customer', 'DONE'), { hardWindowStartMin: 1080, hardWindowEndMin: 1440 });
+    row('customer', 'USABLE').locationSource = null;
+    tables.customer.push(customer('usable', { name: 'Old twin' }));
     const before = JSON.parse(JSON.stringify(tables.customer));
-    const buf = Buffer.from(await (await master()).arrayBuffer());
+    const res = await master();
+    const buf = Buffer.from(await res.clone().arrayBuffer());
+    const wb = await workbookOf(res);
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Customers', 'Changed in last 24 hours', 'Still missing', 'Same code, other case', 'About this file']);
+    expect(rowsOf(wb.getWorksheet('Customers')!).filter((x) => String(x.code).toUpperCase() === 'USABLE').map((x) => x.code)).toEqual(['USABLE']);
+    expect(rowsOf(wb.getWorksheet('Same code, other case')!).map((x) => [x.code, x.name, x.imported_as])).toEqual([['usable', 'Old twin', 'USABLE']]);
+    expect(rowsOf(wb.getWorksheet('Customers')!).find((x) => x.code === 'DONE')).toMatchObject({ hard_from: '18:00', hard_to: '24:00' });
     const r = await importXlsx(buf);
     expect(r.status).toBe(200);
     expect(r.body.data).toMatchObject({ errorRows: 0, creates: 0, updates: 6, unchanged: 6, receivingHoursChanged: 0 });
     expect(JSON.parse(JSON.stringify(tables.customer))).toEqual(before);
     expect(audits.filter((a) => a.action === 'UPDATE')).toEqual([]);
     expect(r.body.data.warnings.join(' ')).not.toMatch(/differ from the customer's saved location/);
+    // One plain count for the customers without a usable location (NONE, LOW), none per row.
+    expect(r.body.data.warnings.join(' ')).not.toMatch(/geocode|missing coordinates/);
+    expect(r.body.data.warnings.filter((w: string) => /have no usable location/.test(w))).toEqual([
+      '2 customer(s) in the file have no usable location and no lat / lng in the file. Their orders are not planned or sent out until the pin is dropped (ADD LOCATION on Daily dispatch, or Set location on the customer page).',
+    ]);
     // The admin's import of the same file changes nothing either.
     session.role = 'TENANT_ADMIN';
     expect((await importXlsx(buf)).body.data).toMatchObject({ unchanged: 6 });
@@ -393,5 +464,21 @@ describe('item 6: GET /api/customers/master and the import reading it back', () 
       ['NONE', 'fileName,hardWindowEndMin,hardWindowStartMin,source,windowConfirmedAt'],
       ['USABLE', 'fileName,priority,priorityConfirmed,source'],
     ]);
+    // The location set for NONE has its own row (who, from what to what), for "Changed since".
+    expect(audits.filter((a) => a.action === 'CUSTOMER_LOCATION_SET').map((a) => [a.entityId, a.userId, a.beforeJson.lat, a.afterJson.lat])).toEqual([['NONE', 'u1', null, 23.6001]]);
+  });
+
+  it('each customer the import creates, or whose location it sets or marks not usable, gets its own audit row', async () => {
+    session.role = 'TENANT_ADMIN';
+    // NEW1: created with an exact point. USABLE: the file points elsewhere, not exact (marked LOW).
+    // CONFIRMED: not in the file.
+    const r = await importCsv('code,name,priority,lat,lng\nNEW1,New Shop,3,23.6101,58.5101\nUSABLE,Customer USABLE,3,23.70,58.50\n');
+    expect(r.body.data).toMatchObject({ errorRows: 0, creates: 1 });
+    const created = tables.customer.find((c) => c.code === 'NEW1')!;
+    expect(audits.find((a) => a.action === 'CREATE' && a.entityId === created.id)).toMatchObject({ userId: 'u1', afterJson: { code: 'NEW1', name: 'New Shop', lat: 23.6101, lng: 58.5101, source: 'IMPORT' } });
+    expect(audits.find((a) => a.action === 'UPDATE' && a.entityId === 'USABLE' && 'geocodeConfidence' in a.afterJson)).toMatchObject({
+      userId: 'u1', beforeJson: { geocodeConfidence: 'HIGH' }, afterJson: { geocodeConfidence: 'LOW', source: 'IMPORT' },
+    });
+    expect(row('customer', 'USABLE').geocodeConfidence).toBe('LOW');
   });
 });

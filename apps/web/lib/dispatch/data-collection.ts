@@ -3,9 +3,10 @@
  * so the screens, the routes and the tests share every rule and every word.
  *
  *  - Item 3, loading gate: with the company setting "Require location and delivery window before
- *    loading" on, LOCK, LOADING and DISPATCH of a load are refused while a customer on it has no usable
+ *    loading" on, a load leaving PLANNED (LOCK) is refused while a customer on it has no usable
  *    location (`locationBlocksDelivery`), or neither its own confirmed receiving hours nor a delivery
- *    time on one of its orders on that load (`dataGaps`). Planning is never refused by it.
+ *    time its planned stop carries (`dataGaps`). A load already locked or loading is never judged
+ *    again by it. Planning is never refused by it.
  *  - Item 4, data to collect: customers with open orders from today to N days ahead that miss a usable
  *    location or their own confirmed receiving hours (`buildWorklist`), counted per depot and per day.
  *  - Item 6, daily customer master: one row per customer (`masterValues`, MASTER_COLUMNS) that the
@@ -22,6 +23,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
+import { clockText } from './order-window';
 import { addDaysIso, fmtDayMonth, fmtHhmm, localDateIso, localMinutes, parseHhmm, zonedDayStart } from './time';
 
 // ---------------------------------------------------------------------------------------------
@@ -72,9 +74,10 @@ const byCode = (a: { code: string; branchCode: string | null }, b: { code: strin
 /**
  * The customers of `orders` that miss data needed before loading: no usable location
  * (`locationBlocksDelivery`), or no delivery window - neither their own confirmed receiving hours nor
- * a delivery time (urgent / promised) on one of the orders given (all orders of a customer go in one
- * visit, which is planned inside that time). Sorted by code and branch. Company and customer-type
- * default hours do not count.
+ * a delivery time (urgent / promised) on one of the entries given (all orders of a customer go in one
+ * visit, which is planned inside that time). The gate gives one entry per planned stop, with the time
+ * the stop was planned with; the day screen gives the orders' times now. Sorted by code and branch.
+ * Company and customer-type default hours do not count.
  */
 export function dataGaps(customers: readonly GateCustomer[], orders: readonly GateOrder[], area: ServiceArea = DEFAULT_SERVICE_AREA): DataGap[] {
   const ordered = new Set(orders.map((o) => o.customerId));
@@ -107,31 +110,43 @@ export function customerRef(c: { code: string; branchCode: string | null; name: 
 const CONFIRM_HOURS =
   'Enter each customer\'s receiving hours in Details (Daily dispatch or the customer page) and tick "These hours are confirmed with the customer", or tick "Open all day"';
 
-/** What to do about a missing delivery window, for the load as it is (a locked load's orders keep their times). */
-export function windowGateRemedy(status: string): string {
-  if (status === 'PLANNED') {
-    return `${CONFIRM_HOURS}; or set a delivery time for the order under Delivery times (step 2). If the hours differ from the ones planned, RE-PLAN. Then try again.`;
-  }
-  if (status === 'LOCKED') {
-    return `${CONFIRM_HOURS}, then try again. To give an order a delivery time instead, unlock this load (put it back to Planned), set the time under Delivery times, then RE-PLAN.`;
-  }
-  return `${CONFIRM_HOURS}, then try again.`;
+/**
+ * What to do about a missing delivery window. Only a load that is still Planned is refused for it
+ * (a load already locked or loading is never judged again), so the remedy is always for a planned load.
+ */
+export function windowGateRemedy(): string {
+  return `${CONFIRM_HOURS}, then try again (if the confirmed hours differ from the ones planned, RE-PLAN first). Or set a delivery time for the order under Delivery times (step 2), then RE-PLAN and try again.`;
 }
 
 /**
- * The refusal of LOCK / LOADING / DISPATCH under the loading gate: each customer and what it misses,
- * the rule, and the remedy for each kind of gap. `locationRemedy`: what to do about a missing
+ * The refusal of LOCK under the loading gate (a load leaving Planned): each customer and what it
+ * misses, the rule, and the remedy for each kind of gap. `locationRemedy`: what to do about a missing
  * location for this load (plan-service noLocationLoadRemedy).
  */
-export function dataGateRefusal(load: { truck: string; loadNo: number; status: string }, gaps: readonly DataGap[], locationRemedy: string): string {
+export function dataGateRefusal(load: { truck: string; loadNo: number }, gaps: readonly DataGap[], locationRemedy: string): string {
   const shown = gaps.slice(0, 8).map((g) => `${customerRef(g)}: no ${gapText(g)}`);
   const more = gaps.length > 8 ? `; and ${gaps.length - 8} more` : '';
   const who = gaps.length === 1 ? '1 customer on this load misses' : `${gaps.length} customers on this load miss`;
   const remedies = [
-    gaps.some((g) => g.window) ? `Delivery window: ${windowGateRemedy(load.status)}` : null,
+    gaps.some((g) => g.window) ? `Delivery window: ${windowGateRemedy()}` : null,
     gaps.some((g) => g.location) ? `Location: ${locationRemedy}` : null,
   ].filter(Boolean);
   return `${load.truck} L${load.loadNo}: ${who} data needed before loading - ${shown.join('; ')}${more}. ${DATA_GATE_RULE} ${remedies.join(' ')}`;
+}
+
+/**
+ * The refusal of LOCK when an order's delivery time was set, changed or removed after the plan the
+ * load is on was made (item 1): its stop was planned with other hours, and the outputs would not show
+ * the time. Whatever the loading rule's setting.
+ */
+export function deliveryTimeChangedRefusal(
+  load: { truck: string; loadNo: number },
+  orders: number,
+  customers: readonly { code: string; branchCode: string | null; name: string }[],
+): string {
+  const what = orders === 1 ? 'the delivery time of 1 order was' : `the delivery times of ${orders} orders were`;
+  const who = `${customers.slice(0, 8).map(customerRef).join(', ')}${customers.length > 8 ? `, and ${customers.length - 8} more` : ''}`;
+  return `${load.truck} L${load.loadNo}: ${what} set or changed after this plan was made (${who}). RE-PLAN first, so the stop is planned with the new time and the plan, the Excel, the driver sheet and WhatsApp show it. Then lock the load.`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -352,7 +367,7 @@ export const MASTER_COLUMNS: readonly MasterColumn[] = [
   { key: 'preferred_from', width: 9, imported: true, text: 'Preferred hours (soft): from, HH:MM.' },
   { key: 'preferred_to', width: 9, imported: true, text: 'Preferred hours: to, HH:MM.' },
   { key: 'open_all_day', width: 9, imported: true, text: 'yes = the customer accepts deliveries at any time (confirmed, no hours).' },
-  { key: 'hours_confirmed', width: 9, imported: true, text: 'yes = the hours are confirmed with the customer. Blank = not confirmed yet: hours you enter or change are confirmed by you. no = store them without confirming.' },
+  { key: 'hours_confirmed', width: 9, imported: true, text: 'yes = the hours are confirmed with the customer: write yes when the hours already shown are right. Blank = not confirmed yet: hours you enter or change are confirmed by you, hours left as shown stay not confirmed. no = store them without confirming.' },
   { key: 'receiving_hours', width: 40, imported: false, text: 'The hours planning uses, and where they come from.' },
   { key: 'hours_confirmed_by', width: 16, imported: false, text: 'Who confirmed the receiving hours.' },
   { key: 'hours_confirmed_at', width: 17, imported: false, text: 'When (company time).' },
@@ -412,7 +427,8 @@ export function locationStatusText(c: Pick<MasterCustomer, 'lat' | 'lng' | 'loca
   return c.geocodeConfidence === 'HIGH' ? 'Usable - not confirmed by a dispatcher' : 'Usable - not exact, not confirmed by a dispatcher';
 }
 
-const hhmm = (v: number | null) => (v === null ? null : fmtHhmm(v));
+// 1440 (the end of the day) is "24:00", which the import reads back (fmtHhmm would write "00:00 +1").
+const hhmm = (v: number | null) => (v === null ? null : clockText(v));
 
 /**
  * One customer as the master shows it (keys = MASTER_COLUMNS). Round trip: imported back unchanged,
@@ -461,6 +477,25 @@ export function masterValues(c: MasterCustomer, ctx: MasterContext): Record<stri
     created_at: localStamp(c.createdAt, ctx.timezone),
     updated_at: localStamp(c.updatedAt, ctx.timezone),
   };
+}
+
+/**
+ * What the collector does for one customer on the data-to-collect sheet (its "what_to_do" cell).
+ * Hours already in the file that are not confirmed stay not confirmed when the row is left as it is
+ * (so importing the master back changes nothing): the collector writes yes in hours_confirmed.
+ */
+export function collectText(r: { location: boolean; window: boolean }, v: Record<string, MasterValue>): string {
+  const out: string[] = [];
+  if (r.location) out.push('Location: fill in lat and lng (the exact point, at least 4 decimals), or leave them blank and drop the pin with ADD LOCATION.');
+  if (r.window) {
+    const shown = ['hard_from', 'hard_to', 'preferred_from', 'preferred_to'].some((k) => v[k] != null);
+    out.push(
+      shown
+        ? 'Hours shown are not confirmed: check them with the customer. If they are right, write yes in hours_confirmed; if not, correct them (hours you change are confirmed by you).'
+        : 'Receiving hours: fill in hard_from and hard_to (and preferred_from / preferred_to if any), or write yes in open_all_day if the customer accepts deliveries at any time.',
+    );
+  }
+  return out.join(' ');
 }
 
 /** The start of "changed since": the company's midnight of `dateIso`, or 24 hours before `now`. */

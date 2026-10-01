@@ -57,7 +57,11 @@ const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartM
 // says no; with a priority_confirmed column an unchanged priority that is not confirmed stays as it is
 // (importedPriority; without the column every priority is confirmed, as before). A row that changes nothing
 // writes nothing (so the master imported back as downloaded changes nothing, and "Changed since"
-// lists only real changes); each customer it changes gets an audit row with what it was and became.
+// lists only real changes; a saved point that is confirmed or exact is the same point whatever its
+// source); each customer it changes gets its own audit row with what it was and became: UPDATE for
+// its fields (and a point marked LOW), CUSTOMER_LOCATION_SET for each location it writes, CREATE for
+// each customer it creates. Rows without lat / lng whose customer has no usable location are counted
+// in one warning.
 
 interface ImportError {
   row: number;
@@ -248,9 +252,9 @@ export async function POST(req: Request) {
       } else {
         notExact.push({ row, pair });
       }
-    } else {
-      warnings.push(`Row ${row} (${code}): missing coordinates — will need map geocode.`);
     }
+    // No lat / lng: the customer keeps what it has. Those left without a usable location are counted
+    // in one warning below (not one line per row: a master of thousands leaves many blank).
 
     valid.push({
       row,
@@ -299,6 +303,18 @@ export async function POST(req: Request) {
   // saved location is kept (owner decision 1 Oct 2026, item 5: only an admin can change it).
   const adminOnlyRows = new Set<number>();
   const notExactByRow = new Map(notExact.map((n) => [n.row, n.pair]));
+  // Rows without lat / lng whose customer has no usable location (new, none saved, or a saved one that
+  // cannot be used): one plain count. A customer that keeps a usable saved location needs nothing.
+  const noLocation = valid.filter((v) => {
+    if (v.lat !== null || notExactByRow.has(v.row)) return false;
+    const m = matchOf(v);
+    return !m || m.lat === null || m.lng === null || locationBlocksDelivery(m, area);
+  }).length;
+  if (noLocation) {
+    warnings.push(
+      `${noLocation} customer(s) in the file have no usable location and no lat / lng in the file. Their orders are not planned or sent out until the pin is dropped (ADD LOCATION on Daily dispatch, or Set location on the customer page).`,
+    );
+  }
   for (const v of valid) {
     const pair = notExactByRow.get(v.row);
     if (pair === undefined) continue;
@@ -420,6 +436,7 @@ export async function POST(req: Request) {
   let markedLow = 0;
   let replacedNotUsable = 0;
   const importedAt = new Date();
+  const importTenantId = session.user.tenantId;
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
     const fileHasLoc = v.lat !== null && v.lng !== null;
@@ -436,7 +453,7 @@ export async function POST(req: Request) {
     }
     if (Object.keys(hoursData).length) hoursChanged++;
     if (!m) {
-      await db.customer.create({
+      const created = await db.customer.create({
         data: {
           tenantId: session.user.tenantId,
           code: v.code,
@@ -457,6 +474,19 @@ export async function POST(req: Request) {
           ...(v.paymentType ? { paymentType: v.paymentType } : {}),
           ...hoursData,
         },
+      });
+      // Its own row, so "Changed since" in the customer master says who created it and from which file.
+      const { windowConfirmedById: _by, ...hoursShown } = hoursData;
+      await audit({
+        tenantId: session.user.tenantId,
+        userId: session.user.id,
+        action: 'CREATE',
+        entity: 'Customer',
+        entityId: created.id,
+        afterJson: {
+          code: v.code, branchCode: v.branchCode, name: v.name, regionId, lat: v.lat, lng: v.lng, priority: v.priority, ...hoursShown, source: 'IMPORT', fileName: parsed.fileName,
+        } as never,
+        ip,
       });
     } else {
       // Only what the row changes is written (item 6): a customer master imported back as it was
@@ -491,11 +521,25 @@ export async function POST(req: Request) {
         });
       }
       const samePlace = fileHasLoc && m.lat !== null && m.lng !== null && samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat!, lng: v.lng! });
-      if (samePlace && (m.locationVerified || (m.geocodeConfidence === 'HIGH' && m.locationSource === 'IMPORT'))) {
-        // The file's point is the saved one, already confirmed or exact from a file: nothing to write
-        // (item 6, a customer master imported back).
+      if (samePlace && (m.locationVerified || m.geocodeConfidence === 'HIGH')) {
+        // The file's point is the saved one, already confirmed or exact (from a file, a pin, or a
+        // customer created with coordinates): nothing to write, its source stays (item 6, a customer
+        // master imported back).
       } else if (fileHasLoc) {
         const data = { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const };
+        // Each location the import writes has its own row (who, from what, to what), so "Changed since"
+        // in the customer master can say it; one that replaced a point that was not usable is also what
+        // plan-service locationGate reads.
+        const locationRow = (before: { lat: number | null; lng: number | null; locationSource: string | null; locationVerified: boolean; geocodeConfidence: string | null }) => ({
+          tenantId: importTenantId,
+          userId: session.user.id,
+          action: 'CUSTOMER_LOCATION_SET' as const,
+          entity: 'Customer' as const,
+          entityId: m.id,
+          beforeJson: { lat: before.lat, lng: before.lng, source: before.locationSource, verified: before.locationVerified, confidence: before.geocodeConfidence } as never,
+          afterJson: { lat: v.lat, lng: v.lng, source: 'IMPORT', confidence: geocodeConfidence, check: 'IMPORT', fileName: parsed.fileName } as never,
+          ip,
+        });
         // A saved point that was not usable (an earlier file marked it LOW, or it is outside the area)
         // replaced by the file's exact pair is recorded like a pin set in ADD LOCATION, so a stop
         // still planned at the old point is refused at LOCK, LOADING and DISPATCH until a re-plan
@@ -519,7 +563,10 @@ export async function POST(req: Request) {
             where: { id: m.id, locationVerified: false, lat: m.lat, lng: m.lng, geocodeConfidence: m.geocodeConfidence },
             data,
           });
-          if (written.count === 1) outcome = 'WRITTEN';
+          if (written.count === 1) {
+            outcome = 'WRITTEN';
+            await audit(locationRow(m));
+          }
         }
         if (!outcome) {
           // The customer changed since the import read it, or the change needs its row: lock the
@@ -538,21 +585,8 @@ export async function POST(req: Request) {
             if (now && savedLocationLocked(isAdmin, now, area)) return 'KEPT_LOCKED' as const;
             const written = await tx.customer.updateMany({ where: { id: m.id, locationVerified: false }, data });
             if (written.count === 0 || !now) return 'KEPT_VERIFIED' as const;
-            if (!needsRow(now)) return 'WRITTEN' as const;
-            await audit(
-              {
-                tenantId,
-                userId: session.user.id,
-                action: 'CUSTOMER_LOCATION_SET',
-                entity: 'Customer',
-                entityId: m.id,
-                beforeJson: { lat: now.lat, lng: now.lng, source: now.locationSource, verified: now.locationVerified, confidence: now.geocodeConfidence } as never,
-                afterJson: { lat: v.lat, lng: v.lng, source: 'IMPORT', confidence: geocodeConfidence, check: 'IMPORT', fileName: parsed.fileName } as never,
-                ip,
-              },
-              tx as unknown as Prisma.TransactionClient,
-            );
-            return 'REPLACED' as const;
+            await audit(locationRow(now), tx as unknown as Prisma.TransactionClient);
+            return needsRow(now) ? ('REPLACED' as const) : ('WRITTEN' as const);
           });
         }
         if (outcome === 'KEPT_VERIFIED') keptVerified++;
@@ -568,7 +602,19 @@ export async function POST(req: Request) {
             data: { geocodeConfidence: 'LOW' },
           });
           markedLow += marked.count;
-          if (marked.count) wrote = true;
+          if (marked.count) {
+            wrote = true;
+            await audit({
+              tenantId: session.user.tenantId,
+              userId: session.user.id,
+              action: 'UPDATE',
+              entity: 'Customer',
+              entityId: m.id,
+              beforeJson: { geocodeConfidence: m.geocodeConfidence } as never,
+              afterJson: { geocodeConfidence: 'LOW', source: 'IMPORT', fileName: parsed.fileName } as never,
+              ip,
+            });
+          }
         }
       }
       if (!wrote) unchanged++;

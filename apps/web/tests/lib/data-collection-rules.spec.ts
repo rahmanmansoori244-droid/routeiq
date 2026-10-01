@@ -77,16 +77,32 @@ describe('item 1: a delivery time for one order', () => {
   });
 
   it("a visit with no timed order is planned with the customer's hours", () => {
-    expect(stopWindowFor(EFF, [NONE, NONE])).toEqual({ ...EFF, promised: null, conflict: false });
+    expect(stopWindowFor(EFF, [NONE, NONE])).toEqual({ ...EFF, promised: null, conflict: false, outsideHours: false });
   });
 
   it("a timed order replaces the customer's hours (hard and preferred) for the whole visit; several overlap: within all", () => {
     expect(stopWindowFor(EFF, [NONE, times(300, 420, 'URGENT', 'shop opens early')])).toEqual({
-      hardStart: 300, hardEnd: 420, prefStart: null, prefEnd: null, conflict: false,
+      hardStart: 300, hardEnd: 420, prefStart: null, prefEnd: null, conflict: false, outsideHours: false,
       promised: { startMin: 300, endMin: 420, reason: 'URGENT', note: 'shop opens early' },
     });
     const both = stopWindowFor(EFF, [times(600, 720, 'PROMISED'), times(null, 660, 'URGENT')]);
     expect(both).toMatchObject({ hardStart: 600, hardEnd: 660, conflict: false, promised: { startMin: 600, endMin: 660, reason: 'URGENT' } });
+  });
+
+  it("a time with one end only keeps the customer's opening or closing time on the other side (and its preferred hours inside)", () => {
+    // Customer 06:00-14:00 (preferred 07:00-10:00). "Promised from 09:00": 09:00-14:00, never after closing.
+    expect(stopWindowFor(EFF, [times(540, null, 'PROMISED')])).toMatchObject({
+      hardStart: 540, hardEnd: 840, prefStart: 540, prefEnd: 600, outsideHours: false, promised: { startMin: 540, endMin: null },
+    });
+    // "Promised by 10:00": 06:00-10:00, never before opening.
+    expect(stopWindowFor(EFF, [times(null, 600, 'URGENT')])).toMatchObject({ hardStart: 360, hardEnd: 600, prefStart: 420, prefEnd: 600, outsideHours: false });
+    // The promised end itself is the dispatcher's (agreed with the customer): "from 05:00" at a shop opening at 06:00.
+    expect(stopWindowFor(EFF, [times(300, null, 'URGENT')])).toMatchObject({ hardStart: 300, hardEnd: 840, prefStart: 420, prefEnd: 600, outsideHours: false });
+    // Preferred hours outside what is left are dropped.
+    expect(stopWindowFor(EFF, [times(660, null, 'PROMISED')])).toMatchObject({ hardStart: 660, hardEnd: 840, prefStart: null, prefEnd: null });
+    // "Promised from 15:00" after a 14:00 closing: planned with the promised time, and flagged.
+    expect(stopWindowFor(EFF, [times(900, null, 'PROMISED')])).toMatchObject({ hardStart: 900, hardEnd: null, prefStart: null, prefEnd: null, outsideHours: true });
+    expect(stopWindowFor({ hardStart: 480, hardEnd: null, prefStart: null, prefEnd: null }, [times(null, 420, 'URGENT')])).toMatchObject({ hardStart: null, hardEnd: 420, outsideHours: true });
   });
 
   it('times that do not overlap: planned with the one that ends first, and flagged', () => {
@@ -174,6 +190,18 @@ describe('item 1: the planner plans the visit with the order time, and keeps it 
     const built = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
     expect(built.request.stops[0]).toMatchObject({ hard_start_min: 480, hard_end_min: 540 });
     expect(built.warnings.join(' ')).toMatch(/Orders of one customer have delivery times that do not overlap: A\. .*planned within the time that ends first/);
+  });
+
+  it("a time with one end only: the visit keeps the customer's closing time; a time outside the customer's hours is planned as promised, and the plan warns", async () => {
+    const a = cust('A');
+    const b = cust('B', { lat: 23.6, lng: 58.42 });
+    wire([order('O1', a, times(600, null, 'PROMISED')), order('O2', b, times(900, null, 'PROMISED'))]);
+    const built = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
+    const stop = (id: string) => built.request.stops.find((s) => s.customer_id === id)!;
+    expect(stop('A')).toMatchObject({ hard_start_min: 600, hard_end_min: 840 });
+    expect(stop('B')).toMatchObject({ hard_start_min: 900, hard_end_min: null });
+    expect(built.warnings.join(' ')).toMatch(/Delivery time outside the customer's receiving hours: B\. /);
+    expect(built.warnings.join(' ')).not.toMatch(/receiving hours: A/);
   });
 });
 

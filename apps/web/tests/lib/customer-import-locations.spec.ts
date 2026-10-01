@@ -289,8 +289,14 @@ describe("owner's location rule (audit PR A5): a location that is not exact is n
         beforeJson: { lat: 23.5859, lng: 58.4059, source: 'IMPORT', verified: false, confidence: 'LOW' },
         afterJson: { lat: 23.6012, lng: 58.4201, source: 'IMPORT', confidence: 'HIGH', check: 'IMPORT', fileName: 'customers.csv' },
       }),
+      // Data collection (item 6): every location the import writes has its row, for "Changed since".
+      // K2's was usable (HIGH), so locationGate does not refuse a stop planned at it.
+      expect.objectContaining({
+        entityId: 'K2',
+        beforeJson: expect.objectContaining({ lat: 23.5901, lng: 58.4101, verified: false, confidence: 'HIGH' }),
+      }),
     ]);
-    // Control: K2's usable point and K3's confirmed one (kept) write no such row.
+    // Control: K3's confirmed one is kept and writes no such row.
     expect(S.rows[2]).toMatchObject({ lat: 23.9, lng: 58.9 });
   });
 
