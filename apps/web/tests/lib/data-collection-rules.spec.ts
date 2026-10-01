@@ -23,6 +23,7 @@ import {
   checkOrderTime,
   orderTimeFromForm,
   orderTimeOf,
+  plannedVisitOrders,
   promisedText,
   readPromised,
   stopWindowFor,
@@ -30,6 +31,7 @@ import {
 import {
   customerIssues,
   effectiveAttrs,
+  locationButtonText,
   savedLocationLocked,
   windowLabel,
   type CustomerForPlanning,
@@ -39,7 +41,7 @@ import { stopMasterChanges, type StopSnapshot } from '@/lib/dispatch/snapshots';
 import { buildDispatchRequest, planInputsOf } from '@/lib/dispatch/plan-service';
 import { whatsappText } from '@/lib/dispatch/driver-links';
 import { detailsFormOf, detailsPatch, type DetailsCustomer } from '@/app/t/[slug]/dispatch/customer-details';
-import { orderTimeFormOf } from '@/app/t/[slug]/dispatch/delivery-times';
+import { orderTimeFormOf, orderTimeHint } from '@/app/t/[slug]/dispatch/delivery-times';
 
 const times = (start: number | null, end: number | null, reason = 'URGENT', note: string | null = null) => ({
   deliveryStartMin: start,
@@ -129,6 +131,32 @@ describe('item 1: a delivery time for one order', () => {
     const promisedSnap = { ...snap, hardStartMin: 600, hardEndMin: 660, promised: { startMin: 600, endMin: 660, reason: 'URGENT', note: null } };
     expect(stopMasterChanges(promisedSnap, { ...live, hardStartMin: 600, hardEndMin: 660, promised: promisedSnap.promised })).toEqual([]);
     expect(stopMasterChanges(promisedSnap, live)[0]!.text).toBe('Delivery time changed after planning: now receives 06:00–14:00 (planned with Promised 10:00–11:00)');
+    // The same hours as a promised time (prefilled from the customer's hours, "Promised to customer"):
+    // the hours do not move, but the stop was not planned with a promised time, so the plan is out of
+    // date - as LOCK says (RE-PLAN first). Another reason or note only is no change.
+    expect(stopMasterChanges(snap, { ...live, promised: { startMin: 360, endMin: 840, reason: 'PROMISED', note: null } })).toEqual([
+      { kind: 'HOURS', text: 'Delivery time changed after planning: now Promised 06:00–14:00 (planned with 06:00–14:00)' },
+    ]);
+    const sameHoursSnap = { ...snap, promised: { startMin: 360, endMin: 840, reason: 'PROMISED', note: null } };
+    expect(stopMasterChanges(sameHoursSnap, live)).toEqual([{ kind: 'HOURS', text: 'Delivery time changed after planning: now receives 06:00–14:00 (planned with Promised 06:00–14:00)' }]);
+    expect(stopMasterChanges(sameHoursSnap, { ...live, promised: { startMin: 360, endMin: 840, reason: 'URGENT', note: 'call first' } })).toEqual([]);
+  });
+
+  it("a stop is judged with all of its customer's orders of the day (one visit), except those on a load locked before its plan was made", () => {
+    const o = (id: string) => ({ id });
+    const orders = [o('A'), o('B'), o('C'), o('D')];
+    const at = '2026-10-01T10:00:00.000Z';
+    const placements = [
+      { orderId: 'A', frozen: true, whole: true, capturedAt: at }, // locked after this plan was made: counts
+      { orderId: 'B', frozen: false, whole: false, capturedAt: at }, // the other part of a split customer
+      { orderId: 'C', frozen: true, whole: true, capturedAt: '2026-10-01T06:00:00.000Z' }, // locked in an earlier plan
+      // D: left unserved (no placement): counts
+    ];
+    expect(plannedVisitOrders(orders, placements, at).map((x) => x.id)).toEqual(['A', 'B', 'D']);
+    // Not known when the stop was planned: as a re-plan now (frozen orders left out).
+    expect(plannedVisitOrders(orders, placements, null).map((x) => x.id)).toEqual(['B', 'D']);
+    // A split portion on a frozen load: its open rest was planned with the others.
+    expect(plannedVisitOrders(orders, [{ orderId: 'C', frozen: true, whole: false, capturedAt: '2026-10-01T06:00:00.000Z' }], at).map((x) => x.id)).toEqual(['A', 'B', 'C', 'D']);
   });
 
   it('the WhatsApp message marks the stop "Promised ..."', () => {
@@ -182,6 +210,21 @@ describe('item 1: the planner plans the visit with the order time, and keeps it 
     const inputs = planInputsOf(built, 'J1', new Date('2026-10-01T10:00:00Z'))!;
     expect(inputs.stops.A).toMatchObject({ hardStartMin: 300, hardEndMin: 420, promised: { startMin: 300, endMin: 420, reason: 'URGENT' } });
     expect(inputs.stops.B!.promised).toBeUndefined();
+  });
+
+  it('the plan keeps when the orders were read, not when the optimization was saved: a time set while it ran is after the plan (LOCK refuses it)', async () => {
+    const a = cust('A');
+    wire([order('O1', a)]);
+    const built = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
+    expect(built.builtAt).toBe('2026-10-01T10:00:00.000Z');
+    // A THOROUGH search saves its plan 15 minutes later: the inputs still say 10:00.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-01T10:15:00Z'));
+    try {
+      expect(planInputsOf(built, 'J1')!.capturedAt).toBe('2026-10-01T10:00:00.000Z');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('two orders of one customer with times that do not overlap: the earliest is used, and the plan warns', async () => {
@@ -266,12 +309,24 @@ describe('item 2: own confirmed window', () => {
     expect(detailsPatch(open, { ...open, openAllDay: false })).toEqual({ ok: true, patch: { hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null } });
   });
 
-  it("an order's Change time opens prefilled from the customer's hours (its own time when it has one)", () => {
-    const c = { customerId: 'c1', code: 'C1', branchCode: null, name: 'C1', effWindow: { hardStart: 360, hardEnd: 840, prefStart: 420, prefEnd: 600 } };
+  it("an order's Set time opens prefilled from the customer's own confirmed hours only, with no reason chosen (its own time when it has one)", () => {
+    const c = { customerId: 'c1', code: 'C1', branchCode: null, name: 'C1', windowConfirmed: true, effWindow: { hardStart: 360, hardEnd: 840, prefStart: 420, prefEnd: 600 } };
     const o = { orderId: 'O1', cases: 5, salesOrders: ['SO1'], time: null, text: null, frozen: false };
-    expect(orderTimeFormOf(c, o)).toEqual({ start: '06:00', end: '14:00', reason: 'URGENT', note: '' });
+    expect(orderTimeFormOf(c, o)).toEqual({ start: '06:00', end: '14:00', reason: '', note: '' });
     expect(orderTimeFormOf({ ...c, effWindow: { hardStart: null, hardEnd: null, prefStart: 420, prefEnd: 600 } }, o)).toMatchObject({ start: '07:00', end: '10:00' });
     expect(orderTimeFormOf(c, { ...o, time: { startMin: 600, endMin: 1440, reason: 'PROMISED', note: 'x' } })).toEqual({ start: '10:00', end: '24:00', reason: 'PROMISED', note: 'x' });
+    // A customer-type or company default (or hours nobody confirmed) never counts as a delivery window:
+    // nothing is prefilled from it, so one Save cannot turn it into "Urgent 06:00-14:00".
+    expect(orderTimeFormOf({ ...c, windowConfirmed: false }, o)).toEqual({ start: '', end: '', reason: '', note: '' });
+    expect(orderTimeFormOf({ ...c, windowConfirmed: undefined }, o)).toEqual({ start: '', end: '', reason: '', note: '' });
+    // Saving that form as it opens is refused: a time and a reason must be given.
+    expect(orderTimeFromForm(orderTimeFormOf(c, o))).toMatchObject({ ok: false, error: expect.stringMatching(/^Choose a reason/) });
+    expect(orderTimeFromForm(orderTimeFormOf({ ...c, windowConfirmed: false }, o))).toMatchObject({ ok: false, error: 'Give a start or an end time (or both).' });
+    // The dialog says why nothing is prefilled, naming the hours in use.
+    expect(orderTimeHint({ ...c, windowConfirmed: false, windowLabel: 'hard 06:00–14:00 (default - not confirmed)' })).toBe(
+      "The customer's hours in use (hard 06:00–14:00 (default - not confirmed)) are not its own confirmed hours, so they do not count as a delivery window. Type the time agreed for this order.",
+    );
+    expect(orderTimeHint(c)).toBeNull();
   });
 });
 
@@ -285,5 +340,17 @@ describe('item 5: the location admin-lock rule', () => {
     expect(savedLocationLocked(false, at({ geocodeConfidence: 'LOW' }))).toBe(false); // LOW, never confirmed
     expect(savedLocationLocked(false, at({ lat: 51.5, lng: -0.12 }))).toBe(false); // outside the area, never confirmed
     expect(savedLocationLocked(true, at({ locationVerified: true }))).toBe(false);
+  });
+
+  it("the day card's location button never offers a dispatcher to confirm a saved point that is not exact", () => {
+    expect(locationButtonText({ needsLocation: true, isAdmin: false, notExact: false })).toEqual({ label: 'ADD LOCATION', title: undefined });
+    expect(locationButtonText({ needsLocation: false, isAdmin: true, notExact: true })).toEqual({ label: 'Location', title: undefined });
+    expect(locationButtonText({ needsLocation: false, isAdmin: false, notExact: false })).toEqual({
+      label: 'Location (admin changes)',
+      title: 'Only an admin can change a saved location. You can confirm it as it is.',
+    });
+    const notExact = locationButtonText({ needsLocation: false, isAdmin: false, notExact: true });
+    expect(notExact.title).toBe("This saved location is not exact and only an admin can change it. Ask your company admin to drop the pin on the customer's exact location.");
+    expect(notExact.title).not.toMatch(/confirm it/);
   });
 });

@@ -380,8 +380,11 @@ export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): 
   const prefThen = win(snap.prefStartMin, snap.prefEndMin);
   const promisedNow = liveIn.promised ? promisedText(liveIn.promised) : null;
   const promisedThen = snapIn.promised ? promisedText(snapIn.promised) : null;
-  if ((hardNow !== hardThen || prefNow !== prefThen) && (promisedNow || promisedThen)) {
-    // A delivery time given to one order (urgent / promised) set, changed or removed since planning.
+  if (promisedNow !== promisedThen) {
+    // A delivery time given to one order (urgent / promised) set, changed or removed since planning -
+    // also one with the same hours as the stop was planned with (data collection review: the stop was
+    // not planned with a promised time, its outputs do not say it, and LOCK asks for a RE-PLAN, so
+    // the day screen says the plan is out of date too). A reason or note alone is not a change.
     out.push({ kind: 'HOURS', text: `Delivery time changed after planning: now ${promisedNow ?? `receives ${hardNow}`} (planned with ${promisedThen ?? hardThen})` });
   } else if (hardNow !== hardThen || prefNow !== prefThen) {
     const parts =[hardNow !== hardThen ? `receives ${hardNow} (planned with ${hardThen})` : null, prefNow !== prefThen ? `best ${prefNow} (planned with ${prefThen})` : null];

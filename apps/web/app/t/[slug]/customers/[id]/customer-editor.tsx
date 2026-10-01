@@ -7,7 +7,7 @@ import { MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LocationDialog } from '../../dispatch/location-dialog';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
-import { LOCATION_ADMIN_ONLY_MESSAGE, locationIssue, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
+import { LOCATION_ADMIN_ONLY_MESSAGE, LOCKED_NOT_EXACT_MESSAGE, locationIssue, savedLocationLocked, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -51,6 +51,9 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit, isAdmin
   const blocked = issue?.blocking ? issue.message : null;
   // Item 5: a dispatcher may set a location only while there is no usable one (only an admin changes it).
   const locked = savedLocationLocked(isAdmin, customer, serviceArea);
+  // A usable saved point that is not exact cannot be confirmed as it is: only an admin can fix it, so
+  // the dispatcher is told so and offered nothing (data collection review).
+  const lockedNotExact = locked && savedPointProblem(customer, serviceArea) !== null;
   function openDialog() {
     setTarget({
       customerId: customer.id,
@@ -77,15 +80,17 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit, isAdmin
             ? `Pin: ${customer.lat!.toFixed(6)}, ${customer.lng!.toFixed(6)} (${blocked ? 'not usable' : customer.locationVerified ? 'confirmed by a dispatcher' : 'from an import, not confirmed'})`
             : 'No location yet: nothing is delivered to this customer until it has one.'}
         </p>
-        {canEdit ? (
+        {canEdit && !lockedNotExact ? (
           <Button size="sm" onClick={openDialog} data-testid="set-location">
             {locked ? 'Confirm location' : 'Set location'}
           </Button>
         ) : null}
       </div>
       {canEdit && locked ? (
-        <p className="text-xs text-muted-foreground" data-testid="customer-location-admin-only">
-          {LOCATION_ADMIN_ONLY_MESSAGE} You can confirm the saved location as it is; if it is wrong, ask your company admin to change it.
+        <p className={`text-xs ${lockedNotExact ? 'text-amber-800' : 'text-muted-foreground'}`} data-testid="customer-location-admin-only">
+          {lockedNotExact
+            ? LOCKED_NOT_EXACT_MESSAGE
+            : `${LOCATION_ADMIN_ONLY_MESSAGE} You can confirm the saved location as it is; if it is wrong, ask your company admin to change it.`}
         </p>
       ) : null}
       {blocked ? (

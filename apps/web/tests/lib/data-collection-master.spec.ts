@@ -33,10 +33,13 @@ vi.mock('@/lib/dispatch/service-area', async () => {
 import { GET as worklistGet } from '@/app/api/customers/data-to-collect/route';
 import { GET as masterGet } from '@/app/api/customers/master/route';
 import { POST as customerImport } from '@/app/api/customers/import/route';
+import { dayLoadingGaps } from '@/lib/dispatch/day-overview';
 import {
   buildWorklist,
   cellTime,
   changeSummary,
+  confirmNotesSummary,
+  resolveIssuesStep,
   DATA_GATE_RULE,
   dataGaps,
   dataGateRefusal,
@@ -167,6 +170,29 @@ describe('item 3: the loading gate words', () => {
     expect(windowGateRemedy()).not.toMatch(/unlock/i);
   });
 
+  it("the day's \"Loading rule is on\" box lists only what the rule will refuse: never a customer whose orders are all on locked (or later) loads", () => {
+    const day = (id: string, frozen: boolean[], over: Record<string, unknown> = {}) =>
+      ({
+        ...customer(id, over), customerId: id, inactive: false,
+        orderTimes: frozen.map((f, i) => ({ orderId: `${id}-${i}`, cases: 5, salesOrders: [], time: null, text: null, frozen: f })),
+      }) as never;
+    const gaps = dayLoadingGaps([day('ALL_LOCKED', [true, true]), day('PART', [true, false]), day('OPEN', [false]), day('NOPIN', [true], { lat: null, lng: null })], DEFAULT_SERVICE_AREA);
+    expect(gaps.map((g) => g.code)).toEqual(['OPEN', 'PART']);
+  });
+
+  it('step 2 is not "done" while the loading rule is on and customers miss data, and receiving hours are not called optional then', () => {
+    const base = { orders: 10, blocking: 0, blockingSummary: '', ruleOn: true, loadingGaps: 12 };
+    expect(resolveIssuesStep(base)).toEqual({ done: false, warn: true, summary: '12 customer(s) miss data needed before loading' });
+    expect(resolveIssuesStep({ ...base, loadingGaps: 0 })).toEqual({ done: true, warn: false, summary: 'All delivery locations known' });
+    expect(resolveIssuesStep({ ...base, ruleOn: false })).toEqual({ done: true, warn: false, summary: 'All delivery locations known' });
+    expect(resolveIssuesStep({ ...base, blocking: 2, blockingSummary: '2 customer(s) need a location' })).toEqual({
+      done: false, warn: true, summary: '2 customer(s) need a location · 12 customer(s) miss data needed before loading',
+    });
+    expect(resolveIssuesStep({ ...base, orders: 0, loadingGaps: 0 })).toMatchObject({ done: false, summary: '—' });
+    expect(confirmNotesSummary(40, false)).toBe('40 customer(s) to confirm (priority / type / receiving hours) — optional, defaults are used');
+    expect(confirmNotesSummary(40, true)).toBe('40 customer(s) to confirm (priority / type / receiving hours) — the loading rule is on: confirmed receiving hours (or a delivery time for the order) are needed before loading');
+  });
+
   it('a delivery time changed after planning: RE-PLAN first, naming the customers', () => {
     expect(deliveryTimeChangedRefusal({ truck: 'T01', loadNo: 2 }, 3, [{ code: 'A', branchCode: 'B2', name: 'Shop A' }, { code: 'C', branchCode: null, name: 'Shop C' }])).toBe(
       'T01 L2: the delivery times of 3 orders were set or changed after this plan was made (A / B2 (Shop A), C (Shop C)). RE-PLAN first, so the stop is planned with the new time and the plan, the Excel, the driver sheet and WhatsApp show it. Then lock the load.',
@@ -266,6 +292,77 @@ describe('item 4: GET /api/customers/data-to-collect', () => {
     setCells(ws, 'USABLE', { hours_confirmed: 'yes' });
     expect((await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()))).body.data).toMatchObject({ errorRows: 0, receivingHoursChanged: 1 });
     expect(row('customer', 'USABLE')).toMatchObject({ hardWindowStartMin: 360, hardWindowEndMin: 840, windowConfirmedById: 'u1' });
+  });
+});
+
+describe('data collection review: files kept for days, odd codes and case twins', () => {
+  it('an old file imported after the customer was changed in RouteIQ: that row is skipped and listed (nothing undone, no hours confirmed from it); the rows filled in are imported', async () => {
+    // 08:00: the list is downloaded. USABLE shows hours nobody confirmed.
+    Object.assign(row('customer', 'USABLE'), { hardWindowStartMin: 480, hardWindowEndMin: 720 });
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    const ws = wb.worksheets[0]!;
+    expect(rowsOf(ws).find((x) => x.code === 'USABLE')!.row_version).toMatch(/^v1-[0-9a-f]+$/);
+    // 10:00: a dispatcher confirms USABLE's real hours, sets its priority and corrects its name.
+    const at = new Date();
+    Object.assign(row('customer', 'USABLE'), { hardWindowStartMin: 420, hardWindowEndMin: 720, windowConfirmedAt: at, windowConfirmedById: 'u2', priority: 1, priorityConfirmed: true, name: 'Customer X (Seeb)' });
+    // The collector filled in only NONE, and imports the 08:00 file.
+    setCells(ws, 'NONE', { open_all_day: 'yes' });
+    const buf = Buffer.from(await wb.xlsx.writeBuffer());
+    const dry = await importXlsx(buf, true);
+    expect(dry.body.data.staleRows).toEqual([{ row: 4, code: 'USABLE', branchCode: null }]);
+    const r = await importXlsx(buf);
+    expect(r.status).toBe(200);
+    expect(r.body.data).toMatchObject({ errorRows: 0, staleRows: [{ code: 'USABLE' }] });
+    expect(row('customer', 'USABLE')).toMatchObject({ name: 'Customer X (Seeb)', priority: 1, priorityConfirmed: true, hardWindowStartMin: 420, hardWindowEndMin: 720, windowConfirmedAt: at, windowConfirmedById: 'u2' });
+    expect(row('customer', 'NONE')).toMatchObject({ windowConfirmedById: 'u1' });
+    expect(r.body.data.warnings.join(' ')).toContain(
+      '1 row(s) were not imported: the customer was changed in RouteIQ after this file was downloaded (USABLE). Nothing in those rows was saved. Download a new file and enter those changes again.',
+    );
+    expect(audits.filter((a) => a.entityId === 'USABLE')).toEqual([]);
+  });
+
+  it("a customer whose code the import's own format would refuse (created from an order file) is matched and imported; a new customer with such a code is refused", async () => {
+    tables.customer.push(customer('AB 12', { lat: null, lng: null, geocodeConfidence: 'MISSING', locationSource: null, createdFromUpload: true }));
+    tables.order.push(order('O9', 'AB 12', 'D1', 1));
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    const ws = wb.worksheets[0]!;
+    expect(rowsOf(ws).map((x) => x.code)).toContain('AB 12');
+    setCells(ws, 'NONE', { open_all_day: 'yes' });
+    setCells(ws, 'AB 12', { open_all_day: 'yes' });
+    const r = await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.body.data).toMatchObject({ errorRows: 0, receivingHoursChanged: 2 });
+    expect(row('customer', 'AB 12')).toMatchObject({ windowConfirmedById: 'u1' });
+    expect(row('customer', 'NONE')).toMatchObject({ windowConfirmedById: 'u1' });
+    // Matched whatever its letter case; a new one still needs a plain code.
+    expect((await importCsv('code,name,priority\nab 12,Customer AB 12,3\n')).body.data).toMatchObject({ errorRows: 0, creates: 0, updates: 1 });
+    expect((await importCsv('code,name,priority\nNEW 1,New Shop,3\n')).body.data.errors).toEqual([{ row: 2, message: 'Invalid code "NEW 1".' }]);
+  });
+
+  it('customers whose codes differ only in letter case: the data-to-collect sheet keeps the one the import updates, and lists the other apart (the file imports)', async () => {
+    // C001 has a location (the import updates it); c001, older, has none. Both have orders and miss data.
+    tables.customer.push(customer('C001'), customer('c001', { lat: null, lng: null, geocodeConfidence: 'MISSING', name: 'Old twin' }));
+    tables.order.push(order('O10', 'C001', 'D1', 0), order('O11', 'c001', 'D1', 1));
+    let wb = await workbookOf(await getWorklist('?format=xlsx'));
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Data to collect', 'Per depot and day', 'Same code, other case', 'About this file']);
+    expect(rowsOf(wb.worksheets[0]!).filter((x) => String(x.code).toUpperCase() === 'C001').map((x) => x.code)).toEqual(['C001']);
+    expect(rowsOf(wb.getWorksheet('Same code, other case')!).map((x) => [x.code, x.name, x.imported_as])).toEqual([['c001', 'Old twin', 'C001']]);
+    expect(aboutText(wb)).toMatch(/Same code, other case.*For reading only: the import updates the customer with the code in imported_as/);
+    setCells(wb.worksheets[0]!, 'C001', { open_all_day: 'yes' });
+    const r = await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.body.data).toMatchObject({ errorRows: 0, receivingHoursChanged: 1 });
+    expect(row('customer', 'C001').windowConfirmedById).toBe('u1');
+    // Only the older twin misses data: it is listed apart, so its data is not imported onto the other.
+    Object.assign(row('customer', 'C001'), { locationVerified: true });
+    wb = await workbookOf(await getWorklist('?format=xlsx'));
+    expect(rowsOf(wb.worksheets[0]!).some((x) => String(x.code).toUpperCase() === 'C001')).toBe(false);
+    expect(rowsOf(wb.getWorksheet('Same code, other case')!).map((x) => [x.code, x.imported_as])).toEqual([['c001', 'C001']]);
+  });
+
+  it('24:00 typed in Excel as a time (stored as 1) is read as the end of the day in an end column', () => {
+    expect(cellTime('1', 'hard_to')).toBe(1440);
+    expect(cellTime('0.99999999', 'preferred_to')).toBe(1440);
+    expect(() => cellTime('1', 'hard_from')).toThrow('hard_from must be a time like 06:30 (got "1").');
+    expect(readImportedHours({ hard_from: '0.75', hard_to: '1' }, null)).toMatchObject({ ok: true, change: { hours: { hardWindowStartMin: 1080, hardWindowEndMin: 1440 } } });
   });
 });
 
@@ -404,6 +501,32 @@ describe('item 6: GET /api/customers/master and the import reading it back', () 
     expect((await master('?since=2026-13-45')).status).toBe(400);
     session.role = 'VIEWER';
     expect((await master()).status).toBe(403);
+  });
+
+  it('"Changed since" also lists customers deleted in the period, and changes to customers of the "Same code, other case" sheet (marked)', async () => {
+    tables.customer.push(customer('usable', { name: 'Old twin', active: false }));
+    const now = Date.now();
+    tables.auditLog = [
+      { id: 'a1', tenantId: T, entity: 'Customer', entityId: 'GONE', action: 'DELETE', createdAt: new Date(now - 60_000), beforeJson: { code: 'GONE', branchCode: 'B2', name: 'Gone Shop' }, afterJson: null, user: { name: 'Admin One' } },
+      { id: 'a2', tenantId: T, entity: 'Customer', entityId: 'usable', action: 'UPDATE', createdAt: new Date(now - 120_000), beforeJson: { active: true }, afterJson: { active: false }, user: { name: 'Sara' } },
+    ];
+    const wb = await workbookOf(await master());
+    const changed = rowsOf(wb.worksheets[1]!);
+    expect(changed.map((x) => [x.code, x.branch_code, x.name, x.changed_by, x.what_changed])).toEqual([
+      ['GONE', 'B2', 'Gone Shop', 'Admin One', 'Deleted'],
+      ['usable', null, 'Old twin', 'Sara', 'Active (same code as USABLE in another letter case: on the "Same code, other case" sheet, not imported)'],
+    ]);
+    // Neither is on the Customers sheet the import reads.
+    expect(rowsOf(wb.worksheets[0]!).map((x) => x.code)).not.toContain('GONE');
+    expect(rowsOf(wb.worksheets[0]!).map((x) => x.code)).not.toContain('usable');
+  });
+
+  it('"Changed since" goes back at most 31 days (the audit rows are read into the web process)', async () => {
+    const day = (n: number) => addDaysIso(today, -n);
+    expect((await master(`?since=${day(31)}`)).status).toBe(200);
+    const old = await answer(await master(`?since=${day(32)}`));
+    expect(old.status).toBe(400);
+    expect(JSON.stringify(old.body.error)).toMatch(/at most 31 days back/);
   });
 
   it('imported back as downloaded (by a dispatcher), it changes nothing: no customer written, no audit row', async () => {

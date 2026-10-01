@@ -34,11 +34,12 @@ export default async function SettingsPage({ params }: { params: { slug: string 
       description={
         admin
           ? 'What the daily dispatch planner plans with. Changes apply to the next optimization; plans already made keep the settings they were made with.'
-          : 'When trucks may leave and must be back, when overtime starts, and the customer data needed before loading. Shift changes apply to the next optimization; plans already made keep the settings they were made with. Other settings are changed by a company admin.'
+          : 'When trucks may leave and must be back, when overtime starts, and how many days ahead the data to collect looks. Shift changes apply to the next optimization; plans already made keep the settings they were made with. Other settings, such as the loading rule, are changed by a company admin.'
       }
     >
       <SettingsForm
         scope={admin ? 'ADMIN' : 'DISPATCHER'}
+        dataRuleOn={cfg.requireDataBeforeLoading}
         initial={{
           tenant: {
             name: tenant.name,

@@ -24,6 +24,7 @@ import { tenantDb } from '../tenant';
 import {
   coordStatus,
   customerIssues,
+  describeWindows,
   effectiveAttrs,
   locationBlocksDelivery,
   parsePriorityWeights,
@@ -32,8 +33,16 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { readPromised, stopWindowFor, type OrderTime } from './order-window';
-import { dataGaps, dataGateRefusal, deliveryTimeChangedRefusal, gapText } from './data-collection';
+import { plannedVisitOrders, readPromised, samePromisedTime, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
+import {
+  dataGaps,
+  dataGateRefusal,
+  deliveryTimeChangedRefusal,
+  gapText,
+  hasOwnWindow,
+  hoursChangedRefusal,
+  type HoursMismatch,
+} from './data-collection';
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
@@ -182,6 +191,13 @@ export interface BuiltRequest {
    * by stop id: kept with the stop's facts (StopFacts.promised) so every output says "Promised ...".
    */
   promised?: Record<string, OrderTime>;
+  /**
+   * When the request started reading the orders (ISO). Kept as the plan inputs' `capturedAt`: a
+   * delivery time set after it is not in the plan, also one set while the optimization was queued or
+   * searching (up to 20 minutes, THOROUGH) - LOCK then asks for a RE-PLAN (deliveryTimeGate).
+   * Absent on unit-test stubs (then the time the result is saved).
+   */
+  builtAt?: string;
 }
 
 /** The inputs of a request's same-day times, and the times it carries now (BuiltRequest.sameDay). */
@@ -289,6 +305,8 @@ export async function buildDispatchRequest(
   scenarios: DispatchScenarioName[] = ALL_SCENARIOS,
   opts: BuildOptions = {},
 ): Promise<BuiltRequest> {
+  // Before any order is read: what the plan is made with is what was saved by now (BuiltRequest.builtAt).
+  const builtAt = (opts.now ?? new Date()).toISOString();
   const db = tenantDb(tenantId);
   const run = await db.runPlan.findUniqueOrThrow({ where: { id: runId }, include: { depot: true } });
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
@@ -771,6 +789,7 @@ export async function buildDispatchRequest(
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
     sameDay: { input: sameDayIn, baseShiftStartMin, timing },
     ...(Object.keys(promised).length ? { promised } : {}),
+    builtAt,
   };
 }
 
@@ -837,8 +856,10 @@ function frozenBreak(json: unknown): { break_start_min?: number; break_min?: num
  * (ScenarioDetails.inputs): the depot, each truck and each stop exactly as sent to the optimizer,
  * its config (without the OSRM address), the tenant settings and the job. Plan detail, driver
  * sheets, the workbook and the timetable check read these instead of today's master data.
+ * `capturedAt` is when the request read the orders (BuiltRequest.builtAt), not when the result is
+ * saved after the search: LOCK compares delivery times set since with it (deliveryTimeGate).
  */
-export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Date = new Date()): PlanInputs | null {
+export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Date = built.builtAt ? new Date(built.builtAt) : new Date()): PlanInputs | null {
   const r = built.request;
   if (!r?.config || !r.depot) return null; // not a complete request (unit-test stubs): no inputs kept
   const { osrm_url: osrmUrl, ...config } = r.config;
@@ -1322,8 +1343,11 @@ async function snapshotSource(
   d: ScenarioDetails,
   liveTrucks: { id: string; code: string; capacityCases: number; capacityWeightKg: number; fixedCostPerDay: number; tripCost: number; costPerKm: number; kmPerLitre: number | null; availableFromMin: number | null; availableToMin: number | null; maxTripsPerDay: number | null }[],
 ) {
-  const capturedAt = new Date().toISOString();
   const inputs = readPlanInputs(d.inputs);
+  // The stops of one optimization share the time it read the orders (its inputs; data collection
+  // review): a stop is judged against the orders that plan saw (deliveryTimeGate, plannedVisitOrders).
+  // An option without inputs: now.
+  const capturedAt = inputs?.capturedAt && Number.isFinite(Date.parse(inputs.capturedAt)) ? inputs.capturedAt : new Date().toISOString();
   const customers = new Map(
     (await tx.customer.findMany({ where: { tenantId, id: { in: [...new Set(d.loads.flatMap((l) => l.stops.map((x) => x.customer_id)))] } } })).map((c) => [c.id, c]),
   );
@@ -2201,7 +2225,7 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // loading" on, every customer on the load needs a delivery window too (and a usable location, as
   // below). A load already locked or loading is never judged again by them (frozen loads).
   if (load.status === 'PLANNED' && isGatedMove(load.status, to)) {
-    await deliveryTimeGate(tx, tenantId, run.chosenScenarioId, load);
+    await deliveryTimeGate(tx, tenantId, run, load);
     await dataGate(tx, tenantId, load);
   }
   // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
@@ -2264,22 +2288,71 @@ async function loadPlannedAt(tx: Tx, chosenScenarioId: string | null, load: { ru
   return captured.length ? new Date(Math.min(...captured)) : null;
 }
 
+/** No receiving hours: only an order's own delivery time decides a stop's promised time (stopWindowFor). */
+const NO_HOURS = { hardStart: null, hardEnd: null, prefStart: null, prefEnd: null };
+
 /**
  * Owner decision 1 Oct 2026 (item 1): an order's delivery time (urgent / promised) is planned with
  * the stop and every output shows it. One set, changed or removed after the plan the load is on was
  * made is not in that plan (its stop was planned with other hours, and the sheets would not say
  * "Promised ..."), so LOCK of the PLANNED load is refused with 409 DELIVERY_TIME_CHANGED: RE-PLAN
  * first. Whatever the loading rule's setting. Frozen loads are never judged by it.
+ *
+ * Data collection review: (1) "after the plan was made" is after its optimization read the orders
+ * (plan inputs `capturedAt` = BuiltRequest.builtAt), so a time set while the search ran counts; (2)
+ * one visit per customer: every order of the day of each customer on the load counts - a split
+ * customer's part on another load, an order left unserved - not only the orders on this load; (3) a
+ * stop is refused only when the delivery time it would be planned with now (plannedVisitOrders,
+ * stopWindowFor) is not the one it was planned with (StopFacts.promised): a time removed again, or
+ * saved again as planned, changes nothing to re-plan.
  */
-async function deliveryTimeGate(tx: Tx, tenantId: string, chosenScenarioId: string | null, load: { id: string; runId: string; truckId: string; loadNo: number }) {
+async function deliveryTimeGate(
+  tx: Tx,
+  tenantId: string,
+  run: { chosenScenarioId: string | null; depotId: string; runDate: Date },
+  load: { id: string; runId: string; truckId: string; loadNo: number },
+) {
   const rows = await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true, stopSnapshotJson: true } });
-  const orderIds = [...new Set(rows.map((a) => a.orderId))];
-  if (!orderIds.length) return;
-  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { id: true, customerId: true, deliveryTimeSetAt: true } });
+  const loadOrderIds = [...new Set(rows.map((a) => a.orderId))];
+  if (!loadOrderIds.length) return;
+  const onLoad = await tx.order.findMany({ where: { tenantId, id: { in: loadOrderIds } }, select: { id: true, customerId: true } });
+  const customerOf = new Map(onLoad.map((o) => [o.id, o.customerId]));
+  const customerIds = [...new Set(onLoad.map((o) => o.customerId))];
+  const scope = await ordersInScopeWhere(tenantId, run.depotId, run.runDate, tx);
+  const orders = await tx.order.findMany({
+    where: { tenantId, OR: [{ id: { in: loadOrderIds } }, { ...scope, customerId: { in: customerIds } }] },
+    select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, deliveryTimeSetAt: true },
+  });
   if (!orders.some((o) => o.deliveryTimeSetAt)) return;
-  const plannedAt = await loadPlannedAt(tx, chosenScenarioId, load, rows);
+  const plannedAt = await loadPlannedAt(tx, run.chosenScenarioId, load, rows);
   if (!plannedAt) return;
-  const changed = orders.filter((o) => o.deliveryTimeSetAt && o.deliveryTimeSetAt.getTime() > plannedAt.getTime()).sort((a, b) => a.id.localeCompare(b.id));
+  const setSince = orders.filter((o) => o.deliveryTimeSetAt && o.deliveryTimeSetAt.getTime() > plannedAt.getTime());
+  if (!setSince.length) return;
+  // What each stop of those customers would be planned with now, against what it was planned with.
+  const [placedRows, loadRows] = await Promise.all([
+    tx.routeAssignment.findMany({ where: { runId: load.runId, orderId: { in: orders.map((o) => o.id) } }, select: { orderId: true, loadId: true, portionLinesJson: true, stopSnapshotJson: true } }),
+    tx.planLoad.findMany({ where: { runId: load.runId }, select: { id: true, status: true } }),
+  ]);
+  const statusOf = new Map(loadRows.map((l) => [l.id, l.status]));
+  const placements: OrderPlacement[] = placedRows.map((p) => ({
+    orderId: p.orderId,
+    frozen: (statusOf.get(p.loadId ?? '') ?? 'PLANNED') !== 'PLANNED',
+    whole: p.portionLinesJson === null,
+    capturedAt: readStopSnapshot(p.stopSnapshotJson)?.capturedAt ?? null,
+  }));
+  const ordersOf = new Map<string, typeof orders>();
+  for (const o of orders) ordersOf.set(o.customerId, [...(ordersOf.get(o.customerId) ?? []), o]);
+  const stale = new Set<string>();
+  for (const customerId of new Set(setSince.map((o) => o.customerId))) {
+    for (const a of rows) {
+      if (customerOf.get(a.orderId) !== customerId) continue;
+      const snap = readStopSnapshot(a.stopSnapshotJson);
+      const now = stopWindowFor(NO_HOURS, plannedVisitOrders(ordersOf.get(customerId) ?? [], placements, snap?.capturedAt ?? null)).promised;
+      // A stop without the plan's own facts has no record of the time it was planned with: re-plan.
+      if (!snap || snap.source !== 'PLAN' || !samePromisedTime(now, readPromised(snap.promised))) stale.add(customerId);
+    }
+  }
+  const changed = setSince.filter((o) => stale.has(o.customerId)).sort((a, b) => a.id.localeCompare(b.id));
   if (!changed.length) return;
   const customers = await tx.customer.findMany({
     where: { tenantId, id: { in: [...new Set(changed.map((o) => o.customerId))] } },
@@ -2306,6 +2379,11 @@ async function deliveryTimeGate(tx: Tx, tenantId: string, chosenScenarioId: stri
  * loading is never blocked by the setting switched on later, nor by hours un-confirmed after it was
  * locked (frozen loads; locationGate still covers locations). Planning is not refused by it (the day
  * screen warns). Off: nothing is read.
+ *
+ * Data collection review: a customer's confirmed hours count only when its stop was planned with them.
+ * A stop planned with other hours (a customer-type default, or hours that changed since) and no
+ * delivery time of its own is refused with 409 HOURS_CHANGED: RE-PLAN first (the truck would go with
+ * hours nobody confirmed, which "defaults never count" rules out).
  */
 async function dataGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
   const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { requireDataBeforeLoading: true, serviceAreaJson: true } });
@@ -2328,17 +2406,44 @@ async function dataGate(tx: Tx, tenantId: string, load: { id: string; truckId: s
   if (!customerIds.length) return;
   const customers = await tx.customer.findMany({
     where: { tenantId, id: { in: customerIds } },
-    select: { id: true, code: true, branchCode: true, name: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, windowConfirmedAt: true },
+    select: {
+      id: true, code: true, branchCode: true, name: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, windowConfirmedAt: true,
+      hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true,
+    },
   });
   const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
   const gaps = dataGaps(customers, orders, parseServiceArea(cfg.serviceAreaJson, tenant?.country));
-  if (!gaps.some((g) => g.window)) return;
-  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
-  throw new PlanError(dataGateRefusal({ truck: truck?.code ?? 'Truck', loadNo: load.loadNo }, gaps, noLocationLoadRemedy(load.status)), 409, {
-    code: 'DATA_REQUIRED',
-    customerIds: gaps.map((g) => g.customerId),
-    customers: gaps.map((g) => ({ code: g.code, branchCode: g.branchCode, name: g.name, missing: gapText(g) })),
-  });
+  const truckRef = async () => ({ truck: (await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } }))?.code ?? 'Truck', loadNo: load.loadNo });
+  if (gaps.some((g) => g.window)) {
+    throw new PlanError(dataGateRefusal(await truckRef(), gaps, noLocationLoadRemedy(load.status)), 409, {
+      code: 'DATA_REQUIRED',
+      customerIds: gaps.map((g) => g.customerId),
+      customers: gaps.map((g) => ({ code: g.code, branchCode: g.branchCode, name: g.name, missing: gapText(g) })),
+    });
+  }
+  // Confirmed hours the stop was not planned with (no delivery time of its own on the stop).
+  const mismatches = new Map<string, HoursMismatch>();
+  for (const c of customers) {
+    if (!hasOwnWindow(c)) continue;
+    const hard = usableWindow(c.hardWindowStartMin ?? null, c.hardWindowEndMin ?? null);
+    const pref = usableWindow(c.prefWindowStartMin ?? null, c.prefWindowEndMin ?? null);
+    for (const a of rows) {
+      const o = orderById.get(a.orderId);
+      const snap = readStopSnapshot(a.stopSnapshotJson);
+      if (o?.customerId !== c.id || !snap) continue;
+      const timed = snap.source === 'PLAN' ? readPromised(snap.promised) !== null : o.deliveryStartMin != null || o.deliveryEndMin != null;
+      if (timed) continue;
+      if (snap.hardStartMin === hard.start && snap.hardEndMin === hard.end && snap.prefStartMin === pref.start && snap.prefEndMin === pref.end) continue;
+      mismatches.set(c.id, {
+        customerId: c.id, code: c.code, branchCode: c.branchCode, name: c.name,
+        planned: describeWindows({ hardStart: snap.hardStartMin, hardEnd: snap.hardEndMin, prefStart: snap.prefStartMin, prefEnd: snap.prefEndMin }),
+        confirmed: describeWindows({ hardStart: hard.start, hardEnd: hard.end, prefStart: pref.start, prefEnd: pref.end }),
+      });
+    }
+  }
+  if (!mismatches.size) return;
+  const list = [...mismatches.values()].sort((a, b) => a.code.localeCompare(b.code) || (a.branchCode ?? '').localeCompare(b.branchCode ?? ''));
+  throw new PlanError(hoursChangedRefusal(await truckRef(), list), 409, { code: 'HOURS_CHANGED', customerIds: list.map((m) => m.customerId) });
 }
 
 /** Why LOCK, LOADING and DISPATCH refuse a load holding a customer without a usable location (locationGate). */

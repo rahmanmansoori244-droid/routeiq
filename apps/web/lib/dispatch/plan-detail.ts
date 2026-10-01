@@ -5,7 +5,7 @@
 import { Prisma } from '@prisma/client';
 import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
-import { promisedText, stopWindowFor } from './order-window';
+import { plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTimeColumns } from './order-window';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
@@ -411,13 +411,37 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const depotPoint = inputs ? { lat: inputs.depot.lat, lng: inputs.depot.lng } : { lat: run.depot.lat, lng: run.depot.lng };
   // Stops that carry split portions, for the "Part k of n" labels across the whole plan.
   const portionStops: { stop: DetailStop; customerId: string; portion: boolean; departMin: number; truckCode: string; sequence: number }[] = [];
+  // The delivery time a stop would be planned with now (order-window): one visit per customer, so with
+  // all of its customer's orders in this plan - on every load and left unserved - as the plan was made
+  // (every part of a split customer carries the time of any of its orders; data collection review),
+  // not only the part on this load.
+  const visitOrders = new Map<string, Map<string, OrderTimeColumns & { id: string }>>();
+  const addVisitOrder = (customerId: string, o: OrderTimeColumns & { id: string }) => {
+    const m = visitOrders.get(customerId) ?? new Map<string, OrderTimeColumns & { id: string }>();
+    m.set(o.id, o);
+    visitOrders.set(customerId, m);
+  };
+  for (const l of loads) for (const a of l.assignments) addVisitOrder(a.order.customerId, a.order);
+  const unservedIds = (chosen?.unservedOrders ?? []).map((u) => u.orderId);
+  if (unservedIds.length) {
+    const times = await db.order.findMany({
+      where: { tenantId, id: { in: unservedIds } },
+      select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true },
+    });
+    for (const o of times) addVisitOrder(o.customerId, o);
+  }
+  const placements: OrderPlacement[] = loads.flatMap((l) =>
+    l.assignments.map((a) => ({
+      orderId: a.orderId,
+      frozen: l.status !== 'PLANNED',
+      whole: a.portionLinesJson === null,
+      capturedAt: readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null,
+    })),
+  );
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
     const carriedAwayOrders = new Set<string>();
-    // The orders of each stop, for the delivery time it would be planned with now (order-window).
-    const ordersAt = new Map<number, (typeof l.assignments)[number]['order'][]>();
-    for (const a of l.assignments) ordersAt.set(a.sequenceInTruck, [...(ordersAt.get(a.sequenceInTruck) ?? []), a.order]);
     for (const a of l.assignments) {
       const o = a.order;
       const c = o.customer;
@@ -497,8 +521,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         snapshot: !!snap,
         masterChanged: snap
           ? (() => {
-              // As the stop would be planned now: its orders' own delivery time, else the customer's hours.
-              const sw = stopWindowFor(eff, ordersAt.get(a.sequenceInTruck) ?? [o]);
+              // As the stop would be planned now: its customer's orders' own delivery time, else its hours.
+              const sw = stopWindowFor(eff, plannedVisitOrders([...(visitOrders.get(c.id)?.values() ?? [o])], placements, snap.capturedAt));
               return stopMasterChanges(snap, {
                 name: c.name,
                 address: c.address,

@@ -18,13 +18,14 @@ import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
-import type { DataGap } from '@/lib/dispatch/data-collection';
+import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { locationButtonText, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 interface Issue {
   code: string;
@@ -554,26 +555,20 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       </Step>
 
       {/* STEP 2 */}
-      <Step
-        n={2}
-        title="Resolve issues"
-        done={day.orders.count > 0 && blocking.length === 0}
-        warn={blocking.length > 0}
-        summary={blocking.length ? blockingSummary : day.orders.count ? 'All delivery locations known' : '—'}
-      >
+      <Step n={2} title="Resolve issues" {...resolveIssuesStep({ orders: day.orders.count, blocking: blocking.length, blockingSummary, ruleOn: !!day.dataRule?.on, loadingGaps: day.loadingGaps?.length ?? 0 })}>
         {blocking.length ? (
           <div className="grid gap-2 md:grid-cols-2" data-testid="blocking-issues">
             {blocking.map((c) => (
-              <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+              <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} serviceArea={day.serviceArea} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
             ))}
           </div>
         ) : null}
         {notes.length ? (
           <details className="rounded-md border p-2 text-sm" open={blocking.length === 0 && notes.length <= 6}>
-            <summary className="cursor-pointer">{notes.length} customer(s) to confirm (priority / type / receiving hours) — optional, defaults are used</summary>
+            <summary className="cursor-pointer">{confirmNotesSummary(notes.length, !!day.dataRule?.on)}</summary>
             <div className="mt-2 grid gap-2 md:grid-cols-2">
               {notes.slice(0, showAllCustomers ? undefined : 12).map((c) => (
-                <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+                <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} serviceArea={day.serviceArea} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
               ))}
             </div>
             {notes.length > 12 && !showAllCustomers ? (
@@ -717,10 +712,25 @@ function needsLocation(c: IssueCustomer): boolean {
   return c.issues.some((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION');
 }
 
-function IssueCard({ c, canPlan, canChangeLocations, onLocation, onEdit }: { c: IssueCustomer; canPlan: boolean; canChangeLocations: boolean; onLocation: () => void; onEdit: () => void }) {
+function IssueCard({
+  c,
+  canPlan,
+  canChangeLocations,
+  serviceArea,
+  onLocation,
+  onEdit,
+}: {
+  c: IssueCustomer;
+  canPlan: boolean;
+  canChangeLocations: boolean;
+  serviceArea: ServiceArea;
+  onLocation: () => void;
+  onEdit: () => void;
+}) {
   const needsLoc = needsLocation(c);
-  // Owner decision 1 Oct 2026 (item 5): only an admin changes a saved (usable) location.
-  const locLocked = !needsLoc && !canChangeLocations;
+  // Owner decision 1 Oct 2026 (item 5): only an admin changes a saved (usable) location; a saved point
+  // that is not exact cannot be confirmed as it is either (data collection review).
+  const locButton = locationButtonText({ needsLocation: needsLoc, isAdmin: canChangeLocations, notExact: savedPointProblem(c, serviceArea) !== null });
   return (
     <div className={`rounded-md border p-2 text-sm ${c.blocking ? 'border-red-300 bg-red-50' : ''}`} data-testid={`issue-${c.code}${c.branchCode ? `-${c.branchCode}` : ''}`}>
       <div className="flex items-start justify-between gap-2">
@@ -763,10 +773,10 @@ function IssueCard({ c, canPlan, canChangeLocations, onLocation, onEdit }: { c: 
             size="sm"
             variant={needsLoc ? 'default' : 'outline'}
             onClick={onLocation}
-            title={locLocked ? 'Only an admin can change a saved location. You can confirm it as it is.' : undefined}
+            title={locButton.title}
             data-testid={`add-location-${c.code}`}
           >
-            <MapPin className="mr-1 h-3 w-3" /> {needsLoc ? 'ADD LOCATION' : locLocked ? 'Location (admin changes)' : 'Location'}
+            <MapPin className="mr-1 h-3 w-3" /> {locButton.label}
           </Button>
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="mr-1 h-3 w-3" /> Details

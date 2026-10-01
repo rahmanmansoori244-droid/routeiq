@@ -24,6 +24,7 @@ import {
   type MasterCustomer,
   type MasterValue,
   type Worklist,
+  type WorklistRow,
 } from './data-collection';
 
 const CUSTOMER_SELECT = {
@@ -32,6 +33,7 @@ const CUSTOMER_SELECT = {
   branchCode: true,
   branchKey: true,
   name: true,
+  regionId: true,
   lat: true,
   lng: true,
   priority: true,
@@ -97,6 +99,34 @@ export interface LoadedWorklist extends Worklist {
   today: string;
   /** The customers of the rows, as the master shows them (for the Excel). */
   master: Map<string, Record<string, MasterValue>>;
+  /**
+   * Rows whose customer is an older twin (its code and branch differ only in letter case from
+   * another customer's): the code of the customer the import updates instead (preferredCustomer). Such
+   * a row goes on its own sheet, for reading only (data collection review).
+   */
+  importedAs: Map<string, string>;
+}
+
+/**
+ * For each of `ids` that is not the customer the import (and the order intake) matches for its code
+ * and branch whatever the letter case (preferredCustomer among all the company's customers with that
+ * key): the code of the one it matches.
+ */
+async function twinsOf(tenantId: string, ids: readonly string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (!ids.length) return out;
+  const all = await prisma.customer.findMany({ where: { tenantId }, select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true } });
+  const groups = new Map<string, typeof all>();
+  for (const c of all) groups.set(customerKey(c.code, c.branchKey), [...(groups.get(customerKey(c.code, c.branchKey)) ?? []), c]);
+  const byId = new Map(all.map((c) => [c.id, c]));
+  for (const id of ids) {
+    const c = byId.get(id);
+    const list = c ? groups.get(customerKey(c.code, c.branchKey)) : undefined;
+    if (!c || !list || list.length < 2) continue;
+    const kept = preferredCustomer([...list])!;
+    if (kept.id !== c.id) out.set(id, kept.code);
+  }
+  return out;
 }
 
 /**
@@ -126,7 +156,8 @@ export async function loadWorklist(tenantId: string, opts: { days?: number | nul
   );
   const wanted = new Set(list.rows.map((r) => r.customerId));
   const master = new Map(customers.filter((c) => wanted.has(c.id)).map((c) => [c.id, masterValues(c, ctx)]));
-  return { ...list, gateOn: ctx.requireDataBeforeLoading, today, master };
+  const importedAs = await twinsOf(tenantId, [...wanted]);
+  return { ...list, gateOn: ctx.requireDataBeforeLoading, today, master, importedAs };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -159,7 +190,13 @@ export function coordCell(v: MasterValue): MasterValue {
 function customerSheet(wb: ExcelJS.Workbook, name: string, lead: readonly LeadColumn[], rows: readonly Record<string, MasterValue>[]) {
   const columns = [...lead.map((c) => ({ ...c, imported: false })), ...MASTER_COLUMNS];
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 1 }] });
-  ws.columns = columns.map((c) => ({ header: c.key, key: c.key, width: c.width, ...(TEXT_COLUMNS.has(c.key) ? { style: { numFmt: '@' } } : {}) }));
+  ws.columns = columns.map((c) => ({
+    header: c.key,
+    key: c.key,
+    width: c.width,
+    ...('hidden' in c && c.hidden ? { hidden: true } : {}),
+    ...(TEXT_COLUMNS.has(c.key) ? { style: { numFmt: '@' } } : {}),
+  }));
   columns.forEach((c, i) => {
     const cell = ws.getRow(1).getCell(i + 1);
     cell.font = c.imported ? IMPORTED_HEAD : INFO_HEAD;
@@ -192,7 +229,7 @@ function aboutSheet(wb: ExcelJS.Workbook, lines: readonly string[]) {
   r++;
   for (const c of MASTER_COLUMNS) {
     ws.getCell(r, 1).value = c.key;
-    ws.getCell(r, 2).value = `${c.imported ? 'Imported back. ' : 'For reading only (not imported). '}${c.text}`;
+    ws.getCell(r, 2).value = `${c.hidden ? '' : c.imported ? 'Imported back. ' : 'For reading only (not imported). '}${c.text}`;
     r++;
   }
 }
@@ -212,8 +249,8 @@ const WORKLIST_LEAD: readonly LeadColumn[] = [
   { key: 'depots', width: 10 },
 ];
 
-function worklistRows(list: LoadedWorklist): Record<string, MasterValue>[] {
-  return list.rows.map((r) => {
+function worklistRows(list: LoadedWorklist, rows: readonly WorklistRow[] = list.rows): Record<string, MasterValue>[] {
+  return rows.map((r) => {
     const values = list.master.get(r.customerId) ?? {};
     return {
       missing: r.missing,
@@ -267,17 +304,36 @@ function perDaySheet(wb: ExcelJS.Workbook, list: LoadedWorklist) {
   for (const d of list.perDepot) ws.addRow({ depot: d.code, date: d.customers, customers: d.location, missing: d.window });
 }
 
-/** Item 4: the data-to-collect workbook for the people who collect the data (importable back). */
+/**
+ * Item 4: the data-to-collect workbook for the people who collect the data (importable back). A
+ * customer whose code differs only in letter case from the one the import updates (an older twin) is
+ * listed apart, for reading only, with imported_as (data collection review): on the first sheet it
+ * would make the import refuse the whole file (the same code twice), or send its data to the other one.
+ */
 export async function buildWorklistWorkbook(list: LoadedWorklist, meta: { generatedBy: string; generatedAt: Date; timezone: string }): Promise<Buffer> {
   const wb = new ExcelJS.Workbook();
   wb.creator = 'RouteIQ';
   wb.created = meta.generatedAt;
-  customerSheet(wb, 'Data to collect', WORKLIST_LEAD, worklistRows(list));
+  const twins = list.rows.filter((r) => list.importedAs.has(r.customerId));
+  customerSheet(wb, 'Data to collect', WORKLIST_LEAD, worklistRows(list, list.rows.filter((r) => !list.importedAs.has(r.customerId))));
   perDaySheet(wb, list);
+  if (twins.length) {
+    customerSheet(
+      wb,
+      TWINS_SHEET,
+      [{ key: 'imported_as', width: 12 }, ...WORKLIST_LEAD],
+      worklistRows(list, twins).map((v, i) => ({ imported_as: list.importedAs.get(twins[i]!.customerId) ?? null, ...v })),
+    );
+  }
   aboutSheet(wb, [
     'Data to collect',
     `Customers with open orders from ${list.from} to ${list.to} that miss a usable location or their own confirmed receiving hours, soonest delivery first.`,
     `Made by ${meta.generatedBy} on ${localStamp(meta.generatedAt, meta.timezone)} (company time).`,
+    ...(twins.length
+      ? [
+          `"${TWINS_SHEET}": customers (${twins.length}) whose code differs only in letter case from another customer's. For reading only: the import updates the customer with the code in imported_as, never these. Set their data on Daily dispatch (Details, ADD LOCATION).`,
+        ]
+      : []),
     ...IMPORT_RULES,
   ]);
   return Buffer.from(await wb.xlsx.writeBuffer());
@@ -307,16 +363,33 @@ export async function buildMasterWorkbook(
   const auditsOf = new Map<string, CustomerAudit[]>();
   for (const a of audits) {
     if (!a.entityId) continue;
-    auditsOf.set(a.entityId, [...(auditsOf.get(a.entityId) ?? []), { action: a.action, createdAt: a.createdAt, userName: a.user?.name ?? null, beforeJson: a.beforeJson, afterJson: a.afterJson }]);
+    const list = auditsOf.get(a.entityId) ?? [];
+    list.push({ action: a.action, createdAt: a.createdAt, userName: a.user?.name ?? null, beforeJson: a.beforeJson, afterJson: a.afterJson });
+    auditsOf.set(a.entityId, list);
   }
   const customers = rows.map(toMaster);
   const { main, twins } = splitTwins(customers);
   const values = main.map((c) => masterValues(c, ctx));
-  const changed = main
-    .map((c, i) => ({ c, v: values[i]!, s: changeSummary(c, auditsOf.get(c.id) ?? [], since) }))
+  // What changed (data collection review): the customers on the Customers sheet, the twins listed
+  // apart (marked), and the customers deleted in the period (from their DELETE row: code, branch, name).
+  const twinNote = (importedAs: string) => ` (same code as ${importedAs} in another letter case: on the "${TWINS_SHEET}" sheet, not imported)`;
+  const present = new Set(customers.map((c) => c.id));
+  const deleted = audits
+    .filter((a) => a.action === 'DELETE' && a.entityId && !present.has(a.entityId))
+    .map((a) => {
+      const b = (a.beforeJson && typeof a.beforeJson === 'object' ? a.beforeJson : {}) as Record<string, unknown>;
+      const text = (k: string) => (typeof b[k] === 'string' ? (b[k] as string) : null);
+      return { at: a.createdAt, v: { changed_at: localStamp(a.createdAt, ctx.timezone), changed_by: a.user?.name ?? null, what_changed: 'Deleted', code: text('code'), branch_code: text('branchCode'), name: text('name') } as Record<string, MasterValue> };
+    });
+  const changed = [
+    ...main.map((c, i) => ({ v: values[i]!, s: changeSummary(c, auditsOf.get(c.id) ?? [], since), note: '' })),
+    ...twins.map((t) => ({ v: masterValues(t.c, ctx), s: changeSummary(t.c, auditsOf.get(t.c.id) ?? [], since), note: twinNote(t.importedAs) })),
+  ]
     .filter((x) => x.s !== null)
-    .sort((a, b) => b.s!.at.getTime() - a.s!.at.getTime())
-    .map(({ v, s }) => ({ changed_at: localStamp(s!.at, ctx.timezone), changed_by: s!.by || null, what_changed: s!.what, ...v }));
+    .map(({ v, s, note }) => ({ at: s!.at, v: { changed_at: localStamp(s!.at, ctx.timezone), changed_by: s!.by || null, what_changed: `${s!.what}${note}`, ...v } as Record<string, MasterValue> }))
+    .concat(deleted)
+    .sort((a, b) => b.at.getTime() - a.at.getTime())
+    .map((x) => x.v);
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'RouteIQ';
@@ -328,7 +401,7 @@ export async function buildMasterWorkbook(
   aboutSheet(wb, [
     'Customer master',
     `Every customer (${main.length}), made by ${opts.generatedBy} on ${localStamp(now, ctx.timezone)} (company time).`,
-    `"${label}": customers created or changed since ${localStamp(since, ctx.timezone)} (${changed.length}), newest first.`,
+    `"${label}": customers created, changed or deleted since ${localStamp(since, ctx.timezone)} (${changed.length}), newest first. A customer of the "${TWINS_SHEET}" sheet says so.`,
     `"Still missing": customers with open orders from ${list.from} to ${list.to} that miss a usable location or their own confirmed receiving hours (${list.rows.length}).`,
     ...(twins.length
       ? [`"${TWINS_SHEET}": older customers (${twins.length}) whose code differs only in letter case from one on the Customers sheet. For reading only: the import updates the customer on the Customers sheet (imported_as).`]

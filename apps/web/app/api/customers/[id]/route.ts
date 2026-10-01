@@ -2,7 +2,10 @@ import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
-import { CUSTOMER_SERVICE_COLUMN_DEFAULT } from '@/lib/dispatch/customer-attrs';
+import { CUSTOMER_SERVICE_COLUMN_DEFAULT, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
+import { customerKey } from '@/lib/dispatch/order-intake';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { canManageMasterData } from '@/lib/rbac';
 
 interface Params { params: { id: string } }
 
@@ -69,6 +72,23 @@ export const PATCH = (req: Request, { params }: Params) =>
       }
       const code = input.code ?? before.code;
       const branchKey = (data.branchKey as string | undefined) ?? before.branchKey;
+      // Owner decision 1 Oct 2026 (item 5, location admin-lock "on every write path"): orders are
+      // matched to customers by code and branch (letter case aside). Renaming a customer with a usable
+      // saved location away, then creating one (or letting an order file create one) under its old
+      // code, would send every order of that code to a point the dispatcher chose: only an admin
+      // changes the code or branch of such a customer.
+      if (
+        customerKey(code, branchKey) !== customerKey(before.code, before.branchKey) &&
+        savedLocationLocked(canManageMasterData(user.role), before, await tenantServiceArea(user.tenantId))
+      ) {
+        return fail(
+          {
+            code: 'LOCATION_ADMIN_ONLY',
+            message: `Only an admin can change the code or branch of a customer with a saved location: orders are matched to the customer by its code and branch. Ask your company admin. Nothing was saved.`,
+          } as Record<string, unknown>,
+          403,
+        );
+      }
       if (code !== before.code || branchKey !== before.branchKey) {
         // Codes are one customer whatever their letter case (the order intake matches them so).
         const twin = await db.customer.findFirst({

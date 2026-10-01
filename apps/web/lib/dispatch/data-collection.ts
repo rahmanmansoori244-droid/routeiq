@@ -102,6 +102,28 @@ export function gapText(g: Pick<DataGap, 'location' | 'window'>): string {
   return g.location ? 'location' : 'delivery window';
 }
 
+/**
+ * Step 2 ("Resolve issues") of the day screen: done, warn and its summary. With the loading rule on,
+ * customers that miss data needed before loading keep the step from "done" (their loads cannot be
+ * locked), as customers without a location do.
+ */
+export function resolveIssuesStep(s: { orders: number; blocking: number; blockingSummary: string; ruleOn: boolean; loadingGaps: number }): { done: boolean; warn: boolean; summary: string } {
+  const gaps = s.ruleOn && s.loadingGaps > 0 ? `${s.loadingGaps} customer(s) miss data needed before loading` : '';
+  const summary = [s.blocking > 0 ? s.blockingSummary : '', gaps].filter(Boolean).join(' · ');
+  return {
+    done: s.orders > 0 && s.blocking === 0 && !gaps,
+    warn: s.blocking > 0 || !!gaps,
+    summary: summary || (s.orders ? 'All delivery locations known' : '—'),
+  };
+}
+
+/** The summary of step 2's white list (customers to confirm): with the loading rule on, receiving hours are not optional. */
+export function confirmNotesSummary(count: number, ruleOn: boolean): string {
+  return ruleOn
+    ? `${count} customer(s) to confirm (priority / type / receiving hours) — the loading rule is on: confirmed receiving hours (or a delivery time for the order) are needed before loading`
+    : `${count} customer(s) to confirm (priority / type / receiving hours) — optional, defaults are used`;
+}
+
 /** "C001 / B2 (Corner Shop Seeb)". */
 export function customerRef(c: { code: string; branchCode: string | null; name: string }): string {
   return `${c.code}${c.branchCode ? ` / ${c.branchCode}` : ''} (${c.name})`;
@@ -132,6 +154,47 @@ export function dataGateRefusal(load: { truck: string; loadNo: number }, gaps: r
     gaps.some((g) => g.location) ? `Location: ${locationRemedy}` : null,
   ].filter(Boolean);
   return `${load.truck} L${load.loadNo}: ${who} data needed before loading - ${shown.join('; ')}${more}. ${DATA_GATE_RULE} ${remedies.join(' ')}`;
+}
+
+/**
+ * The refusal of dispatching a legacy run (POST /api/runs/:id/dispatch, a plan of the previous planner
+ * dispatched whole) under the loading rule: the customers without a delivery window, the rule and the
+ * remedy (data collection review: only the location was checked there).
+ */
+export function legacyRunDataRefusal(gaps: readonly DataGap[]): string {
+  const shown = gaps.slice(0, 10).map(customerRef).join(', ');
+  const more = gaps.length > 10 ? ', ...' : '';
+  return `${gaps.length} customer(s) on this run have no delivery window: ${shown}${more}. Nothing was dispatched. ${DATA_GATE_RULE} ${CONFIRM_HOURS}, then dispatch again.`;
+}
+
+/** A customer whose confirmed receiving hours are not the hours its stop was planned with (no delivery time on it). */
+export interface HoursMismatch {
+  customerId: string;
+  code: string;
+  branchCode: string | null;
+  name: string;
+  /** "hard 06:00–18:00" / "Any time": what the stop was planned with. */
+  planned: string;
+  /** The customer's own confirmed hours now ("Any time" = open all day). */
+  confirmed: string;
+}
+
+/**
+ * The refusal of LOCK under the loading gate when a customer's confirmed hours are not the hours its
+ * stop was planned with (planned with a default, or the hours changed since): the truck would go
+ * with hours nobody confirmed. RE-PLAN first.
+ */
+export function hoursChangedRefusal(load: { truck: string; loadNo: number }, list: readonly HoursMismatch[]): string {
+  const who =
+    list.length === 1
+      ? '1 customer on this load has confirmed receiving hours that its stop was not planned with'
+      : `${list.length} customers on this load have confirmed receiving hours that their stops were not planned with`;
+  const shown = list
+    .slice(0, 8)
+    .map((m) => `${customerRef(m)}: planned with ${m.planned}, confirmed ${m.confirmed === 'Any time' ? 'open all day' : m.confirmed}`)
+    .join('; ');
+  const more = list.length > 8 ? `; and ${list.length - 8} more` : '';
+  return `${load.truck} L${load.loadNo}: ${who} - ${shown}${more}. ${DATA_GATE_RULE} RE-PLAN first, so the stop is planned with the confirmed hours. Then lock the load.`;
 }
 
 /**
@@ -335,8 +398,63 @@ export interface MasterColumn {
   width: number;
   /** The customer import reads this column back (the others are for reading only). */
   imported: boolean;
+  /** Hidden in the sheet: kept for the import, not for people (row_version). */
+  hidden?: boolean;
   /** What it holds, for the "About this file" sheet. */
   text: string;
+}
+
+/** The customer fields the import can change: what row_version is made of (rowVersion). */
+export interface VersionedCustomer {
+  name: string;
+  regionId?: string | null;
+  address: string | null;
+  priority: number;
+  priorityConfirmed: boolean;
+  avgServiceTimeMin: number;
+  serviceTimeConfirmed: boolean;
+  paymentType: string;
+  lat: number | null;
+  lng: number | null;
+  locationVerified: boolean;
+  geocodeConfidence?: string | null;
+  hardWindowStartMin: number | null;
+  hardWindowEndMin: number | null;
+  prefWindowStartMin: number | null;
+  prefWindowEndMin: number | null;
+  windowConfirmedAt?: Date | string | null;
+}
+
+/** cyrb53: a short, stable hash (not for security; the same in the browser and the server). */
+function shortHash(text: string): string {
+  let h1 = 0xdeadbeef;
+  let h2 = 0x41c6ce57;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
+}
+
+/**
+ * The version of a customer as a downloaded file shows it (the hidden row_version column of the
+ * master and the data-to-collect list; data collection review): a hash of every field the customer
+ * import can change. The import compares it with the customer as it is: a different one means the
+ * customer was changed in RouteIQ after the file was downloaded, so the row is not imported (an old
+ * file would otherwise undo the change, and confirm hours nobody checked under the importer's name).
+ */
+export function rowVersion(c: VersionedCustomer): string {
+  const confirmedAt = c.windowConfirmedAt ? new Date(c.windowConfirmedAt) : null;
+  const values = [
+    c.name, c.regionId ?? null, c.address ?? null, c.priority, c.priorityConfirmed, c.avgServiceTimeMin, c.serviceTimeConfirmed, c.paymentType,
+    c.lat, c.lng, c.locationVerified, c.geocodeConfidence ?? null,
+    c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin,
+    confirmedAt && !Number.isNaN(confirmedAt.getTime()) ? confirmedAt.toISOString() : null,
+  ];
+  return `v1-${shortHash(JSON.stringify(values))}`;
 }
 
 /**
@@ -378,9 +496,17 @@ export const MASTER_COLUMNS: readonly MasterColumn[] = [
   { key: 'active', width: 7, imported: false, text: 'yes / no. Changed on the Customers page.' },
   { key: 'created_at', width: 17, imported: false, text: 'When the customer was created (blank: before this was recorded).' },
   { key: 'updated_at', width: 17, imported: false, text: 'When the customer last changed (blank: not since this was recorded).' },
+  {
+    key: 'row_version',
+    width: 14,
+    imported: false,
+    hidden: true,
+    text: 'Hidden; leave it as it is. The customer as this file shows it: a row whose customer was changed in RouteIQ after the file was downloaded is not imported (an old file never undoes a later change), and the import lists it.',
+  },
 ];
 
 export interface MasterCustomer extends CustomerForPlanning {
+  regionId?: string | null;
   regionCode: string | null;
   regionName: string | null;
   depotCode: string | null;
@@ -476,6 +602,7 @@ export function masterValues(c: MasterCustomer, ctx: MasterContext): Record<stri
     active: c.active ? 'yes' : 'no',
     created_at: localStamp(c.createdAt, ctx.timezone),
     updated_at: localStamp(c.updatedAt, ctx.timezone),
+    row_version: rowVersion(c),
   };
 }
 
@@ -497,6 +624,9 @@ export function collectText(r: { location: boolean; window: boolean }, v: Record
   }
   return out.join(' ');
 }
+
+/** How far back "Changed since" of the customer master may go (its audit rows are read into the web process). */
+export const MASTER_SINCE_MAX_DAYS = 31;
 
 /** The start of "changed since": the company's midnight of `dateIso`, or 24 hours before `now`. */
 export function changedSince(dateIso: string | null | undefined, now: Date, tz: string): { since: Date; label: string } {
@@ -617,7 +747,8 @@ export function yesNo(raw: string | null | undefined): boolean | null | undefine
 
 /**
  * A time cell: "06:00", "6:00", "0600", "06:00:00", "6:00 AM", or an Excel time (a fraction of a day,
- * 0.25 = 06:00). Null for blank; throws with a plain message on anything else.
+ * 0.25 = 06:00). In an end column ("..._to") 1 - how Excel stores a typed 24:00 - is the end of the day
+ * (1440), as the master's "24:00" is. Null for blank; throws with a plain message on anything else.
  */
 export function cellTime(raw: string | null | undefined, column: string): number | null {
   const s = (raw ?? '').trim();
@@ -628,9 +759,10 @@ export function cellTime(raw: string | null | undefined, column: string): number
     if (h >= 1 && h <= 12 && Number(ampm[2]) <= 59) return ((h % 12) + (ampm[3]!.toLowerCase() === 'p' ? 12 : 0)) * 60 + Number(ampm[2]);
   }
   const secs = /^(\d{1,2}:\d{2}):\d{2}$/.exec(s);
-  if (/^(0(\.\d+)?|\.\d+)$/.test(s)) {
+  if (/^(0(\.\d+)?|1(\.0+)?|\.\d+)$/.test(s)) {
     const min = Math.round(Number(s) * 1440);
     if (min >= 0 && min < 1440) return min;
+    if (min === 1440 && column.endsWith('_to')) return 1440;
   }
   try {
     const v = parseHhmm(secs ? secs[1] : s);

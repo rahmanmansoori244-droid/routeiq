@@ -15,6 +15,8 @@ import { Switch } from '@/components/ui/switch';
 import { runInlineUpdate } from '@/lib/customer-inline-update';
 import { locationIssue } from '@/lib/dispatch/customer-attrs';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { MASTER_SINCE_MAX_DAYS } from '@/lib/dispatch/data-collection';
+import { addDaysIso } from '@/lib/dispatch/time';
 
 interface CustomerRow {
   id: string;
@@ -203,9 +205,17 @@ export function CustomersClient({
         <div className="flex flex-wrap items-end gap-3 rounded-md border bg-muted/30 p-2 text-sm" data-testid="customer-downloads">
           <div className="space-y-1">
             <label htmlFor="master-since" className="text-xs text-muted-foreground">
-              Changed since (empty = last 24 hours)
+              Changed since (empty = last 24 hours; at most {MASTER_SINCE_MAX_DAYS} days back)
             </label>
-            <Input id="master-since" type="date" value={since} onChange={(e) => setSince(e.target.value)} className="h-8 w-40" />
+            <Input
+              id="master-since"
+              type="date"
+              value={since}
+              min={addDaysIso(collect.from, -MASTER_SINCE_MAX_DAYS)}
+              max={collect.from}
+              onChange={(e) => setSince(e.target.value)}
+              className="h-8 w-40"
+            />
           </div>
           <Button asChild size="sm" variant="outline">
             <a href={`/api/customers/master${since ? `?since=${since}` : ''}`} data-testid="download-master">

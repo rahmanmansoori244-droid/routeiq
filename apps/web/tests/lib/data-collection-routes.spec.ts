@@ -12,7 +12,7 @@
  *    reason, audited, never on an order on a locked load or one brought forward to a later day.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 
 const session = vi.hoisted(() => ({ role: 'PLANNER' as string }));
 vi.mock('@/lib/auth', () => ({
@@ -35,6 +35,7 @@ import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerImport } from '@/app/api/customers/import/route';
 import { PUT as deliveryTimePut } from '@/app/api/dispatch/delivery-time/route';
 import { LOCATION_ADMIN_ONLY_MESSAGE } from '@/lib/dispatch/customer-attrs';
+import { audit } from '@/lib/audit';
 
 const T = 'tA';
 const customer = (id: string, over: Record<string, unknown> = {}) => ({
@@ -116,7 +117,15 @@ describe("item 5: a dispatcher's customer import never changes a usable saved lo
   it('as a dispatcher: usable locations kept (warned), missing and unusable ones set from the file', async () => {
     const dry = await importCsv(file, true);
     expect(dry.status).toBe(200);
-    expect(dry.body.data.warnings.join(' ')).toMatch(/2 location\(s\) in the file differ from the customer's saved location, which will be kept: Only an admin can change a saved location\./);
+    // Counted apart (data collection review): an admin's import changes a usable pin nobody confirmed
+    // (USABLE), but never one confirmed on the map (CONFIRMED) - for that one only Set location helps.
+    const dryText = dry.body.data.warnings.join(' ');
+    expect(dryText).toMatch(
+      /1 location\(s\) in the file differ from the customer's saved location, which will be kept: Only an admin can change a saved location\. Ask your company admin to import the file, or to change each one with Set location on the customer page\./,
+    );
+    expect(dryText).toMatch(
+      /1 location\(s\) in the file differ from a location confirmed on the map, which will be kept: no import changes a location confirmed on the map \(an admin's neither\)\. If one is wrong, ask your company admin to change it with Set location on the customer page\./,
+    );
     const r = await importCsv(file);
     expect(r.status).toBe(200);
     expect(point('USABLE')).toMatchObject({ lat: 23.5859, lng: 58.4059 });
@@ -124,6 +133,7 @@ describe("item 5: a dispatcher's customer import never changes a usable saved lo
     expect(point('NONE')).toMatchObject({ lat: 23.7002, lng: 58.5002 });
     expect(point('LOW')).toMatchObject({ lat: 23.7003, lng: 58.5003 });
     expect(r.body.data.warnings.join(' ')).toMatch(/which was kept: Only an admin can change a saved location/);
+    expect(r.body.data.warnings.join(' ')).toMatch(/confirmed on the map, which was kept: no import changes/);
   });
 
   it('a pair that is not exact and points elsewhere does not mark a usable location LOW for a dispatcher', async () => {
@@ -210,5 +220,76 @@ describe('item 1: a delivery time for one order (PUT /api/dispatch/delivery-time
   it('a viewer cannot set it (403)', async () => {
     session.role = 'VIEWER';
     expect((await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'URGENT' })).status).toBe(403);
+  });
+
+  // Frozen loads never change: LOCK runs under the plan row lock, so the frozen check, the order
+  // update and its audit row run in one transaction under the day lock and the plan row lock, with the
+  // load read again under them. Before, the load was read first and the order written later, so a LOCK
+  // committed in between left a locked load with a promised time its stop was never planned with.
+  const seedPlan = (status: string) => {
+    tables.runPlan = [{ id: 'R1', tenantId: T, depotId: 'D1', runDate: DAY, status: 'READY', supersededAt: null, version: 1, chosenScenarioId: 'S1', createdAt: new Date() }];
+    tables.planLoad = [{ id: 'L1', tenantId: T, runId: 'R1', truckId: 'T1', loadNo: 1, status }];
+    tables.routeAssignment = [{ id: 'A1', runId: 'R1', orderId: 'O1', loadId: 'L1' }];
+  };
+
+  it('a load locked while the time is being saved: the save waits for the plan row lock, sees the lock, and changes nothing (409)', async () => {
+    seedPlan('PLANNED');
+    rawLog.length = 0;
+    const real = fakePrisma.$queryRaw;
+    // LOCK of L1 commits just before this save gets the plan row lock.
+    fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      const out = await real(strings, ...values);
+      if (/FROM "RunPlan" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(strings.join('?').replace(/\s+/g, ' '))) tables.planLoad[0]!.status = 'LOCKED';
+      return out;
+    };
+    try {
+      const r = await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'PROMISED' });
+      expect(r.status).toBe(409);
+      expect(r.body.error).toMatchObject({ code: 'ORDER_ON_FROZEN_LOAD' });
+    } finally {
+      fakePrisma.$queryRaw = real;
+    }
+    expect(row('order', 'O1')).toMatchObject({ deliveryStartMin: null, deliveryEndMin: null });
+    expect(audits).toEqual([]);
+    // Lock order as everywhere: the day lock, then the plan row.
+    const day = rawLog.findIndex((s) => /pg_advisory_xact_lock/.test(s));
+    const planRow = rawLog.findIndex((s) => /FROM "RunPlan" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(s));
+    expect(day).toBeGreaterThanOrEqual(0);
+    expect(planRow).toBeGreaterThan(day);
+  });
+
+  it('the order and its audit row commit together: if the row cannot be written, the time is not saved', async () => {
+    seedPlan('PLANNED');
+    vi.mocked(audit).mockRejectedValueOnce(new Error('audit insert failed (simulated)'));
+    const r = await deliveryTimePut(json('/api/dispatch/delivery-time', 'PUT', { orderId: 'O1', startMin: 600, endMin: 660, reason: 'URGENT' })).catch((e: Error) => e);
+    expect(r instanceof Error ? 500 : r.status).toBe(500);
+    expect(row('order', 'O1')).toMatchObject({ deliveryStartMin: null, deliveryEndMin: null, deliveryTimeReason: null });
+    // The row is written with the transaction's client.
+    await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'URGENT' });
+    expect(vi.mocked(audit).mock.calls.at(-1)![1]).toBeDefined();
+  });
+
+  it('saving the same time again (or only another reason or note) is not a new delivery time: the plan is not out of date', async () => {
+    seedPlan('PLANNED');
+    expect((await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'URGENT' })).status).toBe(200);
+    const at = new Date('2026-10-01T05:00:00.000Z');
+    row('order', 'O1').deliveryTimeSetAt = at;
+    const n = audits.length;
+    // Exactly as it is: nothing written, nothing audited.
+    const same = await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'URGENT' });
+    expect(same.status).toBe(200);
+    expect(same.body.data.message).toMatch(/nothing changed/i);
+    expect(same.body.data.message).not.toMatch(/RE-PLAN/);
+    expect(audits).toHaveLength(n);
+    // Another reason and note, the same time: saved and audited, but the time was not set again.
+    const note = await putTime({ orderId: 'O1', startMin: 600, endMin: 660, reason: 'PROMISED', note: 'sales promised' });
+    expect(note.status).toBe(200);
+    expect(note.body.data.message).not.toMatch(/RE-PLAN/);
+    expect(row('order', 'O1')).toMatchObject({ deliveryTimeReason: 'PROMISED', deliveryTimeNote: 'sales promised', deliveryTimeSetAt: at });
+    expect(audits).toHaveLength(n + 1);
+    // Another time: set again (the plan is out of date).
+    const moved = await putTime({ orderId: 'O1', startMin: 600, endMin: 690, reason: 'PROMISED' });
+    expect(moved.body.data.message).toMatch(/RE-PLAN to plan the order with it/);
+    expect(row('order', 'O1').deliveryTimeSetAt.getTime()).toBeGreaterThan(at.getTime());
   });
 });

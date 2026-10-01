@@ -14,7 +14,7 @@ import { LOCATION_ADMIN_ONLY_MESSAGE, locationBlocksDelivery, savedLocationLocke
 import { samePoint } from '@/lib/dispatch/location-input';
 import { canManageMasterData } from '@/lib/rbac';
 import { clientIp } from '@/lib/client-ip';
-import { HOURS_COLUMNS, importedPriority, readImportedHours, yesNo, type PriorityConfirm } from '@/lib/dispatch/data-collection';
+import { HOURS_COLUMNS, importedPriority, readImportedHours, rowVersion, yesNo, type PriorityConfirm } from '@/lib/dispatch/data-collection';
 
 const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartMin', 'prefWindowEndMin'] as const;
 
@@ -62,6 +62,14 @@ const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartM
 // its fields (and a point marked LOW), CUSTOMER_LOCATION_SET for each location it writes, CREATE for
 // each customer it creates. Rows without lat / lng whose customer has no usable location are counted
 // in one warning.
+//
+// Data collection review: a downloaded row carries the customer's version (hidden row_version,
+// lib/dispatch/data-collection rowVersion); a row whose customer was changed in RouteIQ after the
+// download is not imported at all (an old file would undo the change, and confirm old hours under the
+// importer's name), and the rows it would have changed are listed (`staleRows`). A code outside the
+// import's own format is accepted when it matches an existing customer (an order file creates any
+// non-blank code); a new customer still needs a plain code. A pair that differs from a pin confirmed
+// on the map is counted apart in a dispatcher's import: no import changes such a pin, an admin's neither.
 
 interface ImportError {
   row: number;
@@ -102,6 +110,8 @@ interface CustomerRow {
   priorityConfirm: PriorityConfirm;
   /** The receiving-hours cells (HOURS_COLUMNS) the file has, for readImportedHours. */
   hoursCells: Partial<Record<(typeof HOURS_COLUMNS)[number], string>>;
+  /** The customer as the downloaded file showed it (row_version, rowVersion); null = a file without it. */
+  rowVersion: string | null;
 }
 
 const PAYMENT_TYPES = new Set(['CASH', 'CREDIT', 'PREPAID']);
@@ -158,6 +168,24 @@ export async function POST(req: Request) {
   const isAdmin = canManageMasterData(session.user.role);
   const regionByCode = new Map(regions.map((r) => [r.code.toLowerCase(), r.id]));
 
+  // Existing customers, matched case-insensitively (twins resolve like the order intake).
+  const existingRows = await db.customer.findMany({
+    select: {
+      id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true,
+      // What a row would change (item 6: a row that changes nothing writes nothing, so a master imported back changes nothing).
+      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true,
+      hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true, windowConfirmedAt: true,
+    },
+  });
+  const twins = new Map<string, typeof existingRows>();
+  for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
+  const matchOf = (v: { code: string; branchKey: string }) => {
+    const list = twins.get(customerKey(v.code, v.branchKey));
+    return list ? preferredCustomer(list) ?? null : null;
+  };
+  // Rows of a file downloaded before their customer was changed in RouteIQ (row_version): not imported.
+  const staleRows: { row: number; code: string; branchCode: string | null; changes: boolean }[] = [];
+
   parsed.rows.forEach((raw, idx) => {
     const row = idx + 2; // header + 1-based
     const code = cell(raw, 'code');
@@ -166,13 +194,15 @@ export async function POST(req: Request) {
       errors.push({ row, message: 'Missing required column (code, name).' });
       return;
     }
-    if (!/^[A-Za-z0-9._-]+$/.test(code) || code.length > 32) {
+    const branchCode = cell(raw, 'branch_code') || null;
+    const branchKey = normalizeBranchKey(branchCode);
+    // A code an order file created (any non-blank text, e.g. "AB 12") is matched like the order intake
+    // matches it; the strict format applies only to a customer the import would create (data
+    // collection review: such a customer on the data-to-collect list refused the whole file).
+    if ((!/^[A-Za-z0-9._-]+$/.test(code) || code.length > 32) && !matchOf({ code, branchKey })) {
       errors.push({ row, message: `Invalid code "${code}".` });
       return;
     }
-
-    const branchCode = cell(raw, 'branch_code') || null;
-    const branchKey = normalizeBranchKey(branchCode);
     const dupKey = customerKey(code, branchKey);
     if (codeSeen.has(dupKey)) {
       errors.push({
@@ -271,24 +301,45 @@ export async function POST(req: Request) {
       paymentType: payment,
       priorityConfirm,
       hoursCells,
+      rowVersion: cell(raw, 'row_version') || null,
     });
   });
 
-  // Existing customers, matched case-insensitively (twins resolve like the order intake).
-  const existingRows = await db.customer.findMany({
-    select: {
-      id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true,
-      // What a row would change (item 6: a row that changes nothing writes nothing, so a master imported back changes nothing).
-      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true,
-      hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true, windowConfirmedAt: true,
-    },
-  });
-  const twins = new Map<string, typeof existingRows>();
-  for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
-  const matchOf = (v: CustomerRow) => {
-    const list = twins.get(customerKey(v.code, v.branchKey));
-    return list ? preferredCustomer(list) ?? null : null;
+  // Data collection review: a row of a downloaded file (the master, the data-to-collect list) whose
+  // customer was changed in RouteIQ after the download (its hidden row_version is not the customer's
+  // now) is not imported at all: compared with the customer as it is now, every value someone changed
+  // since would count as a change by the file - an old file undid later edits and confirmed hours
+  // nobody checked under the importer's name. Rows that would change something are listed.
+  const notExactRows = new Set(notExact.map((n) => n.row));
+  const changesSomething = (v: CustomerRow, m: NonNullable<ReturnType<typeof matchOf>>): boolean => {
+    if (v.name !== m.name || (v.address && v.address !== m.address) || (v.paymentType && v.paymentType !== m.paymentType)) return true;
+    if (v.regionCode && (regionByCode.get(v.regionCode.toLowerCase()) ?? null) !== m.regionId) return true;
+    const p = importedPriority(v.priority, v.priorityConfirm, m);
+    if (p.priority !== null || p.confirm) return true;
+    if (v.avgServiceTimeMin !== null && (v.avgServiceTimeMin !== m.avgServiceTimeMin || !m.serviceTimeConfirmed)) return true;
+    const h = readImportedHours(v.hoursCells, m);
+    if (h.ok && h.change && (h.change.confirm !== 'KEEP' || HOUR_FIELDS.some((k) => h.change!.hours[k] !== m[k]))) return true;
+    if (notExactRows.has(v.row)) return true;
+    if (v.lat === null || v.lng === null) return false;
+    const same = m.lat !== null && m.lng !== null && samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat, lng: v.lng });
+    return !(same && (m.locationVerified || m.geocodeConfidence === 'HIGH'));
   };
+  const fresh = valid.filter((v) => {
+    const m = v.rowVersion ? matchOf(v) : null;
+    if (!m || rowVersion(m) === v.rowVersion) return true;
+    staleRows.push({ row: v.row, code: v.code, branchCode: v.branchCode, changes: changesSomething(v, m) });
+    return false;
+  });
+  valid.splice(0, valid.length, ...fresh);
+  const staleListed = staleRows.filter((s) => s.changes).map(({ row, code, branchCode }) => ({ row, code, branchCode }));
+  if (staleListed.length) {
+    const codes = staleListed.slice(0, 10).map((s) => `${s.code}${s.branchCode ? ` / ${s.branchCode}` : ''}`).join(', ');
+    const later = dryRun || errors.length > 0;
+    warnings.push(
+      `${staleListed.length} row(s) ${later ? 'will not be' : 'were not'} imported: the customer was changed in RouteIQ after this file was downloaded (${codes}${staleListed.length > 10 ? ', ...' : ''}). Nothing in those rows ${later ? 'will be' : 'was'} saved. Download a new file and enter those changes again.`,
+    );
+  }
+
   let creates = 0;
   let updates = 0;
   const confirmedServiceChanges: { code: string; branchCode: string | null; from: number; to: number }[] = [];
@@ -345,17 +396,27 @@ export async function POST(req: Request) {
   // the same place) is planned and sent out as before, so its rows are counted apart.
   const keptUsable = locationsNotSaved.filter((l) => l.kept === 'SAVED_LOCATION' && !adminOnlyRows.has(l.row)).length;
   const needPin = locationsNotSaved.filter((l) => l.kept !== 'SAVED_LOCATION').length;
-  // Exact pairs of a dispatcher's file that would change a usable saved location: kept (item 5).
+  // Exact pairs of a dispatcher's file that would change a usable saved location: kept (item 5). A pin
+  // confirmed on the map is counted apart: no import changes it, an admin's neither (owner decision),
+  // so "ask your company admin to import the file" would not help for it (data collection review).
+  const adminOnlyVerifiedRows = new Set<number>();
   for (const v of valid) {
     if (v.lat === null || v.lng === null) continue;
     const m = matchOf(v);
     if (m && savedLocationLocked(isAdmin, m, area) && !(m.lat !== null && m.lng !== null && samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat, lng: v.lng }))) {
-      adminOnlyRows.add(v.row);
+      if (m.locationVerified) adminOnlyVerifiedRows.add(v.row);
+      else adminOnlyRows.add(v.row);
     }
   }
+  const kept = dryRun || errors.length > 0 ? 'will be' : 'was';
   if (adminOnlyRows.size) {
     warnings.push(
-      `${adminOnlyRows.size} location(s) in the file differ from the customer's saved location, which ${dryRun || errors.length > 0 ? 'will be' : 'was'} kept: ${LOCATION_ADMIN_ONLY_MESSAGE} Ask your company admin to import the file, or to change each one with Set location on the customer page.`,
+      `${adminOnlyRows.size} location(s) in the file differ from the customer's saved location, which ${kept} kept: ${LOCATION_ADMIN_ONLY_MESSAGE} Ask your company admin to import the file, or to change each one with Set location on the customer page.`,
+    );
+  }
+  if (adminOnlyVerifiedRows.size) {
+    warnings.push(
+      `${adminOnlyVerifiedRows.size} location(s) in the file differ from a location confirmed on the map, which ${kept} kept: no import changes a location confirmed on the map (an admin's neither). If one is wrong, ask your company admin to change it with Set location on the customer page.`,
     );
   }
   if (needPin) {
@@ -419,6 +480,7 @@ export async function POST(req: Request) {
         updates,
         confirmedServiceChanges,
         locationsNotSaved,
+        staleRows: staleListed,
       },
       error: null,
     });
@@ -632,7 +694,8 @@ export async function POST(req: Request) {
       bulkImport: {
         fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length,
         savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size, savedLocationsNotUsableReplaced: replacedNotUsable,
-        savedLocationsKeptAdminOnly: adminOnlyRows.size, unchanged, receivingHoursChanged: hoursChanged,
+        savedLocationsKeptAdminOnly: adminOnlyRows.size, savedLocationsKeptConfirmedOnMap: adminOnlyVerifiedRows.size, unchanged, receivingHoursChanged: hoursChanged,
+        staleRowsSkipped: staleRows.length,
       },
     } as never,
     ip,
@@ -652,6 +715,7 @@ export async function POST(req: Request) {
       receivingHoursChanged: hoursChanged,
       confirmedServiceChanges,
       locationsNotSaved,
+      staleRows: staleListed,
       keptVerifiedLocations: keptVerified,
       warnings: keptVerified ? [...warnings, `${keptVerified} customer location(s) confirmed by a dispatcher were kept (file coordinates ignored).`] : warnings,
     },

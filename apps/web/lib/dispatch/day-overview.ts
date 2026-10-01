@@ -16,14 +16,14 @@ import {
   type TypeProfileLike,
   windowLabel,
 } from './customer-attrs';
-import { orderTimeOf, promisedText, stopWindowFor, type OrderTime } from './order-window';
+import { orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
-import { plannedLoadsMasterChanged, readPlanInputs } from './snapshots';
+import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot } from './snapshots';
 import { dataGaps, type DataGap } from './data-collection';
 import type { ServiceArea } from './location-input';
 
@@ -260,18 +260,23 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
   // plan was made, and trucks with PLANNED loads whose capacity or payload was corrected since. The
   // plan keeps what it was planned with; a re-plan adopts the new data.
-  // A customer's orders on PLANNED loads: their own delivery times (urgent / promised, set or changed
-  // since planning) are the hours the stop would be planned with now (order-window stopWindowFor).
-  const plannedOrdersOf = new Map<string, (typeof orders)[number][]>();
-  for (const id of onPlannedLoad) {
-    const o = orderById.get(id);
-    if (o) plannedOrdersOf.set(o.customerId, [...(plannedOrdersOf.get(o.customerId) ?? []), o]);
-  }
+  // The delivery time a stop would be planned with now (order-window stopWindowFor): one visit per
+  // customer, so with all of its customer's orders of the day - on any load, left unserved or waiting -
+  // except those on a load locked before its plan was made (plannedVisitOrders; the same rule as LOCK's
+  // deliveryTimeGate and the plan screen, data collection review).
+  const dayOrdersOf = new Map<string, (typeof orders)[number][]>();
+  for (const o of orders) dayOrdersOf.set(o.customerId, [...(dayOrdersOf.get(o.customerId) ?? []), o]);
+  const placements: OrderPlacement[] = onPlan.map((a) => ({
+    orderId: a.orderId,
+    frozen: !!a.load && a.load.status !== 'PLANNED',
+    whole: a.portionLinesJson === null,
+    capturedAt: readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null,
+  }));
   const plannedStops = onPlan.flatMap((a) => {
     const o = orderById.get(a.orderId);
     if (a.load?.status !== 'PLANNED' || !o) return [];
     const eff = effectiveAttrs(o.customer, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
-    const sw = stopWindowFor(eff, plannedOrdersOf.get(o.customerId) ?? [o]);
+    const sw = stopWindowFor(eff, plannedVisitOrders(dayOrdersOf.get(o.customerId) ?? [o], placements, readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null));
     return [{
       customerId: o.customerId,
       stopSnapshotJson: a.stopSnapshotJson,
@@ -503,12 +508,18 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   };
 }
 
-/** The day's loading gaps (item 3), by the gate's own rule (`dataGaps`) on the day's customers and order times. */
+/**
+ * The day's loading gaps (item 3), by the gate's own rule (`dataGaps`) on the day's customers and order
+ * times. Only orders not on a locked (or later) load: the gate judges a load only when it leaves
+ * PLANNED, so a customer whose orders are all on locked, loading or dispatched loads is never refused
+ * by it and is not listed (data collection review; a missing location there is in step 2's red list,
+ * the always-on location rule).
+ */
 export function dayLoadingGaps(customers: readonly IssueCustomer[], area: ServiceArea): DataGap[] {
   const active = customers.filter((c) => !c.inactive);
   return dataGaps(
     active.map((c) => ({ id: c.customerId, code: c.code, branchCode: c.branchCode, name: c.name, lat: c.lat, lng: c.lng, locationVerified: c.locationVerified, geocodeConfidence: c.geocodeConfidence, windowConfirmedAt: c.windowConfirmedAt })),
-    active.flatMap((c) => c.orderTimes.map((t) => ({ customerId: c.customerId, deliveryStartMin: t.time?.startMin ?? null, deliveryEndMin: t.time?.endMin ?? null }))),
+    active.flatMap((c) => c.orderTimes.filter((t) => !t.frozen).map((t) => ({ customerId: c.customerId, deliveryStartMin: t.time?.startMin ?? null, deliveryEndMin: t.time?.endMin ?? null }))),
     area,
   );
 }

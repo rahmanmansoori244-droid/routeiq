@@ -21,10 +21,11 @@ import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 import { Host, elements, textOf, typeName } from './hook-host';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
+const session = vi.hoisted(() => ({ role: 'TENANT_ADMIN' }));
 vi.mock('@/lib/auth', () => ({
   // The company admin: these are A5's point checks. Since 1 Oct 2026 a dispatcher (PLANNER) may not change a
   // usable saved location at all (location admin-lock, tests/lib/data-collection-rules.spec.ts).
-  auth: async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'TENANT_ADMIN', name: 'Admin One', email: 'p@a.example' } }),
+  auth: async () => ({ user: { id: 'u1', tenantId: 'tA', role: session.role, name: 'Admin One', email: 'p@a.example' } }),
 }));
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -48,6 +49,8 @@ import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
 import { DEFAULT_SERVICE_AREA, PIN_REQUIRED_MESSAGE, SAVED_NOT_EXACT_MESSAGE, SAVED_OUTSIDE_AREA_MESSAGE, SAVED_SWAPPED_MESSAGE } from '@/lib/dispatch/location-input';
 import { CustomerEditor } from '@/app/t/[slug]/customers/[id]/customer-editor';
+import { CustomerDetailsButton } from '@/app/t/[slug]/customers/[id]/customer-details-button';
+import { windowGateRemedy } from '@/lib/dispatch/data-collection';
 import { CustomersClient } from '@/app/t/[slug]/customers/customers-client';
 import { LOW_LOCATION_MESSAGE, OUTSIDE_AREA_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
 
@@ -89,6 +92,7 @@ const fetchSpy = vi.fn(async () => {
 beforeEach(() => {
   resetDb();
   audits.length = 0;
+  session.role = 'TENANT_ADMIN';
   fetchSpy.mockClear();
   vi.stubGlobal('fetch', fetchSpy);
   tables.customer = [
@@ -439,6 +443,37 @@ describe('PATCH /api/customers/:id never changes a location', () => {
     expect(r.status).toBe(200);
     expect(row('customer', 'MED').name).toBe('Renamed');
   });
+
+  // Owner decision 1 Oct 2026 (item 5, "on every write path"): orders are matched to customers by code
+  // and branch, so renaming a customer with a saved location away and creating (or letting an order
+  // file create) a new one under its code would move every order of that code to a point the
+  // dispatcher chose. Only an admin renames such a customer.
+  it("a dispatcher cannot change the code or branch of a customer with a usable saved location (403 LOCATION_ADMIN_ONLY); nothing written", async () => {
+    session.role = 'PLANNER';
+    const patch = async (id: string, body: unknown) => answer(await customerPatch(json(`/api/customers/${id}`, 'PATCH', body), { params: { id } }));
+    for (const [id, body] of [['K1', { code: 'K1-OLD' }], ['OK', { code: 'OK-OLD' }], ['OK', { branchCode: 'B2' }], ['MED', { code: 'MED2', name: 'Renamed' }]] as const) {
+      const before = JSON.parse(JSON.stringify(row('customer', id)));
+      const r = await patch(id, body);
+      expect(r.status, `${id} ${JSON.stringify(body)}`).toBe(403);
+      expect(r.body.error.code).toBe('LOCATION_ADMIN_ONLY');
+      expect(r.body.error.message).toMatch(/^Only an admin can change the code or branch of a customer with a saved location/);
+      expect(JSON.parse(JSON.stringify(row('customer', id)))).toEqual(before);
+    }
+    expect(audits).toEqual([]);
+    // The same code in another letter case is the same customer (the order intake matches it so).
+    tables.customer = [customer('K1')];
+    expect((await patch('K1', { code: 'k1' })).status).toBe(200);
+    // A customer without a usable location can be renamed by the dispatcher.
+    for (const id of ['NONE', 'LOW']) {
+      tables.customer = [customer(id, id === 'NONE' ? { lat: null, lng: null, geocodeConfidence: 'MISSING' } : { geocodeConfidence: 'LOW', lat: 23, lng: 58 })];
+      expect((await patch(id, { code: `${id}-NEW` })).status, id).toBe(200);
+    }
+    // The company admin renames it.
+    session.role = 'TENANT_ADMIN';
+    tables.customer = [customer('K1')];
+    expect((await patch('K1', { code: 'K1-OLD' })).status).toBe(200);
+    expect(row('customer', 'K1').code).toBe('K1-OLD');
+  });
 });
 
 describe('POST /api/customers checks coordinates like a Read', () => {
@@ -505,6 +540,8 @@ describe('the customer page sets a location through ADD LOCATION (the same dialo
     // The company's own delivery area (Settings), as the page loads it.
     serviceArea: { ...DEFAULT_SERVICE_AREA, maxLng: 61 },
     canEdit: true,
+    // The company admin, as in the rest of this file (a dispatcher's view: the item 5 test below).
+    isAdmin: true,
   };
 
   it('Set location opens the location dialog for this customer, with how exact its saved point is', () => {
@@ -531,6 +568,43 @@ describe('the customer page sets a location through ADD LOCATION (the same dialo
     const host = new Host(CustomerEditor as any, { ...props, canEdit: false });
     host.render();
     expect(elements(host.tree).some((e) => e.props?.['data-testid'] === 'set-location')).toBe(false);
+  });
+
+  // Data collection review: the Lock refusal ("Enter each customer's receiving hours in Details (Daily
+  // dispatch or the customer page)") and the Data to collect links send the dispatcher to the customer
+  // page, which only showed the hours: it now has the same Details dialog as Daily dispatch.
+  it('the customer page has Details (receiving hours, open all day, confirmed with the customer), the same dialog as Daily dispatch', () => {
+    const details = {
+      customerId: 'MED', code: 'MED', branchCode: null, name: 'Customer MED', customerType: 'GROCERY', priority: 3, prioritySource: 'DEFAULT', serviceMin: 10, serviceSource: 'DEFAULT',
+      hardWindowStartMin: 360, hardWindowEndMin: 600, prefWindowStartMin: null, prefWindowEndMin: null, windowConfirmed: false, windowLabel: 'hard 06:00–10:00 (not confirmed)',
+    };
+    const host = new Host(CustomerDetailsButton as any, { customer: details });
+    host.render();
+    const dialog = () => elements(host.tree).find((e) => typeName(e) === 'CustomerDialog');
+    expect(dialog().props.open).toBe(false);
+    elements(host.tree).find((e) => e.props?.['data-testid'] === 'customer-details').props.onClick();
+    host.flush();
+    expect(dialog().props).toMatchObject({ open: true, customer: details });
+    expect(windowGateRemedy()).toMatch(/in Details \(Daily dispatch or the customer page\)/);
+  });
+
+  // Owner decision 1 Oct 2026 (item 5) and the data collection review: a dispatcher is never offered to
+  // "confirm" a usable saved point that is not exact (it cannot be saved as it is, and a new pin is a
+  // change only an admin makes); an exact one can be confirmed as it is.
+  it('a dispatcher: a saved point that is not exact says only an admin can fix it (no Confirm location); an exact one can be confirmed', () => {
+    const render = (customer: Record<string, unknown>) => {
+      const host = new Host(CustomerEditor as any, { ...props, isAdmin: false, customer: { ...props.customer, ...customer } });
+      host.render();
+      const note = elements(host.tree).find((e) => e.props?.['data-testid'] === 'customer-location-admin-only');
+      const btn = elements(host.tree).find((e) => e.props?.['data-testid'] === 'set-location');
+      return { note: note ? textOf(note) : null, button: btn ? textOf(btn) : null };
+    };
+    const medium = render({ geocodeConfidence: 'MEDIUM' });
+    expect(medium.note).toBe("This saved location is not exact and only an admin can change it. Ask your company admin to drop the pin on the customer's exact location.");
+    expect(medium.button).toBeNull();
+    const high = render({ geocodeConfidence: 'HIGH' });
+    expect(high.note).toMatch(/^Only an admin can change a saved location\. You can confirm the saved location as it is/);
+    expect(high.button).toBe('Confirm location');
   });
 
   // A5 third review: a saved point that blocks delivery (an import marked it LOW, or it is outside the

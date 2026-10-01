@@ -27,6 +27,8 @@ export interface DeliveryTimesCustomer {
   branchCode: string | null;
   name: string;
   windowLabel?: string;
+  /** Its own receiving hours, confirmed by a dispatcher or admin (owner decision 1 Oct 2026, item 2). */
+  windowConfirmed?: boolean;
   effWindow?: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
   orderTimes?: DayOrderTimeRow[];
   inactive?: boolean;
@@ -35,15 +37,24 @@ export interface DeliveryTimesCustomer {
 const minText = (m: number | null | undefined) => (m == null ? '' : clockText(m));
 
 /**
- * The form an order's Change time opens with (owner decision 1 Oct 2026, item 1): the order's own time
- * when it has one, else prefilled from the customer's receiving hours (hard, else preferred), which the
- * dispatcher then changes for this order only.
+ * The form an order's Set time / Change time opens with (owner decision 1 Oct 2026, item 1): the
+ * order's own time when it has one; else prefilled from the customer's OWN CONFIRMED receiving hours
+ * (hard, else preferred), which the dispatcher then changes for this order only. Company and
+ * customer-type defaults (and hours nobody confirmed) never count as a delivery window, so nothing is
+ * prefilled from them (data collection review: one Save turned a default into "Urgent 06:00-14:00").
+ * No reason is chosen for the dispatcher: a per-order time needs one (checkOrderTime refuses none).
  */
 export function orderTimeFormOf(c: DeliveryTimesCustomer, o: DayOrderTimeRow): OrderTimeForm {
   if (o.time) return { start: minText(o.time.startMin), end: minText(o.time.endMin), reason: o.time.reason, note: o.time.note ?? '' };
-  const w = c.effWindow;
+  const w = c.windowConfirmed ? c.effWindow : undefined;
   const hard = w && (w.hardStart !== null || w.hardEnd !== null);
-  return { start: minText(hard ? w?.hardStart : w?.prefStart), end: minText(hard ? w?.hardEnd : w?.prefEnd), reason: 'URGENT', note: '' };
+  return { start: minText(hard ? w?.hardStart : w?.prefStart), end: minText(hard ? w?.hardEnd : w?.prefEnd), reason: '', note: '' };
+}
+
+/** Why the dialog opens empty: the hours in use are not the customer's own confirmed hours (null when they are). */
+export function orderTimeHint(c: DeliveryTimesCustomer): string | null {
+  if (c.windowConfirmed) return null;
+  return `The customer's hours in use${c.windowLabel ? ` (${c.windowLabel})` : ''} are not its own confirmed hours, so they do not count as a delivery window. Type the time agreed for this order.`;
 }
 
 /**
@@ -95,7 +106,7 @@ export function DeliveryTimesPanel({ customers, canPlan, onSaved }: { customers:
 }
 
 export function OrderTimeDialog({ target, onClose, onSaved }: { target: { c: DeliveryTimesCustomer; o: DayOrderTimeRow } | null; onClose: () => void; onSaved: () => void }) {
-  const [form, setForm] = useState<OrderTimeForm>({ start: '', end: '', reason: 'URGENT', note: '' });
+  const [form, setForm] = useState<OrderTimeForm>({ start: '', end: '', reason: '', note: '' });
   const [busy, setBusy] = useState(false);
   // An answer that arrives after the dialog closed or moved to another order is reported for its own order.
   const shown = useRef(0);
@@ -153,6 +164,9 @@ export function OrderTimeDialog({ target, onClose, onSaved }: { target: { c: Del
           <div className="space-y-1">
             <Label htmlFor="ot-reason">Reason</Label>
             <select id="ot-reason" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={form.reason} onChange={(e) => set('reason')(e.target.value)}>
+              <option value="" disabled>
+                Choose a reason
+              </option>
               {DELIVERY_TIME_REASONS.map((r) => (
                 <option key={r} value={r}>
                   {DELIVERY_TIME_REASON_TEXT[r]}
@@ -165,6 +179,11 @@ export function OrderTimeDialog({ target, onClose, onSaved }: { target: { c: Del
             <Input id="ot-note" maxLength={200} placeholder="e.g. promised by sales" value={form.note} onChange={(e) => set('note')(e.target.value)} />
           </div>
         </div>
+        {target && !target.o.time && orderTimeHint(target.c) ? (
+          <p className="text-xs text-amber-800" data-testid="order-time-hint">
+            {orderTimeHint(target.c)}
+          </p>
+        ) : null}
         <p className="text-xs text-muted-foreground">Leave From or To empty for &quot;by 10:00&quot; or &quot;from 14:00&quot;.</p>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>

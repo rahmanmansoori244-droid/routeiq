@@ -194,6 +194,42 @@ export function stopWindowFor(
   };
 }
 
+/** The same delivery time (start and end): what a stop is planned with. A reason or a note is not. */
+export function samePromisedTime(a: Pick<OrderTime, 'startMin' | 'endMin'> | null | undefined, b: Pick<OrderTime, 'startMin' | 'endMin'> | null | undefined): boolean {
+  return (a?.startMin ?? null) === (b?.startMin ?? null) && (a?.endMin ?? null) === (b?.endMin ?? null);
+}
+
+/** Where an order sits on a plan version (plannedVisitOrders). */
+export interface OrderPlacement {
+  orderId: string;
+  /** On a load that is locked or later (frozen). */
+  frozen: boolean;
+  /** The whole order (not a split portion). */
+  whole: boolean;
+  /** When the stop it is on was planned (its snapshot's capturedAt); null = not known. */
+  capturedAt: string | null;
+}
+
+/**
+ * The orders a customer's planned stop is judged with now (data collection review). All open orders
+ * of a customer go in one visit, and every part of a split customer is planned within their
+ * delivery times (buildDispatchRequest), so a stop is judged with all of the customer's orders of the
+ * day - on this load, on another load or left unserved - not only the part on its own load. Except an
+ * order wholly on a load that was already locked when the stop's plan was made: that optimization
+ * did not see it (it came from an earlier plan, captured before the stop; not known: as a re-plan
+ * now, which leaves frozen orders out). An order locked after the plan was made still counts.
+ */
+export function plannedVisitOrders<T extends { id: string }>(orders: readonly T[], placements: readonly OrderPlacement[], stopCapturedAt: string | null): T[] {
+  const at = stopCapturedAt ? Date.parse(stopCapturedAt) : Number.NaN;
+  const earlier = new Set<string>();
+  for (const p of placements) {
+    if (!p.frozen || !p.whole) continue;
+    const t = p.capturedAt ? Date.parse(p.capturedAt) : Number.NaN;
+    if (!Number.isFinite(at) || !Number.isFinite(t) || t < at) earlier.add(p.orderId);
+  }
+  return orders.filter((o) => !earlier.has(o.id));
+}
+
 /** A planned stop's promised time as kept in the plan inputs (StopFacts.promised), or null. */
 export function readPromised(json: unknown): OrderTime | null {
   if (!json || typeof json !== 'object') return null;

@@ -48,4 +48,29 @@ describe('Settings as the dispatcher', () => {
   it('the admin page still shows Overtime after once', () => {
     expect(render('ADMIN').split('id="overtimeAfterMin"')).toHaveLength(2);
   });
+
+  it('the loading rule: the admin switches it; the dispatcher sees whether it is on, with no switch, and is not told they can change it', () => {
+    // The words of the "Customer data before loading" card only (the driver shift card is the dispatcher's).
+    const card = (html: string) => html.slice(html.indexOf('data-testid="data-rules"'), html.indexOf('id="dataCollectDays"'));
+    const admin = render('ADMIN');
+    expect(admin).toContain('id="requireDataBeforeLoading"');
+    expect(admin).toContain('id="dataCollectDays"');
+    expect(card(admin)).toMatch(/Only a company admin can switch this rule/);
+    expect(card(admin)).not.toMatch(/The dispatcher can change these/);
+    const on = renderToStaticMarkup(
+      createElement(SettingsForm, {
+        initial: { tenant: { name: 'T', country: 'Oman', currency: 'OMR', primaryUnit: 'CASES' }, config } as never,
+        effective: [],
+        profiles: [],
+        scope: 'DISPATCHER',
+        dataRuleOn: true,
+      }),
+    );
+    expect(on).not.toContain('id="requireDataBeforeLoading"');
+    expect(on).toContain('id="dataCollectDays"');
+    expect(on).toMatch(/data-testid="data-rule-state"[^>]*>[^<]*On/);
+    expect(card(on)).toMatch(/Only a company admin can switch this rule/);
+    expect(card(on)).not.toMatch(/The dispatcher can change these/);
+    expect(render('DISPATCHER')).toMatch(/data-testid="data-rule-state"[^>]*>[^<]*Off/);
+  });
 });

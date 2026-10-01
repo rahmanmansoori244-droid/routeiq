@@ -11,6 +11,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { AUDIT_ACTIONS } from '@/lib/audit-catalog';
 
 const WEB = path.resolve(__dirname, '../..');
 const APPS = path.resolve(WEB, '..');
@@ -451,6 +452,21 @@ describe('the handbook counts what is on disk and lists every spec in 5.3 (fourt
     expect(specs('lib').filter((f) => !named(unit, f))).toEqual([]);
     expect(specs('integration').filter((f) => !named(integration, f))).toEqual([]);
     allAre(counts(unit, /^\*\*Web unit specs\*\* \(`apps\/web\/tests\/lib\/`, (\d+) files/gm), specs('lib').length);
+  });
+});
+
+describe('the handbook audit table names every audit action that is still written (data collection review)', () => {
+  it('3.13 "Action | Entity | Written by" has a row for each action of lib/audit-catalog.ts that is not legacy', () => {
+    const REPO = path.resolve(APPS, '..');
+    const text = readFileSync(path.join(REPO, 'docs', 'PROJECT_HANDBOOK.md'), 'utf8').replace(/\r\n/g, '\n');
+    const from = text.indexOf('| Action | Entity | Written by |');
+    const table = text.slice(from, text.indexOf('### 3.14', from));
+    const rows = table.split('\n').filter((l) => l.startsWith('| `'));
+    const named = new Set(rows.flatMap((l) => [...l.split('|')[1]!.matchAll(/`([A-Z_]+)`/g)].map((m) => m[1]!)));
+    const written = Object.entries(AUDIT_ACTIONS)
+      .filter(([, info]) => !('legacy' in info && info.legacy))
+      .map(([k]) => k);
+    expect(written.filter((k) => !named.has(k))).toEqual([]);
   });
 });
 

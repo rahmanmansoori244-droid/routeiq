@@ -336,6 +336,24 @@ export function windowLabel(eff: Pick<EffectiveAttrs, 'hardStart' | 'hardEnd' | 
 export const LOCATION_ADMIN_ONLY_MESSAGE = 'Only an admin can change a saved location.';
 
 /**
+ * A dispatcher's view of a usable saved location that is not exact (a MEDIUM reading nobody confirmed):
+ * it cannot be confirmed as it is, and dropping a pin would change it, which only an admin may do
+ * (item 5). Said in one message, never "you can confirm it" (data collection review).
+ */
+export const LOCKED_NOT_EXACT_MESSAGE = "This saved location is not exact and only an admin can change it. Ask your company admin to drop the pin on the customer's exact location.";
+
+/**
+ * The day card's location button (item 5): ADD LOCATION while there is no usable location; for a
+ * dispatcher with a usable one, "Location (admin changes)" - with "you can confirm it" only when the
+ * saved point is exact (one that is not cannot be confirmed as it is; data collection review).
+ */
+export function locationButtonText(o: { needsLocation: boolean; isAdmin: boolean; notExact: boolean }): { label: string; title: string | undefined } {
+  if (o.needsLocation) return { label: 'ADD LOCATION', title: undefined };
+  if (o.isAdmin) return { label: 'Location', title: undefined };
+  return { label: 'Location (admin changes)', title: o.notExact ? LOCKED_NOT_EXACT_MESSAGE : `${LOCATION_ADMIN_ONLY_MESSAGE} You can confirm it as it is.` };
+}
+
+/**
  * Owner decision 1 Oct 2026 (item 5, location admin-lock): a dispatcher may set a location only while
  * the customer has no usable location (`locationBlocksDelivery`: none, 0,0 or out of range, outside
  * the area and never confirmed, or a LOW reading never confirmed). Changing a usable one needs the

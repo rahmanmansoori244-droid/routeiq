@@ -11,6 +11,8 @@ import { describeServiceTime, effectiveAttrs, windowLabel, type TypeProfileLike 
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
+import { CustomerDetailsButton } from './customer-details-button';
+import type { EditableCustomer } from '../../dispatch/customer-dialog';
 
 export const dynamic = 'force-dynamic';
 
@@ -50,6 +52,26 @@ export default async function CustomerDetailPage({
   // The company's delivery area, so Set location judges the saved pin as the server does.
   const serviceArea = await tenantServiceArea(tenant.id);
   const canEdit = canPlan(user.role);
+  // What the Details dialog opens with, as the day screen sends it (the hours are the customer's own).
+  const details: EditableCustomer = {
+    customerId: customer.id,
+    code: customer.code,
+    branchCode: customer.branchCode,
+    name: customer.name,
+    customerType: customer.customerType,
+    priority: eff.priority,
+    prioritySource: eff.prioritySource,
+    serviceMin: eff.serviceMin,
+    serviceSource: eff.serviceSource,
+    hardWindowStartMin: customer.hardWindowStartMin,
+    hardWindowEndMin: customer.hardWindowEndMin,
+    prefWindowStartMin: customer.prefWindowStartMin,
+    prefWindowEndMin: customer.prefWindowEndMin,
+    windowConfirmed: eff.windowConfirmed,
+    windowLabel: windowLabel(eff),
+    windowConfirmedBy: customer.windowConfirmedBy?.name ?? null,
+    windowConfirmedAt: customer.windowConfirmedAt ? customer.windowConfirmedAt.toISOString() : null,
+  };
 
   return (
     <PageShell
@@ -97,8 +119,9 @@ export default async function CustomerDetailPage({
         </div>
         <div className="space-y-4">
           <Card>
-            <CardHeader>
+            <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0">
               <CardTitle className="text-base">Details</CardTitle>
+              {canEdit ? <CustomerDetailsButton customer={details} /> : null}
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <Field label="Code">
@@ -135,7 +158,9 @@ export default async function CustomerDetailPage({
                       Confirmed{customer.windowConfirmedBy ? ` by ${customer.windowConfirmedBy.name}` : ''} on {fmtDayMonth(customer.windowConfirmedAt.toISOString().slice(0, 10))}
                     </span>
                   ) : (
-                    <span className="block max-w-xs text-xs text-amber-700">Not confirmed: confirm them in Details on Daily dispatch.</span>
+                    <span className="block max-w-xs text-xs text-amber-700">
+                      Not confirmed: {canEdit ? 'confirm them with Details above (or tick Open all day).' : 'a dispatcher confirms them in Details.'}
+                    </span>
                   )}
                 </span>
               </Field>
@@ -159,7 +184,7 @@ export default async function CustomerDetailPage({
               <CardTitle className="text-base">Phase 1 scope</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1 text-xs text-muted-foreground">
-              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Full edit dialog (priority, service time, payment type) is reachable from the customer list inline controls.</p>
+              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Details opens the same dialog as on Daily dispatch (customer type, priority, unloading time and receiving hours, with Open all day and confirmed with the customer); the payment type is changed in the customer list.</p>
               <p>The {regions.length} regions in this tenant are visible in the dropdown filter.</p>
             </CardContent>
           </Card>

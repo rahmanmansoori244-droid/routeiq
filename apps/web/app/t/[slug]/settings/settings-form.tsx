@@ -57,12 +57,15 @@ export function SettingsForm({
   effective,
   profiles,
   scope = 'ADMIN',
+  dataRuleOn = false,
 }: {
   initial: Initial;
   effective: EffectiveRow[];
   profiles: TypeProfileRow[];
   /** DISPATCHER: only the driver shift card (the API refuses every other field for that role). */
   scope?: 'ADMIN' | 'DISPATCHER';
+  /** DISPATCHER: whether the loading rule is on (shown, not editable: only a company admin switches it). */
+  dataRuleOn?: boolean;
 }) {
   const admin = scope === 'ADMIN';
   const router = useRouter();
@@ -207,16 +210,27 @@ export function SettingsForm({
           <CardDescription>
             When this is on, no truck is locked, loaded or dispatched while a customer on it has no usable location or no delivery window (its own confirmed
             receiving hours, or a delivery time set for the order). You can still OPTIMIZE and see the plan. Loads already locked, loading or out stay as
-            they are. The dispatcher can change these; every change is in the audit log.
+            they are. Only a company admin can switch this rule; the dispatcher can change the days ahead of the data to collect. Every change is in the
+            audit log.
           </CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 md:col-span-2">
-            <Label htmlFor="requireDataBeforeLoading" className="text-sm font-normal">
-              Require location and delivery window before loading
-            </Label>
-            <Switch id="requireDataBeforeLoading" checked={c.requireDataBeforeLoading} onCheckedChange={(v) => setC({ ...c, requireDataBeforeLoading: v })} />
-          </div>
+          {admin ? (
+            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 md:col-span-2">
+              <Label htmlFor="requireDataBeforeLoading" className="text-sm font-normal">
+                Require location and delivery window before loading
+              </Label>
+              <Switch id="requireDataBeforeLoading" checked={c.requireDataBeforeLoading} onCheckedChange={(v) => setC({ ...c, requireDataBeforeLoading: v })} />
+            </div>
+          ) : (
+            // The dispatcher sees whether the rule is on, without a switch (the API refuses it: 403 ADMIN_ONLY_SETTING).
+            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm md:col-span-2">
+              <span>Require location and delivery window before loading</span>
+              <span className="font-medium" data-testid="data-rule-state">
+                {dataRuleOn ? 'On' : 'Off'}
+              </span>
+            </div>
+          )}
           <div className="space-y-1.5">
             <Label htmlFor="dataCollectDays">Data to collect: days ahead</Label>
             <Input

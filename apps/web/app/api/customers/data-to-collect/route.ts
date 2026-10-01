@@ -40,7 +40,7 @@ export const GET = withTenantApi(
         headers: { 'Content-Type': XLSX, 'Content-Disposition': `attachment; filename="${name}"`, 'Content-Length': bytes.byteLength.toString() },
       });
     }
-    const { master: _master, ...rest } = list;
+    const { master: _master, importedAs: _importedAs, ...rest } = list;
     return ok({ ...rest, rows, depotId: depot?.depotId ?? null });
   },
   { role: 'PLANNER' },

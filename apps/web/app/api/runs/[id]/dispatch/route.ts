@@ -4,6 +4,7 @@ import { audit } from '@/lib/audit';
 import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { dataGaps, gapText, legacyRunDataRefusal } from '@/lib/dispatch/data-collection';
 
 interface Params { params: { id: string } }
 
@@ -38,7 +39,16 @@ export const POST = (req: Request, { params }: Params) =>
       const area = await tenantServiceArea(user.tenantId);
       const stops = await prisma.routeAssignment.findMany({
         where: { runId: run.id },
-        select: { order: { select: { customer: { select: { code: true, branchCode: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true } } } } },
+        select: {
+          order: {
+            select: {
+              customerId: true,
+              deliveryStartMin: true,
+              deliveryEndMin: true,
+              customer: { select: { id: true, code: true, branchCode: true, name: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, windowConfirmedAt: true } },
+            },
+          },
+        },
       });
       const noLocation = [...new Set(stops.map((s) => s.order.customer).filter((c) => locationBlocksDelivery(c, area)).map((c) => (c.branchCode ? `${c.code} / ${c.branchCode}` : c.code)))];
       if (noLocation.length) {
@@ -49,6 +59,27 @@ export const POST = (req: Request, { params }: Params) =>
           },
           409,
         );
+      }
+      // Owner decision 1 Oct 2026, the loading rule (Settings, "Require location and delivery window
+      // before loading"): no truck is loaded unless every order has a location and a delivery window - its
+      // customer's own confirmed hours or a delivery time on the order. Daily dispatch plans are checked
+      // when a load leaves Planned (plan-service dataGate); a legacy run, dispatched whole, here
+      // (data collection review: only the location was checked).
+      const cfg = await prisma.tenantConfig.findUnique({ where: { tenantId: user.tenantId }, select: { requireDataBeforeLoading: true } });
+      if (cfg?.requireDataBeforeLoading) {
+        const customers = [...new Map(stops.map((s) => [s.order.customer.id, s.order.customer])).values()];
+        const gaps = dataGaps(customers, stops.map((s) => s.order), area).filter((g) => g.window);
+        if (gaps.length) {
+          return fail(
+            {
+              code: 'DATA_REQUIRED',
+              error: legacyRunDataRefusal(gaps),
+              customerIds: gaps.map((g) => g.customerId),
+              customers: gaps.map((g) => ({ code: g.code, branchCode: g.branchCode, name: g.name, missing: gapText(g) })),
+            },
+            409,
+          );
+        }
       }
 
       const dispatched = await prisma.$transaction(async (tx) => {
