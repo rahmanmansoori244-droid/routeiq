@@ -17,6 +17,7 @@ import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } fr
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
 import { breakSaveProblem, changedFields, overtimeSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
+import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
 
 interface TenantFields {
   name: string;
@@ -94,6 +95,10 @@ export function SettingsForm({
     }
     if (breakProblem) {
       toast.error(breakProblem);
+      return;
+    }
+    if ('dataCollectDays' in configDiff.changes && !(Number.isInteger(c.dataCollectDays) && c.dataCollectDays >= 0 && c.dataCollectDays <= DATA_COLLECT_DAYS_MAX)) {
+      toast.error(`Data to collect: days ahead must be a whole number from 0 to ${DATA_COLLECT_DAYS_MAX}.`);
       return;
     }
     startSave(async () => {
@@ -193,6 +198,41 @@ export function SettingsForm({
               {breakProblem}
             </p>
           ) : null}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="data-rules">
+        <CardHeader>
+          <CardTitle className="text-base">Customer data before loading</CardTitle>
+          <CardDescription>
+            When this is on, no truck is locked, loaded or dispatched while a customer on it has no usable location or no delivery window (its own confirmed
+            receiving hours, or a delivery time set for the order). You can still OPTIMIZE and see the plan. Loads already locked, loading or out stay as
+            they are. The dispatcher can change these; every change is in the audit log.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2 md:col-span-2">
+            <Label htmlFor="requireDataBeforeLoading" className="text-sm font-normal">
+              Require location and delivery window before loading
+            </Label>
+            <Switch id="requireDataBeforeLoading" checked={c.requireDataBeforeLoading} onCheckedChange={(v) => setC({ ...c, requireDataBeforeLoading: v })} />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="dataCollectDays">Data to collect: days ahead</Label>
+            <Input
+              id="dataCollectDays"
+              type="number"
+              min={0}
+              max={DATA_COLLECT_DAYS_MAX}
+              step={1}
+              value={Number.isFinite(c.dataCollectDays) ? c.dataCollectDays : ''}
+              onChange={(e) => setC({ ...c, dataCollectDays: e.target.value === '' ? Number.NaN : Number(e.target.value) })}
+            />
+            <p className="text-xs text-muted-foreground">
+              The &quot;Data to collect&quot; list (Daily dispatch and Customers) shows customers with orders from today to this many days ahead that miss a location
+              or confirmed receiving hours. 0 to {DATA_COLLECT_DAYS_MAX}.
+            </p>
+          </div>
         </CardContent>
       </Card>
 

@@ -63,6 +63,9 @@ const EXPECTED: Record<string, string> = {
   'DELETE /api/customers/[id]': 'TENANT_ADMIN',
   'PUT /api/customers/[id]/location': 'PLANNER',
   'POST /api/customers/import': 'SESSION:PLANNER',
+  // Owner decisions 1 Oct 2026 (items 4 and 6): the data to collect and the customer master (Excel).
+  'GET /api/customers/data-to-collect': 'PLANNER',
+  'GET /api/customers/master': 'PLANNER',
   'GET /api/dashboard/kpis': 'ANY',
   'GET /api/depots': 'ANY',
   'POST /api/depots': 'TENANT_ADMIN',

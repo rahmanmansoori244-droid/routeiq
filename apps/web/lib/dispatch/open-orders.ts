@@ -6,7 +6,8 @@ import type { OrderStatus } from '@prisma/client';
 import { prisma } from '../db';
 import { dateOnly, isoOf, todayIso } from './time';
 
-const OPEN: OrderStatus[] = ['UPLOADED', 'VALIDATED', 'ASSIGNED', 'UNSERVED'];
+/** Statuses of an order that is not yet out for delivery (also the data-to-collect list, item 4). */
+export const OPEN: OrderStatus[] = ['UPLOADED', 'VALIDATED', 'ASSIGNED', 'UNSERVED'];
 
 export async function openOrders(
   tenantId: string,

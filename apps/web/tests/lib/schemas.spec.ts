@@ -187,6 +187,8 @@ describe('tenantConfigSchema', () => {
     overtimeCostPerHour: 4,
     prefWindowPenaltyPerMin: 0.05,
     roadTimeFactor: 1.25,
+    requireDataBeforeLoading: false,
+    dataCollectDays: 3,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

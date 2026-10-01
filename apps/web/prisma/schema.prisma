@@ -250,6 +250,14 @@ model TenantConfig {
   orderColumnMapJson      Json? // extra header aliases for the NMWC order export
   dateOrder               String  @default("DMY") // how to read 03/04/2026
   serviceAreaJson         Json? // {"minLat":..,"maxLat":..,"minLng":..,"maxLng":..} location sanity box
+  // Owner decisions 1 Oct 2026 (data collection, items 3 and 4). Loading gate: when on, a load is
+  // locked, loaded or dispatched only when every customer on it has a usable location and a delivery
+  // window (its own confirmed hours, or a delivery time on the order). Off by default: the dispatcher
+  // or admin switches it on at launch. Planning is never refused by it.
+  requireDataBeforeLoading Boolean @default(false)
+  // Data to collect: customers with open orders from today to this many days ahead that miss a
+  // location or their own confirmed receiving hours.
+  dataCollectDays          Int     @default(3)
 }
 
 // Defaults per customer type; a customer's own values always win.
@@ -526,9 +534,14 @@ model Customer {
   windowConfirmedAt    DateTime?
   windowConfirmedById  String?
   windowConfirmedBy    User?           @relation("CustomerWindowConfirmedBy", fields: [windowConfirmedById], references: [id], onDelete: SetNull)
+  /// Owner decision 1 Oct 2026 (item 6, daily customer master): when the customer was created and last
+  /// changed. NULL on customers from before this release (nothing recorded when they were made).
+  createdAt            DateTime?       @default(now())
+  updatedAt            DateTime?       @updatedAt
 
   @@unique([tenantId, code, branchKey])
   @@index([tenantId, regionId])
+  @@index([tenantId, updatedAt])
 }
 
 model Product {

@@ -24,6 +24,8 @@ import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs } from './snapshots';
+import { dataGaps, type DataGap } from './data-collection';
+import type { ServiceArea } from './location-input';
 
 export interface IssueCustomer {
   customerId: string;
@@ -490,5 +492,23 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,
     runDateIso: isoOf(dateOnly(date)),
+    /** Settings (owner decisions 1 Oct 2026, items 3 and 4): the loading gate, and the days ahead of the data-to-collect list. */
+    dataRule: { on: cfg.requireDataBeforeLoading, days: cfg.dataCollectDays },
+    /**
+     * With the loading gate on: the active customers of this day that miss a usable location or a
+     * delivery window (own confirmed hours, or a delivery time on one of their orders). Their loads
+     * are planned, but cannot be locked, loaded or dispatched (plan-service dataGate).
+     */
+    loadingGaps: cfg.requireDataBeforeLoading ? dayLoadingGaps(customers, area) : ([] as DataGap[]),
   };
+}
+
+/** The day's loading gaps (item 3), by the gate's own rule (`dataGaps`) on the day's customers and order times. */
+export function dayLoadingGaps(customers: readonly IssueCustomer[], area: ServiceArea): DataGap[] {
+  const active = customers.filter((c) => !c.inactive);
+  return dataGaps(
+    active.map((c) => ({ id: c.customerId, code: c.code, branchCode: c.branchCode, name: c.name, lat: c.lat, lng: c.lng, locationVerified: c.locationVerified, geocodeConfidence: c.geocodeConfidence, windowConfirmedAt: c.windowConfirmedAt })),
+    active.flatMap((c) => c.orderTimes.map((t) => ({ customerId: c.customerId, deliveryStartMin: t.time?.startMin ?? null, deliveryEndMin: t.time?.endMin ?? null }))),
+    area,
+  );
 }

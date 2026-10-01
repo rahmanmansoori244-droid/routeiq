@@ -34,7 +34,7 @@ export default async function SettingsPage({ params }: { params: { slug: string 
       description={
         admin
           ? 'What the daily dispatch planner plans with. Changes apply to the next optimization; plans already made keep the settings they were made with.'
-          : 'When trucks may leave and must be back, and when overtime starts. Changes apply to the next optimization; plans already made keep the settings they were made with. Other settings are changed by a company admin.'
+          : 'When trucks may leave and must be back, when overtime starts, and the customer data needed before loading. Shift changes apply to the next optimization; plans already made keep the settings they were made with. Other settings are changed by a company admin.'
       }
     >
       <SettingsForm

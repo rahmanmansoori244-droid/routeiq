@@ -58,6 +58,7 @@ import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
 import { failJob, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
 import { trackInflight } from '@/lib/jobs/optimize-job';
+import { DATA_GATE_RULE, windowGateRemedy } from '@/lib/dispatch/data-collection';
 
 const T = 'tA';
 const user = { id: 'u1', role: 'TENANT_ADMIN' };
@@ -1651,5 +1652,70 @@ describe('weights from the product master are saved with the applied plan only (
     expect(weightUpdates()).toHaveLength(0);
     expect(tables.auditLog.some((a) => a.action === 'ORDER_WEIGHTS_RESOLVED')).toBe(false);
     expect(row('planLoad', 'LC').weightKg).toBe(row('order', 'O1').totalWeightKg);
+  });
+});
+
+describe('owner decision 1 Oct 2026, item 3: location and delivery window before loading (Settings switch)', () => {
+  // The customer of O1 (on LOCKED L1) and O2 (on PLANNED L2): a usable point, no confirmed hours.
+  const customerNow = (over: Record<string, unknown> = {}) => {
+    tables.customer = [{ id: 'c', tenantId: T, code: 'C1', branchCode: null, name: 'Corner Shop', lat: 23.6111, lng: 58.4111, locationVerified: false, geocodeConfidence: 'HIGH', windowConfirmedAt: null, ...over }];
+  };
+  const gate = (on: boolean) => {
+    tables.tenantConfig = [{ id: 'cfg', tenantId: T, requireDataBeforeLoading: on, serviceAreaJson: null }];
+  };
+
+  it('off (the default): a customer without confirmed hours is locked and dispatched as before', async () => {
+    seedAppliedPlan();
+    customerNow();
+    gate(false);
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
+  });
+
+  it('on: LOCK, LOADING and DISPATCH are refused (409 DATA_REQUIRED) with each customer, what it misses, the rule and the remedy; nothing changes; stepping back is never refused', async () => {
+    seedAppliedPlan();
+    customerNow();
+    gate(true);
+    const lock = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+    expect(lock).toBeInstanceOf(PlanError);
+    expect(lock).toMatchObject({ status: 409, details: { code: 'DATA_REQUIRED', customerIds: ['c'], customers: [{ code: 'C1', branchCode: null, name: 'Corner Shop', missing: 'delivery window' }] } });
+    expect(lock.message).toBe(`T01 L2: 1 customer on this load misses data needed before loading - C1 (Corner Shop): no delivery window. ${DATA_GATE_RULE} Delivery window: ${windowGateRemedy('PLANNED')}`);
+    for (const to of ['LOADING', 'DISPATCHED'] as const) {
+      const e = await updateLoad(T, 'P', 'L1', { status: to }, user, allow).catch((x) => x);
+      expect(e, to).toMatchObject({ status: 409, details: { code: 'DATA_REQUIRED' } });
+      expect(e.message).toContain(windowGateRemedy('LOCKED'));
+    }
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOCKED', 'PLANNED']);
+    expect(tables.auditLog).toEqual([]);
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+  });
+
+  it('on: own confirmed hours (or open all day) let the load go; so does a delivery time on an order of that load, not of another load', async () => {
+    seedAppliedPlan();
+    gate(true);
+    customerNow({ windowConfirmedAt: new Date('2026-09-30T08:00:00Z') });
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    expect(row('planLoad', 'L2').status).toBe('LOCKED');
+
+    seedAppliedPlan();
+    gate(true);
+    customerNow();
+    Object.assign(row('order', 'O2'), { deliveryStartMin: 600, deliveryEndMin: 660 });
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    expect(row('planLoad', 'L2').status).toBe('LOCKED');
+    await expect(updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'DATA_REQUIRED' } });
+  });
+
+  it('on: a customer missing both is listed with both and the location remedy; one missing only a location is refused by the location rule as before', async () => {
+    seedAppliedPlan();
+    gate(true);
+    customerNow({ lat: null, lng: null, geocodeConfidence: 'MISSING' });
+    const both = await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow).catch((e) => e);
+    expect(both).toMatchObject({ status: 409, details: { code: 'DATA_REQUIRED', customers: [{ missing: 'location and delivery window' }] } });
+    expect(both.message).toContain(`C1 (Corner Shop): no location and delivery window. ${DATA_GATE_RULE} Delivery window: ${windowGateRemedy('PLANNED')} Location: ${noLocationLoadRemedy('PLANNED')}`);
+    customerNow({ lat: null, lng: null, geocodeConfidence: 'MISSING', windowConfirmedAt: new Date() });
+    await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
   });
 });

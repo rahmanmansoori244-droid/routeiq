@@ -17,6 +17,8 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
+import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
+import type { DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
@@ -107,6 +109,10 @@ interface Day {
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
   /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
   serviceArea: ServiceArea;
+  /** Settings (owner decisions 1 Oct 2026): the loading rule, and the days ahead of the data to collect. */
+  dataRule?: { on: boolean; days: number };
+  /** With the loading rule on: this day's customers without a usable location or a delivery window. */
+  loadingGaps?: DataGap[];
 }
 interface Validation {
   totalRows: number;
@@ -577,7 +583,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             ) : null}
           </details>
         ) : null}
+        {day.dataRule?.on ? <LoadingGapsNote gaps={day.loadingGaps ?? []} /> : null}
         <DeliveryTimesPanel customers={day.customers} canPlan={canPlan} onSaved={afterCustomerSaved} />
+        {canPlan && day.depot ? (
+          <DataToCollectPanel slug={slug} depotId={day.depot.id} reloadKey={`${day.date}|${day.customers.length}|${day.customers.filter((c) => c.blocking).length}|${day.customers.filter((c) => c.windowConfirmed).length}|${day.loadingGaps?.length ?? 0}`} />
+        ) : null}
         {day.productsWithoutWeight.length ? (
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
             No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (

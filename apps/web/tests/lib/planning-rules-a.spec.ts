@@ -108,7 +108,10 @@ describe('the request asks for finish by closing', () => {
 describe('the dispatcher changes the driver shift on Settings', () => {
   it('the driver-shift fields are Settings fields; everything else is admin-only', () => {
     // Phase B: and the driver break (length and window).
-    expect([...DISPATCHER_SETTINGS_FIELDS]).toEqual(['shiftStartMin', 'driverShiftMaxMinutes', 'overtimeAfterMin', 'driverBreakMinutes', 'driverBreakFromMin', 'driverBreakToMin']);
+    // Owner decisions 1 Oct 2026: and the customer data rules (loading gate, days ahead of the data to collect).
+    expect([...DISPATCHER_SETTINGS_FIELDS]).toEqual([
+      'shiftStartMin', 'driverShiftMaxMinutes', 'overtimeAfterMin', 'driverBreakMinutes', 'driverBreakFromMin', 'driverBreakToMin', 'requireDataBeforeLoading', 'dataCollectDays',
+    ]);
     for (const k of DISPATCHER_SETTINGS_FIELDS) expect(SETTINGS_FIELDS).toContain(k);
     expect(adminOnlyFields({}, { shiftStartMin: 420, driverShiftMaxMinutes: 660, overtimeAfterMin: 540 })).toEqual([]);
     expect(adminOnlyFields({ name: 'X' }, { shiftStartMin: 420, driverCostPerHour: 2 })).toEqual(['name', 'driverCostPerHour']);

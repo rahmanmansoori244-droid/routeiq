@@ -50,8 +50,15 @@ export default async function CustomerImportPage({ params }: { params: { slug: s
             <Field name="priority" required hint="Integer 1-5 (1 = highest)." />
             <Field name="avg_service_time_min" hint="Minutes. Default 10." />
             <Field name="payment_type" required hint="cash | credit | prepaid" />
+            <Field name="priority_confirmed" hint="yes = confirmed. Blank = not confirmed yet: an unchanged priority stays as it is, a changed one is confirmed by you. no = store without confirming. Without this column every priority in the file is confirmed." />
+            <Field name="hard_from / hard_to" hint="Receiving hours, HARD (never outside), HH:MM." />
+            <Field name="preferred_from / preferred_to" hint="Preferred hours (soft), HH:MM. When any of the four hour cells is filled in, the four are the customer's own hours (a blank one = no limit)." />
+            <Field name="open_all_day" hint="yes = the customer accepts deliveries at any time (leave the hours blank)." />
+            <Field name="hours_confirmed" hint="yes = confirmed with the customer. Hours entered or changed here are confirmed by you unless this says no. Nothing un-confirms hours that did not change." />
             <div className="border-t pt-2 text-muted-foreground">
-              Duplicate <code>code + branch_code</code> within the file is rejected.
+              Duplicate <code>code + branch_code</code> within the file is rejected. The customer master (Customers &gt; Download customer master) and the data-to-collect Excel have
+              these columns: correct the first sheet and import it here. Columns not listed are for reading only. A row that changes nothing writes nothing. Only an admin can
+              change a saved location.
             </div>
           </CardContent>
         </Card>

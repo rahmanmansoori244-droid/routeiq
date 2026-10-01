@@ -33,6 +33,7 @@ import {
   type TypeProfileLike,
 } from './customer-attrs';
 import { stopWindowFor, type OrderTime } from './order-window';
+import { dataGaps, dataGateRefusal, gapText } from './data-collection';
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
@@ -2188,6 +2189,9 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // Completed are never refused (a load that left keeps its orders: they are never carried).
   // Also a load of today whose orders were brought forward to tomorrow in the evening.
   if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
+  // Owner decision 1 Oct 2026 (item 3): with "Require location and delivery window before loading"
+  // on, every customer on the load needs a delivery window too (and a usable location, as below).
+  if (isGatedMove(load.status, to)) await dataGate(tx, tenantId, load);
   // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
@@ -2231,6 +2235,40 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/**
+ * Owner decision 1 Oct 2026 (item 3, "no truck is loaded unless every order has a location and a
+ * delivery window"): with the company setting `requireDataBeforeLoading` on, LOCK, LOADING and
+ * DISPATCH of a load are refused with 409 DATA_REQUIRED while a customer on it has no delivery
+ * window - neither its own confirmed receiving hours nor a delivery time on one of its orders on this
+ * load (`dataGaps`) - listing each customer and what it misses (a location too), with the remedy.
+ * Customers that miss only a location are left to locationGate (always on, owner rule A5), which
+ * refuses them with its own words. Only forward moves are checked (isGatedMove): stepping back and
+ * Completed never are, and a load already locked, loading or out is never changed by the setting.
+ * Planning is not refused by it (the day screen warns). Off: nothing is read.
+ */
+async function dataGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }) {
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { requireDataBeforeLoading: true, serviceAreaJson: true } });
+  if (!cfg?.requireDataBeforeLoading) return;
+  const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (!orderIds.length) return;
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { customerId: true, deliveryStartMin: true, deliveryEndMin: true } });
+  const customerIds = [...new Set(orders.map((o) => o.customerId))];
+  if (!customerIds.length) return;
+  const customers = await tx.customer.findMany({
+    where: { tenantId, id: { in: customerIds } },
+    select: { id: true, code: true, branchCode: true, name: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, windowConfirmedAt: true },
+  });
+  const tenant = await tx.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
+  const gaps = dataGaps(customers, orders, parseServiceArea(cfg.serviceAreaJson, tenant?.country));
+  if (!gaps.some((g) => g.window)) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  throw new PlanError(dataGateRefusal({ truck: truck?.code ?? 'Truck', loadNo: load.loadNo, status: load.status }, gaps, noLocationLoadRemedy(load.status)), 409, {
+    code: 'DATA_REQUIRED',
+    customerIds: gaps.map((g) => g.customerId),
+    customers: gaps.map((g) => ({ code: g.code, branchCode: g.branchCode, name: g.name, missing: gapText(g) })),
+  });
 }
 
 /** Why LOCK, LOADING and DISPATCH refuse a load holding a customer without a usable location (locationGate). */

@@ -7,6 +7,7 @@ import {
   Role,
 } from '@prisma/client';
 import { MAX_SERVICE_MIN } from './dispatch/service-time';
+import { DATA_COLLECT_DAYS_MAX } from './dispatch/data-collection';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
 
@@ -250,6 +251,10 @@ export const tenantConfigSchema = z
     roadTimeFactor: bounded(CONFIG_BOUNDS.roadTimeFactor),
     distanceMultiplier: bounded(CONFIG_BOUNDS.distanceMultiplier),
     avgSpeedKmh: bounded(CONFIG_BOUNDS.avgSpeedKmh),
+    // Customer data (owner decisions 1 Oct 2026, items 3 and 4): the loading gate, and how many days
+    // ahead the data-to-collect list looks. Web only (the optimizer never reads them).
+    requireDataBeforeLoading: z.boolean(),
+    dataCollectDays: z.number().int().min(0).max(DATA_COLLECT_DAYS_MAX),
   })
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;

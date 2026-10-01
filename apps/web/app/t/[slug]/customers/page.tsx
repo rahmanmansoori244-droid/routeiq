@@ -6,16 +6,17 @@ import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { Button } from '@/components/ui/button';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { loadWorklist } from '@/lib/dispatch/customer-master';
 import { CustomersClient } from './customers-client';
 
 export const metadata = { title: 'Customers — RouteIQ' };
 export const dynamic = 'force-dynamic';
 
-export default async function CustomersPage({ params }: { params: { slug: string } }) {
+export default async function CustomersPage({ params, searchParams }: { params: { slug: string }; searchParams?: { show?: string } }) {
   const { db, user, tenant } = await getCurrentTenant(params.slug);
   const canEdit = canPlan(user.role);
 
-  const [customers, regions, serviceArea] = await Promise.all([
+  const [listed, regions, serviceArea, worklist] = await Promise.all([
     db.customer.findMany({
       orderBy: [{ active: 'desc' }, { code: 'asc' }],
       include: { region: { select: { id: true, code: true, name: true } } },
@@ -24,7 +25,24 @@ export default async function CustomersPage({ params }: { params: { slug: string
     db.region.findMany({ orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),
     // The company's delivery area: a saved point outside it that nobody confirmed needs a pin.
     tenantServiceArea(tenant.id),
+    // Owner decision 1 Oct 2026, item 4: the data to collect (dispatchers and up).
+    canEdit ? loadWorklist(tenant.id) : Promise.resolve(null),
   ]);
+  // Every customer of the data-to-collect list is on the page, also past the first 1000.
+  const shown = new Set(listed.map((c) => c.id));
+  const extra = worklist?.rows.filter((r) => !shown.has(r.customerId)).map((r) => r.customerId) ?? [];
+  const customers = extra.length
+    ? [...listed, ...(await db.customer.findMany({ where: { id: { in: extra } }, include: { region: { select: { id: true, code: true, name: true } } } }))]
+    : listed;
+  const collect = worklist
+    ? {
+        from: worklist.from,
+        to: worklist.to,
+        days: worklist.days,
+        perDepot: worklist.perDepot.map((d) => ({ code: d.code, customers: d.customers })),
+        rows: Object.fromEntries(worklist.rows.map((r) => [r.customerId, { missing: r.missing, firstDelivery: r.firstDelivery, depots: r.depots }])),
+      }
+    : null;
 
   if (customers.length === 0) {
     return (
@@ -76,7 +94,15 @@ export default async function CustomersPage({ params }: { params: { slug: string
         ) : null
       }
     >
-      <CustomersClient slug={params.slug} initial={customers} regions={regions} canEdit={canEdit} serviceArea={serviceArea} />
+      <CustomersClient
+        slug={params.slug}
+        initial={customers}
+        regions={regions}
+        canEdit={canEdit}
+        serviceArea={serviceArea}
+        collect={collect}
+        initialCollectOnly={searchParams?.show === 'collect'}
+      />
     </PageShell>
   );
 }

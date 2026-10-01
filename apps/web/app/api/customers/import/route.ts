@@ -14,6 +14,9 @@ import { LOCATION_ADMIN_ONLY_MESSAGE, locationBlocksDelivery, savedLocationLocke
 import { samePoint } from '@/lib/dispatch/location-input';
 import { canManageMasterData } from '@/lib/rbac';
 import { clientIp } from '@/lib/client-ip';
+import { HOURS_COLUMNS, importedPriority, readImportedHours, yesNo, type PriorityConfirm } from '@/lib/dispatch/data-collection';
+
+const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartMin', 'prefWindowEndMin'] as const;
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard; the file is read in the parser process
 // (audit P5, lib/upload-parse).
@@ -46,6 +49,15 @@ import { clientIp } from '@/lib/client-ip';
 // not, is ignored for such a customer (never marked LOW either), the row says "Only an admin can
 // change a saved location", and a warning counts them. It still sets the location of a new customer
 // or of one without a usable location. An admin's import works as above (A5's exact-location rules).
+//
+// Owner decision 1 Oct 2026 (item 6, daily customer master): the downloaded master (and the data-to-
+// collect list) is read back by this import. Its receiving-hours columns (hard_from, hard_to,
+// preferred_from, preferred_to, open_all_day, hours_confirmed: lib/dispatch/data-collection
+// readImportedHours) set the customer's own hours, confirmed by the importer unless hours_confirmed
+// says no; with a priority_confirmed column an unchanged priority that is not confirmed stays as it is
+// (importedPriority; without the column every priority is confirmed, as before). A row that changes nothing
+// writes nothing (so the master imported back as downloaded changes nothing, and "Changed since"
+// lists only real changes); each customer it changes gets an audit row with what it was and became.
 
 interface ImportError {
   row: number;
@@ -82,6 +94,10 @@ interface CustomerRow {
   priority: number;
   avgServiceTimeMin: number | null; // null = not in the file (keep; 10 min on create, unconfirmed)
   paymentType: 'CASH' | 'CREDIT' | 'PREPAID' | null; // null = not in the file (keep; CREDIT on create)
+  /** priority_confirmed (importedPriority): ABSENT = the file has no such column (confirmed, as before). */
+  priorityConfirm: PriorityConfirm;
+  /** The receiving-hours cells (HOURS_COLUMNS) the file has, for readImportedHours. */
+  hoursCells: Partial<Record<(typeof HOURS_COLUMNS)[number], string>>;
 }
 
 const PAYMENT_TYPES = new Set(['CASH', 'CREDIT', 'PREPAID']);
@@ -195,6 +211,19 @@ export async function POST(req: Request) {
       errors.push({ row, message: `payment_type must be cash | credit | prepaid (got "${paymentRaw}").` });
       return;
     }
+    // Item 6 (customer master read back): priority_confirmed and the receiving-hours columns.
+    const priorityFlag = yesNo(cell(raw, 'priority_confirmed'));
+    if (priorityFlag === undefined) {
+      errors.push({ row, message: `priority_confirmed must be yes or no (got "${cell(raw, 'priority_confirmed')}").` });
+      return;
+    }
+    const priorityConfirm: PriorityConfirm = !('priority_confirmed' in raw) ? 'ABSENT' : priorityFlag === null ? 'BLANK' : priorityFlag ? 'YES' : 'NO';
+    const hoursCells = Object.fromEntries(HOURS_COLUMNS.filter((k) => k in raw).map((k) => [k, cell(raw, k)]));
+    const hoursCheck = readImportedHours(hoursCells, null);
+    if (!hoursCheck.ok) {
+      errors.push({ row, message: hoursCheck.error });
+      return;
+    }
 
     const latRaw = cell(raw, 'lat');
     const lngRaw = cell(raw, 'lng');
@@ -236,12 +265,19 @@ export async function POST(req: Request) {
       priority: priorityNum,
       avgServiceTimeMin: serviceMin,
       paymentType: payment,
+      priorityConfirm,
+      hoursCells,
     });
   });
 
   // Existing customers, matched case-insensitively (twins resolve like the order intake).
   const existingRows = await db.customer.findMany({
-    select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true },
+    select: {
+      id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true,
+      // What a row would change (item 6: a row that changes nothing writes nothing, so a master imported back changes nothing).
+      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true,
+      hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true, windowConfirmedAt: true,
+    },
   });
   const twins = new Map<string, typeof existingRows>();
   for (const c of existingRows) twins.set(customerKey(c.code, c.branchKey), [...(twins.get(customerKey(c.code, c.branchKey)) ?? []), c]);
@@ -378,14 +414,27 @@ export async function POST(req: Request) {
   // is "still not verified", checked by PostgreSQL on the row as it is at that moment (not on the
   // list read above), and the kept count comes from what those updates did.
   let upserted = 0;
+  let unchanged = 0;
+  let hoursChanged = 0;
   let keptVerified = 0;
   let markedLow = 0;
   let replacedNotUsable = 0;
+  const importedAt = new Date();
   for (const v of valid) {
     const regionId = v.regionCode ? regionByCode.get(v.regionCode.toLowerCase()) ?? null : null;
     const fileHasLoc = v.lat !== null && v.lng !== null;
     const geocodeConfidence = fileHasLoc ? 'HIGH' : 'MISSING';
     const m = matchOf(v);
+    // Receiving hours (owner decisions 1 Oct 2026, items 2 and 6): hours entered here are confirmed by
+    // the importer unless hours_confirmed says no; nothing un-confirms hours that did not change.
+    const hours = readImportedHours(v.hoursCells, m);
+    const hoursData: Record<string, unknown> = {};
+    if (hours.ok && hours.change) {
+      for (const k of HOUR_FIELDS) if (!m || hours.change.hours[k] !== m[k]) hoursData[k] = hours.change.hours[k];
+      if (hours.change.confirm === 'SET') Object.assign(hoursData, { windowConfirmedAt: importedAt, windowConfirmedById: session.user.id });
+      else if (hours.change.confirm === 'CLEAR' && m?.windowConfirmedAt) Object.assign(hoursData, { windowConfirmedAt: null, windowConfirmedById: null });
+    }
+    if (Object.keys(hoursData).length) hoursChanged++;
     if (!m) {
       await db.customer.create({
         data: {
@@ -401,27 +450,51 @@ export async function POST(req: Request) {
           geocodeConfidence,
           locationSource: fileHasLoc ? 'IMPORT' : undefined,
           priority: v.priority,
-          priorityConfirmed: true,
+          priorityConfirmed: importedPriority(v.priority, v.priorityConfirm, null).confirm,
           // A time from the file is the customer's own; without one the default 10 min is only a
           // placeholder (the customer-type time applies until someone confirms one).
           ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
           ...(v.paymentType ? { paymentType: v.paymentType } : {}),
+          ...hoursData,
         },
       });
     } else {
-      await db.customer.update({
-        where: { id: m.id },
-        data: {
-          name: v.name,
-          ...(v.regionCode ? { regionId } : {}),
-          ...(v.address ? { address: v.address } : {}),
-          priority: v.priority,
-          priorityConfirmed: true,
-          ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
-          ...(v.paymentType ? { paymentType: v.paymentType } : {}),
-        },
-      });
-      if (fileHasLoc) {
+      // Only what the row changes is written (item 6): a customer master imported back as it was
+      // downloaded changes nothing, so "Changed since" lists only real changes. Each customer changed
+      // gets its own audit row (what it was, what the file made it).
+      const data: Record<string, unknown> = { ...hoursData };
+      if (v.name !== m.name) data.name = v.name;
+      if (v.regionCode && regionId !== m.regionId) data.regionId = regionId;
+      if (v.address && v.address !== m.address) data.address = v.address;
+      // An unchanged priority the master shows as not confirmed stays as it is (a default stays a default).
+      const p = importedPriority(v.priority, v.priorityConfirm, m);
+      if (p.priority !== null) data.priority = p.priority;
+      if (p.confirm) data.priorityConfirmed = true;
+      if (v.avgServiceTimeMin !== null && (v.avgServiceTimeMin !== m.avgServiceTimeMin || !m.serviceTimeConfirmed)) {
+        Object.assign(data, { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true });
+      }
+      if (v.paymentType && v.paymentType !== m.paymentType) data.paymentType = v.paymentType;
+      let wrote = false;
+      if (Object.keys(data).length) {
+        wrote = true;
+        await db.customer.update({ where: { id: m.id }, data });
+        const { windowConfirmedById: _by, ...shown } = data;
+        await audit({
+          tenantId: session.user.tenantId,
+          userId: session.user.id,
+          action: 'UPDATE',
+          entity: 'Customer',
+          entityId: m.id,
+          beforeJson: Object.fromEntries(Object.keys(shown).map((k) => [k, (m as Record<string, unknown>)[k] ?? null])) as never,
+          afterJson: { ...shown, source: 'IMPORT', fileName: parsed.fileName } as never,
+          ip,
+        });
+      }
+      const samePlace = fileHasLoc && m.lat !== null && m.lng !== null && samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat!, lng: v.lng! });
+      if (samePlace && (m.locationVerified || (m.geocodeConfidence === 'HIGH' && m.locationSource === 'IMPORT'))) {
+        // The file's point is the saved one, already confirmed or exact from a file: nothing to write
+        // (item 6, a customer master imported back).
+      } else if (fileHasLoc) {
         const data = { lat: v.lat, lng: v.lng, geocodeConfidence, locationSource: 'IMPORT' as const };
         // A saved point that was not usable (an earlier file marked it LOW, or it is outside the area)
         // replaced by the file's exact pair is recorded like a pin set in ADD LOCATION, so a stop
@@ -484,6 +557,7 @@ export async function POST(req: Request) {
         }
         if (outcome === 'KEPT_VERIFIED') keptVerified++;
         else if (outcome === 'REPLACED') replacedNotUsable++;
+        if (outcome === 'WRITTEN' || outcome === 'REPLACED') wrote = true;
       } else {
         // The file points elsewhere: the saved point is not used until a dispatcher drops the pin
         // (LOW blocks planning). Never a verified one, nor one changed since it was compared (F05).
@@ -494,8 +568,10 @@ export async function POST(req: Request) {
             data: { geocodeConfidence: 'LOW' },
           });
           markedLow += marked.count;
+          if (marked.count) wrote = true;
         }
       }
+      if (!wrote) unchanged++;
     }
     upserted++;
   }
@@ -510,7 +586,7 @@ export async function POST(req: Request) {
       bulkImport: {
         fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length,
         savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size, savedLocationsNotUsableReplaced: replacedNotUsable,
-        savedLocationsKeptAdminOnly: adminOnlyRows.size,
+        savedLocationsKeptAdminOnly: adminOnlyRows.size, unchanged, receivingHoursChanged: hoursChanged,
       },
     } as never,
     ip,
@@ -526,6 +602,8 @@ export async function POST(req: Request) {
       upserted,
       creates,
       updates,
+      unchanged,
+      receivingHoursChanged: hoursChanged,
       confirmedServiceChanges,
       locationsNotSaved,
       keptVerifiedLocations: keptVerified,
