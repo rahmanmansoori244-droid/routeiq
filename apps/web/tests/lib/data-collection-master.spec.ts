@@ -171,13 +171,19 @@ describe('item 3: the loading gate words', () => {
   });
 
   it("the day's \"Loading rule is on\" box lists only what the rule will refuse: never a customer whose orders are all on locked (or later) loads", () => {
-    const day = (id: string, frozen: boolean[], over: Record<string, unknown> = {}) =>
+    // Per order: 'all' = every case on locked (or later) loads, 'part' = some of it (a split part), 'open' = none.
+    const day = (id: string, onLocked: ('all' | 'part' | 'open')[], over: Record<string, unknown> = {}) =>
       ({
         ...customer(id, over), customerId: id, inactive: false,
-        orderTimes: frozen.map((f, i) => ({ orderId: `${id}-${i}`, cases: 5, salesOrders: [], time: null, text: null, frozen: f })),
+        orderTimes: onLocked.map((f, i) => ({ orderId: `${id}-${i}`, cases: 5, salesOrders: [], time: null, text: null, frozen: f !== 'open', allFrozen: f === 'all' })),
       }) as never;
-    const gaps = dayLoadingGaps([day('ALL_LOCKED', [true, true]), day('PART', [true, false]), day('OPEN', [false]), day('NOPIN', [true], { lat: null, lng: null })], DEFAULT_SERVICE_AREA);
-    expect(gaps.map((g) => g.code)).toEqual(['OPEN', 'PART']);
+    const gaps = dayLoadingGaps(
+      [day('ALL_LOCKED', ['all', 'all']), day('PART', ['all', 'open']), day('OPEN', ['open']), day('NOPIN', ['all'], { lat: null, lng: null }), day('SPLIT', ['part'])],
+      DEFAULT_SERVICE_AREA,
+    );
+    // Third review: an order only partly on a locked load has its other part on a PLANNED load, which
+    // LOCK refuses (DATA_REQUIRED): its customer is listed although Set time is hidden for that order.
+    expect(gaps.map((g) => g.code)).toEqual(['OPEN', 'PART', 'SPLIT']);
   });
 
   it('step 2 is not "done" while the loading rule is on and customers miss data, and receiving hours are not called optional then', () => {

@@ -204,30 +204,69 @@ export interface OrderPlacement {
   orderId: string;
   /** On a load that is locked or later (frozen). */
   frozen: boolean;
-  /** The whole order (not a split portion). */
-  whole: boolean;
+  /**
+   * The cases of each order line it carries (a split portion, RouteAssignment.portionLinesJson read
+   * with readPortionLines); null = the whole order.
+   */
+  lines: readonly { lineId: string; cases: number }[] | null;
   /** When the stop it is on was planned (its snapshot's capturedAt); null = not known. */
   capturedAt: string | null;
+}
+
+/**
+ * Every case of the order is in `on` (cases per order line id, e.g. what frozen loads carry), at
+ * least one of them: buildDispatchRequest's "every case is already on frozen loads" (a part of the
+ * order on them and nothing of it left to plan), which leaves the order out of the plan.
+ */
+export function allCasesOn(lines: readonly { id: string; cases: number }[], on: ReadonlyMap<string, number>): boolean {
+  return lines.some((l) => l.cases > 0 && (on.get(l.id) ?? 0) > 0) && lines.every((l) => (on.get(l.id) ?? 0) >= l.cases);
+}
+
+/** Why a plan leaves an order unserved before the optimizer when a case is heavier than any truck. */
+const TOO_HEAVY = 'EXCEEDS_ANY_TRUCK_CAPACITY';
+
+/**
+ * The orders a plan left unserved whole as heavier than any truck (its UnservedOrder rows with that
+ * reason and no portion). buildDispatchRequest leaves such an order out of its customer's visit, so
+ * the visit never carried its delivery time (plannedVisitOrders). The optimizer's own "larger than
+ * any truck" of a whole stop is that customer's only stop of the plan: nothing of it is judged.
+ */
+export function leftOutWhole(unserved: readonly { orderId: string; reasonCode: string; portionLinesJson: unknown }[]): Set<string> {
+  return new Set(unserved.filter((u) => u.reasonCode === TOO_HEAVY && !Array.isArray(u.portionLinesJson)).map((u) => u.orderId));
 }
 
 /**
  * The orders a customer's planned stop is judged with now (data collection review). All open orders
  * of a customer go in one visit, and every part of a split customer is planned within their
  * delivery times (buildDispatchRequest), so a stop is judged with all of the customer's orders of the
- * day - on this load, on another load or left unserved - not only the part on its own load. Except an
- * order wholly on a load that was already locked when the stop's plan was made: that optimization
- * did not see it (it came from an earlier plan, captured before the stop; not known: as a re-plan
- * now, which leaves frozen orders out). An order locked after the plan was made still counts.
+ * day - on this load, on another load or left unserved - not only the part on its own load. Except
+ * what that plan left out, as buildDispatchRequest does:
+ *  - an order with every case on loads that were already locked when the stop's plan was made, whole
+ *    or in split portions (a split customer stores every order of every part as a portion; third
+ *    review): that optimization did not see it (it came from an earlier plan, captured before the stop;
+ *    not known: as a re-plan now, which leaves frozen orders out). An order locked after the plan was
+ *    made, or with a case still open then, still counts;
+ *  - `leftOut`: orders the stop's plan left unserved whole as heavier than any truck (leftOutWhole);
+ *    pass them only for a stop of that plan (one on a PLANNED load).
  */
-export function plannedVisitOrders<T extends { id: string }>(orders: readonly T[], placements: readonly OrderPlacement[], stopCapturedAt: string | null): T[] {
+export function plannedVisitOrders<T extends { id: string; lines: readonly { id: string; cases: number }[] }>(
+  orders: readonly T[],
+  placements: readonly OrderPlacement[],
+  stopCapturedAt: string | null,
+  leftOut: ReadonlySet<string> = new Set(),
+): T[] {
   const at = stopCapturedAt ? Date.parse(stopCapturedAt) : Number.NaN;
-  const earlier = new Set<string>();
+  const whole = new Set<string>();
+  // Cases per order line on loads locked before the stop was planned.
+  const lockedCases = new Map<string, number>();
   for (const p of placements) {
-    if (!p.frozen || !p.whole) continue;
+    if (!p.frozen) continue;
     const t = p.capturedAt ? Date.parse(p.capturedAt) : Number.NaN;
-    if (!Number.isFinite(at) || !Number.isFinite(t) || t < at) earlier.add(p.orderId);
+    if (Number.isFinite(at) && Number.isFinite(t) && t >= at) continue;
+    if (!p.lines) whole.add(p.orderId);
+    else for (const l of p.lines) lockedCases.set(l.lineId, (lockedCases.get(l.lineId) ?? 0) + l.cases);
   }
-  return orders.filter((o) => !earlier.has(o.id));
+  return orders.filter((o) => !leftOut.has(o.id) && !whole.has(o.id) && !(lockedCases.size > 0 && allCasesOn(o.lines, lockedCases)));
 }
 
 /** A planned stop's promised time as kept in the plan inputs (StopFacts.promised), or null. */

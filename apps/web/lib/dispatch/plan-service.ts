@@ -33,7 +33,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
-import { plannedVisitOrders, readPromised, samePromisedTime, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
+import { leftOutWhole, plannedVisitOrders, readPromised, samePromisedTime, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import {
   dataGaps,
   dataGateRefusal,
@@ -2321,25 +2321,38 @@ async function deliveryTimeGate(
   const scope = await ordersInScopeWhere(tenantId, run.depotId, run.runDate, tx);
   const orders = await tx.order.findMany({
     where: { tenantId, OR: [{ id: { in: loadOrderIds } }, { ...scope, customerId: { in: customerIds } }] },
-    select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, deliveryTimeSetAt: true },
+    select: {
+      id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, deliveryTimeSetAt: true,
+      lines: { select: { id: true, cases: true } },
+    },
   });
   if (!orders.some((o) => o.deliveryTimeSetAt)) return;
   const plannedAt = await loadPlannedAt(tx, run.chosenScenarioId, load, rows);
   if (!plannedAt) return;
   const setSince = orders.filter((o) => o.deliveryTimeSetAt && o.deliveryTimeSetAt.getTime() > plannedAt.getTime());
   if (!setSince.length) return;
-  // What each stop of those customers would be planned with now, against what it was planned with.
-  const [placedRows, loadRows] = await Promise.all([
-    tx.routeAssignment.findMany({ where: { runId: load.runId, orderId: { in: orders.map((o) => o.id) } }, select: { orderId: true, loadId: true, portionLinesJson: true, stopSnapshotJson: true } }),
+  // What each stop of those customers would be planned with now, against what it was planned with:
+  // without what the plan left out (plannedVisitOrders: orders with every case on loads locked before
+  // it, and orders left unserved whole as heavier than any truck; third review).
+  const orderIds = orders.map((o) => o.id);
+  const [placedRows, loadRows, tooHeavyRows] = await Promise.all([
+    tx.routeAssignment.findMany({ where: { runId: load.runId, orderId: { in: orderIds } }, select: { orderId: true, loadId: true, portionLinesJson: true, stopSnapshotJson: true } }),
     tx.planLoad.findMany({ where: { runId: load.runId }, select: { id: true, status: true } }),
+    run.chosenScenarioId
+      ? tx.unservedOrder.findMany({
+          where: { scenarioId: run.chosenScenarioId, orderId: { in: orderIds }, reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY' },
+          select: { orderId: true, reasonCode: true, portionLinesJson: true },
+        })
+      : Promise.resolve([]),
   ]);
   const statusOf = new Map(loadRows.map((l) => [l.id, l.status]));
   const placements: OrderPlacement[] = placedRows.map((p) => ({
     orderId: p.orderId,
     frozen: (statusOf.get(p.loadId ?? '') ?? 'PLANNED') !== 'PLANNED',
-    whole: p.portionLinesJson === null,
+    lines: readPortionLines(p.portionLinesJson),
     capturedAt: readStopSnapshot(p.stopSnapshotJson)?.capturedAt ?? null,
   }));
+  const tooHeavy = leftOutWhole(tooHeavyRows);
   const ordersOf = new Map<string, typeof orders>();
   for (const o of orders) ordersOf.set(o.customerId, [...(ordersOf.get(o.customerId) ?? []), o]);
   const stale = new Set<string>();
@@ -2347,7 +2360,7 @@ async function deliveryTimeGate(
     for (const a of rows) {
       if (customerOf.get(a.orderId) !== customerId) continue;
       const snap = readStopSnapshot(a.stopSnapshotJson);
-      const now = stopWindowFor(NO_HOURS, plannedVisitOrders(ordersOf.get(customerId) ?? [], placements, snap?.capturedAt ?? null)).promised;
+      const now = stopWindowFor(NO_HOURS, plannedVisitOrders(ordersOf.get(customerId) ?? [], placements, snap?.capturedAt ?? null, tooHeavy)).promised;
       // A stop without the plan's own facts has no record of the time it was planned with: re-plan.
       if (!snap || snap.source !== 'PLAN' || !samePromisedTime(now, readPromised(snap.promised))) stale.add(customerId);
     }

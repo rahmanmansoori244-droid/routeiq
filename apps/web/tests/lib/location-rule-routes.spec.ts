@@ -474,6 +474,52 @@ describe('PATCH /api/customers/:id never changes a location', () => {
     expect((await patch('K1', { code: 'K1-OLD' })).status).toBe(200);
     expect(row('customer', 'K1').code).toBe('K1-OLD');
   });
+
+  // Third review: orders go to one of two letter-case twins (preferredCustomer: the active one first,
+  // then the one with a location). A dispatcher deactivating the twin with a usable saved location (or
+  // reactivating the one without, while it is inactive) would send every new order of that code to a
+  // customer whose location a dispatcher may fill: the location admin-lock "on every write path".
+  it('a dispatcher cannot switch the orders of a code from the twin with a usable saved location to another twin by (de)activating one (403 LOCATION_ADMIN_ONLY); nothing written', async () => {
+    session.role = 'PLANNER';
+    const patch = async (id: string, body: unknown) => answer(await customerPatch(json(`/api/customers/${id}`, 'PATCH', body), { params: { id } }));
+    // X: a usable saved point. x: the same code in small letters, no location (an older twin).
+    const twins = (x: Record<string, unknown> = {}, small: Record<string, unknown> = {}) => [
+      customer('X', x),
+      customer('x-old', { code: 'x', name: 'Old twin', lat: null, lng: null, geocodeConfidence: 'MISSING', ...small }),
+    ];
+    // Both active: orders go to X. Deactivating X would send them to x.
+    tables.customer = twins();
+    const before = JSON.parse(JSON.stringify(row('customer', 'X')));
+    const r = await patch('X', { active: false });
+    expect(r.status).toBe(403);
+    expect(r.body.error.code).toBe('LOCATION_ADMIN_ONLY');
+    expect(r.body.error.message).toBe(
+      'Only an admin can deactivate this customer: new orders of its code would then go to x (Old twin) instead of X (Customer X), which has a saved location (codes are the same whatever the letter case). Ask your company admin. Nothing was saved.',
+    );
+    expect(JSON.parse(JSON.stringify(row('customer', 'X')))).toEqual(before);
+    expect(audits).toEqual([]);
+    // Both inactive: orders would go to X (the one with a location). Reactivating x would send them to x.
+    tables.customer = twins({ active: false }, { active: false });
+    const back = await patch('x-old', { active: true });
+    expect(back.status).toBe(403);
+    expect(back.body.error.message).toMatch(/^Only an admin can reactivate this customer: new orders of its code would then go to x \(Old twin\) instead of X \(Customer X\), which has a saved location/);
+    expect(row('customer', 'x-old').active).toBe(false);
+    // Allowed: the orders stay where they go (x deactivated or reactivated while X is active) ...
+    tables.customer = twins();
+    expect((await patch('x-old', { active: false })).status).toBe(200);
+    expect((await patch('x-old', { active: true })).status).toBe(200);
+    // ... they move to the twin with the saved point from one without a usable location (filling a missing one) ...
+    tables.customer = twins({ active: false });
+    expect((await patch('X', { active: true })).status).toBe(200);
+    // ... X has no twin ...
+    tables.customer = [customer('X')];
+    expect((await patch('X', { active: false })).status).toBe(200);
+    // ... or the company admin does it.
+    session.role = 'TENANT_ADMIN';
+    tables.customer = twins();
+    expect((await patch('X', { active: false })).status).toBe(200);
+    expect(row('customer', 'X').active).toBe(false);
+  });
 });
 
 describe('POST /api/customers checks coordinates like a Read', () => {

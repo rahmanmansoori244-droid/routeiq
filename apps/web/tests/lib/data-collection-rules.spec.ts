@@ -21,6 +21,7 @@ vi.mock('@/lib/tenant', () => ({ tenantDb: () => fake.tdb }));
 
 import {
   checkOrderTime,
+  leftOutWhole,
   orderTimeFromForm,
   orderTimeOf,
   plannedVisitOrders,
@@ -143,20 +144,60 @@ describe('item 1: a delivery time for one order', () => {
   });
 
   it("a stop is judged with all of its customer's orders of the day (one visit), except those on a load locked before its plan was made", () => {
-    const o = (id: string) => ({ id });
+    const o = (id: string) => ({ id, lines: [{ id: `${id}-l1`, cases: 10 }] });
     const orders = [o('A'), o('B'), o('C'), o('D')];
     const at = '2026-10-01T10:00:00.000Z';
     const placements = [
-      { orderId: 'A', frozen: true, whole: true, capturedAt: at }, // locked after this plan was made: counts
-      { orderId: 'B', frozen: false, whole: false, capturedAt: at }, // the other part of a split customer
-      { orderId: 'C', frozen: true, whole: true, capturedAt: '2026-10-01T06:00:00.000Z' }, // locked in an earlier plan
+      { orderId: 'A', frozen: true, lines: null, capturedAt: at }, // locked after this plan was made: counts
+      { orderId: 'B', frozen: false, lines: [{ lineId: 'B-l1', cases: 10 }], capturedAt: at }, // the other part of a split customer
+      { orderId: 'C', frozen: true, lines: null, capturedAt: '2026-10-01T06:00:00.000Z' }, // locked in an earlier plan
       // D: left unserved (no placement): counts
     ];
     expect(plannedVisitOrders(orders, placements, at).map((x) => x.id)).toEqual(['A', 'B', 'D']);
     // Not known when the stop was planned: as a re-plan now (frozen orders left out).
     expect(plannedVisitOrders(orders, placements, null).map((x) => x.id)).toEqual(['B', 'D']);
     // A split portion on a frozen load: its open rest was planned with the others.
-    expect(plannedVisitOrders(orders, [{ orderId: 'C', frozen: true, whole: false, capturedAt: '2026-10-01T06:00:00.000Z' }], at).map((x) => x.id)).toEqual(['A', 'B', 'C', 'D']);
+    expect(plannedVisitOrders(orders, [{ orderId: 'C', frozen: true, lines: [{ lineId: 'C-l1', cases: 4 }], capturedAt: '2026-10-01T06:00:00.000Z' }], at).map((x) => x.id)).toEqual(['A', 'B', 'C', 'D']);
+  });
+
+  // Third review: a split customer stores every order of every part as a portion, so "whole" was never
+  // true there. An order whose cases are all on a load locked before the stop was planned is not in that
+  // plan (buildDispatchRequest leaves it out): the stop never carried its time, and no RE-PLAN changes that.
+  it('a split customer: an order with every case on a load locked before the stop was planned is left out; one with cases still open counts', () => {
+    const orders = [
+      { id: 'O1', lines: [{ id: 'l1', cases: 10 }, { id: 'l2', cases: 5 }] },
+      { id: 'O2', lines: [{ id: 'l3', cases: 20 }] },
+    ];
+    const at = '2026-10-01T10:00:00.000Z';
+    const earlier = '2026-10-01T06:00:00.000Z';
+    const part2 = { orderId: 'O2', frozen: false, lines: [{ lineId: 'l3', cases: 20 }], capturedAt: at };
+    // Part 1 (locked in an earlier plan) holds all of O1: the re-plan did not see it.
+    const part1 = { orderId: 'O1', frozen: true, lines: [{ lineId: 'l1', cases: 10 }, { lineId: 'l2', cases: 5 }], capturedAt: earlier };
+    expect(plannedVisitOrders(orders, [part1, part2], at).map((x) => x.id)).toEqual(['O2']);
+    // Spread over two locked loads: the same.
+    const twoLoads = [
+      { orderId: 'O1', frozen: true, lines: [{ lineId: 'l1', cases: 6 }], capturedAt: earlier },
+      { orderId: 'O1', frozen: true, lines: [{ lineId: 'l1', cases: 4 }, { lineId: 'l2', cases: 5 }], capturedAt: earlier },
+      part2,
+    ];
+    expect(plannedVisitOrders(orders, twoLoads, at).map((x) => x.id)).toEqual(['O2']);
+    // A case of O1 still open (planned again with the others): O1 counts.
+    expect(plannedVisitOrders(orders, [{ ...part1, lines: [{ lineId: 'l1', cases: 10 }, { lineId: 'l2', cases: 4 }] }, part2], at).map((x) => x.id)).toEqual(['O1', 'O2']);
+    // Part 1 locked after this plan was made (the same optimization planned both parts): O1 counts.
+    expect(plannedVisitOrders(orders, [{ ...part1, capturedAt: at }, part2], at).map((x) => x.id)).toEqual(['O1', 'O2']);
+    // Part 1 still PLANNED: counts.
+    expect(plannedVisitOrders(orders, [{ ...part1, frozen: false }, part2], at).map((x) => x.id)).toEqual(['O1', 'O2']);
+  });
+
+  it('an order the plan left out whole as heavier than any truck is not in the visit (as the planner leaves it out); a part of an order left out is', () => {
+    const orders = [{ id: 'O1', lines: [{ id: 'l1', cases: 10 }] }, { id: 'O2', lines: [{ id: 'l2', cases: 10 }] }];
+    const unserved = [
+      { orderId: 'O1', reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY', portionLinesJson: null },
+      { orderId: 'O2', reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY', portionLinesJson: [{ lineId: 'l2', cases: 4 }] },
+      { orderId: 'O2', reasonCode: 'NO_AVAILABLE_TRUCK', portionLinesJson: null },
+    ];
+    expect([...leftOutWhole(unserved)]).toEqual(['O1']);
+    expect(plannedVisitOrders(orders, [], '2026-10-01T10:00:00.000Z', leftOutWhole(unserved)).map((x) => x.id)).toEqual(['O2']);
   });
 
   it('the WhatsApp message marks the stop "Promised ..."', () => {
@@ -210,6 +251,54 @@ describe('item 1: the planner plans the visit with the order time, and keeps it 
     const inputs = planInputsOf(built, 'J1', new Date('2026-10-01T10:00:00Z'))!;
     expect(inputs.stops.A).toMatchObject({ hardStartMin: 300, hardEndMin: 420, promised: { startMin: 300, endMin: 420, reason: 'URGENT' } });
     expect(inputs.stops.B!.promised).toBeUndefined();
+  });
+
+  // Third review: the screens and LOCK judge a planned stop by plannedVisitOrders; it must leave out
+  // exactly what the planner left out, or a RE-PLAN that builds the same stop never clears "changed".
+  it('a split customer with part 1 locked before a re-plan: the new stop is planned without the locked order, and judged so', async () => {
+    const a = cust('A');
+    const o1 = order('O1', a, times(600, 660, 'PROMISED'));
+    const o2 = order('O2', a);
+    const frozenPart = (cases: number) => ({
+      planLoad: {
+        findMany: async () => [
+          { id: 'L1', truckId: 'T1', loadNo: 1, status: 'LOCKED', departMin: 360, returnMin: 480, cases, breakJson: null, assignments: [{ orderId: 'O1', portionLinesJson: [{ lineId: 'O1-l1', cases }] }] },
+        ],
+      },
+    });
+    const earlier = '2026-10-01T06:00:00.000Z';
+    // All of O1 (promised 10:00-11:00) is on the locked part: the re-plan plans O2 alone, with the customer's hours.
+    wire([o1, o2]);
+    Object.assign(fake.tdb, frozenPart(10));
+    const built = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
+    expect(built.request.stops.find((s) => s.customer_id === 'A')!.order_ids).toEqual(['O2']);
+    expect(built.promised?.A).toBeUndefined();
+    // The new stop was planned when the re-plan read the orders (its capturedAt).
+    const at = built.builtAt ?? null;
+    const placements = (lockedCases: number) => [
+      { orderId: 'O1', frozen: true, lines: [{ lineId: 'O1-l1', cases: lockedCases }], capturedAt: earlier },
+      { orderId: 'O2', frozen: false, lines: [{ lineId: 'O2-l1', cases: 10 }], capturedAt: at },
+    ];
+    expect(stopWindowFor(EFF, plannedVisitOrders([o1, o2], placements(10), at)).promised).toBeNull();
+    // Only 4 cases of O1 locked: its open rest goes with O2 and the visit is planned with O1's time; judged so.
+    wire([o1, o2]);
+    Object.assign(fake.tdb, frozenPart(4));
+    const rest = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
+    expect(rest.promised?.A).toMatchObject({ startMin: 600, endMin: 660 });
+    expect(stopWindowFor(EFF, plannedVisitOrders([o1, o2], placements(4), rest.builtAt ?? null)).promised).toMatchObject({ startMin: 600, endMin: 660 });
+  });
+
+  it('an order of the customer heavier than any truck is left out of the visit by the planner, and judged so', async () => {
+    const a = cust('A');
+    const heavy = { ...order('O3', a, times(480, 540, 'URGENT')), totalWeightKg: 200_000 };
+    heavy.lines = [{ ...heavy.lines[0]!, weightKg: 200_000, product: { code: 'BRICK', name: 'Brick', weightPerCaseKg: 20_000, active: true } }];
+    const o2 = order('O2', a);
+    wire([heavy, o2]);
+    const built = await buildDispatchRequest('TEN', 'R1', ['MIN_TRUCKS'] as never, { now: new Date('2026-10-01T10:00:00Z') });
+    expect(built.preDrops).toMatchObject([{ orderId: 'O3', reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY', portion: undefined }]);
+    expect(built.promised?.A).toBeUndefined();
+    const left = leftOutWhole(built.preDrops.map((d) => ({ orderId: d.orderId, reasonCode: d.reasonCode, portionLinesJson: d.portion?.lines ?? null })));
+    expect(stopWindowFor(EFF, plannedVisitOrders([heavy, o2], [{ orderId: 'O2', frozen: false, lines: null, capturedAt: built.builtAt ?? null }], built.builtAt ?? null, left)).promised).toBeNull();
   });
 
   it('the plan keeps when the orders were read, not when the optimization was saved: a time set while it ran is after the plan (LOCK refuses it)', async () => {

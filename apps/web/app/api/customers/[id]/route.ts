@@ -3,7 +3,7 @@ import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
 import { CUSTOMER_SERVICE_COLUMN_DEFAULT, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
-import { customerKey } from '@/lib/dispatch/order-intake';
+import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { canManageMasterData } from '@/lib/rbac';
 
@@ -72,6 +72,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       }
       const code = input.code ?? before.code;
       const branchKey = (data.branchKey as string | undefined) ?? before.branchKey;
+      const isAdmin = canManageMasterData(user.role);
       // Owner decision 1 Oct 2026 (item 5, location admin-lock "on every write path"): orders are
       // matched to customers by code and branch (letter case aside). Renaming a customer with a usable
       // saved location away, then creating one (or letting an order file create one) under its old
@@ -79,7 +80,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       // changes the code or branch of such a customer.
       if (
         customerKey(code, branchKey) !== customerKey(before.code, before.branchKey) &&
-        savedLocationLocked(canManageMasterData(user.role), before, await tenantServiceArea(user.tenantId))
+        savedLocationLocked(isAdmin, before, await tenantServiceArea(user.tenantId))
       ) {
         return fail(
           {
@@ -88,6 +89,33 @@ export const PATCH = (req: Request, { params }: Params) =>
           } as Record<string, unknown>,
           403,
         );
+      }
+      // The same rule for (de)activating one of two customers whose codes differ only in letter case
+      // (third review): the order intake sends a code's orders to one of them (preferredCustomer: the
+      // active one first, then the one with a location). Moving them away from the one with a usable
+      // saved location, to a twin whose location a dispatcher may fill (or one saved elsewhere), changes
+      // where they are delivered: only an admin does it. Moving them to the one with the saved point,
+      // from a twin without a usable one, only fills a missing location and stays allowed.
+      if (!isAdmin && input.active !== undefined && input.active !== before.active) {
+        const key = customerKey(before.code, before.branchKey);
+        const twins = (
+          await db.customer.findMany({
+            where: { id: { not: before.id }, code: { equals: before.code, mode: 'insensitive' }, branchKey: { equals: before.branchKey, mode: 'insensitive' } },
+            select: { id: true, code: true, branchCode: true, branchKey: true, name: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true },
+          })
+        ).filter((t) => customerKey(t.code, t.branchKey) === key);
+        const matched = twins.length ? preferredCustomer([before, ...twins]) : undefined;
+        const next = twins.length ? preferredCustomer([{ ...before, active: input.active }, ...twins]) : undefined;
+        if (matched && next && matched.id !== next.id && savedLocationLocked(isAdmin, matched, await tenantServiceArea(user.tenantId))) {
+          const label = (c: { code: string; branchCode: string | null; name: string }) => `${c.code}${c.branchCode ? ` / ${c.branchCode}` : ''} (${c.name})`;
+          return fail(
+            {
+              code: 'LOCATION_ADMIN_ONLY',
+              message: `Only an admin can ${input.active ? 'reactivate' : 'deactivate'} this customer: new orders of its code would then go to ${label(next)} instead of ${label(matched)}, which has a saved location (codes are the same whatever the letter case). Ask your company admin. Nothing was saved.`,
+            } as Record<string, unknown>,
+            403,
+          );
+        }
       }
       if (code !== before.code || branchKey !== before.branchKey) {
         // Codes are one customer whatever their letter case (the order intake matches them so).

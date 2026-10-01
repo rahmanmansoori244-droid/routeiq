@@ -16,7 +16,7 @@ import {
   type TypeProfileLike,
   windowLabel,
 } from './customer-attrs';
-import { orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
+import { allCasesOn, leftOutWhole, orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, thoroughMaxSec } from './search-mode';
@@ -77,8 +77,14 @@ export interface DayOrderTime {
   time: OrderTime | null;
   /** "Promised 10:00–11:00" when it has one. */
   text: string | null;
-  /** On a locked (or later) load of the plan in use: its time cannot change. */
+  /** On a locked (or later) load of the plan in use, wholly or a part of it: its time cannot change. */
   frozen: boolean;
+  /**
+   * Every case of it is on locked (or later) loads of the plan in use: nothing of it is planned again,
+   * so the loading rule never judges it (dayLoadingGaps). Only a part there: its other part is on a
+   * PLANNED load (or still to plan), which LOCK judges.
+   */
+  allFrozen: boolean;
 }
 
 /** Products whose order lines have no weight yet (per product: lines and cases). */
@@ -201,7 +207,13 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     if (!pl) frozenWhole.add(a.orderId);
     else for (const x of pl) frozenLineCases.set(x.lineId, (frozenLineCases.get(x.lineId) ?? 0) + x.cases);
   }
-  const chosen = plan?.chosenScenarioId ? await prisma.scenarioResult.findUnique({ where: { id: plan.chosenScenarioId } }) : null;
+  // The option in use, with the orders it left unserved for a case heavier than any truck (leftOutWhole).
+  const chosen = plan?.chosenScenarioId
+    ? await prisma.scenarioResult.findUnique({
+        where: { id: plan.chosenScenarioId },
+        include: { unservedOrders: { where: { reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY' }, select: { orderId: true, reasonCode: true, portionLinesJson: true } } },
+      })
+    : null;
   const d = chosen?.detailsJson as unknown as ScenarioDetails | undefined;
   const inScope = new Set(d?.scope ? [...d.scope.orderIds, ...d.scope.frozenOrderIds] : []);
   // Weights per order LINE (0 kg on a line = unknown), not per product: a product whose case
@@ -262,21 +274,23 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // plan keeps what it was planned with; a re-plan adopts the new data.
   // The delivery time a stop would be planned with now (order-window stopWindowFor): one visit per
   // customer, so with all of its customer's orders of the day - on any load, left unserved or waiting -
-  // except those on a load locked before its plan was made (plannedVisitOrders; the same rule as LOCK's
+  // except what its plan left out: orders with every case on loads locked before it was made, and
+  // orders left unserved whole as heavier than any truck (plannedVisitOrders; the same rule as LOCK's
   // deliveryTimeGate and the plan screen, data collection review).
   const dayOrdersOf = new Map<string, (typeof orders)[number][]>();
   for (const o of orders) dayOrdersOf.set(o.customerId, [...(dayOrdersOf.get(o.customerId) ?? []), o]);
   const placements: OrderPlacement[] = onPlan.map((a) => ({
     orderId: a.orderId,
     frozen: !!a.load && a.load.status !== 'PLANNED',
-    whole: a.portionLinesJson === null,
+    lines: readPortionLines(a.portionLinesJson),
     capturedAt: readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null,
   }));
+  const tooHeavy = leftOutWhole(chosen?.unservedOrders ?? []);
   const plannedStops = onPlan.flatMap((a) => {
     const o = orderById.get(a.orderId);
     if (a.load?.status !== 'PLANNED' || !o) return [];
     const eff = effectiveAttrs(o.customer, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
-    const sw = stopWindowFor(eff, plannedVisitOrders(dayOrdersOf.get(o.customerId) ?? [o], placements, readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null));
+    const sw = stopWindowFor(eff, plannedVisitOrders(dayOrdersOf.get(o.customerId) ?? [o], placements, readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null, tooHeavy));
     return [{
       customerId: o.customerId,
       stopSnapshotJson: a.stopSnapshotJson,
@@ -314,6 +328,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       time,
       text: time ? promisedText(time) : null,
       frozen: onFrozenLoad.has(o.id),
+      // As buildDispatchRequest reads it: whole on a frozen load, or every case in frozen portions.
+      allFrozen: frozenWhole.has(o.id) || allCasesOn(o.lines, frozenLineCases),
     };
   };
   for (const o of orders) {
@@ -510,16 +526,17 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
 
 /**
  * The day's loading gaps (item 3), by the gate's own rule (`dataGaps`) on the day's customers and order
- * times. Only orders not on a locked (or later) load: the gate judges a load only when it leaves
+ * times. Only orders not wholly on locked (or later) loads: the gate judges a load only when it leaves
  * PLANNED, so a customer whose orders are all on locked, loading or dispatched loads is never refused
  * by it and is not listed (data collection review; a missing location there is in step 2's red list,
- * the always-on location rule).
+ * the always-on location rule). An order only partly there (a split part) still counts: its other part
+ * is on a PLANNED load, or still to plan, and LOCK of that load judges it (third review).
  */
 export function dayLoadingGaps(customers: readonly IssueCustomer[], area: ServiceArea): DataGap[] {
   const active = customers.filter((c) => !c.inactive);
   return dataGaps(
     active.map((c) => ({ id: c.customerId, code: c.code, branchCode: c.branchCode, name: c.name, lat: c.lat, lng: c.lng, locationVerified: c.locationVerified, geocodeConfidence: c.geocodeConfidence, windowConfirmedAt: c.windowConfirmedAt })),
-    active.flatMap((c) => c.orderTimes.filter((t) => !t.frozen).map((t) => ({ customerId: c.customerId, deliveryStartMin: t.time?.startMin ?? null, deliveryEndMin: t.time?.endMin ?? null }))),
+    active.flatMap((c) => c.orderTimes.filter((t) => !t.allFrozen).map((t) => ({ customerId: c.customerId, deliveryStartMin: t.time?.startMin ?? null, deliveryEndMin: t.time?.endMin ?? null }))),
     area,
   );
 }

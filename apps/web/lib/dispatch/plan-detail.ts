@@ -5,7 +5,7 @@
 import { Prisma } from '@prisma/client';
 import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
-import { plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTimeColumns } from './order-window';
+import { leftOutWhole, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTimeColumns } from './order-window';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
@@ -415,9 +415,10 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // all of its customer's orders in this plan - on every load and left unserved - as the plan was made
   // (every part of a split customer carries the time of any of its orders; data collection review),
   // not only the part on this load.
-  const visitOrders = new Map<string, Map<string, OrderTimeColumns & { id: string }>>();
-  const addVisitOrder = (customerId: string, o: OrderTimeColumns & { id: string }) => {
-    const m = visitOrders.get(customerId) ?? new Map<string, OrderTimeColumns & { id: string }>();
+  type VisitOrder = OrderTimeColumns & { id: string; lines: { id: string; cases: number }[] };
+  const visitOrders = new Map<string, Map<string, VisitOrder>>();
+  const addVisitOrder = (customerId: string, o: VisitOrder) => {
+    const m = visitOrders.get(customerId) ?? new Map<string, VisitOrder>();
     m.set(o.id, o);
     visitOrders.set(customerId, m);
   };
@@ -426,7 +427,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   if (unservedIds.length) {
     const times = await db.order.findMany({
       where: { tenantId, id: { in: unservedIds } },
-      select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true },
+      select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, lines: { select: { id: true, cases: true } } },
     });
     for (const o of times) addVisitOrder(o.customerId, o);
   }
@@ -434,10 +435,12 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     l.assignments.map((a) => ({
       orderId: a.orderId,
       frozen: l.status !== 'PLANNED',
-      whole: a.portionLinesJson === null,
+      lines: readPortionLines(a.portionLinesJson),
       capturedAt: readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null,
     })),
   );
+  // Orders the chosen option left unserved whole as heavier than any truck: not in its stops' visits.
+  const tooHeavy = leftOutWhole(chosen?.unservedOrders ?? []);
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -522,7 +525,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         masterChanged: snap
           ? (() => {
               // As the stop would be planned now: its customer's orders' own delivery time, else its hours.
-              const sw = stopWindowFor(eff, plannedVisitOrders([...(visitOrders.get(c.id)?.values() ?? [o])], placements, snap.capturedAt));
+              // The chosen option's left-out orders only for its own stops (a frozen one may be older).
+              const leftOut = l.status === 'PLANNED' ? tooHeavy : undefined;
+              const sw = stopWindowFor(eff, plannedVisitOrders([...(visitOrders.get(c.id)?.values() ?? [o])], placements, snap.capturedAt, leftOut));
               return stopMasterChanges(snap, {
                 name: c.name,
                 address: c.address,
