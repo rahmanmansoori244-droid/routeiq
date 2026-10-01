@@ -161,7 +161,9 @@ describe('3. customer import vs a pin verified meanwhile (F05)', () => {
       data: Array.from({ length: N }, (_, i) => ({ tenantId, code: `K${i}`, name: `K${i}`, branchKey: '__MAIN__', lat: 23.5, lng: 58.3, geocodeConfidence: 'HIGH' as const, locationVerified: false, priority: 3 })),
     });
     const target = await prisma.customer.findFirstOrThrow({ where: { tenantId, code: `K${N - 1}` } });
-    as('PLANNER');
+    // The company admin: since 1 Oct 2026 a dispatcher's import never changes a usable saved location
+    // (location admin-lock), so only an admin's import writes the other customers' pairs here.
+    as('TENANT_ADMIN');
     const fd = new FormData();
     fd.set('file', new File([csv([['code', 'name', 'priority', 'lat', 'lng'], ...Array.from({ length: N }, (_, i) => [`K${i}`, `K${i}`, 3, '23.7001', '58.5001'])])], 'customers.csv', { type: 'text/csv' }));
 

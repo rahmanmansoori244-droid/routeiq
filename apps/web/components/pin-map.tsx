@@ -15,15 +15,19 @@ interface Props {
   center: { lat: number; lng: number };
   onChange: (lat: number, lng: number) => void;
   height?: number;
+  /** Shows the pin only: no click to drop it, no drag (a location the user may not change). */
+  readOnly?: boolean;
 }
 
 /** Click to drop a pin, drag it to adjust. Token-free (OpenStreetMap raster tiles). */
-export function PinMap({ lat, lng, center, onChange, height = 280 }: Props) {
+export function PinMap({ lat, lng, center, onChange, height = 280, readOnly = false }: Props) {
   const el = useRef<HTMLDivElement | null>(null);
   const map = useRef<maplibregl.Map | null>(null);
   const marker = useRef<maplibregl.Marker | null>(null);
   const cb = useRef(onChange);
   cb.current = onChange;
+  const ro = useRef(readOnly);
+  ro.current = readOnly;
 
   useEffect(() => {
     if (!el.current) return;
@@ -35,6 +39,7 @@ export function PinMap({ lat, lng, center, onChange, height = 280 }: Props) {
     });
     m.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
     m.on('click', (e) => {
+      if (ro.current) return;
       place(e.lngLat.lat, e.lngLat.lng);
       cb.current(round(e.lngLat.lat), round(e.lngLat.lng));
     });
@@ -54,11 +59,16 @@ export function PinMap({ lat, lng, center, onChange, height = 280 }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lat, lng]);
 
+  useEffect(() => {
+    marker.current?.setDraggable(!readOnly);
+  }, [readOnly]);
+
   function place(la: number, ln: number) {
     if (!map.current) return;
     if (!marker.current) {
-      marker.current = new maplibregl.Marker({ color: '#dc2626', draggable: true }).setLngLat([ln, la]).addTo(map.current);
+      marker.current = new maplibregl.Marker({ color: '#dc2626', draggable: !ro.current }).setLngLat([ln, la]).addTo(map.current);
       marker.current.on('dragend', () => {
+        if (ro.current) return;
         const p = marker.current!.getLngLat();
         cb.current(round(p.lat), round(p.lng));
       });

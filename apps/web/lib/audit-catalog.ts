@@ -42,6 +42,8 @@ export const AUDIT_ACTIONS = {
   PLATFORM_ADMIN_GRANTED: { label: 'Platform admin granted' },
   PLATFORM_ADMIN_REVOKED: { label: 'Platform admin revoked' },
   CUSTOMER_LOCATION_SET: { label: 'Customer location set' },
+  ORDER_DELIVERY_TIME_SET: { label: 'Delivery time set for one order (urgent / promised)' },
+  ORDER_DELIVERY_TIME_CLEARED: { label: 'Delivery time of one order removed' },
   LATE_ORDER_RECORDED: { label: 'Late order recorded' },
   ORDERS_CARRIED_OVER: { label: 'Orders brought forward from earlier days' },
   ORDER_WEIGHTS_RESOLVED: { label: 'Order weights taken from products' },

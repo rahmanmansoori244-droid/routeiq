@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Search, MapPin, MapPinOff } from 'lucide-react';
+import { Download, Search, MapPin, MapPinOff } from 'lucide-react';
+import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import type { PaymentType } from '@prisma/client';
 import { Input } from '@/components/ui/input';
@@ -14,6 +15,8 @@ import { Switch } from '@/components/ui/switch';
 import { runInlineUpdate } from '@/lib/customer-inline-update';
 import { locationIssue } from '@/lib/dispatch/customer-attrs';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { MASTER_SINCE_MAX_DAYS } from '@/lib/dispatch/data-collection';
+import { addDaysIso } from '@/lib/dispatch/time';
 
 interface CustomerRow {
   id: string;
@@ -40,6 +43,15 @@ interface RegionOption {
   name: string;
 }
 
+/** The data to collect (owner decision 1 Oct 2026, item 4), by customer id. */
+export interface CollectInfo {
+  from: string;
+  to: string;
+  days: number;
+  perDepot: { code: string; customers: number }[];
+  rows: Record<string, { missing: string; firstDelivery: string; depots: string[] }>;
+}
+
 const ALL = '__all__';
 const NO_REGION = '__noregion__';
 
@@ -49,6 +61,8 @@ export function CustomersClient({
   regions,
   canEdit,
   serviceArea,
+  collect = null,
+  initialCollectOnly = false,
 }: {
   slug: string;
   initial: CustomerRow[];
@@ -56,6 +70,10 @@ export function CustomersClient({
   canEdit: boolean;
   /** The company's delivery area: a saved point outside it that nobody confirmed needs a pin. */
   serviceArea: ServiceArea;
+  /** Dispatchers and up: the data to collect (customers with open orders soon that miss data). */
+  collect?: CollectInfo | null;
+  /** Opened from "Open on Customers" (?show=collect): only the data to collect. */
+  initialCollectOnly?: boolean;
 }) {
   const router = useRouter();
   const [rows, setRows] = useState(initial);
@@ -69,11 +87,15 @@ export function CustomersClient({
   const [q, setQ] = useState('');
   const [regionFilter, setRegionFilter] = useState<string>(ALL);
   const [onlyActive, setOnlyActive] = useState(false);
+  const [collectOnly, setCollectOnly] = useState(initialCollectOnly && !!collect);
+  const [since, setSince] = useState('');
   const [updating, startUpdate] = useTransition();
+  const toCollect = useMemo(() => collect?.rows ?? {}, [collect]);
 
   const filtered = useMemo(() => {
     const lower = q.trim().toLowerCase();
-    return rows.filter((c) => {
+    const list = rows.filter((c) => {
+      if (collectOnly && !toCollect[c.id]) return false;
       if (onlyActive && !c.active) return false;
       if (regionFilter === NO_REGION && c.regionId !== null) return false;
       if (regionFilter !== ALL && regionFilter !== NO_REGION && c.regionId !== regionFilter) return false;
@@ -86,7 +108,11 @@ export function CustomersClient({
       }
       return true;
     });
-  }, [rows, q, regionFilter, onlyActive]);
+    // The data to collect: soonest delivery first (as the day screen and the Excel).
+    if (collectOnly) list.sort((a, b) => (toCollect[a.id]?.firstDelivery ?? '').localeCompare(toCollect[b.id]?.firstDelivery ?? '') || a.code.localeCompare(b.code));
+    return list;
+  }, [rows, q, regionFilter, onlyActive, collectOnly, toCollect]);
+  const collectCount = Object.keys(toCollect).length;
 
   function patchRow(id: string, patch: Partial<CustomerRow>) {
     const before = rows.find((r) => r.id === id);
@@ -155,6 +181,12 @@ export function CustomersClient({
           <Switch checked={onlyActive} onCheckedChange={setOnlyActive} />
           Active only
         </label>
+        {collect ? (
+          <label className="flex items-center gap-2 text-sm text-muted-foreground" title={`Customers with open orders from ${collect.from} to ${collect.to} that miss a usable location or confirmed receiving hours`}>
+            <Switch checked={collectOnly} onCheckedChange={setCollectOnly} data-testid="collect-only" />
+            Data to collect ({collectCount})
+          </label>
+        ) : null}
         {needsPinMessage.size > 0 ? (
           <Badge variant="destructive" className="ms-auto" data-testid="customers-need-pin" title="Their saved location is not usable. Open each one and use Set location to drop the pin.">
             <MapPin className="me-1 h-3 w-3" />
@@ -168,6 +200,42 @@ export function CustomersClient({
           </Badge>
         ) : null}
       </div>
+
+      {canEdit && collect ? (
+        <div className="flex flex-wrap items-end gap-3 rounded-md border bg-muted/30 p-2 text-sm" data-testid="customer-downloads">
+          <div className="space-y-1">
+            <label htmlFor="master-since" className="text-xs text-muted-foreground">
+              Changed since (empty = last 24 hours; at most {MASTER_SINCE_MAX_DAYS} days back)
+            </label>
+            <Input
+              id="master-since"
+              type="date"
+              value={since}
+              min={addDaysIso(collect.from, -MASTER_SINCE_MAX_DAYS)}
+              max={collect.from}
+              onChange={(e) => setSince(e.target.value)}
+              className="h-8 w-40"
+            />
+          </div>
+          <Button asChild size="sm" variant="outline">
+            <a href={`/api/customers/master${since ? `?since=${since}` : ''}`} data-testid="download-master">
+              <Download className="me-1 h-4 w-4" />
+              Download customer master
+            </a>
+          </Button>
+          <Button asChild size="sm" variant="outline">
+            <a href="/api/customers/data-to-collect?format=xlsx" data-testid="download-collect">
+              <Download className="me-1 h-4 w-4" />
+              Data to collect (Excel)
+            </a>
+          </Button>
+          <p className="basis-full text-xs text-muted-foreground">
+            The master has every customer, the ones changed since the date, and the ones still missing data
+            {collect.perDepot.length ? ` (${collect.perDepot.map((d) => `${d.code}: ${d.customers}`).join(', ')} with orders from ${collect.from} to ${collect.to})` : ''}. Correct
+            the first sheet and import it back with Import CSV: a blank cell keeps what is saved, and only an admin can change a saved location.
+          </p>
+        </div>
+      ) : null}
 
       <div className="rounded-lg border bg-card">
         <Table>
@@ -195,6 +263,14 @@ export function CustomersClient({
                   <Link className="hover:underline" href={`/t/${slug}/customers/${c.id}`}>
                     {c.name}
                   </Link>
+                  {toCollect[c.id] ? (
+                    <span className="ms-2 inline-flex items-center gap-1 text-xs font-normal" data-testid="to-collect" data-customer={c.code}>
+                      <Badge variant="warning">{toCollect[c.id]!.missing}</Badge>
+                      <span className="text-muted-foreground">
+                        first delivery {toCollect[c.id]!.firstDelivery} ({toCollect[c.id]!.depots.join(', ')})
+                      </span>
+                    </span>
+                  ) : null}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{c.region ? c.region.code : '—'}</TableCell>
                 <TableCell className="text-right font-mono text-xs">

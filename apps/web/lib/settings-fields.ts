@@ -28,6 +28,8 @@ export const SETTINGS_FIELDS = [
   'roadTimeFactor',
   'distanceMultiplier',
   'avgSpeedKmh',
+  'requireDataBeforeLoading',
+  'dataCollectDays',
 ] as const satisfies readonly (keyof TenantConfig)[];
 
 export type SettingsField = (typeof SETTINGS_FIELDS)[number];
@@ -38,7 +40,11 @@ export type EditableConfig = Pick<TenantConfig, SettingsField>;
  * 2026): the driver shift - first departure, the shift maximum (the latest return is first
  * departure + shift maximum) and when overtime starts. Every other setting (cost rates, routing,
  * the company) stays company-admin data. Every save is in the audit log. Also the driver break
- * (length and the window it may start in).
+ * (length and the window it may start in), and the days ahead of the data-to-collect list (1 Oct
+ * 2026). The loading rule itself (`requireDataBeforeLoading`, "no truck is loaded unless every
+ * pre-sales order has a location and a delivery window") is a management control over the
+ * dispatcher's own loads: only a company admin switches it (a dispatcher who could switch it off,
+ * lock a load and switch it on again would bypass it).
  */
 export const DISPATCHER_SETTINGS_FIELDS = [
   'shiftStartMin',
@@ -47,6 +53,7 @@ export const DISPATCHER_SETTINGS_FIELDS = [
   'driverBreakMinutes',
   'driverBreakFromMin',
   'driverBreakToMin',
+  'dataCollectDays',
 ] as const satisfies readonly SettingsField[];
 export type DispatcherField = (typeof DISPATCHER_SETTINGS_FIELDS)[number];
 export type DispatcherConfig = Pick<TenantConfig, DispatcherField>;

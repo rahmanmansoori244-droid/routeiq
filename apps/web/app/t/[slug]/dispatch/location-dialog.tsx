@@ -11,7 +11,7 @@ import { Label } from '@/components/ui/label';
 import { api } from './client-api';
 import { createLocationRequests, type LocationRequests } from './location-requests';
 import { notExactMessage, type ServiceArea } from '@/lib/dispatch/location-input';
-import { savedPointProblem } from '@/lib/dispatch/customer-attrs';
+import { LOCATION_ADMIN_ONLY_MESSAGE, LOCKED_NOT_EXACT_MESSAGE, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -49,6 +49,12 @@ interface Props {
    * pin outside it that no dispatcher confirmed is not saved again as it is (A5 review).
    */
   serviceArea: ServiceArea;
+  /**
+   * Owner decision 1 Oct 2026 (location admin-lock): the customer has a usable saved location and the
+   * user is not an admin, so only the saved point can be confirmed as it is; any other point is
+   * refused (403 LOCATION_ADMIN_ONLY, the server checks it again).
+   */
+  locked?: boolean;
   onSaved: () => void;
 }
 
@@ -74,7 +80,7 @@ interface Props {
  * test, with the reason as the note: not exact, outside the area, or latitude and longitude swapped).
  * The server checks all of this again (PUT /api/customers/:id/location).
  */
-export function LocationDialog({ open, onOpenChange, customer, depot, serviceArea, onSaved }: Props) {
+export function LocationDialog({ open, onOpenChange, customer, depot, serviceArea, locked = false, onSaved }: Props) {
   const [input, setInput] = useState('');
   const [parse, setParse] = useState<ParseResult | null>(null);
   // The text the point on screen was read from: saved as the location's input, never other text typed since.
@@ -161,11 +167,15 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
   // Why that saved pin cannot be saved as it is (null = it can): the server's test, with the company's area.
   const savedProblem = savedAsIs && customer ? savedPointProblem(customer, serviceArea) : null;
   const savedNotExact = savedProblem !== null;
-  const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved) && !savedNotExact;
+  // Locked (a dispatcher, a usable saved location): only the saved point as it is can be saved, so the
+  // input, Read and the map pin are not offered. A saved point that is not exact cannot be saved as it
+  // is either: only an admin can fix it, and the dialog says so in one message (data collection review).
+  const lockedNotExact = locked && !!customer && savedPointProblem(customer, serviceArea) !== null;
+  const canSave = !!pin && (!textUnread || pinMoved) && (!needsConfirmation || pinMoved) && !savedNotExact && (!locked || savedAsIs);
   // What to do, in the owner's words (not while the text on screen waits for a Read: that note says it).
   // A pair padded with zeros says why first (owner decision of 28 Sep 2026: only one zero at the end
   // counts, and the text on screen looks like 4 decimals); the server's 422 says the same.
-  const pinNote = pinMoved || textUnread || reading
+  const pinNote = pinMoved || textUnread || reading || lockedNotExact
     ? null
     : needsConfirmation
       ? parse?.ok
@@ -236,25 +246,34 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
+          {locked ? (
+            <p className="rounded-md border border-amber-300 bg-amber-50 p-2 text-xs font-medium text-amber-900" data-testid="location-admin-only">
+              {lockedNotExact ? LOCKED_NOT_EXACT_MESSAGE : `${LOCATION_ADMIN_ONLY_MESSAGE} You can confirm the saved location as it is. If it is wrong, ask your company admin to change it.`}
+            </p>
+          ) : null}
           <div className="space-y-1">
-            <Label htmlFor="loc-input">Google Maps link or “latitude, longitude”</Label>
-            <div className="flex gap-2">
-              <Input
-                id="loc-input"
-                value={input}
-                placeholder="https://maps.app.goo.gl/…  or  23.5880, 58.4081"
-                onChange={(e) => changeInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    void preview();
-                  }
-                }}
-              />
-              <Button type="button" variant="secondary" onClick={preview} disabled={busy || !input.trim()} data-testid="read-location">
-                {reading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Read'}
-              </Button>
-            </div>
+            {locked ? null : (
+              <>
+                <Label htmlFor="loc-input">Google Maps link or “latitude, longitude”</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="loc-input"
+                    value={input}
+                    placeholder="https://maps.app.goo.gl/…  or  23.5880, 58.4081"
+                    onChange={(e) => changeInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void preview();
+                      }
+                    }}
+                  />
+                  <Button type="button" variant="secondary" onClick={preview} disabled={busy || !input.trim()} data-testid="read-location">
+                    {reading ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Read'}
+                  </Button>
+                </div>
+              </>
+            )}
             {unreadNote ? (
               <p className="text-xs font-medium text-amber-800" data-testid="location-text-unread">
                 {unreadNote}
@@ -297,7 +316,9 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
             lat={pin?.lat ?? null}
             lng={pin?.lng ?? null}
             center={depot}
+            readOnly={locked}
             onChange={(lat, lng) => {
+              if (locked) return;
               // The dispatcher's own pin wins over a Read still on its way.
               reqs.inputChanged();
               setReading(false);
@@ -317,7 +338,7 @@ export function LocationDialog({ open, onOpenChange, customer, depot, serviceAre
             Cancel
           </Button>
           <Button onClick={save} disabled={!canSave || busy} data-testid="save-location">
-            {outsideConfirm ? 'Confirm & save' : 'Save location'}
+            {outsideConfirm ? 'Confirm & save' : lockedNotExact ? 'Ask an admin' : locked ? 'Confirm saved location' : 'Save location'}
           </Button>
         </DialogFooter>
       </DialogContent>

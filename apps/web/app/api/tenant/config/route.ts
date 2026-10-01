@@ -48,8 +48,10 @@ const same = (a: unknown, b: unknown) => (typeof a === 'number' && typeof b === 
 
 /**
  * A company admin saves any setting. The dispatcher (PLANNER role and up, owner decision 29 Sep
- * 2026) saves only the driver shift (DISPATCHER_SETTINGS_FIELDS) and gets back only those fields:
- * the cost rates and the routing address stay admin data. Both are audited the same way.
+ * 2026) saves only the driver shift and the days ahead of the data to collect
+ * (DISPATCHER_SETTINGS_FIELDS) and gets back only those fields: the cost rates, the routing address
+ * and the loading rule (a management control over the dispatcher's own loads) stay admin data. Both
+ * are audited the same way.
  */
 export const PATCH = withTenantApi(
   async (req, { user, ip }) => {
@@ -62,7 +64,7 @@ export const PATCH = withTenantApi(
     if (refused.length) {
       return fail(
         {
-          error: `Only a company admin can change ${refused.join(', ')}. A dispatcher can change the driver shift: first departure, shift maximum (latest return), overtime after and the driver break (length, earliest and latest start). Nothing was saved.`,
+          error: `Only a company admin can change ${refused.join(', ')}. A dispatcher can change the driver shift: first departure, shift maximum (latest return), overtime after and the driver break (length, earliest and latest start); and the days ahead of the data to collect. Nothing was saved.`,
           code: 'ADMIN_ONLY_SETTING',
           fields: refused,
         },

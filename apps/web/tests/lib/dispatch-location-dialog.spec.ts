@@ -596,3 +596,51 @@ describe("LocationDialog: the owner's location rule (audit PR A5)", () => {
     expect(u.puts().at(-1)!.init.json.resolvedUrl).toBeUndefined();
   });
 });
+
+// Owner decision 1 Oct 2026 (item 5, location admin-lock): a dispatcher may only fill a missing
+// location; changing a saved one needs the company admin. Data collection review: the locked dialog
+// said "You can confirm the saved location as it is" for a saved point that is not exact, which can
+// never be saved as it is (and a pin dropped by hand is a change): Save stayed off with nothing saying
+// why. Now it says plainly that only an admin can fix it, and offers nothing that cannot be saved.
+describe('LocationDialog locked for a dispatcher (a usable saved location)', () => {
+  const B_MEDIUM = { ...B, lat: 23.6786, lng: 57.8859, locationVerified: false, geocodeConfidence: 'MEDIUM' };
+  const note = (t: ReturnType<typeof setup>) => textOf(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'location-admin-only') ?? null);
+  const map = (t: ReturnType<typeof setup>) => elements(t.host.tree).find((e) => typeName(e) === 'PinMapStub');
+
+  it('a saved point that is not exact: one plain message (only an admin can fix it), no input, Read or map pin to change, and Save says "Ask an admin" (off)', () => {
+    const t = setup();
+    t.host.render({ locked: true });
+    t.openFor(B_MEDIUM);
+    expect(note(t)).toBe("This saved location is not exact and only an admin can change it. Ask your company admin to drop the pin on the customer's exact location.");
+    expect(textOf(t.host.tree)).not.toMatch(/You can confirm/);
+    expect(textOf(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'location-pin-required') ?? null)).toBe('');
+    expect(t.input()).toBeUndefined();
+    expect(elements(t.host.tree).find((e) => e.props?.['data-testid'] === 'read-location')).toBeUndefined();
+    expect(map(t)!.props.readOnly).toBe(true);
+    expect(t.saveBtn().props.disabled).toBe(true);
+    expect(textOf(t.saveBtn())).toBe('Ask an admin');
+    t.save();
+    expect(t.puts()).toEqual([]);
+  });
+
+  it('an exact saved point: it can be confirmed as it is (the only save offered); nothing else can be read or dropped', () => {
+    const t = setup();
+    t.host.render({ locked: true });
+    t.openFor(B_PINNED);
+    expect(note(t)).toBe('Only an admin can change a saved location. You can confirm the saved location as it is. If it is wrong, ask your company admin to change it.');
+    expect(t.input()).toBeUndefined();
+    expect(map(t)!.props.readOnly).toBe(true);
+    expect(t.saveBtn().props.disabled).toBe(false);
+    expect(textOf(t.saveBtn())).toBe('Confirm saved location');
+    t.save();
+    expect(t.puts()[0].init.json).toMatchObject({ lat: 23.6786, lng: 57.8859, source: 'MAP_PIN' });
+  });
+
+  it('not locked (no usable location, or an admin): the input, Read and the map pin work as before', () => {
+    const t = setup();
+    t.openFor(B_MEDIUM);
+    expect(note(t)).toBe('');
+    expect(t.input()).toBeDefined();
+    expect(map(t)!.props.readOnly).toBeFalsy();
+  });
+});

@@ -7,7 +7,7 @@ import { MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { LocationDialog } from '../../dispatch/location-dialog';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
-import { locationIssue } from '@/lib/dispatch/customer-attrs';
+import { LOCATION_ADMIN_ONLY_MESSAGE, LOCKED_NOT_EXACT_MESSAGE, locationIssue, savedLocationLocked, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 const PinMap = dynamic(() => import('@/components/pin-map').then((m) => m.PinMap), { ssr: false });
 
@@ -27,6 +27,8 @@ interface Props {
   /** The company's delivery area: the dialog judges the saved pin with it, as the server does. */
   serviceArea: ServiceArea;
   canEdit: boolean;
+  /** TENANT_ADMIN or SUPER_ADMIN: may change a usable saved location (owner decision 1 Oct 2026, item 5). */
+  isAdmin?: boolean;
 }
 
 /**
@@ -36,7 +38,7 @@ interface Props {
  * PUT /api/customers/:id/location. The page used to save a map click or two typed numbers through
  * PATCH /api/customers/:id as a verified HIGH location, with no check at all.
  */
-export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props) {
+export function CustomerEditor({ customer, center, serviceArea, canEdit, isAdmin = false }: Props) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   // The customer as it was when the dialog was opened: one object for the whole dialog (a new one on
@@ -47,6 +49,11 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props
   // the company's area, or 0,0, and nobody confirmed it. The day card's words, on this page too.
   const issue = has ? locationIssue(customer, serviceArea) : null;
   const blocked = issue?.blocking ? issue.message : null;
+  // Item 5: a dispatcher may set a location only while there is no usable one (only an admin changes it).
+  const locked = savedLocationLocked(isAdmin, customer, serviceArea);
+  // A usable saved point that is not exact cannot be confirmed as it is: only an admin can fix it, so
+  // the dispatcher is told so and offered nothing (data collection review).
+  const lockedNotExact = locked && savedPointProblem(customer, serviceArea) !== null;
   function openDialog() {
     setTarget({
       customerId: customer.id,
@@ -73,18 +80,25 @@ export function CustomerEditor({ customer, center, serviceArea, canEdit }: Props
             ? `Pin: ${customer.lat!.toFixed(6)}, ${customer.lng!.toFixed(6)} (${blocked ? 'not usable' : customer.locationVerified ? 'confirmed by a dispatcher' : 'from an import, not confirmed'})`
             : 'No location yet: nothing is delivered to this customer until it has one.'}
         </p>
-        {canEdit ? (
+        {canEdit && !lockedNotExact ? (
           <Button size="sm" onClick={openDialog} data-testid="set-location">
-            Set location
+            {locked ? 'Confirm location' : 'Set location'}
           </Button>
         ) : null}
       </div>
+      {canEdit && locked ? (
+        <p className={`text-xs ${lockedNotExact ? 'text-amber-800' : 'text-muted-foreground'}`} data-testid="customer-location-admin-only">
+          {lockedNotExact
+            ? LOCKED_NOT_EXACT_MESSAGE
+            : `${LOCATION_ADMIN_ONLY_MESSAGE} You can confirm the saved location as it is; if it is wrong, ask your company admin to change it.`}
+        </p>
+      ) : null}
       {blocked ? (
         <p className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700" data-testid="customer-location-blocked">
           {`${blocked} Its orders are not planned or sent out until then.`}
         </p>
       ) : null}
-      <LocationDialog open={open} onOpenChange={setOpen} customer={target} depot={center} serviceArea={serviceArea} onSaved={() => router.refresh()} />
+      <LocationDialog open={open} onOpenChange={setOpen} customer={target} depot={center} serviceArea={serviceArea} locked={locked} onSaved={() => router.refresh()} />
     </div>
   );
 }

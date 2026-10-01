@@ -5,6 +5,7 @@
 import { Prisma } from '@prisma/client';
 import { tenantDb } from '../tenant';
 import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
+import { leftOutWhole, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTimeColumns } from './order-window';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
 import { feasibilityInputFromRows, isDispatchDetails, legacyPlanFacts, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
@@ -21,6 +22,7 @@ import {
   type LoadBreak,
   type MasterChange,
   type PlanSettings,
+  type StopFacts,
 } from './snapshots';
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
@@ -52,8 +54,11 @@ export interface DetailStop {
   serviceStartMin: number | null;
   departureMin: number | null;
   waitMin: number | null;
+  /** The hours the stop was planned with: "Promised 10:00–11:00" when an order of it had its own delivery time. */
   window: string;
   hardWindow: string | null;
+  /** "Promised 10:00–11:00" (urgent / promised time of one of its orders, owner decision 1 Oct 2026); null = the customer's hours. */
+  promised: string | null;
   serviceMin: number;
   cases: number;
   weightKg: number;
@@ -328,9 +333,10 @@ export interface CarrySummary {
 }
 
 /** "hard 06:00–14:00, preferred 07:00–10:00" from planned hours (describeWindows reads only these four). */
-function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | null; prefStartMin: number | null; prefEndMin: number | null }) {
+function plannedWindows(h: { hardStartMin: number | null; hardEndMin: number | null; prefStartMin: number | null; prefEndMin: number | null; promised?: StopFacts['promised'] }) {
   const eff = { hardStart: h.hardStartMin, hardEnd: h.hardEndMin, prefStart: h.prefStartMin, prefEnd: h.prefEndMin } as EffectiveAttrs;
-  return { window: describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null };
+  const promised = h.promised ? promisedText(h.promised) : null;
+  return { window: promised ?? describeWindows(eff), hardWindow: h.hardStartMin !== null || h.hardEndMin !== null ? fmtWindow(h.hardStartMin, h.hardEndMin) : null, promised };
 }
 
 /** How long the consistent read may wait for a connection and run (it takes no locks). */
@@ -405,6 +411,36 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const depotPoint = inputs ? { lat: inputs.depot.lat, lng: inputs.depot.lng } : { lat: run.depot.lat, lng: run.depot.lng };
   // Stops that carry split portions, for the "Part k of n" labels across the whole plan.
   const portionStops: { stop: DetailStop; customerId: string; portion: boolean; departMin: number; truckCode: string; sequence: number }[] = [];
+  // The delivery time a stop would be planned with now (order-window): one visit per customer, so with
+  // all of its customer's orders in this plan - on every load and left unserved - as the plan was made
+  // (every part of a split customer carries the time of any of its orders; data collection review),
+  // not only the part on this load.
+  type VisitOrder = OrderTimeColumns & { id: string; lines: { id: string; cases: number }[] };
+  const visitOrders = new Map<string, Map<string, VisitOrder>>();
+  const addVisitOrder = (customerId: string, o: VisitOrder) => {
+    const m = visitOrders.get(customerId) ?? new Map<string, VisitOrder>();
+    m.set(o.id, o);
+    visitOrders.set(customerId, m);
+  };
+  for (const l of loads) for (const a of l.assignments) addVisitOrder(a.order.customerId, a.order);
+  const unservedIds = (chosen?.unservedOrders ?? []).map((u) => u.orderId);
+  if (unservedIds.length) {
+    const times = await db.order.findMany({
+      where: { tenantId, id: { in: unservedIds } },
+      select: { id: true, customerId: true, deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true, lines: { select: { id: true, cases: true } } },
+    });
+    for (const o of times) addVisitOrder(o.customerId, o);
+  }
+  const placements: OrderPlacement[] = loads.flatMap((l) =>
+    l.assignments.map((a) => ({
+      orderId: a.orderId,
+      frozen: l.status !== 'PLANNED',
+      lines: readPortionLines(a.portionLinesJson),
+      capturedAt: readStopSnapshot(a.stopSnapshotJson)?.capturedAt ?? null,
+    })),
+  );
+  // Orders the chosen option left unserved whole as heavier than any truck: not in its stops' visits.
+  const tooHeavy = leftOutWhole(chosen?.unservedOrders ?? []);
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -464,6 +500,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         waitMin: a.waitMin,
         window: planned ? planned.window : describeWindows(eff),
         hardWindow: planned ? planned.hardWindow : eff.hardStart !== null || eff.hardEnd !== null ? fmtWindow(eff.hardStart, eff.hardEnd) : null,
+        promised: planned ? planned.promised : null,
         // Show the unloading time the optimizer scheduled (a split part's share, plus the
         // per-case time when the tenant sets one); the customer's own time when not scheduled.
         serviceMin: a.departureMin !== null && a.serviceStartMin !== null ? a.departureMin - a.serviceStartMin : eff.serviceMin,
@@ -486,16 +523,23 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         split: null,
         snapshot: !!snap,
         masterChanged: snap
-          ? stopMasterChanges(snap, {
-              name: c.name,
-              address: c.address,
-              lat: c.lat,
-              lng: c.lng,
-              hardStartMin: eff.hardStart,
-              hardEndMin: eff.hardEnd,
-              prefStartMin: eff.prefStart,
-              prefEndMin: eff.prefEnd,
-            })
+          ? (() => {
+              // As the stop would be planned now: its customer's orders' own delivery time, else its hours.
+              // The chosen option's left-out orders only for its own stops (a frozen one may be older).
+              const leftOut = l.status === 'PLANNED' ? tooHeavy : undefined;
+              const sw = stopWindowFor(eff, plannedVisitOrders([...(visitOrders.get(c.id)?.values() ?? [o])], placements, snap.capturedAt, leftOut));
+              return stopMasterChanges(snap, {
+                name: c.name,
+                address: c.address,
+                lat: c.lat,
+                lng: c.lng,
+                hardStartMin: sw.hardStart,
+                hardEndMin: sw.hardEnd,
+                prefStartMin: sw.prefStart,
+                prefEndMin: sw.prefEnd,
+                promised: sw.promised,
+              });
+            })()
           : [],
         carriedFrom: cameFrom,
         carriedTo: wentTo,

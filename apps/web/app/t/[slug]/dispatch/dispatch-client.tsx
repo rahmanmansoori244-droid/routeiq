@@ -16,12 +16,16 @@ import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
+import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
+import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
+import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
+import { locationButtonText, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 
 interface Issue {
   code: string;
@@ -40,6 +44,10 @@ interface IssueCustomer extends EditableCustomer {
   issues: Issue[];
   blocking: boolean;
   inactive?: boolean;
+  /** The hours in use (own, else customer type): what an order's delivery time is prefilled from. */
+  effWindow?: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
+  /** Each order of the day with its own delivery time (urgent / promised) if it has one. */
+  orderTimes?: DayOrderTimeRow[];
 }
 interface WeightGap {
   code: string;
@@ -102,6 +110,10 @@ interface Day {
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
   /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
   serviceArea: ServiceArea;
+  /** Settings (owner decisions 1 Oct 2026): the loading rule, and the days ahead of the data to collect. */
+  dataRule?: { on: boolean; days: number };
+  /** With the loading rule on: this day's customers without a usable location or a delivery window. */
+  loadingGaps?: DataGap[];
 }
 interface Validation {
   totalRows: number;
@@ -543,26 +555,20 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       </Step>
 
       {/* STEP 2 */}
-      <Step
-        n={2}
-        title="Resolve issues"
-        done={day.orders.count > 0 && blocking.length === 0}
-        warn={blocking.length > 0}
-        summary={blocking.length ? blockingSummary : day.orders.count ? 'All delivery locations known' : '—'}
-      >
+      <Step n={2} title="Resolve issues" {...resolveIssuesStep({ orders: day.orders.count, blocking: blocking.length, blockingSummary, ruleOn: !!day.dataRule?.on, loadingGaps: day.loadingGaps?.length ?? 0 })}>
         {blocking.length ? (
           <div className="grid gap-2 md:grid-cols-2" data-testid="blocking-issues">
             {blocking.map((c) => (
-              <IssueCard key={c.customerId} c={c} canPlan={canPlan} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+              <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} serviceArea={day.serviceArea} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
             ))}
           </div>
         ) : null}
         {notes.length ? (
           <details className="rounded-md border p-2 text-sm" open={blocking.length === 0 && notes.length <= 6}>
-            <summary className="cursor-pointer">{notes.length} customer(s) to confirm (priority / type / receiving hours) — optional, defaults are used</summary>
+            <summary className="cursor-pointer">{confirmNotesSummary(notes.length, !!day.dataRule?.on)}</summary>
             <div className="mt-2 grid gap-2 md:grid-cols-2">
               {notes.slice(0, showAllCustomers ? undefined : 12).map((c) => (
-                <IssueCard key={c.customerId} c={c} canPlan={canPlan} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+                <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} serviceArea={day.serviceArea} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
               ))}
             </div>
             {notes.length > 12 && !showAllCustomers ? (
@@ -571,6 +577,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               </Button>
             ) : null}
           </details>
+        ) : null}
+        {day.dataRule?.on ? <LoadingGapsNote gaps={day.loadingGaps ?? []} /> : null}
+        <DeliveryTimesPanel customers={day.customers} canPlan={canPlan} onSaved={afterCustomerSaved} />
+        {canPlan && day.depot ? (
+          <DataToCollectPanel slug={slug} depotId={day.depot.id} reloadKey={`${day.date}|${day.customers.length}|${day.customers.filter((c) => c.blocking).length}|${day.customers.filter((c) => c.windowConfirmed).length}|${day.loadingGaps?.length ?? 0}`} />
         ) : null}
         {day.productsWithoutWeight.length ? (
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
@@ -671,6 +682,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         customer={locFor}
         depot={{ lat: day.depot.lat, lng: day.depot.lng }}
         serviceArea={day.serviceArea}
+        locked={!!locFor && !canEditProducts && !needsLocation(locFor)}
         onSaved={afterCustomerSaved}
       />
       <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={afterCustomerSaved} />
@@ -695,8 +707,30 @@ function Step({ n, title, done, warn, summary, children }: { n: number; title: s
   );
 }
 
-function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPlan: boolean; onLocation: () => void; onEdit: () => void }) {
-  const needsLoc = c.issues.some((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION');
+/** No usable location (LOCATION_REQUIRED / INVALID_LOCATION: the planner's own test). A dispatcher may set one only then. */
+function needsLocation(c: IssueCustomer): boolean {
+  return c.issues.some((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION');
+}
+
+function IssueCard({
+  c,
+  canPlan,
+  canChangeLocations,
+  serviceArea,
+  onLocation,
+  onEdit,
+}: {
+  c: IssueCustomer;
+  canPlan: boolean;
+  canChangeLocations: boolean;
+  serviceArea: ServiceArea;
+  onLocation: () => void;
+  onEdit: () => void;
+}) {
+  const needsLoc = needsLocation(c);
+  // Owner decision 1 Oct 2026 (item 5): only an admin changes a saved (usable) location; a saved point
+  // that is not exact cannot be confirmed as it is either (data collection review).
+  const locButton = locationButtonText({ needsLocation: needsLoc, isAdmin: canChangeLocations, notExact: savedPointProblem(c, serviceArea) !== null });
   return (
     <div className={`rounded-md border p-2 text-sm ${c.blocking ? 'border-red-300 bg-red-50' : ''}`} data-testid={`issue-${c.code}${c.branchCode ? `-${c.branchCode}` : ''}`}>
       <div className="flex items-start justify-between gap-2">
@@ -717,7 +751,7 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
       ) : (
         <>
           <p className="mt-1 text-xs">
-            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
+            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Receiving hours: {c.windowLabel ?? c.window}
           </p>
           {needsLoc ? (
             <p className="text-xs text-red-700" data-testid={`location-issue-${c.code}`}>
@@ -735,8 +769,14 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
         ))}
       {canPlan && !c.inactive ? (
         <div className="mt-2 flex gap-2">
-          <Button size="sm" variant={needsLoc ? 'default' : 'outline'} onClick={onLocation} data-testid={`add-location-${c.code}`}>
-            <MapPin className="mr-1 h-3 w-3" /> {needsLoc ? 'ADD LOCATION' : 'Location'}
+          <Button
+            size="sm"
+            variant={needsLoc ? 'default' : 'outline'}
+            onClick={onLocation}
+            title={locButton.title}
+            data-testid={`add-location-${c.code}`}
+          >
+            <MapPin className="mr-1 h-3 w-3" /> {locButton.label}
           </Button>
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="mr-1 h-3 w-3" /> Details

@@ -152,4 +152,30 @@ describe('PATCH /api/tenant/config as the dispatcher (PLANNER, owner decision 29
     expect(state.updates).toEqual([]);
     expect(state.audits).toEqual([]);
   });
+
+  it('the loading rule is a management control: a dispatcher (or supervisor) cannot switch it off or on (403), only the days ahead of the data to collect', async () => {
+    state.config.requireDataBeforeLoading = true;
+    for (const role of ['PLANNER', 'SUPERVISOR']) {
+      state.role = role;
+      for (const value of [false, true]) {
+        const res = await patch({ config: { requireDataBeforeLoading: value } });
+        expect(res.status, `${role} ${value}`).toBe(403);
+        const body = await res.json();
+        expect(body.error).toMatchObject({ code: 'ADMIN_ONLY_SETTING', fields: ['requireDataBeforeLoading'] });
+        // The refusal no longer says a dispatcher can change the loading rule.
+        expect(JSON.stringify(body)).not.toMatch(/location and delivery window before loading/);
+      }
+    }
+    expect(state.config.requireDataBeforeLoading).toBe(true);
+    expect(state.updates).toEqual([]);
+    expect(state.audits).toEqual([]);
+    state.role = 'PLANNER';
+    expect((await patch({ config: { dataCollectDays: 5 } })).status).toBe(200);
+    expect(state.config.dataCollectDays).toBe(5);
+    expect(DISPATCHER_SETTINGS_FIELDS as readonly string[]).not.toContain('requireDataBeforeLoading');
+    // The company admin switches it.
+    state.role = 'TENANT_ADMIN';
+    expect((await patch({ config: { requireDataBeforeLoading: false } })).status).toBe(200);
+    expect(state.config.requireDataBeforeLoading).toBe(false);
+  });
 });

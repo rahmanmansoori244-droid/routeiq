@@ -128,6 +128,8 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
     masterChanged?: DetailStop['masterChanged'];
     /** When unloading is finished (the planned departure from the stop); absent = not shown. */
     departureMin?: DetailStop['departureMin'];
+    /** "Promised 10:00–11:00": an urgent / promised delivery time (owner decision 1 Oct 2026); absent / null = none. */
+    promised?: DetailStop['promised'];
   })[];
 };
 
@@ -160,7 +162,7 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   for (const s of stops) {
     const part = s.split ? ` · part ${s.split.part}/${s.split.parts}` : '';
     const until = s.departureMin !== null && s.departureMin !== undefined ? ` (unload until ${fmtHhmm(s.departureMin)})` : '';
-    lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)}${until} ${stopTitle(s)} · ${s.cases} cs${part}`);
+    lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)}${until} ${stopTitle(s)} · ${s.cases} cs${part}${s.promised ? ` · *${s.promised}*` : ''}`);
     lines.push(pinUrl(s) ?? 'No location - call dispatcher');
     for (const c of s.masterChanged ?? []) {
       lines.push(`! ${c.text}`);

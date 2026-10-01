@@ -85,9 +85,14 @@ const CHANGED: Record<string, unknown> = {
   defaultServiceTimeMin: 25, maxTripsPerTruck: 2, splitDeliveries: false, planningCutoffMin: 1020, dateOrder: 'MDY', fuelPricePerLitre: 0.3,
   driverCostPerHour: 3, overtimeCostPerHour: 6, prefWindowPenaltyPerMin: 0.2, distanceProvider: 'HAVERSINE', roadTimeFactor: 1.4,
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
+  requireDataBeforeLoading: true, dataCollectDays: 5,
 };
-/** Read by the order intake, not by the optimizer request (checked against their consumer below). */
-const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder']);
+/**
+ * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
+ * the customer data rules of 1 Oct 2026, which never change a plan: the loading gate (LOCK / LOADING /
+ * DISPATCH, plan-lifecycle.spec) and the data-to-collect list (data-collection-master.spec).
+ */
+const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays']);
 
 beforeEach(() => {
   customers = [customer('C1', 23.6, 58.4), customer('C2', 23.55, 58.3)];

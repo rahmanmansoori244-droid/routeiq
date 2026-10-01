@@ -2,7 +2,10 @@ import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
-import { CUSTOMER_SERVICE_COLUMN_DEFAULT } from '@/lib/dispatch/customer-attrs';
+import { CUSTOMER_SERVICE_COLUMN_DEFAULT, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
+import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
+import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { canManageMasterData } from '@/lib/rbac';
 
 interface Params { params: { id: string } }
 
@@ -51,12 +54,69 @@ export const PATCH = (req: Request, { params }: Params) =>
         if (!region) return fail('Region not found in this tenant', 400);
       }
 
-      const data: Record<string, unknown> = { ...input };
+      const { windowConfirmed, ...fields } = input;
+      const data: Record<string, unknown> = { ...fields };
+      // Owner decision 1 Oct 2026 ("own confirmed window"): receiving hours a dispatcher or admin
+      // enters are confirmed by them (who and when are kept; the change is in the audit row below).
+      // Explicit windowConfirmed true with no hours = open all day; all hours cleared = not confirmed
+      // (the customer-type or company default applies again).
+      const windowsSent = windows.some(([a, b]) => input[a] !== undefined || input[b] !== undefined);
+      const anyHours = windows.some(([a, b]) => (input[a] !== undefined ? input[a] : before[a]) !== null || (input[b] !== undefined ? input[b] : before[b]) !== null);
+      const confirm = windowConfirmed ?? (windowsSent ? anyHours : undefined);
+      if (confirm !== undefined) {
+        data.windowConfirmedAt = confirm ? new Date() : null;
+        data.windowConfirmedById = confirm ? user.id : null;
+      }
       if (Object.prototype.hasOwnProperty.call(input, 'branchCode')) {
         data.branchKey = normalizeBranchKey(input.branchCode);
       }
       const code = input.code ?? before.code;
       const branchKey = (data.branchKey as string | undefined) ?? before.branchKey;
+      const isAdmin = canManageMasterData(user.role);
+      // Owner decision 1 Oct 2026 (item 5, location admin-lock "on every write path"): orders are
+      // matched to customers by code and branch (letter case aside). Renaming a customer with a usable
+      // saved location away, then creating one (or letting an order file create one) under its old
+      // code, would send every order of that code to a point the dispatcher chose: only an admin
+      // changes the code or branch of such a customer.
+      if (
+        customerKey(code, branchKey) !== customerKey(before.code, before.branchKey) &&
+        savedLocationLocked(isAdmin, before, await tenantServiceArea(user.tenantId))
+      ) {
+        return fail(
+          {
+            code: 'LOCATION_ADMIN_ONLY',
+            message: `Only an admin can change the code or branch of a customer with a saved location: orders are matched to the customer by its code and branch. Ask your company admin. Nothing was saved.`,
+          } as Record<string, unknown>,
+          403,
+        );
+      }
+      // The same rule for (de)activating one of two customers whose codes differ only in letter case
+      // (third review): the order intake sends a code's orders to one of them (preferredCustomer: the
+      // active one first, then the one with a location). Moving them away from the one with a usable
+      // saved location, to a twin whose location a dispatcher may fill (or one saved elsewhere), changes
+      // where they are delivered: only an admin does it. Moving them to the one with the saved point,
+      // from a twin without a usable one, only fills a missing location and stays allowed.
+      if (!isAdmin && input.active !== undefined && input.active !== before.active) {
+        const key = customerKey(before.code, before.branchKey);
+        const twins = (
+          await db.customer.findMany({
+            where: { id: { not: before.id }, code: { equals: before.code, mode: 'insensitive' }, branchKey: { equals: before.branchKey, mode: 'insensitive' } },
+            select: { id: true, code: true, branchCode: true, branchKey: true, name: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true },
+          })
+        ).filter((t) => customerKey(t.code, t.branchKey) === key);
+        const matched = twins.length ? preferredCustomer([before, ...twins]) : undefined;
+        const next = twins.length ? preferredCustomer([{ ...before, active: input.active }, ...twins]) : undefined;
+        if (matched && next && matched.id !== next.id && savedLocationLocked(isAdmin, matched, await tenantServiceArea(user.tenantId))) {
+          const label = (c: { code: string; branchCode: string | null; name: string }) => `${c.code}${c.branchCode ? ` / ${c.branchCode}` : ''} (${c.name})`;
+          return fail(
+            {
+              code: 'LOCATION_ADMIN_ONLY',
+              message: `Only an admin can ${input.active ? 'reactivate' : 'deactivate'} this customer: new orders of its code would then go to ${label(next)} instead of ${label(matched)}, which has a saved location (codes are the same whatever the letter case). Ask your company admin. Nothing was saved.`,
+            } as Record<string, unknown>,
+            403,
+          );
+        }
+      }
       if (code !== before.code || branchKey !== before.branchKey) {
         // Codes are one customer whatever their letter case (the order intake matches them so).
         const twin = await db.customer.findFirst({

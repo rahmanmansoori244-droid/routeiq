@@ -14,6 +14,10 @@
  *   alone was merged by the route with the other end as stored, which a form opened earlier may no
  *   longer show, so a window nobody typed could be saved (06:00-10:00 on screen, 12:00-15:00 stored
  *   since, end set to 16:00: 12:00-16:00 saved).
+ * - Own confirmed window (owner decision 1 Oct 2026): hours typed here are confirmed by the server
+ *   (who and when); "Open all day" confirms a customer who accepts any time (no hours, and the
+ *   customer-type default no longer applies); "Hours confirmed with the customer" confirms the hours
+ *   shown without changing them (sent whole). Clearing every hour leaves the customer unconfirmed.
  */
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
@@ -33,6 +37,8 @@ export interface DetailsCustomer {
   hardWindowEndMin: number | null;
   prefWindowStartMin: number | null;
   prefWindowEndMin: number | null;
+  /** An own confirmed window (owner decision 1 Oct 2026): the hours were entered or confirmed by a dispatcher or admin. Absent = not confirmed. */
+  windowConfirmed?: boolean;
 }
 
 /** The form as typed. '' = not set / the default applies. */
@@ -46,6 +52,10 @@ export interface DetailsForm {
   hardEnd: string;
   prefStart: string;
   prefEnd: string;
+  /** "Open all day": the customer accepts deliveries at any time (confirmed, no hours). Absent = false. */
+  openAllDay?: boolean;
+  /** "Hours confirmed with the customer" ticked. Absent = false. */
+  confirmHours?: boolean;
 }
 
 /** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
@@ -58,9 +68,11 @@ export interface DetailsPatch {
   hardWindowEndMin?: number | null;
   prefWindowStartMin?: number | null;
   prefWindowEndMin?: number | null;
+  /** true = the hours as sent (or as stored) are confirmed; sent for "Open all day" and for confirming unchanged hours. */
+  windowConfirmed?: boolean;
 }
 
-export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '' };
+export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false };
 
 const isOwn = (source: string | undefined) => source === undefined || source === 'CUSTOMER';
 
@@ -82,6 +94,8 @@ export function detailsFormOf(c: DetailsCustomer): DetailsForm {
     hardEnd: windowText(c.hardWindowEndMin),
     prefStart: windowText(c.prefWindowStartMin),
     prefEnd: windowText(c.prefWindowEndMin),
+    openAllDay: !!c.windowConfirmed && [c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin].every((v) => v === null),
+    confirmHours: !!c.windowConfirmed,
   };
 }
 
@@ -129,7 +143,8 @@ export type DetailsResult = { ok: true; patch: DetailsPatch } | { ok: false; err
  * end alone.
  */
 export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsResult {
-  const nowTimes = readTimes(now);
+  // "Open all day": the hours on screen are not used (the boxes are off), so they are not checked.
+  const nowTimes = now.openAllDay ? readTimes(EMPTY_DETAILS) : readTimes(now);
   if (!nowTimes.ok) return nowTimes;
   const t = nowTimes.times;
   for (const [a, b, , , label] of WINDOWS) {
@@ -148,12 +163,37 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   if (now.priority !== initial.priority && now.priority !== '') patch.priority = Number(now.priority);
   const before = parseServiceMinutes(initial.service);
   if (!before.ok || before.minutes !== service.minutes) patch.avgServiceTimeMin = service.minutes;
+  // Receiving hours (owner decision 1 Oct 2026, "own confirmed window"): hours the dispatcher enters
+  // are confirmed by the server; "Open all day" is confirmed with no hours; ticking "confirmed with
+  // the customer" confirms the hours as shown (sent whole, so what is confirmed is what was seen).
+  const all = (patchTimes: Times) => {
+    for (const [a, b, fa, fb] of WINDOWS) {
+      patch[fa] = patchTimes[a];
+      patch[fb] = patchTimes[b];
+    }
+  };
+  if (now.openAllDay) {
+    if (!initial.openAllDay) {
+      all(t);
+      patch.windowConfirmed = true;
+    }
+    return { ok: true, patch };
+  }
   const was = readTimes(initial);
+  let changed = false;
   for (const [a, b, fa, fb] of WINDOWS) {
     if (!was.ok || was.times[a] !== t[a] || was.times[b] !== t[b]) {
       patch[fa] = t[a];
       patch[fb] = t[b];
+      changed = true;
     }
+  }
+  const anyHours = Object.values(t).some((v) => v !== null);
+  // "Open all day" switched off: the hours as on screen (none = not confirmed any more).
+  if (initial.openAllDay && !changed) all(t);
+  else if (!changed && now.confirmHours && !initial.confirmHours && anyHours) {
+    all(t);
+    patch.windowConfirmed = true;
   }
   return { ok: true, patch };
 }

@@ -130,7 +130,10 @@ const BADGE: Record<string, string> = {
   COMPLETED: 'COMPLETED',
 };
 
-/** "hard 06:00–14:00, preferred 07:00–10:00" (describeWindows) -> driver wording, one per line. */
+/**
+ * "hard 06:00–14:00, preferred 07:00–10:00" (describeWindows) -> driver wording, one per line. An
+ * order's own delivery time reads "Promised 10:00–11:00" (DetailStop.window) and is printed as it is.
+ */
 function hoursLines(window: string): string[] {
   if (!window || window === 'Any time') return ['Any time'];
   return window.split(', ').map((w) => w.replace(/^hard /, 'Receives ').replace(/^preferred /, 'Best '));
