@@ -217,8 +217,8 @@ describe('customerIssues', () => {
   const codes = (c: CustomerForPlanning) => issues(c).map((i) => i.code);
   const blocking = (c: CustomerForPlanning) => issues(c).filter((i) => i.blocking).map((i) => i.code);
 
-  it('a complete, verified customer has no issues', () => {
-    expect(issues(C({ priorityConfirmed: true }))).toEqual([]);
+  it('a complete, verified customer has no issues (receiving hours confirmed: open all day)', () => {
+    expect(issues(C({ priorityConfirmed: true, windowConfirmedAt: new Date() }))).toEqual([]);
   });
 
   it('missing location is blocking', () => {
@@ -239,11 +239,11 @@ describe('customerIssues', () => {
   });
 
   it('outside the service area but verified by a dispatcher is accepted', () => {
-    expect(codes(C({ lat: 51.5, lng: -0.12, locationVerified: true, priorityConfirmed: true }))).toEqual([]);
+    expect(codes(C({ lat: 51.5, lng: -0.12, locationVerified: true, priorityConfirmed: true, windowConfirmedAt: new Date() }))).toEqual([]);
   });
 
   it('an unverified in-area location is a non-blocking warning', () => {
-    const list = issues(C({ locationVerified: false, priorityConfirmed: true }));
+    const list = issues(C({ locationVerified: false, priorityConfirmed: true, windowConfirmedAt: new Date() }));
     expect(list).toEqual([expect.objectContaining({ code: 'LOCATION_UNVERIFIED', blocking: false })]);
   });
 
@@ -261,7 +261,7 @@ describe('customerIssues', () => {
 
   it('uses the given service area', () => {
     const area = { minLat: 20, maxLat: 30, minLng: 40, maxLng: 50 };
-    const c = C({ locationVerified: false, priorityConfirmed: true });
+    const c = C({ locationVerified: false, priorityConfirmed: true, windowConfirmedAt: new Date() });
     expect(customerIssues(c, effectiveAttrs(c, PROFILES, DEFAULTS), area).map((i) => [i.code, i.blocking])).toEqual([['INVALID_LOCATION', true]]);
   });
 });

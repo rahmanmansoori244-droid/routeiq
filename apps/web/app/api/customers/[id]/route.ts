@@ -51,7 +51,19 @@ export const PATCH = (req: Request, { params }: Params) =>
         if (!region) return fail('Region not found in this tenant', 400);
       }
 
-      const data: Record<string, unknown> = { ...input };
+      const { windowConfirmed, ...fields } = input;
+      const data: Record<string, unknown> = { ...fields };
+      // Owner decision 1 Oct 2026 ("own confirmed window"): receiving hours a dispatcher or admin
+      // enters are confirmed by them (who and when are kept; the change is in the audit row below).
+      // Explicit windowConfirmed true with no hours = open all day; all hours cleared = not confirmed
+      // (the customer-type or company default applies again).
+      const windowsSent = windows.some(([a, b]) => input[a] !== undefined || input[b] !== undefined);
+      const anyHours = windows.some(([a, b]) => (input[a] !== undefined ? input[a] : before[a]) !== null || (input[b] !== undefined ? input[b] : before[b]) !== null);
+      const confirm = windowConfirmed ?? (windowsSent ? anyHours : undefined);
+      if (confirm !== undefined) {
+        data.windowConfirmedAt = confirm ? new Date() : null;
+        data.windowConfirmedById = confirm ? user.id : null;
+      }
       if (Object.prototype.hasOwnProperty.call(input, 'branchCode')) {
         data.branchKey = normalizeBranchKey(input.branchCode);
       }

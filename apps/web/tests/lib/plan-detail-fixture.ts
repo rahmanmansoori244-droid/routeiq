@@ -78,6 +78,7 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     waitMin: 5,
     window: 'hard 06:00–14:00, preferred 07:00–10:00',
     hardWindow: '06:00–14:00',
+    promised: null,
     serviceMin: 20,
     cases: casesOf(o),
     weightKg: kgOf(o),

@@ -16,6 +16,7 @@ import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
+import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
 import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
@@ -40,6 +41,10 @@ interface IssueCustomer extends EditableCustomer {
   issues: Issue[];
   blocking: boolean;
   inactive?: boolean;
+  /** The hours in use (own, else customer type): what an order's delivery time is prefilled from. */
+  effWindow?: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
+  /** Each order of the day with its own delivery time (urgent / promised) if it has one. */
+  orderTimes?: DayOrderTimeRow[];
 }
 interface WeightGap {
   code: string;
@@ -553,7 +558,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         {blocking.length ? (
           <div className="grid gap-2 md:grid-cols-2" data-testid="blocking-issues">
             {blocking.map((c) => (
-              <IssueCard key={c.customerId} c={c} canPlan={canPlan} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+              <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
             ))}
           </div>
         ) : null}
@@ -562,7 +567,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             <summary className="cursor-pointer">{notes.length} customer(s) to confirm (priority / type / receiving hours) — optional, defaults are used</summary>
             <div className="mt-2 grid gap-2 md:grid-cols-2">
               {notes.slice(0, showAllCustomers ? undefined : 12).map((c) => (
-                <IssueCard key={c.customerId} c={c} canPlan={canPlan} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
+                <IssueCard key={c.customerId} c={c} canPlan={canPlan} canChangeLocations={canEditProducts} onLocation={() => { setLocFor(c); setLocOpen(true); }} onEdit={() => { setEditFor(c); setEditOpen(true); }} />
               ))}
             </div>
             {notes.length > 12 && !showAllCustomers ? (
@@ -572,6 +577,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             ) : null}
           </details>
         ) : null}
+        <DeliveryTimesPanel customers={day.customers} canPlan={canPlan} onSaved={afterCustomerSaved} />
         {day.productsWithoutWeight.length ? (
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
             No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (
@@ -671,6 +677,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         customer={locFor}
         depot={{ lat: day.depot.lat, lng: day.depot.lng }}
         serviceArea={day.serviceArea}
+        locked={!!locFor && !canEditProducts && !needsLocation(locFor)}
         onSaved={afterCustomerSaved}
       />
       <CustomerDialog open={editOpen} onOpenChange={setEditOpen} customer={editFor} onSaved={afterCustomerSaved} />
@@ -695,8 +702,15 @@ function Step({ n, title, done, warn, summary, children }: { n: number; title: s
   );
 }
 
-function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPlan: boolean; onLocation: () => void; onEdit: () => void }) {
-  const needsLoc = c.issues.some((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION');
+/** No usable location (LOCATION_REQUIRED / INVALID_LOCATION: the planner's own test). A dispatcher may set one only then. */
+function needsLocation(c: IssueCustomer): boolean {
+  return c.issues.some((i) => i.code === 'LOCATION_REQUIRED' || i.code === 'INVALID_LOCATION');
+}
+
+function IssueCard({ c, canPlan, canChangeLocations, onLocation, onEdit }: { c: IssueCustomer; canPlan: boolean; canChangeLocations: boolean; onLocation: () => void; onEdit: () => void }) {
+  const needsLoc = needsLocation(c);
+  // Owner decision 1 Oct 2026 (item 5): only an admin changes a saved (usable) location.
+  const locLocked = !needsLoc && !canChangeLocations;
   return (
     <div className={`rounded-md border p-2 text-sm ${c.blocking ? 'border-red-300 bg-red-50' : ''}`} data-testid={`issue-${c.code}${c.branchCode ? `-${c.branchCode}` : ''}`}>
       <div className="flex items-start justify-between gap-2">
@@ -717,7 +731,7 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
       ) : (
         <>
           <p className="mt-1 text-xs">
-            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Window: {c.window}
+            Location: {needsLoc ? <b className="text-red-700">{c.issues.find((i) => i.blocking)?.code === 'INVALID_LOCATION' ? 'INVALID' : 'MISSING'}</b> : c.locationVerified ? 'confirmed' : 'imported'} · Receiving hours: {c.windowLabel ?? c.window}
           </p>
           {needsLoc ? (
             <p className="text-xs text-red-700" data-testid={`location-issue-${c.code}`}>
@@ -735,8 +749,14 @@ function IssueCard({ c, canPlan, onLocation, onEdit }: { c: IssueCustomer; canPl
         ))}
       {canPlan && !c.inactive ? (
         <div className="mt-2 flex gap-2">
-          <Button size="sm" variant={needsLoc ? 'default' : 'outline'} onClick={onLocation} data-testid={`add-location-${c.code}`}>
-            <MapPin className="mr-1 h-3 w-3" /> {needsLoc ? 'ADD LOCATION' : 'Location'}
+          <Button
+            size="sm"
+            variant={needsLoc ? 'default' : 'outline'}
+            onClick={onLocation}
+            title={locLocked ? 'Only an admin can change a saved location. You can confirm it as it is.' : undefined}
+            data-testid={`add-location-${c.code}`}
+          >
+            <MapPin className="mr-1 h-3 w-3" /> {needsLoc ? 'ADD LOCATION' : locLocked ? 'Location (admin changes)' : 'Location'}
           </Button>
           <Button size="sm" variant="outline" onClick={onEdit}>
             <Pencil className="mr-1 h-3 w-3" /> Details

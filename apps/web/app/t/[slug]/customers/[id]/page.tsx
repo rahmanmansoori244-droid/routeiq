@@ -1,13 +1,14 @@
 import Link from 'next/link';
 import { ChevronLeft } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
-import { canPlan } from '@/lib/rbac';
+import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { notFoundIfNull } from '@/lib/api';
 import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { describeServiceTime, effectiveAttrs, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
+import { describeServiceTime, effectiveAttrs, windowLabel, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
 
@@ -24,7 +25,7 @@ export default async function CustomerDetailPage({
   const customer = notFoundIfNull(
     await db.customer.findUnique({
       where: { id: params.id },
-      include: { region: { select: { id: true, code: true, name: true } } },
+      include: { region: { select: { id: true, code: true, name: true } }, windowConfirmedBy: { select: { name: true } } },
     }),
   );
   const regions = await db.region.findMany({
@@ -89,6 +90,7 @@ export default async function CustomerDetailPage({
                 center={center}
                 serviceArea={serviceArea}
                 canEdit={canEdit}
+                isAdmin={canManageMasterData(user.role)}
               />
             </CardContent>
           </Card>
@@ -123,6 +125,18 @@ export default async function CustomerDetailPage({
                       {service.note}
                     </span>
                   ) : null}
+                </span>
+              </Field>
+              <Field label="Receiving hours">
+                <span data-testid="customer-receiving-hours">
+                  {windowLabel(eff)}
+                  {customer.windowConfirmedAt ? (
+                    <span className="block text-xs text-muted-foreground">
+                      Confirmed{customer.windowConfirmedBy ? ` by ${customer.windowConfirmedBy.name}` : ''} on {fmtDayMonth(customer.windowConfirmedAt.toISOString().slice(0, 10))}
+                    </span>
+                  ) : (
+                    <span className="block max-w-xs text-xs text-amber-700">Not confirmed: confirm them in Details on Daily dispatch.</span>
+                  )}
                 </span>
               </Field>
               <Field label="Payment">

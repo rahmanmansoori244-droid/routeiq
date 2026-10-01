@@ -22,7 +22,9 @@ import { Host, elements, textOf, typeName } from './hook-host';
 
 vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
 vi.mock('@/lib/auth', () => ({
-  auth: async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'PLANNER', name: 'Planner One', email: 'p@a.example' } }),
+  // The company admin: these are A5's point checks. Since 1 Oct 2026 a dispatcher (PLANNER) may not change a
+  // usable saved location at all (location admin-lock, tests/lib/data-collection-rules.spec.ts).
+  auth: async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'TENANT_ADMIN', name: 'Admin One', email: 'p@a.example' } }),
 }));
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {

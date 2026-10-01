@@ -28,6 +28,12 @@ export interface CustomerForPlanning {
   createdFromUpload: boolean;
   /** HIGH / MEDIUM / LOW / MISSING (null or left out: not known). LOW and never confirmed blocks planning (audit PR A5). */
   geocodeConfidence?: string | null;
+  /**
+   * When a dispatcher or admin entered or confirmed the receiving hours (owner decision 1 Oct 2026,
+   * "own confirmed window"); null or left out = not confirmed. Confirmed with all four window
+   * columns empty = open all day (any time), and the customer-type default does not apply.
+   */
+  windowConfirmedAt?: Date | string | null;
 }
 
 export interface TypeProfileLike {
@@ -52,6 +58,8 @@ export interface EffectiveAttrs {
   prefStart: number | null;
   prefEnd: number | null;
   windowSource: AttrSource;
+  /** The customer's own receiving hours, confirmed by a dispatcher or admin (an own confirmed window). */
+  windowConfirmed: boolean;
 }
 
 export function effectiveAttrs(
@@ -85,7 +93,10 @@ export function effectiveAttrs(
       serviceSource = 'DEFAULT';
     }
   }
-  const own = [c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin].some((v) => v !== null);
+  // Own hours: some stored, or confirmed (all four empty and confirmed = open all day, any time: the
+  // customer-type default does not apply to a customer who accepts deliveries at any time).
+  const windowConfirmed = c.windowConfirmedAt != null;
+  const own = windowConfirmed || [c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin].some((v) => v !== null);
   let windowSource: AttrSource = own ? 'CUSTOMER' : 'DEFAULT';
   let hardStart = c.hardWindowStartMin;
   let hardEnd = c.hardWindowEndMin;
@@ -98,7 +109,7 @@ export function effectiveAttrs(
     prefEnd = p.prefWindowEndMin;
     windowSource = 'TYPE';
   }
-  return { priority, prioritySource, serviceMin, serviceSource, hardStart, hardEnd, prefStart, prefEnd, windowSource };
+  return { priority, prioritySource, serviceMin, serviceSource, hardStart, hardEnd, prefStart, prefEnd, windowSource, windowConfirmed };
 }
 
 const SERVICE_SOURCE_TEXT: Record<AttrSource, string> = {
@@ -227,6 +238,7 @@ export type IssueCode =
   | 'PRIORITY_UNCONFIRMED'
   | 'TYPE_MISSING'
   | 'NO_RECEIVING_WINDOW'
+  | 'WINDOW_UNCONFIRMED'
   | 'NEW_CUSTOMER'
   | 'CUSTOMER_INACTIVE';
 
@@ -281,13 +293,64 @@ export function customerIssues(c: CustomerForPlanning, eff: EffectiveAttrs, area
     out.push({ code: 'PRIORITY_UNCONFIRMED', blocking: false, message: `Priority P${eff.priority} is a default - confirm it (P1 highest, P5 lowest).` });
   }
   if (!c.customerType) out.push({ code: 'TYPE_MISSING', blocking: false, message: 'Customer type not set (hypermarket, grocery, ...). Type defaults fill receiving hours.' });
-  if (eff.hardStart === null && eff.hardEnd === null && eff.prefStart === null && eff.prefEnd === null) {
-    out.push({ code: 'NO_RECEIVING_WINDOW', blocking: false, message: 'No receiving hours known - any time in the shift is allowed.' });
-  }
+  const w = windowIssue(eff);
+  if (w) out.push(w);
   return out;
 }
 
-export function describeWindows(eff: EffectiveAttrs): string {
+/**
+ * The receiving-hours note of a customer without an own confirmed window (owner decision 1 Oct
+ * 2026), or null. Planning still uses the hours shown (a default, or hours nobody confirmed).
+ */
+export function windowIssue(eff: Pick<EffectiveAttrs, 'hardStart' | 'hardEnd' | 'prefStart' | 'prefEnd' | 'windowSource' | 'windowConfirmed'>): CustomerIssue | null {
+  if (eff.windowConfirmed) return null;
+  if (eff.hardStart === null && eff.hardEnd === null && eff.prefStart === null && eff.prefEnd === null) {
+    return {
+      code: 'NO_RECEIVING_WINDOW',
+      blocking: false,
+      message: 'No receiving hours known - any time in the shift is allowed. Ask the customer and enter them in Details (or tick "Open all day").',
+    };
+  }
+  return {
+    code: 'WINDOW_UNCONFIRMED',
+    blocking: false,
+    message:
+      eff.windowSource === 'TYPE'
+        ? `Receiving hours (${describeWindows(eff)}) are the customer-type default - not confirmed. Confirm them in Details.`
+        : `Receiving hours (${describeWindows(eff)}) were never confirmed by a dispatcher - confirm them in Details.`,
+  };
+}
+
+/**
+ * The receiving hours as the day screen shows them, with where they come from: "hard 06:00–10:00
+ * (confirmed)", "Open all day (confirmed)", "... (not confirmed)" or "... (default - not confirmed)".
+ */
+export function windowLabel(eff: Pick<EffectiveAttrs, 'hardStart' | 'hardEnd' | 'prefStart' | 'prefEnd' | 'windowSource' | 'windowConfirmed'>): string {
+  const hours = describeWindows(eff);
+  if (eff.windowConfirmed) return hours === 'Any time' ? 'Open all day (confirmed)' : `${hours} (confirmed)`;
+  if (eff.windowSource === 'CUSTOMER') return `${hours} (not confirmed)`;
+  return `${hours} (default - not confirmed)`;
+}
+
+/** The refusal when a dispatcher tries to change a saved location (owner decision 1 Oct 2026, item 5). */
+export const LOCATION_ADMIN_ONLY_MESSAGE = 'Only an admin can change a saved location.';
+
+/**
+ * Owner decision 1 Oct 2026 (item 5, location admin-lock): a dispatcher may set a location only while
+ * the customer has no usable location (`locationBlocksDelivery`: none, 0,0 or out of range, outside
+ * the area and never confirmed, or a LOW reading never confirmed). Changing a usable one needs the
+ * company admin (`isAdmin`: TENANT_ADMIN or SUPER_ADMIN, rbac canManageMasterData). Confirming the
+ * saved point as it is changes nothing and stays allowed (the callers compare the points).
+ */
+export function savedLocationLocked(
+  isAdmin: boolean,
+  c: Pick<CustomerForPlanning, 'lat' | 'lng' | 'locationVerified' | 'geocodeConfidence'>,
+  area: ServiceArea = DEFAULT_SERVICE_AREA,
+): boolean {
+  return !isAdmin && !locationBlocksDelivery(c, area);
+}
+
+export function describeWindows(eff: Pick<EffectiveAttrs, 'hardStart' | 'hardEnd' | 'prefStart' | 'prefEnd'>): string {
   const hard = eff.hardStart !== null || eff.hardEnd !== null ? `hard ${fmtWindow(eff.hardStart, eff.hardEnd)}` : null;
   const pref = eff.prefStart !== null || eff.prefEnd !== null ? `preferred ${fmtWindow(eff.prefStart, eff.prefEnd)}` : null;
   return [hard, pref].filter(Boolean).join(', ') || 'Any time';

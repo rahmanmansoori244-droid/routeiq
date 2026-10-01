@@ -73,6 +73,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/dispatch/carry-over': 'ANY',
   'POST /api/dispatch/carry-over': 'PLANNER',
   'GET /api/dispatch/day': 'ANY',
+  // Data collection rules (1 Oct 2026): a delivery time for one order (urgent / promised).
+  'PUT /api/dispatch/delivery-time': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',
   'POST /api/driver/login': 'GONE',

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, CUSTOMER_TYPES } from './client-api';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
@@ -14,6 +15,10 @@ export interface EditableCustomer extends DetailsCustomer {
   code: string;
   branchCode: string | null;
   name: string;
+  /** The hours in use with their source ("hard 06:00–10:00 (default - not confirmed)"). */
+  windowLabel?: string;
+  windowConfirmedBy?: string | null;
+  windowConfirmedAt?: string | null;
 }
 
 interface Props {
@@ -55,6 +60,11 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
   }, [open, customer]);
 
   const set = (key: keyof DetailsForm) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
+  const tick = (key: 'openAllDay' | 'confirmHours') => (value: boolean) => setForm((f) => ({ ...f, [key]: value }));
+  const hoursShown = !!(form.hardStart.trim() || form.hardEnd.trim() || form.prefStart.trim() || form.prefEnd.trim());
+  const confirmedText = customer?.windowConfirmed
+    ? `Receiving hours confirmed${customer.windowConfirmedBy ? ` by ${customer.windowConfirmedBy}` : ''}${customer.windowConfirmedAt ? ` on ${fmtDayMonth(customer.windowConfirmedAt.slice(0, 10))}` : ''}.`
+    : `Receiving hours not confirmed${customer?.windowLabel ? ` (now: ${customer.windowLabel})` : ''}. Enter them as the customer gave them, or tick "Open all day".`;
 
   async function save() {
     if (!customer || busy) return;
@@ -100,7 +110,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <DialogTitle>Customer delivery details</DialogTitle>
           <DialogDescription>
             {customer?.name} — {customer?.code}
-            {customer?.branchCode ? ` / ${customer.branchCode}` : ''}. Only what you change is saved. Empty receiving hours = use the customer-type default; empty
+            {customer?.branchCode ? ` / ${customer.branchCode}` : ''}. Only what you change is saved. Empty receiving hours = the customer-type default (not confirmed); empty
             unloading time = the customer-type or Settings default.
           </DialogDescription>
         </DialogHeader>
@@ -138,18 +148,32 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <div className="space-y-1">
             <Label htmlFor="cd-hs">Receiving hours — HARD (never outside)</Label>
             <div className="flex items-center gap-1">
-              <Input id="cd-hs" placeholder="06:00" value={form.hardStart} onChange={(e) => set('hardStart')(e.target.value)} />
+              <Input id="cd-hs" placeholder="06:00" value={form.hardStart} disabled={!!form.openAllDay} onChange={(e) => set('hardStart')(e.target.value)} />
               <span>–</span>
-              <Input id="cd-he" aria-label="Receiving hours end" placeholder="10:00" value={form.hardEnd} onChange={(e) => set('hardEnd')(e.target.value)} />
+              <Input id="cd-he" aria-label="Receiving hours end" placeholder="10:00" value={form.hardEnd} disabled={!!form.openAllDay} onChange={(e) => set('hardEnd')(e.target.value)} />
             </div>
           </div>
           <div className="space-y-1">
             <Label htmlFor="cd-ps">Preferred hours (soft)</Label>
             <div className="flex items-center gap-1">
-              <Input id="cd-ps" placeholder="07:00" value={form.prefStart} onChange={(e) => set('prefStart')(e.target.value)} />
+              <Input id="cd-ps" placeholder="07:00" value={form.prefStart} disabled={!!form.openAllDay} onChange={(e) => set('prefStart')(e.target.value)} />
               <span>–</span>
-              <Input id="cd-pe" aria-label="Preferred hours end" placeholder="09:00" value={form.prefEnd} onChange={(e) => set('prefEnd')(e.target.value)} />
+              <Input id="cd-pe" aria-label="Preferred hours end" placeholder="09:00" value={form.prefEnd} disabled={!!form.openAllDay} onChange={(e) => set('prefEnd')(e.target.value)} />
             </div>
+          </div>
+          <div className="col-span-2 space-y-1 rounded-md border p-2 text-sm" data-testid="window-confirmation">
+            <p className={`text-xs ${customer?.windowConfirmed ? 'text-green-700' : 'text-amber-800'}`}>{confirmedText}</p>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={!!form.openAllDay} onChange={(e) => tick('openAllDay')(e.target.checked)} data-testid="open-all-day" />
+              Open all day — this customer accepts deliveries at any time
+            </label>
+            {!initial.confirmHours && !form.openAllDay && hoursShown ? (
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={!!form.confirmHours} onChange={(e) => tick('confirmHours')(e.target.checked)} data-testid="confirm-hours" />
+                These hours are confirmed with the customer
+              </label>
+            ) : null}
+            <p className="text-xs text-muted-foreground">Hours you type here are saved as confirmed by you. To give one order a different time (urgent or promised), use Delivery times on the day screen: the customer&apos;s hours do not change.</p>
           </div>
         </div>
         <DialogFooter>

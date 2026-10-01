@@ -32,6 +32,7 @@ import {
   type CustomerForPlanning,
   type TypeProfileLike,
 } from './customer-attrs';
+import { stopWindowFor, type OrderTime } from './order-window';
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
@@ -175,6 +176,11 @@ export interface BuiltRequest {
    * time them again from the end of the search (retimeSameDay). Absent on unit-test stubs.
    */
   sameDay?: SameDayBasis;
+  /**
+   * Stops planned with a delivery time of one of their orders (owner decision 1 Oct 2026, item 1),
+   * by stop id: kept with the stop's facts (StopFacts.promised) so every output says "Promised ...".
+   */
+  promised?: Record<string, OrderTime>;
 }
 
 /** The inputs of a request's same-day times, and the times it carries now (BuiltRequest.sameDay). */
@@ -263,7 +269,7 @@ function toPlanningCustomer(c: {
   priority: number; priorityConfirmed: boolean; avgServiceTimeMin: number; serviceTimeConfirmed: boolean;
   customerType: string | null; hardWindowStartMin: number | null; hardWindowEndMin: number | null;
   prefWindowStartMin: number | null; prefWindowEndMin: number | null; locationVerified: boolean; createdFromUpload: boolean;
-  geocodeConfidence?: string | null;
+  geocodeConfidence?: string | null; windowConfirmedAt?: Date | null;
 }): CustomerForPlanning {
   return { ...c };
 }
@@ -439,6 +445,10 @@ export async function buildDispatchRequest(
   const stopList: DispatchStop[] = [];
   const scopeIds: string[] = [];
   const badWindows: string[] = [];
+  // Item 1 (1 Oct 2026): stops planned with an order's own delivery time, and customers whose orders'
+  // delivery times do not overlap (planned with the one that ends first).
+  const promised: Record<string, OrderTime> = {};
+  const timeConflicts: string[] = [];
   const splitNotes: string[] = [];
   const inactiveCustomers: string[] = [];
   const inactiveProducts = new Set<string>();
@@ -553,8 +563,12 @@ export async function buildDispatchRequest(
         if (lineInfo.get(l.lineId)?.productActive === false) inactiveProducts.add(lineInfo.get(l.lineId)!.productCode);
       }
     }
-    const hard = usableWindow(eff.hardStart, eff.hardEnd);
-    const pref = usableWindow(eff.prefStart, eff.prefEnd);
+    // The customer's receiving hours, or the delivery time an order of this visit was given (urgent /
+    // promised, owner decision 1 Oct 2026): it replaces the hours for this visit only.
+    const sw = stopWindowFor(eff, live.map((x) => x.o));
+    if (sw.conflict) timeConflicts.push(label);
+    const hard = usableWindow(sw.hardStart, sw.hardEnd);
+    const pref = usableWindow(sw.prefStart, sw.prefEnd);
     if (!hard.ok || !pref.ok) badWindows.push(label);
     const totalCases = live.reduce((a, x) => a + x.cases, 0);
     // Added up in 0.1 kg units: exactly the sum the optimizer and the stored load get (no float drift).
@@ -583,6 +597,7 @@ export async function buildDispatchRequest(
     const split = partCapFor(totalCases, totalKg, maxCaseKg);
     if (!split) {
       const ids = live.map(orderRef);
+      if (sw.promised) promised[c.id] = sw.promised;
       stopList.push({
         ...base,
         stop_id: c.id,
@@ -606,6 +621,7 @@ export async function buildDispatchRequest(
           return id;
         });
         const cases = recs.reduce((a, r) => a + r.cases, 0);
+        if (sw.promised) promised[`${c.id}#${k + 1}`] = sw.promised;
         stopList.push({
           ...base,
           stop_id: `${c.id}#${k + 1}`,
@@ -696,6 +712,11 @@ export async function buildDispatchRequest(
   if (badWindows.length) {
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
   }
+  if (timeConflicts.length) {
+    warnings.push(
+      `Orders of one customer have delivery times that do not overlap: ${timeConflicts.join(', ')}. All orders of a customer go in one visit, planned within the time that ends first. Check the orders' delivery times.`,
+    );
+  }
   const { config: plannerConfig, routing } = dispatchConfigFromTenant(cfg, tenant.country, scenarios);
   const baseShiftStartMin = plannerConfig.shift_start_min ?? cfg.shiftStartMin;
   if (planFrom) plannerConfig.shift_start_min = planFrom.fromMin;
@@ -741,6 +762,7 @@ export async function buildDispatchRequest(
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
     sameDay: { input: sameDayIn, baseShiftStartMin, timing },
+    ...(Object.keys(promised).length ? { promised } : {}),
   };
 }
 
@@ -839,6 +861,7 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
       prefEndMin: x.pref_end_min ?? null,
       serviceMin: x.service_min ?? 10,
       priority: x.priority ?? 3,
+      ...(built.promised?.[x.stop_id] ? { promised: built.promised[x.stop_id] } : {}),
     };
   }
   return {
@@ -1356,6 +1379,7 @@ async function snapshotSource(
         prefEndMin: planned.prefEndMin,
         serviceMin: planned.serviceMin,
         priority: planned.priority,
+        ...(planned.promised ? { promised: planned.promised } : {}),
         source: 'PLAN',
       };
     }

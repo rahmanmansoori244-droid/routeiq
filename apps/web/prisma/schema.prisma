@@ -289,6 +289,8 @@ model User {
   loadStatusChanges    PlanLoad[]           @relation("PlanLoadStatusBy")
   loadDriversSet       PlanLoad[]           @relation("PlanLoadDriverSetBy")
   ordersCarried        Order[]              @relation("OrderCarriedBy")
+  confirmedWindows     Customer[]           @relation("CustomerWindowConfirmedBy")
+  orderTimesSet        Order[]              @relation("OrderDeliveryTimeSetBy")
 
   @@index([tenantId])
 }
@@ -518,6 +520,12 @@ model Customer {
   locationVerifiedBy   User?           @relation("CustomerLocationVerifiedBy", fields: [locationVerifiedById], references: [id], onDelete: SetNull)
   locationVerifiedAt   DateTime?
   createdFromUpload    Boolean         @default(false) // stub created from an order file
+  /// Owner decision 1 Oct 2026 ("own confirmed window"): set when a dispatcher or admin entered or
+  /// confirmed this customer's receiving hours (the four window columns; all four empty = open all
+  /// day, any time). NULL = not confirmed: the hours in use are a default or were never checked.
+  windowConfirmedAt    DateTime?
+  windowConfirmedById  String?
+  windowConfirmedBy    User?           @relation("CustomerWindowConfirmedBy", fields: [windowConfirmedById], references: [id], onDelete: SetNull)
 
   @@unique([tenantId, code, branchKey])
   @@index([tenantId, regionId])
@@ -620,6 +628,17 @@ model Order {
   carriedAt                 DateTime?
   carriedById               String?
   carriedBy                 User?                      @relation("OrderCarriedBy", fields: [carriedById], references: [id], onDelete: SetNull)
+  // --- Delivery time for this one order (owner decision 1 Oct 2026): urgent or promised. It replaces
+  // the customer's receiving hours for this order only; the customer master is not changed. Minutes
+  // from local midnight; one end may be empty ("by 10:00", "from 14:00"); both empty = none.
+  deliveryStartMin          Int?
+  deliveryEndMin            Int?
+  /// URGENT | PROMISED | OTHER (lib/dispatch/order-window.ts).
+  deliveryTimeReason        String?
+  deliveryTimeNote          String?
+  deliveryTimeSetAt         DateTime?
+  deliveryTimeSetById       String?
+  deliveryTimeSetBy         User?                      @relation("OrderDeliveryTimeSetBy", fields: [deliveryTimeSetById], references: [id], onDelete: SetNull)
 
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])

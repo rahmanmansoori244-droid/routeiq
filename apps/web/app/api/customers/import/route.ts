@@ -10,8 +10,9 @@ import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
 import { fileAgreesWithSaved, pointsElsewhereText, readImportedPair, type ImportedPair } from '@/lib/dispatch/import-location';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
-import { locationBlocksDelivery } from '@/lib/dispatch/customer-attrs';
+import { LOCATION_ADMIN_ONLY_MESSAGE, locationBlocksDelivery, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
 import { samePoint } from '@/lib/dispatch/location-input';
+import { canManageMasterData } from '@/lib/rbac';
 import { clientIp } from '@/lib/client-ip';
 
 // Per CLAUDE.md §15: 10 MB / 50k rows / content-type guard; the file is read in the parser process
@@ -39,6 +40,12 @@ import { clientIp } from '@/lib/client-ip';
 // point is then refused at LOCK, LOADING and DISPATCH until a re-plan (A5 third review). The pair and
 // its row commit together, judged on the customer as it is when written (A5 fifth review). Rows that
 // keep a usable saved location are counted apart: nothing to do for them (A5 fifth review).
+//
+// Owner decision 1 Oct 2026 (location admin-lock): an import by a dispatcher (PLANNER, SUPERVISOR)
+// never changes a customer's usable saved location (`savedLocationLocked`): the file's pair, exact or
+// not, is ignored for such a customer (never marked LOW either), the row says "Only an admin can
+// change a saved location", and a warning counts them. It still sets the location of a new customer
+// or of one without a usable location. An admin's import works as above (A5's exact-location rules).
 
 interface ImportError {
   row: number;
@@ -128,6 +135,7 @@ export async function POST(req: Request) {
   const db = tenantDb(session.user.tenantId);
   const regions = await db.region.findMany({ select: { id: true, code: true } });
   const area = await tenantServiceArea(session.user.tenantId);
+  const isAdmin = canManageMasterData(session.user.role);
   const regionByCode = new Map(regions.map((r) => [r.code.toLowerCase(), r.id]));
 
   parsed.rows.forEach((raw, idx) => {
@@ -251,6 +259,9 @@ export async function POST(req: Request) {
   // Customers that keep a saved point which is itself not usable (A5 second review): listed as such,
   // never marked again, and counted in their own warning.
   const keptNotUsable = new Set<string>();
+  // Rows whose pair differs from the customer's usable saved location, in a dispatcher's import: the
+  // saved location is kept (owner decision 1 Oct 2026, item 5: only an admin can change it).
+  const adminOnlyRows = new Set<number>();
   const notExactByRow = new Map(notExact.map((n) => [n.row, n.pair]));
   for (const v of valid) {
     const pair = notExactByRow.get(v.row);
@@ -262,6 +273,12 @@ export async function POST(req: Request) {
       continue;
     }
     const saved = { lat: m.lat, lng: m.lng };
+    if (!m.locationVerified && !fileAgreesWithSaved(pair, saved) && savedLocationLocked(isAdmin, m, area)) {
+      // A dispatcher's file pointing elsewhere does not touch a usable saved location (item 5).
+      adminOnlyRows.add(v.row);
+      locationsNotSaved.push({ row: v.row, code: v.code, branchCode: v.branchCode, reason: `${reason} ${pointsElsewhereText(pair, saved)} ${LOCATION_ADMIN_ONLY_MESSAGE}`, kept: 'SAVED_LOCATION' });
+      continue;
+    }
     if (m.locationVerified || fileAgreesWithSaved(pair, saved)) {
       const usable = !locationBlocksDelivery(m, area);
       if (!usable) keptNotUsable.add(m.id);
@@ -274,8 +291,21 @@ export async function POST(req: Request) {
   // A5 fifth review: only the rows whose customer has no usable location after the import are told to
   // set it on the map; a customer that keeps a usable saved location (confirmed, or the file points at
   // the same place) is planned and sent out as before, so its rows are counted apart.
-  const keptUsable = locationsNotSaved.filter((l) => l.kept === 'SAVED_LOCATION').length;
-  const needPin = locationsNotSaved.length - keptUsable;
+  const keptUsable = locationsNotSaved.filter((l) => l.kept === 'SAVED_LOCATION' && !adminOnlyRows.has(l.row)).length;
+  const needPin = locationsNotSaved.filter((l) => l.kept !== 'SAVED_LOCATION').length;
+  // Exact pairs of a dispatcher's file that would change a usable saved location: kept (item 5).
+  for (const v of valid) {
+    if (v.lat === null || v.lng === null) continue;
+    const m = matchOf(v);
+    if (m && savedLocationLocked(isAdmin, m, area) && !(m.lat !== null && m.lng !== null && samePoint({ lat: m.lat, lng: m.lng }, { lat: v.lat, lng: v.lng }))) {
+      adminOnlyRows.add(v.row);
+    }
+  }
+  if (adminOnlyRows.size) {
+    warnings.push(
+      `${adminOnlyRows.size} location(s) in the file differ from the customer's saved location, which ${dryRun || errors.length > 0 ? 'will be' : 'was'} kept: ${LOCATION_ADMIN_ONLY_MESSAGE} Ask your company admin to import the file, or to change each one with Set location on the customer page.`,
+    );
+  }
   if (needPin) {
     // A5 fourth review: the tense follows what happens (Validate only, or a file with errors, saves
     // nothing yet), like the warning below. The fix is never "format the cells to show 4 decimals":
@@ -399,8 +429,11 @@ export async function POST(req: Request) {
         // gives it the new one (plan-service locationGate, A5 third review).
         const needsRow = (c: { lat: number | null; lng: number | null; locationVerified: boolean; geocodeConfidence: string | null }) =>
           c.lat !== null && c.lng !== null && locationBlocksDelivery(c, area) && !samePoint({ lat: c.lat, lng: c.lng }, { lat: v.lat!, lng: v.lng! });
-        let outcome: 'KEPT_VERIFIED' | 'WRITTEN' | 'REPLACED' | null = null;
-        if (m.locationVerified) {
+        let outcome: 'KEPT_VERIFIED' | 'KEPT_LOCKED' | 'WRITTEN' | 'REPLACED' | null = null;
+        if (savedLocationLocked(isAdmin, m, area)) {
+          // A dispatcher's import never changes a usable saved location (item 5; counted above).
+          outcome = 'KEPT_LOCKED';
+        } else if (m.locationVerified) {
           // Nothing un-confirms a location, so this one stays as it is (F05: checked on the row).
           const written = await db.customer.updateMany({ where: { id: m.id, locationVerified: false }, data });
           if (written.count === 0) outcome = 'KEPT_VERIFIED';
@@ -427,6 +460,9 @@ export async function POST(req: Request) {
               where: { id: m.id },
               select: { lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true },
             });
+            // Item 5, on the row as it is now (locked): a usable location saved meanwhile is kept for a
+            // dispatcher, nothing written.
+            if (now && savedLocationLocked(isAdmin, now, area)) return 'KEPT_LOCKED' as const;
             const written = await tx.customer.updateMany({ where: { id: m.id, locationVerified: false }, data });
             if (written.count === 0 || !now) return 'KEPT_VERIFIED' as const;
             if (!needsRow(now)) return 'WRITTEN' as const;
@@ -474,6 +510,7 @@ export async function POST(req: Request) {
       bulkImport: {
         fileName: parsed.fileName, upserted, creates, updates, confirmedServiceChanges, locationsNotSaved: locationsNotSaved.length,
         savedLocationsMarkedLow: markedLow, savedLocationsNotUsable: keptNotUsable.size, savedLocationsNotUsableReplaced: replacedNotUsable,
+        savedLocationsKeptAdminOnly: adminOnlyRows.size,
       },
     } as never,
     ip,

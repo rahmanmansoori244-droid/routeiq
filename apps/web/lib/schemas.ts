@@ -187,6 +187,10 @@ export const customerPatchSchema = customerSchema
     hardWindowEndMin: minuteOfDay.nullable().optional(),
     prefWindowStartMin: minuteOfDay.nullable().optional(),
     prefWindowEndMin: minuteOfDay.nullable().optional(),
+    // Owner decision 1 Oct 2026 ("own confirmed window"): true = the receiving hours, as stored after
+    // this change, are confirmed by this user (all four empty = open all day, any time); false = not
+    // confirmed any more. Left out: hours sent with a time are confirmed, hours all cleared are not.
+    windowConfirmed: z.boolean().optional(),
   })
   .superRefine((v, ctx) => {
     const pairs: [keyof typeof v, keyof typeof v, string][] = [

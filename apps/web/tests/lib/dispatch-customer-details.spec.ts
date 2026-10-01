@@ -85,7 +85,7 @@ const CONFIRMED = { ...UNCONFIRMED, customerId: 'c2', name: 'Carrefour Seeb', pr
 
 describe('the Details form helpers (customer-details.ts)', () => {
   it('opens with defaults shown as defaults (blank), and own values as typed values', () => {
-    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '' });
+    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false });
     expect(detailsFormOf(CONFIRMED)).toMatchObject({ priority: '2', service: '25' });
     // A customer without the sources (older callers) is shown as before.
     const plain: DetailsCustomer = { ...UNCONFIRMED, prioritySource: undefined, serviceSource: undefined };
@@ -302,9 +302,9 @@ describe('PATCH /api/customers/:id - unloading time and confirmation (audit F07)
     expect(route.updates.at(-1)).toEqual({ avgServiceTimeMin: 45, serviceTimeConfirmed: true });
   });
 
-  it('only the fields sent: a receiving-hours change confirms neither priority nor unloading time', async () => {
+  it('only the fields sent: a receiving-hours change confirms neither priority nor unloading time (the hours themselves are confirmed, 1 Oct 2026)', async () => {
     expect((await patch({ hardWindowStartMin: 360, hardWindowEndMin: 660 })).status).toBe(200);
-    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 660 }]);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 660, windowConfirmedAt: expect.any(Date), windowConfirmedById: 'u1' }]);
   });
 
   it('refuses text, fractions and blanks instead of turning them into 0 (400, nothing saved)', async () => {
@@ -342,7 +342,7 @@ describe('a window saved from a form opened before someone else changed it (A2 r
     const body = t.patches()[0].init.json;
     expect(body).toEqual({ hardWindowStartMin: 360, hardWindowEndMin: 960 });
     expect((await send(body)).status).toBe(200);
-    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 960 }]);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 360, hardWindowEndMin: 960, windowConfirmedAt: expect.any(Date), windowConfirmedById: 'u1' }]);
   });
 
   it('screen 06:00-10:00, stored 06:00-08:00 since, start set to 09:00: 09:00-10:00 is saved (before: refused, the end before the start)', async () => {
@@ -353,6 +353,6 @@ describe('a window saved from a form opened before someone else changed it (A2 r
     const body = t.patches()[0].init.json;
     expect(body).toEqual({ hardWindowStartMin: 540, hardWindowEndMin: 600 });
     expect((await send(body)).status).toBe(200);
-    expect(route.updates).toEqual([{ hardWindowStartMin: 540, hardWindowEndMin: 600 }]);
+    expect(route.updates).toEqual([{ hardWindowStartMin: 540, hardWindowEndMin: 600, windowConfirmedAt: expect.any(Date), windowConfirmedById: 'u1' }]);
   });
 });

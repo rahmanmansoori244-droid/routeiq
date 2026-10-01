@@ -14,7 +14,9 @@ import {
   parseServiceArea,
   type CustomerIssue,
   type TypeProfileLike,
+  windowLabel,
 } from './customer-attrs';
+import { orderTimeOf, promisedText, stopWindowFor, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, thoroughMaxSec } from './search-mode';
@@ -50,6 +52,31 @@ export interface IssueCustomer {
   blocking: boolean;
   /** Deactivated after its orders were confirmed: its open orders are left unserved. */
   inactive: boolean;
+  /** The receiving hours in use with where they come from: "hard 06:00–10:00 (confirmed)", "... (default - not confirmed)". */
+  windowLabel: string;
+  /** CUSTOMER / TYPE / DEFAULT: where the hours in use come from. */
+  windowSource: string;
+  /** An own confirmed window (owner decision 1 Oct 2026): entered or confirmed by a dispatcher or admin. */
+  windowConfirmed: boolean;
+  windowConfirmedAt: string | null;
+  windowConfirmedBy: string | null;
+  /** The hours in use (own, else customer type, else none): what an order's delivery time starts from. */
+  effWindow: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
+  /** Each order of the customer on this day, with its own delivery time (urgent / promised) if it has one. */
+  orderTimes: DayOrderTime[];
+}
+
+/** One order of the day and its delivery time (owner decision 1 Oct 2026, item 1). */
+export interface DayOrderTime {
+  orderId: string;
+  cases: number;
+  salesOrders: string[];
+  /** The order's own delivery time; null = the customer's receiving hours apply. */
+  time: OrderTime | null;
+  /** "Promised 10:00–11:00" when it has one. */
+  text: string | null;
+  /** On a locked (or later) load of the plan in use: its time cannot change. */
+  frozen: boolean;
 }
 
 /** Products whose order lines have no weight yet (per product: lines and cases). */
@@ -135,7 +162,10 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const where = await ordersInScopeWhere(tenantId, depot.id, dateOnly(date));
   const orders = await prisma.order.findMany({
     where,
-    include: { customer: true, lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } } },
+    include: {
+      customer: { include: { windowConfirmedBy: { select: { name: true } } } },
+      lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
+    },
   });
   const byCustomer = new Map<string, IssueCustomer>();
   const plan = await currentPlan(tenantId, depot.id, date);
@@ -228,16 +258,24 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
   // plan was made, and trucks with PLANNED loads whose capacity or payload was corrected since. The
   // plan keeps what it was planned with; a re-plan adopts the new data.
+  // A customer's orders on PLANNED loads: their own delivery times (urgent / promised, set or changed
+  // since planning) are the hours the stop would be planned with now (order-window stopWindowFor).
+  const plannedOrdersOf = new Map<string, (typeof orders)[number][]>();
+  for (const id of onPlannedLoad) {
+    const o = orderById.get(id);
+    if (o) plannedOrdersOf.set(o.customerId, [...(plannedOrdersOf.get(o.customerId) ?? []), o]);
+  }
   const plannedStops = onPlan.flatMap((a) => {
     const o = orderById.get(a.orderId);
     if (a.load?.status !== 'PLANNED' || !o) return [];
     const eff = effectiveAttrs(o.customer, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
+    const sw = stopWindowFor(eff, plannedOrdersOf.get(o.customerId) ?? [o]);
     return [{
       customerId: o.customerId,
       stopSnapshotJson: a.stopSnapshotJson,
       live: {
         name: o.customer.name, address: o.customer.address, lat: o.customer.lat, lng: o.customer.lng,
-        hardStartMin: eff.hardStart, hardEndMin: eff.hardEnd, prefStartMin: eff.prefStart, prefEndMin: eff.prefEnd,
+        hardStartMin: sw.hardStart, hardEndMin: sw.hardEnd, prefStartMin: sw.prefStart, prefEndMin: sw.prefEnd, promised: sw.promised,
       },
     }];
   });
@@ -259,12 +297,25 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   outdated.masterChanged = changed.customers;
   outdated.trucksChanged = changed.trucks;
   outdated.depotMoved = changed.depotMoved;
+  const onFrozenLoad = new Set(onPlan.filter((a) => a.load && a.load.status !== 'PLANNED').map((a) => a.orderId));
+  const orderTimeRow = (o: (typeof orders)[number]): DayOrderTime => {
+    const time = orderTimeOf(o);
+    return {
+      orderId: o.id,
+      cases: o.totalCases,
+      salesOrders: [...new Set(o.lines.map((l) => l.salesOrderNo).filter((s): s is string => !!s))].sort(),
+      time,
+      text: time ? promisedText(time) : null,
+      frozen: onFrozenLoad.has(o.id),
+    };
+  };
   for (const o of orders) {
     const c = o.customer;
     const cur = byCustomer.get(c.id);
     if (cur) {
       cur.orders++;
       cur.cases += o.totalCases;
+      cur.orderTimes.push(orderTimeRow(o));
       continue;
     }
     const eff = effectiveAttrs(c, profiles, { serviceTimeMin: cfg.defaultServiceTimeMin });
@@ -296,8 +347,16 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       issues,
       blocking: issues.some((i) => i.blocking),
       inactive: !c.active,
+      windowLabel: windowLabel(eff),
+      windowSource: eff.windowSource,
+      windowConfirmed: eff.windowConfirmed,
+      windowConfirmedAt: c.windowConfirmedAt ? c.windowConfirmedAt.toISOString() : null,
+      windowConfirmedBy: c.windowConfirmedBy?.name ?? null,
+      effWindow: { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd },
+      orderTimes: [orderTimeRow(o)],
     });
   }
+  for (const c of byCustomer.values()) c.orderTimes.sort((a, b) => a.salesOrders.join().localeCompare(b.salesOrders.join()) || a.orderId.localeCompare(b.orderId));
   const customers = [...byCustomer.values()].sort(
     (a, b) => Number(b.blocking) - Number(a.blocking) || b.issues.length - a.issues.length || a.priority - b.priority || b.cases - a.cases,
   );

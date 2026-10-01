@@ -20,6 +20,7 @@
  */
 import type { DispatchConfig } from '@routeiq/shared-types';
 import type { PlanFrom } from './plan-from';
+import { promisedText } from './order-window';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -112,6 +113,11 @@ export interface StopFacts {
   prefEndMin: number | null;
   serviceMin: number;
   priority: number;
+  /**
+   * The delivery time of one of the stop's orders (urgent / promised, owner decision 1 Oct 2026) that
+   * the hard window above is; absent = the customer's receiving hours (lib/dispatch/order-window.ts).
+   */
+  promised?: { startMin: number | null; endMin: number | null; reason: string; note: string | null } | null;
 }
 
 /**
@@ -332,6 +338,8 @@ export interface LiveStopFacts {
   hardEndMin: number | null;
   prefStartMin: number | null;
   prefEndMin: number | null;
+  /** The delivery time of one of the stop's orders the windows above are (order-window stopWindowFor); absent = the customer's hours. */
+  promised?: StopFacts['promised'];
 }
 
 /**
@@ -370,8 +378,13 @@ export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): 
   const hardThen = win(snap.hardStartMin, snap.hardEndMin);
   const prefNow = win(live.prefStartMin, live.prefEndMin);
   const prefThen = win(snap.prefStartMin, snap.prefEndMin);
-  if (hardNow !== hardThen || prefNow !== prefThen) {
-    const parts = [hardNow !== hardThen ? `receives ${hardNow} (planned with ${hardThen})` : null, prefNow !== prefThen ? `best ${prefNow} (planned with ${prefThen})` : null];
+  const promisedNow = liveIn.promised ? promisedText(liveIn.promised) : null;
+  const promisedThen = snapIn.promised ? promisedText(snapIn.promised) : null;
+  if ((hardNow !== hardThen || prefNow !== prefThen) && (promisedNow || promisedThen)) {
+    // A delivery time given to one order (urgent / promised) set, changed or removed since planning.
+    out.push({ kind: 'HOURS', text: `Delivery time changed after planning: now ${promisedNow ?? `receives ${hardNow}`} (planned with ${promisedThen ?? hardThen})` });
+  } else if (hardNow !== hardThen || prefNow !== prefThen) {
+    const parts =[hardNow !== hardThen ? `receives ${hardNow} (planned with ${hardThen})` : null, prefNow !== prefThen ? `best ${prefNow} (planned with ${prefThen})` : null];
     out.push({ kind: 'HOURS', text: `Receiving hours changed after planning: now ${parts.filter(Boolean).join(', ')}` });
   }
   if (norm(live.name) !== norm(snap.name)) out.push({ kind: 'NAME', text: `Customer name changed after planning: now "${norm(live.name)}"` });

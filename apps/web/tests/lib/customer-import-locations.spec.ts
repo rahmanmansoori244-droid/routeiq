@@ -33,7 +33,9 @@ const S = vi.hoisted(() => ({
   /** Raw SQL the import ran (the row lock). */
   raw: [] as string[],
 }));
-vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'PLANNER', name: 'P', email: 'p@a.example' } })) }));
+// The company admin: A5's import rules. A dispatcher's import never changes a usable saved location
+// (location admin-lock, 1 Oct 2026: tests/lib/data-collection-rules.spec.ts).
+vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'TENANT_ADMIN', name: 'P', email: 'p@a.example' } })) }));
 vi.mock('@/lib/audit', () => ({ audit: vi.fn(async () => ({})) }));
 // The company's delivery area: Oman + UAE (the NMWC default).
 vi.mock('@/lib/dispatch/service-area', async () => {

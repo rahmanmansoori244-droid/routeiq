@@ -10,8 +10,9 @@ import {
   samePoint,
   type Confidence,
 } from '@/lib/dispatch/location-input';
-import { coordStatus, savedPointProblem } from '@/lib/dispatch/customer-attrs';
+import { coordStatus, LOCATION_ADMIN_ONLY_MESSAGE, savedLocationLocked, savedPointProblem } from '@/lib/dispatch/customer-attrs';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { canManageMasterData } from '@/lib/rbac';
 
 interface Params { params: { id: string } }
 
@@ -28,6 +29,11 @@ const schema = z.object({
 });
 
 const pinRequired = (message: string, parse?: unknown) => fail({ code: 'PIN_REQUIRED', message, ...(parse ? { parse } : {}) } as Record<string, unknown>, 422);
+
+/** Owner decision 1 Oct 2026 (item 5): a dispatcher does not change a usable saved location. */
+const adminOnly = () =>
+  fail({ code: 'LOCATION_ADMIN_ONLY', message: `${LOCATION_ADMIN_ONLY_MESSAGE} Ask your company admin to change it (Set location on the customer page).` } as Record<string, unknown>, 403);
+const LOCKED = Symbol('locked');
 
 // PUT /api/customers/:id/location - save a dispatcher-confirmed location PERMANENTLY on the
 // customer master (tomorrow RouteIQ already knows this customer).
@@ -48,6 +54,9 @@ const pinRequired = (message: string, parse?: unknown) => fail({ code: 'PIN_REQU
 // 2026, "Same rule everywhere", `countedText`): "23.5800, 58.4100" needs a pin, and the 422 says why.
 // A point outside the service area is 422 OUTSIDE_AREA until the dispatcher confirms it (only a
 // hand pin can get there: a reading outside the area always needs a pin).
+// Owner decision 1 Oct 2026 (location admin-lock): a dispatcher (PLANNER, SUPERVISOR) may set a
+// location only while the customer has no usable one; any other point is 403 LOCATION_ADMIN_ONLY
+// ("Only an admin can change a saved location"). The saved point confirmed as it is stays allowed.
 export const PUT = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
@@ -110,6 +119,14 @@ export const PUT = (req: Request, { params }: Params) =>
       // change is written, the customer locked meanwhile (A5 fifth review: the row said what the
       // route had read at the start, so a point a customer file marked LOW in between was recorded
       // as usable).
+      // Owner decision 1 Oct 2026 (item 5, location admin-lock): a dispatcher sets a location only while
+      // the customer has no usable one; changing a usable one needs the company admin. Confirming the
+      // saved point as it is (the same point) changes nothing and stays allowed. Judged on the row as
+      // it is when written (locked below), so a point saved meanwhile by someone else is not replaced.
+      const isAdmin = canManageMasterData(user.role);
+      const lockedFor = (c: { lat: number | null; lng: number | null; locationVerified: boolean; geocodeConfidence: string | null }) =>
+        savedLocationLocked(isAdmin, c, area) && !(c.lat !== null && c.lng !== null && samePoint({ lat, lng }, { lat: c.lat, lng: c.lng }));
+      if (lockedFor(before)) return adminOnly();
       const after = await prisma.$transaction(async (tx) => {
         await tx.$queryRaw`SELECT id FROM "Customer" WHERE id = ${params.id} AND "tenantId" = ${user.tenantId} FOR UPDATE`;
         const replaced =
@@ -117,6 +134,7 @@ export const PUT = (req: Request, { params }: Params) =>
             where: { id: params.id, tenantId: user.tenantId },
             select: { lat: true, lng: true, locationSource: true, locationVerified: true, geocodeConfidence: true },
           })) ?? before;
+        if (lockedFor(replaced)) return LOCKED;
         const saved = await tx.customer.update({
           where: { id: params.id, tenantId: user.tenantId },
           data: {
@@ -147,6 +165,7 @@ export const PUT = (req: Request, { params }: Params) =>
         );
         return saved;
       });
+      if (after === LOCKED) return adminOnly();
       return ok({ id: after.id, lat: after.lat, lng: after.lng, locationSource: after.locationSource, locationVerified: after.locationVerified, geocodeConfidence: after.geocodeConfidence });
     },
     { role: 'PLANNER' },
