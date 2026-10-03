@@ -14,8 +14,9 @@ import { prisma } from '../db';
 import { getPlanDetail, type DetailLoad, type DetailStop, type PlanDetail } from '../dispatch/plan-detail';
 import { coordText } from '../dispatch/driver-links';
 import { DEFAULT_TZ } from '../dispatch/time';
+import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
-import type { DriverManifest, LoadStatusName, ManifestLoad, ManifestOrder, ManifestStop } from './manifest-types';
+import type { DriverManifest, DriverResults, LoadStatusName, ManifestLoad, ManifestOrder, ManifestStop } from './manifest-types';
 
 export const MANIFEST_MEMO_MS = 60_000;
 const MEMO_MAX = 200;
@@ -189,7 +190,7 @@ export async function driverManifest(args: {
   ]);
   const runIds = [...new Set(dayLoads.map((l) => l.runId))];
   const details = (await Promise.all(runIds.map((id) => memoPlanDetail(tenantId, id, args.now.getTime())))).filter((d): d is PlanDetail => !!d);
-  return projectManifest(details, {
+  const manifest = projectManifest(details, {
     truckId,
     date,
     tz: cfg?.timezone || DEFAULT_TZ,
@@ -206,4 +207,32 @@ export async function driverManifest(args: {
     },
     office: args.office,
   });
+  // Results are read live, never memoised (Part 2).
+  const depotOf = new Map(dayLoads.map((l) => [l.loadNo, l.depotId]));
+  const results = await truckDayResults(
+    prisma,
+    tenantId,
+    truckId,
+    date,
+    manifest.loads.map((l) => ({
+      loadNo: l.loadNo,
+      depotId: depotOf.get(l.loadNo) ?? '',
+      status: l.status,
+      stops: l.stops.map((s) => ({ sequence: s.sequence, orderIds: s.orders.map((o) => o.orderId) })),
+    })),
+    args.office ? 'OFFICE' : 'DRIVER',
+  );
+  return mergeResults(manifest, results);
+}
+
+/** The manifest with the truck-day's results laid in: each stop's result and each trip's Back at depot. Pure. */
+export function mergeResults(manifest: DriverManifest, results: DriverResults): DriverManifest {
+  return {
+    ...manifest,
+    loads: manifest.loads.map((l) => ({
+      ...l,
+      backAtDepotAt: results.back[String(l.loadNo)] ?? null,
+      stops: l.stops.map((s) => ({ ...s, result: results.stops[s.key] ?? null })),
+    })),
+  };
 }

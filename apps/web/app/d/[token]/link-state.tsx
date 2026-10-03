@@ -17,7 +17,9 @@ export function LinkState({ lang, code, date }: { lang: Lang; code: LinkStateCod
         ? t(lang, 'linkExpired', { date: day })
         : code === 'DRIVER_LINKS_OFF'
           ? t(lang, 'linksOff')
-          : t(lang, 'linkInvalid');
+          : code === 'SIGNED_IN_OTHER_TENANT'
+            ? t(lang, 'signedInOther')
+            : t(lang, 'linkInvalid');
   const Icon = code === 'LINK_EXPIRED' || code === 'UPLOAD_CLOSED' ? Clock : code === 'LINK_REPLACED' ? RefreshCw : code === 'DRIVER_LINKS_OFF' ? AlertTriangle : Link2Off;
   return (
     <div className="mx-auto flex min-h-[60vh] max-w-md flex-col items-center justify-center gap-4 p-6 text-center" data-testid="link-state" data-code={code}>

@@ -16,8 +16,10 @@ vi.mock('@/lib/tenant', async () => {
   return { tenantDb: () => m.fakePrisma };
 });
 
-import { navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
+import { mergeResults, navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
+import { plannedStopOf } from '@/lib/delivery/planned-stop';
+import { fakePrisma } from './fake-plan-db';
 
 const input = (over: Partial<ManifestInput> = {}): ManifestInput => ({
   truckId: 't1',
@@ -189,5 +191,31 @@ describe('getPlanDetail: the additive stop fields (orderLines, plannedHours, pro
     tables.routeAssignment[0].portionCases = 5;
     const s = (await getPlanDetail('tA', 'P'))!.loads[0].stops[0];
     expect(s.orderLines).toEqual([{ orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 5 }]);
+  });
+
+  it('Part 2: the planned stop of the driver API has exactly the manifest\'s order lines (whole and split), so the two paths cannot drift', async () => {
+    for (const portion of [null, [{ lineId: 'LN1', cases: 5 }, { lineId: 'LN2', cases: 3 }]]) {
+      tables.routeAssignment[0].portionLinesJson = portion;
+      tables.routeAssignment[0].portionCases = portion ? 8 : null;
+      const s = (await getPlanDetail('tA', 'P'))!.loads[0].stops[0];
+      const planned = (await plannedStopOf(fakePrisma as never, { id: 'L1', breakJson: null }, 1))!;
+      expect(planned.lines.map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.plannedCases }))).toEqual(s.orderLines.map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases })));
+      expect(planned.casesPlanned).toBe(s.cases);
+    }
+  });
+});
+
+describe('Part 2: results merged into the manifest', () => {
+  it('lays each stop\'s result and each trip\'s Back at depot into the projection', () => {
+    const m = projectManifest([fixture()], input());
+    const first = m.loads[0]!;
+    const key = first.stops[0]!.key;
+    const merged = mergeResults(m, {
+      stops: { [key]: { state: 'DONE', arrivedAt: null, arrivalObserved: true, departedAt: null, minutes: null, outcome: 'DELIVERED', reason: null, note: null, outcomeAt: null, by: 'DRIVER', casesDelivered: 1, lines: null, photoIds: [], noPhotoReason: null, late: false, editable: true, carriedTo: null } },
+      back: { [String(first.loadNo)]: '2026-10-05T12:00:00.000Z' },
+    });
+    expect(merged.loads[0]!.stops[0]!.result).toMatchObject({ outcome: 'DELIVERED' });
+    expect(merged.loads[0]!.stops[1]?.result ?? null).toBeNull();
+    expect(merged.loads[0]!.backAtDepotAt).toBe('2026-10-05T12:00:00.000Z');
   });
 });

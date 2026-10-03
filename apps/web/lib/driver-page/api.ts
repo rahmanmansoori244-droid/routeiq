@@ -5,7 +5,7 @@
  * every poll. Each browser sends its random id (X-Driver-Device) for "used on N phones".
  * Browser-safe.
  */
-import type { DriverManifest, LinkStateCode } from '../driver-link/manifest-types';
+import type { DriverAction, DriverManifest, LinkStateCode } from '../driver-link/manifest-types';
 
 /** The token of a /d/<token> path, or null. */
 export function tokenFromPath(pathname: string): string | null {
@@ -63,11 +63,64 @@ export function readManifestAnswer(status: number, body: unknown, retryAfter: st
   if ((status === 404 || status === 410 || status === 503) && typeof err.code === 'string') {
     return { kind: 'link', status, code: err.code as LinkStateCode, uploadOnly: err.uploadOnly === true, date: typeof err.date === 'string' ? err.date : null };
   }
+  // A RouteIQ session of another company in this browser: the link cannot be used here until it signs out.
+  if (status === 403 && err.code === 'SIGNED_IN_OTHER_TENANT') return { kind: 'link', status, code: 'SIGNED_IN_OTHER_TENANT', uploadOnly: false, date: null };
   if (status === 429) {
     const s = Number(retryAfter);
     return { kind: 'busy', retryAfterSec: Number.isFinite(s) && s > 0 ? s : null };
   }
   return { kind: 'error', status };
+}
+
+export interface RawAnswer {
+  status: number;
+  body: unknown;
+  retryAfter: string | null;
+}
+
+async function raw(res: Response): Promise<RawAnswer> {
+  return { status: res.status, body: await res.json().catch(() => null), retryAfter: res.headers.get('retry-after') };
+}
+
+/** POST /api/d/actions (Part 2): the queued actions with the phone's clock. A network failure answers status 0. */
+export async function postActions(token: string, device: string, actions: DriverAction[], fetchImpl: typeof fetch = fetch): Promise<RawAnswer> {
+  try {
+    const res = await fetchImpl('/api/d/actions', {
+      method: 'POST',
+      headers: { ...driverHeaders(token, device), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientNow: new Date().toISOString(), actions }),
+      cache: 'no-store',
+      credentials: 'same-origin',
+      referrerPolicy: 'no-referrer',
+    });
+    return await raw(res);
+  } catch {
+    return { status: 0, body: null, retryAfter: null };
+  }
+}
+
+/** POST /api/d/photos (Part 2): one photo as multipart (`meta` JSON + `file`). A network failure answers status 0. */
+export async function postPhoto(token: string, device: string, meta: Record<string, unknown>, file: Blob, fetchImpl: typeof fetch = fetch): Promise<RawAnswer> {
+  try {
+    const form = new FormData();
+    form.append('meta', JSON.stringify({ ...meta, clientNow: new Date().toISOString() }));
+    form.append('file', file, 'photo.jpg');
+    const res = await fetchImpl('/api/d/photos', { method: 'POST', headers: driverHeaders(token, device), body: form, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
+    return await raw(res);
+  } catch {
+    return { status: 0, body: null, retryAfter: null };
+  }
+}
+
+/** A photo of the truck-day as a blob URL (the token stays in the header, never in an image URL), or null. */
+export async function photoUrl(token: string, device: string, photoId: string, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  try {
+    const res = await fetchImpl(`/api/d/photos/${encodeURIComponent(photoId)}`, { headers: { ...driverHeaders(token, device), Accept: 'image/jpeg' }, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
+    if (!res.ok) return null;
+    return URL.createObjectURL(await res.blob());
+  } catch {
+    return null;
+  }
 }
 
 /** GET /api/d/manifest with the token in the header. A network failure answers { kind: 'error', status: 0 }. */

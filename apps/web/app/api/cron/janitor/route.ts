@@ -26,6 +26,7 @@
 import { NextResponse } from 'next/server';
 import { reapStuckJobs } from '@/lib/jobs/optimize-job';
 import { reapStaleShifts } from '@/lib/jobs/shift-janitor';
+import { completeReturnedLoads } from '@/lib/delivery/event-service';
 import { janitorAuthorized } from '@/lib/janitor-auth';
 
 export const dynamic = 'force-dynamic';
@@ -36,7 +37,9 @@ function authorize(req: Request): boolean {
 
 async function runJanitor() {
   const [jobs, shifts] = await Promise.all([reapStuckJobs(), reapStaleShifts()]);
-  return { jobs, shifts };
+  // Delivery outcome: loads reported back at the depot with a result on every stop are completed.
+  const returnedLoads = await completeReturnedLoads();
+  return { jobs, shifts, returnedLoads };
 }
 
 export async function POST(req: Request) {

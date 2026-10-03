@@ -8,6 +8,7 @@
  */
 import { reapStuckJobs } from './optimize-job';
 import { reapStaleShifts } from './shift-janitor';
+import { completeReturnedLoads } from '../delivery/event-service';
 
 const INTERVAL_MS = 60_000;
 const g = globalThis as unknown as { __routeiqJanitor?: NodeJS.Timeout };
@@ -19,6 +20,14 @@ async function sweep() {
   } catch (err) {
     // The database may not be reachable yet at boot; the next sweep retries.
     console.error('janitor: sweep failed', (err as Error)?.message ?? err);
+  }
+  // Delivery outcome (owner request 4 Oct 2026): a load the driver reported back at the depot is
+  // completed once every stop has a result (spec section 8.7). Its own try: it never stops the reaper.
+  try {
+    const returned = await completeReturnedLoads();
+    if (returned.completed) console.warn('janitor: returned loads completed', returned);
+  } catch (err) {
+    console.error('janitor: returned loads not checked', (err as Error)?.message ?? err);
   }
 }
 

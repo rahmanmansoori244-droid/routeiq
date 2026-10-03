@@ -44,6 +44,7 @@ vi.mock('@/lib/solver-client', () => ({
 import {
   applyScenario,
   chooseScenario,
+  completeLoadAsDriver,
   createInitialPlan,
   createNextVersion,
   DRIVER_REQUIRED_RULE,
@@ -1980,5 +1981,43 @@ describe('owner rule 20 (30 Sep 2026): a load never leaves without a driver', ()
     row('planLoad', 'L1').status = 'DISPATCHED';
     await updateLoad(T, 'P', 'L1', { status: 'COMPLETED' }, user, allow);
     expect(row('planLoad', 'L1').status).toBe('COMPLETED');
+  });
+});
+
+describe('completeLoadAsDriver: Back at depot closes the trip (delivery outcome, spec section 8.7)', () => {
+  const ref = { runId: 'P', loadId: 'L1', depotId: 'D1', date: '2026-09-27' };
+  const visit = (sequence: number, outcome: string | null) => ({
+    id: `V${sequence}`,
+    tenantId: T,
+    depotId: 'D1',
+    deliveryDate: DAY,
+    truckId: 'T1',
+    loadNo: 1,
+    sequence,
+    outcome,
+  });
+
+  it('completes a DISPATCHED load whose every stop has a result, with no user and the driver link as the actor', async () => {
+    seedAppliedPlan();
+    row('planLoad', 'L1').status = 'DISPATCHED';
+    tables.stopVisit = [visit(1, 'DELIVERED')];
+    const r = await completeLoadAsDriver(T, ref, { label: 'Driver link: Salim (T01, back at depot)' });
+    expect(r).toEqual({ completed: true });
+    expect(row('planLoad', 'L1')).toMatchObject({ status: 'COMPLETED', statusChangedById: null });
+    const a = tables.auditLog.find((x) => x.action === 'LOAD_COMPLETED' && x.entityId === 'L1');
+    expect(a).toMatchObject({ userId: null, afterJson: expect.objectContaining({ actor: 'Driver link: Salim (T01, back at depot)' }) });
+    expect(rawLog.some((s) => /FROM "RunPlan" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(s))).toBe(true);
+  });
+
+  it('leaves the load DISPATCHED while a stop has no result, and never touches a load that is not DISPATCHED', async () => {
+    seedAppliedPlan();
+    row('planLoad', 'L1').status = 'DISPATCHED';
+    tables.stopVisit = [visit(1, null)];
+    expect(await completeLoadAsDriver(T, ref, { label: 'x' })).toEqual({ completed: false, reason: 'NO_RESULT' });
+    expect(row('planLoad', 'L1').status).toBe('DISPATCHED');
+    row('planLoad', 'L1').status = 'LOADING';
+    tables.stopVisit = [visit(1, 'DELIVERED')];
+    expect(await completeLoadAsDriver(T, ref, { label: 'x' })).toEqual({ completed: false, reason: 'NOT_DISPATCHED' });
+    expect(row('planLoad', 'L1').status).toBe('LOADING');
   });
 });

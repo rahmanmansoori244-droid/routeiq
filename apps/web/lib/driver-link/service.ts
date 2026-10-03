@@ -551,6 +551,8 @@ const STATE_TEXT: Record<LinkStateCode, string> = {
   LINK_EXPIRED: 'This link has expired.',
   UPLOAD_CLOSED: 'This link has expired.',
   DRIVER_LINKS_OFF: 'Driver links are not available on this server. Ask your dispatcher.',
+  // Answered by withDriverLink (403), never by resolve: a RouteIQ session of another company.
+  SIGNED_IN_OTHER_TENANT: 'You are signed in to RouteIQ for another company. Sign out to use this driver link.',
 };
 
 function refused(status: 404 | 410 | 503, code: LinkStateCode, known: boolean, extra: { uploadOnly?: boolean; date?: string } = {}): ResolvedLink {

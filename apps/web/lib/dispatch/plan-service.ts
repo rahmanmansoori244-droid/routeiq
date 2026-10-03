@@ -2194,6 +2194,25 @@ export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
 }
 
 async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date) {
+  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now);
+}
+
+/**
+ * Who changes a load's status: a signed-in user (`userId`), or the driver link / RouteIQ itself
+ * (`userId` null, `label` names it in the audit row's afterJson.actor: "Driver link: Salim (T05,
+ * back at depot)").
+ */
+export interface StatusActor {
+  userId: string | null;
+  label: string | null;
+}
+
+/**
+ * The status change of one load, shared by the dispatcher's buttons (changeStatusTx) and the driver's
+ * Back at depot (completeLoadAsDriver). `hasRole` null skips the role check: only the driver path,
+ * which completes a DISPATCHED load whose every stop has a result.
+ */
+async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, actor: StatusActor, hasRole: RoleCheck | null, now: Date) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
@@ -2207,7 +2226,7 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   if (!run.chosenScenarioId && !scenariolessTransitionAllowed(load.status, to)) {
     throw noPlanApplied((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
   }
-  if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
+  if (hasRole && !hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
   const recon = run.reconciliationJson as unknown as Reconciliation | null;
   if (to === 'DISPATCHED' && !recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
   // PR4 (review F04): locking and loading freeze what later re-plans build on, so they need the
@@ -2238,7 +2257,7 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   if (to === 'DISPATCHED') await driverGate(tx, tenantId, load);
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
+    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: actor.userId },
   });
   const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
   if (to === 'DISPATCHED' && orderIds.length) {
@@ -2264,17 +2283,50 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   await audit(
     {
       tenantId,
-      userId: user.id,
+      userId: actor.userId,
       action: loadStatusAction(to),
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { status: load.status } as never,
-      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}) } as never,
+      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}), ...(actor.label ? { actor: actor.label } : {}) } as never,
     },
     tx,
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/**
+ * The driver's "Back at depot" closes the trip (owner request 4 Oct 2026, spec section 8.7): a
+ * DISPATCHED load on the live plan whose every stop has a delivery result becomes COMPLETED, with the
+ * same tail as the dispatcher's Completed button (status, the version's status, the audit row with
+ * afterJson.actor, the plan facts) and no role check (the caller is the driver link or the janitor).
+ * Anything else leaves the load as it is: not DISPATCHED, a stop without a result, or a busy plan
+ * (409 PLAN_BUSY is thrown: the caller tries again later).
+ */
+export async function completeLoadAsDriver(
+  tenantId: string,
+  ref: { runId: string; loadId: string; depotId: string; date: string },
+  actor: { label: string },
+  opts: { now?: Date } = {},
+): Promise<{ completed: boolean; reason?: 'NOT_DISPATCHED' | 'NO_RESULT' }> {
+  return inLoadTx(async (tx) => {
+    const run = await lockOpenRun(tx, tenantId, ref.runId);
+    const load = await tx.planLoad.findFirst({ where: { id: ref.loadId, runId: run.id, tenantId }, select: { id: true, status: true, truckId: true, loadNo: true } });
+    if (!load || load.status !== 'DISPATCHED') return { completed: false, reason: 'NOT_DISPATCHED' as const };
+    const seqs = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { sequenceInTruck: true } })).map((r) => r.sequenceInTruck))];
+    const done = new Set(
+      (
+        await tx.stopVisit.findMany({
+          where: { tenantId, depotId: ref.depotId, deliveryDate: dateOnly(ref.date), truckId: load.truckId, loadNo: load.loadNo, outcome: { not: null } },
+          select: { sequence: true },
+        })
+      ).map((v) => v.sequence),
+    );
+    if (!seqs.length || seqs.some((s) => !done.has(s))) return { completed: false, reason: 'NO_RESULT' as const };
+    await changeStatusCore(tx, tenantId, run, load.id, 'COMPLETED', { userId: null, label: actor.label }, null, opts.now ?? new Date());
+    return { completed: true };
+  });
 }
 
 /**

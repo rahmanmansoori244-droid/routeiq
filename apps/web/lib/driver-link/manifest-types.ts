@@ -22,16 +22,27 @@ export type NotDeliveredReasonName = (typeof NOT_DELIVERED_REASONS)[number];
 export const PHOTO_POSITION_STATUSES = ['OK', 'POOR', 'DENIED', 'TIMEOUT', 'UNSUPPORTED'] as const;
 export type PhotoPositionStatusName = (typeof PHOTO_POSITION_STATUSES)[number];
 
+export type OutcomeName = 'DELIVERED' | 'PARTLY_DELIVERED' | 'NOT_DELIVERED';
+
 /** A stop's result as the page shows it (spec section 8.6; filled from Part 2 on, null until then). */
 export interface StopResult {
+  /** DONE = a result; ARRIVED = an arrival and no departure yet (a stop in progress); else PENDING. */
   state: 'PENDING' | 'ARRIVED' | 'DONE';
   arrivedAt: string | null;
   arrivalObserved: boolean;
   departedAt: string | null;
   minutes: number | null;
-  outcome: 'DELIVERED' | 'PARTLY_DELIVERED' | 'NOT_DELIVERED' | null;
+  outcome: OutcomeName | null;
   reason: NotDeliveredReasonName | null;
+  /** The result's note (Other, or any note), null = none. */
+  note: string | null;
+  /** When the result was recorded (the tracker's "done" time). */
+  outcomeAt: string | null;
+  /** Who recorded the current result: the driver link or the office. */
+  by: 'DRIVER' | 'OFFICE' | null;
   casesDelivered: number | null;
+  /** Delivered cases per order line of the current result (Partly entry prefills from it). */
+  lines: { lineId: string; delivered: number }[] | null;
   photoIds: string[];
   noPhotoReason: string | null;
   late: boolean;
@@ -39,6 +50,66 @@ export interface StopResult {
   editable: boolean;
   /** The copy's date (YYYY-MM-DD), for any stop holding a brought-forward order. */
   carriedTo: string | null;
+}
+
+/** One action of the driver page's queue (POST /api/d/actions, spec section 8.1). */
+export interface DriverPos {
+  lat: number;
+  lng: number;
+  accuracyM: number;
+  /** The device clock when the position was read (ISO). */
+  at: string;
+  gpsAt?: string | null;
+  speedMps?: number | null;
+}
+
+export type DriverAction =
+  | {
+      key: string;
+      type: 'ARRIVE';
+      stop: string;
+      at: string;
+      mode: 'AUTO' | 'MANUAL';
+      pos?: DriverPos;
+      chained?: boolean;
+      /** The stop the chained arrival came from (neighbour shops). */
+      from?: string;
+      observed?: boolean;
+      chosen?: boolean;
+      /** An answer to "Arrived at ... - when?". */
+      when?: boolean;
+    }
+  | { key: string; type: 'DEPART'; stop: string; at: string; mode: 'AUTO'; pos?: DriverPos; reason: 'LEFT' | 'NEXT_STOP'; gap?: boolean }
+  | {
+      key: string;
+      type: 'OUTCOME';
+      stop: string;
+      at: string;
+      pos?: DriverPos;
+      outcome: OutcomeName | null;
+      reason?: NotDeliveredReasonName | null;
+      note?: string | null;
+      lines?: { lineId: string; delivered: number }[] | null;
+      photoKeys: string[];
+      noPhotoReason?: 'CAMERA_FAILED' | null;
+    }
+  | { key: string; type: 'BACK_AT_DEPOT'; load: number; at: string; pos?: DriverPos };
+
+/** The answer per action: ok, a duplicate of one already stored, or refused (with the driver's words). */
+export interface DriverActionResult {
+  key: string;
+  status: 'ok' | 'duplicate' | 'refused' | 'error';
+  code?: string;
+  /** Refused but worth keeping on the phone (an arrival before the load is dispatched). */
+  transient?: boolean;
+  message?: { en: string; ar: string };
+}
+
+/** POST /api/d/actions and the photo route answer with the truck-day's results, merged into the stored manifest. */
+export interface DriverResults {
+  stops: Record<string, StopResult>;
+  /** Back at depot per load number (ISO time). */
+  back: Record<string, string>;
 }
 
 export interface ManifestOrderLine {
@@ -118,7 +189,7 @@ export interface DriverManifest {
 }
 
 /** The answer of a driver route that refuses the link (404 / 410 / 503), as the page reads it. */
-export type LinkStateCode = 'LINK_NOT_FOUND' | 'LINK_REPLACED' | 'LINK_REVOKED' | 'LINK_EXPIRED' | 'UPLOAD_CLOSED' | 'DRIVER_LINKS_OFF';
+export type LinkStateCode = 'LINK_NOT_FOUND' | 'LINK_REPLACED' | 'LINK_REVOKED' | 'LINK_EXPIRED' | 'UPLOAD_CLOSED' | 'DRIVER_LINKS_OFF' | 'SIGNED_IN_OTHER_TENANT';
 
 /** One truck-day link as the plan screen's Driver link dialog shows it. */
 export interface DriverLinkView {

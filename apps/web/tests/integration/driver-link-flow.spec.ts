@@ -10,6 +10,13 @@
  * - after a reissue the old token answers 410 LINK_REPLACED;
  * - owner rule 20: dispatch without a driver is 409 DRIVER_REQUIRED; a daily driver added from the
  *   load, then dispatch: 200; the same phone with another name: 409 PHONE_BELONGS_TO.
+ * Part 2 (the plan and its links move to today first: the phone's times must lie inside the day):
+ * - an arrival on a LOADING load is transient LOAD_NOT_DISPATCHED, then accepted after Dispatch;
+ * - Delivered with a photo key, then the photo: stored without its EXIF; replays answer duplicate;
+ *   the photo is served to its own truck-day's link only;
+ * - an automatic arrival 2 km from the pin is stored as a manual one (downgraded);
+ * - a result on every stop + Back at depot complete the load (audited with the driver link);
+ * - after the dispatcher completes a load: a backdated change is LOAD_COMPLETED, a gap-fill is late.
  * Synthetic data only.
  *
  * Requires: dev server (RATE_LIMITS_DISABLED=1) + solver running.
@@ -210,5 +217,161 @@ describe('Part 1: the driver link and the read-only driver page', () => {
     expect(r.status).toBe(409);
     expect((await json(r)).error).toMatchObject({ code: 'PHONE_BELONGS_TO', name: 'Khalid' });
     expect(await prisma.driver.count({ where: { tenantId: t.tenantId, casual: true } })).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Part 2: field actions
+// ---------------------------------------------------------------------------------------
+
+const seg = (marker: number, payload: number[]) => [0xff, marker, (payload.length + 2) >> 8, (payload.length + 2) & 0xff, ...payload];
+const ascii = (s: string) => [...s].map((c) => c.charCodeAt(0));
+/** A tiny JPEG (structure only) with an EXIF block that must not be stored. */
+function tinyJpeg(): Uint8Array {
+  return Uint8Array.from([
+    0xff,
+    0xd8,
+    ...seg(0xe0, [...ascii('JFIF'), 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]),
+    ...seg(0xe1, [...ascii('Exif'), 0, 0, ...ascii('II'), 42, 0, 8, 0, 0, 0, 0, 0, ...ascii('EXIFSECRET')]),
+    ...seg(0xdb, [0, ...Array.from({ length: 64 }, () => 1)]),
+    ...seg(0xc0, [8, 0, 16, 0, 16, 1, 1, 0x11, 0]),
+    ...seg(0xc4, [0, 1, ...Array.from({ length: 15 }, () => 0), 0]),
+    ...seg(0xda, [1, 1, 0, 0, 63, 0]),
+    1,
+    2,
+    3,
+    0xff,
+    0xd9,
+  ]);
+}
+
+describe('Part 2: results, photos and Back at depot from the driver page', () => {
+  let t02Token = '';
+  let t01LoadId = '';
+  let t01LoadNo = 0;
+  let stops: { key: string; lat: number; lng: number }[] = [];
+  const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
+  const uuid = () => crypto.randomUUID();
+  const post = async (tok: string, actions: unknown[]) => {
+    const r = await fetch(`${BASE}/api/d/actions`, {
+      method: 'POST',
+      headers: { authorization: `DriverLink ${tok}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ clientNow: new Date().toISOString(), actions }),
+    });
+    expect(r.status).toBe(200);
+    return (await json(r)).data as { results: { key: string; status: string; code?: string; transient?: boolean }[] };
+  };
+  const manifest = async (tok: string) => (await json(await driverGet('/api/d/manifest', tok))).data;
+  const arrival = (stop: { key: string; lat: number; lng: number }, key = uuid(), northM = 15) => ({
+    key,
+    type: 'ARRIVE',
+    stop: stop.key,
+    at: ago(20),
+    mode: 'AUTO',
+    pos: { lat: stop.lat + northM / 111_320, lng: stop.lng, accuracyM: 10, at: ago(20) },
+  });
+
+  beforeAll(async () => {
+    // Every load change while the plan is still dated tomorrow (as in Part 1), then the plan and its
+    // links move to today: the phone's times must lie inside the delivery day.
+    const p = await plan();
+    const t01 = p.loads.filter((l: any) => l.truckId === trucks.T01).sort((a: any, b: any) => a.loadNo - b.loadNo);
+    t01LoadId = t01[0].id;
+    t01LoadNo = t01[0].loadNo;
+    const salim = await prisma.driver.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'D1' } });
+    expect((await patchLoad(t01LoadId, { driverId: salim.id, status: 'LOCKED' })).status).toBe(200);
+    expect((await patchLoad(t01LoadId, { status: 'LOADING' })).status).toBe(200);
+    const r2 = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/driver-links`, j({ runId, truckId: trucks.T02 }));
+    expect([200, 201]).toContain(r2.status);
+    const v2 = (await json(r2)).data;
+    t02Token = v2.url.split('/d/')[1];
+    const today = isoPlus(0);
+    await prisma.runPlan.update({ where: { id: runId }, data: { runDate: new Date(`${today}T00:00:00Z`) } });
+    for (const id of [linkId, v2.linkId]) {
+      await prisma.driverLink.update({ where: { id }, data: { deliveryDate: new Date(`${today}T00:00:00Z`), expiresAt: new Date(`${isoPlus(1)}T08:00:00Z`) } });
+    }
+    const m = await manifest(token);
+    const load = m.loads.find((l: any) => l.loadNo === t01LoadNo);
+    stops = load.stops.map((s: any) => ({ key: s.key, lat: s.lat, lng: s.lng }));
+    expect(stops.length).toBeGreaterThanOrEqual(1);
+  }, 120_000);
+
+  it('an arrival on a LOADING load is kept on the phone (transient) and accepted once the load is dispatched', async () => {
+    const a = arrival(stops[0]!);
+    const first = await post(token, [a]);
+    expect(first.results[0]).toMatchObject({ status: 'refused', code: 'LOAD_NOT_DISPATCHED', transient: true });
+    expect((await patchLoad(t01LoadId, { status: 'DISPATCHED' })).status).toBe(200);
+    expect((await post(token, [a])).results[0]).toMatchObject({ status: 'ok' });
+    const ev = await prisma.stopEvent.findFirstOrThrow({ where: { tenantId: t.tenantId, idempotencyKey: `dl:${a.key}` } });
+    expect(ev).toMatchObject({ kind: 'ARRIVED', source: 'PHONE_AUTO' });
+  });
+
+  it('Delivered with a photo key, then the photo (stored without its EXIF); the same batch again answers duplicate', async () => {
+    const photoKey = uuid();
+    const a = arrival(stops[0]!);
+    const o = { key: uuid(), type: 'OUTCOME', stop: stops[0]!.key, at: ago(5), outcome: 'DELIVERED', photoKeys: [photoKey] };
+    expect((await post(token, [a, o])).results.map((r) => r.status)).toEqual(['ok', 'ok']);
+    const form = new FormData();
+    form.append(
+      'meta',
+      JSON.stringify({ key: photoKey, stop: stops[0]!.key, takenAt: ago(5), clientNow: new Date().toISOString(), positionStatus: 'OK', pos: { lat: stops[0]!.lat, lng: stops[0]!.lng + 0.0002, accuracyM: 12, at: ago(5) } }),
+    );
+    form.append('file', new Blob([tinyJpeg() as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }), 'p.jpg');
+    const body = new Response(form);
+    const bytes = new Uint8Array(await body.arrayBuffer());
+    const up = await fetch(`${BASE}/api/d/photos`, {
+      method: 'POST',
+      headers: { authorization: `DriverLink ${token}`, 'content-type': body.headers.get('content-type')!, 'content-length': String(bytes.length) },
+      body: bytes,
+    });
+    expect(up.status).toBe(200);
+    const photo = (await json(up)).data;
+    expect(photo.status).toBe('ok');
+    const row = await prisma.deliveryPhoto.findUniqueOrThrow({ where: { id: photo.photoId } });
+    expect(Buffer.from(row.bytes!).toString('latin1')).not.toContain('EXIFSECRET');
+    const before = await prisma.stopEvent.count({ where: { tenantId: t.tenantId } });
+    expect((await post(token, [a, o])).results.map((r) => r.status)).toEqual(['duplicate', 'duplicate']);
+    expect(await prisma.stopEvent.count({ where: { tenantId: t.tenantId } })).toBe(before);
+    const visit = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[0]!.key.split(':')[1]) } });
+    expect(visit).toMatchObject({ outcome: 'DELIVERED', photoCount: 1 });
+    // The photo of this truck-day is served to its link only.
+    expect((await driverGet(`/api/d/photos/${photo.photoId}`, token)).status).toBe(200);
+    expect((await driverGet(`/api/d/photos/${photo.photoId}`, t02Token)).status).toBe(404);
+  });
+
+  it('an automatic arrival 2 km from the pin is stored as a manual one (downgraded)', async () => {
+    const stop = stops[1] ?? stops[0]!;
+    const far = arrival(stop, uuid(), 2_000);
+    expect((await post(token, [far])).results[0]).toMatchObject({ status: 'ok' });
+    const ev = await prisma.stopEvent.findFirstOrThrow({ where: { tenantId: t.tenantId, idempotencyKey: `dl:${far.key}` } });
+    expect(ev.source).toBe('PHONE_MANUAL');
+    expect(ev.payloadJson).toMatchObject({ downgraded: true });
+  });
+
+  it('T02: a result on every stop and Back at depot complete the load, audited with the driver link', async () => {
+    const m = await manifest(t02Token);
+    const load = m.loads.find((l: any) => l.status === 'DISPATCHED');
+    expect(load).toBeTruthy();
+    const actions: unknown[] = load.stops.map((s: any) => ({ key: uuid(), type: 'OUTCOME', stop: s.key, at: ago(30), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }));
+    actions.push({ key: uuid(), type: 'BACK_AT_DEPOT', load: load.loadNo, at: ago(10) });
+    expect((await post(t02Token, actions)).results.every((r) => r.status === 'ok')).toBe(true);
+    const row = await prisma.planLoad.findFirstOrThrow({ where: { runId, truckId: trucks.T02, loadNo: load.loadNo } });
+    expect(row.status).toBe('COMPLETED');
+    const a = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, action: 'LOAD_COMPLETED', entityId: row.id } });
+    expect(a.userId).toBeNull();
+    expect(a.afterJson).toMatchObject({ actor: expect.stringMatching(/^Driver link: Khalid \(T02, back at depot\)$/) });
+    expect(await prisma.auditLog.count({ where: { tenantId: t.tenantId, action: 'DRIVER_BACK_AT_DEPOT' } })).toBe(1);
+  });
+
+  it('after the dispatcher completes T01 L1: a backdated change of a stop that had a result is refused; a stop without one is filled in, late', async () => {
+    expect((await patchLoad(t01LoadId, { status: 'COMPLETED' })).status).toBe(200);
+    const changed = await post(token, [{ key: uuid(), type: 'OUTCOME', stop: stops[0]!.key, at: ago(3), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }]);
+    expect(changed.results[0]).toMatchObject({ status: 'refused', code: 'LOAD_COMPLETED' });
+    if (stops[1]) {
+      const fill = await post(token, [{ key: uuid(), type: 'OUTCOME', stop: stops[1].key, at: ago(4), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }]);
+      expect(fill.results[0]).toMatchObject({ status: 'ok' });
+      const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[1].key.split(':')[1]) } });
+      expect(v).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
+    }
   });
 });

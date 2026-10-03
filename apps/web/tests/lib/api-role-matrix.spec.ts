@@ -50,6 +50,10 @@
  *   /api/runs/[id]/loads/[loadId] (409 DRIVER_REQUIRED: owner rule 20), GET|PATCH /api/tenant/config
  *   (five admin settings), POST /api/trucks + PATCH /api/trucks/[id] (`hired`) and PATCH
  *   /api/drivers/[id] (`casual`).
+ * - Part 2 (field actions): POST /api/d/actions, POST /api/d/photos and GET /api/d/photos/[photoId]
+ *   are DRIVER_LINK too (a signed-in user of the link's company writes as the office, PLANNER+;
+ *   below PLANNER the writes are 403). The janitor route (TOKEN) also completes loads reported back
+ *   at the depot with a result on every stop.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -76,7 +80,10 @@ const EXPECTED: Record<string, string> = {
   'GET /api/customers/data-to-collect': 'PLANNER',
   'GET /api/customers/master': 'PLANNER',
   // Owner request 4 Oct 2026: the driver page's API (token in a header) and the driver links.
+  'POST /api/d/actions': 'DRIVER_LINK',
   'GET /api/d/manifest': 'DRIVER_LINK',
+  'POST /api/d/photos': 'DRIVER_LINK',
+  'GET /api/d/photos/[photoId]': 'DRIVER_LINK',
   'GET /api/dashboard/kpis': 'ANY',
   'GET /api/depots': 'ANY',
   'POST /api/depots': 'TENANT_ADMIN',

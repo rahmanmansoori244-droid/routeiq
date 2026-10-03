@@ -134,5 +134,9 @@ describe('the page API helpers', () => {
     expect(readManifestAnswer(404, { data: null, error: { code: 'LINK_NOT_FOUND' } }, null)).toMatchObject({ kind: 'link', code: 'LINK_NOT_FOUND' });
     expect(readManifestAnswer(429, null, '30')).toEqual({ kind: 'busy', retryAfterSec: 30 });
     expect(readManifestAnswer(500, null, null)).toEqual({ kind: 'error', status: 500 });
+    // Part 2 (found in the browser check): another company's RouteIQ session in this browser is a
+    // clear state, not "No signal" for ever.
+    expect(readManifestAnswer(403, { data: null, error: { code: 'SIGNED_IN_OTHER_TENANT' } }, null)).toEqual({ kind: 'link', status: 403, code: 'SIGNED_IN_OTHER_TENANT', uploadOnly: false, date: null });
+    expect(readManifestAnswer(403, { data: null, error: { code: 'SOMETHING_ELSE' } }, null)).toEqual({ kind: 'error', status: 403 });
   });
 });
