@@ -164,4 +164,15 @@ export const LIMITS = {
   loginIpEmailFailures: { limit: 5, windowMs: 15 * 60_000 },
   loginIpAttempts: { limit: 30, windowMs: 10 * 60_000 },
   loginEmailFailures: { limit: 20, windowMs: 60 * 60_000 },
+  /**
+   * Driver link routes (lib/driver-link/guard.ts, owner request 4 Oct 2026). Unknown tokens are
+   * counted per IP (never a token that resolves, never a null or internal IP: drivers share the depot
+   * Wi-Fi and mobile CGNAT); everything else is per link id. A 429 carries Retry-After.
+   */
+  driverBadToken: { limit: 30, windowMs: 10 * 60_000 },
+  driverManifest: { limit: 60, windowMs: 60_000 },
+  driverActions: { limit: 60, windowMs: 60_000 },
+  /** Bursts only: the daily cap per link (3 x the truck-day's stops + 10) is checked by the photo route. */
+  driverPhotoBurst: { limit: 60, windowMs: 10 * 60_000 },
+  driverPhotoGet: { limit: 120, windowMs: 60_000 },
 } as const;

@@ -86,13 +86,16 @@ const CHANGED: Record<string, unknown> = {
   driverCostPerHour: 3, overtimeCostPerHour: 6, prefWindowPenaltyPerMin: 0.2, distanceProvider: 'HAVERSINE', roadTimeFactor: 1.4,
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
   requireDataBeforeLoading: true, dataCollectDays: 5,
+  geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
  * the customer data rules of 1 Oct 2026, which never change a plan: the loading gate (LOCK / LOADING /
- * DISPATCH, plan-lifecycle.spec) and the data-to-collect list (data-collection-master.spec).
+ * DISPATCH, plan-lifecycle.spec) and the data-to-collect list (data-collection-master.spec). And the
+ * driver page settings of 4 Oct 2026 (arrival radius, photo proof, retention, the dispatcher phone),
+ * read by the driver page and its routes only (driver-manifest.spec).
  */
-const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays']);
+const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
 
 beforeEach(() => {
   customers = [customer('C1', 23.6, 58.4), customer('C2', 23.55, 58.3)];

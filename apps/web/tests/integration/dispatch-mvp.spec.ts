@@ -18,7 +18,7 @@ import { buildDispatchRequest } from '@/lib/dispatch/plan-service';
 import { driverPackModel } from '@/lib/dispatch/driver-pack';
 import { loadPath, loadPathKey } from '@/lib/dispatch/load-path';
 import { answerIsStale, type GeoRow } from '@/lib/dispatch/plan-map-state';
-import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
+import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, withDriver, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
 let depotId = '';
@@ -313,6 +313,7 @@ describe('NMWC dispatch MVP workflow', () => {
   it('24 dispatched loads cannot change; a further re-plan keeps them', async () => {
     const p2 = await plan(runV2);
     const l1 = p2.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
+    await withDriver(t.tenantId, [l1.id]); // owner rule 20
     const d = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/loads/${l1.id}`, { ...j({ status: 'DISPATCHED' }), method: 'PATCH' });
     expect(d.status).toBe(200);
     for (const to of ['PLANNED', 'LOCKED', 'LOADING']) {

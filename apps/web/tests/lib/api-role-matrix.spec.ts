@@ -41,6 +41,15 @@
  * - Long searches (owner request 29 Sep 2026): POST /api/runs/[id]/stop-search ("Use the best plan
  *   found so far") is SUPERVISOR and above; the optimize / re-plan routes take an optional
  *   searchMode (roles unchanged).
+ * - Delivery outcome and the driver page (owner request 4 Oct 2026), Part 1: GET /api/d/manifest is
+ *   DRIVER_LINK (the driver link token in the Authorization header, withDriverLink; no session
+ *   needed, a signed-in user of the link's company is the office); the driver links of a plan
+ *   (GET / POST /api/dispatch/driver-links, PATCH /api/dispatch/driver-links/[id]) and the daily-driver
+ *   quick add (POST /api/dispatch/casual-driver) are PLANNER, like the Driver list. Roles unchanged on
+ *   GET /api/runs/[id]/export/pdf (prints the driver-link QR for PLANNER+ only), PATCH
+ *   /api/runs/[id]/loads/[loadId] (409 DRIVER_REQUIRED: owner rule 20), GET|PATCH /api/tenant/config
+ *   (five admin settings), POST /api/trucks + PATCH /api/trucks/[id] (`hired`) and PATCH
+ *   /api/drivers/[id] (`casual`).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -66,6 +75,8 @@ const EXPECTED: Record<string, string> = {
   // Owner decisions 1 Oct 2026 (items 4 and 6): the data to collect and the customer master (Excel).
   'GET /api/customers/data-to-collect': 'PLANNER',
   'GET /api/customers/master': 'PLANNER',
+  // Owner request 4 Oct 2026: the driver page's API (token in a header) and the driver links.
+  'GET /api/d/manifest': 'DRIVER_LINK',
   'GET /api/dashboard/kpis': 'ANY',
   'GET /api/depots': 'ANY',
   'POST /api/depots': 'TENANT_ADMIN',
@@ -75,9 +86,13 @@ const EXPECTED: Record<string, string> = {
   'DELETE /api/depots/[id]': 'TENANT_ADMIN',
   'GET /api/dispatch/carry-over': 'ANY',
   'POST /api/dispatch/carry-over': 'PLANNER',
+  'POST /api/dispatch/casual-driver': 'PLANNER',
   'GET /api/dispatch/day': 'ANY',
   // Data collection rules (1 Oct 2026): a delivery time for one order (urgent / promised).
   'PUT /api/dispatch/delivery-time': 'PLANNER',
+  'GET /api/dispatch/driver-links': 'PLANNER',
+  'POST /api/dispatch/driver-links': 'PLANNER',
+  'PATCH /api/dispatch/driver-links/[id]': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',
   'POST /api/driver/login': 'GONE',

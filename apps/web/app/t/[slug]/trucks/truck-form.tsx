@@ -37,6 +37,8 @@ export interface TruckRow {
   availableToMin?: number | null;
   defaultDriverId: string | null;
   active: boolean;
+  /** Hired from outside (owner request 4 Oct 2026): a badge only, the planner never reads it. */
+  hired?: boolean;
   depot?: { id: string; code: string; name: string };
 }
 
@@ -75,6 +77,7 @@ interface FormState {
   availableTo: string; // HH:MM, '' = to the end of the day
   defaultDriverId: string;
   active: boolean;
+  hired: boolean;
 }
 
 function buildBlank(depots: DepotOption[]): FormState {
@@ -95,6 +98,7 @@ function buildBlank(depots: DepotOption[]): FormState {
     availableTo: '',
     defaultDriverId: NO_DRIVER,
     active: true,
+    hired: false,
   };
 }
 
@@ -136,6 +140,7 @@ export function TruckFormDialog({
           availableTo: timeInputValue(truck.availableToMin, 'until'),
           defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
           active: truck.active,
+          hired: !!truck.hired,
         });
       } else {
         setForm(buildBlank(depots));
@@ -180,6 +185,7 @@ export function TruckFormDialog({
       availableToMin,
       defaultDriverId: form.defaultDriverId === NO_DRIVER ? null : form.defaultDriverId,
       active: form.active,
+      hired: form.hired,
     };
     startTransition(async () => {
       const url = mode === 'create' ? '/api/trucks' : `/api/trucks/${truck!.id}`;
@@ -384,6 +390,13 @@ export function TruckFormDialog({
               Active
             </Label>
             <Switch id="active" checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} />
+          </div>
+          <div className="flex items-center justify-between rounded-md border px-3 py-2">
+            <Label htmlFor="hired" className="text-sm">
+              Hired from outside
+              <span className="block text-xs font-normal text-muted-foreground">A badge on the plan, the driver sheets and the driver page. Planning is the same. Deactivate the truck when it goes back.</span>
+            </Label>
+            <Switch id="hired" checked={form.hired} onCheckedChange={(v) => setForm({ ...form, hired: v })} />
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={pending}>

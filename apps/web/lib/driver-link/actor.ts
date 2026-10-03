@@ -1,0 +1,37 @@
+/**
+ * Who a driver-link action is (spec section 16.4). Possession of the link is the only credential, so
+ * the audit says whose truck-day it is, which generation of the link, whom it was made for and which
+ * phone (the first 4 hex of the hashed browser id). Pure.
+ *
+ *   "Driver link: Salim (T05, 5 Oct) · link #2 · phone 3f9a"
+ *   "Driver link: Khalid (T05, 5 Oct) · link #1 made for Salim · phone 3f9a"
+ *   "Driver link: Salim (T05, 5 Oct) · link #1 made before a driver was set"
+ */
+import { fmtDayMonth } from '../dispatch/time';
+
+export interface ActorLink {
+  generation: number;
+  driverIdAtIssue: string | null;
+  /** The name of driverIdAtIssue, when known. */
+  driverNameAtIssue?: string | null;
+}
+
+export interface ActorLoad {
+  truckCode: string;
+  /** YYYY-MM-DD */
+  date: string;
+  driverId: string | null;
+  driverName: string | null;
+}
+
+export function driverActor(link: ActorLink, load: ActorLoad, deviceId: string | null): string {
+  const who = `Driver link: ${load.driverName ?? 'no driver set'} (${load.truckCode}, ${fmtDayMonth(load.date)})`;
+  const made =
+    link.driverIdAtIssue === null
+      ? ` · link #${link.generation} made before a driver was set`
+      : link.driverIdAtIssue !== load.driverId
+        ? ` · link #${link.generation} made for ${link.driverNameAtIssue ?? 'another driver'}`
+        : ` · link #${link.generation}`;
+  const phone = deviceId ? ` · phone ${deviceId.slice(0, 4)}` : '';
+  return `${who}${made}${phone}`;
+}

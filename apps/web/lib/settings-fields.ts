@@ -30,7 +30,34 @@ export const SETTINGS_FIELDS = [
   'avgSpeedKmh',
   'requireDataBeforeLoading',
   'dataCollectDays',
+  // The driver page and delivery results (owner request 4 Oct 2026): company admin only.
+  'geofenceRadiusM',
+  'photoProofRequired',
+  'photoRetentionDays',
+  'locationRetentionDays',
+  'dispatcherPhone',
 ] as const satisfies readonly (keyof TenantConfig)[];
+
+/** Bounds of the driver-page settings (web only: the optimizer never reads them). */
+export const DELIVERY_SETTING_BOUNDS = {
+  geofenceRadiusM: { min: 50, max: 500 },
+  photoRetentionDays: { min: 30, max: 1095 },
+  locationRetentionDays: { min: 30, max: 1095 },
+} as const;
+
+/**
+ * Positions are never kept longer than the photos (spec 12.4): a save that changes either retention
+ * is refused while the location retention is longer than the photo retention.
+ */
+export function retentionSaveProblem(
+  changed: Record<string, unknown>,
+  merged: { photoRetentionDays: number; locationRetentionDays: number },
+): string | null {
+  if (!('photoRetentionDays' in changed) && !('locationRetentionDays' in changed)) return null;
+  return merged.locationRetentionDays > merged.photoRetentionDays
+    ? `Driver positions (${merged.locationRetentionDays} days) cannot be kept longer than the delivery photos (${merged.photoRetentionDays} days).`
+    : null;
+}
 
 export type SettingsField = (typeof SETTINGS_FIELDS)[number];
 export type EditableConfig = Pick<TenantConfig, SettingsField>;

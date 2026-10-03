@@ -30,7 +30,12 @@ describe('redactForAudit', () => {
   });
 
   it('covers exactly the credential fields', () => {
-    expect([...AUDIT_REDACTED_KEYS].sort()).toEqual(['accessPinHash', 'passwordHash', 'sessionToken', 'tokenHash']);
+    expect([...AUDIT_REDACTED_KEYS].sort()).toEqual(['accessPinHash', 'passwordHash', 'prevTokenHash', 'salt', 'sessionToken', 'tokenHash']);
+  });
+
+  it('drops a driver link salt and token hashes (owner request 4 Oct 2026): the token can be derived from the salt', () => {
+    const link = { id: 'dl1', generation: 2, salt: 'c2FsdC1zYWx0LXNhbHQ', tokenHash: 'ab'.repeat(32), prevTokenHash: 'cd'.repeat(32), truckCode: 'T05' };
+    expect(redactForAudit({ before: link, after: [link] })).toEqual({ before: { id: 'dl1', generation: 2, truckCode: 'T05' }, after: [{ id: 'dl1', generation: 2, truckCode: 'T05' }] });
   });
 
   it('audit() strips them before the row is written', async () => {

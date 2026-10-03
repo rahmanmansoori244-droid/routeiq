@@ -1,11 +1,12 @@
 import { NextResponse } from 'next/server';
-import { withTenantApi, fail, type AuthedContext } from '@/lib/api';
+import { withTenantApi, fail, hasRole, type AuthedContext } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetPdf } from '@/lib/exports/pdf';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { driverPackModel, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
+import { driverPackModel, renderDriverPackPdf, type SheetDriverLink } from '@/lib/dispatch/driver-pack';
 import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
+import { ensureLink } from '@/lib/driver-link/service';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -27,6 +28,21 @@ function pdfResponse(buf: Buffer, filename: string, disposition: 'inline' | 'att
 // Codes are free text - keep the download filename header-safe.
 const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, '_') || 'X';
 
+async function packDriverLinks(user: AuthedContext['user'], runId: string, truckIds: string[], origin: string): Promise<Map<string, SheetDriverLink | null>> {
+  const out = new Map<string, SheetDriverLink | null>();
+  for (const truckId of truckIds) {
+    try {
+      const v = await ensureLink(user.tenantId, runId, truckId, user.id, { origin });
+      out.set(truckId, v.url ? { kind: 'QR', url: v.url } : v.revoked ? { kind: 'STOPPED' } : { kind: 'ASK' });
+    } catch (e) {
+      const code = (e as { details?: { code?: unknown } } | null)?.details?.code;
+      out.set(truckId, code === 'LINK_DAY_OVER' ? null : { kind: 'ASK' });
+      if (code !== 'LINK_DAY_OVER') console.warn('[pdf] driver link not made for a truck', { runId, truckId, code: code ?? (e as Error)?.message });
+    }
+  }
+  return out;
+}
+
 // NMWC dispatch plan version -> driver sheets, one section per load.
 // ?load=<loadId> one load, ?truck=<truckId or code> every load of that truck.
 // Driver sheets only (audit F16): a dispatch plan without loads (every order unserved) has none;
@@ -45,7 +61,12 @@ async function driverSheets(r: Request, runId: string, { user }: AuthedContext) 
   if (truck) loads = loads.filter((l) => l.truckId === truck || l.truckCode === truck);
   if ((loadId || truck) && !loads.length) return fail(loadId ? 'Load not found in this plan.' : 'Truck has no load in this plan.', 404);
   const tenant = await prisma.tenant.findUnique({ where: { id: user.tenantId }, select: { name: true } });
-  const buf = await renderDriverPackPdf(driverPackModel(detail, { tenantName: tenant?.name ?? '', loadIds: loads.map((l) => l.id) }));
+  // The driver link (QR) per truck-day, printed only for PLANNER and above: the link can record
+  // delivery results, and this PDF is readable by every role (a VIEWER's sheets say "ask the
+  // dispatcher"). Each truck-day in its own transaction; a failure prints the same placeholder on that
+  // truck's sheets and never fails the pack. Revoked: "Driver link stopped"; its day over: nothing.
+  const driverLinks = hasRole(user.role, 'PLANNER') ? await packDriverLinks(user, runId, [...new Set(loads.map((l) => l.truckId))], new URL(r.url).origin) : undefined;
+  const buf = await renderDriverPackPdf(driverPackModel(detail, { tenantName: tenant?.name ?? '', loadIds: loads.map((l) => l.id), driverLinks }));
   // A filtered pack is one truck (and, for ?load=, one trip of it).
   const suffix = loadId || truck ? `-${safe(loads[0].truckCode)}${loadId ? `-trip${loads[0].loadNo}` : ''}` : '';
   // Inline: opens in the browser's PDF viewer, ready to print or share; the name is used on save.

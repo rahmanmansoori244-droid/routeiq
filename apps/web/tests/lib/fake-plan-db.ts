@@ -178,6 +178,8 @@ const MODELS = [
   'runPlan', 'planLoad', 'routeAssignment', 'runJob', 'auditLog', 'scenarioResult', 'unservedOrder', 'order', 'orderLine',
   'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer', 'uploadBatch',
   'product', 'intakeLineKey', 'manualBaseline', 'region',
+  // Delivery outcome and the driver page (owner request 4 Oct 2026).
+  'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto',
 ];
 
 export const fakePrisma: Row = {};

@@ -42,6 +42,11 @@ const TENANT_SCOPED_MODELS = new Set([
   'PlanLoad',
   'CustomerTypeProfile',
   'IntakeLineKey',
+  // Delivery outcome and the driver page (owner request 4 Oct 2026)
+  'DriverLink',
+  'StopVisit',
+  'StopEvent',
+  'DeliveryPhoto',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

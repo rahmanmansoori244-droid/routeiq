@@ -3,6 +3,7 @@
  *   PUBLIC            no session needed (sign-in, sign-up, health, ...)
  *   TOKEN             a service token (janitor)
  *   GONE              retired, always 410 (lib/driver-app.ts)
+ *   DRIVER_LINK       withDriverLink: the driver link token in a header (lib/driver-link/guard.ts)
  *   ANY               withTenantApi without a role: any signed-in tenant user, VIEWER included
  *   <ROLE>            withTenantApi({ role }) minimum role
  *   SESSION:<ROLE>    calls auth() itself and checks the role in the handler
@@ -24,6 +25,7 @@ function routeFiles(dir: string, out: string[] = []): string[] {
 
 function classify(segment: string, whole: string): string {
   if (/driverAppGone\(/.test(segment)) return 'GONE';
+  if (/withDriverLink\(/.test(segment)) return 'DRIVER_LINK';
   if (/withTenantApi\(/.test(segment)) {
     const opts = [...segment.matchAll(/\}\s*,\s*\{\s*role:\s*'(\w+)'/g)];
     return opts.length ? opts[opts.length - 1]![1]! : 'ANY';

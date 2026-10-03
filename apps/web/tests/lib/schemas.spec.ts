@@ -189,6 +189,12 @@ describe('tenantConfigSchema', () => {
     roadTimeFactor: 1.25,
     requireDataBeforeLoading: false,
     dataCollectDays: 3,
+    // The driver page and delivery results (owner request 4 Oct 2026).
+    geofenceRadiusM: 100,
+    photoProofRequired: true,
+    photoRetentionDays: 365,
+    locationRetentionDays: 90,
+    dispatcherPhone: null,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

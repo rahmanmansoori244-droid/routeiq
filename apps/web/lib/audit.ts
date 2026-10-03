@@ -28,6 +28,8 @@ export interface AuditInput {
 export const AUDIT_REDACTED_KEYS: ReadonlySet<string> = new Set([
   'accessPinHash',
   'passwordHash',
+  'prevTokenHash',
+  'salt',
   'sessionToken',
   'tokenHash',
 ]);

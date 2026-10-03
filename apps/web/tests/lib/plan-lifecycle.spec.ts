@@ -46,6 +46,7 @@ import {
   chooseScenario,
   createInitialPlan,
   createNextVersion,
+  DRIVER_REQUIRED_RULE,
   LOCATION_GATE_RULE,
   noLocationLoadRemedy,
   PlanError,
@@ -456,6 +457,7 @@ describe("load changes and the owner's location rule (audit PR A5, second review
     seedAppliedPlan();
     customerNow(over);
     await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
     await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
     expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
   });
@@ -529,6 +531,7 @@ describe("load changes and the owner's location rule (audit PR A5, second review
     ])('control: %s is locked and dispatched as before', async (_what, now, before, planned) => {
       seedReplaced(now, before, planned);
       await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+      row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
       await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
       expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
     });
@@ -584,6 +587,7 @@ describe("load changes and the owner's location rule (audit PR A5, second review
       history(changes);
       await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
       await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+      row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
       await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
       expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
     });
@@ -1424,6 +1428,7 @@ describe('a failed copy-forward re-plan: labels and change summary (review: PLAN
     const copies = tables.planLoad.filter((l) => l.runId === child.id);
     expect(copies.every((l) => l.carriedFromLoadId)).toBe(true); // both copied (the driver rules need the link)
     const l1 = copies.find((l) => l.carriedFromLoadId === 'L1')!;
+    l1.driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
     await updateLoad(T, child.id, l1.id, { status: 'DISPATCHED' }, user, allow);
     const summary = row('runPlan', child.id).changeSummaryJson;
     expect(summary).toMatchObject({ parentVersion: 1, lockedLoadsPreserved: 1 }); // not 2: L2's copy is still PLANNED
@@ -1675,6 +1680,7 @@ describe('owner decision 1 Oct 2026, item 3: location and delivery window before
     customerNow();
     gate(false);
     await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
     await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
     expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['DISPATCHED', 'LOCKED']);
   });
@@ -1697,6 +1703,7 @@ describe('owner decision 1 Oct 2026, item 3: location and delivery window before
     gate(true);
     await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
     expect(row('planLoad', 'L1').status).toBe('LOADING');
+    row('planLoad', 'L1').driverId = 'DRV1'; // owner rule 20: a load never leaves without a driver
     await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow);
     expect(row('planLoad', 'L1').status).toBe('DISPATCHED');
   });
@@ -1921,5 +1928,57 @@ describe('owner decision 1 Oct 2026, item 3: location and delivery window before
     expect(both.message).toContain(`C1 (Corner Shop): no location and delivery window. ${DATA_GATE_RULE} Delivery window: ${windowGateRemedy()} Location: ${noLocationLoadRemedy('PLANNED')}`);
     customerNow({ lat: null, lng: null, geocodeConfidence: 'MISSING', windowConfirmedAt: new Date() });
     await expect(updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow)).rejects.toMatchObject({ status: 409, details: { code: 'LOCATION_REQUIRED' } });
+  });
+});
+
+describe('owner rule 20 (30 Sep 2026): a load never leaves without a driver', () => {
+  const usableCustomer = (over: Record<string, unknown> = {}) => {
+    tables.customer = [{ id: 'c', tenantId: T, code: 'C1', branchCode: null, lat: 23.6111, lng: 58.4111, locationVerified: true, geocodeConfidence: 'HIGH', ...over }];
+  };
+  const salim = () => {
+    tables.driver = [{ id: 'DRV1', tenantId: T, code: 'D1', name: 'Salim', phone: null, active: true, casual: false }];
+  };
+
+  it('dispatch without a driver: 409 DRIVER_REQUIRED, nothing changes', async () => {
+    seedAppliedPlan();
+    usableCustomer();
+    const e = await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow).catch((x) => x);
+    expect(e).toBeInstanceOf(PlanError);
+    expect(e).toMatchObject({ status: 409, details: { code: 'DRIVER_REQUIRED' } });
+    expect(e.message).toBe(`T01 L1: ${DRIVER_REQUIRED_RULE}`);
+    expect(e.message).toBe('T01 L1: a load never leaves without a driver. Pick the driver in the Driver list, or add a daily driver, then dispatch.');
+    expect(row('planLoad', 'L1').status).toBe('LOCKED');
+    expect(tables.auditLog).toEqual([]);
+  });
+
+  it('the driver and the dispatch in one request: allowed (the driver is set first)', async () => {
+    seedAppliedPlan();
+    usableCustomer();
+    salim();
+    await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED', driverId: 'DRV1' }, user, allow);
+    expect(row('planLoad', 'L1')).toMatchObject({ status: 'DISPATCHED', driverId: 'DRV1' });
+    expect(tables.auditLog.map((a) => a.action)).toEqual(['LOAD_DRIVER_SET', 'LOAD_DISPATCHED']);
+  });
+
+  it('runs after the other gates: their refusals keep their words', async () => {
+    seedAppliedPlan();
+    usableCustomer({ geocodeConfidence: 'LOW', locationVerified: false });
+    await expect(updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow)).rejects.toMatchObject({ details: { code: 'LOCATION_REQUIRED' } });
+    // Cases that do not reconcile come first too.
+    seedAppliedPlan('READY', { reconciliationJson: { ok: false } });
+    usableCustomer();
+    await expect(updateLoad(T, 'P', 'L1', { status: 'DISPATCHED' }, user, allow)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/reconcile/) });
+  });
+
+  it('Lock, Loading and Completed are not affected', async () => {
+    seedAppliedPlan();
+    usableCustomer();
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+    expect([row('planLoad', 'L1').status, row('planLoad', 'L2').status]).toEqual(['LOADING', 'LOCKED']);
+    // A load already out without a driver (dispatched before the rule) can still be completed.
+    row('planLoad', 'L1').status = 'DISPATCHED';
+    await updateLoad(T, 'P', 'L1', { status: 'COMPLETED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('COMPLETED');
   });
 });

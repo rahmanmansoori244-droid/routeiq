@@ -36,6 +36,12 @@ import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
+import type { DriverLinkView } from '@/lib/driver-link/manifest-types';
+import { reissuePrompt, reissuePromptText } from '@/lib/driver-link/reissue-prompt';
+import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
+import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
+import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
+import type { ApiResult } from './client-api';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -58,7 +64,14 @@ const STUCK_RESET_CONFIRM =
 /** Once a load is out, who drove it is history. */
 const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
 
-interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean }
+interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean; casual?: boolean }
+
+/** Owner rule 20: the Dispatch button's title on a load without a driver. */
+const DISPATCH_NEEDS_DRIVER = 'Pick the driver first: a load never leaves without a driver';
+/** The Driver list's last option: add a daily (casual) driver from the load. */
+const ADD_DAILY = '__add_daily_driver__';
+/** PATCH /api/dispatch/driver-links/:id action after the "Reissue link?" prompt. */
+const LINK_REISSUE = 'REISSUE' as const;
 
 interface Props {
   slug: string;
@@ -146,12 +159,79 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const loadDrivers = useCallback(async () => {
     const r = await api<DriverOption[]>('/api/drivers');
-    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
+    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active, casual }) => ({ id, code, name, phone, active, casual: !!casual })));
   }, []);
 
   useEffect(() => {
     void loadDrivers();
   }, [loadDrivers]);
+
+  // The plan's truck-day driver links (owner request 4 Oct 2026), loaded with the plan for the
+  // dispatcher (PLANNER+): the WhatsApp link carries the driver link at render time, never after an
+  // awaited call a browser would block as a pop-up. Existing links only (nothing is made here).
+  const [links, setLinks] = useState<DriverLinkView[]>([]);
+  const [linkDialog, setLinkDialog] = useState<{ truckId: string; loadId: string } | null>(null);
+  const [casualFor, setCasualFor] = useState<DetailLoad | null>(null);
+  const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
+  const loadLinks = useCallback(async () => {
+    if (!canPlan) return;
+    const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
+    if (r.ok && Array.isArray(r.data)) setLinks(r.data);
+  }, [runId, canPlan]);
+
+  useEffect(() => {
+    void loadLinks();
+  }, [loadLinks]);
+
+  const linkOf = (truckId: string) => links.find((x) => x.truckId === truckId) ?? null;
+  const keepLink = (view: DriverLinkView) => setLinks((cur) => [...cur.filter((x) => x.truckId !== view.truckId), view]);
+
+  /**
+   * After a driver change (the Driver list or a daily driver): "Reissue link?" only when the truck-day's
+   * link was made for another named driver, the change is on its earliest open trip and nobody else
+   * is on the road with it; a link made before any driver was set takes the new driver silently
+   * (reissuePrompt, spec 4.3).
+   */
+  async function afterDriverChange(fresh: PlanDetail | null, l: DetailLoad, driverId: string | null) {
+    const link = linkOf(l.truckId);
+    if (!fresh || !link) return;
+    const truckLoads = fresh.loads.filter((x) => x.truckId === l.truckId).map((x) => ({ id: x.id, loadNo: x.loadNo, status: x.status, driverId: x.driverId, departMin: x.departMin }));
+    const decision = reissuePrompt({ driverIdAtIssue: link.driverIdAtIssue, revoked: link.revoked, expired: link.expired }, truckLoads, l.id, driverId);
+    if (decision === 'RECORD') {
+      const r = await api<DriverLinkView>('/api/dispatch/driver-links', { method: 'POST', json: { runId, truckId: l.truckId } });
+      if (r.ok && r.data) keepLink(r.data);
+    } else if (decision === 'PROMPT') {
+      const newName = fresh.loads.find((x) => x.id === l.id)?.driverName ?? 'the new driver';
+      setReissueAsk({ link, text: reissuePromptText(l.truckCode, fmtDayMonth(fresh.run.runDate), link.driverNameAtIssue ?? 'another driver', newName) });
+    }
+  }
+
+  async function reissueNow(link: DriverLinkView) {
+    const r = await api<DriverLinkView>(`/api/dispatch/driver-links/${link.linkId}`, { method: 'PATCH', json: { action: LINK_REISSUE, reason: 'driver changed' } });
+    if (r.ok && r.data) {
+      keepLink(r.data);
+      toast.success(`New driver link for ${r.data.truckCode}: send it or print the sheets again.`);
+    } else toast.error(r.error ?? 'Could not reissue the driver link.');
+  }
+
+  /** "+ Add daily driver…": the quick add under the plan's action lock, then the plan and the driver list again. */
+  async function addDailyDriver(l: DetailLoad, body: CasualDriverBody): Promise<ApiResult<CasualDriverAnswer> | null> {
+    let res: ApiResult<CasualDriverAnswer> | null = null;
+    await runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
+        if (!res.ok || !res.data) return;
+        toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
+        await loadDrivers();
+        const fresh = await load();
+        await afterDriverChange(fresh, l, res.data.driver.id);
+      },
+      failed,
+    );
+    return res;
+  }
 
   // Try again after a failed load: the plan, and the driver list if it did not load either.
   const retry = () => {
@@ -168,7 +248,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     seenReload.current = reloadSignal;
     void load();
     if (!drivers.length) void loadDrivers();
-  }, [reloadSignal, load, loadDrivers, drivers.length]);
+    void loadLinks();
+  }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
 
   useEffect(() => {
     if (!d) return;
@@ -243,6 +324,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         // Allowed, but a driver cannot be on two trucks at once: say so right away.
         const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
         if (clash) toast.warning(clash.text);
+        if (!keep) await afterDriverChange(fresh, l, driverId);
       },
       failed,
     );
@@ -453,6 +535,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const planLoads = remedyLoads(d.loads);
   const remedy = timingRemedy(blockingViolations, planLoads);
   const replanOff = timingReplanOff(remedy, nothingToPlan);
+  // The driver page was opened after a load's planned departure while it is still at the depot (spec 6.5).
+  const lateNotes = superseded ? [] : lateDispatchNotes(d.loads, links, d.run.runDate, d.timezone || 'Asia/Muscat');
+  const dialogLoad = linkDialog ? d.loads.find((x) => x.id === linkDialog.loadId) ?? null : null;
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -884,6 +969,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{open[l.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
+                      {l.hired ? (
+                        <Badge variant="outline" className="ml-1 text-[10px]" title="Hired from outside" data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
+                          hired
+                        </Badge>
+                      ) : null}
                     </td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
                       <LoadDriver
@@ -892,6 +982,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
                         busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
+                        onAddDaily={() => setCasualFor(l)}
                         onKeep={() => setDriver(l, l.driverId, true)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
@@ -901,10 +992,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                             : running
                               ? { off: 'Wait for the optimization to finish: the trips are about to change.' }
                               : {
-                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo), phoneCountryCode),
+                                  // The driver link line only with an active link (not revoked, expired or missing).
+                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo, { driverLinkUrl: linkOf(l.truckId)?.url ?? null }), phoneCountryCode),
                                   number: whatsappNumber(l.driverPhone, phoneCountryCode),
                                 }
                         }
+                        // The dispatcher (PLANNER+) without a usable link yet: WhatsApp opens the Driver link dialog first.
+                        linkFirst={canPlan && !superseded && !running && (!linkOf(l.truckId) || !!linkOf(l.truckId)?.keyChanged)}
+                        onLink={canPlan && !superseded && !running ? () => setLinkDialog({ truckId: l.truckId, loadId: l.id }) : null}
                       />
                     </td>
                     <td className="p-2">
@@ -941,6 +1036,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         >
                           Changed after planning
                         </Badge>
+                      ) : null}
+                      {lateNotes.find((n) => n.loadId === l.id) ? (
+                        <span className="mt-1 block text-xs text-amber-700" data-testid={`load-late-dispatch-${l.truckCode}-${l.loadNo}`}>
+                          {lateNotes.find((n) => n.loadId === l.id)!.text}
+                        </span>
                       ) : null}
                     </td>
                     <td className="p-2">
@@ -985,6 +1085,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           canDispatch={canDispatch}
                           reconOk={!!rec?.ok}
                           timingBlocked={gateOn && !!l.timing && !l.timing.ok}
+                          noDriver={!l.driverId}
                           onStatus={(st) => setStatus(l, st)}
                         />
                       ) : null}
@@ -1109,6 +1210,41 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </Card>
       ) : null}
 
+      {canPlan && linkDialog ? (
+        <DriverLinkDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setLinkDialog(null);
+          }}
+          runId={runId}
+          truckId={linkDialog.truckId}
+          truckCode={dialogLoad?.truckCode ?? ''}
+          date={d.run.runDate}
+          timezone={d.timezone || 'Asia/Muscat'}
+          link={linkOf(linkDialog.truckId)}
+          driverName={dialogLoad?.driverName ?? null}
+          driverPhone={dialogLoad?.driverPhone ?? null}
+          phoneCountryCode={phoneCountryCode}
+          onChanged={keepLink}
+        />
+      ) : null}
+      <CasualDriverDialog
+        load={casualFor ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo } : null}
+        onOpenChange={(o) => {
+          if (!o) setCasualFor(null);
+        }}
+        submit={(body) => (casualFor ? addDailyDriver(casualFor, body) : Promise.resolve(null))}
+      />
+      <ReissueLinkPrompt
+        text={reissueAsk?.text ?? null}
+        onKeep={() => setReissueAsk(null)}
+        onReissue={() => {
+          const ask = reissueAsk;
+          setReissueAsk(null);
+          if (ask) void reissueNow(ask.link);
+        }}
+      />
+
       <LateOrderDialog
         open={lateOpen}
         onOpenChange={setLateOpen}
@@ -1165,12 +1301,21 @@ function LoadDriver({
   pdfUrl,
   clash,
   whatsapp,
+  onAddDaily,
+  linkFirst = false,
+  onLink = null,
 }: {
   l: DetailLoad;
   drivers: DriverOption[];
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
+  /** "+ Add daily driver…" (owner rule 20): a daily driver added from this load. */
+  onAddDaily?: () => void;
+  /** No usable driver link for the truck-day yet: WhatsApp opens the Driver link dialog first (it makes the link). */
+  linkFirst?: boolean;
+  /** Opens the truck-day's Driver link dialog (PLANNER+); null = no Link action. */
+  onLink?: (() => void) | null;
   /** Keep the driver RouteIQ filled in as the dispatcher's own pick. */
   onKeep: () => void;
   pdfUrl: string;
@@ -1202,22 +1347,45 @@ function LoadDriver({
         value={l.driverId ?? ''}
         disabled={!editable || busy}
         title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
-        onChange={(e) => onChange(e.target.value || null)}
+        onChange={(e) => (e.target.value === ADD_DAILY ? onAddDaily?.() : onChange(e.target.value || null))}
         data-testid={`driver-select-${tag}`}
       >
         <option value="">No driver</option>
         {options.map((x) => (
           <option key={x.id} value={x.id}>
             {x.name}
+            {x.casual ? ' (daily)' : ''}
             {x.active ? '' : ' (inactive)'}
           </option>
         ))}
+        {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}
       </select>
       <div className="flex gap-2 text-xs">
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
         </a>
-        {'url' in whatsapp ? (
+        {onLink ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline"
+            onClick={onLink}
+            data-testid={`load-link-${tag}`}
+            title="Driver link (QR): the driver's phone page with his trips, for every trip of this truck today"
+          >
+            Link
+          </button>
+        ) : null}
+        {'url' in whatsapp && linkFirst && onLink ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline"
+            onClick={onLink}
+            data-testid={`load-whatsapp-${tag}`}
+            title="Make the driver link first: the dialog sends it on WhatsApp"
+          >
+            WhatsApp
+          </button>
+        ) : 'url' in whatsapp ? (
           <a className="text-primary underline-offset-2 hover:underline" href={whatsapp.url} target="_blank" rel="noreferrer" data-testid={`load-whatsapp-${tag}`} title={waTitle}>
             WhatsApp
           </a>
@@ -1271,9 +1439,12 @@ function LoadActions({
   canDispatch,
   reconOk,
   timingBlocked,
+  noDriver = false,
   onStatus,
 }: {
   l: DetailLoad;
+  /** Owner rule 20: Dispatch is off until the load has a driver (the server refuses it too: 409 DRIVER_REQUIRED). */
+  noDriver?: boolean;
   busy: boolean;
   /** The version has an optimized plan; without one only Unlock, Back to locked and Completed are offered. */
   applied: boolean;
@@ -1312,7 +1483,7 @@ function LoadActions({
   }
   if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
   if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) {
-    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
+    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze && !noDriver, timingTitle ?? (noDriver ? DISPATCH_NEEDS_DRIVER : undefined)));
   }
   if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
   return <div className="flex flex-wrap gap-1">{out}</div>;

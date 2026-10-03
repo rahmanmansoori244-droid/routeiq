@@ -2232,6 +2232,10 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
+  // Owner rule 20 (30 Sep 2026): a load never leaves without a driver. Checked LAST, after every
+  // other gate (their refusals keep their words), on the load as it is after the driver step of the
+  // same request (updateLoad sets the driver first). Lock, Loading and Completed are not affected.
+  if (to === 'DISPATCHED') await driverGate(tx, tenantId, load);
   const updated = await tx.planLoad.update({
     where: { id: loadId },
     data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
@@ -2732,6 +2736,32 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     ...(stored && stored.inputHash !== fresh.inputHash ? { reportWasStale: true } : {}),
     ...(!ok ? { overridden: 'FEASIBILITY_GATE=warn', violations: blocking.slice(0, 10).map((v) => `${v.code}: ${v.message}`) } : {}),
   };
+}
+
+/** The words of the 409 DRIVER_REQUIRED refusal (and the plan screen's Dispatch title, without the load). */
+export const DRIVER_REQUIRED_RULE = 'a load never leaves without a driver. Pick the driver in the Driver list, or add a daily driver, then dispatch.';
+
+/** Owner rule 20: 409 DRIVER_REQUIRED when the load has no driver (see changeStatusTx). */
+async function driverGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; driverId: string | null }) {
+  if (load.driverId) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  throw new PlanError(`${truck?.code ?? 'Truck'} L${load.loadNo}: ${DRIVER_REQUIRED_RULE}`, 409, { code: 'DRIVER_REQUIRED' });
+}
+
+/**
+ * The daily-driver quick add (lib/dispatch/casual-driver.ts, owner rule 20): its own reads and writes
+ * and the driver setting of the load in ONE load-change transaction under the plan's row lock, as
+ * updateLoad. A refusal anywhere rolls back the new driver too.
+ */
+export async function inLoadChange<T>(
+  tenantId: string,
+  runId: string,
+  fn: (tx: Tx, run: OpenRun, setDriver: (loadId: string, driverId: string | null, user: { id: string }) => ReturnType<typeof setDriverTx>) => Promise<T>,
+): Promise<T> {
+  return inLoadTx(async (tx) => {
+    const run = await lockOpenRun(tx, tenantId, runId);
+    return fn(tx, run, (loadId, driverId, user) => setDriverTx(tx, tenantId, run, loadId, driverId, user));
+  });
 }
 
 async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, driverId: string | null, user: { id: string }) {

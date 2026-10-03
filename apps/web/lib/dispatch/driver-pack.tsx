@@ -16,8 +16,8 @@
  */
 import * as React from 'react';
 import { Document, Link, Page, Path, StyleSheet, Svg, Text, View, renderToBuffer } from '@react-pdf/renderer';
-import { create as createQr } from 'qrcode';
 import type { DetailLoad, DetailStop, PlanDetail } from './plan-detail';
+import { qrPath } from './qr';
 import { isSupersededRun } from './plan-status';
 import { coordText, pinUrl, routeLinks, tripsByTruck, type RoutePlan } from './driver-links';
 import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
@@ -102,7 +102,36 @@ export interface DriverSheet {
   unprintable: boolean;
   /** Review F04: this truck-day's times did not pass the timetable check. */
   timesNotVerified: boolean;
+  /**
+   * The QR codes printed at the top right, in print order (owner request 4 Oct 2026): the driver
+   * link first (76 pt), then at most 2 route codes; without any driver-link line, up to 3 route codes
+   * as before. Route parts beyond them stay the text links above.
+   */
+  qrCodes: SheetQr[];
+  /** In the driver link's place when there is no QR: "Driver link stopped - ask the dispatcher" or "Driver link: ask the dispatcher". */
+  driverLinkNote: string | null;
 }
+
+/** One printed QR code: the driver link (opens the driver's phone page) or a Google Maps route part. */
+export interface SheetQr {
+  kind: 'DRIVER_LINK' | 'ROUTE';
+  url: string;
+  caption: string;
+  /** Printed size in pt. */
+  size: number;
+}
+
+/**
+ * The driver link of a sheet's truck-day: its link (QR), STOPPED (revoked: no QR), or ASK (no link
+ * for this reader - a VIEWER - or it could not be made). Absent from the map with the map given, or
+ * null: print nothing (the truck-day's link is past its expiry).
+ */
+export type SheetDriverLink = { kind: 'QR'; url: string } | { kind: 'STOPPED' } | { kind: 'ASK' };
+
+/** The caption under the driver-link QR (the PDF font is Latin only). */
+export const DRIVER_LINK_CAPTION = 'Scan with the phone camera - opens in Chrome/Safari';
+export const DRIVER_LINK_STOPPED_TEXT = 'Driver link stopped - ask the dispatcher';
+export const DRIVER_LINK_ASK_TEXT = 'Driver link: ask the dispatcher';
 
 export interface DriverPackModel {
   title: string;
@@ -120,6 +149,29 @@ export interface DriverPackOptions {
   tenantName: string;
   /** Only these loads (kept in plan order); all loads when omitted. */
   loadIds?: string[];
+  /**
+   * The driver link per truck id (the export route ensures one per truck-day for PLANNER and above).
+   * Omitted: every sheet says "Driver link: ask the dispatcher". A truck missing from the map says
+   * the same; a truck mapped to null prints nothing (its link's day is over).
+   */
+  driverLinks?: ReadonlyMap<string, SheetDriverLink | null>;
+}
+
+/** The QR codes and the driver-link note of one sheet (pure: the layout only draws them). */
+export function sheetQrCodes(route: RoutePlan, link: SheetDriverLink | null): { qrCodes: SheetQr[]; driverLinkNote: string | null } {
+  const routeShown = route.links.slice(0, link ? 2 : 3);
+  const routeSize = link || routeShown.length > 1 ? 64 : 76;
+  const qrCodes: SheetQr[] = [
+    ...(link?.kind === 'QR' ? [{ kind: 'DRIVER_LINK' as const, url: link.url, caption: DRIVER_LINK_CAPTION, size: 76 }] : []),
+    ...routeShown.map((r) => ({
+      kind: 'ROUTE' as const,
+      url: r.url,
+      caption: routeShown.length > 1 || route.links.length > 1 ? `Route ${r.part}/${r.parts}` : 'Scan: whole route',
+      size: routeSize,
+    })),
+  ];
+  const driverLinkNote = link?.kind === 'STOPPED' ? DRIVER_LINK_STOPPED_TEXT : link?.kind === 'ASK' ? DRIVER_LINK_ASK_TEXT : null;
+  return { qrCodes, driverLinkNote };
 }
 
 const BADGE: Record<string, string> = {
@@ -199,6 +251,13 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
       const next = d.loads.filter((x) => x.truckId === l.truckId && x.loadNo > l.loadNo).sort((a, b) => a.loadNo - b.loadNo)[0];
       const stops = [...l.stops].sort((a, b) => a.sequence - b.sequence);
       const total = l.manifest.reduce((a, m) => a + m.cases, 0);
+      const route = routeLinks(l.origin ?? d.run.depot, stops);
+      // The driver link of this truck-day (owner request 4 Oct 2026): see DriverPackOptions.driverLinks.
+      const link: SheetDriverLink | null = !opts.driverLinks
+        ? { kind: 'ASK' }
+        : opts.driverLinks.has(l.truckId)
+          ? (opts.driverLinks.get(l.truckId) ?? null)
+          : { kind: 'ASK' };
       const sheet: Omit<DriverSheet, 'unprintable' | 'timesNotVerified'> = {
         loadId: l.id,
         truckId: l.truckId,
@@ -213,6 +272,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
           ...(l.timing && !l.timing.ok ? ['TIMES NOT VERIFIED'] : []),
           // Audit E1: the route below starts and ends at the depot pin the load was planned from.
           ...(l.masterChanged.some((c) => c.kind === 'DEPOT') ? ['DEPOT MOVED SINCE PLANNING: ROUTE FROM THE PLANNED DEPOT PIN'] : []),
+          ...(l.hired ? ['HIRED TRUCK'] : []),
         ],
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
@@ -229,7 +289,8 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
           total,
           matchesLoad: total === l.cases,
         },
-        route: routeLinks(l.origin ?? d.run.depot, stops),
+        route,
+        ...sheetQrCodes(route, link),
         stops: stops.map((s) => sheetStop(d, l, s, t)),
         returnText:
           `Return to depot ${depot.code} ~${fmtHhmm(l.returnMin)}` +
@@ -253,25 +314,10 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
 }
 
 // ---------------------------------------------------------------------------------------
-// QR codes, drawn as vectors (one path per code: crisp at any print size, tiny file)
+// QR codes, drawn as vectors (lib/dispatch/qr.ts: one path per code, crisp at any print size)
 // ---------------------------------------------------------------------------------------
 
-export function qrPath(text: string, level: 'L' | 'M' = 'M'): { size: number; d: string } {
-  const m = createQr(text, { errorCorrectionLevel: level }).modules;
-  const parts: string[] = [];
-  for (let r = 0; r < m.size; r++) {
-    for (let c = 0; c < m.size; ) {
-      if (!m.get(r, c)) {
-        c++;
-        continue;
-      }
-      const c0 = c;
-      while (c < m.size && m.get(r, c)) c++;
-      parts.push(`M${c0} ${r}H${c}V${r + 1}H${c0}Z`);
-    }
-  }
-  return { size: m.size, d: parts.join('') };
-}
+export { qrPath };
 
 function Qr({ url, size, level = 'M', quiet = 2 }: { url: string; size: number; level?: 'L' | 'M'; quiet?: number }) {
   const q = qrPath(url, level);
@@ -424,10 +470,10 @@ function StopRow({ st }: { st: SheetStop }) {
 
 function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
   const lastStop = sh.stops[sh.stops.length - 1];
-  const routeQrs = sh.route.links.slice(0, 3);
-  const qrSize = routeQrs.length > 1 ? 64 : 76;
+  // The driver link first (its QR, or the note in its place), then the route codes (sheetQrCodes).
+  const NOTE_WIDTH = 76;
   // Fixed widths, not flex-shrink: react-pdf lays text out once, at the first width it measures.
-  const headWidth = CONTENT_WIDTH - routeQrs.length * (qrSize + 12);
+  const headWidth = CONTENT_WIDTH - (sh.driverLinkNote ? NOTE_WIDTH + 12 : 0) - sh.qrCodes.reduce((a, q) => a + q.size + 12, 0);
   return (
     <Page size="A4" style={s.page}>
       {/* Compact header on every page (the only header on continuation pages). Fixed widths so a
@@ -502,12 +548,18 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
           </T>
           {sh.unprintable ? <T style={[s.line, s.b]}>{`${UNPRINTABLE} = text this sheet cannot print (for example Arabic letters) - ask the dispatcher.`}</T> : null}
         </View>
-        {routeQrs.length ? (
+        {sh.qrCodes.length || sh.driverLinkNote ? (
           <View style={{ flexDirection: 'row', marginLeft: 6 }}>
-            {routeQrs.map((r) => (
-              <View key={r.url} style={{ alignItems: 'center', marginLeft: 12 }}>
-                <Qr url={r.url} size={qrSize} level="L" quiet={4} />
-                <T style={{ fontSize: 6.5, color: C.mute }}>{routeQrs.length > 1 ? `Route ${r.part}/${r.parts}` : 'Scan: whole route'}</T>
+            {sh.driverLinkNote ? (
+              <View style={{ marginLeft: 12, width: NOTE_WIDTH, borderWidth: 1, borderColor: C.ink, padding: 3 }}>
+                <T style={{ fontFamily: BOLD, fontSize: 8 }}>{sh.driverLinkNote}</T>
+              </View>
+            ) : null}
+            {sh.qrCodes.map((q) => (
+              <View key={`${q.kind}-${q.url}`} style={{ alignItems: 'center', marginLeft: 12, width: q.size }}>
+                {q.kind === 'DRIVER_LINK' ? <T style={{ fontFamily: BOLD, fontSize: 7 }}>DRIVER PAGE</T> : null}
+                <Qr url={q.url} size={q.size} level={q.kind === 'DRIVER_LINK' ? 'M' : 'L'} quiet={4} />
+                <T style={{ fontSize: 6.5, color: q.kind === 'DRIVER_LINK' ? C.ink : C.mute, textAlign: 'center' }}>{q.caption}</T>
               </View>
             ))}
           </View>

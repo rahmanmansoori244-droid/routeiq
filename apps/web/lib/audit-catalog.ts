@@ -56,6 +56,20 @@ export const AUDIT_ACTIONS = {
   PLAN_VERSION_CREATED: { label: 'Plan version created (re-plan)' },
   ...LOAD_ACTIONS,
   LOAD_DRIVER_SET: { label: 'Load driver set' },
+  // Delivery outcome and the driver page (owner request 4 Oct 2026).
+  DRIVER_LINK_ISSUED: { label: 'Driver link (QR) made' },
+  DRIVER_LINK_REISSUED: { label: 'Driver link reissued (the old one stopped working)' },
+  DRIVER_LINK_REVOKED: { label: 'Driver link stopped' },
+  CASUAL_DRIVER_ADDED: { label: 'Daily driver added' },
+  DELIVERY_OUTCOME_SET: { label: 'Delivery result recorded or corrected' },
+  DELIVERY_PHOTO_ADDED: { label: 'Delivery photo added' },
+  STOP_ARRIVAL_MANUAL: { label: 'Arrival at a stop recorded by hand' },
+  DRIVER_BACK_AT_DEPOT: { label: 'Driver back at the depot' },
+  DELIVERY_CARRY_CONFLICT: { label: 'Result change refused: already brought forward' },
+  ORDERS_CARRY_UNDONE: { label: 'Bring forward undone' },
+  DELIVERY_PHOTOS_PURGED: { label: 'Old delivery photos removed (retention)' },
+  DELIVERY_LOCATIONS_PURGED: { label: 'Old driver positions removed (retention)' },
+  CASUAL_DRIVERS_CLEARED: { label: 'Idle daily drivers hidden (clean-up)' },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
@@ -91,6 +105,8 @@ export const AUDIT_ENTITIES = {
   PlanLoad: { label: 'Load' },
   RouteAssignment: { label: 'Stop (legacy run)' },
   ManualBaseline: { label: 'Baseline (legacy run)' },
+  DriverLink: { label: 'Driver link' },
+  StopVisit: { label: 'Delivery stop' },
   RunJob: { label: 'Optimization job', legacy: true },
   DriverShift: { label: 'Driver shift (retired app)', legacy: true },
 } as const satisfies Record<string, AuditActionInfo>;
@@ -103,6 +119,7 @@ export function auditActionTone(action: string): 'default' | 'success' | 'warnin
   if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED') return 'destructive';
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
   if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
+  if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT') return 'warning';
   if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';
   return 'outline';
 }

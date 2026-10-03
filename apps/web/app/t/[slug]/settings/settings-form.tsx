@@ -15,7 +15,7 @@ import { errorMessage } from '@/lib/error-message';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 import { boundText, CONFIG_BOUNDS, inBound, type Bound, type ConfigBoundKey } from '@/lib/planner-bounds';
 import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config';
-import { breakSaveProblem, changedFields, overtimeSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
+import { breakSaveProblem, changedFields, DELIVERY_SETTING_BOUNDS, overtimeSaveProblem, retentionSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
 
@@ -102,6 +102,20 @@ export function SettingsForm({
     }
     if ('dataCollectDays' in configDiff.changes && !(Number.isInteger(c.dataCollectDays) && c.dataCollectDays >= 0 && c.dataCollectDays <= DATA_COLLECT_DAYS_MAX)) {
       toast.error(`Data to collect: days ahead must be a whole number from 0 to ${DATA_COLLECT_DAYS_MAX}.`);
+      return;
+    }
+    // The driver page settings (owner request 4 Oct 2026): whole numbers within their bounds, and
+    // positions never kept longer than the photos.
+    for (const k of ['geofenceRadiusM', 'photoRetentionDays', 'locationRetentionDays'] as const) {
+      const b = DELIVERY_SETTING_BOUNDS[k];
+      if (k in configDiff.changes && !(Number.isInteger(c[k]) && c[k] >= b.min && c[k] <= b.max)) {
+        toast.error(`${k === 'geofenceRadiusM' ? 'Arrival radius' : k === 'photoRetentionDays' ? 'Keep delivery photos' : 'Keep driver positions'} must be a whole number from ${b.min} to ${b.max}.`);
+        return;
+      }
+    }
+    const retention = retentionSaveProblem(configDiff.changes, c);
+    if (retention) {
+      toast.error(retention);
       return;
     }
     startSave(async () => {
@@ -392,6 +406,79 @@ export function SettingsForm({
           {num('roadTimeFactor', 'Road time factor (truck vs car)', { step: 0.05, unit: 'x', hint: 'Trucks are slower than the cars road routing times: 1.25 = 25% longer. Not applied to estimates.' })}
           {num('distanceMultiplier', 'Straight-line multiplier (estimates)', { step: 0.05, unit: 'x', hint: 'Straight line x this = estimated road km.' })}
           {num('avgSpeedKmh', 'Average speed (estimates)', { step: 1, unit: 'km/h' })}
+        </CardContent>
+      </Card>
+
+      <Card data-testid="driver-page-settings">
+        <CardHeader>
+          <CardTitle className="text-base">Driver page and delivery results</CardTitle>
+          <CardDescription>
+            The driver opens his trips with the driver link (QR) on the sheets. These settings decide when the stop timer starts by itself, whether a
+            delivery needs a photo, and how long photos and driver positions are kept. Only a company admin changes them.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <NumField
+            id="geofenceRadiusM"
+            label="Arrival radius around the customer's pin"
+            unit="m"
+            value={c.geofenceRadiusM}
+            onChange={(v) => setC({ ...c, geofenceRadiusM: v })}
+            step={10}
+            bound={{ solver: null, int: true, ...DELIVERY_SETTING_BOUNDS.geofenceRadiusM }}
+            hint="The truck counts as arrived when the driver's phone stays this close to the pin. Larger for big sites, smaller where shops are close together."
+            changed={'geofenceRadiusM' in configDiff.changes}
+          />
+          <div className="flex items-center justify-between rounded-md border px-3 py-2">
+            <Label htmlFor="photoProofRequired" className="text-sm font-normal">
+              Photo required for Delivered and Partly delivered
+              {'photoProofRequired' in configDiff.changes ? <span className="ml-1 text-xs text-blue-700">changed</span> : null}
+            </Label>
+            <Switch id="photoProofRequired" checked={c.photoProofRequired} onCheckedChange={(v) => setC({ ...c, photoProofRequired: v })} />
+          </div>
+          <NumField
+            id="photoRetentionDays"
+            label="Keep delivery photos"
+            unit="days"
+            value={c.photoRetentionDays}
+            onChange={(v) => setC({ ...c, photoRetentionDays: v })}
+            step={1}
+            bound={{ solver: null, int: true, ...DELIVERY_SETTING_BOUNDS.photoRetentionDays }}
+            hint={
+              c.photoRetentionDays < baseline.config.photoRetentionDays
+                ? `Photos older than ${c.photoRetentionDays} days will be deleted for good at the next clean-up (the record of the delivery stays).`
+                : 'After this the photo itself is deleted; the record of the delivery stays.'
+            }
+            changed={'photoRetentionDays' in configDiff.changes}
+          />
+          <NumField
+            id="locationRetentionDays"
+            label="Keep driver positions"
+            unit="days"
+            value={c.locationRetentionDays}
+            onChange={(v) => setC({ ...c, locationRetentionDays: v })}
+            step={1}
+            bound={{ solver: null, int: true, ...DELIVERY_SETTING_BOUNDS.locationRetentionDays }}
+            hint={
+              c.locationRetentionDays < baseline.config.locationRetentionDays
+                ? `Positions older than ${c.locationRetentionDays} days will be deleted for good at the next clean-up (distances from the pin stay).`
+                : 'Where each arrival, result and photo happened. Never longer than the photos. The distances from the pin are kept.'
+            }
+            changed={'locationRetentionDays' in configDiff.changes}
+          />
+          <div className="space-y-1.5">
+            <Label htmlFor="dispatcherPhone">
+              Dispatcher phone (driver page)
+              {'dispatcherPhone' in configDiff.changes ? <span className="ml-1 text-xs text-blue-700">changed</span> : null}
+            </Label>
+            <Input
+              id="dispatcherPhone"
+              value={c.dispatcherPhone ?? ''}
+              placeholder="+968 9123 4567"
+              onChange={(e) => setC({ ...c, dispatcherPhone: e.target.value.trim() === '' ? null : e.target.value })}
+            />
+            <p className="text-xs text-muted-foreground">The number behind the driver page&apos;s Call dispatcher button. Empty: the button is hidden.</p>
+          </div>
         </CardContent>
       </Card>
         </>
