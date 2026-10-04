@@ -142,7 +142,7 @@ export interface DispatchConfig {
   break_start_from_min?: number;
   break_start_to_min?: number;
   max_trips_per_truck?: number;
-  /** Pallet fill (owner decision 4 Oct 2026): percent of a bay truck's bays the planner may fill, 50-100 (default 95). */
+  /** Pallet fill (owner decision 4 Oct 2026): percent of a bay truck's bays the planner may fill, 50-100 (default 100 = every bay). */
   pallet_fill_pct?: number;
   fuel_price_per_litre?: number;
   /**

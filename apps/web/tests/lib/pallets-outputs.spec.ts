@@ -199,6 +199,14 @@ describe('Excel workbook with pallets', () => {
     expect(ws.getCell(total.row + 1, 2).text).toBe('130 cases = 1.8 pallets (1 full pallet + 46 loose cases on mixed pallets)');
   });
 
+  it('payload 0 is no weight limit (owner decisions of 4 Oct 2026): the load sheet says "no limit", never "/ 0", and the kg check is OK', async () => {
+    const d = palletFixture();
+    for (const l of d.loads) l.truckPayloadKg = 0;
+    const ws = longTruckSheet(await render(d));
+    const label = findCell(ws, 'Weight / payload kg')!;
+    expect(ws.getCell(label.row, 9).text).toBe(`${Math.round(d.loads[2]!.weightKg * 10) / 10} / no limit`);
+  });
+
   it('the pallet cells hold the exact pallets (shown to 0.1): the column adds up to its TOTAL (pallets review)', async () => {
     // Before: each product's cell was rounded to 0.1 (1.2 + 0.4 + 0.1 = 1.7) under a TOTAL of 1.8.
     const wb = await render(palletFixture());
@@ -268,8 +276,10 @@ describe('Excel workbook with pallets', () => {
     const a = tenantAssumptions(cfg, { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, solverRules: rules });
     expect(a['Truck capacity']).toMatch(/^trucks with bays: pallets up to bays x 95% \(Pallet fill\) and the payload/);
     expect(a['Truck capacity']).toMatch(/mixed pallets; each order line rounded up to 0.001 pallet/);
+    // Owner decisions of 4 Oct 2026: NMWC's trucks have payload 0, which is no weight limit.
+    expect(a['Truck capacity']).toMatch(/; a payload of 0 is no weight limit\. /);
     const none = tenantAssumptions(cfg, { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, solverRules: solverRules(fixture()) });
-    expect(none['Truck capacity']).toBe('cases and payload (no truck of this plan was planned by pallets)');
+    expect(none['Truck capacity']).toBe('cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit');
   });
 
   it('loadPalletsCell is empty for a load planned by cases', () => {

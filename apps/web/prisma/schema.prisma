@@ -250,8 +250,9 @@ model TenantConfig {
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
   splitDeliveries         Boolean @default(true) // customers bigger than the largest truck are delivered in parts
   // Pallet fill (owner decision 4 Oct 2026): the percent of a truck's bays the planner may fill with
-  // mixed pallets (the safety margin; 12 bays at 95% = 11.4 pallets). 50-100 (database CHECK).
-  palletFillPct           Int     @default(95)
+  // mixed pallets. 100 = every bay (the default, owner decision); lower = a safety margin (12 bays at
+  // 95% = 11.4 pallets). 50-100 (database CHECK).
+  palletFillPct           Int     @default(100)
   osrmUrl                 String? // overrides the OSRM_URL env var; there is no silent public default
   priorityWeightsJson     Json? // {"1":10000,...,"5":1}; must be strictly decreasing
   orderColumnMapJson      Json? // extra header aliases for the NMWC order export

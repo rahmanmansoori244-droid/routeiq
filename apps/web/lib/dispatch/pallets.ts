@@ -6,8 +6,10 @@
  * total they should be less than the truck capacity." A truck with bays (pallet positions) is planned
  * by pallets: mixed pallets are allowed, so a load's pallet need is the sum over its products of
  * cases / cases per pallet (fractions add up), and it fits when that need is at most bays x the
- * company's Pallet fill (TenantConfig.palletFillPct, the safety margin, default 95%) AND its kg is at
- * most the payload. A truck without bays keeps the case rule.
+ * company's Pallet fill (TenantConfig.palletFillPct, PALLET_FILL_DEFAULT = 100%: every bay; a lower
+ * figure is a safety margin) AND its kg is at most the payload, when the truck has one (a payload of
+ * 0 = no weight limit: owner decisions of 4 Oct 2026, NMWC plans by bays only). A truck without bays
+ * keeps the case rule.
  *
  * Units: whole 1/1000 pallets (PALLET_UNIT), each order line rounded UP once (never under-counted),
  * then added up as integers - the web, the optimizer, the stored rows and every check add the same
@@ -19,6 +21,12 @@
 export const PALLET_UNIT = 0.001;
 /** Units per pallet. */
 export const UNITS_PER_PALLET = 1000;
+/**
+ * Pallet fill when the company has none saved (the column default, migration 20261006090000): 100% =
+ * every bay (owner decision 4 Oct 2026; it was 95 before the owner was asked). A company may lower it
+ * as a safety margin for mixed pallets (Settings, 50-100).
+ */
+export const PALLET_FILL_DEFAULT = 100;
 /** A cases-per-pallet factor must be a whole number in this range (anything else counts as missing). */
 export const PALLET_FACTOR_MAX = 10_000;
 
@@ -38,7 +46,7 @@ export function palletUnits(cases: number, cpp: number | null | undefined): numb
   return Math.floor((Math.round(cases) * UNITS_PER_PALLET + f - 1) / f);
 }
 
-/** A bay truck's room in units: bays x fill % x 10 (12 bays at 95% = 11,400 = 11.4 pallets). */
+/** A bay truck's room in units: bays x fill % x 10 (12 bays at 100% = 12,000 = 12.0 pallets; at 95% = 11,400 = 11.4). */
 export function palletRoomUnits(bays: number, fillPct: number): number {
   return Math.round(bays) * Math.round(fillPct) * 10;
 }
@@ -120,7 +128,7 @@ export function palletsOverBays(p: LoadPallets): string {
   return `${palletText(p.units)} / ${p.bays}`;
 }
 
-/** "limit 11.4 at 95% fill" - the most the planner could put on the truck. */
+/** "limit 12.0 at 100% fill" ("limit 11.4 at 95% fill") - the most the planner could put on the truck. */
 export function palletLimitText(p: LoadPallets): string {
   return `limit ${palletText(p.room)}${p.fillPct !== null ? ` at ${p.fillPct}% fill` : ''}`;
 }

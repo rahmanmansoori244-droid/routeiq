@@ -8,6 +8,7 @@
 import type { DispatchConfig, DispatchScenarioName } from '@routeiq/shared-types';
 import { autoTimeLimitSec, CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, outOfBounds, SEARCH_TIME_SCHEDULE, type ConfigBoundKey } from '../planner-bounds';
 import { parsePriorityWeights, routingProviderFor } from './customer-attrs';
+import { PALLET_FILL_DEFAULT } from './pallets';
 import { fmtHhmm } from './time';
 
 /** The TenantConfig fields the planner reads (a Prisma TenantConfig row satisfies it). */
@@ -24,7 +25,7 @@ export interface TenantPlannerConfig {
   serviceMinPerCase: number;
   maxTripsPerTruck: number;
   splitDeliveries: boolean;
-  /** Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill; absent = 95. */
+  /** Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill; absent = 100 (PALLET_FILL_DEFAULT). */
   palletFillPct?: number;
   defaultServiceTimeMin: number;
   fuelPricePerLitre: number;
@@ -187,7 +188,7 @@ export function dispatchConfigFromTenant(
       loading_min_per_case: cfg.loadingMinPerCase,
       max_trips_per_truck: cfg.maxTripsPerTruck,
       // Pallet fill: only trucks with bays use it (each load keeps the fill the solver REPORTS).
-      pallet_fill_pct: cfg.palletFillPct ?? 95,
+      pallet_fill_pct: cfg.palletFillPct ?? PALLET_FILL_DEFAULT,
       fuel_price_per_litre: cfg.fuelPricePerLitre,
       driver_cost_per_hour: cfg.driverCostPerHour,
       // A higher priority always wins over any number of lower ones (weights kept for reference).
@@ -289,7 +290,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     {
       label: 'Truck capacity',
-      value: `bays x ${cfg.palletFillPct ?? 95}% and payload (trucks without bays: cases and payload)`,
+      value: `bays x ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`,
       source: 'SETTING',
       note: "a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases",
     },

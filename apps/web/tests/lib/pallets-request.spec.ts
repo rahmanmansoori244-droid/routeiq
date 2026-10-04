@@ -25,7 +25,8 @@ const CFG: Record<string, any> = {
   defaultServiceTimeMin: 10, timezone: 'Asia/Muscat', planningCutoffMin: 1080, fuelPricePerLitre: 0, driverCostPerHour: 0,
   overtimeAfterMin: 540, overtimeCostPerHour: 0, prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, osrmUrl: null,
   driverBreakMinutes: 0, driverBreakFromMin: 720, driverBreakToMin: 840, priorityWeightsJson: null, dateOrder: 'DMY',
-  serviceAreaJson: null, palletFillPct: 95,
+  // No palletFillPct: a company that never saved one plans at PALLET_FILL_DEFAULT (100%, owner decision 4 Oct 2026).
+  serviceAreaJson: null,
 };
 const truckRow = (id: string, over: Record<string, any> = {}) => ({
   id, code: id, capacityCases: 1140, capacityWeightKg: 10_000, fixedCostPerDay: 20, tripCost: 0, costPerKm: 0.15, kmPerLitre: null,
@@ -85,7 +86,7 @@ describe('buildDispatchRequest with trucks that have bays', () => {
     wire([truckRow('R1', { bays: 12 }), truckRow('C2')], [order('O1', C1, [['JA05', 100], ['TN15', 50], ['EFF', 30]]), order('O2', C2, [['P84', 84]])]);
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
     expect(b.request.trucks.map((t) => [t.id, t.bays])).toEqual([['R1', 12], ['C2', undefined]]);
-    expect(b.request.config.pallet_fill_pct).toBe(95);
+    expect(b.request.config.pallet_fill_pct).toBe(100);
     const units = Object.fromEntries(b.request.stops.map((s) => [s.stop_id, s.demand_pallet_units]));
     // The spec's worked example: 1,042 + 1,283 + 188 = 2,513 units = 2.5 pallets.
     expect(units).toEqual({ C1: 2513, C2: 1000 });
@@ -93,9 +94,14 @@ describe('buildDispatchRequest with trucks that have bays', () => {
     expect(b.missingPalletFactors).toEqual([]);
     expect(b.palletFactors).toEqual({ 'JA0.5L': 96, 'TN1.5L': 39, EFF24: 160, 'SS0.5L': 84 });
     const inputs = planInputsOf(b, 'J1', NOW)!;
-    expect(inputs.trucks.R1).toMatchObject({ bays: 12, palletFillPct: 95, palletRoomUnits: 11_400 });
+    expect(inputs.trucks.R1).toMatchObject({ bays: 12, palletFillPct: 100, palletRoomUnits: 12_000 });
     expect(inputs.trucks.C2).not.toHaveProperty('bays');
     expect(inputs.palletFactors).toEqual({ 'JA0.5L': 96, 'TN1.5L': 39, EFF24: 160, 'SS0.5L': 84 });
+    // A company that keeps a margin sends its own figure.
+    fake.tdb.tenantConfig = { findUniqueOrThrow: async () => ({ ...CFG, palletFillPct: 95 }) };
+    const b95 = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
+    expect(b95.request.config.pallet_fill_pct).toBe(95);
+    expect(planInputsOf(b95, 'J1', NOW)!.trucks.R1).toMatchObject({ palletFillPct: 95, palletRoomUnits: 11_400 });
   });
 
   it('lists the products without a usable cases per pallet (missing, or not a whole number); the request is still built', async () => {
@@ -110,14 +116,14 @@ describe('buildDispatchRequest with trucks that have bays', () => {
   });
 
   it('splits a customer bigger than one truck by pallets, every part within the room', async () => {
-    // 2,000 cases of an 84-per-pallet product: 23.8 pallets on 12 bays at 95% (11.4) - and only 1,000 kg.
+    // 2,000 cases of an 84-per-pallet product: 23.8 pallets on 12 bays at the default 100% (12.0) - and only 1,000 kg.
     wire([truckRow('R1', { bays: 12, capacityCases: 5000 })], [order('O1', C1, [['P84', 2000]])]);
     const b = await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW });
     const parts = b.request.stops.filter((s) => s.stop_id.startsWith('C1#'));
-    expect(parts.length).toBe(3);
-    for (const p of parts) expect(p.demand_pallet_units).toBeLessThanOrEqual(11_400);
+    expect(parts.length).toBe(2);
+    for (const p of parts) expect(p.demand_pallet_units).toBeLessThanOrEqual(12_000);
     expect(parts.reduce((a, p) => a + p.demand_cases, 0)).toBe(2000);
-    expect(b.warnings.join(' ')).toMatch(/C1 \(2000 cases, 23\.8 pallets, 10000 kg\) in 3 parts sized for R1/);
+    expect(b.warnings.join(' ')).toMatch(/C1 \(2000 cases, 23\.8 pallets, 10000 kg\) in 2 parts sized for R1/);
     // Each part's portion keeps the factor it was cut with; its units are the part's.
     const portion = Object.values(b.scope.portions ?? {})[0];
     expect(portion.lines[0]).toMatchObject({ casesPerPallet: 84 });

@@ -83,6 +83,7 @@ import pyvrp_candidate as PV
 from dispatch_models import (
     DAY_MIN,
     MAX_STOPS,
+    PALLET_FILL_DEFAULT,
     PALLET_UNIT,
     WEIGHT_UNIT_KG,
     BreakRule,
@@ -834,7 +835,7 @@ class _Fleet:
     cap_kg_u: int
     demand_kg_u: int
     kg_bound: bool
-    fill_pct: int = 95
+    fill_pct: int = PALLET_FILL_DEFAULT
     trips: int = 0
 
     @property
@@ -848,7 +849,7 @@ class _Fleet:
         return _space_text(self.by_pallets, amount)
 
 
-def _fleet(stops: list[DispatchStop], tds: list[TruckDay], fill_pct: int = 95) -> _Fleet:
+def _fleet(stops: list[DispatchStop], tds: list[TruckDay], fill_pct: int = PALLET_FILL_DEFAULT) -> _Fleet:
     usable_tds = [td for td in tds if td.usable]
     kg_bound = bool(usable_tds) and all(td.max_kg_units > 0 for td in usable_tds)
     cap_u = sum(td.max_kg_units * td.trips_left for td in usable_tds) if kg_bound else 0
@@ -1712,8 +1713,8 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         mine: list[PlannedLoad] = []
         for (tl, stops_out, km, cases, return_s, kg, back_m, est_legs), c in zip(built, day_cost.loads):
             load_no += 1
-            # A truck with bays: its pallets against the physical bays (a load at the 95% fill limit
-            # shows 95%, never 100%), and kg; otherwise cases and kg as before.
+            # A truck with bays: its pallets against the physical bays (a load at a 95% fill limit
+            # shows 95%, never 100%), and kg when it has a payload; otherwise cases and kg as before.
             units = sum(st.pallet_units or 0 for st in stops_out) if td.by_pallets else None
             if units is not None:
                 util_parts = [units / (td.bays * 1000)] if td.bays else [0.0]

@@ -279,7 +279,11 @@ export function TruckFormDialog({
                 value={form.capacityWeightKg}
                 onChange={(e) => setForm({ ...form, capacityWeightKg: e.target.value })}
                 required
+                aria-describedby="capacityWeightKg-hint"
               />
+              <p id="capacityWeightKg-hint" className="text-xs text-muted-foreground">
+                0 = no weight limit
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="capacityVolumeL">Volume (L)</Label>
@@ -308,8 +312,9 @@ export function TruckFormDialog({
               className="max-w-[12rem]"
             />
             <p className="text-xs text-muted-foreground">
-              With bays the planner fills mixed pallets up to the company&apos;s Pallet fill (95%: 11.4 of 12 bays) and the payload; the case
-              capacity is then not used. Every product on the day&apos;s orders needs its cases per pallet (Products). Empty = planned by cases.
+              With bays the planner fills mixed pallets up to the company&apos;s Pallet fill (100%, the default: all 12 of 12 bays) and the
+              payload, if one is set; the case capacity is then not used. Every product on the day&apos;s orders needs its cases per pallet
+              (Products). Empty = planned by cases.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3">

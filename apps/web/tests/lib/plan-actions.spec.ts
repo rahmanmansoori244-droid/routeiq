@@ -137,6 +137,16 @@ describe('after a late order is saved (review of PR3: Step 3 RE-PLAN clickable d
       'reload day',
     ]);
   });
+
+  it('no truck of the depot has a payload (payload 0 = no weight limit): never says the re-plan will ask', async () => {
+    const { calls, d } = deps(false);
+    await afterLateOrderSaved({ locationRequired: false, productsWithoutWeight: ['W-19'], weightLimited: false }, d);
+    expect(calls).toEqual([
+      'warn: No case weight for W-19: its kg counts as 0 on the plan and the sheets (no truck here has a payload, so weight is not a limit). To show its kg, add the case weight under Products.',
+      'asked',
+      'reload day',
+    ]);
+  });
 });
 
 describe('a failed reload keeps the plan on screen (third review of PR3: the plan was replaced by the error for good)', () => {

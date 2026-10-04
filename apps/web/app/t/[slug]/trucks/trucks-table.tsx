@@ -91,7 +91,9 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                 <TableCell className="text-muted-foreground">{t.description ?? '—'}</TableCell>
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">{t.capacityCases.toLocaleString()}</TableCell>
-                <TableCell className="text-right tabular-nums">{t.capacityWeightKg.toLocaleString()}</TableCell>
+                <TableCell className="text-right tabular-nums" title={t.capacityWeightKg > 0 ? undefined : 'Payload 0 = no weight limit'}>
+                  {t.capacityWeightKg > 0 ? t.capacityWeightKg.toLocaleString() : 'no limit'}
+                </TableCell>
                 <TableCell className="text-right tabular-nums" title={t.bays ? 'Planned by pallets' : 'Planned by cases'}>
                   {t.bays ?? '—'}
                 </TableCell>

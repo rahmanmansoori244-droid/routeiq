@@ -66,19 +66,23 @@ def kg_text(kg: float) -> str:
 
 # Pallets (owner decision 4 Oct 2026: truck capacity in pallets / bays, mixed pallets allowed). A
 # truck with ``bays`` (pallet positions) is planned by PALLETS: a load fits when its pallet need is
-# at most bays x Pallet fill (config.pallet_fill_pct, the company's safety margin, default 95%) AND
-# its kg at most the payload; its case capacity is then not a limit. A truck without bays keeps the
-# case rule exactly as before. A stop's pallet need comes from the web, in whole units of 1/1000
+# at most bays x Pallet fill (config.pallet_fill_pct, PALLET_FILL_DEFAULT = 100%: every bay; a lower
+# figure is a safety margin, owner decisions of 4 Oct 2026) AND its kg at most the payload (a payload
+# of 0 = no weight limit: NMWC plans by bays only); its case capacity is then not a limit. A truck
+# without bays keeps the case rule exactly as before. A stop's pallet need comes from the web, in whole units of 1/1000
 # pallet (demand_pallet_units): each order line's cases / its product's cases per pallet, rounded UP
 # once per line, then added up (mixed pallets: fractions add up). Every pallet comparison of the
 # engine - the route search's Pallets dimension, the prefilters, the repack, the shortage reasons,
 # the second search and the independent check - adds and compares these integers, with no other
 # rounding (the F08 pattern of the kg tenths). Orders, invoices and driver sheets stay in cases.
 PALLET_UNIT = 0.001
+# Pallet fill when the request does not send one (owner decision 4 Oct 2026: 100%, not 95%).
+PALLET_FILL_DEFAULT = 100
 
 
 def pallet_room_units(bays: int, fill_pct: int) -> int:
-    """A bay truck's room in 1/1000 pallet: bays x fill % x 10 (12 bays at 95% = 11,400 = 11.4 pallets)."""
+    """A bay truck's room in 1/1000 pallet: bays x fill % x 10 (12 bays at 100% = 12,000 = 12.0 pallets;
+    at 95% = 11,400 = 11.4)."""
     return int(bays) * int(fill_pct) * 10
 
 
@@ -211,8 +215,9 @@ class DispatchConfig(BaseModel):
     break_start_to_min: int = Field(default=840, ge=0, le=DAY_MIN)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
     # Pallet fill (owner decision 4 Oct 2026): the percent of a bay truck's bays the planner may fill
-    # - the safety margin of mixed pallets (12 bays at 95% = 11.4 pallets). Only trucks with bays use it.
-    pallet_fill_pct: int = Field(default=95, ge=50, le=100)
+    # - 100 (the default, owner decision of 4 Oct 2026) = every bay; lower is a safety margin for mixed
+    # pallets (12 bays at 95% = 11.4 pallets). Only trucks with bays use it.
+    pallet_fill_pct: int = Field(default=PALLET_FILL_DEFAULT, ge=50, le=100)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
     # return, depot turnaround and waiting included (costing.py, policy TRUCK_DAY_SPAN). Overtime
@@ -357,7 +362,8 @@ class PlannedLoad(BaseModel):
     cases: int
     kg: float
     # max(cases, kg) share of the binding capacity; a truck with bays: max(pallet units / (bays x
-    # 1,000), kg / payload) - against the physical bays, so a load at the 95% fill limit shows 95%.
+    # 1,000), kg / payload when a payload is set) - against the physical bays, so a load at a 95% fill
+    # limit shows 95%.
     utilization_pct: float
     fuel_litres: float | None
     fuel_cost: float

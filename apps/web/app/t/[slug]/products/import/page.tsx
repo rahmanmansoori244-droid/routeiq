@@ -18,7 +18,7 @@ export default async function ProductImportPage({ params }: { params: { slug: st
   return (
     <PageShell
       title="Import products"
-      description="Upload the product master (Excel or CSV) from the ERP. Each row creates or updates a product (the code is the key, whatever its letter case)."
+      description="Upload the product master (Excel or CSV) from the ERP. Each row creates or updates a product (the code is the key, whatever its letter case or extra spaces)."
       actions={
         <Button asChild variant="outline" size="sm">
           <Link href={`/t/${params.slug}/products`}>
@@ -38,7 +38,11 @@ export default async function ProductImportPage({ params }: { params: { slug: st
             <CardDescription>Header names are read without case, spaces or punctuation.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-2 text-xs">
-            <Field name="code" required hint="Also read as: SKU, item code, product code." />
+            <Field
+              name="code"
+              required
+              hint="Also read as: SKU, item code, product code. As the ERP writes it (JA1.5L(6), TN1.5L (6)): letters, digits, spaces and . ( ) - _ / + &, up to 40 characters, the same rule as the order file."
+            />
             <Field name="name" hint="Also: description. A new product without a name is named after its code." />
             <Field
               name="weight_per_case_kg"
@@ -53,6 +57,10 @@ export default async function ProductImportPage({ params }: { params: { slug: st
               A blank cell, or a column the file does not have, keeps what the product has. A row that changes nothing writes nothing. A file with an
               error imports nothing: fix the rows listed and import it again. Trucks with bays are loaded by pallets, so every product on a day&apos;s
               orders needs its cases per pallet before that day can be optimized. Orders stay in cases.
+            </div>
+            <div className="text-muted-foreground">
+              Other columns (for example volume_per_case_l, units_per_case or notes) are not read; the result names them. In an Excel workbook
+              the first sheet with rows is read (put the products first); the other sheets are named in the result.
             </div>
           </CardContent>
         </Card>

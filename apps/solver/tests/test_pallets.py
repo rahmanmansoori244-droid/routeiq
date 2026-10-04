@@ -3,8 +3,10 @@
 "All cases stay in cases, but when it comes to loading they are transformed to pallets, and in
 total they should be less than the truck capacity." A truck with ``bays`` is planned by pallets:
 a load fits when its pallet need (1/1000 pallet units, mixed pallets: the stops' needs added up) is
-at most bays x Pallet fill (config.pallet_fill_pct, default 95) AND its kg at most the payload; its
-case capacity is then not a limit. A truck without bays keeps the case rule exactly as before.
+at most bays x Pallet fill (config.pallet_fill_pct, default 100 since the owner decisions of 4 Oct
+2026; a company may keep a margin, e.g. 95) AND its kg at most the payload - a payload of 0 is no
+weight limit (NMWC: weight is not a planning limit, every truck has payload 0); its case capacity is
+then not a limit. A truck without bays keeps the case rule exactly as before.
 
 Haversine only (no network)."""
 from __future__ import annotations
@@ -20,7 +22,7 @@ import dispatch_solver as ds
 import feasibility as FZ
 import load_repack as LR
 import pyvrp_candidate as PV
-from dispatch_models import DispatchTruck, pallet_room_units, pallet_text
+from dispatch_models import PALLET_FILL_DEFAULT, DispatchConfig, DispatchTruck, pallet_room_units, pallet_text
 from dispatch_solver import optimize_dispatch
 from tests.test_dispatch import assert_reconciled, rec, req, served_ids, stop, truck, unserved_map
 
@@ -30,6 +32,13 @@ ALL = ["RECOMMENDED", "MIN_TRUCKS", "MIN_DISTANCE"]
 def pstop(sid: str, lat: float, lng: float, cases: int = 10, units: int = 100, **kw):
     """A stop with its pallet need in 1/1000 pallet (as the web sends it)."""
     return stop(sid, lat, lng, cases=cases, demand_pallet_units=units, **kw)
+
+
+def req95(stops, trucks, **cfg):
+    """A company that keeps a 5% margin (Pallet fill 95%: 12 bays = 11.4 pallets, 2 bays = 1.9): the
+    mechanics below were first written with these figures (the default was 95 until the owner
+    decisions of 4 Oct 2026 made it 100)."""
+    return req(stops, trucks, pallet_fill_pct=95, **cfg)
 
 
 def btruck(tid: str, bays: int = 12, cap: int = 1140, **kw) -> DispatchTruck:
@@ -65,6 +74,7 @@ def test_room_and_text_helpers():
     assert pallet_room_units(12, 95) == 11_400
     assert pallet_room_units(2, 95) == 1_900
     assert pallet_room_units(12, 100) == 12_000
+    assert DispatchConfig().pallet_fill_pct == PALLET_FILL_DEFAULT == 100  # owner decision 4 Oct 2026: every bay
     assert pallet_text(11_400) == "11.4"
     assert pallet_text(2_513) == "2.5"  # the spec's worked example: 1,042 + 1,283 + 188 units
     assert pallet_text(2_550) == "2.6"  # halves up
@@ -76,7 +86,7 @@ def test_truck_days_of_bay_trucks():
     stops = [pstop("A", 23.60, 58.45, cases=420, units=5_000), pstop("B", 23.61, 58.46, cases=420, units=5_000)]
     r = req(stops, [btruck("B12", bays=12, cap=1140), truck("C", cap=570)])
     b, c = ds._truck_days(r)
-    assert b.by_pallets and b.bays == 12 and b.max_pallet_units == 11_400
+    assert b.by_pallets and b.bays == 12 and b.max_pallet_units == 12_000  # Pallet fill 100% (the default)
     assert b.max_cases == 841  # CASES_FREE: the request's cases + 1, so no case comparison ever binds
     assert not c.by_pallets and c.max_pallet_units == 0 and c.max_cases == 570 and c.full_cases == 570
 
@@ -131,9 +141,9 @@ GOLDEN = (2, 3, 78.4, 68.9, [("T1", 1, 360, ["S0", "S3", "S5"]), ("T2", 1, 360, 
 # ---------------------------------------------------------------------------------------------
 
 def test_the_route_search_respects_the_bays():
-    """5 + 5 + 2 pallets on one 12-bay truck at 95% (11.4 pallets): two loads, never one."""
+    """5 + 5 + 2.5 pallets on one 12-bay truck at the default 100% (12.0 pallets): two loads, never one."""
     stops = [pstop("A", 23.60, 58.45, cases=100, units=5_000), pstop("B", 23.605, 58.455, cases=100, units=5_000),
-             pstop("C", 23.61, 58.46, cases=100, units=2_000)]
+             pstop("C", 23.61, 58.46, cases=100, units=2_500)]
     r = req(stops, [btruck("R1", bays=12, max_trips=3)], scenarios=ALL)
     for sc in optimize_dispatch(r).scenarios:
         assert served_ids(sc) == {"A", "B", "C"}, sc.name
@@ -142,15 +152,20 @@ def test_the_route_search_respects_the_bays():
 
 
 def test_fill_is_the_limit_to_one_unit():
-    one = lambda units, fill=95: req([pstop("A", 23.60, 58.45, cases=900, units=units)], [btruck("R1", bays=12, max_trips=1)],
-                                     pallet_fill_pct=fill)
-    sc = rec(optimize_dispatch(one(11_400)))
+    def one(units, **fill):
+        return req([pstop("A", 23.60, 58.45, cases=900, units=units)], [btruck("R1", bays=12, max_trips=1)], **fill)
+    # The default, Pallet fill 100%: every bay, 12.0 pallets.
+    sc = rec(optimize_dispatch(one(12_000)))
+    assert served_ids(sc) == {"A"} and sc.loads[0].pallet_units == 12_000 and sc.loads[0].pallet_room_units == 12_000
+    assert sc.loads[0].utilization_pct == 100.0
+    sc = rec(optimize_dispatch(one(12_001)))
+    assert unserved_map(sc) == {"A": "EXCEEDS_ANY_TRUCK_CAPACITY"}
+    # A company that keeps a margin: 95% = 11.4 pallets.
+    sc = rec(optimize_dispatch(one(11_400, pallet_fill_pct=95)))
     assert served_ids(sc) == {"A"} and sc.loads[0].pallet_units == 11_400
     assert sc.loads[0].utilization_pct == 95.0  # against the physical bays: the 95% limit shows 95%
-    sc = rec(optimize_dispatch(one(11_401)))
+    sc = rec(optimize_dispatch(one(11_401, pallet_fill_pct=95)))
     assert unserved_map(sc) == {"A": "EXCEEDS_ANY_TRUCK_CAPACITY"}
-    sc = rec(optimize_dispatch(one(12_000, fill=100)))
-    assert served_ids(sc) == {"A"} and sc.loads[0].utilization_pct == 100.0
 
 
 def test_kg_still_binds_on_a_bay_truck():
@@ -165,6 +180,36 @@ def test_kg_still_binds_on_a_bay_truck():
     assert len(sc.unserved) == 2 and all(ld.kg <= 10_000 for ld in sc.loads)
     assert all("kg" in u.reason_message for u in sc.unserved), [u.reason_message for u in sc.unserved]
     assert_pallets_hold(r, sc)
+
+
+def test_payload_0_is_no_weight_limit():
+    """Owner decisions of 4 Oct 2026: weight is not a planning limit for NMWC - every truck has payload
+    0, and 0 means no limit everywhere: the route search, the prefilters (no "kg vs largest payload"),
+    the fleet total, the second search (no kg dimension), the independent check and the utilization.
+    The heavy pallets kg_still_binds leaves out (5 x 2,600 kg on a 10,000 kg truck) all ride."""
+    heavy = [pstop(f"H{i}", 23.60 + i * 0.001, 58.45, cases=80, units=1_000, demand_kg=2_600) for i in range(5)]
+    r = req(heavy, [btruck("R1", bays=12, max_trips=1), btruck("R0", bays=2, cap=190, max_trips=1)], scenarios=ALL)
+    assert all(t.capacity_kg == 0 for t in r.trucks)
+    resp = optimize_dispatch(r)
+    for sc in resp.scenarios:
+        assert served_ids(sc) == {f"H{i}" for i in range(5)} and not sc.unserved, sc.name
+        assert sum(ld.kg for ld in sc.loads) == 13_000
+        for ld in sc.loads:
+            # Utilization against the bays only (5.0 pallets on 12 bays = 41.7%; 2.0 on 2 = 100%), never kg.
+            assert ld.utilization_pct == round(100 * ld.pallet_units / (12_000 if ld.truck_id == "R1" else 2_000), 1), (sc.name, ld)
+        assert not any("kg" in w or "payload" in w for w in sc.warnings), sc.warnings
+        assert_pallets_hold(r, sc)
+    tds = ds._truck_days(r)
+    assert all(td.max_kg_units == 0 for td in tds)
+    assert not ds._fleet(r.stops, tds, r.config.pallet_fill_pct).kg_bound
+    # The second search has no kg dimension when no truck has a payload.
+    tds2, solvable, _, mx, _ = _day_of(r)
+    assert [c["delivery"] for c in PV.build_model(r, solvable, tds2, mx).clients] == [[1_000]] * 5
+    # A truck without bays and payload 0: cases only.
+    plain = req([stop(f"C{i}", 23.60 + i * 0.001, 58.45, cases=100, demand_kg=4_000) for i in range(5)], [truck("C", cap=570, max_trips=1)])
+    sc = rec(optimize_dispatch(plain))
+    assert len(sc.loads) == 1 and sc.loads[0].kg == 20_000 and sc.loads[0].utilization_pct == round(100 * 500 / 570, 1)
+    assert sc.feasibility.status == "VERIFIED"
 
 
 def test_cases_are_not_a_limit_on_a_bay_truck():
@@ -198,17 +243,22 @@ def test_order_larger_than_every_truck_names_pallets():
     sc = rec(optimize_dispatch(r))
     assert unserved_map(sc) == {"BIG": "EXCEEDS_ANY_TRUCK_CAPACITY"}
     msg = sc.unserved[0].reason_message
-    assert ("Order is larger than any available truck (16.3 pallets vs largest truck 11.4 pallets: 12 bays at 95% fill; "
+    assert ("Order is larger than any available truck (16.3 pallets vs largest truck 12.0 pallets: 12 bays at 100% fill; "
             "15,355 kg vs largest payload 10,000 kg). Split it or use a bigger truck.") == msg, msg
     # A mixed fleet names both measures.
     r = req([pstop("BIG", 23.60, 58.45, cases=1_250, units=16_300)], [btruck("R1", bays=12), truck("C", cap=570)])
     msg = rec(optimize_dispatch(r)).unserved[0].reason_message
-    assert "16.3 pallets vs largest truck 11.4 pallets: 12 bays at 95% fill; 1250 cases vs largest truck without bays 570 cases" in msg, msg
+    assert "16.3 pallets vs largest truck 12.0 pallets: 12 bays at 100% fill; 1250 cases vs largest truck without bays 570 cases" in msg, msg
+    # Payload 0 (no weight limit): the bays alone, no kg named.
+    r = req([pstop("BIG", 23.60, 58.45, cases=1_020, units=16_300, demand_kg=15_355)], [btruck("R1", bays=12), btruck("R2", bays=2, cap=190)])
+    msg = rec(optimize_dispatch(r)).unserved[0].reason_message
+    assert msg == ("Order is larger than any available truck (16.3 pallets vs largest truck 12.0 pallets: 12 bays at 100% fill). "
+                   "Split it or use a bigger truck."), msg
 
 
 def test_fleet_shortage_in_pallets_and_none_claimed_in_a_mixed_fleet():
     stops = [pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000, priority=3) for i in range(3)]
-    r = req(stops, [btruck("R0", bays=2, cap=190, max_trips=1)])
+    r = req95(stops, [btruck("R0", bays=2, cap=190, max_trips=1)])
     sc = rec(optimize_dispatch(r))
     assert len(sc.unserved) == 2 and len(sc.loads) == 1 and sc.loads[0].pallet_units == 1_000
     for u in sc.unserved:
@@ -218,7 +268,7 @@ def test_fleet_shortage_in_pallets_and_none_claimed_in_a_mixed_fleet():
     tds = ds._truck_days(r)
     assert ds._fleet_shortage(r.stops, tds) == (True, False)
     # The same stops with a case truck beside it: no sound space total exists, none is claimed.
-    mixed = req(stops, [btruck("R0", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)])
+    mixed = req95(stops, [btruck("R0", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)])
     assert ds._fleet_shortage(mixed.stops, ds._truck_days(mixed)) == (False, False)
 
 
@@ -229,7 +279,7 @@ def test_mixed_fleet_a_stop_no_load_can_take_is_told_so_not_re_plan():
     both trucks, so no two share a load). It was told "the optimizer found no truck, trip or time slot
     ... Re-plan to search again", with a warning that no check proves it impossible."""
     stops = [pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000, priority=3) for i in range(3)]
-    r = req(stops, [btruck("B", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)], scenarios=ALL)
+    r = req95(stops, [btruck("B", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)], scenarios=ALL)
     for sc in optimize_dispatch(r).scenarios:
         assert len(sc.loads) == 2 and len(sc.unserved) == 1, sc.name
         u = sc.unserved[0]
@@ -248,7 +298,7 @@ def test_mixed_fleet_proofs_are_sound():
       second search then uses its raised penalty), with its own reason.
     Neither claims anything when a packing exists."""
     mixed = [btruck("B", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)]
-    three = req([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000) for i in range(3)], mixed)
+    three = req95([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000) for i in range(3)], mixed)
     usable = ds._truck_days(three)
     needs = [(s.demand_cases, s.demand_pallet_units) for s in three.stops]
     assert ds._mixed_space_proven(needs, usable, halves=True)  # 3 stops over half of both trucks, 2 trips
@@ -260,7 +310,7 @@ def test_mixed_fleet_proofs_are_sound():
     small = [(40, 400)] * 4
     assert not ds._mixed_space_proven(small, usable, halves=True)
     # Six stops of 80 cases / 1.0 pallet: at least 6 x 0.526 = 3.2 loads of 2 - short, in both measures.
-    six = req([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=80, units=1_000, priority=3) for i in range(6)], mixed)
+    six = req95([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=80, units=1_000, priority=3) for i in range(6)], mixed)
     assert ds._fleet_shortage(six.stops, ds._truck_days(six)) == (True, False)
     sc = rec(optimize_dispatch(six))
     assert len(sc.unserved) == 4 and len(sc.loads) == 2
@@ -275,7 +325,7 @@ def test_mixed_fleet_proofs_are_sound():
 def test_the_no_room_reason_in_pallets():
     """3 x 1.2 pallets on 2 trucks x 1 load of 2 bays (1.9 pallets): no two share a load."""
     two = [btruck("R0", bays=2, cap=190, max_trips=1), btruck("R1", bays=2, cap=190, max_trips=1)]
-    r = req([pstop(f"P{i}", 23.60 + i * 0.001, 58.45, cases=100, units=1_200, priority=1) for i in range(3)], two)
+    r = req95([pstop(f"P{i}", 23.60 + i * 0.001, 58.45, cases=100, units=1_200, priority=1) for i in range(3)], two)
     by_id = {s.stop_id: s for s in r.stops}
     loads = [NS(truck_id=tid, stops=[NS(stop_id=k, cases=by_id[k].demand_cases, kg=0.0, pallet_units=by_id[k].demand_pallet_units)
                                      for k in ids]) for tid, ids in (("R0", ["P0"]), ("R1", ["P1"]))]
@@ -283,7 +333,7 @@ def test_the_no_room_reason_in_pallets():
     assert msg == ("Not planned: no load or free trip has room for its 1.2 pallets (the most room left is 0.7 pallets). "
                    "This P1 stop was left out. Add a truck or raise the loads-per-truck limit."), msg
     # Two 0.9-pallet stops share a load: nothing proves the third cannot go.
-    small = req([pstop(f"Q{i}", 23.60 + i * 0.001, 58.45, cases=40, units=900, priority=1) for i in range(3)], two)
+    small = req95([pstop(f"Q{i}", 23.60 + i * 0.001, 58.45, cases=40, units=900, priority=1) for i in range(3)], two)
     by_id = {s.stop_id: s for s in small.stops}
     loads = [NS(truck_id="R0", stops=[NS(stop_id="Q0", cases=40, kg=0.0, pallet_units=900)])]
     assert ds._no_room_reason(small.stops[2], ds._truck_days(small), loads, {f"Q{i}": 1 for i in range(3)}) is None
@@ -304,7 +354,7 @@ def _day_of(r):
 def test_repack_fits_loads_by_pallets():
     stops = [pstop("A", 23.60, 58.45, cases=900, units=6_000), pstop("B", 23.605, 58.455, cases=100, units=5_400),
              pstop("C", 23.61, 58.46, cases=100, units=5_401)]
-    r = req(stops, [btruck("R1", bays=12, cap=1140, max_trips=3), btruck("R2", bays=12, cap=1140, max_trips=3)])
+    r = req95(stops, [btruck("R1", bays=12, cap=1140, max_trips=3), btruck("R2", bays=12, cap=1140, max_trips=3)])
     tds, solvable, _, mx, ctx = _day_of(r)
     day = ctx.day
     td = day.trucks[0]
@@ -315,7 +365,7 @@ def test_repack_fits_loads_by_pallets():
     assert LR.time_plan(day, {td.idx: [(0, 1), (2,)]}, ctx.rec_pricing) is not None
     # Identical trucks only when their bays are the same.
     assert len(LR._identical_trucks(day, ctx.rec_pricing)) == 2
-    r2 = req(stops, [btruck("R1", bays=12, cap=1140, max_trips=3), btruck("R2", bays=10, cap=1140, max_trips=3)])
+    r2 = req95(stops, [btruck("R1", bays=12, cap=1140, max_trips=3), btruck("R2", bays=10, cap=1140, max_trips=3)])
     _, _, _, _, ctx2 = _day_of(r2)
     assert LR._identical_trucks(ctx2.day, ctx2.rec_pricing) == {}
 
@@ -335,8 +385,8 @@ def test_search_turnaround_estimate_uses_the_days_cases_per_pallet():
     stops = [pstop("A", 23.60, 58.45, cases=420, units=5_000), pstop("B", 23.61, 58.46, cases=420, units=5_000)]
     r = req(stops, [btruck("R1", bays=12)], reload_min=30, loading_min_per_case=0.04)
     td = ds._truck_days(r)[0]
-    assert td.full_cases == round(11_400 * 840 / 10_000)  # 958 cases: 11.4 pallets x 84 cases per pallet
-    assert ds._approx_gap_s(r.config, td) == int(round((30 + 0.04 * 958 * 0.8) * 60))
+    assert td.full_cases == round(12_000 * 840 / 10_000)  # 1,008 cases: 12.0 pallets (100% fill) x 84 cases per pallet
+    assert ds._approx_gap_s(r.config, td) == int(round((30 + 0.04 * 1_008 * 0.8) * 60))
     case = ds._truck_days(req(stops, [truck("C", cap=1140)], reload_min=30, loading_min_per_case=0.04))[0]
     assert ds._approx_gap_s(r.config, case) == int(round((30 + 0.04 * 1140 * 0.8) * 60))  # unchanged
 
@@ -347,14 +397,17 @@ def test_independent_check_flags_pallets_and_wrong_totals():
     sc = rec(optimize_dispatch(r))
     assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 3
     assert sc.loads[0].cases == 1_000  # over the case capacity 500: not a violation on a bay truck
-    # The same plan checked against 10 bays: 11.4 > 9.5 pallets.
+    # The same plan checked against 10 bays: 11.4 > 10.0 pallets (100% fill), and > 9.5 at 95%.
     fewer = r.model_copy(deep=True)
     fewer.trucks[0].bays = 10
     rep = FZ.check_scenario(fewer, sc)
     assert [v.code for v in rep.violations] == ["CAPACITY_PALLETS"], rep.violations
     v = rep.violations[0]
-    assert v.message == "R1 load 1 needs 11.4 pallets; the truck takes 9.5 (10 bays at 95% fill).", v.message
-    assert v.short_by_min == 1.9
+    assert v.message == "R1 load 1 needs 11.4 pallets; the truck takes 10.0 (10 bays at 100% fill).", v.message
+    assert v.short_by_min == 1.4
+    fewer.config.pallet_fill_pct = 95
+    v = FZ.check_scenario(fewer, sc).violations[0]
+    assert (v.message, v.short_by_min) == ("R1 load 1 needs 11.4 pallets; the truck takes 9.5 (10 bays at 95% fill).", 1.9), v.message
     # A load that records other units than its stops add up to.
     bad = sc.model_copy(deep=True)
     bad.loads[0].pallet_units = 11_000
@@ -378,7 +431,7 @@ def test_second_search_model_has_a_pallet_dimension_only_with_bays():
     assert m.summary["pallets"] == "on"
     assert [c["delivery"] for c in m.clients] == [[300, 3_000, 9_000], [200, 2_500, 5_000]]  # cases, pallet units, kg
     by_truck = {tds[i].truck.id: v for v, ts in zip(m.vehicle_types, m.type_trucks) for i in ts}
-    assert by_truck["B12"]["capacity"] == [501, 11_400, 100_000]  # CASES_FREE, bays x 95%, payload
+    assert by_truck["B12"]["capacity"] == [501, 12_000, 100_000]  # CASES_FREE, bays x 100%, payload
     assert by_truck["C"]["capacity"] == [570, 5_501, 30_000]  # the whole day's pallets: not its limit
     # An all-bay fleet: pallets and kg only, as an all-case fleet has cases and kg.
     r2 = req(stops, [btruck("B12", bays=12, capacity_kg=10_000)])
@@ -392,10 +445,10 @@ def test_second_search_model_has_a_pallet_dimension_only_with_bays():
 
 
 def test_second_search_plans_over_the_bays_are_rejected():
-    stops = [pstop("A", 23.60, 58.45, cases=300, units=6_000), pstop("B", 23.61, 58.46, cases=200, units=6_000)]
+    stops = [pstop("A", 23.60, 58.45, cases=300, units=6_000), pstop("B", 23.61, 58.46, cases=200, units=6_001)]
     r = req(stops, [btruck("B12", bays=12), truck("C", cap=1_000)])
     tds, solvable, _, _, _ = _day_of(r)
-    plan, why = PV.plan_of({"plan": {"0": [[0, 1]]}}, tds, solvable)  # 12.0 pallets on 11.4
+    plan, why = PV.plan_of({"plan": {"0": [[0, 1]]}}, tds, solvable)  # 12.001 pallets on 12.0
     assert plan is None and why == "INVALID_PLAN"
     plan, why = PV.plan_of({"plan": {"0": [[0]], "1": [[1]]}}, tds, solvable)  # the case truck by cases: 200 <= 1,000
     assert plan == {0: [(0,)], 1: [(1,)]} and why is None
@@ -459,7 +512,7 @@ def test_echo_utilization_and_totals():
     assert_pallets_hold(r, sc)
     # An empty day echoes the rule too.
     empty = rec(optimize_dispatch(req([], [btruck("R1")])))
-    assert (empty.pallet_unit, empty.pallet_fill_pct, empty.total_pallet_units) == (0.001, 95, 0)
+    assert (empty.pallet_unit, empty.pallet_fill_pct, empty.total_pallet_units) == (0.001, 100, 0)
 
 
 def test_reconciliation_counts_pallet_units():

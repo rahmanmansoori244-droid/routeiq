@@ -81,7 +81,7 @@ import {
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
-import { groupMissingPalletFactors, loadPallets, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
+import { groupMissingPalletFactors, loadPallets, PALLET_FILL_DEFAULT, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
 import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
@@ -401,7 +401,7 @@ export async function buildDispatchRequest(
   // the product is listed in missingPalletFactors and OPTIMIZE is refused); a day without bay trucks
   // is planned exactly as before (no pallet field is sent).
   const byPallets = trucks.some((t) => t.bays !== null && t.bays !== undefined);
-  const fillPct = cfg.palletFillPct ?? 95;
+  const fillPct = cfg.palletFillPct ?? PALLET_FILL_DEFAULT;
 
   // Each order with the lines (cases) still to plan.
   type OpenOrder = { o: (typeof orders)[number]; lines: OpenLine[]; cases: number; kg: number; partial: boolean };
@@ -969,7 +969,7 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
   if (!r?.config || !r.depot) return null; // not a complete request (unit-test stubs): no inputs kept
   const { osrm_url: osrmUrl, ...config } = r.config;
   const trucks: Record<string, TruckFacts> = {};
-  const fill = r.config.pallet_fill_pct ?? 95;
+  const fill = r.config.pallet_fill_pct ?? PALLET_FILL_DEFAULT;
   for (const t of r.trucks ?? []) {
     trucks[t.id] = {
       code: t.code ?? t.id,

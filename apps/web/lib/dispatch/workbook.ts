@@ -142,7 +142,7 @@ export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
 /** The pallets of a load planned by pallets (pallets.ts loadPallets); null = cases only. */
 const palletsOf = (l: DetailLoad): LoadPallets | null => loadPallets(l);
 
-/** "11.1 / 12 (limit 11.4 at 95% fill)" - a load's pallets on the sheets; '' for a load planned by cases. */
+/** "11.1 / 12 (limit 12.0 at 100% fill)" - a load's pallets on the sheets; '' for a load planned by cases. */
 export function loadPalletsCell(l: DetailLoad): string {
   const p = palletsOf(l);
   return p ? `${palletsOverBays(p)} (${palletLimitText(p)})` : '';
@@ -708,7 +708,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     pallets
       ? ['Cases · pallets / bays', `${l.cases.toLocaleString('en-US')} · ${loadPalletsCell(l)}`]
       : ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
-    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
+    // A payload of 0 is no weight limit (owner decisions of 4 Oct 2026: NMWC's trucks have none): never "/ 0".
+    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg > 0 ? l.truckPayloadKg : 'no limit'}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
     ['Utilization %', l.utilizationPct, FMT_PCT],
     [kmWord, l.distanceKm, FMT_KM],
     ['Estimated time (h:mm)', fmtDuration(l.durationMin)],
@@ -1199,8 +1200,8 @@ export function tenantAssumptions(
       : 'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
     // Pallets (owner decision 4 Oct 2026), worded by the rule the solver REPORTED (its echo).
     'Truck capacity': solver.pallets
-      ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill) and the payload - their case capacity is not used; trucks without bays: cases and payload. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
-      : 'cases and payload (no truck of this plan was planned by pallets)',
+      ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill) and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
+      : 'cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit',
     // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.
     'Receiving hours': solver.finishByClosing
       ? 'unloading must be finished by the end of the receiving hours'

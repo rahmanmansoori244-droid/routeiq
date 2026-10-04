@@ -46,6 +46,15 @@ class LateOrderRefused extends Error {
   }
 }
 
+/**
+ * An active truck of the depot has a payload: only then do OPTIMIZE and RE-PLAN ask before planning
+ * lines without a case weight (start-optimize.ts gate). A payload of 0 is no weight limit (owner
+ * decisions of 4 Oct 2026: NMWC's trucks have none).
+ */
+async function depotHasPayload(depotId: string): Promise<boolean> {
+  return (await prisma.truck.count({ where: { depotId, active: true, capacityWeightKg: { gt: 0 } } })) > 0;
+}
+
 // POST /api/dispatch/late-order - record a single late order (e.g. a P1 customer phoning at
 // 22:15). Unknown customers become "LOCATION REQUIRED" stubs; nothing is planned until the
 // dispatcher re-plans (new version, locked loads preserved). Like a confirmed file, a sales-order
@@ -218,6 +227,9 @@ export const POST = withTenantApi(
         customerCreated: result.customerCreated,
         locationRequired: result.customer.lat === null || result.customer.lng === null,
         productsWithoutWeight: result.productsWithoutWeight,
+        // Whether a re-plan would ask about them: only when an active truck of the depot has a payload
+        // (payload 0 = no weight limit, owner decisions of 4 Oct 2026; start-optimize.ts gate).
+        ...(result.productsWithoutWeight.length ? { weightLimited: await depotHasPayload(depot.id) } : {}),
         planId: plan?.id ?? null,
         replanNeeded: !!plan?.chosenScenarioId,
       },

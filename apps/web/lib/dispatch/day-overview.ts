@@ -22,7 +22,7 @@ import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, planSearching, readResultsNow, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, planningKgPerCase } from './weights';
-import { palletRoomUnits, validPalletFactor } from './pallets';
+import { PALLET_FILL_DEFAULT, palletRoomUnits, validPalletFactor } from './pallets';
 import { caseHeavierThanAnyTruck, maxCasePayloadKg, portionPlannedKgPerCase, readPortionLines, rowPalletUnitsNow, type FleetTruck } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot } from './snapshots';
 import { dataGaps, type DataGap } from './data-collection';
@@ -183,7 +183,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -529,7 +529,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       cases: t.capacityCases,
       kg: t.capacityWeightKg > 0 ? t.capacityWeightKg : null,
       tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenOf.get(t.id) ?? 0),
-      ...(typeof t.bays === 'number' ? { palletUnits: palletRoomUnits(t.bays, cfg.palletFillPct ?? 95) } : {}),
+      ...(typeof t.bays === 'number' ? { palletUnits: palletRoomUnits(t.bays, cfg.palletFillPct ?? PALLET_FILL_DEFAULT) } : {}),
     }));
     const maxKg = maxCasePayloadKg(fleet);
     for (const g of factorGaps) {
@@ -615,6 +615,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       withBays: bayTrucks.length,
       bays: bayTrucks.reduce((a, t) => a + (t.bays ?? 0), 0),
       casesWithoutBays: trucks.filter((t) => typeof t.bays !== 'number').reduce((a, t) => a + t.capacityCases, 0),
+      // Trucks with a payload: only then does OPTIMIZE ask about lines without a weight (a payload of 0 is
+      // no weight limit, owner decisions of 4 Oct 2026; start-optimize.ts gate).
+      withPayload: trucks.filter((t) => t.capacityWeightKg > 0).length,
     },
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,

@@ -110,7 +110,7 @@ interface Day {
   carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
   /** PR9: orders of this day brought forward to later days (no longer open here). */
   carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
-  trucks: { active: number; capacityCases: number; withBays?: number; bays?: number; casesWithoutBays?: number };
+  trucks: { active: number; capacityCases: number; withBays?: number; bays?: number; casesWithoutBays?: number; withPayload?: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
   /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
   serviceArea: ServiceArea;
@@ -611,7 +611,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         {day.productsWithoutWeight.length ? (
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
             No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (
-            {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). To check truck payloads, {fixWeight}: until then OPTIMIZE asks before planning them as 0 kg.
+            {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}).{' '}
+            {day.trucks.withPayload === 0
+              ? `No truck here has a payload (weight is not a limit), so OPTIMIZE plans them without asking; the kg on the plan and the sheets count them as 0. To show their kg, ${fixWeight}.`
+              : `To check truck payloads, ${fixWeight}: until then OPTIMIZE asks before planning them as 0 kg.`}
           </p>
         ) : null}
         {day.productsWithoutPalletFactor?.length ? (

@@ -130,6 +130,24 @@ describe("day overview: the red list of products without cases per pallet names 
     expect((await day()).productsWithoutPalletFactor).toEqual([]);
   });
 
+  it('payload 0 is no weight limit (owner decisions of 4 Oct 2026): a case heavier than any payload is not left out, and the screen is told no truck has a payload', async () => {
+    state.plan = false;
+    // NMWC's trucks: 12 and 6 bays, payload 0 (weight is not a planning limit).
+    state.trucks = [
+      { ...BAY_TRUCK, capacityWeightKg: 0 },
+      { code: 'R4', capacityCases: 570, capacityWeightKg: 0, maxTripsPerDay: null, bays: 6 },
+    ];
+    state.orders = [order('O4', customer('C4'), 'NEW-4', 5, { kg: 20_000, cpp: null }, 0)];
+    const d = await day();
+    expect(d.productsWithoutPalletFactor).toEqual([{ code: 'NEW-4', name: 'NEW-4', lines: 1, cases: 5 }]);
+    expect(d.trucks).toMatchObject({ active: 2, withBays: 2, bays: 18, withPayload: 0 });
+    // A line without a weight is still listed (the kg on the sheets leave it out); the screen words it by withPayload.
+    state.orders = [order('O5', customer('C5'), 'NEW-5', 5, { kg: 0, cpp: 84 }, 0)];
+    expect((await day()).productsWithoutWeight.map((p) => p.code)).toEqual(['NEW-5']);
+    state.trucks = [BAY_TRUCK];
+    expect((await day()).trucks.withPayload).toBe(1);
+  });
+
   it('still nothing without trucks with bays', async () => {
     state.plan = false;
     state.trucks = [{ code: 'C1', capacityCases: 600, capacityWeightKg: 3000, maxTripsPerDay: null, bays: null }];
