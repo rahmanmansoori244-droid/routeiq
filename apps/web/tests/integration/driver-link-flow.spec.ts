@@ -77,9 +77,12 @@ beforeAll(async () => {
   t = await freshTenant('drvlink');
   other = await freshTenant('drvlink-x');
   day = isoPlus(1);
+  // Both trucks must get a load (Part 1 rule 20 and Part 2 work on the hired T02). The optimizer
+  // uses as few trucks as it can, so one truck must not be able to carry the day: at most 2 loads
+  // of 120 cases each = 240 cases per truck, and the orders below total 315 cases.
   await prisma.tenantConfig.update({
     where: { tenantId: t.tenantId },
-    data: { timezone: 'Asia/Muscat', planningCutoffMin: 18 * 60, shiftStartMin: 6 * 60, driverShiftMaxMinutes: 12 * 60, reloadMinutes: 30, maxTripsPerTruck: 3, distanceProvider: 'HAVERSINE', osrmUrl: null },
+    data: { timezone: 'Asia/Muscat', planningCutoffMin: 18 * 60, shiftStartMin: 6 * 60, driverShiftMaxMinutes: 12 * 60, reloadMinutes: 30, maxTripsPerTruck: 2, distanceProvider: 'HAVERSINE', osrmUrl: null },
   });
   const depot = await prisma.depot.create({ data: { tenantId: t.tenantId, code: 'MCT', name: 'Muscat depot', lat: 23.568, lng: 58.392, openMin: 300, closeMin: 1380 } });
   depotId = depot.id;
@@ -120,6 +123,9 @@ beforeAll(async () => {
   expect(r.status).toBe(202);
   runId = (await json(r)).data.runId;
   expect((await waitForPlan(runId)).run.status).toBe('READY');
+  // Each truck has a load (see the trip limit above), or the tests below have nothing to work on.
+  const used = new Set((await plan()).loads.map((l: any) => l.truckId));
+  expect([...used].sort()).toEqual([trucks.T01, trucks.T02].sort());
 }, 300_000);
 
 afterAll(async () => {
