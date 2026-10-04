@@ -7,7 +7,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { NOT_DELIVERED_REASONS } from '@/lib/driver-link/manifest-types';
-import { reasonLabel } from '@/lib/delivery/office-text';
+import { officeTimesToSend, reasonLabel } from '@/lib/delivery/office-text';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import type { VisitLine } from '@/lib/delivery/visit';
 import { api } from './client-api';
@@ -25,6 +25,8 @@ export interface OutcomeTarget {
   customerCode: string;
   lines: VisitLine[];
   current: { outcome: string | null; reason: string | null; note: string | null } | null;
+  /** The stored Arrived / Left (HH:MM, officeTimesPrefill): shown in the boxes, sent only when changed. */
+  times?: { arrived: string; left: string };
 }
 
 type Choice = 'DELIVERED' | 'PARTLY_DELIVERED' | 'NOT_DELIVERED';
@@ -69,8 +71,8 @@ export function OutcomeDialog({ open, onOpenChange, target, onSaved }: { open: b
     setReason(cur?.reason ?? '');
     setNote(cur?.note ?? '');
     setDelivered(Object.fromEntries(target.lines.map((l) => [l.lineId, String(l.deliveredCases ?? l.plannedCases)])));
-    setArrived('');
-    setLeft('');
+    setArrived(target.times?.arrived ?? '');
+    setLeft(target.times?.left ?? '');
   }, [open, target]);
 
   async function send(outcome: Choice | null, undoCarry = false) {
@@ -98,8 +100,8 @@ export function OutcomeDialog({ open, onOpenChange, target, onSaved }: { open: b
         reason: outcome && outcome !== 'DELIVERED' ? reason || null : null,
         note: note.trim() || null,
         lines,
-        arrivedAt: arrived.trim() || null,
-        departedAt: left.trim() || null,
+        // Only a changed box: re-sending the phone's stored times would turn them into office times.
+        ...officeTimesToSend({ arrived, left }, target.times ?? { arrived: '', left: '' }),
         ...(undoCarry ? { undoCarry: true } : {}),
       },
     });

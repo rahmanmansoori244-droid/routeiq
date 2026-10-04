@@ -8,8 +8,9 @@
  *    check; EXIF GPS is rarely present (most camera apps and browsers remove it).
  * 4. The photo is compressed without decoding the full image where the browser can: long side at most
  *    1600 px, JPEG 0.7 (0.6 and 0.5 when still over 400 KB); over 1.5 MB: "Photo too large, retake".
- * 5. The position: a fresh high-accuracy fix when the camera returns, or the tracker's last fix from
- *    no more than 30 s before the camera opened, whichever is more accurate. Save never waits for it.
+ * 5. The position: a fresh high-accuracy fix asked the moment the file arrives from the camera (not
+ *    when "Use photo" is tapped), or the tracker's last fix at that moment if it is from no more than
+ *    30 s before the camera opened, whichever is more accurate. Save never waits for it.
  */
 import type { PhotoPositionStatusName } from '../driver-link/manifest-types';
 import { jpegSize, readExif } from '../delivery/jpeg';
@@ -19,7 +20,6 @@ export const QUALITIES = [0.7, 0.6, 0.5] as const;
 export const TARGET_BYTES = 400 * 1024;
 export const MAX_BYTES = 1_500_000;
 export const OK_ACCURACY_M = 100;
-export const OLD_PHOTO_MS = 15 * 60_000;
 /** The tracker's last fix counts for a photo when it is at most this old when the camera opened. */
 export const LAST_FIX_MS = 30_000;
 
@@ -57,18 +57,16 @@ export function positionStatus(fix: PosFix | null, error: 'DENIED' | 'TIMEOUT' |
   return error ?? 'TIMEOUT';
 }
 
-/** "Taken earlier": the EXIF time or the file time more than 15 min before the arrival (or the dispatch) (pure). */
-export function isOldPhoto(exifTakenAt: number | null, fileLastModified: number | null, reference: number | null): boolean {
-  if (reference === null) return false;
-  return [exifTakenAt, fileLastModified].some((t) => t !== null && Number.isFinite(t) && t < reference - OLD_PHOTO_MS);
-}
-
-/** EXIF of the original file (its first 256 KB hold the APP1 block), or null. */
-export async function exifOfFile(file: Blob, tz: string): Promise<{ lat: number | null; lng: number | null; takenAt: number | null } | null> {
+/**
+ * EXIF of the original file (its first 256 KB hold the APP1 block), or null. `zoned`: the capture time
+ * came with its own offset. Whether the photo was "taken earlier" is decided by the server, on one
+ * clock with the arrival (photo-service isOldPhotoOnServerClock): the phone's own clock may be wrong.
+ */
+export async function exifOfFile(file: Blob, tz: string): Promise<{ lat: number | null; lng: number | null; takenAt: number | null; zoned: boolean } | null> {
   try {
     const head = new Uint8Array(await file.slice(0, 256 * 1024).arrayBuffer());
     const e = readExif(head, tz);
-    return e ? { lat: e.lat, lng: e.lng, takenAt: e.takenAt ? e.takenAt.getTime() : null } : null;
+    return e ? { lat: e.lat, lng: e.lng, takenAt: e.takenAt ? e.takenAt.getTime() : null, zoned: e.zoned } : null;
   } catch {
     return null;
   }

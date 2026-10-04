@@ -3,10 +3,12 @@
  * 8.7 and 13.3). Server only.
  *
  * Every action (ARRIVE, DEPART, OUTCOME, BACK_AT_DEPOT) runs in ONE short transaction, in this order:
- * the lock timeout, the live load and its planned stop, the outcome-day lock, the idempotency check
- * under the lock (`dl:<uuid>`, a duplicate only for the same link), the rules (section 8.3), the
- * StopEvent, the StopVisit rebuilt from all its events (visit.ts), the audit row. After the commit a
- * load that is back at the depot with a result on every stop is completed (completeLoadAsDriver).
+ * the lock timeout, the outcome-day lock, the live load and its planned stop (read under the lock),
+ * the idempotency check (`dl:<uuid>`, a duplicate only for the same link), the rules (section 8.3),
+ * the caps (40 arrivals, departures and results per stop, 5 Back at depot per load), the StopEvent,
+ * the StopVisit rebuilt from all its events (visit.ts), the audit row. A result equal to the stop's
+ * current one is answered ok and stores nothing. After the commit a load that is back at the depot
+ * with a result on every stop is completed (completeLoadAsDriver).
  *
  * A unique-key error (P2002) aborts the transaction; it is answered from a fresh read OUTSIDE it,
  * never retried inside it (PostgreSQL refuses every statement after the first error).
@@ -41,7 +43,7 @@ import {
   type RefusalCode,
   type WriteKind,
 } from './outcome-rules';
-import { deriveVisit, readVisitLines, type EventSource, type VisitEvent } from './visit';
+import { deriveVisit, readVisitLines, resultEvent, type EventSource, type VisitEvent } from './visit';
 
 type Tx = Prisma.TransactionClient;
 type Db = Tx | typeof prisma;
@@ -158,15 +160,19 @@ export async function dayFacts(ctx: Pick<DriverWriteContext, 'tenantId' | 'truck
   };
 }
 
-/** The audit identity of a write (spec section 16.4): the driver link's actor, or the signed-in office user. */
-export function writerAudit(ctx: DriverWriteContext, facts: DayFacts, load: TruckDayLoad): { userId: string | null; extra: Record<string, unknown> } {
-  if (ctx.session) return { userId: ctx.session.userId, extra: { via: 'driver page' } };
+/**
+ * The audit identity of a write (spec section 16.4): the driver link's actor, or the signed-in office
+ * user. `ip`: the AuditLog.ip of the row - the office user's, as on every user row; none (false) for
+ * the driver link (audit rows are kept for good, while a driver's IP and browser id are erased from
+ * the stop events and photos after locationRetentionDays).
+ */
+export function writerAudit(ctx: DriverWriteContext, facts: DayFacts, load: TruckDayLoad): { userId: string | null; ip: string | null | false; extra: Record<string, unknown> } {
+  if (ctx.session) return { userId: ctx.session.userId, ip: ctx.ip, extra: { via: 'driver page' } };
   const actor = driverActor(
     { generation: ctx.link.generation, driverIdAtIssue: ctx.link.driverIdAtIssue, driverNameAtIssue: facts.nameAtIssue },
     { truckCode: facts.truckCode, date: ctx.date, driverId: load.driverId, driverName: load.driverName },
-    ctx.deviceId,
   );
-  return { userId: null, extra: { actor, linkGeneration: ctx.link.generation, ip: ctx.ip } };
+  return { userId: null, ip: false, extra: { actor, linkGeneration: ctx.link.generation } };
 }
 
 export function parseStopKey(s: string): { loadNo: number; sequence: number } | null {
@@ -285,7 +291,9 @@ export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Dat
       autoBasis: v.autoBasis,
       autoMinutes: v.autoMinutes,
       autoServiceMinutes: v.autoServiceMinutes,
-      timingSuspect: v.timingSuspect,
+      // After the location purge the positions the plausibility flags were read from are gone: a
+      // visit flagged before keeps its flag (it must never start feeding measured times and KPIs).
+      timingSuspect: visit.locationPurgedAt ? !!visit.timingSuspect || v.timingSuspect : v.timingSuspect,
       outcome: v.outcome,
       reason: v.reason as NotDeliveredReasonName | null,
       reasonNote: v.reasonNote,
@@ -313,19 +321,60 @@ async function loadBreak(tx: Db, tenantId: string, loadId: string): Promise<{ st
   return b && b.v === 1 && typeof b.startMin === 'number' && typeof b.endMin === 'number' ? { startMin: b.startMin, endMin: b.endMin } : null;
 }
 
-/** COMPLETED: did the stop have a result at completion (an OUTCOME received at or before it)? */
+/**
+ * COMPLETED: did the stop have a result at completion? The EFFECTIVE result of the OUTCOME events
+ * received at or before it (resultEvent, as deriveVisit picks it): a result that was cleared again
+ * before the trip closed is no result, so a late result may still fill that gap.
+ */
 async function hadResultAtCompletion(tx: Tx, tenantId: string, visitId: string | null, completedAt: Date | null): Promise<boolean> {
   if (!visitId || !completedAt) return false;
-  const n = await tx.stopEvent.count({ where: { tenantId, visitId, kind: 'OUTCOME', receivedAt: { lte: completedAt } } });
-  return n > 0;
+  const rows = await tx.stopEvent.findMany({
+    where: { tenantId, visitId, kind: 'OUTCOME', receivedAt: { lte: completedAt } },
+    select: { kind: true, source: true, at: true, receivedAt: true, payloadJson: true },
+  });
+  return hadResultAmong(rows);
 }
 
-/** The copies' carry basis of the stop's brought-forward orders (an empty basis for copies made before Part 3). */
-export async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop) {
-  const copies = planned.orders.map((o) => o.carriedToOrderId).filter((x): x is string => !!x);
-  if (!copies.length) return [];
-  const rows = await tx.order.findMany({ where: { tenantId, id: { in: copies } }, select: { id: true, deliveryDate: true, carryBasisJson: true } });
-  return rows.map((r) => ({ copyId: r.id, copyDate: isoOf(r.deliveryDate), basis: readCarryBasis(r.carryBasisJson) }));
+/** Whether OUTCOME events leave a result (not a cleared one) (pure). */
+export function hadResultAmong(rows: readonly { kind: string; source: string; at: Date; receivedAt: Date; payloadJson: unknown }[]): boolean {
+  const res = resultEvent(rows.map((r) => ({ kind: r.kind as VisitEvent['kind'], source: r.source as EventSource, at: r.at, receivedAt: r.receivedAt, payload: (r.payloadJson ?? null) as Record<string, unknown> | null })));
+  return !!res && typeof res.payload?.outcome === 'string';
+}
+
+/**
+ * The copies' carry basis of the stop's brought-forward orders (an empty basis for copies made before
+ * Part 3). Called UNDER the outcome-day lock: the orders' carriedToOrderId is read again here, never
+ * taken from the planned stop read before the lock (a Bring forward committing meanwhile would be
+ * missed, and a result change would slip past the basis rule).
+ */
+export async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop): Promise<{ copyId: string; copyDate: string; basis: ReturnType<typeof readCarryBasis>; originalId: string }[]> {
+  const ids = planned.orders.map((o) => o.orderId);
+  if (!ids.length) return [];
+  const fresh = await tx.order.findMany({ where: { tenantId, id: { in: ids } }, select: { id: true, carriedToOrderId: true } });
+  const originalOf = new Map(fresh.filter((o) => !!o.carriedToOrderId).map((o) => [o.carriedToOrderId!, o.id]));
+  if (!originalOf.size) return [];
+  const rows = await tx.order.findMany({ where: { tenantId, id: { in: [...originalOf.keys()] } }, select: { id: true, deliveryDate: true, carryBasisJson: true } });
+  return rows.map((r) => ({ copyId: r.id, copyDate: isoOf(r.deliveryDate), basis: readCarryBasis(r.carryBasisJson), originalId: originalOf.get(r.id)! }));
+}
+
+/** At most this many arrivals, departures and results are stored per stop (a flood of one link is refused INVALID). */
+export const MAX_EVENTS_PER_VISIT = 40;
+/** At most this many Back at depot events per load. */
+export const MAX_BACK_EVENTS_PER_LOAD = 5;
+
+/** Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note, lines, photos). */
+export function repeatsCurrentResult(
+  visit: { outcome: string | null; reason: string | null; reasonNote: string | null; outcomeSource: string | null; noPhotoReason: string | null; photoKeysJson: unknown; linesJson: unknown } | null,
+  next: { source: EventSource; outcome: string | null; reason: string | null; note: string | null; lines: { lineId: string; delivered: number }[]; photoKeys: readonly string[]; noPhotoReason: string | null },
+): boolean {
+  if (!visit) return next.outcome === null;
+  if (next.outcome === null) return visit.outcome === null;
+  if (visit.outcome !== next.outcome || visit.outcomeSource !== next.source) return false;
+  if ((visit.reason ?? null) !== (next.reason ?? null) || (visit.reasonNote ?? null) !== (next.note ?? null) || (visit.noPhotoReason ?? null) !== (next.noPhotoReason ?? null)) return false;
+  const keys = Array.isArray(visit.photoKeysJson) ? (visit.photoKeysJson as unknown[]).filter((k): k is string => typeof k === 'string') : [];
+  if (keys.length !== next.photoKeys.length || [...keys].sort().join('|') !== [...next.photoKeys].sort().join('|')) return false;
+  const stored = new Map(readVisitLines(visit.linesJson).map((l) => [l.lineId, l.deliveredCases]));
+  return next.lines.every((l) => stored.get(l.lineId) === l.delivered) && stored.size === next.lines.length;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -355,6 +404,9 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
   return prisma.$transaction(
     async (tx): Promise<Applied> => {
       await setLockTimeout(tx);
+      // The outcome-day lock FIRST: the load's status, the stop's orders (carriedToOrderId) and the
+      // visit are read under it, so a Bring forward or a completion committing meanwhile is seen.
+      await lockOutcomesDay(tx, ctx.tenantId, dayLoad.depotId, ctx.date);
       const load = await tx.planLoad.findFirst({
         where: { id: dayLoad.id, tenantId: ctx.tenantId },
         select: { id: true, status: true, statusChangedAt: true, breakJson: true, truckSnapshotJson: true, runId: true },
@@ -362,7 +414,6 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
       if (!load) return { result: refused(a.key, 'STOP_NOT_FOUND') };
       const planned = where.sequence !== null ? await plannedStopOf(tx, load, where.sequence) : null;
       if (where.sequence !== null && !planned) return { result: refused(a.key, 'STOP_NOT_FOUND') };
-      await lockOutcomesDay(tx, ctx.tenantId, dayLoad.depotId, ctx.date);
       // Idempotency under the lock: a duplicate only for the same link; another link's key is INVALID.
       const existing = await tx.stopEvent.findFirst({ where: { tenantId: ctx.tenantId, idempotencyKey: storedKey }, select: { id: true, driverLinkId: true, kind: true } });
       if (existing) {
@@ -382,6 +433,14 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
         expiresAt: ctx.link.expiresAt,
       });
       if (!rule.ok) return { result: refused(a.key, rule.code, rule.transient) };
+      // Bounded storage per stop and per load: a link holder flooding one stop with fresh keys is refused.
+      if (a.type === 'BACK_AT_DEPOT') {
+        const backs = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, deliveryDate: dateOnly(ctx.date), truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, kind: 'BACK_AT_DEPOT' } });
+        if (backs >= MAX_BACK_EVENTS_PER_LOAD) return { result: refused(a.key, 'INVALID') };
+      } else if (visit) {
+        const n = await tx.stopEvent.count({ where: { tenantId: ctx.tenantId, visitId: visit.id, kind: { in: ['ARRIVED', 'DEPARTED', 'OUTCOME'] } } });
+        if (n >= MAX_EVENTS_PER_VISIT) return { result: refused(a.key, 'INVALID') };
+      }
       const late = rule.late;
       const who = writerAudit(ctx, facts, dayLoad);
       const base = {
@@ -428,7 +487,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
             entity: 'PlanLoad',
             entityId: dayLoad.id,
             afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, date: ctx.date, at: at.toISOString(), late, ...who.extra } as Prisma.InputJsonValue,
-            ip: ctx.ip,
+            ip: who.ip,
           },
           tx,
         );
@@ -481,7 +540,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
               entity: 'StopVisit',
               entityId: v.id,
               afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, at: arriveAt.toISOString(), customerCode: p.customerCode, when: !!a.when, late, ...who.extra } as Prisma.InputJsonValue,
-              ip: ctx.ip,
+              ip: who.ip,
             },
             tx,
           );
@@ -515,12 +574,29 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
       );
       if (!norm.ok) return { result: { ...refused(a.key, 'INVALID'), message: { en: norm.message, ar: REFUSAL_TEXT.INVALID.ar } } };
       const outcome = norm.outcome;
-      if (photoRule({ required: facts.photoRequired, byDriver: !office, outcome, photoKeys: a.photoKeys, noPhotoReason: a.noPhotoReason }) !== 'ok') {
-        return { result: refused(a.key, 'PHOTO_REQUIRED') };
+      const photoArgs = { required: facts.photoRequired, byDriver: !office, outcome, photoKeys: a.photoKeys, noPhotoReason: a.noPhotoReason };
+      if (photoRule(photoArgs) !== 'ok') {
+        // A changed or redone result: the stop's photos already sent are its proof.
+        const kept = visit ? await tx.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, visitId: visit.id, source: { not: 'DISPATCHER' } } }) : 0;
+        if (photoRule({ ...photoArgs, existingPhotos: kept }) !== 'ok') return { result: refused(a.key, 'PHOTO_REQUIRED') };
       }
       const after = new Map(p.lines.map((l) => [l.lineId, 0]));
       if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);
       const source: EventSource = office ? 'DISPATCHER' : 'PHONE_MANUAL';
+      // The same result again (a phone repeating itself, or a flood with fresh keys): nothing to store.
+      if (
+        repeatsCurrentResult(visit, {
+          source,
+          outcome: norm.outcome,
+          reason: norm.outcome === null ? null : norm.reason,
+          note: norm.outcome === null ? null : norm.note,
+          lines: norm.outcome === null ? [] : norm.lines.map((l) => ({ lineId: l.lineId, delivered: l.delivered })),
+          photoKeys: a.photoKeys,
+          noPhotoReason: a.noPhotoReason ?? null,
+        })
+      ) {
+        return { result: { key: a.key, status: 'ok' }, completeLoadNo: load.status === 'DISPATCHED' && norm.outcome !== null ? where.loadNo : undefined };
+      }
       const payload: Record<string, unknown> =
         norm.outcome === null
           ? { outcome: null, ...common }
@@ -560,7 +636,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
               entity: 'StopVisit',
               entityId: visit.id,
               afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, refusedOutcome: norm.outcome, copyDate: c.copyDate, lines: check.lines, ...who.extra } as Prisma.InputJsonValue,
-              ip: ctx.ip,
+              ip: who.ip,
             },
             tx,
           );
@@ -597,7 +673,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
             late,
             ...who.extra,
           } as Prisma.InputJsonValue,
-          ip: ctx.ip,
+          ip: who.ip,
         },
         tx,
       );
@@ -648,7 +724,9 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
       results.push({ key: a.key, status: 'error' });
     }
   }
-  for (const loadNo of toComplete) await maybeCompleteLoad(ctx.tenantId, ctx.truckId, ctx.date, loadNo, facts);
+  // A signed-in office user on the driver page closes the trip as themselves, not as the driver link.
+  const closer = ctx.session ? { userId: ctx.session.userId, label: null } : undefined;
+  for (const loadNo of toComplete) await maybeCompleteLoad(ctx.tenantId, ctx.truckId, ctx.date, loadNo, facts, closer);
   const res = await truckDayResultsFromDb(prisma, ctx.tenantId, ctx.truckId, ctx.date, ctx.session ? 'OFFICE' : 'DRIVER');
   return { results, ...res };
 }
@@ -663,19 +741,31 @@ async function isBack(db: Db, tenantId: string, depotId: string, date: string, t
   return n > 0;
 }
 
+/** Who closes a trip: a signed-in user (their own audit row), else the driver link's label. */
+export interface CompletionActor {
+  userId: string | null;
+  label: string | null;
+}
+
 /**
  * Completes a DISPATCHED load that is back at the depot with a result on every stop. Best effort: a
  * busy plan (409) or a missing result leaves it DISPATCHED (the janitor tries again); never throws.
+ * `actor`: the office user who recorded the last result ({ userId, label: null }); without it the
+ * row says "Driver link: <driver> (<truck>, back at depot)" with no user (the driver link, the janitor).
  */
-export async function maybeCompleteLoad(tenantId: string, truckId: string, date: string, loadNo: number, facts?: DayFacts, label?: string): Promise<boolean> {
+export async function maybeCompleteLoad(tenantId: string, truckId: string, date: string, loadNo: number, facts?: DayFacts, actor?: CompletionActor): Promise<boolean> {
   try {
     const loads = facts?.loads ?? (await truckDayLoads(prisma, tenantId, truckId, date));
     const load = loads.find((l) => l.loadNo === loadNo);
     if (!load || load.status !== 'DISPATCHED') return false;
     if (!(await isBack(prisma, tenantId, load.depotId, date, truckId, loadNo))) return false;
-    const truck = facts?.truckCode ?? (await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true } }))?.code ?? '';
-    const actor = label ?? `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)`;
-    const r = await completeLoadAsDriver(tenantId, { runId: load.runId, loadId: load.id, depotId: load.depotId, date }, { label: actor });
+    let who: CompletionActor;
+    if (actor?.userId) who = { userId: actor.userId, label: actor.label };
+    else {
+      const truck = facts?.truckCode ?? (await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true } }))?.code ?? '';
+      who = { userId: null, label: actor?.label ?? `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` };
+    }
+    const r = await completeLoadAsDriver(tenantId, { runId: load.runId, loadId: load.id, depotId: load.depotId, date }, who);
     return r.completed;
   } catch (e) {
     console.warn('[delivery] load not completed yet', (e as Error)?.message ?? e);
@@ -684,28 +774,41 @@ export async function maybeCompleteLoad(tenantId: string, truckId: string, date:
 }
 
 /**
- * The janitor's sweep (every 60 s and the cron route): DISPATCHED loads on live plans that reported
- * Back at depot in the last 4 days and have a result on every stop are completed, actor SYSTEM.
+ * The janitor's sweep (at most every 10 min from the loop, and the cron route): DISPATCHED loads on
+ * live plans that reported Back at depot in the last 4 days and have a result on every stop are
+ * completed, actor "Driver link: ... (back at depot)". The usual case never reaches it: the last
+ * result completes the load at once. The newest Back at depot events first (index kind, receivedAt);
+ * truck-days whose load is no longer DISPATCHED are dropped in one query before any per-load work.
  */
 export async function completeReturnedLoads(now: Date = new Date()): Promise<{ completed: number }> {
   const since = new Date(now.getTime() - 4 * 24 * 60 * 60_000);
   const backs = await prisma.stopEvent.findMany({
     where: { kind: 'BACK_AT_DEPOT', receivedAt: { gte: since } },
     select: { tenantId: true, deliveryDate: true, truckId: true, loadNo: true },
+    orderBy: [{ receivedAt: 'desc' }],
     take: 2000,
   });
+  if (!backs.length) return { completed: 0 };
+  // The loads still out (DISPATCHED) of those trucks: anything else needs no work.
+  const out = await prisma.planLoad.findMany({
+    where: { status: 'DISPATCHED', tenantId: { in: [...new Set(backs.map((b) => b.tenantId))] }, truckId: { in: [...new Set(backs.map((b) => b.truckId))] } },
+    select: { tenantId: true, truckId: true, loadNo: true, runId: true },
+  });
+  const runs = out.length ? await prisma.runPlan.findMany({ where: { id: { in: [...new Set(out.map((l) => l.runId))] } }, select: { id: true, runDate: true } }) : [];
+  const dateOfRun = new Map(runs.map((r) => [r.id, isoOf(r.runDate)]));
+  const stillOut = new Set(out.map((l) => `${l.tenantId}|${l.truckId}|${dateOfRun.get(l.runId) ?? ''}|${l.loadNo}`));
   const seen = new Set<string>();
   let completed = 0;
   for (const b of backs) {
     const date = isoOf(b.deliveryDate);
     const k = `${b.tenantId}|${b.truckId}|${date}|${b.loadNo}`;
-    if (seen.has(k)) continue;
+    if (seen.has(k) || !stillOut.has(k)) continue;
     seen.add(k);
     const loads = await truckDayLoads(prisma, b.tenantId, b.truckId, date);
     const load = loads.find((l) => l.loadNo === b.loadNo);
     if (!load || load.status !== 'DISPATCHED') continue;
     const truck = (await prisma.truck.findFirst({ where: { id: b.truckId, tenantId: b.tenantId }, select: { code: true } }))?.code ?? '';
-    if (await maybeCompleteLoad(b.tenantId, b.truckId, date, b.loadNo, undefined, `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)`)) completed++;
+    if (await maybeCompleteLoad(b.tenantId, b.truckId, date, b.loadNo, undefined, { userId: null, label: `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` })) completed++;
   }
   return { completed };
 }

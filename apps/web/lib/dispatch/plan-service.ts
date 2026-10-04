@@ -2296,6 +2296,9 @@ async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: 
       entityId: loadId,
       beforeJson: { status: load.status } as never,
       afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}), ...(actor.label ? { actor: actor.label } : {}) } as never,
+      // A row without a user (the driver link, the janitor) keeps no IP: a driver's IP is erased with
+      // the stop events after the location retention, audit rows are kept for good.
+      ...(actor.userId === null ? { ip: false as const } : {}),
     },
     tx,
   );
@@ -2307,14 +2310,15 @@ async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: 
  * The driver's "Back at depot" closes the trip (owner request 4 Oct 2026, spec section 8.7): a
  * DISPATCHED load on the live plan whose every stop has a delivery result becomes COMPLETED, with the
  * same tail as the dispatcher's Completed button (status, the version's status, the audit row with
- * afterJson.actor, the plan facts) and no role check (the caller is the driver link or the janitor).
+ * afterJson.actor, the plan facts) and no role check (the caller is the driver link, the janitor, or
+ * the office recording the last result: then `actor.userId` names the user and the row is theirs).
  * Anything else leaves the load as it is: not DISPATCHED, a stop without a result, or a busy plan
  * (409 PLAN_BUSY is thrown: the caller tries again later).
  */
 export async function completeLoadAsDriver(
   tenantId: string,
   ref: { runId: string; loadId: string; depotId: string; date: string },
-  actor: { label: string },
+  actor: { userId?: string | null; label: string | null },
   opts: { now?: Date } = {},
 ): Promise<{ completed: boolean; reason?: 'NOT_DISPATCHED' | 'NO_RESULT' }> {
   return inLoadTx(async (tx) => {
@@ -2331,7 +2335,7 @@ export async function completeLoadAsDriver(
       ).map((v) => v.sequence),
     );
     if (!seqs.length || seqs.some((s) => !done.has(s))) return { completed: false, reason: 'NO_RESULT' as const };
-    await changeStatusCore(tx, tenantId, run, load.id, 'COMPLETED', { userId: null, label: actor.label }, null, opts.now ?? new Date());
+    await changeStatusCore(tx, tenantId, run, load.id, 'COMPLETED', { userId: actor.userId ?? null, label: actor.label }, null, opts.now ?? new Date());
     return { completed: true };
   });
 }

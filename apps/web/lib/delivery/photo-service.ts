@@ -46,8 +46,11 @@ export const photoMetaSchema = z.object({
   pos: z
     .object({ lat: z.number().gte(-90).lte(90), lng: z.number().gte(-180).lte(180), accuracyM: z.number().gte(0).lte(100_000), at: iso.nullish() })
     .nullish(),
-  exif: z.object({ lat: z.number().gte(-90).lte(90).nullish(), lng: z.number().gte(-180).lte(180).nullish(), takenAt: iso.nullish() }).nullish(),
+  exif: z
+    .object({ lat: z.number().gte(-90).lte(90).nullish(), lng: z.number().gte(-180).lte(180).nullish(), takenAt: iso.nullish(), zoned: z.boolean().nullish() })
+    .nullish(),
   fileLastModified: iso.nullish(),
+  /** Sent by older pages (computed on the phone's clock): ignored, the server decides on one clock. */
   oldPhoto: z.boolean().optional(),
 });
 export type PhotoMeta = z.infer<typeof photoMetaSchema>;
@@ -87,6 +90,20 @@ export function positionStatusOf(meta: Pick<PhotoMeta, 'pos' | 'positionStatus'>
   return meta.positionStatus === 'OK' || meta.positionStatus === 'POOR' ? 'TIMEOUT' : meta.positionStatus;
 }
 
+/**
+ * "Taken earlier": the photo's file time or EXIF time more than 15 min before the arrival (or the
+ * dispatch), all on the SERVER clock (pure). The arrival is stored skew-corrected, so the phone's
+ * times get the same correction first: a phone running 20 min slow does not flag every genuine photo.
+ * An EXIF time without its own offset is a local phone time read in the company zone (a phone left
+ * on another zone would be hours off): it is ignored.
+ */
+export function isOldPhotoOnServerClock(a: { reference: Date | null; skewMs: number; fileLastModified: Date | null; exif: { takenAt: Date | null; zoned: boolean } | null }): boolean {
+  if (!a.reference) return false;
+  const limit = a.reference.getTime() - OLD_PHOTO_MS;
+  const times = [a.fileLastModified, a.exif?.zoned ? a.exif.takenAt : null].filter((t): t is Date => !!t && Number.isFinite(t.getTime()));
+  return times.some((t) => t.getTime() + a.skewMs < limit);
+}
+
 /** POST /api/d/photos: store one photo (see the top). Throws PhotoError for 409 / 415. */
 export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta, file: Uint8Array): Promise<PhotoAnswer> {
   if (!UUID_RE.test(meta.key)) return refusedPhoto({ key: meta.key, status: 'refused', code: 'INVALID', message: REFUSAL_TEXT.INVALID });
@@ -108,15 +125,20 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
   if (takenAt.getTime() > ctx.link.expiresAt.getTime()) return refusedPhoto({ key: meta.key, status: 'refused', code: 'TIME_OUT_OF_RANGE', message: REFUSAL_TEXT.TIME_OUT_OF_RANGE });
   const office = !!ctx.session;
   const maxForDay = 3 * (await stopCount(dayLoadIds(facts))) + 10;
+  // The daily cap is a soft limit: counted before the outcome-day lock (index driverLinkId), so the
+  // lock every arrival and result of the depot-day waits on is held only for the write itself.
+  const usedToday = office ? 0 : await prisma.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, driverLinkId: ctx.link.id } });
+  if (!office && usedToday >= maxForDay) throw new PhotoError('Too many photos for this truck today. Call your dispatcher.', 409, 'PHOTO_LIMIT', { daily: true });
 
   return prisma.$transaction(
     async (tx): Promise<PhotoAnswer> => {
       await setLockTimeout(tx);
+      // The lock first: the load, the stop and the visit are read under it.
+      await lockOutcomesDay(tx, ctx.tenantId, dayLoad.depotId, ctx.date);
       const load = await tx.planLoad.findFirst({ where: { id: dayLoad.id, tenantId: ctx.tenantId }, select: { id: true, status: true, statusChangedAt: true, breakJson: true, runId: true } });
       if (!load) return refusedPhoto({ key: meta.key, status: 'refused', code: 'STOP_NOT_FOUND', message: REFUSAL_TEXT.STOP_NOT_FOUND });
       const planned = await plannedStopOf(tx, load, where.sequence);
       if (!planned) return refusedPhoto({ key: meta.key, status: 'refused', code: 'STOP_NOT_FOUND', message: REFUSAL_TEXT.STOP_NOT_FOUND });
-      await lockOutcomesDay(tx, ctx.tenantId, dayLoad.depotId, ctx.date);
       const existing = await tx.deliveryPhoto.findFirst({ where: { tenantId: ctx.tenantId, idempotencyKey: storedKey }, select: { id: true, driverLinkId: true, sha256: true } });
       if (existing) {
         if (existing.driverLinkId !== ctx.link.id) return refusedPhoto({ key: meta.key, status: 'refused', code: 'INVALID', message: REFUSAL_TEXT.INVALID });
@@ -140,8 +162,6 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
         const n = await tx.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, visitId: found.id, source: { not: 'DISPATCHER' } } });
         if (n >= MAX_DRIVER_PHOTOS_PER_STOP) throw new PhotoError(`At most ${MAX_DRIVER_PHOTOS_PER_STOP} photos per stop.`, 409, 'PHOTO_LIMIT');
       }
-      const today = await tx.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, driverLinkId: ctx.link.id } });
-      if (!office && today >= maxForDay) throw new PhotoError('Too many photos for this truck today. Call your dispatcher.', 409, 'PHOTO_LIMIT', { daily: true });
       const visit = found ?? (await ensureVisit(tx, vk, planned, dayLoad.id));
       const pin = planned.pin;
       const pos = meta.pos ?? null;
@@ -149,9 +169,12 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
       const exifLng = exifBytes?.lng ?? meta.exif?.lng ?? null;
       const exifTakenAt = exifBytes?.takenAt ?? date(meta.exif?.takenAt);
       const reference = visit.arrivedAt ?? (load.status === 'DISPATCHED' ? load.statusChangedAt : null);
-      const fileTime = date(meta.fileLastModified);
-      const oldPhoto =
-        !!meta.oldPhoto || (!!reference && [exifTakenAt, fileTime].some((t) => !!t && t.getTime() < reference.getTime() - OLD_PHOTO_MS));
+      const oldPhoto = isOldPhotoOnServerClock({
+        reference,
+        skewMs: skew,
+        fileLastModified: date(meta.fileLastModified),
+        exif: exifBytes?.takenAt ? { takenAt: exifBytes.takenAt, zoned: exifBytes.zoned } : meta.exif?.takenAt ? { takenAt: date(meta.exif.takenAt), zoned: meta.exif.zoned === true } : null,
+      });
       const positionStatus = positionStatusOf(meta);
       const photo = await tx.deliveryPhoto.create({
         data: {
@@ -232,7 +255,7 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
             late: rule.late,
             ...who.extra,
           } as Prisma.InputJsonValue,
-          ip: ctx.ip,
+          ip: who.ip,
         },
         tx,
       );

@@ -82,53 +82,89 @@ async function raw(res: Response): Promise<RawAnswer> {
   return { status: res.status, body: await res.json().catch(() => null), retryAfter: res.headers.get('retry-after') };
 }
 
-/** POST /api/d/actions (Part 2): the queued actions with the phone's clock. A network failure answers status 0. */
-export async function postActions(token: string, device: string, actions: DriverAction[], fetchImpl: typeof fetch = fetch): Promise<RawAnswer> {
+/** How long one request may take on a weak signal before it counts as failed (status 0: the queue backs off and retries). */
+export const ACTIONS_TIMEOUT_MS = 30_000;
+export const MANIFEST_TIMEOUT_MS = 30_000;
+export const PHOTO_TIMEOUT_MS = 90_000;
+
+/**
+ * A request with a time limit, the answer's body included: AbortController plus a timer (older
+ * iPhones have no AbortSignal.timeout), and the timer alone ends it when a fetch ignores the abort.
+ * Without it one stalled upload (the truck left coverage mid-request) held every later send until
+ * the page was reloaded.
+ */
+async function timed<T>(ms: number, run: (signal: AbortSignal | undefined) => Promise<T>): Promise<T> {
+  const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const limit = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      ctrl?.abort();
+      reject(new Error('timeout'));
+    }, ms);
+  });
   try {
-    const res = await fetchImpl('/api/d/actions', {
-      method: 'POST',
-      headers: { ...driverHeaders(token, device), 'Content-Type': 'application/json' },
-      body: JSON.stringify({ clientNow: new Date().toISOString(), actions }),
-      cache: 'no-store',
-      credentials: 'same-origin',
-      referrerPolicy: 'no-referrer',
-    });
-    return await raw(res);
+    return await Promise.race([run(ctrl?.signal), limit]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** POST /api/d/actions (Part 2): the queued actions with the phone's clock. A network failure or a timeout answers status 0. */
+export async function postActions(token: string, device: string, actions: DriverAction[], fetchImpl: typeof fetch = fetch, timeoutMs = ACTIONS_TIMEOUT_MS): Promise<RawAnswer> {
+  try {
+    return await timed(timeoutMs, async (signal) =>
+      raw(
+        await fetchImpl('/api/d/actions', {
+          method: 'POST',
+          headers: { ...driverHeaders(token, device), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clientNow: new Date().toISOString(), actions }),
+          cache: 'no-store',
+          credentials: 'same-origin',
+          referrerPolicy: 'no-referrer',
+          signal,
+        }),
+      ),
+    );
   } catch {
     return { status: 0, body: null, retryAfter: null };
   }
 }
 
-/** POST /api/d/photos (Part 2): one photo as multipart (`meta` JSON + `file`). A network failure answers status 0. */
-export async function postPhoto(token: string, device: string, meta: Record<string, unknown>, file: Blob, fetchImpl: typeof fetch = fetch): Promise<RawAnswer> {
+/** POST /api/d/photos (Part 2): one photo as multipart (`meta` JSON + `file`). A network failure or a timeout answers status 0. */
+export async function postPhoto(token: string, device: string, meta: Record<string, unknown>, file: Blob, fetchImpl: typeof fetch = fetch, timeoutMs = PHOTO_TIMEOUT_MS): Promise<RawAnswer> {
   try {
     const form = new FormData();
     form.append('meta', JSON.stringify({ ...meta, clientNow: new Date().toISOString() }));
     form.append('file', file, 'photo.jpg');
-    const res = await fetchImpl('/api/d/photos', { method: 'POST', headers: driverHeaders(token, device), body: form, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
-    return await raw(res);
+    return await timed(timeoutMs, async (signal) =>
+      raw(await fetchImpl('/api/d/photos', { method: 'POST', headers: driverHeaders(token, device), body: form, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer', signal })),
+    );
   } catch {
     return { status: 0, body: null, retryAfter: null };
   }
 }
 
 /** A photo of the truck-day as a blob URL (the token stays in the header, never in an image URL), or null. */
-export async function photoUrl(token: string, device: string, photoId: string, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+export async function photoUrl(token: string, device: string, photoId: string, fetchImpl: typeof fetch = fetch, timeoutMs = PHOTO_TIMEOUT_MS): Promise<string | null> {
   try {
-    const res = await fetchImpl(`/api/d/photos/${encodeURIComponent(photoId)}`, { headers: { ...driverHeaders(token, device), Accept: 'image/jpeg' }, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
-    if (!res.ok) return null;
-    return URL.createObjectURL(await res.blob());
+    return await timed(timeoutMs, async (signal) => {
+      const res = await fetchImpl(`/api/d/photos/${encodeURIComponent(photoId)}`, { headers: { ...driverHeaders(token, device), Accept: 'image/jpeg' }, cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer', signal });
+      if (!res.ok) return null;
+      return URL.createObjectURL(await res.blob());
+    });
   } catch {
     return null;
   }
 }
 
-/** GET /api/d/manifest with the token in the header. A network failure answers { kind: 'error', status: 0 }. */
-export async function fetchManifest(token: string, device: string, fetchImpl: typeof fetch = fetch): Promise<ManifestAnswer> {
+/** GET /api/d/manifest with the token in the header. A network failure or a timeout answers { kind: 'error', status: 0 }. */
+export async function fetchManifest(token: string, device: string, fetchImpl: typeof fetch = fetch, timeoutMs = MANIFEST_TIMEOUT_MS): Promise<ManifestAnswer> {
   try {
-    const res = await fetchImpl('/api/d/manifest', { headers: driverHeaders(token, device), cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer' });
-    const body = await res.json().catch(() => null);
-    return readManifestAnswer(res.status, body, res.headers.get('retry-after'));
+    return await timed(timeoutMs, async (signal) => {
+      const res = await fetchImpl('/api/d/manifest', { headers: driverHeaders(token, device), cache: 'no-store', credentials: 'same-origin', referrerPolicy: 'no-referrer', signal });
+      const body = await res.json().catch(() => null);
+      return readManifestAnswer(res.status, body, res.headers.get('retry-after'));
+    });
   } catch {
     return { kind: 'error', status: 0 };
   }

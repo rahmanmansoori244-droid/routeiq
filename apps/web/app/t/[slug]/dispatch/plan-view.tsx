@@ -22,6 +22,7 @@ import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
   fmtSearchTime,
   optimizeStartedText,
+  planSearching,
   searchModeNow,
   searchPollMs,
   searchProgressText,
@@ -43,6 +44,7 @@ import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
 import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
 import type { ApiResult } from './client-api';
 import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
+import { officeTimesPrefill } from '@/lib/delivery/office-text';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 
@@ -144,6 +146,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const overlayOrder = useRef(0);
   // The plan's load reads the results too (a ref, so `load` keeps depending on the run only).
   const overlayLoad = useRef<() => void>(() => undefined);
+  // The results were read once: a running search's polls do not read them again.
+  const overlaySeen = useRef(false);
 
   // Newest answer wins (createLoadOrder): an answer older than the one on screen is dropped (null).
   const loadOrder = useRef(createLoadOrder());
@@ -156,15 +160,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     if (!loadOrder.current.accept(ticket)) return null;
     setReloading(loadOrder.current.pending());
     setPanel((shown) => planAfterLoad(shown, r));
-    // The results follow the plan (a load completed, a result recorded): read again with it.
-    overlayLoad.current();
+    // The results follow the plan (a load completed, a result recorded): read again with it - but not
+    // on the polls of a running search (every 2.5-10 s for up to 20 min): a search never changes them,
+    // and the 60 s read below brings the phones' results.
+    if (!(r.ok && r.data && planSearching(r.data.run, r.data.job) && overlaySeen.current)) overlayLoad.current();
     return r.ok ? r.data : null;
   }, [runId]);
 
   const loadOverlay = useCallback(async () => {
     const ticket = ++overlayOrder.current;
     const r = await api<OutcomeOverlay>(`/api/runs/${runId}/outcomes`);
-    if (ticket === overlayOrder.current && r.ok && r.data) setOverlay(r.data);
+    if (ticket === overlayOrder.current && r.ok && r.data) {
+      overlaySeen.current = true;
+      setOverlay(r.data);
+    }
   }, [runId]);
   overlayLoad.current = () => void loadOverlay();
 
@@ -1150,6 +1159,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                               customerCode: st.customerCode,
                               lines: ov.lines,
                               current: ov.outcome ? { outcome: ov.outcome, reason: ov.reason, note: ov.note } : null,
+                              times: officeTimesPrefill(ov, overlay?.tz ?? 'Asia/Muscat'),
                             })
                           }
                           onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}

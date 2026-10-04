@@ -169,7 +169,7 @@ export function carryConfirmText(chosen: readonly { cases: number; ofToday: bool
  * wait for it, and RE-PLAN adds them once it finished.
  */
 export function carryDoneText(
-  res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean; carried?: readonly { fromDate: string }[] },
+  res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean; carried?: readonly { fromDate: string; basis?: readonly unknown[] | null }[] },
   dateIso: string,
   todayIso?: string,
 ): string {
@@ -181,12 +181,17 @@ export function carryDoneText(
       ? 'RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are.'
       : `OPTIMIZE plans them with the other orders of ${day}.`;
   const skipped = res.skipped.length ? ` ${res.skipped.length} order(s) were already brought forward.` : '';
-  // Orders of today brought forward (in the evening): their loads of today no longer go out with them.
-  const ofToday = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso).length : 0;
+  // Orders of today brought forward (in the evening). Those carried from a recorded result (a basis:
+  // the truck left and came back with them) need nothing on today's plan; the others are on loads of
+  // today that have not left, which no longer go out with them.
+  const todays = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso) : [];
+  const recorded = todays.filter((c) => (c.basis?.length ?? 0) > 0).length;
+  const ofToday = todays.length - recorded;
+  const recordedText = recorded ? ` ${recorded} of them were recorded as not delivered today (${fmtDayMonth(todayIso!)}): nothing to do on today's plan.` : '';
   const today = ofToday
     ? ` ${ofToday} of them were orders of today (${fmtDayMonth(todayIso!)}): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (a loading one goes Back to locked first; unload a loaded one).`
     : '';
-  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${today}`;
+  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${recordedText}${today}`;
 }
 
 /** The carried-over line of a stop on the driver sheet and the Excel load sheet, or null. */

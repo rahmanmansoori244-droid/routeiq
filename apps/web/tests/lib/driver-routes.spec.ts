@@ -33,6 +33,8 @@ import { POST as actionsPOST } from '@/app/api/d/actions/route';
 import { POST as photosPOST } from '@/app/api/d/photos/route';
 import { GET as photoGET } from '@/app/api/d/photos/[photoId]/route';
 import { GET as manifestGET } from '@/app/api/d/manifest/route';
+import { isOldPhotoOnServerClock } from '@/lib/delivery/photo-service';
+import { completeReturnedLoads } from '@/lib/delivery/event-service';
 import { deriveToken, driverLinkKey, linkExpiry, tokenHash } from '@/lib/driver-link/token';
 import { dateOnly, todayIso } from '@/lib/dispatch/time';
 
@@ -358,8 +360,10 @@ describe('POST /api/d/actions (spec section 8)', () => {
   it('E10: after the trip closed, a backdated change of a stop that had a result is refused; a stop without one is filled in, late', async () => {
     const token = makeLink('t5');
     await act(token, [outcome('1:1', { at: iso(90 * 60_000) })]);
-    // Completed after stop 1's result was received; stop 2 had none.
-    Object.assign(row('planLoad', 'L1'), { status: 'COMPLETED', statusChangedAt: new Date(Date.now() - 1) });
+    // Completed after stop 1's result was received (from the stored receipt time, never the clock's
+    // resolution); stop 2 had none.
+    const received = tables.stopEvent.find((e) => e.kind === 'OUTCOME')!.receivedAt as Date;
+    Object.assign(row('planLoad', 'L1'), { status: 'COMPLETED', statusChangedAt: new Date(received.getTime() + 1) });
     const r = await act(token, [
       outcome('1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }),
       outcome('1:2', { at: iso(45 * 60_000), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }),
@@ -378,7 +382,171 @@ describe('POST /api/d/actions (spec section 8)', () => {
     expect(tables.auditLog.some((a) => a.action === 'DRIVER_BACK_AT_DEPOT' && a.entityId === 'L1')).toBe(true);
     completeLoad.mockClear();
     await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
-    expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { label: 'Driver link: Salim (T05, back at depot)' });
+    expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { userId: null, label: 'Driver link: Salim (T05, back at depot)' });
+  });
+
+  it('a signed-in planner recording the last result on the driver page closes the trip as themselves, not as the driver link', async () => {
+    const token = makeLink('t5');
+    await act(token, [outcome('1:1'), { key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000) }]);
+    completeLoad.mockClear();
+    session.value = { user: { id: 'u-ali', name: 'Ali', role: 'PLANNER', tenantId: T } };
+    await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
+    expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { userId: 'u-ali', label: null });
+  });
+
+  it('a result cleared before the trip closed is no result at completion: a queued result for that stop still fills the gap', async () => {
+    const token = makeLink('t5');
+    await act(token, [outcome('1:1', { at: iso(100 * 60_000) })]);
+    await act(token, [outcome('1:1', { at: iso(99 * 60_000), outcome: null, photoKeys: [] })]);
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: null });
+    const lastReceipt = Math.max(...tables.stopEvent.map((e) => (e.receivedAt as Date).getTime()));
+    Object.assign(row('planLoad', 'L1'), { status: 'COMPLETED', statusChangedAt: new Date(lastReceipt + 1) });
+    const late = await act(token, [outcome('1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] })]);
+    expect(late.body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
+  });
+
+  it('changing a result needs no new photo when the stop already has a driver photo', async () => {
+    const token = makeLink('t5');
+    expect((await sendPhoto(token, photoMeta('1:1'))).body.data).toMatchObject({ status: 'ok' });
+    const first = await act(token, [outcome('1:1')]);
+    expect(first.body.data!.results[0]).toMatchObject({ status: 'ok' });
+    const change = await act(token, [outcome('1:1', { at: iso(2 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] })]);
+    expect(change.body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 38, noPhotoReason: null });
+    // A stop without any photo still needs one.
+    expect((await act(token, [outcome('1:2', { photoKeys: [] })])).body.data!.results[0]).toMatchObject({ code: 'PHOTO_REQUIRED' });
+  });
+
+  it('driver-link audit rows keep no IP and no phone id (those are erased with the stop events after the location retention)', async () => {
+    const token = makeLink('t5');
+    const res = await actionsPOST(
+      req('/api/d/actions', {
+        method: 'POST',
+        token,
+        ip: '203.0.113.7',
+        headers: { 'x-driver-device': '3f9a1234abcd5678'.repeat(2) },
+        body: JSON.stringify({ clientNow: new Date().toISOString(), actions: [outcome('1:1'), arrive('1:2', { mode: 'MANUAL', pos: undefined })] }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    const rows = tables.auditLog.filter((a) => a.action === 'DELIVERY_OUTCOME_SET' || a.action === 'STOP_ARRIVAL_MANUAL');
+    expect(rows).toHaveLength(2);
+    for (const a of rows) {
+      expect(a.ip).toBe(false); // "no IP at all" for audit(): not even the request's
+      expect(a.afterJson).not.toHaveProperty('ip');
+      expect(String(a.afterJson.actor)).not.toMatch(/phone/);
+    }
+    // The stop event keeps them until the retention janitor erases them.
+    expect(tables.stopEvent.find((e) => e.kind === 'OUTCOME')).toMatchObject({ clientIp: '203.0.113.7' });
+  });
+
+  it('takes the outcome-day lock before it reads the load and the stop (a Bring forward committing meanwhile is seen)', async () => {
+    const token = makeLink('t5');
+    const seen: string[] = [];
+    const raw = fakePrisma.$queryRaw;
+    const find = fakePrisma.planLoad.findFirst;
+    const rows = fakePrisma.routeAssignment.findMany;
+    fakePrisma.$queryRaw = async (s: TemplateStringsArray, ...v: unknown[]) => {
+      if (String(v[0]).startsWith('outcomes:')) seen.push('lock');
+      return raw(s, ...v);
+    };
+    fakePrisma.planLoad.findFirst = async (a: { select?: Record<string, unknown> }) => {
+      if (a?.select?.statusChangedAt) seen.push('load');
+      return find(a);
+    };
+    fakePrisma.routeAssignment.findMany = async (a: { where?: { sequenceInTruck?: unknown } }) => {
+      if (a?.where?.sequenceInTruck !== undefined) seen.push('stop');
+      return rows(a);
+    };
+    try {
+      await act(token, [outcome('1:1')]);
+    } finally {
+      fakePrisma.$queryRaw = raw;
+      fakePrisma.planLoad.findFirst = find;
+      fakePrisma.routeAssignment.findMany = rows;
+    }
+    expect(seen.slice(0, 3)).toEqual(['lock', 'load', 'stop']);
+  });
+});
+
+describe('the returned-loads janitor sweep', () => {
+  it('completes a load still out that reported Back at depot; a truck-day whose load is no longer DISPATCHED is dropped before any per-load work', async () => {
+    const back = (truckId: string, loadNo: number, minAgo: number) => ({
+      id: `b-${truckId}-${minAgo}`, tenantId: T, depotId: 'D1', deliveryDate: dateOnly(D), truckId, loadNo, sequence: null, visitId: null, kind: 'BACK_AT_DEPOT', source: 'PHONE_MANUAL',
+      at: new Date(Date.now() - minAgo * 60_000), receivedAt: new Date(Date.now() - minAgo * 60_000),
+    });
+    tables.stopEvent.push(back('t6', 1, 30), back('t5', 1, 20), back('t5', 1, 10));
+    row('planLoad', 'L6').status = 'COMPLETED';
+    const trucks = vi.spyOn(fakePrisma.truck, 'findFirst');
+    try {
+      expect(await completeReturnedLoads()).toEqual({ completed: 1 });
+      expect(completeLoad).toHaveBeenCalledTimes(1);
+      expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { userId: null, label: 'Driver link: Salim (T05, back at depot)' });
+      // Per-load work only for T05 (T06's load is completed already).
+      expect(trucks.mock.calls.every((c) => (c[0] as { where: { id: string } }).where.id === 't5')).toBe(true);
+    } finally {
+      trucks.mockRestore();
+    }
+  });
+});
+
+describe('a flood from one link (security review)', () => {
+  it('a chunked body with no Content-Length is cut at 64 KB (413) without buffering the rest', async () => {
+    const token = makeLink('t5');
+    let pulled = 0;
+    const chunk = new TextEncoder().encode('x'.repeat(16 * 1024));
+    const stream = new ReadableStream<Uint8Array>({
+      pull(c) {
+        pulled++;
+        if (pulled > 1000) c.close();
+        else c.enqueue(chunk);
+      },
+    });
+    const r = new Request('https://routeiq.test/api/d/actions', { method: 'POST', headers: { authorization: `DriverLink ${token}`, 'content-type': 'application/json' }, body: stream, duplex: 'half' } as RequestInit);
+    expect(r.headers.get('content-length')).toBeNull();
+    const res = await actionsPOST(r);
+    expect(res.status).toBe(413);
+    expect(pulled).toBeLessThan(10);
+  });
+
+  it('the per-link limit counts actions, not requests (120 a minute)', async () => {
+    const token = makeLink('t5');
+    const fifty = () => Array.from({ length: 50 }, () => arrive('1:1'));
+    expect((await act(token, fifty())).status).toBe(200);
+    expect((await act(token, fifty())).status).toBe(200);
+    const third = await act(token, fifty());
+    expect(third.status).toBe(429);
+    expect(Number(third.res.headers.get('retry-after'))).toBeGreaterThan(0);
+  });
+
+  it('at most 2 requests of one link are handled at once', async () => {
+    const token = makeLink('t5');
+    const statuses = (await Promise.all([1, 2, 3].map(() => act(token, [arrive('1:2')])))).map((r) => r.status).sort();
+    expect(statuses).toEqual([200, 200, 429]);
+    // Once they finished, the link sends again.
+    expect((await act(token, [arrive('1:2')])).status).toBe(200);
+  });
+
+  it('stores at most 40 arrivals, departures and results per stop and 5 Back at depot per load; the rest is refused INVALID', async () => {
+    const token = makeLink('t5');
+    const r = await act(token, Array.from({ length: 42 }, () => arrive('1:1')));
+    expect(r.body.data!.results.filter((x) => x.status === 'ok')).toHaveLength(40);
+    expect(r.body.data!.results.slice(40).map((x) => x.code)).toEqual(['INVALID', 'INVALID']);
+    const backs = await act(token, Array.from({ length: 6 }, () => ({ key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000) })));
+    expect(backs.body.data!.results.map((x) => x.code ?? x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'INVALID']);
+  });
+
+  it('the same result again with a fresh key is answered ok and stores nothing (no event, no audit row)', async () => {
+    const token = makeLink('t5');
+    const nd = () => outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const r = await act(token, [nd(), nd(), nd()]);
+    expect(r.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(tables.stopEvent.filter((e) => e.kind === 'OUTCOME')).toHaveLength(1);
+    expect(tables.auditLog.filter((a) => a.action === 'DELIVERY_OUTCOME_SET')).toHaveLength(1);
+    // A different result is stored.
+    await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] })]);
+    expect(tables.stopEvent.filter((e) => e.kind === 'OUTCOME')).toHaveLength(2);
   });
 
   it('a body that cannot be read answers 400; more than 50 actions 400', async () => {
@@ -417,6 +585,27 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
     expect(reused.body.error).toMatchObject({ code: 'KEY_REUSED' });
     // The same UUID as an action key: both are stored (dl: and dlphoto: never collide).
     expect((await act(token, [arrive('1:1', { key })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+  });
+
+  it('"taken earlier" is decided on the server clock: a phone running 20 min slow does not flag a genuine photo', async () => {
+    const token = makeLink('t5');
+    // Arrived 10 min ago (server time, the phone's clock right at that moment).
+    await act(token, [arrive('1:1', { at: iso(10 * 60_000), pos: { lat: ACME.lat + 0.0002, lng: ACME.lng, accuracyM: 8, at: iso(10 * 60_000) } })]);
+    // Now the phone runs 20 min slow: the photo, taken 2 min after the arrival, carries phone times.
+    const slow = (msAgo: number) => new Date(Date.now() - msAgo - 20 * 60_000).toISOString();
+    const meta = { ...photoMeta('1:1'), clientNow: slow(0), takenAt: slow(8 * 60_000), fileLastModified: slow(8 * 60_000), oldPhoto: true };
+    expect((await sendPhoto(token, meta)).body.data).toMatchObject({ status: 'ok' });
+    expect(tables.deliveryPhoto[0]).toMatchObject({ oldPhoto: false });
+  });
+
+  it('isOldPhotoOnServerClock: skew applied to the file time and a zoned EXIF time; an EXIF time without an offset is ignored', () => {
+    const arrival = new Date('2026-10-05T06:00:00Z');
+    const m = (min: number) => new Date(arrival.getTime() + min * 60_000);
+    expect(isOldPhotoOnServerClock({ reference: arrival, skewMs: 0, fileLastModified: m(-30), exif: null })).toBe(true);
+    expect(isOldPhotoOnServerClock({ reference: arrival, skewMs: 20 * 60_000, fileLastModified: m(-18), exif: null })).toBe(false);
+    expect(isOldPhotoOnServerClock({ reference: arrival, skewMs: 0, fileLastModified: null, exif: { takenAt: m(-240), zoned: false } })).toBe(false);
+    expect(isOldPhotoOnServerClock({ reference: arrival, skewMs: 0, fileLastModified: null, exif: { takenAt: m(-60), zoned: true } })).toBe(true);
+    expect(isOldPhotoOnServerClock({ reference: null, skewMs: 0, fileLastModified: m(-600), exif: null })).toBe(false);
   });
 
   it('at most 3 driver photos per stop, and 3 x the truck-day\'s stops + 10 per link', async () => {

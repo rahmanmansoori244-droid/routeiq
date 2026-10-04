@@ -82,18 +82,23 @@ export class RateLimiter {
     this.buckets.set(key, bucket);
   }
 
-  /** Check and count one request in the window. */
-  consume(key: string, limit: number, windowMs: number): RateLimitResult {
+  /**
+   * Check and count `cost` units (default one request) in the window. Refused, nothing is counted,
+   * when the units would go past `limit`.
+   */
+  consume(key: string, limit: number, windowMs: number, cost = 1): RateLimitResult {
     const now = this.now();
+    const units = Math.max(1, Math.floor(cost));
     if (this.bypass()) return { ok: true, remaining: limit, resetAt: now + windowMs };
     const existing = this.live(key);
     if (!existing) {
       const resetAt = now + windowMs;
-      this.insert(key, { count: 1, resetAt });
-      return { ok: true, remaining: limit - 1, resetAt };
+      if (units > limit) return { ok: false, remaining: limit, resetAt };
+      this.insert(key, { count: units, resetAt });
+      return { ok: true, remaining: limit - units, resetAt };
     }
-    if (existing.count >= limit) return { ok: false, remaining: 0, resetAt: existing.resetAt };
-    existing.count += 1;
+    if (existing.count + units > limit) return { ok: false, remaining: Math.max(0, limit - existing.count), resetAt: existing.resetAt };
+    existing.count += units;
     return { ok: true, remaining: limit - existing.count, resetAt: existing.resetAt };
   }
 
@@ -171,7 +176,10 @@ export const LIMITS = {
    */
   driverBadToken: { limit: 30, windowMs: 10 * 60_000 },
   driverManifest: { limit: 60, windowMs: 60_000 },
-  driverActions: { limit: 60, windowMs: 60_000 },
+  /** ACTIONS per link per minute (a request counts once per action it carries, at most 50 per request). */
+  driverActions: { limit: 120, windowMs: 60_000 },
+  /** Requests of one link being handled at the same moment (actions, photos): the phone sends one at a time. */
+  driverInFlight: 2,
   /** Bursts only: the daily cap per link (3 x the truck-day's stops + 10) is checked by the photo route. */
   driverPhotoBurst: { limit: 60, windowMs: 10 * 60_000 },
   driverPhotoGet: { limit: 120, windowMs: 60_000 },

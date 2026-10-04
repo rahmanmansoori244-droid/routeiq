@@ -99,11 +99,18 @@ export async function liveRuns(db: Db, tenantId: string, dateIso: string): Promi
 
 /** Every load of the truck on the plans in use of that date (normally one depot), by departure. */
 export async function truckDayLoads(db: Db, tenantId: string, truckId: string, dateIso: string): Promise<TruckDayLoad[]> {
+  return (await truckDayLoadsMany(db, tenantId, [truckId], dateIso)).get(truckId) ?? [];
+}
+
+/** truckDayLoads of several trucks of one date in three queries (the plan's links, the PDF), never one round per truck. */
+export async function truckDayLoadsMany(db: Db, tenantId: string, truckIds: readonly string[], dateIso: string): Promise<Map<string, TruckDayLoad[]>> {
+  const out = new Map<string, TruckDayLoad[]>(truckIds.map((id) => [id, []]));
+  if (!truckIds.length) return out;
   const runs = await liveRuns(db, tenantId, dateIso);
-  if (!runs.length) return [];
+  if (!runs.length) return out;
   const depotOf = new Map(runs.map((r) => [r.id, r.depotId]));
   const loads = await db.planLoad.findMany({
-    where: { tenantId, truckId, runId: { in: runs.map((r) => r.id) } },
+    where: { tenantId, truckId: truckIds.length === 1 ? truckIds[0]! : { in: [...truckIds] }, runId: { in: runs.map((r) => r.id) } },
     orderBy: [{ departMin: 'asc' }, { loadNo: 'asc' }],
     select: { id: true, runId: true, truckId: true, loadNo: true, status: true, departMin: true, returnMin: true, driverId: true, statusChangedAt: true },
   });
@@ -112,7 +119,7 @@ export async function truckDayLoads(db: Db, tenantId: string, truckId: string, d
     ? await db.driver.findMany({ where: { tenantId, id: { in: driverIds } }, select: { id: true, name: true, phone: true, casual: true } })
     : [];
   const byId = new Map(drivers.map((d) => [d.id, d]));
-  return loads
+  const rows = loads
     .map((l) => {
       const d = l.driverId ? byId.get(l.driverId) : undefined;
       return {
@@ -132,6 +139,11 @@ export async function truckDayLoads(db: Db, tenantId: string, truckId: string, d
       };
     })
     .sort((a, b) => a.departMin - b.departMin || a.loadNo - b.loadNo);
+  for (const r of rows) {
+    const list = out.get(r.truckId);
+    if (list) list.push(r);
+  }
+  return out;
 }
 
 async function tenantTz(db: Db, tenantId: string): Promise<string> {
@@ -409,13 +421,18 @@ export async function listLinks(tenantId: string, runId: string, opts: LinkCallO
   const trucks = await prisma.truck.findMany({ where: { tenantId, id: { in: links.map((l) => l.truckId) } }, select: { id: true, code: true, hired: true } });
   const truckOf = new Map(trucks.map((t) => [t.id, t]));
   const base = driverLinkBaseUrl(env, opts.origin ?? null);
+  // Every truck's loads at once, and the names of drivers no longer on a load in one query.
+  const loadsOf = await truckDayLoadsMany(prisma, tenantId, links.map((l) => l.truckId), date);
+  const onLoads = new Map([...loadsOf.values()].flat().flatMap((l) => (l.driverId && l.driverName ? [[l.driverId, l.driverName] as const] : [])));
+  const missing = [...new Set(links.map((l) => l.driverIdAtIssue).filter((id): id is string => !!id && !onLoads.has(id)))];
+  const others = missing.length ? await prisma.driver.findMany({ where: { tenantId, id: { in: missing } }, select: { id: true, name: true } }) : [];
+  const names = new Map([...onLoads, ...others.map((d) => [d.id, d.name] as const)]);
   const out: DriverLinkView[] = [];
   for (const link of links) {
-    const loads = await truckDayLoads(prisma, tenantId, link.truckId, date);
+    const loads = loadsOf.get(link.truckId) ?? [];
     const t = truckOf.get(link.truckId);
-    out.push(
-      linkView(link, { key, base, now, truckCode: t?.code ?? link.truckId, hired: !!t?.hired, loads, nameAtIssue: await nameOf(prisma, tenantId, link.driverIdAtIssue, loads) }),
-    );
+    const nameAtIssue = link.driverIdAtIssue ? (loads.find((l) => l.driverId === link.driverIdAtIssue)?.driverName ?? names.get(link.driverIdAtIssue) ?? null) : null;
+    out.push(linkView(link, { key, base, now, truckCode: t?.code ?? link.truckId, hired: !!t?.hired, loads, nameAtIssue }));
   }
   return out;
 }

@@ -22,7 +22,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
    - **Partly delivered**: set the **cases delivered** for each product, choose the **reason**, take a photo, then **Save**.
    - **Not delivered**: choose the **reason** - *Shop closed*, *Customer refused*, *No one to receive*, *Wrong location or could not find*, *No time left*, *Payment issue*, *Damaged goods*, *Missing from the truck*, or *Other* (write the reason) - then **Save**. A photo is optional.
    - The camera does not open? Tap **Camera not working** to save without a photo.
-8. A wrong result? Tap **Change result** (until your trip is closed). If the page says the cases were moved to another day, call your dispatcher.
+8. A wrong result? Tap **Change result** (until your trip is closed): the photos you already took count, no new photo is needed. If the page says the cases were moved to another day, call your dispatcher.
 
 **At the end of the trip**
 9. Drive back and tap **Back at depot**. Stops without a result are recorded by your dispatcher.
@@ -36,7 +36,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 **Good to know**
 - The link works until 12:00 the day after your deliveries.
 - The location uses battery: use a car charger. Keep the phone's clock on automatic.
-- Your location: the company keeps the time and place of each arrival, departure, result and photo (the places for 90 days, the photos longer, as delivery proof), never a track of your route.
+- Your location: the company keeps the time and place of each arrival, departure, result and photo (the places for the time your company set - 90 days unless it changed it, the page says how long - and the photos longer, as delivery proof), never a track of your route.
 
 ---
 
@@ -49,7 +49,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 1. **امسح رمز QR** الموجود أعلى ورقتك **بكاميرا الهاتف** (أو افتح الرابط الذي أرسله لك مسؤول التوزيع على واتساب). تُفتح الصفحة في كروم أو سفاري. لا حاجة إلى حساب أو كلمة مرور أو تطبيق.
    - إذا فُتحت داخل فيسبوك أو إنستغرام أو تطبيق QR، اضغط **«افتح في كروم»** (أندرويد) أو اضغط أيقونة المشاركة ثم **«فتح في سفاري»** (آيفون).
 2. اختر **العربية** أو **English** في أعلى الصفحة.
-3. اقرأ تنبيه **الموقع** واضغط **«موافق»**.
+3. اقرأ تنبيه **الموقع** واضغط **«حسنًا»**.
 4. اضغط **«ابدأ التوصيل»** و**اسمح باستخدام الموقع**. تستخدم الصفحة موقعك فقط أثناء فتحها.
 
 **عند كل عميل**
@@ -64,7 +64,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
    - **«تسليم جزئي»**: أدخل **الكراتين المسلَّمة** لكل منتج، واختر **السبب**، والتقط صورة، ثم **«حفظ»**.
    - **«لم يتم التسليم»**: اختر **السبب**: المحل مغلق، العميل رفض الاستلام، لا يوجد من يستلم، الموقع خطأ أو لم أجده، لم يتبقَّ وقت، مشكلة في الدفع، بضاعة تالفة، غير موجود في الشاحنة، أو سبب آخر (اكتب السبب)، ثم **«حفظ»**. الصورة اختيارية.
    - الكاميرا لا تُفتح؟ اضغط **«الكاميرا لا تعمل»** للحفظ بدون صورة.
-8. النتيجة خطأ؟ اضغط **«تغيير النتيجة»** (حتى إغلاق رحلتك). إذا قالت الصفحة إن الكراتين نُقلت إلى يوم آخر، اتصل بمسؤول التوزيع.
+8. النتيجة خطأ؟ اضغط **«تغيير النتيجة»** (حتى إغلاق رحلتك): الصور التي التقطتها تُحتسب، ولا حاجة إلى صورة جديدة. إذا قالت الصفحة إن الكراتين نُقلت إلى يوم آخر، اتصل بمسؤول التوزيع.
 
 **في نهاية الرحلة**
 
@@ -82,6 +82,6 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 
 - يعمل الرابط حتى الساعة 12:00 ظهرًا من اليوم التالي لتوصيلاتك.
 - استخدام الموقع يستهلك البطارية: استخدم شاحن السيارة. اترك ساعة الهاتف على الضبط التلقائي.
-- موقعك: تحفظ الشركة وقت ومكان كل وصول ومغادرة ونتيجة وصورة (الأماكن لمدة 90 يومًا، والصور مدة أطول كإثبات للتسليم)، ولا تسجّل مسار رحلتك.
+- موقعك: تحفظ الشركة وقت ومكان كل وصول ومغادرة ونتيجة وصورة (الأماكن للمدة التي حددتها شركتك - 90 يومًا ما لم تغيّرها، وتذكرها الصفحة - والصور مدة أطول كإثبات للتسليم)، ولا تسجّل مسار رحلتك.
 
 </div>

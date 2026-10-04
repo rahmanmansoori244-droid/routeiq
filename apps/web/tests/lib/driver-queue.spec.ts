@@ -122,6 +122,28 @@ describe('flushQueue on the memory store', () => {
     expect(await store.items(NS)).toEqual([]);
   });
 
+  it("each round's results reach the page BEFORE its sent items leave the phone (a sent result never disappears in between)", async () => {
+    const store = memoryStore();
+    const a = actionItem(NS, result('1:1'), T0);
+    const p = photo('1:1', T0 + 1);
+    await store.put([a, p]);
+    const seen: string[] = [];
+    await flushQueue({
+      store,
+      ns: NS,
+      now: () => T0 + 20_000,
+      postActions: async (actions) => ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: { '1:1': { outcome: 'DELIVERED' } }, back: {} }),
+      postPhoto: async (item) => ok({ photoId: item.key, status: 'ok', stops: { '1:1': { outcome: 'DELIVERED', photoIds: [item.key] } }, back: {} }),
+      onResults: async (r) => {
+        // When the results arrive, the item they answer is still on the phone.
+        const keys = (await store.items(NS)).map((i) => i.key);
+        seen.push(`${Object.keys(r.stops).join(',')}:${keys.includes(a.key) ? 'action kept' : 'action gone'}:${keys.includes(p.key) ? 'photo kept' : 'photo gone'}`);
+      },
+    });
+    expect(seen).toEqual(['1:1:action kept:photo kept', '1:1:action gone:photo kept']);
+    expect(await store.items(NS)).toEqual([]);
+  });
+
   it('409 / 5xx keep the items for a retry; 404 / 410 stop sending; UPLOAD_CLOSED is reported', async () => {
     const store = memoryStore();
     const a = actionItem(NS, arrive('1:1'), T0);

@@ -24,12 +24,19 @@ vi.mock('@/lib/audit', async () => {
 });
 const session = vi.hoisted(() => ({ role: 'PLANNER', id: 'u1' }));
 vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: session.id, tenantId: 'tA', role: session.role, name: 'Dispatcher Ali', email: 'ali@a.example' } })) }));
+// The real completion, watched (who closes the trip).
+vi.mock('@/lib/dispatch/plan-service', async (orig) => {
+  const m = await orig<typeof import('@/lib/dispatch/plan-service')>();
+  return { ...m, completeLoadAsDriver: vi.fn(m.completeLoadAsDriver) };
+});
 
 import { POST as outcomeRoute } from '@/app/api/dispatch/outcomes/route';
 import { GET as overlayRoute } from '@/app/api/runs/[id]/outcomes/route';
 import { GET as photoRoute } from '@/app/api/delivery-photos/[id]/route';
 import { GET as statsRoute } from '@/app/api/customers/delivery-stats/route';
 import { GET as pinRoute } from '@/app/api/customers/pin-check/route';
+import { DELETE as truckDelete } from '@/app/api/trucks/[id]/route';
+import { completeLoadAsDriver } from '@/lib/dispatch/plan-service';
 import { todayIso, zonedDayStart } from '@/lib/dispatch/time';
 
 const T = 'tA';
@@ -109,6 +116,48 @@ describe('POST /api/dispatch/outcomes: the dispatcher records a result', () => {
     expect((await post(body)).status).toBe(409);
   });
 
+  it('a corrected Arrived / Left replaces the earlier entry; Left alone after a stored arrival is kept; the result time is never a Left', async () => {
+    const start = zonedDayStart(D, TZ).getTime();
+    const minOf = (d: unknown) => ((d as Date).getTime() - start) / 60_000;
+    expect((await post(record({ outcome: 'DELIVERED', reason: null, arrivedAt: '10:30', departedAt: '10:50' }))).status).toBe(200);
+    expect((await post(record({ outcome: 'DELIVERED', reason: null, arrivedAt: '10:05' }))).status).toBe(200);
+    let v = tables.stopVisit[0]!;
+    expect([minOf(v.arrivedAt), minOf(v.departedAt)]).toEqual([10 * 60 + 5, 10 * 60 + 50]);
+    expect((await post(record({ outcome: 'DELIVERED', reason: null, departedAt: '10:40' }))).status).toBe(200);
+    v = tables.stopVisit[0]!;
+    expect(minOf(v.departedAt)).toBe(10 * 60 + 40);
+    // Only Arrived for stop 2: no Left from the time the result was entered.
+    expect((await post(record({ sequence: 2, outcome: 'DELIVERED', reason: null, arrivedAt: '11:00' }))).status).toBe(200);
+    expect(tables.stopVisit.find((x) => x.sequence === 2)).toMatchObject({ departedAt: null, departedAtOutcome: false });
+  });
+
+  it('the last result recorded by the dispatcher on a load that is back closes it as the dispatcher, not as the driver link', async () => {
+    tables.stopEvent.push({ id: 'back1', tenantId: T, depotId: 'DA', deliveryDate: day(D), truckId: 'T5', loadNo: 1, sequence: null, visitId: null, kind: 'BACK_AT_DEPOT', source: 'PHONE_MANUAL', at: new Date(), receivedAt: new Date() });
+    expect((await post(record({ sequence: 1 }))).status).toBe(200);
+    vi.mocked(completeLoadAsDriver).mockClear();
+    expect((await post(record({ sequence: 2 }))).status).toBe(200);
+    expect(completeLoadAsDriver).toHaveBeenCalledWith(T, { runId: 'P1', loadId: 'L1', depotId: 'DA', date: D }, { userId: 'u1', label: null });
+  });
+
+  it('a visit flagged "unverified timing" keeps the flag when it is corrected after the location purge', async () => {
+    tables.stopVisit = [
+      {
+        id: 'VP', tenantId: T, depotId: 'DA', deliveryDate: day(D), truckId: 'T5', loadNo: 1, sequence: 1, customerId: 'c-ACME', firstLoadId: 'L1',
+        plannedEtaMin: 500, plannedServiceMin: 20, plannedLat: PIN.lat, plannedLng: PIN.lng, windowStartMin: null, windowEndMin: null,
+        linesJson: [{ orderId: 'OA', lineId: 'OA-1', productCode: 'W500', plannedCases: 10, deliveredCases: 10 }], casesPlanned: 10, casesDelivered: 10,
+        outcome: 'DELIVERED', outcomeSource: 'PHONE_MANUAL', timingSuspect: true, autoServiceMinutes: 3, locationPurgedAt: new Date(),
+      },
+    ];
+    const at = (min: number) => new Date(zonedDayStart(D, TZ).getTime() + min * 60_000);
+    // The spoofed events, their positions erased by the purge.
+    tables.stopEvent = [
+      { id: 'e1', tenantId: T, visitId: 'VP', kind: 'ARRIVED', source: 'PHONE_AUTO', at: at(500), receivedAt: at(500), lat: null, lng: null, accuracyM: null, distanceM: 0, payloadJson: { mode: 'AUTO' } },
+      { id: 'e2', tenantId: T, visitId: 'VP', kind: 'OUTCOME', source: 'PHONE_MANUAL', at: at(503), receivedAt: at(503), lat: null, lng: null, accuracyM: null, distanceM: 0, payloadJson: { outcome: 'DELIVERED', photoKeys: [] } },
+    ];
+    expect((await post(record({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'OA-1', delivered: 7 }] }))).status).toBe(200);
+    expect(row('stopVisit', 'VP')).toMatchObject({ outcome: 'PARTLY_DELIVERED', timingSuspect: true });
+  });
+
   it('a correction later wins over the driver; "Clear result" clears it; the office is not held to "photo required"', async () => {
     expect((await post(record({ sequence: 2, outcome: 'DELIVERED' }))).status).toBe(200);
     expect((await post(record({ sequence: 2, outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'OB-1', delivered: 12 }] }))).status).toBe(200);
@@ -131,6 +180,9 @@ describe('POST /api/dispatch/outcomes: the dispatcher records a result', () => {
     expect([r.status, (await r.json()).error.code]).toEqual([422, 'INVALID']);
     r = await post(record({ arrivedAt: '09:00', departedAt: '08:00' }));
     expect(r.status).toBe(422);
+    // "Left" alone, on a stop with no arrival: refused (it used to be dropped without a word).
+    r = await post(record({ departedAt: '08:30' }));
+    expect([r.status, (await r.json()).error.error]).toEqual([422, 'Enter "Arrived" too: "Left" needs an arrival time.']);
     session.role = 'VIEWER';
     expect((await post(record())).status).toBe(403);
     expect(tables.stopVisit).toEqual([]);
@@ -219,11 +271,58 @@ describe('customer feed routes', () => {
     expect((await statsRoute(new Request(`http://x/api/customers/delivery-stats?ids=${many}`))).status).toBe(400);
   });
 
+  it('measured times read each customer\'s own newest visits (no limit shared by a busy customer and a monthly one)', async () => {
+    const visitsFor = (customerId: string, n: number, month: number) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: `${customerId}-${i}`, tenantId: T, customerId, deliveryDate: day(D), outcome: 'DELIVERED', autoServiceMinutes: 25, timingSuspect: false, outcomeLate: false, plannedServiceMin: 20, casesDelivered: 10,
+        autoArrivedAt: new Date(Date.UTC(2026, month, 1 + (i % 27))),
+      }));
+    tables.customer.push({ ...tables.customer[0], id: 'c-BETA', code: 'BETA', name: 'BETA' });
+    tables.stopVisit = [...visitsFor('c-ACME', 60, 8), ...visitsFor('c-BETA', 3, 5)];
+    const { fakePrisma } = await import('./fake-plan-db');
+    const spy = vi.spyOn(fakePrisma.stopVisit, 'findMany');
+    try {
+      const data = (await (await statsRoute(new Request('http://x/api/customers/delivery-stats?ids=c-ACME,c-BETA'))).json()).data;
+      expect(data['c-BETA'].measured).toMatchObject({ minutes: 25, n: 3 });
+      const calls = spy.mock.calls.map((c) => c[0] as { where: { customerId: unknown }; take: number });
+      expect(calls.length).toBe(2);
+      for (const c of calls) {
+        expect(typeof c.where.customerId).toBe('string');
+        expect(c.take).toBeLessThanOrEqual(20);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('pin-check: company admin only', async () => {
     expect((await pinRoute(new Request('http://x/api/customers/pin-check'))).status).toBe(403);
     session.role = 'TENANT_ADMIN';
     const r = await pinRoute(new Request('http://x/api/customers/pin-check'));
     expect(r.status).toBe(200);
     expect((await r.json()).data).toEqual([]);
+  });
+});
+
+describe('DELETE /api/trucks/<id>: a truck the delivery outcome refers to', () => {
+  beforeEach(() => seed());
+
+  it('a hired truck with only a driver link (its plan rows gone) is deactivated, not deleted; a truck nothing names is deleted', async () => {
+    session.role = 'TENANT_ADMIN';
+    tables.truck.push({ id: 'T9', tenantId: T, code: 'T09', hired: true, active: true }, { id: 'T8', tenantId: T, code: 'T08', hired: true, active: true });
+    tables.driverLink = [{ id: 'dl9', tenantId: T, truckId: 'T9', deliveryDate: day(D) }];
+    const del = (id: string) => truckDelete(new Request(`http://x/api/trucks/${id}`, { method: 'DELETE' }), { params: { id } });
+    const r = await del('T9');
+    expect(r.status).toBe(200);
+    expect((await r.json()).data).toMatchObject({ softDeleted: true });
+    expect(row('truck', 'T9').active).toBe(false);
+    // A stop visit names it too.
+    tables.driverLink = [];
+    tables.stopVisit = [{ id: 'sv8', tenantId: T, truckId: 'T8' }];
+    expect((await (await del('T8')).json()).data).toMatchObject({ softDeleted: true });
+    tables.stopVisit = [];
+    tables.truck.push({ id: 'T7', tenantId: T, code: 'T07', hired: true, active: true });
+    expect((await (await del('T7')).json()).data).toEqual({ deleted: true });
+    expect(tables.truck.some((t) => t.id === 'T7')).toBe(false);
   });
 });

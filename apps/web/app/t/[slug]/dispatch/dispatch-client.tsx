@@ -22,7 +22,7 @@ import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
 import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
-import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
+import { keepDeliveries, optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
@@ -187,7 +187,8 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         return api<Day>(`/api/dispatch/day?${q}`);
       },
       show: (d, { afterError }) => {
-        setDay(d);
+        // While a search runs the day's polls leave the delivery results out: keep the card shown.
+        setDay((prev) => keepDeliveries(prev, d));
         setLoadError(null);
         // The day is back after a failed load: load the plan below again too (its own load most
         // likely failed as well; third review of PR3) - in place, never a remount: a late order

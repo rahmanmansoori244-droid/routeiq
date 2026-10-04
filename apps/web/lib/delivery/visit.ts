@@ -6,7 +6,11 @@
  *
  * - Result = the OUTCOME event with the latest `at` (ties: the latest received, then the dispatcher
  *   over the phone); an OUTCOME with outcome null clears it.
- * - Cycles = a run of ARRIVED events closed by the first DEPARTED; the chosen cycle holds the result.
+ * - Cycles = a run of phone (or Ayun) ARRIVED events closed by the first DEPARTED; the chosen cycle
+ *   holds the result. The dispatcher's Arrived / Left (Record outcome) are not cycle members: the
+ *   newest entry of each (latest received) replaces the phone's, so a correction always shows.
+ * - Departure: the office's Left, else the cycle's, else (a phone result) the result time; a result
+ *   the office entered later never ends the stop.
  * - Automatic timing only from OBSERVED automatic events: an arrival found when the page came back
  *   (observed false) or a departure after a gap never feeds measured times or the on-time KPI.
  */
@@ -179,13 +183,18 @@ function chooseCycle(cycles: Cycle[], outcomeAt: number | null): Cycle | null {
   return before.length ? before[before.length - 1]! : null;
 }
 
-/** The arrival of a cycle: the dispatcher's (an explicit correction), else a "when?" answer, else the earliest. */
+/** The arrival of a phone cycle: a "when?" answer, else the earliest. */
 function arrivalOf(c: Cycle): VisitEvent {
-  const office = c.arrivals.filter((e) => e.source === 'DISPATCHER');
-  if (office.length) return office[office.length - 1]!;
   const answered = c.arrivals.filter((e) => e.source === 'PHONE_MANUAL' && e.payload?.when === true);
   if (answered.length) return answered[answered.length - 1]!;
   return c.arrivals[0]!;
+}
+
+/** The newest entry (latest received, then latest time) of the dispatcher's events of a kind: a correction replaces the one before. */
+function newestOffice(events: readonly VisitEvent[], kind: 'ARRIVED' | 'DEPARTED'): VisitEvent | null {
+  const office = events.filter((e) => e.kind === kind && e.source === 'DISPATCHER');
+  if (!office.length) return null;
+  return [...office].sort((a, b) => t(b.receivedAt) - t(a.receivedAt) || t(b.at) - t(a.at))[0]!;
 }
 
 const isObserved = (e: VisitEvent) => e.payload?.observed !== false;
@@ -226,22 +235,28 @@ export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): V
   const rp = res?.payload ?? null;
   const outcome = res && typeof rp?.outcome === 'string' ? (rp.outcome as OutcomeName) : null;
   const outcomeAt = outcome && res ? t(res.at) : null;
-  // 2-3. Cycles and the chosen one.
-  const cycle = chooseCycle(cyclesOf(evs), outcomeAt);
+  // 2-3. Cycles of the phone (and Ayun) events, and the chosen one. The dispatcher's Arrived / Left
+  // (Record outcome) are corrections of the whole stop, not cycle members: the newest entry of each
+  // replaces the phone's (an earlier office entry included).
+  const cycle = chooseCycle(cyclesOf(evs.filter((e) => e.source !== 'DISPATCHER')), outcomeAt);
+  const officeArrival = newestOffice(evs, 'ARRIVED');
+  const officeDeparture = newestOffice(evs, 'DEPARTED');
   // 4. Arrival.
-  const arrival = cycle ? arrivalOf(cycle) : null;
+  const arrival = officeArrival ?? (cycle ? arrivalOf(cycle) : null);
   const arrivalObserved = arrival ? !(AUTO.has(arrival.source) && !isObserved(arrival)) : true;
-  // 5. Departure.
+  // 5. Departure: the office's Left, else the cycle's; never one at or before the arrival.
   let departedAt: number | null = null;
   let departureSource: EventSource | null = null;
   let departedAtOutcome = false;
   let departureGap = false;
-  const dep = cycle?.departure ?? null;
-  if (dep && !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter)) {
+  let dep = officeDeparture ?? cycle?.departure ?? null;
+  if (dep && arrival && t(dep.at) <= t(arrival.at)) dep = null;
+  if (dep && (dep.source === 'DISPATCHER' || !(outcomeAt !== null && t(dep.at) > outcomeAt + maxAfter))) {
     departedAt = t(dep.at);
     departureSource = dep.source;
     departureGap = dep.payload?.gap === true;
-  } else if (outcomeAt !== null && arrival) {
+  } else if (outcomeAt !== null && arrival && res!.source !== 'DISPATCHER') {
+    // A result entered by the office later (Record outcome) is not the end of the stop.
     departedAt = outcomeAt;
     departureSource = res!.source;
     departedAtOutcome = true;

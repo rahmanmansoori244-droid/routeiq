@@ -7,8 +7,9 @@
  * forgotten stop, a wrong tap. It is stored as an event of source DISPATCHER with the user's id (key
  * `disp:<uuid>`, so a double click records once), rebuilds the visit (visit.ts) and is audited
  * DELIVERY_OUTCOME_SET with before and after. The office is not held to "photo required". Optional
- * Arrived / Left times (HH:MM) are stored as DISPATCHER arrival and departure events: an office
- * arrival overrides the phone's.
+ * Arrived / Left times (HH:MM) are stored as DISPATCHER arrival and departure events: the newest
+ * office entry overrides the phone's and any earlier office entry (visit.ts). "Left" needs an arrival
+ * (typed, or stored) before it; the time a result is entered is never taken as "Left".
  *
  * The carry basis rule (section 9.4): a change that would shrink cases already brought forward from
  * this visit is refused 409 OUTCOME_CARRIED and kept as a CARRY_CONFLICT event (it warns on the
@@ -125,13 +126,18 @@ export async function recordOfficeOutcome(
         const planned = await plannedStopOf(tx, planLoad, input.sequence);
         if (!planned) throw new OfficeOutcomeError('This stop is not on the load.', 404, 'STOP_NOT_FOUND');
         // Undo needs the intake and day locks BEFORE the outcome-day lock (lock order, plan-locks.ts).
+        // Which orders were brought forward is only a hint here (read before the locks): the basis rule
+        // below reads it again under the outcome-day lock (carryBases), and an undo runs only for an
+        // order whose locks were taken here.
         const carriedOrders = planned.orders.filter((o) => o.carriedToOrderId);
+        const undoLocked = new Set<string>();
         if (input.undoCarry && carriedOrders.length) {
           await lockForUndo(
             tx,
             tenantId,
             carriedOrders.map((o) => o.orderId),
           );
+          for (const o of carriedOrders) undoLocked.add(o.orderId);
         } else {
           await setLockTimeout(tx);
         }
@@ -153,6 +159,10 @@ export async function recordOfficeOutcome(
         if (!norm.ok) throw new OfficeOutcomeError(norm.message, 422, 'INVALID');
         const vk: VisitKey = { tenantId, depotId: load.depotId, date: input.date, truckId: input.truckId, loadNo: input.loadNo, sequence: input.sequence };
         const visit = await findVisit(tx, vk);
+        // "Left" needs an arrival (typed now, or already stored) and must come after it.
+        const arrivalForLeft = arrivedAt ?? visit?.arrivedAt ?? null;
+        if (departedAt && !arrivalForLeft) throw new OfficeOutcomeError('Enter "Arrived" too: "Left" needs an arrival time.', 422, 'INVALID');
+        if (departedAt && arrivalForLeft && departedAt <= arrivalForLeft) throw new OfficeOutcomeError('"Left" must be after "Arrived".', 422, 'INVALID');
         const after = new Map(planned.lines.map((l) => [l.lineId, 0]));
         if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);
         const payload: Record<string, unknown> =
@@ -184,10 +194,9 @@ export async function recordOfficeOutcome(
             if (!inCarryBasis(c.basis, visit.id)) continue;
             const check = carryChangeCheck(c.basis, visit.id, after);
             if (check.ok) continue;
-            const original = planned.orders.find((o) => o.carriedToOrderId === c.copyId);
-            const can = original ? await undoCheck(tx, tenantId, original.orderId) : null;
-            if (input.undoCarry && original && can?.ok) {
-              carryUndone = await undoCarryTx(tx, tenantId, original.orderId, user, { ip: opts.ip });
+            const can = await undoCheck(tx, tenantId, c.originalId);
+            if (input.undoCarry && undoLocked.has(c.originalId) && can.ok) {
+              carryUndone = await undoCarryTx(tx, tenantId, c.originalId, user, { ip: opts.ip });
               continue;
             }
             // Refused: kept as a CARRY_CONFLICT event (it warns on the copy's plan), nothing else changes.
@@ -294,9 +303,10 @@ export async function recordOfficeOutcome(
       { copyId: c.copyId, copyDate: c.copyDate, undoable: c.undoable },
     );
   }
-  // A load that is back at the depot closes once every stop has a result (the driver's rule, section 8.7).
+  // A load that is back at the depot closes once every stop has a result (the driver's rule, section
+  // 8.7). The dispatcher recorded that last result: the LOAD_COMPLETED row is theirs.
   if (answer.result === 'ok' && load.status === 'DISPATCHED') {
-    const completed = await maybeCompleteLoad(tenantId, input.truckId, input.date, input.loadNo);
+    const completed = await maybeCompleteLoad(tenantId, input.truckId, input.date, input.loadNo, undefined, { userId: user.id, label: null });
     if (completed) answer.loadCompleted = true;
   }
   return answer;

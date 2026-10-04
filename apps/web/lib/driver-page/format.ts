@@ -44,3 +44,13 @@ export function driverNames(m: Pick<DriverManifest, 'drivers'>): string | null {
   const names = m.drivers.map((d) => d.name).filter(Boolean);
   return names.length ? names.join(', ') : null;
 }
+
+/**
+ * Cases typed in the Partly stepper: Arabic-Indic (٠-٩, U+0660-0669) and Persian / Urdu (۰-۹,
+ * U+06F0-06F9) digits count as 0-9 - the Arabic number pads type them - then anything that is not a
+ * digit is dropped; empty is 0.
+ */
+export function casesFromInput(value: string): number {
+  const western = value.replace(/[\u0660-\u0669\u06F0-\u06F9]/g, (c) => String(c.charCodeAt(0) & 0xf));
+  return Number(western.replace(/\D/g, '')) || 0;
+}

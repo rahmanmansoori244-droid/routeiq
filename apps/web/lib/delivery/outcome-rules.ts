@@ -128,11 +128,19 @@ export function normalizeResult(planned: readonly PlannedLine[], input: ResultIn
  * "Photo proof required" (company setting, default on): a driver's Delivered or Partly needs a photo
  * key, unless the driver tapped "Camera not working" (the only exception: a broken camera or an in-app
  * browser must never block a delivery). The photos themselves may arrive later. The office is not held
- * to it.
+ * to it. A changed or redone result needs no new photo when the stop already has a driver photo
+ * (`existingPhotos`): at 3 photos the driver could not take another one.
  */
-export function photoRule(args: { required: boolean; byDriver: boolean; outcome: OutcomeName | null; photoKeys: readonly string[]; noPhotoReason: string | null | undefined }): 'ok' | 'PHOTO_REQUIRED' {
+export function photoRule(args: {
+  required: boolean;
+  byDriver: boolean;
+  outcome: OutcomeName | null;
+  photoKeys: readonly string[];
+  noPhotoReason: string | null | undefined;
+  existingPhotos?: number;
+}): 'ok' | 'PHOTO_REQUIRED' {
   if (!args.required || !args.byDriver || args.outcome === null || args.outcome === 'NOT_DELIVERED') return 'ok';
-  if (args.photoKeys.length >= 1 || args.noPhotoReason === 'CAMERA_FAILED') return 'ok';
+  if (args.photoKeys.length >= 1 || args.noPhotoReason === 'CAMERA_FAILED' || (args.existingPhotos ?? 0) >= 1) return 'ok';
   return 'PHOTO_REQUIRED';
 }
 

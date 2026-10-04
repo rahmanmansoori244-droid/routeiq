@@ -14,6 +14,8 @@ import {
   defaultSearchMode,
   fmtSearchTime,
   jobMaxMinutes,
+  keepDeliveries,
+  planSearching,
   queuedMessage,
   quickExpectedSec,
   searchAssumptions,
@@ -561,5 +563,26 @@ describe('solve admission per mode', () => {
     expect(t.waiting && q.waiting).toBe(true);
     expect(q.position()).toBe(1); // the QUICK starts when B's QUICK ends
     expect(t.position()).toBe(2);
+  });
+});
+
+describe('delivery results are not re-read on the polls of a running search (review of 4 Oct 2026)', () => {
+  it('planSearching: OPTIMIZING, or a job QUEUED / RUNNING', () => {
+    expect(planSearching({ status: 'OPTIMIZING' }, null)).toBe(true);
+    expect(planSearching({ status: 'DISPATCHED' }, { status: 'RUNNING' })).toBe(true);
+    expect(planSearching({ status: 'READY' }, { status: 'QUEUED' })).toBe(true);
+    expect(planSearching({ status: 'DISPATCHED' }, { status: 'SUCCEEDED' })).toBe(false);
+    expect(planSearching(null, null)).toBe(false);
+  });
+
+  it('keepDeliveries: a poll without them keeps the card shown for the same day and depot only', () => {
+    type DayLike = { date: string; depot: { id: string }; deliveries?: unknown };
+    const day = (date: string, depot: string, over: Partial<DayLike> = {}): DayLike => ({ date, depot: { id: depot }, ...over });
+    const shown = day('2026-10-05', 'DA', { deliveries: { kpis: 1 } });
+    expect(keepDeliveries(shown, day('2026-10-05', 'DA'))).toMatchObject({ deliveries: { kpis: 1 } });
+    expect(keepDeliveries(shown, day('2026-10-05', 'DA', { deliveries: null })).deliveries).toBeNull();
+    expect(keepDeliveries(shown, day('2026-10-06', 'DA')).deliveries).toBeUndefined();
+    expect(keepDeliveries(shown, day('2026-10-05', 'DB')).deliveries).toBeUndefined();
+    expect(keepDeliveries(null, day('2026-10-05', 'DA')).deliveries).toBeUndefined();
   });
 });

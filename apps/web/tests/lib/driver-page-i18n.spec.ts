@@ -7,8 +7,19 @@ import { describe, expect, it } from 'vitest';
 import { DICT, fmtDate, fmtHours, hhmm, LANG_TOGGLE, pickLang, placeholders, positionLabel, reasonLabel, statusLabel, t, type Key } from '@/lib/driver-page/i18n';
 import { NOT_DELIVERED_REASONS, PHOTO_POSITION_STATUSES, type LoadStatusName } from '@/lib/driver-link/manifest-types';
 import { LOAD_STATUS_NAMES } from '@/lib/audit-catalog';
-import { openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
-import { readManifestAnswer, tokenFromPath, deviceId, driverHeaders } from '@/lib/driver-page/api';
+import { casesFromInput, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
+import {
+  ACTIONS_TIMEOUT_MS,
+  deviceId,
+  driverHeaders,
+  fetchManifest,
+  MANIFEST_TIMEOUT_MS,
+  PHOTO_TIMEOUT_MS,
+  postActions,
+  postPhoto,
+  readManifestAnswer,
+  tokenFromPath,
+} from '@/lib/driver-page/api';
 import { NotDeliveredReason, PhotoPositionStatus } from '@prisma/client';
 
 const ARABIC = /[؀-ۿ]/;
@@ -138,5 +149,35 @@ describe('the page API helpers', () => {
     // clear state, not "No signal" for ever.
     expect(readManifestAnswer(403, { data: null, error: { code: 'SIGNED_IN_OTHER_TENANT' } }, null)).toEqual({ kind: 'link', status: 403, code: 'SIGNED_IN_OTHER_TENANT', uploadOnly: false, date: null });
     expect(readManifestAnswer(403, { data: null, error: { code: 'SOMETHING_ELSE' } }, null)).toEqual({ kind: 'error', status: 403 });
+  });
+});
+
+describe('weak signal and Arabic keyboards (review of 4 Oct 2026)', () => {
+  it('a stalled request ends with status 0 after its timeout (the queue backs off and tries again); a fetch that ignores the abort too', async () => {
+    let aborted = false;
+    const stalls: typeof fetch = (_url, init) =>
+      new Promise((_, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new Error('aborted'));
+        });
+      });
+    const t0 = Date.now();
+    expect(await postActions('T'.repeat(24), 'd'.repeat(32), [], stalls, 30)).toEqual({ status: 0, body: null, retryAfter: null });
+    expect(aborted).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const deaf: typeof fetch = () => new Promise(() => undefined);
+    expect(await postPhoto('T'.repeat(24), 'd'.repeat(32), {}, new Blob([new Uint8Array([1])]), deaf, 30)).toMatchObject({ status: 0 });
+    expect(await fetchManifest('T'.repeat(24), 'd'.repeat(32), deaf, 30)).toEqual({ kind: 'error', status: 0 });
+    expect([ACTIONS_TIMEOUT_MS, MANIFEST_TIMEOUT_MS, PHOTO_TIMEOUT_MS]).toEqual([30_000, 30_000, 90_000]);
+  });
+
+  it('cases typed on an Arabic or Persian number pad count (٤ is 4, ۱۲ is 12); anything else is dropped', () => {
+    expect(casesFromInput('٤')).toBe(4);
+    expect(casesFromInput('۱۲')).toBe(12);
+    expect(casesFromInput('1٠')).toBe(10);
+    expect(casesFromInput(' 7 ')).toBe(7);
+    expect(casesFromInput('')).toBe(0);
+    expect(casesFromInput('abc')).toBe(0);
   });
 });

@@ -28,7 +28,8 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tena
 
 import { POST as undoRoute } from '@/app/api/dispatch/carry-over/undo/route';
 import { POST as outcomeRoute } from '@/app/api/dispatch/outcomes/route';
-import { undoCarry } from '@/lib/dispatch/carry-over';
+import { carryOverPreview, undoCarry } from '@/lib/dispatch/carry-over';
+import { carryBases } from '@/lib/delivery/event-service';
 
 const T = 'tA';
 const D5 = '2026-10-05';
@@ -148,6 +149,20 @@ describe('Undo bring forward (spec 9.4)', () => {
     expect(tables.auditLog).toEqual([]);
   });
 
+  it('a copy brought forward again (O2 -> C2 -> C3) is not offered for undo and is refused COPY_CARRIED_AGAIN, nothing changed', async () => {
+    const D7 = '2026-10-07';
+    Object.assign(row('order', 'C2'), { carriedToOrderId: 'C3', carriedTo: { deliveryDate: day(D7) } });
+    tables.order.push({ id: 'C3', tenantId: T, depotId: 'DA', customerId: 'c-BETA', deliveryDate: day(D7), status: 'VALIDATED', totalCases: 6, carriedFromOrderId: 'C2', customer: { id: 'c-BETA', code: 'BETA', branchCode: null, name: 'BETA' }, lines: [] });
+    const e = await undoCarry(T, 'O2', { id: 'u1' }).catch((x) => x);
+    expect(e.status).toBe(409);
+    expect(e.details).toMatchObject({ code: 'COPY_CARRIED_AGAIN', copyId: 'C2', copyDate: D6 });
+    expect(e.message).toContain('7 Oct');
+    expect(row('order', 'O2').carriedToOrderId).toBe('C2');
+    expect(tables.order.some((o) => o.id === 'C2')).toBe(true);
+    // 6 Oct's panel does not list C2 under "Brought forward to 6 Oct, not planned yet".
+    expect((await carryOverPreview(T, 'DA', D6, { now: new Date('2026-10-06T05:00:00Z') })).undoable).toEqual([]);
+  });
+
   it('the route: PLANNER, 404 when there is nothing to undo, 403 for a viewer', async () => {
     session.role = 'VIEWER';
     expect((await post(undoRoute, { originalOrderId: 'O2' })).status).toBe(403);
@@ -191,6 +206,13 @@ describe('E6: a correction after the carry (spec 9.3)', () => {
     expect(body.error).toContain('already planned with it');
     expect(row('stopVisit', 'V2').outcome).toBe('PARTLY_DELIVERED');
     expect(tables.order.some((o) => o.id === 'C2')).toBe(true);
+  });
+
+  it('the carry basis is read again under the outcome-day lock, never from the stop read before it (a Bring forward committed meanwhile)', async () => {
+    // The planned stop as read before the lock: O2 not brought forward yet.
+    const stale = { orders: [{ orderId: 'O2', carriedToOrderId: null }] } as unknown as Parameters<typeof carryBases>[2];
+    const bases = await carryBases(fakePrisma as never, T, stale);
+    expect(bases).toEqual([{ copyId: 'C2', copyDate: D6, originalId: 'O2', basis: { visits: [{ visitId: 'V2', lines: [{ lineId: 'O2-b', notDelivered: 6 }] }] } }]);
   });
 
   it('a change that keeps or grows the carried shortfall is stored (the basis rule refuses only a shrink)', async () => {

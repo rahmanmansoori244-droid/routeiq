@@ -73,6 +73,42 @@ describe('cycles, arrival and departure (steps 2-5)', () => {
     expect(v.arrivedAt).toEqual(L('09:55'));
   });
 
+  describe('office times (Record outcome): the newest correction wins', () => {
+    const office = (kind: 'ARRIVED' | 'DEPARTED', at: string, received: string) => ev(kind, 'DISPATCHER', at, { mode: 'OFFICE' }, { receivedAt: L(received), userId: 'u1' });
+    const officeResult = (at: string) => result(at, 'DELIVERED', { via: 'office' }, 'DISPATCHER', { userId: 'u1' });
+
+    it('(a) Arrived corrected from 10:30 to 10:05: the newest entry wins, not the latest time', () => {
+      const v = deriveVisit([office('ARRIVED', '10:30', '16:00'), office('DEPARTED', '10:50', '16:00'), officeResult('16:00'), office('ARRIVED', '10:05', '17:00'), officeResult('17:00')], CTX);
+      expect(v.arrivedAt).toEqual(L('10:05'));
+      expect(v.departedAt).toEqual(L('10:50'));
+      expect(v).toMatchObject({ arrivalSource: 'DISPATCHER', departureSource: 'DISPATCHER', departedAtOutcome: false });
+    });
+
+    it('(b) Left corrected from 10:20 to 10:40 is used', () => {
+      const v = deriveVisit([office('ARRIVED', '10:00', '16:00'), office('DEPARTED', '10:20', '16:00'), officeResult('16:00'), office('DEPARTED', '10:40', '17:00'), officeResult('17:00')], CTX);
+      expect(v.departedAt).toEqual(L('10:40'));
+    });
+
+    it("(c) an office Left replaces the phone's gap departure", () => {
+      const v = deriveVisit([arrive('10:00'), depart('10:10', { gap: true }), result('10:05', 'DELIVERED'), office('DEPARTED', '10:40', '16:00'), officeResult('16:00')], CTX);
+      expect(v.departedAt).toEqual(L('10:40'));
+      expect(v).toMatchObject({ departureSource: 'DISPATCHER', departureGap: false, departedAtOutcome: false });
+    });
+
+    it('(d) only Arrived typed and the result saved at 17:30: no "Left" from the result time', () => {
+      const v = deriveVisit([office('ARRIVED', '10:05', '17:30'), officeResult('17:30')], CTX);
+      expect(v.arrivedAt).toEqual(L('10:05'));
+      expect(v).toMatchObject({ departedAt: null, departedAtOutcome: false, state: 'DONE' });
+      // The same for a phone arrival whose stop the office closed later.
+      expect(deriveVisit([arrive('10:00'), officeResult('17:30')], CTX)).toMatchObject({ departedAt: null, departedAtOutcome: false });
+    });
+
+    it("(e) an office Left after the phone's arrival is kept; one before the arrival is not this stay's", () => {
+      expect(deriveVisit([arrive('10:00'), office('DEPARTED', '10:25', '16:00'), officeResult('16:00')], CTX).departedAt).toEqual(L('10:25'));
+      expect(deriveVisit([arrive('10:00'), office('DEPARTED', '09:50', '16:00'), officeResult('16:00')], CTX).departedAt).toBeNull();
+    });
+  });
+
   it('no departure and a result: the result time ends the stop; a departure over 15 min after the result is capped', () => {
     const lost = deriveVisit([arrive('10:00'), result('10:20', 'DELIVERED')], CTX);
     expect(lost).toMatchObject({ departedAtOutcome: true, autoBasis: 'RESULT', autoMinutes: 20 });

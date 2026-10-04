@@ -120,6 +120,23 @@ describe('addCasualDriver', () => {
     });
   });
 
+  it('an inactive regular driver is never reactivated by the quick add (only an admin changes that)', async () => {
+    tables.driver.push({ id: 'gone', tenantId: T, code: 'D07', name: 'Nasser', phone: '+968 9000 3333', casual: false, active: false });
+    // Sent directly by id: refused, nothing changes.
+    await expect(addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Nasser', useExisting: 'gone' }, user)).rejects.toMatchObject({
+      status: 409,
+      details: { code: 'DRIVER_INACTIVE' },
+    });
+    expect(row('driver', 'gone').active).toBe(false);
+    expect(row('planLoad', 'L1').driverId).toBeNull();
+    // His phone is not offered ("Use Nasser?"): a new daily driver is made instead.
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Nasser', phone: '9000 3333' }, user);
+    expect(r.reused).toBe(false);
+    expect(r.driver.id).not.toBe('gone');
+    expect(row('driver', 'gone').active).toBe(false);
+    expect(tables.auditLog.some((a) => a.entityId === 'gone')).toBe(false);
+  });
+
   it('refused on a load on the road; a load of another plan is not found', async () => {
     await expect(addCasualDriver(T, { runId: 'P', loadId: 'L2', name: 'Salim' }, user)).rejects.toMatchObject({ status: 409, details: { code: 'LOAD_ON_ROAD' } });
     await expect(addCasualDriver(T, { runId: 'P', loadId: 'nope', name: 'Salim' }, user)).rejects.toMatchObject({ status: 404 });

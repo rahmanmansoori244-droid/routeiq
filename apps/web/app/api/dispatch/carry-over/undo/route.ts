@@ -9,7 +9,8 @@ const schema = z.object({ originalOrderId: z.string().min(1).max(64) }).strict()
 // POST /api/dispatch/carry-over/undo { originalOrderId } - "Undo bring forward" (owner request 4 Oct
 // 2026, spec section 9.4): removes the copy on the later day and the order is open again on its own
 // day. Only while no plan version refers to the copy (409 COPY_PLANNED / COPY_ON_ROAD otherwise: a
-// planned order cannot be removed in the app yet), and not while that day's plan is being optimized
+// planned order cannot be removed in the app yet), not while the copy was itself brought forward again
+// (409 COPY_CARRIED_AGAIN: undo that one first), and not while that day's plan is being optimized
 // (409 PLAN_BUSY). One transaction under the intake, day and outcome-day locks; audited
 // ORDERS_CARRY_UNDONE. PLANNER, like Bring forward.
 export const POST = withTenantApi(

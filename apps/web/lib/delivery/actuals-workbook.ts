@@ -11,12 +11,12 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { daysBetween, fmtHhmm, isoOf, localMinutes } from '../dispatch/time';
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
-import { arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
+import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
 import { keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
-export const ACTUALS_MAX_DAYS = 31;
+export { ACTUALS_MAX_DAYS } from './office-text';
 
 /** One stop row (every value as the sheet shows it; null = empty cell). */
 export interface ActualsRow {
@@ -78,7 +78,9 @@ export const ACTUALS_COLUMNS: { key: keyof ActualsRow; header: string; width: nu
   { key: 'insideWindow', header: 'Inside window', width: 8 },
   { key: 'earlyLateMin', header: 'Minutes early(-)/late(+)', width: 10 },
   { key: 'plannedUnloadMin', header: 'Planned unloading min', width: 10 },
-  { key: 'actualUnloadMin', header: 'Actual unloading min (from the service start)', width: 12 },
+  // The plan screen's figure: automatic (from the service start when the truck waited), else the
+  // office's or the manual arrival to departure; "Timed by" says which.
+  { key: 'actualUnloadMin', header: 'Actual unloading min', width: 12 },
   { key: 'waitingMin', header: 'Waiting before the window (min)', width: 10 },
   { key: 'timedBy', header: 'Timed by', width: 16 },
   { key: 'unverified', header: 'Unverified timing', width: 9 },
@@ -169,7 +171,20 @@ const yesNo = (b: boolean) => (b ? 'Yes' : 'No');
 /** One row from a stop and its visit (pure: tests feed it). */
 export function actualsRowOf(
   stop: { date: string; depot: string; truck: string; hired: boolean; loadNo: number; sequence: number; customerCode: string; branch: string | null; customer: string; driver: string | null; dailyDriver: boolean; etaMin: number | null; windowStartMin: number | null; windowEndMin: number | null; plannedServiceMin: number | null; casesPlanned: number; broughtForwardTo: string | null },
-  v: (KpiVisit & { autoBasis: string | null; departedAtOutcome: boolean; outcomeSource: string | null; arrivalDistanceM: number | null; outcomeAt: Date | null; reasonNote: string | null; recordedBy: string | null }) | null,
+  v:
+    | (KpiVisit & {
+        autoBasis: string | null;
+        autoMinutes?: number | null;
+        departedAt?: Date | string | null;
+        departureSource?: string | null;
+        departedAtOutcome: boolean;
+        outcomeSource: string | null;
+        arrivalDistanceM: number | null;
+        outcomeAt: Date | null;
+        reasonNote: string | null;
+        recordedBy: string | null;
+      })
+    | null,
   photos: readonly { positionStatus: string; distanceM: number | null }[],
   tz: string,
 ): ActualsRow {
@@ -187,6 +202,22 @@ export function actualsRowOf(
   const okPhotos = photos.filter((p) => p.positionStatus === 'OK' && p.distanceM !== null);
   const status = photos.length ? (okPhotos.length ? 'OK' : (photos[0]!.positionStatus ?? '')) : null;
   const notDelivered = v?.outcome && v.casesDelivered !== null ? Math.max(0, v.casesPlanned - v.casesDelivered) : null;
+  // The same figure as the plan screen's Unload cell: automatic, else the office's or the manual times.
+  const toDate = (d: Date | string | null | undefined) => (d ? new Date(d) : null);
+  const actual = v
+    ? actualMinutes({
+        autoServiceMinutes: v.autoServiceMinutes,
+        autoMinutes: v.autoMinutes ?? null,
+        arrivedAt: toDate(v.arrivedAt),
+        departedAt: toDate(v.departedAt),
+        departedAtOutcome: v.departedAtOutcome,
+        outcomeSource: v.outcomeSource,
+      })
+    : { min: null, auto: false };
+  const timedBy =
+    v && actual.min !== null
+      ? timedByText({ autoBasis: actual.auto ? v.autoBasis : null, arrivalSource: v.arrivalSource, departureSource: v.departureSource ?? null, departedAtOutcome: v.departedAtOutcome, outcomeSource: v.outcomeSource }) || null
+      : null;
   return {
     date: stop.date,
     depot: stop.depot,
@@ -206,9 +237,9 @@ export function actualsRowOf(
     insideWindow: inside === null ? '-' : yesNo(inside),
     earlyLateMin: earlyLate,
     plannedUnloadMin: stop.plannedServiceMin,
-    actualUnloadMin: v?.autoServiceMinutes ?? null,
+    actualUnloadMin: actual.min,
     waitingMin: waiting,
-    timedBy: v ? timedByText({ autoBasis: v.autoBasis, arrivalSource: v.arrivalSource, departedAtOutcome: v.departedAtOutcome, outcomeSource: v.outcomeSource }) || null : null,
+    timedBy,
     unverified: yesNo(!!v?.timingSuspect),
     result: v?.outcome ? (OUTCOME_LABEL[v.outcome] ?? v.outcome) : 'No result',
     reason: v?.outcome && v.outcome !== 'DELIVERED' ? reasonLabel(v.reason) : null,
@@ -285,7 +316,21 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
             casesPlanned: s.casesPlanned,
             broughtForwardTo: s.orderIds.map((id) => carriedTo.get(id)).filter((x): x is string => !!x).sort().at(-1) ?? null,
           },
-          v && kv ? { ...kv, autoBasis: v.autoBasis, departedAtOutcome: v.departedAtOutcome, outcomeSource: v.outcomeSource, arrivalDistanceM: v.arrivalDistanceM, outcomeAt: v.outcomeAt, reasonNote: v.reasonNote, recordedBy } : null,
+          v && kv
+            ? {
+                ...kv,
+                autoBasis: v.autoBasis,
+                autoMinutes: v.autoMinutes,
+                departedAt: v.departedAt,
+                departureSource: v.departureSource,
+                departedAtOutcome: v.departedAtOutcome,
+                outcomeSource: v.outcomeSource,
+                arrivalDistanceM: v.arrivalDistanceM,
+                outcomeAt: v.outcomeAt,
+                reasonNote: v.reasonNote,
+                recordedBy,
+              }
+            : null,
           v ? photos.filter((p) => p.visitId === v.id) : [],
           set.tz,
         ),

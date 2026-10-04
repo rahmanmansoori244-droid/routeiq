@@ -18,7 +18,8 @@ export interface AuditInput {
   entityId?: string | null;
   beforeJson?: Prisma.InputJsonValue | null;
   afterJson?: Prisma.InputJsonValue | null;
-  ip?: string | null;
+  /** null / absent: the request's IP; false: no IP at all (a driver-link row: its IP is erased with the stop events). */
+  ip?: string | null | false;
 }
 
 /**
@@ -64,7 +65,7 @@ export function redactForAudit<T>(value: T): T {
  */
 export async function audit(input: AuditInput, tx?: Prisma.TransactionClient) {
   const client = tx ?? prisma;
-  const ip = input.ip ?? getRequestIp();
+  const ip = input.ip === false ? null : (input.ip ?? getRequestIp());
   return client.auditLog.create({
     data: {
       tenantId: input.tenantId,

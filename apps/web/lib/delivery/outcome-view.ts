@@ -31,7 +31,7 @@ import {
   visitsInRange,
   type NoResultStop,
 } from './day-results';
-import { arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
+import { actualMinutes, arrivalNote, departureNote, noPhotoText, OUTCOME_LABEL, reasonText, sourceWord } from './office-text';
 import { copyConflicts } from './carry-conflicts';
 import { readVisitLines, type VisitLine } from './visit';
 import type { KpiVisit } from './kpis';
@@ -127,25 +127,9 @@ export interface OutcomeOverlay {
 }
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
-const minutesBetween = (a: Date, b: Date) => Math.round(((b.getTime() - a.getTime()) / 60_000) * 10) / 10;
 
-/** Actual unloading of a visit (spec section 10.1): automatic from the window start, else automatic, else arrival to departure. */
-export function actualMinutes(v: {
-  autoServiceMinutes: number | null;
-  autoMinutes: number | null;
-  arrivedAt: Date | null;
-  departedAt: Date | null;
-  departedAtOutcome: boolean;
-  outcomeSource: string | null;
-}): { min: number | null; label: string | null; auto: boolean } {
-  if (v.autoServiceMinutes !== null) return { min: v.autoServiceMinutes, label: 'auto, from the window start', auto: true };
-  if (v.autoMinutes !== null) return { min: v.autoMinutes, label: 'auto', auto: true };
-  // An office result recorded later is not the end of the stop.
-  if (v.arrivedAt && v.departedAt && v.departedAt > v.arrivedAt && !(v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) {
-    return { min: minutesBetween(v.arrivedAt, v.departedAt), label: v.departedAtOutcome ? 'arrival to result' : 'arrival to departure', auto: false };
-  }
-  return { min: null, label: null, auto: false };
-}
+/** Actual unloading of a visit (spec section 10.1): shared with the actuals Excel (office-text.ts). */
+export { actualMinutes } from './office-text';
 
 export async function readOutcomeOverlay(tenantId: string, runId: string, opts: { now?: Date; db?: Db } = {}): Promise<OutcomeOverlay | null> {
   const db = opts.db ?? prisma;

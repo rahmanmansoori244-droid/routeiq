@@ -5,13 +5,15 @@ import Link from 'next/link';
 import { MapPinned } from 'lucide-react';
 import type { PinCheckRow } from '@/lib/delivery/customer-stats';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { PIN_CHECK_RULE_TEXT, pinFarText } from '@/lib/delivery/pin-check';
 
 /**
  * "Pin may be wrong" (owner request 4 Oct 2026, spec section 11.2), for the company admin on the
- * Customers page: customers whose delivery photos (else a manual arrival or the result) were more than
- * 150 m from the pin on at least 2 of their last 3 visits, or where the driver said "wrong location".
- * The suggested point opens in Google Maps; the admin checks it and uses Set location on the customer
- * (the location lock stays: nothing moves by itself). Hidden when nothing is flagged.
+ * Customers page: customers with at least 2 of their last 3 visits "far" - delivery photos (else a
+ * manual arrival or the result) more than 150 m from the pin, or the driver reported "wrong location"
+ * (one report alone is not enough). The suggested point opens in Google Maps; the admin checks it and
+ * uses Set location on the customer (the location lock stays: nothing moves by itself). Hidden when
+ * nothing is flagged.
  */
 export function PinCheckPanel({ slug }: { slug: string }) {
   const [rows, setRows] = useState<PinCheckRow[] | null>(null);
@@ -33,10 +35,7 @@ export function PinCheckPanel({ slug }: { slug: string }) {
       <summary className="flex cursor-pointer items-center gap-2 font-medium">
         <MapPinned className="h-4 w-4" /> Pin may be wrong: {rows.length} customer{rows.length === 1 ? '' : 's'}
       </summary>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Delivery photos or the driver&apos;s position were far from the saved pin on 2 of the last 3 visits, or the driver said &quot;wrong location&quot;. Check the
-        suggested point, then open the customer and use Set location. Nothing changes by itself.
-      </p>
+      <p className="mt-1 text-xs text-muted-foreground">{PIN_CHECK_RULE_TEXT} Check the suggested point, then open the customer and use Set location. Nothing changes by itself.</p>
       <ul className="mt-2 space-y-1 text-xs">
         {rows.map((r) => (
           <li key={r.customerId} data-testid={`pin-check-${r.code}`}>
@@ -45,11 +44,7 @@ export function PinCheckPanel({ slug }: { slug: string }) {
               {r.branchCode ? `/${r.branchCode}` : ''})
             </Link>
             {' · '}
-            {r.far
-              .filter((f) => f.distanceM !== null)
-              .map((f) => `${f.distanceM} m (${fmtDayMonth(f.date)})`)
-              .join(', ')}
-            {r.wrongLocationDates.length ? ` · Driver said: wrong location (${r.wrongLocationDates.map(fmtDayMonth).join(', ')})` : ''}
+            {pinFarText(r.far, fmtDayMonth)}
             {r.suggested ? (
               <>
                 {' · '}

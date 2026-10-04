@@ -3,10 +3,15 @@
  * 4 Oct 2026, spec section 13.5). applyQueued, stopInProgress and the unsent list. Synthetic stops
  * ACME and BETA on truck T05.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DriverAction, DriverManifest, ManifestStop, StopResult } from '@/lib/driver-link/manifest-types';
 import { applyQueued, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
 import { actionItem, newKey, type QueueItem } from '@/lib/driver-page/queue';
+import { Host } from './hook-host';
+
+// The tracker hook (app/d/[token]/use-tracker.ts) runs on the hook host: React's hooks replaced.
+vi.mock('react', async (importActual) => (await import('./hook-host')).mockReactHooks(importActual));
+const { useTracker } = await import('@/app/d/[token]/use-tracker');
 
 const NS = 't5|2026-10-05';
 const T0 = Date.parse('2026-10-05T06:00:00Z');
@@ -112,5 +117,75 @@ describe('applyQueued', () => {
     const r = item({ key: newKey(), type: 'OUTCOME', stop: '1:2', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
     const loads = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [r]);
     expect(unsentList(loads, [r])).toEqual([{ stopKey: '1:2', customer: 'BETA', outcome: 'NOT_DELIVERED', at: new Date(T0).toISOString() }]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// The tracker hook on the page (review of 4 Oct 2026), on the hook host (no DOM).
+// ---------------------------------------------------------------------------------------
+describe('useTracker on the page', () => {
+  const DEPOT = { lat: 23.6, lng: 58.3 };
+  const queuedArrive = () => item({ key: newKey(), type: 'ARRIVE', stop: '1:2', at: new Date(T0 + 60_000).toISOString(), mode: 'AUTO' });
+  const base = (loads: ReturnType<typeof applyQueued>, over: { ready?: boolean } = {}): Parameters<typeof useTracker>[0] => ({
+    loads,
+    depot: DEPOT,
+    radiusM: 100,
+    nowMinOf: () => 600,
+    enqueue: () => undefined,
+    resume: false,
+    onTrackingChange: () => undefined,
+    ...over,
+  });
+
+  beforeEach(() => {
+    vi.stubGlobal('document', { visibilityState: 'visible', addEventListener: () => undefined, removeEventListener: () => undefined });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('after a reload the trip starts only once the queue was read: an arrival still waiting to send restores its stop with its own time', () => {
+    const m = manifest([stop(1, 'ACME', serverResult({})), stop(2, 'BETA')]);
+    const host = new Host(useTracker, base(applyQueued(m, []), { ready: false }));
+    host.render();
+    expect(host.tree.state.phase).toBe('SEEKING');
+    host.render({ loads: applyQueued(m, [queuedArrive()]), ready: true });
+    expect(host.tree.state).toMatchObject({ phase: 'AT_STOP', key: '1:2', arrivedAt: T0 + 60_000 });
+  });
+
+  it('"Back at depot?" belongs to the trip it was raised for: dispatching trip 2 clears it', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    let watcher: ((p: { coords: { latitude: number; longitude: number; accuracy: number; speed: number | null }; timestamp: number }) => void) | null = null;
+    vi.stubGlobal('navigator', { geolocation: { watchPosition: (cb: typeof watcher) => ((watcher = cb), 1), clearWatch: () => undefined } });
+    const done = manifest([stop(1, 'ACME', serverResult({}))]);
+    const host = new Host(useTracker, base(applyQueued(done, [])));
+    host.render();
+    host.tree.start();
+    host.flush();
+    for (let s = 0; s <= 130; s += 5) {
+      vi.setSystemTime(T0 + s * 1000);
+      watcher!({ coords: { latitude: DEPOT.lat, longitude: DEPOT.lng, accuracy: 10, speed: 0 }, timestamp: Date.now() });
+      host.flush();
+    }
+    expect(host.tree.backSuggested).toBe(1);
+    // The dispatcher dispatches trip 2: the suggestion is not carried over to it.
+    const twoTrips = { loads: [...done.loads, { ...done.loads[0]!, loadNo: 2, trips: 2, stops: [{ ...stop(1, 'GAMMA'), key: '2:1' }] }] };
+    host.render({ loads: applyQueued(twoTrips, []) });
+    expect(host.tree.trip).toMatchObject({ loadNo: 2 });
+    expect(host.tree.backSuggested).toBeNull();
+  });
+});
+
+describe('the result sheet (review of 4 Oct 2026)', () => {
+  const draft = (over: Record<string, unknown> = {}) => ({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', note: '', lines: { A1: 28 }, photoKeys: [], pendingPhotoKey: null, noPhoto: false, savedAt: T0, ...over }) as never;
+  it('a changed result saves without a new photo when the stop already has photos (sent or on the phone); a first result still needs one', async () => {
+    const { canSave, existingPhotos } = await import('@/app/d/[token]/outcome-flow');
+    const [l] = applyQueued(manifest([stop(1, 'ACME', serverResult({ photoIds: ['p1', 'p2', 'p3'] })), stop(2, 'BETA')]), []);
+    expect(existingPhotos(l!.stops[0]!)).toBe(3);
+    expect(canSave(l!.stops[0]!, draft(), true)).toBe(true);
+    expect(canSave(l!.stops[1]!, draft(), true)).toBe(false);
+    expect(canSave(l!.stops[1]!, draft({ noPhoto: true }), true)).toBe(true);
   });
 });

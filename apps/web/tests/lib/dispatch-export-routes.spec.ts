@@ -71,8 +71,9 @@ vi.mock('@/lib/exports/route-sheet-data', async (importActual) => ({
 }));
 vi.mock('@/lib/exports/pdf', () => ({ buildRouteSheetPdf: vi.fn(async () => Buffer.from('%PDF-legacy')) }));
 // Owner request 4 Oct 2026: the driver-link QR per truck-day, ensured only for PLANNER and above.
-const links = vi.hoisted(() => ({ calls: [] as string[], failFor: null as string | null }));
+const links = vi.hoisted(() => ({ calls: [] as string[], failFor: null as string | null, known: [] as Record<string, unknown>[] }));
 vi.mock('@/lib/driver-link/service', () => ({
+  listLinks: vi.fn(async () => links.known),
   ensureLink: vi.fn(async (_t: string, _r: string, truckId: string) => {
     links.calls.push(truckId);
     if (truckId === links.failFor) throw Object.assign(new Error('Plan is being saved'), { status: 409, details: { code: 'PLAN_BUSY' } });
@@ -213,5 +214,16 @@ describe('GET /api/runs/:id/export/pdf prints the driver link for PLANNER and ab
     expect(again.status).toBe(200);
     expect((state.packOpts as { driverLinks: Map<string, unknown> }).driverLinks.get('t1')).toEqual({ kind: 'ASK' });
     expect(state.driverPacks).toBe(2);
+    // Links that already work are read in one batch: no transaction per truck for them.
+    links.failFor = null;
+    links.calls = [];
+    links.known = [{ truckId: 't1', url: 'https://routeiq.example/d/known-t1', revoked: false, driverIdAtIssue: 'd1' }];
+    try {
+      expect((await get(pdfGet, 'withLoads')).status).toBe(200);
+      expect(links.calls).toEqual(['t2']);
+      expect((state.packOpts as { driverLinks: Map<string, unknown> }).driverLinks.get('t1')).toEqual({ kind: 'QR', url: 'https://routeiq.example/d/known-t1' });
+    } finally {
+      links.known = [];
+    }
   });
 });

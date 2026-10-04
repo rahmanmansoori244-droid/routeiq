@@ -2006,7 +2006,21 @@ describe('completeLoadAsDriver: Back at depot closes the trip (delivery outcome,
     expect(row('planLoad', 'L1')).toMatchObject({ status: 'COMPLETED', statusChangedById: null });
     const a = tables.auditLog.find((x) => x.action === 'LOAD_COMPLETED' && x.entityId === 'L1');
     expect(a).toMatchObject({ userId: null, afterJson: expect.objectContaining({ actor: 'Driver link: Salim (T01, back at depot)' }) });
+    // No IP on a row without a user (the driver's IP is erased with the stop events after the retention).
+    expect(a!.ip).toBe(false);
     expect(rawLog.some((s) => /FROM "RunPlan" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(s))).toBe(true);
+  });
+
+  it('closed by a signed-in user (the office recorded the last result): their row, no driver-link actor', async () => {
+    seedAppliedPlan();
+    row('planLoad', 'L1').status = 'DISPATCHED';
+    tables.stopVisit = [visit(1, 'DELIVERED')];
+    expect(await completeLoadAsDriver(T, ref, { userId: 'u-ali', label: null })).toEqual({ completed: true });
+    expect(row('planLoad', 'L1')).toMatchObject({ status: 'COMPLETED', statusChangedById: 'u-ali' });
+    const a = tables.auditLog.find((x) => x.action === 'LOAD_COMPLETED' && x.entityId === 'L1')!;
+    expect(a).toMatchObject({ userId: 'u-ali' });
+    expect(a.afterJson).not.toHaveProperty('actor');
+    expect(a).not.toHaveProperty('ip'); // a user row keeps the request's IP as usual
   });
 
   it('leaves the load DISPATCHED while a stop has no result, and never touches a load that is not DISPATCHED', async () => {

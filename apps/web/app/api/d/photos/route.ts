@@ -2,6 +2,7 @@ import { driverFail, driverOk, withDriverLink } from '@/lib/driver-link/guard';
 import { truckDayResultsFromDb } from '@/lib/delivery/event-service';
 import { MAX_PHOTO_BYTES, MAX_PHOTO_REQUEST_BYTES, photoMetaSchema, recordDriverPhoto } from '@/lib/delivery/photo-service';
 import { prisma } from '@/lib/db';
+import { LIMITS } from '@/lib/rate-limit';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -41,5 +42,5 @@ export const POST = withDriverLink(
     const results = answer.status === 'refused' ? null : await truckDayResultsFromDb(prisma, ctx.tenantId, ctx.truckId, ctx.date, ctx.session ? 'OFFICE' : 'DRIVER');
     return driverOk({ ...answer, ...(results ?? {}) });
   },
-  { limit: 'photo', write: true, allowUploadOnly: true },
+  { limit: 'photo', write: true, allowUploadOnly: true, maxInFlight: LIMITS.driverInFlight },
 );

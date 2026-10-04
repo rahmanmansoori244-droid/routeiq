@@ -50,8 +50,15 @@ export const DELETE = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.truck.findUnique({ where: { id: params.id } }));
-      const assignments = await db.routeAssignment.count({ where: { truckId: params.id } });
-      if (assignments > 0) {
+      // Anything that names the truck keeps it (deactivated, never deleted): plan rows, and the
+      // delivery outcome's driver links and stop visits (NO ACTION keys) - a driver link is made when
+      // driver sheets are printed, even for a truck no plan uses any more.
+      const [assignments, links, visits] = await Promise.all([
+        db.routeAssignment.count({ where: { truckId: params.id } }),
+        db.driverLink.count({ where: { truckId: params.id } }),
+        db.stopVisit.count({ where: { truckId: params.id } }),
+      ]);
+      if (assignments + links + visits > 0) {
         const after = await db.truck.update({ where: { id: params.id }, data: { active: false } });
         await audit({
           tenantId: user.tenantId,

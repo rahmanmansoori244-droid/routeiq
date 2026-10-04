@@ -19,7 +19,7 @@ import {
 import { allCasesOn, leftOutWhole, orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
-import { defaultSearchMode, thoroughMaxSec } from './search-mode';
+import { defaultSearchMode, planSearching, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
@@ -476,8 +476,11 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // Delivery outcome (owner request 4 Oct 2026, spec section 10.3): the day's results, the stops of
   // loads that are back without one, the late-dispatch notes. Read on their own: a failure here never
   // keeps the day screen from loading (the card then says it could not be read).
-  let deliveries: DayDeliveries | null = null;
-  if (plan) {
+  // Not on the polls while a search runs (every 3 s for up to 20 min): undefined = "not read now", the
+  // screen keeps the card it has (a search never changes the results).
+  let deliveries: DayDeliveries | null | undefined = null;
+  if (plan && planSearching({ status: plan.status }, planInfo?.job ? { status: planInfo.job.status } : null)) deliveries = undefined;
+  else if (plan) {
     try {
       deliveries = await dayDeliveries(tenantId, depot.id, date);
     } catch (e) {
@@ -533,7 +536,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * are planned, but cannot be locked, loaded or dispatched (plan-service dataGate).
      */
     loadingGaps: cfg.requireDataBeforeLoading ? dayLoadingGaps(customers, area) : ([] as DataGap[]),
-    /** Delivery results of the day (null without a plan, or when they could not be read). */
+    /** Delivery results of the day (null without a plan, or when they could not be read; absent while a search runs: keep the last). */
     deliveries,
   };
 }

@@ -7,7 +7,7 @@ import { deviceId, fetchManifest, photoUrl, postActions, postPhoto, safeLocalSto
 import { driverNames, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
 import { clockTime, fmtDate, fmtHours, hhmm, LANG_TOGGLE, pickLang, statusLabel, t, type Lang } from '@/lib/driver-page/i18n';
 import { applyQueued, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
-import { betterFix, freshFix, isOldPhoto, positionStatus } from '@/lib/driver-page/photo';
+import { betterFix, freshFix, positionStatus } from '@/lib/driver-page/photo';
 import {
   actionItem,
   flushQueue,
@@ -26,7 +26,7 @@ import {
 import { memoryStore, openIdbStore, phoneTodayIso, photoBlob } from '@/lib/driver-page/store';
 import { zonedDayStart } from '@/lib/dispatch/time';
 import { ArrivedWhen } from './arrived-when';
-import type { TakenPhoto } from './camera-button';
+import type { PhotoPlace, TakenPhoto } from './camera-button';
 import { LinkState } from './link-state';
 import { OutcomeFlow, type DraftPhoto } from './outcome-flow';
 import { ResultChip, StopSheet } from './stop-sheet';
@@ -120,6 +120,9 @@ export function DriverPage() {
   const [manifest, setManifest] = useState<DriverManifest | null>(null);
   const [staleAt, setStaleAt] = useState<number | null>(null);
   const [items, setItems] = useState<QueueItem[]>([]);
+  // The phone's queue was read for the truck-day shown (the tracker waits for it: an unsent arrival
+  // restores its stop with its own time instead of being found again).
+  const [itemsRead, setItemsRead] = useState(false);
   const [sent, setSent] = useState<SentMap>({});
   const [reports, setReports] = useState<Report[]>([]);
   const [online, setOnline] = useState(true);
@@ -150,10 +153,13 @@ export function DriverPage() {
   const sentRef = useRef<SentMap>({});
   const draftsChecked = useRef(false);
   const trackingOnRef = useRef(false);
+  // Bumped each time a send brought results: a manifest asked for before that is older than them.
+  const sendSeq = useRef(0);
 
   const refreshItems = useCallback(async () => {
     if (!store.current || !ns.current) return;
     setItems(await store.current.items(ns.current));
+    setItemsRead(true);
   }, []);
 
   const saveManifest = useCallback(async (m: DriverManifest) => {
@@ -189,12 +195,16 @@ export function DriverPage() {
           const { positionUntil: _u, width: _w, height: _h, ...meta } = item.body as PhotoBody;
           return postPhoto(tok, device.current, meta as unknown as Record<string, unknown>, blob);
         },
+        // Each answer's results are shown BEFORE its items leave the queue (a sent result never vanishes).
+        onResults: async (results) => {
+          sendSeq.current++;
+          if (manifestRef.current) await saveManifest(withResults(manifestRef.current, results));
+        },
       });
       if (Object.keys(r.sentMap).length) {
         sentRef.current = { ...sentRef.current, ...r.sentMap };
         setSent(sentRef.current);
       }
-      if (r.results && manifestRef.current) await saveManifest(withResults(manifestRef.current, r.results));
       if (r.reports.length) setReports((prev) => [...prev, ...r.reports].slice(-30));
       if (r.pauseUntil) pauseUntil.current = r.pauseUntil;
       if (r.dead) {
@@ -225,15 +235,25 @@ export function DriverPage() {
       setPhase({ kind: 'link', code: 'LINK_NOT_FOUND', date: null, uploadOnly: false });
       return;
     }
+    const asked = sendSeq.current;
     const a = await fetchManifest(tok, device.current);
     if (a.kind === 'ok') {
       const m = a.manifest;
       const n = nsOf(m.truck.id, m.date);
+      // A send answered while this manifest was on its way: the manifest may predate those results
+      // (read on the server before they were stored). The page keeps what it has; the next read is fresh.
+      if (asked !== sendSeq.current && manifestRef.current && ns.current === n) {
+        void flush();
+        return;
+      }
       if (ns.current !== n) {
         ns.current = n;
+        setItemsRead(false);
         const kept = await store.current?.getManifest<DriverManifest>(n).catch(() => null);
         sentRef.current = kept?.sent ?? sentRef.current;
         setSent(sentRef.current);
+        // The queue first, then the manifest: the tracker starts from both together.
+        await refreshItems();
       }
       await saveManifest(m);
       setStaleAt(null);
@@ -306,6 +326,9 @@ export function DriverPage() {
           trackingOnRef.current = entry.trackingOn;
           setResume(entry.trackingOn);
           const kept = await s.getManifest<DriverManifest>(entry.ns).catch(() => null);
+          // The queue BEFORE the kept manifest: the tracker restores a stop in progress from both (an
+          // arrival still waiting to send keeps its time instead of being found again).
+          await refreshItems();
           if (kept && !manifestRef.current) {
             sentRef.current = kept.sent ?? {};
             setSent(sentRef.current);
@@ -314,7 +337,6 @@ export function DriverPage() {
             setStaleAt(kept.savedAt);
             setPhase({ kind: 'ready' });
           }
-          await refreshItems();
         }
       }
       try {
@@ -428,6 +450,7 @@ export function DriverPage() {
       trackingOnRef.current = on;
       if (store.current && ns.current) void store.current.putLink(linkKey.current, { ns: ns.current, trackingOn: on }).catch(() => {});
     },
+    ready: itemsRead,
   });
 
   // ---------------------------------------------------------------- results
@@ -510,10 +533,15 @@ export function DriverPage() {
     void enqueue({ key: newKey(), type: 'OUTCOME', stop: stopKey, at: new Date().toISOString(), pos: posOf(tracker.lastFix()), outcome: null, photoKeys: [] }, false);
   };
 
-  const beforeCamera = async (): Promise<string> => {
-    const key = newKey();
-    if (entering) await putDraft(entering.stopKey, { ...entering.draft, pendingPhotoKey: key, savedAt: Date.now() });
-    return key;
+  // Not awaited by the camera (it opens inside the tap); the write ends long before the camera returns.
+  const beforeCamera = (key: string) => {
+    if (entering) void putDraft(entering.stopKey, { ...entering.draft, pendingPhotoKey: key, savedAt: Date.now() });
+  };
+
+  // Asked the moment the photo comes back from the camera: a fresh fix, and the tracker's last fix then.
+  const locatePhoto = (): PhotoPlace => {
+    const last = tracker.lastFix();
+    return { fresh: freshFix(), last: last ? { lat: last.lat, lng: last.lng, accuracyM: last.accuracyM, at: last.at } : null };
   };
 
   const addPhoto = async (p: TakenPhoto) => {
@@ -521,7 +549,6 @@ export function DriverPage() {
     const s = store.current;
     const n = ns.current;
     const stopKey = entering.stopKey;
-    const found = stopOf(stopKey);
     const now = Date.now();
     const body: PhotoBody = {
       key: p.key,
@@ -529,9 +556,8 @@ export function DriverPage() {
       takenAt: new Date(p.takenAt).toISOString(),
       positionStatus: 'TIMEOUT',
       pos: null,
-      exif: p.exif ? { lat: p.exif.lat, lng: p.exif.lng, takenAt: p.exif.takenAt ? new Date(p.exif.takenAt).toISOString() : null } : null,
+      exif: p.exif ? { lat: p.exif.lat, lng: p.exif.lng, takenAt: p.exif.takenAt ? new Date(p.exif.takenAt).toISOString() : null, zoned: p.exif.zoned } : null,
       fileLastModified: p.fileLastModified ? new Date(p.fileLastModified).toISOString() : null,
-      oldPhoto: isOldPhoto(p.exif?.takenAt ?? null, p.fileLastModified, found?.stop.view.arrivedAt ?? null),
       positionUntil: now + 15_000,
       width: p.width,
       height: p.height,
@@ -539,10 +565,10 @@ export function DriverPage() {
     await s.put([{ key: p.key, ns: n, kind: 'photo', state: 'draft', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo: Number(stopKey.split(':')[0]), body, blob: p.blob }]);
     setDraftPhotos((prev) => ({ ...prev, [p.key]: { url: URL.createObjectURL(p.blob), positionStatus: null } }));
     await putDraft(stopKey, { ...entering.draft, photoKeys: [...entering.draft.photoKeys, p.key], pendingPhotoKey: null, savedAt: Date.now() });
-    // The position: Save never waits for it; the photo is held at most 15 s for it.
-    const fresh = await freshFix();
-    const last = tracker.lastFix();
-    const fix = betterFix(fresh.fix, last ? { lat: last.lat, lng: last.lng, accuracyM: last.accuracyM, at: last.at } : null, p.cameraOpenedAt);
+    // The position asked when the photo came back (never where "Use photo" was tapped); Save never
+    // waits for it, the photo is held at most 15 s for it.
+    const fresh = await p.place.fresh;
+    const fix = betterFix(fresh.fix, p.place.last, p.cameraOpenedAt);
     const status = positionStatus(fix, fresh.error);
     const current = (await s.items(n)).find((i) => i.key === p.key);
     if (current) {
@@ -622,6 +648,7 @@ export function DriverPage() {
           photoRequired={manifest?.settings.photoRequired ?? true}
           onDraft={(d) => void putDraft(entering.stopKey, d)}
           onBeforeCamera={beforeCamera}
+          onLocate={locatePhoto}
           onPhoto={(p) => void addPhoto(p)}
           onRemovePhoto={(k) => void removePhoto(k)}
           onSave={() => void saveResult()}
@@ -737,10 +764,11 @@ export function DriverPage() {
         />
       ) : null}
       {whenStop && !tracker.whichCustomer ? <ArrivedWhen lang={lang} customer={whenStop.stop.customerName} onAnswer={(m) => tracker.answerWhen(whenStop.stop.key, m)} /> : null}
-      {(confirmBack !== null || (tracker.backSuggested && tracker.trip)) && overlay ? (
+      {/* The suggestion names the trip it was raised for, and only while that trip is still the current one. */}
+      {(confirmBack !== null || (tracker.backSuggested !== null && tracker.trip?.loadNo === tracker.backSuggested)) && overlay ? (
         <BackAtDepotDialog
           lang={lang}
-          load={overlay.find((l) => l.loadNo === (confirmBack ?? tracker.trip?.loadNo)) ?? null}
+          load={overlay.find((l) => l.loadNo === (confirmBack ?? tracker.backSuggested)) ?? null}
           onYes={(n) => backAtDepot(n)}
           onNo={() => {
             setConfirmBack(null);

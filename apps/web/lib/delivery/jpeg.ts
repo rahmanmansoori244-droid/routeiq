@@ -150,6 +150,8 @@ export interface ExifFacts {
   lng: number | null;
   /** DateTimeOriginal with OffsetTimeOriginal, else read in the company's time zone. */
   takenAt: Date | null;
+  /** takenAt came with its own offset (an instant); false = a local phone-clock time read in the company zone. */
+  zoned: boolean;
 }
 
 interface Tiff {
@@ -269,9 +271,12 @@ export function readExif(bytes: Uint8Array, tz: string): ExifFacts | null {
         const exifPtr = ifd0.get(0x8769);
         const gpsPtr = ifd0.get(0x8825);
         let takenAt: Date | null = null;
+        let zoned = false;
         if (exifPtr) {
           const ex = ifd(t, rd32(t, exifPtr.at), limit);
-          takenAt = exifTime(ascii(t, ex.get(0x9003)), ascii(t, ex.get(0x9011)), tz);
+          const offset = ascii(t, ex.get(0x9011));
+          takenAt = exifTime(ascii(t, ex.get(0x9003)), offset, tz);
+          zoned = !!takenAt && /^[+-]\d{2}:\d{2}$/.test(offset ?? '');
         }
         let lat: number | null = null;
         let lng: number | null = null;
@@ -284,7 +289,7 @@ export function readExif(bytes: Uint8Array, tz: string): ExifFacts | null {
             lng = null;
           }
         }
-        return lat === null && takenAt === null ? null : { lat, lng, takenAt };
+        return lat === null && takenAt === null ? null : { lat, lng, takenAt, zoned };
       }
       i += 2 + len;
     }

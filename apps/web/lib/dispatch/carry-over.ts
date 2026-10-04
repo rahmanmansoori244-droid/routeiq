@@ -1026,9 +1026,10 @@ async function carryFollowUps(
       });
     }
   }
-  // Copies on day D that no plan version refers to (no route row, no unserved row): Undo can remove them.
+  // Copies on day D that no plan version refers to (no route row, no unserved row) and that were not
+  // brought forward again themselves: Undo can remove them.
   const copiesOnD = await db.order.findMany({
-    where: { tenantId, depotId, deliveryDate: dateOnly(date), carriedFromOrderId: { not: null } },
+    where: { tenantId, depotId, deliveryDate: dateOnly(date), carriedFromOrderId: { not: null }, carriedToOrderId: null },
     select: { id: true, carriedFromOrderId: true, totalCases: true, carriedFrom: { select: { deliveryDate: true } }, customer: { select: { code: true, branchCode: true, name: true } } },
   });
   const undoable: UndoableCarry[] = [];
@@ -1337,7 +1338,7 @@ export async function bringForward(
 // Undo bring forward (delivery outcome, spec section 9.4)
 // ---------------------------------------------------------------------------------------
 
-export type UndoRefusalCode = 'COPY_NOT_FOUND' | 'COPY_PLANNED' | 'COPY_ON_ROAD' | 'PLAN_BUSY';
+export type UndoRefusalCode = 'COPY_NOT_FOUND' | 'COPY_PLANNED' | 'COPY_ON_ROAD' | 'COPY_CARRIED_AGAIN' | 'PLAN_BUSY';
 
 export interface UndoCarryResult {
   undone: true;
@@ -1370,12 +1371,24 @@ export async function undoCheck(
   if (!original?.carriedToOrderId) return none;
   const copy = await db.order.findFirst({
     where: { id: original.carriedToOrderId, tenantId },
-    select: { id: true, deliveryDate: true, depotId: true, totalCases: true, carriedFromOrderId: true, customer: { select: { code: true, branchCode: true } } },
+    select: { id: true, deliveryDate: true, depotId: true, totalCases: true, carriedFromOrderId: true, carriedToOrderId: true, customer: { select: { code: true, branchCode: true } } },
   });
   if (!copy || copy.carriedFromOrderId !== original.id) return none;
   const copyDate = isoOf(copy.deliveryDate);
   const day = fmtDayMonth(copyDate);
   const who = custLabel(copy.customer);
+  // The copy was itself brought forward again (O -> C -> C2): C2 points at C, so C cannot go first.
+  if (copy.carriedToOrderId) {
+    const next = await db.order.findFirst({ where: { id: copy.carriedToOrderId, tenantId }, select: { deliveryDate: true } });
+    const nextDay = next ? fmtDayMonth(isoOf(next.deliveryDate)) : 'a later day';
+    return {
+      ok: false,
+      code: 'COPY_CARRIED_AGAIN',
+      text: `${who}'s copy on ${day} was brought forward again to ${nextDay}: undo that first (on ${nextDay}'s Bring forward panel).`,
+      copyId: copy.id,
+      copyDate,
+    };
+  }
   const [rows, unserved] = await Promise.all([
     db.routeAssignment.findMany({ where: { orderId: copy.id }, select: { load: { select: { status: true } } } }),
     db.unservedOrder.findMany({ where: { orderId: copy.id }, select: { orderId: true } }),

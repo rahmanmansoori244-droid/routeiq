@@ -42,6 +42,12 @@ export interface TrackerOptions {
   /** Tracking restarts by itself after a reload when it was on and location is already allowed. */
   resume: boolean;
   onTrackingChange: (on: boolean) => void;
+  /**
+   * The phone's queue has been read for these loads (default true). Until then the trip is not
+   * started: an arrival still waiting to send would be missing from `loads`, the stop would not be
+   * restored, and the tracker would find it again ("Arrived when?").
+   */
+  ready?: boolean;
 }
 
 export interface TrackerApi {
@@ -51,7 +57,8 @@ export interface TrackerApi {
   trip: { loadNo: number; held: boolean } | null;
   whichCustomer: string[] | null;
   arrivedWhen: string | null;
-  backSuggested: boolean;
+  /** "Back at depot?" suggested for this trip (load number), null = none; cleared when the trip changes. */
+  backSuggested: number | null;
   lastFix: () => Fix | null;
   start: () => void;
   stop: () => void;
@@ -78,7 +85,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   const [state, setState] = useState<TrackerState>(initialTracker());
   const [whichCustomer, setWhich] = useState<string[] | null>(null);
   const [arrivedWhen, setWhen] = useState<string | null>(null);
-  const [backSuggested, setBack] = useState(false);
+  const [backSuggested, setBack] = useState<number | null>(null);
   const stateRef = useRef<TrackerState>(state);
   const fixRef = useRef<Fix | null>(null);
   const watchRef = useRef<number | null>(null);
@@ -117,15 +124,19 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
     setState(s);
   }, []);
 
-  // A new trip (or the first manifest): the tracker starts from the server's and the phone's state.
+  // A new trip (or the first manifest): the tracker starts from the server's and the phone's state -
+  // once the phone's queue was read (an unsent arrival restores its stop with its own time).
+  const ready = opts.ready !== false;
   useEffect(() => {
     const k = trip ? `${trip.loadNo}|${trip.held}` : '';
-    if (k === tripKey.current || !opts.loads) return;
+    if (k === tripKey.current || !opts.loads || !ready) return;
     tripKey.current = k;
     setTracker(trip ? restoreTracker(stopInProgress(opts.loads, trip.loadNo)) : initialTracker());
     setWhich(null);
     setWhen(null);
-  }, [trip, opts.loads, setTracker]);
+    // A "Back at depot?" raised for the trip before belongs to that trip only.
+    setBack(null);
+  }, [trip, opts.loads, ready, setTracker]);
 
   const emit = useCallback((events: TrackEvent[]) => {
     const held = !!tripRef.current?.held;
@@ -157,7 +168,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
     for (const p of r.prompts) {
       if (p.kind === 'WHICH_CUSTOMER') setWhich(p.keys);
       else if (p.kind === 'ARRIVED_WHEN') setWhen(p.key);
-      else setBack(true);
+      else if (tripRef.current && !tripRef.current.held) setBack(tripRef.current.loadNo);
     }
     if (r.state.phase === 'SEEKING' && !r.state.ambiguous) setWhich(null);
     const f = fixRef.current;
@@ -317,6 +328,6 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
     manualArrive,
     answerWhen,
     chooseCustomer,
-    dismissBack: () => setBack(false),
+    dismissBack: () => setBack(null),
   };
 }

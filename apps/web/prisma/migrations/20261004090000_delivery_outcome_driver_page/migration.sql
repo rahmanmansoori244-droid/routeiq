@@ -214,6 +214,12 @@ CREATE INDEX "StopEvent_tenantId_deliveryDate_truckId_idx" ON "StopEvent"("tenan
 CREATE INDEX "StopEvent_visitId_at_idx" ON "StopEvent"("visitId", "at");
 
 -- CreateIndex
+CREATE INDEX "StopEvent_kind_receivedAt_idx" ON "StopEvent"("kind", "receivedAt");
+
+-- CreateIndex
+CREATE INDEX "StopEvent_tenantId_receivedAt_idx" ON "StopEvent"("tenantId", "receivedAt");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "StopEvent_tenantId_idempotencyKey_key" ON "StopEvent"("tenantId", "idempotencyKey");
 
 -- CreateIndex
@@ -221,6 +227,9 @@ CREATE INDEX "DeliveryPhoto_visitId_idx" ON "DeliveryPhoto"("visitId");
 
 -- CreateIndex
 CREATE INDEX "DeliveryPhoto_tenantId_receivedAt_idx" ON "DeliveryPhoto"("tenantId", "receivedAt");
+
+-- CreateIndex
+CREATE INDEX "DeliveryPhoto_driverLinkId_idx" ON "DeliveryPhoto"("driverLinkId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "DeliveryPhoto_tenantId_idempotencyKey_key" ON "DeliveryPhoto"("tenantId", "idempotencyKey");

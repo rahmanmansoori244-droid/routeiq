@@ -5,7 +5,7 @@ import { Download, PackageCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { kpiHeadline, kpiOnTimeText } from '@/lib/delivery/kpis';
-import { reasonLabel } from '@/lib/delivery/office-text';
+import { ACTUALS_MAX_DAYS, actualsDefaultRange, actualsRangeProblem, actualsUrl, reasonLabel } from '@/lib/delivery/office-text';
 import { noOutcomeGroups } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
@@ -15,8 +15,8 @@ import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
  * a result, delivered in full / partly / not delivered, the reasons with their cases, arrivals inside
  * the window (observed arrivals only), "no photo: camera failed" and "recorded after the trip closed";
  * then the stops of loads that are back with no result (grouped per truck, with Record), and the
- * late-dispatch notes. The "Delivery actuals" Excel of the day for dispatchers. A day before the
- * feature started says so instead.
+ * late-dispatch notes. The "Delivery actuals" Excel of the day for dispatchers, and of a From / To
+ * range (at most 31 days). A day before the feature started says so instead.
  */
 export function DeliverySummary({
   deliveries,
@@ -52,12 +52,13 @@ export function DeliverySummary({
         </p>
         {canPlan ? (
           <Button asChild variant="outline" size="sm">
-            <a href={`/api/dispatch/delivery-actuals?from=${date}&to=${date}&depotId=${encodeURIComponent(depotId)}`} data-testid="delivery-actuals">
+            <a href={actualsUrl(date, date, depotId)} data-testid="delivery-actuals">
               <Download className="mr-1 h-4 w-4" /> Delivery actuals (Excel)
             </a>
           </Button>
         ) : null}
       </div>
+      {canPlan ? <ActualsRange key={date} date={date} depotId={depotId} /> : null}
       <p data-testid="deliveries-headline">{kpiHeadline(k)}</p>
       {k.byReason.length ? (
         <p className="text-xs text-muted-foreground" data-testid="deliveries-reasons">
@@ -132,5 +133,36 @@ export function DeliverySummary({
         onSaved={onRecorded}
       />
     </div>
+  );
+}
+
+/** "Delivery actuals" for several days: From / To (the last 7 days by default, at most 31), this depot. */
+function ActualsRange({ date, depotId }: { date: string; depotId: string }) {
+  const [range, setRange] = useState(() => actualsDefaultRange(date));
+  const problem = actualsRangeProblem(range.from, range.to);
+  return (
+    <details className="text-xs" data-testid="delivery-actuals-range">
+      <summary className="cursor-pointer text-muted-foreground">Delivery actuals for several days</summary>
+      <div className="mt-1 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col gap-0.5">
+          From
+          <input type="date" className="h-8 rounded-md border px-2" value={range.from} max={range.to} onChange={(e) => setRange((r) => ({ ...r, from: e.target.value }))} />
+        </label>
+        <label className="flex flex-col gap-0.5">
+          To
+          <input type="date" className="h-8 rounded-md border px-2" value={range.to} min={range.from} onChange={(e) => setRange((r) => ({ ...r, to: e.target.value }))} />
+        </label>
+        {problem ? (
+          <span className="text-amber-700">{problem}</span>
+        ) : (
+          <Button asChild variant="outline" size="sm">
+            <a href={actualsUrl(range.from, range.to, depotId)} data-testid="delivery-actuals-range-download">
+              <Download className="mr-1 h-4 w-4" /> Download (Excel)
+            </a>
+          </Button>
+        )}
+        <span className="text-muted-foreground">At most {ACTUALS_MAX_DAYS} days at a time.</span>
+      </div>
+    </details>
   );
 }

@@ -519,6 +519,18 @@ describe('the words on every screen and paper', () => {
         '1 of them were orders of today (27 Sep): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (a loading one goes Back to locked first; unload a loaded one).',
     );
     expect(carryDoneText({ ...done, carried: [{ fromDate: D2 }] }, D, D1)).not.toMatch(/today/);
+    // Orders of today recorded as not delivered (their truck is back): nothing to re-plan, unlock or unload.
+    const recorded = { ...done, carried: [{ fromDate: D1, basis: [{ visitId: 'V1', lines: [{ lineId: 'L', notDelivered: 20 }] }] }] };
+    const text = carryDoneText(recorded, D, D1);
+    expect(text).toBe(
+      '2 order(s) (30 cases) brought forward to 28 Sep. RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are. ' +
+        "1 of them were recorded as not delivered today (27 Sep): nothing to do on today's plan.",
+    );
+    expect(text).not.toMatch(/unlock|unload|re-plan today/);
+    // Both kinds: each gets its own sentence.
+    const both = carryDoneText({ ...done, carried: [...recorded.carried, { fromDate: D1, basis: [] }] }, D, D1);
+    expect(both).toContain("1 of them were recorded as not delivered today (27 Sep): nothing to do on today's plan.");
+    expect(both).toContain('1 of them were orders of today (27 Sep): a load of today that still holds one cannot be locked');
   });
 
   it("today's rows say \"Load not left yet\" / \"Not planned\" (never \"never\"), and the button's count names today's ticked orders", () => {

@@ -1205,6 +1205,10 @@ model StopEvent {
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, deliveryDate, truckId])
   @@index([visitId, at])
+  /// The janitor's returned-loads sweep (kind BACK_AT_DEPOT, newest first).
+  @@index([kind, receivedAt])
+  /// The location retention sweep (per company, by receipt time).
+  @@index([tenantId, receivedAt])
 }
 
 /// A delivery photo: compressed JPEG in the database. bytes = NULL once the retention janitor
@@ -1250,4 +1254,6 @@ model DeliveryPhoto {
   @@unique([tenantId, idempotencyKey])
   @@index([visitId])
   @@index([tenantId, receivedAt])
+  /// The daily photo cap per driver link.
+  @@index([driverLinkId])
 }

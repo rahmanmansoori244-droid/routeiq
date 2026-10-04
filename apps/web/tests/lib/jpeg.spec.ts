@@ -94,6 +94,7 @@ describe('readExif', () => {
     expect(e.lat).toBeCloseTo(23.5859, 4);
     expect(e.lng).toBeCloseTo(58.4059, 4);
     expect(e.takenAt?.toISOString()).toBe('2026-10-05T05:12:30.000Z');
+    expect(e.zoned).toBe(true);
   });
 
   it('reads S and W as negative, and a big-endian (MM) block', () => {
@@ -106,6 +107,8 @@ describe('readExif', () => {
   it('an EXIF time without an offset is read in the company time zone', () => {
     const e = readExif(jpeg([exifApp1({ time: '2026:10:05 09:12:30' })]), TZ)!;
     expect(e.takenAt?.toISOString()).toBe('2026-10-05T05:12:30.000Z');
+    // A local phone-clock time: not an instant (the "taken earlier" check ignores it).
+    expect(e.zoned).toBe(false);
     expect(e.lat).toBeNull();
     expect(exifTime('2026:10:05 09:12:30', '-03:30', TZ)?.toISOString()).toBe('2026-10-05T12:42:30.000Z');
     expect(exifTime('not a time', null, TZ)).toBeNull();

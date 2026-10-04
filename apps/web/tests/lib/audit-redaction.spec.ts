@@ -58,4 +58,14 @@ describe('redactForAudit', () => {
     expect(data.afterJson).toEqual({ code: 'D1', name: 'N' });
     expect(JSON.stringify(data)).not.toMatch(/\$2[aby]\$\d\d\$/);
   });
+
+  it('ip: false writes no IP at all - not even the request\'s (driver-link rows: the IP is erased with the stop events)', async () => {
+    const create = vi.fn(async (args: unknown) => args);
+    const tx = { auditLog: { create } } as never;
+    await audit({ tenantId: 't1', action: 'DELIVERY_OUTCOME_SET', entity: 'StopVisit', entityId: 'v1', afterJson: { actor: 'Driver link: Salim (T05, 5 Oct) · link #1' }, ip: false }, tx);
+    await audit({ tenantId: 't1', action: 'UPDATE', entity: 'Driver', entityId: 'd1', ip: '203.0.113.1' }, tx);
+    const rows = create.mock.calls.map((c) => (c[0] as { data: Record<string, unknown> }).data);
+    expect(rows[0]!.ip).toBeUndefined();
+    expect(rows[1]!.ip).toBe('203.0.113.1');
+  });
 });

@@ -5,7 +5,8 @@ import { NOT_DELIVERED_REASONS, type NotDeliveredReasonName, type OutcomeName, t
 import { positionLabel, reasonLabel, t, type Lang } from '@/lib/driver-page/i18n';
 import type { OverlayStop } from '@/lib/driver-page/overlay';
 import type { Draft } from '@/lib/driver-page/queue';
-import { CameraButton, type TakenPhoto } from './camera-button';
+import { casesFromInput } from '@/lib/driver-page/format';
+import { CameraButton, type PhotoPlace, type TakenPhoto } from './camera-button';
 
 /** A photo of the result being entered, as the flow shows it. */
 export interface DraftPhoto {
@@ -14,8 +15,16 @@ export interface DraftPhoto {
   positionStatus: PhotoPositionStatusName | null;
 }
 
-/** Whether the entered result can be saved (pure; the server checks the same rules again). */
-export function canSave(stop: Pick<OverlayStop, 'orders'>, d: Draft, photoRequired: boolean): boolean {
+/** The stop's photos already taken for an earlier result (sent, or still on the phone): they are its proof. */
+export function existingPhotos(stop: { view: Pick<OverlayStop['view'], 'photoIds' | 'localPhotos'> }): number {
+  return stop.view.photoIds.length + stop.view.localPhotos;
+}
+
+/**
+ * Whether the entered result can be saved (pure; the server checks the same rules again). A changed
+ * or redone result needs no new photo when the stop already has one (at 3 photos no other can be taken).
+ */
+export function canSave(stop: Pick<OverlayStop, 'orders'> & { view?: Pick<OverlayStop['view'], 'photoIds' | 'localPhotos'> }, d: Draft, photoRequired: boolean): boolean {
   if (!d.outcome) return false;
   if (d.outcome !== 'DELIVERED') {
     if (!d.reason) return false;
@@ -27,7 +36,8 @@ export function canSave(stop: Pick<OverlayStop, 'orders'>, d: Draft, photoRequir
     const total = lines.reduce((a, l) => a + (d.lines[l.lineId] ?? l.cases), 0);
     if (total <= 0) return false;
   }
-  if (photoRequired && d.outcome !== 'NOT_DELIVERED' && !d.photoKeys.length && !d.noPhoto) return false;
+  const kept = stop.view ? existingPhotos({ view: stop.view }) : 0;
+  if (photoRequired && d.outcome !== 'NOT_DELIVERED' && !d.photoKeys.length && !d.noPhoto && !kept) return false;
   return true;
 }
 
@@ -47,6 +57,7 @@ export function OutcomeFlow({
   photoRequired,
   onDraft,
   onBeforeCamera,
+  onLocate,
   onPhoto,
   onRemovePhoto,
   onSave,
@@ -61,7 +72,8 @@ export function OutcomeFlow({
   maxPhotos: number;
   photoRequired: boolean;
   onDraft: (d: Draft) => void;
-  onBeforeCamera: () => Promise<string>;
+  onBeforeCamera: (key: string) => void;
+  onLocate: () => PhotoPlace;
   onPhoto: (p: TakenPhoto) => void;
   onRemovePhoto: (key: string) => void;
   onSave: () => void;
@@ -72,7 +84,9 @@ export function OutcomeFlow({
   const set = (patch: Partial<Draft>) => onDraft({ ...draft, ...patch, savedAt: Date.now() });
   const lines = stop.orders.flatMap((o) => o.lines);
   const needsReason = outcome !== 'DELIVERED';
-  const photoNeeded = photoRequired && outcome !== 'NOT_DELIVERED';
+  const kept = existingPhotos(stop);
+  // A changed result: the stop's photos already taken are its proof.
+  const photoNeeded = photoRequired && outcome !== 'NOT_DELIVERED' && !kept;
   const ok = canSave(stop, draft, photoRequired);
   const total = lines.reduce((a, l) => a + (draft.lines[l.lineId] ?? l.cases), 0);
   const title = outcome === 'DELIVERED' ? t(lang, 'delivered') : outcome === 'PARTLY_DELIVERED' ? t(lang, 'partly') : t(lang, 'notDelivered');
@@ -99,7 +113,7 @@ export function OutcomeFlow({
                 <input
                   inputMode="numeric"
                   value={v}
-                  onChange={(e) => put(Number(e.target.value.replace(/\D/g, '')) || 0)}
+                  onChange={(e) => put(casesFromInput(e.target.value))}
                   className="h-12 w-16 rounded-lg border border-slate-400 text-center text-lg font-bold"
                   aria-label={t(lang, 'casesDelivered')}
                 />
@@ -149,7 +163,8 @@ export function OutcomeFlow({
 
       <div className="space-y-2">
         <p className="font-bold">
-          {photoNeeded ? t(lang, 'photoRequired') : t(lang, 'photosLabel', { n: photos.length })} · {t(lang, 'photoLimit', { n: maxPhotos })}
+          {photoNeeded ? t(lang, 'photoRequired') : t(lang, 'photosLabel', { n: photos.length + kept })}
+          {maxPhotos > 0 ? ` · ${t(lang, 'photoLimit', { n: maxPhotos })}` : ''}
         </p>
         {photos.length ? (
           <div className="grid grid-cols-3 gap-2">
@@ -178,7 +193,9 @@ export function OutcomeFlow({
             ))}
           </div>
         ) : null}
-        {photos.length < maxPhotos ? <CameraButton lang={lang} tz={tz} disabled={false} onBeforeOpen={onBeforeCamera} onUse={onPhoto} onCameraSlow={onCameraSlow} /> : null}
+        {photos.length < maxPhotos ? (
+          <CameraButton lang={lang} tz={tz} disabled={false} onBeforeOpen={onBeforeCamera} onLocate={onLocate} onUse={onPhoto} onCameraSlow={onCameraSlow} />
+        ) : null}
         {photoNeeded && !photos.length ? (
           <button
             type="button"

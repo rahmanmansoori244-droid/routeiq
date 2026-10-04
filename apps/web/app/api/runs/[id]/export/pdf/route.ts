@@ -6,7 +6,7 @@ import { buildRouteSheetPdf } from '@/lib/exports/pdf';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { driverPackModel, renderDriverPackPdf, type SheetDriverLink } from '@/lib/dispatch/driver-pack';
 import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
-import { ensureLink } from '@/lib/driver-link/service';
+import { ensureLink, listLinks } from '@/lib/driver-link/service';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -30,7 +30,19 @@ const safe = (s: string) => s.replace(/[^A-Za-z0-9_-]+/g, '_') || 'X';
 
 async function packDriverLinks(user: AuthedContext['user'], runId: string, truckIds: string[], origin: string): Promise<Map<string, SheetDriverLink | null>> {
   const out = new Map<string, SheetDriverLink | null>();
+  // The links that exist and work already, read in one batch: only the others go through ensureLink
+  // (one transaction each: a new link, a rotated server key, a link made before a driver was set).
+  const known = new Map((await listLinks(user.tenantId, runId, { origin }).catch(() => [])).map((v) => [v.truckId, v]));
   for (const truckId of truckIds) {
+    const v = known.get(truckId);
+    if (v?.url && v.driverIdAtIssue) {
+      out.set(truckId, { kind: 'QR', url: v.url });
+      continue;
+    }
+    if (v?.revoked) {
+      out.set(truckId, { kind: 'STOPPED' });
+      continue;
+    }
     try {
       const v = await ensureLink(user.tenantId, runId, truckId, user.id, { origin });
       out.set(truckId, v.url ? { kind: 'QR', url: v.url } : v.revoked ? { kind: 'STOPPED' } : { kind: 'ASK' });

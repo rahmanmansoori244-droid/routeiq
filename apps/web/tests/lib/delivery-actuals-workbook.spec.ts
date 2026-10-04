@@ -11,6 +11,7 @@ vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fake
 
 import { ACTUALS_COLUMNS, actualsRowOf, buildActualsWorkbook, readActuals } from '@/lib/delivery/actuals-workbook';
 import { deliveryKpis, type KpiVisit } from '@/lib/delivery/kpis';
+import { actualsDefaultRange, actualsRangeProblem, actualsUrl, officeTimesPrefill, officeTimesToSend } from '@/lib/delivery/office-text';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
 const TZ = 'Asia/Muscat';
@@ -49,6 +50,28 @@ describe('the actuals rows (spec 11.3)', () => {
     expect(office).toMatchObject({ arrivalBy: 'Office', noPhotoReason: 'Office result', recordedBy: 'Dispatcher Ali' });
   });
 
+  it('"Actual unloading" is the value the plan screen shows (actualMinutes): office and manual timings too; "Timed by" names it', () => {
+    // A phone-less daily driver: the dispatcher typed Arrived 10:05, Left 10:30.
+    const office = actualsRowOf(
+      stop,
+      visit({ arrivalSource: 'DISPATCHER', departureSource: 'DISPATCHER', arrivedAt: at(605), departedAt: at(630), autoArrivedAt: null, autoServiceMinutes: null, autoMinutes: null, autoBasis: null, outcomeSource: 'DISPATCHER' }) as never,
+      [],
+      TZ,
+    );
+    expect(office).toMatchObject({ actualUnloadMin: 25, timedBy: 'Office' });
+    // "I have arrived" (manual) and the driver's result 18 min later.
+    const manual = actualsRowOf(
+      stop,
+      visit({ arrivalSource: 'PHONE_MANUAL', arrivedAt: at(600), departedAt: at(618), departedAtOutcome: true, autoArrivedAt: null, autoServiceMinutes: null, autoMinutes: null, autoBasis: null }) as never,
+      [],
+      TZ,
+    );
+    expect(manual).toMatchObject({ actualUnloadMin: 18, timedBy: 'Result time' });
+    // Nothing to show: no "Timed by" either.
+    const none = actualsRowOf(stop, visit({ arrivedAt: null, departedAt: null, autoArrivedAt: null, autoServiceMinutes: null, autoMinutes: null, autoBasis: null, arrivalSource: null }) as never, [], TZ);
+    expect(none).toMatchObject({ actualUnloadMin: null, timedBy: null });
+  });
+
   it('the workbook: Stops, Summary and Reasons; the headers; one row per stop; no money anywhere', async () => {
     const rows = [actualsRowOf(stop, visit() as never, [], TZ), actualsRowOf({ ...stop, sequence: 4 }, visit({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0 }) as never, [], TZ)];
     const kpis = deliveryKpis([visit() as never, visit({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0 }) as never]);
@@ -65,6 +88,30 @@ describe('the actuals rows (spec 11.3)', () => {
     for (const money of ['cost', 'price', 'sales', 'margin', 'omr', 'payment amount', 'revenue']) expect(all).not.toContain(money);
     const reasons = wb.getWorksheet('Reasons')!;
     expect((reasons.getRow(2).values as unknown[]).slice(1)).toEqual(['Shop closed', 1, 40]);
+  });
+});
+
+describe('the range picker on the Deliveries card (D9c: a day or a range)', () => {
+  it('defaults to the 7 days up to the day on screen; at most 31 days; the same URL the route reads', () => {
+    expect(actualsDefaultRange('2026-10-07')).toEqual({ from: '2026-10-01', to: '2026-10-07' });
+    expect(actualsRangeProblem('2026-10-01', '2026-10-07')).toBeNull();
+    expect(actualsRangeProblem('2026-09-01', '2026-10-01')).toBeNull(); // 31 days
+    expect(actualsRangeProblem('2026-09-01', '2026-10-02')).toBe('At most 31 days at a time.');
+    expect(actualsRangeProblem('2026-10-07', '2026-10-01')).toBe('"To" must not be before "From".');
+    expect(actualsRangeProblem('', '2026-10-01')).toBe('Choose both dates.');
+    expect(actualsUrl('2026-10-01', '2026-10-07', 'DA')).toBe('/api/dispatch/delivery-actuals?from=2026-10-01&to=2026-10-07&depotId=DA');
+  });
+});
+
+describe('Record outcome: the stored Arrived / Left (review of 4 Oct 2026)', () => {
+  it('prefills the stored times (never the result time as Left) and sends only a box the dispatcher changed', () => {
+    const shown = officeTimesPrefill({ arrivedAt: at(605).toISOString(), departedAt: at(630).toISOString(), departedAtOutcome: false }, TZ);
+    expect(shown).toEqual({ arrived: '10:05', left: '10:30' });
+    expect(officeTimesPrefill({ arrivedAt: at(605).toISOString(), departedAt: at(1050).toISOString(), departedAtOutcome: true }, TZ)).toEqual({ arrived: '10:05', left: '' });
+    expect(officeTimesPrefill(null, TZ)).toEqual({ arrived: '', left: '' });
+    expect(officeTimesToSend(shown, shown)).toEqual({ arrivedAt: null, departedAt: null });
+    expect(officeTimesToSend({ arrived: '09:55', left: '10:30' }, shown)).toEqual({ arrivedAt: '09:55', departedAt: null });
+    expect(officeTimesToSend({ arrived: '', left: '10:40' }, { arrived: '', left: '' })).toEqual({ arrivedAt: null, departedAt: '10:40' });
   });
 });
 

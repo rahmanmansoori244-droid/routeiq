@@ -9,7 +9,8 @@ export const dynamic = 'force-dynamic';
 // (casual) driver from a load and put them on it, in one transaction (owner rule 20: a load never
 // leaves without a driver). 409 PHONE_BELONGS_TO { driverId, name } when the phone is another
 // driver's (the dialog asks "Use <name>?" and posts again with useExisting); 409 CODE_TAKEN: try
-// again. PLANNER, like the Driver list. Audited CASUAL_DRIVER_ADDED + LOAD_DRIVER_SET.
+// again; 409 DRIVER_INACTIVE: useExisting names a regular driver a company admin switched off (only a
+// daily driver is reactivated here). PLANNER, like the Driver list. Audited CASUAL_DRIVER_ADDED + LOAD_DRIVER_SET.
 export const POST = withTenantApi(
   async (req, { user }) => {
     const input = await parseBody(req, casualDriverSchema);

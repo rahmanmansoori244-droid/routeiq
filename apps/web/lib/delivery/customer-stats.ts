@@ -12,7 +12,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { effectiveAttrs, type TypeProfileLike } from '../dispatch/customer-attrs';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/time';
-import { measuredText, measuredUnloading, type MeasuredUnloading } from './measured';
+import { MEASURED_MAX_MIN, measuredText, measuredUnloading, type MeasuredUnloading } from './measured';
 import { pinCheck, suggestedMapsUrl, type PinVisit } from './pin-check';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -30,6 +30,42 @@ export interface CustomerDeliveryStats {
   text: string;
 }
 
+/** Per customer, the newest timed visits read (room for the outliers measuredUnloading leaves out of its last 10). */
+export const TIMED_VISITS_PER_CUSTOMER = 20;
+/** Customers read at the same time (each its own small indexed query). */
+const STATS_PARALLEL = 8;
+
+/**
+ * The newest timed visits of EACH customer (at most TIMED_VISITS_PER_CUSTOMER), one query per
+ * customer: a limit shared by many customers would let the busy ones push a monthly customer's
+ * visits out, and its measured time would vanish from the Customers page.
+ */
+async function recentTimedVisits(db: Db, tenantId: string, ids: readonly string[], since: string) {
+  const out = new Map<string, Awaited<ReturnType<typeof readOne>>>();
+  async function readOne(customerId: string) {
+    return db.stopVisit.findMany({
+      where: {
+        tenantId,
+        customerId,
+        deliveryDate: { gte: dateOnly(since) },
+        outcome: { in: ['DELIVERED', 'PARTLY_DELIVERED'] },
+        autoServiceMinutes: { not: null, gte: 1, lte: MEASURED_MAX_MIN },
+        timingSuspect: false,
+        outcomeLate: false,
+      },
+      select: { customerId: true, outcome: true, autoServiceMinutes: true, timingSuspect: true, outcomeLate: true, plannedServiceMin: true, casesDelivered: true, autoArrivedAt: true, deliveryDate: true },
+      orderBy: [{ autoArrivedAt: 'desc' }],
+      take: TIMED_VISITS_PER_CUSTOMER,
+    });
+  }
+  for (let i = 0; i < ids.length; i += STATS_PARALLEL) {
+    const part = ids.slice(i, i + STATS_PARALLEL);
+    const rows = await Promise.all(part.map(readOne));
+    part.forEach((id, k) => out.set(id, rows[k]!));
+  }
+  return out;
+}
+
 export async function customerDeliveryStats(tenantId: string, ids: readonly string[], opts: { db?: Db; now?: Date } = {}): Promise<Record<string, CustomerDeliveryStats>> {
   const db = opts.db ?? prisma;
   const want = [...new Set(ids)].slice(0, MAX_STATS_IDS);
@@ -40,26 +76,13 @@ export async function customerDeliveryStats(tenantId: string, ids: readonly stri
   const [customers, profiles, visits] = await Promise.all([
     db.customer.findMany({ where: { tenantId, id: { in: want } } }),
     db.customerTypeProfile.findMany({ where: { tenantId } }),
-    db.stopVisit.findMany({
-      where: {
-        tenantId,
-        customerId: { in: want },
-        deliveryDate: { gte: dateOnly(since) },
-        outcome: { in: ['DELIVERED', 'PARTLY_DELIVERED'] },
-        autoServiceMinutes: { not: null },
-        timingSuspect: false,
-        outcomeLate: false,
-      },
-      select: { customerId: true, outcome: true, autoServiceMinutes: true, timingSuspect: true, outcomeLate: true, plannedServiceMin: true, casesDelivered: true, autoArrivedAt: true, deliveryDate: true },
-      orderBy: [{ autoArrivedAt: 'desc' }],
-      take: MAX_STATS_IDS * 40,
-    }),
+    recentTimedVisits(db, tenantId, want, since),
   ]);
   const prof = new Map<string, TypeProfileLike>(profiles.map((p) => [p.customerType, p]));
   const out: Record<string, CustomerDeliveryStats> = {};
   for (const c of customers) {
     const eff = effectiveAttrs(c, prof, { serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10 });
-    const mine = visits.filter((v) => v.customerId === c.id).map((v) => ({ ...v, deliveryDate: isoOf(v.deliveryDate) }));
+    const mine = (visits.get(c.id) ?? []).map((v) => ({ ...v, deliveryDate: isoOf(v.deliveryDate) }));
     const measured = measuredUnloading(mine, cfg?.serviceMinPerCase ?? 0);
     out[c.id] = { plannedMin: eff.serviceMin, plannedSource: eff.serviceSource, measured, text: measuredText(eff.serviceMin, measured) };
   }
@@ -135,8 +158,17 @@ export async function pinCheckList(tenantId: string, opts: { db?: Db; now?: Date
       orderBy: [{ at: 'asc' }],
     }),
   ]);
+  // One pass each (never a scan per visit: 20,000 visits x their photos would block the process).
+  const photosOf = new Map<string, typeof photos>();
+  for (const p of photos) {
+    const list = photosOf.get(p.visitId);
+    if (list) list.push(p);
+    else photosOf.set(p.visitId, [p]);
+  }
+  const firstManual = new Map<string, (typeof arrivals)[number]>();
+  for (const a of arrivals) if (a.visitId && !firstManual.has(a.visitId)) firstManual.set(a.visitId, a); // sorted by time: the first
   const input: PinVisit[] = visits.map((v) => {
-    const arr = arrivals.find((a) => a.visitId === v.id);
+    const arr = firstManual.get(v.id);
     return {
       visitId: v.id,
       customerId: v.customerId,
@@ -145,9 +177,17 @@ export async function pinCheckList(tenantId: string, opts: { db?: Db; now?: Date
       plannedLng: v.plannedLng,
       timingSuspect: v.timingSuspect,
       reason: v.reason,
-      photos: photos
-        .filter((p) => p.visitId === v.id)
-        .map((p) => ({ positionStatus: p.positionStatus, lat: p.lat, lng: p.lng, accuracyM: p.accuracyM, distanceM: p.distanceM, exifLat: p.exifLat, exifLng: p.exifLng, exifDistanceM: p.exifDistanceM, purged: !!p.locationPurgedAt })),
+      photos: (photosOf.get(v.id) ?? []).map((p) => ({
+        positionStatus: p.positionStatus,
+        lat: p.lat,
+        lng: p.lng,
+        accuracyM: p.accuracyM,
+        distanceM: p.distanceM,
+        exifLat: p.exifLat,
+        exifLng: p.exifLng,
+        exifDistanceM: p.exifDistanceM,
+        purged: !!p.locationPurgedAt,
+      })),
       manualArrival: arr ? { lat: arr.lat, lng: arr.lng, accuracyM: arr.accuracyM, distanceM: arr.distanceM, purged: arr.lat === null && arr.distanceM !== null } : null,
       result: v.outcomeDistanceM !== null || v.outcomeLat !== null ? { lat: v.outcomeLat, lng: v.outcomeLng, accuracyM: v.outcomeAccuracyM, distanceM: v.outcomeDistanceM, purged: !!v.locationPurgedAt } : null,
     };

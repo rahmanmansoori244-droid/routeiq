@@ -189,6 +189,21 @@ export function searchPollMs(
 }
 
 /**
+ * A search is going on for the plan (OPTIMIZING, or its job QUEUED / RUNNING): the screens poll it
+ * every few seconds, and read the delivery results NOT on each poll - a search never changes them
+ * (the phones' results come in on the plan screen's own 60 s read).
+ */
+export function planSearching(run: { status?: string | null } | null | undefined, job: { status?: string | null } | null | undefined): boolean {
+  return run?.status === 'OPTIMIZING' || job?.status === 'QUEUED' || job?.status === 'RUNNING';
+}
+
+/** The day just read keeps the delivery results already shown when its poll left them out (planSearching), for the same day and depot. */
+export function keepDeliveries<T extends { date: string; depot?: { id: string } | null; deliveries?: unknown }>(prev: T | null, next: T): T {
+  if (next.deliveries !== undefined || !prev || prev.date !== next.date || (prev.depot?.id ?? null) !== (next.depot?.id ?? null)) return next;
+  return { ...next, deliveries: prev.deliveries };
+}
+
+/**
  * The option in use when it is not the recommended plan (MIN_TRUCKS, MIN_DISTANCE). The search report
  * stored with every option is the RECOMMENDED search's (the optimizer reports that one only). An
  * alternative is searched after it, for its own goal, up to its own time limit (the option's

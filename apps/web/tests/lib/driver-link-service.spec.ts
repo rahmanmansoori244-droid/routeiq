@@ -239,11 +239,11 @@ describe('the reissue prompt (spec 4.3)', () => {
 
 describe('driverActor (audit wording)', () => {
   const load = { truckCode: 'T05', date: '2026-10-05', driverId: 'salim', driverName: 'Salim' };
-  it('names the driver, the truck-day, the link generation and the phone', () => {
-    expect(driverActor({ generation: 2, driverIdAtIssue: 'salim', driverNameAtIssue: 'Salim' }, load, '3f9a1234abcd5678')).toBe('Driver link: Salim (T05, 5 Oct) · link #2 · phone 3f9a');
-    expect(driverActor({ generation: 1, driverIdAtIssue: 'salim', driverNameAtIssue: 'Salim' }, { ...load, driverId: 'khalid', driverName: 'Khalid' }, '3f9a1234abcd5678')).toBe(
-      'Driver link: Khalid (T05, 5 Oct) · link #1 made for Salim · phone 3f9a',
+  it('names the driver, the truck-day and the link generation; never the phone (audit rows outlive the location retention)', () => {
+    expect(driverActor({ generation: 2, driverIdAtIssue: 'salim', driverNameAtIssue: 'Salim' }, load)).toBe('Driver link: Salim (T05, 5 Oct) · link #2');
+    expect(driverActor({ generation: 1, driverIdAtIssue: 'salim', driverNameAtIssue: 'Salim' }, { ...load, driverId: 'khalid', driverName: 'Khalid' })).toBe(
+      'Driver link: Khalid (T05, 5 Oct) · link #1 made for Salim',
     );
-    expect(driverActor({ generation: 1, driverIdAtIssue: null }, load, null)).toBe('Driver link: Salim (T05, 5 Oct) · link #1 made before a driver was set');
+    expect(driverActor({ generation: 1, driverIdAtIssue: null }, load)).toBe('Driver link: Salim (T05, 5 Oct) · link #1 made before a driver was set');
   });
 });

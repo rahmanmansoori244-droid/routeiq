@@ -3,7 +3,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { Camera, Check, RotateCcw } from 'lucide-react';
 import { t, type Lang } from '@/lib/driver-page/i18n';
-import { compressPhoto, exifOfFile, PhotoTooLargeError } from '@/lib/driver-page/photo';
+import { compressPhoto, exifOfFile, PhotoTooLargeError, type PosFix } from '@/lib/driver-page/photo';
+import { newKey } from '@/lib/driver-page/queue';
+
+/** Where the phone was when the photo came back from the camera: a fresh fix on its way, and the tracker's last fix then. */
+export interface PhotoPlace {
+  fresh: Promise<{ fix: PosFix | null; error: 'DENIED' | 'TIMEOUT' | 'UNSUPPORTED' | null }>;
+  last: PosFix | null;
+}
 
 /** A photo taken and compressed, before it is used. */
 export interface TakenPhoto {
@@ -14,29 +21,37 @@ export interface TakenPhoto {
   /** Date.now() when the camera returned (the device clock). */
   takenAt: number;
   cameraOpenedAt: number;
-  exif: { lat: number | null; lng: number | null; takenAt: number | null } | null;
+  exif: { lat: number | null; lng: number | null; takenAt: number | null; zoned: boolean } | null;
   fileLastModified: number | null;
+  /** The position asked for the moment the file arrived - never when "Use photo" is tapped later. */
+  place: PhotoPlace;
 }
 
 /**
  * Take photo (spec section 12.1): the camera opens straight from the file input; the photo is read
- * (EXIF), compressed and previewed with Use photo / Retake. Before the camera opens the page saves the
- * stop's draft with the photo's key, so a phone that kills the tab while the camera is open loses
- * nothing but that photo (the draft says so when the page comes back).
+ * (EXIF), compressed and previewed with Use photo / Retake. The input is clicked INSIDE the tap (iOS
+ * Safari opens a file or camera picker only within the tap's user gesture, which an awaited write
+ * ends); the stop's draft is saved with the photo's key at the same moment without waiting, long
+ * before the camera returns, so a phone that kills the tab while the camera is open loses nothing
+ * but that photo (the draft says so when the page comes back). The position is asked as soon as the
+ * file arrives.
  */
 export function CameraButton({
   lang,
   tz,
   disabled,
   onBeforeOpen,
+  onLocate,
   onUse,
   onCameraSlow,
 }: {
   lang: Lang;
   tz: string;
   disabled: boolean;
-  /** Saves the draft and returns the new photo's key. */
-  onBeforeOpen: () => Promise<string>;
+  /** Saves the draft with the new photo's key (not awaited: the camera must open inside the tap). */
+  onBeforeOpen: (key: string) => void;
+  /** Asks the position now (the file just arrived). */
+  onLocate: () => PhotoPlace;
   onUse: (p: TakenPhoto) => void;
   /** The file chooser did not open within 3 s of the tap (an in-app browser ignoring the camera). */
   onCameraSlow: () => void;
@@ -67,10 +82,12 @@ export function CameraButton({
 
   useEffect(() => () => (preview ? URL.revokeObjectURL(preview.url) : undefined), [preview]);
 
-  const open = async () => {
+  // Synchronous on purpose: no await before input.click() (see the top).
+  const open = () => {
     setError(null);
-    const key = await onBeforeOpen();
+    const key = newKey();
     pending.current = { key, openedAt: Date.now() };
+    onBeforeOpen(key);
     if (slowTimer.current) clearTimeout(slowTimer.current);
     slowTimer.current = setTimeout(() => {
       slowTimer.current = null;
@@ -87,6 +104,8 @@ export function CameraButton({
     const p = pending.current;
     if (!file || !p) return;
     const takenAt = Date.now();
+    // Where the photo was taken: asked now, while the driver is still where he took it.
+    const place = onLocate();
     setBusy(true);
     try {
       const exif = await exifOfFile(file, tz);
@@ -100,6 +119,7 @@ export function CameraButton({
         cameraOpenedAt: p.openedAt,
         exif,
         fileLastModified: Number.isFinite((file as File).lastModified) ? (file as File).lastModified : null,
+        place,
       };
       setPreview({ photo, url: URL.createObjectURL(c.blob) });
     } catch (err) {
@@ -125,7 +145,7 @@ export function CameraButton({
           >
             <Check className="h-6 w-6" aria-hidden /> {t(lang, 'usePhoto')}
           </button>
-          <button type="button" className="flex min-h-14 items-center justify-center gap-2 rounded-xl border border-slate-400 text-lg font-semibold" onClick={() => void open()}>
+          <button type="button" className="flex min-h-14 items-center justify-center gap-2 rounded-xl border border-slate-400 text-lg font-semibold" onClick={open}>
             <RotateCcw className="h-6 w-6" aria-hidden /> {t(lang, 'retake')}
           </button>
         </div>
@@ -138,7 +158,7 @@ export function CameraButton({
       <button
         type="button"
         disabled={disabled || busy}
-        onClick={() => void open()}
+        onClick={open}
         className="flex min-h-14 w-full items-center justify-center gap-2 rounded-xl bg-blue-700 text-lg font-bold text-white disabled:opacity-50"
         data-testid="take-photo"
       >

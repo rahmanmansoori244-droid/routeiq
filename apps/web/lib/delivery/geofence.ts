@@ -25,6 +25,8 @@ export interface GeofenceParams {
   /** Dwell for any other pending stop: a wait at a roundabout is not an arrival. */
   otherDwellMs: number;
   departDwellMs: number;
+  /** After a gap, an outside fix is confirmed by another one at least this much later (a departure not seen). */
+  gapConfirmMs: number;
   /** A worse fix is ignored. */
   maxAccuracyM: number;
   /** An older fix cannot confirm anything; a longer silence is a gap. */
@@ -43,6 +45,7 @@ export function geofenceParams(radiusM = 100): GeofenceParams {
     arriveDwellMs: 20_000,
     otherDwellMs: 90_000,
     departDwellMs: 60_000,
+    gapConfirmMs: 20_000,
     maxAccuracyM: 250,
     maxFixAgeMs: 30_000,
     movingMps: 2.5,
@@ -89,16 +92,27 @@ export interface TrackInput {
 export type Zone = 'IN' | 'OUT' | 'NEAR' | 'IGNORED';
 
 /**
- * The zone of one fix for one pin (spec section 7.2): accuracy-aware but bounded, and a moving truck is
- * never IN.
+ * The zone of one fix for one pin (spec section 7.2), accuracy-aware: IN with an allowance bounded at
+ * half the radius (a coarse fix never makes an arrival), and OUT only when the whole error circle is
+ * past radius + 50 m (no bound: a coarse fix whose circle covers the pin is never OUT, it is NEAR). A
+ * moving truck is never IN.
  */
 export function zoneOf(fix: Pick<Fix, 'lat' | 'lng' | 'accuracyM' | 'speedMps'>, pin: { lat: number; lng: number }, p: GeofenceParams): Zone {
   if (!Number.isFinite(fix.accuracyM) || fix.accuracyM > p.maxAccuracyM || !Number.isFinite(fix.lat) || !Number.isFinite(fix.lng)) return 'IGNORED';
-  const allowance = Math.min(Math.max(0, fix.accuracyM), p.radiusM / 2);
+  const accuracy = Math.max(0, fix.accuracyM);
+  const allowance = Math.min(accuracy, p.radiusM / 2);
   const d = distanceM(fix, pin);
   if (d <= p.radiusM + allowance && !(fix.speedMps != null && fix.speedMps > p.movingMps)) return 'IN';
-  if (d - allowance > p.radiusM + p.exitExtraM) return 'OUT';
+  if (d - accuracy > p.radiusM + p.exitExtraM) return 'OUT';
   return 'NEAR';
+}
+
+/**
+ * A fix that shows the truck was outside a stop (the "seen outside" an observed arrival needs): OUT,
+ * or NEAR with an accuracy of half the radius or better. A coarse NEAR fix proves nothing.
+ */
+function seenOutsideBy(z: Zone, fix: Pick<Fix, 'accuracyM'>, p: GeofenceParams): boolean {
+  return z === 'OUT' || (z === 'NEAR' && fix.accuracyM <= p.radiusM / 2);
 }
 
 interface Cand {
@@ -147,6 +161,8 @@ export interface AtStopState extends Common {
   ahead: Cand | null;
   /** Rebuilt after a reload (restoreTracker): it may leave without having been seen inside. */
   restored: boolean;
+  /** After a gap: the first outside fix, waiting for a second one gapConfirmMs later (null = none). */
+  gapOut: number | null;
 }
 
 export type TrackerState = SeekingState | AtStopState;
@@ -194,6 +210,7 @@ function atStop(c: Common, key: string, arrivedAt: number, observed: boolean, fi
     outSinceDone: false,
     ahead: null,
     restored,
+    gapOut: null,
   };
 }
 
@@ -215,8 +232,7 @@ function seekOnFix(st: SeekingState, input: TrackInput & { fix: Fix }, p: Geofen
   const cands = candidates(input.stops);
   const zones = new Map(cands.map((s) => [s.key, zoneOf(fix, s, p)]));
   for (const s of cands) {
-    const z = zones.get(s.key);
-    if (z === 'OUT' || z === 'NEAR') st.seenOutside[s.key] = fix.at;
+    if (seenOutsideBy(zones.get(s.key)!, fix, p)) st.seenOutside[s.key] = fix.at;
   }
   const inside = cands.filter((s) => zones.get(s.key) === 'IN');
   if (inside.length >= 2) {
@@ -272,8 +288,7 @@ function atStopOnFix(st: AtStopState, input: TrackInput & { fix: Fix }, p: Geofe
   const others = candidates(input.stops).filter((s) => s.key !== st.key);
   const otherZones = new Map(others.map((s) => [s.key, zoneOf(fix, s, p)]));
   for (const s of others) {
-    const z = otherZones.get(s.key);
-    if (z === 'OUT' || z === 'NEAR') st.seenOutside[s.key] = fix.at;
+    if (seenOutsideBy(otherZones.get(s.key)!, fix, p)) st.seenOutside[s.key] = fix.at;
   }
   const z = zoneOf(fix, stop, p);
   if (z === 'IN') {
@@ -283,24 +298,34 @@ function atStopOnFix(st: AtStopState, input: TrackInput & { fix: Fix }, p: Geofe
     st.ahead = null;
   }
   if (z === 'OUT' && stop.doneAt !== null && fix.at > stop.doneAt) st.outSinceDone = true;
-  if (z === 'OUT' && st.cleanSince === null) {
-    // The first fix after a gap is already outside: the departure was not seen.
-    if (st.lastInAt !== null) {
-      events.push({ type: 'DEPARTED', key: st.key, at: st.lastInAt, reason: 'LEFT', gap: true, fix: st.lastInFix });
-      return seekOnFix(seeking(commonOf(st)), input, p, events, prompts);
-    }
-    // Never seen inside (a manual arrival, or a stop restored after a reload): nothing to date a
-    // departure with. The tracker moves on silently (the result time ends the stop) once it has a
-    // result, or at once for a restored stop.
-    if (stop.doneAt !== null || st.restored) return seekOnFix(seeking(commonOf(st)), input, p, events, prompts);
-  }
-  if (st.cleanSince === null) st.cleanSince = fix.at;
-  if (z === 'OUT') st.leaving ??= { since: fix.at, fix };
   if (z !== 'IN' && z !== 'IGNORED') {
     const inside = others.filter((s) => otherZones.get(s.key) === 'IN');
     const b = inside.length === 1 ? inside[0]! : null;
     st.ahead = b ? (st.ahead?.key === b.key ? st.ahead : { key: b.key, since: fix.at, observed: observedAt(st, b.key, fix.at, p), fix }) : null;
   }
+  if (st.cleanSince === null) {
+    if (z === 'OUT') {
+      // After a gap (the camera, Maps, a locked screen) the first fix is often coarse or stale: one
+      // outside fix proves nothing. A second outside fix gapConfirmMs later, with no fix inside or
+      // near between, confirms the truck left.
+      st.gapOut ??= fix.at;
+      if (fix.at - st.gapOut < p.gapConfirmMs) return st;
+      // Confirmed. Seen inside before the gap: the departure was not seen, it is dated at the last
+      // inside fix (a lower bound).
+      if (st.lastInAt !== null) {
+        events.push({ type: 'DEPARTED', key: st.key, at: st.lastInAt, reason: 'LEFT', gap: true, fix: st.lastInFix });
+        return seekOnFix(seeking(commonOf(st), st.ahead), input, p, events, prompts);
+      }
+      // Never seen inside (a manual arrival, or a stop restored after a reload): nothing to date a
+      // departure with. The tracker moves on silently (the result time ends the stop) once it has a
+      // result, or at once for a restored stop.
+      if (stop.doneAt !== null || st.restored) return seekOnFix(seeking(commonOf(st), st.ahead), input, p, events, prompts);
+    } else if (z !== 'IGNORED') {
+      st.gapOut = null;
+    }
+  }
+  if (st.cleanSince === null) st.cleanSince = fix.at;
+  if (z === 'OUT') st.leaving ??= { since: fix.at, fix };
   if (st.leaving && now - st.leaving.since >= p.departDwellMs && z !== 'IN') {
     // A manual arrival never seen inside leaves only after its result (a wrong pin must not end it),
     // silently: the result time ends it. A restored stop leaves silently too.

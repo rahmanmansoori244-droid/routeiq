@@ -124,7 +124,11 @@ export interface PinFlag {
  */
 export function pinCheck(visits: readonly PinVisit[], pins: ReadonlyMap<string, { lat: number | null; lng: number | null }>): PinFlag[] {
   const byCustomer = new Map<string, PinVisit[]>();
-  for (const v of visits) byCustomer.set(v.customerId, [...(byCustomer.get(v.customerId) ?? []), v]);
+  for (const v of visits) {
+    const list = byCustomer.get(v.customerId);
+    if (list) list.push(v);
+    else byCustomer.set(v.customerId, [v]);
+  }
   const out: PinFlag[] = [];
   for (const [customerId, list] of byCustomer) {
     const now = pins.get(customerId);
@@ -148,6 +152,20 @@ export function pinCheck(visits: readonly PinVisit[], pins: ReadonlyMap<string, 
   }
   return out.sort((a, b) => b.far.length - a.far.length || a.customerId.localeCompare(b.customerId));
 }
+
+/**
+ * The far visits as the panel lists them: "412 m (3 Oct)" for a far evidence point, "wrong location
+ * (1 Oct)" for a visit the driver reported - never the (near) distance of such a visit's evidence.
+ */
+export function pinFarText(far: readonly { date: string; distanceM: number | null; wrongLocation: boolean }[], fmtDay: (iso: string) => string): string {
+  return far
+    .flatMap((f) => (f.wrongLocation ? [`wrong location (${fmtDay(f.date)})`] : f.distanceM !== null ? [`${f.distanceM} m (${fmtDay(f.date)})`] : []))
+    .join(', ');
+}
+
+/** The rule in words (the panel, the guide): at least 2 of the last 3 visits far or reported. */
+export const PIN_CHECK_RULE_TEXT =
+  'On at least 2 of the last 3 visits the delivery photos or the driver\'s position were more than 150 m from the saved pin, or the driver reported "wrong location".';
 
 /** A Google Maps link to a suggested point (the admin checks it, then uses Set location). */
 export function suggestedMapsUrl(p: { lat: number; lng: number }): string {

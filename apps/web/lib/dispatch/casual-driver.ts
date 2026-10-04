@@ -10,9 +10,11 @@
  *   active, no account. A P2002 that still happens (an admin typed that code by hand) aborts the
  *   transaction: the answer is 409 CODE_TAKEN "Try again", never a retry inside the aborted one.
  * - Reuse by phone: a daily driver (active or not) with the same phone and the same name (case and
- *   spaces ignored) is used again, reactivated if needed. Another name, or a regular driver with that
- *   phone: 409 PHONE_BELONGS_TO, and the dialog asks "This phone belongs to <name>. Use <name>?"; the
- *   answer posts again with `useExisting`. The audit never names a driver the dispatcher did not choose.
+ *   spaces ignored) is used again, reactivated if needed. Another name, or an active regular driver with
+ *   that phone: 409 PHONE_BELONGS_TO, and the dialog asks "This phone belongs to <name>. Use <name>?";
+ *   the answer posts again with `useExisting`. The audit never names a driver the dispatcher did not choose.
+ * - Only a daily driver is ever reactivated here. An inactive regular driver (a company admin switched
+ *   them off) is not offered, and `useExisting` naming one is refused 409 DRIVER_INACTIVE.
  */
 import { Prisma } from '@prisma/client';
 import { audit } from '../audit';
@@ -94,10 +96,15 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
       if (input.useExisting) {
         driver = await tx.driver.findFirst({ where: { id: input.useExisting, tenantId }, select: DRIVER_PUBLIC_SELECT });
         if (!driver) throw new PlanError('Driver not found.', 404);
+        if (!driver.active && !driver.casual) {
+          // Only a company admin changes a regular driver's active switch (PATCH /api/drivers/[id]).
+          throw new PlanError(`Driver ${driver.name} is inactive: ask a company admin.`, 409, { code: 'DRIVER_INACTIVE', driverId: driver.id, name: driver.name });
+        }
         reused = true;
       } else if (input.phone) {
         const withPhone = await tx.driver.findMany({ where: { tenantId, phone: { not: null } }, select: DRIVER_PUBLIC_SELECT, orderBy: { code: 'asc' } });
-        const matches = withPhone.filter((d) => samePhone(d.phone, input.phone));
+        // An inactive regular driver is never offered: the quick add cannot bring them back.
+        const matches = withPhone.filter((d) => (d.active || d.casual) && samePhone(d.phone, input.phone));
         // A daily driver with this phone and this name: the same person, used again.
         const same = matches.find((d) => d.casual && sameName(d.name, input.name));
         if (same) {
@@ -112,7 +119,7 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
           );
         }
       }
-      if (driver && !driver.active) {
+      if (driver && !driver.active && driver.casual) {
         const before = driver;
         driver = await tx.driver.update({ where: { id: driver.id }, data: { active: true }, select: DRIVER_PUBLIC_SELECT });
         await audit({ tenantId, userId: user.id, action: 'UPDATE', entity: 'Driver', entityId: driver.id, beforeJson: before, afterJson: { ...driver, reactivatedFrom: 'daily driver quick add' } }, tx);

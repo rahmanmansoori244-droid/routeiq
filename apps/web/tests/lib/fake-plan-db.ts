@@ -177,6 +177,12 @@ function delegate(model: string) {
       for (const r of rs) Object.assign(r, a.data);
       return { count: rs.length };
     },
+    delete: async (a: Row) => {
+      const r = t().find((x) => match(x, a.where));
+      if (!r) throw new Error(`${model} delete: not found`);
+      tables[model] = t().filter((x) => x !== r);
+      return { ...r };
+    },
     deleteMany: async (a: Row = {}) => {
       const keep = t().filter((x) => !match(x, a.where));
       const n = t().length - keep.length;

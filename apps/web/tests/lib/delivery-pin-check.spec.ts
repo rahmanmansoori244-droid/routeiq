@@ -6,7 +6,7 @@
  * retention the stored distances still count. Synthetic customers only (ACME, BETA).
  */
 import { describe, expect, it } from 'vitest';
-import { evidenceOf, pinCheck, suggestedMapsUrl, type PinVisit } from '@/lib/delivery/pin-check';
+import { evidenceOf, PIN_CHECK_RULE_TEXT, pinCheck, pinFarText, suggestedMapsUrl, type PinVisit } from '@/lib/delivery/pin-check';
 
 const PIN = { lat: 23.6, lng: 58.4 };
 /** A point `m` metres north of the pin (1 degree of latitude is about 111,195 m). */
@@ -79,5 +79,35 @@ describe('pin check (spec 11.2)', () => {
     expect(flags[0]!.suggested).toBeNull();
     const mixed = pinCheck([purged('a', '2026-07-01'), visit('b', '2026-10-02', { photos: [photo(400)] })], pins);
     expect(mixed[0]!.suggested!.lat).toBeCloseTo(north(400).lat, 6);
+  });
+});
+
+describe('pin check: the words (review of 4 Oct 2026)', () => {
+  it('one "wrong location" report alone does not flag; the rule text says "at least 2 of the last 3"', () => {
+    const near = (id: string, d: string) => visit(id, d, { photos: [photo(20)] });
+    expect(pinCheck([near('a', '2026-10-01'), near('b', '2026-10-02'), visit('c', '2026-10-03', { reason: 'WRONG_LOCATION', photos: [photo(20)] })], pins)).toEqual([]);
+    expect(PIN_CHECK_RULE_TEXT).toMatch(/at least 2 of the last 3 visits/);
+  });
+
+  it('a reported visit is listed as "wrong location", never with the near distance of its photos', () => {
+    const fmt = (iso: string) => iso.slice(5);
+    expect(
+      pinFarText(
+        [
+          { date: '2026-10-03', distanceM: 20, wrongLocation: true },
+          { date: '2026-10-01', distanceM: 412, wrongLocation: false },
+          { date: '2026-09-28', distanceM: null, wrongLocation: false },
+        ],
+        fmt,
+      ),
+    ).toBe('wrong location (10-03), 412 m (10-01)');
+  });
+
+  it('many visits of many customers are grouped in one pass (no copy per visit)', () => {
+    const many: PinVisit[] = [];
+    for (let c = 0; c < 200; c++) for (let i = 0; i < 100; i++) many.push({ ...visit(`v${c}-${i}`, `2026-0${1 + (i % 9)}-1${i % 10}`, { photos: [photo(10)] }), customerId: `C${c}` });
+    const t0 = Date.now();
+    expect(pinCheck(many, new Map())).toEqual([]);
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 });

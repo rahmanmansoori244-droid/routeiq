@@ -204,7 +204,10 @@ describe('departures (spec section 7.4)', () => {
     feed(r, track(30, 590, ACME, 0, 0, 10), stops);
     feed(r, [{ now: T0 + 595_000, fix: null }], stops);
     doneAt = T0 + 600_000;
+    // After a gap one outside fix is not enough: a second one 20 s later confirms the departure.
     feed(r, [{ now: T0 + 700_000, fix: null }, { now: T0 + 830_000, fix: null }, fix(840, ACME, 0, 900)], stops);
+    expect(departures(r)).toEqual([]);
+    feed(r, [fix(860, ACME, 0, 1100)], stops);
     expect(departures(r)).toEqual([expect.objectContaining({ key: '1:1', at: T0 + 590_000, gap: true })]);
     expect(arrivals(r).filter((a) => a.chained)).toEqual([]);
   });
@@ -220,6 +223,53 @@ describe('departures (spec section 7.4)', () => {
     expect(arrivals(r).at(-1)).toMatchObject({ key: '1:2', at: back, observed: false, resumed: true });
     expect(arrivals(r).filter((a) => a.chained)).toEqual([]);
     expect(r.prompts).toContainEqual({ kind: 'ARRIVED_WHEN', key: '1:2' });
+  });
+});
+
+describe('after a camera or lock gap (review of 4 Oct 2026)', () => {
+  const stops = () => [stopAt('1:1', ACME, { expected: true })];
+  /** At the stop with continuous fixes (the arrival observed), then the page hidden `gapSec` for the camera. */
+  function atStopThenGap(r: Run, from: number, gapSec: number): number {
+    feed(r, track(from, from + 60, ACME, 5), stops);
+    const hiddenAt = from + 62;
+    feed(r, [{ now: T0 + hiddenAt * 1000, fix: fix(from + 60, ACME, 5), visible: false }], stops);
+    return hiddenAt + gapSec;
+  }
+
+  it('a coarse first fix (220 m, accuracy 200 m) after the camera is NEAR, not OUT: no departure, no second arrival', () => {
+    expect(zoneOf(fix(0, ACME, 220, 0, { accuracyM: 200 }), ACME, P)).toBe('NEAR');
+    const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
+    const back = atStopThenGap(r, 30, 40);
+    feed(r, [fix(back, ACME, 220, 0, { accuracyM: 200 }), ...track(back + 5, back + 120, ACME, 3)], stops);
+    expect(departures(r)).toEqual([]);
+    expect(arrivals(r)).toHaveLength(1);
+    expect(r.state).toMatchObject({ phase: 'AT_STOP', key: '1:1', arrivedAt: T0 });
+  });
+
+  it('three photos (three gaps), each followed by one confident outside fix, then back at the pin: still one stay', () => {
+    const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
+    let t = 30;
+    for (let i = 0; i < 3; i++) {
+      const back = atStopThenGap(r, t, 40);
+      feed(r, [fix(back, ACME, 300, 0, { accuracyM: 20 }), ...track(back + 5, back + 30, ACME, 3)], stops);
+      t = back + 35;
+    }
+    expect(departures(r)).toEqual([]);
+    expect(arrivals(r)).toHaveLength(1);
+    expect(r.state).toMatchObject({ phase: 'AT_STOP', arrivedAt: T0 });
+  });
+
+  it('a real departure during the gap: two outside fixes 20 s apart end the stop at the last inside fix (gap)', () => {
+    const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
+    const back = atStopThenGap(r, 30, 300);
+    feed(r, [fix(back, ACME, 2000), fix(back + 20, ACME, 2300)], stops);
+    expect(departures(r)).toEqual([expect.objectContaining({ key: '1:1', at: T0 + 90_000, gap: true })]);
+    expect(r.state.phase).toBe('SEEKING');
+  });
+
+  it('a coarse NEAR fix never counts as "seen outside": an arrival found after it is not observed', () => {
+    const r = feed(fresh(), [{ now: T0, fix: fix(0, ACME, 160, 0, { accuracyM: 90 }) }, ...track(5, 30, ACME)], stops);
+    expect(arrivals(r)).toEqual([expect.objectContaining({ key: '1:1', observed: false })]);
   });
 });
 

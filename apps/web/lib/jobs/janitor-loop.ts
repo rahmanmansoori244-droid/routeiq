@@ -12,7 +12,9 @@ import { completeReturnedLoads } from '../delivery/event-service';
 import { runDeliveryJanitor } from './delivery-janitor';
 
 const INTERVAL_MS = 60_000;
-const g = globalThis as unknown as { __routeiqJanitor?: NodeJS.Timeout };
+/** The returned-loads sweep: the last result already completes a load at once; this is the safety net. */
+const RETURNED_EVERY_MS = 10 * 60_000;
+const g = globalThis as unknown as { __routeiqJanitor?: NodeJS.Timeout; __routeiqReturnedSweepAt?: number };
 
 async function sweep() {
   try {
@@ -23,12 +25,17 @@ async function sweep() {
     console.error('janitor: sweep failed', (err as Error)?.message ?? err);
   }
   // Delivery outcome (owner request 4 Oct 2026): a load the driver reported back at the depot is
-  // completed once every stop has a result (spec section 8.7). Its own try: it never stops the reaper.
-  try {
-    const returned = await completeReturnedLoads();
-    if (returned.completed) console.warn('janitor: returned loads completed', returned);
-  } catch (err) {
-    console.error('janitor: returned loads not checked', (err as Error)?.message ?? err);
+  // completed once every stop has a result (spec section 8.7). The last result normally completes it
+  // at once, so this safety net runs at most every 10 min. Its own try: it never stops the reaper.
+  const nowMs = Date.now();
+  if (!g.__routeiqReturnedSweepAt || nowMs - g.__routeiqReturnedSweepAt >= RETURNED_EVERY_MS) {
+    g.__routeiqReturnedSweepAt = nowMs;
+    try {
+      const returned = await completeReturnedLoads();
+      if (returned.completed) console.warn('janitor: returned loads completed', returned);
+    } catch (err) {
+      console.error('janitor: returned loads not checked', (err as Error)?.message ?? err);
+    }
   }
   // Retention (spec section 12.4): old photo bytes, old driver positions and idle daily drivers, at
   // most every 10 min (the daily drivers once a day). Its own try as well.

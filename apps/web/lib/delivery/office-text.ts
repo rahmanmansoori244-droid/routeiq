@@ -5,6 +5,46 @@
  */
 import { DICT } from '../driver-page/i18n';
 import { NOT_DELIVERED_REASONS, type NotDeliveredReasonName } from '../driver-link/manifest-types';
+import { addDaysIso, daysBetween, fmtHhmm, localMinutes } from '../dispatch/time';
+
+/**
+ * Record outcome's Arrived / Left boxes start with the stored times (HH:MM, company time), so the
+ * dispatcher sees what a correction replaces. A "Left" that is only the result time is not shown.
+ */
+export function officeTimesPrefill(v: { arrivedAt: string | null; departedAt: string | null; departedAtOutcome: boolean } | null, tz: string): { arrived: string; left: string } {
+  const hhmm = (iso: string | null) => (iso ? fmtHhmm(localMinutes(new Date(iso), tz)) : '');
+  return { arrived: hhmm(v?.arrivedAt ?? null), left: v && !v.departedAtOutcome ? hhmm(v.departedAt) : '' };
+}
+
+/** The Arrived / Left to send: only the boxes the dispatcher changed (a box left as stored records nothing). */
+export function officeTimesToSend(typed: { arrived: string; left: string }, shown: { arrived: string; left: string }): { arrivedAt: string | null; departedAt: string | null } {
+  const a = typed.arrived.trim();
+  const l = typed.left.trim();
+  return { arrivedAt: a && a !== shown.arrived ? a : null, departedAt: l && l !== shown.left ? l : null };
+}
+
+/** The "Delivery actuals" Excel covers at most this many days at a time. */
+export const ACTUALS_MAX_DAYS = 31;
+
+/** The default range of the Deliveries card's range picker: the 7 days up to the day on screen. */
+export function actualsDefaultRange(dateIso: string): { from: string; to: string } {
+  return { from: addDaysIso(dateIso, -6), to: dateIso };
+}
+
+/** Why a From / To range cannot be downloaded, or null (the same rules as the route). */
+export function actualsRangeProblem(from: string, to: string): string | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to)) return 'Choose both dates.';
+  if (to < from) return '"To" must not be before "From".';
+  if (daysBetween(from, to) + 1 > ACTUALS_MAX_DAYS) return `At most ${ACTUALS_MAX_DAYS} days at a time.`;
+  return null;
+}
+
+/** GET /api/dispatch/delivery-actuals for a range and a depot. */
+export function actualsUrl(from: string, to: string, depotId: string | null): string {
+  const q = new URLSearchParams({ from, to });
+  if (depotId) q.set('depotId', depotId);
+  return `/api/dispatch/delivery-actuals?${q}`;
+}
 
 /** "Shop closed", "Wrong location or could not find", ... (the driver page's English labels). */
 export function reasonLabel(reason: string | null | undefined): string {
@@ -89,13 +129,36 @@ export function departureNote(atOutcome: boolean, gap: boolean): string | null {
 }
 
 /** "Timed by" in the Excel. */
-export function timedByText(v: { autoBasis: string | null; arrivalSource: string | null; departedAtOutcome: boolean; outcomeSource: string | null }): string {
+export function timedByText(v: { autoBasis: string | null; arrivalSource: string | null; departureSource?: string | null; departedAtOutcome: boolean; outcomeSource: string | null }): string {
   if (v.autoBasis === 'DEPARTURE') return 'Auto to departure';
   if (v.autoBasis === 'RESULT') return 'Auto to result';
-  if (v.arrivalSource === 'DISPATCHER' || (v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) return 'Office';
+  if (v.arrivalSource === 'DISPATCHER' || v.departureSource === 'DISPATCHER' || (v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) return 'Office';
   if (v.departedAtOutcome) return 'Result time';
   if (v.arrivalSource) return 'Manual';
   return '';
+}
+
+const minutesBetween = (a: Date, b: Date) => Math.round(((b.getTime() - a.getTime()) / 60_000) * 10) / 10;
+
+/**
+ * Actual unloading of a visit (spec section 10.1), the plan screen's and the actuals Excel's: automatic
+ * from the window start, else automatic, else arrival to departure (an office or manual timing).
+ */
+export function actualMinutes(v: {
+  autoServiceMinutes: number | null;
+  autoMinutes: number | null;
+  arrivedAt: Date | null;
+  departedAt: Date | null;
+  departedAtOutcome: boolean;
+  outcomeSource: string | null;
+}): { min: number | null; label: string | null; auto: boolean } {
+  if (v.autoServiceMinutes !== null) return { min: v.autoServiceMinutes, label: 'auto, from the window start', auto: true };
+  if (v.autoMinutes !== null) return { min: v.autoMinutes, label: 'auto', auto: true };
+  // An office result recorded later is not the end of the stop.
+  if (v.arrivedAt && v.departedAt && v.departedAt > v.arrivedAt && !(v.departedAtOutcome && v.outcomeSource === 'DISPATCHER')) {
+    return { min: minutesBetween(v.arrivedAt, v.departedAt), label: v.departedAtOutcome ? 'arrival to result' : 'arrival to departure', auto: false };
+  }
+  return { min: null, label: null, auto: false };
 }
 
 export const POSITION_TEXT: Record<string, string> = {

@@ -24,8 +24,9 @@ export interface PhotoBody {
   takenAt: string;
   positionStatus: PhotoPositionStatusName;
   pos?: { lat: number; lng: number; accuracyM: number; at: string } | null;
-  exif?: { lat?: number | null; lng?: number | null; takenAt?: string | null } | null;
+  exif?: { lat?: number | null; lng?: number | null; takenAt?: string | null; zoned?: boolean | null } | null;
   fileLastModified?: string | null;
+  /** Older pages computed it on the phone's clock; the server decides now (kept for items still queued). */
   oldPhoto?: boolean;
   /** The photo waits for its position until then (ms); it is sent anyway after it. */
   positionUntil?: number | null;
@@ -258,6 +259,12 @@ export interface SendDeps {
   postActions(actions: DriverAction[]): Promise<{ status: number; body: unknown; retryAfter: string | null }>;
   postPhoto(item: QueueItem): Promise<{ status: number; body: unknown; retryAfter: string | null }>;
   now(): number;
+  /**
+   * The truck-day's results of one answer, given to the page BEFORE the items it answered are removed
+   * from the phone: the page shows them from the manifest first, so a sent result never disappears
+   * between its removal from the queue and the end of the flush.
+   */
+  onResults?(results: DriverResults): Promise<void>;
 }
 
 export interface FlushResult {
@@ -285,11 +292,14 @@ export async function flushQueue(deps: SendDeps, rounds = 20): Promise<FlushResu
       if (ans.kind === 'ok') {
         const data = ans.data as { results?: DriverActionResult[]; stops?: DriverResults['stops']; back?: DriverResults['back'] };
         const applied = applyResults(actions, Array.isArray(data.results) ? data.results : [], deps.now());
+        if (data.stops) {
+          out.results = { stops: data.stops, back: data.back ?? {} };
+          await deps.onResults?.(out.results);
+        }
         await persist(deps, applied);
         out.sent += applied.remove.length - applied.report.length;
         out.reports.push(...applied.report);
         Object.assign(out.sentMap, applied.sent);
-        if (data.stops) out.results = { stops: data.stops, back: data.back ?? {} };
       }
       continue;
     }
@@ -305,10 +315,13 @@ export async function flushQueue(deps: SendDeps, rounds = 20): Promise<FlushResu
       if (ans.kind === 'ok') {
         const data = ans.data as { status?: string; code?: string; message?: { en: string; ar: string }; stops?: DriverResults['stops']; back?: DriverResults['back'] };
         const applied = applyResults([photo], [{ key: photo.key, status: (data.status as DriverActionResult['status']) ?? 'error', code: data.code, message: data.message }], deps.now());
+        if (data.stops) {
+          out.results = { stops: data.stops, back: data.back ?? {} };
+          await deps.onResults?.(out.results);
+        }
         await persist(deps, applied);
         out.sent += applied.remove.length - applied.report.length;
         out.reports.push(...applied.report);
-        if (data.stops) out.results = { stops: data.stops, back: data.back ?? {} };
       }
     }
   }

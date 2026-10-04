@@ -8,7 +8,9 @@
  *    throttled by IP. Only an UNKNOWN hash counts against the IP (`dl-bad:<ip>`, 30 per 10 min),
  *    and never when the IP is unknown or internal (depot Wi-Fi, CGNAT, a proxy): over the limit,
  *    unknown tokens from that IP get 429; known tokens still pass.
- * 3. Per-link limits (LIMITS.driver*); every 429 carries Retry-After.
+ * 3. Per-link limits (LIMITS.driver*); every 429 carries Retry-After. The actions route counts one
+ *    unit per action it carries (consumeMore); the write routes allow at most LIMITS.driverInFlight
+ *    requests of one link in the handler at a time (maxInFlight).
  * 4. A signed-in RouteIQ session: of the link's company, the request is the office's (reads
  *    allowed; writes need PLANNER or above, else 403 SIGNED_IN_READ_ONLY); of another company,
  *    403 SIGNED_IN_OTHER_TENANT.
@@ -66,6 +68,55 @@ export interface DriverLinkOptions {
   write?: boolean;
   /** Reaches the handler in the upload-only grace (POST actions and photos, Part 2). */
   allowUploadOnly?: boolean;
+  /**
+   * At most this many requests of one link in the handler at the same moment (the writes: the phone
+   * sends one at a time, so parallel requests are a flood holding pooled connections on the
+   * outcome-day lock). Over it: 429 with Retry-After 2.
+   */
+  maxInFlight?: number;
+}
+
+/**
+ * The request body as text, read through a reader that counts bytes and stops at `maxBytes`,
+ * whatever the headers say (a chunked request has no Content-Length). Null = too large: the stream
+ * is cancelled and nothing more is buffered.
+ */
+export async function readBodyLimited(req: Request, maxBytes: number): Promise<string | null> {
+  const declared = Number(req.headers.get('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  if (!req.body) return '';
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
+/** Requests of each link in a write handler now (one web replica: process memory is the store). */
+const inFlight = new Map<string, number>();
+
+/** Counts `units` more against the route's per-link limit (the actions route: one unit per action). */
+export function consumeMore(ctx: Pick<DriverLinkContext, 'link'>, limit: DriverRouteLimit, units: number): { ok: true } | { ok: false; response: NextResponse } {
+  if (units <= 0) return { ok: true };
+  const lim = LIMIT_OF[limit];
+  const now = Date.now();
+  const r = limiter.consume(`${lim.key}:${ctx.link.id}`, lim.limit, lim.windowMs, units);
+  return r.ok ? { ok: true } : { ok: false, response: tooMany(r.resetAt, now) };
 }
 
 /** Headers on every driver answer (the token must not leak through Referer, caches or search engines). */
@@ -181,9 +232,22 @@ export function withDriverLink(handler: (req: Request, ctx: DriverLinkContext) =
         session,
         now,
       };
-      const res = await handler(req, ctx);
-      for (const [k, v] of Object.entries(DRIVER_HEADERS)) res.headers.set(k, v);
-      return res;
+      const max = opts.maxInFlight;
+      if (max !== undefined && (inFlight.get(link.id) ?? 0) >= max) {
+        return driverFail({ code: 'RATE_LIMITED', message: 'Too many requests. It will be sent automatically.' }, 429, { 'Retry-After': '2' });
+      }
+      if (max !== undefined) inFlight.set(link.id, (inFlight.get(link.id) ?? 0) + 1);
+      try {
+        const res = await handler(req, ctx);
+        for (const [k, v] of Object.entries(DRIVER_HEADERS)) res.headers.set(k, v);
+        return res;
+      } finally {
+        if (max !== undefined) {
+          const n = (inFlight.get(link.id) ?? 1) - 1;
+          if (n > 0) inFlight.set(link.id, n);
+          else inFlight.delete(link.id);
+        }
+      }
     } catch (err) {
       return mapError(err);
     }
