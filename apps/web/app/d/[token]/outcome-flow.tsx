@@ -25,6 +25,15 @@ export function proofPhotos(stop: { view: Pick<OverlayStop['view'], 'proofPhotos
 }
 
 /**
+ * Whether the photo heading still says "Photo required": the company wants one for this result, no
+ * earlier Delivered or Partly photo proves it (proofPhotos) and none is on the draft yet - a photo
+ * just added to the draft counts, the heading then shows the number of photos.
+ */
+export function photoStillRequired(stop: { view: Pick<OverlayStop['view'], 'proofPhotos'> }, outcome: OutcomeName, photoRequired: boolean, draftPhotos: number): boolean {
+  return photoRequired && outcome !== 'NOT_DELIVERED' && !proofPhotos(stop) && draftPhotos === 0;
+}
+
+/**
  * Whether the entered result can be saved (pure; the server checks the same rules again). A changed
  * or redone result needs no new photo when an earlier Delivered or Partly named one (proofPhotos).
  */
@@ -90,8 +99,9 @@ export function OutcomeFlow({
   const needsReason = outcome !== 'DELIVERED';
   // Every photo of the stop (sent, or still on the phone), for the count shown.
   const kept = stop.view.photoIds.length + stop.view.localPhotos;
-  // A changed result: the photos an earlier Delivered or Partly named are its proof (not a Not delivered's).
-  const photoNeeded = photoRequired && outcome !== 'NOT_DELIVERED' && !proofPhotos(stop);
+  // A changed result: the photos an earlier Delivered or Partly named are its proof (not a Not delivered's);
+  // a photo added to the draft ends "Photo required" too.
+  const photoNeeded = photoStillRequired(stop, outcome, photoRequired, photos.length);
   const ok = canSave(stop, draft, photoRequired);
   const total = lines.reduce((a, l) => a + (draft.lines[l.lineId] ?? l.cases), 0);
   const title = outcome === 'DELIVERED' ? t(lang, 'delivered') : outcome === 'PARTLY_DELIVERED' ? t(lang, 'partly') : t(lang, 'notDelivered');
@@ -201,7 +211,7 @@ export function OutcomeFlow({
         {photos.length < maxPhotos ? (
           <CameraButton lang={lang} tz={tz} disabled={false} onBeforeOpen={onBeforeCamera} onLocate={onLocate} onUse={onPhoto} onCameraSlow={onCameraSlow} />
         ) : null}
-        {photoNeeded && !photos.length ? (
+        {photoNeeded ? (
           <button
             type="button"
             onClick={() => set({ noPhoto: !draft.noPhoto })}

@@ -3,6 +3,8 @@
  * 4 Oct 2026, spec section 13.5). applyQueued, stopInProgress and the unsent list. Synthetic stops
  * ACME and BETA on truck T05.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DriverAction, DriverManifest, ManifestStop, StopResult } from '@/lib/driver-link/manifest-types';
 import { applyQueued, stopInProgress, unsentList } from '@/lib/driver-page/overlay';
@@ -177,6 +179,55 @@ describe('useTracker on the page', () => {
     expect(host.tree.trip).toMatchObject({ loadNo: 2 });
     expect(host.tree.backSuggested).toBeNull();
   });
+
+  it('the last trip back at the depot ends the position watch and shows the timer off; a trip dispatched later starts it again; a timer the driver stopped stays stopped (demo fix, 4 Oct 2026)', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    const watched: number[] = [];
+    const cleared: number[] = [];
+    const saved: boolean[] = [];
+    vi.stubGlobal('navigator', {
+      geolocation: {
+        watchPosition: () => {
+          watched.push(watched.length + 1);
+          return watched.length;
+        },
+        clearWatch: (id: number) => cleared.push(id),
+      },
+    });
+    const first = manifest([stop(1, 'ACME'), stop(2, 'BETA')]).loads[0]!;
+    const trip = (loadNo: number, over: Partial<typeof first> = {}) => ({ ...first, loadNo, trips: 3, stops: [{ ...stop(1, 'GAMMA'), key: `${loadNo}:1` }], ...over });
+    const backAt = new Date(T0 + 3_600_000).toISOString();
+    const host = new Host(useTracker, { ...base(applyQueued({ loads: [first] }, [])), onTrackingChange: (on: boolean) => void saved.push(on) });
+    host.render();
+    host.tree.start();
+    host.flush();
+    expect(host.tree).toMatchObject({ on: true, trip: { loadNo: 1 } });
+    expect(saved).toEqual([true]);
+
+    // "Back at depot" on the only trip: nothing left to time -> the watch ends, the page shows the timer off.
+    const done = applyQueued({ loads: [{ ...first, backAtDepotAt: backAt }] }, []);
+    host.render({ loads: done });
+    expect(host.tree).toMatchObject({ on: false, gps: 'idle', trip: null });
+    expect(cleared).toEqual([1]);
+    expect(saved).toEqual([true]); // the saved "timer on" is kept: a reload during the wait restarts it too
+    host.render({ loads: done });
+    expect(watched).toEqual([1]); // still nothing on the road: not started again
+
+    // Trip 2 is dispatched later: the watch starts again without a tap.
+    host.render({ loads: applyQueued({ loads: [{ ...first, backAtDepotAt: backAt }, trip(2)] }, []) });
+    expect(host.tree).toMatchObject({ on: true, trip: { loadNo: 2, held: false } });
+    expect(watched).toEqual([1, 2]);
+
+    // A timer the driver stops by hand is not started again by the next trip.
+    host.tree.stop();
+    host.flush();
+    expect(host.tree.on).toBe(false);
+    expect(cleared).toEqual([1, 2]);
+    host.render({ loads: applyQueued({ loads: [{ ...first, backAtDepotAt: backAt }, trip(2, { backAtDepotAt: backAt }), trip(3)] }, []) });
+    expect(host.tree.on).toBe(false);
+    expect(watched).toEqual([1, 2]);
+  });
 });
 
 describe('the result sheet (review of 4 Oct 2026)', () => {
@@ -193,6 +244,29 @@ describe('the result sheet (review of 4 Oct 2026)', () => {
     const [q] = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [queued]);
     expect(proofPhotos(q!.stops[1]!)).toBe(1);
     expect(canSave(q!.stops[1]!, draft(), true)).toBe(true);
+  });
+
+  it('the photo heading says "Photo required" only while no photo is on the draft: a photo just added counts (demo fix, 4 Oct 2026)', async () => {
+    const { photoStillRequired } = await import('@/app/d/[token]/outcome-flow');
+    const [l] = applyQueued(manifest([stop(1, 'ACME', serverResult({ photoIds: ['p1'], proofPhotos: 1 })), stop(2, 'BETA')]), []);
+    const fresh = l!.stops[1]!;
+    expect(photoStillRequired(fresh, 'DELIVERED', true, 0)).toBe(true);
+    expect(photoStillRequired(fresh, 'PARTLY_DELIVERED', true, 0)).toBe(true);
+    expect(photoStillRequired(fresh, 'DELIVERED', true, 1)).toBe(false); // a photo was added to the draft
+    expect(photoStillRequired(fresh, 'NOT_DELIVERED', true, 0)).toBe(false); // optional for Not delivered
+    expect(photoStillRequired(fresh, 'DELIVERED', false, 0)).toBe(false); // the company does not require one
+    expect(photoStillRequired(l!.stops[0]!, 'DELIVERED', true, 0)).toBe(false); // an earlier Delivered's photo is the proof
+    // The component uses it for the heading and for "Camera not working", with the draft's photo count.
+    const flow = readFileSync(path.resolve(__dirname, '../../app/d/[token]/outcome-flow.tsx'), 'utf8');
+    expect(flow).toContain('photoStillRequired(stop, outcome, photoRequired, photos.length)');
+    expect(flow).toContain("{photoNeeded ? t(lang, 'photoRequired') : t(lang, 'photosLabel', { n: photos.length + kept })}");
+  });
+
+  it('the driver page keeps "Cases: N" together on a stop row (nowrap) and registers the worker in production builds only', () => {
+    const page = readFileSync(path.resolve(__dirname, '../../app/d/[token]/driver-page.tsx'), 'utf8');
+    expect(page).toContain(`<span className="whitespace-nowrap">{t(lang, 'casesLabel', { n: s.cases })}</span>`);
+    expect(page).toContain('shouldRegisterWorker(process.env.NODE_ENV, navigator)');
+    expect(page).not.toMatch(/if \('serviceWorker' in navigator\) void navigator\.serviceWorker\.register/);
   });
 
   it('photos taken for a Not delivered are no proof for a later Delivered (a return visit takes its own photo)', async () => {

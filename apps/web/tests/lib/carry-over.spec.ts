@@ -61,6 +61,8 @@ import {
   carrySelected,
   carrySelectionPayload,
   carryTickedByDefault,
+  carryTodayHint,
+  carryTodaySplit,
   carryTodayTitle,
   carryUndoConfirmText,
   carryWhyLabel,
@@ -497,7 +499,25 @@ describe('the words on every screen and paper', () => {
   });
 
   it("today's group: its heading, the owner's warning, and the question before bringing today's orders forward", () => {
-    expect(carryTodayTitle('2026-09-27')).toBe('Today (27 Sep) - may still leave today');
+    // Demo fix (4 Oct 2026): the heading says plainly which of today's rows are ticked (the driver's result is
+    // settled, the truck is back) and which may still leave today (not ticked).
+    const split = carryTodaySplit([
+      { orderId: 'A', blocked: null, ofToday: true, confirmed: true },
+      { orderId: 'B', blocked: null, ofToday: true, confirmed: false },
+      { orderId: 'C', blocked: null, ofToday: true },
+      { orderId: 'D', blocked: { code: 'X' }, ofToday: true, confirmed: true }, // cannot be brought forward: in neither
+    ]);
+    expect(split).toEqual({ settled: 1, open: 2 });
+    expect(carryTodayTitle('2026-09-27', split)).toBe('Today (27 Sep) - 1 driver-confirmed not delivered (ticked), 2 may still leave today (not ticked)');
+    expect(carryTodayTitle('2026-09-27', { settled: 0, open: 3 })).toBe('Today (27 Sep) - may still leave today (not ticked)');
+    expect(carryTodayTitle('2026-09-27', { settled: 2, open: 0 })).toBe('Today (27 Sep) - driver-confirmed not delivered (ticked)');
+    expect(carryTodayTitle('2026-09-27', { settled: 0, open: 0 })).toBe('Today (27 Sep)');
+    // The ticked ones are exactly the settled ones (the heading and the default tick never disagree).
+    expect([...defaultCarrySelection([{ orderId: 'A', blocked: null, ofToday: true, confirmed: true }, { orderId: 'B', blocked: null, ofToday: true }])]).toEqual(['A']);
+    expect(carryTodayHint({ settled: 1, open: 0 })).toBe('The driver recorded these as not delivered and the truck is back, so they are ticked.');
+    expect(carryTodayHint({ settled: 0, open: 2 })).toBe(CARRY_TODAY_WARNING);
+    expect(carryTodayHint({ settled: 1, open: 2 })).toBe(`The driver recorded these as not delivered and the truck is back, so they are ticked. ${CARRY_TODAY_WARNING}`);
+    expect(carryTodayHint({ settled: 0, open: 0 })).toBe('');
     expect(CARRY_TODAY_WARNING).toBe("Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.");
     const earlierOnly = carryConfirmText([{ cases: 10, ofToday: false }, { cases: 5, ofToday: false }], D, D1);
     expect(earlierOnly).toBe(
@@ -1556,9 +1576,12 @@ describe('PR9 second review: the day it goes to must not be over; a day being op
     // Today's orders in their own group, after the earlier days, under the owner's heading and warning.
     const list = panel.slice(panel.indexOf('data-testid="carry-over-list"'));
     expect(list.indexOf('{earlier.map(row)}')).toBeGreaterThan(0);
-    expect(list.indexOf('{carryTodayTitle(preview.today)}')).toBeGreaterThan(list.indexOf('{earlier.map(row)}'));
-    expect(list.indexOf('{CARRY_TODAY_WARNING}')).toBeGreaterThan(list.indexOf('{carryTodayTitle(preview.today)}'));
-    expect(list.indexOf('{todays.map(row)}')).toBeGreaterThan(list.indexOf('{CARRY_TODAY_WARNING}'));
+    expect(list.indexOf('{carryTodayTitle(preview.today, todaySplit)}')).toBeGreaterThan(list.indexOf('{earlier.map(row)}'));
+    expect(list.indexOf('{carryTodayHint(todaySplit)}')).toBeGreaterThan(list.indexOf('{carryTodayTitle(preview.today, todaySplit)}'));
+    expect(list.indexOf('{todays.map(row)}')).toBeGreaterThan(list.indexOf('{carryTodayHint(todaySplit)}'));
+    expect(panel).toContain('const todaySplit = carryTodaySplit(todays);');
+    // "Not ticked by default" is no longer said of the whole group: some of today's rows are ticked by default.
+    expect(panel).not.toContain('Not ticked by default');
     expect(panel).toContain('const todays = preview.candidates.filter((c) => c.ofToday);');
     // The warning also shows with the list closed: it comes before the list's "{open ? (".
     const warningAt = panel.indexOf('data-testid="carry-over-today-warning"');

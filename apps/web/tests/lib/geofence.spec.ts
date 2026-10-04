@@ -3,6 +3,8 @@
  * synthetic tracks. Pins are synthetic points around 23.6 N, 58.4 E; distances are in metres east /
  * north of a pin. Customers ACME, BETA and the rest are synthetic.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   chooseCustomer,
@@ -12,6 +14,7 @@ import {
   manualArrive,
   restoreTracker,
   step,
+  timerStep,
   trackStops,
   zoneOf,
   type Fix,
@@ -389,6 +392,44 @@ describe('trips, the depot and reloads (spec section 7.4)', () => {
         { started: false, nowMin: 900 },
       ),
     ).toEqual({ loadNo: 1, held: false });
+  });
+
+  it('timerStep: the last trip back stops the watch; a trip on the road again restarts it; a timer the driver stopped stays stopped', () => {
+    const loads = (back: boolean, status = 'DISPATCHED') => [{ loadNo: 1, status, departMin: 430, back }];
+    const live = (on: boolean, autoStopped: boolean, l: ReturnType<typeof loads>, nowMin = 600) => {
+      const trip = currentTrip(l, { started: on, nowMin });
+      return timerStep({ on, trip, autoStopped, loadsKnown: true });
+    };
+    // On the road: nothing changes. Back at the depot with nothing else to time: STOP.
+    expect(live(true, false, loads(false))).toBe('NONE');
+    expect(live(true, false, loads(true))).toBe('STOP');
+    // A held trip (LOCKED, the driver tapped Start deliveries) is still something to wait for.
+    expect(live(true, false, loads(false, 'LOCKED'), 420)).toBe('NONE');
+    // Stopped by itself; trip 2 is dispatched later: RESTART. Still nothing to time: NONE.
+    const two = [{ loadNo: 1, status: 'DISPATCHED', departMin: 430, back: true }, { loadNo: 2, status: 'LOCKED', departMin: 900, back: false }];
+    expect(live(false, true, two, 700)).toBe('NONE');
+    expect(live(false, true, [two[0]!, { ...two[1]!, status: 'DISPATCHED' }], 900)).toBe('RESTART');
+    // Stopped by hand: never restarted by itself.
+    expect(live(false, false, [two[0]!, { ...two[1]!, status: 'DISPATCHED' }], 900)).toBe('NONE');
+    // A held trip alone never restarts it (only a trip on the road does); before the loads are known nothing happens.
+    expect(timerStep({ on: false, trip: { held: true }, autoStopped: true, loadsKnown: true })).toBe('NONE');
+    expect(timerStep({ on: true, trip: null, autoStopped: false, loadsKnown: false })).toBe('NONE');
+    expect(timerStep({ on: false, trip: { held: false }, autoStopped: true, loadsKnown: false })).toBe('NONE');
+  });
+
+  it('use-tracker: the STOP step ends the watch and shows the timer off, keeps the saved "on", and the wake lock follows `on`', () => {
+    const hook = readFileSync(path.resolve(__dirname, '../../app/d/[token]/use-tracker.ts'), 'utf8');
+    const effect = hook.slice(hook.indexOf('const what = timerStep('), hook.indexOf('// The tick and visibility changes'));
+    expect(effect).toContain("what === 'STOP'");
+    expect(effect).toContain('clearWatch(watchRef.current)');
+    expect(effect).toContain('setOn(false)');
+    expect(effect).toContain("setGps('idle')");
+    expect(effect).toContain("what === 'RESTART'");
+    // The saved flag is not cleared by the automatic stop (a reload restarts the timer), only by the driver's stop.
+    expect(effect).not.toContain('onTrackingChange');
+    expect(hook).toMatch(/autoStopped\.current = false; \/\/ the driver's own stop/);
+    // The wake lock is taken only while on and at a stop, so `on` false releases it.
+    expect(hook).toContain("const want = on && state.phase === 'AT_STOP';");
   });
 
   it('a manual arrival with a wrong pin never departs before its result', () => {

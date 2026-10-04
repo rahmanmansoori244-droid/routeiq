@@ -9,7 +9,7 @@
 import ExcelJS from 'exceljs';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
-import { daysBetween, fmtHhmm, isoOf, localMinutes } from '../dispatch/time';
+import { DEFAULT_TZ, daysBetween, fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
 import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
 import { keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
@@ -109,6 +109,13 @@ export interface ActualsMeta {
   generatedAt: Date;
   generatedBy: string;
   kpis: DeliveryKpis;
+  /** The company's timezone (readActuals returns it); Asia/Muscat when left out. */
+  tz?: string;
+}
+
+/** "2026-10-05 19:00": the moment in the company's time (the Summary's "Made" line), like the Stops sheet's times. */
+export function madeAtText(at: Date, tz: string = DEFAULT_TZ): string {
+  return `${localDateIso(at, tz)} ${fmtHhmm(localMinutes(at, tz))}`;
 }
 
 /** The workbook (pure: rows in, bytes out). */
@@ -135,7 +142,8 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
     ['Company', meta.tenantName],
     ['Days', meta.from === meta.to ? meta.from : `${meta.from} to ${meta.to}`],
     ['Depot', meta.depot ?? 'all'],
-    ['Made', `${meta.generatedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC by ${meta.generatedBy}`],
+    // Company time like every other time in this file (Muscat), never UTC.
+    ['Made', `${madeAtText(meta.generatedAt, meta.tz)} by ${meta.generatedBy}`],
     ['Dispatched stops', k.stops],
     ['With a result', k.withResult],
     ['Delivered in full', k.delivered],
@@ -260,7 +268,7 @@ export function actualsRowOf(
 }
 
 /** The rows and KPIs for [from, to] (31 days at most), one depot or all. */
-export async function readActuals(tenantId: string, range: { from: string; to: string }, depotId: string | null, opts: { db?: Db } = {}): Promise<{ rows: ActualsRow[]; kpis: DeliveryKpis; depot: string | null }> {
+export async function readActuals(tenantId: string, range: { from: string; to: string }, depotId: string | null, opts: { db?: Db } = {}): Promise<{ rows: ActualsRow[]; kpis: DeliveryKpis; depot: string | null; tz: string }> {
   const db = opts.db ?? prisma;
   if (daysBetween(range.from, range.to) + 1 > ACTUALS_MAX_DAYS || range.to < range.from) throw new Error('range');
   const set = await outcomeSettings(db, tenantId);
@@ -268,7 +276,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
   const loads = await loadsOfRuns(db, tenantId, runs);
   const depots = await db.depot.findMany({ where: { tenantId }, select: { id: true, code: true } });
   const depotCode = new Map(depots.map((d) => [d.id, d.code]));
-  if (!loads.length) return { rows: [], kpis: deliveryKpis([]), depot: depotId ? (depotCode.get(depotId) ?? null) : null };
+  if (!loads.length) return { rows: [], kpis: deliveryKpis([]), depot: depotId ? (depotCode.get(depotId) ?? null) : null, tz: set.tz };
   const [stopsBy, visits] = await Promise.all([stopsOfLoads(db, loads), visitsInRange(db, tenantId, range.from, range.to, depotId)]);
   const scoped = await truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
@@ -337,5 +345,5 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
       );
     }
   }
-  return { rows, kpis: deliveryKpis(kpiStops), depot: depotId ? (depotCode.get(depotId) ?? null) : null };
+  return { rows, kpis: deliveryKpis(kpiStops), depot: depotId ? (depotCode.get(depotId) ?? null) : null, tz: set.tz };
 }

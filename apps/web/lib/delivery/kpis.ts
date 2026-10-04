@@ -13,6 +13,7 @@
  *   arrival that waits for the window counts as inside; an open end is unbounded.
  */
 import { eligibleForMeasured, type MeasuredVisit } from './measured';
+import { countOf } from './office-text';
 
 export interface KpiVisit extends MeasuredVisit {
   reason: string | null;
@@ -157,10 +158,10 @@ export function deliveryKpis(stops: readonly (KpiVisit | null)[]): DeliveryKpis 
 /** The Deliveries card's first line: "212 of 300 stops have a result · 196 delivered in full · 9 partly · 7 not delivered · 88 no result yet". */
 export function kpiHeadline(k: DeliveryKpis): string {
   if (!k.stops) return 'No dispatched stops yet.';
-  return `${k.withResult} of ${k.stops} stops have a result · ${k.delivered} delivered in full · ${k.partly} partly · ${k.notDelivered} not delivered · ${k.noResult} no result yet`;
+  return `${k.withResult} of ${countOf(k.stops, 'stop')} ${k.stops === 1 ? 'has' : 'have'} a result · ${k.delivered} delivered in full · ${k.partly} partly · ${k.notDelivered} not delivered · ${k.noResult} no result yet`;
 }
 
 /** "Arrived inside the window 91 % (of 140 observed arrivals)", or null without an observed arrival. */
 export function kpiOnTimeText(k: DeliveryKpis): string | null {
-  return k.timedArrivals ? `Arrived inside the window ${k.insideWindowPct} % (of ${k.timedArrivals} observed arrivals)` : null;
+  return k.timedArrivals ? `Arrived inside the window ${k.insideWindowPct} % (of ${countOf(k.timedArrivals, 'observed arrival')})` : null;
 }

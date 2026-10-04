@@ -7,7 +7,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import type { BringForwardResult, CarryCandidate, CarryPreview, UndoableCarry } from '@/lib/dispatch/carry-over';
 import {
-  CARRY_TODAY_WARNING,
   carryButtonSuffix,
   carryConfirmText,
   carryDoneText,
@@ -15,6 +14,9 @@ import {
   carryResultNote,
   carrySelected,
   carrySelectionPayload,
+  carryTickedByDefault,
+  carryTodayHint,
+  carryTodaySplit,
   carryTodayTitle,
   carryUndoConfirmText,
   carryWhyLabel,
@@ -52,9 +54,11 @@ interface Props {
  *
  * Two groups (owner decision): the days before today are over - their orders are ticked by
  * default; today's orders (when this day is later than today, for example tomorrow planned in the
- * evening) are listed on their own, "Today (27 Sep) - may still leave today", with a warning, and
- * are NOT ticked by default: today's loads that have not left yet may still go out today. An order
- * of today goes in the POST only when ticked (`today: true`); the server refuses it otherwise.
+ * evening) are listed on their own, "Today (27 Sep) - ...", with a warning, and are NOT ticked by
+ * default, except those the driver's result settled (every open case recorded as not delivered, the
+ * truck back): today's loads that have not left yet may still go out today. The heading says which
+ * rows are ticked and which "may still leave today (not ticked)" (carryTodayTitle). An order of
+ * today goes in the POST only when ticked (`today: true`); the server refuses it otherwise.
  *
  * What the dispatcher ticked or unticked stays when the list is read again (after a refusal, a
  * partial bring forward, a new plan version or file, Look again): only orders new to the list get
@@ -148,9 +152,13 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
   if (preview.candidates.length === 0) return <CarryFollowUps preview={preview} canPlan={canPlan} disabled={!ready || busy || running} onUndo={(u) => void undo(u)} />;
   const selected = carrySelected(preview.candidates, choices);
   const chosen = preview.candidates.filter((c) => selected.has(c.orderId));
-  const chosenToday = chosen.filter((c) => c.ofToday).length;
   const earlier = preview.candidates.filter((c) => !c.ofToday);
   const todays = preview.candidates.filter((c) => c.ofToday);
+  // Today's group: the rows ticked by default (the driver's result is settled, the truck is back) and the
+  // rows that may still leave today (not ticked); what the dispatcher changed by hand is said apart.
+  const todaySplit = carryTodaySplit(todays);
+  const tickedByYou = todays.filter((c) => selected.has(c.orderId) && !carryTickedByDefault(c)).length;
+  const untickedByYou = todays.filter((c) => !c.blocked && !selected.has(c.orderId) && carryTickedByDefault(c)).length;
   const toggle = (c: CarryCandidate) => setChoices((m) => toggleCarry(m, c));
   // The count is on the button whenever the selection is not "every order of the earlier days" (with today's ticked).
   const suffix = carryButtonSuffix(chosen, preview);
@@ -232,7 +240,9 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
         <p className="flex items-start gap-1 text-xs font-medium text-amber-900" data-testid="carry-over-today-warning">
           <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
           <span>
-            {carryTodayTitle(preview.today)}: {CARRY_TODAY_WARNING} Not ticked by default{chosenToday ? `: ${chosenToday} ticked by you` : ''}.
+            {carryTodayTitle(preview.today, todaySplit)}: {carryTodayHint(todaySplit)}
+            {tickedByYou ? ` ${tickedByYou} more ticked by you.` : ''}
+            {untickedByYou ? ` ${untickedByYou} unticked by you.` : ''}
           </span>
         </p>
       ) : null}
@@ -271,8 +281,8 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
               {todays.length ? (
                 <tr className="border-t bg-amber-100">
                   <td className="p-2" colSpan={5} data-testid="carry-over-today-group">
-                    <span className="block font-medium">{carryTodayTitle(preview.today)}</span>
-                    <span className="block text-amber-900">{CARRY_TODAY_WARNING}</span>
+                    <span className="block font-medium">{carryTodayTitle(preview.today, todaySplit)}</span>
+                    <span className="block text-amber-900">{carryTodayHint(todaySplit)}</span>
                   </td>
                 </tr>
               ) : null}

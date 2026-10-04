@@ -7,6 +7,11 @@ import { DICT } from '../driver-page/i18n';
 import { NOT_DELIVERED_REASONS, type NotDeliveredReasonName } from '../driver-link/manifest-types';
 import { addDaysIso, daysBetween, fmtHhmm, localMinutes } from '../dispatch/time';
 
+/** "1 stop" / "2 stops" / "0 stops" (`many` for a plural that is not just an s). */
+export function countOf(n: number, one: string, many = `${one}s`): string {
+  return `${n} ${n === 1 ? one : many}`;
+}
+
 /**
  * Record outcome's Arrived / Left boxes start with the stored times (HH:MM, company time), so the
  * dispatcher sees what a correction replaces. A "Left" that is only the result time is not shown.

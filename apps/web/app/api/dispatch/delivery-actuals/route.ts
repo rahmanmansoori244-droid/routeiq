@@ -23,9 +23,9 @@ export const GET = withTenantApi(
     if (to < from) throw new HttpError('"to" must not be before "from".', 400, { code: 'INVALID_RANGE' });
     if (daysBetween(from, to) + 1 > ACTUALS_MAX_DAYS) throw new HttpError(`At most ${ACTUALS_MAX_DAYS} days at a time.`, 400, { code: 'RANGE_TOO_LONG' });
     if (depotId && !(await db.depot.findFirst({ where: { id: depotId }, select: { id: true } }))) throw new HttpError('Depot not found.', 404, { code: 'DEPOT_NOT_FOUND' });
-    const { rows, kpis, depot } = await readActuals(user.tenantId, { from, to }, depotId);
+    const { rows, kpis, depot, tz } = await readActuals(user.tenantId, { from, to }, depotId);
     const tenant = await db.tenant.findFirst({ where: { id: user.tenantId }, select: { name: true } });
-    const buf = await buildActualsWorkbook(rows, { tenantName: tenant?.name ?? '', from, to, depot, generatedAt: new Date(), generatedBy: user.name || user.email, kpis });
+    const buf = await buildActualsWorkbook(rows, { tenantName: tenant?.name ?? '', from, to, depot, generatedAt: new Date(), generatedBy: user.name || user.email, kpis, tz });
     const bytes = new Uint8Array(buf);
     const name = `delivery-actuals-${from}${to !== from ? `_${to}` : ''}${depot ? `-${depot.replace(/[^A-Za-z0-9_-]/g, '')}` : ''}.xlsx`;
     return new NextResponse(bytes, {

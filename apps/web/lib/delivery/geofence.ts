@@ -462,6 +462,24 @@ export function currentTrip(loads: readonly TripLoad[], local: { started: boolea
   return waiting ? { loadNo: waiting.loadNo, held: true } : null;
 }
 
+/**
+ * What the phone does with the position watch (and the screen wake lock) after the loads changed.
+ * - STOP: the timer is on but there is no trip left to time (the last trip is back at the depot, or
+ *   the one waited for is gone): the watch ends and the page shows the timer as off, so the phone
+ *   does not keep the GPS running all day. `autoStopped` is then remembered.
+ * - RESTART: the timer was stopped like that and a trip is on the road again (DISPATCHED, not held):
+ *   the watch starts again without a tap (location is already allowed).
+ * - NONE: nothing changes. A timer the driver stopped by hand (`autoStopped` false) is never restarted
+ *   by itself, and nothing happens before the loads are known (`loadsKnown` false).
+ */
+export type TimerStep = 'STOP' | 'RESTART' | 'NONE';
+
+export function timerStep(s: { on: boolean; trip: { held: boolean } | null; autoStopped: boolean; loadsKnown: boolean }): TimerStep {
+  if (!s.loadsKnown) return 'NONE';
+  if (s.on) return s.trip ? 'NONE' : 'STOP';
+  return s.autoStopped && s.trip && !s.trip.held ? 'RESTART' : 'NONE';
+}
+
 export interface TripStopIn {
   key: string;
   sequence: number;

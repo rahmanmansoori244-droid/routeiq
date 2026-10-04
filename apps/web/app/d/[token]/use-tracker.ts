@@ -10,6 +10,7 @@ import {
   manualArrive as manualInTracker,
   restoreTracker,
   step,
+  timerStep,
   trackStops,
   type Fix,
   type TrackEvent,
@@ -93,6 +94,9 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   const optsRef = useRef(opts);
   optsRef.current = opts;
   const tripKey = useRef<string>('');
+  // The timer ended by itself because no trip was left to time (not stopped by the driver): it starts
+  // again when a trip is on the road (timerStep).
+  const autoStopped = useRef(false);
 
   const trip = useMemo(() => {
     if (!opts.loads) return null;
@@ -206,6 +210,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   const stop = useCallback(() => {
     if (watchRef.current !== null && typeof navigator !== 'undefined') navigator.geolocation?.clearWatch(watchRef.current);
     watchRef.current = null;
+    autoStopped.current = false; // the driver's own stop: never restarted by itself
     setOn(false);
     setGps('idle');
     optsRef.current.onTrackingChange(false);
@@ -218,6 +223,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
       return;
     }
     if (watchRef.current !== null) return;
+    autoStopped.current = false;
     setGps('waiting');
     try {
       watchRef.current = geo.watchPosition(
@@ -243,6 +249,23 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
       setGps('unsupported');
     }
   }, [run]);
+
+  // No trip left to time (the last trip is back at the depot): the position watch ends, the wake lock
+  // goes with it (the effect above) and the page shows the timer as off - the GPS does not run all
+  // day for nothing. A trip on the road again (a new DISPATCHED load) starts it again without a tap.
+  // The saved "timer on" is kept, so a reload during the wait restarts it too (see `resume`).
+  useEffect(() => {
+    const what = timerStep({ on, trip, autoStopped: autoStopped.current, loadsKnown: !!opts.loads && ready });
+    if (what === 'STOP') {
+      if (watchRef.current !== null && typeof navigator !== 'undefined') navigator.geolocation?.clearWatch(watchRef.current);
+      watchRef.current = null;
+      autoStopped.current = true;
+      setOn(false);
+      setGps('idle');
+    } else if (what === 'RESTART') {
+      start();
+    }
+  }, [on, trip, opts.loads, ready, start]);
 
   // The tick and visibility changes (the tracker records gaps; a page coming back may ask "when?").
   useEffect(() => {

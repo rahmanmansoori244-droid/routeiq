@@ -5,7 +5,7 @@ import { Download, PackageCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { kpiHeadline, kpiOnTimeText } from '@/lib/delivery/kpis';
-import { ACTUALS_MAX_DAYS, actualsDefaultRange, actualsRangeProblem, actualsUrl, reasonLabel } from '@/lib/delivery/office-text';
+import { ACTUALS_MAX_DAYS, actualsDefaultRange, actualsRangeProblem, actualsUrl, countOf, reasonLabel } from '@/lib/delivery/office-text';
 import { noOutcomeGroups } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
@@ -62,7 +62,7 @@ export function DeliverySummary({
       <p data-testid="deliveries-headline">{kpiHeadline(k)}</p>
       {k.byReason.length ? (
         <p className="text-xs text-muted-foreground" data-testid="deliveries-reasons">
-          {k.byReason.map((r) => `${reasonLabel(r.reason)} ${r.stops} stop${r.stops === 1 ? '' : 's'} / ${r.cases} cases`).join(' · ')}
+          {k.byReason.map((r) => `${reasonLabel(r.reason)} ${countOf(r.stops, 'stop')} / ${countOf(r.cases, 'case')}`).join(' · ')}
         </p>
       ) : null}
       {onTime ? <p className="text-xs">{onTime}</p> : null}

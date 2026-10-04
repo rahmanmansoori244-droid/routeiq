@@ -4,6 +4,9 @@
  * arrivals released at dispatch, drafts committed with Save, a reissued link picking up the waiting
  * items and the clean-up of old truck-days. Synthetic data only.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   actionItem,
@@ -20,6 +23,7 @@ import {
   type QueueItem,
 } from '@/lib/driver-page/queue';
 import { memoryStore } from '@/lib/driver-page/store';
+import { dropDriverWorker, shouldRegisterWorker } from '@/lib/driver-page/worker';
 import type { DriverAction } from '@/lib/driver-link/manifest-types';
 
 const NS = 't5|2026-10-05';
@@ -220,5 +224,139 @@ describe('held items, drafts, namespaces', () => {
     expect(await store.getManifest(old)).toBeNull();
     expect(await store.getLink('h')).toBeNull();
     expect(await store.items(NS)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// The service worker (public/driver-sw.js, demo fix of 4 Oct 2026): a cache that fails never fails a
+// request, and the page registers the worker in production builds only. The worker file is run as it
+// is, in a vm context with a stub CacheStorage, fetch and `self` (no browser here).
+// ---------------------------------------------------------------------------------------
+describe('the driver service worker', () => {
+  const src = readFileSync(path.resolve(__dirname, '../../public/driver-sw.js'), 'utf8');
+  type Listener = (e: Record<string, unknown>) => void;
+  type Cache = { match: (r: unknown) => Promise<Response | undefined>; put: (r: unknown, res: Response) => Promise<void>; keys: () => Promise<unknown[]>; delete: (r: unknown) => Promise<boolean> };
+  type Storage = { open: () => Promise<Cache>; keys?: () => Promise<string[]>; delete?: (n: string) => Promise<boolean> };
+
+  /** The worker's script in a context with the given CacheStorage (undefined: none at all) and fetch. */
+  function boot(storage: Storage | undefined, fetchImpl: (r: unknown) => Promise<Response>) {
+    const listeners: Record<string, Listener> = {};
+    const claimed = { n: 0 };
+    const self = {
+      location: { href: 'https://app.test/driver-sw.js?v=b1', origin: 'https://app.test' },
+      addEventListener: (type: string, l: Listener) => {
+        listeners[type] = l;
+      },
+      skipWaiting: () => undefined,
+      clients: { claim: async () => void claimed.n++ },
+    };
+    const globals: Record<string, unknown> = { self, fetch: fetchImpl, URL, Response };
+    if (storage) globals.caches = storage;
+    vm.runInContext(src, vm.createContext(globals));
+    return { listeners, claimed };
+  }
+  const goodCache = (over: Partial<Cache> = {}): Cache => ({ match: async () => undefined, put: async () => undefined, keys: async () => [], delete: async () => true, ...over });
+  /** Fires a fetch event and returns what the worker answered (undefined: it did not respond, the browser goes to the network itself). */
+  async function ask(listeners: Record<string, Listener>, url: string, mode = 'no-cors', method = 'GET') {
+    let answer: Promise<Response> | undefined;
+    listeners.fetch!({ request: { method, url, mode }, respondWith: (p: Promise<Response>) => void (answer = p) });
+    return answer ? await answer : undefined;
+  }
+  const CHUNK = 'https://app.test/_next/static/chunks/app.js';
+  const network = () => {
+    const calls: unknown[] = [];
+    return { calls, fetch: async (r: unknown) => (calls.push(r), new Response('js', { status: 200 })) };
+  };
+  const text = async (r: Response | undefined) => (r ? await r.text() : null);
+
+  it('a /_next/static/ file: the kept copy first, else the network, and the copy is kept for next time', async () => {
+    const net = network();
+    const kept: unknown[] = [];
+    const a = boot({ open: async () => goodCache({ match: async () => new Response('kept') }) }, net.fetch);
+    expect(await text(await ask(a.listeners, CHUNK))).toBe('kept');
+    expect(net.calls).toHaveLength(0);
+    const b = boot({ open: async () => goodCache({ put: async (r) => void kept.push(r) }) }, net.fetch);
+    expect(await text(await ask(b.listeners, CHUNK))).toBe('js');
+    expect(net.calls).toHaveLength(1);
+    expect(kept).toHaveLength(1);
+  });
+
+  it('a broken or full CacheStorage never fails a chunk: open, match and put errors (and no CacheStorage at all) all fall back to the network', async () => {
+    const cases: [string, Storage | undefined][] = [
+      ['open rejects', { open: async () => Promise.reject(new Error('QuotaExceededError')) }],
+      [
+        'open throws',
+        {
+          open: () => {
+            throw new Error('SecurityError');
+          },
+        },
+      ],
+      ['match rejects', { open: async () => goodCache({ match: async () => Promise.reject(new Error('UnknownError')) }) }],
+      ['put rejects (storage full)', { open: async () => goodCache({ put: async () => Promise.reject(new Error('QuotaExceededError')) }) }],
+      [
+        'put throws',
+        {
+          open: async () =>
+            goodCache({
+              put: () => {
+                throw new Error('boom');
+              },
+            }),
+        },
+      ],
+      ['no CacheStorage', undefined],
+    ];
+    for (const [name, storage] of cases) {
+      const net = network();
+      const w = boot(storage, net.fetch);
+      expect(await text(await ask(w.listeners, CHUNK)), name).toBe('js');
+      expect(net.calls, name).toHaveLength(1);
+    }
+    // The network failing is the one thing that fails the request (as without a worker).
+    const down = boot({ open: async () => Promise.reject(new Error('x')) }, async () => Promise.reject(new TypeError('Failed to fetch')));
+    await expect(ask(down.listeners, CHUNK)).rejects.toThrow('Failed to fetch');
+  });
+
+  it('a page under /d/ without network and with a broken cache is a network error, not a crash; /api, other origins and POSTs are never touched', async () => {
+    const down = boot({ open: async () => Promise.reject(new Error('x')) }, async () => Promise.reject(new TypeError('offline')));
+    const res = await ask(down.listeners, 'https://app.test/d/token123', 'navigate');
+    expect(res?.type).toBe('error');
+    const net = network();
+    const w = boot({ open: async () => goodCache() }, net.fetch);
+    expect(await ask(w.listeners, 'https://app.test/api/driver/x')).toBeUndefined();
+    expect(await ask(w.listeners, 'https://cdn.other.test/_next/static/a.js')).toBeUndefined();
+    expect(await ask(w.listeners, CHUNK, 'no-cors', 'POST')).toBeUndefined();
+    expect(await ask(w.listeners, 'https://app.test/t/acme/dispatch', 'navigate')).toBeUndefined();
+  });
+
+  it('activate takes over and the "forget" message ends well even when the cache storage is broken', async () => {
+    const w = boot({ open: async () => Promise.reject(new Error('x')), keys: async () => Promise.reject(new Error('x')) }, network().fetch);
+    const waits: Promise<unknown>[] = [];
+    w.listeners.activate!({ waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    w.listeners.message!({ data: { type: 'forget', url: '/d/token123' }, waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    await expect(Promise.all(waits)).resolves.toHaveLength(2);
+    expect(w.claimed.n).toBe(1);
+  });
+
+  it('only production builds register it (next dev chunk URLs are not hashed: cache first would serve stale JS); a dev build removes an old one', async () => {
+    expect(shouldRegisterWorker('production', { serviceWorker: {} })).toBe(true);
+    expect(shouldRegisterWorker('development', { serviceWorker: {} })).toBe(false);
+    expect(shouldRegisterWorker('test', { serviceWorker: {} })).toBe(false);
+    expect(shouldRegisterWorker(undefined, { serviceWorker: {} })).toBe(false);
+    expect(shouldRegisterWorker('production', {})).toBe(false); // a browser without service workers
+    expect(shouldRegisterWorker('production', null)).toBe(false);
+    const unregistered: string[] = [];
+    const deleted: string[] = [];
+    const reg = (scope: string) => ({ scope, unregister: async () => void unregistered.push(scope) });
+    await dropDriverWorker({ serviceWorker: { getRegistrations: async () => [reg('https://app.test/d/'), reg('https://app.test/')] } } as never, {
+      keys: async () => ['riq-driver-static-b1', 'riq-driver-pages-b1', 'other-cache'],
+      delete: async (n: string) => (deleted.push(n), true),
+    });
+    expect(unregistered).toEqual(['https://app.test/d/']); // the driver page's own scope only
+    expect(deleted).toEqual(['riq-driver-static-b1', 'riq-driver-pages-b1']);
+    // Errors never reach the page.
+    await expect(dropDriverWorker({ serviceWorker: { getRegistrations: async () => Promise.reject(new Error('x')) } } as never, { keys: async () => Promise.reject(new Error('x')), delete: async () => true })).resolves.toBeUndefined();
+    await expect(dropDriverWorker({} as never, undefined)).resolves.toBeUndefined();
   });
 });

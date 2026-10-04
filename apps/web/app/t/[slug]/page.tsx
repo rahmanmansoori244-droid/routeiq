@@ -3,7 +3,7 @@ import { ListChecks, ArrowRight, Truck } from 'lucide-react';
 import type { RunStatus } from '@prisma/client';
 import { getCurrentTenant } from '@/lib/tenant';
 import { getDashboardData } from '@/lib/dashboard';
-import { reasonLabel } from '@/lib/delivery/office-text';
+import { countOf, reasonLabel } from '@/lib/delivery/office-text';
 import { canPlan } from '@/lib/rbac';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -139,18 +139,18 @@ export default async function DashboardPage({ params }: { params: { slug: string
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
                 <p>
                   Delivered in full: <b>{k.deliveredInFullPct === null ? '—' : `${k.deliveredInFullPct} %`}</b>
-                  <span className="text-muted-foreground"> of {k.withResult} stops with a result</span>
+                  <span className="text-muted-foreground"> of {countOf(k.withResult, 'stop')} with a result</span>
                 </p>
                 <p>
                   Arrived inside the window: <b>{k.insideWindowPct === null ? '—' : `${k.insideWindowPct} %`}</b>
-                  <span className="text-muted-foreground"> of {k.timedArrivals} observed arrivals</span>
+                  <span className="text-muted-foreground"> of {countOf(k.timedArrivals, 'observed arrival')}</span>
                 </p>
                 <p className="text-muted-foreground">
                   {k.notDelivered} not delivered · {k.partly} partly · {k.noResult} no result recorded
                 </p>
                 {k.byReason.length ? (
                   <p className="text-muted-foreground">
-                    Not delivered by reason: {k.byReason.slice(0, 4).map((r) => `${reasonLabel(r.reason)} ${r.stops} stops / ${r.cases} cases`).join(' · ')}
+                    Not delivered by reason: {k.byReason.slice(0, 4).map((r) => `${reasonLabel(r.reason)} ${countOf(r.stops, 'stop')} / ${countOf(r.cases, 'case')}`).join(' · ')}
                   </p>
                 ) : null}
               </div>

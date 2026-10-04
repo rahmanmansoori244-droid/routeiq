@@ -9,9 +9,9 @@ import { resetDb, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 
-import { ACTUALS_COLUMNS, actualsRowOf, buildActualsWorkbook, readActuals } from '@/lib/delivery/actuals-workbook';
-import { deliveryKpis, type KpiVisit } from '@/lib/delivery/kpis';
-import { actualsDefaultRange, actualsRangeProblem, actualsUrl, officeTimesPrefill, officeTimesToSend } from '@/lib/delivery/office-text';
+import { ACTUALS_COLUMNS, actualsRowOf, buildActualsWorkbook, madeAtText, readActuals } from '@/lib/delivery/actuals-workbook';
+import { deliveryKpis, kpiHeadline, kpiOnTimeText, type KpiVisit } from '@/lib/delivery/kpis';
+import { actualsDefaultRange, actualsRangeProblem, actualsUrl, countOf, officeTimesPrefill, officeTimesToSend } from '@/lib/delivery/office-text';
 import { zonedDayStart } from '@/lib/dispatch/time';
 
 const TZ = 'Asia/Muscat';
@@ -88,6 +88,27 @@ describe('the actuals rows (spec 11.3)', () => {
     for (const money of ['cost', 'price', 'sales', 'margin', 'omr', 'payment amount', 'revenue']) expect(all).not.toContain(money);
     const reasons = wb.getWorksheet('Reasons')!;
     expect((reasons.getRow(2).values as unknown[]).slice(1)).toEqual(['Shop closed', 1, 40]);
+    // Demo fix (4 Oct 2026): "Made" is Muscat time like every other time in the file (15:00 UTC = 19:00), never "UTC".
+    const made = (wb.getWorksheet('Summary')!.getSheetValues() as unknown[][]).find((r) => r?.[1] === 'Made');
+    expect(made?.[2]).toBe('2026-10-05 19:00 by Ali');
+    expect(String(made?.[2])).not.toContain('UTC');
+  });
+
+  it('the Made line is in the company time zone, across midnight too (madeAtText)', () => {
+    expect(madeAtText(new Date('2026-10-05T15:00:00Z'))).toBe('2026-10-05 19:00');
+    expect(madeAtText(new Date('2026-10-05T21:30:00Z'))).toBe('2026-10-06 01:30'); // the next day in Muscat
+    expect(madeAtText(new Date('2026-10-05T15:00:00Z'), 'UTC')).toBe('2026-10-05 15:00');
+  });
+
+  it('countOf: "1 stop", "2 stops", "0 stops" (the dashboard tile said "1 stops")', () => {
+    expect(countOf(1, 'stop')).toBe('1 stop');
+    expect(countOf(0, 'stop')).toBe('0 stops');
+    expect(countOf(12, 'case')).toBe('12 cases');
+    expect(countOf(1, 'observed arrival')).toBe('1 observed arrival');
+    // The Deliveries card's sentences say it right with one stop and one observed arrival.
+    const one = deliveryKpis([visit() as never]);
+    expect(kpiHeadline(one)).toBe('1 of 1 stop has a result · 1 delivered in full · 0 partly · 0 not delivered · 0 no result yet');
+    expect(kpiOnTimeText(one)).toBe('Arrived inside the window 100 % (of 1 observed arrival)');
   });
 });
 
@@ -141,6 +162,7 @@ describe('the actuals read from the database', () => {
     const res = await readActuals('tA', { from: D, to: D }, null);
     expect(res.rows.map((r) => [r.truck, r.trip, r.stop, r.result])).toEqual([['T05', 1, 1, 'No result']]);
     expect(res.kpis).toMatchObject({ stops: 1, noResult: 1 });
+    expect(res.tz).toBe(TZ); // the workbook prints "Made" in this zone
     await expect(readActuals('tA', { from: '2026-09-01', to: '2026-10-05' }, null)).rejects.toThrow();
   });
 });

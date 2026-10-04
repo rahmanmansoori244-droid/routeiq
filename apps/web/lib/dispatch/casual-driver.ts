@@ -13,6 +13,9 @@
  *   spaces ignored) is used again, reactivated if needed. Another name, or an active regular driver with
  *   that phone: 409 PHONE_BELONGS_TO, and the dialog asks "This phone belongs to <name>. Use <name>?";
  *   the answer posts again with `useExisting`. The audit never names a driver the dispatcher did not choose.
+ * - The audit rows of a daily driver (CASUAL_DRIVER_ADDED, a reactivation) keep only the last 3 digits
+ *   of the mobile (maskPhone): the number on the driver row is erased after the location retention, an
+ *   audit row is not.
  * - Only a daily driver is ever reactivated here. An inactive regular driver (a company admin switched
  *   them off) is not offered, and `useExisting` naming one is refused 409 DRIVER_INACTIVE.
  */
@@ -55,6 +58,23 @@ export function samePhone(a: string | null | undefined, b: string | null | undef
   if (!x || !y) return false;
   if (x === y) return true;
   return Math.min(x.length, y.length) >= 8 && (x.endsWith(y) || y.endsWith(x));
+}
+
+/**
+ * A daily driver's mobile as the audit log may keep it: only the last 3 digits ("+968 9123 4567" ->
+ * "***567"). The mobile on the driver row is erased after the location retention (the janitor); an
+ * audit row lives for ever, so it never carries the whole number. A number of fewer than 7 digits
+ * is masked completely.
+ */
+export function maskPhone(phone: string | null | undefined): string | null {
+  const digits = (phone ?? '').replace(/\D/g, '');
+  if (!digits) return null;
+  return digits.length >= 7 ? `***${digits.slice(-3)}` : '***';
+}
+
+/** The driver row as an audit row shows it: the mobile masked (maskPhone). */
+function auditDriver(d: DriverPublic): DriverPublic {
+  return { ...d, phone: maskPhone(d.phone) };
 }
 
 /** The same name, case and spaces ignored. */
@@ -122,7 +142,7 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
       if (driver && !driver.active && driver.casual) {
         const before = driver;
         driver = await tx.driver.update({ where: { id: driver.id }, data: { active: true }, select: DRIVER_PUBLIC_SELECT });
-        await audit({ tenantId, userId: user.id, action: 'UPDATE', entity: 'Driver', entityId: driver.id, beforeJson: before, afterJson: { ...driver, reactivatedFrom: 'daily driver quick add' } }, tx);
+        await audit({ tenantId, userId: user.id, action: 'UPDATE', entity: 'Driver', entityId: driver.id, beforeJson: auditDriver(before), afterJson: { ...auditDriver(driver), reactivatedFrom: 'daily driver quick add' } }, tx);
       }
       if (!driver) {
         const used = await tx.driver.findMany({ where: { tenantId, code: { startsWith: `DAY-${yymmdd(date)}-` } }, select: { code: true } });
@@ -130,7 +150,7 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
           data: { tenantId, code: casualCode(date, used.map((d) => d.code)), name: input.name.trim(), phone: input.phone?.trim() || null, casual: true, active: true },
           select: DRIVER_PUBLIC_SELECT,
         });
-        await audit({ tenantId, userId: user.id, action: 'CASUAL_DRIVER_ADDED', entity: 'Driver', entityId: driver.id, afterJson: { ...driver, runId: run.id, loadId: load.id, date } }, tx);
+        await audit({ tenantId, userId: user.id, action: 'CASUAL_DRIVER_ADDED', entity: 'Driver', entityId: driver.id, afterJson: { ...auditDriver(driver), runId: run.id, loadId: load.id, date } }, tx);
       }
       const updated = await setDriver(load.id, driver.id, user);
       return {

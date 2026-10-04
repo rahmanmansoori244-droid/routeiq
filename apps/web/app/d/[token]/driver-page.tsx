@@ -24,6 +24,7 @@ import {
   type SentMap,
 } from '@/lib/driver-page/queue';
 import { memoryStore, openIdbStore, phoneTodayIso, photoBlob } from '@/lib/driver-page/store';
+import { dropDriverWorker, shouldRegisterWorker } from '@/lib/driver-page/worker';
 import { zonedDayStart } from '@/lib/dispatch/time';
 import { ArrivedWhen } from './arrived-when';
 import type { PhotoPlace, TakenPhoto } from './camera-button';
@@ -340,7 +341,9 @@ export function DriverPage() {
         }
       }
       try {
-        if ('serviceWorker' in navigator) void navigator.serviceWorker.register(`/driver-sw.js?v=${buildTag()}`, { scope: '/d/' }).catch(() => {});
+        // Production builds only (lib/driver-page/worker.ts): next dev chunk URLs are not content-hashed.
+        if (shouldRegisterWorker(process.env.NODE_ENV, navigator)) void navigator.serviceWorker.register(`/driver-sw.js?v=${buildTag()}`, { scope: '/d/' }).catch(() => {});
+        else void dropDriverWorker(navigator, typeof caches === 'undefined' ? undefined : caches);
       } catch {
         // no worker: the page still works while it is open
       }
@@ -945,7 +948,7 @@ function TripCard({
                     </span>
                     <span className="block text-sm text-slate-600">
                       <Clock className="me-1 inline h-4 w-4" aria-hidden />
-                      {hhmm(s.etaMin)} · {fmtHours(lang, s.hours, s.promised)} · {t(lang, 'casesLabel', { n: s.cases })}
+                      {hhmm(s.etaMin)} · {fmtHours(lang, s.hours, s.promised)} · <span className="whitespace-nowrap">{t(lang, 'casesLabel', { n: s.cases })}</span>
                     </span>
                     <span className="mt-1 flex flex-wrap gap-1">
                       {s.key === nextKey && s.view.arrivedAt === null ? <span className="rounded-full bg-slate-900 px-2 py-0.5 text-xs font-semibold text-white">{t(lang, 'next')}</span> : null}

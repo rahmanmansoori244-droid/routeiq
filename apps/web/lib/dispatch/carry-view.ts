@@ -74,13 +74,52 @@ export function carrySelectionPayload(candidates: readonly (Listed & { cases: nu
     .map((c) => (c.ofToday ? { orderId: c.orderId, cases: c.cases, today: true as const } : { orderId: c.orderId, cases: c.cases }));
 }
 
-/** The heading of the day screen's group of today's orders: "Today (27 Sep) - may still leave today". */
-export function carryTodayTitle(todayIso: string): string {
-  return `Today (${fmtDayMonth(todayIso)}) - may still leave today`;
+/**
+ * How today's listed orders divide (the "Today" group): `settled` are ticked by default - the driver's
+ * result says every open case was not delivered and the truck is back (carryTickedByDefault); `open`
+ * are not - they may still leave today (a load that has not left, a truck still out, a result that
+ * may change). An order that cannot be brought forward at all (`blocked`) is in neither.
+ */
+export interface CarryTodaySplit {
+  settled: number;
+  open: number;
 }
 
-/** The warning above today's orders (owner decision: unticked by default). */
+export function carryTodaySplit(todays: readonly Listed[]): CarryTodaySplit {
+  let settled = 0;
+  let open = 0;
+  for (const c of todays) {
+    if (c.blocked) continue;
+    if (carryTickedByDefault({ ...c, ofToday: true })) settled++;
+    else open++;
+  }
+  return { settled, open };
+}
+
+/**
+ * The heading of the day screen's group of today's orders. It says which rows are ticked and why:
+ * "Today (27 Sep) - 1 driver-confirmed not delivered (ticked), 2 may still leave today (not ticked)";
+ * with only one kind: "Today (27 Sep) - may still leave today (not ticked)" or
+ * "Today (27 Sep) - driver-confirmed not delivered (ticked)".
+ */
+export function carryTodayTitle(todayIso: string, split: CarryTodaySplit): string {
+  const day = `Today (${fmtDayMonth(todayIso)})`;
+  if (split.settled && split.open) return `${day} - ${split.settled} driver-confirmed not delivered (ticked), ${split.open} may still leave today (not ticked)`;
+  if (split.settled) return `${day} - driver-confirmed not delivered (ticked)`;
+  if (split.open) return `${day} - may still leave today (not ticked)`;
+  return day;
+}
+
+/** The warning for today's orders that may still leave today (owner decision: not ticked by default). */
 export const CARRY_TODAY_WARNING = "Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.";
+
+/** What the driver's result already settled for today's ticked rows. */
+export const CARRY_TODAY_SETTLED = 'The driver recorded these as not delivered and the truck is back, so they are ticked.';
+
+/** The hint under the heading: what ticked rows mean, and the owner's warning for the rows that are not ticked. */
+export function carryTodayHint(split: CarryTodaySplit): string {
+  return [split.settled ? CARRY_TODAY_SETTLED : null, split.open ? CARRY_TODAY_WARNING : null].filter((x): x is string => !!x).join(' ');
+}
 
 /**
  * The "Why not delivered" label of a listed order on the day screen. Today's day is not over, so

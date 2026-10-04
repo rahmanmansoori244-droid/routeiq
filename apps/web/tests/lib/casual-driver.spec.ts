@@ -17,7 +17,7 @@ vi.mock('@/lib/audit', () => ({
   audit: vi.fn(async (input: Record<string, unknown>, tx?: typeof fakePrisma) => (tx ?? fakePrisma).auditLog.create({ data: { ...input } })),
 }));
 
-import { addCasualDriver, casualCode, phoneKey, sameName, samePhone } from '@/lib/dispatch/casual-driver';
+import { addCasualDriver, casualCode, maskPhone, phoneKey, sameName, samePhone } from '@/lib/dispatch/casual-driver';
 import { casualDriverSchema } from '@/lib/schemas';
 
 const T = 'tA';
@@ -50,6 +50,15 @@ describe('pure rules', () => {
     expect(sameName('  Salim  Al Harthy', 'salim al harthy')).toBe(true);
     expect(sameName('Salim', 'Khalid')).toBe(false);
   });
+  it('maskPhone keeps only the last 3 digits (a short number is masked completely, none stays none)', () => {
+    expect(maskPhone('+968 9000 1111')).toBe('***111');
+    expect(maskPhone('0096890001111')).toBe('***111');
+    expect(maskPhone('9000-1111')).toBe('***111');
+    expect(maskPhone('12345')).toBe('***');
+    expect(maskPhone('')).toBeNull();
+    expect(maskPhone(null)).toBeNull();
+    expect(maskPhone(undefined)).toBeNull();
+  });
   it('validation: name 2-80 characters, phone like the Drivers page', () => {
     const ok = { runId: 'P', loadId: 'L1', name: 'Salim' };
     expect(casualDriverSchema.safeParse(ok).success).toBe(true);
@@ -69,6 +78,11 @@ describe('addCasualDriver', () => {
     expect(row('planLoad', 'L1').driverId).toBe(r.driver.id);
     expect(rawLog.filter((s) => /pg_advisory_xact_lock/.test(s))).toHaveLength(1);
     expect(tables.auditLog.map((a) => a.action)).toEqual(['CASUAL_DRIVER_ADDED', 'LOAD_DRIVER_SET']);
+    // Privacy (demo fix, 4 Oct 2026): the driver row keeps the mobile until the janitor erases it, the audit row
+    // lives for ever - it keeps only the last 3 digits, never the whole number.
+    const added = tables.auditLog.find((a) => a.action === 'CASUAL_DRIVER_ADDED')!;
+    expect(added.afterJson).toMatchObject({ code: 'DAY-261005-1', name: 'Salim', phone: '***111', casual: true });
+    expect(JSON.stringify(tables.auditLog)).not.toMatch(/9000\s?1111/);
     // A second one the same day gets the next number.
     tables.planLoad.push({ id: 'L3', tenantId: T, runId: 'P', truckId: 'T5', loadNo: 3, status: 'PLANNED', driverId: null, departMin: 950, returnMin: 1050 });
     const r2 = await addCasualDriver(T, { runId: 'P', loadId: 'L3', name: 'Khalid' }, user);
@@ -100,6 +114,11 @@ describe('addCasualDriver', () => {
     expect(row('driver', 'old').active).toBe(true);
     expect(tables.driver).toHaveLength(2); // nobody new
     expect(row('planLoad', 'L1').driverId).toBe('old');
+    // The reactivation's audit row masks the mobile too (before and after).
+    const reactivated = tables.auditLog.find((a) => a.entityId === 'old')!;
+    expect(reactivated.beforeJson).toMatchObject({ phone: '***111', active: false });
+    expect(reactivated.afterJson).toMatchObject({ phone: '***111', active: true });
+    expect(JSON.stringify(tables.auditLog)).not.toMatch(/9000\s?1111/);
   });
 
   it('the same phone with another name: 409 PHONE_BELONGS_TO, nothing saved; then "Use Salim" works', async () => {
