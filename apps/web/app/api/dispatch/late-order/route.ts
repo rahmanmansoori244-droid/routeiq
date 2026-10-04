@@ -3,6 +3,7 @@ import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import { isoDateSchema, normalizeBranchKey } from '@/lib/schemas';
+import { normalizeProductCode, productCodeProblem, productKey, twinsOf } from '@/lib/product-code';
 import { currentPlan } from '@/lib/dispatch/plan-service';
 import { createIntakeKeys, INTAKE_BUSY, isIntakeKeyConflict, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
 import { normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
@@ -22,7 +23,14 @@ const schema = z.object({
   lines: z
     .array(
       z.object({
-        productCode: z.string().trim().min(1).max(64),
+        // The tidy code ("TN1.5L (6)"). A code that is not in the master yet must also follow the
+        // Products page's rule (checked below, where the master is read); a product already there
+        // is found whatever its code looks like, as in the file intake (lib/product-code.ts).
+        productCode: z
+          .string({ required_error: 'Required' })
+          .max(200, 'Item code is too long')
+          .transform(normalizeProductCode)
+          .pipe(z.string().min(1, 'Required')),
         productDescription: z.string().trim().max(200).optional(),
         cases: z.number().int().positive(),
         salesOrderNo: z.string().trim().max(64).optional(),
@@ -52,7 +60,7 @@ export const POST = withTenantApi(
     for (const l of input.lines) {
       const so = normSalesOrder(l.salesOrderNo);
       if (!so) continue;
-      const k = `${so}|${l.productCode.toUpperCase()}`;
+      const k = `${so}|${productKey(l.productCode)}`;
       if (seen.has(k)) return fail(`Product ${l.productCode} is entered twice for sales order ${l.salesOrderNo}. Enter each product once with its total cases.`, 400);
       seen.add(k);
     }
@@ -98,13 +106,22 @@ export const POST = withTenantApi(
         // Every case-variant twin of each product: a line keyed under another twin is the same line.
         const productTwinIds: string[][] = [];
         const newWithoutWeight: string[] = [];
+        // The company's products once, matched on the code in the program (letter case and spacing;
+        // "_" is a letter, not "any character" as in the database's ILIKE: lib/product-code.ts). A
+        // product made below is added, so a second line with the same code uses it.
+        const master = await tx.product.findMany({ where: { tenantId } });
         for (const l of input.lines) {
-          const ptwins = await tx.product.findMany({ where: { tenantId, code: { equals: l.productCode, mode: 'insensitive' } } });
+          const ptwins = twinsOf(master, l.productCode);
           const found = preferredProduct(ptwins);
           if (found && !found.active) {
             throw new LateOrderRefused(`Product ${found.code} is inactive. Reactivate it in Products or use another code.`, 409, 'PRODUCT_INACTIVE');
           }
+          if (!found) {
+            const bad = productCodeProblem(l.productCode);
+            if (bad) throw new LateOrderRefused(`Item code ${JSON.stringify(l.productCode)} cannot be used: ${bad}.`, 400, 'PRODUCT_CODE_INVALID');
+          }
           const p = found ?? (await tx.product.create({ data: { tenantId, code: l.productCode, name: l.productDescription || l.productCode, createdFromUpload: true } }));
+          if (!found) master.push(p);
           if (!(p.weightPerCaseKg > 0)) newWithoutWeight.push(p.code);
           products.push(p);
           productTwinIds.push([...new Set([p.id, ...ptwins.map((x) => x.id)])]);

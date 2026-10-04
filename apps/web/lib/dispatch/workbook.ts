@@ -815,7 +815,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
 function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
   const nLoads = d.loads.length;
   const ws = wb.addWorksheet(SHEETS.skuSummary, { views: [{ state: 'frozen', ySplit: 4, xSplit: 2 }], pageSetup: LANDSCAPE });
-  ws.columns = [{ width: 16 }, { width: 34 }, ...d.loads.map(() => ({ width: 11 })), { width: 12 }, { width: 12 }];
+  // The SKU code column holds ERP codes such as "INVOMAN330(24)" or "SS5GB NRB" (up to 40 characters).
+  ws.columns = [{ width: 24 }, { width: 34 }, ...d.loads.map(() => ({ width: 11 })), { width: 12 }, { width: 12 }];
   titleRows(ws, 'SKU LOADING SUMMARY', `Cases per SKU per load · Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version}`);
   headRow(ws, 4, ['SKU code', 'Description', ...d.loads.map(loadLabel), 'Total cases', 'Total kg']);
   ws.pageSetup.printTitlesRow = '4:4';

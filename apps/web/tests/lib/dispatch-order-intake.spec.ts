@@ -676,6 +676,129 @@ describe('contentFingerprint (same-file check)', () => {
   });
 });
 
+describe('product codes with spaces and brackets (the NMWC ERP codes)', () => {
+  const D = '25/09/2026';
+  const REAL = ['JA1.5L(6)', 'TN1.5L (6)', 'SS5GB NRB', 'INVOMAN330(24)'];
+  const master = REAL.map((c) => prod(c));
+  const resolveItems = (items: string[], products: KnownProduct[] = master, confirmed: Set<string> | Map<string, number[]> = NONE) =>
+    resolveOrderLines(
+      normalizeOrderRows(items.map((item, i) => row({ so: `S${i + 1}`, date: D, cust: 'C001', item, qty: '5' }))),
+      [cust('C001')],
+      products,
+      confirmed,
+    );
+
+  it('an order line "JA1.5L(6)" matches the product "JA1.5L(6)" and the product "ja1.5l(6)"', () => {
+    for (const code of ['JA1.5L(6)', 'ja1.5l(6)']) {
+      const res = resolveItems(['JA1.5L(6)'], [prod(code)]);
+      expect(res.errors, code).toEqual([]);
+      expect(res.lines[0]!.productId, code).toBe(`id-${code}`);
+      expect(res.issues.newProducts, code).toEqual([]);
+    }
+  });
+
+  it('every real code matches its own product, in any letter case', () => {
+    const res = resolveItems([...REAL, ...REAL.map((c) => c.toLowerCase())]);
+    expect(res.errors).toEqual([]);
+    expect(res.issues.newProducts).toEqual([]);
+    expect(res.lines.map((l) => l.productId)).toEqual([...REAL, ...REAL].map((c) => `id-${c}`));
+  });
+
+  it('" TN1.5L  (6) " is read as "TN1.5L (6)": the order row carries the tidy code and matches the master', () => {
+    const norm = normalizeOrderRows([row({ so: 'S1', date: D, cust: 'C001', item: ' TN1.5L  (6) ', qty: '5' })]);
+    expect(norm.lines[0]!.productCode).toBe('TN1.5L (6)');
+    const res = resolveOrderLines(norm, [cust('C001')], master, NONE);
+    expect(res.lines[0]).toMatchObject({ productId: 'id-TN1.5L (6)', productCode: 'TN1.5L (6)' });
+    expect(res.issues.newProducts).toEqual([]);
+  });
+
+  it('a master code saved before spaces were tidied (two spaces, or a non-breaking space) is still the product of the tidy file code', () => {
+    for (const saved of ['TN1.5L  (6)', 'TN1.5L\u00a0(6)', ' TN1.5L (6)']) {
+      const res = resolveItems(['TN1.5L (6)'], [prod(saved)]);
+      expect(res.issues.newProducts, JSON.stringify(saved)).toEqual([]);
+      expect(res.lines[0]!.productId, JSON.stringify(saved)).toBe(`id-${saved}`);
+    }
+  });
+
+  it('TN1.5L(6) and TN1.5L (6) are two products: a space that is there counts', () => {
+    const res = resolveItems(['TN1.5L(6)'], [prod('TN1.5L (6)')]);
+    expect(res.lines[0]!.productId).toBeNull();
+    expect(res.issues.newProducts).toEqual([{ code: 'TN1.5L(6)', name: 'TN1.5L(6)', rows: [2] }]);
+  });
+
+  it('a new product is listed with its tidy code, once for rows that differ only in letter case or spacing', () => {
+    const res = resolveItems([' SS9GB  NRB', 'ss9gb nrb', 'SS9GB\u00a0NRB '], []);
+    expect(res.errors).toEqual([]);
+    expect(res.issues.newProducts).toEqual([{ code: 'SS9GB NRB', name: 'SS9GB NRB', rows: [2, 3, 4] }]);
+    expect(res.lines.map((l) => l.productCode)).toEqual(['SS9GB NRB', 'ss9gb nrb', 'SS9GB NRB']);
+  });
+
+  it('an _ in a code is a letter of it, not "any character": A_B is not the product AxB', () => {
+    const res = resolveItems(['A_B'], [prod('AxB')]);
+    expect(res.lines[0]!.productId).toBeNull();
+    expect(res.issues.newProducts.map((p) => p.code)).toEqual(['A_B']);
+    expect(resolveItems(['a_b'], [prod('A_B'), prod('AxB')]).lines[0]!.productId).toBe('id-A_B');
+  });
+
+  it('rows of one sales order whose item codes differ only in case or spacing are one line', () => {
+    const res = resolveOrderLines(
+      normalizeOrderRows([
+        row({ so: 'S1', date: D, cust: 'C001', item: 'TN1.5L (6)', qty: '5' }),
+        row({ so: 'S1', date: D, cust: 'C001', item: ' tn1.5l  (6)', qty: '3' }),
+      ]),
+      [cust('C001')],
+      master,
+      NONE,
+    );
+    expect(res.lines).toHaveLength(1);
+    expect(res.lines[0]).toMatchObject({ productCode: 'TN1.5L (6)', cases: 8, sourceRows: [2, 3] });
+  });
+
+  it('a line already confirmed is found whatever the spacing of its code (duplicate, not a second line)', () => {
+    const confirmed = new Map([[lineDupKey('2026-09-25', 'S1', customerKey('C001', '__MAIN__'), 'TN1.5L (6)'), [5]]]);
+    const res = resolveItems(['  TN1.5L   (6)'], master, confirmed);
+    expect(res.lines).toEqual([]);
+    expect(res.duplicates.map((d) => d.message)).toEqual(['Already confirmed: sales order S1, TN1.5L (6) for C001 on 2026-09-25. Skipped.']);
+    expect(lineDupKey('2026-09-25', 'S1', 'C001::__MAIN__', ' ja1.5l(6)')).toBe(lineDupKey('2026-09-25', 'S1', 'C001::__MAIN__', 'JA1.5L(6)'));
+    expect(lineDupKey('2026-09-25', 'S1', 'C001::__MAIN__', 'ss5gb  nrb')).toBe('2026-09-25|S1|C001::__MAIN__|SS5GB NRB');
+  });
+
+  it('the same file with codes spaced or cased differently has the same fingerprint (a re-sent file is found)', () => {
+    const a = contentFingerprint(normalizeOrderRows([row({ so: 'S1', date: D, cust: 'C001', item: 'TN1.5L (6)', qty: '5' })]).lines);
+    const b = contentFingerprint(normalizeOrderRows([row({ so: 'S1', date: D, cust: 'C001', item: ' tn1.5l  (6) ', qty: '5' })]).lines);
+    expect(b).toBe(a);
+  });
+
+  it('a new code the product master cannot hold is a row error with its cases, never a product', () => {
+    const rows = ['A,B', 'SS5GB\tNRB', 'X'.repeat(41), '+1', 'هايبر'].map((item, i) => row({ so: `S${i + 1}`, date: D, cust: 'C001', item, qty: String(i + 1) }));
+    const res = resolveOrderLines(normalizeOrderRows([...rows, row({ so: 'S9', date: D, cust: 'C001', item: 'JA1.5L(6)', qty: '9' })]), [cust('C001')], master, NONE);
+    expect(res.issues.newProducts).toEqual([]);
+    expect(res.lines.map((l) => l.row)).toEqual([7]);
+    expect(res.errors).toEqual([
+      { row: 2, message: 'Item code "A,B" cannot be used: A product code can have only letters, digits, spaces and . ( ) - _ / + & (not ","). Correct it in the file.', cases: 1 },
+      { row: 3, message: 'Item code "SS5GB\\tNRB" cannot be used: A product code cannot contain tabs, line breaks or other control characters. Correct it in the file.', cases: 2 },
+      { row: 4, message: `Item code "${'X'.repeat(41)}" cannot be used: Max 40 characters (this code has 41). Correct it in the file.`, cases: 3 },
+      { row: 5, message: 'Item code "+1" cannot be used: A product code cannot start with + or -. Correct it in the file.', cases: 4 },
+      expect.objectContaining({ row: 6, cases: 5 }),
+    ]);
+    // The rows are counted: nothing disappears between the file and the check.
+    expect(res.totals.cases).toBe(9);
+  });
+
+  it('a product already in the master with a code the rule would refuse today keeps matching (it is not a new product)', () => {
+    const res = resolveItems(['SKU#7,B'], [prod('SKU#7,B')]);
+    expect(res.errors).toEqual([]);
+    expect(res.lines[0]!.productId).toBe('id-SKU#7,B');
+    expect(res.issues.newProducts).toEqual([]);
+  });
+
+  it('twins in the master that differ only in letter case or spacing resolve to one product, with the existing warning', () => {
+    const res = resolveItems(['TN1.5L (6)'], [prod('TN1.5L  (6)', { id: 'a' }), prod('tn1.5l (6)', { id: 'b' })]);
+    expect(res.lines[0]!.productId).toBe('a'); // the same preference as before: plain character order of the code
+    expect(res.warnings.filter((w) => w.startsWith('Product codes'))).toHaveLength(1);
+  });
+});
+
 describe('customerTypeFromText', () => {
   it('maps free-text channels to CustomerType values', () => {
     expect(customerTypeFromText('Hypermarket')).toBe('HYPERMARKET');

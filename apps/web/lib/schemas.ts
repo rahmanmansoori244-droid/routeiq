@@ -11,6 +11,7 @@ import { DATA_COLLECT_DAYS_MAX } from './dispatch/data-collection';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
+import { parseProductCode } from './product-code';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -171,8 +172,25 @@ export const regionSchema = z.object({
 });
 export type RegionInput = z.infer<typeof regionSchema>;
 
+/**
+ * A product code as the NMWC ERP writes it ("JA1.5L(6)", "TN1.5L (6)", "SS5GB NRB"): letters, digits,
+ * spaces and . ( ) - _ / + & , tidied (spaces at the ends cut, runs of spaces inside made one), up to
+ * 40 long (lib/product-code.ts). Products only: customer, depot, truck, driver and region codes keep
+ * `codeSchema`.
+ */
+export const productCodeSchema = z
+  .string({ required_error: 'Required', invalid_type_error: 'A product code is text' })
+  .transform((raw, ctx) => {
+    const r = parseProductCode(raw);
+    if (!r.ok) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: r.message });
+      return z.NEVER;
+    }
+    return r.code;
+  });
+
 export const productSchema = z.object({
-  code: codeSchema,
+  code: productCodeSchema,
   name: nameSchema,
   weightPerCaseKg: z.coerce.number().min(0).max(10_000),
   volumePerCaseL: z.coerce.number().min(0).max(10_000),

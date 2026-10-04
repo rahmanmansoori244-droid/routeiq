@@ -13,6 +13,7 @@
  * but every SKU line (and its sales-order number) is kept so the truck manifest reconciles.
  */
 import { normalizeBranchKey } from '../schemas';
+import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
 
 // The header matching (aliases, the order-sheet test) lives in order-headers.ts, which has no
 // dependencies, so the upload parser process can use it (audit P5); it is re-exported here.
@@ -173,7 +174,9 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
 
     const customerCode = get(r, 'customer_code');
     if (!customerCode) return err('Customer code is empty.');
-    const productCode = get(r, 'product_code');
+    // The tidy code (spaces at the ends cut, runs of spaces inside one): " TN1.5L  (6) " is
+    // "TN1.5L (6)" in the master, in every message and in the duplicate checks (lib/product-code.ts).
+    const productCode = normalizeProductCode(get(r, 'product_code'));
     if (!productCode) return err('Product / item code is empty.');
     if (casesNum === null) return err('Cases is empty.');
     if (!Number.isFinite(casesNum) || !Number.isInteger(casesNum) || casesNum <= 0) {
@@ -385,7 +388,7 @@ export function normSalesOrder(so: string | null | undefined): string | null {
 
 /** Identity of a sales-order line for duplicate checks: `${date}|${SO}|${customerKey}|${PRODUCT}`. */
 export function lineDupKey(deliveryDate: string, salesOrderNo: string, custKey: string, productCode: string): string {
-  return `${deliveryDate}|${normSalesOrder(salesOrderNo) ?? ''}|${custKey}|${productCode.trim().toUpperCase()}`;
+  return `${deliveryDate}|${normSalesOrder(salesOrderNo) ?? ''}|${custKey}|${productKey(productCode)}`;
 }
 
 /**
@@ -450,7 +453,10 @@ export function resolveOrderLines(
 ): ResolveResult {
   // Case-variant twins resolve to one master row, always the same one.
   const custTwins = groupBy(customers, (c) => customerKey(c.code, c.branchKey));
-  const prodTwins = groupBy(products, (p) => p.code.trim().toUpperCase());
+  // Products are matched on productKey: whatever the letter case, and whatever the spacing of the
+  // code (one saved before spaces were tidied still matches). Nothing else is folded: "TN1.5L(6)"
+  // and "TN1.5L (6)" are two products.
+  const prodTwins = groupBy(products, (p) => productKey(p.code));
   const custByKey = new Map([...custTwins].map(([k, list]) => [k, preferredCustomer(list)!]));
   const prodByCode = new Map([...prodTwins].map(([k, list]) => [k, preferredProduct(list)!]));
   const errors: RowError[] = [...norm.errors];
@@ -474,8 +480,16 @@ export function resolveOrderLines(
   for (const l of norm.lines) {
     const ck = customerKey(l.customerCode, l.branchKey);
     const cust = custByKey.get(ck);
-    const pk = l.productCode.trim().toUpperCase();
+    const pk = productKey(l.productCode);
     const prod = prodByCode.get(pk);
+    // A code that is not in the master becomes a product on confirm, so it must be one the Products
+    // page could hold (no comma, quote or control character, at most 40 long). A product already in
+    // the master keeps matching whatever its code looks like.
+    const badCode = prod ? null : productCodeProblem(l.productCode);
+    if (badCode) {
+      errors.push({ row: l.row, message: `Item code ${JSON.stringify(l.productCode)} cannot be used: ${badCode}. Correct it in the file.`, cases: l.cases });
+      continue;
+    }
     const inactive: 'CUSTOMER' | 'PRODUCT' | null = cust && !cust.active ? 'CUSTOMER' : prod && !prod.active ? 'PRODUCT' : null;
     if (inactive) {
       const bk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
@@ -543,7 +557,7 @@ export function resolveOrderLines(
     const confirmed = l.salesOrderNo ? confirmedOf(mk) : undefined;
     if (confirmed !== undefined) {
       const rows = l.sourceRows.length > 1 ? ` (rows ${l.sourceRows.join(', ')})` : '';
-      const product = prodByCode.get(l.productCode.trim().toUpperCase())?.code ?? l.productCode;
+      const product = prodByCode.get(productKey(l.productCode))?.code ?? l.productCode;
       const customer = custByKey.get(l.customerKey)?.code ?? l.customerCode;
       if (confirmed === null || confirmed.includes(l.cases)) {
         duplicates.push({ row: l.row, message: `Already confirmed: sales order ${l.salesOrderNo}, ${product} for ${customer} on ${l.deliveryDate}${rows}. Skipped.`, cases: l.cases });
@@ -584,7 +598,7 @@ export function resolveOrderLines(
   const otherDateWarned = new Set<string>();
   for (const l of lines) {
     const cust = custByKey.get(l.customerKey);
-    const prod = prodByCode.get(l.productCode.trim().toUpperCase());
+    const prod = prodByCode.get(productKey(l.productCode));
     const mergedWarning = mergedLineWarning(l, { customer: custName(l, cust), product: prod?.code ?? l.productCode });
     if (mergedWarning) warnings.push(mergedWarning);
     if (!cust) {
@@ -596,11 +610,12 @@ export function resolveOrderLines(
     }
     const missingWeight = (l.weightMissingCases ?? 0) > 0;
     if (!prod) {
-      const code = l.productCode.toUpperCase();
+      const code = productKey(l.productCode);
       const np = newProducts.get(code);
       if (np) np.rows.push(...l.sourceRows);
       else newProducts.set(code, { code: l.productCode, name: l.productDescription || l.productCode, rows: [...l.sourceRows] });
-      if (missingWeight) noWeight.add(l.productCode);
+      // Named once by the code the product will get (rows spelled in another case or spacing are one product).
+      if (missingWeight) noWeight.add(newProducts.get(code)!.code);
     } else if (!(prod.weightPerCaseKg > 0) && missingWeight) {
       noWeight.add(prod.code);
     } else if (prod && l.weightKg !== null && !missingWeight && weightLooksWrong(l.weightKg, l.cases, prod.weightPerCaseKg)) {
@@ -656,7 +671,7 @@ export function contentFingerprint(lines: NormalizedLine[]): string {
         l.deliveryDate,
         normSalesOrder(l.salesOrderNo) ?? '',
         customerKey(l.customerCode, l.branchKey),
-        l.productCode.trim().toUpperCase(),
+        productKey(l.productCode),
         l.cases,
         l.weightKg ?? '',
         l.salesValue ?? '',
