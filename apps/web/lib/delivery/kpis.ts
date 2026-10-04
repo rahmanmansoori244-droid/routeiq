@@ -11,9 +11,13 @@
  * - On time: only arrivals that were OBSERVED (an automatic arrival the page saw, a manual or office
  *   arrival, Ayun later) and not flagged as unverified timing, at a stop with a window; an early
  *   arrival that waits for the window counts as inside; an open end is unbounded.
+ * - "Camera not working" (owner decision 2, 5 Oct 2026): Delivered / Partly saved without a photo,
+ *   their share of the delivered results, and the truck-days (driver links) that used it 3 times or
+ *   more (camera-exceptions.ts).
  */
 import { eligibleForMeasured, type MeasuredVisit } from './measured';
 import { countOf } from './office-text';
+import { CAMERA_ALERT_PER_DAY, isCameraException, truckDayKey } from './camera-exceptions';
 
 export interface KpiVisit extends MeasuredVisit {
   reason: string | null;
@@ -26,6 +30,8 @@ export interface KpiVisit extends MeasuredVisit {
   noPhotoReason: string | null;
   /** zonedDayStart of the delivery date (local minutes of an arrival are counted from it). */
   dayStart: Date | string;
+  /** The truck (one driver link per truck-day): the "Camera not working" alert counts per truck-day. */
+  truckId?: string;
 }
 
 export interface KpiReasonRow {
@@ -56,8 +62,12 @@ export interface DeliveryKpis {
   /** Mean of (measured - planned) unloading over the visits that feed measured times; null without any. */
   avgUnloadDeltaMin: number | null;
   unloadSample: number;
-  /** Delivered / partly saved without a photo because the camera failed (driver). */
+  /** Delivered / partly saved without a photo because the camera failed (driver): "Camera not working". */
   cameraFailed: number;
+  /** cameraFailed of the delivered and partly delivered results, percent (1 decimal); null without any. */
+  cameraFailedPct: number | null;
+  /** Truck-days (driver links) that used "Camera not working" CAMERA_ALERT_PER_DAY (3) times or more. */
+  cameraAlertDays: number;
   /** Results recorded after the trip closed. */
   late: number;
 }
@@ -109,9 +119,12 @@ export function deliveryKpis(stops: readonly (KpiVisit | null)[]): DeliveryKpis 
     avgUnloadDeltaMin: null,
     unloadSample: 0,
     cameraFailed: 0,
+    cameraFailedPct: null,
+    cameraAlertDays: 0,
     late: 0,
   };
   const reasons = new Map<string, KpiReasonRow>();
+  const camera = new Map<string, number>();
   let deltaSum = 0;
   for (const v of stops) {
     if (v) {
@@ -140,7 +153,11 @@ export function deliveryKpis(stops: readonly (KpiVisit | null)[]): DeliveryKpis 
       r.cases += missing;
       reasons.set(key, r);
     }
-    if (v.noPhotoReason === 'CAMERA_FAILED') out.cameraFailed++;
+    if (isCameraException(v)) {
+      out.cameraFailed++;
+      const k = truckDayKey(v.deliveryDate, v.truckId ?? '');
+      camera.set(k, (camera.get(k) ?? 0) + 1);
+    }
     if (v.outcomeLate) out.late++;
     if (eligibleForMeasured(v) && v.plannedServiceMin !== null) {
       deltaSum += v.autoServiceMinutes! - v.plannedServiceMin;
@@ -150,6 +167,8 @@ export function deliveryKpis(stops: readonly (KpiVisit | null)[]): DeliveryKpis 
   out.deliveredInFullPct = pct(out.delivered, out.withResult);
   out.casesDeliveredPct = pct(out.casesDelivered, out.casesPlanned);
   out.insideWindowPct = pct(out.insideWindow, out.timedArrivals);
+  out.cameraFailedPct = pct(out.cameraFailed, out.delivered + out.partly);
+  out.cameraAlertDays = [...camera.values()].filter((n) => n >= CAMERA_ALERT_PER_DAY).length;
   out.avgUnloadDeltaMin = out.unloadSample ? Math.round((deltaSum / out.unloadSample) * 10) / 10 : null;
   out.byReason = [...reasons.values()].sort((a, b) => b.cases - a.cases || b.stops - a.stops || a.reason.localeCompare(b.reason));
   return out;

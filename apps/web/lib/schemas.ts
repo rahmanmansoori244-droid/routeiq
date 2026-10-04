@@ -65,6 +65,9 @@ export const searchModeSchema = z.enum(['QUICK', 'THOROUGH']);
 /** Longest unloading time one stop can have: the optimizer's limit (lib/dispatch/service-time). */
 export { MAX_SERVICE_MIN };
 
+/** A phone number as typed (drivers, the dispatcher phones): digits, spaces and +-() only. */
+const driverPhoneSchema = z.string().trim().max(40).regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only');
+
 const depotFields = z.object({
     code: codeSchema,
     name: nameSchema,
@@ -76,6 +79,9 @@ const depotFields = z.object({
     // returns after it closes (review F21: these were planner inputs no screen could set).
     openMin: optionalBounded(DEPOT_BOUNDS.openMin),
     closeMin: optionalBounded(DEPOT_BOUNDS.closeMin),
+    // Owner decision 3 (5 Oct 2026): the depot's own number for the driver page's "Call dispatcher";
+    // '' or null clears it (the company number in Settings is then used).
+    dispatcherPhone: clearable(driverPhoneSchema),
   });
 
 /** "closes before it opens" for a depot (the merged row on a PATCH), or null. */
@@ -125,8 +131,6 @@ const truckHoursRefine = (v: { availableFromMin?: number | null; availableToMin?
 export const truckSchema = truckFields.superRefine(truckHoursRefine);
 export const truckPatchSchema = truckFields.partial().superRefine(truckHoursRefine);
 export type TruckInput = z.infer<typeof truckSchema>;
-
-const driverPhoneSchema = z.string().trim().max(40).regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only');
 
 export const driverSchema = z.object({
   code: codeSchema,
@@ -287,7 +291,8 @@ export const tenantConfigSchema = z
     photoProofRequired: z.boolean(),
     photoRetentionDays: z.number().int().min(DELIVERY_SETTING_BOUNDS.photoRetentionDays.min).max(DELIVERY_SETTING_BOUNDS.photoRetentionDays.max),
     locationRetentionDays: z.number().int().min(DELIVERY_SETTING_BOUNDS.locationRetentionDays.min).max(DELIVERY_SETTING_BOUNDS.locationRetentionDays.max),
-    // The number behind the driver page's "Call dispatcher" button; '' or null = none (hidden).
+    // The company number behind the driver page's "Call dispatcher" button, used when the truck's depot
+    // has none of its own (owner decision 3, 5 Oct 2026); '' or null = none.
     dispatcherPhone: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), driverPhoneSchema.nullable()),
   })
   .strict();

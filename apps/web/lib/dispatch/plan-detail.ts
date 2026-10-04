@@ -345,7 +345,7 @@ export interface PlanDetail {
   today?: string;
   /**
    * Audit F09: the version is shown as optimizing but its optimization has ended or was lost (a
-   * stuck plan): what the screen says, and whether a supervisor may reset it now. null = not stuck.
+   * stuck plan): what the screen says, and whether a dispatcher may reset it now. null = not stuck.
    */
   stuck?: StuckState | null;
 }

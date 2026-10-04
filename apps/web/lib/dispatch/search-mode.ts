@@ -245,7 +245,7 @@ function recommendedSearchBrief(r: SearchReport): string {
     case 'CAP':
       return `Thorough: ${searched}, all the time allowed`;
     case 'STOPPED':
-      return `Thorough: stopped early after ${searched} by a supervisor`;
+      return `Thorough: stopped early after ${searched} by a dispatcher`;
     default:
       return `Thorough: ${searched}`;
   }
@@ -286,7 +286,7 @@ export function searchResultText(r: SearchReport | null | undefined, option?: Se
       return `Thorough search: searched ${searched}, all the time allowed (${fmtSearchTime(r.cap_sec)} in all)${late ? '; it was still finding small improvements near the end' : ''}.${last}`;
     }
     case 'STOPPED':
-      return `Thorough search stopped early after ${searched} by a supervisor: the best plan found so far is used.${last}`;
+      return `Thorough search stopped early after ${searched} by a dispatcher: the best plan found so far is used.${last}`;
     default:
       return `Thorough search: searched ${searched}.${last}`;
   }

@@ -5,8 +5,8 @@ import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-run
 interface Params { params: { id: string } }
 
 /**
- * Reverses a dispatch: a SUPERVISOR can flip a DISPATCHED run back to READY for
- * further edits. Always audited. Per CLAUDE.md §12 Phase 4 acceptance: "After
+ * Reverses a dispatch: the dispatcher (PLANNER and above since owner decision 4, 5 Oct 2026; it was
+ * SUPERVISOR) can flip a DISPATCHED run back to READY for further edits. Always audited. Per CLAUDE.md §12 Phase 4 acceptance: "After
  * dispatch, I cannot edit assignments without explicit 'unlock' action that audits."
  */
 export const POST = (req: Request, { params }: Params) =>
@@ -44,5 +44,5 @@ export const POST = (req: Request, { params }: Params) =>
       });
       return ok({ status: updated.status });
     },
-    { role: 'SUPERVISOR' },
+    { role: 'PLANNER' },
   )(req);

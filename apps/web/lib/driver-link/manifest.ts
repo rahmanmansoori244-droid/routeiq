@@ -9,6 +9,8 @@
  * - It never carries money (cost, fuel, sales value, margin, payment amounts), priorities, other
  *   trucks or other customers.
  * - Results (Part 2) are read live, never memoised.
+ * - "Call dispatcher" (owner decision 3, 5 Oct 2026): the number of the depot of the trip the driver
+ *   is on or goes on next, else the company number (dispatcherPhoneFor).
  */
 import { prisma } from '../db';
 import { getPlanDetail, type DetailLoad, type DetailStop, type PlanDetail } from '../dispatch/plan-detail';
@@ -16,6 +18,8 @@ import { coordText } from '../dispatch/driver-links';
 import { DEFAULT_TZ } from '../dispatch/time';
 import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
+import { dispatcherPhoneFor } from './dispatcher-phone';
+import { DEFAULT_LOCATION_RETENTION_DAYS } from '../settings-fields';
 import type { DriverManifest, DriverResults, LoadStatusName, ManifestLoad, ManifestOrder, ManifestStop } from './manifest-types';
 
 export const MANIFEST_MEMO_MS = 60_000;
@@ -189,7 +193,11 @@ export async function driverManifest(args: {
     truckDayLoads(prisma, tenantId, truckId, date),
   ]);
   const runIds = [...new Set(dayLoads.map((l) => l.runId))];
-  const details = (await Promise.all(runIds.map((id) => memoPlanDetail(tenantId, id, args.now.getTime())))).filter((d): d is PlanDetail => !!d);
+  const depotIds = [...new Set(dayLoads.map((l) => l.depotId).filter(Boolean))];
+  const [details, depots] = await Promise.all([
+    Promise.all(runIds.map((id) => memoPlanDetail(tenantId, id, args.now.getTime()))).then((all) => all.filter((d): d is PlanDetail => !!d)),
+    depotIds.length ? prisma.depot.findMany({ where: { tenantId, id: { in: depotIds } }, select: { id: true, dispatcherPhone: true } }) : [],
+  ]);
   const manifest = projectManifest(details, {
     truckId,
     date,
@@ -202,8 +210,8 @@ export async function driverManifest(args: {
     settings: {
       radiusM: Math.min(500, Math.max(50, cfg?.geofenceRadiusM ?? 100)),
       photoRequired: cfg?.photoProofRequired ?? true,
-      locationRetentionDays: cfg?.locationRetentionDays ?? 90,
-      dispatcherPhone: cfg?.dispatcherPhone?.trim() || null,
+      locationRetentionDays: cfg?.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS,
+      dispatcherPhone: dispatcherPhoneFor(dayLoads, new Map(depots.map((d) => [d.id, d.dispatcherPhone])), cfg?.dispatcherPhone ?? null),
     },
     office: args.office,
   });

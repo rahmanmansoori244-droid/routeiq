@@ -267,12 +267,15 @@ model TenantConfig {
   geofenceRadiusM          Int      @default(100)
   // Delivered and Partly delivered need a photo from the driver (one exception: "Camera not working").
   photoProofRequired       Boolean  @default(true)
-  // Delivery photo bytes are dropped after this many days (the metadata stays), 30-1095.
-  photoRetentionDays       Int      @default(365)
+  // Delivery photo bytes are dropped after this many days (the metadata stays), 30-1095. Owner
+  // decision 1 (5 Oct 2026): 90 days (it was 365; migration 20261005090000 moved companies on 365).
+  photoRetentionDays       Int      @default(90)
   // Positions, IP addresses and browser ids of driver events and photos are erased after this many
   // days (30 .. photoRetentionDays); the distances from the pin are kept.
   locationRetentionDays    Int      @default(90)
-  // The number behind the driver page's "Call dispatcher" button (hidden while empty).
+  // The company number behind the driver page's "Call dispatcher" button: used when the truck's depot
+  // has no number of its own (Depot.dispatcherPhone, owner decision 3 of 5 Oct 2026); hidden while
+  // neither has one.
   dispatcherPhone          String?
   // Deliveries before this moment are outside the no-result list and the outcome KPIs (set to the
   // migration time for existing companies).
@@ -360,6 +363,10 @@ model Depot {
   /// make it active or to put a truck or region on it. The database refuses it too (CHECK
   /// "Depot_historyOnly_not_active", in that migration; Prisma's schema has no CHECK constraints).
   historyOnly   Boolean       @default(false)
+  /// Owner decision 3 (5 Oct 2026): the number behind the driver page's "Call dispatcher" for the
+  /// trucks of this depot (company admin, Depots page). Null: the company number
+  /// (TenantConfig.dispatcherPhone). lib/driver-link/dispatcher-phone.ts.
+  dispatcherPhone String?
   trucks        Truck[]
   regions       Region[]
   runs          RunPlan[]

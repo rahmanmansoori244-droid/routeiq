@@ -1438,7 +1438,7 @@ describe('a failed copy-forward re-plan: labels and change summary (review: PLAN
 });
 
 describe('a version without an applied plan: loads already out can be completed (review F03 dead end)', () => {
-  it('DISPATCHED -> COMPLETED is allowed and the version keeps its status; it still needs a supervisor', async () => {
+  it('DISPATCHED -> COMPLETED is allowed and the version keeps its status; it still needs the dispatcher role', async () => {
     seedAppliedPlan('SUPERSEDED', { supersededAt: new Date() });
     tables.runPlan.push({ ...tables.runPlan[0], id: 'C', status: 'FAILED', version: 2, parentRunId: 'P', chosenScenarioId: null, supersededAt: null, reconciliationJson: null, summaryJson: null });
     tables.planLoad.push(load('CL1', 'C', 1, 'DISPATCHED', { carriedFromLoadId: 'L1' }), load('CL2', 'C', 2, 'DISPATCHED', { carriedFromLoadId: 'L2' }));
@@ -1446,8 +1446,11 @@ describe('a version without an applied plan: loads already out can be completed 
     expect(row('planLoad', 'CL1').status).toBe('COMPLETED');
     expect(row('runPlan', 'C').status).toBe('FAILED'); // never READY / DISPATCHED without a plan
     expect(tables.auditLog.some((a) => a.action === 'LOAD_COMPLETED' && a.entityId === 'CL1')).toBe(true);
-    const plannerOnly = (role: 'PLANNER' | 'SUPERVISOR') => role === 'PLANNER';
-    await expect(updateLoad(T, 'C', 'CL2', { status: 'COMPLETED' }, user, plannerOnly)).rejects.toMatchObject({ status: 403 });
+    // Owner decision 4 (5 Oct 2026): the role asked is PLANNER (it was SUPERVISOR); a role below it is refused.
+    const asked: string[] = [];
+    const viewerOnly = (role: string) => (asked.push(role), false);
+    await expect(updateLoad(T, 'C', 'CL2', { status: 'COMPLETED' }, user, viewerOnly)).rejects.toMatchObject({ status: 403 });
+    expect(asked).toEqual(['PLANNER']);
     expect(row('planLoad', 'CL2').status).toBe('DISPATCHED');
   });
 

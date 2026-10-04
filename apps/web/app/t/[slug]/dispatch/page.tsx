@@ -1,5 +1,5 @@
 import { getCurrentTenant } from '@/lib/tenant';
-import { canApproveOverride, canManageMasterData, canPlan } from '@/lib/rbac';
+import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { phoneCountryCode } from '@/lib/dispatch/customer-attrs';
 import { PageShell } from '@/components/page-shell';
 import { DispatchClient } from './dispatch-client';
@@ -17,7 +17,8 @@ export default async function DispatchPage({ params, searchParams }: { params: {
       <DispatchClient
         slug={params.slug}
         canPlan={canPlan(user.role)}
-        canDispatch={canApproveOverride(user.role)}
+        // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) dispatches, completes and resets a stuck plan.
+        canDispatch={canPlan(user.role)}
         canEditProducts={canManageMasterData(user.role)}
         initialDate={searchParams.date ?? null}
         initialDepot={searchParams.depot ?? null}

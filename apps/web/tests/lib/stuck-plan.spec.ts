@@ -4,7 +4,8 @@
  *   restart) and which are really optimizing (a live job, or one that just started);
  * - repairStuckPlans (the janitor sweep): a plan OPTIMIZING behind an ended job goes back to FAILED
  *   with an OPTIMIZE_FAILED audit row (reason STUCK_PLAN); a live one is never touched;
- * - resetStuckPlan and POST /api/runs/:id/reset-stuck (owner decision 17): SUPERVISOR and above,
+ * - resetStuckPlan and POST /api/runs/:id/reset-stuck (owner decision 17): the dispatcher, PLANNER and
+ *   above since owner decision 4 of 5 Oct 2026 (it was SUPERVISOR); VIEWER is refused;
  *   PLAN_RESET audited, refused for a plan that is not stuck.
  * The real PostgreSQL fault injection and races are in tests/integration/recovery-races-db.spec.ts.
  */
@@ -140,13 +141,13 @@ describe('resetStuckPlan (Reset stuck plan)', () => {
     ]);
   });
 
-  it('a job lost by a restart (RUNNING, not in this server, 20 min old) is failed "reset by a supervisor" with the plan', async () => {
+  it('a job lost by a restart (RUNNING, not in this server, 20 min old) is failed "reset by a dispatcher" with the plan', async () => {
     seed({ chosen: 'scCopy' }, [job('RUNNING', 20 * 60_000)]);
     const r = await resetStuckPlan(T, 'P', sup, null, { isLive: notLive, now: NOW });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ jobFailed: true, kind: 'JOB_LOST' });
     expect(row('runJob', 'J1')).toMatchObject({ status: 'FAILED', errorJson: { reason: 'RESET', userId: 'sup1' } });
-    expect(row('runJob', 'J1').message).toMatch(/Reset by a supervisor/);
+    expect(row('runJob', 'J1').message).toMatch(/Reset by a dispatcher/);
     expect(row('runPlan', 'P')).toMatchObject({ status: 'FAILED', chosenScenarioId: 'scCopy' }); // the copied plan stays usable
   });
 
@@ -221,7 +222,7 @@ describe('second review of audit PR4: the plan screen read (getPlanDetail) racin
 describe('the "Reset stuck plan" button (static: the plan screens)', () => {
   const read = (p: string) => readFileSync(path.join(__dirname, '../..', p), 'utf8');
 
-  it('is shown only for a resettable stuck plan and only with the supervisor permission, and calls the reset route', () => {
+  it('is shown only for a resettable stuck plan and only with the dispatcher permission, and calls the reset route', () => {
     const view = read('app/t/[slug]/dispatch/plan-view.tsx');
     expect(view).toContain('canResetStuck && d.stuck.resettable ?');
     expect(view).toContain('`/api/runs/${runId}/reset-stuck`');
@@ -229,11 +230,11 @@ describe('the "Reset stuck plan" button (static: the plan screens)', () => {
     expect(view).toMatch(/canResetStuck = false/); // off unless a screen grants it
   });
 
-  it('both plan screens grant it to SUPERVISOR and above only (canApproveOverride)', () => {
+  it('both plan screens grant it to the dispatcher, PLANNER and above (canPlan; owner decision 4 of 5 Oct 2026)', () => {
     expect(read('app/t/[slug]/dispatch/dispatch-client.tsx')).toContain('canResetStuck={canDispatch && dayReady}');
-    expect(read('app/t/[slug]/dispatch/page.tsx')).toContain('canDispatch={canApproveOverride(user.role)}');
+    expect(read('app/t/[slug]/dispatch/page.tsx')).toContain('canDispatch={canPlan(user.role)}');
     expect(read('app/t/[slug]/dispatch/plan/[id]/plan-version-client.tsx')).toContain('canResetStuck={canDispatch}');
-    expect(read('app/t/[slug]/dispatch/plan/[id]/page.tsx')).toContain('canDispatch={canApproveOverride(user.role)}');
+    expect(read('app/t/[slug]/dispatch/plan/[id]/page.tsx')).toContain('canDispatch={canPlan(user.role)}');
   });
 });
 
@@ -258,12 +259,12 @@ describe('review of audit PR4: the stuck-plan text names only what the viewer ca
     }
   });
 
-  it('a plan behind an ended or missing job: wait (reset by itself within a minute) or a supervisor presses Reset stuck plan', () => {
+  it('a plan behind an ended or missing job: wait (reset by itself within a minute) or a dispatcher presses Reset stuck plan', () => {
     for (const text of [texts.JOB_ENDED, texts.NO_JOB]) {
       expect(text).toContain('RouteIQ resets it by itself within a minute');
-      expect(text).toContain('a supervisor can press Reset stuck plan');
+      expect(text).toContain('a dispatcher can press Reset stuck plan');
     }
-    expect(texts.JOB_LOST).toContain('A supervisor can reset the plan now');
+    expect(texts.JOB_LOST).toContain('A dispatcher can reset the plan now');
   });
 
   it('the dispatcher guide says the same (no "OPTIMIZE or Re-plan resets it first")', () => {
@@ -282,7 +283,7 @@ describe('review of audit PR4: the stuck-plan text names only what the viewer ca
     // Before: "**OPTIMIZE** and **Re-plan** on such a plan do the same first, then start a new optimization."
     expect(section).not.toMatch(/on such a plan do the same first|resets it first/);
     expect(section).toMatch(/\*\*OPTIMIZE\*\* and \*\*Re-plan\*\* stay greyed out while the plan shows \*Optimizing…\*/);
-    expect(section).toMatch(/or a supervisor presses \*\*Reset stuck plan\*\* now/);
+    expect(section).toMatch(/or a dispatcher presses \*\*Reset stuck plan\*\* now/);
     // Reset stuck plan also covers a plan whose job has already ended, not only a job lost by a restart.
     expect(section).toContain('a plan whose job has already ended');
   });
@@ -296,12 +297,21 @@ describe('POST /api/runs/:id/reset-stuck', () => {
     session.role = 'SUPERVISOR';
   });
 
-  it('a planner is refused (403): the reset is for supervisors and above', async () => {
+  it('a viewer is refused (403): the reset is for the dispatcher (PLANNER) and above', async () => {
     seed({}, [job('FAILED')]);
-    session.role = 'PLANNER';
+    session.role = 'VIEWER';
     const res = await call();
     expect(res.status).toBe(403);
     expect(row('runPlan', 'P').status).toBe('OPTIMIZING');
+  });
+
+  it('owner decision 4 (5 Oct 2026): a dispatcher (PLANNER) resets a stuck plan, audited with his name', async () => {
+    seed({}, [job('FAILED')]);
+    session.role = 'PLANNER';
+    const res = await call();
+    expect(res.status).toBe(200);
+    expect(row('runPlan', 'P').status).toBe('FAILED');
+    expect(tables.auditLog[0]).toMatchObject({ action: 'PLAN_RESET', userId: 'sup1' });
   });
 
   it('a supervisor resets a stuck plan (200) and the answer says what happened', async () => {

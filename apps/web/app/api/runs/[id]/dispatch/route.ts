@@ -10,6 +10,7 @@ interface Params { params: { id: string } }
 
 class DispatchRaceError extends Error {}
 
+// Dispatch a legacy run: the dispatcher (PLANNER and above since owner decision 4, 5 Oct 2026; it was SUPERVISOR).
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (_r, { db, user, ip }) => {
@@ -128,5 +129,5 @@ export const POST = (req: Request, { params }: Params) =>
 
       return ok({ status: dispatched.status, finalizedAt: dispatched.finalizedAt });
     },
-    { role: 'SUPERVISOR' },
+    { role: 'PLANNER' },
   )(req);

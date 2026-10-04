@@ -2,7 +2,8 @@
  * The delivery-outcome retention janitor (owner request 4 Oct 2026, spec section 12.4, D10). Three
  * sweeps, from the in-process janitor loop (at most every 10 min) and the cron route:
  *
- * - purgeOldPhotos: photo BYTES older than photoRetentionDays (default 365) are dropped; the metadata
+ * - purgeOldPhotos: photo BYTES older than photoRetentionDays (default 90 since owner decision 1 of
+ *   5 Oct 2026; it was 365) are dropped; the metadata
  *   stays (time, position status, distance). Keyed on the SERVER time `receivedAt`, so a phone with a
  *   wrong clock can neither keep a photo forever nor lose it the next day.
  * - purgeOldLocations: after locationRetentionDays (default 90, never more than the photo retention)
@@ -23,6 +24,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, todayIso } from '../dispatch/time';
+import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -43,9 +45,9 @@ async function tenants(db: Db): Promise<TenantRetention[]> {
   const rows = await db.tenantConfig.findMany({ select: { tenantId: true, photoRetentionDays: true, locationRetentionDays: true, timezone: true } });
   return rows.map((r) => ({
     tenantId: r.tenantId,
-    photoRetentionDays: Math.max(30, r.photoRetentionDays ?? 365),
+    photoRetentionDays: Math.max(30, r.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS),
     // Never kept longer than the photos (spec section 3).
-    locationRetentionDays: Math.max(30, Math.min(r.locationRetentionDays ?? 90, r.photoRetentionDays ?? 365)),
+    locationRetentionDays: Math.max(30, Math.min(r.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS, r.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS)),
     timezone: r.timezone || DEFAULT_TZ,
   }));
 }

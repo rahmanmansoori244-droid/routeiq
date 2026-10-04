@@ -15,6 +15,7 @@ import { lateDispatchNotes } from '../driver-link/plan-notes';
 import { plannedStopFromRows } from './planned-stop';
 import type { VisitLine } from './visit';
 import { deliveryKpis, inOutcomeScope, type DeliveryKpis, type KpiVisit } from './kpis';
+import { cameraExceptionOf, cameraLinkAlerts, isCameraException, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -330,6 +331,7 @@ export function kpiVisitOf(v: StopVisit, tz: string): KpiVisit {
     autoArrivedAt: v.autoArrivedAt,
     deliveryDate: date,
     dayStart: zonedDayStart(date, tz),
+    truckId: v.truckId,
   };
 }
 
@@ -364,6 +366,48 @@ export async function rangeKpis(db: Db, tenantId: string, range: { from: string;
   return deliveryKpis(stops);
 }
 
+/**
+ * "Camera not working" (owner decision 2, 5 Oct 2026): the results saved without a photo per truck-day
+ * (`date|truckId`, one driver link) in [from, to], every depot (a truck that loads at two depots has
+ * one link for the day).
+ */
+export async function cameraCountsByTruckDay(db: Db, tenantId: string, from: string, to: string): Promise<Map<string, number>> {
+  const rows = await db.stopVisit.findMany({
+    where: { tenantId, deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, noPhotoReason: 'CAMERA_FAILED', outcome: { in: ['DELIVERED', 'PARTLY_DELIVERED'] } },
+    select: { deliveryDate: true, truckId: true, outcome: true, noPhotoReason: true },
+  });
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    if (!isCameraException(r)) continue;
+    const k = truckDayKey(isoOf(r.deliveryDate), r.truckId);
+    out.set(k, (out.get(k) ?? 0) + 1);
+  }
+  return out;
+}
+
+/**
+ * The day's results saved without a photo on the dispatched stops of a depot's plan in use (stop,
+ * customer, driver, time), and the driver links that used it 3 times or more that day.
+ */
+export async function dayCameraExceptions(db: Db, tenantId: string, depotId: string, date: string, tz: string): Promise<{ list: CameraException[]; alerts: CameraLinkAlert[] }> {
+  const visits = (await visitsInRange(db, tenantId, date, date, depotId)).filter(isCameraException);
+  if (!visits.length) return { list: [], alerts: [] };
+  const runs = await liveRunsInRange(db, tenantId, date, date, depotId);
+  const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
+  const loads = (await loadsOfRuns(db, tenantId, runs)).filter((l) => visits.some((v) => v.truckId === l.truckId && v.loadNo === l.loadNo && v.depotId === l.depotId));
+  if (!loads.length) return { list: [], alerts: [] };
+  const [stops, counts] = await Promise.all([stopsOfLoads(db, loads), cameraCountsByTruckDay(db, tenantId, date, date)]);
+  const list: CameraException[] = [];
+  for (const l of loads) {
+    for (const s of stops.get(l.id) ?? []) {
+      const v = byKey.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence }));
+      if (v) list.push(cameraExceptionOf(l, s, v, tz));
+    }
+  }
+  const sorted = sortCameraExceptions(list);
+  return { list: sorted, alerts: cameraLinkAlerts(sorted, counts) };
+}
+
 /** The day screen's Deliveries card (spec section 10.3): the day's KPIs, the stops of loads that are back without a result, the late-dispatch notes. */
 export interface DayDeliveries {
   /** The local date the delivery results started (TenantConfig.outcomesSince), or null. */
@@ -373,6 +417,10 @@ export interface DayDeliveries {
   kpis: DeliveryKpis;
   noResult: NoResultStop[];
   lateDispatch: { loadId: string; text: string }[];
+  /** Owner decision 2 (5 Oct 2026): results saved without a photo ("Camera not working"), every one listed. */
+  cameraExceptions: CameraException[];
+  /** The driver links (truck-days) that used it 3 times or more that day. */
+  cameraAlerts: CameraLinkAlert[];
 }
 
 export async function dayDeliveries(tenantId: string, depotId: string, date: string, opts: { now?: Date; db?: Db } = {}): Promise<DayDeliveries> {
@@ -380,12 +428,13 @@ export async function dayDeliveries(tenantId: string, depotId: string, date: str
   const now = opts.now ?? new Date();
   const set = await outcomeSettings(db, tenantId);
   const beforeStart = !!set.sinceLocal && date < set.sinceLocal;
-  const [kpis, noResult, late] = await Promise.all([
+  const [kpis, noResult, late, camera] = await Promise.all([
     rangeKpis(db, tenantId, { from: date, to: date }, depotId),
     noResultStops(db, tenantId, depotId, { from: date, to: date }, { now }),
     lateDispatchOfDay(db, tenantId, depotId, date, set.tz),
+    dayCameraExceptions(db, tenantId, depotId, date, set.tz),
   ]);
-  return { since: set.sinceLocal, beforeStart, kpis, noResult, lateDispatch: late };
+  return { since: set.sinceLocal, beforeStart, kpis, noResult, lateDispatch: late, cameraExceptions: camera.list, cameraAlerts: camera.alerts };
 }
 
 /** The plan screen's late-dispatch notes for the day screen (driver page opened after a load's planned departure, load still Locked / Loading). */

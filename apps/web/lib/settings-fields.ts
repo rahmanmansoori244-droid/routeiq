@@ -38,6 +38,14 @@ export const SETTINGS_FIELDS = [
   'dispatcherPhone',
 ] as const satisfies readonly (keyof TenantConfig)[];
 
+/**
+ * How long delivery photos and driver positions are kept by default: 90 days each (owner decision 1,
+ * 5 Oct 2026: "photos 90 days is enough"; the photo default was 365). The schema has the same
+ * defaults; a settings row without a value is read with them (the janitor, the photo route).
+ */
+export const DEFAULT_PHOTO_RETENTION_DAYS = 90;
+export const DEFAULT_LOCATION_RETENTION_DAYS = 90;
+
 /** Bounds of the driver-page settings (web only: the optimizer never reads them). */
 export const DELIVERY_SETTING_BOUNDS = {
   geofenceRadiusM: { min: 50, max: 500 },

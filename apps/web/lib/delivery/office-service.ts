@@ -25,6 +25,7 @@ import { HttpError } from '../http-error';
 import { isLockBusy, PlanBusyError, setLockTimeout } from '../dispatch/plan-locks';
 import { DEFAULT_TZ, dateOnly, fmtDayMonth, parseHhmm, zonedDayStart } from '../dispatch/time';
 import { isoDateSchema } from '../schemas';
+import { DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { lockForUndo, undoCheck, undoCarryTx, type UndoCarryResult } from '../dispatch/carry-over';
 import { truckDayLoads } from '../driver-link/service';
 import { NOT_DELIVERED_REASONS } from '../driver-link/manifest-types';
@@ -325,7 +326,7 @@ export async function readOfficePhoto(tenantId: string, photoId: string): Promis
   if (!visit) throw notFound();
   if (!photo.bytes || photo.purgedAt) {
     const cfg = await prisma.tenantConfig.findFirst({ where: { tenantId }, select: { photoRetentionDays: true } });
-    throw new OfficeOutcomeError(`Photo removed after ${cfg?.photoRetentionDays ?? 365} days (retention).`, 404, 'PHOTO_PURGED');
+    throw new OfficeOutcomeError(`Photo removed after ${cfg?.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS} days (retention).`, 404, 'PHOTO_PURGED');
   }
   const [truck, siblings] = await Promise.all([
     prisma.truck.findFirst({ where: { id: visit.truckId, tenantId }, select: { code: true } }),

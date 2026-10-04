@@ -666,7 +666,7 @@ describe('F09: a plan can no longer be stranded on "optimizing" (real PostgreSQL
     expect(await prisma.auditLog.count({ where: { tenantId: h.tenantId, action: 'OPTIMIZE_FAILED', entityId: run.id } })).toBe(1);
   });
 
-  it('"Reset stuck plan": a supervisor resets a job lost by a restart; two resets at once are serialized (one 200, one 409)', async () => {
+  it('"Reset stuck plan": the dispatcher (PLANNER, owner decision 4 of 5 Oct 2026) resets a job lost by a restart; a viewer cannot; two resets at once are serialized (one 200, one 409)', async () => {
     const h = await dispatchTenant('f09x');
     const day = isoPlus(7);
     const run = await prisma.runPlan.create({ data: { tenantId: h.tenantId, depotId: h.depotId, runDate: new Date(`${day}T00:00:00.000Z`), status: 'OPTIMIZING', createdById: h.admin.id } });
@@ -674,22 +674,23 @@ describe('F09: a plan can no longer be stranded on "optimizing" (real PostgreSQL
     await prisma.runPlan.update({ where: { id: run.id }, data: { currentJobId: job.id } });
     await prisma.$executeRawUnsafe(`UPDATE "RunJob" SET "startedAt" = NOW() - INTERVAL '5 minutes', "createdAt" = NOW() - INTERVAL '5 minutes' WHERE id = $1`, job.id);
     const planner = await mkUser(h.tenantId, 'PLANNER', 'f09x-planner');
+    const viewer = await mkUser(h.tenantId, 'VIEWER', 'f09x-viewer');
     const call = async (u: U) => {
       m.auth.mockResolvedValueOnce(sessionOf(u));
       const res = await resetStuckRoute.POST(send(`/api/runs/${run.id}/reset-stuck`, 'POST', { note: 'deploy restarted it' }), { params: { id: run.id } });
       return { status: res.status, body: (await res.json()) as { data?: Record<string, unknown>; error?: { code?: string } } };
     };
-    expect((await call(planner)).status).toBe(403);
-    const both = await Promise.all([call(h.supervisor), call(h.supervisor)]);
+    expect((await call(viewer)).status).toBe(403);
+    const both = await Promise.all([call(planner), call(planner)]);
     expect(both.map((r) => r.status).sort()).toEqual([200, 409]);
     expect(both.find((r) => r.status === 409)?.body.error?.code).toBe('NOT_STUCK');
     expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } })).status).toBe('FAILED');
     const j = await prisma.runJob.findUniqueOrThrow({ where: { id: job.id } });
     expect(j.status).toBe('FAILED');
-    expect(j.errorJson).toMatchObject({ reason: 'RESET', userId: h.supervisor.id });
+    expect(j.errorJson).toMatchObject({ reason: 'RESET', userId: planner.id });
     const audits = await prisma.auditLog.findMany({ where: { tenantId: h.tenantId, action: 'PLAN_RESET' } });
     expect(audits).toHaveLength(1);
-    expect(audits[0]).toMatchObject({ userId: h.supervisor.id, entityId: run.id, afterJson: expect.objectContaining({ kind: 'JOB_LOST', jobFailed: true, note: 'deploy restarted it' }) });
+    expect(audits[0]).toMatchObject({ userId: planner.id, entityId: run.id, afterJson: expect.objectContaining({ kind: 'JOB_LOST', jobFailed: true, note: 'deploy restarted it' }) });
   });
 });
 

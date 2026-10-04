@@ -468,7 +468,7 @@ export function SettingsForm({
           />
           <div className="space-y-1.5">
             <Label htmlFor="dispatcherPhone">
-              Dispatcher phone (driver page)
+              Company dispatcher phone (driver page)
               {'dispatcherPhone' in configDiff.changes ? <span className="ml-1 text-xs text-blue-700">changed</span> : null}
             </Label>
             <Input
@@ -477,7 +477,9 @@ export function SettingsForm({
               placeholder="+968 9123 4567"
               onChange={(e) => setC({ ...c, dispatcherPhone: e.target.value.trim() === '' ? null : e.target.value })}
             />
-            <p className="text-xs text-muted-foreground">The number behind the driver page&apos;s Call dispatcher button. Empty: the button is hidden.</p>
+            <p className="text-xs text-muted-foreground">
+              The driver page&apos;s Call dispatcher button calls the number of the truck&apos;s depot (Depots page); this company number is used when the depot has no number of its own. Neither: the button is hidden.
+            </p>
           </div>
         </CardContent>
       </Card>

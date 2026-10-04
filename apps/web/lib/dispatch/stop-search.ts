@@ -1,6 +1,7 @@
 /**
- * "Use the best plan found so far" (owner request 29 Sep 2026, optional step): a SUPERVISOR or above
- * ends a running THOROUGH search early. The optimizer (POST /optimize-dispatch/stop) ends its search
+ * "Use the best plan found so far" (owner request 29 Sep 2026, optional step): the dispatcher
+ * (PLANNER or above since owner decision 4 of 5 Oct 2026; it was SUPERVISOR) ends a running THOROUGH
+ * search early. The optimizer (POST /optimize-dispatch/stop) ends its search
  * at the next plan it finds, skips the alternatives and re-checks the loads with QUICK's time; the
  * job then saves that plan exactly as after a normal search (its search report says STOPPED). Nothing
  * is cancelled and nothing is lost: the plan keeps OPTIMIZING until the job saves it (or fails).

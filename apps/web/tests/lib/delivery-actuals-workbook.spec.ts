@@ -43,7 +43,7 @@ describe('the actuals rows (spec 11.3)', () => {
     const found = actualsRowOf(stop, visit({ arrivalObserved: false, autoServiceMinutes: null, autoArrivedAt: null, autoBasis: null }) as never, [], TZ);
     expect(found).toMatchObject({ arrivalBy: 'Auto, not observed', insideWindow: '-', earlyLateMin: null, actualUnloadMin: null, waitingMin: null });
     const late = actualsRowOf(stop, visit({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', casesDelivered: 34, outcomeLate: true, noPhotoReason: 'CAMERA_FAILED' }) as never, [], TZ);
-    expect(late).toMatchObject({ result: 'Partly delivered', reason: 'Damaged goods', casesDelivered: 34, casesNotDelivered: 6, late: 'Yes', noPhotoReason: 'Camera failed (driver)', photos: 0 });
+    expect(late).toMatchObject({ result: 'Partly delivered', reason: 'Damaged goods', casesDelivered: 34, casesNotDelivered: 6, late: 'Yes', noPhotoReason: 'Camera failed (driver)', cameraException: 'Yes', photos: 0 });
     const none = actualsRowOf(stop, null, [], TZ);
     expect(none).toMatchObject({ result: 'No result', casesPlanned: 40, casesDelivered: null, insideWindow: '-', recordedBy: null });
     const office = actualsRowOf(stop, visit({ outcomeSource: 'DISPATCHER', recordedBy: 'Dispatcher Ali', arrivalSource: 'DISPATCHER' }) as never, [], TZ);
@@ -72,17 +72,20 @@ describe('the actuals rows (spec 11.3)', () => {
     expect(none).toMatchObject({ actualUnloadMin: null, timedBy: null });
   });
 
-  it('the workbook: Stops, Summary and Reasons; the headers; one row per stop; no money anywhere', async () => {
+  it('the workbook: Stops, Summary, Without photo and Reasons; the headers; one row per stop; no money anywhere', async () => {
     const rows = [actualsRowOf(stop, visit() as never, [], TZ), actualsRowOf({ ...stop, sequence: 4 }, visit({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0 }) as never, [], TZ)];
     const kpis = deliveryKpis([visit() as never, visit({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0 }) as never]);
     const buf = await buildActualsWorkbook(rows, { tenantName: 'Demo Co', from: D, to: D, depot: 'A1', generatedAt: new Date('2026-10-05T15:00:00Z'), generatedBy: 'Ali', kpis });
     const wb = new ExcelJS.Workbook();
     await wb.xlsx.load(buf as never);
-    expect(wb.worksheets.map((w) => w.name)).toEqual(['Stops', 'Summary', 'Reasons']);
+    // Owner decision 2 (5 Oct 2026): the "Without photo" sheet lists every result saved without a photo.
+    expect(wb.worksheets.map((w) => w.name)).toEqual(['Stops', 'Summary', 'Without photo', 'Reasons']);
     const s = wb.getWorksheet('Stops')!;
     const headers = (s.getRow(1).values as unknown[]).slice(1);
     expect(headers).toEqual(ACTUALS_COLUMNS.map((c) => c.header));
-    expect(headers).toEqual(expect.arrayContaining(['Arrival by', 'Inside window', 'Recorded after the trip closed', 'No photo reason', 'Unverified timing', 'Hired', 'Daily driver']));
+    expect(headers).toEqual(
+      expect.arrayContaining(['Arrival by', 'Inside window', 'Recorded after the trip closed', 'No photo reason', 'Saved without a photo (Camera not working)', 'Unverified timing', 'Hired', 'Daily driver']),
+    );
     expect(s.rowCount).toBe(3);
     const all = wb.worksheets.flatMap((w) => w.getSheetValues().flat().map(String)).join(' ').toLowerCase();
     for (const money of ['cost', 'price', 'sales', 'margin', 'omr', 'payment amount', 'revenue']) expect(all).not.toContain(money);

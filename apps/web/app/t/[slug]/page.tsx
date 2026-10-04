@@ -4,6 +4,7 @@ import type { RunStatus } from '@prisma/client';
 import { getCurrentTenant } from '@/lib/tenant';
 import { getDashboardData } from '@/lib/dashboard';
 import { countOf, reasonLabel } from '@/lib/delivery/office-text';
+import { CAMERA_ALERT_PER_DAY, cameraShareText } from '@/lib/delivery/camera-exceptions';
 import { canPlan } from '@/lib/rbac';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -147,6 +148,16 @@ export default async function DashboardPage({ params }: { params: { slug: string
                 </p>
                 <p className="text-muted-foreground">
                   {k.notDelivered} not delivered · {k.partly} partly · {k.noResult} no result recorded
+                </p>
+                {/* Owner decision 2 (5 Oct 2026): "Camera not working" is allowed but monitored. */}
+                <p className={k.cameraFailed ? 'text-amber-800' : 'text-muted-foreground'} data-testid="dashboard-camera">
+                  Saved without a photo (Camera not working): <b>{cameraShareText(k)}</b>
+                  {k.cameraAlertDays ? (
+                    <span className="font-medium text-red-700">
+                      {' '}
+                      · {countOf(k.cameraAlertDays, 'driver link')} used it {CAMERA_ALERT_PER_DAY} times or more in a day
+                    </span>
+                  ) : null}
                 </p>
                 {k.byReason.length ? (
                   <p className="text-muted-foreground">

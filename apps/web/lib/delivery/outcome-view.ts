@@ -10,16 +10,20 @@
  * photo: camera failed (driver)", "unverified timing", "changed after it was brought forward").
  * Visits are matched by (truck, load number, stop), so a superseded version shows the same physical
  * results. Plus, for any load of the version, the brought-forward copies whose original result changed
- * after the carry (the red chip and the Lock question).
+ * after the carry (the red chip and the Lock question). And (owner decision 2, 5 Oct 2026) every
+ * result saved without a photo ("Camera not working": stop, customer, driver, time), with the driver
+ * links that used it 3 times or more that day.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
 import { isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { readDevices } from '../driver-link/service';
 import { deliveryKpis, inOutcomeScope, type DeliveryKpis } from './kpis';
+import { cameraExceptionOf, cameraLinkAlerts, isCameraException, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
 import {
   backAtDepot,
   backKey,
+  cameraCountsByTruckDay,
   keyOfVisit,
   kpiVisitOf,
   loadIsBack,
@@ -106,6 +110,8 @@ export interface OverlayLoad {
   noResult: number;
   backAtDepotAt: string | null;
   driverLink: { lastSeenAt: string | null; devices: number } | null;
+  /** Results of this truck's day (its driver link, every depot) saved without a photo: 3 or more is highlighted. */
+  cameraFailedToday: number;
 }
 
 export interface OutcomeOverlay {
@@ -124,6 +130,10 @@ export interface OutcomeOverlay {
   copyConflicts: Record<string, string>;
   /** Per load id: the Lock question's lines (the same copies). */
   lockWarnings: Record<string, string[]>;
+  /** Owner decision 2 (5 Oct 2026): this version's results saved without a photo ("Camera not working"). */
+  cameraExceptions: CameraException[];
+  /** The driver links (truck-days) that used it 3 times or more that day. */
+  cameraAlerts: CameraLinkAlert[];
 }
 
 const iso = (d: Date | null | undefined) => (d ? d.toISOString() : null);
@@ -138,7 +148,20 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
   if (!run) return null;
   const date = isoOf(run.runDate);
   const set = await outcomeSettings(db, tenantId);
-  const empty: OutcomeOverlay = { runId, date, depotId: run.depotId, tz: set.tz, loads: {}, stops: {}, summary: deliveryKpis([]), noOutcome: [], copyConflicts: {}, lockWarnings: {} };
+  const empty: OutcomeOverlay = {
+    runId,
+    date,
+    depotId: run.depotId,
+    tz: set.tz,
+    loads: {},
+    stops: {},
+    summary: deliveryKpis([]),
+    noOutcome: [],
+    copyConflicts: {},
+    lockWarnings: {},
+    cameraExceptions: [],
+    cameraAlerts: [],
+  };
 
   // Brought-forward copies on any load of this version (the chip and the Lock question).
   const allRows = await db.routeAssignment.findMany({ where: { runId }, select: { loadId: true, sequenceInTruck: true, orderId: true } });
@@ -160,7 +183,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
   ]);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
   const visitIds = visits.map((v) => v.id);
-  const [photos, flagged, users, links, scoped] = await Promise.all([
+  const [photos, flagged, users, links, scoped, cameraCounts] = await Promise.all([
     visitIds.length
       ? db.deliveryPhoto.findMany({
           where: { tenantId, visitId: { in: visitIds } },
@@ -177,6 +200,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
     })(),
     db.driverLink.findMany({ where: { tenantId, deliveryDate: run.runDate, truckId: { in: [...new Set(loads.map((l) => l.truckId))] } }, select: { truckId: true, lastSeenAt: true, devicesJson: true } }),
     truckDaysWithLinkOrVisit(db, tenantId, date, date, visits),
+    visits.some(isCameraException) ? cameraCountsByTruckDay(db, tenantId, date, date) : new Map<string, number>(),
   ]);
   const userName = new Map(users.map((u) => [u.id, u.name]));
   // The copies of this day's orders (carriedTo per stop).
@@ -202,6 +226,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
       noResult: 0,
       backAtDepotAt: iso(back),
       driverLink: link ? { lastSeenAt: iso(link.lastSeenAt), devices: readDevices(link.devicesJson).length } : null,
+      cameraFailedToday: cameraCounts.get(truckDayKey(l.date, l.truckId)) ?? 0,
     };
     const inScope = inOutcomeScope(l.date, set.sinceLocal, scoped.has(`${l.date}|${l.truckId}`));
     const isBack = loadIsBack(l, today, nowMin, !!back);
@@ -263,6 +288,7 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
           empty.noOutcome.push({ date: l.date, depotId: l.depotId, truckId: l.truckId, truckCode: l.truckCode, loadId: l.id, loadNo: l.loadNo, sequence: s.sequence, customerCode: s.customerCode, branchCode: s.branchCode, customerName: s.customerName, cases: s.casesPlanned, lines: s.lines });
         }
       }
+      if (isCameraException(v)) empty.cameraExceptions.push(cameraExceptionOf(l, s, v, set.tz));
       const vPhotos = photos.filter((p) => p.visitId === v.id);
       const events = flagged.filter((e) => e.visitId === v.id);
       const conflict = events.filter((e) => e.kind === 'CARRY_CONFLICT').sort((a, b) => a.at.getTime() - b.at.getTime()).at(-1);
@@ -316,6 +342,8 @@ export async function readOutcomeOverlay(tenantId: string, runId: string, opts: 
     empty.loads[l.id] = ov;
   }
   empty.summary = deliveryKpis(kpiStops);
+  empty.cameraExceptions = sortCameraExceptions(empty.cameraExceptions);
+  empty.cameraAlerts = cameraLinkAlerts(empty.cameraExceptions, cameraCounts);
   return empty;
 }
 

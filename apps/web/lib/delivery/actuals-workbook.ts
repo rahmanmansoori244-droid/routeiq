@@ -5,6 +5,11 @@
  * the reason, the cases delivered and not, the proof and who recorded it - plus a Summary sheet (the
  * KPIs of spec section 11.4) and a Reasons sheet. Per-driver performance data: PLANNER and above.
  * Money never appears. exceljs, like the dispatch workbook.
+ *
+ * "Camera not working" (owner decision 2, 5 Oct 2026): a clear column "Saved without a photo (Camera
+ * not working)" (Yes, the row filled amber), the driver link's count of them that day (3 or more in
+ * red), the Summary's count, share and alert days, and a "Without photo" sheet listing each one
+ * (date, depot, truck, trip, stop, customer, driver, time) for the weekly review.
  */
 import ExcelJS from 'exceljs';
 import type { Prisma } from '@prisma/client';
@@ -12,7 +17,8 @@ import { prisma } from '../db';
 import { DEFAULT_TZ, daysBetween, fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
 import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
-import { keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
+import { cameraCountsByTruckDay, keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
+import { CAMERA_ALERT_PER_DAY, cameraShareText, isCameraException, truckDayKey } from './camera-exceptions';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -52,6 +58,10 @@ export interface ActualsRow {
   late: string;
   photos: number;
   noPhotoReason: string | null;
+  /** "Yes": Delivered / Partly saved without a photo ("Camera not working"). */
+  cameraException: string;
+  /** Results of this truck-day (its driver link, every depot) saved without a photo. */
+  linkCameraCount: number;
   photoLocation: string | null;
   photoDistanceM: number | null;
   arrivalDistanceM: number | null;
@@ -94,6 +104,8 @@ export const ACTUALS_COLUMNS: { key: keyof ActualsRow; header: string; width: nu
   { key: 'late', header: 'Recorded after the trip closed', width: 9 },
   { key: 'photos', header: 'Photos', width: 6 },
   { key: 'noPhotoReason', header: 'No photo reason', width: 16 },
+  { key: 'cameraException', header: 'Saved without a photo (Camera not working)', width: 12 },
+  { key: 'linkCameraCount', header: 'Driver link: saved without a photo that day', width: 12 },
   { key: 'photoLocation', header: 'Photo location', width: 11 },
   { key: 'photoDistanceM', header: 'Photo distance from pin (m)', width: 10 },
   { key: 'arrivalDistanceM', header: 'Arrival distance from pin (m)', width: 10 },
@@ -127,7 +139,13 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
   stops.columns = ACTUALS_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
   stops.getRow(1).font = { bold: true };
   stops.getRow(1).alignment = { wrapText: true, vertical: 'top' };
-  for (const r of rows) stops.addRow(r);
+  const countCol = ACTUALS_COLUMNS.findIndex((c) => c.key === 'linkCameraCount') + 1;
+  for (const r of rows) {
+    const added = stops.addRow(r);
+    // A result saved without a photo stands out; a driver link that used it 3 times or more that day is red.
+    if (r.cameraException === 'Yes') added.eachCell({ includeEmpty: true }, (c) => (c.fill = AMBER));
+    if (r.linkCameraCount >= CAMERA_ALERT_PER_DAY) added.getCell(countCol).font = { bold: true, color: { argb: 'FFC00000' } };
+  }
   stops.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ACTUALS_COLUMNS.length } };
 
   const k = meta.kpis;
@@ -155,12 +173,37 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
     ['Observed arrivals at stops with a window', k.timedArrivals],
     ['Arrived inside the window', pct(k.insideWindowPct)],
     ['Unloading: measured minus planned, average min', k.avgUnloadDeltaMin === null ? '-' : k.avgUnloadDeltaMin],
-    ['No photo: camera failed', k.cameraFailed],
+    ['Saved without a photo (Camera not working)', k.cameraFailed],
+    ['Saved without a photo, of the delivered results', cameraShareText(k)],
+    [`Driver links that used it ${CAMERA_ALERT_PER_DAY} times or more in a day`, k.cameraAlertDays],
     ['Recorded after the trip closed', k.late],
   ];
   for (const [a, b] of lines) sum.addRow({ a, b });
   sum.addRow({});
   sum.addRow({ a: 'Only observed arrivals count for "inside the window": an arrival found when the page was opened at the shop, or an unverified timing, does not.' });
+  sum.addRow({ a: '"Camera not working" lets the driver save Delivered or Partly without a photo. Each one is on the "Without photo" sheet: check them daily, and review the drivers who use it often every week.' });
+
+  // Every result saved without a photo, for the daily check and the weekly review (owner decision 2).
+  const wp = wb.addWorksheet('Without photo', { views: [{ state: 'frozen', ySplit: 1 }] });
+  wp.columns = [
+    { header: 'Date', key: 'date', width: 11 },
+    { header: 'Depot', key: 'depot', width: 8 },
+    { header: 'Truck', key: 'truck', width: 8 },
+    { header: 'Trip', key: 'trip', width: 5 },
+    { header: 'Stop', key: 'stop', width: 5 },
+    { header: 'Customer code', key: 'customerCode', width: 12 },
+    { header: 'Customer', key: 'customer', width: 26 },
+    { header: 'Driver', key: 'driver', width: 16 },
+    { header: 'Result', key: 'result', width: 14 },
+    { header: 'Result time', key: 'resultTime', width: 8 },
+    { header: 'Driver link: saved without a photo that day', key: 'linkCameraCount', width: 12 },
+  ];
+  wp.getRow(1).font = { bold: true };
+  wp.getRow(1).alignment = { wrapText: true, vertical: 'top' };
+  for (const r of rows.filter((x) => x.cameraException === 'Yes')) {
+    const added = wp.addRow(r);
+    if (r.linkCameraCount >= CAMERA_ALERT_PER_DAY) added.getCell('linkCameraCount').font = { bold: true, color: { argb: 'FFC00000' } };
+  }
 
   const rs = wb.addWorksheet('Reasons');
   rs.columns = [
@@ -175,10 +218,11 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
 }
 
 const yesNo = (b: boolean) => (b ? 'Yes' : 'No');
+const AMBER: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFE699' } };
 
 /** One row from a stop and its visit (pure: tests feed it). */
 export function actualsRowOf(
-  stop: { date: string; depot: string; truck: string; hired: boolean; loadNo: number; sequence: number; customerCode: string; branch: string | null; customer: string; driver: string | null; dailyDriver: boolean; etaMin: number | null; windowStartMin: number | null; windowEndMin: number | null; plannedServiceMin: number | null; casesPlanned: number; broughtForwardTo: string | null },
+  stop: { date: string; depot: string; truck: string; hired: boolean; loadNo: number; sequence: number; customerCode: string; branch: string | null; customer: string; driver: string | null; dailyDriver: boolean; etaMin: number | null; windowStartMin: number | null; windowEndMin: number | null; plannedServiceMin: number | null; casesPlanned: number; broughtForwardTo: string | null; linkCameraCount?: number },
   v:
     | (KpiVisit & {
         autoBasis: string | null;
@@ -259,6 +303,8 @@ export function actualsRowOf(
     late: yesNo(!!v?.outcomeLate),
     photos: photos.length,
     noPhotoReason: v?.noPhotoReason === 'CAMERA_FAILED' ? 'Camera failed (driver)' : v?.outcome && v.outcome !== 'NOT_DELIVERED' && !photos.length && v.outcomeSource === 'DISPATCHER' ? 'Office result' : null,
+    cameraException: yesNo(!!v && isCameraException(v)),
+    linkCameraCount: stop.linkCameraCount ?? 0,
     photoLocation: status ? (POSITION_TEXT[status] ?? status) : null,
     photoDistanceM: okPhotos.length ? Math.round(okPhotos[0]!.distanceM!) : null,
     arrivalDistanceM: v?.arrivalDistanceM !== null && v?.arrivalDistanceM !== undefined ? Math.round(v.arrivalDistanceM) : null,
@@ -281,7 +327,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
   const scoped = await truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
   const visitIds = visits.map((v) => v.id);
-  const [photos, users, carried] = await Promise.all([
+  const [photos, users, carried, cameraCounts] = await Promise.all([
     visitIds.length ? db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: visitIds } }, select: { visitId: true, positionStatus: true, distanceM: true, takenAt: true }, orderBy: [{ takenAt: 'asc' }] }) : [],
     (async () => {
       const ids = [...new Set(visits.map((v) => v.outcomeById).filter((x): x is string => !!x))];
@@ -291,6 +337,8 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
       const ids = [...new Set([...stopsBy.values()].flat().flatMap((s) => s.orderIds))];
       return ids.length ? db.order.findMany({ where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } }, select: { id: true, carriedTo: { select: { deliveryDate: true } } } }) : [];
     })(),
+    // Per driver link (truck-day), every depot: a truck that loads at two depots has one link.
+    visits.some(isCameraException) ? cameraCountsByTruckDay(db, tenantId, range.from, range.to) : new Map<string, number>(),
   ]);
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const carriedTo = new Map(carried.map((c) => [c.id, c.carriedTo ? isoOf(c.carriedTo.deliveryDate) : null]));
@@ -323,6 +371,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
             plannedServiceMin: v?.plannedServiceMin ?? s.plannedServiceMin,
             casesPlanned: s.casesPlanned,
             broughtForwardTo: s.orderIds.map((id) => carriedTo.get(id)).filter((x): x is string => !!x).sort().at(-1) ?? null,
+            linkCameraCount: cameraCounts.get(truckDayKey(l.date, l.truckId)) ?? 0,
           },
           v && kv
             ? {

@@ -48,6 +48,8 @@ import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/o
 import { officeTimesPrefill } from '@/lib/delivery/office-text';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
+import { CameraExceptions } from './camera-exceptions';
+import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -94,8 +96,13 @@ interface Props {
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
-  /** Supervisor and above: may "Reset stuck plan" (audit F09, owner decision 17). */
+  /** The dispatcher (PLANNER and above, owner decision 4 of 5 Oct 2026): may "Reset stuck plan" and "Use the best plan found so far". */
   canResetStuck?: boolean;
+  /**
+   * The list of results saved without a photo ("Camera not working"). Off on the day screen, whose
+   * Deliveries card right below lists them; the load rows' red badge shows either way.
+   */
+  showCameraList?: boolean;
   /** A request of the screen around this plan is running (the day screen's OPTIMIZE / RE-PLAN): every action here waits. */
   externalBusy?: boolean;
   /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
@@ -119,7 +126,7 @@ interface Props {
   today?: string;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -430,7 +437,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   /**
-   * "Reset stuck plan" (audit F09, owner decision 17: supervisors and above, audited). Only offered
+   * "Reset stuck plan" (audit F09, owner decision 17; the dispatcher since 5 Oct 2026, audited). Only offered
    * when the server says the version is stuck on "optimizing" (PlanDetail.stuck).
    */
   function resetStuck() {
@@ -450,7 +457,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   /**
-   * "Use the best plan found so far" (supervisors and above, audited): a running thorough search
+   * "Use the best plan found so far" (the dispatcher since 5 Oct 2026, audited): a running thorough search
    * ends at the next plan it finds; the job then checks and saves that plan as usual.
    */
   function stopSearch() {
@@ -990,6 +997,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           </CardContent>
         </Card>
       ) : null}
+
+      {/* Owner decision 2 (5 Oct 2026): results saved without a photo ("Camera not working"), every one listed. */}
+      {overlay && showCameraList ? <CameraExceptions list={overlay.cameraExceptions ?? []} alerts={overlay.cameraAlerts ?? []} testId="plan-camera" /> : null}
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between py-3">
@@ -1608,6 +1618,12 @@ function LoadProgress({ o, tag, tz }: { o: NonNullable<OutcomeOverlay['loads'][s
       {o.partly ? <Badge variant="warning">{o.partly} partly</Badge> : null}
       {o.notDelivered ? <Badge variant="destructive">{o.notDelivered} not delivered</Badge> : null}
       {o.noResult ? <Badge variant="warning">{o.noResult} no result</Badge> : null}
+      {/* Owner decision 2 (5 Oct 2026): this truck's driver link used "Camera not working" 3 times or more today. */}
+      {(o.cameraFailedToday ?? 0) >= CAMERA_ALERT_PER_DAY ? (
+        <Badge variant="destructive" title="Results saved without a photo by this truck's driver link today: check the phone's camera with the driver" data-testid={`load-camera-alert-${tag}`}>
+          No photo {o.cameraFailedToday}× today
+        </Badge>
+      ) : null}
       {back ? <span className="text-xs text-muted-foreground">Back {back}</span> : null}
     </span>
   );

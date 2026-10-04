@@ -66,6 +66,13 @@
  *   (results, the carry basis, the information lists), PATCH /api/runs/[id]/loads/[loadId] (Lock
  *   answers `warnings` for a copy whose original result changed) and the janitor route (TOKEN: the
  *   photo, location and daily-driver retention sweeps).
+ * - Owner decisions of 5 Oct 2026: (4) "the dispatcher is the planner": POST /api/runs/[id]/dispatch,
+ *   /unlock, /reset-stuck and /stop-search are PLANNER (they were SUPERVISOR), and so are Dispatch and
+ *   Completed of a load (PATCH /api/runs/[id]/loads/[loadId], checkTransition); the solver debug JSON
+ *   stays SUPERVISOR (support data, not dispatch work). Roles unchanged on POST /api/depots and PATCH
+ *   /api/depots/[id] (a depot's own dispatcher phone, decision 3), GET /api/dispatch/day and GET
+ *   /api/runs/[id]/outcomes (results saved without a photo, decision 2), GET
+ *   /api/dispatch/delivery-actuals (its "Saved without a photo" column) and GET /api/dashboard/kpis.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -156,7 +163,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/baseline': 'SESSION:ANY',
   'POST /api/runs/[id]/baseline': 'SESSION:PLANNER',
   'POST /api/runs/[id]/choose-scenario': 'PLANNER',
-  'POST /api/runs/[id]/dispatch': 'SUPERVISOR',
+  // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) does every Daily dispatch action.
+  'POST /api/runs/[id]/dispatch': 'PLANNER',
   'GET /api/runs/[id]/export/excel': 'ANY',
   'GET /api/runs/[id]/export/pdf': 'ANY',
   'GET /api/runs/[id]/jobs/[jobId]/debug': 'SUPERVISOR',
@@ -167,13 +175,13 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/outcomes': 'ANY',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
-  'POST /api/runs/[id]/reset-stuck': 'SUPERVISOR',
-  'POST /api/runs/[id]/stop-search': 'SUPERVISOR',
+  'POST /api/runs/[id]/reset-stuck': 'PLANNER',
+  'POST /api/runs/[id]/stop-search': 'PLANNER',
   'GET /api/runs/[id]/route-geometries': 'ANY',
   'PATCH /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'DELETE /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'GET /api/runs/[id]/status': 'ANY',
-  'POST /api/runs/[id]/unlock': 'SUPERVISOR',
+  'POST /api/runs/[id]/unlock': 'PLANNER',
   'GET /api/tenant/config': 'TENANT_ADMIN',
   'PATCH /api/tenant/config': 'PLANNER', // the dispatcher saves the driver shift only (adminOnlyFields)
   'GET /api/trucks': 'ANY',

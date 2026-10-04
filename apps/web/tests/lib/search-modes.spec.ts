@@ -200,7 +200,7 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     expect(searchResultText(report({ stop_reason: 'CAP', search_sec: 21, last_improvement_sec: 0, cap_sec: 60 }))).toBe(
       'Thorough search: searched 21 s, all the time allowed (1 min in all). The best plan was last improved after 0 s.',
     );
-    expect(searchResultText(report({ stop_reason: 'STOPPED', search_sec: 360 }))).toMatch(/^Thorough search stopped early after 6 min by a supervisor: the best plan found so far is used\./);
+    expect(searchResultText(report({ stop_reason: 'STOPPED', search_sec: 360 }))).toMatch(/^Thorough search stopped early after 6 min by a dispatcher: the best plan found so far is used\./);
     expect(searchResultText(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', search_sec: 20.4, last_improvement_sec: null, stall_sec: null, best_over_time: [] }))).toBe(
       'Quick search: 20 s, the automatic time for a day of this size.',
     );

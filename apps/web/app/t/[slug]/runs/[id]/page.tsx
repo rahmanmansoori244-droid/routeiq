@@ -118,7 +118,9 @@ export default async function RunDetailPage({
       <RunDetail
         slug={params.slug}
         canEdit={canPlan(user.role)}
-        canDispatch={canApproveOverride(user.role)}
+        // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) dispatches and unlocks a run.
+        canDispatch={canPlan(user.role)}
+        canDownloadDebug={canApproveOverride(user.role)}
         canEditProducts={canManageMasterData(user.role)}
         currency={tenant.currency}
         mapboxToken={process.env.MAPBOX_TOKEN ?? ''}

@@ -31,6 +31,8 @@ export interface DepotRow {
   /** Depot hours, minutes from midnight (null = 00:00 / 24:00). */
   openMin?: number | null;
   closeMin?: number | null;
+  /** Owner decision 3 (5 Oct 2026): the driver page's "Call dispatcher" number for this depot (null: the company's). */
+  dispatcherPhone?: string | null;
   _count?: { trucks: number; regions?: number; runs?: number; orders?: number; uploadBatches?: number };
 }
 
@@ -51,10 +53,11 @@ interface FormState {
   address: string;
   openAt: string; // HH:MM, '' = from midnight
   closeAt: string; // HH:MM, '' = until midnight
+  dispatcherPhone: string; // '' = the company number (Settings)
   active: boolean;
 }
 
-const blank: FormState = { code: '', name: '', lat: 23.5859, lng: 58.4059, address: '', openAt: '', closeAt: '', active: true };
+const blank: FormState = { code: '', name: '', lat: 23.5859, lng: 58.4059, address: '', openAt: '', closeAt: '', dispatcherPhone: '', active: true };
 
 /** Shown instead of the Active switch on the history-only depot (audit PR A5). */
 export const HISTORY_ONLY_NOTE =
@@ -76,6 +79,7 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
           address: depot.address ?? '',
           openAt: depot.openMin != null ? fmtHhmm(depot.openMin) : '',
           closeAt: depot.closeMin != null && depot.closeMin < 1440 ? fmtHhmm(depot.closeMin) : '',
+          dispatcherPhone: depot.dispatcherPhone ?? '',
           active: depot.active,
         });
       } else {
@@ -107,6 +111,8 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
       address: form.address,
       openMin,
       closeMin,
+      // '' clears it: the driver page then calls the company number (Settings).
+      dispatcherPhone: form.dispatcherPhone,
       // The history-only depot has no Active switch: its state is never sent (audit PR A5).
       ...(historyOnly ? {} : { active: form.active }),
     };
@@ -188,6 +194,19 @@ export function DepotFormDialog({ open, onOpenChange, mode, depot, mapboxToken, 
             </div>
             <p className="col-span-2 -mt-1 text-xs text-muted-foreground">
               No truck leaves before the depot opens or comes back after it closes. Empty = open all day.
+            </p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="dispatcherPhone">Dispatcher phone (driver page)</Label>
+            <Input
+              id="dispatcherPhone"
+              value={form.dispatcherPhone}
+              placeholder="+968 9123 4567"
+              maxLength={40}
+              onChange={(e) => setForm({ ...form, dispatcherPhone: e.target.value })}
+            />
+            <p className="text-xs text-muted-foreground">
+              Drivers of this depot&apos;s trucks call this number with the driver page&apos;s Call dispatcher button. Empty: the company number in Settings.
             </p>
           </div>
           {historyOnly ? (

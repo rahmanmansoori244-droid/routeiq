@@ -9,11 +9,14 @@ import { ACTUALS_MAX_DAYS, actualsDefaultRange, actualsRangeProblem, actualsUrl,
 import { noOutcomeGroups } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
+import { CameraExceptions } from './camera-exceptions';
 
 /**
  * The day screen's Deliveries card (owner request 4 Oct 2026, spec section 10.3): how many stops have
  * a result, delivered in full / partly / not delivered, the reasons with their cases, arrivals inside
- * the window (observed arrivals only), "no photo: camera failed" and "recorded after the trip closed";
+ * the window (observed arrivals only), the results saved without a photo ("Camera not working", owner
+ * decision 2 of 5 Oct 2026: every one listed, a driver link with 3 or more in red) and "recorded after
+ * the trip closed";
  * then the stops of loads that are back with no result (grouped per truck, with Record), and the
  * late-dispatch notes. The "Delivery actuals" Excel of the day for dispatchers, and of a From / To
  * range (at most 31 days). A day before the feature started says so instead.
@@ -66,11 +69,8 @@ export function DeliverySummary({
         </p>
       ) : null}
       {onTime ? <p className="text-xs">{onTime}</p> : null}
-      {k.cameraFailed || k.late ? (
-        <p className="text-xs text-amber-800">
-          {[k.cameraFailed ? `No photo: camera failed ${k.cameraFailed}` : null, k.late ? `Recorded after the trip closed ${k.late}` : null].filter(Boolean).join(' · ')}
-        </p>
-      ) : null}
+      <CameraExceptions list={deliveries.cameraExceptions ?? []} alerts={deliveries.cameraAlerts ?? []} testId="deliveries-camera" />
+      {k.late ? <p className="text-xs text-amber-800">Recorded after the trip closed {k.late}</p> : null}
       {groups.length ? (
         <div className="space-y-1" data-testid="deliveries-no-result">
           <p className="text-xs font-medium">Back at the depot, no result recorded (counted as delivered):</p>
