@@ -15,7 +15,9 @@
  *  - a cases per pallet corrected after planning makes the plan out of date (outdated.palletFactorCases)
  *    and LOCK is refused for a load the new figure puts over its bays (CAPACITY_PALLETS_NEW_FACTOR);
  *  - LOCK is refused for a load whose stored units are over its bays (an edit in the database);
- *  - a re-plan copies a locked load's units unchanged.
+ *  - a re-plan copies a locked load's units unchanged (a late order is added first: the day's orders
+ *    can all ride the locked load, and a re-plan with nothing open to plan is refused, 409
+ *    NOTHING_TO_PLAN); the late order's row is planned by pallets.
  *
  * Requires: dev server (RATE_LIMITS_DISABLED=1) + solver running (the solver of this release: an
  * older one plans by cases and the plan says so).
@@ -226,15 +228,25 @@ describe('truck capacity in pallets', () => {
     const load = await prisma.planLoad.findFirstOrThrow({ where: { runId: runV1, truck: { code: 'R12' } }, include: { assignments: true }, orderBy: { loadNo: 'asc' } });
     const lock = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/loads/${load.id}`, j({ status: 'LOCKED' }, 'PATCH'));
     expect(lock.status).toBe(200);
+    // Something open to plan, whatever the optimizer put on that load: the day's three orders fit on
+    // one R12 load (about 5.3 pallets of its 11.4), and with that load locked every order of the day
+    // is frozen, so a re-plan has nothing to plan and is refused (409 NOTHING_TO_PLAN, by design).
+    // A late order of the day gives it one.
+    const late = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/late-order`, j({ date: day, depotId, customerCode: 'C3', reason: 'Top-up', lines: [{ productCode: 'TN1.5L', cases: 10, salesOrderNo: 'SO-4' }] }));
+    expect(late.status).toBe(201);
     const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/replan`, j({ reason: 'REOPTIMIZE' }));
     expect(rp.status).toBe(202);
     const runV2 = (await json(rp)).data.runId;
-    await waitForPlan(runV2);
+    expect((await waitForPlan(runV2)).run.status).toBe('READY');
     const copy = await prisma.planLoad.findFirstOrThrow({ where: { runId: runV2, carriedFromLoadId: load.id }, include: { assignments: true } });
     expect(copy.status).toBe('LOCKED');
     expect(copy.palletUnits).toBe(load.palletUnits);
     const [was, now] = [load.truckSnapshotJson as any, copy.truckSnapshotJson as any];
     expect([now.bays, now.palletFillPct, now.palletRoomUnits, now.rules.pallets]).toEqual([was.bays, was.palletFillPct, was.palletRoomUnits, was.rules.pallets]);
     expect(copy.assignments.map((a) => [a.orderId, a.palletUnits]).sort()).toEqual(load.assignments.map((a) => [a.orderId, a.palletUnits]).sort());
+    // The late order is planned by pallets too, on another load: its row's units as sent.
+    const lateRow = await prisma.routeAssignment.findFirstOrThrow({ where: { runId: runV2, order: { lines: { some: { salesOrderNo: 'SO-4' } } } } });
+    expect(lateRow.loadId).not.toBe(copy.id);
+    expect(lateRow.palletUnits).toBe(await expectedRowUnits(lateRow));
   });
 });
