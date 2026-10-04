@@ -2065,7 +2065,7 @@ pnpm --filter @routeiq/web dev
 
 **Vitest configuration** (`apps/web/vitest.config.ts`): Node environment; includes `tests/**/*.spec.ts` and `lib/**/*.spec.ts` (there are no specs under `lib/` today); `pool: 'forks'` with `singleFork: true`, so tests run serially in one process; `testTimeout` 120 s and `hookTimeout` 60 s. The setup file `tests/setup.ts` makes every spec read uploads in the test process (since audit P5: the `__routeiqUploadParseInProcess` hook, honoured outside production only), so specs that watch or replace SheetJS still see the read; a spec that tests the real parser process calls `useRealUploadParser()` (`tests/lib/upload-parse-helpers.ts`). Since audit PR A2, `esbuild.jsx` is `automatic` (JSX compiled as Next.js does, without `import React`), so the component tests can load the dispatch screen's `.tsx` files. There is no DOM (no jsdom): `tests/lib/hook-host.ts` (adapted from the audit verifiers' harness) calls a component function with its own small hooks runtime (`vi.mock('react', ...)` with `mockReactHooks`), reads the element tree it returns and calls its callbacks like a user; child components are not rendered.
 
-**Web unit specs** (`apps/web/tests/lib/`, 124 files; the PR1 security specs are listed after the table):
+**Web unit specs** (`apps/web/tests/lib/`, 126 files; the PR1 security specs are listed after the table):
 
 | Spec | Module under test | Covers |
 |---|---|---|
