@@ -24,6 +24,7 @@ import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
 import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption, type SearchReport } from './search-mode';
+import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -123,6 +124,8 @@ export interface SolverRules {
   finishByClosing?: boolean;
   /** The driver break the plan was made with (the solver's echo); absent/null = none planned. */
   breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
+  /** Trucks with bays were planned by pallets at this Pallet fill (the solver's echo); absent/null = by cases only. */
+  pallets?: { fillPct: number } | null;
 }
 
 export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
@@ -132,7 +135,17 @@ export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
     newOvertimeOnly: option?.newOvertimeOnly === true,
     finishByClosing: option?.windowRule === 'FINISH',
     breakRule: option?.breakRule ?? null,
+    pallets: option?.palletRule ?? null,
   };
+}
+
+/** The pallets of a load planned by pallets (pallets.ts loadPallets); null = cases only. */
+const palletsOf = (l: DetailLoad): LoadPallets | null => loadPallets(l);
+
+/** "11.1 / 12 (limit 12.0 at 100% fill)" - a load's pallets on the sheets; '' for a load planned by cases. */
+export function loadPalletsCell(l: DetailLoad): string {
+  const p = palletsOf(l);
+  return p ? `${palletsOverBays(p)} (${palletLimitText(p)})` : '';
 }
 
 const WHOLE_DAY_NOTE =
@@ -167,6 +180,8 @@ const FMT_MONEY = '0.000';
 const FMT_KG = '#,##0.0';
 const FMT_INT = '#,##0';
 const FMT_PCT = '0.0';
+/** Pallets: the cells hold the exact pallets (palletsExact), shown to 0.1, so a column adds up to its TOTAL. */
+const FMT_PALLETS = '0.0';
 
 const THIN: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: 'FFBFBFBF' } };
 const BOX: Partial<ExcelJS.Borders> = { top: THIN, bottom: THIN, left: THIN, right: THIN };
@@ -408,6 +423,12 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
       kv('Paid driver hours (truck days)', s.driverPaidHours, FMT_KM, 'first departure to last return of each truck, depot turnaround and waiting included');
     }
     kv('Average utilization %', s.avgUtilizationPct, FMT_PCT);
+    // Pallets (owner decision 4 Oct 2026): only when loads were planned by pallets (trucks with bays).
+    if (typeof s.palletUnits === 'number') {
+      const n = s.palletLoads ?? 0;
+      kv('Pallets planned', palletsExact(s.palletUnits), FMT_PALLETS, `on ${n} load${n === 1 ? '' : 's'} of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up); orders stay in cases`);
+      if (typeof s.avgBayFillPct === 'number') kv('Average bay fill %', s.avgBayFillPct, FMT_PCT, 'pallets / bays of each of those loads, averaged');
+    }
     kv('Estimated fuel (litres)', s.fuelLitres ?? 'not calculated', FMT_KM, s.fuelLitres === null ? 'trucks have no km-per-litre' : undefined);
     kv(`Fuel cost (${cur})`, s.fuelCost, FMT_MONEY);
     const basis = summaryCostBasis(s);
@@ -535,13 +556,18 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
   const ws = wb.addWorksheet(SHEETS.loadPlan, { views: [{ state: 'frozen', ySplit: 4 }], pageSetup: LANDSCAPE });
   const est = d.loads.some((l) => l.distanceIsEstimated) || !!d.summary?.distanceIsEstimated;
   const cur = m.currency;
-  const heads = [
+  // Pallets (owner decision 4 Oct 2026): a "Pallets / bays" column after the case capacity, only when
+  // a load of the plan was planned by pallets (a plan without bays keeps its columns).
+  const withPallets = d.loads.some((l) => !!palletsOf(l));
+  const at = 9;
+  const ins = <T>(xs: T[], v: T): T[] => (withPallets ? [...xs.slice(0, at), v, ...xs.slice(at)] : xs);
+  const heads = ins([
     'Truck', 'Load', 'Status', 'Driver', 'Departure', 'Return', 'Stops (customers)', 'Cases', 'Capacity (cases)', 'Weight kg', 'Payload kg', 'Kg check',
     'Utilization %', est ? 'Estimated km' : 'Route km', 'Est. time (h:mm)', 'Paid time (h:mm)', 'Est. fuel (l)', `Fuel cost (${cur})`,
     `Driver + overtime (${cur})`, `Operating cost (${cur})`, 'Timing', 'Sheet',
-  ];
-  const fmts = [undefined, FMT_INT, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_KG, undefined, FMT_PCT, FMT_KM, undefined, undefined, FMT_KM, FMT_MONEY, FMT_MONEY, FMT_MONEY];
-  ws.columns = [12, 6, 16, 20, 10, 10, 10, 9, 10, 11, 11, 18, 11, 11, 10, 10, 10, 12, 14, 14, 18, 22].map((width) => ({ width }));
+  ], 'Pallets / bays');
+  const fmts = ins<string | undefined>([undefined, FMT_INT, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_KG, undefined, FMT_PCT, FMT_KM, undefined, undefined, FMT_KM, FMT_MONEY, FMT_MONEY, FMT_MONEY], undefined);
+  ws.columns = ins([12, 6, 16, 20, 10, 10, 10, 9, 10, 11, 11, 18, 11, 11, 10, 10, 10, 12, 14, 14, 18, 22], 22).map((width) => ({ width }));
   titleRows(ws, 'LOAD PLAN', `Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} (${d.run.status})${est ? ' · km are ESTIMATED' : ''}${timesNotVerified(d) ? ` · ${NOT_VERIFIED}` : ''}`);
   watermark(ws, d);
   ws.pageSetup.printTitlesRow = '4:4';
@@ -555,28 +581,29 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
     tableRow(
       ws,
       r++,
-      [
+      ins<ExcelJS.CellValue>([
         l.truckCode, l.loadNo, l.status + (l.carried ? ' (kept from previous version)' : ''), l.driverName ?? 'Not assigned',
-        fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
+        fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, palletsOf(l) ? 'by pallets' : l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
         l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), l.cost ? fmtDuration(l.cost.driverPaidMin) : 'earlier costing', l.fuelLitres, l.fuelCost,
         l.cost ? Math.round((l.cost.driver + l.cost.overtime) * 1000) / 1000 : null, l.operatingCost,
         l.timing ? (l.timing.ok ? TIMING_TEXT[l.timing.status] : NOT_VERIFIED) : '—', names.get(l.id) ?? '',
-      ],
+      ], loadPalletsCell(l) || 'by cases'),
       fmts,
     );
   }
   const fuelKnown = d.loads.some((l) => l.fuelLitres !== null);
+  const palletTotal = sum(d.loads.map((l) => palletsOf(l)?.units ?? 0));
   totalRow(
     ws,
     r,
-    [
+    ins<ExcelJS.CellValue>([
       'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '',
       sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '', '', '',
       sum(d.loads.map((l) => l.distanceKm)), fmtDuration(sum(d.loads.map((l) => l.durationMin))),
       fmtDuration(sum(d.loads.map((l) => (l.cost ? l.cost.driverPaidMin : l.durationMin)))),
       fuelKnown ? sum(d.loads.map((l) => l.fuelLitres ?? 0)) : null, sum(d.loads.map((l) => l.fuelCost)),
       sum(d.loads.map((l) => (l.cost ? l.cost.driver + l.cost.overtime : 0))), sum(d.loads.map((l) => l.operatingCost)), '', '',
-    ],
+    ], `${palletText(palletTotal)} pallets`),
     fmts,
   );
 }
@@ -673,9 +700,16 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ['Return', fmtHhmm(l.returnMin)],
     ['Status', l.status + (l.carried ? ' (kept from previous version)' : '')],
   ];
+  const pallets = palletsOf(l);
   const right: [string, ExcelJS.CellValue, string?][] = [
-    ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
-    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
+    // A truck with bays is loaded by pallets (its case capacity is not used): its cases and its pallets
+    // over its bays in one row, so the block stays on rows 4-9 and row 10 is free for the driver break
+    // (pallets review: a 7th row landed on row 10 and cut the break's text off).
+    pallets
+      ? ['Cases · pallets / bays', `${l.cases.toLocaleString('en-US')} · ${loadPalletsCell(l)}`]
+      : ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
+    // A payload of 0 is no weight limit (owner decisions of 4 Oct 2026: NMWC's trucks have none): never "/ 0".
+    ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg > 0 ? l.truckPayloadKg : 'no limit'}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
     ['Utilization %', l.utilizationPct, FMT_PCT],
     [kmWord, l.distanceKm, FMT_KM],
     ['Estimated time (h:mm)', fmtDuration(l.durationMin)],
@@ -701,21 +735,28 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     l.break?.where === 'DEPOT' ? ` The driver's break is ${breakTimes(l.break)} at the depot; loading continues meanwhile.` : ''
   }`).font = GREY;
   r++;
-  headRow(ws, r, ['#', 'SKU code', 'Description', '', 'Cases', 'Kg', 'Loaded']);
+  // A load planned by pallets: each product's cases per pallet, full pallets + loose cases and its
+  // pallets, so the warehouse builds the pallets (mixed pallets for the loose cases). Cases stay first.
+  const palletHeads = pallets ? ['Cases per pallet', 'Full pallets', 'Loose cases', 'Pallets'] : [];
+  const palletFmts = pallets ? [FMT_INT, FMT_INT, FMT_INT, FMT_PALLETS] : [];
+  const kgCol = 6 + palletHeads.length;
+  headRow(ws, r, ['#', 'SKU code', 'Description', '', 'Cases', ...palletHeads, 'Kg', 'Loaded']);
   ws.mergeCells(r, 3, r, 4);
   r++;
   l.manifest.forEach((x, i) => {
-    tableRow(ws, r, [i + 1, x.productCode, x.productName, '', x.cases, x.weightKg, ''], [FMT_INT, undefined, undefined, undefined, FMT_INT, FMT_KG]);
+    const palletCells = pallets ? [x.casesPerPallet ?? 'not set', x.fullPallets ?? 0, x.looseCases ?? x.cases, palletsExact(x.palletUnits ?? 0)] : [];
+    tableRow(ws, r, [i + 1, x.productCode, x.productName, '', x.cases, ...palletCells, x.weightKg, ''], [FMT_INT, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG]);
     ws.mergeCells(r, 3, r, 4);
     r++;
   });
   const manifestCases = sum(l.manifest.map((x) => x.cases));
   const manifestKg = manifestKgOf(l.manifest);
+  const totals = manifestPalletTotals(l.manifest);
   totalRow(
     ws,
     r,
-    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, manifestKg, ''],
-    [undefined, undefined, undefined, undefined, FMT_INT, FMT_KG],
+    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, ...(pallets ? ['', totals.full, totals.loose, palletsExact(pallets.units)] : []), manifestKg, ''],
+    [undefined, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG],
   );
   ws.mergeCells(r, 3, r, 4);
   // Audit E3: the sheet's kg is the load's kg (the lines share the kg each order was planned with).
@@ -724,7 +765,14 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ...(manifestCases !== l.cases ? [`MISMATCH: load records ${l.cases} cases`] : []),
     ...(manifestKgDiffers(manifestKg, l.weightKg) ? [`MISMATCH: load records ${l.weightKg} kg (order weights changed since planning)`] : []),
   ];
-  if (manifestProblems.length) put(ws, r, 8, manifestProblems.join('; ')).font = { bold: true };
+  if (manifestProblems.length) put(ws, r, kgCol + 2, manifestProblems.join('; ')).font = { bold: true };
+  if (pallets) {
+    // "1,045 cases = 11.1 pallets (8 full pallets + 293 loose cases on mixed pallets)", and any cases
+    // per pallet changed under Products since planning (the load keeps its pallets).
+    r++;
+    put(ws, r, 2, manifestTotalText(manifestCases, pallets.units, totals)).font = { bold: true };
+    for (const n of l.palletNotes ?? []) put(ws, ++r, 2, n).font = GREY;
+  }
   r += 2;
 
   // DELIVERY ROUTE - driver's sequence.
@@ -851,6 +899,13 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
     sum(perLoad) === sum(d.loads.map((l) => l.cases)) ? 'OK' : 'MISMATCH',
     manifestKgDiffers(skuKg, loadsKg) ? 'MISMATCH' : 'OK',
   ]);
+  // Pallets of each load planned by pallets (blank for a load planned by cases), and their bays.
+  if (d.loads.some((l) => !!palletsOf(l))) {
+    const pFmts = [undefined, undefined, ...d.loads.map(() => FMT_PALLETS), FMT_PALLETS];
+    r++;
+    tableRow(ws, r++, ['Pallets (plan)', 'mixed pallets: cases / cases per pallet, added up', ...d.loads.map((l) => (palletsOf(l) ? palletsExact(palletsOf(l)!.units) : null)), palletsExact(sum(d.loads.map((l) => palletsOf(l)?.units ?? 0)))], pFmts);
+    tableRow(ws, r, ['Bays', 'pallet positions of the truck', ...d.loads.map((l) => palletsOf(l)?.bays ?? null), null], [undefined, undefined, ...d.loads.map(() => FMT_INT)]);
+  }
 }
 
 function addUnservedSheet(wb: ExcelJS.Workbook, d: PlanDetail) {
@@ -1143,6 +1198,10 @@ export function tenantAssumptions(
     Weights: solver.weightsToTenthKg
       ? "each order to the nearest 0.1 kg, checked against each truck's payload with no margin (a load may weigh exactly the payload)"
       : 'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
+    // Pallets (owner decision 4 Oct 2026), worded by the rule the solver REPORTED (its echo).
+    'Truck capacity': solver.pallets
+      ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill) and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
+      : 'cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit',
     // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.
     'Receiving hours': solver.finishByClosing
       ? 'unloading must be finished by the end of the receiving hours'

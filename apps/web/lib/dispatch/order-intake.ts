@@ -363,6 +363,12 @@ export interface IntakeIssueSummary {
   customersWithoutLocation: string[]; // existing customers lacking coordinates
   /** Products (existing without a case weight, or new) with rows that carry no file weight. */
   productsWithoutWeight: string[];
+  /**
+   * Pallets (owner decision 4 Oct 2026): products of the file without a usable cases per pallet (new
+   * ones, or existing without it), listed only when the depot has an active truck with bays: the day
+   * cannot be optimized until they have it (validateIntake). Absent: none, or no truck with bays.
+   */
+  productsWithoutPalletFactor?: string[];
 }
 
 export interface ResolveResult {

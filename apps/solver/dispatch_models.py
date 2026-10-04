@@ -64,6 +64,36 @@ def kg_text(kg: float) -> str:
     return f"{u // 10:,}" if u % 10 == 0 else f"{u / 10:,.1f}"
 
 
+# Pallets (owner decision 4 Oct 2026: truck capacity in pallets / bays, mixed pallets allowed). A
+# truck with ``bays`` (pallet positions) is planned by PALLETS: a load fits when its pallet need is
+# at most bays x Pallet fill (config.pallet_fill_pct, PALLET_FILL_DEFAULT = 100%: every bay; a lower
+# figure is a safety margin, owner decisions of 4 Oct 2026) AND its kg at most the payload (a payload
+# of 0 = no weight limit: NMWC plans by bays only); its case capacity is then not a limit. A truck
+# without bays keeps the case rule exactly as before. A stop's pallet need comes from the web, in whole units of 1/1000
+# pallet (demand_pallet_units): each order line's cases / its product's cases per pallet, rounded UP
+# once per line, then added up (mixed pallets: fractions add up). Every pallet comparison of the
+# engine - the route search's Pallets dimension, the prefilters, the repack, the shortage reasons,
+# the second search and the independent check - adds and compares these integers, with no other
+# rounding (the F08 pattern of the kg tenths). Orders, invoices and driver sheets stay in cases.
+PALLET_UNIT = 0.001
+# Pallet fill when the request does not send one (owner decision 4 Oct 2026: 100%, not 95%).
+PALLET_FILL_DEFAULT = 100
+
+
+def pallet_room_units(bays: int, fill_pct: int) -> int:
+    """A bay truck's room in 1/1000 pallet: bays x fill % x 10 (12 bays at 100% = 12,000 = 12.0 pallets;
+    at 95% = 11,400 = 11.4)."""
+    return int(bays) * int(fill_pct) * 10
+
+
+def pallet_text(units: int) -> str:
+    """Pallets for a message, to one decimal, halves up: 11,400 -> "11.4", 2,513 -> "2.5", 160,250 -> "160.3"."""
+    neg = units < 0
+    tenths = (abs(int(units)) + 50) // 100
+    text = f"{tenths // 10:,}.{tenths % 10}"
+    return f"-{text}" if neg and tenths else text
+
+
 class DispatchDepot(BaseModel):
     id: str
     lat: float = Field(ge=-90, le=90)
@@ -86,6 +116,9 @@ class FrozenTrip(BaseModel):
     # additive: an older web never sends it.
     break_start_min: int | None = Field(default=None, ge=0, le=DAY_MIN * 2)
     break_min: int | None = Field(default=None, ge=0, le=180)
+    # The pallet need the load was planned with (1/1000 pallet), for the record only: frozen loads
+    # are never re-checked. Optional and additive: an older web never sends it.
+    pallet_units: int | None = Field(default=None, ge=0)
 
 
 class DispatchTruck(BaseModel):
@@ -101,6 +134,10 @@ class DispatchTruck(BaseModel):
     available_to_min: int | None = Field(default=None, ge=0, le=DAY_MIN * 2)
     max_trips: int | None = Field(default=None, ge=1, le=10)
     frozen_trips: list[FrozenTrip] = Field(default_factory=list)
+    # Pallet positions (owner decision 4 Oct 2026). Set: the truck is planned by pallets - room =
+    # bays x config.pallet_fill_pct (pallet_room_units) and the payload; capacity_cases is then not a
+    # limit. None (an older web, or a truck without bays): planned by cases, exactly as before.
+    bays: int | None = Field(default=None, ge=1, le=40)
 
 
 class DispatchStop(BaseModel):
@@ -114,6 +151,10 @@ class DispatchStop(BaseModel):
     lng: float = Field(ge=-180, le=180)
     demand_cases: int = Field(ge=0)
     demand_kg: float = Field(default=0, ge=0)
+    # The stop's pallet need in 1/1000 pallet (PALLET_UNIT): the sum over its order lines of
+    # ceil(cases x 1000 / cases per pallet). Required on every stop when a truck has bays (the
+    # request's validator); None otherwise (an older web, or a day without bay trucks).
+    demand_pallet_units: int | None = Field(default=None, ge=0)
     service_min: int = Field(default=10, ge=0, le=480)
     priority: int = Field(default=3, ge=1, le=5)  # 1 = HIGHEST, 5 = LOWEST
     hard_start_min: int | None = Field(default=None, ge=0, le=DAY_MIN)
@@ -173,6 +214,10 @@ class DispatchConfig(BaseModel):
     break_start_from_min: int = Field(default=720, ge=0, le=DAY_MIN)
     break_start_to_min: int = Field(default=840, ge=0, le=DAY_MIN)
     max_trips_per_truck: int = Field(default=3, ge=1, le=10)
+    # Pallet fill (owner decision 4 Oct 2026): the percent of a bay truck's bays the planner may fill
+    # - 100 (the default, owner decision of 4 Oct 2026) = every bay; lower is a safety margin for mixed
+    # pallets (12 bays at 95% = 11.4 pallets). Only trucks with bays use it.
+    pallet_fill_pct: int = Field(default=PALLET_FILL_DEFAULT, ge=50, le=100)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
     # return, depot turnaround and waiting included (costing.py, policy TRUCK_DAY_SPAN). Overtime
@@ -255,6 +300,13 @@ class DispatchRequest(BaseModel):
         truck_ids = [t.id for t in self.trucks]
         if len(truck_ids) != len(set(truck_ids)):
             raise ValueError("duplicate truck id")
+        if any(t.bays is not None for t in self.trucks):
+            # Planned by pallets: every stop needs its pallet need (the web refuses first, with the
+            # products that have no cases per pallet: PALLET_FACTOR_REQUIRED).
+            for s in self.stops:
+                if s.demand_pallet_units is None:
+                    raise ValueError(f"stop {s.stop_id} has no pallet need; every stop needs demand_pallet_units "
+                                     "when a truck has bays")
         return self
 
 
@@ -276,6 +328,9 @@ class PlannedStop(BaseModel):
     pref_window_ok: bool
     # The leg into this stop is an estimate (straight line x multiplier), not a road distance.
     leg_estimated: bool = False
+    # The stop's pallet need in 1/1000 pallet (DispatchStop.demand_pallet_units); None when the
+    # request sent none.
+    pallet_units: int | None = None
 
 
 class PlannedBreak(BaseModel):
@@ -306,7 +361,10 @@ class PlannedLoad(BaseModel):
     duration_min: int
     cases: int
     kg: float
-    utilization_pct: float  # max(cases, kg) share of the binding capacity
+    # max(cases, kg) share of the binding capacity; a truck with bays: max(pallet units / (bays x
+    # 1,000), kg / payload when a payload is set) - against the physical bays, so a load at a 95% fill
+    # limit shows 95%.
+    utilization_pct: float
     fuel_litres: float | None
     fuel_cost: float
     distance_cost: float
@@ -326,6 +384,10 @@ class PlannedLoad(BaseModel):
     # The driver break planned with this load (None: none on this load). The stop after a ROAD
     # break arrives after it when the break started on the way; wait_min never counts break minutes.
     driver_break: PlannedBreak | None = None
+    # Pallets (a truck with bays only; None on a truck planned by cases): the load's pallet need
+    # (the sum of its stops', 1/1000 pallet) and its truck's room (bays x fill % x 10).
+    pallet_units: int | None = None
+    pallet_room_units: int | None = None
 
 
 class UnservedStop(BaseModel):
@@ -400,6 +462,7 @@ FeasibilityCode = Literal[
     "LOAD_TOTALS",
     "CAPACITY_CASES",
     "CAPACITY_KG",
+    "CAPACITY_PALLETS",
     "HARD_WINDOW",
     "TRAVEL",
     "SERVICE_TIME",
@@ -498,6 +561,13 @@ class DispatchScenario(BaseModel):
     # The absolute latest return this plan was made with (config.latest_return_min, echoed); None =
     # none (a solver before it, or an older web that sent none).
     latest_return_min: int | None = None
+    # The pallet rule this plan was made with (echoed when a truck of the request has bays): every
+    # bay truck was checked by pallets in units of pallet_unit (0.001) at pallet_fill_pct; None = no
+    # bay truck in the request (or a solver before the rule). The web marks loads as planned by
+    # pallets ONLY from this echo. total_pallet_units: the sum over the bay trucks' loads.
+    pallet_unit: float | None = None
+    pallet_fill_pct: int | None = None
+    total_pallet_units: int | None = None
 
 
 class DispatchResponse(BaseModel):

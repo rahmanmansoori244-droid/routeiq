@@ -5,6 +5,7 @@
 import type { DetailLoad, DetailStop, DetailUnserved, PlanDetail } from '@/lib/dispatch/plan-detail';
 import { aggregateSkus, reconcile, type ReconOrder } from '@/lib/dispatch/reconcile';
 import { computeSummary } from '@/lib/dispatch/summary';
+import { palletRoomUnits, palletUnits, withManifestPallets } from '@/lib/dispatch/pallets';
 
 // ---------------------------------------------------------------------------------------
 // Fixture: 2 trucks, 3 loads, several SKUs per stop, 1 unserved order
@@ -253,4 +254,62 @@ export function fixture(opts: { estimated?: boolean; revenue?: boolean; noUnserv
     job: null,
     warnings: [],
   };
+}
+
+// ---------------------------------------------------------------------------------------
+// Truck capacity in pallets (owner decision 4 Oct 2026, part B)
+// ---------------------------------------------------------------------------------------
+
+/** Cases per pallet of the fixture's products (the ERP pallet factor). */
+export const CPP: Record<string, number> = { 'TAN-500-24': 84, 'JAB-1500-6': 56, 'TAN-5G': 40 };
+
+/**
+ * The fixture with its loads on trucks with bays planned by pallets, as getPlanDetail reads them:
+ * T01 load 1 on 2 bays and the long truck's load on 12 bays (95% fill), each product's pallets per
+ * order line rounded up and added up (palletUnits), the stored load units = their sum; T01 load 2 is
+ * planned by cases (a mixed fleet). The option in use echoes the pallet rule. The summary is
+ * recomputed with the loads' pallets.
+ */
+export function palletFixture(): PlanDetail {
+  const d = fixture();
+  const bays: Record<string, number> = { L1: 2, L3: 12 };
+  d.loads = d.loads.map((l) => {
+    const b = bays[l.id];
+    if (!b) return l;
+    const unitsByCode = new Map<string, number>();
+    for (const s of l.stops) {
+      for (const o of ORDERS.filter((x) => s.orderIds.includes(x.id))) {
+        for (const ln of o.lines) unitsByCode.set(ln.sku, (unitsByCode.get(ln.sku) ?? 0) + palletUnits(ln.cases, CPP[ln.sku]));
+      }
+    }
+    const units = [...unitsByCode.values()].reduce((a, v) => a + v, 0);
+    const factorByCode = new Map(Object.entries(CPP));
+    return {
+      ...l,
+      palletUnits: units,
+      bays: b,
+      palletFillPct: 95,
+      palletRoomUnits: palletRoomUnits(b, 95),
+      manifest: withManifestPallets(l.manifest, { unitsByCode, factorByCode }),
+    };
+  });
+  d.scenarios = [
+    {
+      id: 's1', name: 'RECOMMENDED', status: 'OPTIMIZED', solverStatus: 'OK', solverTimeSec: 1, trucksUsed: 2, trips: 3, frozenLoads: 0, totalKm: 10, dayKm: 10,
+      totalDurationMin: 100, operatingCost: 50, dayOperatingCost: 50, costVersion: 2, estimatedLegs: 0, avgUtilizationPct: 50, unservedOrders: 1,
+      distanceIsEstimated: false, provider: 'OSRM', objective: null, preference: null, preferenceCost: null, preferredHoursCost: null, tradeoff: null, chosen: true, feasibility: null,
+      weightUnitKg: 0.1, newOvertimeOnly: true, palletRule: { fillPct: 95 },
+    },
+  ];
+  d.summary = computeSummary({
+    orders: ORDERS.map((o) => ({ id: o.id, customerId: o.customerId, priority: o.priority, cases: casesOf(o), weightKg: kgOf(o), salesValue: null, marginValue: null, isLate: o.late })),
+    plannedOrderIds: new Set(d.loads.flatMap((l) => l.stops.flatMap((s) => s.orderIds))),
+    unserved: [{ orderId: 'o5', reasonCode: 'MISSING_COORDINATES' }],
+    loads: d.loads.map((l) => ({ ...l })),
+    warnings: [],
+    distanceIsEstimated: false,
+    distanceProvider: 'OSRM',
+    solver: { engine: 'OR-Tools', scenario: 'RECOMMENDED', status: 'OPTIMIZED', timeSec: 12.4 },
+  });
+  return d;
 }

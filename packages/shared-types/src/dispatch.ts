@@ -46,6 +46,8 @@ export interface FrozenTrip {
   /** The driver break planned with this load (PlanLoad.breakJson); absent = none recorded. */
   break_start_min?: number | null;
   break_min?: number | null;
+  /** The pallet need the load was planned with (1/1000 pallet), for the record only. */
+  pallet_units?: number | null;
 }
 
 export interface DispatchTruck {
@@ -61,6 +63,12 @@ export interface DispatchTruck {
   available_to_min?: number | null;
   max_trips?: number | null;
   frozen_trips?: FrozenTrip[];
+  /**
+   * Pallet positions (owner decision 4 Oct 2026), 1-40. Set: the truck is planned by pallets - room =
+   * bays x config.pallet_fill_pct and the payload; capacity_cases is then not a limit. Absent / null:
+   * planned by cases. Solvers without the field plan every truck by cases (and echo no pallet_unit).
+   */
+  bays?: number | null;
 }
 
 export interface DispatchStop {
@@ -71,6 +79,12 @@ export interface DispatchStop {
   lng: number;
   demand_cases: number;
   demand_kg?: number;
+  /**
+   * The stop's pallet need in 1/1000 pallet: the sum over its order lines of ceil(cases x 1000 /
+   * cases per pallet) (lib/dispatch/pallets.ts). Required on every stop when a truck has bays (the
+   * solver answers 422 otherwise); absent on a day without bay trucks.
+   */
+  demand_pallet_units?: number | null;
   service_min?: number;
   priority?: number; // 1 = HIGHEST .. 5 = LOWEST
   hard_start_min?: number | null;
@@ -128,6 +142,8 @@ export interface DispatchConfig {
   break_start_from_min?: number;
   break_start_to_min?: number;
   max_trips_per_truck?: number;
+  /** Pallet fill (owner decision 4 Oct 2026): percent of a bay truck's bays the planner may fill, 50-100 (default 100 = every bay). */
+  pallet_fill_pct?: number;
   fuel_price_per_litre?: number;
   /**
    * OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
@@ -242,6 +258,8 @@ export interface PlannedStop {
   pref_window_ok: boolean;
   /** The leg into this stop is an estimate (straight line x multiplier), not a road distance. */
   leg_estimated?: boolean;
+  /** The stop's pallet need (1/1000 pallet); absent / null when the request sent none. */
+  pallet_units?: number | null;
 }
 
 /**
@@ -281,6 +299,13 @@ export interface PlannedLoad {
   estimated_legs?: number | null;
   /** The driver break planned with this load; absent / null = none on this load. */
   driver_break?: PlannedBreak | null;
+  /**
+   * Pallets, on a truck with bays only (null on a truck planned by cases, absent from an older
+   * solver): the load's pallet need (the sum of its stops', 1/1000 pallet) and the truck's room
+   * (bays x fill % x 10). utilization_pct is then max(pallets / bays, kg / payload).
+   */
+  pallet_units?: number | null;
+  pallet_room_units?: number | null;
 }
 
 /**
@@ -352,6 +377,7 @@ export type FeasibilityCode =
   | 'LOAD_TOTALS'
   | 'CAPACITY_CASES'
   | 'CAPACITY_KG'
+  | 'CAPACITY_PALLETS'
   | 'HARD_WINDOW'
   | 'TRAVEL'
   | 'SERVICE_TIME'
@@ -443,6 +469,15 @@ export interface DispatchScenario {
   break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
   /** The latest return the plan was made with (echoed); absent / null: none. The web takes it ONLY from this echo. */
   latest_return_min?: number | null;
+  /**
+   * The pallet rule the plan was made with (echoed when a truck of the request has bays): bay trucks
+   * were checked by pallets in units of pallet_unit (0.001) at pallet_fill_pct. Absent / null: no bay
+   * truck in the request, or a solver before the rule - the web then marks no load as planned by
+   * pallets. total_pallet_units: the sum over the bay trucks' loads.
+   */
+  pallet_unit?: number | null;
+  pallet_fill_pct?: number | null;
+  total_pallet_units?: number | null;
 }
 
 export interface DispatchResponse {

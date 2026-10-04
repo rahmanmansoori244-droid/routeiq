@@ -23,6 +23,8 @@ export const POST = withTenantApi(
         name: input.name,
         weightPerCaseKg: input.weightPerCaseKg,
         volumePerCaseL: input.volumePerCaseL,
+        // The ERP pallet factor (owner decision 4 Oct 2026); not set = null.
+        casesPerPallet: input.casesPerPallet ?? null,
         active: input.active ?? true,
       },
     });

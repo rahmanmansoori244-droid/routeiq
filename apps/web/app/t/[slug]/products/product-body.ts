@@ -9,6 +9,8 @@ export interface ProductFormState {
   name: string;
   weightPerCaseKg: string;
   volumePerCaseL: string;
+  /** Cases per pallet as typed; empty = not set. */
+  casesPerPallet: string;
   active: boolean;
 }
 
@@ -17,6 +19,8 @@ export function productRequestBody(mode: 'create' | 'edit', form: ProductFormSta
     name: form.name,
     weightPerCaseKg: Number(form.weightPerCaseKg),
     volumePerCaseL: Number(form.volumePerCaseL),
+    // The ERP pallet factor (owner decision 4 Oct 2026): empty = not set (cleared on edit).
+    casesPerPallet: form.casesPerPallet.trim() === '' ? null : Number(form.casesPerPallet),
     active: form.active,
   };
   return mode === 'create' ? { code: form.code, ...fields } : fields;

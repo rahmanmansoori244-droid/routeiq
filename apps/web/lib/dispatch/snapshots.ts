@@ -61,6 +61,12 @@ export interface PlanRules {
    * ONLY from the solver's echo (DispatchScenario.latest_return_min). Absent: planned without it.
    */
   latestReturnMin?: number;
+  /**
+   * The pallet rule the plan was made with (owner decision 4 Oct 2026), ONLY from the solver's echo
+   * (DispatchScenario.pallet_unit / pallet_fill_pct): trucks with bays were checked by pallets in
+   * units of 0.001 at this fill. Absent: planned without it (no bay truck, or an older solver).
+   */
+  pallets?: { fillPct: number; unit: number };
 }
 
 /** The driver break planned with a load (PlanLoad.breakJson). */
@@ -101,6 +107,15 @@ export interface TruckFacts {
   availableFromMin: number | null;
   availableToMin: number | null;
   maxTripsPerDay: number | null;
+  /**
+   * Pallets (owner decision 4 Oct 2026), on a truck with bays only: its bays, the company's Pallet
+   * fill and the room they give (bays x fill x 10, in 1/1000 pallet) as planned. In a load's snapshot
+   * ONLY when the optimizer echoed the pallet rule (the load was really planned by pallets); absent =
+   * planned by cases.
+   */
+  bays?: number | null;
+  palletFillPct?: number | null;
+  palletRoomUnits?: number | null;
 }
 
 export interface StopFacts {
@@ -187,6 +202,11 @@ export interface PlanInputs {
   /** The optimizer's config block, without the OSRM address. */
   config: Omit<DispatchConfig, 'osrm_url'> & { osrm_configured: boolean };
   settings: PlanSettings | null;
+  /**
+   * Pallets: the cases per pallet of each product of the day as planned (by product code); absent on a
+   * day without bay trucks. Manifests read these, so a factor changed later never changes a planned load.
+   */
+  palletFactors?: Record<string, number>;
 }
 
 export interface StopSnapshot extends Omit<StopFacts, 'lat' | 'lng' | 'serviceMin' | 'priority'> {
@@ -260,6 +280,8 @@ export function rulesFrom(
     window_rule?: string | null;
     break_rule?: { length_min: number; start_from_min: number; start_to_min: number } | null;
     latest_return_min?: number | null;
+    pallet_unit?: number | null;
+    pallet_fill_pct?: number | null;
   } | null,
 ): PlanRules {
   const close = depot.closeMin ?? depot.close_min ?? 1440;
@@ -282,7 +304,21 @@ export function rulesFrom(
       ? { break: { lengthMin: echo.break_rule.length_min, startFromMin: echo.break_rule.start_from_min, startToMin: echo.break_rule.start_to_min } }
       : {}),
     ...(typeof echo?.latest_return_min === 'number' ? { latestReturnMin: echo.latest_return_min } : {}),
+    ...(typeof echo?.pallet_unit === 'number' && typeof echo.pallet_fill_pct === 'number'
+      ? { pallets: { fillPct: echo.pallet_fill_pct, unit: echo.pallet_unit } }
+      : {}),
   };
+}
+
+/**
+ * The truck facts a load keeps (TruckSnapshot): the bays, fill and room ONLY when the optimizer
+ * echoed the pallet rule (`echoed`), so a load planned by an older solver (or by cases) is never
+ * read or checked as planned by pallets.
+ */
+export function plannedTruckFacts(facts: TruckFacts, echoed: boolean): TruckFacts {
+  if (echoed && typeof facts.bays === 'number' && typeof facts.palletRoomUnits === 'number') return facts;
+  const { bays: _b, palletFillPct: _f, palletRoomUnits: _r, ...rest } = facts;
+  return rest;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -405,7 +441,7 @@ export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): 
  */
 export function plannedLoadsMasterChanged(
   stops: { customerId: string; stopSnapshotJson: unknown; live: LiveStopFacts }[],
-  loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number } | null }[],
+  loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number; bays?: number | null } | null }[],
   depotNow?: { lat: number; lng: number } | null,
   /**
    * The depot pin the plan's option was optimized from (its inputs.depot): the origin of a load
@@ -451,9 +487,18 @@ export function depotMovedChange(origin: { lat: number; lng: number } | null, li
   };
 }
 
-/** What changed on the truck since the load was planned (capacity / payload only). */
-export function truckMasterChanges(snap: TruckSnapshot, live: { capacityCases: number; capacityWeightKg: number }): MasterChange[] {
+/**
+ * What changed on the truck since the load was planned (capacity / payload; and for a load planned
+ * by pallets its bays - `live.bays` absent = not read).
+ */
+export function truckMasterChanges(snap: TruckSnapshot, live: { capacityCases: number; capacityWeightKg: number; bays?: number | null }): MasterChange[] {
   const out: MasterChange[] = [];
+  if (typeof snap.palletRoomUnits === 'number' && live.bays !== undefined && (live.bays ?? null) !== (snap.bays ?? null)) {
+    out.push({
+      kind: 'CAPACITY',
+      text: `Truck bays changed after planning: now ${live.bays === null ? 'no bays (planned by cases)' : `${live.bays} bays`} (planned with ${snap.bays} bays)`,
+    });
+  }
   if (live.capacityCases !== snap.capacityCases || Math.abs(live.capacityWeightKg - snap.capacityWeightKg) > 0.05) {
     out.push({
       kind: 'CAPACITY',

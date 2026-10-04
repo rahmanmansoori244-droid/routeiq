@@ -76,7 +76,10 @@ const patchLoad = (loadId: string, body: unknown) => fetchWith(t.cookieJar, `${B
 beforeAll(async () => {
   t = await freshTenant('drvlink');
   other = await freshTenant('drvlink-x');
-  day = isoPlus(1);
+  // Three days out, never tomorrow: a file for tomorrow uploaded after the 18:00 cutoff is late and
+  // its confirm needs a reason (400 LATE_REASON_REQUIRED), so the suite failed when run after 18:00
+  // Muscat. Part 2 moves the plan to today itself.
+  day = isoPlus(3);
   // Both trucks must get a load (Part 1 rule 20 and Part 2 work on the hired T02). The optimizer
   // uses as few trucks as it can, so one truck must not be able to carry the day: at most 2 loads
   // of 120 cases each = 240 cases per truck, and the orders below total 315 cases.
@@ -118,7 +121,9 @@ beforeAll(async () => {
   fd.set('depotId', depotId);
   expect((await fetchWith(t.cookieJar, `${BASE}/api/orders/upload`, { method: 'POST', body: fd })).status).toBe(200);
   const batch = await prisma.uploadBatch.findFirstOrThrow({ where: { tenantId: t.tenantId }, orderBy: { uploadedAt: 'desc' } });
-  expect((await fetchWith(t.cookieJar, `${BASE}/api/orders/${batch.id}/confirm`, j({}))).status).toBe(200);
+  const confirmed = await fetchWith(t.cookieJar, `${BASE}/api/orders/${batch.id}/confirm`, j({}));
+  expect(confirmed.status).toBe(200);
+  expect((await json(confirmed)).data.late).toBe(false); // on time whatever the hour
   const r = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/plan`, j({ date: day, depotId, optimize: true }));
   expect(r.status).toBe(202);
   runId = (await json(r)).data.runId;
@@ -285,7 +290,7 @@ describe('Part 2: results, photos and Back at depot from the driver page', () =>
   });
 
   beforeAll(async () => {
-    // Every load change while the plan is still dated tomorrow (as in Part 1), then the plan and its
+    // Every load change while the plan is still dated ahead (as in Part 1), then the plan and its
     // links move to today: the phone's times must lie inside the delivery day.
     const p = await plan();
     const t01 = p.loads.filter((l: any) => l.truckId === trucks.T01).sort((a: any, b: any) => a.loadNo - b.loadNo);

@@ -27,7 +27,7 @@ import {
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
-import { orderIdOf, portionPlannedKgPerCase, readPortionLines, rowLines, rowLinesKg, splitPartLabels } from './split';
+import { orderIdOf, portionPlannedKgPerCase, readPortionLines, readPortionPalletFactors, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
 import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } from './search-mode';
@@ -39,6 +39,7 @@ import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
 import { stuckPlanState, type StuckState } from './stuck-plan';
 import { isOptimizing } from '../jobs/optimize-job';
+import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
 
 export interface DetailStop {
   sequence: number;
@@ -117,6 +118,13 @@ export interface DetailStop {
   promisedWindow: { startMin: number | null; endMin: number | null } | null;
 }
 
+/**
+ * One product of a load's loading manifest, in cases (and kg). On a load planned by pallets it also
+ * has its pallets (pallets.ts ManifestPallets): the cases per pallet it was planned with, full pallets
+ * + loose cases ("3 pallets + 12 cases"), and its pallet need in 1/1000 pallet.
+ */
+export type ManifestRow = { productCode: string; productName: string; cases: number; weightKg: number } & Partial<ManifestPallets>;
+
 export interface DetailOrderLine {
   orderId: string;
   lineId: string;
@@ -160,7 +168,23 @@ export interface DetailLoad {
   returnLegKm: number;
   distanceIsEstimated: boolean;
   stops: DetailStop[];
-  manifest: { productCode: string; productName: string; cases: number; weightKg: number }[];
+  manifest: ManifestRow[];
+  /**
+   * Pallets (owner decision 4 Oct 2026), set only on a load planned by pallets (its truck had bays
+   * and the optimizer echoed the rule): the pallets planned, in 1/1000 pallet (PlanLoad.palletUnits),
+   * and the truck's bays, the company's Pallet fill and the room (bays x fill x 10) as planned (its
+   * truck snapshot). Null / absent on a load planned by cases: its outputs show cases only.
+   */
+  palletUnits?: number | null;
+  bays?: number | null;
+  palletFillPct?: number | null;
+  palletRoomUnits?: number | null;
+  /**
+   * A product of this load whose cases per pallet was changed under Products after planning: the load
+   * keeps the pallets it was planned with ("Changed after planning: cases per pallet of TN1.5L is now 40
+   * (planned with 39)"). Absent / empty: none.
+   */
+  palletNotes?: string[];
   /** The truck code and capacities above are the ones the load was planned with (false: today's truck). */
   truckSnapshot: boolean;
   /**
@@ -280,6 +304,8 @@ export interface PlanDetail {
     windowRule?: 'FINISH' | null;
     /** The driver-break rule this option was made with (the solver's echo); null: no break was planned. */
     breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
+    /** The pallet rule this option was made with (the solver's echo: trucks with bays checked by pallets at this fill); null: by cases only. */
+    palletRule?: { fillPct: number } | null;
   }[];
   loads: DetailLoad[];
   unserved: DetailUnserved[];
@@ -415,7 +441,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, hired: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -423,7 +449,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           order: {
             include: {
               customer: true,
-              lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
+              lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, casesPerPallet: true } } } },
               carriedTo: { select: { deliveryDate: true, totalCases: true } },
             },
           },
@@ -467,10 +493,20 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   );
   // Orders the chosen option left unserved whole as heavier than any truck: not in its stops' visits.
   const tooHeavy = leftOutWhole(chosen?.unservedOrders ?? []);
+  // Pallets: the cases per pallet the option was planned with (by product code), so a factor changed
+  // under Products later never changes how a planned load reads.
+  const plannedFactors = inputs?.palletFactors ?? {};
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
     const carriedAwayOrders = new Set<string>();
+    // A load planned by pallets (its stored pallets, and bays + room in its truck snapshot, both kept
+    // only from the optimizer's echo): each product's pallets on it, line by line as it was planned.
+    const tsPallets = readTruckSnapshot(l.truckSnapshotJson);
+    const pallets = loadPallets({ palletUnits: l.palletUnits, bays: tsPallets?.bays, palletRoomUnits: tsPallets?.palletRoomUnits, palletFillPct: tsPallets?.palletFillPct });
+    const unitsByCode = new Map<string, number>();
+    const factorByCode = new Map<string, number>();
+    const liveFactorByCode = new Map<string, number | null>();
     for (const a of l.assignments) {
       const o = a.order;
       const c = o.customer;
@@ -482,6 +518,18 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const cases = a.portionCases ?? o.totalCases;
       const weightKg = roundKg(a.portionWeightKg ?? o.totalWeightKg);
       const lines = rowLinesKg(o.lines, a.portionLinesJson, weightKg, !orderUsesLineWeights(o));
+      if (pallets) {
+        // The factor a split part was cut with, else the one the option was planned with, else today's.
+        const cut = readPortionPalletFactors(a.portionLinesJson);
+        for (const ln of lines) {
+          const code = ln.product.code;
+          const live = validPalletFactor(ln.product.casesPerPallet);
+          const f = cut.get(ln.id) ?? validPalletFactor(plannedFactors[code]) ?? live;
+          unitsByCode.set(code, (unitsByCode.get(code) ?? 0) + palletUnits(ln.cases, f));
+          if (f !== null && !factorByCode.has(code)) factorByCode.set(code, f);
+          liveFactorByCode.set(code, live);
+        }
+      }
       const skus = lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
       const orderLines: DetailOrderLine[] = lines.map((ln) => ({
@@ -592,10 +640,29 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       s.weightKg = Math.round(s.weightKg * 10) / 10;
       portionStops.push({ stop: s, customerId: s.customerId, portion: withPortion.has(s.sequence), departMin: l.departMin, truckCode: l.truck.code, sequence: s.sequence });
     }
-    const ts = readTruckSnapshot(l.truckSnapshotJson);
+    const ts = tsPallets;
     // Audit E1: the depot pin the load was planned from, and a note when the depot's pin moved since.
     const origin = readLoadOrigin(ts) ?? depotPoint;
     const depotMoved = depotMovedChange(origin, { lat: run.depot.lat, lng: run.depot.lng });
+    const manifest: ManifestRow[] = withManifestPallets(aggregateSkus(stopList.flatMap((s) => s.skus)), pallets ? { unitsByCode, factorByCode } : null);
+    // A factor changed under Products since planning: the load keeps its pallets, the manifest says so.
+    const palletNotes = pallets
+      ? manifest.flatMap((m) => {
+          const planned = m.casesPerPallet ?? null;
+          const live = liveFactorByCode.get(m.productCode) ?? null;
+          return planned !== null && live !== null && live !== planned
+            ? [`Changed after planning: cases per pallet of ${m.productCode} is now ${live} (planned with ${planned}). This load keeps the pallets it was planned with; re-plan to use the new figure.`]
+            : [];
+        })
+      : [];
+    // A load kept from an earlier version may have been planned with factors this option does not
+    // know: its products are then worked out with today's, and the line says what the load holds.
+    const productUnits = [...unitsByCode.values()].reduce((a, v) => a + v, 0);
+    if (pallets && productUnits !== pallets.units) {
+      palletNotes.push(
+        `The products' pallets are worked out with the cases per pallet known now (${palletText(productUnits)} pallets); this load was planned with ${palletText(pallets.units)} pallets.`,
+      );
+    }
     return {
       id: l.id,
       truckId: l.truckId,
@@ -623,7 +690,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       returnLegKm: l.returnLegKm,
       distanceIsEstimated: l.distanceIsEstimated,
       stops: stopList,
-      manifest: aggregateSkus(stopList.flatMap((s) => s.skus)),
+      manifest,
+      // Pallets only on a load planned by pallets (loadPallets); null = cases only.
+      palletUnits: pallets ? pallets.units : null,
+      bays: pallets ? pallets.bays : null,
+      palletFillPct: pallets ? pallets.fillPct : null,
+      palletRoomUnits: pallets ? pallets.room : null,
+      ...(palletNotes.length ? { palletNotes } : {}),
       truckSnapshot: !!ts,
       origin: { lat: origin.lat, lng: origin.lng },
       masterChanged: [...(ts ? truckMasterChanges(ts, l.truck) : []), ...(depotMoved ? [depotMoved] : [])],
@@ -640,7 +713,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   if (chosenDetails) {
     const needLegacy = loads.some((l) => l.carriedFromLoadId === null && !readTruckSnapshot(l.truckSnapshotJson));
     const legacy = needLegacy ? await legacyPlanFacts(db, tenantId, run.currentJobId) : null;
-    feasibility = checkPlanFeasibility(feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy));
+    feasibility = checkPlanFeasibility(
+      feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy, { palletFillPctNow: cfg?.palletFillPct ?? null }),
+    );
     for (const dl of detailLoads) {
       const t = feasibility.trucks[dl.truckId];
       dl.timing = t ? { status: t.status, ok: t.ok } : null;
@@ -827,6 +902,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         breakRule: d.break_rule && d.break_rule.length_min > 0
           ? { lengthMin: d.break_rule.length_min, startFromMin: d.break_rule.start_from_min, startToMin: d.break_rule.start_to_min }
           : null,
+        palletRule: typeof d.pallet_unit === 'number' && typeof d.pallet_fill_pct === 'number' ? { fillPct: d.pallet_fill_pct } : null,
       };
     }),
     loads: detailLoads,

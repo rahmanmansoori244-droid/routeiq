@@ -51,6 +51,18 @@
  * carries, is a warning (CAPACITY_CHANGED): the load keeps the truck it was planned with. On a
  * locked or loading load it names the same unlock order, latest first (frozenReplanText).
  *
+ * Pallets (owner decision 4 Oct 2026): a load planned by pallets (its truck snapshot keeps the room,
+ * bays x Pallet fill, only when the optimizer echoed the rule) is checked by the pallet units stored
+ * on its rows, never by its case capacity: CAPACITY_PALLETS blocks like CAPACITY_CASES. A load whose
+ * rows have no units (planned by cases, or before pallets) is never blocked for pallets after the
+ * fact. Bays or Pallet fill changed since planning so that the load no longer fits: CAPACITY_CHANGED
+ * (a warning). A product's cases per pallet corrected under Products since planning (pallets review: a
+ * pilot factor 96 corrected to 84 put a planned load over its bays and nothing said so): its rows are
+ * worked out again with today's factors (FeasStop.palletUnitsNow, split.ts rowPalletUnitsNow), and a
+ * load that then needs more than its room is CAPACITY_PALLETS_NEW_FACTOR - blocking on a PLANNED load
+ * (a re-plan loads it by the figures now), a warning on a locked or loading one (a re-plan keeps it:
+ * unlock it first), like a case weight entered since (CAPACITY_KG_NEW_WEIGHT).
+ *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
  */
@@ -59,6 +71,7 @@ import type { FeasibilityReport } from '@routeiq/shared-types';
 import { usableWindow, type LoadBreak, type PlanRules } from './snapshots';
 import { KG_ROUNDING_TOL } from './weights';
 import { unlockFirstText } from './feasibility-view';
+import { palletText } from './pallets';
 
 export const FEASIBILITY_VERSION = 1;
 export const TOL_MIN = 1;
@@ -66,8 +79,10 @@ const KG_TOL = KG_ROUNDING_TOL;
 
 export type WebViolationCode =
   | 'CAPACITY_CASES'
+  | 'CAPACITY_PALLETS'
   | 'CAPACITY_KG'
   | 'CAPACITY_KG_NEW_WEIGHT'
+  | 'CAPACITY_PALLETS_NEW_FACTOR'
   | 'KG_UNKNOWN'
   | 'HARD_WINDOW'
   | 'STOP_TIMES'
@@ -131,6 +146,25 @@ export interface FeasStop {
   /** The receiving window the stop was planned with (snapshot); undefined = not known. */
   hardStartMin?: number | null;
   hardEndMin?: number | null;
+  /** The row's pallets as planned (1/1000 pallet); absent = planned without pallets. */
+  palletUnits?: number | null;
+  /**
+   * The row's pallets with the cases per pallet known now, when a product's figure was corrected under
+   * Products since planning and gives other pallets (absent = none changed); only on a load planned by pallets.
+   */
+  palletUnitsNow?: number;
+  /** The products whose cases per pallet changed since planning (with palletUnitsNow; empty = not known which). */
+  palletFactorChanged?: string[];
+}
+
+/** A truck's capacity for the gate: cases and kg; a load planned by pallets also its bays and room. */
+export interface FeasCapacity {
+  cases: number;
+  kg: number;
+  /** Planned by pallets: bays x fill x 10 (1/1000 pallet); absent / null = planned by cases. */
+  palletRoomUnits?: number | null;
+  bays?: number | null;
+  fillPct?: number | null;
 }
 
 export interface FeasLoad {
@@ -147,9 +181,12 @@ export interface FeasLoad {
   cases: number;
   weightKg: number;
   /** The truck the load was planned on (snapshot, else the optimizer request); null = not known. */
-  capacity: { cases: number; kg: number } | null;
-  /** The truck's capacity in the master now (only for the CAPACITY_CHANGED warning); absent = not known. */
-  capacityNow?: { cases: number; kg: number } | null;
+  capacity: FeasCapacity | null;
+  /**
+   * The truck's capacity in the master now (only for the CAPACITY_CHANGED warning); absent = not known.
+   * For a load planned by pallets also its bays now (null = no bays any more) and the room they give.
+   */
+  capacityNow?: FeasCapacity | null;
   /** The rules the load was timed with; null = not known (no turnaround / shift check). */
   rules: PlanRules | null;
   stops: FeasStop[];
@@ -177,12 +214,12 @@ const r1 = (x: number) => Math.round(x * 10) / 10;
  * "Put T01 L2, T01 L1 back to Planned first, in this order, and re-plan to use the new capacity."
  * `truckLoads` = every load of the truck.
  */
-function frozenReplanText(code: string, l: FeasLoad, truckLoads: FeasLoad[]): string {
+function frozenReplanText(code: string, l: FeasLoad, truckLoads: FeasLoad[], what = 'the new capacity'): string {
   const back = [l, ...truckLoads.filter((x) => x.frozen && !x.onRoad && x.loadNo > l.loadNo)]
     .sort((a, b) => b.loadNo - a.loadNo)
     .map((x) => `${code} L${x.loadNo}`);
   const put = unlockFirstText(back);
-  return `${put.charAt(0).toUpperCase()}${put.slice(1)}${back.length > 1 ? ',' : ''} and re-plan to use the new capacity.`;
+  return `${put.charAt(0).toUpperCase()}${put.slice(1)}${back.length > 1 ? ',' : ''} and re-plan to use ${what}.`;
 }
 
 export function inputHash(input: FeasibilityInput): string {
@@ -206,6 +243,22 @@ export function inputHash(input: FeasibilityInput): string {
       ...(l.rules?.break ? [['BREAK_RULE', l.rules.break.lengthMin, l.rules.break.startFromMin, l.rules.break.startToMin]] : []),
       ...(l.break ? [['BREAK', l.break.startMin, l.break.endMin, l.break.where, l.break.afterSequence]] : []),
       ...(typeof l.rules?.latestReturnMin === 'number' ? [['LATEST_RETURN', l.rules.latestReturnMin]] : []),
+      // Pallets, only when the load was planned by them: every other plan keeps its hash.
+      ...(typeof l.capacity?.palletRoomUnits === 'number'
+        ? [
+            [
+              'PALLETS',
+              l.capacity.palletRoomUnits,
+              l.capacityNow?.palletRoomUnits ?? null,
+              l.capacityNow?.bays ?? null,
+              [...l.stops].sort((a, b) => a.sequence - b.sequence || a.orderId.localeCompare(b.orderId)).map((s) => s.palletUnits ?? null),
+              // A cases per pallet corrected since planning, only when one was: other plans keep their hash.
+              ...(l.stops.some((s) => typeof s.palletUnitsNow === 'number')
+                ? [[...l.stops].sort((a, b) => a.sequence - b.sequence || a.orderId.localeCompare(b.orderId)).map((s) => s.palletUnitsNow ?? null)]
+                : []),
+            ],
+          ]
+        : []),
     ]);
   const solver = input.solver ? [input.solver.status, input.solver.timing, input.solver.violations.map((v) => [v.code, v.truck_id ?? null, v.load_no ?? null])] : null;
   return createHash('sha256').update(JSON.stringify({ v: FEASIBILITY_VERSION, s: input.scenarioId, solver, loads })).digest('hex');
@@ -235,8 +288,41 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
     for (const l of loads) {
       const cases = l.stops.reduce((a, s) => a + s.cases, 0);
       const kg = r1(l.stops.reduce((a, s) => a + s.kg, 0));
+      // Planned by pallets: the room kept with the load, and its rows' units (none = never checked).
+      const room = typeof l.capacity?.palletRoomUnits === 'number' ? l.capacity.palletRoomUnits : null;
+      const withUnits = l.stops.some((s) => typeof s.palletUnits === 'number');
+      const units = l.stops.reduce((a, s) => a + (s.palletUnits ?? 0), 0);
+      const roomText = (r: number, bays: number | null | undefined, fill: number | null | undefined) =>
+        `${palletText(r)}${typeof bays === 'number' && typeof fill === 'number' ? ` (${bays} bays at ${fill}% fill)` : ''}`;
       if (l.capacity) {
-        if (cases > l.capacity.cases) {
+        if (room !== null) {
+          // Bays, never the case capacity, on a truck planned by pallets.
+          if (withUnits && units > room) {
+            v({
+              ...at(l),
+              code: 'CAPACITY_PALLETS',
+              message: `${code} load ${l.loadNo} needs ${palletText(units)} pallets; the truck takes ${roomText(room, l.capacity.bays, l.capacity.fillPct)}.`,
+              shortBy: Math.round((units - room) / 100) / 10,
+            });
+          } else if (withUnits && l.stops.some((s) => typeof s.palletUnitsNow === 'number')) {
+            // A cases per pallet corrected under Products since planning: the load by the figures now.
+            const unitsNow = l.stops.reduce((a, s) => a + (s.palletUnitsNow ?? s.palletUnits ?? 0), 0);
+            if (unitsNow > room) {
+              const products = [...new Set(l.stops.flatMap((s) => s.palletFactorChanged ?? []))].sort();
+              const named = products.length ? ` (${products.slice(0, 3).join(', ')}${products.length > 3 ? ', ...' : ''})` : '';
+              const message =
+                `${code} load ${l.loadNo} was planned with ${palletText(units)} pallets; with the cases per pallet corrected under Products since${named} it needs ` +
+                `${palletText(unitsNow)} pallets, more than the truck takes: ${roomText(room, l.capacity.bays, l.capacity.fillPct)}.`;
+              const shortBy = Math.round((unitsNow - room) / 100) / 10;
+              // A locked or loading load is kept as it is by a re-plan: shown, with the unlock order.
+              if (l.frozen && !l.onRoad) {
+                v({ ...at(l), severity: 'WARN', code: 'CAPACITY_PALLETS_NEW_FACTOR', message: `${message} ${frozenReplanText(code, l, loads, 'the cases per pallet now')}`, shortBy });
+              } else {
+                v({ ...at(l), code: 'CAPACITY_PALLETS_NEW_FACTOR', message: `${message} Re-plan to load it by the cases per pallet now.`, shortBy });
+              }
+            }
+          }
+        } else if (cases > l.capacity.cases) {
           v({ ...at(l), code: 'CAPACITY_CASES', message: `${code} load ${l.loadNo} carries ${cases} cases; the truck takes ${l.capacity.cases}.`, shortBy: cases - l.capacity.cases });
         }
         const overPlanned = l.capacity.kg > 0 && kg > l.capacity.kg + KG_TOL;
@@ -271,7 +357,30 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       // The truck was corrected in the master after planning and the load (not out yet) no longer
       // fits it: the load keeps the truck it was planned with, so this is shown, not blocked.
       const now = l.capacityNow;
-      if (now && !l.onRoad && l.capacity && (now.cases !== l.capacity.cases || Math.abs(now.kg - l.capacity.kg) > 0.05)) {
+      if (room !== null && withUnits && now && !l.onRoad && l.capacity && now.bays !== undefined) {
+        // A load planned by pallets: its bays / the Pallet fill (or the payload) changed since planning.
+        const roomNow = now.palletRoomUnits ?? null;
+        const kgChanged = Math.abs(now.kg - l.capacity.kg) > 0.05;
+        if (roomNow !== room || kgChanged) {
+          const overSpace = roomNow !== null ? units > roomNow : now.cases > 0 && cases > now.cases;
+          const overKg = now.kg > 0 && kg > now.kg + KG_TOL;
+          if (overSpace || overKg) {
+            const truckNow =
+              roomNow !== null
+                ? `${now.bays} bays (${palletText(roomNow)} pallets at ${now.fillPct}% fill)`
+                : `${now.cases} cases (no bays)`;
+            const payloadNow = kgChanged ? ` and ${now.kg > 0 ? `${Math.round(now.kg)} kg` : 'no payload set'}` : '';
+            v({
+              ...at(l),
+              severity: 'WARN',
+              code: 'CAPACITY_CHANGED',
+              message:
+                `${code} load ${l.loadNo} needs ${palletText(units)} pallets${overKg ? ` / ${Math.round(kg)} kg` : ''}, but the truck was changed to ${truckNow}${payloadNow} after planning. ` +
+                (l.frozen ? frozenReplanText(code, l, loads) : 'Re-plan to use the new capacity.'),
+            });
+          }
+        }
+      } else if (room === null && now && !l.onRoad && l.capacity && (now.cases !== l.capacity.cases || Math.abs(now.kg - l.capacity.kg) > 0.05)) {
         const overCases = now.cases > 0 && cases > now.cases;
         const overKg = now.kg > 0 && kg > now.kg + KG_TOL;
         if (overCases || overKg) {

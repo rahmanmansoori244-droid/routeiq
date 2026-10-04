@@ -21,6 +21,7 @@ import { solveAdmission, type AdmissionDenied, type SolveTicket } from './solve-
 import { queuedMessage, searchLeadMin, thoroughMaxSec, type SearchMode } from './search-mode';
 import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
+import { palletFactorGate } from './pallets';
 
 export interface StartResult {
   status: number;
@@ -122,8 +123,13 @@ export function dayMismatch(run: Pick<RunPlan, 'runDate' | 'depotId'>, expect: E
  * Checks on a built request that need the dispatcher's explicit go-ahead: customers without a
  * location (LOCATION_REQUIRED) and, when a truck has a payload, lines without a case weight
  * (WEIGHT_REQUIRED). With the override for weights, the plan carries a warning that stays on it.
+ * Before them, the one refusal without an override: products without cases per pallet on a day
+ * planned with trucks that have bays (PALLET_FACTOR_REQUIRED).
  */
 function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): StartResult | null {
+  // The screen links to its own Products page (/t/<slug>/products) with the list.
+  const pallets = palletFactorGate(built, verb === 're-planning' ? 're-plan' : 'optimize');
+  if (pallets) return pallets;
   if (built.blocking.length && !opts.allowMissingLocations) {
     return {
       status: 409,

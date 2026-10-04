@@ -11,6 +11,9 @@ seconds to minutes in dispatch_solver._min_of):
 
 * capacity: a load's cases (and kg, when the truck has a payload) from the request's stops; kg in
   0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
+  on a truck with bays (owner decision 4 Oct 2026) its pallets instead of its cases: the request's
+  stops' demand_pallet_units (1/1000 pallet) added up, at most bays x config.pallet_fill_pct x 10
+  (CAPACITY_PALLETS), and a load's recorded pallet_units must be that sum (LOAD_TOTALS);
 * hard receiving windows: service starts at or after opening, and unloading is finished by
   closing (departure <= closing) under config.window_rule FINISH; under START (the earlier rule,
   the default) service starts inside the window;
@@ -46,6 +49,8 @@ from dispatch_models import (
     FeasibilityViolation,
     kg_text,
     kg_units,
+    pallet_room_units,
+    pallet_text,
     payload_units,
 )
 
@@ -55,7 +60,9 @@ if TYPE_CHECKING:  # pragma: no cover
 log = logging.getLogger("routeiq.dispatch.feasibility")
 
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
-CHECK_VERSION = 2  # 2: the receiving-hours rule FINISH (unloading finished by closing) and the driver break
+# 2: the receiving-hours rule FINISH (unloading finished by closing) and the driver break;
+# 3: pallets on trucks with bays (CAPACITY_PALLETS, the load's pallet units in LOAD_TOTALS).
+CHECK_VERSION = 3
 
 
 def _hhmm(m: float | int | None) -> str:
@@ -159,7 +166,20 @@ def check_scenario(
             if ld.cases != cases:
                 add("LOAD_TOTALS", f"{code} load {lno} records {ld.cases} cases but its stops add up to {cases}.",
                     truck_id=tid, load_no=lno)
-            if cases > t.capacity_cases:
+            # Pallets, in 1/1000 pallet units from the request's stops (re-derived here, not
+            # TruckDay.max_pallet_units: this is the independent check).
+            units = sum(s.demand_pallet_units or 0 for s in known if s is not None)
+            if ld.pallet_units is not None and ld.pallet_units != units:
+                add("LOAD_TOTALS", f"{code} load {lno} records {pallet_text(ld.pallet_units)} pallets but its stops add up to "
+                                   f"{pallet_text(units)}.", truck_id=tid, load_no=lno)
+            if t.bays is not None:
+                # A truck with bays: pallets (and kg), never its case capacity.
+                room = pallet_room_units(t.bays, cfg.pallet_fill_pct)
+                if units > room:
+                    add("CAPACITY_PALLETS", f"{code} load {lno} needs {pallet_text(units)} pallets; the truck takes "
+                                            f"{pallet_text(room)} ({t.bays} bays at {cfg.pallet_fill_pct}% fill).",
+                        truck_id=tid, load_no=lno, short=(units - room) / 1000)
+            elif cases > t.capacity_cases:
                 add("CAPACITY_CASES", f"{code} load {lno} carries {cases} cases; the truck takes {t.capacity_cases}.",
                     truck_id=tid, load_no=lno, short=cases - t.capacity_cases)
             if cap_u > 0 and kg_u > cap_u:

@@ -39,6 +39,8 @@ export const POST = withTenantApi(
         maxTripsPerDay: input.maxTripsPerDay ?? null,
         availableFromMin: input.availableFromMin ?? null,
         availableToMin: input.availableToMin ?? null,
+        // Pallet positions: set = planned by pallets (owner decision 4 Oct 2026).
+        bays: input.bays ?? null,
         defaultDriverId: input.defaultDriverId ?? null,
         active: input.active ?? true,
         hired: input.hired ?? false,

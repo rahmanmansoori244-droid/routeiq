@@ -17,6 +17,8 @@ export const SETTINGS_FIELDS = [
   'serviceMinPerCase',
   'defaultServiceTimeMin',
   'maxTripsPerTruck',
+  // Pallet fill (owner decision 4 Oct 2026): company admin only.
+  'palletFillPct',
   'splitDeliveries',
   'planningCutoffMin',
   'dateOrder',

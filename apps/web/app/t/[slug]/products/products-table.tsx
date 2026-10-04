@@ -55,6 +55,9 @@ export function ProductsTable({ initial, canManage }: { initial: ProductRow[]; c
               <TableHead>Name</TableHead>
               <TableHead className="text-right">Weight/case (kg)</TableHead>
               <TableHead className="text-right">Volume/case (L)</TableHead>
+              <TableHead className="text-right" title="The ERP pallet factor: trucks with bays are loaded by pallets">
+                Cases/pallet
+              </TableHead>
               <TableHead>Status</TableHead>
               {canManage ? <TableHead className="w-[1%]"></TableHead> : null}
             </TableRow>
@@ -66,6 +69,7 @@ export function ProductsTable({ initial, canManage }: { initial: ProductRow[]; c
                 <TableCell className="font-medium">{p.name}</TableCell>
                 <TableCell className="text-right tabular-nums">{p.weightPerCaseKg.toLocaleString()}</TableCell>
                 <TableCell className="text-right tabular-nums">{p.volumePerCaseL.toLocaleString()}</TableCell>
+                <TableCell className="text-right tabular-nums">{p.casesPerPallet != null ? p.casesPerPallet.toLocaleString() : '—'}</TableCell>
                 <TableCell>
                   {p.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
                 </TableCell>

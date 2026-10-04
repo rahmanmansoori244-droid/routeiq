@@ -87,6 +87,7 @@ const CHANGED: Record<string, unknown> = {
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
+  palletFillPct: 90,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -128,7 +129,7 @@ describe('Settings fields drive the planner (review F21)', () => {
     const base = await build(BASE_CFG);
     const truckChanges: Record<string, unknown> = {
       capacityCases: 900, capacityWeightKg: 9000, fixedCostPerDay: 25, tripCost: 2, costPerKm: 0.2, kmPerLitre: 4, maxTripsPerDay: 2,
-      availableFromMin: 420, availableToMin: 1200,
+      availableFromMin: 420, availableToMin: 1200, bays: 12,
     };
     for (const k of Object.keys(TRUCK_BOUNDS)) {
       expect(truckSchema.innerType().shape, k).toHaveProperty(k);

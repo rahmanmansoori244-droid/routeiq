@@ -58,9 +58,10 @@ describe('the migrations (additive, audited)', () => {
   const read = (m: string) => readFileSync(path.join(WEB, 'prisma', 'migrations', m, 'migration.sql'), 'utf8');
   const sql = () => read(MIGRATION);
 
-  it("this branch's two migrations are the newest, in order", () => {
+  it("this branch's two migrations follow the driver-page migration, in order (later releases add theirs after them)", () => {
     const dirs = readdirSync(path.join(WEB, 'prisma', 'migrations')).filter((d) => /^\d{14}_/.test(d)).sort();
-    expect(dirs.slice(-3)).toEqual([DRIVER_PAGE_MIGRATION, MIGRATION, NO_PHOTO_MIGRATION]);
+    const at = dirs.indexOf(DRIVER_PAGE_MIGRATION);
+    expect(dirs.slice(at, at + 3)).toEqual([DRIVER_PAGE_MIGRATION, MIGRATION, NO_PHOTO_MIGRATION]);
   });
 
   it('the driver-page migration creates the column at 90 (both ship in one deploy: no company ever has 365, no audit row is written)', () => {

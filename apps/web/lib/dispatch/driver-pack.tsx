@@ -24,6 +24,7 @@ import { pdfTextCollector, UNPRINTABLE } from './pdf-text';
 import { fmtHhmm } from './time';
 import { carriedStopText } from './carry-view';
 import { breakLine, breakTimes } from './break-text';
+import { loadPallets, palletsOverBays, palletText } from './pallets';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -90,6 +91,11 @@ export interface DriverSheet {
   breakBefore: string | null;
   cases: number;
   capacityCases: number;
+  /**
+   * A load planned by pallets (a truck with bays): its pallets over the truck's bays ("11.1 / 12") and
+   * the pallets alone ("11.1"), printed beside the cases; null = planned by cases (cases / capacity).
+   */
+  pallets: { overBays: string; total: string } | null;
   kmLabel: 'Estimated km' | 'Road km';
   km: number;
   /** From the load manifest: what the driver counts before leaving. */
@@ -282,6 +288,10 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         breakBefore: l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0) ? breakLine(l.break, stops.length) : null,
         cases: l.cases,
         capacityCases: l.truckCapacityCases,
+        pallets: (() => {
+          const p = loadPallets(l);
+          return p ? { overBays: palletsOverBays(p), total: palletText(p.units) } : null;
+        })(),
         kmLabel: l.distanceIsEstimated ? 'Estimated km' : 'Road km',
         km: Math.round(l.distanceKm),
         loadCheck: {
@@ -523,13 +533,23 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
               {sh.breakTimes ?? ''}
             </T>
             <T style={s.fact}>
-              <T style={s.b}>{sh.stops.length}</T> {sh.stops.length === 1 ? 'stop' : 'stops'} · <T style={s.b}>{sh.cases}</T> / {sh.capacityCases} cases · {sh.kmLabel} {sh.km}
+              <T style={s.b}>{sh.stops.length}</T> {sh.stops.length === 1 ? 'stop' : 'stops'} ·{' '}
+              {sh.pallets ? (
+                <>
+                  <T style={s.b}>{sh.cases}</T> cases · <T style={s.b}>{sh.pallets.overBays}</T> pallets
+                </>
+              ) : (
+                <>
+                  <T style={s.b}>{sh.cases}</T> / {sh.capacityCases} cases
+                </>
+              )}{' '}
+              · {sh.kmLabel} {sh.km}
             </T>
           </View>
           <T style={s.line}>
             <T style={s.b}>Load check: </T>
             {sh.loadCheck.items.map((k) => `${k.productCode} ×${k.cases}`).join(' · ')}
-            <T style={s.b}> = {sh.loadCheck.total} cases</T>
+            <T style={s.b}> = {sh.loadCheck.total} cases{sh.pallets ? ` (${sh.pallets.total} pallets)` : ''}</T>
             {sh.loadCheck.matchesLoad ? '' : ` - the plan says ${sh.cases}: check with the dispatcher before loading`}
           </T>
           <T style={s.line}>

@@ -195,6 +195,7 @@ describe('tenantConfigSchema', () => {
     photoRetentionDays: 365,
     locationRetentionDays: 90,
     dispatcherPhone: null,
+    palletFillPct: 95,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

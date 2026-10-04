@@ -356,6 +356,92 @@ describe('review fixes: in-place optimize, advice, weights at the start', () => 
   });
 });
 
+describe('pallets (owner decision 4 Oct 2026): products without cases per pallet refuse OPTIMIZE and RE-PLAN, no override', () => {
+  const MISSING = [{ productId: 'p1', productCode: 'TN1.5L', productName: 'Tanuf 1.5L', lines: 2, cases: 120 }];
+  const BLOCKING = [{ customerId: 'c', customerCode: 'C1', branchCode: null, customerName: 'C1', code: 'LOCATION_REQUIRED', message: '', orderIds: ['O2'], cases: 10 }];
+  async function withMissing() {
+    const { buildDispatchRequest } = await import('@/lib/dispatch/plan-service');
+    vi.mocked(buildDispatchRequest).mockImplementation(async (_t, runId) => ({ ...builtFor(runId), blocking: BLOCKING, missingPalletFactors: MISSING }) as never);
+  }
+
+  it('OPTIMIZE: 409 PALLET_FACTOR_REQUIRED before the location question, also with every override; no job', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    await withMissing();
+    for (const overrides of [{}, { allowMissingLocations: true, allowMissingWeights: true }]) {
+      const res = await startDispatchOptimize(T, 'P', user, null, overrides);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('PALLET_FACTOR_REQUIRED');
+      expect(res.body.missingPalletFactors).toEqual(MISSING);
+      expect(String(res.body.error)).toMatch(/^Cannot plan by pallets: 1 product\(s\) on this day's orders have no cases per pallet: TN1\.5L \(120 cases\)\. .*then optimize again\.$/);
+    }
+    expect(tables.runJob).toHaveLength(0);
+    expect(row('runPlan', 'P').status).toBe('DRAFT');
+    admissionIdle();
+  });
+
+  it('RE-PLAN: refused before any version exists, the parent stays the live plan', async () => {
+    seed();
+    await withMissing();
+    const reserve = vi.spyOn(solveAdmission, 'reserve');
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null, { allowMissingLocations: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PALLET_FACTOR_REQUIRED');
+    expect(String(res.body.error)).toMatch(/then re-plan again\.$/);
+    expect(tables.runPlan).toHaveLength(1);
+    expect(createNextVersion).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+  });
+});
+
+describe('payload 0 is no weight limit (owner decisions of 4 Oct 2026): lines without a weight are neither asked about nor refused', () => {
+  const UNKNOWN = [{ productCode: 'NEW-1', productName: 'NEW-1', lines: 2, cases: 30 }];
+  async function withUnknownWeights(payloadKg: number) {
+    const { buildDispatchRequest } = await import('@/lib/dispatch/plan-service');
+    buildState.trucks = 2;
+    vi.mocked(buildDispatchRequest).mockImplementation(async (_t, runId) => {
+      const b = builtFor(runId);
+      // The first truck carries `payloadKg`, the second none.
+      return { ...b, request: { ...b.request, trucks: b.request.trucks.map((t, i) => ({ ...t, capacity_kg: i === 0 ? payloadKg : 0 })) }, unknownWeights: UNKNOWN } as never;
+    });
+  }
+
+  it('every truck of the day at payload 0: OPTIMIZE starts with no WEIGHT_REQUIRED question and no "planned without weights" note', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    await withUnknownWeights(0);
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(202);
+    const call = vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0];
+    expect(call.built.warnings.some((w: string) => /without weights/.test(w))).toBe(false);
+    call.ticket!.release();
+    admissionIdle();
+  });
+
+  it('RE-PLAN with every truck at payload 0: no question either', async () => {
+    seed();
+    await withUnknownWeights(0);
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null);
+    expect(res.body.code).not.toBe('WEIGHT_REQUIRED');
+    expect(res.status).toBe(202);
+    vi.mocked(scheduleDispatchOptimize).mock.calls[0]?.[0].ticket?.release();
+    admissionIdle();
+  });
+
+  it('one truck with a payload: the question comes back (409 WEIGHT_REQUIRED), and "optimize anyway" notes it on the plan', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    await withUnknownWeights(10_000);
+    const res = await startDispatchOptimize(T, 'P', user, null);
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('WEIGHT_REQUIRED');
+    expect(tables.runJob).toHaveLength(0);
+    const anyway = await startDispatchOptimize(T, 'P', user, null, { allowMissingWeights: true });
+    expect(anyway.status).toBe(202);
+    const call = vi.mocked(scheduleDispatchOptimize).mock.calls[0]![0];
+    expect(call.built.warnings.some((w: string) => /^Planned without weights for 2 order line\(s\) \(30 cases\)/.test(w))).toBe(true);
+    call.ticket!.release();
+    admissionIdle();
+  });
+});
+
 describe('PR9: an order brought forward to a later day while the start was prepared', () => {
   it('an open order of the request carried meanwhile: 409 ORDERS_CHANGED, no job, the plan is not OPTIMIZING', async () => {
     seed({ status: 'DRAFT', chosen: null });

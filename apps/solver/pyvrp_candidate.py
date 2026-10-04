@@ -25,7 +25,9 @@ The model (all prices from the engine's own functions, in its units: 1 unit = 0.
               turnaround (dispatch_solver._approx_gap_s); then the solvable stops in the engine's
               order (client k = solvable[k], matrix node k + 1)
   vehicles    one VehicleType per group of interchangeable usable trucks
-  hard        cases and 0.1 kg units per load (dispatch_models.kg_units, TruckDay.max_kg_units),
+  hard        cases (trucks without bays) and / or pallet units (trucks with bays: 1/1000 pallet,
+              TruckDay.max_pallet_units = bays x fill) and 0.1 kg units per load
+              (dispatch_models.kg_units, TruckDay.max_kg_units), one delivery dimension each,
               hard receiving windows (config.window_rule FINISH: the latest start is closing - stop
               time, load_repack.latest_start_s), truck hours (TruckDay: frozen return, same-day
               loading, the latest return), loads per truck (max_reloads = trips_left - 1), shift
@@ -296,6 +298,12 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     prizes = ds._drop_penalties(values, w)
     kg_dem = [kg_units(s.demand_kg) for s in solvable]
     kg_active = any(td.max_kg_units > 0 for td in vehicles) and any(kg_dem)
+    # Space: cases when a usable truck has no bays, pallet units when one has bays (both in a mixed
+    # fleet); a truck gets room for the whole day in the measure it does not use, as in the engine.
+    cases_active = any(not td.by_pallets for td in vehicles)
+    pal_dem = [int(s.demand_pallet_units or 0) for s in solvable]
+    pal_active = any(td.by_pallets for td in vehicles)
+    no_pal = sum(pal_dem) + 1
     # Preferred windows become part of the hard window only when they carry a price (C10: the
     # engine ignores them at 0) and the intersection is not empty.
     prefhard = cfg.pref_window_penalty_per_min > 0
@@ -313,7 +321,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
             if a <= b:
                 hs, he = a, b
                 n_tight += 1
-        clients.append(dict(delivery=[int(s.demand_cases)] + ([int(kg_dem[k])] if kg_active else []),
+        clients.append(dict(delivery=([int(s.demand_cases)] if cases_active else []) + ([pal_dem[k]] if pal_active else [])
+                            + ([int(kg_dem[k])] if kg_active else []),
                             service=int(s.service_min * 60), tw_early=int(hs), tw_late=int(he), prize=int(prizes[k])))
 
     L = 1 + R + n
@@ -334,10 +343,14 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
         gap = ds._approx_gap_s(cfg, td)
         first = td.earliest_depart_s if td.ready_s is None else max(td.earliest_depart_s, td.ready_s + gap)
         kg_cap = (td.max_kg_units if td.max_kg_units > 0 else no_kg) if kg_active else None
+        # The space capacities in the delivery order: cases (CASES_FREE on a truck with bays), then
+        # pallet units (the whole day's on a truck without bays).
+        space = ([int(td.max_cases)] if cases_active else []) + (
+            [int(td.max_pallet_units if td.by_pallets else no_pal)] if pal_active else [])
         # Driver break: as in the engine's search, a DUE truck-day keeps the break's length free of
         # its shift (span and latest return); the exact timing places the break afterwards.
         end_s, span_s = ds._search_day_end(td, first, shift_s)
-        key = (td.max_cases, kg_cap, km_key, trip_units, int(round(fixed * ds.COST_SCALE)), min(first, td.latest_return_s),
+        key = (tuple(space), kg_cap, km_key, trip_units, int(round(fixed * ds.COST_SCALE)), min(first, td.latest_return_s),
                end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None)
         groups.setdefault(key, []).append(td)
 
@@ -346,7 +359,7 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     vtypes: list[dict] = []
     type_trucks: list[list[int]] = []
     for key, members in groups.items():
-        cases, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id = key
+        space, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id = key
         pkey = (km_key, trip_units, cont_id)
         if pkey not in prof_of:
             M = np.rint(D * km_key / 1000.0).astype(np.int64)  # the engine: int(round(d * key / 1000)) per arc
@@ -376,7 +389,7 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
                 max_ot = span - nominal
             else:
                 nominal, max_ot = span, 0
-        vtypes.append(dict(num_available=len(members), capacity=[int(cases)] + ([int(kg_cap)] if kg_cap is not None else []),
+        vtypes.append(dict(num_available=len(members), capacity=list(space) + ([int(kg_cap)] if kg_cap is not None else []),
                            fixed_cost=int(fixed_u), tw_early=int(tw_e), tw_late=int(tw_l), shift_duration=int(nominal),
                            max_overtime=int(max_ot), unit_duration_cost=int(time_coeff),
                            unit_overtime_cost=int(ot_coeff) if max_ot else 0, profile=prof_of[pkey],
@@ -399,9 +412,10 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
 
     # Section 7: default penalties unless the fleet is short of capacity; then 10 x the largest prize,
     # clamped so that the worst penalised cost stays below 2^62.
-    short_cases, short_kg = ds._fleet_shortage(solvable, tds)
+    # space: cases, pallets on an all-bay fleet, or each truck's own measure on a mixed fleet (_mixed_space_proven)
+    short_space, short_kg = ds._fleet_shortage(solvable, tds)
     base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, Tf, clients, depots)
-    if short_cases or short_kg:
+    if short_space or short_kg:
         safe = (INT62 - base) // max(1, per_unit)
         max_penalty, mode = float(min(10 * max(prizes), safe)), "RAISED"
     else:
@@ -409,7 +423,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     if max_penalty < 1 or base + int(max_penalty) * per_unit >= INT62:
         raise ModelTooLarge(f"worst penalised cost {base + int(max(1, max_penalty)) * per_unit:.3g} >= 2^62")
     summary = dict(clients=n, types=len(vtypes), profiles=len(dist), reload_depots=R, kg="on" if kg_active else "off",
-                   prefhard=n_tight, shortage="yes" if (short_cases or short_kg) else "no", continuity=bool(continuity),
+                   pallets="on" if pal_active else "off",
+                   prefhard=n_tight, shortage="yes" if (short_space or short_kg) else "no", continuity=bool(continuity),
                    penalty=mode if mode == "DEFAULT" else f"RAISED {max_penalty:.2g}",
                    prizes=f"{min(prizes):.1e}..{max(prizes):.1e}")
     return PvModel(depots=depots, clients=clients, vehicle_types=vtypes, coords=coords, dist=dist, dur=Tf.astype(np.int64),
@@ -592,8 +607,8 @@ def plan_of(result: dict, tds: list, solvable: list[DispatchStop]) -> tuple[LR.P
     """PyVRP's answer -> {truck idx: [load, ...]} (a vehicle type's routes take its trucks in code
     order: they are interchangeable, and the repack relabels identical trucks anyway), validated so
     that a PyVRP bug can never reach _assert_reconciled: client indices in range and each at most
-    once, loads per truck <= trips_left, every load within the truck's cases and 0.1 kg units.
-    (None, INVALID_PLAN) otherwise."""
+    once, loads per truck <= trips_left, every load within the truck's pallet units (a truck with
+    bays) or cases and its 0.1 kg units. (None, INVALID_PLAN) otherwise."""
     by_idx = {td.idx: td for td in tds if td.usable}
     plan: LR.Plan = {}
     try:
@@ -614,7 +629,10 @@ def plan_of(result: dict, tds: list, solvable: list[DispatchStop]) -> tuple[LR.P
                 if any(k < 0 or k >= len(solvable) or k in seen for k in load) or len(set(load)) != len(load):
                     return None, "INVALID_PLAN"
                 seen.update(load)
-                if sum(solvable[k].demand_cases for k in load) > td.max_cases:
+                if td.by_pallets:
+                    if sum(solvable[k].demand_pallet_units or 0 for k in load) > td.max_pallet_units:
+                        return None, "INVALID_PLAN"
+                elif sum(solvable[k].demand_cases for k in load) > td.max_cases:
                     return None, "INVALID_PLAN"
                 if td.max_kg_units > 0 and sum(kg_units(solvable[k].demand_kg) for k in load) > td.max_kg_units:
                     return None, "INVALID_PLAN"

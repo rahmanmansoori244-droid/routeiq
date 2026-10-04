@@ -99,6 +99,12 @@ export function planReloadErrorText(error: string): string {
 export interface LateOrderSaved {
   locationRequired: boolean;
   productsWithoutWeight?: string[];
+  /**
+   * An active truck of the depot has a payload, so the re-plan asks before planning lines without a
+   * weight (WEIGHT_REQUIRED). false: payload 0 everywhere = no weight limit (owner decisions of 4 Oct
+   * 2026), the re-plan never asks. Absent (an older server): as true.
+   */
+  weightLimited?: boolean;
 }
 
 export interface AfterLateOrderDeps {
@@ -115,7 +121,11 @@ export interface AfterLateOrderDeps {
 
 export async function afterLateOrderSaved(res: LateOrderSaved, deps: AfterLateOrderDeps): Promise<void> {
   if (res.productsWithoutWeight?.length) {
-    deps.warn(`No case weight for ${res.productsWithoutWeight.join(', ')}: ${deps.weightFix}, or the re-plan will ask before counting it as 0 kg.`);
+    deps.warn(
+      res.weightLimited === false
+        ? `No case weight for ${res.productsWithoutWeight.join(', ')}: its kg counts as 0 on the plan and the sheets (no truck here has a payload, so weight is not a limit). To show its kg, ${deps.weightFix}.`
+        : `No case weight for ${res.productsWithoutWeight.join(', ')}: ${deps.weightFix}, or the re-plan will ask before counting it as 0 kg.`,
+    );
   }
   if (res.locationRequired) {
     deps.warn('New customer has no location yet — add it in step 2 before re-planning.');

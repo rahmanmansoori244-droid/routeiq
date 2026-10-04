@@ -66,6 +66,8 @@ export const CONFIG_BOUNDS = {
   reloadMinutes: { solver: 'reload_min', min: 0, max: 240, int: true },
   loadingMinPerCase: { solver: 'loading_min_per_case', min: 0, max: 1 },
   maxTripsPerTruck: { solver: 'max_trips_per_truck', min: 1, max: 10, int: true },
+  // Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill.
+  palletFillPct: { solver: 'pallet_fill_pct', min: 50, max: 100, int: true },
   fuelPricePerLitre: { solver: 'fuel_price_per_litre', min: 0, max: 10 },
   driverCostPerHour: { solver: 'driver_cost_per_hour', min: 0, max: 100 },
   prefWindowPenaltyPerMin: { solver: 'pref_window_penalty_per_min', min: 0, max: 100 },
@@ -87,6 +89,8 @@ export const TRUCK_BOUNDS = {
   maxTripsPerDay: { solver: 'max_trips', min: 1, max: 10, int: true },
   availableFromMin: { solver: 'available_from_min', min: 0, max: 1440, int: true },
   availableToMin: { solver: 'available_to_min', min: 0, max: 1440, int: true },
+  // Pallet positions (owner decision 4 Oct 2026); empty = the truck is planned by cases.
+  bays: { solver: 'bays', min: 1, max: 40, int: true },
 } as const satisfies Record<string, Bound>;
 
 export const DEPOT_BOUNDS = {

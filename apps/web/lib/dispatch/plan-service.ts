@@ -47,8 +47,12 @@ import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
+  caseHeavierThanAnyTruck,
   choosePartCapacity,
   fitsCapacity,
+  hasRoom,
+  linesPalletUnits,
+  maxCasePayloadKg,
   mergePortions,
   orderIdOf,
   partDemandKg,
@@ -57,6 +61,7 @@ import {
   portionPlannedKgPerCase,
   portionsOfPart,
   readPortionLines,
+  rowPalletUnitsNow,
   splitIntoParts,
   type FleetTruck,
   type OpenLine,
@@ -69,13 +74,14 @@ import {
   KG_ROUNDING_TOL,
   kgTenths,
   orderUsesLineWeights,
-  payloadTenths,
+  planningKgPerCase,
   resolveOrderLineWeights,
   roundKg,
   type LineWeightChange,
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
+import { groupMissingPalletFactors, loadPallets, PALLET_FILL_DEFAULT, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
 import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
@@ -93,6 +99,7 @@ import {
   loadBreakJson,
   parseLoadBreak,
   PIN_MOVED_M,
+  plannedTruckFacts,
   readLoadOrigin,
   readPlanInputs,
   readStopSnapshot,
@@ -153,6 +160,12 @@ export interface PlanScope {
   orderPriority: Record<string, number>;
   /** Optimizer ids ("<orderId>~<part>") that stand for part of an order (split deliveries). */
   portions?: Record<string, PortionRecord>;
+  /**
+   * Pallets (a day planned with trucks that have bays): the pallet need of every optimizer order ref
+   * (an order id or a portion id) in 1/1000 pallet, as sent, so applyScenario stores each row's units
+   * exactly. Absent on a day without bay trucks.
+   */
+  palletUnits?: Record<string, number>;
   /** Every order on a frozen load, fully or in part. */
   frozenLoadOrderIds?: string[];
   /** The frozen loads the optimization was computed around (for the "loads changed" check). */
@@ -172,6 +185,15 @@ export interface BuiltRequest {
   warnings: string[];
   /** Open lines sent with 0 kg because neither the line nor its product has a weight. */
   unknownWeights: UnknownWeight[];
+  /**
+   * Pallets (owner decision 4 Oct 2026): products of the open lines without a usable cases per pallet,
+   * on a day whose depot has trucks with bays. Such a request is built (their lines count 0 pallets)
+   * but never sent: OPTIMIZE / RE-PLAN refuse it (start-optimize gate, PALLET_FACTOR_REQUIRED).
+   * Absent / empty otherwise.
+   */
+  missingPalletFactors?: MissingPalletFactor[];
+  /** The cases per pallet of each product the request was planned with (by product code); absent without bay trucks. */
+  palletFactors?: Record<string, number>;
   /**
    * Line weights this request takes from the product master (0 kg lines whose product has a
    * case weight now, lines weighed from the master whose case weight was corrected), for orders
@@ -258,7 +280,7 @@ export interface WeightChanges {
 
 const ORDER_INCLUDE = {
   customer: true,
-  lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, active: true } } } },
+  lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, casesPerPallet: true, active: true } } } },
 } as const;
 
 /** Orders belonging to a plan: same delivery date and depot. Every order has a depot (owner rule,
@@ -374,11 +396,18 @@ export async function buildDispatchRequest(
     return [...votes].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0] ?? null;
   };
 
+  // Pallets (owner decision 4 Oct 2026): a depot with at least one truck with bays plans those trucks
+  // by pallets. Every open line then carries its product's cases per pallet (a usable factor, else
+  // the product is listed in missingPalletFactors and OPTIMIZE is refused); a day without bay trucks
+  // is planned exactly as before (no pallet field is sent).
+  const byPallets = trucks.some((t) => t.bays !== null && t.bays !== undefined);
+  const fillPct = cfg.palletFillPct ?? PALLET_FILL_DEFAULT;
+
   // Each order with the lines (cases) still to plan.
   type OpenOrder = { o: (typeof orders)[number]; lines: OpenLine[]; cases: number; kg: number; partial: boolean };
   const frozenOrderIds: string[] = [];
   const openByCustomer = new Map<string, OpenOrder[]>();
-  const lineInfo = new Map<string, { productCode: string; productName: string; productActive: boolean }>();
+  const lineInfo = new Map<string, { productId: string; productCode: string; productName: string; productActive: boolean; casesPerPallet: number | null }>();
   const unknownWeightLines: { productCode: string; productName: string; cases: number }[] = [];
   const weightChanges: WeightChanges = { lines: [], orders: [] };
   for (const o of orders) {
@@ -386,34 +415,43 @@ export async function buildDispatchRequest(
       frozenOrderIds.push(o.id);
       continue;
     }
-    for (const l of o.lines) lineInfo.set(l.id, { productCode: l.product.code, productName: l.product.name, productActive: l.product.active });
+    for (const l of o.lines) {
+      lineInfo.set(l.id, {
+        productId: l.productId,
+        productCode: l.product.code,
+        productName: l.product.name,
+        productActive: l.product.active,
+        casesPerPallet: validPalletFactor(l.product.casesPerPallet),
+      });
+    }
     // Line kg is what the order total is summed from, so a part's kg matches the order's. Old
     // orders may have no line weights: then the order's own kg is spread per case. A line at 0 kg
     // (unknown) or weighed from the product master is planned with the product's case weight now
     // (see weights.ts). Here that is in memory only: the job saves it with its plan (applyWeightChanges)
     // for orders with no part on a frozen load, so a probe never changes a live plan's orders.
-    const lineLevel = orderUsesLineWeights(o);
-    const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
     const frozenPart = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
     const resolved = resolveOrderLineWeights(
       [{ id: o.id, totalWeightKg: o.totalWeightKg, lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })) }],
       new Set(),
     );
-    const lineKg = new Map(resolved.lines.map((c) => [c.lineId, c.afterKg]));
     const orderKg = resolved.orders[0]?.afterKg ?? o.totalWeightKg;
+    // The case weight each line is planned with (weights.ts planningKgPerCase, the day screen's rule too).
+    const kgPerCaseOf = planningKgPerCase({
+      totalCases: o.totalCases,
+      totalWeightKg: o.totalWeightKg,
+      lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })),
+    });
     if (resolved.lines.length && !frozenPart && o.status !== 'DISPATCHED' && o.status !== 'DELIVERED') {
       weightChanges.lines.push(...resolved.lines.map((c) => ({ ...c, product: lineInfo.get(c.lineId)?.productCode ?? '?' })));
       weightChanges.orders.push(...resolved.orders);
     }
-    const lines: OpenLine[] = o.lines.map((l) => {
-      const kg = lineKg.get(l.id) ?? l.weightKg;
-      return {
-        lineId: l.id,
-        orderId: o.id,
-        cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
-        kgPerCase: !lineLevel ? orderKgPerCase : kg > 0 && l.cases > 0 ? kg / l.cases : 0,
-      };
-    });
+    const lines: OpenLine[] = o.lines.map((l) => ({
+      lineId: l.id,
+      orderId: o.id,
+      cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
+      kgPerCase: kgPerCaseOf.get(l.id) ?? 0,
+      ...(byPallets ? { casesPerPallet: validPalletFactor(l.product.casesPerPallet) } : {}),
+    }));
     const partial = lines.some((l, i) => l.cases !== o.lines[i].cases);
     const cases = lines.reduce((a, l) => a + l.cases, 0);
     if (partial && cases === 0) {
@@ -435,24 +473,27 @@ export async function buildDispatchRequest(
   // Split deliveries: a customer that fits no truck (cases or kg) is planned as several stops at
   // the same place. Only trucks with a load left today count, and parts are sized so that
   // several of them can carry the parts (see choosePartCapacity).
+  // A truck with bays is measured in pallet units (bays x Pallet fill), the others in cases.
   const fleet: FleetTruck[] = trucks.map((t) => ({
     code: t.code,
     cases: t.capacityCases,
     kg: t.capacityWeightKg > 0 ? t.capacityWeightKg : null,
     tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
+    ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
   }));
-  const available = fleet.filter((t) => t.cases > 0 && t.tripsLeft > 0);
+  const available = fleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
   const pool = available.length ? available : fleet;
-  const partCapFor = (cases: number, kg: number, maxCaseKg: number): { cap: PartCapacity; truckCode: string } | null => {
-    if (!cfg.splitDeliveries || !pool.some((t) => t.cases > 0)) return null;
-    if (pool.some((t) => t.cases > 0 && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg }))) return null;
-    return choosePartCapacity(cases, kg, pool, maxCaseKg);
+  const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number): { cap: PartCapacity; truckCode: string } | null => {
+    if (!cfg.splitDeliveries || !pool.some(hasRoom)) return null;
+    // A customer that fits one truck, in that truck's own measure, is never split.
+    if (pool.some((t) => hasRoom(t) && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.palletUnits ?? null }, units))) return null;
+    return choosePartCapacity(cases, kg, pool, maxCaseKg, units);
   };
   // One case heavier than every payload cannot go on any truck: almost always a wrong case weight
-  // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint.
-  const usableTrucks = pool.filter((t) => t.cases > 0);
-  const maxPayloadKg = usableTrucks.length && usableTrucks.every((t) => t.kg !== null) ? Math.max(...usableTrucks.map((t) => t.kg as number)) : null;
-  const tooHeavy = (l: OpenLine) => maxPayloadKg !== null && kgTenths(l.kgPerCase) > payloadTenths(maxPayloadKg);
+  // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint
+  // (split.ts maxCasePayloadKg: the trucks with a load left today; the day screen reads the same).
+  const maxPayloadKg = maxCasePayloadKg(fleet);
+  const tooHeavy = (l: OpenLine) => caseHeavierThanAnyTruck(l.kgPerCase, maxPayloadKg);
   const heavyMessage = (lines: OpenLine[]) =>
     [...new Map(lines.map((l) => [lineInfo.get(l.lineId)?.productCode ?? '?', l.kgPerCase])).entries()]
       .map(([code, kg]) => `One case of ${code} weighs ${Math.round(kg * 10) / 10} kg, more than any truck payload (${Math.round(maxPayloadKg ?? 0)} kg) - check the product weight.`)
@@ -480,17 +521,31 @@ export async function buildDispatchRequest(
   // planned with the product's weight in memory and never saved on its lines).
   const wholePortion = (x: OpenOrder): PortionRecord => ({
     orderId: x.o.id,
-    lines: x.lines.map((l) => ({ lineId: l.lineId, cases: l.cases, kgPerCase: l.kgPerCase })),
+    lines: x.lines.map((l) => ({
+      lineId: l.lineId,
+      cases: l.cases,
+      kgPerCase: l.kgPerCase,
+      ...(typeof l.casesPerPallet === 'number' ? { casesPerPallet: l.casesPerPallet } : {}),
+    })),
     cases: x.cases,
     weightKg: x.kg,
     part: null,
     parts: null,
   });
+  // Pallets: every optimizer order ref's need in units (sent as the stops' demand_pallet_units and
+  // stored on the rows by applyScenario), and the lines whose product has no usable factor.
+  const refUnits: Record<string, number> = {};
+  const missingPalletLines: { productId: string; productCode: string; productName: string; cases: number }[] = [];
+  const cppOfLine = new Map<string, number | null>();
+  const unitsOfLines = (lines: { lineId: string; cases: number }[]) => linesPalletUnits(lines, cppOfLine);
   // Id the optimizer sees for (the open part of) an order: plain when the whole order is open.
   const orderRef = (x: OpenOrder) => {
-    if (!x.partial) return x.o.id;
-    const id = portionId(x.o.id, 'open');
-    portions[id] = wholePortion(x);
+    let id = x.o.id;
+    if (x.partial) {
+      id = portionId(x.o.id, 'open');
+      portions[id] = wholePortion(x);
+    }
+    if (byPallets) refUnits[id] = unitsOfLines(x.lines);
     return id;
   };
   // Revenue / margin of (part of) an order: from its own lines when they carry values.
@@ -582,6 +637,13 @@ export async function buildDispatchRequest(
           unknownWeightLines.push({ productCode: info?.productCode ?? '?', productName: info?.productName ?? '', cases: l.cases });
         }
         if (lineInfo.get(l.lineId)?.productActive === false) inactiveProducts.add(lineInfo.get(l.lineId)!.productCode);
+        if (byPallets) {
+          const info = lineInfo.get(l.lineId);
+          cppOfLine.set(l.lineId, l.casesPerPallet ?? null);
+          if (l.cases > 0 && !l.casesPerPallet) {
+            missingPalletLines.push({ productId: info?.productId ?? '?', productCode: info?.productCode ?? '?', productName: info?.productName ?? '', cases: l.cases });
+          }
+        }
       }
     }
     // The customer's receiving hours, or the delivery time an order of this visit was given (urgent /
@@ -616,7 +678,9 @@ export async function buildDispatchRequest(
     const sumMoney = (vals: (number | null)[]) => (vals.every((v) => v !== null) ? vals.reduce<number>((a, v) => a + (v ?? 0), 0) : null);
 
     const maxCaseKg = Math.max(0, ...live.flatMap((x) => x.lines.map((l) => l.kgPerCase)));
-    const split = partCapFor(totalCases, totalKg, maxCaseKg);
+    // The customer's pallet need (each line rounded up on its own, then added up); 0 without bay trucks.
+    const totalUnits = byPallets ? live.reduce((a, x) => a + unitsOfLines(x.lines), 0) : 0;
+    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits);
     if (!split) {
       const ids = live.map(orderRef);
       if (sw.promised) promised[c.id] = sw.promised;
@@ -626,6 +690,7 @@ export async function buildDispatchRequest(
         order_ids: ids,
         demand_cases: totalCases,
         demand_kg: totalKg,
+        ...(byPallets ? { demand_pallet_units: ids.reduce((a, id) => a + (refUnits[id] ?? 0), 0) } : {}),
         service_min: serviceOf(totalCases),
         previous_truck_id: previousTruckOf(live.flatMap((x) => x.lines.map((l) => l.lineId))),
         margin: sumMoney(live.map((x) => openMoney(x, 'marginValue'))),
@@ -636,10 +701,11 @@ export async function buildDispatchRequest(
       const byOrder = new Map(live.map((x) => [x.o.id, x.o]));
       const kgPerCase = new Map(live.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
       parts.forEach((part, k) => {
-        const recs = portionsOfPart(part, k + 1, parts.length, kgPerCase);
+        const recs = portionsOfPart(part, k + 1, parts.length, kgPerCase, byPallets ? cppOfLine : undefined);
         const ids = recs.map((r) => {
           const id = portionId(r.orderId, k + 1);
           portions[id] = r;
+          if (byPallets) refUnits[id] = unitsOfLines(r.lines);
           return id;
         });
         const cases = recs.reduce((a, r) => a + r.cases, 0);
@@ -651,6 +717,8 @@ export async function buildDispatchRequest(
           demand_cases: cases,
           // The true kg, never capped at the payload the part was sized for (F01).
           demand_kg: partDemandKg(part, kgPerCase),
+          // A part's pallets: its allocations' units (a line cut over two parts may count 0.001 more in total).
+          ...(byPallets ? { demand_pallet_units: ids.reduce((a, id) => a + (refUnits[id] ?? 0), 0) } : {}),
           // Each visit gets the full stop time + the per-case time of its own cases (owner rule).
           service_min: serviceOf(cases),
           previous_truck_id: previousTruckOf(part.map((x) => x.lineId)),
@@ -658,10 +726,24 @@ export async function buildDispatchRequest(
           revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
         });
       });
-      splitNotes.push(`${label} (${totalCases} cases, ${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`);
+      splitNotes.push(
+        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`,
+      );
     }
     for (const x of live) orderPriority[x.o.id] = pr;
   }
+
+  // A full truck in cases for the same-day loading text (text only): its case capacity, or for a
+  // truck with bays its pallet room x the day's average cases per pallet.
+  const dayUnits = stopList.reduce((a, s) => a + (s.demand_pallet_units ?? 0), 0);
+  const dayCases = stopList.reduce((a, s) => a + s.demand_cases, 0);
+  const exampleFullCases = () =>
+    Math.max(
+      0,
+      ...trucks.map((t) =>
+        t.bays !== null && t.bays !== undefined && dayUnits > 0 ? Math.round((palletRoomUnits(t.bays, fillPct) * dayCases) / dayUnits) : t.capacityCases,
+      ),
+    );
 
   // Truck / depot values the optimizer would refuse (a direct database edit): named, not a 422.
   const masterProblems = masterDataProblems(trucks, run.depot);
@@ -691,7 +773,11 @@ export async function buildDispatchRequest(
       cases: l.cases,
       // The driver break planned with this locked / dispatched load: the solver plans no second one.
       ...frozenBreak(l.breakJson),
+      // For the record only: frozen loads are never re-checked or changed.
+      ...(typeof l.palletUnits === 'number' ? { pallet_units: l.palletUnits } : {}),
     })),
+    // Pallet positions: the truck is planned by pallets (bays x Pallet fill and the payload).
+    ...(t.bays !== null && t.bays !== undefined ? { bays: t.bays } : {}),
   }));
 
   // Stabilization PR8 (scenario finding S04 / N2): a plan made on its own delivery day plans new
@@ -711,7 +797,7 @@ export async function buildDispatchRequest(
     firstDepartureMin,
     prepMin: cfg.reloadMinutes,
     depotCloseMin: run.depot.closeMin,
-    loading: { perCase: cfg.loadingMinPerCase, exampleCases: Math.max(0, ...trucks.map((t) => t.capacityCases)) },
+    loading: { perCase: cfg.loadingMinPerCase, exampleCases: exampleFullCases() },
   };
   const timing = sameDayTiming(sameDayIn, now);
   const { planFrom, loadingFromMin } = timing;
@@ -764,6 +850,15 @@ export async function buildDispatchRequest(
     );
   }
   const unknownWeights = groupUnknownWeights(unknownWeightLines);
+  // The factors the day is planned with (by product code): kept with every option (PlanInputs), so a
+  // factor changed later never changes how a planned load reads.
+  const palletFactors: Record<string, number> = {};
+  if (byPallets) {
+    for (const [lineId, cpp] of cppOfLine) {
+      const code = lineInfo.get(lineId)?.productCode;
+      if (code && typeof cpp === 'number') palletFactors[code] = cpp;
+    }
+  }
   const request: DispatchRequest = {
     run_id: runId,
     tenant_id: tenantId,
@@ -782,10 +877,19 @@ export async function buildDispatchRequest(
   return {
     request,
     preDrops,
-    scope: { orderIds: scopeIds, frozenOrderIds, orderPriority, portions, frozenLoadOrderIds, frozenLoadIds: frozenLoads.map((l) => l.id).sort() },
+    scope: {
+      orderIds: scopeIds,
+      frozenOrderIds,
+      orderPriority,
+      portions,
+      frozenLoadOrderIds,
+      frozenLoadIds: frozenLoads.map((l) => l.id).sort(),
+      ...(byPallets ? { palletUnits: refUnits } : {}),
+    },
     blocking: [...blockingByCustomer.values()],
     warnings,
     unknownWeights,
+    ...(byPallets ? { missingPalletFactors: groupMissingPalletFactors(missingPalletLines), palletFactors } : {}),
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
     sameDay: { input: sameDayIn, baseShiftStartMin, timing },
@@ -865,6 +969,7 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
   if (!r?.config || !r.depot) return null; // not a complete request (unit-test stubs): no inputs kept
   const { osrm_url: osrmUrl, ...config } = r.config;
   const trucks: Record<string, TruckFacts> = {};
+  const fill = r.config.pallet_fill_pct ?? PALLET_FILL_DEFAULT;
   for (const t of r.trucks ?? []) {
     trucks[t.id] = {
       code: t.code ?? t.id,
@@ -877,6 +982,8 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
       availableFromMin: t.available_from_min ?? null,
       availableToMin: t.available_to_min ?? null,
       maxTripsPerDay: t.max_trips ?? null,
+      // Pallets as asked (a truck with bays); a load keeps them only when the optimizer echoes the rule.
+      ...(typeof t.bays === 'number' ? { bays: t.bays, palletFillPct: fill, palletRoomUnits: palletRoomUnits(t.bays, fill) } : {}),
     };
   }
   const stops: PlanInputs['stops'] = {};
@@ -903,6 +1010,7 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
     stops,
     config: { ...config, osrm_configured: !!osrmUrl },
     settings: built.settings ?? null,
+    ...(built.palletFactors ? { palletFactors: built.palletFactors } : {}),
   };
 }
 
@@ -920,7 +1028,7 @@ export class OrdersChangedError extends PlanError {
  * result that was planned with these weights is saved and applied (dispatch-job.ts) - never for a
  * probe or at the start - so a refused re-plan, and a failed or stale optimization, leave the
  * orders under the plan in use as they were (its loads keep matching them, and the "planned with
- * the old weight" warning stays). Set-based (a whole NMWC day in a few statements). Each row is
+ * the old weight" warning stays). Set-based (a whole NMWC day in a few statements). The kg arrays go to PostgreSQL as text and are cast there (::text[]::float8[]): a JS number or Decimal array sent straight as float8[] was refused in CI with 22P03 "improper binary format in array element 1". Each row is
  * changed only if it still has the kg the request was built from; otherwise OrdersChangedError.
  * One ORDER_WEIGHTS_RESOLVED audit row lists every line and order total before and after.
  */
@@ -933,7 +1041,7 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
     const n = await tx.$executeRaw`
       UPDATE "OrderLine" AS l
       SET "weightKg" = v.after_kg, "weightFromMaster" = true
-      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg),
+      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => String(c.beforeKg))}::text[]::float8[], ${part.map((c) => String(c.afterKg))}::text[]::float8[]) AS v(id, before_kg, after_kg),
            "Order" AS o
       WHERE l.id = v.id AND o.id = l."orderId" AND o."tenantId" = ${tenantId} AND abs(l."weightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
@@ -943,7 +1051,7 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
     const n = await tx.$executeRaw`
       UPDATE "Order" AS o
       SET "totalWeightKg" = v.after_kg
-      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg)
+      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => String(c.beforeKg))}::text[]::float8[], ${part.map((c) => String(c.afterKg))}::text[]::float8[]) AS v(id, before_kg, after_kg)
       WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
   }
@@ -1038,12 +1146,18 @@ export async function persistDispatchResult(
         ...portionFields(mergePortions(g.list)),
       });
     }
+    // Deploy order is solver first: an older solver ignores bays and echoes no pallet rule. Its
+    // loads are planned by cases and stored so (no pallet units); the plan says so.
+    const palletNote =
+      (built.request?.trucks ?? []).some((t) => typeof t.bays === 'number') && typeof sc.pallet_unit !== 'number'
+        ? ['The optimizer did not plan by pallets (it is being updated): loads are planned by cases. Re-plan in a few minutes.']
+        : [];
     const details: ScenarioDetails = {
       ...sc,
       engine: resp.engine,
       matrix_provider: resp.matrix_provider,
       distance_is_estimated: resp.distance_is_estimated,
-      response_warnings: [...built.warnings, ...resp.warnings],
+      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote],
       scope: built.scope,
       ...(inputs ? { inputs } : {}),
       ...(resp.search ? { search: resp.search } : {}),
@@ -1172,6 +1286,11 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const casesOf = new Map(orders.map((o) => [o.id, o.totalCases]));
   const kgOf = new Map(orders.map((o) => [o.id, o.totalWeightKg]));
   const kgMismatches: { truckId: string; loadNo: number; solverKg: number; ordersKg: number }[] = [];
+  const palletMismatches: { truckId: string; loadNo: number; solverUnits: number; rowsUnits: number }[] = [];
+  // Pallets: each row keeps the units it was sent with (scope.palletUnits); a load is stored as
+  // planned by pallets only when the optimizer echoed the rule and planned it on a truck with bays.
+  const refUnits = d.scope.palletUnits ?? null;
+  const palletEcho = typeof d.pallet_unit === 'number';
   // The facts each new load and stop is planned with (F08): frozen with the rows, so a later pin,
   // hours or truck correction never changes what this plan shows. From the option's inputs (what
   // the optimizer was sent); an option stored before inputs existed takes the master data now.
@@ -1183,6 +1302,10 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     // weight once made a load look lighter than it was); a difference is kept in the audit.
     const ordersKg = loadKgFromRefs(ld.stops.flatMap((st) => st.order_ids), d.scope, kgOf);
     if (Math.abs(ordersKg - ld.kg) > KG_ROUNDING_TOL) kgMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverKg: ld.kg, ordersKg });
+    // The load's pallets = the sum of its rows' (the optimizer's own sum must agree; kept in the audit if not).
+    const rowsUnits = refUnits ? ld.stops.flatMap((st) => st.order_ids).reduce((a, ref) => a + (refUnits[ref] ?? 0), 0) : null;
+    const loadUnits = palletEcho && typeof ld.pallet_units === 'number' && rowsUnits !== null ? rowsUnits : null;
+    if (loadUnits !== null && loadUnits !== ld.pallet_units) palletMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverUnits: ld.pallet_units as number, rowsUnits: loadUnits });
     const driver = driverOf.get(loadKey(ld.truck_id, ld.load_no));
     const load = await tx.planLoad.create({
       data: {
@@ -1214,6 +1337,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         truckSnapshotJson: snap.truck(ld.truck_id) as unknown as Prisma.InputJsonValue,
         // The driver break planned with this load (the solver's timetable), NULL when none.
         breakJson: (loadBreakJson(ld.driver_break) ?? Prisma.DbNull) as Prisma.InputJsonValue | typeof Prisma.DbNull,
+        // Pallets planned (1/1000 pallet), NULL when the load was planned by cases.
+        palletUnits: loadUnits,
       },
     });
     let running = 0;
@@ -1243,6 +1368,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
           cumulativeKm: st.cum_km,
           hardWindowOk: st.hard_window_ok,
           prefWindowOk: st.pref_window_ok,
+          // The row's pallets exactly as sent (null on a day without bay trucks, or when the
+          // optimizer did not say it planned by pallets: an older solver).
+          palletUnits: palletEcho && refUnits && typeof refUnits[ref] === 'number' ? refUnits[ref] : null,
         });
       });
     }
@@ -1282,6 +1410,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         loads: d.loads.length,
         unserved: unservedIds.length,
         ...(kgMismatches.length ? { loadKgMismatches: kgMismatches } : {}),
+        ...(palletMismatches.length ? { loadPalletMismatches: palletMismatches } : {}),
         ...(driverChanges.length
           ? { driverChanges: driverChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, from: c.from?.id ?? null, to: c.to?.id ?? null, reason: c.reason })) }
           : {}),
@@ -1290,6 +1419,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     tx,
   );
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
+  if (palletMismatches.length) console.warn('applyScenario: load pallets differ from its rows', { runId, palletMismatches });
   return { driverChanges };
 }
 
@@ -1362,7 +1492,8 @@ async function snapshotSource(
       };
   const liveById = new Map(liveTrucks.map((t) => [t.id, t]));
   const truck = (truckId: string): TruckSnapshot | null => {
-    const planned = inputs?.trucks[truckId];
+    // Pallets: the bays, fill and room stay with the load only when the optimizer echoed the rule.
+    const planned = inputs?.trucks[truckId] ? plannedTruckFacts(inputs.trucks[truckId], typeof d.pallet_unit === 'number') : undefined;
     const live = liveById.get(truckId);
     const facts: TruckFacts | null = planned ?? (live
       ? { code: live.code, capacityCases: live.capacityCases, capacityWeightKg: live.capacityWeightKg, fixedCostPerDay: live.fixedCostPerDay, tripCost: live.tripCost, costPerKm: live.costPerKm, kmPerLitre: live.kmPerLitre, availableFromMin: live.availableFromMin, availableToMin: live.availableToMin, maxTripsPerDay: live.maxTripsPerDay }
@@ -1469,6 +1600,20 @@ export function carriedHeldCases(
 }
 
 /**
+ * A stored load's pallets for the daily summary: its units and its truck's bays when it was planned
+ * by pallets (stored units and a snapshot with bays and room, both kept only from the optimizer's
+ * echo); nothing for a load planned by cases.
+ */
+export function summaryPallets(l: { palletUnits?: number | null; truckSnapshotJson: unknown }): { palletUnits: number; bays: number } | Record<string, never> {
+  const p = loadPallets({ palletUnits: l.palletUnits, ...pickPalletFacts(readTruckSnapshot(l.truckSnapshotJson)) });
+  return p ? { palletUnits: p.units, bays: p.bays } : {};
+}
+
+function pickPalletFacts(ts: TruckSnapshot | null) {
+  return { bays: ts?.bays, palletRoomUnits: ts?.palletRoomUnits, palletFillPct: ts?.palletFillPct };
+}
+
+/**
  * Recompute reconciliation, daily summary and (for versions > 1) the change summary.
  * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
  * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
@@ -1567,6 +1712,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       returnMin: l.returnMin,
       cost: readLoadCost(l.costJson),
       distanceIsEstimated: l.distanceIsEstimated,
+      // Pallets only for a load planned by pallets (stored units + the bays and room kept from the echo).
+      ...summaryPallets(l),
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,
@@ -1625,7 +1772,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
 
 /** What the timetable check reads of a plan version's loads (the plan detail's rows satisfy it too). */
 export const FEASIBILITY_LOAD_INCLUDE = {
-  truck: { select: { code: true, capacityCases: true, capacityWeightKg: true } },
+  truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true } },
   assignments: {
     orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
     include: {
@@ -1634,7 +1781,8 @@ export const FEASIBILITY_LOAD_INCLUDE = {
           totalCases: true,
           totalWeightKg: true,
           customer: { select: { code: true, branchCode: true, name: true } },
-          lines: { select: { id: true, cases: true, weightKg: true, product: { select: { weightPerCaseKg: true } } } },
+          // The product's code and cases per pallet now: a figure corrected since planning (CAPACITY_PALLETS_NEW_FACTOR).
+          lines: { select: { id: true, cases: true, weightKg: true, product: { select: { weightPerCaseKg: true, code: true, casesPerPallet: true } } } },
         },
       },
     },
@@ -1655,13 +1803,15 @@ export interface FeasibilityRow {
   /** The driver break planned with the load (PlanLoad.breakJson); absent / null = none. */
   breakJson?: unknown;
   /** The truck now: its code, and its capacity for the CAPACITY_CHANGED warning (absent = not read). */
-  truck: { code: string; capacityCases?: number; capacityWeightKg?: number };
+  truck: { code: string; capacityCases?: number; capacityWeightKg?: number; bays?: number | null };
   assignments: {
     orderId: string;
     sequenceInTruck: number;
     portionCases: number | null;
     portionWeightKg: number | null;
     portionLinesJson: unknown;
+    /** The row's pallets as planned (1/1000 pallet); null / absent = planned without pallets. */
+    palletUnits?: number | null;
     etaMin: number | null;
     serviceStartMin: number | null;
     departureMin: number | null;
@@ -1671,7 +1821,8 @@ export interface FeasibilityRow {
       totalCases: number;
       totalWeightKg: number;
       customer: { code: string; branchCode: string | null; name: string };
-      lines: { id: string; cases: number; weightKg: number; product: { weightPerCaseKg: number } }[];
+      /** product.code / casesPerPallet: absent = not read (no pallet check of a factor corrected since). */
+      lines: { id: string; cases: number; weightKg: number; product: { weightPerCaseKg: number; code?: string; casesPerPallet?: number | null } }[];
     };
   }[];
 }
@@ -1721,11 +1872,21 @@ export function feasibilityInputFromRows(
   scenarioId: string | null,
   details: ScenarioDetails | undefined,
   legacy: LegacyPlanFacts | null,
+  /** The company's Pallet fill now (for CAPACITY_CHANGED); absent = the fill each load was planned with. */
+  opts: { palletFillPctNow?: number | null } = {},
 ): FeasibilityInput {
+  // The cases per pallet the option was planned with (by product code): a factor corrected since is
+  // compared with them (rowPalletUnitsNow; a split part keeps the factor it was cut with).
+  const plannedFactors = readPlanInputs(details?.inputs)?.palletFactors ?? {};
   const loads: FeasLoad[] = rows.map((l) => {
     const ts = readTruckSnapshot(l.truckSnapshotJson);
     const own = l.carriedFromLoadId === null; // planned by this version (a carried copy keeps its own snapshot, or nothing)
     const t = l.truck;
+    // Planned by pallets: the snapshot keeps the room (only when the optimizer echoed the rule).
+    const room = ts && typeof ts.palletRoomUnits === 'number' && typeof ts.bays === 'number' ? ts.palletRoomUnits : null;
+    const pallets = room !== null ? { palletRoomUnits: room, bays: ts!.bays as number, fillPct: ts!.palletFillPct ?? null } : {};
+    const fillNow = opts.palletFillPctNow ?? ts?.palletFillPct ?? null;
+    const bayNow = typeof t.bays === 'number' ? t.bays : null;
     return {
       id: l.id,
       truckId: l.truckId,
@@ -1737,14 +1898,26 @@ export function feasibilityInputFromRows(
       returnMin: l.returnMin,
       cases: l.cases,
       weightKg: l.weightKg,
-      capacity: ts ? { cases: ts.capacityCases, kg: ts.capacityWeightKg } : own && legacy ? legacy.capacity(l.truckId) : null,
-      capacityNow: typeof t.capacityCases === 'number' && typeof t.capacityWeightKg === 'number' ? { cases: t.capacityCases, kg: t.capacityWeightKg } : null,
+      capacity: ts ? { cases: ts.capacityCases, kg: ts.capacityWeightKg, ...pallets } : own && legacy ? legacy.capacity(l.truckId) : null,
+      capacityNow:
+        typeof t.capacityCases === 'number' && typeof t.capacityWeightKg === 'number'
+          ? {
+              cases: t.capacityCases,
+              kg: t.capacityWeightKg,
+              // Only for a load planned by pallets: the bays and room now (null bays = now a truck without bays).
+              ...(room !== null && t.bays !== undefined
+                ? { bays: bayNow, fillPct: fillNow, palletRoomUnits: bayNow !== null && fillNow !== null ? palletRoomUnits(bayNow, fillNow) : null }
+                : {}),
+            }
+          : null,
       rules: ts ? ts.rules : own && legacy ? legacy.rules(l.truckId) : null,
       break: parseLoadBreak(l.breakJson),
       stops: l.assignments.map((a) => {
         const snap = readStopSnapshot(a.stopSnapshotJson);
         const c = a.order.customer;
         const unknownKg = rowUnknownKg(a);
+        // Only on a load planned by pallets: its rows with the cases per pallet known now, when they differ.
+        const now = room !== null ? rowPalletUnitsNow(a.order.lines, a.portionLinesJson, a.palletUnits, plannedFactors) : null;
         return {
           orderId: a.orderId,
           sequence: a.sequenceInTruck,
@@ -1754,6 +1927,8 @@ export function feasibilityInputFromRows(
           kg: roundKg(a.portionWeightKg ?? a.order.totalWeightKg),
           kgUnknown: unknownKg.unknown,
           ...(unknownKg.kgNow > 0 ? { unknownKgNow: unknownKg.kgNow } : {}),
+          ...(typeof a.palletUnits === 'number' ? { palletUnits: a.palletUnits } : {}),
+          ...(now ? { palletUnitsNow: now.units, palletFactorChanged: now.products } : {}),
           etaMin: a.etaMin,
           serviceStartMin: a.serviceStartMin,
           departureMin: a.departureMin,
@@ -1795,7 +1970,14 @@ export async function loadFeasibilityInput(db: Db, tenantId: string, runId: stri
   const rows = await db.planLoad.findMany({ where: { runId, tenantId }, include: FEASIBILITY_LOAD_INCLUDE });
   const needLegacy = rows.some((r) => r.carriedFromLoadId === null && !readTruckSnapshot(r.truckSnapshotJson));
   const legacy = needLegacy ? await legacyPlanFacts(db, tenantId, run.currentJobId) : null;
-  return feasibilityInputFromRows(rows, run.chosenScenarioId, details, legacy);
+  return feasibilityInputFromRows(rows, run.chosenScenarioId, details, legacy, { palletFillPctNow: await palletFillNow(db, tenantId, rows) });
+}
+
+/** The company's Pallet fill now, read only when a load of the version was planned by pallets. */
+export async function palletFillNow(db: Db, tenantId: string, rows: { truckSnapshotJson: unknown }[]): Promise<number | null> {
+  if (!rows.some((r) => typeof readTruckSnapshot(r.truckSnapshotJson)?.palletRoomUnits === 'number')) return null;
+  const cfg = await db.tenantConfig.findUnique({ where: { tenantId }, select: { palletFillPct: true } });
+  return cfg?.palletFillPct ?? null;
 }
 
 /** Recompute and store RunPlan.feasibilityJson (null when the version has no applied plan). */

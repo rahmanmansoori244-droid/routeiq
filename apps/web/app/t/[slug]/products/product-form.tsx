@@ -23,6 +23,8 @@ export interface ProductRow {
   name: string;
   weightPerCaseKg: number;
   volumePerCaseL: number;
+  /** The ERP pallet factor (owner decision 4 Oct 2026): cases on one pallet; null = not set. */
+  casesPerPallet?: number | null;
   active: boolean;
 }
 
@@ -34,7 +36,7 @@ interface Props {
   onSaved: () => void;
 }
 
-const blank = { code: '', name: '', weightPerCaseKg: '12', volumePerCaseL: '15', active: true };
+const blank = { code: '', name: '', weightPerCaseKg: '12', volumePerCaseL: '15', casesPerPallet: '', active: true };
 
 export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }: Props) {
   const [form, setForm] = useState(blank);
@@ -48,6 +50,7 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
           name: product.name,
           weightPerCaseKg: String(product.weightPerCaseKg),
           volumePerCaseL: String(product.volumePerCaseL),
+          casesPerPallet: product.casesPerPallet != null ? String(product.casesPerPallet) : '',
           active: product.active,
         });
       } else {
@@ -139,6 +142,24 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
                 required
               />
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="casesPerPallet">Cases per pallet</Label>
+            <Input
+              id="casesPerPallet"
+              type="number"
+              min="1"
+              max="10000"
+              step="1"
+              value={form.casesPerPallet}
+              placeholder="not set"
+              onChange={(e) => setForm({ ...form, casesPerPallet: e.target.value })}
+              className="max-w-[12rem]"
+            />
+            <p className="text-xs text-muted-foreground">
+              The ERP pallet factor (e.g. 84). Trucks with bays are loaded by pallets: a day with this product on its orders is optimized only
+              when it is set. Orders stay in cases.
+            </p>
           </div>
           <div className="flex items-center justify-between rounded-md border px-3 py-2">
             <Label htmlFor="active" className="text-sm">

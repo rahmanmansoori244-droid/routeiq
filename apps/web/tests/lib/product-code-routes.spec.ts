@@ -210,16 +210,21 @@ describe('Products: edit (the weight of JA1.5L(6) can be saved)', () => {
 });
 
 describe('the Products dialog: what the Edit call sends', () => {
-  const form = { code: 'JA1.5L(6)', name: 'Jabal 1.5L x6', weightPerCaseKg: '9.6', volumePerCaseL: '9', active: true };
+  const form = { code: 'JA1.5L(6)', name: 'Jabal 1.5L x6', weightPerCaseKg: '9.6', volumePerCaseL: '9', casesPerPallet: '', active: true };
 
   it('edit: no code (the code cannot be changed there, and a saved code is never checked again by accident)', () => {
     const body = productRequestBody('edit', form);
-    expect(body).toEqual({ name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, active: true });
+    expect(body).toEqual({ name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, casesPerPallet: null, active: true });
     expect('code' in body).toBe(false);
   });
 
   it('create: the code as typed (the server tidies and checks it)', () => {
-    expect(productRequestBody('create', { ...form, code: ' TN1.5L  (6) ' })).toEqual({ code: ' TN1.5L  (6) ', name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, active: true });
+    expect(productRequestBody('create', { ...form, code: ' TN1.5L  (6) ' })).toEqual({ code: ' TN1.5L  (6) ', name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, casesPerPallet: null, active: true });
+  });
+
+  it('cases per pallet: the number typed, or null when the field is empty (pallets)', () => {
+    expect(productRequestBody('edit', { ...form, casesPerPallet: ' 96 ' }).casesPerPallet).toBe(96);
+    expect(productRequestBody('edit', { ...form, casesPerPallet: '  ' }).casesPerPallet).toBeNull();
   });
 });
 
@@ -371,6 +376,23 @@ describe('the order file with real codes: check, then confirm', () => {
     expect(validation.errors[0]!.message).toBe('Item code "A,B" cannot be used: A product code can have only letters, digits, spaces and . ( ) - _ / + & (not ","). Correct it in the file.');
     expect(validation.errors[1]!.message).toMatch(/^Item code "X{41}" cannot be used: Max 40 characters \(this code has 41\)\./);
     expect(validation.issues.newProducts).toEqual([]);
+  });
+
+  it('pallets: with a truck with bays at the depot, the check names each product without cases per pallet once, by the product its rows resolve to', async () => {
+    seedProducts([
+      { code: 'JA1.5L(6)', weightPerCaseKg: 9.6, casesPerPallet: 112 },
+      // Saved with two spaces before codes were tidied: " TN1.5L  (6) " in the file is this product.
+      { code: 'TN1.5L  (6)', weightPerCaseKg: 9.1, casesPerPallet: null },
+    ]);
+    tables.depot = [{ id: 'DA', tenantId: T, code: 'A1', active: true }];
+    tables.customer = [{ id: 'c1', tenantId: T, code: 'C001', branchCode: null, branchKey: '__MAIN__', name: 'ACME', active: true, lat: 23.6, lng: 58.4, priority: 3, avgServiceTimeMin: 10 }];
+    tables.truck = [{ id: 'R1', tenantId: T, depotId: 'DA', code: 'R1', active: true, bays: 12 }];
+    const { validation } = await check(csv());
+    // JA1.5L(6) (twice, in two cases) has its factor; SS5GB NRB is new on two rows spelt differently: named once.
+    expect((validation.issues as { productsWithoutPalletFactor?: string[] }).productsWithoutPalletFactor).toEqual(['INVOMAN330(24)', 'SS5GB NRB', 'TN1.5L  (6)']);
+    // No truck with bays: nothing listed.
+    tables.truck = [{ id: 'R1', tenantId: T, depotId: 'DA', code: 'R1', active: true, bays: null }];
+    expect((await check(csv())).validation.issues).not.toHaveProperty('productsWithoutPalletFactor');
   });
 
   it('confirm creates each new product once with its tidy code, and every line points at the right product', async () => {
