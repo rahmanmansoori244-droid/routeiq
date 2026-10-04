@@ -419,9 +419,12 @@ At the bottom of **Settings**, in a red box. It removes the test data of your co
 How to use it:
 1. **Take a Railway backup first** (Railway: Postgres → Backups → New backup). Removed data can only come back from that backup.
 2. Make sure nobody is uploading orders, optimizing or recording results. It refuses to run while an optimization is queued or running.
-3. Choose **Everything** (the default), or **Only data with a delivery date before** a day (for example the pilot's first day, to keep orders already uploaded for it).
-4. Press **Check what will be removed**. The list shows every count that will be removed and what is kept. If something stops it (an optimization running; a date that would cut a brought-forward order from its original; a plan that holds orders from both sides of the date), it says what to do.
-5. Tick **I have taken a Railway backup**, type your company code (shown on screen) and press **Remove … test records**. The summary shows what was removed.
+3. Choose **Everything** (the default: every order, plan and delivery result of your company, all dates), or **Only data with a delivery date before** a day (for example the pilot's first day, to keep orders already uploaded for it; an order file not confirmed yet that has lines for that day or later is kept too).
+4. Press **Check what will be removed**. The list shows every count that will be removed and what is kept. If something stops it (an optimization running; a date that would cut a brought-forward order from its original; a plan that holds orders from both sides of the date), it says what to do. For a brought-forward order it names two dates that work: an earlier one that keeps the order with its original, and a later one that removes both (also when an order was brought forward more than once). You can also undo that Bring forward first.
+5. **Red warning:** if the removal includes loads already locked, loading, dispatched or completed, orders dated today or later, or driver links for today or later, a red line says so. Once the pilot has started these may be real: choose a date instead. If they are test data, tick **These loads, orders and driver links are test data too**.
+6. Tick **I have taken a Railway backup**, type your company code (shown on screen) and press **Remove … records**. The summary shows what was removed.
+
+It removes only what your check showed. If something was added in between (for example the dispatcher confirmed a real order file), it removes nothing, checks again and shows the new numbers: read them and press Remove again. A check older than 5 minutes disappears; press Check again. After many attempts in a short time it says *Too many attempts. Wait … minutes*.
 
 ## Who can do what
 Owner decision of 5 Oct 2026: **the dispatcher is the planner** (the *Planner* role); he only lacks the admin's powers, such as changing a saved location.

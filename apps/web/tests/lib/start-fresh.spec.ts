@@ -21,12 +21,27 @@ vi.mock('@/lib/audit', async () => {
   return { audit: vi.fn(async (input: Record<string, unknown>, tx?: Record<string, any>) => (tx ?? m.fakePrisma).auditLog.create({ data: { ...input } })) };
 });
 
-import { previewStartFresh, runStartFresh, START_FRESH_DELETE_ORDER } from '@/lib/start-fresh';
-import { startFreshConfirmMatches, startFreshTotal, START_FRESH_KEPT, START_FRESH_REMOVED } from '@/lib/start-fresh-text';
+import { previewStartFresh, runStartFresh, START_FRESH_DELETE_ORDER, startFreshSafeCutoffs } from '@/lib/start-fresh';
+import {
+  startFreshConfirmMatches,
+  startFreshHasLive,
+  startFreshLiveText,
+  startFreshShown,
+  startFreshStale,
+  startFreshTotal,
+  START_FRESH_KEPT,
+  START_FRESH_REMOVED,
+} from '@/lib/start-fresh-text';
 
 type Row = Record<string, any>;
 const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
 const actor = { id: 'uA', name: 'Owner', email: 'owner@a.example' };
+/** 10:00 in Muscat on 4 Oct 2026: the seeded orders of the 6th are "today or later". */
+const NOW = new Date('2026-10-04T06:00:00Z');
+/** A run of company A as the panel sends it after a check: the live-data tick given, nothing compared unless `shown` is passed. */
+const run = (before: string | null, extra: Parameters<typeof runStartFresh>[4] = {}, ip: string | null = null) =>
+  runStartFresh('tA', before, actor, ip, { now: NOW, liveDataConfirmed: true, ...extra });
+const preview = (before: string | null, tenantId = 'tA') => previewStartFresh(tenantId, before, { now: NOW });
 
 /** The database's foreign keys among the tables Start fresh touches (prisma/migrations). */
 const FKS: { child: string; field: string; parent: string; onDelete: 'RESTRICT' | 'NO_ACTION' | 'CASCADE' | 'SET_NULL' }[] = [
@@ -186,11 +201,12 @@ function seedCompany(tenantId: string, p: string) {
     { id: `${p}v3`, depotId: `${p}dep`, truckId: `${p}t1`, customerId: `${p}c1`, deliveryDate: day('2026-10-03') },
     { id: `${p}v6`, depotId: `${p}dep`, truckId: `${p}t1`, customerId: `${p}c2`, deliveryDate: day('2026-10-06') },
   ]);
+  const ev = { depotId: `${p}dep`, truckId: `${p}t1` };
   push('stopEvent', [
-    { id: `${p}e2`, visitId: `${p}v2`, driverLinkId: `${p}dl2`, deliveryDate: day('2026-10-02') },
-    { id: `${p}e2d`, visitId: null, driverLinkId: `${p}dl2`, deliveryDate: day('2026-10-02') }, // back at the depot (load level)
-    { id: `${p}e3`, visitId: `${p}v3`, driverLinkId: null, deliveryDate: day('2026-10-03') },
-    { id: `${p}e6`, visitId: `${p}v6`, driverLinkId: `${p}dl6`, deliveryDate: day('2026-10-06') },
+    { id: `${p}e2`, ...ev, visitId: `${p}v2`, driverLinkId: `${p}dl2`, deliveryDate: day('2026-10-02') },
+    { id: `${p}e2d`, ...ev, visitId: null, driverLinkId: `${p}dl2`, deliveryDate: day('2026-10-02') }, // back at the depot (load level)
+    { id: `${p}e3`, ...ev, visitId: `${p}v3`, driverLinkId: null, deliveryDate: day('2026-10-03') },
+    { id: `${p}e6`, ...ev, visitId: `${p}v6`, driverLinkId: `${p}dl6`, deliveryDate: day('2026-10-06') },
   ]);
   push('deliveryPhoto', [
     { id: `${p}ph2`, visitId: `${p}v2`, driverLinkId: `${p}dl2` },
@@ -249,7 +265,7 @@ describe('pure parts', () => {
 describe('preview (nothing is changed)', () => {
   it('counts everything of this company only, and what is kept', async () => {
     const before = structuredClone(tables);
-    const r = await previewStartFresh('tA', null);
+    const r = await preview(null);
     expect(tables).toEqual(before);
     expect(r.before).toBeNull();
     expect(r.blockers).toEqual([]);
@@ -274,12 +290,15 @@ describe('preview (nothing is changed)', () => {
       baselines: 1,
       oldDriverApp: 3, // a shift, its position and its proof
     });
-    expect(r.kept).toEqual({ customers: 2, products: 1, trucks: 1, drivers: 1, dailyDrivers: 1, depots: 1, regions: 1, users: 2, auditRows: 2 });
+    expect(r.kept).toEqual({ customers: 2, products: 1, trucks: 1, drivers: 1, dailyDrivers: 1, depots: 1, regions: 1, users: 2, auditRows: 2, orderFiles: 0 });
     expect(r.orderDates).toEqual({ from: '2026-10-02', to: '2026-10-06' });
+    // Live-looking data in "Everything": the completed load of the 2nd, the dispatched one of the 3rd,
+    // the order and the driver link of the 6th (today is the 4th).
+    expect(r.live).toEqual({ today: '2026-10-04', frozenLoads: 2, ordersFromToday: 1, driverLinksFromToday: 1 });
   });
 
   it('only before a date: what is on or after it stays', async () => {
-    const r = await previewStartFresh('tA', '2026-10-04');
+    const r = await preview('2026-10-04');
     expect(r.blockers).toEqual([]);
     expect(r.removed).toMatchObject({
       uploadBatches: 2, // b1 (2 Oct) and the deleted file uploaded 30 Sep; b6 stays
@@ -298,7 +317,67 @@ describe('preview (nothing is changed)', () => {
       oldDriverApp: 3,
     });
     expect(r.kept.dailyDrivers).toBe(2);
+    expect(r.kept.orderFiles).toBe(1); // b6
     expect(r.orderDates).toEqual({ from: '2026-10-02', to: '2026-10-03' });
+    expect(r.live).toEqual({ today: '2026-10-04', frozenLoads: 2, ordersFromToday: 0, driverLinksFromToday: 0 });
+  });
+});
+
+describe('live-looking data (loads that left, orders and links from today on)', () => {
+  it('the preview names them in one line; a run without the extra tick is refused (409 LIVE_DATA_CONFIRM), nothing removed', async () => {
+    const r = await preview(null);
+    expect(startFreshHasLive(r.live)).toBe(true);
+    expect(startFreshLiveText(r.live)).toMatch(/2 loads already locked, loading, dispatched or completed/);
+    expect(startFreshLiveText(r.live)).toMatch(/1 order dated today \(2026-10-04\) or later/);
+    expect(startFreshLiveText(r.live)).toMatch(/1 driver link/);
+    const snapshot = structuredClone(tables);
+    await expect(runStartFresh('tA', null, actor, null, { now: NOW })).rejects.toMatchObject({ status: 409, details: { code: 'LIVE_DATA_CONFIRM' } });
+    await expect(runStartFresh('tA', null, actor, null, { now: NOW, liveDataConfirmed: false })).rejects.toMatchObject({ details: { code: 'LIVE_DATA_CONFIRM' } });
+    expect(tables).toEqual(snapshot);
+  });
+
+  it('with the tick it runs, and the audit row records the tick and what was live', async () => {
+    const r = await run(null);
+    expect(r.live).toEqual({ today: '2026-10-04', frozenLoads: 2, ordersFromToday: 1, driverLinksFromToday: 1 });
+    expect(startFreshLiveText(r.live, true)).toBe(
+      'This included 2 loads already locked, loading, dispatched or completed, 1 order dated today (2026-10-04) or later and 1 driver link (QR codes) for today or later.',
+    );
+    expect(tables.auditLog!.filter((a) => a.tenantId === 'tA').at(-1)!.afterJson).toMatchObject({ liveDataConfirmed: true, live: r.live });
+  });
+
+  it('nothing live in scope: no tick needed', async () => {
+    for (const l of tables.planLoad!) if (l.tenantId === 'tA') l.status = 'PLANNED';
+    const r = await preview('2026-10-04');
+    expect(startFreshHasLive(r.live)).toBe(false);
+    expect(startFreshLiveText(r.live)).toBeNull();
+    await runStartFresh('tA', '2026-10-04', actor, null, { now: NOW });
+    expect(idsOf('order', 'a')).toEqual(['ao6']);
+  });
+});
+
+describe('the run removes only what the preview showed (PREVIEW_STALE)', () => {
+  it('more orders (or other dates) than shown: 409 PREVIEW_STALE, nothing removed; the same numbers run', async () => {
+    const shown = startFreshShown(await preview(null));
+    tables.order!.push({ id: 'anew', tenantId: 'tA', customerId: 'ac1', depotId: 'adep', deliveryDate: day('2026-10-01'), isLate: false, carriedFromOrderId: null, carriedToOrderId: null, uploadBatchId: null });
+    const fresh = await preview(null);
+    expect(startFreshStale(shown, fresh)).toEqual(['Orders: 4 shown, now 5', 'Order dates: 2026-10-02 to 2026-10-06 shown, now 2026-10-01 to 2026-10-06']);
+    const snapshot = structuredClone(tables);
+    await expect(run(null, { shown })).rejects.toMatchObject({ status: 409, details: { code: 'PREVIEW_STALE' } });
+    expect(tables).toEqual(snapshot);
+    // Checked again: the new numbers run.
+    const r = await run(null, { shown: startFreshShown(fresh) });
+    expect(r.removed.orders).toBe(5);
+  });
+
+  it('a new live load since the check is stale too; fewer rows than shown is not', async () => {
+    const shown = startFreshShown(await preview(null));
+    tables.planLoad!.find((l) => l.id === 'ald6')!.status = 'DISPATCHED';
+    expect(startFreshStale(shown, await preview(null))).toEqual(['Loads already locked, loading, dispatched or completed: 2 shown, now 3']);
+    await expect(run(null, { shown })).rejects.toMatchObject({ details: { code: 'PREVIEW_STALE' } });
+    tables.planLoad!.find((l) => l.id === 'ald6')!.status = 'PLANNED';
+    tables.deliveryPhoto = tables.deliveryPhoto!.filter((p) => p.id !== 'aph2');
+    await run(null, { shown });
+    expect(idsOf('order', 'a')).toEqual([]);
   });
 });
 
@@ -306,7 +385,7 @@ describe('run: everything', () => {
   it('removes the test data in foreign-key order, keeps masters and the audit log, adds one audit row; the other company is untouched', async () => {
     const other = companyRows('tB', 'b');
     const mastersA = Object.fromEntries(MASTERS.map((m) => [m, structuredClone((tables[m] ?? []).filter((r) => r.tenantId === 'tA' || r.id === 'tA'))]));
-    const r = await runStartFresh('tA', null, actor, '10.0.0.1');
+    const r = await run(null, {}, '10.0.0.1');
 
     // Nothing left of the activity data of company A.
     for (const m of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof']) {
@@ -330,7 +409,7 @@ describe('run: everything', () => {
   });
 
   it('deletes children before the rows they point at (the documented order)', async () => {
-    await runStartFresh('tA', null, actor, null);
+    await run(null);
     const first = (m: string) => deletes.indexOf(m);
     const last = (m: string) => deletes.lastIndexOf(m);
     expect(first('unservedOrder')).toBeGreaterThanOrEqual(0);
@@ -353,17 +432,74 @@ describe('run: everything', () => {
     expect([...new Set(deletes)]).toEqual(START_FRESH_DELETE_ORDER);
   });
 
-  it('takes the locks first: lock timeout, the intake lock (optimize start, files, late orders, Bring forward), then the plan rows', async () => {
+  it('takes the locks first: lock timeout, the intake lock, the outcome-day and driver-link locks of the days in scope, then the plan rows and the driver links', async () => {
+    const calls: { sql: string; values: unknown[] }[] = [];
+    const raw = fakePrisma.$queryRaw;
+    fakePrisma.$queryRaw = async (s: TemplateStringsArray, ...v: unknown[]) => {
+      calls.push({ sql: s.join('?').replace(/\s+/g, ' ').trim(), values: v });
+      return raw(s, ...v);
+    };
     rawLog.length = 0;
-    await runStartFresh('tA', null, actor, null);
+    try {
+      await run('2026-10-04');
+    } finally {
+      fakePrisma.$queryRaw = raw;
+    }
     expect(rawLog[0]).toMatch(/SET LOCAL lock_timeout = '\d+ms'/);
-    expect(rawLog[1]).toMatch(/pg_advisory_xact_lock\(hashtextextended\(\?, 0\)\)/);
-    expect(rawLog[2]).toMatch(/SELECT id FROM "RunPlan" WHERE "tenantId" = \? ORDER BY id FOR UPDATE/);
+    expect(calls[0]!.sql).toMatch(/pg_advisory_xact_lock\(hashtextextended\(\?, 0\)\)/); // intake
+    // Every depot-day in scope (lib/delivery/locks.ts: every driver and office result, arrival and photo
+    // takes it first), then every truck-day (lib/driver-link/service.ts: a link issued, reissued or revoked).
+    expect(calls[1]!.sql).toMatch(/unnest\(\?::text\[\]\).*pg_advisory_xact_lock\(hashtextextended\(k\.key, 0\)\)/);
+    expect(calls[1]!.values[0]).toEqual(['outcomes:tA|adep|2026-10-02', 'outcomes:tA|adep|2026-10-03']);
+    expect(calls[2]!.sql).toMatch(/unnest\(\?::text\[\]\).*pg_advisory_xact_lock/);
+    expect(calls[2]!.values[0]).toEqual(['driver-link:tA|at1|2026-10-02', 'driver-link:tA|at1|2026-10-03']);
+    expect(calls[3]!.sql).toMatch(/SELECT id FROM "RunPlan" WHERE "tenantId" = \? AND "runDate" < \?::date ORDER BY id FOR UPDATE/);
+    expect(calls[4]!.sql).toMatch(/SELECT id FROM "DriverLink" WHERE "tenantId" = \? AND "deliveryDate" < \?::date ORDER BY id FOR UPDATE/);
+    expect(calls).toHaveLength(5);
+  });
+
+  it('everything: the same locks for every day of the company', async () => {
+    rawLog.length = 0;
+    await run(null);
+    expect(rawLog.slice(1)).toEqual([
+      'SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(?, 0))',
+      'SELECT 1 AS locked FROM unnest(?::text[]) AS k(key), LATERAL pg_advisory_xact_lock(hashtextextended(k.key, 0))',
+      'SELECT 1 AS locked FROM unnest(?::text[]) AS k(key), LATERAL pg_advisory_xact_lock(hashtextextended(k.key, 0))',
+      'SELECT id FROM "RunPlan" WHERE "tenantId" = ? ORDER BY id FOR UPDATE',
+      'SELECT id FROM "DriverLink" WHERE "tenantId" = ? ORDER BY id FOR UPDATE',
+    ]);
+  });
+
+  it('delivery results, photos and driver links written after the check go too (removed by company and date, not by ids read earlier)', async () => {
+    // A driver's phone (or the office) records a result between the counting and the removal: a new
+    // stop result with an event and a photo on a link of the 2nd, and a link issued for the 3rd.
+    let injected = false;
+    const fkDelete = fakePrisma.unservedOrder.deleteMany;
+    fakePrisma.unservedOrder.deleteMany = async (a: Row) => {
+      if (!injected) {
+        injected = true;
+        const at = { tenantId: 'tA', depotId: 'adep', truckId: 'at1', deliveryDate: day('2026-10-02') };
+        tables.stopVisit!.push({ id: 'avlate', ...at, customerId: 'ac2', loadNo: 1, sequence: 2 });
+        tables.stopEvent!.push({ id: 'aelate', ...at, visitId: 'avlate', driverLinkId: 'adl2' });
+        tables.deliveryPhoto!.push({ id: 'aphlate', tenantId: 'tA', visitId: 'avlate', driverLinkId: 'adl2' });
+        tables.driverLink!.push({ id: 'adl3', tenantId: 'tA', truckId: 'at1', deliveryDate: day('2026-10-03') });
+      }
+      return fkDelete(a);
+    };
+    const r = await run('2026-10-04');
+    expect(injected).toBe(true);
+    expect(idsOf('stopVisit', 'a')).toEqual(['av6']);
+    expect(idsOf('stopEvent', 'a')).toEqual(['ae6']);
+    expect(idsOf('deliveryPhoto', 'a')).toEqual(['aph6']);
+    expect(idsOf('driverLink', 'a')).toEqual(['adl6']);
+    expect(danglingReferences()).toEqual([]);
+    // The summary counts what was really deleted.
+    expect(r.removed).toMatchObject({ stopVisits: 3, stopEvents: 4, deliveryPhotos: 2, driverLinks: 2 });
   });
 
   it('a second run finds nothing left to remove (the daily driver who is a truck default stays) and still writes its audit row', async () => {
-    await runStartFresh('tA', null, actor, null);
-    const again = await runStartFresh('tA', null, actor, null);
+    await run(null);
+    const again = await run(null);
     expect(startFreshTotal(again.removed)).toBe(0);
     expect(tables.auditLog!.filter((a) => a.tenantId === 'tA' && a.action === 'TEST_DATA_CLEARED')).toHaveLength(2);
   });
@@ -378,44 +514,71 @@ describe('refusals', () => {
       enforceForeignKeys();
       tables.runJob!.push({ id: 'live', tenantId: 'tA', runId: 'ap6', status });
       const snapshot = structuredClone(tables);
-      const preview = await previewStartFresh('tA', null);
-      expect(preview.blockers.map((b) => b.code)).toEqual(['OPTIMIZATION_RUNNING']);
-      expect(preview.blockers[0]!.message).toMatch(/2026-10-06/);
-      await expect(runStartFresh('tA', null, actor, null)).rejects.toMatchObject({ status: 409, details: { code: 'OPTIMIZATION_RUNNING' } });
+      const p = await preview(null);
+      expect(p.blockers.map((b) => b.code)).toEqual(['OPTIMIZATION_RUNNING']);
+      expect(p.blockers[0]!.message).toMatch(/2026-10-06/);
+      await expect(run(null)).rejects.toMatchObject({ status: 409, details: { code: 'OPTIMIZATION_RUNNING' } });
       expect(tables).toEqual(snapshot);
     }
   });
 
   it("another company's optimization does not block this one", async () => {
     tables.runJob!.push({ id: 'liveB', tenantId: 'tB', runId: 'bp6', status: 'RUNNING' });
-    expect((await previewStartFresh('tA', null)).blockers).toEqual([]);
-    await runStartFresh('tA', null, actor, null);
+    expect((await preview(null)).blockers).toEqual([]);
+    await run(null);
     expect(idsOf('runJob', 'b')).toEqual(['bj2', 'bj3', 'bj6']);
     expect(tables.runJob!.find((j) => j.id === 'liveB')).toBeTruthy();
   });
 
-  it('only before a date that splits a Bring forward (original before, copy on or after): refused, the dates named', async () => {
-    const preview = await previewStartFresh('tA', '2026-10-03');
-    expect(preview.blockers.map((b) => b.code)).toEqual(['CARRIED_ACROSS_DATE']);
-    expect(preview.blockers[0]!.message).toMatch(/2026-10-03/);
-    expect(preview.blockers[0]!.message).toMatch(/2026-10-02 or an earlier date/);
+  it('only before a date that splits a Bring forward (original before, copy on or after): refused, the dates named, with a safe earlier and later date', async () => {
+    const p = await preview('2026-10-03');
+    expect(p.blockers.map((b) => b.code)).toEqual(['CARRIED_ACROSS_DATE']);
+    expect(p.blockers[0]!.message).toMatch(/1 order on 2026-10-03 was brought forward from a day before 2026-10-03/);
+    expect(p.blockers[0]!.message).toMatch(/Choose 2026-10-02 \(keeps .*\) or 2026-10-04 \(removes .*\), undo the Bring forward first, or remove everything/);
     const snapshot = structuredClone(tables);
-    await expect(runStartFresh('tA', '2026-10-03', actor, null)).rejects.toMatchObject({ status: 409, details: { code: 'CARRIED_ACROSS_DATE' } });
+    await expect(run('2026-10-03')).rejects.toMatchObject({ status: 409, details: { code: 'CARRIED_ACROSS_DATE' } });
     expect(tables).toEqual(snapshot);
+    for (const safe of ['2026-10-02', '2026-10-04']) expect((await preview(safe)).blockers, safe).toEqual([]);
+  });
+
+  it('an order brought forward twice (2nd -> 3rd -> 4th): the suggested dates pass at once, never a date that is refused again', async () => {
+    // ao3 (3 Oct, carried from ao2 of the 2nd) carried again to a new order on the 4th.
+    tables.order!.push({ id: 'ao4', tenantId: 'tA', customerId: 'ac1', depotId: 'adep', deliveryDate: day('2026-10-04'), isLate: false, carriedFromOrderId: 'ao3', carriedToOrderId: null, uploadBatchId: null });
+    tables.order!.find((o) => o.id === 'ao3')!.carriedToOrderId = 'ao4';
+    const p = await preview('2026-10-04');
+    expect(p.blockers.map((b) => b.code)).toEqual(['CARRIED_ACROSS_DATE']);
+    // Not 2026-10-03 (the 3rd is itself a copy of the 2nd: refused again), but the chain's first day,
+    // and the day after its last copy.
+    expect(p.blockers[0]!.message).toMatch(/Choose 2026-10-02 \(.*\) or 2026-10-05 \(.*\)/);
+    expect((await preview('2026-10-03')).blockers.map((b) => b.code)).toEqual(['CARRIED_ACROSS_DATE']);
+    expect((await preview('2026-10-02')).blockers).toEqual([]);
+    expect((await preview('2026-10-05')).blockers).toEqual([]);
+  });
+
+  it('the safe dates: the largest date not after the chosen one, and the smallest after it, that split no Bring forward', () => {
+    const spans = [
+      { lo: '2026-10-02', hi: '2026-10-03' },
+      { lo: '2026-10-03', hi: '2026-10-04' },
+      { lo: '2026-09-28', hi: '2026-10-02' }, // another chain that ends where the first starts
+      { lo: '2026-10-10', hi: '2026-10-12' }, // far away: not in the way
+    ];
+    expect(startFreshSafeCutoffs(spans, '2026-10-04')).toEqual({ earlier: '2026-09-28', later: '2026-10-05' });
+    expect(startFreshSafeCutoffs(spans, '2026-10-11')).toEqual({ earlier: '2026-10-10', later: '2026-10-13' });
+    expect(startFreshSafeCutoffs(spans, '2026-10-07')).toEqual({ earlier: '2026-10-07', later: '2026-10-07' });
   });
 
   it('a plan on or after the date that names an order from before it: refused (never a broken plan)', async () => {
     tables.routeAssignment!.push({ id: 'odd', runId: 'ap6', loadId: 'ald6', orderId: 'ao1', truckId: 'at1' });
-    const preview = await previewStartFresh('tA', '2026-10-04');
-    expect(preview.blockers.map((b) => b.code)).toEqual(['PLAN_ACROSS_DATE']);
-    await expect(runStartFresh('tA', '2026-10-04', actor, null)).rejects.toMatchObject({ status: 409, details: { code: 'PLAN_ACROSS_DATE' } });
+    const p = await preview('2026-10-04');
+    expect(p.blockers.map((b) => b.code)).toEqual(['PLAN_ACROSS_DATE']);
+    await expect(run('2026-10-04')).rejects.toMatchObject({ status: 409, details: { code: 'PLAN_ACROSS_DATE' } });
   });
 });
 
 describe('run: only before a date', () => {
   it('removes what is before the date; what is on or after it, and the other company, stay', async () => {
     const other = companyRows('tB', 'b');
-    const r = await runStartFresh('tA', '2026-10-04', actor, null);
+    const r = await run('2026-10-04');
     expect(idsOf('order', 'a')).toEqual(['ao6']);
     expect(idsOf('orderLine', 'a')).toEqual(['al-o6']);
     expect(idsOf('intakeLineKey', 'a')).toEqual(['ak-o6']);
@@ -433,5 +596,24 @@ describe('run: only before a date', () => {
     expect(companyRows('tB', 'b')).toEqual(other);
     expect(danglingReferences()).toEqual([]);
     expect(tables.auditLog!.filter((a) => a.tenantId === 'tA').at(-1)!.afterJson).toMatchObject({ before: '2026-10-04', removed: r.removed });
+  });
+
+  it('an order file not confirmed yet whose lines reach the date or later is kept (counted as kept); one with every line before it goes', async () => {
+    // Uploaded on the 3rd for the 3rd and the 4th (UploadBatch.deliveryDate is the file's earliest date),
+    // not confirmed: no order yet. And one for the 2nd and 3rd only, uploaded with errors.
+    tables.uploadBatch!.push(
+      { id: 'abst', tenantId: 'tA', depotId: 'adep', deliveryDate: day('2026-10-03'), uploadedAt: new Date('2026-10-03T08:00:00Z'), status: 'VALIDATED', validationJson: { totals: { deliveryDates: ['2026-10-03', '2026-10-04'] }, fileDeliveryDates: ['2026-10-03', '2026-10-04'] } },
+      { id: 'abold', tenantId: 'tA', depotId: 'adep', deliveryDate: day('2026-10-02'), uploadedAt: new Date('2026-10-01T08:00:00Z'), status: 'PARSED', validationJson: { totals: { deliveryDates: ['2026-10-02'] }, fileDeliveryDates: ['2026-10-02', '2026-10-03'] } },
+      // Only skipped rows reached the 4th: still a file for the kept day.
+      { id: 'abskip', tenantId: 'tA', depotId: 'adep', deliveryDate: null, uploadedAt: new Date('2026-10-02T08:00:00Z'), status: 'PARSED', validationJson: { totals: { deliveryDates: [] }, fileDeliveryDates: ['2026-10-04'] } },
+    );
+    const p = await preview('2026-10-04');
+    expect(p.removed.uploadBatches).toBe(3); // b1, the deleted file of 30 Sep, abold
+    expect(p.kept.orderFiles).toBe(3); // b6, abst, abskip
+    await run('2026-10-04');
+    expect(idsOf('uploadBatch', 'a')).toEqual(['ab6', 'abskip', 'abst']);
+    // Everything removes them all.
+    await run(null);
+    expect(idsOf('uploadBatch', 'a')).toEqual([]);
   });
 });

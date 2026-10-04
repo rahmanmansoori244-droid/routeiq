@@ -277,9 +277,17 @@ async function inLinkTx<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Pr
   }
 }
 
+/**
+ * The key of one truck-day's link lock. Start fresh (lib/start-fresh.ts) takes it for every truck-day
+ * it removes, so no link is issued for a day while that day's plan is being removed.
+ */
+export function driverLinkLockKey(tenantId: string, truckId: string, dateIso: string): string {
+  return `driver-link:${tenantId}|${truckId}|${dateIso}`;
+}
+
 /** The advisory lock of one truck-day's link (ensure, reissue and revoke serialize on it). */
 async function lockTruckDay(tx: Prisma.TransactionClient, tenantId: string, truckId: string, dateIso: string): Promise<void> {
-  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`driver-link:${tenantId}|${truckId}|${dateIso}`}, 0))`;
+  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${driverLinkLockKey(tenantId, truckId, dateIso)}, 0))`;
 }
 
 function isUniqueViolation(e: unknown): boolean {

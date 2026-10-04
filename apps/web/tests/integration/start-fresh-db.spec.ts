@@ -5,19 +5,24 @@
  * ACTION, PlanLoad.driverId NO ACTION, ...) and its locks; only the session is faked (vi.mock of
  * auth). Needs DATABASE_URL (migrated); the web server and the solver are not used.
  *
- * Two companies with the same kind of data: order files, orders on two days (a late one, one
- * brought forward with a delivery time of its own), intake keys, plan versions with options, loads
- * (a daily driver on one), stops, an unserved row, jobs, driver links, delivery results, events,
- * a photo, a comparison baseline, the retired driver app's rows, daily drivers and audit rows.
+ * Two companies with the same kind of data: order files (one not confirmed yet, for days 2 and 3),
+ * orders on two days (a late one, one brought forward with a delivery time of its own), intake keys,
+ * plan versions with options, loads (a daily driver on a completed one), stops, an unserved row,
+ * jobs, driver links, delivery results, events, a photo, a comparison baseline, the retired driver
+ * app's rows, daily drivers and audit rows. Every run sends the preview it was shown (`expect`).
  *  1. The preview counts company A only, and changes nothing.
  *  2. A dispatcher (PLANNER) gets 403; a wrong company code 400; nothing is removed.
  *  3. Refused (409) while an optimization of A is RUNNING; nothing is removed.
- *  4. "Only before a date" that would split the Bring forward pair is refused (409); one after both
- *     days of the first day removes only that day.
+ *  4. "Only before a date" that would split the Bring forward pair is refused (409) with a safe date
+ *     on each side; an order added after the check is refused (PREVIEW_STALE); the completed load
+ *     needs the live-data tick (LIVE_DATA_CONFIRM); then a date after both days removes them and
+ *     keeps day 3, and the file not confirmed yet whose lines reach day 3.
  *  5. Everything: A has no order, file, plan, load, stop, job, link, result, photo, baseline or
  *     old driver app row left; its customers, products, trucks, regular drivers, depots, regions,
  *     users, settings and audit rows are kept, plus one TEST_DATA_CLEARED row with the counts and
  *     the user; the daily driver who is a truck's default driver stays; company B is untouched.
+ * The SQL of the locks (the outcome-day and driver-link advisory locks of the days in scope, the
+ * plan rows and driver links FOR UPDATE) runs on PostgreSQL in every run.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -26,6 +31,7 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: s
 
 import { GET, POST } from '@/app/api/tenant/start-fresh/route';
 import { prisma as libPrisma } from '@/lib/db';
+import { startFreshShown } from '@/lib/start-fresh-text';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
 const day = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
@@ -52,6 +58,12 @@ const get = async (q = '') => {
 const post = async (body: unknown) => {
   const res = await POST(new Request('http://localhost/api/tenant/start-fresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
   return { status: res.status, body: (await res.json()) as { data: any; error: any } };
+};
+/** A run as the panel sends it: the code, the backup tick, the live-data tick and the preview just shown. */
+const runBody = async (c: Company, extra: Record<string, unknown> = {}) => {
+  const before = typeof extra.before === 'string' ? extra.before : null;
+  const preview = await get(before ? `?before=${before}` : '');
+  return { confirm: c.slug, backupConfirmed: true, liveDataConfirmed: true, expect: startFreshShown(preview.body.data), ...extra };
 };
 
 /** One company's master data and test activity. */
@@ -109,6 +121,13 @@ async function seed(c: Company) {
 
   // Day 3 (after the dates "only before" removes): its own file, order, plan, load, stop, job and link.
   const batch3 = await prisma.uploadBatch.create({ data: { tenantId, fileName: 'orders-6.csv', fileType: 'csv', uploadedById: c.adminId, depotId: depot.id, deliveryDate: day(D3), status: 'CONFIRMED' } });
+  // A file for days 2 and 3 not confirmed yet (UploadBatch.deliveryDate is its earliest date): no order.
+  await prisma.uploadBatch.create({
+    data: {
+      tenantId, fileName: 'orders-3-6.csv', fileType: 'csv', uploadedById: c.adminId, depotId: depot.id, deliveryDate: day(D2), status: 'VALIDATED',
+      validationJson: { totals: { deliveryDates: [D2, D3] }, fileDeliveryDates: [D2, D3] },
+    },
+  });
   const o6 = await prisma.order.create({ data: { tenantId, customerId: c1.id, depotId: depot.id, deliveryDate: day(D3), totalCases: 40, uploadBatchId: batch3.id } });
   await prisma.orderLine.create({ data: { orderId: o6.id, productId: product.id, cases: 40 } });
   const p6 = await prisma.runPlan.create({ data: { tenantId, depotId: depot.id, runDate: day(D3), createdById: c.adminId, status: 'READY' } });
@@ -199,7 +218,7 @@ describe('Start fresh on real PostgreSQL', () => {
     expect(r.status).toBe(200);
     expect(r.body.data.blockers).toEqual([]);
     expect(r.body.data.removed).toEqual({
-      uploadBatches: 2,
+      uploadBatches: 3,
       orders: 4,
       lateOrders: 1,
       broughtForward: 1,
@@ -219,16 +238,20 @@ describe('Start fresh on real PostgreSQL', () => {
       baselines: 1,
       oldDriverApp: 3,
     });
-    expect(r.body.data.kept).toEqual({ customers: 2, products: 1, trucks: 1, drivers: 1, dailyDrivers: 1, depots: 1, regions: 1, users: 2, auditRows: 2 });
+    expect(r.body.data.kept).toEqual({ customers: 2, products: 1, trucks: 1, drivers: 1, dailyDrivers: 1, depots: 1, regions: 1, users: 2, auditRows: 2, orderFiles: 0 });
+    // The completed load of day 1 may already be real: the run needs the extra tick.
+    expect(r.body.data.live).toMatchObject({ frozenLoads: 1 });
     expect(await census(A.tenantId)).toEqual(before);
   });
 
   it('2. a dispatcher gets 403, a wrong company code 400: nothing removed', async () => {
     const before = await census(A.tenantId);
-    as(A, 'PLANNER');
-    expect((await post({ confirm: A.slug, backupConfirmed: true })).status).toBe(403);
     as(A, 'TENANT_ADMIN');
-    const wrong = await post({ confirm: B.slug, backupConfirmed: true });
+    const body = await runBody(A);
+    as(A, 'PLANNER');
+    expect((await post(body)).status).toBe(403);
+    as(A, 'TENANT_ADMIN');
+    const wrong = await post({ ...body, confirm: B.slug });
     expect(wrong.status).toBe(400);
     expect(wrong.body.error.code).toBe('CONFIRM_MISMATCH');
     expect(await census(A.tenantId)).toEqual(before);
@@ -239,26 +262,46 @@ describe('Start fresh on real PostgreSQL', () => {
     const plan = await prisma.runPlan.findFirstOrThrow({ where: { tenantId: A.tenantId, runDate: day(D2) } });
     const job = await prisma.runJob.create({ data: { tenantId: A.tenantId, runId: plan.id, createdById: A.adminId, status: 'RUNNING', attemptNo: 2 } });
     as(A, 'TENANT_ADMIN');
-    const r = await post({ confirm: A.slug, backupConfirmed: true });
+    const r = await post(await runBody(A));
     expect(r.status).toBe(409);
     expect(r.body.error.code).toBe('OPTIMIZATION_RUNNING');
     expect(await census(A.tenantId)).toEqual({ ...before, runJob: before.runJob + 1 });
     await prisma.runJob.delete({ where: { id: job.id } });
   });
 
-  it('4. only before a date: a date that splits the Bring forward pair is refused; a date after it removes days 1 and 2 and keeps day 3', async () => {
+  it('4. only before a date: a split Bring forward, a changed preview and live data are refused; a date after both days removes them and keeps day 3', async () => {
     const beforeB = await census(B.tenantId);
     as(A, 'TENANT_ADMIN');
-    const split = await post({ confirm: A.slug, backupConfirmed: true, before: D2 });
+    const split = await post(await runBody(A, { before: D2 }));
     expect(split.status).toBe(409);
     expect(split.body.error.code).toBe('CARRIED_ACROSS_DATE');
-    expect(split.body.error.error).toMatch(/2026-10-02 or an earlier date/);
+    expect(split.body.error.error).toMatch(/Choose 2026-10-02 \(.*\) or 2026-10-04 \(.*\)/);
 
-    const r = await post({ confirm: A.slug, backupConfirmed: true, before: '2026-10-04' });
+    // An order confirmed after the check: more to remove than shown, nothing removed.
+    const shown = await runBody(A, { before: '2026-10-04' });
+    const census0 = await census(A.tenantId);
+    const c1 = await prisma.customer.findFirstOrThrow({ where: { tenantId: A.tenantId, code: 'C1' } });
+    const depot = await prisma.depot.findFirstOrThrow({ where: { tenantId: A.tenantId } });
+    const extra = await prisma.order.create({ data: { tenantId: A.tenantId, customerId: c1.id, depotId: depot.id, deliveryDate: day(D1), totalCases: 5 } });
+    const stale = await post(shown);
+    expect(stale.status).toBe(409);
+    expect(stale.body.error.code).toBe('PREVIEW_STALE');
+    expect(stale.body.error.error).toMatch(/Orders: 3 shown, now 4/);
+    await prisma.order.delete({ where: { id: extra.id } });
+    expect(await census(A.tenantId)).toEqual(census0);
+
+    // The completed load of day 1: refused without the live-data tick.
+    const unticked = await post({ ...shown, liveDataConfirmed: false });
+    expect(unticked.status).toBe(409);
+    expect(unticked.body.error.code).toBe('LIVE_DATA_CONFIRM');
+    expect(await census(A.tenantId)).toEqual(census0);
+
+    const r = await post(shown);
     expect(r.status).toBe(200);
     expect(r.body.data.removed).toMatchObject({ uploadBatches: 1, orders: 3, orderLines: 3, planVersions: 3, loads: 2, stops: 2, unserved: 1, driverLinks: 1, stopVisits: 1, stopEvents: 2, deliveryPhotos: 1, dailyDrivers: 2, baselines: 1, oldDriverApp: 3 });
+    expect(r.body.data.kept).toMatchObject({ orderFiles: 2 }); // day 3's file, and the unconfirmed file whose lines reach day 3
     const after = await census(A.tenantId);
-    expect(after).toMatchObject({ uploadBatch: 1, order: 1, orderLine: 1, intakeLineKey: 0, runPlan: 1, scenarioResult: 1, planLoad: 1, routeAssignment: 1, runJob: 1, driverLink: 1, stopVisit: 0, driverShift: 0, driverDaily: 1 });
+    expect(after).toMatchObject({ uploadBatch: 2, order: 1, orderLine: 1, intakeLineKey: 0, runPlan: 1, scenarioResult: 1, planLoad: 1, routeAssignment: 1, runJob: 1, driverLink: 1, stopVisit: 0, driverShift: 0, driverDaily: 1 });
     const left = await prisma.order.findFirstOrThrow({ where: { tenantId: A.tenantId } });
     expect(left.deliveryDate.toISOString().slice(0, 10)).toBe(D3);
     expect(await census(B.tenantId)).toEqual(beforeB);
@@ -268,9 +311,9 @@ describe('Start fresh on real PostgreSQL', () => {
     const beforeA = await census(A.tenantId);
     const beforeB = await census(B.tenantId);
     as(A, 'TENANT_ADMIN');
-    const r = await post({ confirm: ` ${A.slug.toUpperCase()} `, backupConfirmed: true });
+    const r = await post(await runBody(A, { confirm: ` ${A.slug.toUpperCase()} ` }));
     expect(r.status).toBe(200);
-    expect(r.body.data.removed).toMatchObject({ uploadBatches: 1, orders: 1, orderLines: 1, planVersions: 1, loads: 1, stops: 1, optimizationJobs: 1, driverLinks: 1, unserved: 0, dailyDrivers: 0 });
+    expect(r.body.data.removed).toMatchObject({ uploadBatches: 2, orders: 1, orderLines: 1, planVersions: 1, loads: 1, stops: 1, optimizationJobs: 1, driverLinks: 1, unserved: 0, dailyDrivers: 0 });
 
     const after = await census(A.tenantId);
     for (const k of ['uploadBatch', 'order', 'orderLine', 'intakeLineKey', 'runPlan', 'scenarioResult', 'unservedOrder', 'planLoad', 'routeAssignment', 'runJob', 'manualBaseline', 'manualBaselineAssignment', 'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'driverShift', 'truckLocation', 'deliveryProof'] as const) {
