@@ -269,6 +269,9 @@ class Facts:
     pause_after: int | None = None
     pause_lo: int = 0
     pause_drive: int = 0
+    # The load's pallet need in 1/1000 pallet (the sum of its stops' demand_pallet_units; 0 when the
+    # request sent none): what fits_truck compares on a truck with bays.
+    pallet_units: int = 0
 
     @property
     def waits(self) -> bool:
@@ -304,6 +307,7 @@ def facts(day: Day, load: Load, pause_after: int | None = None, pause_s: int = 0
         lo=max(_hs(s) - o for s, o in zip(ss, off)), hi=min(_he(day, s) - o for s, o in zip(ss, off)),
         cases=sum(s.demand_cases for s in ss), kg_units=sum(kg_units(s.demand_kg) for s in ss), metres=day.metres(load),
         gap=day.gap_s(sum(s.demand_cases for s in ss)), pause_after=pause_after, pause_lo=p_lo, pause_drive=p_drive,
+        pallet_units=sum(s.demand_pallet_units or 0 for s in ss),
     )
 
 
@@ -329,9 +333,14 @@ def _first_departure_s(day: Day, td: "TruckDay", f: Facts) -> int:
 
 
 def fits_truck(f: Facts, td: "TruckDay") -> bool:
-    """The load's cases and kg fit the truck: kg in 0.1 kg units against the payload rounded down,
-    with no margin either way (audit F08)."""
-    return f.cases <= td.max_cases and (td.max_kg_units <= 0 or f.kg_units <= td.max_kg_units)
+    """The load fits the truck: its pallet units within bays x fill on a truck with bays
+    (TruckDay.max_pallet_units; its case capacity is then not a limit), else its cases; and its kg
+    in 0.1 kg units against the payload rounded down, with no margin either way (audit F08). Every
+    repack path (depart_range, the optional one-stop loads, the fit fallback, time_plan) goes
+    through here, so a load over its bays never gets a truck."""
+    room = getattr(td, "max_pallet_units", 0)
+    space_ok = f.pallet_units <= room if room > 0 else f.cases <= td.max_cases
+    return space_ok and (td.max_kg_units <= 0 or f.kg_units <= td.max_kg_units)
 
 
 def depart_range(day: Day, f: Facts, td: "TruckDay") -> tuple[int, int] | None:
@@ -1115,7 +1124,8 @@ def _identical_trucks(day: Day, pricing: Pricing) -> dict[int, tuple[int, int]]:
     for td in day.trucks:
         groups[(td.max_cases, td.max_kg, td.earliest_depart_s, td.latest_return_s, td.trips_left, td.n_frozen,
                 td.shift_anchor_s, td.frozen_return_s, td.loading_from_s, pricing.trucks[td.idx],
-                getattr(td, "break_state", "OFF"), getattr(td, "break_lo_s", 0), getattr(td, "break_hi_s", 0))].append(td.idx)
+                getattr(td, "break_state", "OFF"), getattr(td, "break_lo_s", 0), getattr(td, "break_hi_s", 0),
+                getattr(td, "max_pallet_units", 0), getattr(td, "bays", None))].append(td.idx)
     out: dict[int, tuple[int, int]] = {}
     for c, members in enumerate(v for v in groups.values() if len(v) > 1):
         for i, idx in enumerate(sorted(members)):

@@ -335,6 +335,11 @@ export function SettingsForm({
             hint: "For customers whose own time was never confirmed and whose customer type has none. A confirmed customer time always wins.",
           })}
           {num('maxTripsPerTruck', 'Max loads per truck per day', { step: 1, hint: "A truck's own limit (Trucks) wins when it has one." })}
+          {num('palletFillPct', 'Pallet fill', {
+            step: 1,
+            unit: '%',
+            hint: 'Trucks with bays only: the share of the bays the planner may fill with mixed pallets (95% of 12 bays = 11.4 pallets), and the payload. Trucks without bays are planned by cases.',
+          })}
           <ToggleField
             label="Split deliveries: a customer bigger than the largest truck is delivered in parts"
             value={c.splitDeliveries}

@@ -249,6 +249,9 @@ model TenantConfig {
   prefWindowPenaltyPerMin Float   @default(0.05)
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
   splitDeliveries         Boolean @default(true) // customers bigger than the largest truck are delivered in parts
+  // Pallet fill (owner decision 4 Oct 2026): the percent of a truck's bays the planner may fill with
+  // mixed pallets (the safety margin; 12 bays at 95% = 11.4 pallets). 50-100 (database CHECK).
+  palletFillPct           Int     @default(95)
   osrmUrl                 String? // overrides the OSRM_URL env var; there is no silent public default
   priorityWeightsJson     Json? // {"1":10000,...,"5":1}; must be strictly decreasing
   orderColumnMapJson      Json? // extra header aliases for the NMWC order export
@@ -391,7 +394,10 @@ model Truck {
   fixedCostPerDay  Float             @default(0) // fixed operating cost per day the truck is used
   costPerKm        Float             @default(0) // variable cost/km EXCLUDING fuel when kmPerLitre is set
   kmPerLitre       Float? // fuel economy: fuel cost = km / kmPerLitre x fuel price
-  palletCapacity   Int?
+  /// Bays (pallet positions, owner decision 4 Oct 2026): set = the truck is planned by PALLETS
+  /// (bays x TenantConfig.palletFillPct and the payload; capacityCases is then not a limit);
+  /// null = planned by cases (capacityCases). The column kept its first name.
+  bays             Int?              @map("palletCapacity")
   tripCost         Float             @default(0) // per load (loading labour etc.)
   maxTripsPerDay   Int? // overrides TenantConfig.maxTripsPerTruck
   availableFromMin Int?
@@ -593,6 +599,9 @@ model Product {
   weightPerCaseKg   Float       @default(0) // 0 = unknown
   volumePerCaseL    Float       @default(0)
   unitsPerCase      Int?
+  /// The ERP pallet factor (owner decision 4 Oct 2026): cases of this product on one pallet. A
+  /// whole number 1-10,000 (lib/dispatch/pallets.ts validPalletFactor; anything else counts as
+  /// missing). Needed on every product of a day planned with trucks that have bays.
   casesPerPallet    Float?
   createdFromUpload Boolean     @default(false)
   active            Boolean     @default(true)
@@ -824,6 +833,10 @@ model PlanLoad {
   // The driver break planned with this load (v1: startMin, endMin, lengthMin, where DEPOT | ROAD,
   // afterSequence), or NULL. Copied with the load into every new version, so a locked load keeps it.
   breakJson           Json?
+  /// The pallet need the load was planned with, in 1/1000 pallet (the sum of its rows'): set only
+  /// on a load planned by pallets (a truck with bays, and the optimizer said so). NULL = planned by
+  /// cases, or before pallets existed. Copied unchanged with a frozen load.
+  palletUnits         Int?
   /// The load's cost breakdown under the one cost model (review F17, apps/solver/costing.py: the
   /// driver is paid for the whole truck day): fixed, trip, distance, fuel, driver share, overtime,
   /// paid minutes, estimated legs (lib/dispatch/costs.ts). Null on loads costed the earlier way
@@ -897,6 +910,9 @@ model RouteAssignment {
   portionCases              Int?
   portionWeightKg           Float?
   portionLinesJson          Json? // [{ lineId, cases }] - exact SKU lines of this portion
+  /// The row's pallet need as sent to the optimizer, in 1/1000 pallet (each line's cases / its cases
+  /// per pallet, rounded up per line). NULL = planned without pallets (no truck with bays).
+  palletUnits               Int?
   /// The customer facts this stop was planned with (pin, receiving hours, service time, name,
   /// address, access notes): lib/dispatch/snapshots.ts. Null on rows planned before snapshots
   /// existed (the live customer is shown, labelled as such).

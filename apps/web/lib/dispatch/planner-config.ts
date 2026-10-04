@@ -24,6 +24,8 @@ export interface TenantPlannerConfig {
   serviceMinPerCase: number;
   maxTripsPerTruck: number;
   splitDeliveries: boolean;
+  /** Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill; absent = 95. */
+  palletFillPct?: number;
   defaultServiceTimeMin: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
@@ -86,6 +88,7 @@ export const SETTING_LABELS: Record<ConfigBoundKey, string> = {
   reloadMinutes: 'Turnaround between loads',
   loadingMinPerCase: 'Loading minutes per case',
   maxTripsPerTruck: 'Max loads per truck per day',
+  palletFillPct: 'Pallet fill',
   fuelPricePerLitre: 'Fuel price per litre',
   driverCostPerHour: 'Driver cost per hour',
   prefWindowPenaltyPerMin: 'Preferred-window penalty per minute',
@@ -131,6 +134,8 @@ interface TruckRow {
   availableFromMin: number | null;
   availableToMin: number | null;
   maxTripsPerDay: number | null;
+  /** Pallet positions; null = planned by cases. */
+  bays?: number | null;
 }
 
 /**
@@ -150,6 +155,7 @@ export function masterDataProblems(trucks: TruckRow[], depot: { openMin: number 
     if (bad(t.kmPerLitre, 0, Number.MAX_VALUE, { open: true })) p.push(`km per litre ${t.kmPerLitre} (must be above 0, or empty)`);
     if (bad(t.maxTripsPerDay, 1, 10, { int: true })) p.push(`max loads ${t.maxTripsPerDay} (1-10)`);
     if (bad(t.availableFromMin, 0, 1440, { int: true }) || bad(t.availableToMin, 0, 2880, { int: true })) p.push('availability outside the day');
+    if (bad(t.bays ?? null, 1, 40, { int: true })) p.push(`bays ${t.bays} (1-40, or empty)`);
     if (p.length) out.push(`Truck ${t.code}: ${p.join(', ')}`);
   }
   if (bad(depot.openMin, 0, 1440, { int: true }) || bad(depot.closeMin, 0, 1440, { int: true })) out.push('Depot hours outside 00:00-24:00');
@@ -180,6 +186,8 @@ export function dispatchConfigFromTenant(
       reload_min: cfg.reloadMinutes,
       loading_min_per_case: cfg.loadingMinPerCase,
       max_trips_per_truck: cfg.maxTripsPerTruck,
+      // Pallet fill: only trucks with bays use it (each load keeps the fill the solver REPORTS).
+      pallet_fill_pct: cfg.palletFillPct ?? 95,
       fuel_price_per_litre: cfg.fuelPricePerLitre,
       driver_cost_per_hour: cfg.driverCostPerHour,
       // A higher priority always wins over any number of lower ones (weights kept for reference).
@@ -279,6 +287,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       note: 'a customer whose unloading takes longer than its receiving hours cannot be planned',
     },
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
+    {
+      label: 'Truck capacity',
+      value: `bays x ${cfg.palletFillPct ?? 95}% and payload (trucks without bays: cases and payload)`,
+      source: 'SETTING',
+      note: "a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases",
+    },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
     { label: 'Fuel price', value: cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${currency} per litre` : '0 (fuel not costed separately)', source: 'SETTING' },
     {

@@ -33,7 +33,7 @@ import {
   type StartedAnswer,
 } from '@/lib/dispatch/search-mode';
 import { kgText, manifestKgNote } from '@/lib/dispatch/weights';
-import { api, askOverride, durH, hhmm, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
+import { api, askOverride, durH, hhmm, isPalletFactorRefusal, palletRefusalToast, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
@@ -540,7 +540,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             overrides = { ...overrides, ...more };
             continue;
           }
-          if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
+          if (isPalletFactorRefusal(r.errorBody)) {
+            // Refused, no question: the products to fix, with the Products link (the previous plan stays).
+            toast.error(r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+          } else if (r.errorBody?.code !== 'LOCATION_REQUIRED' && r.errorBody?.code !== 'WEIGHT_REQUIRED') {
             toast.error(r.error ?? 'Re-plan failed.');
             // The plan may have changed meanwhile (superseded by another re-plan, a new version kept
             // after a refused start): reload it and the day instead of keeping stale buttons.

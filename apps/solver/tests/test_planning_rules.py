@@ -139,7 +139,7 @@ def test_f3_pref_end_bound_is_clamped_at_zero():
 # --------------------------------------------------------------------------------------
 
 def test_f4_check_scenario_flags_unloading_after_closing_under_finish_only():
-    assert FZ.CHECK_VERSION == 2
+    assert FZ.CHECK_VERSION >= 2  # 2: FINISH and the break; 3: pallets (test_pallets.py)
     r = _late_arrival_day("START")
     resp = optimize_dispatch(r)
     sc = rec(resp)

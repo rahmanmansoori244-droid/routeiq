@@ -415,7 +415,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, hired: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -640,7 +640,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   if (chosenDetails) {
     const needLegacy = loads.some((l) => l.carriedFromLoadId === null && !readTruckSnapshot(l.truckSnapshotJson));
     const legacy = needLegacy ? await legacyPlanFacts(db, tenantId, run.currentJobId) : null;
-    feasibility = checkPlanFeasibility(feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy));
+    feasibility = checkPlanFeasibility(
+      feasibilityInputFromRows(loads, run.chosenScenarioId, chosenDetails, legacy, { palletFillPctNow: cfg?.palletFillPct ?? null }),
+    );
     for (const dl of detailLoads) {
       const t = feasibility.trucks[dl.truckId];
       dl.timing = t ? { status: t.status, ok: t.ok } : null;

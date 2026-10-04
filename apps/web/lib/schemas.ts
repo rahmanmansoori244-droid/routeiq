@@ -112,6 +112,8 @@ const truckFields = z.object({
     maxTripsPerDay: optionalBounded(TRUCK_BOUNDS.maxTripsPerDay),
     availableFromMin: optionalBounded(TRUCK_BOUNDS.availableFromMin),
     availableToMin: optionalBounded(TRUCK_BOUNDS.availableToMin),
+    // Pallet positions (owner decision 4 Oct 2026): set = planned by pallets; '' or null = by cases.
+    bays: optionalBounded(TRUCK_BOUNDS.bays),
     // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
     defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
     active: z.boolean().optional(),
@@ -287,6 +289,8 @@ export const tenantConfigSchema = z
     serviceMinPerCase: bounded(CONFIG_BOUNDS.serviceMinPerCase),
     defaultServiceTimeMin: bounded(CONFIG_BOUNDS.defaultServiceTimeMin),
     maxTripsPerTruck: bounded(CONFIG_BOUNDS.maxTripsPerTruck),
+    // Pallet fill (owner decision 4 Oct 2026): the share of a truck's bays the planner may fill.
+    palletFillPct: bounded(CONFIG_BOUNDS.palletFillPct),
     splitDeliveries: z.boolean(),
     planningCutoffMin: bounded(CONFIG_BOUNDS.planningCutoffMin),
     dateOrder: z.enum(['DMY', 'MDY']),

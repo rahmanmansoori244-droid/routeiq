@@ -94,8 +94,23 @@ function locationQuestion(blocking: { code?: unknown }[], verb: 'Optimize' | 'Re
 }
 
 /**
+ * PALLET_FACTOR_REQUIRED (owner decision 4 Oct 2026): products of the day without cases per pallet on
+ * a depot with trucks that have bays. A refusal, never a question (no "optimize anyway"): the screen
+ * shows the answer as a red message with an Open Products link.
+ */
+export function isPalletFactorRefusal(errorBody: Record<string, unknown> | null): boolean {
+  return errorBody?.code === 'PALLET_FACTOR_REQUIRED';
+}
+
+/** The red message's options: it stays a while and links to the company's Products page. */
+export function palletRefusalToast(slug: string): { duration: number; action: { label: string; onClick: () => void } } {
+  return { duration: 30_000, action: { label: 'Open Products', onClick: () => window.location.assign(`/t/${slug}/products`) } };
+}
+
+/**
  * Optimize / re-plan answers that need the dispatcher's go-ahead (409 LOCATION_REQUIRED or
- * WEIGHT_REQUIRED): asks, and returns the override to send again, or null (not asked or declined).
+ * WEIGHT_REQUIRED): asks, and returns the override to send again, or null (not asked or declined;
+ * also for PALLET_FACTOR_REQUIRED, which is never asked).
  */
 export function askOverride(errorBody: Record<string, unknown> | null, verb: 'Optimize' | 'Re-plan', opts: { canEditProducts?: boolean } = {}): OptimizeOverrides | null {
   if (errorBody?.code === 'LOCATION_REQUIRED') {

@@ -356,6 +356,43 @@ describe('review fixes: in-place optimize, advice, weights at the start', () => 
   });
 });
 
+describe('pallets (owner decision 4 Oct 2026): products without cases per pallet refuse OPTIMIZE and RE-PLAN, no override', () => {
+  const MISSING = [{ productId: 'p1', productCode: 'TN1.5L', productName: 'Tanuf 1.5L', lines: 2, cases: 120 }];
+  const BLOCKING = [{ customerId: 'c', customerCode: 'C1', branchCode: null, customerName: 'C1', code: 'LOCATION_REQUIRED', message: '', orderIds: ['O2'], cases: 10 }];
+  async function withMissing() {
+    const { buildDispatchRequest } = await import('@/lib/dispatch/plan-service');
+    vi.mocked(buildDispatchRequest).mockImplementation(async (_t, runId) => ({ ...builtFor(runId), blocking: BLOCKING, missingPalletFactors: MISSING }) as never);
+  }
+
+  it('OPTIMIZE: 409 PALLET_FACTOR_REQUIRED before the location question, also with every override; no job', async () => {
+    seed({ status: 'DRAFT', chosen: null });
+    await withMissing();
+    for (const overrides of [{}, { allowMissingLocations: true, allowMissingWeights: true }]) {
+      const res = await startDispatchOptimize(T, 'P', user, null, overrides);
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('PALLET_FACTOR_REQUIRED');
+      expect(res.body.missingPalletFactors).toEqual(MISSING);
+      expect(String(res.body.error)).toMatch(/^Cannot plan by pallets: 1 product\(s\) on this day's orders have no cases per pallet: TN1\.5L \(120 cases\)\. .*then optimize again\.$/);
+    }
+    expect(tables.runJob).toHaveLength(0);
+    expect(row('runPlan', 'P').status).toBe('DRAFT');
+    admissionIdle();
+  });
+
+  it('RE-PLAN: refused before any version exists, the parent stays the live plan', async () => {
+    seed();
+    await withMissing();
+    const reserve = vi.spyOn(solveAdmission, 'reserve');
+    const res = await replan(T, 'P', 'REOPTIMIZE', null, user, null, { allowMissingLocations: true });
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('PALLET_FACTOR_REQUIRED');
+    expect(String(res.body.error)).toMatch(/then re-plan again\.$/);
+    expect(tables.runPlan).toHaveLength(1);
+    expect(createNextVersion).not.toHaveBeenCalled();
+    expect(reserve).not.toHaveBeenCalled();
+  });
+});
+
 describe('PR9: an order brought forward to a later day while the start was prepared', () => {
   it('an open order of the request carried meanwhile: 409 ORDERS_CHANGED, no job, the plan is not OPTIMIZING', async () => {
     seed({ status: 'DRAFT', chosen: null });

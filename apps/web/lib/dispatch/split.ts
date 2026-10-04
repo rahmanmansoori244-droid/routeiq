@@ -9,7 +9,13 @@
  * Strategy: fill part 1 up to one full largest truck, then part 2, ... (lines in order, a line is
  * cut only when it does not fit). The last part is the remainder, which the optimizer can
  * combine with other customers.
+ *
+ * Pallets (owner decision 4 Oct 2026): a truck with bays is measured in pallet units (1/1000 pallet,
+ * pallets.ts), not cases. A part sized for such a truck is filled up to its room (bays x fill) by
+ * each line's cases / its cases per pallet, rounded up per line; its case count is then no limit.
+ * A customer that fits one truck in that truck's own measure is never split.
  */
+import { palletUnits } from './pallets';
 import { kgTenths, payloadTenths, roundKg } from './weights';
 
 export interface OpenLine {
@@ -17,6 +23,8 @@ export interface OpenLine {
   orderId: string;
   cases: number; // cases still to plan (after any frozen portion)
   kgPerCase: number;
+  /** The product's cases per pallet (a usable factor), when the day is planned by pallets; null / absent = none. */
+  casesPerPallet?: number | null;
 }
 
 export interface LineAllocation {
@@ -29,14 +37,18 @@ export interface LineAllocation {
 export interface PartCapacity {
   cases: number;
   kg: number | null; // null = weight not constrained
+  /** Room in pallet units (a truck with bays: bays x fill x 10); null / absent = measured in cases. */
+  palletUnits?: number | null;
 }
 
 /** One line's cases in a portion. `kgPerCase`: the case weight the part was planned with (0 = no
- * weight, counted as 0 kg); absent on portions planned before it was kept, and on unserved rows. */
+ * weight, counted as 0 kg); absent on portions planned before it was kept, and on unserved rows.
+ * `casesPerPallet`: the factor the part was cut with (a day planned by pallets). */
 export interface PortionLine {
   lineId: string;
   cases: number;
   kgPerCase?: number;
+  casesPerPallet?: number;
 }
 
 /** A part of an order that is planned (or unserved) on its own. */
@@ -51,9 +63,18 @@ export interface PortionRecord {
 
 const r1 = (v: number) => Math.round(v * 10) / 10;
 
-/** Fits one truck of `cap`? In 0.1 kg units, the optimizer's rule (weights.ts kgTenths / payloadTenths, audit F08). */
-export function fitsCapacity(cases: number, kg: number, cap: PartCapacity): boolean {
-  return cases <= cap.cases && (cap.kg === null || !(cap.kg > 0) || kgTenths(kg) <= payloadTenths(cap.kg));
+/**
+ * Fits one truck of `cap`? By its pallet units (`units`) when `cap` is measured in pallets, else by
+ * cases; and kg in 0.1 kg units, the optimizer's rule (weights.ts kgTenths / payloadTenths, audit F08).
+ */
+export function fitsCapacity(cases: number, kg: number, cap: PartCapacity, units = 0): boolean {
+  const space = cap.palletUnits != null ? units <= cap.palletUnits : cases <= cap.cases;
+  return space && (cap.kg === null || !(cap.kg > 0) || kgTenths(kg) <= payloadTenths(cap.kg));
+}
+
+/** The pallet units of some lines (or allocations), each rounded up on its own (pallets.ts). */
+export function linesPalletUnits(lines: { lineId: string; cases: number }[], cpp: Map<string, number | null | undefined>): number {
+  return lines.reduce((a, l) => a + palletUnits(l.cases, cpp.get(l.lineId) ?? null), 0);
 }
 
 /**
@@ -66,26 +87,34 @@ export function fitsCapacity(cases: number, kg: number, cap: PartCapacity): bool
  */
 export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAllocation[][] {
   const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase] as const));
-  if (!(cap.cases > 0)) {
+  // Measured in pallets (a part sized for a truck with bays): the room is pallet units, cases are free.
+  const roomUnits = cap.palletUnits ?? null;
+  if (roomUnits !== null ? !(roomUnits > 0) : !(cap.cases > 0)) {
     return [roundPart(lines.filter((l) => l.cases > 0).map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases, weightKg: 0 })), kgPerCase)];
   }
   const parts: LineAllocation[][] = [];
   let cur: LineAllocation[] = [];
   let curCases = 0;
   let curKg = 0;
+  let curUnits = 0; // each take rounded up on its own: never less than the part's true need
   const flush = () => {
     if (cur.length) parts.push(cur);
     cur = [];
     curCases = 0;
     curKg = 0;
+    curUnits = 0;
   };
   for (const l of lines) {
     let left = l.cases;
+    const cpp = roomUnits !== null ? (l.casesPerPallet ?? null) : null;
     while (left > 0) {
-      const roomCases = cap.cases - curCases;
+      const roomCases = roomUnits !== null ? Number.POSITIVE_INFINITY : cap.cases - curCases;
       const roomKg = cap.kg === null ? Number.POSITIVE_INFINITY : cap.kg - curKg;
       const byKg = l.kgPerCase > 0 ? Math.floor((roomKg + 1e-6) / l.kgPerCase) : Number.POSITIVE_INFINITY;
-      let take = Math.min(left, roomCases, byKg);
+      // Whole cases whose units fit the pallet room left: floor(room x cpp / 1000) cases need at most
+      // `room` units, rounded up (integers). A line without a factor counts 0 (the day is refused first).
+      const byPallets = roomUnits !== null && cpp ? Math.floor(((roomUnits - curUnits) * cpp) / 1000) : Number.POSITIVE_INFINITY;
+      let take = Math.min(left, roomCases, byKg, byPallets);
       if (take <= 0) {
         if (cur.length) {
           flush();
@@ -102,8 +131,10 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
       }
       curCases += take;
       curKg += take * l.kgPerCase;
+      curUnits += palletUnits(take, cpp);
       left -= take;
-      if (curCases >= cap.cases || (cap.kg !== null && curKg >= cap.kg - 1e-6)) flush();
+      const spaceFull = roomUnits !== null ? curUnits >= roomUnits : curCases >= cap.cases;
+      if (spaceFull || (cap.kg !== null && curKg >= cap.kg - 1e-6)) flush();
     }
   }
   flush();
@@ -147,6 +178,13 @@ export interface FleetTruck {
   cases: number;
   kg: number | null; // null = payload not set
   tripsLeft: number; // loads it can still do today (max trips minus frozen loads)
+  /** A truck with bays: its room in pallet units (bays x fill x 10); null / absent = measured in cases. */
+  palletUnits?: number | null;
+}
+
+/** The truck has room in its own measure (pallet units with bays, else cases). */
+export function hasRoom(t: FleetTruck): boolean {
+  return t.palletUnits != null ? t.palletUnits > 0 : t.cases > 0;
 }
 
 /**
@@ -159,38 +197,48 @@ export interface FleetTruck {
  * `maxCaseKg` is the heaviest single case of the customer: sizes whose payload cannot carry it
  * are used only when no truck can (a part sized for a small truck would hold cases that only a
  * bigger truck may legally carry).
+ *
+ * Pallets: a truck with bays offers a size in pallet units (`units` = the customer's pallet need);
+ * its parts = max(units / its room, kg / its payload). A truck carries a size only in the same
+ * measure (in a mixed fleet the trips are counted conservatively).
  */
 export function choosePartCapacity(
   cases: number,
   kg: number,
   fleet: FleetTruck[],
   maxCaseKg = 0,
+  units = 0,
 ): { cap: PartCapacity; truckCode: string } | null {
-  const usable = fleet.filter((t) => t.cases > 0);
+  const usable = fleet.filter(hasRoom);
   if (!usable.length) return null;
-  const carries = (t: FleetTruck, c: FleetTruck) => t.cases >= c.cases && (t.kg === null || (c.kg !== null && t.kg >= c.kg));
+  const pal = (t: FleetTruck) => t.palletUnits != null;
+  const size = (t: FleetTruck) => (pal(t) ? (t.palletUnits as number) : t.cases);
+  const need = (t: FleetTruck) => (pal(t) ? units : cases);
+  const carries = (t: FleetTruck, c: FleetTruck) =>
+    pal(t) === pal(c) && size(t) >= size(c) && (t.kg === null || (c.kg !== null && t.kg >= c.kg));
   // Compared on the payload the part is sized for, in 0.1 kg (see below).
   const carriesHeaviestCase = (c: FleetTruck) => c.kg === null || !(c.kg > 0) || payloadTenths(c.kg) >= kgTenths(maxCaseKg);
   const candidates = usable.some(carriesHeaviestCase) ? usable.filter(carriesHeaviestCase) : usable;
   const ranked = candidates.map((c) => {
-    const parts = Math.max(Math.ceil(cases / c.cases), c.kg !== null && c.kg > 0 ? Math.ceil(kg / c.kg) : 1);
+    const parts = Math.max(Math.ceil(need(c) / size(c)), c.kg !== null && c.kg > 0 ? Math.ceil(kg / c.kg) : 1);
     const trips = usable.filter((t) => carries(t, c)).reduce((a, t) => a + Math.max(0, t.tripsLeft), 0);
-    // Share of the demand the trips can carry: the binding one of cases and kg.
-    const share = Math.min(1, cases > 0 ? (trips * c.cases) / cases : 1, c.kg !== null && c.kg > 0 && kg > 0 ? (trips * c.kg) / kg : 1);
+    // Share of the demand the trips can carry: the binding one of space (cases or pallets) and kg.
+    const share = Math.min(1, need(c) > 0 ? (trips * size(c)) / need(c) : 1, c.kg !== null && c.kg > 0 && kg > 0 ? (trips * c.kg) / kg : 1);
     return { c, parts, trips, feasible: parts <= trips, share };
   });
   ranked.sort(
     (a, b) =>
       Number(b.feasible) - Number(a.feasible) ||
       (a.feasible ? a.parts - b.parts || b.trips - a.trips : b.share - a.share || a.parts - b.parts) ||
-      b.c.cases - a.c.cases ||
+      size(b.c) - size(a.c) ||
       (b.c.kg ?? Infinity) - (a.c.kg ?? Infinity) ||
       a.c.code.localeCompare(b.c.code),
   );
   const best = ranked[0].c;
   // The payload rounded down to 0.1 kg, as the optimizer compares it (audit F08: it compared in
   // whole kg, so parts were sized for the payload floored to a whole kg - a hidden margin).
-  return { cap: { cases: best.cases, kg: best.kg !== null && best.kg > 0 ? payloadTenths(best.kg) / 10 : null }, truckCode: best.code };
+  const capKg = best.kg !== null && best.kg > 0 ? payloadTenths(best.kg) / 10 : null;
+  return { cap: pal(best) ? { cases: best.cases, kg: capKg, palletUnits: best.palletUnits as number } : { cases: best.cases, kg: capKg }, truckCode: best.code };
 }
 
 /**
@@ -231,12 +279,25 @@ export function orderIdOf(id: string): string {
  * weights), each portion line also keeps the case weight it was planned with, so the dispatch
  * check can tell cases planned at 0 kg from the plan itself, not from today's product master.
  */
-export function portionsOfPart(part: LineAllocation[], partNo: number | null, parts: number | null, kgPerCase?: Map<string, number>): PortionRecord[] {
+export function portionsOfPart(
+  part: LineAllocation[],
+  partNo: number | null,
+  parts: number | null,
+  kgPerCase?: Map<string, number>,
+  casesPerPallet?: Map<string, number | null | undefined>,
+): PortionRecord[] {
   const byOrder = new Map<string, PortionRecord>();
   for (const a of part) {
     const p = byOrder.get(a.orderId) ?? { orderId: a.orderId, lines: [], cases: 0, weightKg: 0, part: partNo, parts };
     const kg = kgPerCase?.get(a.lineId);
-    p.lines.push(kg === undefined ? { lineId: a.lineId, cases: a.cases } : { lineId: a.lineId, cases: a.cases, kgPerCase: kg });
+    const cpp = casesPerPallet?.get(a.lineId);
+    p.lines.push({
+      lineId: a.lineId,
+      cases: a.cases,
+      ...(kg === undefined ? {} : { kgPerCase: kg }),
+      // The factor the part was cut with (a day planned by pallets): manifests keep it.
+      ...(typeof cpp === 'number' ? { casesPerPallet: cpp } : {}),
+    });
     p.cases += a.cases;
     p.weightKg = r1(p.weightKg + a.weightKg);
     byOrder.set(a.orderId, p);

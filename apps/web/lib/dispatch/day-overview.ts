@@ -22,6 +22,7 @@ import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, planSearching, readResultsNow, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
+import { validPalletFactor } from './pallets';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot } from './snapshots';
 import { dataGaps, type DataGap } from './data-collection';
@@ -89,6 +90,14 @@ export interface DayOrderTime {
 }
 
 /** Products whose order lines have no weight yet (per product: lines and cases). */
+/** A product of the day's open lines without a usable cases per pallet (the day screen's red line). */
+export interface PalletFactorGap {
+  code: string;
+  name: string;
+  lines: number;
+  cases: number;
+}
+
 export interface WeightGap {
   code: string;
   name: string;
@@ -167,7 +176,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -177,7 +186,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     where,
     include: {
       customer: { include: { windowConfirmedBy: { select: { name: true } } } },
-      lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true } } } },
+      lines: { include: { product: { select: { code: true, name: true, weightPerCaseKg: true, casesPerPallet: true } } } },
     },
   });
   const byCustomer = new Map<string, IssueCustomer>();
@@ -227,6 +236,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // keeps the kg it was loaded with (the same rule as the OPTIMIZE / RE-PLAN weight check).
   const noWeight = new Map<string, WeightGap & { kgPerCase: number }>();
   const toApply = new Map<string, WeightGap & { kgPerCase: number }>();
+  // Pallets: open cases of products without a usable cases per pallet (shown only when the depot has trucks with bays).
+  const noFactor = new Map<string, PalletFactorGap>();
   // Why the plan in use is out of date although no new order is waiting (RE-PLAN enabled).
   const outdated: DayOutdated = { ...UP_TO_DATE };
   const openCasesOf = new Map<string, number>();
@@ -245,6 +256,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       const cases = Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0));
       if (cases <= 0) continue;
       open += cases;
+      if (validPalletFactor(l.product.casesPerPallet) === null) {
+        const f = noFactor.get(l.product.code) ?? { code: l.product.code, name: l.product.name, lines: 0, cases: 0 };
+        f.lines++;
+        f.cases += cases;
+        noFactor.set(l.product.code, f);
+      }
       const st = lineWeightStatus({ cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster }, l.product.weightPerCaseKg, orderLevel);
       if (st === 'KNOWN' || (st === 'MASTER' && partlyFrozen && !plannedWithOtherKg(l))) continue;
       const m = st === 'UNKNOWN' ? noWeight : toApply;
@@ -308,7 +325,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const plannedLoads = plan?.chosenScenarioId
     ? await prisma.planLoad.findMany({
         where: { runId: plan.id, tenantId, status: 'PLANNED' },
-        select: { truckId: true, truckSnapshotJson: true, truck: { select: { capacityCases: true, capacityWeightKg: true } } },
+        select: { truckId: true, truckSnapshotJson: true, truck: { select: { capacityCases: true, capacityWeightKg: true, bays: true } } },
       })
     : [];
   // A load planned before origins were kept was planned from the pin its option was optimized
@@ -470,7 +487,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
         toDates: [...new Set(away.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])))].sort(),
       }
     : null;
-  const trucks = await db.truck.findMany({ where: { depotId: depot.id, active: true }, select: { capacityCases: true } });
+  const trucks = await db.truck.findMany({ where: { depotId: depot.id, active: true }, select: { capacityCases: true, bays: true } });
+  const bayTrucks = trucks.filter((t) => typeof t.bays === 'number');
   const batches = await db.uploadBatch.findMany({
     where: { OR: [{ deliveryDate: dateOnly(date) }, { orders: { some: { deliveryDate: dateOnly(date) } } }], depotId: depot.id },
     orderBy: { uploadedAt: 'desc' },
@@ -511,6 +529,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     productsWithoutWeight: [...noWeight.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)),
     /** Lines whose product's case weight (entered or corrected since) gives them another kg: applied at the next optimize. */
     weightsToApply: [...toApply.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)),
+    /**
+     * Pallets (owner decision 4 Oct 2026): with trucks with bays at this depot, the products of the open
+     * lines without a usable cases per pallet - OPTIMIZE / RE-PLAN refuse until they are entered under
+     * Products (PALLET_FACTOR_REQUIRED). Empty without bay trucks.
+     */
+    productsWithoutPalletFactor: bayTrucks.length ? [...noFactor.values()].sort((a, b) => b.cases - a.cases || a.code.localeCompare(b.code)) : [],
     plan: planInfo,
     pending,
     /**
@@ -530,7 +554,14 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
-    trucks: { active: trucks.length, capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0) },
+    trucks: {
+      active: trucks.length,
+      capacityCases: trucks.reduce((a, t) => a + t.capacityCases, 0),
+      // Pallets: the trucks with bays and their bays per load round; the other trucks' cases.
+      withBays: bayTrucks.length,
+      bays: bayTrucks.reduce((a, t) => a + (t.bays ?? 0), 0),
+      casesWithoutBays: trucks.filter((t) => typeof t.bays !== 'number').reduce((a, t) => a + t.capacityCases, 0),
+    },
     batches: batches.map((b) => ({ ...b, uploadedAt: b.uploadedAt.toISOString() })),
     serviceArea: area,
     runDateIso: isoOf(dateOnly(date)),

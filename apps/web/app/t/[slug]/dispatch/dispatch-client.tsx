@@ -9,7 +9,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { api, askOverride, weightFixText, type OptimizeOverrides } from './client-api';
+import { api, askOverride, isPalletFactorRefusal, palletRefusalToast, weightFixText, type OptimizeOverrides } from './client-api';
 import { LocationDialog } from './location-dialog';
 import { CustomerDialog, type EditableCustomer } from './customer-dialog';
 import { PlanView } from './plan-view';
@@ -81,6 +81,8 @@ interface Day {
   inactiveCustomers?: number;
   /** Lines with no weight at all: counted as 0 kg until the product gets a case weight. */
   productsWithoutWeight: WeightGap[];
+  /** Pallets: products of the open lines without cases per pallet, when the depot has trucks with bays (OPTIMIZE is refused). */
+  productsWithoutPalletFactor?: { code: string; name: string; lines: number; cases: number }[];
   /** Lines whose product's case weight was entered or corrected since: applied at the next optimize. */
   weightsToApply?: WeightGap[];
   /**
@@ -108,7 +110,7 @@ interface Day {
   carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
   /** PR9: orders of this day brought forward to later days (no longer open here). */
   carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
-  trucks: { active: number; capacityCases: number };
+  trucks: { active: number; capacityCases: number; withBays?: number; bays?: number; casesWithoutBays?: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
   /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
   serviceArea: ServiceArea;
@@ -385,6 +387,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           continue;
         }
         if (r.errorBody?.code === 'LOCATION_REQUIRED' || r.errorBody?.code === 'WEIGHT_REQUIRED') return;
+        if (isPalletFactorRefusal(r.errorBody)) {
+          // Refused, no question: the products to fix, with the Products link.
+          toast.error(r.error ?? 'Cannot plan by pallets: products have no cases per pallet.', palletRefusalToast(slug));
+          break;
+        }
         // The day may have changed under the screen (another user, a failed re-plan): show it as it is.
         toast.error(r.error ?? 'Could not start optimization.');
         reached = r.status !== 0;
@@ -481,7 +488,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </span>
         ) : (
           <>
-            Order cutoff {day.cutoff} the day before · {day.trucks.active} trucks ({day.trucks.capacityCases.toLocaleString()} cases per load round)
+            Order cutoff {day.cutoff} the day before · {day.trucks.active} trucks ({truckRoundText(day.trucks)} per load round)
           </>
         )}
       </p>
@@ -597,6 +604,16 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           <p className="text-xs text-amber-700" data-testid="weights-unknown">
             No weight for {casesOf(day.productsWithoutWeight).toLocaleString()} cases of {day.productsWithoutWeight.length} product(s) (
             {day.productsWithoutWeight.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). To check truck payloads, {fixWeight}: until then OPTIMIZE asks before planning them as 0 kg.
+          </p>
+        ) : null}
+        {day.productsWithoutPalletFactor?.length ? (
+          <p className="text-xs text-red-700" data-testid="pallet-factors-missing">
+            No cases per pallet for {day.productsWithoutPalletFactor.length} product(s) (
+            {day.productsWithoutPalletFactor.map((p) => `${p.code}: ${p.cases} cases`).join(', ')}). OPTIMIZE is refused until they are entered under{' '}
+            <a className="underline" href={`/t/${slug}/products`}>
+              Products
+            </a>
+            {canEditProducts ? '.' : ' (ask a company admin).'}
           </p>
         ) : null}
         {toApply.length ? (
@@ -876,4 +893,11 @@ function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, o
       </div>
     </div>
   );
+}
+
+/** "1,140 cases", "148 bays" or "120 bays and 570 cases": a load round of the depot's active trucks. */
+function truckRoundText(t: { capacityCases: number; withBays?: number; bays?: number; casesWithoutBays?: number }): string {
+  if (!t.withBays) return `${t.capacityCases.toLocaleString()} cases`;
+  const bays = `${(t.bays ?? 0).toLocaleString()} bays`;
+  return t.casesWithoutBays ? `${bays} and ${t.casesWithoutBays.toLocaleString()} cases` : bays;
 }
