@@ -31,6 +31,17 @@ const nextConfig = {
           },
         ],
       },
+      // The driver page and its API (owner request 4 Oct 2026): the token is in the page's path, so
+      // no Referer, no index, no cache. After the global rule: the last matching rule wins per key.
+      ...['/d/:path*', '/api/d/:path*'].map((source) => ({
+        source,
+        headers: [
+          { key: 'Referrer-Policy', value: 'no-referrer' },
+          { key: 'X-Robots-Tag', value: 'noindex, nofollow, noarchive' },
+          { key: 'Cache-Control', value: 'no-store' },
+          { key: 'Permissions-Policy', value: 'geolocation=(self), camera=(self)' },
+        ],
+      })),
     ];
   },
 };

@@ -79,6 +79,18 @@ function orderOf(id: string) {
     : { id, customerId: 'c', totalCases: 0, totalWeightKg: 0, lines: [], customer };
 }
 
+/**
+ * Relations a `select` reads like an include (the delivery outcome code selects a route assignment's
+ * order). Only these: other tests rely on the fake ignoring `select` (the whole row, no relation).
+ */
+const SELECTED_RELATIONS: Record<string, string[]> = { routeAssignment: ['order'] };
+
+function relSelect(model: string, select?: Row): Row | undefined {
+  if (!select) return undefined;
+  const rel = Object.keys(select).filter((k) => SELECTED_RELATIONS[model]?.includes(k) && typeof select[k] === 'object');
+  return rel.length ? Object.fromEntries(rel.map((k) => [k, true])) : undefined;
+}
+
 function withInclude(model: string, r: Row, include?: Row) {
   if (!include) return { ...r };
   const out = { ...r };
@@ -125,7 +137,7 @@ function delegate(model: string) {
   return {
     findFirst: async (a: Row = {}) => {
       const r = sortRows(t().filter((x) => match(x, a.where)), a.orderBy)[0];
-      return r ? withInclude(model, r, a.include) : null;
+      return r ? withInclude(model, r, a.include ?? relSelect(model, a.select)) : null;
     },
     findFirstOrThrow: async (a: Row = {}) => {
       const r = sortRows(t().filter((x) => match(x, a.where)), a.orderBy)[0];
@@ -141,7 +153,7 @@ function delegate(model: string) {
       if (!r) throw new Error(`${model} not found`);
       return withInclude(model, r, a.include);
     },
-    findMany: async (a: Row = {}) => sortRows(t().filter((x) => match(x, a.where)), a.orderBy).map((r) => withInclude(model, r, a.include)),
+    findMany: async (a: Row = {}) => sortRows(t().filter((x) => match(x, a.where)), a.orderBy).map((r) => withInclude(model, r, a.include ?? relSelect(model, a.select))),
     count: async (a: Row = {}) => t().filter((x) => match(x, a.where)).length,
     groupBy: async () => [],
     // Nested creates (ManualBaseline.assignments: { create: [...] }) stay on the row; include._count counts them.
@@ -165,6 +177,12 @@ function delegate(model: string) {
       for (const r of rs) Object.assign(r, a.data);
       return { count: rs.length };
     },
+    delete: async (a: Row) => {
+      const r = t().find((x) => match(x, a.where));
+      if (!r) throw new Error(`${model} delete: not found`);
+      tables[model] = t().filter((x) => x !== r);
+      return { ...r };
+    },
     deleteMany: async (a: Row = {}) => {
       const keep = t().filter((x) => !match(x, a.where));
       const n = t().length - keep.length;
@@ -178,6 +196,8 @@ const MODELS = [
   'runPlan', 'planLoad', 'routeAssignment', 'runJob', 'auditLog', 'scenarioResult', 'unservedOrder', 'order', 'orderLine',
   'truck', 'driver', 'depot', 'tenantConfig', 'customerTypeProfile', 'tenant', 'customer', 'uploadBatch',
   'product', 'intakeLineKey', 'manualBaseline', 'region',
+  // Delivery outcome and the driver page (owner request 4 Oct 2026); users: the office side names who recorded a result.
+  'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
 ];
 
 export const fakePrisma: Row = {};

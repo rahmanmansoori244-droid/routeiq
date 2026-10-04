@@ -10,6 +10,7 @@ import { MAX_SERVICE_MIN } from './dispatch/service-time';
 import { DATA_COLLECT_DAYS_MAX } from './dispatch/data-collection';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
+import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -64,6 +65,9 @@ export const searchModeSchema = z.enum(['QUICK', 'THOROUGH']);
 /** Longest unloading time one stop can have: the optimizer's limit (lib/dispatch/service-time). */
 export { MAX_SERVICE_MIN };
 
+/** A phone number as typed (drivers, the dispatcher phones): digits, spaces and +-() only. */
+const driverPhoneSchema = z.string().trim().max(40).regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only');
+
 const depotFields = z.object({
     code: codeSchema,
     name: nameSchema,
@@ -75,6 +79,9 @@ const depotFields = z.object({
     // returns after it closes (review F21: these were planner inputs no screen could set).
     openMin: optionalBounded(DEPOT_BOUNDS.openMin),
     closeMin: optionalBounded(DEPOT_BOUNDS.closeMin),
+    // Owner decision 3 (5 Oct 2026): the depot's own number for the driver page's "Call dispatcher";
+    // '' or null clears it (the company number in Settings is then used).
+    dispatcherPhone: clearable(driverPhoneSchema),
   });
 
 /** "closes before it opens" for a depot (the merged row on a PATCH), or null. */
@@ -107,6 +114,8 @@ const truckFields = z.object({
     // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
     defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
     active: z.boolean().optional(),
+    // Hired from outside (owner request 4 Oct 2026): a badge only; the planner never reads it.
+    hired: z.boolean().optional(),
   });
 
 /** "available until before available from" for a truck (the merged row on a PATCH), or null. */
@@ -127,10 +136,32 @@ export const driverSchema = z.object({
   code: codeSchema,
   name: nameSchema,
   // '' or null clears the phone (audit F26): WhatsApp links then have no number to use.
-  phone: clearable(z.string().trim().max(40).regex(/^[+0-9 ()-]+$/, 'Digits, spaces, +-() only')),
+  phone: clearable(driverPhoneSchema),
   active: z.boolean().optional(),
 });
 export type DriverInput = z.infer<typeof driverSchema>;
+
+/**
+ * PATCH /api/drivers/[id] (company admin): any driver field, and `casual` - a daily driver added from
+ * a load is made a regular driver by clearing it (owner request 4 Oct 2026).
+ */
+export const driverPatchSchema = driverSchema.partial().extend({ casual: z.boolean().optional() });
+
+/**
+ * POST /api/dispatch/casual-driver: a daily (casual) driver added from a load (owner rule 20: a
+ * load never leaves without a driver). `useExisting`: the dispatcher answered "Use <name>?" when the
+ * phone belongs to another driver.
+ */
+export const casualDriverSchema = z
+  .object({
+    runId: z.string().min(1),
+    loadId: z.string().min(1),
+    name: z.string().trim().min(2, 'Name: at least 2 characters').max(80, 'Name: at most 80 characters'),
+    phone: clearable(driverPhoneSchema),
+    useExisting: z.string().min(1).optional(),
+  })
+  .strict();
+export type CasualDriverInput = z.infer<typeof casualDriverSchema>;
 
 export const regionSchema = z.object({
   code: codeSchema,
@@ -255,11 +286,19 @@ export const tenantConfigSchema = z
     // ahead the data-to-collect list looks. Web only (the optimizer never reads them).
     requireDataBeforeLoading: z.boolean(),
     dataCollectDays: z.number().int().min(0).max(DATA_COLLECT_DAYS_MAX),
+    // The driver page and delivery results (owner request 4 Oct 2026). Web only, company admin.
+    geofenceRadiusM: z.number().int().min(DELIVERY_SETTING_BOUNDS.geofenceRadiusM.min).max(DELIVERY_SETTING_BOUNDS.geofenceRadiusM.max),
+    photoProofRequired: z.boolean(),
+    photoRetentionDays: z.number().int().min(DELIVERY_SETTING_BOUNDS.photoRetentionDays.min).max(DELIVERY_SETTING_BOUNDS.photoRetentionDays.max),
+    locationRetentionDays: z.number().int().min(DELIVERY_SETTING_BOUNDS.locationRetentionDays.min).max(DELIVERY_SETTING_BOUNDS.locationRetentionDays.max),
+    // The company number behind the driver page's "Call dispatcher" button, used when the truck's depot
+    // has none of its own (owner decision 3, 5 Oct 2026); '' or null = none.
+    dispatcherPhone: z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? null : v), driverPhoneSchema.nullable()),
   })
   .strict();
 export type TenantConfigInput = z.infer<typeof tenantConfigSchema>;
 
-export { breakSaveProblem, overtimeProblem, overtimeSaveProblem } from './settings-fields';
+export { breakSaveProblem, overtimeProblem, overtimeSaveProblem, retentionSaveProblem } from './settings-fields';
 
 export const tenantSettingsSchema = z.object({
   name: z.string().trim().min(2).max(120),

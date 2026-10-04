@@ -17,6 +17,8 @@ import { locationIssue } from '@/lib/dispatch/customer-attrs';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
 import { MASTER_SINCE_MAX_DAYS } from '@/lib/dispatch/data-collection';
 import { addDaysIso } from '@/lib/dispatch/time';
+import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
+import { measuredServiceValue } from '@/lib/delivery/measured';
 
 interface CustomerRow {
   id: string;
@@ -63,6 +65,7 @@ export function CustomersClient({
   serviceArea,
   collect = null,
   initialCollectOnly = false,
+  measured = {},
 }: {
   slug: string;
   initial: CustomerRow[];
@@ -74,6 +77,8 @@ export function CustomersClient({
   collect?: CollectInfo | null;
   /** Opened from "Open on Customers" (?show=collect): only the data to collect. */
   initialCollectOnly?: boolean;
+  /** Measured unloading times (delivery outcome, spec section 11.1), by customer id: only customers that have one. */
+  measured?: Record<string, CustomerDeliveryStats>;
 }) {
   const router = useRouter();
   const [rows, setRows] = useState(initial);
@@ -246,6 +251,7 @@ export function CustomersClient({
               <TableHead>Region</TableHead>
               <TableHead className="text-right">Lat/Lng</TableHead>
               <TableHead className="text-center">Priority</TableHead>
+              {Object.keys(measured).length ? <TableHead title="Planned unloading time, and the time measured by the driver page (median of the last timed visits)">Unloading</TableHead> : null}
               <TableHead>Payment</TableHead>
               <TableHead className="text-center">Active</TableHead>
             </TableRow>
@@ -294,6 +300,32 @@ export function CustomersClient({
                     <Badge variant="outline">{c.priority}</Badge>
                   )}
                 </TableCell>
+                {Object.keys(measured).length ? (
+                  <TableCell className="text-xs" data-testid="customer-measured" data-customer={c.code}>
+                    {measured[c.id]?.measured ? (
+                      <span title={measured[c.id]!.text}>
+                        {measured[c.id]!.plannedMin} min planned · <b>measured {measured[c.id]!.measured!.minutes}</b>
+                        <span className="text-muted-foreground"> ({measured[c.id]!.measured!.n} visits)</span>
+                        {canEdit && measuredServiceValue(measured[c.id]!.measured!) !== measured[c.id]!.plannedMin ? (
+                          <button
+                            type="button"
+                            className="ms-1 text-primary underline-offset-2 hover:underline disabled:opacity-50"
+                            disabled={updating}
+                            onClick={() => {
+                              const v = measuredServiceValue(measured[c.id]!.measured!);
+                              if (window.confirm(`Set the unloading time of ${c.name} to ${v} min (measured)? It is saved as confirmed; the next plans use it.`)) patchRow(c.id, { avgServiceTimeMin: v });
+                            }}
+                            data-testid="use-measured-time"
+                          >
+                            Use measured time
+                          </button>
+                        ) : null}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                ) : null}
                 <TableCell>
                   <Badge variant={c.paymentType === 'CASH' ? 'secondary' : c.paymentType === 'PREPAID' ? 'success' : 'outline'}>
                     {c.paymentType.toLowerCase()}

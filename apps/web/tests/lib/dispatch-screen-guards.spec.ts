@@ -125,7 +125,16 @@ describe('plan screen (plan-view.tsx)', () => {
   });
 
   it('the screen around the plan reloads it in place (reloadSignal): the same load, no remount (fourth review of PR3)', () => {
-    expect(planScreen).toMatch(/if \(reloadSignal === seenReload\.current\) return;\s*seenReload\.current = reloadSignal;\s*void load\(\);/);
+    // With its results: the reload follows a write there (a result recorded on the Deliveries card).
+    expect(planScreen).toMatch(/if \(reloadSignal === seenReload\.current\) return;\s*seenReload\.current = reloadSignal;\s*void load\(\{ results: true \}\);/);
+  });
+
+  it('a result recorded on the plan reads the plan\'s results and the day\'s Deliveries card at once, also while a search runs (second review of 4 Oct 2026)', () => {
+    expect(planScreen).toMatch(/onSaved=\{\(\) => \{[^}]*void load\(\{ results: true \}\);\s*onResultRecorded\?\.\(\);/);
+    const body = planScreen.slice(planScreen.indexOf('const load = useCallback('), planScreen.indexOf('}, [runId]);'));
+    // Read before the plan's answer: a search poll that answers first never drops it.
+    expect(body.indexOf('if (afterWrite) overlayLoad.current();')).toBeGreaterThan(-1);
+    expect(body.indexOf('if (afterWrite) overlayLoad.current();')).toBeLessThan(body.indexOf('await api<PlanDetail>'));
   });
 
   it('only the newest load changes the plan on screen, and Try again waits for a reload or an action (fourth review of PR3)', () => {

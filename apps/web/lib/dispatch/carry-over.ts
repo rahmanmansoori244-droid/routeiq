@@ -44,6 +44,18 @@
  * Priority stays as the order had it (no automatic bump). On D the copies are ordinary orders: with
  * no plan yet, OPTIMIZE plans them; with a plan, they are pending like late orders and RE-PLAN adds
  * them (reason LATE_ORDER) around the locked, loading and dispatched loads.
+ *
+ * Delivery results (owner request 4 Oct 2026, spec section 9): a stop of a load that left with a
+ * recorded result of Not delivered or Partly delivered is NOT delivered for the cases the result says
+ * (outcomeShortfalls reads them from StopVisit), so its order is listed again with the reason ("Not
+ * delivered: Shop closed (driver)"). Such an order is ticked by default once its result is final:
+ * earlier days always (unless the result was recorded after the trip closed), today's only when all
+ * of its open cases are recorded as not delivered, every part that left has a result, and the truck
+ * is back (Back at depot or Completed) - the driver may still change it while he is out. A stop that
+ * left with no result still counts as delivered, as before, and is listed for the dispatcher as
+ * information only ("Dispatched, no result recorded"). The copy keeps the visits it was based on
+ * (Order.carryBasisJson): a later change that would shrink those cases is refused (the basis rule,
+ * outcome-rules.ts) and "Undo bring forward" (undoCarry) removes a copy no plan refers to yet.
  */
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
@@ -56,6 +68,11 @@ import { customerKey, lineDupKey, normSalesOrder } from './order-intake';
 import { portionMoney, readPortionLines } from './split';
 import { addDaysIso, dateOnly, DEFAULT_TZ, fmtDayMonth, isAfterCutoff, isoOf, todayIso } from './time';
 import { orderUsesLineWeights } from './weights';
+import { lockOutcomesDay } from '../delivery/locks';
+import { readVisitLines } from '../delivery/visit';
+import { readCarryBasis } from '../delivery/outcome-rules';
+import { reasonText, shortfallText, sourceWord } from '../delivery/office-text';
+import { noResultStops, type NoResultStop } from '../delivery/day-results';
 
 type Tx = Prisma.TransactionClient;
 type Db = Tx | typeof prisma;
@@ -79,12 +96,38 @@ export function carryWindow(date: string, today: string): { from: string; to: st
 /** Load statuses whose cases count as delivered (the load left the depot). */
 const LEFT_DEPOT = new Set(['DISPATCHED', 'COMPLETED']);
 
-export type CarryWhyKind = 'UNSERVED' | 'NOT_LEFT' | 'NEVER_PLANNED';
+export type CarryWhyKind = 'UNSERVED' | 'NOT_LEFT' | 'NEVER_PLANNED' | 'NOT_DELIVERED';
 export interface CarryWhy {
   kind: CarryWhyKind;
   text: string;
   /** UNSERVED: the unserved reason code of the plan (labelled on screen). */
   reasonCode?: string;
+  /** NOT_DELIVERED: the recorded reason (NotDeliveredReason) and who recorded it ("driver", "dispatcher"). */
+  reason?: string | null;
+  source?: string;
+  /** NOT_DELIVERED: the stop the result was recorded on ("T01 L1 stop 3"). */
+  where?: string;
+}
+
+/**
+ * One recorded delivery result of a stop of a load that left (StopVisit with a result), as Bring
+ * forward needs it (spec section 9.1 item 1): the cases not delivered per order line.
+ */
+export interface VisitShortfall {
+  visitId: string;
+  truckId: string;
+  loadNo: number;
+  sequence: number;
+  outcome: string;
+  reason: string | null;
+  note: string | null;
+  /** StopEventSource of the result (PHONE_MANUAL = the driver, DISPATCHER = the office). */
+  source: string | null;
+  /** Recorded after the trip closed (outcomeLate): never ticked by default. */
+  late: boolean;
+  /** The visit's load (on the live plan) is COMPLETED or reported Back at depot: the result is final. */
+  final: boolean;
+  lines: { orderId: string; lineId: string; planned: number; notDelivered: number }[];
 }
 
 export type CarryBlockCode = 'CUSTOMER_INACTIVE' | 'ALREADY_ON_DAY' | 'SAME_LINE_LATER' | 'DAY_OPTIMIZING';
@@ -129,6 +172,20 @@ export interface CarryCandidate {
   /** Listed but not carried, with the reason. */
   blocked: { code: CarryBlockCode; text: string } | null;
   lines: CarryLine[];
+  /**
+   * Delivery results (spec section 9.1 item 4): every open case is recorded as not delivered, every
+   * part that left has a result, no result was recorded after the trip closed and - for an order of
+   * today - the truck is back (final). An order of today is ticked by default only then.
+   */
+  confirmed: boolean;
+  /** Today: a result behind the shortfall is not final yet (the truck is still out): "the result may still change". */
+  notFinal: boolean;
+  /** A result behind the shortfall was recorded after the trip closed: never ticked by default. */
+  late: boolean;
+  /** "other part (T03 L1 stop 1) has no result": a part that left without a result (it may still be short). */
+  openPartsText: string | null;
+  /** The visits and not-delivered cases per line the carry is based on (Order.carryBasisJson of the copy). */
+  basis: { visitId: string; lines: { lineId: string; notDelivered: number }[] }[];
 }
 
 export interface CarryPreview {
@@ -153,6 +210,41 @@ export interface CarryPreview {
   /** Listed but not carried (deactivated customer, entered again for D or a later day, day being optimized). */
   blocked: number;
   candidates: CarryCandidate[];
+  /**
+   * Information only (spec section 9.1 item 7): stops of loads that are back with no result recorded
+   * (counted as delivered), in the window, from the feature's start. Grouped per truck on screen.
+   */
+  noOutcome: NoOutcomeStop[];
+  /** Information only (spec section 9.1 item 11): orders brought forward whose recorded shortfall grew since. */
+  lateShortfalls: LateShortfall[];
+  /** Copies on day D that no plan refers to yet: "Undo" removes them (spec section 9.4). */
+  undoable: UndoableCarry[];
+}
+
+/** A stop of a load that left with no result recorded (the panel's information list). */
+export type NoOutcomeStop = Pick<NoResultStop, 'date' | 'truckCode' | 'loadNo' | 'sequence' | 'customerCode' | 'branchCode' | 'customerName' | 'cases'>;
+
+export interface LateShortfall {
+  orderId: string;
+  /** The copy's date (YYYY-MM-DD). */
+  copyDate: string;
+  customerCode: string;
+  branchCode: string | null;
+  customerName: string;
+  /** Cases not delivered beyond what was brought forward. */
+  cases: number;
+  text: string;
+}
+
+export interface UndoableCarry {
+  originalOrderId: string;
+  copyId: string;
+  customerCode: string;
+  branchCode: string | null;
+  customerName: string;
+  cases: number;
+  /** The original's delivery date. */
+  fromDate: string;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -183,7 +275,11 @@ export interface CarryPlanIn {
   chosen: boolean;
   /** The applied option's scope (orders it was made for); null without an applied dispatch plan. */
   scopeOrderIds: string[] | null;
-  loads: { truckCode: string; loadNo: number; status: string; assignments: { orderId: string; portionLinesJson: unknown }[] }[];
+  /**
+   * `truckId` and `sequenceInTruck` match a delivery result (StopVisit: truck, load number, stop) to
+   * the stop of a load that left (delivery outcome, spec section 9.1 item 3).
+   */
+  loads: { truckId?: string; truckCode: string; loadNo: number; status: string; assignments: { orderId: string; portionLinesJson: unknown; sequenceInTruck?: number }[] }[];
   /** The applied option's unserved rows. */
   unserved: { orderId: string; reasonCode: string; reasonMessage: string | null; portionLinesJson: unknown }[];
 }
@@ -221,6 +317,11 @@ export interface CarryTarget {
    * carryCandidates count too.
    */
   laterLines?: readonly LaterLine[];
+  /**
+   * The recorded delivery results per delivery date (outcomeShortfalls): a Not delivered or Partly
+   * result on a stop that left makes those cases open again (spec section 9.1 item 4).
+   */
+  shortfalls?: ReadonlyMap<string, readonly VisitShortfall[]>;
 }
 
 const round = (x: number, d: number) => Math.round(x * 10 ** d) / 10 ** d;
@@ -261,25 +362,43 @@ function laterState(x: LaterLine): string {
 export function carryCandidates(orders: readonly CarryOrderIn[], plans: ReadonlyMap<string, CarryPlanIn | null>, target: CarryTarget): CarryCandidate[] {
   const out: CarryCandidate[] = [];
   for (const o of orders) {
-    if (o.carriedToOrderId || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
+    if (o.carriedToOrderId || o.status === 'DELIVERED') continue;
     if (!(o.deliveryDate < target.date) || o.deliveryDate > target.today) continue;
     const ofToday = o.deliveryDate === target.today;
     const plan = plans.get(o.deliveryDate) ?? null;
-    // Cases on loads that left the depot are delivered; loads that never left are listed.
+    const visits = target.shortfalls?.get(o.deliveryDate) ?? [];
+    // Cases on loads that left the depot are delivered, except what a recorded result says was not
+    // delivered (delivery outcome); loads that never left are listed.
     const delivered = new Map<string, number>();
     const notLeft: string[] = [];
+    // The results behind this order's open cases, and the parts that left without a result.
+    const short: { v: VisitShortfall; where: string; notDelivered: number; planned: number; lines: { lineId: string; notDelivered: number }[] }[] = [];
+    const openParts: string[] = [];
     for (const l of plan?.loads ?? []) {
       for (const a of l.assignments) {
         if (a.orderId !== o.id) continue;
         if (LEFT_DEPOT.has(l.status)) {
           const part = readPortionLines(a.portionLinesJson) ?? o.lines.map((x) => ({ lineId: x.id, cases: x.cases }));
-          for (const x of part) delivered.set(x.lineId, (delivered.get(x.lineId) ?? 0) + x.cases);
+          const where = `${l.truckCode} L${l.loadNo} stop ${a.sequenceInTruck ?? '?'}`;
+          // A result is matched by (truck, load number, stop): a visit that matches nothing is ignored.
+          const v = l.truckId && a.sequenceInTruck !== undefined ? visits.find((x) => x.truckId === l.truckId && x.loadNo === l.loadNo && x.sequence === a.sequenceInTruck) : undefined;
+          const nd = (lineId: string) => v?.lines.find((x) => x.orderId === o.id && x.lineId === lineId)?.notDelivered ?? 0;
+          for (const x of part) delivered.set(x.lineId, (delivered.get(x.lineId) ?? 0) + Math.max(0, x.cases - Math.min(x.cases, nd(x.lineId))));
+          if (!v) {
+            if (!openParts.includes(where)) openParts.push(where);
+            continue;
+          }
+          const lines = part.map((x) => ({ lineId: x.lineId, notDelivered: Math.min(x.cases, nd(x.lineId)) })).filter((x) => x.notDelivered > 0);
+          const n = lines.reduce((s, x) => s + x.notDelivered, 0);
+          if (n > 0) short.push({ v, where, notDelivered: n, planned: part.reduce((s, x) => s + x.cases, 0), lines });
         } else {
           const where = `${l.truckCode} L${l.loadNo} (${l.status.toLowerCase()})`;
           if (!notLeft.includes(where)) notLeft.push(where);
         }
       }
     }
+    // Every part of a DISPATCHED order left the depot: it is open only through a recorded shortfall.
+    if (o.status === 'DISPATCHED' && !short.length) continue;
     const lines: CarryLine[] = o.lines
       .map((l) => ({ lineId: l.id, productCode: l.productCode, salesOrderNo: l.salesOrderNo, cases: Math.max(0, l.cases - (delivered.get(l.id) ?? 0)), lineCases: l.cases }))
       .filter((l) => l.cases > 0);
@@ -299,6 +418,16 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
     );
 
     const why: CarryWhy[] = [];
+    // Delivery results first: what the driver (or the office) recorded at the stop.
+    for (const s of short) {
+      why.push({
+        kind: 'NOT_DELIVERED',
+        reason: s.v.reason,
+        source: sourceWord(s.v.source),
+        where: s.where,
+        text: shortfallText({ outcome: s.v.outcome, notDelivered: s.notDelivered, planned: s.planned, reason: s.v.reason, note: s.v.note, source: s.v.source }),
+      });
+    }
     // Today's loads have not left YET: they may still go out today.
     if (notLeft.length) why.push({ kind: 'NOT_LEFT', text: `On ${notLeft.join(', ')}: ${ofToday ? 'has not left the depot yet' : 'never left the depot'}` });
     for (const u of plan?.chosen ? plan.unserved.filter((x) => x.orderId === o.id) : []) {
@@ -341,6 +470,17 @@ export function carryCandidates(orders: readonly CarryOrderIn[], plans: Readonly
       why,
       blocked,
       lines,
+      // Delivery results (spec section 9.1 item 4, C6): ticked by default only when the result is settled.
+      confirmed:
+        short.length > 0 &&
+        why.every((w) => w.kind === 'NOT_DELIVERED') &&
+        openParts.length === 0 &&
+        (!ofToday || short.every((s) => s.v.final)) &&
+        !short.some((s) => s.v.late),
+      notFinal: ofToday && short.some((s) => !s.v.final),
+      late: short.some((s) => s.v.late),
+      openPartsText: short.length && openParts.length ? `other part (${openParts.join(', ')}) has no result` : null,
+      basis: short.map((s) => ({ visitId: s.v.visitId, lines: s.lines })),
     });
   }
   // A sales-order line that is also on an order of a later delivery date was entered again (sales
@@ -507,7 +647,11 @@ export interface CopyOptions {
  * line weighed from the product master stays so), money shared out by cases; linked to the
  * original. No upload batch: deleting the original's file can never delete the copy.
  */
-export function carryCopyData(src: CarrySource, cand: Pick<CarryCandidate, 'lines' | 'cases' | 'date' | 'firstDate'>, opt: CopyOptions): Prisma.OrderUncheckedCreateInput {
+export function carryCopyData(
+  src: CarrySource,
+  cand: Pick<CarryCandidate, 'lines' | 'cases' | 'date' | 'firstDate'> & Partial<Pick<CarryCandidate, 'why' | 'basis'>>,
+  opt: CopyOptions,
+): Prisma.OrderUncheckedCreateInput {
   const byId = new Map(src.lines.map((l) => [l.id, l]));
   const orderLevel = !orderUsesLineWeights(src);
   const share = (v: number | null, part: number, whole: number) => (v === null ? null : whole > 0 ? round((v * part) / whole, 3) : v);
@@ -552,14 +696,27 @@ export function carryCopyData(src: CarrySource, cand: Pick<CarryCandidate, 'line
     uploadBatchId: null,
     uploadedAt: opt.now,
     isLate: opt.late,
-    lateReason: `Brought forward from ${fmtDayMonth(cand.date)}: not delivered on that day.`,
+    lateReason: carryLateReason(cand),
     lateRecordedById: opt.userId,
     salesValue: money('salesValue'),
     marginValue: money('marginValue'),
     carriedFromOrderId: src.id,
     carriedFromDate: src.carriedFromDate ?? src.deliveryDate,
+    // The visits and not-delivered cases the carry is based on (spec section 9.4): a later change that
+    // would shrink them is refused. Copies made from other whys (unserved, not left) have no visits.
+    carryBasisJson: { visits: cand.basis ?? [] } as unknown as Prisma.InputJsonValue,
     lines: { create: lines },
   };
+}
+
+/**
+ * The copy's late reason: "Brought forward from 5 Oct: not delivered (Shop closed, driver)." when a
+ * recorded result is behind it, else "Brought forward from 5 Oct: not delivered on that day.".
+ */
+export function carryLateReason(cand: Pick<CarryCandidate, 'date'> & Partial<Pick<CarryCandidate, 'why'>>): string {
+  const nd = (cand.why ?? []).find((w) => w.kind === 'NOT_DELIVERED');
+  if (nd) return `Brought forward from ${fmtDayMonth(cand.date)}: not delivered (${nd.reason === 'OTHER' ? 'Other' : reasonText(nd.reason, null)}, ${nd.source ?? 'driver'}).`;
+  return `Brought forward from ${fmtDayMonth(cand.date)}: not delivered on that day.`;
 }
 
 // ---------------------------------------------------------------------------------------
@@ -574,17 +731,81 @@ async function companyToday(db: Db, tenantId: string, now: Date): Promise<{ toda
   return { today: todayIso(cfg.timezone || DEFAULT_TZ, now), cfg };
 }
 
-async function windowOrders(db: Db, tenantId: string, depotId: string, window: { from: string; to: string }) {
+/**
+ * The recorded delivery results of the depot's stops in [from, to] (spec section 9.1 item 1): every
+ * visit with a result, with the cases not delivered per order line. `final` is filled by the caller
+ * (it needs the live plans): see withFinal.
+ */
+export async function outcomeShortfalls(db: Db, tenantId: string, depotId: string, window: { from: string; to: string }): Promise<{ date: string; v: VisitShortfall }[]> {
+  if (window.to < window.from) return [];
+  const rows = await db.stopVisit.findMany({
+    where: { tenantId, depotId, deliveryDate: { gte: dateOnly(window.from), lte: dateOnly(window.to) }, outcome: { not: null } },
+    select: { id: true, deliveryDate: true, truckId: true, loadNo: true, sequence: true, outcome: true, reason: true, reasonNote: true, outcomeSource: true, outcomeLate: true, linesJson: true },
+  });
+  return rows.map((r) => ({
+    date: isoOf(r.deliveryDate),
+    v: {
+      visitId: r.id,
+      truckId: r.truckId,
+      loadNo: r.loadNo,
+      sequence: r.sequence,
+      outcome: r.outcome as string,
+      reason: r.reason,
+      note: r.reasonNote,
+      source: r.outcomeSource,
+      late: r.outcomeLate,
+      final: false,
+      lines: readVisitLines(r.linesJson).map((l) => ({ orderId: l.orderId, lineId: l.lineId, planned: l.plannedCases, notDelivered: Math.max(0, l.plannedCases - (l.deliveredCases ?? l.plannedCases)) })),
+    },
+  }));
+}
+
+/** Order ids with cases recorded as not delivered (they are read although their status is DISPATCHED). */
+function shortfallOrderIds(found: readonly { v: VisitShortfall }[]): string[] {
+  return [...new Set(found.flatMap((x) => x.v.lines.filter((l) => l.notDelivered > 0).map((l) => l.orderId)))];
+}
+
+/**
+ * Each result's `final`: its load on the day's live plan is COMPLETED or reported Back at depot
+ * (spec section 8.7). Grouped per delivery date for carryCandidates.
+ */
+async function withFinal(
+  db: Db,
+  tenantId: string,
+  depotId: string,
+  found: readonly { date: string; v: VisitShortfall }[],
+  plans: ReadonlyMap<string, { id: string; plan: CarryPlanIn } | null>,
+): Promise<Map<string, VisitShortfall[]>> {
+  const out = new Map<string, VisitShortfall[]>();
+  if (!found.length) return out;
+  const dates = [...new Set(found.map((x) => x.date))];
+  const backs = await db.stopEvent.findMany({
+    where: { tenantId, depotId, kind: 'BACK_AT_DEPOT', deliveryDate: { in: dates.map(dateOnly) } },
+    select: { deliveryDate: true, truckId: true, loadNo: true },
+  });
+  const back = new Set(backs.map((b) => `${isoOf(b.deliveryDate)}|${b.truckId}|${b.loadNo}`));
+  for (const { date, v } of found) {
+    const load = plans.get(date)?.plan.loads.find((l) => l.truckId === v.truckId && l.loadNo === v.loadNo);
+    const final = load?.status === 'COMPLETED' || back.has(`${date}|${v.truckId}|${v.loadNo}`);
+    out.set(date, [...(out.get(date) ?? []), { ...v, final }]);
+  }
+  return out;
+}
+
+async function windowOrders(db: Db, tenantId: string, depotId: string, window: { from: string; to: string }, shortIds: readonly string[] = []) {
   const { from, to } = window;
   if (to < from) return [];
-  // The depot's orders (the same scope as ordersInScopeWhere; every order has a depot).
+  // The depot's orders (the same scope as ordersInScopeWhere; every order has a depot). An order that
+  // left (DISPATCHED) is read only when a recorded result says some of its cases were not delivered.
   return db.order.findMany({
     where: {
       tenantId,
       deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
       depotId,
       carriedToOrderId: null,
-      status: { notIn: ['DISPATCHED', 'DELIVERED'] },
+      ...(shortIds.length
+        ? { OR: [{ status: { notIn: ['DISPATCHED', 'DELIVERED'] } }, { status: 'DISPATCHED', id: { in: [...shortIds] } }] }
+        : { status: { notIn: ['DISPATCHED', 'DELIVERED'] } }),
     },
     include: {
       customer: { select: { code: true, branchCode: true, branchKey: true, name: true, active: true } },
@@ -611,7 +832,7 @@ async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string
     }
     const loads = await db.planLoad.findMany({
       where: { runId: run.id, tenantId },
-      select: { loadNo: true, status: true, truck: { select: { code: true } }, assignments: { select: { orderId: true, portionLinesJson: true } } },
+      select: { truckId: true, loadNo: true, status: true, truck: { select: { code: true } }, assignments: { select: { orderId: true, portionLinesJson: true, sequenceInTruck: true } } },
       orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }],
     });
     const sc = run.chosenScenarioId
@@ -625,7 +846,7 @@ async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string
         status: run.status,
         chosen: !!run.chosenScenarioId,
         scopeOrderIds: details ? [...details.scope.orderIds, ...details.scope.frozenOrderIds, ...(details.scope.frozenLoadOrderIds ?? [])] : null,
-        loads: loads.map((l) => ({ truckCode: l.truck.code, loadNo: l.loadNo, status: l.status, assignments: l.assignments })),
+        loads: loads.map((l) => ({ truckId: l.truckId, truckCode: l.truck.code, loadNo: l.loadNo, status: l.status, assignments: l.assignments })),
         unserved: (sc?.unservedOrders ?? []).map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode, reasonMessage: u.reasonMessage, portionLinesJson: u.portionLinesJson })),
       },
     });
@@ -715,22 +936,133 @@ function toOrderIn(o: Awaited<ReturnType<typeof windowOrders>>[number]): CarryOr
 /** The candidates for day D; `runs`: the locked live plans (bringForward), else read here. */
 async function readCandidates(db: Db, tenantId: string, depotId: string, date: string, today: string, runs?: ReadonlyMap<string, LiveRun | null>) {
   const { from, to } = carryWindow(date, today);
-  const orders = await windowOrders(db, tenantId, depotId, { from, to });
+  // The recorded results first: an order that left with cases recorded as not delivered is open again.
+  const found = await outcomeShortfalls(db, tenantId, depotId, { from, to });
+  const orders = await windowOrders(db, tenantId, depotId, { from, to }, shortfallOrderIds(found));
   const dates = [...new Set(orders.map((o) => isoOf(o.deliveryDate)))];
   const plans = await dayPlans(db, tenantId, depotId, dates, runs);
+  const shortfalls = await withFinal(db, tenantId, depotId, found, plans);
   const confirmedKeys = orders.length ? await confirmedKeysOn(db, tenantId, date) : new Set<string>();
   const ordersIn = orders.map(toOrderIn);
   const livePlans = new Map([...plans].map(([d, p]) => [d, p?.plan ?? null]));
-  const first = carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys });
+  const first = carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys, shortfalls });
   // Then the lines of the orders with open cases, wherever else they are (entered again for a later
   // day): read only for those orders' customers and sales orders, not the whole window.
   const open = new Set(first.map((c) => c.orderId));
   const laterLines = open.size ? await laterLinesOf(db, tenantId, orders.filter((o) => open.has(o.id)), from) : [];
-  const candidates = laterLines.length ? carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys, laterLines }) : first;
+  const candidates = laterLines.length ? carryCandidates(ordersIn, livePlans, { date, today, confirmedKeys, laterLines, shortfalls }) : first;
   return { from, to, candidates, plans };
 }
 
-function previewOf(date: string, depotId: string, window: { from: string; to: string; today: string }, candidates: CarryCandidate[]): CarryPreview {
+/**
+ * The panel's information lists (spec sections 9.1 items 7 and 11, 9.4): the stops of the window's
+ * loads that are back with no result recorded, orders brought forward whose recorded shortfall grew
+ * since, and the copies on day D that no plan refers to yet (Undo).
+ */
+async function carryFollowUps(
+  db: Db,
+  tenantId: string,
+  depotId: string,
+  date: string,
+  window: { from: string; to: string },
+  now: Date,
+): Promise<Pick<CarryPreview, 'noOutcome' | 'lateShortfalls' | 'undoable'>> {
+  const noOutcome = (await noResultStops(db, tenantId, depotId, window, { now })).map((s) => ({
+    date: s.date,
+    truckCode: s.truckCode,
+    loadNo: s.loadNo,
+    sequence: s.sequence,
+    customerCode: s.customerCode,
+    branchCode: s.branchCode,
+    customerName: s.customerName,
+    cases: s.cases,
+  }));
+  // Orders of the window brought forward, with the copy's basis, against what is recorded now.
+  const carried =
+    window.to < window.from
+      ? []
+      : await db.order.findMany({
+          where: { tenantId, depotId, deliveryDate: { gte: dateOnly(window.from), lte: dateOnly(window.to) }, carriedToOrderId: { not: null } },
+          select: { id: true, carriedToOrderId: true, customer: { select: { code: true, branchCode: true, name: true } } },
+        });
+  const lateShortfalls: LateShortfall[] = [];
+  if (carried.length) {
+    const copies = await db.order.findMany({
+      where: { tenantId, id: { in: carried.map((c) => c.carriedToOrderId!) } },
+      select: { id: true, deliveryDate: true, carryBasisJson: true },
+    });
+    const copyOf = new Map(copies.map((c) => [c.id, c]));
+    const results = await outcomeShortfalls(db, tenantId, depotId, window);
+    const trucks = await db.truck.findMany({ where: { tenantId, id: { in: [...new Set(results.map((r) => r.v.truckId))] } }, select: { id: true, code: true } });
+    const truckCode = new Map(trucks.map((t) => [t.id, t.code]));
+    for (const o of carried) {
+      const copy = copyOf.get(o.carriedToOrderId!);
+      if (!copy) continue;
+      const basis = readCarryBasis(copy.carryBasisJson);
+      const carriedLine = new Map<string, number>();
+      for (const v of basis.visits) for (const l of v.lines) carriedLine.set(l.lineId, (carriedLine.get(l.lineId) ?? 0) + l.notDelivered);
+      const nowLine = new Map<string, number>();
+      const extra: { where: string; reason: string }[] = [];
+      for (const r of results) {
+        const mine = r.v.lines.filter((l) => l.orderId === o.id && l.notDelivered > 0);
+        if (!mine.length) continue;
+        for (const l of mine) nowLine.set(l.lineId, (nowLine.get(l.lineId) ?? 0) + l.notDelivered);
+        const b = basis.visits.find((x) => x.visitId === r.v.visitId);
+        const grew = mine.some((l) => l.notDelivered > (b?.lines.find((x) => x.lineId === l.lineId)?.notDelivered ?? 0));
+        if (grew) extra.push({ where: `${truckCode.get(r.v.truckId) ?? '?'} L${r.v.loadNo} stop ${r.v.sequence}`, reason: reasonText(r.v.reason, r.v.note) });
+      }
+      // Only shortfalls beyond what was brought forward (a copy made from an unserved part counts its cases too).
+      const more = [...nowLine].reduce((s, [lineId, n]) => s + Math.max(0, n - (carriedLine.get(lineId) ?? 0)), 0);
+      if (more <= 0 || !extra.length) continue;
+      const copyDate = isoOf(copy.deliveryDate);
+      lateShortfalls.push({
+        orderId: o.id,
+        copyDate,
+        customerCode: o.customer.code,
+        branchCode: o.customer.branchCode,
+        customerName: o.customer.name,
+        cases: more,
+        text: `Not delivered after it was brought forward: ${more} cases of ${o.customer.code}${o.customer.branchCode ? `/${o.customer.branchCode}` : ''} (${extra.map((e) => `${e.where}, ${e.reason}`).join('; ')}) - add a late order for ${fmtDayMonth(copyDate)}`,
+      });
+    }
+  }
+  // Copies on day D that no plan version refers to (no route row, no unserved row) and that were not
+  // brought forward again themselves: Undo can remove them.
+  const copiesOnD = await db.order.findMany({
+    where: { tenantId, depotId, deliveryDate: dateOnly(date), carriedFromOrderId: { not: null }, carriedToOrderId: null },
+    select: { id: true, carriedFromOrderId: true, totalCases: true, carriedFrom: { select: { deliveryDate: true } }, customer: { select: { code: true, branchCode: true, name: true } } },
+  });
+  const undoable: UndoableCarry[] = [];
+  if (copiesOnD.length) {
+    const ids = copiesOnD.map((c) => c.id);
+    const [planned, unserved] = await Promise.all([
+      db.routeAssignment.findMany({ where: { orderId: { in: ids } }, select: { orderId: true } }),
+      db.unservedOrder.findMany({ where: { orderId: { in: ids } }, select: { orderId: true } }),
+    ]);
+    const onPlan = new Set([...planned, ...unserved].map((x) => x.orderId));
+    for (const c of copiesOnD) {
+      if (onPlan.has(c.id)) continue;
+      undoable.push({
+        originalOrderId: c.carriedFromOrderId!,
+        copyId: c.id,
+        customerCode: c.customer.code,
+        branchCode: c.customer.branchCode,
+        customerName: c.customer.name,
+        cases: c.totalCases,
+        fromDate: c.carriedFrom ? isoOf(c.carriedFrom.deliveryDate) : '',
+      });
+    }
+  }
+  return { noOutcome, lateShortfalls, undoable };
+}
+
+function previewOf(
+  date: string,
+  depotId: string,
+  window: { from: string; to: string; today: string },
+  candidates: CarryCandidate[],
+  follow: Pick<CarryPreview, 'noOutcome' | 'lateShortfalls' | 'undoable'> = { noOutcome: [], lateShortfalls: [], undoable: [] },
+): CarryPreview {
   const open = candidates.filter((c) => !c.blocked);
   const earlier = open.filter((c) => !c.ofToday);
   const today = open.filter((c) => c.ofToday);
@@ -747,6 +1079,7 @@ function previewOf(date: string, depotId: string, window: { from: string; to: st
     todayCases: today.reduce((a, c) => a + c.cases, 0),
     blocked: candidates.length - open.length,
     candidates,
+    ...follow,
   };
 }
 
@@ -773,11 +1106,12 @@ export function dayOverError(date: string, today: string): PlanError {
  */
 export async function carryOverPreview(tenantId: string, depotId: string, date: string, opts: { now?: Date; db?: Db } = {}): Promise<CarryPreview> {
   const db = opts.db ?? prisma;
+  const now = opts.now ?? new Date();
   await activeDepot(db, tenantId, depotId);
-  const { today } = await companyToday(db, tenantId, opts.now ?? new Date());
+  const { today } = await companyToday(db, tenantId, now);
   if (date < today) return previewOf(date, depotId, { ...carryWindow(date, today), today }, []);
   const { from, to, candidates } = await readCandidates(db, tenantId, depotId, date, today);
-  return previewOf(date, depotId, { from, to, today }, candidates);
+  return previewOf(date, depotId, { from, to, today }, candidates, await carryFollowUps(db, tenantId, depotId, date, { from, to }, now));
 }
 
 export interface CarriedOrder {
@@ -791,6 +1125,8 @@ export interface CarriedOrder {
   firstDate: string;
   cases: number;
   partial: boolean;
+  /** The delivery results the carry is based on (empty for unserved / not-left orders). */
+  basis?: CarryCandidate['basis'];
 }
 
 export interface BringForwardResult {
@@ -849,9 +1185,14 @@ export async function bringForward(
         // The days read (orders only change under the intake lock held here), their day locks, then
         // their live plans' row locks: a load dispatched (or a plan applied) meanwhile is seen here,
         // and a dispatch after this commits sees the carried orders (it is refused).
-        const pre = await windowOrders(tx, tenantId, depotId, carryWindow(date, today));
-        const dates = [...new Set(pre.map((o) => isoOf(o.deliveryDate)))].sort();
+        const window = carryWindow(date, today);
+        const preShort = await outcomeShortfalls(tx, tenantId, depotId, window);
+        const pre = await windowOrders(tx, tenantId, depotId, window, shortfallOrderIds(preShort));
+        const dates = [...new Set([...pre.map((o) => isoOf(o.deliveryDate)), ...preShort.map((x) => x.date)])].sort();
         for (const d of dates) await lockPlanDay(tx, tenantId, depotId, d);
+        // Delivery results (spec section 9.1 item 6): the outcome-day locks after the day locks and
+        // before the plans' row locks, so a result change and this carry never interleave.
+        for (const d of dates) await lockOutcomesDay(tx, tenantId, depotId, d);
         const runs = new Map<string, LiveRun | null>();
         for (const d of dates) runs.set(d, await currentPlan(tenantId, depotId, d, tx));
         const runIds = [...runs.values()].flatMap((r) => (r ? [r.id] : [])).sort();
@@ -933,6 +1274,7 @@ export async function bringForward(
             firstDate: c.firstDate,
             cases: c.cases,
             partial: c.partial,
+            basis: c.basis,
           });
         }
         const cases = carried.reduce((a, c) => a + c.cases, 0);
@@ -950,7 +1292,16 @@ export async function bringForward(
                 orders: carried.length,
                 cases,
                 late,
-                carried: carried.map((c) => ({ from: c.fromOrderId, to: c.toOrderId, customer: c.branchCode ? `${c.customerCode}/${c.branchCode}` : c.customerCode, fromDate: c.fromDate, cases: c.cases, partial: c.partial })),
+                carried: carried.map((c) => ({
+                  from: c.fromOrderId,
+                  to: c.toOrderId,
+                  customer: c.branchCode ? `${c.customerCode}/${c.branchCode}` : c.customerCode,
+                  fromDate: c.fromDate,
+                  cases: c.cases,
+                  partial: c.partial,
+                  // The delivery results the carry is based on (the copy's carryBasisJson).
+                  ...(c.basis?.length ? { basis: { visits: c.basis } } : {}),
+                })),
                 ...(check.skipped.length ? { skipped: check.skipped.map((s) => s.orderId) } : {}),
               } as never,
               ...(opts.ip ? { ip: opts.ip } : {}),
@@ -979,6 +1330,166 @@ export async function bringForward(
     if (isCarryConflict(e)) {
       throw new PlanError('An order was brought forward, or a sales-order line confirmed, at the same time. Nothing was brought forward: look at the list again.', 409, { code: 'CARRY_OVER_CHANGED' });
     }
+    throw e;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Undo bring forward (delivery outcome, spec section 9.4)
+// ---------------------------------------------------------------------------------------
+
+export type UndoRefusalCode = 'COPY_NOT_FOUND' | 'COPY_PLANNED' | 'COPY_ON_ROAD' | 'COPY_CARRIED_AGAIN' | 'PLAN_BUSY';
+
+export interface UndoCarryResult {
+  undone: true;
+  /** The copy was on no plan: nothing needs to be re-planned. */
+  replanNeeded: false;
+  originalOrderId: string;
+  copyId: string;
+  copyDate: string;
+  cases: number;
+}
+
+const custLabel = (c: { code: string; branchCode: string | null }) => (c.branchCode ? `${c.code}/${c.branchCode}` : c.code);
+
+/**
+ * Can the copy of `originalOrderId` be removed? Only when no plan version refers to it (no route row
+ * and no unserved row: RouteAssignment.orderId is ON DELETE RESTRICT and every version keeps its own
+ * rows, so a planned copy cannot be removed without rewriting plan history, F12), and day D's plan is
+ * not being optimized (that optimization may have read it). Reads only.
+ */
+export async function undoCheck(
+  db: Db,
+  tenantId: string,
+  originalOrderId: string,
+): Promise<
+  | { ok: true; original: { id: string; deliveryDate: Date; depotId: string }; copy: { id: string; deliveryDate: Date; depotId: string; totalCases: number; customer: { code: string; branchCode: string | null } } }
+  | { ok: false; code: UndoRefusalCode; text: string; copyId: string | null; copyDate: string | null }
+> {
+  const original = await db.order.findFirst({ where: { id: originalOrderId, tenantId }, select: { id: true, deliveryDate: true, depotId: true, carriedToOrderId: true } });
+  const none = { ok: false as const, code: 'COPY_NOT_FOUND' as const, text: 'This order is not brought forward (any more): nothing to undo. Look at the list again.', copyId: null, copyDate: null };
+  if (!original?.carriedToOrderId) return none;
+  const copy = await db.order.findFirst({
+    where: { id: original.carriedToOrderId, tenantId },
+    select: { id: true, deliveryDate: true, depotId: true, totalCases: true, carriedFromOrderId: true, carriedToOrderId: true, customer: { select: { code: true, branchCode: true } } },
+  });
+  if (!copy || copy.carriedFromOrderId !== original.id) return none;
+  const copyDate = isoOf(copy.deliveryDate);
+  const day = fmtDayMonth(copyDate);
+  const who = custLabel(copy.customer);
+  // The copy was itself brought forward again (O -> C -> C2): C2 points at C, so C cannot go first.
+  if (copy.carriedToOrderId) {
+    const next = await db.order.findFirst({ where: { id: copy.carriedToOrderId, tenantId }, select: { deliveryDate: true } });
+    const nextDay = next ? fmtDayMonth(isoOf(next.deliveryDate)) : 'a later day';
+    return {
+      ok: false,
+      code: 'COPY_CARRIED_AGAIN',
+      text: `${who}'s copy on ${day} was brought forward again to ${nextDay}: undo that first (on ${nextDay}'s Bring forward panel).`,
+      copyId: copy.id,
+      copyDate,
+    };
+  }
+  const [rows, unserved] = await Promise.all([
+    db.routeAssignment.findMany({ where: { orderId: copy.id }, select: { load: { select: { status: true } } } }),
+    db.unservedOrder.findMany({ where: { orderId: copy.id }, select: { orderId: true } }),
+  ]);
+  if (rows.some((r) => r.load && r.load.status !== 'PLANNED')) {
+    return { ok: false, code: 'COPY_ON_ROAD', text: `${who}'s copy is already being loaded or delivered on ${day}: it cannot be removed.`, copyId: copy.id, copyDate };
+  }
+  if (rows.length || unserved.length) {
+    return {
+      ok: false,
+      code: 'COPY_PLANNED',
+      text: `${who} was brought forward to ${day} with ${copy.totalCases} cases and ${day} is already planned with it. A planned order cannot be removed in the app yet: ask an administrator to remove the copy.`,
+      copyId: copy.id,
+      copyDate,
+    };
+  }
+  const dayPlan = await currentPlan(tenantId, copy.depotId, copyDate, db);
+  if (dayPlan?.status === 'OPTIMIZING') {
+    return { ok: false, code: 'PLAN_BUSY', text: `The ${day} plan is being optimized right now: wait for it to finish, then try again.`, copyId: copy.id, copyDate };
+  }
+  return { ok: true, original: { id: original.id, deliveryDate: original.deliveryDate, depotId: original.depotId }, copy };
+}
+
+/** The refusal of an undo as an error (409 with the code). */
+export function undoRefusal(r: { code: UndoRefusalCode; text: string; copyId: string | null; copyDate: string | null }): PlanError {
+  return r.code === 'PLAN_BUSY' ? new PlanBusyError(r.text) : new PlanError(r.text, r.code === 'COPY_NOT_FOUND' ? 404 : 409, { code: r.code, copyId: r.copyId, copyDate: r.copyDate });
+}
+
+/**
+ * Removes the copy of `originalOrderId` (the caller holds the locks: intake, the day locks of the
+ * original's date and the copy's date, the outcome-day lock of the original's date). In this order:
+ * the original's carry fields are cleared first (Order.carriedTo is a NO ACTION foreign key, checked
+ * at the end of each statement), then the copy is deleted (its lines and their intake keys cascade).
+ * Audited ORDERS_CARRY_UNDONE.
+ */
+export async function undoCarryTx(tx: Tx, tenantId: string, originalOrderId: string, user: { id: string }, opts: { ip?: string | null } = {}): Promise<UndoCarryResult> {
+  const check = await undoCheck(tx, tenantId, originalOrderId);
+  if (!check.ok) throw undoRefusal(check);
+  const { copy } = check;
+  const cleared = await tx.order.updateMany({ where: { id: originalOrderId, tenantId, carriedToOrderId: copy.id }, data: { carriedToOrderId: null, carriedAt: null, carriedById: null } });
+  if (cleared.count !== 1) throw new PlanError('The order changed meanwhile: nothing was undone. Look at the list again.', 409, { code: 'CARRY_OVER_CHANGED' });
+  await tx.order.deleteMany({ where: { id: copy.id, tenantId } });
+  const copyDate = isoOf(copy.deliveryDate);
+  await audit(
+    {
+      tenantId,
+      userId: user.id,
+      action: 'ORDERS_CARRY_UNDONE',
+      entity: 'Order',
+      entityId: originalOrderId,
+      afterJson: { originalOrderId, copyId: copy.id, copyDate, cases: copy.totalCases, customer: custLabel(copy.customer) } as never,
+      ...(opts.ip ? { ip: opts.ip } : {}),
+    },
+    tx,
+  );
+  return { undone: true, replanNeeded: false, originalOrderId, copyId: copy.id, copyDate, cases: copy.totalCases };
+}
+
+/**
+ * The locks an undo needs, in the lock order (plan-locks.ts): intake, the day locks of the original's
+ * date and of day D (date order), then the outcome-day lock of the original's date (its visits are the
+ * carry basis). Read before locking, checked again under the locks by undoCarryTx.
+ */
+export async function lockForUndo(tx: Tx, tenantId: string, originalOrderIds: readonly string[]): Promise<void> {
+  await lockIntake(tx, tenantId);
+  await setLockTimeout(tx);
+  const orders = await tx.order.findMany({
+    where: { id: { in: [...originalOrderIds] }, tenantId },
+    select: { depotId: true, deliveryDate: true, carriedTo: { select: { deliveryDate: true } } },
+  });
+  // Every day lock in date order (per depot), then every outcome-day lock: never a later day before an earlier one.
+  const dayLocks = new Set<string>();
+  const outcomeLocks = new Set<string>();
+  for (const o of orders) {
+    dayLocks.add(`${isoOf(o.deliveryDate)}|${o.depotId}`);
+    if (o.carriedTo) dayLocks.add(`${isoOf(o.carriedTo.deliveryDate)}|${o.depotId}`);
+    outcomeLocks.add(`${isoOf(o.deliveryDate)}|${o.depotId}`);
+  }
+  for (const k of [...dayLocks].sort()) {
+    const [d, depotId] = k.split('|') as [string, string];
+    await lockPlanDay(tx, tenantId, depotId, d);
+  }
+  for (const k of [...outcomeLocks].sort()) {
+    const [d, depotId] = k.split('|') as [string, string];
+    await lockOutcomesDay(tx, tenantId, depotId, d);
+  }
+}
+
+/** POST /api/dispatch/carry-over/undo: "Undo bring forward" for a copy no plan refers to yet. */
+export async function undoCarry(tenantId: string, originalOrderId: string, user: { id: string }, opts: { ip?: string | null } = {}): Promise<UndoCarryResult> {
+  try {
+    return await prisma.$transaction(
+      async (tx) => {
+        await lockForUndo(tx, tenantId, [originalOrderId]);
+        return undoCarryTx(tx, tenantId, originalOrderId, user, opts);
+      },
+      { timeout: 30_000, maxWait: 10_000 },
+    );
+  } catch (e) {
+    if (isTransactionTimeout(e)) throw new PlanError(INTAKE_BUSY.error, 409, { code: INTAKE_BUSY.code });
+    if (isLockBusy(e)) throw new PlanBusyError();
     throw e;
   }
 }

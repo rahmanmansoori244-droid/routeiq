@@ -4,8 +4,8 @@ import { stopSearch } from '@/lib/dispatch/stop-search';
 interface Params { params: { id: string } }
 
 /**
- * POST /api/runs/:id/stop-search - "Use the best plan found so far" (SUPERVISOR and above, audited
- * SEARCH_STOPPED). A running THOROUGH search ends at the next plan it finds; the job then checks and
+ * POST /api/runs/:id/stop-search - "Use the best plan found so far" (the dispatcher: PLANNER and above
+ * since owner decision 4, 5 Oct 2026 - it was SUPERVISOR; audited SEARCH_STOPPED). A running THOROUGH search ends at the next plan it finds; the job then checks and
  * saves that plan as usual. 409 when no thorough search is running for the plan (NOT_RUNNING,
  * NOT_THOROUGH, NOT_STARTED, SOLVER_NOT_RUNNING); 502 when the optimizer cannot be reached (the
  * search goes on). See lib/dispatch/stop-search.ts.
@@ -17,5 +17,5 @@ export const POST = (req: Request, { params }: Params) =>
       if (res.status >= 400) return fail(res.body, res.status);
       return ok(res.body, res.status);
     },
-    { role: 'SUPERVISOR' },
+    { role: 'PLANNER' },
   )(req);

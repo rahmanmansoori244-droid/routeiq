@@ -183,6 +183,10 @@ model Tenant {
   customerTypeProfiles CustomerTypeProfile[]
   planLoads            PlanLoad[]
   intakeLineKeys       IntakeLineKey[]
+  driverLinks          DriverLink[]
+  stopVisits           StopVisit[]
+  stopEvents           StopEvent[]
+  deliveryPhotos       DeliveryPhoto[]
 }
 
 model TenantConfig {
@@ -258,6 +262,24 @@ model TenantConfig {
   // Data to collect: customers with open orders from today to this many days ahead that miss a
   // location or their own confirmed receiving hours.
   dataCollectDays          Int     @default(3)
+  // Delivery outcome and the driver page (owner request 4 Oct 2026). Admin settings.
+  // Radius around a stop's pin inside which the driver page counts the truck as arrived (50-500 m).
+  geofenceRadiusM          Int      @default(100)
+  // Delivered and Partly delivered need a photo from the driver (one exception: "Camera not working").
+  photoProofRequired       Boolean  @default(true)
+  // Delivery photo bytes are dropped after this many days (the metadata stays), 30-1095. Owner
+  // decision 1 (5 Oct 2026): 90 days (it was 365; migration 20261005090000 moved companies on 365).
+  photoRetentionDays       Int      @default(90)
+  // Positions, IP addresses and browser ids of driver events and photos are erased after this many
+  // days (30 .. photoRetentionDays); the distances from the pin are kept.
+  locationRetentionDays    Int      @default(90)
+  // The company number behind the driver page's "Call dispatcher" button: used when the truck's depot
+  // has no number of its own (Depot.dispatcherPhone, owner decision 3 of 5 Oct 2026); hidden while
+  // neither has one.
+  dispatcherPhone          String?
+  // Deliveries before this moment are outside the no-result list and the outcome KPIs (set to the
+  // migration time for existing companies).
+  outcomesSince            DateTime @default(now())
 }
 
 // Defaults per customer type; a customer's own values always win.
@@ -299,6 +321,11 @@ model User {
   ordersCarried        Order[]              @relation("OrderCarriedBy")
   confirmedWindows     Customer[]           @relation("CustomerWindowConfirmedBy")
   orderTimesSet        Order[]              @relation("OrderDeliveryTimeSetBy")
+  driverLinksIssued    DriverLink[]         @relation("DriverLinkIssuedBy")
+  driverLinksRevoked   DriverLink[]         @relation("DriverLinkRevokedBy")
+  stopOutcomesSet      StopVisit[]          @relation("StopVisitOutcomeBy")
+  stopEvents           StopEvent[]          @relation("StopEventUser")
+  deliveryPhotos       DeliveryPhoto[]      @relation("DeliveryPhotoUser")
 
   @@index([tenantId])
 }
@@ -336,6 +363,10 @@ model Depot {
   /// make it active or to put a truck or region on it. The database refuses it too (CHECK
   /// "Depot_historyOnly_not_active", in that migration; Prisma's schema has no CHECK constraints).
   historyOnly   Boolean       @default(false)
+  /// Owner decision 3 (5 Oct 2026): the number behind the driver page's "Call dispatcher" for the
+  /// trucks of this depot (company admin, Depots page). Null: the company number
+  /// (TenantConfig.dispatcherPhone). lib/driver-link/dispatcher-phone.ts.
+  dispatcherPhone String?
   trucks        Truck[]
   regions       Region[]
   runs          RunPlan[]
@@ -369,10 +400,15 @@ model Truck {
   /// NO ACTION (audit F20): a driver still set as a truck's default is never deleted (drivers are deactivated).
   defaultDriver    Driver?           @relation("TruckDefaultDriver", fields: [defaultDriverId], references: [id], onDelete: NoAction)
   active           Boolean           @default(true)
+  /// Hired from outside (owner request 4 Oct 2026): a badge on the plan, the driver sheets and the
+  /// driver page. The planner never reads it.
+  hired            Boolean           @default(false)
   routes           RouteAssignment[]
   shifts           DriverShift[]
   locations        TruckLocation[]
   loads            PlanLoad[]
+  driverLinks      DriverLink[]
+  stopVisits       StopVisit[]
 
   @@unique([tenantId, code])
   @@index([tenantId, depotId])
@@ -389,6 +425,9 @@ model Driver {
   // PIN is stored hashed (bcrypt cost 12, same as User passwords). Null until set.
   accessPinHash String?
   active        Boolean @default(true)
+  /// A daily (casual) driver added from a load by the dispatcher (owner request 4 Oct 2026). No
+  /// account; an admin may clear it to make them a regular driver.
+  casual        Boolean @default(false)
 
   shifts        DriverShift[]
   defaultTrucks Truck[]       @relation("TruckDefaultDriver")
@@ -538,6 +577,7 @@ model Customer {
   /// changed. NULL on customers from before this release (nothing recorded when they were made).
   createdAt            DateTime?       @default(now())
   updatedAt            DateTime?       @updatedAt
+  stopVisits           StopVisit[]
 
   @@unique([tenantId, code, branchKey])
   @@index([tenantId, regionId])
@@ -652,6 +692,9 @@ model Order {
   deliveryTimeSetAt         DateTime?
   deliveryTimeSetById       String?
   deliveryTimeSetBy         User?                      @relation("OrderDeliveryTimeSetBy", fields: [deliveryTimeSetById], references: [id], onDelete: SetNull)
+  /// On a brought-forward copy: the delivery results (visits and not-delivered cases per line) the
+  /// carry was based on (owner request 4 Oct 2026). Null on copies made from other reasons or before.
+  carryBasisJson            Json?
 
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])
@@ -970,4 +1013,262 @@ model AuditLog {
 
   @@index([tenantId, createdAt])
   @@index([tenantId, entity, entityId])
+}
+
+// --- Delivery outcome & driver page (owner request 4 Oct 2026) ---------------------------------
+// One driver link (QR) per truck and delivery date opens the driver's phone page (app/d/[token]);
+// arrivals, departures, results and photos are stop events. Spec: lib/driver-link/*, lib/delivery/*.
+// The retired driver app's tables (DriverShift, TruckLocation, DeliveryProof) are not used.
+
+enum StopEventKind {
+  ARRIVED        // payload: chained?, observed (false = first seen when the page came back), resumed?
+  DEPARTED       // payload: reason LEFT | NEXT_STOP, gap? (true = not observed: the page was away)
+  OUTCOME        // payload: outcome (or null = result cleared), reason, note, lines, photoKeys, noPhotoReason?
+  PHOTO          // payload: { photoId }
+  BACK_AT_DEPOT  // load level: sequence is NULL
+  CARRY_CONFLICT // a result change refused because the order was brought forward; ignored by deriveVisit
+}
+
+enum PhotoPositionStatus {
+  OK             // a fix with accuracy <= 100 m
+  POOR           // a fix, accuracy > 100 m
+  DENIED         // location permission refused
+  TIMEOUT        // no fix within 15 s
+  UNSUPPORTED    // no Geolocation in this browser
+}
+
+enum StopEventSource {
+  PHONE_AUTO     // the driver page's geofence (no tap)
+  PHONE_MANUAL   // the driver tapped (I have arrived, a result, a photo, Back at depot)
+  DISPATCHER     // recorded or corrected on the plan screen
+  AYUN           // later: Ayun GPS stop events
+  SYSTEM         // derived by RouteIQ (for example the janitor completing a returned load)
+}
+
+enum DeliveryOutcome {
+  DELIVERED
+  PARTLY_DELIVERED
+  NOT_DELIVERED
+}
+
+enum NotDeliveredReason {
+  SHOP_CLOSED
+  CUSTOMER_REFUSED
+  NO_ONE_TO_RECEIVE
+  WRONG_LOCATION      // "Wrong location or could not find"
+  NO_TIME_LEFT
+  PAYMENT_ISSUE
+  DAMAGED_GOODS
+  NOT_ON_TRUCK        // cases missing from the truck
+  OTHER               // note required
+}
+
+/// One driver link per truck and delivery date. The token is never stored: tokenHash is its
+/// SHA-256 (lookup), and the token is re-derived on the server from (id, generation, salt) and the
+/// server key (lib/driver-link/token.ts), so the plan screen and every PDF can show it again.
+model DriverLink {
+  id               String          @id @default(cuid())
+  tenantId         String
+  tenant           Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  truckId          String
+  /// NO ACTION: a truck with links is deactivated, never deleted.
+  truck            Truck           @relation(fields: [truckId], references: [id], onDelete: NoAction)
+  deliveryDate     DateTime        @db.Date
+  generation       Int             @default(1)
+  salt             String // 16 random bytes, base64url; new on every reissue
+  keyId            String // first 8 hex of SHA-256(server key): resolve refuses a link made with an older key
+  tokenHash        String          @unique // SHA-256 hex of the token
+  /// The hash of the generation before the last reissue: that token answers 410 LINK_REPLACED
+  /// (never counted as a bad token) instead of 404.
+  prevTokenHash    String?         @unique
+  expiresAt        DateTime        @db.Timestamptz(3) // reading and new results; uploads get +72 h
+  issuedAt         DateTime        @default(now()) @db.Timestamptz(3)
+  issuedById       String?
+  issuedBy         User?           @relation("DriverLinkIssuedBy", fields: [issuedById], references: [id], onDelete: SetNull)
+  /// The driver of the truck-day's first load not yet COMPLETED when (re)issued: "Reissue link?" prompt.
+  driverIdAtIssue  String?
+  revokedAt        DateTime?       @db.Timestamptz(3)
+  revokedById      String?
+  revokedBy        User?           @relation("DriverLinkRevokedBy", fields: [revokedById], references: [id], onDelete: SetNull)
+  lastSeenAt       DateTime?       @db.Timestamptz(3)
+  /// Up to 5 browsers seen with this generation: [{ device: first 8 hex of sha256(deviceId), first, last }]
+  /// (written at most every 5 min). The link dialog shows "used on N phones".
+  devicesJson      Json?
+  events           StopEvent[]
+  photos           DeliveryPhoto[]
+
+  @@unique([tenantId, truckId, deliveryDate])
+  @@index([tenantId, deliveryDate])
+}
+
+/// One physical stop of a load that left the depot: the current state, rebuilt from its events.
+/// Keyed by the stop itself, never by a plan version's row (a re-plan copies the loads).
+model StopVisit {
+  id                  String               @id @default(cuid())
+  tenantId            String
+  tenant              Tenant               @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId             String
+  deliveryDate        DateTime             @db.Date
+  truckId             String
+  truck               Truck                @relation(fields: [truckId], references: [id], onDelete: NoAction)
+  loadNo              Int
+  sequence            Int
+  customerId          String
+  customer            Customer             @relation(fields: [customerId], references: [id], onDelete: NoAction)
+  /// Traceability only (no FK): the PlanLoad row of the version the first event was recorded on.
+  firstLoadId         String?
+  // The plan as it was for this stop (copied at the first write; frozen loads never change):
+  plannedEtaMin       Int?
+  plannedServiceMin   Int? // departureMin - serviceStartMin (the scheduled unloading)
+  plannedLat          Float?
+  plannedLng          Float?
+  windowStartMin      Int? // promised time, else the hard receiving window; null = any time
+  windowEndMin        Int?
+  /// [{ orderId, lineId, productCode, plannedCases, deliveredCases|null }] (readVisitLines)
+  linesJson           Json
+  casesPlanned        Int
+  casesDelivered      Int? // null = no result
+  // Timing (rebuilt from events):
+  arrivedAt           DateTime?            @db.Timestamptz(3)
+  arrivalSource       StopEventSource?
+  arrivalDistanceM    Float?
+  arrivalAccuracyM    Float?
+  departedAt          DateTime?            @db.Timestamptz(3)
+  departureSource     StopEventSource?
+  departedAtOutcome   Boolean              @default(false) // no usable departure: the result time ended the stop
+  /// false = the automatic arrival was first seen when the page came back (resumed), so its time
+  /// is only an upper bound: never used for measured times or the on-time KPI.
+  arrivalObserved     Boolean              @default(true)
+  autoArrivedAt       DateTime?            @db.Timestamptz(3) // an OBSERVED automatic arrival only
+  autoDepartedAt      DateTime?            @db.Timestamptz(3) // an OBSERVED automatic departure only
+  autoBasis           String? // 'DEPARTURE' | 'RESULT': what ended the automatic timing
+  autoMinutes         Float? // observed auto arrival -> observed departure, else -> the driver's result time
+  autoServiceMinutes  Float? // the same, from max(arrival, window start), break excluded
+  /// Plausibility flags of the phone-reported positions: any flag excludes the visit from
+  /// measured times, the on-time KPI and the pin check. The overlay says "unverified timing".
+  timingSuspect       Boolean              @default(false)
+  // Result (rebuilt from the latest OUTCOME event):
+  outcome             DeliveryOutcome?
+  reason              NotDeliveredReason?
+  reasonNote          String?
+  outcomeAt           DateTime?            @db.Timestamptz(3)
+  outcomeSource       StopEventSource?
+  outcomeById         String?
+  outcomeBy           User?                @relation("StopVisitOutcomeBy", fields: [outcomeById], references: [id], onDelete: SetNull)
+  outcomeLat          Float?
+  outcomeLng          Float?
+  outcomeAccuracyM    Float?
+  outcomeDistanceM    Float?
+  /// The current result came from an event received after the load was COMPLETED or after the
+  /// link expired: shown "recorded after the trip closed", never ticked in Bring forward.
+  outcomeLate         Boolean              @default(false)
+  noPhotoReason       String? // 'CAMERA_FAILED' (the driver's only exception to "photo required")
+  photoKeysJson       Json? // photo keys the result named (shows "photo not received yet")
+  photoCount          Int                  @default(0)
+  // The driver's own last Delivered or Partly result (owner decision 2 of 5 Oct 2026), rebuilt from the
+  // events the driver link sent. A result the office records (Record) never changes these four, so a
+  // result the driver saved without a photo stays on the lists, the KPI and the Excel after a correction
+  // (lib/delivery/camera-exceptions.ts).
+  driverResultAt      DateTime?            @db.Timestamptz(3)
+  driverResultOutcome DeliveryOutcome?
+  driverNoPhotoReason String? // 'CAMERA_FAILED': that result was saved with "Camera not working"
+  driverPhotoKeys     Int                  @default(0) // photo keys named by the driver's Delivered / Partly results
+  locationPurgedAt    DateTime?            @db.Timestamptz(3) // lat/lng/accuracy erased; distances kept
+  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime             @updatedAt @db.Timestamptz(3)
+  events              StopEvent[]
+  photos              DeliveryPhoto[]
+
+  @@unique([tenantId, depotId, deliveryDate, truckId, loadNo, sequence])
+  @@index([tenantId, deliveryDate])
+  @@index([tenantId, customerId, deliveryDate])
+}
+
+/// Append-only log: what happened at a stop, from which source. Ayun (later) writes here too.
+model StopEvent {
+  id              String          @id @default(cuid())
+  tenantId        String
+  tenant          Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId         String
+  deliveryDate    DateTime        @db.Date
+  truckId         String
+  loadNo          Int
+  sequence        Int? // NULL = load level (BACK_AT_DEPOT)
+  visitId         String?
+  visit           StopVisit?      @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  kind            StopEventKind
+  source          StopEventSource
+  at              DateTime        @db.Timestamptz(3) // when it happened (device clock, corrected and clamped)
+  receivedAt      DateTime        @default(now()) @db.Timestamptz(3)
+  lat             Float?
+  lng             Float?
+  accuracyM       Float?
+  distanceM       Float? // from the stop's planned pin (the depot pin for BACK_AT_DEPOT)
+  speedMps        Float?
+  driverLinkId    String?
+  driverLink      DriverLink?     @relation(fields: [driverLinkId], references: [id], onDelete: SetNull)
+  linkGeneration  Int?
+  userId          String?
+  user            User?           @relation("StopEventUser", fields: [userId], references: [id], onDelete: SetNull)
+  clientIp        String? // as AuditLog: who sent it (erased with the location)
+  deviceId        String? // sha256 of the page's random per-browser id, first 16 hex (erased with the location)
+  /// Namespaced on the server so sources cannot collide: "dl:<uuid>" (driver action),
+  /// "dlphoto:<uuid>" (driver photo), "disp:<uuid>" (dispatcher), "ayun:<id>" (later).
+  idempotencyKey  String
+  payloadJson     Json? // also: late, clockSkewMs, gpsAt, suspect[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, deliveryDate, truckId])
+  @@index([visitId, at])
+  /// The janitor's returned-loads sweep (kind BACK_AT_DEPOT, newest first).
+  @@index([kind, receivedAt])
+  /// The location retention sweep (per company, by receipt time).
+  @@index([tenantId, receivedAt])
+}
+
+/// A delivery photo: compressed JPEG in the database. bytes = NULL once the retention janitor
+/// dropped it; the metadata stays.
+model DeliveryPhoto {
+  id               String              @id @default(cuid())
+  tenantId         String
+  tenant           Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  visitId          String
+  visit            StopVisit           @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  idempotencyKey   String
+  source           StopEventSource
+  driverLinkId     String?
+  driverLink       DriverLink?         @relation(fields: [driverLinkId], references: [id], onDelete: SetNull)
+  userId           String?
+  user             User?               @relation("DeliveryPhotoUser", fields: [userId], references: [id], onDelete: SetNull)
+  clientIp         String?
+  deviceId         String?
+  /// The capture time on the device clock, skew-corrected and clamped to
+  /// [zonedDayStart(date) - 6 h, receivedAt]. The raw value is in rawTakenAt.
+  takenAt          DateTime            @db.Timestamptz(3)
+  rawTakenAt       DateTime?           @db.Timestamptz(3)
+  receivedAt       DateTime            @default(now()) @db.Timestamptz(3) // server time: retention runs on it
+  positionStatus   PhotoPositionStatus
+  lat              Float?
+  lng              Float?
+  accuracyM        Float?
+  distanceM        Float?
+  exifLat          Float?
+  exifLng          Float?
+  exifTakenAt      DateTime?           @db.Timestamptz(3) // parsed with OffsetTimeOriginal, else the tenant time zone
+  exifDistanceM    Float?
+  oldPhoto         Boolean             @default(false) // EXIF time or file time > 15 min before the arrival / dispatch
+  contentType      String              @default("image/jpeg")
+  byteSize         Int // of the stored (metadata-stripped) bytes
+  width            Int?
+  height           Int?
+  sha256           String // of the stored (metadata-stripped) bytes
+  bytes            Bytes?
+  purgedAt         DateTime?           @db.Timestamptz(3)
+  locationPurgedAt DateTime?           @db.Timestamptz(3)
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([visitId])
+  @@index([tenantId, receivedAt])
+  /// The daily photo cap per driver link.
+  @@index([driverLinkId])
 }

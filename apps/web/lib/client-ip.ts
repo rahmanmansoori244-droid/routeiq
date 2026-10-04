@@ -43,6 +43,15 @@ function cleanIp(raw: string | null | undefined): string | null {
 // always a proxy, which would make every user share one rate-limit bucket.
 const INTERNAL_IP =
   /^(10\.|127\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.|::1$|f[cd][0-9a-f]{2}:|fe80:)/i;
+
+/**
+ * True for a private, loopback, link-local or carrier-grade NAT address: almost always a proxy, so
+ * a limit keyed on it would throttle everyone behind it. The driver link's bad-token counter skips
+ * such an address (and an unknown one), as sign-in does (lib/driver-link/guard.ts).
+ */
+export function isInternalIp(ip: string | null | undefined): boolean {
+  return !!ip && INTERNAL_IP.test(ip);
+}
 let warnedInternal = false;
 let warnedUnresolved = false;
 

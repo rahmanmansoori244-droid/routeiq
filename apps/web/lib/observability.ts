@@ -10,6 +10,8 @@
  * The harness intentionally never throws — observability code MUST NOT crash
  * the request path.
  */
+import { sentryScrubOptions } from './observability-scrub';
+
 type Extra = Record<string, unknown> | undefined;
 
 let sentry: {
@@ -30,17 +32,11 @@ async function initLazy(): Promise<void> {
     if (!mod) return;
     mod.init({
       dsn,
-      tracesSampleRate: 0.1,
       environment: process.env.NODE_ENV,
-      // Scrub passwords/tokens/credentials before they leave the box.
-      beforeSend(event: { request?: { headers?: Record<string, string>; data?: unknown } }) {
-        if (event.request?.headers) {
-          for (const k of ['authorization', 'cookie', 'x-solver-token', 'x-janitor-token']) {
-            if (event.request.headers[k]) event.request.headers[k] = '[redacted]';
-          }
-        }
-        return event;
-      },
+      // Scrub passwords/tokens/credentials before they leave the box, and never trace or name a
+      // driver-link token (lib/observability-scrub.ts: tracesSampler, beforeSend,
+      // beforeSendTransaction, beforeBreadcrumb).
+      ...sentryScrubOptions(0.1),
     });
     sentry = mod;
   } catch {

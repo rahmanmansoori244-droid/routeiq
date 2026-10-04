@@ -22,6 +22,8 @@ import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
   fmtSearchTime,
   optimizeStartedText,
+  planSearching,
+  readResultsNow,
   searchModeNow,
   searchPollMs,
   searchProgressText,
@@ -36,6 +38,18 @@ import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
 import { afterLateOrderSaved, createLoadOrder, planAfterLoad, planReloadErrorText, runPlanAction, type ActionLock, type PlanPanel } from './plan-actions';
+import type { DriverLinkView } from '@/lib/driver-link/manifest-types';
+import { reissuePrompt, reissuePromptText } from '@/lib/driver-link/reissue-prompt';
+import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
+import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
+import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
+import type { ApiResult } from './client-api';
+import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
+import { officeTimesPrefill } from '@/lib/delivery/office-text';
+import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
+import { PhotoViewer } from './photo-viewer';
+import { CameraExceptions } from './camera-exceptions';
+import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -58,7 +72,14 @@ const STUCK_RESET_CONFIRM =
 /** Once a load is out, who drove it is history. */
 const ON_ROAD = new Set(['DISPATCHED', 'COMPLETED']);
 
-interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean }
+interface DriverOption { id: string; code: string; name: string; phone: string | null; active: boolean; casual?: boolean }
+
+/** Owner rule 20: the Dispatch button's title on a load without a driver. */
+const DISPATCH_NEEDS_DRIVER = 'Pick the driver first: a load never leaves without a driver';
+/** The Driver list's last option: add a daily (casual) driver from the load. */
+const ADD_DAILY = '__add_daily_driver__';
+/** PATCH /api/dispatch/driver-links/:id action after the "Reissue link?" prompt. */
+const LINK_REISSUE = 'REISSUE' as const;
 
 interface Props {
   slug: string;
@@ -75,8 +96,13 @@ interface Props {
   showVersionLink?: boolean;
   /** Calling code added to drivers' phones saved without one (WhatsApp links); null = unknown. */
   phoneCountryCode?: string | null;
-  /** Supervisor and above: may "Reset stuck plan" (audit F09, owner decision 17). */
+  /** The dispatcher (PLANNER and above, owner decision 4 of 5 Oct 2026): may "Reset stuck plan" and "Use the best plan found so far". */
   canResetStuck?: boolean;
+  /**
+   * The list of results saved without a photo ("Camera not working"). Off on the day screen, whose
+   * Deliveries card right below lists them; the load rows' red badge shows either way.
+   */
+  showCameraList?: boolean;
   /** A request of the screen around this plan is running (the day screen's OPTIMIZE / RE-PLAN): every action here waits. */
   externalBusy?: boolean;
   /** Told when an action of this plan starts (true) and ends (false), so the screen around it waits too. */
@@ -88,6 +114,11 @@ interface Props {
    */
   reloadSignal?: number;
   /**
+   * A result was recorded on this plan (Record outcome): the screen around it reads its Deliveries
+   * card again, also while a search runs.
+   */
+  onResultRecorded?: () => void;
+  /**
    * The company's today (YYYY-MM-DD) as the day screen knows it: a load of today holding orders
    * brought forward to tomorrow says "re-plan today" / "unlock" (carriedLoadTitle). Optional:
    * without it (the standalone plan version page) the plan's own today is used (PlanDetail.today).
@@ -95,7 +126,7 @@ interface Props {
   today?: string;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, externalBusy = false, onBusyChange, reloadSignal = 0, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, showCameraList = true, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -120,19 +151,49 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
+  // Delivery results of this version's loads that left (owner request 4 Oct 2026, spec section 10):
+  // read with the plan, and every 60 s while a load is on the road and the page is in front.
+  const [overlay, setOverlay] = useState<OutcomeOverlay | null>(null);
+  const [recordFor, setRecordFor] = useState<OutcomeTarget | null>(null);
+  const [photosFor, setPhotosFor] = useState<{ title: string; photos: OverlayPhoto[] } | null>(null);
+  const overlayOrder = useRef(0);
+  // The plan's load reads the results too (a ref, so `load` keeps depending on the run only).
+  const overlayLoad = useRef<() => void>(() => undefined);
+  // The results were read once: a running search's polls do not read them again.
+  const overlaySeen = useRef(false);
+
   // Newest answer wins (createLoadOrder): an answer older than the one on screen is dropped (null).
   const loadOrder = useRef(createLoadOrder());
   // A load newer than the answer on screen is on its way: Try again waits for it.
   const [reloading, setReloading] = useState(false);
-  const load = useCallback(async () => {
+  // `results`: the load follows a write (a result recorded, a reload the screen asked for): the
+  // results are read at once, whatever the plan's answer - also while a search runs, and even when a
+  // search poll answers first and this answer is dropped.
+  const load = useCallback(async (opts?: { results?: boolean }) => {
+    const afterWrite = opts?.results === true;
+    if (afterWrite) overlayLoad.current();
     const ticket = loadOrder.current.begin();
     setReloading(true);
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
     if (!loadOrder.current.accept(ticket)) return null;
     setReloading(loadOrder.current.pending());
     setPanel((shown) => planAfterLoad(shown, r));
+    // The results follow the plan (a load completed): read again with it - but not on the polls of a
+    // running search (every 2.5-10 s for up to 20 min): a search never changes them, and the 60 s read
+    // below brings the phones' results.
+    if (!afterWrite && readResultsNow({ searching: !!(r.ok && r.data && planSearching(r.data.run, r.data.job)), seen: overlaySeen.current, afterWrite })) overlayLoad.current();
     return r.ok ? r.data : null;
   }, [runId]);
+
+  const loadOverlay = useCallback(async () => {
+    const ticket = ++overlayOrder.current;
+    const r = await api<OutcomeOverlay>(`/api/runs/${runId}/outcomes`);
+    if (ticket === overlayOrder.current && r.ok && r.data) {
+      overlaySeen.current = true;
+      setOverlay(r.data);
+    }
+  }, [runId]);
+  overlayLoad.current = () => void loadOverlay();
 
   useEffect(() => {
     void load();
@@ -146,12 +207,79 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const loadDrivers = useCallback(async () => {
     const r = await api<DriverOption[]>('/api/drivers');
-    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active }) => ({ id, code, name, phone, active })));
+    if (r.ok && r.data) setDrivers(r.data.map(({ id, code, name, phone, active, casual }) => ({ id, code, name, phone, active, casual: !!casual })));
   }, []);
 
   useEffect(() => {
     void loadDrivers();
   }, [loadDrivers]);
+
+  // The plan's truck-day driver links (owner request 4 Oct 2026), loaded with the plan for the
+  // dispatcher (PLANNER+): the WhatsApp link carries the driver link at render time, never after an
+  // awaited call a browser would block as a pop-up. Existing links only (nothing is made here).
+  const [links, setLinks] = useState<DriverLinkView[]>([]);
+  const [linkDialog, setLinkDialog] = useState<{ truckId: string; loadId: string } | null>(null);
+  const [casualFor, setCasualFor] = useState<DetailLoad | null>(null);
+  const [reissueAsk, setReissueAsk] = useState<{ link: DriverLinkView; text: string } | null>(null);
+  const loadLinks = useCallback(async () => {
+    if (!canPlan) return;
+    const r = await api<DriverLinkView[]>(`/api/dispatch/driver-links?runId=${encodeURIComponent(runId)}`);
+    if (r.ok && Array.isArray(r.data)) setLinks(r.data);
+  }, [runId, canPlan]);
+
+  useEffect(() => {
+    void loadLinks();
+  }, [loadLinks]);
+
+  const linkOf = (truckId: string) => links.find((x) => x.truckId === truckId) ?? null;
+  const keepLink = (view: DriverLinkView) => setLinks((cur) => [...cur.filter((x) => x.truckId !== view.truckId), view]);
+
+  /**
+   * After a driver change (the Driver list or a daily driver): "Reissue link?" only when the truck-day's
+   * link was made for another named driver, the change is on its earliest open trip and nobody else
+   * is on the road with it; a link made before any driver was set takes the new driver silently
+   * (reissuePrompt, spec 4.3).
+   */
+  async function afterDriverChange(fresh: PlanDetail | null, l: DetailLoad, driverId: string | null) {
+    const link = linkOf(l.truckId);
+    if (!fresh || !link) return;
+    const truckLoads = fresh.loads.filter((x) => x.truckId === l.truckId).map((x) => ({ id: x.id, loadNo: x.loadNo, status: x.status, driverId: x.driverId, departMin: x.departMin }));
+    const decision = reissuePrompt({ driverIdAtIssue: link.driverIdAtIssue, revoked: link.revoked, expired: link.expired }, truckLoads, l.id, driverId);
+    if (decision === 'RECORD') {
+      const r = await api<DriverLinkView>('/api/dispatch/driver-links', { method: 'POST', json: { runId, truckId: l.truckId } });
+      if (r.ok && r.data) keepLink(r.data);
+    } else if (decision === 'PROMPT') {
+      const newName = fresh.loads.find((x) => x.id === l.id)?.driverName ?? 'the new driver';
+      setReissueAsk({ link, text: reissuePromptText(l.truckCode, fmtDayMonth(fresh.run.runDate), link.driverNameAtIssue ?? 'another driver', newName) });
+    }
+  }
+
+  async function reissueNow(link: DriverLinkView) {
+    const r = await api<DriverLinkView>(`/api/dispatch/driver-links/${link.linkId}`, { method: 'PATCH', json: { action: LINK_REISSUE, reason: 'driver changed' } });
+    if (r.ok && r.data) {
+      keepLink(r.data);
+      toast.success(`New driver link for ${r.data.truckCode}: send it or print the sheets again.`);
+    } else toast.error(r.error ?? 'Could not reissue the driver link.');
+  }
+
+  /** "+ Add daily driver…": the quick add under the plan's action lock, then the plan and the driver list again. */
+  async function addDailyDriver(l: DetailLoad, body: CasualDriverBody): Promise<ApiResult<CasualDriverAnswer> | null> {
+    let res: ApiResult<CasualDriverAnswer> | null = null;
+    await runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
+        if (!res.ok || !res.data) return;
+        toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
+        await loadDrivers();
+        const fresh = await load();
+        await afterDriverChange(fresh, l, res.data.driver.id);
+      },
+      failed,
+    );
+    return res;
+  }
 
   // Try again after a failed load: the plan, and the driver list if it did not load either.
   const retry = () => {
@@ -161,14 +289,26 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Off while a reload is on its way or an action runs (its own reload shows the plan).
   const retryOff = !!busy || reloading;
 
-  // The screen around the plan asks for a reload (reloadSignal): the same, in place.
+  // The screen around the plan asks for a reload (reloadSignal): the same, in place, with the results
+  // (it follows a write there: a result recorded on the Deliveries card, a customer saved).
   const seenReload = useRef(reloadSignal);
   useEffect(() => {
     if (reloadSignal === seenReload.current) return;
     seenReload.current = reloadSignal;
-    void load();
+    void load({ results: true });
     if (!drivers.length) void loadDrivers();
-  }, [reloadSignal, load, loadDrivers, drivers.length]);
+    void loadLinks();
+  }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
+
+  // Results come in from the drivers' phones while loads are on the road: read them every 60 s.
+  const onRoadNow = !!d?.loads.some((l) => l.status === 'DISPATCHED');
+  useEffect(() => {
+    if (!onRoadNow) return;
+    const t = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') void loadOverlay();
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [onRoadNow, loadOverlay]);
 
   useEffect(() => {
     if (!d) return;
@@ -198,16 +338,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
   // user cannot race themselves (F07; plan-actions.ts).
   function setStatus(l: DetailLoad, status: string) {
+    // Delivery outcome (spec section 9.4): a brought-forward order on this load whose original result
+    // changed after the carry may not be needed. Lock asks; it is never refused.
+    const warnings = status === 'LOCKED' ? (overlay?.lockWarnings[l.id] ?? []) : [];
+    if (warnings.length && !window.confirm(`${warnings.join('\n')}\n\nLock anyway?`)) return;
     return runPlanAction(
       lock,
       l.id,
       async () => {
-        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        const r = await api<{ warnings?: string[] }>(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
         if (!r.ok) {
           toast.error(r.error ?? 'Could not change the load.');
           await load(); // show the plan as it is now (it may have changed meanwhile)
           return;
         }
+        if (r.data?.warnings?.length && !warnings.length) toast.warning(r.data.warnings.join(' '));
         toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
         await load();
         await onChanged?.();
@@ -243,6 +388,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         // Allowed, but a driver cannot be on two trucks at once: say so right away.
         const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
         if (clash) toast.warning(clash.text);
+        if (!keep) await afterDriverChange(fresh, l, driverId);
       },
       failed,
     );
@@ -251,6 +397,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   function lockAll() {
     if (!d) return;
     const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
+    const warnings = planned.flatMap((l) => overlay?.lockWarnings[l.id] ?? []);
+    if (warnings.length && !window.confirm(`${warnings.join('\n')}\n\nLock anyway?`)) return;
     return runPlanAction(
       lock,
       'all',
@@ -289,7 +437,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   /**
-   * "Reset stuck plan" (audit F09, owner decision 17: supervisors and above, audited). Only offered
+   * "Reset stuck plan" (audit F09, owner decision 17; the dispatcher since 5 Oct 2026, audited). Only offered
    * when the server says the version is stuck on "optimizing" (PlanDetail.stuck).
    */
   function resetStuck() {
@@ -309,7 +457,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   }
 
   /**
-   * "Use the best plan found so far" (supervisors and above, audited): a running thorough search
+   * "Use the best plan found so far" (the dispatcher since 5 Oct 2026, audited): a running thorough search
    * ends at the next plan it finds; the job then checks and saves that plan as usual.
    */
   function stopSearch() {
@@ -453,6 +601,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const planLoads = remedyLoads(d.loads);
   const remedy = timingRemedy(blockingViolations, planLoads);
   const replanOff = timingReplanOff(remedy, nothingToPlan);
+  // The driver page was opened after a load's planned departure while it is still at the depot (spec 6.5).
+  const lateNotes = superseded ? [] : lateDispatchNotes(d.loads, links, d.run.runDate, d.timezone || 'Asia/Muscat');
+  const dialogLoad = linkDialog ? d.loads.find((x) => x.id === linkDialog.loadId) ?? null : null;
 
   return (
     <div className="space-y-4" data-testid="plan-view">
@@ -847,6 +998,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </Card>
       ) : null}
 
+      {/* Owner decision 2 (5 Oct 2026): results saved without a photo ("Camera not working"), every one listed. */}
+      {overlay && showCameraList ? <CameraExceptions list={overlay.cameraExceptions ?? []} alerts={overlay.cameraAlerts ?? []} testId="plan-camera" /> : null}
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between py-3">
           <CardTitle className="flex items-center gap-2 text-sm">
@@ -884,6 +1038,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{open[l.id] ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}</td>
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
+                      {l.hired ? (
+                        <Badge variant="outline" className="ml-1 text-[10px]" title="Hired from outside" data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
+                          hired
+                        </Badge>
+                      ) : null}
                     </td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
                       <LoadDriver
@@ -892,6 +1051,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
                         busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
+                        onAddDaily={() => setCasualFor(l)}
                         onKeep={() => setDriver(l, l.driverId, true)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
@@ -901,10 +1061,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                             : running
                               ? { off: 'Wait for the optimization to finish: the trips are about to change.' }
                               : {
-                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo), phoneCountryCode),
+                                  // The driver link line only with an active link (not revoked, expired or missing).
+                                  url: whatsappUrl(l.driverPhone, whatsappText(d.run, l, trips.get(l.truckId) ?? l.loadNo, { driverLinkUrl: linkOf(l.truckId)?.url ?? null }), phoneCountryCode),
                                   number: whatsappNumber(l.driverPhone, phoneCountryCode),
                                 }
                         }
+                        // The dispatcher (PLANNER+) without a usable link yet: WhatsApp opens the Driver link dialog first.
+                        linkFirst={canPlan && !superseded && !running && (!linkOf(l.truckId) || !!linkOf(l.truckId)?.keyChanged)}
+                        onLink={canPlan && !superseded && !running ? () => setLinkDialog({ truckId: l.truckId, loadId: l.id }) : null}
                       />
                     </td>
                     <td className="p-2">
@@ -941,6 +1105,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         >
                           Changed after planning
                         </Badge>
+                      ) : null}
+                      {ON_ROAD.has(l.status) && overlay?.loads[l.id] ? <LoadProgress o={overlay.loads[l.id]!} tag={`${l.truckCode}-${l.loadNo}`} tz={overlay.tz} /> : null}
+                      {lateNotes.find((n) => n.loadId === l.id) ? (
+                        <span className="mt-1 block text-xs text-amber-700" data-testid={`load-late-dispatch-${l.truckCode}-${l.loadNo}`}>
+                          {lateNotes.find((n) => n.loadId === l.id)!.text}
+                        </span>
                       ) : null}
                     </td>
                     <td className="p-2">
@@ -985,6 +1155,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           canDispatch={canDispatch}
                           reconOk={!!rec?.ok}
                           timingBlocked={gateOn && !!l.timing && !l.timing.ok}
+                          noDriver={!l.driverId}
                           onStatus={(st) => setStatus(l, st)}
                         />
                       ) : null}
@@ -993,7 +1164,28 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
                       <td colSpan={13} className="p-3">
-                        <LoadDetail l={l} depotCode={d.run.depot.code} />
+                        <LoadDetail
+                          l={l}
+                          depotCode={d.run.depot.code}
+                          overlay={overlay}
+                          canRecord={canPlan && ON_ROAD.has(l.status)}
+                          onRecord={(st, ov) =>
+                            setRecordFor({
+                              depotId: d.run.depot.id,
+                              date: d.run.runDate,
+                              truckId: l.truckId,
+                              truckCode: l.truckCode,
+                              loadNo: l.loadNo,
+                              sequence: st.sequence,
+                              customerName: st.customerName,
+                              customerCode: st.customerCode,
+                              lines: ov.lines,
+                              current: ov.outcome ? { outcome: ov.outcome, reason: ov.reason, note: ov.note } : null,
+                              times: officeTimesPrefill(ov, overlay?.tz ?? 'Asia/Muscat'),
+                            })
+                          }
+                          onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}
+                        />
                       </td>
                     </tr>
                   ) : null}
@@ -1109,6 +1301,40 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         </Card>
       ) : null}
 
+      {canPlan && linkDialog ? (
+        <DriverLinkDialog
+          open
+          onOpenChange={(o) => {
+            if (!o) setLinkDialog(null);
+          }}
+          runId={runId}
+          truckId={linkDialog.truckId}
+          truckCode={dialogLoad?.truckCode ?? ''}
+          date={d.run.runDate}
+          timezone={d.timezone || 'Asia/Muscat'}
+          link={linkOf(linkDialog.truckId)}
+          driverName={dialogLoad?.driverName ?? null}
+          driverPhone={dialogLoad?.driverPhone ?? null}
+          phoneCountryCode={phoneCountryCode}
+          onChanged={keepLink}
+        />
+      ) : null}
+      <CasualDriverDialog
+        load={casualFor ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo } : null}
+        onOpenChange={(o) => {
+          if (!o) setCasualFor(null);
+        }}
+        submit={(body) => (casualFor ? addDailyDriver(casualFor, body) : Promise.resolve(null))}
+      />
+      <ReissueLinkPrompt
+        text={reissueAsk?.text ?? null}
+        onKeep={() => setReissueAsk(null)}
+        onReissue={() => {
+          const ask = reissueAsk;
+          setReissueAsk(null);
+          if (ask) void reissueNow(ask.link);
+        }}
+      />
       <LateOrderDialog
         open={lateOpen}
         onOpenChange={setLateOpen}
@@ -1142,6 +1368,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           })
         }
       />
+      {/* Delivery outcome (spec section 10.2): Record outcome and the photo viewer. */}
+      <OutcomeDialog
+        open={!!recordFor}
+        onOpenChange={(v) => {
+          if (!v) setRecordFor(null);
+        }}
+        target={recordFor}
+        onSaved={() => {
+          // A result can complete a load that is back: the plan and its results again, in place (the open
+          // loads stay open), and the day's Deliveries card - also while a search runs.
+          void load({ results: true });
+          onResultRecorded?.();
+        }}
+      />
+      <PhotoViewer open={!!photosFor} onOpenChange={(v) => (v ? null : setPhotosFor(null))} title={photosFor?.title ?? ''} photos={photosFor?.photos ?? []} timezone={overlay?.tz ?? d.timezone ?? 'Asia/Muscat'} />
     </div>
   );
 }
@@ -1165,12 +1406,21 @@ function LoadDriver({
   pdfUrl,
   clash,
   whatsapp,
+  onAddDaily,
+  linkFirst = false,
+  onLink = null,
 }: {
   l: DetailLoad;
   drivers: DriverOption[];
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
+  /** "+ Add daily driver…" (owner rule 20): a daily driver added from this load. */
+  onAddDaily?: () => void;
+  /** No usable driver link for the truck-day yet: WhatsApp opens the Driver link dialog first (it makes the link). */
+  linkFirst?: boolean;
+  /** Opens the truck-day's Driver link dialog (PLANNER+); null = no Link action. */
+  onLink?: (() => void) | null;
   /** Keep the driver RouteIQ filled in as the dispatcher's own pick. */
   onKeep: () => void;
   pdfUrl: string;
@@ -1202,22 +1452,45 @@ function LoadDriver({
         value={l.driverId ?? ''}
         disabled={!editable || busy}
         title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
-        onChange={(e) => onChange(e.target.value || null)}
+        onChange={(e) => (e.target.value === ADD_DAILY ? onAddDaily?.() : onChange(e.target.value || null))}
         data-testid={`driver-select-${tag}`}
       >
         <option value="">No driver</option>
         {options.map((x) => (
           <option key={x.id} value={x.id}>
             {x.name}
+            {x.casual ? ' (daily)' : ''}
             {x.active ? '' : ' (inactive)'}
           </option>
         ))}
+        {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}
       </select>
       <div className="flex gap-2 text-xs">
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
         </a>
-        {'url' in whatsapp ? (
+        {onLink ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline"
+            onClick={onLink}
+            data-testid={`load-link-${tag}`}
+            title="Driver link (QR): the driver's phone page with his trips, for every trip of this truck today"
+          >
+            Link
+          </button>
+        ) : null}
+        {'url' in whatsapp && linkFirst && onLink ? (
+          <button
+            type="button"
+            className="text-primary underline-offset-2 hover:underline"
+            onClick={onLink}
+            data-testid={`load-whatsapp-${tag}`}
+            title="Make the driver link first: the dialog sends it on WhatsApp"
+          >
+            WhatsApp
+          </button>
+        ) : 'url' in whatsapp ? (
           <a className="text-primary underline-offset-2 hover:underline" href={whatsapp.url} target="_blank" rel="noreferrer" data-testid={`load-whatsapp-${tag}`} title={waTitle}>
             WhatsApp
           </a>
@@ -1271,9 +1544,12 @@ function LoadActions({
   canDispatch,
   reconOk,
   timingBlocked,
+  noDriver = false,
   onStatus,
 }: {
   l: DetailLoad;
+  /** Owner rule 20: Dispatch is off until the load has a driver (the server refuses it too: 409 DRIVER_REQUIRED). */
+  noDriver?: boolean;
   busy: boolean;
   /** The version has an optimized plan; without one only Unlock, Back to locked and Completed are offered. */
   applied: boolean;
@@ -1312,7 +1588,7 @@ function LoadActions({
   }
   if (l.status === 'LOADING' && canPlan) out.push(b('Back to locked', 'LOCKED', <Lock className="mr-1 h-3 w-3" />));
   if ((l.status === 'LOCKED' || l.status === 'LOADING') && canDispatch) {
-    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze, timingTitle));
+    out.push(b('Dispatch', 'DISPATCHED', <Send className="mr-1 h-3 w-3" />, canFreeze && !noDriver, timingTitle ?? (noDriver ? DISPATCH_NEEDS_DRIVER : undefined)));
   }
   if (l.status === 'DISPATCHED' && canDispatch) out.push(b('Completed', 'COMPLETED', <Flag className="mr-1 h-3 w-3" />));
   return <div className="flex flex-wrap gap-1">{out}</div>;
@@ -1331,9 +1607,110 @@ function BreakRow({ l }: { l: DetailLoad }) {
   );
 }
 
-function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
+/** The Loads table's delivery progress of a load that left: "Delivered 7/12", "1 not delivered", "2 no result", "Back 14:32". */
+function LoadProgress({ o, tag, tz }: { o: NonNullable<OutcomeOverlay['loads'][string]>; tag: string; tz: string }) {
+  const back = o.backAtDepotAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).format(new Date(o.backAtDepotAt)) : null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1" data-testid={`load-progress-${tag}`}>
+      <Badge variant="secondary" title={`${o.done} of ${o.total} stops have a result`}>
+        Delivered {o.delivered}/{o.total}
+      </Badge>
+      {o.partly ? <Badge variant="warning">{o.partly} partly</Badge> : null}
+      {o.notDelivered ? <Badge variant="destructive">{o.notDelivered} not delivered</Badge> : null}
+      {o.noResult ? <Badge variant="warning">{o.noResult} no result</Badge> : null}
+      {/* Owner decision 2 (5 Oct 2026): this truck's driver link used "Camera not working" 3 times or more today. */}
+      {(o.cameraFailedToday ?? 0) >= CAMERA_ALERT_PER_DAY ? (
+        <Badge variant="destructive" title="Results saved without a photo by this truck's driver link today: check the phone's camera with the driver" data-testid={`load-camera-alert-${tag}`}>
+          No photo {o.cameraFailedToday}× today
+        </Badge>
+      ) : null}
+      {back ? <span className="text-xs text-muted-foreground">Back {back}</span> : null}
+    </span>
+  );
+}
+
+const fmtClock = (iso: string | null, tz: string) => (iso ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).format(new Date(iso)) : '—');
+
+/** The result chip of a stop: "Delivered", "Not delivered · Shop closed (driver)", "→ 6 Oct", with its notes. */
+function ResultCell({ o }: { o: OverlayStop }) {
+  const tone = o.outcome === 'DELIVERED' ? 'success' : o.outcome === 'PARTLY_DELIVERED' ? 'warning' : o.outcome === 'NOT_DELIVERED' ? 'destructive' : 'outline';
+  const label = o.outcome === 'DELIVERED' ? 'Delivered' : o.outcome === 'PARTLY_DELIVERED' ? `Partly ${o.casesDelivered ?? 0}/${o.casesPlanned}` : o.outcome === 'NOT_DELIVERED' ? 'Not delivered' : 'No result';
+  return (
+    <div className="space-y-0.5" data-testid="stop-result">
+      <Badge variant={tone}>{label}</Badge>
+      {o.reasonText ? <span className="block">{o.reasonText}</span> : null}
+      {o.source ? <span className="block text-muted-foreground">by {o.source === 'dispatcher' && o.by ? `${o.by} (office)` : o.source}</span> : null}
+      {o.carriedTo ? <span className="block font-medium">→ {fmtDayMonth(o.carriedTo)}</span> : null}
+      {o.late ? <span className="block text-amber-700">recorded after the trip closed</span> : null}
+      {o.noPhotoText ? <span className="block text-amber-700">{o.noPhotoText}</span> : null}
+      {o.carryConflict ? <span className="block font-medium text-red-700">changed after it was brought forward: {o.carryConflict}</span> : null}
+    </div>
+  );
+}
+
+/** The result columns of one stop of a load that left: Result, Arrived, Left, Unload, Photos, [Record]. */
+function StopResultCells({ o, tz, canRecord, onRecord, onPhotos }: { o: OverlayStop | null; tz: string; canRecord: boolean; onRecord: (o: OverlayStop) => void; onPhotos: (o: OverlayStop) => void }) {
+  if (!o) return <td colSpan={6} className="text-muted-foreground">—</td>;
+  return (
+    <>
+      <td className="max-w-[200px]">
+        <ResultCell o={o} />
+      </td>
+      <td data-testid="stop-arrived">
+        {fmtClock(o.arrivedAt, tz)}
+        {o.arrivalNote ? <span className="block text-muted-foreground">{o.arrivalNote}</span> : null}
+        {o.downgradedArrival ? <span className="block text-muted-foreground" title="The phone was far from the pin: the automatic arrival counts as manual">far from pin</span> : null}
+      </td>
+      <td data-testid="stop-left">
+        {fmtClock(o.departedAt, tz)}
+        {o.departureNote ? <span className="block text-muted-foreground">{o.departureNote}</span> : null}
+      </td>
+      <td data-testid="stop-unload" title={o.actualLabel ?? undefined}>
+        {o.plannedMin !== null || o.actualMin !== null ? `plan ${o.plannedMin ?? '—'} / actual ${o.actualMin ?? '—'} min` : '—'}
+        {o.timingSuspect ? <span className="block text-amber-700">unverified timing</span> : null}
+      </td>
+      <td>
+        {o.photos.length ? (
+          <button type="button" className="text-primary underline-offset-2 hover:underline" onClick={() => onPhotos(o)} data-testid="stop-photos">
+            {o.photos.length} photo{o.photos.length === 1 ? '' : 's'}
+          </button>
+        ) : (
+          '—'
+        )}
+        {o.photoMissing ? <span className="block text-muted-foreground">{o.photoMissing} not received yet</span> : null}
+      </td>
+      <td>
+        {canRecord ? (
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => onRecord(o)} data-testid="stop-record">
+            Record
+          </Button>
+        ) : null}
+      </td>
+    </>
+  );
+}
+
+function LoadDetail({
+  l,
+  depotCode,
+  overlay = null,
+  canRecord = false,
+  onRecord,
+  onPhotos,
+}: {
+  l: DetailLoad;
+  depotCode: string;
+  /** The delivery results (spec section 10.2); the extra columns show for loads that left. */
+  overlay?: OutcomeOverlay | null;
+  canRecord?: boolean;
+  onRecord?: (st: DetailLoad['stops'][number], o: OverlayStop) => void;
+  onPhotos?: (st: DetailLoad['stops'][number], o: OverlayStop) => void;
+}) {
   // A6 second review: an older version whose orders a later re-plan re-weighed says so (as its Excel sheet does).
   const kgNote = manifestKgNote(l);
+  const results = ON_ROAD.has(l.status) && !!overlay;
+  const tz = overlay?.tz ?? 'Asia/Muscat';
+  const span = results ? 15 : 9;
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div>
@@ -1379,12 +1756,22 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
               <th>SKUs</th>
               <th>km</th>
               <th>cum km</th>
+              {results ? (
+                <>
+                  <th>Result</th>
+                  <th>Arrived</th>
+                  <th>Left</th>
+                  <th title="Unloading minutes: planned / actual (from the window start when the truck waited)">Unload</th>
+                  <th>Photos</th>
+                  <th />
+                </>
+              ) : null}
             </tr>
           </thead>
           <tbody>
             <tr className="border-b">
               <td className="py-1">—</td>
-              <td colSpan={9}>
+              <td colSpan={span}>
                 DEPOT {depotCode} — depart {hhmm(l.departMin)}
               </td>
             </tr>
@@ -1427,6 +1814,11 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                       {st.masterChanged.map((c) => c.text).join(' · ')}
                     </span>
                   ) : null}
+                  {overlay?.copyConflicts[`${l.id}:${st.sequence}`] ? (
+                    <Badge variant="destructive" className="mt-0.5" data-testid="stop-copy-conflict">
+                      {overlay.copyConflicts[`${l.id}:${st.sequence}`]}
+                    </Badge>
+                  ) : null}
                   {!st.snapshot ? <span className="block text-muted-foreground" title="Planned before stop details were kept with the plan">current customer data</span> : null}
                 </td>
                 <td>P{st.priority}</td>
@@ -1441,13 +1833,14 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td className="max-w-[220px]">{st.skus.map((k) => `${k.productCode} ×${k.cases}`).join('; ')}</td>
                 <td>{st.legKm}</td>
                 <td>{st.cumulativeKm ?? '—'}</td>
+                {results ? <StopResultCells o={overlay!.stops[`${l.id}:${st.sequence}`] ?? null} tz={tz} canRecord={canRecord} onRecord={(o) => onRecord?.(st, o)} onPhotos={(o) => onPhotos?.(st, o)} /> : null}
               </tr>
               {l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === st.sequence ? <BreakRow l={l} /> : null}
               </Fragment>
             ))}
             <tr>
               <td className="py-1">—</td>
-              <td colSpan={9}>
+              <td colSpan={span}>
                 DEPOT — return {hhmm(l.returnMin)} (+{l.returnLegKm} km)
               </td>
             </tr>

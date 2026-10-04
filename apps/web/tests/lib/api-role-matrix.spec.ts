@@ -41,6 +41,38 @@
  * - Long searches (owner request 29 Sep 2026): POST /api/runs/[id]/stop-search ("Use the best plan
  *   found so far") is SUPERVISOR and above; the optimize / re-plan routes take an optional
  *   searchMode (roles unchanged).
+ * - Delivery outcome and the driver page (owner request 4 Oct 2026), Part 1: GET /api/d/manifest is
+ *   DRIVER_LINK (the driver link token in the Authorization header, withDriverLink; no session
+ *   needed, a signed-in user of the link's company is the office); the driver links of a plan
+ *   (GET / POST /api/dispatch/driver-links, PATCH /api/dispatch/driver-links/[id]) and the daily-driver
+ *   quick add (POST /api/dispatch/casual-driver) are PLANNER, like the Driver list. Roles unchanged on
+ *   GET /api/runs/[id]/export/pdf (prints the driver-link QR for PLANNER+ only), PATCH
+ *   /api/runs/[id]/loads/[loadId] (409 DRIVER_REQUIRED: owner rule 20), GET|PATCH /api/tenant/config
+ *   (five admin settings), POST /api/trucks + PATCH /api/trucks/[id] (`hired`) and PATCH
+ *   /api/drivers/[id] (`casual`).
+ * - Part 2 (field actions): POST /api/d/actions, POST /api/d/photos and GET /api/d/photos/[photoId]
+ *   are DRIVER_LINK too (a signed-in user of the link's company writes as the office, PLANNER+;
+ *   below PLANNER the writes are 403). The janitor route (TOKEN) also completes loads reported back
+ *   at the depot with a result on every stop.
+ * - Part 3 (office side): the results on the plan (GET /api/runs/[id]/outcomes) and a delivery photo
+ *   (GET /api/delivery-photos/[id]) are readable by every role, like the plan; Record outcome (POST
+ *   /api/dispatch/outcomes) and Undo bring forward (POST /api/dispatch/carry-over/undo) are PLANNER,
+ *   like Bring forward; the "Delivery actuals" Excel (GET /api/dispatch/delivery-actuals) is PLANNER
+ *   (per-driver performance data, coordinator decision C9); the measured unloading times (GET
+ *   /api/customers/delivery-stats) are readable by every role (changing the time stays PATCH
+ *   /api/customers/[id], PLANNER); "Pin may be wrong" (GET /api/customers/pin-check) is TENANT_ADMIN
+ *   (the location lock: only an admin changes a saved pin). Roles unchanged on GET /api/dispatch/day
+ *   (`deliveries`), GET /api/dashboard/kpis (outcome KPIs), GET|POST /api/dispatch/carry-over
+ *   (results, the carry basis, the information lists), PATCH /api/runs/[id]/loads/[loadId] (Lock
+ *   answers `warnings` for a copy whose original result changed) and the janitor route (TOKEN: the
+ *   photo, location and daily-driver retention sweeps).
+ * - Owner decisions of 5 Oct 2026: (4) "the dispatcher is the planner": POST /api/runs/[id]/dispatch,
+ *   /unlock, /reset-stuck and /stop-search are PLANNER (they were SUPERVISOR), and so are Dispatch and
+ *   Completed of a load (PATCH /api/runs/[id]/loads/[loadId], checkTransition); the solver debug JSON
+ *   stays SUPERVISOR (support data, not dispatch work). Roles unchanged on POST /api/depots and PATCH
+ *   /api/depots/[id] (a depot's own dispatcher phone, decision 3), GET /api/dispatch/day and GET
+ *   /api/runs/[id]/outcomes (results saved without a photo, decision 2), GET
+ *   /api/dispatch/delivery-actuals (its "Saved without a photo" column) and GET /api/dashboard/kpis.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -65,8 +97,17 @@ const EXPECTED: Record<string, string> = {
   'POST /api/customers/import': 'SESSION:PLANNER',
   // Owner decisions 1 Oct 2026 (items 4 and 6): the data to collect and the customer master (Excel).
   'GET /api/customers/data-to-collect': 'PLANNER',
+  // Owner request 4 Oct 2026, Part 3: measured unloading times (read), "Pin may be wrong" (admin).
+  'GET /api/customers/delivery-stats': 'ANY',
   'GET /api/customers/master': 'PLANNER',
+  'GET /api/customers/pin-check': 'TENANT_ADMIN',
+  // Owner request 4 Oct 2026: the driver page's API (token in a header) and the driver links.
+  'POST /api/d/actions': 'DRIVER_LINK',
+  'GET /api/d/manifest': 'DRIVER_LINK',
+  'POST /api/d/photos': 'DRIVER_LINK',
+  'GET /api/d/photos/[photoId]': 'DRIVER_LINK',
   'GET /api/dashboard/kpis': 'ANY',
+  'GET /api/delivery-photos/[id]': 'ANY',
   'GET /api/depots': 'ANY',
   'POST /api/depots': 'TENANT_ADMIN',
   'GET /api/depots/[id]': 'ANY',
@@ -75,10 +116,17 @@ const EXPECTED: Record<string, string> = {
   'DELETE /api/depots/[id]': 'TENANT_ADMIN',
   'GET /api/dispatch/carry-over': 'ANY',
   'POST /api/dispatch/carry-over': 'PLANNER',
+  'POST /api/dispatch/carry-over/undo': 'PLANNER',
+  'POST /api/dispatch/casual-driver': 'PLANNER',
   'GET /api/dispatch/day': 'ANY',
+  'GET /api/dispatch/delivery-actuals': 'PLANNER',
   // Data collection rules (1 Oct 2026): a delivery time for one order (urgent / promised).
   'PUT /api/dispatch/delivery-time': 'PLANNER',
+  'GET /api/dispatch/driver-links': 'PLANNER',
+  'POST /api/dispatch/driver-links': 'PLANNER',
+  'PATCH /api/dispatch/driver-links/[id]': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
+  'POST /api/dispatch/outcomes': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',
   'POST /api/driver/login': 'GONE',
   'GET /api/driver/manifest': 'GONE',
@@ -115,7 +163,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/baseline': 'SESSION:ANY',
   'POST /api/runs/[id]/baseline': 'SESSION:PLANNER',
   'POST /api/runs/[id]/choose-scenario': 'PLANNER',
-  'POST /api/runs/[id]/dispatch': 'SUPERVISOR',
+  // Owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) does every Daily dispatch action.
+  'POST /api/runs/[id]/dispatch': 'PLANNER',
   'GET /api/runs/[id]/export/excel': 'ANY',
   'GET /api/runs/[id]/export/pdf': 'ANY',
   'GET /api/runs/[id]/jobs/[jobId]/debug': 'SUPERVISOR',
@@ -123,15 +172,16 @@ const EXPECTED: Record<string, string> = {
   'GET /api/runs/[id]/load-geometry': 'ANY',
   'PATCH /api/runs/[id]/loads/[loadId]': 'PLANNER',
   'POST /api/runs/[id]/optimize': 'PLANNER',
+  'GET /api/runs/[id]/outcomes': 'ANY',
   'GET /api/runs/[id]/plan': 'ANY',
   'POST /api/runs/[id]/replan': 'PLANNER',
-  'POST /api/runs/[id]/reset-stuck': 'SUPERVISOR',
-  'POST /api/runs/[id]/stop-search': 'SUPERVISOR',
+  'POST /api/runs/[id]/reset-stuck': 'PLANNER',
+  'POST /api/runs/[id]/stop-search': 'PLANNER',
   'GET /api/runs/[id]/route-geometries': 'ANY',
   'PATCH /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'DELETE /api/runs/[id]/routes/[assignmentId]': 'PLANNER',
   'GET /api/runs/[id]/status': 'ANY',
-  'POST /api/runs/[id]/unlock': 'SUPERVISOR',
+  'POST /api/runs/[id]/unlock': 'PLANNER',
   'GET /api/tenant/config': 'TENANT_ADMIN',
   'PATCH /api/tenant/config': 'PLANNER', // the dispatcher saves the driver shift only (adminOnlyFields)
   'GET /api/trucks': 'ANY',

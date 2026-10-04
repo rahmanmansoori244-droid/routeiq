@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import ExcelJS from 'exceljs';
-import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
+import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, withDriver, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
 let depotId = '';
@@ -246,6 +246,7 @@ describe('split deliveries', () => {
       .sort((a: any, b: any) => a.loadNo - b.loadNo)[0];
     // Dispatch that truck's loads in order up to the BIG part.
     for (const l of p2.loads.filter((x: any) => x.truckId === first.truckId && x.loadNo <= first.loadNo).sort((a: any, b: any) => a.loadNo - b.loadNo)) {
+      await withDriver(t.tenantId, [l.id]); // owner rule 20
       const d = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/loads/${l.id}`, j({ status: 'DISPATCHED' }, 'PATCH'));
       expect(d.status).toBe(200);
     }

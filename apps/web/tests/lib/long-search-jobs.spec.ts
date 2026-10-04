@@ -312,7 +312,7 @@ describe('the heartbeat: long searches are alive, lost jobs are found', () => {
     expect(stuckPlanState(run, job(20 * 60_000, JOB_LOST_AFTER_MS - 5_000), false, false, NOW)).toBeNull();
   });
 
-  it('its process gone (no heartbeat for 2 minutes): lost, and a supervisor may reset it', () => {
+  it('its process gone (no heartbeat for 2 minutes): lost, and a dispatcher may reset it', () => {
     expect(stuckPlanState(run, job(20 * 60_000, JOB_LOST_AFTER_MS + 5_000), false, false, NOW)).toMatchObject({ kind: 'JOB_LOST', resettable: true });
     expect(stuckPlanState(run, job(3 * 60_000, 3 * 60_000), false, false, NOW)?.text).toMatch(/fails it by itself within a few minutes/);
   });

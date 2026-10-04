@@ -8,7 +8,7 @@
  * Requires: dev server (RATE_LIMITS_DISABLED=1) + solver running.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, type TenantHandle } from './helpers';
+import { BASE, cleanupTenant, fetchWith, freshTenant, prisma, withDriver, type TenantHandle } from './helpers';
 
 let t: TenantHandle;
 let depotId = '';
@@ -231,6 +231,7 @@ describe('dispatch feasibility gate (review F04)', () => {
   it('a verified plan still locks, loads and dispatches', async () => {
     const plan = await planNow();
     const l1 = plan.loads.find((l: any) => l.truckCode === 'T01' && l.loadNo === 1);
+    await withDriver(t.tenantId, [l1.id]); // owner rule 20
     for (const to of ['LOCKED', 'LOADING', 'DISPATCHED']) {
       const r = await patch(l1.id, to);
       expect(r.status, `${to}: ${JSON.stringify(await r.clone().json())}`).toBe(200);

@@ -11,10 +11,10 @@
  *   row (reason STUCK_PLAN). Automatic: the janitor sweep (every 60 s, repairStuckPlans in
  *   lib/jobs/optimize-job.ts) and every OPTIMIZE / RE-PLAN request for such a plan run it first, so
  *   a retry starts real work instead of answering 202 with the dead job. (The screens disable
- *   OPTIMIZE and Re-plan while a plan is OPTIMIZING, so for a dispatcher it is the janitor or a
- *   supervisor's Reset stuck plan that puts the plan back; the screen text says so.)
- * - resetStuckPlan: the supervisor's "Reset stuck plan" (owner decision 17: SUPERVISOR and above,
- *   audited PLAN_RESET). Also for a job lost by a server restart, before the janitor fails it (5
+ *   OPTIMIZE and Re-plan while a plan is OPTIMIZING, so it is the janitor or the dispatcher's
+ *   Reset stuck plan that puts the plan back; the screen text says so.)
+ * - resetStuckPlan: the dispatcher's "Reset stuck plan" (owner decision 17; PLANNER and above since
+ *   owner decision 4 of 5 Oct 2026, it was SUPERVISOR; audited PLAN_RESET). Also for a job lost by a server restart, before the janitor fails it (5
  *   minutes after its last heartbeat). Never for a job still running in this web process.
  *
  * Long searches (owner decision 29 Sep 2026): a job's process writes RunJob.heartbeatAt every 30 s
@@ -62,7 +62,7 @@ export function lastSignOfLife(job: Pick<StuckJobFacts, 'createdAt' | 'startedAt
 
 export interface StuckState {
   kind: StuckKind;
-  /** A supervisor may reset the plan now ("Reset stuck plan"). */
+  /** A dispatcher may reset the plan now ("Reset stuck plan"). */
   resettable: boolean;
   /** What the plan screen says. */
   text: string;
@@ -72,15 +72,15 @@ export interface StuckState {
  * What the plan screen says under "Optimizing...". Review of audit PR4: never "click OPTIMIZE or
  * RE-PLAN" - both buttons (the day screen's step 3 and the plan's Re-plan) are disabled while the
  * plan is OPTIMIZING. The plan screen reloads every 2.5 s while it shows "Optimizing...", so the
- * reset (by the janitor or a supervisor) appears by itself and the buttons come back.
+ * reset (by the janitor or a dispatcher) appears by itself and the buttons come back.
  */
 const TEXT: Record<StuckKind, string> = {
   JOB_ENDED:
-    'This plan is still marked as optimizing, but its optimization has already ended. RouteIQ resets it by itself within a minute (a supervisor can press Reset stuck plan to do it now); then optimize or re-plan again.',
+    'This plan is still marked as optimizing, but its optimization has already ended. RouteIQ resets it by itself within a minute (a dispatcher can press Reset stuck plan to do it now); then optimize or re-plan again.',
   NO_JOB:
-    'This plan is marked as optimizing, but no optimization is running for it. RouteIQ resets it by itself within a minute (a supervisor can press Reset stuck plan to do it now); then optimize or re-plan again.',
+    'This plan is marked as optimizing, but no optimization is running for it. RouteIQ resets it by itself within a minute (a dispatcher can press Reset stuck plan to do it now); then optimize or re-plan again.',
   JOB_LOST:
-    'This optimization stopped without a result (the server restarted while it ran). A supervisor can reset the plan now; otherwise RouteIQ fails it by itself within a few minutes.',
+    'This optimization stopped without a result (the server restarted while it ran). A dispatcher can reset the plan now; otherwise RouteIQ fails it by itself within a few minutes.',
 };
 
 /**
@@ -152,7 +152,7 @@ export async function repairEndedJobPlan(
         if (!f) return false;
         const state = stuckPlanState(f.run, f.job, f.otherActiveJob, false);
         // Only a definitely ended job: a lost QUEUED / RUNNING job is the janitor's (5 min after its
-        // last heartbeat) or a supervisor's (Reset stuck plan) to fail.
+        // last heartbeat) or a dispatcher's (Reset stuck plan) to fail.
         if (!state || state.kind === 'JOB_LOST') return false;
         const moved = await tx.runPlan.updateMany({ where: { id: runId, tenantId, status: 'OPTIMIZING', currentJobId: f.run.currentJobId }, data: { status: 'FAILED' } });
         if (moved.count !== 1) return false;
@@ -203,10 +203,10 @@ export function jobRunningText(searchMode: string | null | undefined): string {
 }
 
 /**
- * "Reset stuck plan" (owner decision 17): a SUPERVISOR or above puts a plan stuck on "optimizing"
+ * "Reset stuck plan" (owner decision 17): a dispatcher (PLANNER or above since 5 Oct 2026) puts a plan stuck on "optimizing"
  * back to FAILED, so it can be optimized or re-planned again. In one transaction under the plan
  * row lock: its lost job (QUEUED / RUNNING, not running in this web process, older than
- * JOB_LOST_AFTER_MS) is failed "Reset by a supervisor", the plan goes to FAILED and a PLAN_RESET
+ * JOB_LOST_AFTER_MS) is failed "Reset by a dispatcher", the plan goes to FAILED and a PLAN_RESET
  * audit row names who did it. Refused (409) for a plan that is not stuck: not optimizing
  * (NOT_STUCK), or its optimization is really running (JOB_RUNNING) or just starting (JOB_STARTING).
  * `isLive` answers whether this web process is running the plan's job (the in-flight map).
@@ -253,8 +253,8 @@ export async function resetStuckPlan(
             data: {
               status: 'FAILED',
               finishedAt: now,
-              message: 'Reset by a supervisor: this optimization stopped without a result. Optimize again.',
-              errorJson: { reason: 'RESET', message: 'Plan reset by a supervisor (Reset stuck plan).', userId: user.id } as never,
+              message: 'Reset by a dispatcher: this optimization stopped without a result. Optimize again.',
+              errorJson: { reason: 'RESET', message: 'Plan reset by a dispatcher (Reset stuck plan).', userId: user.id } as never,
             },
           });
           jobFailed = n.count === 1;

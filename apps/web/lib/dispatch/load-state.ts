@@ -6,11 +6,14 @@
  *   LOCKED   -> PLANNED       planner (unlock); later loads of the truck must still be PLANNED
  *   LOCKED   -> LOADING       planner
  *   LOADING  -> LOCKED        planner (loading paused/cancelled)
- *   LOCKED | LOADING -> DISPATCHED   supervisor; earlier loads must be DISPATCHED/COMPLETED
- *   DISPATCHED -> COMPLETED   supervisor
+ *   LOCKED | LOADING -> DISPATCHED   planner; earlier loads must be DISPATCHED/COMPLETED
+ *   DISPATCHED -> COMPLETED   planner
  *   DISPATCHED / COMPLETED    immutable otherwise
  *
  * "Frozen" = anything but PLANNED: a re-plan keeps frozen loads exactly as they are.
+ *
+ * Owner decision 4 (5 Oct 2026): "the dispatcher is the planner" - every move is the PLANNER's
+ * (Dispatch and Completed needed a SUPERVISOR before). VIEWER is refused by the route.
  */
 export type LoadStatusName = 'PLANNED' | 'LOCKED' | 'LOADING' | 'DISPATCHED' | 'COMPLETED';
 
@@ -28,7 +31,7 @@ export interface LoadRef {
 }
 
 export type TransitionCheck =
-  | { ok: true; role: 'PLANNER' | 'SUPERVISOR' }
+  | { ok: true; role: 'PLANNER' }
   | { ok: false; reason: string };
 
 const ALLOWED: Record<LoadStatusName, LoadStatusName[]> = {
@@ -67,8 +70,7 @@ export function checkTransition(load: LoadRef, sameTruckLoads: LoadRef[], to: Lo
       return { ok: false, reason: `Dispatch Load ${notOut.map((l) => l.loadNo).join(', ')} of this truck first.` };
     }
   }
-  const role = to === 'DISPATCHED' || to === 'COMPLETED' ? 'SUPERVISOR' : 'PLANNER';
-  return { ok: true, role };
+  return { ok: true, role: 'PLANNER' };
 }
 
 /**

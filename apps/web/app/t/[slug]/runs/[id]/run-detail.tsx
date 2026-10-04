@@ -60,6 +60,8 @@ interface Props {
   slug: string;
   canEdit: boolean;
   canDispatch: boolean;
+  /** The solver debug JSON (revenue, margins, coordinates): SUPERVISOR and above, like its API (review F15). */
+  canDownloadDebug?: boolean;
   /** Company admin: can enter case weights under Products (the weight question says whom to ask). */
   canEditProducts?: boolean;
   currency: string;
@@ -87,6 +89,7 @@ export function RunDetail({
   slug,
   canEdit,
   canDispatch,
+  canDownloadDebug = false,
   canEditProducts = false,
   currency,
   mapboxToken,
@@ -314,7 +317,7 @@ export function RunDetail({
 
       {/* Failure banner */}
       {run.status === 'FAILED' && currentJob ? (
-        <FailureBanner runId={run.id} job={currentJob} canDownloadDebug={canDispatch} />
+        <FailureBanner runId={run.id} job={currentJob} canDownloadDebug={canDownloadDebug} />
       ) : null}
 
       <Tabs value={tab} onValueChange={(v) => setTab(v as typeof tab)}>

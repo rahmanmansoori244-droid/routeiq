@@ -77,7 +77,14 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
           <TableBody>
             {initial.map((t) => (
               <TableRow key={t.id}>
-                <TableCell className="font-mono text-xs">{t.code}</TableCell>
+                <TableCell className="font-mono text-xs">
+                  {t.code}
+                  {t.hired ? (
+                    <Badge variant="outline" className="ml-1 font-sans text-[10px]" title="Hired from outside">
+                      hired
+                    </Badge>
+                  ) : null}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{t.description ?? '—'}</TableCell>
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">{t.capacityCases.toLocaleString()}</TableCell>

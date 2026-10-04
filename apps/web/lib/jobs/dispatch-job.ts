@@ -296,7 +296,7 @@ async function markStale(args: DispatchJobArgs, e: StaleJobError) {
  * this job as current: never over READY or SUPERSEDED) and the OPTIMIZE_FAILED audit row commit
  * together or not at all. If this write itself fails, nothing changed: the job is still in
  * progress in the database with no live process (its heartbeat stops with this promise), and the
- * janitor fails job and plan together 5 minutes after its last heartbeat (or a supervisor resets
+ * janitor fails job and plan together 5 minutes after its last heartbeat (or a dispatcher resets
  * the plan 2 minutes after it) - a plan is never left OPTIMIZING behind an ended job.
  */
 export async function failJob(args: DispatchJobArgs, err: unknown) {

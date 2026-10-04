@@ -13,6 +13,8 @@ export const DRIVER_PUBLIC_SELECT = {
   name: true,
   phone: true,
   active: true,
+  // A daily (casual) driver added from a load (owner request 4 Oct 2026): "Salim (daily)".
+  casual: true,
 } as const satisfies Prisma.DriverSelect;
 
 export type DriverPublic = Prisma.DriverGetPayload<{ select: typeof DRIVER_PUBLIC_SELECT }>;

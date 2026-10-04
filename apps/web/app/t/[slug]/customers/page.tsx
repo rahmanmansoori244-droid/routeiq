@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import { Building2, Upload } from 'lucide-react';
 import { getCurrentTenant } from '@/lib/tenant';
-import { canPlan } from '@/lib/rbac';
+import { canManageMasterData, canPlan } from '@/lib/rbac';
+import { measuredByCustomer } from '@/lib/delivery/customer-stats';
+import { PinCheckPanel } from './pin-check-panel';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
 import { Button } from '@/components/ui/button';
@@ -16,7 +18,7 @@ export default async function CustomersPage({ params, searchParams }: { params: 
   const { db, user, tenant } = await getCurrentTenant(params.slug);
   const canEdit = canPlan(user.role);
 
-  const [listed, regions, serviceArea, worklist] = await Promise.all([
+  const [listed, regions, serviceArea, worklist, measured] = await Promise.all([
     db.customer.findMany({
       orderBy: [{ active: 'desc' }, { code: 'asc' }],
       include: { region: { select: { id: true, code: true, name: true } } },
@@ -27,6 +29,12 @@ export default async function CustomersPage({ params, searchParams }: { params: 
     tenantServiceArea(tenant.id),
     // Owner decision 1 Oct 2026, item 4: the data to collect (dispatchers and up).
     canEdit ? loadWorklist(tenant.id) : Promise.resolve(null),
+    // Delivery outcome (owner request 4 Oct 2026, spec section 11.1): measured unloading times. Never
+    // keeps the page from loading.
+    measuredByCustomer(tenant.id).catch((e) => {
+      console.error('[customers] measured unloading not read', (e as Error)?.message ?? e);
+      return {};
+    }),
   ]);
   // Every customer of the data-to-collect list is on the page, also past the first 1000.
   const shown = new Set(listed.map((c) => c.id));
@@ -94,6 +102,8 @@ export default async function CustomersPage({ params, searchParams }: { params: 
         ) : null
       }
     >
+      {/* "Pin may be wrong" (spec section 11.2): company admins only; the location lock stays. */}
+      {canManageMasterData(user.role) ? <PinCheckPanel slug={params.slug} /> : null}
       <CustomersClient
         slug={params.slug}
         initial={customers}
@@ -102,6 +112,7 @@ export default async function CustomersPage({ params, searchParams }: { params: 
         serviceArea={serviceArea}
         collect={collect}
         initialCollectOnly={searchParams?.show === 'collect'}
+        measured={measured}
       />
     </PageShell>
   );

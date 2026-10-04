@@ -25,6 +25,10 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
   const [editing, setEditing] = useState<DriverRow | null>(null);
   const [confirming, setConfirming] = useState<DriverRow | null>(null);
   const [deleting, startDelete] = useTransition();
+  // Daily (casual) drivers added from loads (owner request 4 Oct 2026): a badge and a filter.
+  const [show, setShow] = useState<'ALL' | 'REGULAR' | 'DAILY'>('ALL');
+  const rows = initial.filter((d) => (show === 'ALL' ? true : show === 'DAILY' ? !!d.casual : !d.casual));
+  const dailyCount = initial.filter((d) => d.casual).length;
 
   function onDelete(d: DriverRow) {
     startDelete(async () => {
@@ -45,6 +49,15 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
 
   return (
     <>
+      {dailyCount ? (
+        <div className="mb-2 flex gap-1 text-sm" data-testid="driver-filter">
+          {(['ALL', 'REGULAR', 'DAILY'] as const).map((k) => (
+            <Button key={k} size="sm" variant={show === k ? 'default' : 'outline'} onClick={() => setShow(k)}>
+              {k === 'ALL' ? 'All' : k === 'REGULAR' ? 'Regular' : `Daily (${dailyCount})`}
+            </Button>
+          ))}
+        </div>
+      ) : null}
       <div className="rounded-lg border bg-card">
         <Table>
           <TableHeader>
@@ -57,10 +70,17 @@ export function DriversTable({ initial, canManage }: { initial: DriverRow[]; can
             </TableRow>
           </TableHeader>
           <TableBody>
-            {initial.map((d) => (
+            {rows.map((d) => (
               <TableRow key={d.id}>
                 <TableCell className="font-mono text-xs">{d.code}</TableCell>
-                <TableCell className="font-medium">{d.name}</TableCell>
+                <TableCell className="font-medium">
+                  {d.name}
+                  {d.casual ? (
+                    <Badge variant="outline" className="ml-1 text-[10px]" title="Daily (casual) driver added from a load">
+                      Daily
+                    </Badge>
+                  ) : null}
+                </TableCell>
                 <TableCell className="text-muted-foreground">{d.phone ?? '—'}</TableCell>
                 <TableCell>
                   {d.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}

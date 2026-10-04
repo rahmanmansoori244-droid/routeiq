@@ -105,7 +105,7 @@ import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { driverClashes } from '@/lib/dispatch/load-state';
 import { PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
-import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
+import { cleanupTenant, prisma, uniqueSuffix, withDriver } from './helpers';
 
 const slug = `lifedb-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
 let tenantId = '';
@@ -213,6 +213,7 @@ describe('a failed re-plan keeps the previous plan (F03 copy-forward)', () => {
     const lockedCopy = v2Loads.find((l) => l.status === 'LOCKED')!;
     const plannedCopy = v2Loads.find((l) => l.status === 'PLANNED' && l.truckId !== lockedCopy.truckId && l.loadNo === 1) ?? v2Loads.find((l) => l.status === 'PLANNED' && l.truckId === lockedCopy.truckId && l.loadNo === 2)!;
     await updateLoad(tenantId, v2Id, plannedCopy.id, { status: 'LOCKED' }, user(), everyRole);
+    await withDriver(tenantId, [lockedCopy.id]); // owner rule 20
     await updateLoad(tenantId, v2Id, lockedCopy.id, { status: 'DISPATCHED' }, user(), everyRole);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedCopy.id } })).status).toBe('DISPATCHED');
     expect((await prisma.runPlan.findUniqueOrThrow({ where: { id: v2Id } })).status).toBe('READY');

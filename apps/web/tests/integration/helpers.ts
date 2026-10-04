@@ -9,6 +9,21 @@ export const BASE = process.env.TEST_BASE_URL ?? 'http://localhost:3000';
 
 export const prisma = new PrismaClient();
 
+/**
+ * Owner rule 20 (30 Sep 2026): a load never leaves without a driver. Gives these loads a driver, in
+ * the database, before a test dispatches them (a driver of the tenant made once, code RULE20).
+ */
+export async function withDriver(tenantId: string, loadIds: string[]): Promise<string> {
+  const d = await prisma.driver.upsert({
+    where: { tenantId_code: { tenantId, code: 'RULE20' } },
+    update: { active: true },
+    create: { tenantId, code: 'RULE20', name: 'Rule 20 Driver' },
+    select: { id: true },
+  });
+  await prisma.planLoad.updateMany({ where: { tenantId, id: { in: loadIds } }, data: { driverId: d.id } });
+  return d.id;
+}
+
 export function uniqueSuffix(): string {
   return `int-${Date.now()}-${Math.floor(Math.random() * 1e9).toString(36)}`;
 }

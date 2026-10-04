@@ -24,6 +24,8 @@ export const POST = withTenantApi(
         address: input.address,
         openMin: input.openMin ?? null,
         closeMin: input.closeMin ?? null,
+        // Owner decision 3 (5 Oct 2026): the depot's own "Call dispatcher" number (null: the company's).
+        dispatcherPhone: input.dispatcherPhone ?? null,
         active: input.active ?? true,
       },
     });

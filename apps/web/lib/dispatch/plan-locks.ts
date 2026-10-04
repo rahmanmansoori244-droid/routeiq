@@ -2,9 +2,13 @@
  * Database locks for plan versions (review F06 / F07). Only database locks are reliable: a Railway
  * deploy briefly runs two web processes, so the in-memory in-flight map is no mutual exclusion.
  *
- * Lock order, everywhere: the day lock (advisory), then the RunPlan row (FOR UPDATE), then its
- * PlanLoad rows. The intake lock (lockIntake), taken only by the optimize start, comes before the
- * RunPlan row. Nobody takes them in another order, so two mutators never deadlock.
+ * Lock order, everywhere: intake -> day locks -> outcome-day locks -> RunPlan rows -> PlanLoad rows.
+ * The day lock (advisory), then the RunPlan row (FOR UPDATE), then its PlanLoad rows. The intake
+ * lock (lockIntake: the optimize start, a confirmed file, a late order, Bring forward and its Undo)
+ * comes first. The outcome-day lock (lib/delivery/locks.ts: every delivery result, arrival and
+ * photo; Bring forward and Undo bring forward take it after their day locks) comes before the
+ * RunPlan row; a driver or dispatcher result takes only it (the load completion that may follow runs
+ * in its own transaction). Nobody takes them in another order, so two mutators never deadlock.
  *
  * - lockPlanDay: one depot and delivery date. Taken by everything that creates a version
  *   (createInitialPlan, createNextVersion), so a day never gets two live plans.

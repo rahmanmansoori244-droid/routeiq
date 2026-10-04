@@ -100,6 +100,30 @@ export interface DetailStop {
    * was delivered, also when the rest of its split order was carried.
    */
   carriedTo: string | null;
+  /**
+   * The order lines of this stop as planned: one entry per order line (a split part's own cases), no
+   * aggregation - from the same row lines as `skus` (rowLinesKg). The driver page lists them per
+   * order, and a partly-delivered result names their line ids (owner request 4 Oct 2026). The Excel
+   * workbook and the PDF do not read it.
+   */
+  orderLines: DetailOrderLine[];
+  /**
+   * The receiving hours the stop was planned with, as minutes from midnight (the structured `window`;
+   * with a promised time the hard pair is that time). Null only for a stop without a snapshot whose
+   * customer has no hours.
+   */
+  plannedHours: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null } | null;
+  /** The promised delivery time of an order of this stop, as minutes (the structured `promised`); null = none. */
+  promisedWindow: { startMin: number | null; endMin: number | null } | null;
+}
+
+export interface DetailOrderLine {
+  orderId: string;
+  lineId: string;
+  salesOrderNo: string | null;
+  productCode: string;
+  productName: string;
+  cases: number;
 }
 
 export interface DetailLoad {
@@ -156,6 +180,8 @@ export interface DetailLoad {
   carriedAway: number;
   /** The driver break planned with this load (PlanLoad.breakJson); null = none on this load. */
   break: LoadBreak | null;
+  /** The truck is hired from outside (Truck.hired, as it is now): a badge on the plan and the sheets. */
+  hired?: boolean;
 }
 
 export interface DetailUnserved {
@@ -319,7 +345,7 @@ export interface PlanDetail {
   today?: string;
   /**
    * Audit F09: the version is shown as optimizing but its optimization has ended or was lost (a
-   * stuck plan): what the screen says, and whether a supervisor may reset it now. null = not stuck.
+   * stuck plan): what the screen says, and whether a dispatcher may reset it now. null = not stuck.
    */
   stuck?: StuckState | null;
 }
@@ -389,7 +415,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, hired: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -458,6 +484,14 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const lines = rowLinesKg(o.lines, a.portionLinesJson, weightKg, !orderUsesLineWeights(o));
       const skus = lines.map((ln) => ({ productCode: ln.product.code, productName: ln.product.name, cases: ln.cases, weightKg: ln.weightKg }));
       const salesOrders = lines.map((ln) => ln.salesOrderNo).filter((x): x is string => !!x);
+      const orderLines: DetailOrderLine[] = lines.map((ln) => ({
+        orderId: o.id,
+        lineId: ln.id,
+        salesOrderNo: ln.salesOrderNo ?? null,
+        productCode: ln.product.code,
+        productName: ln.product.name,
+        cases: ln.cases,
+      }));
       const s = stops.get(a.sequenceInTruck);
       const snap = readStopSnapshot(a.stopSnapshotJson);
       // PR9: brought forward from an earlier day (the date first due), or to a later day since. What
@@ -475,6 +509,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         s.orderIds.push(o.id);
         s.salesOrders = [...new Set([...s.salesOrders, ...salesOrders])];
         s.skus = aggregateSkus([...s.skus, ...skus]);
+        s.orderLines.push(...orderLines);
         s.late = s.late || o.isLate;
         for (const n of noteParts(o.notes)) if (!s.notes.includes(n)) s.notes.push(n);
         s.priority = Math.min(s.priority, priorityOf(o.id, o.priority));
@@ -543,6 +578,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           : [],
         carriedFrom: cameFrom,
         carriedTo: wentTo,
+        orderLines,
+        plannedHours: snap
+          ? { hardStart: snap.hardStartMin, hardEnd: snap.hardEndMin, prefStart: snap.prefStartMin, prefEnd: snap.prefEndMin }
+          : eff.hardStart !== null || eff.hardEnd !== null || eff.prefStart !== null || eff.prefEnd !== null
+            ? { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd }
+            : null,
+        promisedWindow: snap?.promised ? { startMin: snap.promised.startMin, endMin: snap.promised.endMin } : null,
       });
     }
     const stopList = [...stops.values()].sort((a, b) => a.sequence - b.sequence);
@@ -588,6 +630,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       timing: null,
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
+      hired: l.truck.hired,
     };
   });
 

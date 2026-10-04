@@ -221,6 +221,50 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     expect(afterB).toBe(beforeB);
   });
 
+  it('DriverLink, StopVisit, StopEvent and DeliveryPhoto (owner request 4 Oct 2026) are scoped both ways', async () => {
+    const seedDelivery = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      const depot = await db.depot.create({ data: { code: 'DEP-DL', name: `${tag} delivery depot`, lat: 23.5, lng: 58.4 } as Any });
+      const truck = await db.truck.create({ data: { code: 'T-DL', depotId: depot.id, capacityCases: 100, capacityWeightKg: 1000, capacityVolumeL: 1000, fixedCostPerDay: 1, costPerKm: 0.1 } as Any });
+      const customer = await db.customer.create({ data: { code: 'CUST-DL', name: `${tag} delivery customer` } as Any });
+      const day = new Date('2026-10-05T00:00:00Z');
+      const link = await db.driverLink.create({
+        data: { truckId: truck.id, deliveryDate: day, salt: 's', keyId: 'k', tokenHash: `hash-${tag}-${SUFFIX}`, expiresAt: new Date('2026-10-06T08:00:00Z') } as Any,
+      });
+      const visit = await db.stopVisit.create({
+        data: { depotId: depot.id, deliveryDate: day, truckId: truck.id, loadNo: 1, sequence: 1, customerId: customer.id, linesJson: [], casesPlanned: 10 } as Any,
+      });
+      // The same idempotency key in both companies: unique per company only.
+      await db.stopEvent.create({
+        data: { depotId: depot.id, deliveryDate: day, truckId: truck.id, loadNo: 1, sequence: 1, visitId: visit.id, kind: 'ARRIVED', source: 'PHONE_AUTO', at: new Date(), idempotencyKey: 'dl:00000000-0000-4000-8000-000000000000', driverLinkId: link.id } as Any,
+      });
+      await db.deliveryPhoto.create({
+        data: { visitId: visit.id, idempotencyKey: 'dlphoto:00000000-0000-4000-8000-000000000000', source: 'PHONE_MANUAL', takenAt: new Date(), positionStatus: 'OK', byteSize: 3, sha256: 'x', bytes: Buffer.from([1, 2, 3]) } as Any,
+      });
+      return { link, visit };
+    };
+    const a = await seedDelivery(tenantAId, 'A');
+    const b = await seedDelivery(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect(await db.driverLink.count()).toBe(1);
+      expect(await db.stopVisit.count()).toBe(1);
+      expect(await db.stopEvent.count()).toBe(1);
+      expect(await db.deliveryPhoto.count()).toBe(1);
+      expect((await db.driverLink.findFirst())?.id).toBe(own.link.id);
+      expect(await db.driverLink.findUnique({ where: { id: other.link.id } })).toBeNull();
+      expect(await db.stopVisit.findUnique({ where: { id: other.visit.id } })).toBeNull();
+      expect(await db.stopEvent.findFirst({ where: { visitId: other.visit.id } })).toBeNull();
+      expect(await db.deliveryPhoto.findFirst({ where: { visitId: other.visit.id } })).toBeNull();
+    }
+    // A write through one company cannot touch the other's rows.
+    await tenantDb(tenantAId).driverLink.updateMany({ data: { revokedAt: new Date() } });
+    expect((await tenantDb(tenantBId).driverLink.findFirst())?.revokedAt).toBeNull();
+  });
+
   it('tenantDb refuses an empty tenantId', () => {
     expect(() => tenantDb('')).toThrow(/tenantId/i);
   });

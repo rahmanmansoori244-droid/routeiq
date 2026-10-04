@@ -14,7 +14,10 @@ import {
   defaultSearchMode,
   fmtSearchTime,
   jobMaxMinutes,
+  keepDeliveries,
+  planSearching,
   queuedMessage,
+  readResultsNow,
   quickExpectedSec,
   searchAssumptions,
   searchChoices,
@@ -197,7 +200,7 @@ describe('texts: expected time, progress, result - honest, never "optimal"', () 
     expect(searchResultText(report({ stop_reason: 'CAP', search_sec: 21, last_improvement_sec: 0, cap_sec: 60 }))).toBe(
       'Thorough search: searched 21 s, all the time allowed (1 min in all). The best plan was last improved after 0 s.',
     );
-    expect(searchResultText(report({ stop_reason: 'STOPPED', search_sec: 360 }))).toMatch(/^Thorough search stopped early after 6 min by a supervisor: the best plan found so far is used\./);
+    expect(searchResultText(report({ stop_reason: 'STOPPED', search_sec: 360 }))).toMatch(/^Thorough search stopped early after 6 min by a dispatcher: the best plan found so far is used\./);
     expect(searchResultText(report({ mode: 'QUICK', stop_reason: 'TIME_LIMIT', search_sec: 20.4, last_improvement_sec: null, stall_sec: null, best_over_time: [] }))).toBe(
       'Quick search: 20 s, the automatic time for a day of this size.',
     );
@@ -561,5 +564,34 @@ describe('solve admission per mode', () => {
     expect(t.waiting && q.waiting).toBe(true);
     expect(q.position()).toBe(1); // the QUICK starts when B's QUICK ends
     expect(t.position()).toBe(2);
+  });
+});
+
+describe('delivery results are not re-read on the polls of a running search (review of 4 Oct 2026)', () => {
+  it('planSearching: OPTIMIZING, or a job QUEUED / RUNNING', () => {
+    expect(planSearching({ status: 'OPTIMIZING' }, null)).toBe(true);
+    expect(planSearching({ status: 'DISPATCHED' }, { status: 'RUNNING' })).toBe(true);
+    expect(planSearching({ status: 'READY' }, { status: 'QUEUED' })).toBe(true);
+    expect(planSearching({ status: 'DISPATCHED' }, { status: 'SUCCEEDED' })).toBe(false);
+    expect(planSearching(null, null)).toBe(false);
+  });
+
+  it('keepDeliveries: a poll without them keeps the card shown for the same day and depot only', () => {
+    type DayLike = { date: string; depot: { id: string }; deliveries?: unknown };
+    const day = (date: string, depot: string, over: Partial<DayLike> = {}): DayLike => ({ date, depot: { id: depot }, ...over });
+    const shown = day('2026-10-05', 'DA', { deliveries: { kpis: 1 } });
+    expect(keepDeliveries(shown, day('2026-10-05', 'DA'))).toMatchObject({ deliveries: { kpis: 1 } });
+    expect(keepDeliveries(shown, day('2026-10-05', 'DA', { deliveries: null })).deliveries).toBeNull();
+    expect(keepDeliveries(shown, day('2026-10-06', 'DA')).deliveries).toBeUndefined();
+    expect(keepDeliveries(shown, day('2026-10-05', 'DB')).deliveries).toBeUndefined();
+    expect(keepDeliveries(null, day('2026-10-05', 'DA')).deliveries).toBeUndefined();
+  });
+
+  it('readResultsNow: skipped only on the polls of a running search once read; a load after a write (Record outcome) always reads them', () => {
+    expect(readResultsNow({ searching: false, seen: true, afterWrite: false })).toBe(true);
+    expect(readResultsNow({ searching: true, seen: false, afterWrite: false })).toBe(true);
+    expect(readResultsNow({ searching: true, seen: true, afterWrite: false })).toBe(false);
+    // The dispatcher records "Shop closed" during a 20-minute re-plan: the plan and the day card show it now.
+    expect(readResultsNow({ searching: true, seen: true, afterWrite: true })).toBe(true);
   });
 });

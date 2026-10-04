@@ -114,7 +114,7 @@ import { PATCH as customerPatch } from '@/app/api/customers/[id]/route';
 import { POST as customerPost } from '@/app/api/customers/route';
 import { POST as importCustomers } from '@/app/api/customers/import/route';
 import { POST as legacyDispatch } from '@/app/api/runs/[id]/dispatch/route';
-import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
+import { cleanupTenant, prisma, uniqueSuffix, withDriver } from './helpers';
 
 const slug = `a5loc-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
 let tenantId = '';
@@ -419,6 +419,7 @@ describe('5. a planned customer whose location stops being usable is never locke
     // Control: K2's load (a confirmed location) locks and dispatches.
     const l2 = await loadOf(runId, k2.id);
     await updateLoad(tenantId, runId, l2.id, { status: 'LOCKED' }, planner(), everyRole);
+    await withDriver(tenantId, [l2.id]); // owner rule 20
     await updateLoad(tenantId, runId, l2.id, { status: 'DISPATCHED' }, planner(), everyRole);
     expect(await statusOf(l2.id)).toBe('DISPATCHED');
 
@@ -510,6 +511,7 @@ describe('5. a planned customer whose location stops being usable is never locke
     expect(stop).toMatchObject({ lat: 23.5721, lng: 58.3451 });
     expect(stop.mapsUrl).toContain('query=23.5721,58.3451');
     const l5b = await loadOf(childId, k5.id);
+    await withDriver(tenantId, [l5b.id]); // owner rule 20
     for (const to of ['LOCKED', 'LOADING', 'DISPATCHED'] as const) await updateLoad(tenantId, childId, l5b.id, { status: to }, planner(), everyRole);
     expect(await statusOf(l5b.id)).toBe('DISPATCHED');
     const load = detail!.loads.find((l) => l.id === l5b.id)!;

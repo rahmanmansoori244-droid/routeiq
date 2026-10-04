@@ -31,6 +31,13 @@
  *     day's, today's load holding one cannot go out and the 409 says to unlock it (so does its
  *     badge on the plan version page: the plan detail gives today); the unticked one stays
  *     today's and its load is dispatched; RE-PLAN of tomorrow adds the copies.
+ *  7. (Delivery outcome, owner request 4 Oct 2026, spec 9.3) E1: a dispatched order recorded as not
+ *     delivered by the driver is listed unticked while the truck is out and ticked once it is back;
+ *     brought forward with its carry basis. E6: the dispatcher's correction that would shrink it is
+ *     refused (undoable), then undone and recorded in one transaction; with the copy planned it is
+ *     refused, not undoable, and kept as a conflict. E10: after the trip closed a backdated change
+ *     of a stop with a result is refused, a stop without one is filled in late and never ticked.
+ *     Loads are dispatched with a driver (owner rule 20: `withDriver`).
  *
  * Bring forward never looks past the company's today; today's orders are listed as their own
  * group. Every carry here runs with the clock on the day it carries to (`onDay`), after the days it
@@ -108,7 +115,9 @@ import { carriedLoadTitle, carrySelectionPayload, dayNothingLeftText, defaultCar
 import { fetchRangeRows } from '@/lib/dashboard';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { DELETE as deleteBatch } from '@/app/api/orders/[batchId]/route';
-import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
+import { recordDriverActions } from '@/lib/delivery/event-service';
+import { recordOfficeOutcome } from '@/lib/delivery/office-service';
+import { cleanupTenant, prisma, uniqueSuffix, withDriver } from './helpers';
 
 const slug = `carry-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
 let tenantId = '';
@@ -239,6 +248,8 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     const l1 = await loadOf(day1.id, o1.id);
     const l2 = await loadOf(day1.id, o2.id);
     expect(l1.id).not.toBe(l2.id);
+    // Owner rule 20: a load never leaves without a driver.
+    await withDriver(tenantId, [l1.id, l2.id]);
     for (const s of ['LOCKED', 'DISPATCHED', 'COMPLETED'] as const) await updateLoad(tenantId, day1.id, l1.id, { status: s }, user(), everyRole);
     await updateLoad(tenantId, day1.id, l2.id, { status: 'LOCKED' }, user(), everyRole);
     expect(await prisma.unservedOrder.count({ where: { orderId: o3.id, scenario: { runId: day1.id } } })).toBe(1);
@@ -494,7 +505,8 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(leftCases).toBeGreaterThan(0);
     expect(leftCases).toBeLessThan(1000);
     expect(await prisma.unservedOrder.count({ where: { orderId: big.id, scenario: { runId: planP.id } } })).toBe(1);
-    // Its part leaves the depot.
+    // Its part leaves the depot (with a driver: owner rule 20).
+    await withDriver(tenantId, [partLoad.id]);
     for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planP.id, partLoad.id, { status: s }, user(), everyRole);
 
     // The morning of Q: only the rest of the split order is open (the small order's load never left, it stays).
@@ -528,6 +540,7 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(kept.status).toBe('DISPATCHED');
     const smallLoad = await loadOf(v2.id, small.id);
     expect(smallLoad.status).toBe('PLANNED');
+    await withDriver(tenantId, [smallLoad.id]);
     for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, v2.id, smallLoad.id, { status: s }, user(), everyRole);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: smallLoad.id } })).status).toBe('DISPATCHED');
   });
@@ -658,6 +671,7 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(badge).toContain(`its cases were brought forward to ${fmtDayMonth(N)} and are planned there, so it does not go out today. Unlock it (put it back to Planned)`);
     expect(badge).toContain('A later locked or loading load of the same truck must be unlocked first.');
     // The unticked C5 stays today's: its load can still be locked and dispatched today.
+    await withDriver(tenantId, [l5.id]);
     for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planT.id, l5.id, { status: s }, user(), everyRole, { now: night });
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: l5.id } })).status).toBe('DISPATCHED');
     // Read again: nothing of today is left (C2 and C3 were brought forward, C5's load left the depot).
@@ -674,5 +688,108 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect([kept.status, kept.assignments.map((a) => a.orderId)]).toEqual(['LOCKED', [ownN.id]]);
     const sent = (await prisma.runJob.findFirstOrThrow({ where: { runId: v2.id } })).requestJson as unknown as DispatchRequest;
     expect(sent.stops.flatMap((s) => s.order_ids).sort()).toEqual(copies.map((c) => c.id).sort());
+  });
+
+  it('delivery results (owner request 4 Oct 2026): E1 ticked once the truck is back, E6 a correction after the carry (undo, then a planned copy), E10 a backdated change after the trip closed', async () => {
+    const T = isoPlus(140);
+    const N = isoPlus(141);
+    const at = (hhmmZ: string) => new Date(`${T}T${hhmmZ}:00Z`); // UTC; Muscat is +4
+    const a = await addOrder('C4', T, 40, 'SO-71');
+    const b = await addOrder('C6', T, 6, 'SO-72');
+    const c = await addOrder('C7', T, 12, 'SO-73');
+    const d = await addOrder('C5', T, 8, 'SO-74');
+    const planT = await optimize(T, morningBefore(T));
+    const la = await loadOf(planT.id, a.id);
+    const lb = await loadOf(planT.id, b.id);
+    const lc = await loadOf(planT.id, c.id);
+    const ld = await loadOf(planT.id, d.id);
+    const all = [la, lb, lc, ld].sort((x, y) => x.loadNo - y.loadNo || x.truckId.localeCompare(y.truckId));
+    await withDriver(tenantId, all.map((l) => l.id));
+    for (const l of all) for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planT.id, l.id, { status: s }, user(), everyRole, { now: at('03:00') });
+    // One driver link per truck-day (made directly: the token itself is not needed at library level).
+    const links = new Map<string, { id: string; generation: number; driverIdAtIssue: string | null; expiresAt: Date }>();
+    for (const truckId of new Set(all.map((l) => l.truckId))) {
+      const row = await prisma.driverLink.create({
+        data: { tenantId, truckId, deliveryDate: new Date(`${T}T00:00:00Z`), salt: 'test', keyId: 'test0000', tokenHash: `test-${truckId}-${uniqueSuffix()}`, expiresAt: new Date(`${N}T08:00:00Z`) },
+      });
+      links.set(truckId, { id: row.id, generation: row.generation, driverIdAtIssue: null, expiresAt: row.expiresAt });
+    }
+    const driverSends = (l: { truckId: string }, now: Date, actions: unknown[]) =>
+      recordDriverActions({ tenantId, truckId: l.truckId, date: T, link: links.get(l.truckId)!, ip: null, deviceId: null, session: null, now }, { clientNow: now.toISOString(), actions });
+    const key = () => crypto.randomUUID();
+    const nowT = at('10:00'); // 14:00 in Muscat on T: the dispatcher plans N
+
+    // E1: the driver records Not delivered (Shop closed) while the truck is out: listed, not ticked.
+    const r1 = await driverSends(la, at('05:20'), [{ key: key(), type: 'OUTCOME', stop: `${la.loadNo}:1`, at: at('05:10').toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }]);
+    expect(r1.results[0]).toMatchObject({ status: 'ok' });
+    let pv = await carryOverPreview(tenantId, depotId, N, { now: nowT });
+    const ca = pv.candidates.find((x) => x.orderId === a.id)!;
+    expect(ca).toMatchObject({ ofToday: true, cases: 40, confirmed: false, notFinal: true });
+    expect(ca.why[0]).toMatchObject({ kind: 'NOT_DELIVERED', text: 'Not delivered: Shop closed (driver)' });
+    expect(defaultCarrySelection(pv.candidates).has(a.id)).toBe(false);
+    // Back at depot: the load completes (its only stop has a result) and the order is ticked.
+    const back = await driverSends(la, at('09:00'), [{ key: key(), type: 'BACK_AT_DEPOT', load: la.loadNo, at: at('08:55').toISOString() }]);
+    expect(back.results[0]).toMatchObject({ status: 'ok' });
+    expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: la.id } })).status).toBe('COMPLETED');
+    pv = await carryOverPreview(tenantId, depotId, N, { now: nowT });
+    expect(pv.candidates.find((x) => x.orderId === a.id)).toMatchObject({ confirmed: true });
+    expect(defaultCarrySelection(pv.candidates).has(a.id)).toBe(true);
+    const carried = await bringForward(tenantId, depotId, N, [{ orderId: a.id, cases: 40, today: true }], { id: userId }, { now: nowT });
+    expect(carried.orders).toBe(1);
+    const copyA = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: a.id } });
+    const visitA = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId: la.truckId, loadNo: la.loadNo, sequence: 1 } });
+    expect(copyA.carryBasisJson).toEqual({ visits: [{ visitId: visitA.id, lines: [{ lineId: a.lines[0]!.id, notDelivered: 40 }] }] });
+    expect(copyA.lateReason).toBe(`Brought forward from ${fmtDayMonth(T)}: not delivered (Shop closed, driver).`);
+
+    // E6: the dispatcher's correction to Delivered would shrink what was carried: refused, undoable (the copy is on no plan).
+    const office = { id: userId, name: 'Planner' };
+    const correction = (l: { truckId: string; loadNo: number }, over: Record<string, unknown> = {}) =>
+      recordOfficeOutcome(tenantId, office, { key: key(), depotId, date: T, truckId: l.truckId, loadNo: l.loadNo, sequence: 1, outcome: 'DELIVERED', ...over } as never);
+    const refused = await correction(la).catch((e: unknown) => e);
+    expect((refused as PlanError).details).toMatchObject({ code: 'OUTCOME_CARRIED', copyId: copyA.id, undoable: true });
+    expect(await prisma.stopEvent.count({ where: { tenantId, visitId: visitA.id, kind: 'CARRY_CONFLICT' } })).toBe(1);
+    // "Undo the bring forward and record this result": one transaction.
+    const undone = await correction(la, { undoCarry: true });
+    expect(undone).toMatchObject({ result: 'ok', carryUndone: { copyId: copyA.id } });
+    expect(await prisma.order.count({ where: { id: copyA.id } })).toBe(0);
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: a.id } })).carriedToOrderId).toBeNull();
+    expect((await prisma.stopVisit.findUniqueOrThrow({ where: { id: visitA.id } })).outcome).toBe('DELIVERED');
+    expect(await prisma.auditLog.count({ where: { tenantId, action: 'ORDERS_CARRY_UNDONE', entityId: a.id } })).toBe(1);
+
+    // E6 with a planned copy: recorded by the office (no driver phone), the load completed, brought
+    // forward, N planned with it; the correction is refused, not undoable, and kept as a conflict.
+    await correction(lb, { outcome: 'NOT_DELIVERED', reason: 'PAYMENT_ISSUE' });
+    await updateLoad(tenantId, planT.id, lb.id, { status: 'COMPLETED' }, user(), everyRole, { now: nowT });
+    pv = await carryOverPreview(tenantId, depotId, N, { now: nowT });
+    expect(pv.candidates.find((x) => x.orderId === b.id)).toMatchObject({ confirmed: true, why: [expect.objectContaining({ text: 'Not delivered: Payment issue (dispatcher)' })] });
+    expect((await bringForward(tenantId, depotId, N, [{ orderId: b.id, cases: 6, today: true }], { id: userId }, { now: nowT })).orders).toBe(1);
+    await optimize(N, nowT);
+    const copyB = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: b.id } });
+    expect(await prisma.routeAssignment.count({ where: { orderId: copyB.id } })).toBeGreaterThan(0);
+    const visitB = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId: lb.truckId, loadNo: lb.loadNo, sequence: 1 } });
+    const notUndoable = await correction(lb).catch((e: unknown) => e);
+    expect((notUndoable as PlanError).details).toMatchObject({ code: 'OUTCOME_CARRIED', undoable: false });
+    expect((notUndoable as PlanError).message).toContain('already planned with it');
+    expect((await prisma.stopVisit.findUniqueOrThrow({ where: { id: visitB.id } })).outcome).toBe('NOT_DELIVERED');
+    expect(await prisma.stopEvent.count({ where: { tenantId, visitId: visitB.id, kind: 'CARRY_CONFLICT' } })).toBe(1);
+
+    // E10: C7 Delivered by the driver at 11:00; the trip is closed at 17:00 (13:00Z); at 21:00 a
+    // backdated Not delivered (16:59) is refused. C5 had no result at completion: its queued result
+    // is accepted, flagged late, and listed but never ticked.
+    expect((await driverSends(lc, at('07:05'), [{ key: key(), type: 'OUTCOME', stop: `${lc.loadNo}:1`, at: at('07:00').toISOString(), outcome: 'DELIVERED', photoKeys: [], noPhotoReason: 'CAMERA_FAILED' }])).results[0]).toMatchObject({ status: 'ok' });
+    for (const l of [lc, ld]) {
+      await updateLoad(tenantId, planT.id, l.id, { status: 'COMPLETED' }, user(), everyRole, { now: at('13:00') });
+      // The real clock writes statusChangedAt; this test's day is in the future, so it is set to 17:00 Muscat.
+      await prisma.planLoad.update({ where: { id: l.id }, data: { statusChangedAt: at('13:00') } });
+    }
+    const late = await driverSends(lc, at('17:00'), [{ key: key(), type: 'OUTCOME', stop: `${lc.loadNo}:1`, at: at('12:59').toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }]);
+    expect(late.results[0]).toMatchObject({ status: 'refused', code: 'LOAD_COMPLETED' });
+    const fill = await driverSends(ld, at('17:00'), [{ key: key(), type: 'OUTCOME', stop: `${ld.loadNo}:1`, at: at('11:20').toISOString(), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }]);
+    expect(fill.results[0]).toMatchObject({ status: 'ok' });
+    expect(await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId: ld.truckId, loadNo: ld.loadNo, sequence: 1 } })).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
+    pv = await carryOverPreview(tenantId, depotId, N, { now: at('17:30') });
+    expect(pv.candidates.find((x) => x.orderId === d.id)).toMatchObject({ late: true, confirmed: false });
+    expect(defaultCarrySelection(pv.candidates).has(d.id)).toBe(false);
+    expect(pv.candidates.some((x) => x.orderId === c.id)).toBe(false);
   });
 });

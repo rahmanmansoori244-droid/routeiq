@@ -518,3 +518,60 @@ describe('the web process never reads an upload itself (audit P5)', () => {
     }
   });
 });
+
+describe('the driver link and the driver page (owner request 4 Oct 2026)', () => {
+  const rel = (f: string) => path.relative(WEB, f).split(path.sep).join('/');
+
+  it('every app/api/d route goes through withDriverLink, and no folder there is a [token] segment', () => {
+    const dir = path.join(WEB, 'app', 'api', 'd');
+    const routes = walk(dir, /^route\.ts$/);
+    expect(routes.length).toBeGreaterThan(0);
+    expect(routes.filter((f) => !readFileSync(f, 'utf8').includes('withDriverLink(')).map(rel)).toEqual([]);
+    const dynamicFolders: string[] = [];
+    const visit = (d: string) => {
+      for (const name of readdirSync(d)) {
+        const p = path.join(d, name);
+        if (!statSync(p).isDirectory()) continue;
+        if (/^\[.*token.*\]$/i.test(name)) dynamicFolders.push(rel(p));
+        visit(p);
+      }
+    };
+    visit(dir);
+    expect(dynamicFolders).toEqual([]);
+  });
+
+  it('the page (app/d) and lib/driver-page never import the database, Prisma or the server side of the driver link', () => {
+    const files = [...walk(path.join(WEB, 'app', 'd'), /\.(ts|tsx)$/), ...walk(path.join(WEB, 'lib', 'driver-page'), /\.(ts|tsx)$/)];
+    expect(files.length).toBeGreaterThan(5);
+    const offenders = files.filter((f) => {
+      const src = readFileSync(f, 'utf8');
+      return (
+        /from ['"](@\/lib\/db|@prisma\/client|\.\.?\/.*\bdb)['"]/.test(src) ||
+        /from ['"][^'"]*driver-link\/(service|guard|manifest|token)['"]/.test(src) ||
+        /from ['"]node:/.test(src)
+      );
+    });
+    expect(offenders.map(rel)).toEqual([]);
+  });
+
+  it('no console call in lib/driver-link takes a token', () => {
+    const offenders = walk(path.join(WEB, 'lib', 'driver-link'), /\.ts$/).flatMap((f) =>
+      readFileSync(f, 'utf8')
+        .split(/\r?\n/)
+        .filter((l) => /console\.\w+\(/.test(l) && /token/i.test(l))
+        .map((l) => `${rel(f)}: ${l.trim()}`),
+    );
+    expect(offenders).toEqual([]);
+  });
+
+  it('no new route under /api/driver/ (the retired app): the new page is /d/ with its API at /api/d/', () => {
+    const routes = walk(path.join(WEB, 'app', 'api', 'driver'), /^route\.ts$/).map(rel).sort();
+    expect(routes).toEqual([
+      'app/api/driver/login/route.ts',
+      'app/api/driver/manifest/route.ts',
+      'app/api/driver/ping/route.ts',
+      'app/api/driver/shift/end/route.ts',
+      'app/api/driver/stop/route.ts',
+    ]);
+  });
+});

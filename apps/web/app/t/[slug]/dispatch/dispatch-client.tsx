@@ -16,11 +16,13 @@ import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
+import { DeliverySummary } from './delivery-summary';
+import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
 import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
-import { optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
+import { keepDeliveries, optimizeStartedText, searchModeNow, searchPollMs, searchProgressText, THOROUGH_MAX_SEC_DEFAULT, type StartedAnswer } from '@/lib/dispatch/search-mode';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { useSearchModeChoice } from './search-mode-dialog';
 import { useTicker } from './use-ticker';
@@ -114,6 +116,8 @@ interface Day {
   dataRule?: { on: boolean; days: number };
   /** With the loading rule on: this day's customers without a usable location or a delivery window. */
   loadingGaps?: DataGap[];
+  /** Delivery results of the day (owner request 4 Oct 2026): the Deliveries card under the plan. */
+  deliveries?: DayDeliveries | null;
 }
 interface Validation {
   totalRows: number;
@@ -133,7 +137,7 @@ interface Validation {
 interface Props {
   slug: string;
   canPlan: boolean;
-  /** Supervisor and above (canApproveOverride): dispatch actions and "Reset stuck plan" (audit F09). */
+  /** The dispatcher, PLANNER and above (canPlan; owner decision 4 of 5 Oct 2026, it was SUPERVISOR): Dispatch, Completed and "Reset stuck plan". */
   canDispatch: boolean;
   /** Company admin: can enter case weights under Products. */
   canEditProducts: boolean;
@@ -176,14 +180,17 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   loaderRef.current ??= createDayLoader<Day>(
     { date: initialDate, depotId: initialDepot },
     {
-      fetchDay: (sel) => {
+      fetchDay: (sel, opts) => {
         const q = new URLSearchParams();
         if (sel.date) q.set('date', sel.date);
         if (sel.depotId) q.set('depotId', sel.depotId);
+        // A result was recorded: the Deliveries card is read even while a search runs.
+        if (opts.deliveries) q.set('deliveries', '1');
         return api<Day>(`/api/dispatch/day?${q}`);
       },
       show: (d, { afterError }) => {
-        setDay(d);
+        // While a search runs the day's polls leave the delivery results out: keep the card shown.
+        setDay((prev) => keepDeliveries(prev, d));
         setLoadError(null);
         // The day is back after a failed load: load the plan below again too (its own load most
         // likely failed as well; third review of PR3) - in place, never a remount: a late order
@@ -200,6 +207,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   );
   const loader = loaderRef.current;
   const refresh = useCallback(() => loader.refresh(), [loader]);
+  // A result was recorded (on the plan or on the Deliveries card): the day with its delivery results,
+  // also while a search runs (its polls leave them out).
+  const refreshResults = useCallback(() => loader.refresh({ deliveries: true }), [loader]);
 
   // A customer's pin or details were saved (ADD LOCATION / Details): the day AND the plan below are
   // read again, the plan in place (audit F13). A READY plan does not poll, so its "changed after
@@ -660,17 +670,31 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             canPlan={canPlan && dayReady}
             canDispatch={canDispatch && dayReady}
             canResetStuck={canDispatch && dayReady}
+            showCameraList={false}
             canEditProducts={canEditProducts}
             phoneCountryCode={phoneCountryCode}
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
             reloadSignal={planReload}
+            onResultRecorded={() => void refreshResults()}
             today={day.today}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the
               // plan stays as it is (with its own Try again) until the day's Try again reloads both.
               if (await refresh()) setPlanKey((k) => k + 1);
+            }}
+          />
+          <DeliverySummary
+            deliveries={day.deliveries}
+            date={day.date}
+            depotId={day.depot.id}
+            canPlan={canPlan && dayReady}
+            onRecorded={async () => {
+              // The day's card and the plan's results again (in place: no remount), also while a search
+              // runs. The plan reads its results whatever the day's load answered (it shows its own error).
+              await refreshResults();
+              setPlanReload((k) => k + 1);
             }}
           />
         </Step>

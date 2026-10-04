@@ -68,6 +68,7 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
               <TableHead className="hidden md:table-cell">Address</TableHead>
               <TableHead className="text-right">Lat</TableHead>
               <TableHead className="text-right">Lng</TableHead>
+              <TableHead className="hidden lg:table-cell">Dispatcher phone</TableHead>
               <TableHead className="text-right">Trucks</TableHead>
               <TableHead>Status</TableHead>
               {canManage ? <TableHead className="w-[1%]"></TableHead> : null}
@@ -81,6 +82,10 @@ export function DepotsTable({ initial, canManage, mapboxToken }: Props) {
                 <TableCell className="hidden md:table-cell text-muted-foreground">{d.address ?? '—'}</TableCell>
                 <TableCell className="text-right font-mono text-xs">{d.lat.toFixed(4)}</TableCell>
                 <TableCell className="text-right font-mono text-xs">{d.lng.toFixed(4)}</TableCell>
+                {/* Owner decision 3 (5 Oct 2026): the driver page's Call dispatcher number; empty = the company's. */}
+                <TableCell className="hidden lg:table-cell text-muted-foreground" data-testid={`depot-phone-${d.code}`}>
+                  {d.dispatcherPhone ?? 'Company number'}
+                </TableCell>
                 <TableCell className="text-right">{d._count?.trucks ?? 0}</TableCell>
                 <TableCell>
                   {/* Audit PR A5: the depot that keeps orders and files that had no depot. */}

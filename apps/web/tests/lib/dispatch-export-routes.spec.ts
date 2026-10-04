@@ -19,7 +19,7 @@ interface FakeRun {
   scenarioNames: string[];
   version: number;
 }
-const state = vi.hoisted(() => ({ runs: [] as FakeRun[], detail: null as unknown, legacyBuilt: [] as string[], driverPacks: 0 }));
+const state = vi.hoisted(() => ({ runs: [] as FakeRun[], detail: null as unknown, legacyBuilt: [] as string[], driverPacks: 0, packOpts: null as unknown }));
 
 /** A Prisma RunPlan where clause, as far as the discriminator uses it (anything else throws). */
 function matches(run: FakeRun, where: Record<string, any>): boolean {
@@ -39,7 +39,8 @@ function matches(run: FakeRun, where: Record<string, any>): boolean {
   return true;
 }
 
-vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: 'VIEWER', name: 'Viewer', email: 'v@a.example' } })) }));
+const session = vi.hoisted(() => ({ role: 'VIEWER' }));
+vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => ({ user: { id: 'u1', tenantId: 'tA', role: session.role, name: 'Viewer', email: 'v@a.example' } })) }));
 vi.mock('@/lib/db', () => ({
   prisma: {
     runPlan: { findFirst: vi.fn(async ({ where }: { where: Record<string, any> }) => state.runs.find((r) => matches(r, where)) ?? null) },
@@ -69,8 +70,22 @@ vi.mock('@/lib/exports/route-sheet-data', async (importActual) => ({
   }),
 }));
 vi.mock('@/lib/exports/pdf', () => ({ buildRouteSheetPdf: vi.fn(async () => Buffer.from('%PDF-legacy')) }));
+// Owner request 4 Oct 2026: the driver-link QR per truck-day, ensured only for PLANNER and above.
+const links = vi.hoisted(() => ({ calls: [] as string[], failFor: null as string | null, known: [] as Record<string, unknown>[] }));
+vi.mock('@/lib/driver-link/service', () => ({
+  listLinks: vi.fn(async () => links.known),
+  ensureLink: vi.fn(async (_t: string, _r: string, truckId: string) => {
+    links.calls.push(truckId);
+    if (truckId === links.failFor) throw Object.assign(new Error('Plan is being saved'), { status: 409, details: { code: 'PLAN_BUSY' } });
+    if (truckId === 't2') return { url: null, revoked: true };
+    return { url: `https://routeiq.example/d/link-of-${truckId}`, revoked: false };
+  }),
+}));
 vi.mock('@/lib/dispatch/driver-pack', () => ({
-  driverPackModel: vi.fn(() => ({})),
+  driverPackModel: vi.fn((_d: unknown, opts: unknown) => {
+    state.packOpts = opts;
+    return {};
+  }),
   renderDriverPackPdf: vi.fn(async () => {
     state.driverPacks++;
     return Buffer.from('%PDF-driver');
@@ -115,6 +130,10 @@ beforeEach(() => {
   state.detail = allUnserved();
   state.legacyBuilt = [];
   state.driverPacks = 0;
+  state.packOpts = null;
+  session.role = 'VIEWER';
+  links.calls = [];
+  links.failFor = null;
 });
 
 describe('GET /api/runs/:id/export/excel (audit F16)', () => {
@@ -166,6 +185,45 @@ describe('isDispatchPlanShape is DISPATCH_PLAN_WHERE for a plan already read', (
           expect(isDispatchPlanShape(run), JSON.stringify(run)).toBe(matches(run, DISPATCH_PLAN_WHERE));
         }
       }
+    }
+  });
+});
+
+describe('GET /api/runs/:id/export/pdf prints the driver link for PLANNER and above only (owner request 4 Oct 2026)', () => {
+  it('a VIEWER: no link is made, the sheets say "ask the dispatcher"', async () => {
+    state.detail = fixture();
+    const res = await get(pdfGet, 'withLoads');
+    expect(res.status).toBe(200);
+    expect(links.calls).toEqual([]);
+    expect((state.packOpts as { driverLinks?: unknown }).driverLinks).toBeUndefined();
+  });
+
+  it('a PLANNER: one ensure per truck-day; a revoked link prints "stopped"; a failure prints the placeholder and never fails the pack', async () => {
+    session.role = 'PLANNER';
+    state.detail = fixture();
+    links.failFor = 'tX';
+    const res = await get(pdfGet, 'withLoads');
+    expect(res.status).toBe(200);
+    expect(links.calls).toEqual(['t1', 't2']);
+    const m = (state.packOpts as { driverLinks: Map<string, unknown> }).driverLinks;
+    expect(m.get('t1')).toEqual({ kind: 'QR', url: 'https://routeiq.example/d/link-of-t1' });
+    expect(m.get('t2')).toEqual({ kind: 'STOPPED' });
+    links.failFor = 't1';
+    links.calls = [];
+    const again = await get(pdfGet, 'withLoads');
+    expect(again.status).toBe(200);
+    expect((state.packOpts as { driverLinks: Map<string, unknown> }).driverLinks.get('t1')).toEqual({ kind: 'ASK' });
+    expect(state.driverPacks).toBe(2);
+    // Links that already work are read in one batch: no transaction per truck for them.
+    links.failFor = null;
+    links.calls = [];
+    links.known = [{ truckId: 't1', url: 'https://routeiq.example/d/known-t1', revoked: false, driverIdAtIssue: 'd1' }];
+    try {
+      expect((await get(pdfGet, 'withLoads')).status).toBe(200);
+      expect(links.calls).toEqual(['t2']);
+      expect((state.packOpts as { driverLinks: Map<string, unknown> }).driverLinks.get('t1')).toEqual({ kind: 'QR', url: 'https://routeiq.example/d/known-t1' });
+    } finally {
+      links.known = [];
     }
   });
 });

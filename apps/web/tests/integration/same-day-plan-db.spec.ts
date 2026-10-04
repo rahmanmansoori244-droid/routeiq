@@ -110,7 +110,7 @@ import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { planFromAssumption } from '@/lib/dispatch/plan-from';
 import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { tenantAssumptions } from '@/lib/dispatch/workbook';
-import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
+import { cleanupTenant, prisma, uniqueSuffix, withDriver } from './helpers';
 
 const slug = `sameday-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
 let tenantId = '';
@@ -217,6 +217,7 @@ describe('a same-day re-plan starts from now (PR8)', () => {
     const t01l1 = v1Loads.find((l) => l.truck.code === 'T01' && l.loadNo === 1)!;
     expect([t01l1.departMin, t01l1.returnMin]).toEqual([360, 597]);
     await updateLoad(tenantId, v1.id, t01l1.id, { status: 'LOCKED' }, user(), everyRole);
+    await withDriver(tenantId, [t01l1.id]); // owner rule 20
     await updateLoad(tenantId, v1.id, t01l1.id, { status: 'DISPATCHED' }, user(), everyRole);
 
     // 09:00 on the delivery day: a clinic calls; re-plan.

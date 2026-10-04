@@ -99,6 +99,10 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     masterChanged: [],
     carriedFrom: null,
     carriedTo: null,
+    // One entry per order line, no aggregation (the driver page and Part 2's partly-delivered entry).
+    orderLines: o.lines.map((l, i) => ({ orderId: o.id, lineId: `${o.id}-l${i + 1}`, salesOrderNo: l.so, productCode: l.sku, productName: PRODUCTS[l.sku].name, cases: l.cases })),
+    plannedHours: { hardStart: 360, hardEnd: 840, prefStart: 420, prefEnd: 600 },
+    promisedWindow: null,
   };
 }
 

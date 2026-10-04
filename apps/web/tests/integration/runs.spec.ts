@@ -15,6 +15,7 @@ import {
   seedMinimal,
   tomorrowIso,
   type SeededIds,
+  withDriver,
 } from './helpers';
 
 const createdSlugs = new Set<string>();
@@ -201,6 +202,7 @@ describe('runs: full lifecycle (NMWC dispatch planner)', () => {
       });
     expect((await patch('DISPATCHED')).status).toBe(409); // must be locked first
     expect((await patch('LOCKED')).status).toBe(200);
+    await withDriver(h.tenantId, [first.id]); // owner rule 20
     expect((await patch('DISPATCHED')).status).toBe(200);
     expect((await patch('PLANNED')).status).toBe(409); // dispatched is immutable
 

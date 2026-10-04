@@ -30,7 +30,42 @@ export const SETTINGS_FIELDS = [
   'avgSpeedKmh',
   'requireDataBeforeLoading',
   'dataCollectDays',
+  // The driver page and delivery results (owner request 4 Oct 2026): company admin only.
+  'geofenceRadiusM',
+  'photoProofRequired',
+  'photoRetentionDays',
+  'locationRetentionDays',
+  'dispatcherPhone',
 ] as const satisfies readonly (keyof TenantConfig)[];
+
+/**
+ * How long delivery photos and driver positions are kept by default: 90 days each (owner decision 1,
+ * 5 Oct 2026: "photos 90 days is enough"; the photo default was 365). The schema has the same
+ * defaults; a settings row without a value is read with them (the janitor, the photo route).
+ */
+export const DEFAULT_PHOTO_RETENTION_DAYS = 90;
+export const DEFAULT_LOCATION_RETENTION_DAYS = 90;
+
+/** Bounds of the driver-page settings (web only: the optimizer never reads them). */
+export const DELIVERY_SETTING_BOUNDS = {
+  geofenceRadiusM: { min: 50, max: 500 },
+  photoRetentionDays: { min: 30, max: 1095 },
+  locationRetentionDays: { min: 30, max: 1095 },
+} as const;
+
+/**
+ * Positions are never kept longer than the photos (spec 12.4): a save that changes either retention
+ * is refused while the location retention is longer than the photo retention.
+ */
+export function retentionSaveProblem(
+  changed: Record<string, unknown>,
+  merged: { photoRetentionDays: number; locationRetentionDays: number },
+): string | null {
+  if (!('photoRetentionDays' in changed) && !('locationRetentionDays' in changed)) return null;
+  return merged.locationRetentionDays > merged.photoRetentionDays
+    ? `Driver positions (${merged.locationRetentionDays} days) cannot be kept longer than the delivery photos (${merged.photoRetentionDays} days).`
+    : null;
+}
 
 export type SettingsField = (typeof SETTINGS_FIELDS)[number];
 export type EditableConfig = Pick<TenantConfig, SettingsField>;

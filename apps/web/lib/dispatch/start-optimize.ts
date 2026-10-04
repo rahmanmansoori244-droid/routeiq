@@ -230,7 +230,7 @@ function alreadyRunning(runId: string, job: { id: string; status: string; search
  * as it is now: read again after the job checks, never the row read before them. Review of audit
  * PR4: the job can end during the request (its failure or its saved plan moves the plan to FAILED
  * or READY); the row read before it still said OPTIMIZING, and OPTIMIZE answered 409 PLAN_STUCK
- * ("a supervisor can reset it now") for a plan that was not stuck.
+ * ("a dispatcher can reset it now") for a plan that was not stuck.
  */
 async function unstickIfEnded<T extends Pick<RunPlan, 'status'>>(
   tenantId: string,
@@ -254,7 +254,7 @@ async function unstickIfEnded<T extends Pick<RunPlan, 'status'>>(
 const PLAN_STUCK: StartResult = {
   status: 409,
   body: {
-    error: 'This plan is still marked as optimizing although its optimization has ended. It is reset within a minute (a supervisor can reset it now); then try again.',
+    error: 'This plan is still marked as optimizing although its optimization has ended. It is reset within a minute (a dispatcher can reset it now); then try again.',
     code: 'PLAN_STUCK',
   },
 };

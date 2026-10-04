@@ -16,6 +16,8 @@
 import { Prisma } from '@prisma/client';
 import { prisma } from './db';
 import { addDaysIso, DEFAULT_TZ, localDateIso } from './dispatch/time';
+import { rangeKpis } from './delivery/day-results';
+import type { DeliveryKpis } from './delivery/kpis';
 
 /**
  * The plan versions the dashboard counts, as a SQL condition on "RunPlan" rp: exactly one per depot
@@ -92,6 +94,11 @@ export interface DashboardData {
   recentRuns: RecentRun[];
   distanceIsEstimated: boolean;
   currency: string;
+  /**
+   * Delivery outcome KPIs (owner request 4 Oct 2026, spec section 11.4) of the last 7 and 30 days,
+   * counting only days in scope (from the feature's start); null when they could not be read.
+   */
+  deliveries: { last7: DeliveryKpis; last30: DeliveryKpis } | null;
 }
 
 export interface RecentRun {
@@ -274,6 +281,18 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
     };
   });
 
+  // The Deliveries tile: read on its own, so a failure never keeps the dashboard from loading.
+  let deliveries: DashboardData['deliveries'] = null;
+  try {
+    const [last7, last30] = await Promise.all([
+      rangeKpis(prisma, tenantId, { from: weekFromIso, to: todayIso }),
+      rangeKpis(prisma, tenantId, { from: last30FromIso, to: todayIso }),
+    ]);
+    deliveries = { last7, last30 };
+  } catch (e) {
+    console.error('[dashboard] delivery KPIs not read', (e as Error)?.message ?? e);
+  }
+
   return {
     today: rollupRows(todayRows, todayIso),
     yesterday: rollupRows(yesterdayRows, yesterdayIso),
@@ -283,5 +302,6 @@ export async function getDashboardData(tenantId: string): Promise<DashboardData>
     recentRuns,
     distanceIsEstimated,
     currency: tenant.currency,
+    deliveries,
   };
 }

@@ -133,6 +133,17 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
   })[];
 };
 
+/** Words before the driver link in a WhatsApp message (the driver's phone page: trips and delivery results). */
+export const DRIVER_LINK_LINE = 'Your trips and delivery results';
+
+/**
+ * The Driver link dialog's own WhatsApp message (owner request 4 Oct 2026): the link in English and
+ * Arabic, for a casual driver or a hired truck's driver who reads either. `dayLabel`: "Sun 5 Oct".
+ */
+export function driverLinkMessage(dayLabel: string, truckCode: string, url: string): string {
+  return `RouteIQ - your trips for ${dayLabel}, truck ${truckCode}: ${url}\nRouteIQ - رحلاتك ليوم ${dayLabel}، الشاحنة ${truckCode}: ${url}`;
+}
+
 /** Line of a message whose truck-day did not pass the timetable check (the PDF sheet's banner). */
 export const TIMES_NOT_VERIFIED_LINE = '*TIMES NOT VERIFIED - check with the dispatcher before leaving*';
 
@@ -143,7 +154,7 @@ export const TIMES_NOT_VERIFIED_LINE = '*TIMES NOT VERIFIED - check with the dis
  * timetable check, and under a stop each change made after planning, with the corrected pin (the
  * pin and route links stay the planned ones, never switched silently).
  */
-export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number, opts: { tenantName?: string } = {}): string {
+export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number, opts: { tenantName?: string; driverLinkUrl?: string | null } = {}): string {
   const stops = [...load.stops].sort((a, b) => a.sequence - b.sequence);
   // Audit E1: from and back to the depot pin the load was planned from, with the note when it moved.
   const route = routeLinks(load.origin ?? plan.depot, stops);
@@ -155,6 +166,8 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
     `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
     ...(depotMoved ? [`! ${depotMoved.text}`] : []),
+    // The truck-day's driver link (owner request 4 Oct 2026): only an active link (not revoked or expired).
+    ...(opts.driverLinkUrl ? [`${DRIVER_LINK_LINE}: ${opts.driverLinkUrl}`] : []),
     '',
   ];
   const brk = load.break ?? null;

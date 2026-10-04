@@ -41,6 +41,7 @@ export const POST = withTenantApi(
         availableToMin: input.availableToMin ?? null,
         defaultDriverId: input.defaultDriverId ?? null,
         active: input.active ?? true,
+        hired: input.hired ?? false,
       },
     });
     await audit({

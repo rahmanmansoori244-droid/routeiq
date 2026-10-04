@@ -10,6 +10,7 @@ import { Card, CardContent } from '@/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { auditActionTone } from '@/lib/audit-catalog';
+import { auditActorOf } from '@/lib/driver-link/actor';
 import { errorMessage } from '@/lib/error-message';
 
 export interface AuditRow {
@@ -110,7 +111,8 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
         !r.entity.toLowerCase().includes(lower) &&
         !(r.entityId?.toLowerCase().includes(lower) ?? false) &&
         !(r.user?.email.toLowerCase().includes(lower) ?? false) &&
-        !(r.user?.name.toLowerCase().includes(lower) ?? false)
+        !(r.user?.name.toLowerCase().includes(lower) ?? false) &&
+        !(auditActorOf(r.afterJson)?.toLowerCase().includes(lower) ?? false)
       )
         return false;
     }
@@ -238,7 +240,10 @@ export function AuditClient({ initial, actions, entities, users }: Props) {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-sm">{r.entity}</TableCell>
-                    <TableCell className="text-xs">{r.user ? r.user.email : '—'}</TableCell>
+                    <TableCell className="text-xs" data-testid="audit-who">
+                      {/* Driver-link rows have no user: their actor says whose truck-day, which link and phone. */}
+                      {r.user ? r.user.email : (auditActorOf(r.afterJson) ?? (r.action.startsWith('DELIVERY_') || r.action === 'CASUAL_DRIVERS_CLEARED' ? 'RouteIQ' : '—'))}
+                    </TableCell>
                     <TableCell className="font-mono text-[10px] text-muted-foreground">
                       {r.entityId?.slice(0, 16) ?? '—'}
                     </TableCell>

@@ -190,7 +190,8 @@ function setup(first: typeof UNCONFIRMED = UNCONFIRMED) {
     void saveBtn().props.onClick();
     host.flush();
   };
-  const patches = () => calls.filter((c) => c.init.method === 'PATCH');
+  // Only the saves (the dialog also reads the measured unloading time: a GET without init).
+  const patches = () => calls.filter((c) => c.init?.method === 'PATCH');
   return { host, field, type, save, patches, saved };
 }
 

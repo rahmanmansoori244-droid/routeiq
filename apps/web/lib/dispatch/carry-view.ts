@@ -16,15 +16,20 @@ export function carriedToBadge(toDateIso: string): string {
   return `Carried over to ${fmtDayMonth(toDateIso)}`;
 }
 
-/** A listed order as the selection needs it; `ofToday`: an order of the company's today (the "Today" group). */
-type Listed = { orderId: string; blocked: unknown; ofToday?: boolean };
+/**
+ * A listed order as the selection needs it; `ofToday`: an order of the company's today (the "Today"
+ * group); `confirmed` / `late`: what its recorded delivery results say (carry-over.ts).
+ */
+type Listed = { orderId: string; blocked: unknown; ofToday?: boolean; confirmed?: boolean; late?: boolean };
 
 /**
- * Ticked unless the dispatcher changed it: an order of an earlier day (that day is over) yes, an
- * order of today no - today's loads that have not left yet may still go out today (owner decision).
+ * Ticked unless the dispatcher changed it: an order of an earlier day (that day is over) yes, unless
+ * a result behind it was recorded after the trip closed; an order of today no - today's loads that
+ * have not left yet may still go out today (owner decision) - except one whose open cases are all
+ * recorded as not delivered by a truck that is back (`confirmed`, delivery outcome spec section 9.1).
  */
 export function carryTickedByDefault(c: Listed): boolean {
-  return !c.blocked && !c.ofToday;
+  return !c.blocked && (c.ofToday ? !!c.confirmed : !c.late);
 }
 
 /** What the day screen offers by default: every order of an earlier day that can be brought forward, none of today. */
@@ -69,13 +74,52 @@ export function carrySelectionPayload(candidates: readonly (Listed & { cases: nu
     .map((c) => (c.ofToday ? { orderId: c.orderId, cases: c.cases, today: true as const } : { orderId: c.orderId, cases: c.cases }));
 }
 
-/** The heading of the day screen's group of today's orders: "Today (27 Sep) - may still leave today". */
-export function carryTodayTitle(todayIso: string): string {
-  return `Today (${fmtDayMonth(todayIso)}) - may still leave today`;
+/**
+ * How today's listed orders divide (the "Today" group): `settled` are ticked by default - the driver's
+ * result says every open case was not delivered and the truck is back (carryTickedByDefault); `open`
+ * are not - they may still leave today (a load that has not left, a truck still out, a result that
+ * may change). An order that cannot be brought forward at all (`blocked`) is in neither.
+ */
+export interface CarryTodaySplit {
+  settled: number;
+  open: number;
 }
 
-/** The warning above today's orders (owner decision: unticked by default). */
+export function carryTodaySplit(todays: readonly Listed[]): CarryTodaySplit {
+  let settled = 0;
+  let open = 0;
+  for (const c of todays) {
+    if (c.blocked) continue;
+    if (carryTickedByDefault({ ...c, ofToday: true })) settled++;
+    else open++;
+  }
+  return { settled, open };
+}
+
+/**
+ * The heading of the day screen's group of today's orders. It says which rows are ticked and why:
+ * "Today (27 Sep) - 1 driver-confirmed not delivered (ticked), 2 may still leave today (not ticked)";
+ * with only one kind: "Today (27 Sep) - may still leave today (not ticked)" or
+ * "Today (27 Sep) - driver-confirmed not delivered (ticked)".
+ */
+export function carryTodayTitle(todayIso: string, split: CarryTodaySplit): string {
+  const day = `Today (${fmtDayMonth(todayIso)})`;
+  if (split.settled && split.open) return `${day} - ${split.settled} driver-confirmed not delivered (ticked), ${split.open} may still leave today (not ticked)`;
+  if (split.settled) return `${day} - driver-confirmed not delivered (ticked)`;
+  if (split.open) return `${day} - may still leave today (not ticked)`;
+  return day;
+}
+
+/** The warning for today's orders that may still leave today (owner decision: not ticked by default). */
 export const CARRY_TODAY_WARNING = "Today's loads that have not left yet may still go out today; tick only orders you know will not be delivered today.";
+
+/** What the driver's result already settled for today's ticked rows. */
+export const CARRY_TODAY_SETTLED = 'The driver recorded these as not delivered and the truck is back, so they are ticked.';
+
+/** The hint under the heading: what ticked rows mean, and the owner's warning for the rows that are not ticked. */
+export function carryTodayHint(split: CarryTodaySplit): string {
+  return [split.settled ? CARRY_TODAY_SETTLED : null, split.open ? CARRY_TODAY_WARNING : null].filter((x): x is string => !!x).join(' ');
+}
 
 /**
  * The "Why not delivered" label of a listed order on the day screen. Today's day is not over, so
@@ -91,7 +135,36 @@ export function carryWhyLabel(kind: CarryWhyKind, ofToday: boolean): string {
       return ofToday ? 'Not planned' : 'Never planned';
     case 'UNSERVED':
       return 'Unserved';
+    case 'NOT_DELIVERED':
+      return ofToday ? 'Not delivered today' : 'Not delivered';
   }
+}
+
+/**
+ * Why a listed order is not ticked by default although a result says it was not delivered (the
+ * Today group's note): "truck still out, the result may still change", "other part (T03 L1 stop 1)
+ * has no result", "recorded after the trip closed". Null when nothing needs saying.
+ */
+export function carryResultNote(c: { notFinal?: boolean; late?: boolean; openPartsText?: string | null }): string | null {
+  const notes = [c.notFinal ? 'truck still out, the result may still change' : null, c.openPartsText ?? null, c.late ? 'recorded after the trip closed' : null].filter((x): x is string => !!x);
+  return notes.length ? notes.join('; ') : null;
+}
+
+/** The no-result list grouped per truck and day ("T05: 2 stops"), in the order given. */
+export function noOutcomeGroups<S extends { truckCode: string; date: string }>(stops: readonly S[]): { truckCode: string; date: string; stops: S[] }[] {
+  const out = new Map<string, { truckCode: string; date: string; stops: S[] }>();
+  for (const s of stops) {
+    const k = `${s.date}|${s.truckCode}`;
+    const g = out.get(k) ?? { truckCode: s.truckCode, date: s.date, stops: [] };
+    g.stops.push(s);
+    out.set(k, g);
+  }
+  return [...out.values()];
+}
+
+/** The Undo question: "Remove the copy of ACME on 6 Oct (40 cases)? The order goes back to the list." */
+export function carryUndoConfirmText(u: { customerCode: string; branchCode: string | null; cases: number }, dateIso: string): string {
+  return `Remove the copy of ${u.branchCode ? `${u.customerCode}/${u.branchCode}` : u.customerCode} on ${fmtDayMonth(dateIso)} (${u.cases} cases)? The order goes back to the list.`;
 }
 
 /**
@@ -113,15 +186,20 @@ export function carryButtonSuffix(chosen: readonly { cases: number; ofToday: boo
  * keeps them) and that a load of today still holding one cannot go out today. `chosen` are the
  * listed orders (CarryCandidate, which says `ofToday`), never the POST body (which says `today`).
  */
-export function carryConfirmText(chosen: readonly { cases: number; ofToday: boolean }[], dateIso: string, todayIso: string): string {
+export function carryConfirmText(chosen: readonly { cases: number; ofToday: boolean; confirmed?: boolean }[], dateIso: string, todayIso: string): string {
   const day = fmtDayMonth(dateIso);
   const cases = chosen.reduce((a, c) => a + c.cases, 0);
-  const ofToday = chosen.filter((c) => c.ofToday);
+  // Today's orders recorded as not delivered by a truck that is back are settled; the others are a guess.
+  const recorded = chosen.filter((c) => c.ofToday && c.confirmed);
+  const ofToday = chosen.filter((c) => c.ofToday && !c.confirmed);
   const todayCases = ofToday.reduce((a, c) => a + c.cases, 0);
+  const recordedNote = recorded.length
+    ? `\n\n${recorded.length} of them were recorded as not delivered today (${recorded.reduce((a, c) => a + c.cases, 0).toLocaleString()} cases): their trucks are back.`
+    : '';
   const todayNote = ofToday.length
     ? `\n\n${ofToday.length} of them (${todayCases.toLocaleString()} cases) are orders of TODAY (${fmtDayMonth(todayIso)}): they are closed on today (today's plan stays as it is, for the record), and a load of today that still holds one cannot be locked, loaded or dispatched today. Only continue if you know they will not be delivered today.`
     : '';
-  return `Bring ${chosen.length} order(s) (${cases.toLocaleString()} cases) forward to ${day}?${todayNote}\n\nThey become orders of ${day} and are no longer open on their own days. The plans of those days stay as they are.`;
+  return `Bring ${chosen.length} order(s) (${cases.toLocaleString()} cases) forward to ${day}?${recordedNote}${todayNote}\n\nThey become orders of ${day} and are no longer open on their own days. The plans of those days stay as they are.`;
 }
 
 /**
@@ -130,7 +208,7 @@ export function carryConfirmText(chosen: readonly { cases: number; ofToday: bool
  * wait for it, and RE-PLAN adds them once it finished.
  */
 export function carryDoneText(
-  res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean; carried?: readonly { fromDate: string }[] },
+  res: { orders: number; cases: number; skipped: unknown[]; replanNeeded: boolean; optimizing?: boolean; carried?: readonly { fromDate: string; basis?: readonly unknown[] | null }[] },
   dateIso: string,
   todayIso?: string,
 ): string {
@@ -142,12 +220,17 @@ export function carryDoneText(
       ? 'RE-PLAN to add them to the plan: locked, loading and dispatched loads stay exactly as they are.'
       : `OPTIMIZE plans them with the other orders of ${day}.`;
   const skipped = res.skipped.length ? ` ${res.skipped.length} order(s) were already brought forward.` : '';
-  // Orders of today brought forward (in the evening): their loads of today no longer go out with them.
-  const ofToday = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso).length : 0;
+  // Orders of today brought forward (in the evening). Those carried from a recorded result (a basis:
+  // the truck left and came back with them) need nothing on today's plan; the others are on loads of
+  // today that have not left, which no longer go out with them.
+  const todays = todayIso ? (res.carried ?? []).filter((c) => c.fromDate === todayIso) : [];
+  const recorded = todays.filter((c) => (c.basis?.length ?? 0) > 0).length;
+  const ofToday = todays.length - recorded;
+  const recordedText = recorded ? ` ${recorded} of them were recorded as not delivered today (${fmtDayMonth(todayIso!)}): nothing to do on today's plan.` : '';
   const today = ofToday
     ? ` ${ofToday} of them were orders of today (${fmtDayMonth(todayIso!)}): a load of today that still holds one cannot be locked, loaded or dispatched - re-plan today for its other orders, or unlock it (a loading one goes Back to locked first; unload a loaded one).`
     : '';
-  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${today}`;
+  return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${recordedText}${today}`;
 }
 
 /** The carried-over line of a stop on the driver sheet and the Excel load sheet, or null. */

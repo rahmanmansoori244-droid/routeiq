@@ -189,6 +189,31 @@ export function searchPollMs(
 }
 
 /**
+ * A search is going on for the plan (OPTIMIZING, or its job QUEUED / RUNNING): the screens poll it
+ * every few seconds, and read the delivery results NOT on each poll - a search never changes them
+ * (the phones' results come in on the plan screen's own 60 s read).
+ */
+export function planSearching(run: { status?: string | null } | null | undefined, job: { status?: string | null } | null | undefined): boolean {
+  return run?.status === 'OPTIMIZING' || job?.status === 'QUEUED' || job?.status === 'RUNNING';
+}
+
+/**
+ * Whether a load of the plan or the day reads the delivery results (pure): always, except on the polls
+ * of a running search once they were read. A load that follows a write - a result recorded, a reload
+ * the screen asked for - reads them whatever runs (`afterWrite`): the dispatcher who records "Shop
+ * closed" during a 20-minute re-plan sees it at once, and is not tempted to record it twice.
+ */
+export function readResultsNow(a: { searching: boolean; seen: boolean; afterWrite: boolean }): boolean {
+  return a.afterWrite || !(a.searching && a.seen);
+}
+
+/** The day just read keeps the delivery results already shown when its poll left them out (planSearching), for the same day and depot. */
+export function keepDeliveries<T extends { date: string; depot?: { id: string } | null; deliveries?: unknown }>(prev: T | null, next: T): T {
+  if (next.deliveries !== undefined || !prev || prev.date !== next.date || (prev.depot?.id ?? null) !== (next.depot?.id ?? null)) return next;
+  return { ...next, deliveries: prev.deliveries };
+}
+
+/**
  * The option in use when it is not the recommended plan (MIN_TRUCKS, MIN_DISTANCE). The search report
  * stored with every option is the RECOMMENDED search's (the optimizer reports that one only). An
  * alternative is searched after it, for its own goal, up to its own time limit (the option's
@@ -220,7 +245,7 @@ function recommendedSearchBrief(r: SearchReport): string {
     case 'CAP':
       return `Thorough: ${searched}, all the time allowed`;
     case 'STOPPED':
-      return `Thorough: stopped early after ${searched} by a supervisor`;
+      return `Thorough: stopped early after ${searched} by a dispatcher`;
     default:
       return `Thorough: ${searched}`;
   }
@@ -261,7 +286,7 @@ export function searchResultText(r: SearchReport | null | undefined, option?: Se
       return `Thorough search: searched ${searched}, all the time allowed (${fmtSearchTime(r.cap_sec)} in all)${late ? '; it was still finding small improvements near the end' : ''}.${last}`;
     }
     case 'STOPPED':
-      return `Thorough search stopped early after ${searched} by a supervisor: the best plan found so far is used.${last}`;
+      return `Thorough search stopped early after ${searched} by a dispatcher: the best plan found so far is used.${last}`;
     default:
       return `Thorough search: searched ${searched}.${last}`;
   }

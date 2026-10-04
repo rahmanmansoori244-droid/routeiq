@@ -28,14 +28,15 @@ const L = (loadNo: number, status: LoadStatusName, id = `L${loadNo}`): LoadRef =
 const ALL: LoadStatusName[] = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
 
 describe('checkTransition - status graph (single load)', () => {
-  const allowed: [LoadStatusName, LoadStatusName, 'PLANNER' | 'SUPERVISOR'][] = [
+  // Owner decision 4 (5 Oct 2026): every move is the dispatcher's (PLANNER); Dispatch and Completed were SUPERVISOR.
+  const allowed: [LoadStatusName, LoadStatusName, 'PLANNER'][] = [
     ['PLANNED', 'LOCKED', 'PLANNER'],
     ['LOCKED', 'PLANNED', 'PLANNER'],
     ['LOCKED', 'LOADING', 'PLANNER'],
     ['LOADING', 'LOCKED', 'PLANNER'],
-    ['LOCKED', 'DISPATCHED', 'SUPERVISOR'],
-    ['LOADING', 'DISPATCHED', 'SUPERVISOR'],
-    ['DISPATCHED', 'COMPLETED', 'SUPERVISOR'],
+    ['LOCKED', 'DISPATCHED', 'PLANNER'],
+    ['LOADING', 'DISPATCHED', 'PLANNER'],
+    ['DISPATCHED', 'COMPLETED', 'PLANNER'],
   ];
 
   it.each(allowed)('%s -> %s is allowed for %s', (from, to, role) => {
@@ -127,8 +128,8 @@ describe('checkTransition - load order on one truck', () => {
   });
 
   it('can dispatch Load 2 once Load 1 is DISPATCHED or COMPLETED', () => {
-    expect(checkTransition(L(2, 'LOCKED'), [L(1, 'DISPATCHED'), L(2, 'LOCKED')], 'DISPATCHED')).toEqual({ ok: true, role: 'SUPERVISOR' });
-    expect(checkTransition(L(2, 'LOADING'), [L(1, 'COMPLETED'), L(2, 'LOADING')], 'DISPATCHED')).toEqual({ ok: true, role: 'SUPERVISOR' });
+    expect(checkTransition(L(2, 'LOCKED'), [L(1, 'DISPATCHED'), L(2, 'LOCKED')], 'DISPATCHED')).toEqual({ ok: true, role: 'PLANNER' });
+    expect(checkTransition(L(2, 'LOADING'), [L(1, 'COMPLETED'), L(2, 'LOADING')], 'DISPATCHED')).toEqual({ ok: true, role: 'PLANNER' });
   });
 
   it('loads of other trucks are not passed in and so never block', () => {

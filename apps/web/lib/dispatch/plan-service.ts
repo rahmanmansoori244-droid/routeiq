@@ -87,6 +87,7 @@ import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
+import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
   distanceM,
   loadBreakJson,
@@ -2175,6 +2176,12 @@ export async function updateLoad(
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
     if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date());
+    // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
+    // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
+    if (load && change.status === 'LOCKED') {
+      const warnings = await lockWarningsOf(tx, tenantId, loadId);
+      if (warnings.length) return { ...load, warnings };
+    }
     return load;
   });
 }
@@ -2194,6 +2201,25 @@ export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
 }
 
 async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date) {
+  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now);
+}
+
+/**
+ * Who changes a load's status: a signed-in user (`userId`), or the driver link / RouteIQ itself
+ * (`userId` null, `label` names it in the audit row's afterJson.actor: "Driver link: Salim (T05,
+ * back at depot)").
+ */
+export interface StatusActor {
+  userId: string | null;
+  label: string | null;
+}
+
+/**
+ * The status change of one load, shared by the dispatcher's buttons (changeStatusTx) and the driver's
+ * Back at depot (completeLoadAsDriver). `hasRole` null skips the role check: only the driver path,
+ * which completes a DISPATCHED load whose every stop has a result.
+ */
+async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, actor: StatusActor, hasRole: RoleCheck | null, now: Date) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
@@ -2207,7 +2233,7 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   if (!run.chosenScenarioId && !scenariolessTransitionAllowed(load.status, to)) {
     throw noPlanApplied((await tx.planLoad.findMany({ where: { runId }, select: { status: true } })).map((l) => l.status));
   }
-  if (!hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
+  if (hasRole && !hasRole(check.role)) throw new PlanError(`Only a ${check.role.toLowerCase()} (or above) can do this.`, 403);
   const recon = run.reconciliationJson as unknown as Reconciliation | null;
   if (to === 'DISPATCHED' && !recon?.ok) throw new PlanError('Cases do not reconcile for this plan - fix before dispatching.', 409);
   // PR4 (review F04): locking and loading freeze what later re-plans build on, so they need the
@@ -2232,9 +2258,13 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
+  // Owner rule 20 (30 Sep 2026): a load never leaves without a driver. Checked LAST, after every
+  // other gate (their refusals keep their words), on the load as it is after the driver step of the
+  // same request (updateLoad sets the driver first). Lock, Loading and Completed are not affected.
+  if (to === 'DISPATCHED') await driverGate(tx, tenantId, load);
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: user.id },
+    data: { status: to as LoadStatus, statusChangedAt: new Date(), statusChangedById: actor.userId },
   });
   const orderIds = [...new Set((await tx.routeAssignment.findMany({ where: { loadId }, select: { orderId: true } })).map((a) => a.orderId))];
   if (to === 'DISPATCHED' && orderIds.length) {
@@ -2260,17 +2290,54 @@ async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: st
   await audit(
     {
       tenantId,
-      userId: user.id,
+      userId: actor.userId,
       action: loadStatusAction(to),
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { status: load.status } as never,
-      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}) } as never,
+      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}), ...(actor.label ? { actor: actor.label } : {}) } as never,
+      // A row without a user (the driver link, the janitor) keeps no IP: a driver's IP is erased with
+      // the stop events after the location retention, audit rows are kept for good.
+      ...(actor.userId === null ? { ip: false as const } : {}),
     },
     tx,
   );
   await refreshPlanFacts(tx, tenantId, runId);
   return updated;
+}
+
+/**
+ * The driver's "Back at depot" closes the trip (owner request 4 Oct 2026, spec section 8.7): a
+ * DISPATCHED load on the live plan whose every stop has a delivery result becomes COMPLETED, with the
+ * same tail as the dispatcher's Completed button (status, the version's status, the audit row with
+ * afterJson.actor, the plan facts) and no role check (the caller is the driver link, the janitor, or
+ * the office recording the last result: then `actor.userId` names the user and the row is theirs).
+ * Anything else leaves the load as it is: not DISPATCHED, a stop without a result, or a busy plan
+ * (409 PLAN_BUSY is thrown: the caller tries again later).
+ */
+export async function completeLoadAsDriver(
+  tenantId: string,
+  ref: { runId: string; loadId: string; depotId: string; date: string },
+  actor: { userId?: string | null; label: string | null },
+  opts: { now?: Date } = {},
+): Promise<{ completed: boolean; reason?: 'NOT_DISPATCHED' | 'NO_RESULT' }> {
+  return inLoadTx(async (tx) => {
+    const run = await lockOpenRun(tx, tenantId, ref.runId);
+    const load = await tx.planLoad.findFirst({ where: { id: ref.loadId, runId: run.id, tenantId }, select: { id: true, status: true, truckId: true, loadNo: true } });
+    if (!load || load.status !== 'DISPATCHED') return { completed: false, reason: 'NOT_DISPATCHED' as const };
+    const seqs = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { sequenceInTruck: true } })).map((r) => r.sequenceInTruck))];
+    const done = new Set(
+      (
+        await tx.stopVisit.findMany({
+          where: { tenantId, depotId: ref.depotId, deliveryDate: dateOnly(ref.date), truckId: load.truckId, loadNo: load.loadNo, outcome: { not: null } },
+          select: { sequence: true },
+        })
+      ).map((v) => v.sequence),
+    );
+    if (!seqs.length || seqs.some((s) => !done.has(s))) return { completed: false, reason: 'NO_RESULT' as const };
+    await changeStatusCore(tx, tenantId, run, load.id, 'COMPLETED', { userId: actor.userId ?? null, label: actor.label }, null, opts.now ?? new Date());
+    return { completed: true };
+  });
 }
 
 /**
@@ -2732,6 +2799,32 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     ...(stored && stored.inputHash !== fresh.inputHash ? { reportWasStale: true } : {}),
     ...(!ok ? { overridden: 'FEASIBILITY_GATE=warn', violations: blocking.slice(0, 10).map((v) => `${v.code}: ${v.message}`) } : {}),
   };
+}
+
+/** The words of the 409 DRIVER_REQUIRED refusal (and the plan screen's Dispatch title, without the load). */
+export const DRIVER_REQUIRED_RULE = 'a load never leaves without a driver. Pick the driver in the Driver list, or add a daily driver, then dispatch.';
+
+/** Owner rule 20: 409 DRIVER_REQUIRED when the load has no driver (see changeStatusTx). */
+async function driverGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; driverId: string | null }) {
+  if (load.driverId) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  throw new PlanError(`${truck?.code ?? 'Truck'} L${load.loadNo}: ${DRIVER_REQUIRED_RULE}`, 409, { code: 'DRIVER_REQUIRED' });
+}
+
+/**
+ * The daily-driver quick add (lib/dispatch/casual-driver.ts, owner rule 20): its own reads and writes
+ * and the driver setting of the load in ONE load-change transaction under the plan's row lock, as
+ * updateLoad. A refusal anywhere rolls back the new driver too.
+ */
+export async function inLoadChange<T>(
+  tenantId: string,
+  runId: string,
+  fn: (tx: Tx, run: OpenRun, setDriver: (loadId: string, driverId: string | null, user: { id: string }) => ReturnType<typeof setDriverTx>) => Promise<T>,
+): Promise<T> {
+  return inLoadTx(async (tx) => {
+    const run = await lockOpenRun(tx, tenantId, runId);
+    return fn(tx, run, (loadId, driverId, user) => setDriverTx(tx, tenantId, run, loadId, driverId, user));
+  });
 }
 
 async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, driverId: string | null, user: { id: string }) {

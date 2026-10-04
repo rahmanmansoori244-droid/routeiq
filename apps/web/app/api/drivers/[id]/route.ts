@@ -1,5 +1,5 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull } from '@/lib/api';
-import { driverSchema } from '@/lib/schemas';
+import { driverPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { DRIVER_PUBLIC_SELECT } from '@/lib/driver-fields';
 import { driverDeactivatedWarning } from '@/lib/master-data-delete';
@@ -30,7 +30,8 @@ export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.driver.findUnique({ where: { id: params.id }, select: DRIVER_PUBLIC_SELECT }));
-      const input = await parseBody(r, driverSchema.partial());
+      // casual: false makes a daily driver (added from a load) a regular driver (owner request 4 Oct 2026).
+      const input = await parseBody(r, driverPatchSchema);
       const after = await db.driver.update({ where: { id: params.id }, data: input, select: DRIVER_PUBLIC_SELECT });
       await audit({
         tenantId: user.tenantId,

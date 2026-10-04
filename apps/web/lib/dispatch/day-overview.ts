@@ -19,13 +19,14 @@ import {
 import { allCasesOn, leftOutWhole, orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
-import { defaultSearchMode, thoroughMaxSec } from './search-mode';
+import { defaultSearchMode, planSearching, readResultsNow, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot } from './snapshots';
 import { dataGaps, type DataGap } from './data-collection';
 import type { ServiceArea } from './location-input';
+import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
 
 export interface IssueCustomer {
   customerId: string;
@@ -142,7 +143,11 @@ export interface CarriedOut {
   toDates: string[];
 }
 
-export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null }) {
+/**
+ * `deliveries`: the load follows a write (a result recorded): the delivery results are read even while
+ * a search runs (readResultsNow), whose polls otherwise leave them out.
+ */
+export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null; deliveries?: boolean }) {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
   const depots = await db.depot.findMany({ where: { active: true }, orderBy: { code: 'asc' }, select: { id: true, code: true, name: true, lat: true, lng: true } });
@@ -472,6 +477,22 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     take: 20,
     select: { id: true, fileName: true, status: true, uploadedAt: true, validRows: true, errorRows: true, isLate: true, lateReason: true },
   });
+  // Delivery outcome (owner request 4 Oct 2026, spec section 10.3): the day's results, the stops of
+  // loads that are back without one, the late-dispatch notes. Read on their own: a failure here never
+  // keeps the day screen from loading (the card then says it could not be read).
+  // Not on the polls while a search runs (every 3 s for up to 20 min): undefined = "not read now", the
+  // screen keeps the card it has (a search never changes the results). A load after a recorded result
+  // (`opts.deliveries`) reads them all the same.
+  let deliveries: DayDeliveries | null | undefined = null;
+  const searching = !!plan && planSearching({ status: plan.status }, planInfo?.job ? { status: planInfo.job.status } : null);
+  if (plan && !readResultsNow({ searching, seen: true, afterWrite: !!opts.deliveries })) deliveries = undefined;
+  else if (plan) {
+    try {
+      deliveries = await dayDeliveries(tenantId, depot.id, date);
+    } catch (e) {
+      console.error('[day] delivery results not read', (e as Error)?.message ?? e);
+    }
+  }
   return {
     ...base,
     orders: {
@@ -521,6 +542,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * are planned, but cannot be locked, loaded or dispatched (plan-service dataGate).
      */
     loadingGaps: cfg.requireDataBeforeLoading ? dayLoadingGaps(customers, area) : ([] as DataGap[]),
+    /** Delivery results of the day (null without a plan, or when they could not be read; absent while a search runs: keep the last). */
+    deliveries,
   };
 }
 

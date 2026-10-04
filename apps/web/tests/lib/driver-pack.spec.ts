@@ -5,9 +5,10 @@
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
 import type { DetailStop, PlanDetail } from '@/lib/dispatch/plan-detail';
-import { driverPackModel, qrPath, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
+import { DRIVER_LINK_ASK_TEXT, DRIVER_LINK_CAPTION, DRIVER_LINK_STOPPED_TEXT, driverPackModel, qrPath, renderDriverPackPdf, type SheetDriverLink } from '@/lib/dispatch/driver-pack';
 import {
   coordText,
+  DRIVER_LINK_LINE,
   driverChangeText,
   driverChangeWarnings,
   driverClashNotes,
@@ -566,5 +567,78 @@ describe('frozen plan facts and unverified times on the sheet (review F08 / F04)
     expect(text[0]).toContain(sq('Location updated after planning: new pin'));
     expect(text[0]).toContain(sq('Open the new pin'));
     expect(driverPackModel(fixture(), OPTS).timesNotVerified).toBe(false);
+  });
+});
+
+describe('the driver link on the sheets and in WhatsApp (owner request 4 Oct 2026)', () => {
+  const LINK = 'https://routeiq.example/d/Ab3_dE5-gH7iJ9kL1mN3oP5q';
+  const links = (m: Record<string, SheetDriverLink | null>) => new Map(Object.entries(m));
+
+  it('prints the driver-link QR first with its caption, then at most 2 route codes', () => {
+    const d = longLoad(27); // 3 route links
+    const sh = driverPackModel(d, { ...OPTS, driverLinks: links({ t9: { kind: 'QR', url: LINK } }) }).sheets[0];
+    expect(sh.route.links).toHaveLength(3);
+    expect(sh.qrCodes.map((q) => [q.kind, q.size])).toEqual([
+      ['DRIVER_LINK', 76],
+      ['ROUTE', 64],
+      ['ROUTE', 64],
+    ]);
+    expect(sh.qrCodes[0]).toMatchObject({ url: LINK, caption: DRIVER_LINK_CAPTION });
+    expect(DRIVER_LINK_CAPTION).toBe('Scan with the phone camera - opens in Chrome/Safari');
+    expect(sh.qrCodes.slice(1).map((q) => q.caption)).toEqual(['Route 1/3', 'Route 2/3']);
+    expect(sh.driverLinkNote).toBeNull();
+  });
+
+  it('no link for this reader (a VIEWER, or none could be made): "Driver link: ask the dispatcher"', () => {
+    const viewer = driverPackModel(fixture(), OPTS).sheets;
+    expect(viewer.every((s) => s.driverLinkNote === DRIVER_LINK_ASK_TEXT && s.qrCodes.every((q) => q.kind === 'ROUTE'))).toBe(true);
+    // A truck missing from the map gets the placeholder too; the others their own link.
+    const m = driverPackModel(fixture(), { ...OPTS, driverLinks: links({ t1: { kind: 'QR', url: LINK } }) }).sheets;
+    expect(m.map((s) => s.qrCodes[0]?.kind ?? null)).toEqual(['DRIVER_LINK', 'DRIVER_LINK', 'ROUTE']);
+    expect(m[2].driverLinkNote).toBe(DRIVER_LINK_ASK_TEXT);
+  });
+
+  it('a revoked link prints "Driver link stopped" and no QR; a link whose day is over prints nothing', () => {
+    const m = driverPackModel(fixture(), { ...OPTS, driverLinks: links({ t1: { kind: 'STOPPED' }, t2: null }) }).sheets;
+    expect(m[0].driverLinkNote).toBe(DRIVER_LINK_STOPPED_TEXT);
+    expect(DRIVER_LINK_STOPPED_TEXT).toBe('Driver link stopped - ask the dispatcher');
+    expect(m[0].qrCodes.some((q) => q.kind === 'DRIVER_LINK')).toBe(false);
+    expect(m[2].driverLinkNote).toBeNull();
+    expect(m[2].qrCodes.some((q) => q.kind === 'DRIVER_LINK')).toBe(false);
+    // Nothing printed for the link: the route codes as before (up to 3, 76 pt for a single one).
+    expect(m[2].qrCodes).toEqual([expect.objectContaining({ kind: 'ROUTE', size: 76, caption: 'Scan: whole route' })]);
+  });
+
+  it('renders the link QR, its caption and the placeholders in the PDF', async () => {
+    const d = fixture();
+    const buf = await renderDriverPackPdf(driverPackModel(d, { ...OPTS, driverLinks: links({ t1: { kind: 'QR', url: LINK }, t2: { kind: 'STOPPED' } }) }));
+    const text = pageTexts(buf);
+    const first = text.find((t) => t.includes(sq('Truck T01 — Trip 1 of 2')))!;
+    expect(first).toContain(sq('DRIVER PAGE'));
+    expect(first).toContain(sq(DRIVER_LINK_CAPTION));
+    // The driver link comes before the route code.
+    expect(first.indexOf(sq(DRIVER_LINK_CAPTION))).toBeLessThan(first.indexOf(sq('Scan: whole route')));
+    expect(text.some((t) => t.includes(sq(DRIVER_LINK_STOPPED_TEXT)))).toBe(true);
+    // The link itself is never printed as text (only the QR and its link annotation carry it).
+    for (const t of text) expect(t).not.toContain('Ab3_dE5-gH7iJ9kL1mN3oP5q');
+    expect(text.find((t) => t.includes(sq('Truck T01 — Trip 1 of 2')))).not.toContain(sq(DRIVER_LINK_ASK_TEXT));
+  });
+
+  it('a hired truck says so', () => {
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], hired: true };
+    expect(driverPackModel(d, OPTS).sheets[0].badges).toContain('HIRED TRUCK');
+    expect(driverPackModel(fixture(), OPTS).sheets[0].badges).not.toContain('HIRED TRUCK');
+  });
+
+  it('WhatsApp carries the line only with an active link (absent for a revoked, expired or missing one)', () => {
+    const d = fixture();
+    const withLink = whatsappText(d.run, d.loads[0], 2, { tenantName: 'NMWC', driverLinkUrl: LINK }).split('\n');
+    expect(DRIVER_LINK_LINE).toBe('Your trips and delivery results');
+    expect(withLink[3]).toBe(`Your trips and delivery results: ${LINK}`);
+    expect(withLink.slice(0, 3)).toEqual(whatsappText(d.run, d.loads[0], 2, { tenantName: 'NMWC' }).split('\n').slice(0, 3));
+    for (const none of [null, undefined, '']) {
+      expect(whatsappText(d.run, d.loads[0], 2, { tenantName: 'NMWC', driverLinkUrl: none })).not.toContain(DRIVER_LINK_LINE);
+    }
   });
 });

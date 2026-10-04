@@ -3,6 +3,8 @@ import { ListChecks, ArrowRight, Truck } from 'lucide-react';
 import type { RunStatus } from '@prisma/client';
 import { getCurrentTenant } from '@/lib/tenant';
 import { getDashboardData } from '@/lib/dashboard';
+import { countOf, reasonLabel } from '@/lib/delivery/office-text';
+import { CAMERA_ALERT_PER_DAY, cameraShareText } from '@/lib/delivery/camera-exceptions';
 import { canPlan } from '@/lib/rbac';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -121,6 +123,59 @@ export default async function DashboardPage({ params }: { params: { slug: string
           smallerIsBetter
         />
       </div>
+
+      {data.deliveries && data.deliveries.last30.stops > 0 ? (
+        <Card data-testid="dashboard-deliveries">
+          <CardHeader>
+            <CardTitle className="text-base">Deliveries</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-4 text-sm md:grid-cols-2">
+            {(
+              [
+                ['Last 7 days', data.deliveries.last7],
+                ['Last 30 days', data.deliveries.last30],
+              ] as const
+            ).map(([label, k]) => (
+              <div key={label} className="space-y-1">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+                <p>
+                  Delivered in full: <b>{k.deliveredInFullPct === null ? '—' : `${k.deliveredInFullPct} %`}</b>
+                  <span className="text-muted-foreground"> of {countOf(k.withResult, 'stop')} with a result</span>
+                </p>
+                <p>
+                  Arrived inside the window: <b>{k.insideWindowPct === null ? '—' : `${k.insideWindowPct} %`}</b>
+                  <span className="text-muted-foreground"> of {countOf(k.timedArrivals, 'observed arrival')}</span>
+                </p>
+                <p className="text-muted-foreground">
+                  {k.notDelivered} not delivered · {k.partly} partly · {k.noResult} no result recorded
+                </p>
+                {/* Owner decision 2 (5 Oct 2026): "Camera not working" is allowed but monitored (and a named photo that never arrived counts too). */}
+                <p className={k.withoutPhoto ? 'text-amber-800' : 'text-muted-foreground'} data-testid="dashboard-camera">
+                  Saved without a photo: <b>{cameraShareText(k)}</b>
+                  {k.withoutPhoto ? (
+                    <span className="text-muted-foreground">
+                      {' '}
+                      (Camera not working {k.cameraFailed}
+                      {k.photoNotReceived ? `, photo not received ${k.photoNotReceived}` : ''})
+                    </span>
+                  ) : null}
+                  {k.cameraAlertDays ? (
+                    <span className="font-medium text-red-700">
+                      {' '}
+                      · {countOf(k.cameraAlertDays, 'driver link')} with {CAMERA_ALERT_PER_DAY} or more in a day
+                    </span>
+                  ) : null}
+                </p>
+                {k.byReason.length ? (
+                  <p className="text-muted-foreground">
+                    Not delivered by reason: {k.byReason.slice(0, 4).map((r) => `${reasonLabel(r.reason)} ${countOf(r.stops, 'stop')} / ${countOf(r.cases, 'case')}`).join(' · ')}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">
