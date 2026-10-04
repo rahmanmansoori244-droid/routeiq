@@ -24,6 +24,15 @@ A tenant admin cannot deactivate or demote a platform admin.
 ### Suspending a tenant
 Set `Tenant.active = false` directly in DB (after a backup). Since PR1 this blocks the tenant's sign-in, every API call and every page within 30 s, and open sessions end without a redirect loop. First check that no platform admin account belongs to that tenant.
 
+### Start fresh (remove test data before a pilot)
+Owner request of 4 Oct 2026. A company admin (TENANT_ADMIN; a platform admin only on their own company) opens **Settings** and uses the red **Start fresh (remove test data)** box at the bottom. The dispatcher (PLANNER), supervisors and viewers cannot (403). Code: `lib/start-fresh.ts`, `GET`/`POST /api/tenant/start-fresh`.
+1. Take a manual Postgres backup first (Railway: Postgres → Backups → New backup). It is the only way back.
+2. **Check what will be removed** shows the counts. Removed, for that company only: orders and order lines, order files, plan versions and options, optimization jobs, loads, stops, unserved rows, late orders, Bring forward copies and per-order delivery times (they are orders), driver links, delivery stops, events and photos, comparison baselines, the retired driver app's shifts / positions / proofs, and daily drivers with no load left. Kept: customers (pins, confirmed hours), products, trucks, regular drivers (and a daily driver who is a truck's default), depots, regions, users, settings, customer type defaults and the audit log.
+3. Everything (default) or only data with a delivery date before a chosen day.
+4. Tick the backup box, type the company slug, press the button. One transaction; the audit log gets `TEST_DATA_CLEARED` (counts, scope, user).
+
+Refused with nothing removed (409): an optimization of the company QUEUED or RUNNING (`OPTIMIZATION_RUNNING`: wait, or reset a stuck plan); a date that would split a Bring forward pair (`CARRIED_ACROSS_DATE`) or a plan from its orders (`PLAN_ACROSS_DATE`); orders or plans being changed at that moment (`BUSY`, `CHANGED`: try again). Rate limit: 3 runs per admin per 10 minutes.
+
 ---
 
 ## Daily operations

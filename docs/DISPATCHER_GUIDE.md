@@ -409,6 +409,20 @@ Set these to what the depot and drivers really do; every load is timed with them
 
 Changes apply to the next **OPTIMIZE** or **Re-plan**; plans already made keep their times.
 
+### Start fresh (remove test data) — company admin only
+At the bottom of **Settings**, in a red box. It removes the test data of your company so the pilot starts clean. Only a company admin sees it; the dispatcher cannot delete data.
+
+**What it removes** (for your company only): order files, orders and their lines (late orders, brought-forward orders and per-order delivery times are orders too), plan versions and their options, optimization runs, loads, stops, unserved lists, driver links (QR codes), delivery results with their arrivals, departures and photos, manual comparison baselines, old driver app records, and daily drivers who have no load left.
+
+**What it keeps:** customers (with their locations and confirmed hours), products, trucks, drivers (and a daily driver who is still a truck's default driver), depots, regions, users, settings, and the audit log. The audit log is never deleted: it gets one row *Test data removed (Start fresh)* with the counts and who did it.
+
+How to use it:
+1. **Take a Railway backup first** (Railway: Postgres → Backups → New backup). Removed data can only come back from that backup.
+2. Make sure nobody is uploading orders, optimizing or recording results. It refuses to run while an optimization is queued or running.
+3. Choose **Everything** (the default), or **Only data with a delivery date before** a day (for example the pilot's first day, to keep orders already uploaded for it).
+4. Press **Check what will be removed**. The list shows every count that will be removed and what is kept. If something stops it (an optimization running; a date that would cut a brought-forward order from its original; a plan that holds orders from both sides of the date), it says what to do.
+5. Tick **I have taken a Railway backup**, type your company code (shown on screen) and press **Remove … test records**. The summary shows what was removed.
+
 ## Who can do what
 Owner decision of 5 Oct 2026: **the dispatcher is the planner** (the *Planner* role); he only lacks the admin's powers, such as changing a saved location.
 
@@ -416,7 +430,7 @@ Owner decision of 5 Oct 2026: **the dispatcher is the planner** (the *Planner* r
 |---|---|
 | **Viewer** | Read only: the day, the plans, the results, the exports. |
 | **Planner (the dispatcher)** and **Supervisor** | Everything on Daily dispatch: upload and confirm orders, late orders, delivery times, OPTIMIZE and Re-plan (also without some locations or weights, with the reason), **Use instead**, the driver of each load, **Lock**, **Loading**, **Dispatch**, **Back to locked**, **Unlock**, **Completed**, **Record** a result, driver links (make, reissue, revoke), daily drivers, **Bring forward** and its undo, **Use the best plan found so far**, **Reset stuck plan**, the Delivery actuals Excel, the driver shift and break in Settings, and a location for a customer that has none. |
-| **Company admin** | All of that, plus: changing a saved customer location, the loading rule (*Customer data before loading*), users, depots (with their dispatcher phone), trucks, drivers, products, regions, cost and routing settings, photo and position retention, the audit log. |
+| **Company admin** | All of that, plus: changing a saved customer location, the loading rule (*Customer data before loading*), users, depots (with their dispatcher phone), trucks, drivers, products, regions, cost and routing settings, photo and position retention, the audit log, and **Start fresh** (removing test data before the pilot). |
 
 The Supervisor role can do what the Planner does (and download the optimizer's debug file of a failed run, for support).
 

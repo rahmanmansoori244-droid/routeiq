@@ -200,6 +200,8 @@ const MODELS = [
   'product', 'intakeLineKey', 'manualBaseline', 'region',
   // Delivery outcome and the driver page (owner request 4 Oct 2026); users: the office side names who recorded a result.
   'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
+  // Start fresh (4 Oct 2026) also clears the comparison baselines and the retired driver app's rows.
+  'manualBaselineAssignment', 'driverShift', 'truckLocation', 'deliveryProof',
 ];
 
 export const fakePrisma: Row = {};

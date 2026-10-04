@@ -6,6 +6,7 @@ import { PageShell } from '@/components/page-shell';
 import { effectivePlannerValues } from '@/lib/dispatch/planner-config';
 import { DISPATCHER_SETTINGS_FIELDS, SETTINGS_FIELDS, type EditableConfig } from '@/lib/settings-fields';
 import { SettingsForm } from './settings-form';
+import { StartFreshPanel } from './start-fresh-panel';
 
 export const metadata = { title: 'Settings — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -16,6 +17,9 @@ export default async function SettingsPage({ params }: { params: { slug: string 
   // 2026); everything else on the page - cost rates, routing, customer types - is company-admin data.
   if (!canPlan(user.role)) redirect(`/t/${params.slug}`);
   const admin = canManageMasterData(user.role);
+  // Start fresh acts on the signed-in user's own company (the API takes the session's company), so a
+  // platform admin looking at another company never sees it there.
+  const startFresh = admin && user.tenantId === t.id;
 
   const tenant = await prisma.tenant.findUnique({
     where: { id: t.id },
@@ -60,6 +64,11 @@ export default async function SettingsPage({ params }: { params: { slug: string 
           prefWindowEndMin: p.prefWindowEndMin,
         }))}
       />
+      {startFresh ? (
+        <section aria-label="Danger zone" className="pt-6">
+          <StartFreshPanel slug={tenant.slug} />
+        </section>
+      ) : null}
     </PageShell>
   );
 }

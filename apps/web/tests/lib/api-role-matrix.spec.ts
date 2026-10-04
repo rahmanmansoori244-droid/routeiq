@@ -73,6 +73,9 @@
  *   /api/depots/[id] (a depot's own dispatcher phone, decision 3), GET /api/dispatch/day and GET
  *   /api/runs/[id]/outcomes (results saved without a photo, decision 2), GET
  *   /api/dispatch/delivery-actuals (its "Saved without a photo" column) and GET /api/dashboard/kpis.
+ * - Start fresh (owner request 4 Oct 2026, before the pilot): GET /api/tenant/start-fresh (the
+ *   preview) and POST (remove the company's test orders, plans and results) are TENANT_ADMIN: the
+ *   owner clicks it, the dispatcher (PLANNER) may not delete data.
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -184,6 +187,8 @@ const EXPECTED: Record<string, string> = {
   'POST /api/runs/[id]/unlock': 'PLANNER',
   'GET /api/tenant/config': 'TENANT_ADMIN',
   'PATCH /api/tenant/config': 'PLANNER', // the dispatcher saves the driver shift only (adminOnlyFields)
+  'GET /api/tenant/start-fresh': 'TENANT_ADMIN',
+  'POST /api/tenant/start-fresh': 'TENANT_ADMIN',
   'GET /api/trucks': 'ANY',
   'POST /api/trucks': 'TENANT_ADMIN',
   'GET /api/trucks/[id]': 'ANY',
