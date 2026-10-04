@@ -44,6 +44,11 @@ export interface StopResult {
   /** Delivered cases per order line of the current result (Partly entry prefills from it). */
   lines: { lineId: string; delivered: number }[] | null;
   photoIds: string[];
+  /**
+   * Photo keys named by the driver's Delivered and Partly results of this stop (arrived or not): a
+   * changed result needs no new photo when there is one. Photos taken for a Not delivered do not count.
+   */
+  proofPhotos: number;
   noPhotoReason: string | null;
   late: boolean;
   /** Load DISPATCHED and the visit is not in the carry basis of a brought-forward order. */

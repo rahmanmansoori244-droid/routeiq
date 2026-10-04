@@ -31,6 +31,12 @@ export interface StopView {
   photoIds: string[];
   /** Photos of this stop still on the phone (sent later). */
   localPhotos: number;
+  /**
+   * Photo keys named by the driver's Delivered and Partly results: the server's count plus the
+   * results still queued on the phone (sent before their photos, so the server counts them too).
+   * A changed result needs no new photo when there is one; a Not delivered's photos do not count.
+   */
+  proofPhotos: number;
   noPhotoReason: string | null;
   late: boolean;
   editable: boolean;
@@ -54,6 +60,17 @@ function countCases(stop: ManifestStop, outcome: OutcomeName | null, lines: { li
   const all = stop.orders.flatMap((o) => o.lines);
   const sent = new Map((lines ?? []).map((l) => [l.lineId, l.delivered]));
   return all.reduce((a, l) => a + (sent.get(l.lineId) ?? l.cases), 0);
+}
+
+/** The photo keys of the Delivered and Partly results still queued for a stop (proof, as the server will count them). */
+function queuedProofKeys(outcomes: readonly QueueItem[]): Set<string> {
+  const keys = new Set<string>();
+  for (const i of outcomes) {
+    const b = i.body as Extract<DriverAction, { type: 'OUTCOME' }>;
+    if (b.outcome !== 'DELIVERED' && b.outcome !== 'PARTLY_DELIVERED') continue;
+    for (const k of b.photoKeys ?? []) keys.add(k);
+  }
+  return keys;
 }
 
 /** The overlay of the unsent and held items on the last manifest (pure). */
@@ -95,6 +112,7 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
     changedByOffice: false,
     photoIds: r?.photoIds ?? [],
     localPhotos,
+    proofPhotos: (r?.proofPhotos ?? 0) + queuedProofKeys(outcomes).size,
     noPhotoReason: r?.noPhotoReason ?? null,
     late: r?.late ?? false,
     editable: r ? r.editable : l.status === 'DISPATCHED',

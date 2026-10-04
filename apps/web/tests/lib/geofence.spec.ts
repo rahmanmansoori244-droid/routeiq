@@ -259,6 +259,17 @@ describe('after a camera or lock gap (review of 4 Oct 2026)', () => {
     expect(r.state).toMatchObject({ phase: 'AT_STOP', arrivedAt: T0 });
   });
 
+  it('two camera gaps (Use photo, then Retake), each followed by one outside fix, then back at the pin: still one stay', () => {
+    const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
+    const back = atStopThenGap(r, 30, 40);
+    // One bad outside fix, then the page hidden again 3 s later (Retake), then one more bad fix.
+    feed(r, [fix(back, ACME, 300, 0, { accuracyM: 20 }), { now: T0 + (back + 3) * 1000, fix: fix(back, ACME, 300, 0, { accuracyM: 20 }), visible: false }], stops);
+    feed(r, [fix(back + 40, ACME, 300, 0, { accuracyM: 20 }), ...track(back + 45, back + 120, ACME, 3)], stops);
+    expect(departures(r)).toEqual([]);
+    expect(arrivals(r)).toHaveLength(1);
+    expect(r.state).toMatchObject({ phase: 'AT_STOP', key: '1:1', arrivedAt: T0 });
+  });
+
   it('a real departure during the gap: two outside fixes 20 s apart end the stop at the last inside fix (gap)', () => {
     const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
     const back = atStopThenGap(r, 30, 300);

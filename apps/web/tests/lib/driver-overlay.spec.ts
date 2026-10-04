@@ -57,6 +57,7 @@ function serverResult(over: Partial<StopResult>): StopResult {
     casesDelivered: 40,
     lines: null,
     photoIds: [],
+    proofPhotos: 0,
     noPhotoReason: null,
     late: false,
     editable: true,
@@ -180,12 +181,30 @@ describe('useTracker on the page', () => {
 
 describe('the result sheet (review of 4 Oct 2026)', () => {
   const draft = (over: Record<string, unknown> = {}) => ({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', note: '', lines: { A1: 28 }, photoKeys: [], pendingPhotoKey: null, noPhoto: false, savedAt: T0, ...over }) as never;
-  it('a changed result saves without a new photo when the stop already has photos (sent or on the phone); a first result still needs one', async () => {
-    const { canSave, existingPhotos } = await import('@/app/d/[token]/outcome-flow');
-    const [l] = applyQueued(manifest([stop(1, 'ACME', serverResult({ photoIds: ['p1', 'p2', 'p3'] })), stop(2, 'BETA')]), []);
-    expect(existingPhotos(l!.stops[0]!)).toBe(3);
+  it('a changed result saves without a new photo when an earlier Delivered or Partly named one (on the server or still on the phone); a first result still needs one', async () => {
+    const { canSave, proofPhotos } = await import('@/app/d/[token]/outcome-flow');
+    const [l] = applyQueued(manifest([stop(1, 'ACME', serverResult({ photoIds: ['p1', 'p2', 'p3'], proofPhotos: 3 })), stop(2, 'BETA')]), []);
+    expect(proofPhotos(l!.stops[0]!)).toBe(3);
     expect(canSave(l!.stops[0]!, draft(), true)).toBe(true);
     expect(canSave(l!.stops[1]!, draft(), true)).toBe(false);
     expect(canSave(l!.stops[1]!, draft({ noPhoto: true }), true)).toBe(true);
+    // Delivered with P1 is still on the phone (weak signal), its photo too: the change counts it, as the server will.
+    const queued = item({ key: newKey(), type: 'OUTCOME', stop: '1:2', at: new Date(T0).toISOString(), outcome: 'DELIVERED', photoKeys: [newKey()] });
+    const [q] = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [queued]);
+    expect(proofPhotos(q!.stops[1]!)).toBe(1);
+    expect(canSave(q!.stops[1]!, draft(), true)).toBe(true);
+  });
+
+  it('photos taken for a Not delivered are no proof for a later Delivered (a return visit takes its own photo)', async () => {
+    const { canSave, proofPhotos } = await import('@/app/d/[token]/outcome-flow');
+    const shut = serverResult({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0, photoIds: ['p1'], proofPhotos: 0 });
+    const [l] = applyQueued(manifest([stop(1, 'ACME', shut)]), []);
+    expect(proofPhotos(l!.stops[0]!)).toBe(0);
+    expect(canSave(l!.stops[0]!, draft({ outcome: 'DELIVERED', reason: null }), true)).toBe(false);
+    // The same on the phone: a queued Not delivered with a photo.
+    const queued = item({ key: newKey(), type: 'OUTCOME', stop: '1:1', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [newKey()] });
+    const [q] = applyQueued(manifest([stop(1, 'ACME')]), [queued]);
+    expect(proofPhotos(q!.stops[0]!)).toBe(0);
+    expect(canSave(q!.stops[0]!, draft({ outcome: 'DELIVERED', reason: null }), true)).toBe(false);
   });
 });

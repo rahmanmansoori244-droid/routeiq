@@ -7,8 +7,9 @@
  *   wrong clock can neither keep a photo forever nor lose it the next day.
  * - purgeOldLocations: after locationRetentionDays (default 90, never more than the photo retention)
  *   the positions, accuracies, speeds, IP addresses and browser ids of driver events, visits and
- *   photos are erased. Every distance from the pin is kept: the KPIs, the actuals Excel and the pin
- *   check need only distances. The planned pin is company data and stays.
+ *   photos are erased, and the browser ids on the driver links (devicesJson; the count stays). Every
+ *   distance from the pin is kept: the KPIs, the actuals Excel and the pin check need only distances.
+ *   The planned pin is company data and stays.
  * - clearIdleCasualDrivers (once a day): a daily driver with no load dated within the last 30 days (or
  *   later) is hidden from the Driver list (active false; the quick add finds and reactivates them by
  *   phone); after locationRetentionDays without a load their phone number is erased (the name stays:
@@ -77,13 +78,30 @@ export async function purgeOldPhotos(now: Date = new Date(), db: Db = prisma): P
   return { count: total };
 }
 
+/**
+ * The browser ids a driver link was opened on (DriverLink.devicesJson, "used on N phones"), for links
+ * of a delivery date older than the location retention: each id becomes "" in one statement; the count
+ * and the first / last times stay for the link dialog. jsonb, so raw SQL: a link already erased (or
+ * never opened) matches nothing, and nothing is read back. A link expires the day after its delivery
+ * date, so no phone can add an id afterwards.
+ */
+export async function eraseLinkDevices(db: Db, tenantId: string, cutoffDayIso: string): Promise<number> {
+  return db.$executeRaw`
+    UPDATE "DriverLink"
+    SET "devicesJson" = (SELECT jsonb_agg(jsonb_set(e, '{device}', '""'::jsonb)) FROM jsonb_array_elements("devicesJson") AS e)
+    WHERE "tenantId" = ${tenantId} AND "deliveryDate" < ${cutoffDayIso}::date
+      AND jsonb_typeof("devicesJson") = 'array'
+      AND EXISTS (SELECT 1 FROM jsonb_array_elements("devicesJson") AS e WHERE COALESCE(e->>'device', '') <> '')`;
+}
+
 /** Positions, IPs and browser ids older than the location retention: erased; distances kept. */
-export async function purgeOldLocations(now: Date = new Date(), db: Db = prisma): Promise<{ events: number; visits: number; photos: number }> {
-  const out = { events: 0, visits: 0, photos: 0 };
+export async function purgeOldLocations(now: Date = new Date(), db: Db = prisma): Promise<{ events: number; visits: number; photos: number; links: number }> {
+  const out = { events: 0, visits: 0, photos: 0, links: 0 };
   for (const t of await tenants(db)) {
     const cutoff = new Date(now.getTime() - t.locationRetentionDays * DAY_MS);
-    const cutoffDay = dateOnly(addDaysIso(todayIso(t.timezone, now), -t.locationRetentionDays));
-    const mine = { events: 0, visits: 0, photos: 0 };
+    const cutoffIso = addDaysIso(todayIso(t.timezone, now), -t.locationRetentionDays);
+    const cutoffDay = dateOnly(cutoffIso);
+    const mine = { events: 0, visits: 0, photos: 0, links: 0 };
     for (let i = 0; i < JANITOR_MAX_BATCHES; i++) {
       const rows = await db.stopEvent.findMany({
         where: {
@@ -129,13 +147,15 @@ export async function purgeOldLocations(now: Date = new Date(), db: Db = prisma)
       ).count;
       if (ids.length < JANITOR_BATCH) break;
     }
-    const count = mine.events + mine.visits + mine.photos;
+    mine.links = await eraseLinkDevices(db, t.tenantId, cutoffIso);
+    const count = mine.events + mine.visits + mine.photos + mine.links;
     if (count > 0) {
       await audit({ tenantId: t.tenantId, userId: null, action: 'DELIVERY_LOCATIONS_PURGED', entity: 'Tenant', entityId: t.tenantId, afterJson: { count, ...mine, olderThanDays: t.locationRetentionDays } as never });
     }
     out.events += mine.events;
     out.visits += mine.visits;
     out.photos += mine.photos;
+    out.links += mine.links;
   }
   return out;
 }

@@ -197,6 +197,16 @@ export function planSearching(run: { status?: string | null } | null | undefined
   return run?.status === 'OPTIMIZING' || job?.status === 'QUEUED' || job?.status === 'RUNNING';
 }
 
+/**
+ * Whether a load of the plan or the day reads the delivery results (pure): always, except on the polls
+ * of a running search once they were read. A load that follows a write - a result recorded, a reload
+ * the screen asked for - reads them whatever runs (`afterWrite`): the dispatcher who records "Shop
+ * closed" during a 20-minute re-plan sees it at once, and is not tempted to record it twice.
+ */
+export function readResultsNow(a: { searching: boolean; seen: boolean; afterWrite: boolean }): boolean {
+  return a.afterWrite || !(a.searching && a.seen);
+}
+
 /** The day just read keeps the delivery results already shown when its poll left them out (planSearching), for the same day and depot. */
 export function keepDeliveries<T extends { date: string; depot?: { id: string } | null; deliveries?: unknown }>(prev: T | null, next: T): T {
   if (next.deliveries !== undefined || !prev || prev.date !== next.date || (prev.depot?.id ?? null) !== (next.depot?.id ?? null)) return next;

@@ -7,7 +7,7 @@
  * changed something. Synthetic data only.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/audit', async () => {
@@ -16,6 +16,7 @@ vi.mock('@/lib/audit', async () => {
 });
 
 import { clearIdleCasualDrivers, JANITOR_BATCH, JANITOR_MAX_BATCHES, purgeOldLocations, purgeOldPhotos, runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
+import { readDevices, touchUpdate } from '@/lib/driver-link/service';
 
 const NOW = new Date('2026-10-04T08:00:00Z');
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 24 * 60 * 60_000);
@@ -76,14 +77,32 @@ describe('positions, IPs and browser ids (spec 12.4)', () => {
       { id: 'p1', tenantId: 'tA', receivedAt: daysAgo(100), locationPurgedAt: null, lat: 23.6, lng: 58.4, accuracyM: 5, exifLat: 23.6, exifLng: 58.4, clientIp: '1.2.3.4', deviceId: 'abcd', distanceM: 30, exifDistanceM: 31 },
     ];
     const res = await purgeOldLocations(NOW);
-    expect(res).toEqual({ events: 2, visits: 1, photos: 1 });
+    expect(res).toEqual({ events: 2, visits: 1, photos: 1, links: 0 });
     expect(row('stopEvent', 'e1')).toMatchObject({ lat: null, lng: null, accuracyM: null, speedMps: null, clientIp: null, deviceId: null, distanceM: 12, payloadJson: { late: true } });
     expect(row('stopEvent', 'e2')).toMatchObject({ lat: null, distanceM: 15, payloadJson: { mode: 'AUTO' } });
     expect(row('stopEvent', 'e3')).toMatchObject({ lat: 23.6, clientIp: '10.1.1.1' });
     expect(row('stopVisit', 'v1')).toMatchObject({ outcomeLat: null, outcomeLng: null, outcomeAccuracyM: null, arrivalAccuracyM: null, locationPurgedAt: NOW, outcomeDistanceM: 20, arrivalDistanceM: 11 });
     expect(row('stopVisit', 'v2').outcomeLat).toBe(23.6);
     expect(row('deliveryPhoto', 'p1')).toMatchObject({ lat: null, lng: null, accuracyM: null, exifLat: null, exifLng: null, clientIp: null, deviceId: null, distanceM: 30, exifDistanceM: 31, locationPurgedAt: NOW });
-    expect(tables.auditLog.map((a) => [a.action, a.afterJson])).toEqual([['DELIVERY_LOCATIONS_PURGED', { count: 4, events: 2, visits: 1, photos: 1, olderThanDays: 90 }]]);
+    expect(tables.auditLog.map((a) => [a.action, a.afterJson])).toEqual([['DELIVERY_LOCATIONS_PURGED', { count: 4, events: 2, visits: 1, photos: 1, links: 0, olderThanDays: 90 }]]);
+  });
+
+  it('the browser ids on driver links (devicesJson) are erased after the location retention; "used on N phones" keeps its count', async () => {
+    // The statement runs on PostgreSQL (jsonb): here only that it is sent, per company, for links
+    // whose delivery date is older than the retention, and the erased form the link dialog reads.
+    rawLog.length = 0;
+    await purgeOldLocations(NOW);
+    const sql = rawLog.filter((s) => s.includes('UPDATE "DriverLink"'));
+    expect(sql).toHaveLength(1);
+    expect(sql[0]).toMatch(/"tenantId" = \? AND "deliveryDate" < \?::date/);
+    expect(sql[0]).toMatch(/jsonb_set\(e, '\{device\}', '""'::jsonb\)/);
+    const erased = [
+      { device: '', first: '2026-06-01T05:00:00.000Z', last: '2026-06-01T09:00:00.000Z' },
+      { device: '', first: '2026-06-01T06:00:00.000Z', last: '2026-06-01T06:10:00.000Z' },
+    ];
+    expect(readDevices(erased)).toHaveLength(2);
+    // A phone seen after the erase (never: the link expired long before) would not match an erased entry.
+    expect(touchUpdate({ lastSeenAt: null, devicesJson: erased }, 'ab12cd34', NOW)!.devices).toHaveLength(3);
   });
 
   it('the location retention is never longer than the photo retention', async () => {

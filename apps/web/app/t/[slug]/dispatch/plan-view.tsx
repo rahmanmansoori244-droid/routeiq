@@ -23,6 +23,7 @@ import {
   fmtSearchTime,
   optimizeStartedText,
   planSearching,
+  readResultsNow,
   searchModeNow,
   searchPollMs,
   searchProgressText,
@@ -106,6 +107,11 @@ interface Props {
    */
   reloadSignal?: number;
   /**
+   * A result was recorded on this plan (Record outcome): the screen around it reads its Deliveries
+   * card again, also while a search runs.
+   */
+  onResultRecorded?: () => void;
+  /**
    * The company's today (YYYY-MM-DD) as the day screen knows it: a load of today holding orders
    * brought forward to tomorrow says "re-plan today" / "unlock" (carriedLoadTitle). Optional:
    * without it (the standalone plan version page) the plan's own today is used (PlanDetail.today).
@@ -113,7 +119,7 @@ interface Props {
   today?: string;
 }
 
-export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, externalBusy = false, onBusyChange, reloadSignal = 0, today }: Props) {
+export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = false, onChanged, showVersionLink = true, phoneCountryCode = null, canResetStuck = false, externalBusy = false, onBusyChange, reloadSignal = 0, onResultRecorded, today }: Props) {
   // The plan last loaded, and why the last load failed: a failed reload keeps the plan on screen
   // with the error and Try again (planAfterLoad; third review of PR3).
   const [panel, setPanel] = useState<PlanPanel<PlanDetail>>({ plan: null, error: null });
@@ -153,17 +159,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const loadOrder = useRef(createLoadOrder());
   // A load newer than the answer on screen is on its way: Try again waits for it.
   const [reloading, setReloading] = useState(false);
-  const load = useCallback(async () => {
+  // `results`: the load follows a write (a result recorded, a reload the screen asked for): the
+  // results are read at once, whatever the plan's answer - also while a search runs, and even when a
+  // search poll answers first and this answer is dropped.
+  const load = useCallback(async (opts?: { results?: boolean }) => {
+    const afterWrite = opts?.results === true;
+    if (afterWrite) overlayLoad.current();
     const ticket = loadOrder.current.begin();
     setReloading(true);
     const r = await api<PlanDetail>(`/api/runs/${runId}/plan`);
     if (!loadOrder.current.accept(ticket)) return null;
     setReloading(loadOrder.current.pending());
     setPanel((shown) => planAfterLoad(shown, r));
-    // The results follow the plan (a load completed, a result recorded): read again with it - but not
-    // on the polls of a running search (every 2.5-10 s for up to 20 min): a search never changes them,
-    // and the 60 s read below brings the phones' results.
-    if (!(r.ok && r.data && planSearching(r.data.run, r.data.job) && overlaySeen.current)) overlayLoad.current();
+    // The results follow the plan (a load completed): read again with it - but not on the polls of a
+    // running search (every 2.5-10 s for up to 20 min): a search never changes them, and the 60 s read
+    // below brings the phones' results.
+    if (!afterWrite && readResultsNow({ searching: !!(r.ok && r.data && planSearching(r.data.run, r.data.job)), seen: overlaySeen.current, afterWrite })) overlayLoad.current();
     return r.ok ? r.data : null;
   }, [runId]);
 
@@ -271,12 +282,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Off while a reload is on its way or an action runs (its own reload shows the plan).
   const retryOff = !!busy || reloading;
 
-  // The screen around the plan asks for a reload (reloadSignal): the same, in place.
+  // The screen around the plan asks for a reload (reloadSignal): the same, in place, with the results
+  // (it follows a write there: a result recorded on the Deliveries card, a customer saved).
   const seenReload = useRef(reloadSignal);
   useEffect(() => {
     if (reloadSignal === seenReload.current) return;
     seenReload.current = reloadSignal;
-    void load();
+    void load({ results: true });
     if (!drivers.length) void loadDrivers();
     void loadLinks();
   }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
@@ -1354,9 +1366,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         }}
         target={recordFor}
         onSaved={() => {
-          // A result can complete a load that is back: the plan (and its results) again, in place (the
-          // open loads stay open; the day's Deliveries card reads it at its next load).
-          void load();
+          // A result can complete a load that is back: the plan and its results again, in place (the open
+          // loads stay open), and the day's Deliveries card - also while a search runs.
+          void load({ results: true });
+          onResultRecorded?.();
         }}
       />
       <PhotoViewer open={!!photosFor} onOpenChange={(v) => (v ? null : setPhotosFor(null))} title={photosFor?.title ?? ''} photos={photosFor?.photos ?? []} timezone={overlay?.tz ?? d.timezone ?? 'Asia/Muscat'} />

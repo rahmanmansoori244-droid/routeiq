@@ -17,6 +17,7 @@ import {
   keepDeliveries,
   planSearching,
   queuedMessage,
+  readResultsNow,
   quickExpectedSec,
   searchAssumptions,
   searchChoices,
@@ -584,5 +585,13 @@ describe('delivery results are not re-read on the polls of a running search (rev
     expect(keepDeliveries(shown, day('2026-10-06', 'DA')).deliveries).toBeUndefined();
     expect(keepDeliveries(shown, day('2026-10-05', 'DB')).deliveries).toBeUndefined();
     expect(keepDeliveries(null, day('2026-10-05', 'DA')).deliveries).toBeUndefined();
+  });
+
+  it('readResultsNow: skipped only on the polls of a running search once read; a load after a write (Record outcome) always reads them', () => {
+    expect(readResultsNow({ searching: false, seen: true, afterWrite: false })).toBe(true);
+    expect(readResultsNow({ searching: true, seen: false, afterWrite: false })).toBe(true);
+    expect(readResultsNow({ searching: true, seen: true, afterWrite: false })).toBe(false);
+    // The dispatcher records "Shop closed" during a 20-minute re-plan: the plan and the day card show it now.
+    expect(readResultsNow({ searching: true, seen: true, afterWrite: true })).toBe(true);
   });
 });

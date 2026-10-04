@@ -161,7 +161,10 @@ export interface AtStopState extends Common {
   ahead: Cand | null;
   /** Rebuilt after a reload (restoreTracker): it may leave without having been seen inside. */
   restored: boolean;
-  /** After a gap: the first outside fix, waiting for a second one gapConfirmMs later (null = none). */
+  /**
+   * After a gap: the first outside fix, waiting for a second one gapConfirmMs later in the same
+   * visible period (null = none; every new gap clears it).
+   */
   gapOut: number | null;
 }
 
@@ -307,7 +310,7 @@ function atStopOnFix(st: AtStopState, input: TrackInput & { fix: Fix }, p: Geofe
     if (z === 'OUT') {
       // After a gap (the camera, Maps, a locked screen) the first fix is often coarse or stale: one
       // outside fix proves nothing. A second outside fix gapConfirmMs later, with no fix inside or
-      // near between, confirms the truck left.
+      // near and no other gap between, confirms the truck left.
       st.gapOut ??= fix.at;
       if (fix.at - st.gapOut < p.gapConfirmMs) return st;
       // Confirmed. Seen inside before the gap: the departure was not seen, it is dated at the last
@@ -378,7 +381,12 @@ export function step(state: TrackerState, input: TrackInput, p: GeofenceParams):
       st.gap = true;
       st.gapAt = now;
     }
-    if (st.phase === 'AT_STOP') st.cleanSince = null;
+    if (st.phase === 'AT_STOP') {
+      st.cleanSince = null;
+      // Both outside fixes that confirm a departure must fall in the same visible period: a single
+      // bad fix after the camera, then another after Retake, is not a departure.
+      st.gapOut = null;
+    }
     st.depotSince = null;
     return { state: st, events, prompts };
   }

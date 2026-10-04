@@ -37,6 +37,7 @@ import {
   inCarryBasis,
   normalizeResult,
   photoRule,
+  proofPhotoKeys,
   readCarryBasis,
   REFUSAL_TEXT,
   writeRule,
@@ -335,6 +336,12 @@ async function hadResultAtCompletion(tx: Tx, tenantId: string, visitId: string |
   return hadResultAmong(rows);
 }
 
+/** The photo keys named by the driver's Delivered and Partly results of a visit (proofPhotoKeys). */
+async function visitProofKeys(db: Db, tenantId: string, visitId: string): Promise<Set<string>> {
+  const rows = await db.stopEvent.findMany({ where: { tenantId, visitId, kind: 'OUTCOME' }, select: { kind: true, source: true, payloadJson: true } });
+  return proofPhotoKeys(rows.map((r) => ({ kind: r.kind, source: r.source, payload: (r.payloadJson ?? null) as Record<string, unknown> | null })));
+}
+
 /** Whether OUTCOME events leave a result (not a cleared one) (pure). */
 export function hadResultAmong(rows: readonly { kind: string; source: string; at: Date; receivedAt: Date; payloadJson: unknown }[]): boolean {
   const res = resultEvent(rows.map((r) => ({ kind: r.kind as VisitEvent['kind'], source: r.source as EventSource, at: r.at, receivedAt: r.receivedAt, payload: (r.payloadJson ?? null) as Record<string, unknown> | null })));
@@ -576,9 +583,10 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
       const outcome = norm.outcome;
       const photoArgs = { required: facts.photoRequired, byDriver: !office, outcome, photoKeys: a.photoKeys, noPhotoReason: a.noPhotoReason };
       if (photoRule(photoArgs) !== 'ok') {
-        // A changed or redone result: the stop's photos already sent are its proof.
-        const kept = visit ? await tx.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, visitId: visit.id, source: { not: 'DISPATCHER' } } }) : 0;
-        if (photoRule({ ...photoArgs, existingPhotos: kept }) !== 'ok') return { result: refused(a.key, 'PHOTO_REQUIRED') };
+        // A changed or redone result: the photos an earlier Delivered or Partly of the driver named are
+        // its proof, also while they are still on their way (proofPhotoKeys). A Not delivered's are not.
+        const proof = visit ? await visitProofKeys(tx, ctx.tenantId, visit.id) : new Set<string>();
+        if (photoRule({ ...photoArgs, proofPhotos: proof.size }) !== 'ok') return { result: refused(a.key, 'PHOTO_REQUIRED') };
       }
       const after = new Map(p.lines.map((l) => [l.lineId, 0]));
       if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);
@@ -840,7 +848,15 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
     if (!back[k] || b.at.toISOString() < back[k]!) back[k] = b.at.toISOString();
   }
   const visitIds = visits.map((v) => v.id);
-  const photos = visitIds.length ? await db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: visitIds } }, select: { id: true, visitId: true, takenAt: true } }) : [];
+  const [photos, results] = visitIds.length
+    ? await Promise.all([
+        db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: visitIds } }, select: { id: true, visitId: true, takenAt: true } }),
+        db.stopEvent.findMany({ where: { tenantId, visitId: { in: visitIds }, kind: 'OUTCOME' }, select: { visitId: true, kind: true, source: true, payloadJson: true } }),
+      ])
+    : [[], []];
+  // The photo proof of each stop, as the server counts it for a changed result (proofPhotoKeys).
+  const proofOf = (visitId: string) =>
+    proofPhotoKeys(results.filter((e) => e.visitId === visitId).map((e) => ({ kind: e.kind, source: e.source, payload: (e.payloadJson ?? null) as Record<string, unknown> | null }))).size;
   const orderIds = [...new Set(loads.flatMap((l) => l.stops.flatMap((s) => s.orderIds)))];
   const carried = orderIds.length
     ? await db.order.findMany({ where: { tenantId, id: { in: orderIds }, carriedToOrderId: { not: null } }, select: { id: true, carriedToOrderId: true } })
@@ -881,6 +897,7 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
           .filter((ph) => ph.visitId === v.id)
           .sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime())
           .map((ph) => ph.id),
+        proofPhotos: proofOf(v.id),
         noPhotoReason: v.noPhotoReason,
         late: v.outcomeLate,
         editable: (l.status === 'DISPATCHED' || (viewer === 'OFFICE' && l.status === 'COMPLETED')) && !inBasis,
@@ -906,6 +923,7 @@ function emptyResult(dispatched: boolean, carriedTo: string | null): StopResult 
     casesDelivered: null,
     lines: null,
     photoIds: [],
+    proofPhotos: 0,
     noPhotoReason: null,
     late: false,
     editable: dispatched,

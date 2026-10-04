@@ -15,6 +15,7 @@ import {
   fetchManifest,
   MANIFEST_TIMEOUT_MS,
   PHOTO_TIMEOUT_MS,
+  photoTimeoutMs,
   postActions,
   postPhoto,
   readManifestAnswer,
@@ -170,6 +171,18 @@ describe('weak signal and Arabic keyboards (review of 4 Oct 2026)', () => {
     expect(await postPhoto('T'.repeat(24), 'd'.repeat(32), {}, new Blob([new Uint8Array([1])]), deaf, 30)).toMatchObject({ status: 0 });
     expect(await fetchManifest('T'.repeat(24), 'd'.repeat(32), deaf, 30)).toEqual({ kind: 'error', status: 0 });
     expect([ACTIONS_TIMEOUT_MS, MANIFEST_TIMEOUT_MS, PHOTO_TIMEOUT_MS]).toEqual([30_000, 30_000, 90_000]);
+  });
+
+  it('a photo upload may take longer the larger it is: an EDGE uplink (4 KB/s) still finishes a 400 KB or a 1.5 MB photo', () => {
+    // At 4 KB/s a 400 KB photo needs 100 s and a 1.5 MB one 375 s: a fixed 90 s limit aborted every try.
+    expect(photoTimeoutMs(400_000)).toBeGreaterThan(100_000);
+    expect(photoTimeoutMs(1_500_000)).toBeGreaterThan(375_000);
+    expect(photoTimeoutMs(400_000)).toBe(130_000);
+    // Small photos keep the 90 s limit; nothing waits more than 10 minutes.
+    expect(photoTimeoutMs(50_000)).toBe(PHOTO_TIMEOUT_MS);
+    expect(photoTimeoutMs(0)).toBe(PHOTO_TIMEOUT_MS);
+    expect(photoTimeoutMs(50_000_000)).toBe(600_000);
+    expect(photoTimeoutMs(Number.NaN)).toBe(PHOTO_TIMEOUT_MS);
   });
 
   it('cases typed on an Arabic or Persian number pad count (٤ is 4, ۱۲ is 12); anything else is dropped', () => {

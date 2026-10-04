@@ -15,16 +15,20 @@ export interface DraftPhoto {
   positionStatus: PhotoPositionStatusName | null;
 }
 
-/** The stop's photos already taken for an earlier result (sent, or still on the phone): they are its proof. */
-export function existingPhotos(stop: { view: Pick<OverlayStop['view'], 'photoIds' | 'localPhotos'> }): number {
-  return stop.view.photoIds.length + stop.view.localPhotos;
+/**
+ * The stop's photos that prove a delivery: those an earlier Delivered or Partly named, on the server
+ * or still queued on the phone (the server counts the same keys, proofPhotoKeys). A Not delivered's
+ * photos (the closed shutter) are not: a return visit takes its own.
+ */
+export function proofPhotos(stop: { view: Pick<OverlayStop['view'], 'proofPhotos'> }): number {
+  return stop.view.proofPhotos;
 }
 
 /**
  * Whether the entered result can be saved (pure; the server checks the same rules again). A changed
- * or redone result needs no new photo when the stop already has one (at 3 photos no other can be taken).
+ * or redone result needs no new photo when an earlier Delivered or Partly named one (proofPhotos).
  */
-export function canSave(stop: Pick<OverlayStop, 'orders'> & { view?: Pick<OverlayStop['view'], 'photoIds' | 'localPhotos'> }, d: Draft, photoRequired: boolean): boolean {
+export function canSave(stop: Pick<OverlayStop, 'orders'> & { view?: Pick<OverlayStop['view'], 'proofPhotos'> }, d: Draft, photoRequired: boolean): boolean {
   if (!d.outcome) return false;
   if (d.outcome !== 'DELIVERED') {
     if (!d.reason) return false;
@@ -36,8 +40,8 @@ export function canSave(stop: Pick<OverlayStop, 'orders'> & { view?: Pick<Overla
     const total = lines.reduce((a, l) => a + (d.lines[l.lineId] ?? l.cases), 0);
     if (total <= 0) return false;
   }
-  const kept = stop.view ? existingPhotos({ view: stop.view }) : 0;
-  if (photoRequired && d.outcome !== 'NOT_DELIVERED' && !d.photoKeys.length && !d.noPhoto && !kept) return false;
+  const proof = stop.view ? proofPhotos({ view: stop.view }) : 0;
+  if (photoRequired && d.outcome !== 'NOT_DELIVERED' && !d.photoKeys.length && !d.noPhoto && !proof) return false;
   return true;
 }
 
@@ -84,9 +88,10 @@ export function OutcomeFlow({
   const set = (patch: Partial<Draft>) => onDraft({ ...draft, ...patch, savedAt: Date.now() });
   const lines = stop.orders.flatMap((o) => o.lines);
   const needsReason = outcome !== 'DELIVERED';
-  const kept = existingPhotos(stop);
-  // A changed result: the stop's photos already taken are its proof.
-  const photoNeeded = photoRequired && outcome !== 'NOT_DELIVERED' && !kept;
+  // Every photo of the stop (sent, or still on the phone), for the count shown.
+  const kept = stop.view.photoIds.length + stop.view.localPhotos;
+  // A changed result: the photos an earlier Delivered or Partly named are its proof (not a Not delivered's).
+  const photoNeeded = photoRequired && outcome !== 'NOT_DELIVERED' && !proofPhotos(stop);
   const ok = canSave(stop, draft, photoRequired);
   const total = lines.reduce((a, l) => a + (draft.lines[l.lineId] ?? l.cases), 0);
   const title = outcome === 'DELIVERED' ? t(lang, 'delivered') : outcome === 'PARTLY_DELIVERED' ? t(lang, 'partly') : t(lang, 'notDelivered');

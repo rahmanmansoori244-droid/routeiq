@@ -364,6 +364,9 @@ describe('POST /api/d/actions (spec section 8)', () => {
     // resolution); stop 2 had none.
     const received = tables.stopEvent.find((e) => e.kind === 'OUTCOME')!.receivedAt as Date;
     Object.assign(row('planLoad', 'L1'), { status: 'COMPLETED', statusChangedAt: new Date(received.getTime() + 1) });
+    // The next request is received after the completion: its arrival "dated after the completion" is
+    // clamped to its receipt, which must not fall in the same millisecond as the first request's.
+    while (Date.now() <= received.getTime() + 1) await new Promise((res) => setTimeout(res, 1));
     const r = await act(token, [
       outcome('1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }),
       outcome('1:2', { at: iso(45 * 60_000), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }),
@@ -406,16 +409,47 @@ describe('POST /api/d/actions (spec section 8)', () => {
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
   });
 
-  it('changing a result needs no new photo when the stop already has a driver photo', async () => {
+  it('changing a result needs no new photo when an earlier Delivered or Partly of the driver named one', async () => {
     const token = makeLink('t5');
-    expect((await sendPhoto(token, photoMeta('1:1'))).body.data).toMatchObject({ status: 'ok' });
-    const first = await act(token, [outcome('1:1')]);
+    const p1 = randomUUID();
+    const first = await act(token, [outcome('1:1', { photoKeys: [p1] })]);
     expect(first.body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await sendPhoto(token, photoMeta('1:1', p1))).body.data).toMatchObject({ status: 'ok' });
     const change = await act(token, [outcome('1:1', { at: iso(2 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] })]);
     expect(change.body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 38, noPhotoReason: null });
+    expect(change.body.data!.stops['1:1']).toMatchObject({ proofPhotos: 1 });
     // A stop without any photo still needs one.
     expect((await act(token, [outcome('1:2', { photoKeys: [] })])).body.data!.results[0]).toMatchObject({ code: 'PHOTO_REQUIRED' });
+  });
+
+  it('a result changed while the first result\'s photo is still on the phone: sent in one batch before the photo, the change is accepted', async () => {
+    // Weak signal (or the photo still waiting for its position): Delivered with P1 and the change to
+    // Partly go out together, and the photo only after them.
+    const token = makeLink('t5');
+    const p1 = randomUUID();
+    const batch = await act(token, [
+      outcome('1:1', { photoKeys: [p1] }),
+      outcome('1:1', { at: iso(4 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] }),
+    ]);
+    expect(batch.body.data!.results.map((r) => r.status)).toEqual(['ok', 'ok']);
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 38 });
+    expect(batch.body.data!.stops['1:1']).toMatchObject({ proofPhotos: 1 });
+    expect((await sendPhoto(token, photoMeta('1:1', p1))).body.data).toMatchObject({ status: 'ok' });
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', photoCount: 1 });
+  });
+
+  it('a photo taken for Not delivered is no proof for a later Delivered: the return visit needs its own photo', async () => {
+    const token = makeLink('t5');
+    const shutter = randomUUID();
+    expect((await act(token, [outcome('1:1', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [shutter] })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await sendPhoto(token, photoMeta('1:1', shutter))).body.data).toMatchObject({ status: 'ok' });
+    const back = await act(token, [outcome('1:1', { at: iso(60_000), photoKeys: [] })]);
+    expect(back.body.data!.results[0]).toMatchObject({ status: 'refused', code: 'PHOTO_REQUIRED' });
+    expect(back.body.data!.stops['1:1']).toMatchObject({ outcome: 'NOT_DELIVERED', proofPhotos: 0 });
+    // With a delivery photo of its own it is stored.
+    expect((await act(token, [outcome('1:1', { at: iso(60_000) })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(tables.stopVisit[0]).toMatchObject({ outcome: 'DELIVERED' });
   });
 
   it('driver-link audit rows keep no IP and no phone id (those are erased with the stop events after the location retention)', async () => {
@@ -619,6 +653,22 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
     const daily = await sendPhoto(token, photoMeta('1:2'), jpeg([], [8]));
     expect(daily.status).toBe(409);
     expect(daily.body.error).toMatchObject({ code: 'PHOTO_LIMIT', daily: true });
+  });
+
+  it('a retry of a photo already stored answers duplicate, also once the daily cap is reached (its answer was lost)', async () => {
+    const token = makeLink('t5');
+    const meta = photoMeta('1:1');
+    expect((await sendPhoto(token, meta)).body.data).toMatchObject({ status: 'ok' });
+    // That photo was the last one under the cap (3 x 2 stops + 10 = 16).
+    const linkId = tables.driverLink[0].id;
+    for (let i = 0; i < 15; i++) tables.deliveryPhoto.push({ id: `old${i}`, tenantId: T, visitId: 'elsewhere', driverLinkId: linkId, source: 'PHONE_MANUAL', takenAt: new Date() });
+    const again = await sendPhoto(token, meta);
+    expect(again.status).toBe(200);
+    expect(again.body.data).toMatchObject({ status: 'duplicate' });
+    // A new photo is still refused.
+    const fresh = await sendPhoto(token, photoMeta('1:2'), jpeg([], [9]));
+    expect(fresh.status).toBe(409);
+    expect(fresh.body.error).toMatchObject({ code: 'PHOTO_LIMIT', daily: true });
   });
 
   it('serves a photo of this truck-day only, as an inline JPEG with nosniff and a sandbox CSP; a purged one is 404 PHOTO_PURGED', async () => {

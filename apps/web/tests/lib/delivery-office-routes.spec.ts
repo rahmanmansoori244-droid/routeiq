@@ -119,8 +119,16 @@ describe('POST /api/dispatch/outcomes: the dispatcher records a result', () => {
   it('a corrected Arrived / Left replaces the earlier entry; Left alone after a stored arrival is kept; the result time is never a Left', async () => {
     const start = zonedDayStart(D, TZ).getTime();
     const minOf = (d: unknown) => ((d as Date).getTime() - start) / 60_000;
+    // The newest entry is the latest RECEIVED: two saves in the same millisecond (only in a test) would
+    // tie, so each save is received at least 1 ms after the one before.
+    const nextMs = async () => {
+      const t0 = Date.now();
+      while (Date.now() === t0) await new Promise((r) => setTimeout(r, 1));
+    };
     expect((await post(record({ outcome: 'DELIVERED', reason: null, arrivedAt: '10:30', departedAt: '10:50' }))).status).toBe(200);
+    await nextMs();
     expect((await post(record({ outcome: 'DELIVERED', reason: null, arrivedAt: '10:05' }))).status).toBe(200);
+    await nextMs();
     let v = tables.stopVisit[0]!;
     expect([minOf(v.arrivedAt), minOf(v.departedAt)]).toEqual([10 * 60 + 5, 10 * 60 + 50]);
     expect((await post(record({ outcome: 'DELIVERED', reason: null, departedAt: '10:40' }))).status).toBe(200);

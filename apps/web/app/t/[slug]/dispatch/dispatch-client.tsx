@@ -180,10 +180,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   loaderRef.current ??= createDayLoader<Day>(
     { date: initialDate, depotId: initialDepot },
     {
-      fetchDay: (sel) => {
+      fetchDay: (sel, opts) => {
         const q = new URLSearchParams();
         if (sel.date) q.set('date', sel.date);
         if (sel.depotId) q.set('depotId', sel.depotId);
+        // A result was recorded: the Deliveries card is read even while a search runs.
+        if (opts.deliveries) q.set('deliveries', '1');
         return api<Day>(`/api/dispatch/day?${q}`);
       },
       show: (d, { afterError }) => {
@@ -205,6 +207,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   );
   const loader = loaderRef.current;
   const refresh = useCallback(() => loader.refresh(), [loader]);
+  // A result was recorded (on the plan or on the Deliveries card): the day with its delivery results,
+  // also while a search runs (its polls leave them out).
+  const refreshResults = useCallback(() => loader.refresh({ deliveries: true }), [loader]);
 
   // A customer's pin or details were saved (ADD LOCATION / Details): the day AND the plan below are
   // read again, the plan in place (audit F13). A READY plan does not poll, so its "changed after
@@ -670,6 +675,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             externalBusy={optimizing}
             onBusyChange={setPlanBusy}
             reloadSignal={planReload}
+            onResultRecorded={() => void refreshResults()}
             today={day.today}
             onChanged={async () => {
               // The plan's action keeps its buttons (and Step 3) waiting until the day shows its
@@ -684,8 +690,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             depotId={day.depot.id}
             canPlan={canPlan && dayReady}
             onRecorded={async () => {
-              // The day's card and the plan's results again (in place: no remount).
-              if (await refresh()) setPlanReload((k) => k + 1);
+              // The day's card and the plan's results again (in place: no remount), also while a search
+              // runs. The plan reads its results whatever the day's load answered (it shows its own error).
+              await refreshResults();
+              setPlanReload((k) => k + 1);
             }}
           />
         </Step>

@@ -156,12 +156,16 @@ async function tenantTz(db: Db, tenantId: string): Promise<string> {
 // ---------------------------------------------------------------------------------------
 
 export interface DeviceSeen {
-  /** First 8 hex of SHA-256 of the page's per-browser id. */
+  /**
+   * First 8 hex of SHA-256 of the page's per-browser id; "" once the location retention erased it
+   * (eraseLinkDevices, delivery-janitor.ts): the entry still counts in "used on N phones".
+   */
   device: string;
   first: string;
   last: string;
 }
 
+/** The browsers seen with a link (erased entries included: they keep the count and the times). */
 export function readDevices(json: unknown): DeviceSeen[] {
   if (!Array.isArray(json)) return [];
   return json.filter(
@@ -609,7 +613,7 @@ export async function resolveDriverLink(token: string | null | undefined, opts: 
 /**
  * Best effort: lastSeenAt and the device list, at most every 5 minutes (touchUpdate). Never fails a
  * request. `deviceHash16`: the first 16 hex of SHA-256 of the page's browser id (guard.ts); the list
- * keeps its first 8.
+ * keeps its first 8, until the location retention erases them (the count stays).
  */
 export async function touchLink(link: Pick<DriverLink, 'id' | 'tenantId' | 'lastSeenAt' | 'devicesJson' | 'generation'>, deviceHash16: string | null, now: Date = new Date()): Promise<void> {
   const device = deviceHash16 ? deviceHash16.slice(0, 8) : null;

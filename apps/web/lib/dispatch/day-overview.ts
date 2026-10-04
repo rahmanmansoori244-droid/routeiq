@@ -19,7 +19,7 @@ import {
 import { allCasesOn, leftOutWhole, orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
-import { defaultSearchMode, planSearching, thoroughMaxSec } from './search-mode';
+import { defaultSearchMode, planSearching, readResultsNow, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers } from './weights';
 import { portionPlannedKgPerCase, readPortionLines } from './split';
@@ -143,7 +143,11 @@ export interface CarriedOut {
   toDates: string[];
 }
 
-export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null }) {
+/**
+ * `deliveries`: the load follows a write (a result recorded): the delivery results are read even while
+ * a search runs (readResultsNow), whose polls otherwise leave them out.
+ */
+export async function getDayOverview(tenantId: string, opts: { date?: string | null; depotId?: string | null; deliveries?: boolean }) {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
   const depots = await db.depot.findMany({ where: { active: true }, orderBy: { code: 'asc' }, select: { id: true, code: true, name: true, lat: true, lng: true } });
@@ -477,9 +481,11 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   // loads that are back without one, the late-dispatch notes. Read on their own: a failure here never
   // keeps the day screen from loading (the card then says it could not be read).
   // Not on the polls while a search runs (every 3 s for up to 20 min): undefined = "not read now", the
-  // screen keeps the card it has (a search never changes the results).
+  // screen keeps the card it has (a search never changes the results). A load after a recorded result
+  // (`opts.deliveries`) reads them all the same.
   let deliveries: DayDeliveries | null | undefined = null;
-  if (plan && planSearching({ status: plan.status }, planInfo?.job ? { status: planInfo.job.status } : null)) deliveries = undefined;
+  const searching = !!plan && planSearching({ status: plan.status }, planInfo?.job ? { status: planInfo.job.status } : null);
+  if (plan && !readResultsNow({ searching, seen: true, afterWrite: !!opts.deliveries })) deliveries = undefined;
   else if (plan) {
     try {
       deliveries = await dayDeliveries(tenantId, depot.id, date);

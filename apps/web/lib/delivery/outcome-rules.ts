@@ -128,8 +128,9 @@ export function normalizeResult(planned: readonly PlannedLine[], input: ResultIn
  * "Photo proof required" (company setting, default on): a driver's Delivered or Partly needs a photo
  * key, unless the driver tapped "Camera not working" (the only exception: a broken camera or an in-app
  * browser must never block a delivery). The photos themselves may arrive later. The office is not held
- * to it. A changed or redone result needs no new photo when the stop already has a driver photo
- * (`existingPhotos`): at 3 photos the driver could not take another one.
+ * to it. A changed or redone result needs no new photo when an earlier Delivered or Partly of the
+ * driver at this stop named one (`proofPhotos`, proofPhotoKeys): a photo taken for a Not delivered
+ * (the closed shutter) is no proof of a delivery made on a return visit.
  */
 export function photoRule(args: {
   required: boolean;
@@ -137,11 +138,31 @@ export function photoRule(args: {
   outcome: OutcomeName | null;
   photoKeys: readonly string[];
   noPhotoReason: string | null | undefined;
-  existingPhotos?: number;
+  proofPhotos?: number;
 }): 'ok' | 'PHOTO_REQUIRED' {
   if (!args.required || !args.byDriver || args.outcome === null || args.outcome === 'NOT_DELIVERED') return 'ok';
-  if (args.photoKeys.length >= 1 || args.noPhotoReason === 'CAMERA_FAILED' || (args.existingPhotos ?? 0) >= 1) return 'ok';
+  if (args.photoKeys.length >= 1 || args.noPhotoReason === 'CAMERA_FAILED' || (args.proofPhotos ?? 0) >= 1) return 'ok';
   return 'PHOTO_REQUIRED';
+}
+
+/**
+ * The photo keys that are proof of a delivery at a stop (pure): the keys named by the driver's
+ * Delivered and Partly results (OUTCOME events not written by the office). Counted whether or not the
+ * photo has arrived yet: a phone sends a result before its photos (the queue's order), so a change
+ * sent in the same batch, or while the photo still waits for its position or backs off, finds the
+ * earlier result's keys. The phone counts the same keys (StopResult.proofPhotos plus its queued
+ * Delivered / Partly results), so the two never disagree.
+ */
+export function proofPhotoKeys(events: readonly { kind: string; source: string; payload: Record<string, unknown> | null }[]): Set<string> {
+  const keys = new Set<string>();
+  for (const e of events) {
+    if (e.kind !== 'OUTCOME' || e.source === 'DISPATCHER') continue;
+    const outcome = e.payload?.outcome;
+    if (outcome !== 'DELIVERED' && outcome !== 'PARTLY_DELIVERED') continue;
+    const named = e.payload?.photoKeys;
+    if (Array.isArray(named)) for (const k of named) if (typeof k === 'string') keys.add(k);
+  }
+  return keys;
 }
 
 export type WriteKind = 'ARRIVE' | 'DEPART' | 'OUTCOME' | 'BACK_AT_DEPOT' | 'PHOTO';

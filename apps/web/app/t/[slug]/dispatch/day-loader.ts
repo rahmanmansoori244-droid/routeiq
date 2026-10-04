@@ -31,7 +31,8 @@ export interface DayAnswer {
 }
 
 export interface DayLoaderDeps<D extends DayAnswer> {
-  fetchDay(sel: DaySelection): Promise<{ ok: boolean; data: D | null; error: string | null }>;
+  /** `deliveries`: read the delivery results even while a search runs (a result was recorded). */
+  fetchDay(sel: DaySelection, opts: { deliveries: boolean }): Promise<{ ok: boolean; data: D | null; error: string | null }>;
   /**
    * Show the day loaded for the current selection. `afterError`: the load before this one failed
    * (the screen showed its error), so what depends on the day - the plan - is loaded again too.
@@ -54,8 +55,11 @@ export interface DayLoader {
   /**
    * Load the day selected now (whoever calls, whenever the call started). True when this call
    * showed it; false when the load failed (its error is shown) or a newer load took over.
+   * `deliveries`: a result was just recorded: this load and every later one read the delivery
+   * results, also while a search runs, until an answer sent from then on carrying them is shown (a
+   * poll that answers first and takes over this load must not leave the card stale).
    */
-  refresh(): Promise<boolean>;
+  refresh(opts?: { deliveries?: boolean }): Promise<boolean>;
   /** The key of the newest load still on its way, or null. */
   pendingKey(): string | null;
 }
@@ -83,11 +87,16 @@ export function createDayLoader<D extends DayAnswer>(initial: DaySelection, deps
   let current: DaySelection = { ...initial };
   // The last load of the selection ended in an error (shown with Try again).
   let failed = false;
+  // The ticket of the load that followed the latest recorded result: loads ask for the delivery
+  // results until an answer from that load on is shown with them (null = not asked).
+  let wantDeliveriesFrom: number | null = null;
 
-  async function refresh(): Promise<boolean> {
+  async function refresh(opts: { deliveries?: boolean } = {}): Promise<boolean> {
     const asked = current;
     const ticket = gate.begin(dayKey(asked.date, asked.depotId));
-    const r = await deps.fetchDay(asked);
+    if (opts.deliveries === true) wantDeliveriesFrom = ticket.seq;
+    const deliveries = wantDeliveriesFrom !== null;
+    const r = await deps.fetchDay(asked, { deliveries });
     // Dropped when another day's load started meanwhile, or a newer answer for this day is shown.
     if (!gate.isCurrent(ticket)) return false;
     gate.finish(ticket);
@@ -98,6 +107,7 @@ export function createDayLoader<D extends DayAnswer>(initial: DaySelection, deps
     if (r.ok && r.data) {
       const afterError = failed;
       failed = false;
+      if (deliveries && wantDeliveriesFrom !== null && ticket.seq >= wantDeliveriesFrom) wantDeliveriesFrom = null;
       deps.show(r.data, { afterError });
       const loaded: DaySelection = { date: r.data.date, depotId: r.data.depot?.id ?? asked.depotId };
       if (!sameSelection(loaded, current)) {

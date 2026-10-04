@@ -22,7 +22,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
    - **Partly delivered**: set the **cases delivered** for each product, choose the **reason**, take a photo, then **Save**.
    - **Not delivered**: choose the **reason** - *Shop closed*, *Customer refused*, *No one to receive*, *Wrong location or could not find*, *No time left*, *Payment issue*, *Damaged goods*, *Missing from the truck*, or *Other* (write the reason) - then **Save**. A photo is optional.
    - The camera does not open? Tap **Camera not working** to save without a photo.
-8. A wrong result? Tap **Change result** (until your trip is closed): the photos you already took count, no new photo is needed. If the page says the cases were moved to another day, call your dispatcher.
+8. A wrong result? Tap **Change result** (until your trip is closed): the photos you took for *Delivered* or *Partly* count, no new photo is needed. Came back to a shop that was closed and delivered now? Take a photo of the delivery: the photo of the closed shop does not count. If the page says the cases were moved to another day, call your dispatcher.
 
 **At the end of the trip**
 9. Drive back and tap **Back at depot**. Stops without a result are recorded by your dispatcher.

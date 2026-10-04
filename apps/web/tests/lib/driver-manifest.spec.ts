@@ -211,7 +211,7 @@ describe('Part 2: results merged into the manifest', () => {
     const first = m.loads[0]!;
     const key = first.stops[0]!.key;
     const merged = mergeResults(m, {
-      stops: { [key]: { state: 'DONE', arrivedAt: null, arrivalObserved: true, departedAt: null, minutes: null, outcome: 'DELIVERED', reason: null, note: null, outcomeAt: null, by: 'DRIVER', casesDelivered: 1, lines: null, photoIds: [], noPhotoReason: null, late: false, editable: true, carriedTo: null } },
+      stops: { [key]: { state: 'DONE', arrivedAt: null, arrivalObserved: true, departedAt: null, minutes: null, outcome: 'DELIVERED', reason: null, note: null, outcomeAt: null, by: 'DRIVER', casesDelivered: 1, lines: null, photoIds: [], proofPhotos: 0, noPhotoReason: null, late: false, editable: true, carriedTo: null } },
       back: { [String(first.loadNo)]: '2026-10-05T12:00:00.000Z' },
     });
     expect(merged.loads[0]!.stops[0]!.result).toMatchObject({ outcome: 'DELIVERED' });

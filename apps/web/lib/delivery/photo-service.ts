@@ -126,9 +126,14 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
   const office = !!ctx.session;
   const maxForDay = 3 * (await stopCount(dayLoadIds(facts))) + 10;
   // The daily cap is a soft limit: counted before the outcome-day lock (index driverLinkId), so the
-  // lock every arrival and result of the depot-day waits on is held only for the write itself.
+  // lock every arrival and result of the depot-day waits on is held only for the write itself. A retry
+  // of a photo already stored (its answer was lost on a weak signal) is never refused for the cap: it
+  // is answered below, under the lock (duplicate, KEY_REUSED, another link's key).
   const usedToday = office ? 0 : await prisma.deliveryPhoto.count({ where: { tenantId: ctx.tenantId, driverLinkId: ctx.link.id } });
-  if (!office && usedToday >= maxForDay) throw new PhotoError('Too many photos for this truck today. Call your dispatcher.', 409, 'PHOTO_LIMIT', { daily: true });
+  if (!office && usedToday >= maxForDay) {
+    const stored = await prisma.deliveryPhoto.findFirst({ where: { tenantId: ctx.tenantId, idempotencyKey: storedKey }, select: { id: true } });
+    if (!stored) throw new PhotoError('Too many photos for this truck today. Call your dispatcher.', 409, 'PHOTO_LIMIT', { daily: true });
+  }
 
   return prisma.$transaction(
     async (tx): Promise<PhotoAnswer> => {

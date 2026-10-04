@@ -99,13 +99,14 @@ describe('day loader: every load is for the day selected now (review of PR3: stu
   }
   /** A day screen around the loader: answers resolve when the test says so, in any order. */
   function screen(initial: { date: string | null; depotId: string | null }) {
-    const asked: { sel: { date: string | null; depotId: string | null }; answer: (d: FakeDay | null, error?: string) => Promise<void> }[] = [];
+    const asked: { sel: { date: string | null; depotId: string | null }; opts: { deliveries: boolean }; answer: (d: FakeDay | null, error?: string) => Promise<void> }[] = [];
     const state = { shown: null as FakeDay | null, error: null as string | null, selected: { ...initial }, planReloads: 0 };
     const loader = createDayLoader<FakeDay>(initial, {
-      fetchDay: (sel) =>
+      fetchDay: (sel, opts) =>
         new Promise((resolve) => {
           asked.push({
             sel,
+            opts,
             answer: async (d, error) => {
               resolve(d ? { ok: true, data: d, error: null } : { ok: false, data: null, error: error ?? 'HTTP 500' });
               for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -222,6 +223,30 @@ describe('day loader: every load is for the day selected now (review of PR3: stu
     await s.asked[1]!.answer(s.day('2026-09-26'));
     await s.asked[0]!.answer(s.day('2026-09-26'));
     expect([await older, await newer]).toEqual([false, true]);
+  });
+
+  it('after a result is recorded, every load asks for the delivery results until one carrying them is shown (a running search\'s polls leave them out)', async () => {
+    const s = screen({ date: '2026-10-05', depotId: 'D1' });
+    void s.loader.refresh();
+    await s.asked[0]!.answer(s.day('2026-10-05'));
+    expect(s.asked[0]!.opts).toEqual({ deliveries: false });
+    // A search poll is on its way when the dispatcher records "Shop closed"; another poll starts after it.
+    const pollBefore = s.loader.refresh();
+    const afterWrite = s.loader.refresh({ deliveries: true });
+    const pollAfter = s.loader.refresh();
+    expect(s.asked.slice(1).map((a) => a.opts)).toEqual([{ deliveries: false }, { deliveries: true }, { deliveries: true }]);
+    // The poll sent before the write answers first: it is shown, but it cannot carry the new result.
+    await s.asked[1]!.answer(s.day('2026-10-05'));
+    void s.loader.refresh();
+    expect(s.asked[4]!.opts).toEqual({ deliveries: true });
+    // The poll sent after the write answers before the write's own reload (dropped as older): its results are shown.
+    await s.asked[3]!.answer(s.day('2026-10-05'));
+    await s.asked[2]!.answer(s.day('2026-10-05'));
+    await s.asked[4]!.answer(s.day('2026-10-05'));
+    expect([await pollBefore, await afterWrite, await pollAfter]).toEqual([true, false, true]);
+    // Shown with them: the next polls leave them out again.
+    void s.loader.refresh();
+    expect(s.asked[5]!.opts).toEqual({ deliveries: false });
   });
 });
 

@@ -85,7 +85,23 @@ async function raw(res: Response): Promise<RawAnswer> {
 /** How long one request may take on a weak signal before it counts as failed (status 0: the queue backs off and retries). */
 export const ACTIONS_TIMEOUT_MS = 30_000;
 export const MANIFEST_TIMEOUT_MS = 30_000;
+/** The shortest limit of a photo upload (and of a photo download). */
 export const PHOTO_TIMEOUT_MS = 90_000;
+/** The slowest uplink a photo upload is given time for: 4 KB/s (32 kbit/s, EDGE or weak 3G). */
+export const PHOTO_MIN_UPLOAD_BYTES_PER_SEC = 4_000;
+const PHOTO_TIMEOUT_MAX_MS = 10 * 60_000;
+
+/**
+ * The time limit of one photo upload, by its size (pure): 30 s plus the time to send it at 4 KB/s,
+ * at least 90 s and at most 10 minutes. A fixed limit aborted a large photo on a slow uplink on every
+ * try (each retry starts again from the first byte), so it never arrived and blocked the photos
+ * behind it; fetch cannot tell a stalled upload from a slow one, so the limit grows with the size.
+ */
+export function photoTimeoutMs(bytes: number): number {
+  const size = Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
+  const ms = 30_000 + Math.ceil((size / PHOTO_MIN_UPLOAD_BYTES_PER_SEC) * 1000);
+  return Math.min(PHOTO_TIMEOUT_MAX_MS, Math.max(PHOTO_TIMEOUT_MS, ms));
+}
 
 /**
  * A request with a time limit, the answer's body included: AbortController plus a timer (older
@@ -130,8 +146,11 @@ export async function postActions(token: string, device: string, actions: Driver
   }
 }
 
-/** POST /api/d/photos (Part 2): one photo as multipart (`meta` JSON + `file`). A network failure or a timeout answers status 0. */
-export async function postPhoto(token: string, device: string, meta: Record<string, unknown>, file: Blob, fetchImpl: typeof fetch = fetch, timeoutMs = PHOTO_TIMEOUT_MS): Promise<RawAnswer> {
+/**
+ * POST /api/d/photos (Part 2): one photo as multipart (`meta` JSON + `file`). A network failure or a
+ * timeout (photoTimeoutMs: by the photo's size) answers status 0.
+ */
+export async function postPhoto(token: string, device: string, meta: Record<string, unknown>, file: Blob, fetchImpl: typeof fetch = fetch, timeoutMs = photoTimeoutMs(file.size)): Promise<RawAnswer> {
   try {
     const form = new FormData();
     form.append('meta', JSON.stringify({ ...meta, clientNow: new Date().toISOString() }));
