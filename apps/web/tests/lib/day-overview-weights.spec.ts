@@ -131,7 +131,8 @@ describe('day overview: case weights of a split order partly on a frozen load (P
 
   it('`outdated` has exactly the keys of UP_TO_DATE on every path (the integration specs compare against it)', async () => {
     // depotMoved: audit A6 (E1), PLANNED loads still drawn from a depot pin moved since.
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0 });
+    // palletFactorCases: pallets review, cases per pallet corrected since planning (day-overview-pallets.spec).
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());

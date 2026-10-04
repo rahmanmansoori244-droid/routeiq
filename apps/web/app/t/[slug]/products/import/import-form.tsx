@@ -8,37 +8,15 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { errorMessage } from '@/lib/error-message';
-
-/** The answer of POST /api/products/import. */
-export interface ProductImportResult {
-  fileName: string;
-  totalRows: number;
-  validRows: number;
-  errorRows: number;
-  warningRows: number;
-  creates: number;
-  updates: number;
-  unchanged: number;
-  factorsSet: number;
-  productsWithoutFactor: string[];
-  errors: { row: number; message: string }[];
-  warnings: string[];
-  dryRun: boolean;
-  imported: number;
-}
-
-/** The result heading: "products.xlsx - validation only: 3 new, 40 changed (cases per pallet set on 43), 2 unchanged". */
-export function productImportHeadline(r: ProductImportResult): string {
-  const counts = `${r.creates} new, ${r.updates} changed (cases per pallet set on ${r.factorsSet}), ${r.unchanged} unchanged`;
-  if (r.errorRows) return `${r.fileName} - ${r.errorRows} error(s): nothing imported`;
-  return r.dryRun ? `${r.fileName} - validation only: ${counts}` : `${r.fileName} - imported: ${counts}`;
-}
+import { productImportHeadline, type ProductImportResult } from '@/lib/dispatch/product-import';
 
 export function ProductImportForm() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [result, setResult] = useState<ProductImportResult | null>(null);
+  // Third review: a case weight already in RouteIQ is replaced by the file's only when this is ticked.
+  const [updateWeights, setUpdateWeights] = useState(false);
   const [pending, startTransition] = useTransition();
 
   function handleFile(f: File | null) {
@@ -55,6 +33,7 @@ export function ProductImportForm() {
       const fd = new FormData();
       fd.set('file', file);
       if (!commit) fd.set('dryRun', '1');
+      if (updateWeights) fd.set('updateWeights', '1');
       const res = await fetch('/api/products/import', { method: 'POST', body: fd });
       const body = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -105,6 +84,25 @@ export function ProductImportForm() {
         </CardContent>
       </Card>
 
+      <label className="flex items-start gap-2 text-sm">
+        <input
+          type="checkbox"
+          className="mt-1"
+          checked={updateWeights}
+          onChange={(e) => {
+            setUpdateWeights(e.target.checked);
+            setResult(null);
+          }}
+          data-testid="product-import-update-weights"
+        />
+        <span>
+          Update case weights
+          <span className="block text-xs text-muted-foreground">
+            Off: a product that already has a case weight keeps it (a 0 or blank cell never changes a weight). On: the file&apos;s weights replace them. Validate only lists every weight that changes.
+          </span>
+        </span>
+      </label>
+
       <div className="flex gap-2">
         <Button disabled={!file || pending} onClick={() => submit(false)} variant="outline">
           <FileSpreadsheet className="me-2 h-4 w-4" />
@@ -139,6 +137,21 @@ export function ProductImportForm() {
                   ))}
                 </ul>
                 {result.errors.length > 50 ? <p className="mt-2 text-muted-foreground">…and {result.errors.length - 50} more.</p> : null}
+              </div>
+            ) : null}
+            {result.weightChanges?.length ? (
+              <div className="rounded-md border p-3 text-xs" data-testid="product-import-weight-changes">
+                <p className="mb-2 font-medium">
+                  Case weights {result.dryRun || result.errorRows ? 'that would change' : 'changed'} ({result.weightChanges.length}):
+                </p>
+                <ul className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                  {result.weightChanges.slice(0, 100).map((w) => (
+                    <li key={w.code}>
+                      <span className="font-mono">{w.code}</span>: {w.before ? `${w.before} kg` : 'no weight'} → {w.after} kg
+                    </li>
+                  ))}
+                </ul>
+                {result.weightChanges.length > 100 ? <p className="mt-2 text-muted-foreground">…and {result.weightChanges.length - 100} more.</p> : null}
               </div>
             ) : null}
             {result.warnings.length > 0 ? (

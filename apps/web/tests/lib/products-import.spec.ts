@@ -5,10 +5,12 @@
  *   create / update / unchanged, case-insensitive codes, products still without a factor;
  * - POST /api/products/import: company admins only, Validate only writes nothing, a file with an error
  *   imports nothing, each product created or changed is audited plus one PRODUCTS_IMPORTED row;
- * - productSchema.casesPerPallet and the truck's bays: whole numbers, '' / null = not set.
+ * - productSchema.casesPerPallet and the truck's bays: whole numbers, '' / null = not set;
+ * - case weights (pallets review): a weight of 0 counts as blank, a case weight already in RouteIQ is
+ *   kept unless "update case weights" is ticked, and the answer lists each weight it changes or keeps.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { headerKey, planProductImport, productsStillWithoutFactor, readProductRows, type KnownImportProduct } from '@/lib/dispatch/product-import';
+import { headerKey, planProductImport, productImportHeadline, productsStillWithoutFactor, readProductRows, type KnownImportProduct } from '@/lib/dispatch/product-import';
 import { productSchema, truckSchema } from '@/lib/schemas';
 
 const state = vi.hoisted(() => ({
@@ -43,10 +45,11 @@ vi.mock('@/lib/tenant', () => ({
 
 import { POST } from '@/app/api/products/import/route';
 
-async function importCsv(csv: string, dryRun = false) {
+async function importCsv(csv: string, dryRun = false, updateWeights = false) {
   const fd = new FormData();
   fd.set('file', new File([csv], 'products.csv', { type: 'text/csv' }));
   if (dryRun) fd.set('dryRun', '1');
+  if (updateWeights) fd.set('updateWeights', '1');
   const res = await POST(new Request('http://localhost/api/products/import', { method: 'POST', body: fd }));
   return { status: res.status, body: (await res.json()) as any };
 }
@@ -97,7 +100,7 @@ describe('reading a products file (product-import.ts)', () => {
     ]);
     expect(r.errors.map((e) => e.row)).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
     expect(r.errors[0]!.message).toBe('cases per pallet "84.5" must be a whole number 1-10,000.');
-    expect(r.errors[7]!.message).toMatch(/code a is also on row 2 \(codes are the same whatever the letter case\)/);
+    expect(r.errors[7]!.message).toMatch(/code a is also on row 2 \(codes are the same whatever the letter case or extra spaces\)/);
     // "1,200" reads as 1200; a fully blank row is skipped.
     expect(r.rows).toEqual([{ row: 10, code: 'G', name: null, weightPerCaseKg: null, casesPerPallet: 1200, active: null }]);
     expect(readProductRows([{ sku_name: 'x' }]).errors[0]!.message).toMatch(/No code column/);
@@ -110,10 +113,11 @@ describe('reading a products file (product-import.ts)', () => {
       { code: 'NEW-1', name: 'New one', weight_per_case_kg: '11', cases_per_pallet: '84' },
       // NMWC's ERP codes have spaces and brackets (the order intake creates them as written).
       { code: 'TN1.5L (6)', cases_per_pallet: '39' },
-      { code: 'X'.repeat(65), cases_per_pallet: '84' },
+      { code: 'X'.repeat(41), cases_per_pallet: '84' },
     ]).rows;
     const { changes, errors } = planProductImport(rows, KNOWN);
-    expect(errors).toEqual([{ row: 6, message: `code "${'X'.repeat(64)}" cannot be created: at most 64 characters, without line breaks or tabs.` }]);
+    // The product code rule (lib/product-code.ts, PR #54): at most 40 characters.
+    expect(errors).toEqual([{ row: 6, message: `code "${'X'.repeat(41)}" cannot be a new product: Max 40 characters (this code has 41).` }]);
     expect(changes).toEqual([
       { kind: 'UPDATE', row: 2, id: 'p1', code: 'JA0.5L', before: { casesPerPallet: null }, data: { casesPerPallet: 96 } },
       { kind: 'UNCHANGED', row: 3, id: 'p2', code: 'TN1.5L' },
@@ -123,6 +127,118 @@ describe('reading a products file (product-import.ts)', () => {
     // Active products still without a factor after it: none here (OLD-1 is inactive).
     expect(productsStillWithoutFactor(KNOWN, changes)).toEqual([]);
     expect(productsStillWithoutFactor(KNOWN, [])).toEqual(['JA0.5L']);
+  });
+});
+
+describe('product codes in the products import: the one rule of lib/product-code.ts (PR #54)', () => {
+  const MASTER: KnownImportProduct[] = [
+    // Saved before codes were tidied (two spaces), by an upload before the rule (a comma), and a code with "x".
+    { id: 'm1', code: 'TN1.5L  (6)', name: 'Tanuf 1.5L x6', weightPerCaseKg: 9.1, casesPerPallet: null, active: true },
+    { id: 'm2', code: 'OLD,ODD', name: 'Old odd code', weightPerCaseKg: 5, casesPerPallet: null, active: true },
+    { id: 'm3', code: 'AxB', name: 'AxB', weightPerCaseKg: 5, casesPerPallet: 10, active: true },
+  ];
+
+  it('reads the tidy code, matches it whatever the case and spacing, and creates a new code only when the Products page could hold it', () => {
+    const read = readProductRows([
+      { code: ' tn1.5l (6) ', cases_per_pallet: '39' },
+      { code: 'old,odd', cases_per_pallet: '20' },
+      { code: 'A_B', cases_per_pallet: '10' },
+      { code: 'JA1.5L(6)', cases_per_pallet: '112' },
+      { code: 'SS5GB\u00a0 NRB', cases_per_pallet: '40' },
+      { code: 'A,B', cases_per_pallet: '1' },
+      { code: '-JA', cases_per_pallet: '1' },
+      { code: 'X'.repeat(41), cases_per_pallet: '1' },
+    ]);
+    expect(read.errors).toEqual([]);
+    expect(read.rows.map((r) => r.code)).toEqual(['tn1.5l (6)', 'old,odd', 'A_B', 'JA1.5L(6)', 'SS5GB NRB', 'A,B', '-JA', 'X'.repeat(41)]);
+    const { changes, errors } = planProductImport(read.rows, MASTER);
+    expect(changes.map((c) => [c.kind, c.code])).toEqual([
+      ['UPDATE', 'TN1.5L  (6)'], // letter case and spacing: the product saved with two spaces
+      ['UPDATE', 'OLD,ODD'], // a product already in the master is found whatever its code looks like
+      ['CREATE', 'A_B'], // "_" is a letter, not "any character": never AxB
+      ['CREATE', 'JA1.5L(6)'], // the ERP's own codes, as written
+      ['CREATE', 'SS5GB NRB'], // tidy: a non-breaking space and a space are one space
+    ]);
+    expect(changes[4]).toMatchObject({ data: { code: 'SS5GB NRB', name: 'SS5GB NRB' } });
+    expect(errors).toEqual([
+      { row: 7, message: 'code "A,B" cannot be a new product: A product code can have only letters, digits, spaces and . ( ) - _ / + & (not ",").' },
+      { row: 8, message: 'code "-JA" cannot be a new product: A product code cannot start with + or -.' },
+      { row: 9, message: `code "${'X'.repeat(41)}" cannot be a new product: Max 40 characters (this code has 41).` },
+    ]);
+  });
+
+  it('two rows whose codes differ only in case or spacing are one product: the second is an error', () => {
+    const r = readProductRows([{ code: 'TN1.5L (6)' }, { code: 'tn1.5l  (6)' }, { code: 'TN1.5L(6)' }]);
+    expect(r.errors).toEqual([{ row: 3, message: 'code tn1.5l (6) is also on row 2 (codes are the same whatever the letter case or extra spaces).' }]);
+    // A space that is there counts: "TN1.5L(6)" is another product.
+    expect(r.rows.map((x) => x.code)).toEqual(['TN1.5L (6)', 'TN1.5L(6)']);
+  });
+
+  it('twins in the master resolve like the order intake: active, then with a case weight', () => {
+    const twins: KnownImportProduct[] = [
+      { id: 't1', code: 'ja0.5l', name: 'no weight', weightPerCaseKg: 0, casesPerPallet: null, active: true },
+      { id: 't2', code: 'JA0.5L ', name: 'weighed', weightPerCaseKg: 12.8, casesPerPallet: null, active: true },
+      { id: 't3', code: 'JA0.5L', name: 'inactive', weightPerCaseKg: 12.8, casesPerPallet: null, active: false },
+    ];
+    const { changes } = planProductImport(readProductRows([{ code: 'JA0.5L', cases_per_pallet: '96' }]).rows, twins);
+    expect(changes).toEqual([{ kind: 'UPDATE', row: 2, id: 't2', code: 'JA0.5L ', before: { casesPerPallet: null }, data: { casesPerPallet: 96 } }]);
+  });
+
+  it('Validate only with the real ERP codes: no row refused, the codes kept as written', async () => {
+    state.products = [];
+    const r = await importCsv('code,name,cases_per_pallet\nJA1.5L(6),Jabal Akhdar 1.5 L (6 Packs),112\nTN1.5L (6),Tanuf 1.5L x6,39\nINVOMAN330(24),Invo 330,\n', true);
+    expect(r.body.data).toMatchObject({ dryRun: true, creates: 3, errorRows: 0, productsWithoutFactor: ['INVOMAN330(24)'] });
+  });
+});
+
+describe('case weights in the products import (pallets review)', () => {
+  // The pilot master (.dev/realdata/products.csv) has a weight_per_case_kg_ESTIMATE column: before, any
+  // other figure, 0 included, replaced a case weight entered or corrected in RouteIQ, and Validate only
+  // never showed it (a 0 made the product "no weight", planned at 0 kg on the 10-ton trucks).
+  it('a weight of 0 counts as blank; a weight already in RouteIQ is kept unless "update case weights" is ticked', () => {
+    const rows = readProductRows([
+      { code: 'JA0.5L', weight_per_case_kg: '0' },
+      { code: 'TN1.5L', weight_per_case_kg: '12.5' },
+      { code: 'NEW-0', weight_per_case_kg: '0' },
+    ]).rows;
+    expect(rows.map((r) => r.weightPerCaseKg)).toEqual([null, 12.5, null]);
+    const keep = planProductImport(rows, KNOWN);
+    expect(keep.changes.map((c) => c.kind)).toEqual(['UNCHANGED', 'UNCHANGED', 'CREATE']);
+    expect(keep.changes[2]).toMatchObject({ data: { weightPerCaseKg: 0 } });
+    expect(keep.weightChanges).toEqual([]);
+    expect(keep.weightsKept).toEqual([{ code: 'TN1.5L', kg: 12, fileKg: 12.5 }]);
+    const update = planProductImport(rows, KNOWN, { updateWeights: true });
+    expect(update.changes[1]).toEqual({ kind: 'UPDATE', row: 3, id: 'p2', code: 'TN1.5L', before: { weightPerCaseKg: 12 }, data: { weightPerCaseKg: 12.5 } });
+    expect(update.weightChanges).toEqual([{ code: 'TN1.5L', before: 12, after: 12.5 }]);
+    expect(update.weightsKept).toEqual([]);
+    // A product without a weight yet takes the file's: nothing is overwritten.
+    const none = planProductImport(readProductRows([{ code: 'P0', weight_per_case_kg: '7' }]).rows, [{ id: 'p0', code: 'P0', name: 'P0', weightPerCaseKg: 0, casesPerPallet: 84, active: true }]);
+    expect(none.weightChanges).toEqual([{ code: 'P0', before: 0, after: 7 }]);
+  });
+
+  it('Validate only lists the weights the file would change and keep; "update case weights" replaces them', async () => {
+    const csv = 'code,weight_per_case_kg_ESTIMATE,cases_per_pallet\nJA0.5L,0,96\nTN1.5L,12.5,39\n';
+    const r = await importCsv(csv, true);
+    expect(r.body.data).toMatchObject({ dryRun: true, updates: 1, unchanged: 1, weightChanges: [], weightsKept: [{ code: 'TN1.5L', kg: 12, fileKg: 12.5 }] });
+    expect(r.body.data.warnings).toContain(
+      '1 product(s) keep the case weight already in RouteIQ (the file has another): TN1.5L 12 kg (file 12.5 kg). Tick "Update case weights" to replace them.',
+    );
+    expect(state.updates).toEqual([]);
+    const u = await importCsv(csv, false, true);
+    expect(u.body.data.weightChanges).toEqual([{ code: 'TN1.5L', before: 12, after: 12.5 }]);
+    expect(state.updates).toEqual([
+      { id: 'p1', data: { casesPerPallet: 96 } },
+      { id: 'p2', data: { weightPerCaseKg: 12.5 } },
+    ]);
+    expect(u.body.data.warnings.some((w: string) => w.startsWith('1 case weight(s) changed: TN1.5L 12 -> 12.5 kg. Open order lines weighed from them take the new weight at the next OPTIMIZE or RE-PLAN'))).toBe(true);
+  });
+
+  it('the headline says how many case weights change', () => {
+    const base = { fileName: 'products.csv', totalRows: 3, validRows: 3, errorRows: 0, warningRows: 0, creates: 1, updates: 2, unchanged: 0, factorsSet: 2, productsWithoutFactor: [], errors: [], warnings: [], imported: 0 };
+    expect(productImportHeadline({ ...base, dryRun: true, weightChanges: [{ code: 'TN1.5L', before: 12, after: 12.5 }], weightsKept: [] })).toBe(
+      'products.csv - validation only: 1 new, 2 changed (cases per pallet set on 2, case weight changed on 1), 0 unchanged',
+    );
+    expect(productImportHeadline({ ...base, dryRun: false, weightChanges: [], weightsKept: [] })).toBe('products.csv - imported: 1 new, 2 changed (cases per pallet set on 2), 0 unchanged');
   });
 });
 

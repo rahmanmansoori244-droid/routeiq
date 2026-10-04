@@ -2,13 +2,15 @@ import { withTenantApi, ok, fail } from '@/lib/api';
 import { audit } from '@/lib/audit';
 import { LIMITS } from '@/lib/rate-limit';
 import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '@/lib/upload-parse';
-import { planProductImport, productsStillWithoutFactor, readProductRows } from '@/lib/dispatch/product-import';
+import { describeWeightChanges, describeWeightsKept, planProductImport, productsStillWithoutFactor, readProductRows } from '@/lib/dispatch/product-import';
 
 // Products import (owner decision 4 Oct 2026, truck capacity in pallets): the ERP product master -
 // code, name, weight per case, cases per pallet, active - in one file (lib/dispatch/product-import.ts
 // has the rules). Company admins only, like editing a product. Per CLAUDE.md §15: 10 MB / 50k rows /
 // content-type guard, read in the parser process (lib/upload-parse). "Validate only" (dryRun=1)
-// writes nothing; a file with an error imports nothing. Each product created or changed gets its own
+// writes nothing; a file with an error imports nothing. A case weight already in RouteIQ is kept unless
+// "Update case weights" is ticked (updateWeights=1), and a 0 counts as blank (pallets review); the answer
+// lists each case weight changed or kept. Each product created or changed gets its own
 // audit row (CREATE / UPDATE, what it was and became), and the import one PRODUCTS_IMPORTED row.
 export const POST = withTenantApi(
   async (req, { db, user, ip }) => {
@@ -16,6 +18,7 @@ export const POST = withTenantApi(
     const file = form.get('file');
     if (!(file instanceof File)) return fail('No file uploaded', 400);
     const dryRun = form.get('dryRun') === '1';
+    const updateWeights = form.get('updateWeights') === '1';
 
     let parsed;
     try {
@@ -28,7 +31,7 @@ export const POST = withTenantApi(
 
     const read = readProductRows(parsed.rows);
     const existing = await db.product.findMany({ select: { id: true, code: true, name: true, weightPerCaseKg: true, casesPerPallet: true, active: true } });
-    const planned = planProductImport(read.rows, existing);
+    const planned = planProductImport(read.rows, existing, { updateWeights });
     const errors = [...read.errors, ...planned.errors].sort((a, b) => a.row - b.row);
     const creates = planned.changes.filter((c) => c.kind === 'CREATE').length;
     const updates = planned.changes.filter((c) => c.kind === 'UPDATE').length;
@@ -39,6 +42,19 @@ export const POST = withTenantApi(
       ...parsed.warnings,
       ...(read.unreadColumns.length ? [`Columns not read: ${read.unreadColumns.join(', ')}.`] : []),
       ...(read.columns.includes('casesPerPallet') ? [] : ['The file has no cases per pallet column: pallet factors are unchanged.']),
+      // Case weights: what changes (open lines weighed from them follow at the next optimize, as when a
+      // product is saved) and what is kept although the file has another figure.
+      ...(planned.weightChanges.length
+        ? [
+            `${planned.weightChanges.length} case weight(s) ${dryRun || errors.length ? 'would change' : 'changed'}: ${describeWeightChanges(planned.weightChanges)}. ` +
+              'Open order lines weighed from them take the new weight at the next OPTIMIZE or RE-PLAN of their day; lines on locked or dispatched loads keep the weight they were loaded with.',
+          ]
+        : []),
+      ...(planned.weightsKept.length
+        ? [
+            `${planned.weightsKept.length} product(s) keep the case weight already in RouteIQ (the file has another): ${describeWeightsKept(planned.weightsKept)}. Tick "Update case weights" to replace them.`,
+          ]
+        : []),
       ...(withoutFactor.length
         ? [
             `${withoutFactor.length} active product(s) ${dryRun || errors.length ? 'would still have' : 'still have'} no cases per pallet: ${withoutFactor.slice(0, 20).join(', ')}${withoutFactor.length > 20 ? ` and ${withoutFactor.length - 20} more` : ''}. Trucks with bays cannot plan a day with them on its orders.`,
@@ -56,6 +72,8 @@ export const POST = withTenantApi(
       unchanged,
       factorsSet,
       productsWithoutFactor: withoutFactor,
+      weightChanges: planned.weightChanges,
+      weightsKept: planned.weightsKept,
       errors,
       warnings,
       dryRun,
@@ -88,7 +106,18 @@ export const POST = withTenantApi(
       action: 'PRODUCTS_IMPORTED',
       entity: 'Product',
       entityId: null,
-      afterJson: { fileName: parsed.fileName, rows: parsed.rows.length, creates, updates, unchanged, factorsSet, withoutFactor: withoutFactor.length } as never,
+      afterJson: {
+        fileName: parsed.fileName,
+        rows: parsed.rows.length,
+        creates,
+        updates,
+        unchanged,
+        factorsSet,
+        withoutFactor: withoutFactor.length,
+        weightsChanged: planned.weightChanges.length,
+        weightsKept: planned.weightsKept.length,
+        updateWeights,
+      } as never,
       ip,
     });
     return ok({ ...answer, imported: creates + updates });

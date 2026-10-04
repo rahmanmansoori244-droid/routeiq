@@ -378,6 +378,23 @@ describe('the order file with real codes: check, then confirm', () => {
     expect(validation.issues.newProducts).toEqual([]);
   });
 
+  it('pallets: with a truck with bays at the depot, the check names each product without cases per pallet once, by the product its rows resolve to', async () => {
+    seedProducts([
+      { code: 'JA1.5L(6)', weightPerCaseKg: 9.6, casesPerPallet: 112 },
+      // Saved with two spaces before codes were tidied: " TN1.5L  (6) " in the file is this product.
+      { code: 'TN1.5L  (6)', weightPerCaseKg: 9.1, casesPerPallet: null },
+    ]);
+    tables.depot = [{ id: 'DA', tenantId: T, code: 'A1', active: true }];
+    tables.customer = [{ id: 'c1', tenantId: T, code: 'C001', branchCode: null, branchKey: '__MAIN__', name: 'ACME', active: true, lat: 23.6, lng: 58.4, priority: 3, avgServiceTimeMin: 10 }];
+    tables.truck = [{ id: 'R1', tenantId: T, depotId: 'DA', code: 'R1', active: true, bays: 12 }];
+    const { validation } = await check(csv());
+    // JA1.5L(6) (twice, in two cases) has its factor; SS5GB NRB is new on two rows spelt differently: named once.
+    expect((validation.issues as { productsWithoutPalletFactor?: string[] }).productsWithoutPalletFactor).toEqual(['INVOMAN330(24)', 'SS5GB NRB', 'TN1.5L  (6)']);
+    // No truck with bays: nothing listed.
+    tables.truck = [{ id: 'R1', tenantId: T, depotId: 'DA', code: 'R1', active: true, bays: null }];
+    expect((await check(csv())).validation.issues).not.toHaveProperty('productsWithoutPalletFactor');
+  });
+
   it('confirm creates each new product once with its tidy code, and every line points at the right product', async () => {
     const { batchId } = await check(csv());
     const v = tables.uploadBatch!.find((b) => b.id === batchId)!.validationJson as IntakeValidation;

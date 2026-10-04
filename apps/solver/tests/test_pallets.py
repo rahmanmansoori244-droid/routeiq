@@ -222,6 +222,56 @@ def test_fleet_shortage_in_pallets_and_none_claimed_in_a_mixed_fleet():
     assert ds._fleet_shortage(mixed.stops, ds._truck_days(mixed)) == (False, False)
 
 
+def test_mixed_fleet_a_stop_no_load_can_take_is_told_so_not_re_plan():
+    """Third review: a fleet that mixes a truck with bays (B: 2 bays = 1.9 pallets) and one without
+    (C: 90 cases), one load each, and 3 stops of 90 cases / 1.0 pallet. B takes one, C takes one; the
+    third fits no load, and no packing of the two loads carries all three (each stop is over half of
+    both trucks, so no two share a load). It was told "the optimizer found no truck, trip or time slot
+    ... Re-plan to search again", with a warning that no check proves it impossible."""
+    stops = [pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000, priority=3) for i in range(3)]
+    r = req(stops, [btruck("B", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)], scenarios=ALL)
+    for sc in optimize_dispatch(r).scenarios:
+        assert len(sc.loads) == 2 and len(sc.unserved) == 1, sc.name
+        u = sc.unserved[0]
+        assert u.reason_code == "SOLVER_DROPPED_LOW_PRIORITY"
+        assert u.reason_message == (
+            "Not planned: no load or free trip has room for its 90 cases / 1.0 pallets (the most room left is 0 cases / "
+            "0.9 pallets). This P3 stop was left out. Add a truck or raise the loads-per-truck limit."), (sc.name, u.reason_message)
+        assert not any("no check proves" in w for w in sc.warnings), sc.warnings
+        assert_pallets_hold(r, sc)
+
+
+def test_mixed_fleet_proofs_are_sound():
+    """The mixed-fleet proofs (each stop measured on each truck in that truck's own measure):
+    - more stops over half of every truck than usable trips: no packing carries them all;
+    - the stops' smallest shares add up to more than the usable trips: the fleet is short (the
+      second search then uses its raised penalty), with its own reason.
+    Neither claims anything when a packing exists."""
+    mixed = [btruck("B", bays=2, cap=190, max_trips=1), truck("C", cap=90, max_trips=1)]
+    three = req([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=90, units=1_000) for i in range(3)], mixed)
+    usable = ds._truck_days(three)
+    needs = [(s.demand_cases, s.demand_pallet_units) for s in three.stops]
+    assert ds._mixed_space_proven(needs, usable, halves=True)  # 3 stops over half of both trucks, 2 trips
+    assert not ds._mixed_space_proven(needs, usable, halves=False)  # 0.526 x 3 = 1.58 trips <= 2
+    assert ds._fleet_shortage(three.stops, usable) == (False, False)
+    # Two of them: B and C take one each (a packing exists), nothing is proven.
+    assert not ds._mixed_space_proven(needs[:2], usable, halves=True)
+    # Small stops share a load: 0.4 pallet / 40 cases each, 4 of them fit (B takes 4 x 0.4 = 1.6).
+    small = [(40, 400)] * 4
+    assert not ds._mixed_space_proven(small, usable, halves=True)
+    # Six stops of 80 cases / 1.0 pallet: at least 6 x 0.526 = 3.2 loads of 2 - short, in both measures.
+    six = req([pstop(f"S{i}", 23.60 + i * 0.002, 58.45, cases=80, units=1_000, priority=3) for i in range(6)], mixed)
+    assert ds._fleet_shortage(six.stops, ds._truck_days(six)) == (True, False)
+    sc = rec(optimize_dispatch(six))
+    assert len(sc.unserved) == 4 and len(sc.loads) == 2
+    for u in sc.unserved:
+        assert u.reason_message == (
+            "Fleet capacity shortage: the 2 loads the trucks have left cannot carry every stop of the day (measured in "
+            "pallets on the trucks with bays and in cases on the others). Lower priorities are left out first (this is P3)."), u.reason_message
+    assert not any("short today" in w or "no check proves" in w for w in sc.warnings), sc.warnings
+    assert_pallets_hold(six, sc)
+
+
 def test_the_no_room_reason_in_pallets():
     """3 x 1.2 pallets on 2 trucks x 1 load of 2 bays (1.9 pallets): no two share a load."""
     two = [btruck("R0", bays=2, cap=190, max_trips=1), btruck("R1", bays=2, cap=190, max_trips=1)]

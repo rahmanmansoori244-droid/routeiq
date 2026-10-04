@@ -72,6 +72,7 @@ import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
@@ -820,10 +821,12 @@ class _Fleet:
 
     space: the measure a space shortage can be claimed in - "cases" when no usable truck has bays,
     "pallets" when every usable truck has bays, None for a mixed fleet (a stop may go on a truck of
-    either measure, so no sound space total exists: only kg is claimed, never a false "shortage").
-    Weight bounds the day when every usable truck has a payload (0 = kg not limited): a day can be
-    short of kg while its space would fit (scenario test S03). In 0.1 kg units, no margin (audit
-    F08): 3,000.1 kg on 3,000 kg is short."""
+    either measure, so no space total exists: a shortage is claimed only when _mixed_space_proven
+    shows that the stops' smallest shares of a truck need more loads than the usable trips, never a
+    false "shortage"). Weight bounds the day when every usable truck has a payload (0 = kg not
+    limited): a day can be short of kg while its space would fit (scenario test S03). In 0.1 kg
+    units, no margin (audit F08): 3,000.1 kg on 3,000 kg is short. trips: the usable trips (loads
+    left) of the day."""
 
     space: str | None
     cap_space: int
@@ -832,6 +835,7 @@ class _Fleet:
     demand_kg_u: int
     kg_bound: bool
     fill_pct: int = 95
+    trips: int = 0
 
     @property
     def by_pallets(self) -> bool:
@@ -849,13 +853,47 @@ def _fleet(stops: list[DispatchStop], tds: list[TruckDay], fill_pct: int = 95) -
     kg_bound = bool(usable_tds) and all(td.max_kg_units > 0 for td in usable_tds)
     cap_u = sum(td.max_kg_units * td.trips_left for td in usable_tds) if kg_bound else 0
     demand_u = sum(kg_units(s.demand_kg) for s in stops)
+    trips = sum(td.trips_left for td in usable_tds)
     if usable_tds and all(td.by_pallets for td in usable_tds):
         return _Fleet("pallets", sum(td.max_pallet_units * td.trips_left for td in usable_tds),
-                      sum(s.demand_pallet_units or 0 for s in stops), cap_u, demand_u, kg_bound, fill_pct)
+                      sum(s.demand_pallet_units or 0 for s in stops), cap_u, demand_u, kg_bound, fill_pct, trips)
     if not any(td.by_pallets for td in usable_tds):
         return _Fleet("cases", sum(td.max_cases * td.trips_left for td in usable_tds), sum(s.demand_cases for s in stops),
-                      cap_u, demand_u, kg_bound, fill_pct)
-    return _Fleet(None, 0, 0, cap_u, demand_u, kg_bound, fill_pct)
+                      cap_u, demand_u, kg_bound, fill_pct, trips)
+    return _Fleet(None, 0, 0, cap_u, demand_u, kg_bound, fill_pct, trips)
+
+
+def _mixed_space_proven(needs: list[tuple[int, int | None]], usable_tds: list[TruckDay], halves: bool) -> bool:
+    """A sound proof, for a fleet that mixes trucks with and without bays, that no packing of the
+    usable trips carries every one of `needs` ((cases, pallet units) per stop). A stop's share of a
+    truck is its need in that truck's own measure (pallet units on a truck with bays, cases on the
+    others) over the truck's room per load; a trip carries at most 1 in total, whichever truck it is:
+    - the stops' smallest shares add up to more than the usable trips (the space total of a fleet of
+      one measure, in shares);
+    - halves: more stops are over half of every usable truck than there are usable trips (no two such
+      stops share a load, whatever the packing: 3 stops of 90 cases / 1.0 pallet on a 2-bay truck and
+      a 90-case truck, one load each).
+    Exact fractions, no margin. Times and kg are not checked: a check that passes proves the stops
+    cannot all go, one that fails proves nothing."""
+    trips = sum(td.trips_left for td in usable_tds)
+    rooms = {(td.by_pallets, _room(td)) for td in usable_tds if td.trips_left > 0}
+    if not rooms:
+        return bool(needs)
+
+    def shares(cases: int, units: int | None) -> list[Fraction]:
+        out = []
+        for bp, room in rooms:
+            need = (units or 0) if bp else cases
+            # A truck with no room carries only a stop that needs none.
+            out.append(Fraction(need, room) if room > 0 else Fraction(0 if need <= 0 else trips + 1))
+        return out
+
+    total, big = Fraction(0), 0
+    for cases, units in needs:
+        sh = shares(cases, units)
+        total += min(sh)
+        big += all(2 * x > 1 for x in sh)
+    return total > trips or (halves and big > trips)
 
 
 def _shortage_reason(priority: int, f: _Fleet, short_space: bool, short_kg: bool, demand_cases: int) -> str:
@@ -864,6 +902,12 @@ def _shortage_reason(priority: int, f: _Fleet, short_space: bool, short_kg: bool
     tail = f" Lower priorities are left out first (this is P{priority})."
     demand_kg, cap_kg = f.demand_kg_u / 10, f.cap_kg_u / 10
     fill = f" (the bays at {f.fill_pct}% Pallet fill)" if f.by_pallets else ""
+    if f.space is None and short_space:
+        # A mixed fleet has no space total: what is proven is that the loads left cannot carry every stop.
+        kg = (f" Also by weight: {kg_text(demand_kg)} kg requested vs {kg_text(cap_kg)} kg across all available loads."
+              if short_kg else "")
+        return (f"Fleet capacity shortage: the {f.trips} load{'' if f.trips == 1 else 's'} the trucks have left cannot carry "
+                "every stop of the day (measured in pallets on the trucks with bays and in cases on the others)." + kg + tail)
     if short_kg and not short_space:
         if f.space is None:  # a mixed fleet: nothing is claimed about its space
             return (f"Fleet capacity shortage by weight: {kg_text(demand_kg)} kg requested vs {kg_text(cap_kg)} kg across all "
@@ -928,7 +972,9 @@ def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[Pla
     - more of them are over half the biggest truck than there are usable trips (no two such stops
       share a load, whatever the packing: 3 x 1,600 kg on 2 x 3,000 kg).
     Space is cases when no usable truck has bays and pallet units when every one has bays; a mixed
-    fleet proves nothing by space (a stop may go on a truck of either measure), only by kg.
+    fleet is measured per truck in its own measure (_mixed_space_proven: each stop's share of each
+    truck, the same two checks in shares - pallets review: a stop no load could take was told to
+    "re-plan to search again").
     Times and hours are not checked: a check that passes proves the stop cannot go, one that fails
     proves nothing."""
     if not usable_tds:
@@ -945,6 +991,9 @@ def _no_packing_fits(s: DispatchStop, usable_tds: list[TruckDay], kept: list[Pla
     if all(td.by_pallets for td in usable_tds) and proven(
             [st.pallet_units or 0 for st in kept] + [s.demand_pallet_units or 0],
             [(td.max_pallet_units, td.trips_left) for td in usable_tds]):
+        return True
+    if any(td.by_pallets for td in usable_tds) and not all(td.by_pallets for td in usable_tds) and _mixed_space_proven(
+            [(st.cases, st.pallet_units) for st in kept] + [(s.demand_cases, s.demand_pallet_units)], usable_tds, halves=True):
         return True
     # kg bounds every packing only when every usable truck has a payload (0 = kg not limited).
     return all(td.max_kg_units > 0 for td in usable_tds) and proven(
@@ -1775,18 +1824,23 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
     # left on any load (or on a load a truck did not use). Whole stops leave some room on EVERY
     # load, so over several loads the unserved amount can pass "short + one order" although no
     # re-plan can serve more (PR6 review: 6 loads each 116 kg short of full, every unserved stop 336 kg).
-    explained = (short_space and left_space <= short_by_space + max((fleet.stop_space(s) for s in left), default=0)) or (
+    # A mixed fleet has no space total (_fleet): only the room check explains its space shortage.
+    explained = (short_space and fleet.space is not None
+                 and left_space <= short_by_space + max((fleet.stop_space(s) for s in left), default=0)) or (
         short_kg and left_u <= short_by_u + max((kg_units(s.demand_kg) for s in left), default=0)) or (
         shortage and not _fits_room_left(left, usable_tds, loads))
     if shortage and not explained:
         # Not everything: the rest did not fit by time, hours or the search's limit.
-        what = " and ".join(
-            ([fleet.text(short_by_space)] if short_space else []) + ([f"{kg_text(short_by_u / 10)} kg"] if short_kg else []))
+        kg_short = [f"{kg_text(short_by_u / 10)} kg"] if short_kg else []
+        if short_space and fleet.space is None:
+            head = "The trucks' loads left cannot carry every stop today" + (f" (and are {kg_short[0]} short)" if kg_short else "")
+        else:
+            head = "The trucks are " + " and ".join(([fleet.text(short_by_space)] if short_space else []) + kg_short) + " short today"
         left_extra = ([f"{pallet_text(left_space)} pallets"] if fleet.by_pallets else []) + (
             [f"{kg_text(left_u / 10)} kg"] if fleet.kg_bound else [])
         left_kg_text = f" ({', '.join(left_extra)})" if left_extra else ""
         warnings.append(
-            f"The trucks are {what} short today, but {left_cases} cases{left_kg_text} are unserved: more than the "
+            f"{head}, but {left_cases} cases{left_kg_text} are unserved: more than the "
             "shortage alone explains. Re-plan to search again, add a truck, or raise the loads-per-truck limit."
         )
     # The day's operating cost is the sum of its loads' costs, so the web's sums of stored load costs
@@ -1842,10 +1896,16 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
 def _fleet_shortage(stops: list[DispatchStop], tds: list[TruckDay]) -> tuple[bool, bool]:
     """(short of space, short of kg): the fleet-shortage test of _build_scenario, shared with the
     second search's penalty rule (pyvrp_candidate.build_model). Space is cases when no usable truck
-    has bays and pallets when every one has bays (_fleet); a mixed fleet is never called short of
-    space, only of kg."""
+    has bays and pallets when every one has bays (_fleet); a mixed fleet is short of space when the
+    stops' smallest shares of a truck need more loads than the usable trips (_mixed_space_proven,
+    pallets review: such a day kept the second search's default penalty)."""
     f = _fleet(stops, tds)
-    return f.space is not None and f.demand_space > f.cap_space, f.kg_bound and f.demand_kg_u > f.cap_kg_u
+    if f.space is None:
+        usable = [td for td in tds if td.usable]
+        short_space = _mixed_space_proven([(s.demand_cases, s.demand_pallet_units) for s in stops], usable, halves=False)
+    else:
+        short_space = f.demand_space > f.cap_space
+    return short_space, f.kg_bound and f.demand_kg_u > f.cap_kg_u
 
 
 def _pallet_echo(req: DispatchRequest, loads: list[PlannedLoad] | None = None) -> dict:

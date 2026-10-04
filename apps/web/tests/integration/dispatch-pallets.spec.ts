@@ -12,6 +12,8 @@
  *  - (part B) the plan detail gives each load its pallets, bays, fill and room, each manifest product
  *    its full pallets + loose cases with the planned factor (adding up to the load), the summary the
  *    day's pallets; the Excel export works; the products import's Validate only writes nothing;
+ *  - a cases per pallet corrected after planning makes the plan out of date (outdated.palletFactorCases)
+ *    and LOCK is refused for a load the new figure puts over its bays (CAPACITY_PALLETS_NEW_FACTOR);
  *  - LOCK is refused for a load whose stored units are over its bays (an edit in the database);
  *  - a re-plan copies a locked load's units unchanged.
  *
@@ -186,6 +188,23 @@ describe('truck capacity in pallets', () => {
     expect([b.dryRun, b.updates, b.unchanged, b.errorRows]).toEqual([true, 1, 1, 0]);
     const tn = await prisma.product.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'TN1.5L' } });
     expect(tn.casesPerPallet).toBe(39);
+  });
+
+  it('pallets review: a cases per pallet corrected after planning makes the plan out of date, and LOCK is refused for a load it puts over its bays', async () => {
+    // JA0.5L was planned at 96 per pallet; 10 per pallet makes its 300-case order 30 pallets on 12 bays.
+    const big = await prisma.planLoad.findFirstOrThrow({ where: { runId: runV1, truck: { code: 'R12' }, cases: { gte: 300 } } });
+    await prisma.product.updateMany({ where: { tenantId: t.tenantId, code: 'JA0.5L' }, data: { casesPerPallet: 10 } });
+    try {
+      const v = await dayView();
+      expect(v.outdated.palletFactorCases).toBeGreaterThanOrEqual(300);
+      const r = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/loads/${big.id}`, j({ status: 'LOCKED' }, 'PATCH'));
+      expect(r.status).toBe(409);
+      const b = await json(r);
+      expect(b.error.violations.map((x: any) => x.code)).toContain('CAPACITY_PALLETS_NEW_FACTOR');
+    } finally {
+      await prisma.product.updateMany({ where: { tenantId: t.tenantId, code: 'JA0.5L' }, data: { casesPerPallet: FACTORS['JA0.5L'] } });
+    }
+    expect((await dayView()).outdated.palletFactorCases).toBe(0);
   });
 
   it('LOCK is refused for a load whose stored pallets are over its bays', async () => {

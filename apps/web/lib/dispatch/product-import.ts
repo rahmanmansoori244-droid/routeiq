@@ -7,16 +7,29 @@
  * Rules:
  * - Header names are read without case, spaces or punctuation, with the ERP's usual names as aliases
  *   ("Cases per pallet", "Pallet factor", "Qty per pallet", "Weight per case (kg)", "Kg per case").
- * - code is required; a code matches an existing product whatever its letter case (as the order
- *   intake matches it). A new product takes the code as the ERP writes it, like the order intake does
- *   (NMWC's codes have spaces and brackets: "TN1.5L (6)", "SS5GB NRB", "EFF24 (0)"), so its order
- *   lines find it: any text of at most 64 characters without line breaks or tabs.
+ * - code is required. Product codes have one rule, lib/product-code.ts (the Products page, the order
+ *   intake and the late order use it too): the code is read tidy (normalizeProductCode: spaces at both
+ *   ends cut, each run of spaces inside one) and matched to the master on productKey, in the program -
+ *   whatever the letter case and the spacing it was saved with, "_" a letter, never a database ILIKE.
+ *   Master twins of a code resolve like the order intake's (preferredProduct: active, then with a case
+ *   weight, then code, then id). A code no product has becomes a new product only when the Products
+ *   page could hold it (productCodeProblem, the rule behind productCodeSchema: letters, digits, spaces
+ *   and . ( ) - _ / + &, at most 40, not starting with + or -), so NMWC's ERP codes ("JA1.5L(6)",
+ *   "TN1.5L (6)", "SS5GB NRB") are created as written and their order lines find them; a product
+ *   already in the master is found whatever its code looks like.
  * - A blank cell, or a column the file does not have, keeps what the product has (a re-import never
  *   erases a figure entered in RouteIQ). A new product without a name is named after its code.
+ * - Case weights (pallets review): a weight of 0 counts as a blank cell (0 means "no weight": it would turn
+ *   a weighed product into one planned at 0 kg). A product that already has a case weight keeps it
+ *   unless the person ticks "Update case weights" (`updateWeights`): a dispatcher's correction in
+ *   RouteIQ is never overwritten by an ERP estimate by accident. A product without a weight takes the
+ *   file's. The answer lists each weight it changes (code, before, after) and each it keeps.
  * - Cases per pallet: a whole number 1-10,000; weight per case: 0-10,000 kg; active: yes / no.
  *   Anything else is an error for the row, and a file with an error imports nothing.
  * - A row that changes nothing writes nothing.
  */
+// Both pure (no imports): this module is also loaded by the import form, in the browser.
+import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
 import { PALLET_FACTOR_MAX, validPalletFactor } from './pallets';
 
 export type ProductImportField = 'code' | 'name' | 'weightPerCaseKg' | 'casesPerPallet' | 'active';
@@ -34,11 +47,6 @@ export const PRODUCT_IMPORT_ALIASES: Record<ProductImportField, string[]> = {
 export function headerKey(h: string): string {
   return h.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
-
-/** The longest code a new product may have (an ERP code; the order intake takes any non-blank code). */
-export const IMPORT_CODE_MAX = 64;
-// eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]/;
 
 export interface ProductImportRow {
   /** The file's row number (header = 1). */
@@ -106,15 +114,18 @@ export function readProductRows(raw: Record<string, string>[]): ReadProducts {
     const row = i + 2;
     const cells: Partial<Record<ProductImportField, string>> = {};
     for (const [h, f] of fieldOf) cells[f] = String(r[h] ?? '').trim();
-    const code = cells.code ?? '';
+    // The tidy code (lib/product-code.ts): " TN1.5L  (6) " is "TN1.5L (6)" in the master and in every message.
+    const code = normalizeProductCode(cells.code ?? '');
     // A fully blank row (Excel often has some) is skipped.
     if (!Object.values(cells).some((v) => v)) return;
     const problems: string[] = [];
     if (!code) problems.push('code is blank');
-    const twin = code ? seen.get(code.toUpperCase()) : undefined;
-    if (twin) problems.push(`code ${code} is also on row ${twin} (codes are the same whatever the letter case)`);
-    else if (code) seen.set(code.toUpperCase(), row);
-    const kg = numberCell(cells.weightPerCaseKg ?? '');
+    const twin = code ? seen.get(productKey(code)) : undefined;
+    if (twin) problems.push(`code ${code} is also on row ${twin} (codes are the same whatever the letter case or extra spaces)`);
+    else if (code) seen.set(productKey(code), row);
+    // 0 kg = no weight: read like a blank cell (keep what the product has; a new product has none).
+    const kgCell = numberCell(cells.weightPerCaseKg ?? '');
+    const kg = kgCell === 0 ? null : kgCell;
     if (kg !== null && !(Number.isFinite(kg) && kg >= 0 && kg <= 10_000)) problems.push(`weight per case "${cells.weightPerCaseKg}" must be a number of kg, 0-10,000`);
     const cpp = numberCell(cells.casesPerPallet ?? '');
     if (cpp !== null && validPalletFactor(cpp) === null) {
@@ -142,42 +153,92 @@ export interface KnownImportProduct {
   active: boolean;
 }
 
+/** A case weight the import changes (an existing product), and one it keeps although the file has another. */
+export interface ProductWeightChange {
+  code: string;
+  before: number;
+  after: number;
+}
+export interface ProductWeightKept {
+  code: string;
+  /** The case weight the product keeps (entered or corrected in RouteIQ). */
+  kg: number;
+  /** The file's figure, not used (tick "Update case weights" to use it). */
+  fileKg: number;
+}
+
 export type ProductChange =
   | { kind: 'CREATE'; row: number; code: string; data: { code: string; name: string; weightPerCaseKg: number; casesPerPallet: number | null; active: boolean } }
   | { kind: 'UPDATE'; row: number; id: string; code: string; before: Record<string, unknown>; data: Record<string, unknown> }
   | { kind: 'UNCHANGED'; row: number; id: string; code: string };
 
 /**
- * What each row does to the master: create a product (its code as the ERP writes it), update the
- * fields it changes, or nothing. `existing` is matched by code whatever the letter case; a row with a
- * code that cannot be created (too long, a line break or tab) is an error.
+ * The master row a group of twins (codes with the same productKey) resolves to: the order intake's
+ * preferredProduct (order-intake.ts) - active, then with a case weight, then code, then id. Repeated
+ * here, not imported: order-intake.ts reads lib/schemas.ts (Prisma's enums), and this module is also
+ * loaded by the import form in the browser.
  */
-export function planProductImport(rows: ProductImportRow[], existing: KnownImportProduct[]): { changes: ProductChange[]; errors: ProductImportError[] } {
-  const byCode = new Map<string, KnownImportProduct>();
-  // Case-variant twins (older data): the active one, then the first by code, like the order intake.
-  for (const p of [...existing].sort((a, b) => Number(b.active) - Number(a.active) || a.code.localeCompare(b.code))) {
-    if (!byCode.has(p.code.toUpperCase())) byCode.set(p.code.toUpperCase(), p);
+function preferredTwin(list: KnownImportProduct[]): KnownImportProduct | undefined {
+  return [...list].sort(
+    (a, b) =>
+      Number(b.active) - Number(a.active) ||
+      Number(b.weightPerCaseKg > 0) - Number(a.weightPerCaseKg > 0) ||
+      (a.code < b.code ? -1 : a.code > b.code ? 1 : 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  )[0];
+}
+
+/**
+ * What each row does to the master: create a product (its tidy code), update the fields it changes,
+ * or nothing. `existing` is matched on productKey (lib/product-code.ts: whatever the letter case and
+ * the spacing, in the program); a row whose code matches no product and that the product code rule
+ * refuses (productCodeProblem: a comma, a quote, over 40 characters, a leading + or - ...) is an error.
+ */
+export function planProductImport(
+  rows: ProductImportRow[],
+  existing: KnownImportProduct[],
+  opts: { updateWeights?: boolean } = {},
+): { changes: ProductChange[]; errors: ProductImportError[]; weightChanges: ProductWeightChange[]; weightsKept: ProductWeightKept[] } {
+  // The master grouped once by productKey (what twinsOf compares), each group to its preferred row.
+  const twins = new Map<string, KnownImportProduct[]>();
+  for (const p of existing) {
+    const k = productKey(p.code);
+    if (k) twins.set(k, [...(twins.get(k) ?? []), p]);
   }
+  const byKey = new Map([...twins].map(([k, list]) => [k, preferredTwin(list)!]));
   const changes: ProductChange[] = [];
   const errors: ProductImportError[] = [];
+  const weightChanges: ProductWeightChange[] = [];
+  const weightsKept: ProductWeightKept[] = [];
   for (const r of rows) {
-    const m = byCode.get(r.code.toUpperCase());
+    const m = byKey.get(productKey(r.code));
     if (!m) {
-      if (r.code.length > IMPORT_CODE_MAX || CONTROL.test(r.code)) {
-        errors.push({ row: r.row, message: `code "${r.code.slice(0, IMPORT_CODE_MAX)}" cannot be created: at most ${IMPORT_CODE_MAX} characters, without line breaks or tabs.` });
+      // A new product: its code must be one the Products page could hold (the same rule).
+      const bad = productCodeProblem(normalizeProductCode(r.code));
+      if (bad) {
+        errors.push({ row: r.row, message: `code ${JSON.stringify(r.code)} cannot be a new product: ${bad}.` });
         continue;
       }
+      const code = normalizeProductCode(r.code);
       changes.push({
         kind: 'CREATE',
         row: r.row,
-        code: r.code,
-        data: { code: r.code, name: r.name ?? r.code, weightPerCaseKg: r.weightPerCaseKg ?? 0, casesPerPallet: r.casesPerPallet, active: r.active ?? true },
+        code,
+        data: { code, name: r.name ?? code, weightPerCaseKg: r.weightPerCaseKg ?? 0, casesPerPallet: r.casesPerPallet, active: r.active ?? true },
       });
       continue;
     }
     const data: Record<string, unknown> = {};
     if (r.name !== null && r.name !== m.name) data.name = r.name;
-    if (r.weightPerCaseKg !== null && r.weightPerCaseKg !== m.weightPerCaseKg) data.weightPerCaseKg = r.weightPerCaseKg;
+    if (r.weightPerCaseKg !== null && r.weightPerCaseKg !== m.weightPerCaseKg) {
+      // A weight already in RouteIQ is replaced only when asked; a product without one takes the file's.
+      if (m.weightPerCaseKg > 0 && !opts.updateWeights) {
+        weightsKept.push({ code: m.code, kg: m.weightPerCaseKg, fileKg: r.weightPerCaseKg });
+      } else {
+        data.weightPerCaseKg = r.weightPerCaseKg;
+        weightChanges.push({ code: m.code, before: m.weightPerCaseKg, after: r.weightPerCaseKg });
+      }
+    }
     if (r.casesPerPallet !== null && r.casesPerPallet !== m.casesPerPallet) data.casesPerPallet = r.casesPerPallet;
     if (r.active !== null && r.active !== m.active) data.active = r.active;
     if (!Object.keys(data).length) {
@@ -187,7 +248,49 @@ export function planProductImport(rows: ProductImportRow[], existing: KnownImpor
     const before = Object.fromEntries(Object.keys(data).map((k) => [k, (m as unknown as Record<string, unknown>)[k] ?? null]));
     changes.push({ kind: 'UPDATE', row: r.row, id: m.id, code: m.code, before, data });
   }
-  return { changes, errors };
+  return { changes, errors, weightChanges, weightsKept };
+}
+
+/** The answer of POST /api/products/import (the import form shows it). */
+export interface ProductImportResult {
+  fileName: string;
+  totalRows: number;
+  validRows: number;
+  errorRows: number;
+  warningRows: number;
+  creates: number;
+  updates: number;
+  unchanged: number;
+  factorsSet: number;
+  productsWithoutFactor: string[];
+  /** Case weights of existing products the import changes (before -> after). */
+  weightChanges: ProductWeightChange[];
+  /** Case weights kept although the file has another ("Update case weights" not ticked). */
+  weightsKept: ProductWeightKept[];
+  errors: ProductImportError[];
+  warnings: string[];
+  dryRun: boolean;
+  imported: number;
+}
+
+/** "products.xlsx - validation only: 3 new, 40 changed (cases per pallet set on 43, case weight changed on 2), 2 unchanged". */
+export function productImportHeadline(r: ProductImportResult): string {
+  const weights = r.weightChanges?.length ? `, case weight changed on ${r.weightChanges.length}` : '';
+  const counts = `${r.creates} new, ${r.updates} changed (cases per pallet set on ${r.factorsSet}${weights}), ${r.unchanged} unchanged`;
+  if (r.errorRows) return `${r.fileName} - ${r.errorRows} error(s): nothing imported`;
+  return r.dryRun ? `${r.fileName} - validation only: ${counts}` : `${r.fileName} - imported: ${counts}`;
+}
+
+/** "TN1.5L 12 -> 12.5 kg, SS0.5L 0 -> 11.3 kg" (at most `max` named, then "and N more"). */
+export function describeWeightChanges(list: readonly ProductWeightChange[], max = 10): string {
+  const shown = list.slice(0, max).map((w) => `${w.code} ${w.before} -> ${w.after} kg`);
+  return list.length > max ? `${shown.join(', ')} and ${list.length - max} more` : shown.join(', ');
+}
+
+/** "TN1.5L 12 kg (file 12.5 kg)" (at most `max` named, then "and N more"). */
+export function describeWeightsKept(list: readonly ProductWeightKept[], max = 10): string {
+  const shown = list.slice(0, max).map((w) => `${w.code} ${w.kg} kg (file ${w.fileKg} kg)`);
+  return list.length > max ? `${shown.join(', ')} and ${list.length - max} more` : shown.join(', ');
 }
 
 /**

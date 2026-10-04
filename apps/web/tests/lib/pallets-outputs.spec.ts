@@ -179,30 +179,60 @@ describe('Excel workbook with pallets', () => {
     expect(heads.slice(7, 10)).toEqual(['Cases', 'Capacity (cases)', 'Weight kg']);
   });
 
-  it('a load sheet planned by pallets: Pallets / bays in the header, the manifest per product in pallets + loose cases, the TOTAL words', async () => {
+  it('a load sheet planned by pallets: cases · pallets / bays in the header, the manifest per product in pallets + loose cases, the TOTAL words', async () => {
     const d = palletFixture();
     const wb = await render(d);
     const ws = longTruckSheet(wb);
-    expect(findCell(ws, 'Pallets / bays')).toBeTruthy();
-    expect(cells(ws).some((c) => c.text === '1.8 / 12 (limit 11.4 at 95% fill)')).toBe(true);
+    const label = findCell(ws, 'Cases · pallets / bays')!;
+    expect(ws.getCell(label.row, 9).text).toBe('130 · 1.8 / 12 (limit 11.4 at 95% fill)');
     expect(findCell(ws, 'Cases / capacity')).toBeUndefined();
     const head = findCell(ws, 'Cases per pallet')!;
     const colOf = (t: string) => cells(ws).find((c) => c.row === head.row && c.text === t)!.col;
     expect(['Cases', 'Cases per pallet', 'Full pallets', 'Loose cases', 'Pallets', 'Kg', 'Loaded'].map(colOf)).toEqual([5, 6, 7, 8, 9, 10, 11]);
-    // TAN-500-24: 100 cases at 84 = 1 full pallet + 16 loose cases, 1.191 pallets (1.2).
+    // TAN-500-24: 100 cases at 84 = 1 full pallet + 16 loose cases, 1.191 pallets (the cell shows 1.2).
     const tan = cells(ws).find((c) => c.row > head.row && c.text === 'TAN-500-24')!;
-    expect([5, 6, 7, 8, 9, 10].map((c) => ws.getCell(tan.row, c).value)).toEqual([100, 84, 1, 16, 1.2, 1200]);
+    expect([5, 6, 7, 8, 9, 10].map((c) => ws.getCell(tan.row, c).value)).toEqual([100, 84, 1, 16, 1.191, 1200]);
+    expect(ws.getCell(tan.row, 9).numFmt).toBe('0.0');
     const total = cells(ws).find((c) => c.row > head.row && c.text === 'TOTAL')!;
-    expect([5, 7, 8, 9].map((c) => ws.getCell(total.row, c).value)).toEqual([130, 1, 46, 1.8]);
+    expect([5, 7, 8, 9].map((c) => ws.getCell(total.row, c).value)).toEqual([130, 1, 46, 1.763]);
     expect(ws.getCell(total.row, 10).value).toBe(d.loads[2]!.weightKg);
     expect(ws.getCell(total.row + 1, 2).text).toBe('130 cases = 1.8 pallets (1 full pallet + 46 loose cases on mixed pallets)');
+  });
+
+  it('the pallet cells hold the exact pallets (shown to 0.1): the column adds up to its TOTAL (pallets review)', async () => {
+    // Before: each product's cell was rounded to 0.1 (1.2 + 0.4 + 0.1 = 1.7) under a TOTAL of 1.8.
+    const wb = await render(palletFixture());
+    const ws = longTruckSheet(wb);
+    const head = findCell(ws, 'Cases per pallet')!;
+    const total = cells(ws).find((c) => c.row > head.row && c.text === 'TOTAL')!;
+    let products = 0;
+    for (let r = head.row + 1; r < total.row; r++) products += ws.getCell(r, 9).value as number;
+    expect(products).toBeCloseTo(ws.getCell(total.row, 9).value as number, 9);
+    // SKU LOADING SUMMARY: the loads' pallets add up to the total too (before: 1.6 + 1.8 under 3.3).
+    const sku = wb.getWorksheet('SKU LOADING SUMMARY')!;
+    const p = findCell(sku, 'Pallets (plan)')!;
+    const vals = cells(sku).filter((c) => c.row === p.row && typeof c.value === 'number').map((c) => c.value as number);
+    expect(vals[0]! + vals[1]!).toBeCloseTo(vals[2]!, 9);
+  });
+
+  it('a load sheet planned by pallets keeps the header block on rows 4-9: the driver break on row 10 is not cut off (pallets review)', async () => {
+    // Before: "Pallets / bays" was a 7th header row on row 10, F10 / I10, where the driver break's text in D10 overflows.
+    const d = palletFixture();
+    d.loads[2]!.break = { v: 1, startMin: 720, endMin: 780, lengthMin: 60, where: 'DEPOT', afterSequence: null };
+    const wb = await render(d);
+    const ws = longTruckSheet(wb);
+    expect(ws.getCell(10, 1).text).toBe('Driver break');
+    expect(ws.getCell(10, 4).text).toMatch(/^12:00-13:00 /);
+    for (let c = 5; c <= 20; c++) expect(ws.getCell(10, c).value ?? null, `row 10, column ${c}`).toBeNull();
+    const label = findCell(ws, 'Cases · pallets / bays')!;
+    expect(label.row).toBeLessThanOrEqual(9);
   });
 
   it('a load sheet planned by cases is unchanged (cases / capacity, no pallet columns)', async () => {
     const wb = await render(palletFixture());
     const ws = wb.getWorksheet('T01 - L2')!;
     expect(findCell(ws, 'Cases / capacity')).toBeTruthy();
-    expect(findCell(ws, 'Pallets / bays')).toBeUndefined();
+    expect(findCell(ws, 'Cases · pallets / bays')).toBeUndefined();
     expect(findCell(ws, 'Cases per pallet')).toBeUndefined();
   });
 
@@ -210,12 +240,14 @@ describe('Excel workbook with pallets', () => {
     const wb = await render(palletFixture());
     const sku = wb.getWorksheet('SKU LOADING SUMMARY')!;
     const p = findCell(sku, 'Pallets (plan)')!;
-    expect(cells(sku).filter((c) => c.row === p.row).map((c) => c.value)).toEqual(['Pallets (plan)', 'mixed pallets: cases / cases per pallet, added up', 1.6, 1.8, 3.3]);
+    // Exact pallets, shown to 0.1 by the cell format.
+    expect(cells(sku).filter((c) => c.row === p.row).map((c) => c.value)).toEqual(['Pallets (plan)', 'mixed pallets: cases / cases per pallet, added up', 1.562, 1.763, 3.325]);
     const b = findCell(sku, 'Bays')!;
     expect(cells(sku).filter((c) => c.row === b.row).map((c) => c.value)).toEqual(['Bays', 'pallet positions of the truck', 2, 12]);
     const sum = wb.getWorksheet('SUMMARY')!;
     const planned = findCell(sum, 'Pallets planned')!;
-    expect(sum.getCell(planned.row, 2).value).toBe(3.3);
+    expect(sum.getCell(planned.row, 2).value).toBe(3.325);
+    expect(sum.getCell(planned.row, 2).numFmt).toBe('0.0');
     expect(sum.getCell(planned.row, 3).text).toMatch(/^on 2 loads of trucks with bays/);
     const fill = findCell(sum, 'Average bay fill %')!;
     expect(sum.getCell(fill.row, 2).value).toBe(46.4);

@@ -47,10 +47,12 @@ import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
+  caseHeavierThanAnyTruck,
   choosePartCapacity,
   fitsCapacity,
   hasRoom,
   linesPalletUnits,
+  maxCasePayloadKg,
   mergePortions,
   orderIdOf,
   partDemandKg,
@@ -59,6 +61,7 @@ import {
   portionPlannedKgPerCase,
   portionsOfPart,
   readPortionLines,
+  rowPalletUnitsNow,
   splitIntoParts,
   type FleetTruck,
   type OpenLine,
@@ -71,7 +74,7 @@ import {
   KG_ROUNDING_TOL,
   kgTenths,
   orderUsesLineWeights,
-  payloadTenths,
+  planningKgPerCase,
   resolveOrderLineWeights,
   roundKg,
   type LineWeightChange,
@@ -426,29 +429,29 @@ export async function buildDispatchRequest(
     // (unknown) or weighed from the product master is planned with the product's case weight now
     // (see weights.ts). Here that is in memory only: the job saves it with its plan (applyWeightChanges)
     // for orders with no part on a frozen load, so a probe never changes a live plan's orders.
-    const lineLevel = orderUsesLineWeights(o);
-    const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
     const frozenPart = o.lines.some((l) => (frozenLineCases.get(l.id) ?? 0) > 0);
     const resolved = resolveOrderLineWeights(
       [{ id: o.id, totalWeightKg: o.totalWeightKg, lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })) }],
       new Set(),
     );
-    const lineKg = new Map(resolved.lines.map((c) => [c.lineId, c.afterKg]));
     const orderKg = resolved.orders[0]?.afterKg ?? o.totalWeightKg;
+    // The case weight each line is planned with (weights.ts planningKgPerCase, the day screen's rule too).
+    const kgPerCaseOf = planningKgPerCase({
+      totalCases: o.totalCases,
+      totalWeightKg: o.totalWeightKg,
+      lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })),
+    });
     if (resolved.lines.length && !frozenPart && o.status !== 'DISPATCHED' && o.status !== 'DELIVERED') {
       weightChanges.lines.push(...resolved.lines.map((c) => ({ ...c, product: lineInfo.get(c.lineId)?.productCode ?? '?' })));
       weightChanges.orders.push(...resolved.orders);
     }
-    const lines: OpenLine[] = o.lines.map((l) => {
-      const kg = lineKg.get(l.id) ?? l.weightKg;
-      return {
-        lineId: l.id,
-        orderId: o.id,
-        cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
-        kgPerCase: !lineLevel ? orderKgPerCase : kg > 0 && l.cases > 0 ? kg / l.cases : 0,
-        ...(byPallets ? { casesPerPallet: validPalletFactor(l.product.casesPerPallet) } : {}),
-      };
-    });
+    const lines: OpenLine[] = o.lines.map((l) => ({
+      lineId: l.id,
+      orderId: o.id,
+      cases: Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0)),
+      kgPerCase: kgPerCaseOf.get(l.id) ?? 0,
+      ...(byPallets ? { casesPerPallet: validPalletFactor(l.product.casesPerPallet) } : {}),
+    }));
     const partial = lines.some((l, i) => l.cases !== o.lines[i].cases);
     const cases = lines.reduce((a, l) => a + l.cases, 0);
     if (partial && cases === 0) {
@@ -487,10 +490,10 @@ export async function buildDispatchRequest(
     return choosePartCapacity(cases, kg, pool, maxCaseKg, units);
   };
   // One case heavier than every payload cannot go on any truck: almost always a wrong case weight
-  // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint.
-  const usableTrucks = pool.filter(hasRoom);
-  const maxPayloadKg = usableTrucks.length && usableTrucks.every((t) => t.kg !== null) ? Math.max(...usableTrucks.map((t) => t.kg as number)) : null;
-  const tooHeavy = (l: OpenLine) => maxPayloadKg !== null && kgTenths(l.kgPerCase) > payloadTenths(maxPayloadKg);
+  // (kg per pallet, grams). Such lines are left unserved before the optimizer, with that hint
+  // (split.ts maxCasePayloadKg: the trucks with a load left today; the day screen reads the same).
+  const maxPayloadKg = maxCasePayloadKg(fleet);
+  const tooHeavy = (l: OpenLine) => caseHeavierThanAnyTruck(l.kgPerCase, maxPayloadKg);
   const heavyMessage = (lines: OpenLine[]) =>
     [...new Map(lines.map((l) => [lineInfo.get(l.lineId)?.productCode ?? '?', l.kgPerCase])).entries()]
       .map(([code, kg]) => `One case of ${code} weighs ${Math.round(kg * 10) / 10} kg, more than any truck payload (${Math.round(maxPayloadKg ?? 0)} kg) - check the product weight.`)
@@ -1778,7 +1781,8 @@ export const FEASIBILITY_LOAD_INCLUDE = {
           totalCases: true,
           totalWeightKg: true,
           customer: { select: { code: true, branchCode: true, name: true } },
-          lines: { select: { id: true, cases: true, weightKg: true, product: { select: { weightPerCaseKg: true } } } },
+          // The product's code and cases per pallet now: a figure corrected since planning (CAPACITY_PALLETS_NEW_FACTOR).
+          lines: { select: { id: true, cases: true, weightKg: true, product: { select: { weightPerCaseKg: true, code: true, casesPerPallet: true } } } },
         },
       },
     },
@@ -1817,7 +1821,8 @@ export interface FeasibilityRow {
       totalCases: number;
       totalWeightKg: number;
       customer: { code: string; branchCode: string | null; name: string };
-      lines: { id: string; cases: number; weightKg: number; product: { weightPerCaseKg: number } }[];
+      /** product.code / casesPerPallet: absent = not read (no pallet check of a factor corrected since). */
+      lines: { id: string; cases: number; weightKg: number; product: { weightPerCaseKg: number; code?: string; casesPerPallet?: number | null } }[];
     };
   }[];
 }
@@ -1870,6 +1875,9 @@ export function feasibilityInputFromRows(
   /** The company's Pallet fill now (for CAPACITY_CHANGED); absent = the fill each load was planned with. */
   opts: { palletFillPctNow?: number | null } = {},
 ): FeasibilityInput {
+  // The cases per pallet the option was planned with (by product code): a factor corrected since is
+  // compared with them (rowPalletUnitsNow; a split part keeps the factor it was cut with).
+  const plannedFactors = readPlanInputs(details?.inputs)?.palletFactors ?? {};
   const loads: FeasLoad[] = rows.map((l) => {
     const ts = readTruckSnapshot(l.truckSnapshotJson);
     const own = l.carriedFromLoadId === null; // planned by this version (a carried copy keeps its own snapshot, or nothing)
@@ -1908,6 +1916,8 @@ export function feasibilityInputFromRows(
         const snap = readStopSnapshot(a.stopSnapshotJson);
         const c = a.order.customer;
         const unknownKg = rowUnknownKg(a);
+        // Only on a load planned by pallets: its rows with the cases per pallet known now, when they differ.
+        const now = room !== null ? rowPalletUnitsNow(a.order.lines, a.portionLinesJson, a.palletUnits, plannedFactors) : null;
         return {
           orderId: a.orderId,
           sequence: a.sequenceInTruck,
@@ -1918,6 +1928,7 @@ export function feasibilityInputFromRows(
           kgUnknown: unknownKg.unknown,
           ...(unknownKg.kgNow > 0 ? { unknownKgNow: unknownKg.kgNow } : {}),
           ...(typeof a.palletUnits === 'number' ? { palletUnits: a.palletUnits } : {}),
+          ...(now ? { palletUnitsNow: now.units, palletFactorChanged: now.products } : {}),
           etaMin: a.etaMin,
           serviceStartMin: a.serviceStartMin,
           departureMin: a.departureMin,

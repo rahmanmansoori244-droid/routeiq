@@ -412,7 +412,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
 
     # Section 7: default penalties unless the fleet is short of capacity; then 10 x the largest prize,
     # clamped so that the worst penalised cost stays below 2^62.
-    short_space, short_kg = ds._fleet_shortage(solvable, tds)  # space: cases, or pallets on an all-bay fleet
+    # space: cases, pallets on an all-bay fleet, or each truck's own measure on a mixed fleet (_mixed_space_proven)
+    short_space, short_kg = ds._fleet_shortage(solvable, tds)
     base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, Tf, clients, depots)
     if short_space or short_kg:
         safe = (INT62 - base) // max(1, per_unit)

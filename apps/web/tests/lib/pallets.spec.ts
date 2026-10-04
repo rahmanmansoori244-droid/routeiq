@@ -6,6 +6,8 @@
  * - the dispatch gate (feasibility.ts): CAPACITY_PALLETS instead of CAPACITY_CASES on a load planned
  *   by pallets, never on a load planned without them, CAPACITY_CHANGED when bays or fill change;
  * - the snapshots keep bays / fill / room only when the optimizer echoed the rule;
+ * - a cases per pallet corrected after planning: the rows with the figures known now, and the gate's
+ *   CAPACITY_PALLETS_NEW_FACTOR (blocks a PLANNED load it puts over its bays, warns on a locked one);
  * - the start gate refuses without an override (pallets.ts palletFactorGate, called by start-optimize).
  */
 import { describe, expect, it } from 'vitest';
@@ -23,7 +25,7 @@ import {
   validBays,
   validPalletFactor,
 } from '@/lib/dispatch/pallets';
-import { choosePartCapacity, fitsCapacity, linesPalletUnits, portionsOfPart, splitIntoParts, type FleetTruck, type OpenLine } from '@/lib/dispatch/split';
+import { choosePartCapacity, fitsCapacity, linesPalletUnits, portionsOfPart, rowPalletUnitsNow, splitIntoParts, type FleetTruck, type OpenLine } from '@/lib/dispatch/split';
 import { checkPlanFeasibility, inputHash, type FeasLoad, type FeasStop } from '@/lib/dispatch/feasibility';
 import { feasibilityInputFromRows, type FeasibilityRow } from '@/lib/dispatch/plan-service';
 import { plannedTruckFacts, rulesFrom, type PlanRules, type TruckFacts } from '@/lib/dispatch/snapshots';
@@ -246,6 +248,75 @@ describe('the dispatch gate by pallets (feasibility.ts)', () => {
     expect(inp.loads[0].capacityNow).toEqual({ cases: 1140, kg: 10_000, bays: 10, fillPct: 95, palletRoomUnits: 9_500 });
     expect(inp.loads[0].stops[0].palletUnits).toBe(10_715);
     expect(codes(checkPlanFeasibility(inp))).toEqual(['CAPACITY_CHANGED']);
+  });
+});
+
+describe('a cases per pallet corrected after planning (pallets review)', () => {
+  // The pilot's case: JA0.5L imported at 96 per pallet, 1,090 cases planned on a 12-bay truck =
+  // 11.355 pallets (within 11.4); the owner says 84, corrected under Products: 12.977 pallets, more
+  // than its 12 bays. Before, nothing but a grey manifest line said so: LOCK went through.
+  const line = (casesPerPallet: number | null) => ({ id: 'ln1', cases: 1090, weightKg: 10_791, product: { weightPerCaseKg: 9.9, code: 'JA0.5L', casesPerPallet } });
+
+  it('rowPalletUnitsNow: a row with the figures known now, only when they give other pallets than it was planned with', () => {
+    expect([palletUnits(1090, 96), palletUnits(1090, 84)]).toEqual([11_355, 12_977]);
+    expect(rowPalletUnitsNow([line(84)], null, 11_355, { 'JA0.5L': 96 })).toEqual({ units: 12_977, products: ['JA0.5L'], cases: 1090 });
+    expect(rowPalletUnitsNow([line(96)], null, 11_355, { 'JA0.5L': 96 })).toBeNull();
+    // Removed since: the pallets cannot be worked out (the day's red list names the product).
+    expect(rowPalletUnitsNow([line(null)], null, 11_355, { 'JA0.5L': 96 })).toBeNull();
+    // Planned by cases (no units on the row): nothing to compare.
+    expect(rowPalletUnitsNow([line(84)], null, null, { 'JA0.5L': 96 })).toBeNull();
+    // A split part: its own lines and the factor it was cut with (500 cases: 5.209 -> 5.953 pallets).
+    expect(rowPalletUnitsNow([line(84)], [{ lineId: 'ln1', cases: 500, kgPerCase: 9.9, casesPerPallet: 96 }], 5_209, {})).toEqual({ units: 5_953, products: ['JA0.5L'], cases: 500 });
+    // A load kept from an earlier version whose figures the option does not know: still found, products not named.
+    expect(rowPalletUnitsNow([line(84)], null, 11_355, { 'JA0.5L': 84 })).toEqual({ units: 12_977, products: [], cases: 1090 });
+  });
+
+  const changed = (units: number, unitsNow: number) => ({ ...pstop('o1', 1090, units), palletUnitsNow: unitsNow, palletFactorChanged: ['JA0.5L'] });
+
+  it('the gate: a PLANNED load the corrected figure puts over its bays is blocked (CAPACITY_PALLETS_NEW_FACTOR)', () => {
+    const f = checkPlanFeasibility({ scenarioId: 's', solver: VERIFIED, loads: [pload({ cases: 1090, stops: [changed(11_355, 12_977)] })] });
+    expect(codes(f)).toEqual(['CAPACITY_PALLETS_NEW_FACTOR']);
+    expect(f.violations[0]).toMatchObject({
+      severity: 'BLOCK',
+      shortBy: 1.6,
+      message:
+        'R5 load 2 was planned with 11.4 pallets; with the cases per pallet corrected under Products since (JA0.5L) it needs 13.0 pallets, more than the truck takes: 11.4 (12 bays at 95% fill). Re-plan to load it by the cases per pallet now.',
+    });
+    expect(f.ok).toBe(false);
+    // Still within the bays: nothing.
+    expect(codes(checkPlanFeasibility({ scenarioId: 's', solver: VERIFIED, loads: [pload({ stops: [changed(11_355, 11_400)] })] }))).toEqual([]);
+    // A LOCKED load (a re-plan keeps it): shown, never blocking; it says to unlock it first.
+    const locked = checkPlanFeasibility({ scenarioId: 's', solver: VERIFIED, loads: [pload({ frozen: true, stops: [changed(11_355, 12_977)] })] });
+    expect(locked.violations[0]).toMatchObject({ code: 'CAPACITY_PALLETS_NEW_FACTOR', severity: 'WARN', frozen: true });
+    expect(locked.violations[0].message).toMatch(/Put R5 L2 back to Planned first and re-plan to use the cases per pallet now\.$/);
+    expect(locked.ok).toBe(true);
+    // The stored check's hash changes with it; a load without a change keeps its hash.
+    const plain = pload();
+    expect(inputHash({ scenarioId: 's', solver: VERIFIED, loads: [plain] })).toBe(inputHash({ scenarioId: 's', solver: VERIFIED, loads: [pload()] }));
+    expect(inputHash({ scenarioId: 's', solver: VERIFIED, loads: [pload({ stops: [changed(11_355, 12_977)] })] })).not.toBe(
+      inputHash({ scenarioId: 's', solver: VERIFIED, loads: [pload({ stops: [pstop('o1', 1090, 11_355)] })] }),
+    );
+  });
+
+  it('feasibilityInputFromRows: the rows of a load planned by pallets get the figures known now (the option kept the planned ones)', () => {
+    const snap = {
+      v: 1, code: 'R5', capacityCases: 1140, capacityWeightKg: 12_000, fixedCostPerDay: 0, tripCost: 0, costPerKm: 0, kmPerLitre: null,
+      availableFromMin: null, availableToMin: null, maxTripsPerDay: null, bays: 12, palletFillPct: 95, palletRoomUnits: 11_400,
+      rules: RULES, source: 'PLAN', capturedAt: '2026-10-04T12:00:00Z',
+    };
+    const order = { totalCases: 1090, totalWeightKg: 10_791, customer: { code: 'C1', branchCode: null, name: 'x' }, lines: [line(84)] };
+    const row: FeasibilityRow = {
+      id: 'L1', truckId: 't1', loadNo: 1, status: 'PLANNED', departMin: 400, returnMin: 500, cases: 1090, weightKg: 10_791, carriedFromLoadId: null,
+      truckSnapshotJson: snap, truck: { code: 'R5', capacityCases: 1140, capacityWeightKg: 12_000, bays: 12 },
+      assignments: [{ orderId: 'o1', sequenceInTruck: 1, portionCases: null, portionWeightKg: null, portionLinesJson: null, palletUnits: 11_355, etaMin: 420, serviceStartMin: 420, departureMin: 440, hardWindowOk: true, stopSnapshotJson: null, order }],
+    };
+    const details = { inputs: { v: 1, depot: { id: 'D1', lat: 23.6, lng: 58.4 }, config: {}, stops: {}, trucks: {}, palletFactors: { 'JA0.5L': 96 } } } as unknown as Parameters<typeof feasibilityInputFromRows>[2];
+    const inp = feasibilityInputFromRows([row], 'sc1', details, null, { palletFillPctNow: 95 });
+    expect(inp.loads[0].stops[0]).toMatchObject({ palletUnits: 11_355, palletUnitsNow: 12_977, palletFactorChanged: ['JA0.5L'] });
+    expect(codes(checkPlanFeasibility(inp))).toEqual(['CAPACITY_PALLETS_NEW_FACTOR']);
+    // A load planned by cases (no room kept) is never judged by pallets.
+    const byCases = { ...row, truckSnapshotJson: { ...snap, bays: undefined, palletFillPct: undefined, palletRoomUnits: undefined } };
+    expect(feasibilityInputFromRows([byCases], 'sc1', details, null).loads[0].stops[0]).not.toHaveProperty('palletUnitsNow');
   });
 });
 

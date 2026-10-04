@@ -57,7 +57,16 @@ export function palletText(units: number): string {
   return neg && tenths ? `-${text}` : text;
 }
 
-/** Pallets as a number to one decimal, halves up like palletText (11,450 -> 11.5): for spreadsheet cells. */
+/**
+ * Pallets as an exact number (1,191 units -> 1.191) for spreadsheet cells, which show it to 0.1 by
+ * their format: a column of products then adds up exactly to its TOTAL (pallets review: cells rounded
+ * one by one, 1.2 + 0.4 + 0.1, summed to 1.7 under a TOTAL of 1.8).
+ */
+export function palletsExact(units: number): number {
+  return Math.round(units) / UNITS_PER_PALLET;
+}
+
+/** Pallets as a number to one decimal, halves up like palletText (11,450 -> 11.5). */
 export function palletValue(units: number): number {
   const sign = units < 0 ? -1 : 1;
   return (sign * Math.floor((Math.abs(Math.round(units)) + 50) / 100)) / 10;

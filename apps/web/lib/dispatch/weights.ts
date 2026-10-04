@@ -178,6 +178,27 @@ export function plannedKgDiffers(planned: number | undefined, productKgPerCase: 
 }
 
 /**
+ * The case weight each line of an order is planned with, by line id (buildDispatchRequest; the day
+ * screen reads the same rule): a line weighed from the master, or at 0 kg, takes the product's case
+ * weight now (masterLineKg), any other line keeps its own kg; an order whose kg lives on the order
+ * only (older orders) spreads that kg over its cases. 0 = no weight.
+ */
+export function planningKgPerCase(o: {
+  totalCases: number;
+  totalWeightKg: number;
+  lines: { id: string; cases: number; weightKg: number; fromMaster: boolean; productKgPerCase: number }[];
+}): Map<string, number> {
+  const lineLevel = orderUsesLineWeights(o);
+  const orderKgPerCase = o.totalCases > 0 ? o.totalWeightKg / o.totalCases : 0;
+  const out = new Map<string, number>();
+  for (const l of o.lines) {
+    const kg = masterLineKg(l, l.productKgPerCase) ?? l.weightKg;
+    out.set(l.id, !lineLevel ? orderKgPerCase : kg > 0 && l.cases > 0 ? kg / l.cases : 0);
+  }
+  return out;
+}
+
+/**
  * Lines whose kg now comes from the product master (see masterLineKg), and the new order
  * totals. Orders in `frozenOrderIds` (any part on a frozen load) and orders whose kg lives on
  * the order only are left as they are; lines with a file weight are never changed.

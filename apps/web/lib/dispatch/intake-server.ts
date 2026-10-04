@@ -312,24 +312,29 @@ export async function validateIntake(
 
 /**
  * The product codes of a file's lines without a usable cases per pallet (new products have none),
- * when the depot has an active truck with bays; [] otherwise.
+ * when the depot has an active truck with bays; [] otherwise. A line is judged by the product it was
+ * resolved to (resolveOrderLines: productKey, the preferred twin), the one OPTIMIZE plans it with, and
+ * named by that product's code; a new product by its tidy code (lib/product-code.ts).
  */
 async function productsWithoutPalletFactor(
   db: ReturnType<typeof tenantDb>,
   depotId: string,
-  lines: { productCode: string }[],
-  products: { code: string; casesPerPallet: number | null }[],
+  lines: { productCode: string; productId: string | null }[],
+  products: { id: string; code: string; casesPerPallet: number | null }[],
 ): Promise<string[]> {
   if (!lines.length) return [];
   const bayTrucks = await db.truck.count({ where: { depotId, active: true, bays: { not: null } } });
   if (!bayTrucks) return [];
-  const factor = new Map<string, number | null>();
-  for (const p of products) {
-    const k = p.code.trim().toUpperCase();
-    // Case-variant twins: a usable factor on either counts.
-    factor.set(k, factor.get(k) ?? validPalletFactor(p.casesPerPallet));
+  const byId = new Map(products.map((p) => [p.id, p]));
+  // One name per product: a new code spelt in another case or spacing on another row is the same one.
+  const missing = new Map<string, string>();
+  for (const l of lines) {
+    const p = l.productId ? byId.get(l.productId) : undefined;
+    if (p && validPalletFactor(p.casesPerPallet) !== null) continue;
+    const key = p ? `id:${p.id}` : `new:${productKey(l.productCode)}`;
+    if (!missing.has(key)) missing.set(key, p ? p.code : normalizeProductCode(l.productCode));
   }
-  return [...new Set(lines.filter((l) => !factor.get(l.productCode.trim().toUpperCase())).map((l) => l.productCode.trim()))].sort();
+  return [...new Set(missing.values())].sort();
 }
 
 /** STALE_VALIDATION message for a file checked before merged rows kept every priority and note. */

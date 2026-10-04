@@ -15,7 +15,7 @@
  * each line's cases / its cases per pallet, rounded up per line; its case count is then no limit.
  * A customer that fits one truck in that truck's own measure is never split.
  */
-import { palletUnits } from './pallets';
+import { palletUnits, validPalletFactor } from './pallets';
 import { kgTenths, payloadTenths, roundKg } from './weights';
 
 export interface OpenLine {
@@ -185,6 +185,22 @@ export interface FleetTruck {
 /** The truck has room in its own measure (pallet units with bays, else cases). */
 export function hasRoom(t: FleetTruck): boolean {
   return t.palletUnits != null ? t.palletUnits > 0 : t.cases > 0;
+}
+
+/**
+ * The largest payload a case may go on (buildDispatchRequest's "heavier than any truck" rule; the day
+ * screen reads the same): over the trucks with room and a load left today - every truck when none has
+ * one left - and null when one of them has no payload (kg not limited).
+ */
+export function maxCasePayloadKg(fleet: readonly FleetTruck[]): number | null {
+  const available = fleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
+  const usable = (available.length ? available : fleet).filter(hasRoom);
+  return usable.length && usable.every((t) => t.kg !== null) ? Math.max(...usable.map((t) => t.kg as number)) : null;
+}
+
+/** One case of `kgPerCase` is heavier than every payload (maxCasePayloadKg), in 0.1 kg units: it is left unserved before the optimizer. */
+export function caseHeavierThanAnyTruck(kgPerCase: number, maxPayloadKg: number | null): boolean {
+  return maxPayloadKg !== null && kgTenths(kgPerCase) > payloadTenths(maxPayloadKg);
 }
 
 /**
@@ -423,6 +439,51 @@ export function readPortionPalletFactors(json: unknown): Map<string, number> {
     }
   }
   return out;
+}
+
+/**
+ * A stored row's pallets with the cases per pallet known now, when they give other pallets than the
+ * row was planned with (pallets review: a factor corrected under Products after planning never reached
+ * the day screen or the dispatch check, so a load it puts over its bays was locked and dispatched).
+ * The row's lines (a split part's own, else the whole order's) are worked out again with today's
+ * factors, each line rounded up as the request builder does, so a row whose factors did not change
+ * gives exactly its stored units and returns null. null too when the row has no units (planned by
+ * cases) or a line's product has no usable factor now (the day's red list names it).
+ * `products`: the products whose factor now differs from the one the row was planned with, as far as
+ * the plan says (the factor a split part was cut with, else the option's `palletFactors`); empty when
+ * it does not say (a load kept from an earlier version). `cases`: the cases of those lines (all the
+ * row's cases when none is named).
+ */
+export function rowPalletUnitsNow(
+  orderLines: readonly { id: string; cases: number; product: { code?: string; casesPerPallet?: number | null } }[],
+  portionLinesJson: unknown,
+  storedUnits: number | null | undefined,
+  plannedFactors: Readonly<Record<string, number>>,
+): { units: number; products: string[]; cases: number } | null {
+  if (typeof storedUnits !== 'number') return null;
+  const byId = new Map(orderLines.map((l) => [l.id, l]));
+  const cut = readPortionPalletFactors(portionLinesJson);
+  const lines = readPortionLines(portionLinesJson) ?? orderLines.map((l) => ({ lineId: l.id, cases: l.cases }));
+  let units = 0;
+  let all = 0;
+  let namedCases = 0;
+  const products = new Set<string>();
+  for (const x of lines) {
+    if (!(x.cases > 0)) continue;
+    const l = byId.get(x.lineId);
+    const live = validPalletFactor(l?.product.casesPerPallet);
+    if (!l || live === null) return null;
+    units += palletUnits(x.cases, live);
+    all += x.cases;
+    const code = l.product.code ?? '';
+    const planned = cut.get(x.lineId) ?? validPalletFactor(code ? plannedFactors[code] : null);
+    if (planned !== null && planned !== live) {
+      products.add(code);
+      namedCases += x.cases;
+    }
+  }
+  if (units === storedUnits) return null;
+  return { units, products: [...products].sort(), cases: products.size ? namedCases : all };
 }
 
 /**

@@ -24,7 +24,7 @@ import { invoiceCounts } from './reconcile';
 import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
 import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption, type SearchReport } from './search-mode';
-import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsOverBays, palletText, palletValue, type LoadPallets } from './pallets';
+import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -180,6 +180,8 @@ const FMT_MONEY = '0.000';
 const FMT_KG = '#,##0.0';
 const FMT_INT = '#,##0';
 const FMT_PCT = '0.0';
+/** Pallets: the cells hold the exact pallets (palletsExact), shown to 0.1, so a column adds up to its TOTAL. */
+const FMT_PALLETS = '0.0';
 
 const THIN: Partial<ExcelJS.Border> = { style: 'thin', color: { argb: 'FFBFBFBF' } };
 const BOX: Partial<ExcelJS.Borders> = { top: THIN, bottom: THIN, left: THIN, right: THIN };
@@ -424,7 +426,7 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     // Pallets (owner decision 4 Oct 2026): only when loads were planned by pallets (trucks with bays).
     if (typeof s.palletUnits === 'number') {
       const n = s.palletLoads ?? 0;
-      kv('Pallets planned', palletValue(s.palletUnits), FMT_KM, `on ${n} load${n === 1 ? '' : 's'} of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up); orders stay in cases`);
+      kv('Pallets planned', palletsExact(s.palletUnits), FMT_PALLETS, `on ${n} load${n === 1 ? '' : 's'} of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up); orders stay in cases`);
       if (typeof s.avgBayFillPct === 'number') kv('Average bay fill %', s.avgBayFillPct, FMT_PCT, 'pallets / bays of each of those loads, averaged');
     }
     kv('Estimated fuel (litres)', s.fuelLitres ?? 'not calculated', FMT_KM, s.fuelLitres === null ? 'trucks have no km-per-litre' : undefined);
@@ -700,14 +702,17 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   ];
   const pallets = palletsOf(l);
   const right: [string, ExcelJS.CellValue, string?][] = [
-    // A truck with bays is loaded by pallets (its case capacity is not used): cases, then pallets below.
-    pallets ? ['Cases', l.cases, FMT_INT] : ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
+    // A truck with bays is loaded by pallets (its case capacity is not used): its cases and its pallets
+    // over its bays in one row, so the block stays on rows 4-9 and row 10 is free for the driver break
+    // (pallets review: a 7th row landed on row 10 and cut the break's text off).
+    pallets
+      ? ['Cases · pallets / bays', `${l.cases.toLocaleString('en-US')} · ${loadPalletsCell(l)}`]
+      : ['Cases / capacity', `${l.cases} / ${l.truckCapacityCases}`],
     ['Weight / payload kg', `${Math.round(l.weightKg * 10) / 10} / ${l.truckPayloadKg}${kgCheck(d, l).startsWith('OK') ? '' : ` - ${kgCheck(d, l)}`}`],
     ['Utilization %', l.utilizationPct, FMT_PCT],
     [kmWord, l.distanceKm, FMT_KM],
     ['Estimated time (h:mm)', fmtDuration(l.durationMin)],
     ['Stops', l.stops.length, FMT_INT],
-    ...(pallets ? ([['Pallets / bays', loadPalletsCell(l)]] as [string, ExcelJS.CellValue][]) : []),
   ];
   left.forEach(([k, v, f], i) => {
     put(ws, 4 + i, 1, k).font = { bold: true };
@@ -732,13 +737,13 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   // A load planned by pallets: each product's cases per pallet, full pallets + loose cases and its
   // pallets, so the warehouse builds the pallets (mixed pallets for the loose cases). Cases stay first.
   const palletHeads = pallets ? ['Cases per pallet', 'Full pallets', 'Loose cases', 'Pallets'] : [];
-  const palletFmts = pallets ? [FMT_INT, FMT_INT, FMT_INT, FMT_KM] : [];
+  const palletFmts = pallets ? [FMT_INT, FMT_INT, FMT_INT, FMT_PALLETS] : [];
   const kgCol = 6 + palletHeads.length;
   headRow(ws, r, ['#', 'SKU code', 'Description', '', 'Cases', ...palletHeads, 'Kg', 'Loaded']);
   ws.mergeCells(r, 3, r, 4);
   r++;
   l.manifest.forEach((x, i) => {
-    const palletCells = pallets ? [x.casesPerPallet ?? 'not set', x.fullPallets ?? 0, x.looseCases ?? x.cases, palletValue(x.palletUnits ?? 0)] : [];
+    const palletCells = pallets ? [x.casesPerPallet ?? 'not set', x.fullPallets ?? 0, x.looseCases ?? x.cases, palletsExact(x.palletUnits ?? 0)] : [];
     tableRow(ws, r, [i + 1, x.productCode, x.productName, '', x.cases, ...palletCells, x.weightKg, ''], [FMT_INT, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG]);
     ws.mergeCells(r, 3, r, 4);
     r++;
@@ -749,7 +754,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   totalRow(
     ws,
     r,
-    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, ...(pallets ? ['', totals.full, totals.loose, palletValue(pallets.units)] : []), manifestKg, ''],
+    ['', 'TOTAL', `${l.manifest.length} SKUs`, '', manifestCases, ...(pallets ? ['', totals.full, totals.loose, palletsExact(pallets.units)] : []), manifestKg, ''],
     [undefined, undefined, undefined, undefined, FMT_INT, ...palletFmts, FMT_KG],
   );
   ws.mergeCells(r, 3, r, 4);
@@ -895,9 +900,9 @@ function addSkuSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail) {
   ]);
   // Pallets of each load planned by pallets (blank for a load planned by cases), and their bays.
   if (d.loads.some((l) => !!palletsOf(l))) {
-    const pFmts = [undefined, undefined, ...d.loads.map(() => FMT_KM), FMT_KM];
+    const pFmts = [undefined, undefined, ...d.loads.map(() => FMT_PALLETS), FMT_PALLETS];
     r++;
-    tableRow(ws, r++, ['Pallets (plan)', 'mixed pallets: cases / cases per pallet, added up', ...d.loads.map((l) => (palletsOf(l) ? palletValue(palletsOf(l)!.units) : null)), palletValue(sum(d.loads.map((l) => palletsOf(l)?.units ?? 0)))], pFmts);
+    tableRow(ws, r++, ['Pallets (plan)', 'mixed pallets: cases / cases per pallet, added up', ...d.loads.map((l) => (palletsOf(l) ? palletsExact(palletsOf(l)!.units) : null)), palletsExact(sum(d.loads.map((l) => palletsOf(l)?.units ?? 0)))], pFmts);
     tableRow(ws, r, ['Bays', 'pallet positions of the truck', ...d.loads.map((l) => palletsOf(l)?.bays ?? null), null], [undefined, undefined, ...d.loads.map(() => FMT_INT)]);
   }
 }

@@ -40,7 +40,10 @@ export default async function ProductImportPage({ params }: { params: { slug: st
           <CardContent className="space-y-2 text-xs">
             <Field name="code" required hint="Also read as: SKU, item code, product code." />
             <Field name="name" hint="Also: description. A new product without a name is named after its code." />
-            <Field name="weight_per_case_kg" hint="Kg of one case, 0-10,000. Also: weight per case, kg per case." />
+            <Field
+              name="weight_per_case_kg"
+              hint="Kg of one case, 0-10,000 (0 counts as blank). Also: weight per case, kg per case. A product that already has a case weight keeps it unless Update case weights is ticked."
+            />
             <Field
               name="cases_per_pallet"
               hint="The ERP pallet factor: cases of the product on one pallet, a whole number (e.g. 84). Also: pallet factor, cs/pallet, qty per pallet."
