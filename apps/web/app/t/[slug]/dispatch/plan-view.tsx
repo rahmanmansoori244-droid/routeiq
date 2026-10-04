@@ -33,6 +33,7 @@ import {
   type StartedAnswer,
 } from '@/lib/dispatch/search-mode';
 import { kgText, manifestKgNote } from '@/lib/dispatch/weights';
+import { fullAndLooseText, loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsOverBays, palletText } from '@/lib/dispatch/pallets';
 import { api, askOverride, durH, hhmm, isPalletFactorRefusal, palletRefusalToast, REASON_TEXT, weightFixText, type OptimizeOverrides } from './client-api';
 import { LateOrderDialog } from './late-order-dialog';
 import { useSearchModeChoice } from './search-mode-dialog';
@@ -804,6 +805,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
             title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on."
           />
           <Kpi label="Avg utilization" value={`${s.avgUtilizationPct}%`} />
+          {typeof s.palletUnits === 'number' ? (
+            <Kpi
+              label="Pallets · bay fill"
+              value={`${palletText(s.palletUnits)} · ${s.avgBayFillPct ?? '—'}%`}
+              title={`Pallets planned on the ${s.palletLoads ?? 0} load(s) of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up), and their average share of the bays.`}
+              testId="kpi-pallets"
+            />
+          ) : null}
           <Kpi label="Fuel (l · OMR)" value={`${s.fuelLitres ?? '—'} · ${s.fuelCost.toFixed(1)}`} />
           <Kpi
             label="Operating cost OMR"
@@ -1025,7 +1034,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <th className="p-2">Status</th>
                 <th className="p-2">Depart → return</th>
                 <th className="p-2">Stops</th>
-                <th className="p-2">Cases / capacity</th>
+                <th className="p-2" title="Cases / the truck's capacity; a truck with bays is loaded by pallets: pallets / bays">
+                  Load / capacity
+                </th>
                 <th className="p-2">Util.</th>
                 <th className="p-2">{kmShort}</th>
                 <th className="p-2">Time</th>
@@ -1126,7 +1137,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     </td>
                     <td className="p-2">{l.stops.length}</td>
                     <td className="p-2">
-                      {l.cases} / {l.truckCapacityCases}
+                      <LoadCapacityCell l={l} />
                     </td>
                     <td className="p-2">{l.utilizationPct}%</td>
                     <td className="p-2">{l.distanceKm}</td>
@@ -1693,6 +1704,28 @@ function StopResultCells({ o, tz, canRecord, onRecord, onPhotos }: { o: OverlayS
   );
 }
 
+/**
+ * The loads table's "Load / capacity" cell: cases / the truck's case capacity, or for a load planned by
+ * pallets (a truck with bays) its cases and "11.1 / 12 plt" (pallets / bays; the title gives the limit
+ * at the Pallet fill). Cases stay first: orders, invoices and stops are in cases.
+ */
+function LoadCapacityCell({ l }: { l: DetailLoad }) {
+  const p = loadPallets(l);
+  if (!p) {
+    return (
+      <>
+        {l.cases} / {l.truckCapacityCases}
+      </>
+    );
+  }
+  return (
+    <span title={`Pallets ${palletsOverBays(p)} bays (${palletLimitText(p)}); the truck's case capacity is not used`} data-testid={`load-pallets-${l.truckCode}-${l.loadNo}`}>
+      {l.cases.toLocaleString()} cs
+      <span className="block text-xs text-muted-foreground">{palletsOverBays(p)} plt</span>
+    </span>
+  );
+}
+
 function LoadDetail({
   l,
   depotCode,
@@ -1714,10 +1747,17 @@ function LoadDetail({
   const results = ON_ROAD.has(l.status) && !!overlay;
   const tz = overlay?.tz ?? 'Asia/Muscat';
   const span = results ? 15 : 9;
+  // A load planned by pallets: each product's "3 pallets + 12 cases" and the TOTAL in pallets too.
+  const pallets = loadPallets(l);
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div>
         <p className="mb-1 text-xs font-semibold uppercase text-muted-foreground">Loading manifest</p>
+        {pallets ? (
+          <p className="mb-1 text-xs text-muted-foreground" data-testid={`manifest-pallets-${l.truckCode}-${l.loadNo}`}>
+            Pallets {palletsOverBays(pallets)} ({palletLimitText(pallets)})
+          </p>
+        ) : null}
         <table className="w-full text-xs" data-testid={`manifest-${l.truckCode}-${l.loadNo}`}>
           <tbody>
             {l.manifest.map((m) => (
@@ -1725,6 +1765,11 @@ function LoadDetail({
                 <td className="py-1 pr-2 font-mono">{m.productCode}</td>
                 <td className="py-1 pr-2">{m.productName}</td>
                 <td className="py-1 text-right font-semibold">{m.cases}</td>
+                {pallets ? (
+                  <td className="py-1 pl-2 text-right" title={m.casesPerPallet ? `${m.casesPerPallet} cases per pallet` : 'No cases per pallet'}>
+                    {fullAndLooseText(m.cases, m.casesPerPallet)}
+                  </td>
+                ) : null}
                 {/* Audit E3 (A6 review): each product's kg, which add up to the load's kg (to 0.1 kg). */}
                 <td className="py-1 pl-2 text-right text-muted-foreground">{kgText(m.weightKg)} kg</td>
               </tr>
@@ -1734,10 +1779,21 @@ function LoadDetail({
                 TOTAL
               </td>
               <td className="py-1 text-right font-semibold">{l.cases}</td>
+              {pallets ? <td className="py-1 pl-2 text-right font-semibold">{palletText(pallets.units)} pallets</td> : null}
               <td className="py-1 pl-2 text-right font-semibold">{kgText(l.weightKg)} kg</td>
             </tr>
           </tbody>
         </table>
+        {pallets ? (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid={`manifest-pallet-total-${l.truckCode}-${l.loadNo}`}>
+            {manifestTotalText(l.cases, pallets.units, manifestPalletTotals(l.manifest))}
+          </p>
+        ) : null}
+        {(l.palletNotes ?? []).map((n) => (
+          <p key={n} className="mt-1 text-xs text-amber-700">
+            {n}
+          </p>
+        ))}
         {kgNote ? (
           <p className="mt-1 text-xs text-amber-700" data-testid={`manifest-kg-note-${l.truckCode}-${l.loadNo}`}>
             {kgNote}

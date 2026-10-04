@@ -67,6 +67,9 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
               <TableHead>Depot</TableHead>
               <TableHead className="text-right">Capacity ({unitShort(primaryUnit)})</TableHead>
               <TableHead className="text-right">Weight (kg)</TableHead>
+              <TableHead className="text-right" title="Pallet positions: a truck with bays is planned by pallets (bays x Pallet fill) and its payload">
+                Bays
+              </TableHead>
               <TableHead className="text-right">Fixed/day</TableHead>
               <TableHead className="text-right">Per km</TableHead>
               <TableHead>Default driver</TableHead>
@@ -89,6 +92,9 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums">{t.capacityCases.toLocaleString()}</TableCell>
                 <TableCell className="text-right tabular-nums">{t.capacityWeightKg.toLocaleString()}</TableCell>
+                <TableCell className="text-right tabular-nums" title={t.bays ? 'Planned by pallets' : 'Planned by cases'}>
+                  {t.bays ?? '—'}
+                </TableCell>
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.fixedCostPerDay, currency)}</TableCell>
                 <TableCell className="text-right tabular-nums">{fmtMoney(t.costPerKm, currency)}</TableCell>
                 <TableCell className="text-muted-foreground">{(t.defaultDriverId && driverName.get(t.defaultDriverId)) || '—'}</TableCell>

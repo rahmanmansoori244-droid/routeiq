@@ -8,6 +8,7 @@ import {
 } from '@prisma/client';
 import { MAX_SERVICE_MIN } from './dispatch/service-time';
 import { DATA_COLLECT_DAYS_MAX } from './dispatch/data-collection';
+import { PALLET_FACTOR_MAX } from './dispatch/pallets';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
@@ -43,6 +44,14 @@ const codeSchema = z
   .regex(/^[A-Za-z0-9._-]+$/, 'Letters, digits, dot, dash, underscore only');
 
 const nameSchema = z.string().trim().min(1, 'Required').max(120);
+
+/** Cases per pallet (lib/dispatch/pallets.ts validPalletFactor): a whole number 1-10,000; '' / null = not set; left out = unchanged. */
+export const casesPerPalletSchema = z
+  .preprocess(
+    (v) => (v === '' || (typeof v === 'string' && v.trim() === '') ? null : v),
+    z.coerce.number().int('Cases per pallet must be a whole number').min(1, 'Cases per pallet must be at least 1').max(PALLET_FACTOR_MAX).nullable(),
+  )
+  .optional();
 
 const latSchema = z.coerce.number().min(-90).max(90);
 const lngSchema = z.coerce.number().min(-180).max(180);
@@ -196,6 +205,9 @@ export const productSchema = z.object({
   name: nameSchema,
   weightPerCaseKg: z.coerce.number().min(0).max(10_000),
   volumePerCaseL: z.coerce.number().min(0).max(10_000),
+  // The ERP pallet factor (owner decision 4 Oct 2026): cases of the product on one pallet, a whole
+  // number 1-10,000; '' or null = not set (a day planned with trucks that have bays is then refused).
+  casesPerPallet: casesPerPalletSchema,
   active: z.boolean().optional(),
 });
 export type ProductInput = z.infer<typeof productSchema>;

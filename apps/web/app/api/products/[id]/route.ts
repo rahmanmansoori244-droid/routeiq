@@ -3,6 +3,7 @@ import { productSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { twinsOf } from '@/lib/product-code';
 import { caseWeightChangedNote, deactivateWarning, openMasterWeighedLines, openOrders } from '@/lib/dispatch/open-orders';
+import { palletFactorChangedNote } from '@/lib/dispatch/pallets';
 
 interface Params { params: { id: string } }
 
@@ -33,7 +34,9 @@ export const PATCH = (req: Request, { params }: Params) =>
       // optimize or re-plan (say how many, so a correction is not expected to show at once).
       const weightNote =
         after.weightPerCaseKg > 0 && after.weightPerCaseKg !== before.weightPerCaseKg ? caseWeightChangedNote(await openMasterWeighedLines(user.tenantId, after.id)) : null;
-      const warning = [deactivated, weightNote].filter(Boolean).join(' ') || null;
+      // Cases per pallet changed: loads already planned keep the pallets they were planned with.
+      const palletNote = palletFactorChangedNote(before.casesPerPallet, after.casesPerPallet);
+      const warning = [deactivated, weightNote, palletNote].filter(Boolean).join(' ') || null;
       return ok(warning ? { ...after, warning } : after);
     },
     { role: 'TENANT_ADMIN' },

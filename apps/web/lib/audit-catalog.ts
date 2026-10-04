@@ -47,6 +47,8 @@ export const AUDIT_ACTIONS = {
   LATE_ORDER_RECORDED: { label: 'Late order recorded' },
   ORDERS_CARRIED_OVER: { label: 'Orders brought forward from earlier days' },
   ORDER_WEIGHTS_RESOLVED: { label: 'Order weights taken from products' },
+  // Truck capacity in pallets (owner decision 4 Oct 2026): the product master imported from a file.
+  PRODUCTS_IMPORTED: { label: 'Products imported (weights, cases per pallet)' },
   OPTIMIZE_STARTED: { label: 'Optimization started' },
   OPTIMIZE_SUCCEEDED: { label: 'Optimization finished' },
   OPTIMIZE_FAILED: { label: 'Optimization failed' },

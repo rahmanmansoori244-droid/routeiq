@@ -410,6 +410,22 @@ export function readPortionLineKg(json: unknown): Map<string, number> | null {
 }
 
 /**
+ * The cases per pallet each line of a stored portion row was cut with (a day planned by pallets),
+ * by line id; lines without it are left out. Empty for an order row that is not a portion.
+ */
+export function readPortionPalletFactors(json: unknown): Map<string, number> {
+  const out = new Map<string, number>();
+  if (!Array.isArray(json)) return out;
+  for (const x of json) {
+    const l = x as { lineId?: unknown; casesPerPallet?: unknown };
+    if (typeof l.lineId === 'string' && typeof l.casesPerPallet === 'number' && Number.isInteger(l.casesPerPallet) && l.casesPerPallet > 0) {
+      out.set(l.lineId, l.casesPerPallet);
+    }
+  }
+  return out;
+}
+
+/**
  * The case weight each line of a stored portion row was PLANNED with, as far as the row says
  * (stabilization PR4 review; the timetable check and the day overview read the same rule):
  * - a part planned since kgPerCase is kept: every line's own kgPerCase (0 = planned with no weight);

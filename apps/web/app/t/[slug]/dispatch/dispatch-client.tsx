@@ -130,7 +130,14 @@ interface Validation {
   duplicates: { row: number; message: string }[];
   totals: { lines: number; cases: number; customers: number; salesOrders: number; deliveryDates: string[] };
   fileCases: number;
-  issues: { newCustomers: { code: string; name: string }[]; newProducts: { code: string; name: string }[]; customersWithoutLocation: string[]; productsWithoutWeight?: string[] };
+  issues: {
+    newCustomers: { code: string; name: string }[];
+    newProducts: { code: string; name: string }[];
+    customersWithoutLocation: string[];
+    productsWithoutWeight?: string[];
+    /** Pallets: products of the file without cases per pallet (only when the depot has trucks with bays). */
+    productsWithoutPalletFactor?: string[];
+  };
   mapping: Record<string, string>;
   late: { isLate: boolean; reasons: string[] };
   depotCode: string;
@@ -527,7 +534,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
             </Button>
           </div>
         ) : null}
-        {batch ? <ValidationPanel v={batch.v} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} disabled={!dayReady} /> : null}
+        {batch ? <ValidationPanel v={batch.v} slug={slug} fixWeight={fixWeight} lateReason={lateReason} setLateReason={setLateReason} onConfirm={confirmBatch} onCancel={() => setBatch(null)} disabled={!dayReady} /> : null}
         {/* PR9: orders of earlier days that were not delivered, to bring forward to this day. */}
         <CarryOverPanel
           date={day.date}
@@ -828,7 +835,7 @@ function IssueCard({
   );
 }
 
-function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, onCancel, disabled = false }: { v: Validation; fixWeight: string; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void; disabled?: boolean }) {
+function ValidationPanel({ v, slug, fixWeight, lateReason, setLateReason, onConfirm, onCancel, disabled = false }: { v: Validation; slug: string; fixWeight: string; lateReason: string; setLateReason: (s: string) => void; onConfirm: () => void; onCancel: () => void; disabled?: boolean }) {
   const ok = v.errorRows === 0;
   return (
     <div className={`space-y-2 rounded-md border p-3 text-sm ${ok ? 'border-green-300' : 'border-red-300'}`} data-testid="validation-panel">
@@ -846,6 +853,12 @@ function ValidationPanel({ v, fixWeight, lateReason, setLateReason, onConfirm, o
       {v.issues.productsWithoutWeight?.length ? (
         <p className="text-amber-800">
           No weight in the file or on the product for: {v.issues.productsWithoutWeight.join(', ')}. Before optimizing, {fixWeight}, or those lines count as 0 kg.
+        </p>
+      ) : null}
+      {v.issues.productsWithoutPalletFactor?.length ? (
+        <p className="text-destructive" data-testid="intake-no-pallet-factor">
+          No cases per pallet for: {v.issues.productsWithoutPalletFactor.join(', ')}. Trucks with bays are loaded by pallets: OPTIMIZE is refused until
+          they are entered under <a className="underline" href={`/t/${slug}/products`}>Products</a>.
         </p>
       ) : null}
       {v.duplicates.length ? <p className="text-amber-800">{v.duplicates.length} line(s) were already uploaded and will be skipped.</p> : null}

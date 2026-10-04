@@ -9,6 +9,9 @@
  *    its snapshot, stores the pallet units of each row exactly as sent, and its own units are the sum
  *    of its rows' - within the room; the case capacity is not a limit (a 300-case order rides a truck
  *    whose case capacity is 120); the independent check and the web gate verify it;
+ *  - (part B) the plan detail gives each load its pallets, bays, fill and room, each manifest product
+ *    its full pallets + loose cases with the planned factor (adding up to the load), the summary the
+ *    day's pallets; the Excel export works; the products import's Validate only writes nothing;
  *  - LOCK is refused for a load whose stored units are over its bays (an edit in the database);
  *  - a re-plan copies a locked load's units unchanged.
  *
@@ -151,6 +154,38 @@ describe('truck capacity in pallets', () => {
     expect(d.feasibility.status).toBe('VERIFIED');
     expect(d.inputs.palletFactors).toEqual(FACTORS);
     expect((run.feasibilityJson as any).ok).toBe(true);
+  });
+
+  it('part B: the plan, the summary and the Excel show pallets beside the cases (each product in full pallets + loose cases)', async () => {
+    const loads = await prisma.planLoad.findMany({ where: { runId: runV1 }, include: { truck: true } });
+    const d = (await json(await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/plan`))).data;
+    for (const dl of d.loads) {
+      const stored = loads.find((l) => l.id === dl.id)!;
+      expect(dl.palletUnits).toBe(stored.palletUnits);
+      expect([dl.bays, dl.palletFillPct, dl.palletRoomUnits]).toEqual([stored.truck.bays, 95, (stored.truck.bays as number) * 950]);
+      // Orders stay in cases; each product also in full pallets + loose cases with the planned factor.
+      for (const m of dl.manifest) {
+        expect(m.casesPerPallet).toBe(FACTORS[m.productCode]);
+        expect(m.fullPallets * m.casesPerPallet + m.looseCases).toBe(m.cases);
+      }
+      expect(dl.manifest.reduce((s: number, m: any) => s + m.palletUnits, 0)).toBe(dl.palletUnits);
+    }
+    expect(d.summary.palletUnits).toBe(loads.reduce((s, l) => s + (l.palletUnits ?? 0), 0));
+    expect(d.scenarios.find((s: any) => s.chosen).palletRule).toEqual({ fillPct: 95 });
+    const xl = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/export/excel`);
+    expect(xl.status).toBe(200);
+  });
+
+  it('part B: the products import sets cases per pallet (Validate only writes nothing; company admin)', async () => {
+    const fd = new FormData();
+    fd.set('file', new Blob(['code,cases_per_pallet\nJA0.5L,96\nTN1.5L,40\n'], { type: 'text/csv' }), 'products.csv');
+    fd.set('dryRun', '1');
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/products/import`, { method: 'POST', body: fd });
+    expect(r.status).toBe(200);
+    const b = (await json(r)).data;
+    expect([b.dryRun, b.updates, b.unchanged, b.errorRows]).toEqual([true, 1, 1, 0]);
+    const tn = await prisma.product.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'TN1.5L' } });
+    expect(tn.casesPerPallet).toBe(39);
   });
 
   it('LOCK is refused for a load whose stored pallets are over its bays', async () => {

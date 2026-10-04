@@ -26,6 +26,7 @@ import {
 import { normalizeProductCode, productKey, twinsOf } from '../product-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
+import { validPalletFactor } from './pallets';
 import { dateOnly, isAfterCutoff, isoOf, tomorrowIso } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -254,7 +255,7 @@ export async function validateIntake(
     extraAliases: extra,
   });
   const customers = await db.customer.findMany({ select: { id: true, code: true, branchKey: true, name: true, active: true, lat: true, lng: true } });
-  const products = await db.product.findMany({ select: { id: true, code: true, name: true, active: true, weightPerCaseKg: true } });
+  const products = await db.product.findMany({ select: { id: true, code: true, name: true, active: true, weightPerCaseKg: true, casesPerPallet: true } });
   const dates = [...new Set(norm.lines.map((l) => l.deliveryDate))];
   const already = await confirmedLineMap(prisma, tenantId, dates);
   // The same sales orders confirmed for other delivery dates (warning only). Asked for in parts
@@ -288,6 +289,12 @@ export async function validateIntake(
     res.lines = res.lines.filter((l) => !badRows.has(l.row));
   }
 
+  // Pallets (owner decision 4 Oct 2026): a depot with an active truck with bays plans by pallets, so
+  // each product of the file needs its cases per pallet (a new product gets none): listed here like
+  // the weights; OPTIMIZE refuses the day until they have it (PALLET_FACTOR_REQUIRED).
+  const withoutFactor = await productsWithoutPalletFactor(db, depot.id, res.lines, products);
+  if (withoutFactor.length) res.issues.productsWithoutPalletFactor = withoutFactor;
+
   const reasons = await lateReasons(tenantId, cfg, depot.id, dates, opts.now ?? new Date());
   return {
     ...res,
@@ -301,6 +308,28 @@ export async function validateIntake(
     fileDeliveryDates: [...dates].sort(),
     contentHash: sha256(contentFingerprint(norm.lines)),
   };
+}
+
+/**
+ * The product codes of a file's lines without a usable cases per pallet (new products have none),
+ * when the depot has an active truck with bays; [] otherwise.
+ */
+async function productsWithoutPalletFactor(
+  db: ReturnType<typeof tenantDb>,
+  depotId: string,
+  lines: { productCode: string }[],
+  products: { code: string; casesPerPallet: number | null }[],
+): Promise<string[]> {
+  if (!lines.length) return [];
+  const bayTrucks = await db.truck.count({ where: { depotId, active: true, bays: { not: null } } });
+  if (!bayTrucks) return [];
+  const factor = new Map<string, number | null>();
+  for (const p of products) {
+    const k = p.code.trim().toUpperCase();
+    // Case-variant twins: a usable factor on either counts.
+    factor.set(k, factor.get(k) ?? validPalletFactor(p.casesPerPallet));
+  }
+  return [...new Set(lines.filter((l) => !factor.get(l.productCode.trim().toUpperCase())).map((l) => l.productCode.trim()))].sort();
 }
 
 /** STALE_VALIDATION message for a file checked before merged rows kept every priority and note. */

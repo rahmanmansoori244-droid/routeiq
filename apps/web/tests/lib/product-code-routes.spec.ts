@@ -210,16 +210,21 @@ describe('Products: edit (the weight of JA1.5L(6) can be saved)', () => {
 });
 
 describe('the Products dialog: what the Edit call sends', () => {
-  const form = { code: 'JA1.5L(6)', name: 'Jabal 1.5L x6', weightPerCaseKg: '9.6', volumePerCaseL: '9', active: true };
+  const form = { code: 'JA1.5L(6)', name: 'Jabal 1.5L x6', weightPerCaseKg: '9.6', volumePerCaseL: '9', casesPerPallet: '', active: true };
 
   it('edit: no code (the code cannot be changed there, and a saved code is never checked again by accident)', () => {
     const body = productRequestBody('edit', form);
-    expect(body).toEqual({ name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, active: true });
+    expect(body).toEqual({ name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, casesPerPallet: null, active: true });
     expect('code' in body).toBe(false);
   });
 
   it('create: the code as typed (the server tidies and checks it)', () => {
-    expect(productRequestBody('create', { ...form, code: ' TN1.5L  (6) ' })).toEqual({ code: ' TN1.5L  (6) ', name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, active: true });
+    expect(productRequestBody('create', { ...form, code: ' TN1.5L  (6) ' })).toEqual({ code: ' TN1.5L  (6) ', name: 'Jabal 1.5L x6', weightPerCaseKg: 9.6, volumePerCaseL: 9, casesPerPallet: null, active: true });
+  });
+
+  it('cases per pallet: the number typed, or null when the field is empty (pallets)', () => {
+    expect(productRequestBody('edit', { ...form, casesPerPallet: ' 96 ' }).casesPerPallet).toBe(96);
+    expect(productRequestBody('edit', { ...form, casesPerPallet: '  ' }).casesPerPallet).toBeNull();
   });
 });
 

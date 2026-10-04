@@ -76,6 +76,10 @@
  * - Start fresh (owner request 4 Oct 2026, before the pilot): GET /api/tenant/start-fresh (the
  *   preview) and POST (remove the company's test orders, plans and results) are TENANT_ADMIN: the
  *   owner clicks it, the dispatcher (PLANNER) may not delete data.
+ * - Truck capacity in pallets (owner decision 4 Oct 2026), part B: POST /api/products/import (the ERP
+ *   product master with cases per pallet) is TENANT_ADMIN, like editing a product. Roles unchanged on
+ *   POST /api/products and PATCH /api/products/[id] (`casesPerPallet`), PATCH /api/trucks/[id] (`bays`),
+ *   the plan and the exports (pallets beside the cases on loads planned by pallets).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -156,6 +160,7 @@ const EXPECTED: Record<string, string> = {
   'POST /api/products': 'TENANT_ADMIN',
   'PATCH /api/products/[id]': 'TENANT_ADMIN',
   'DELETE /api/products/[id]': 'TENANT_ADMIN',
+  'POST /api/products/import': 'TENANT_ADMIN',
   'GET /api/regions': 'ANY',
   'POST /api/regions': 'TENANT_ADMIN',
   'PATCH /api/regions/[id]': 'TENANT_ADMIN',

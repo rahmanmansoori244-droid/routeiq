@@ -42,6 +42,12 @@ export interface SummaryLoad {
   returnMin?: number;
   cost?: LoadCostBreakdown | null;
   distanceIsEstimated?: boolean;
+  /**
+   * Pallets (owner decision 4 Oct 2026), on a load planned by pallets only: its pallets in 1/1000
+   * pallet and its truck's bays as planned. Absent / null: planned by cases.
+   */
+  palletUnits?: number | null;
+  bays?: number | null;
 }
 
 export interface DailySummary {
@@ -61,6 +67,15 @@ export interface DailySummary {
   /** On the road: departure to return of each load, added up (= onRoadHours). */
   totalHours: number;
   avgUtilizationPct: number;
+  /**
+   * Pallets: the pallets planned on the loads planned by pallets (1/1000 pallet), how many such loads,
+   * and their average bay fill % (pallets / bays, against the physical bays). Null (or absent on a
+   * summary saved before pallets) when no load of the day was planned by pallets: the keys are then
+   * left out, so a day without bays has the summary it always had.
+   */
+  palletUnits?: number | null;
+  palletLoads?: number;
+  avgBayFillPct?: number | null;
   fuelLitres: number | null;
   fuelCost: number;
   operatingCost: number;
@@ -171,6 +186,8 @@ export function computeSummary(input: {
   }));
   const costs = costTotals(costLoads);
   const paidMin = costLoads.reduce((a, l) => a + (l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
+  // Pallets: only the loads planned by pallets (a truck with bays); a day without them says nothing.
+  const bayLoads = loads.filter((l): l is SummaryLoad & { palletUnits: number; bays: number } => typeof l.palletUnits === 'number' && typeof l.bays === 'number' && l.bays > 0);
   return {
     totalOrders: orders.length,
     totalCustomers: new Set(orders.map((o) => o.customerId)).size,
@@ -187,6 +204,13 @@ export function computeSummary(input: {
     totalKm: r1(loads.reduce((a, l) => a + l.distanceKm, 0)),
     totalHours: r1(loads.reduce((a, l) => a + l.durationMin, 0) / 60),
     avgUtilizationPct: loads.length ? r1(loads.reduce((a, l) => a + l.utilizationPct, 0) / loads.length) : 0,
+    ...(bayLoads.length
+      ? {
+          palletUnits: bayLoads.reduce((a, l) => a + l.palletUnits, 0),
+          palletLoads: bayLoads.length,
+          avgBayFillPct: r1(bayLoads.reduce((a, l) => a + l.palletUnits / (l.bays * 10), 0) / bayLoads.length),
+        }
+      : {}),
     fuelLitres: fuelKnown ? r1(loads.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null,
     fuelCost: r3(loads.reduce((a, l) => a + l.fuelCost, 0)),
     operatingCost: r3(loads.reduce((a, l) => a + l.operatingCost, 0)),

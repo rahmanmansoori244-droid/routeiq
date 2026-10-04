@@ -6,6 +6,7 @@
 import { breakLine } from './break-text';
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
+import { loadPallets, palletText } from './pallets';
 import { isSupersededRun } from './plan-status';
 import type { DriverChangeNote } from './summary';
 import { fmtHhmm } from './time';
@@ -123,6 +124,10 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
   masterChanged?: DetailLoad['masterChanged'];
   /** The driver break planned with this load; absent / null = none on this load. */
   break?: DetailLoad['break'];
+  /** Pallets of a load planned by pallets (the header adds "· 11.1 pallets"); absent / null = cases only. */
+  palletUnits?: DetailLoad['palletUnits'];
+  palletRoomUnits?: DetailLoad['palletRoomUnits'];
+  bays?: DetailLoad['bays'];
   stops: (Pick<DetailStop, 'sequence' | 'etaMin' | 'customerName' | 'customerCode' | 'branchCode' | 'cases' | 'lat' | 'lng' | 'split'> & {
     /** Customer data corrected after planning (review F08): printed under the stop, like the PDF sheet. */
     masterChanged?: DetailStop['masterChanged'];
@@ -159,12 +164,14 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
   // Audit E1: from and back to the depot pin the load was planned from, with the note when it moved.
   const route = routeLinks(load.origin ?? plan.depot, stops);
   const depotMoved = (load.masterChanged ?? []).find((c) => c.kind === 'DEPOT');
+  const pallets = loadPallets(load);
   const lines = [
     ...(isSupersededRun({ status: plan.status ?? '', supersededAt: plan.supersededAt }) ? [REPLACED_LINE] : []),
     ...(load.timing && !load.timing.ok ? [TIMES_NOT_VERIFIED_LINE] : []),
     `*Truck ${load.truckCode} - Trip ${load.loadNo} of ${trips}*`,
     `${opts.tenantName ? `${opts.tenantName} · ` : ''}Delivery ${plan.runDate} · Plan v${plan.version}`,
-    `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases`,
+    // Pallets in addition to the cases, only for a load planned by pallets (a truck with bays).
+    `Depart ${fmtHhmm(load.departMin)} · ${stops.length} stops · ${load.cases} cases${pallets ? ` · ${palletText(pallets.units)} pallets` : ''}`,
     ...(depotMoved ? [`! ${depotMoved.text}`] : []),
     // The truck-day's driver link (owner request 4 Oct 2026): only an active link (not revoked or expired).
     ...(opts.driverLinkUrl ? [`${DRIVER_LINK_LINE}: ${opts.driverLinkUrl}`] : []),

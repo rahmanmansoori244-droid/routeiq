@@ -78,7 +78,7 @@ import {
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
-import { groupMissingPalletFactors, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
+import { groupMissingPalletFactors, loadPallets, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
 import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
@@ -1597,6 +1597,20 @@ export function carriedHeldCases(
 }
 
 /**
+ * A stored load's pallets for the daily summary: its units and its truck's bays when it was planned
+ * by pallets (stored units and a snapshot with bays and room, both kept only from the optimizer's
+ * echo); nothing for a load planned by cases.
+ */
+export function summaryPallets(l: { palletUnits?: number | null; truckSnapshotJson: unknown }): { palletUnits: number; bays: number } | Record<string, never> {
+  const p = loadPallets({ palletUnits: l.palletUnits, ...pickPalletFacts(readTruckSnapshot(l.truckSnapshotJson)) });
+  return p ? { palletUnits: p.units, bays: p.bays } : {};
+}
+
+function pickPalletFacts(ts: TruckSnapshot | null) {
+  return { bays: ts?.bays, palletRoomUnits: ts?.palletRoomUnits, palletFillPct: ts?.palletFillPct };
+}
+
+/**
  * Recompute reconciliation, daily summary and (for versions > 1) the change summary.
  * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
  * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
@@ -1695,6 +1709,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       returnMin: l.returnMin,
       cost: readLoadCost(l.costJson),
       distanceIsEstimated: l.distanceIsEstimated,
+      // Pallets only for a load planned by pallets (stored units + the bays and room kept from the echo).
+      ...summaryPallets(l),
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,

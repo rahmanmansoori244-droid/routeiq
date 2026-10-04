@@ -35,6 +35,8 @@ export interface TruckRow {
   maxTripsPerDay?: number | null;
   availableFromMin?: number | null;
   availableToMin?: number | null;
+  /** Pallet positions (owner decision 4 Oct 2026): set = planned by pallets; null = by cases. */
+  bays?: number | null;
   defaultDriverId: string | null;
   active: boolean;
   /** Hired from outside (owner request 4 Oct 2026): a badge only, the planner never reads it. */
@@ -75,6 +77,7 @@ interface FormState {
   maxTripsPerDay: string;
   availableFrom: string; // HH:MM, '' = from the first departure
   availableTo: string; // HH:MM, '' = to the end of the day
+  bays: string; // '' = planned by cases
   defaultDriverId: string;
   active: boolean;
   hired: boolean;
@@ -96,6 +99,7 @@ function buildBlank(depots: DepotOption[]): FormState {
     maxTripsPerDay: '',
     availableFrom: '',
     availableTo: '',
+    bays: '',
     defaultDriverId: NO_DRIVER,
     active: true,
     hired: false,
@@ -138,6 +142,7 @@ export function TruckFormDialog({
           // A time field shows 00:00-23:59: "until midnight" (1440) is 00:00 (audit F25).
           availableFrom: timeInputValue(truck.availableFromMin, 'from'),
           availableTo: timeInputValue(truck.availableToMin, 'until'),
+          bays: truck.bays != null ? String(truck.bays) : '',
           defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
           active: truck.active,
           hired: !!truck.hired,
@@ -183,6 +188,8 @@ export function TruckFormDialog({
       maxTripsPerDay: form.maxTripsPerDay === '' ? null : Number(form.maxTripsPerDay),
       availableFromMin,
       availableToMin,
+      // Empty = planned by cases (the bays are cleared).
+      bays: form.bays.trim() === '' ? null : Number(form.bays),
       defaultDriverId: form.defaultDriverId === NO_DRIVER ? null : form.defaultDriverId,
       active: form.active,
       hired: form.hired,
@@ -286,6 +293,24 @@ export function TruckFormDialog({
                 required
               />
             </div>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="bays">Bays (pallet positions)</Label>
+            <Input
+              id="bays"
+              type="number"
+              min="1"
+              max="40"
+              step="1"
+              value={form.bays}
+              placeholder="not set: planned by cases"
+              onChange={(e) => setForm({ ...form, bays: e.target.value })}
+              className="max-w-[12rem]"
+            />
+            <p className="text-xs text-muted-foreground">
+              With bays the planner fills mixed pallets up to the company&apos;s Pallet fill (95%: 11.4 of 12 bays) and the payload; the case
+              capacity is then not used. Every product on the day&apos;s orders needs its cases per pallet (Products). Empty = planned by cases.
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
