@@ -149,13 +149,20 @@ export default async function DashboardPage({ params }: { params: { slug: string
                 <p className="text-muted-foreground">
                   {k.notDelivered} not delivered · {k.partly} partly · {k.noResult} no result recorded
                 </p>
-                {/* Owner decision 2 (5 Oct 2026): "Camera not working" is allowed but monitored. */}
-                <p className={k.cameraFailed ? 'text-amber-800' : 'text-muted-foreground'} data-testid="dashboard-camera">
-                  Saved without a photo (Camera not working): <b>{cameraShareText(k)}</b>
+                {/* Owner decision 2 (5 Oct 2026): "Camera not working" is allowed but monitored (and a named photo that never arrived counts too). */}
+                <p className={k.withoutPhoto ? 'text-amber-800' : 'text-muted-foreground'} data-testid="dashboard-camera">
+                  Saved without a photo: <b>{cameraShareText(k)}</b>
+                  {k.withoutPhoto ? (
+                    <span className="text-muted-foreground">
+                      {' '}
+                      (Camera not working {k.cameraFailed}
+                      {k.photoNotReceived ? `, photo not received ${k.photoNotReceived}` : ''})
+                    </span>
+                  ) : null}
                   {k.cameraAlertDays ? (
                     <span className="font-medium text-red-700">
                       {' '}
-                      · {countOf(k.cameraAlertDays, 'driver link')} used it {CAMERA_ALERT_PER_DAY} times or more in a day
+                      · {countOf(k.cameraAlertDays, 'driver link')} with {CAMERA_ALERT_PER_DAY} or more in a day
                     </span>
                   ) : null}
                 </p>

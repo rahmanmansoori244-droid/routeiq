@@ -21,14 +21,14 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
    - **Delivered**: tap **Take photo** (a photo of the delivery, up to 3), then **Save**.
    - **Partly delivered**: set the **cases delivered** for each product, choose the **reason**, take a photo, then **Save**.
    - **Not delivered**: choose the **reason** - *Shop closed*, *Customer refused*, *No one to receive*, *Wrong location or could not find*, *No time left*, *Payment issue*, *Damaged goods*, *Missing from the truck*, or *Other* (write the reason) - then **Save**. A photo is optional.
-   - The camera does not open? Tap **Camera not working** to save without a photo. Use it only when the camera really does not work: every use is recorded and checked by the office every day, and a phone that needs it 3 times or more in one day is checked with you. Before your next trip, make sure the phone's camera works and that Chrome or Safari is allowed to use it.
+   - The camera does not open? Tap **Camera not working** to save without a photo. Use it only when the camera really does not work: every use is recorded and checked by the office every day (a correction by the office does not remove it), and a phone that needs it 3 times or more in one day is checked with you. Before your next trip, make sure the phone's camera works and that Chrome or Safari is allowed to use it.
 8. A wrong result? Tap **Change result** (until your trip is closed): the photos you took for *Delivered* or *Partly* count, no new photo is needed. Came back to a shop that was closed and delivered now? Take a photo of the delivery: the photo of the closed shop does not count. If the page says the cases were moved to another day, call your dispatcher.
 
 **At the end of the trip**
 9. Drive back and tap **Back at depot**. Stops without a result are recorded by your dispatcher.
 
 **No signal?**
-10. Everything is **saved on the phone** and sent when there is signal. *Waiting to send (3)* means 3 items are waiting; *All sent* means everything arrived. Do not clear the browser before *All sent*.
+10. Everything is **saved on the phone** and sent when there is signal. *Waiting to send (3)* means 3 items are waiting; *All sent* means everything arrived. Do not clear the browser before *All sent*. A delivery photo that never reaches the office counts like *Camera not working*: open the page where there is signal until *All sent*, and if your dispatcher gives you a new link, open it on the same phone so the waiting photos are sent.
 
 **Problems**
 11. Tap **Call dispatcher**: it calls the dispatcher of your truck's depot. If the page says *This link does not work any more*, *This link was replaced* or *has expired*, ask your dispatcher for a new link and show him the list of results that were not sent.
@@ -63,7 +63,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
    - **«تم التسليم»**: اضغط **«التقط صورة»** (صورة للتسليم، حتى 3 صور) ثم **«حفظ»**.
    - **«تسليم جزئي»**: أدخل **الكراتين المسلَّمة** لكل منتج، واختر **السبب**، والتقط صورة، ثم **«حفظ»**.
    - **«لم يتم التسليم»**: اختر **السبب**: المحل مغلق، العميل رفض الاستلام، لا يوجد من يستلم، الموقع خطأ أو لم أجده، لم يتبقَّ وقت، مشكلة في الدفع، بضاعة تالفة، غير موجود في الشاحنة، أو سبب آخر (اكتب السبب)، ثم **«حفظ»**. الصورة اختيارية.
-   - الكاميرا لا تُفتح؟ اضغط **«الكاميرا لا تعمل»** للحفظ بدون صورة. استخدمه فقط إذا كانت الكاميرا لا تعمل فعلًا: كل استخدام يُسجَّل وتراجعه الإدارة كل يوم، وإذا احتاجه الهاتف 3 مرات أو أكثر في يوم واحد يُفحص معك. قبل رحلتك التالية تأكد أن كاميرا الهاتف تعمل وأن كروم أو سفاري مسموح له باستخدامها.
+   - الكاميرا لا تُفتح؟ اضغط **«الكاميرا لا تعمل»** للحفظ بدون صورة. استخدمه فقط إذا كانت الكاميرا لا تعمل فعلًا: كل استخدام يُسجَّل وتراجعه الإدارة كل يوم (ولا يُلغيه تصحيح الإدارة للنتيجة)، وإذا احتاجه الهاتف 3 مرات أو أكثر في يوم واحد يُفحص معك. قبل رحلتك التالية تأكد أن كاميرا الهاتف تعمل وأن كروم أو سفاري مسموح له باستخدامها.
 8. النتيجة خطأ؟ اضغط **«تغيير النتيجة»** (حتى إغلاق رحلتك): الصور التي التقطتها تُحتسب، ولا حاجة إلى صورة جديدة. إذا قالت الصفحة إن الكراتين نُقلت إلى يوم آخر، اتصل بمسؤول التوزيع.
 
 **في نهاية الرحلة**
@@ -72,7 +72,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 
 **لا توجد إشارة؟**
 
-10. كل شيء **يُحفظ في الهاتف** ويُرسل عند توفر الإشارة. **«بانتظار الإرسال (3)»** تعني أن 3 عناصر تنتظر، و**«تم إرسال الكل»** تعني أن كل شيء وصل. لا تمسح بيانات المتصفح قبل ظهور «تم إرسال الكل».
+10. كل شيء **يُحفظ في الهاتف** ويُرسل عند توفر الإشارة. **«بانتظار الإرسال (3)»** تعني أن 3 عناصر تنتظر، و**«تم إرسال الكل»** تعني أن كل شيء وصل. لا تمسح بيانات المتصفح قبل ظهور «تم إرسال الكل». صورة التسليم التي لا تصل إلى الإدارة تُحتسب مثل «الكاميرا لا تعمل»: افتح الصفحة في مكان فيه إشارة حتى يظهر «تم إرسال الكل»، وإذا أعطاك مسؤول التوزيع رابطًا جديدًا فافتحه على الهاتف نفسه لتُرسل الصور المنتظرة.
 
 **عند أي مشكلة**
 

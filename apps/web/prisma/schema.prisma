@@ -1165,6 +1165,14 @@ model StopVisit {
   noPhotoReason       String? // 'CAMERA_FAILED' (the driver's only exception to "photo required")
   photoKeysJson       Json? // photo keys the result named (shows "photo not received yet")
   photoCount          Int                  @default(0)
+  // The driver's own last Delivered or Partly result (owner decision 2 of 5 Oct 2026), rebuilt from the
+  // events the driver link sent. A result the office records (Record) never changes these four, so a
+  // result the driver saved without a photo stays on the lists, the KPI and the Excel after a correction
+  // (lib/delivery/camera-exceptions.ts).
+  driverResultAt      DateTime?            @db.Timestamptz(3)
+  driverResultOutcome DeliveryOutcome?
+  driverNoPhotoReason String? // 'CAMERA_FAILED': that result was saved with "Camera not working"
+  driverPhotoKeys     Int                  @default(0) // photo keys named by the driver's Delivered / Partly results
   locationPurgedAt    DateTime?            @db.Timestamptz(3) // lat/lng/accuracy erased; distances kept
   createdAt           DateTime             @default(now()) @db.Timestamptz(3)
   updatedAt           DateTime             @updatedAt @db.Timestamptz(3)

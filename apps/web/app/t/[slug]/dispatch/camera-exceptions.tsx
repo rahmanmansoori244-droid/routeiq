@@ -4,13 +4,14 @@ import { CameraOff } from 'lucide-react';
 import { cameraAlertText, cameraExceptionText, cameraHeadline, type CameraException, type CameraLinkAlert } from '@/lib/delivery/camera-exceptions';
 
 /**
- * "Camera not working" (owner decision 2, 5 Oct 2026): the results saved without a photo, every one
- * listed (truck, trip, stop, customer, driver, time), and the driver links that used it 3 times or
- * more that day in red. On the day screen's Deliveries card and on the plan screen. Nothing when
- * there is none.
+ * "Camera not working" (owner decision 2, 5 Oct 2026): the results saved without a photo ("Camera not
+ * working", or a named photo that never arrived), every one listed (truck, trip, stop, customer,
+ * driver, time, what changed after: a stop the office corrected stays listed), and the driver links
+ * with 3 or more that day in red. On the day screen's Deliveries card and on the plan screen. Nothing
+ * when there is none.
  */
 export function CameraExceptions({ list, alerts, testId = 'camera-exceptions' }: { list: readonly CameraException[]; alerts: readonly CameraLinkAlert[]; testId?: string }) {
-  const headline = cameraHeadline(list.length);
+  const headline = cameraHeadline(list.length, list.filter((e) => e.kind === 'PHOTO_NOT_RECEIVED').length);
   if (!headline) return null;
   return (
     <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-2 text-xs" data-testid={testId}>

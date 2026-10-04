@@ -229,12 +229,17 @@ export async function recordOfficeOutcome(
           }
         }
         const v = visit ?? (await ensureVisit(tx, vk, planned, load.id));
+        // What this entry replaces, as the weekly review needs it: whose result it was and whether it
+        // was saved without a photo ("Camera not working"); the driver's own mark stays on the visit.
         const before = {
           outcome: v.outcome ?? null,
           reason: v.reason ?? null,
           casesDelivered: v.casesDelivered ?? null,
           arrivedAt: v.arrivedAt?.toISOString() ?? null,
           departedAt: v.departedAt?.toISOString() ?? null,
+          outcomeSource: v.outcomeSource ?? null,
+          noPhotoReason: v.noPhotoReason ?? null,
+          photoCount: v.photoCount ?? 0,
         };
         if (arrivedAt) {
           await tx.stopEvent.create({ data: { ...base, visitId: v.id, kind: 'ARRIVED', source: 'DISPATCHER', at: arrivedAt, idempotencyKey: `${storedKey}:arrived`, payloadJson: { mode: 'OFFICE' } } });
@@ -271,6 +276,8 @@ export async function recordOfficeOutcome(
               departedAt: rebuilt.departedAt?.toISOString() ?? null,
               correction: !!before.outcome,
               loadStatus: load.status,
+              // The driver's own result saved with "Camera not working": kept on every monitor.
+              ...(rebuilt.driverNoPhotoReason ? { driverNoPhotoReason: rebuilt.driverNoPhotoReason, driverResultOutcome: rebuilt.driverResultOutcome } : {}),
               ...(carryUndone ? { carryUndone: { copyId: carryUndone.copyId, copyDate: carryUndone.copyDate } } : {}),
             } as Prisma.InputJsonValue,
             ...(opts.ip ? { ip: opts.ip } : {}),

@@ -121,7 +121,7 @@ const EN = {
   'pos.UNSUPPORTED': 'Location not available on this phone',
   locationTitle: 'Location',
   locationNotice:
-    'Location: {company} uses your phone\'s location on this page only while it is open: to start the stop timer when you reach a customer, and to record where delivery photos are taken. It keeps the time and place of each arrival, departure, result and photo for {days} days (the photos themselves longer, as delivery proof), never a track of your route. Questions: ask your dispatcher at {company}.',
+    'Location: {company} uses your phone\'s location on this page only while it is open: to start the stop timer when you reach a customer, and to record where delivery photos are taken. It keeps the time and place of each arrival, departure, result and photo for {days} days and the delivery photos themselves for {photoDays} days (delivery proof), never a track of your route. Questions: ask your dispatcher at {company}.',
   ok: 'OK',
   aboutLocation: 'About location',
   loading: 'Loading…',
@@ -273,7 +273,7 @@ const AR: Record<Key, string> = {
   'pos.UNSUPPORTED': 'الموقع غير متاح في هذا الهاتف',
   locationTitle: 'الموقع',
   locationNotice:
-    'الموقع: تستخدم {company} موقع هاتفك في هذه الصفحة فقط أثناء فتحها، لبدء مؤقت التوقف عند وصولك إلى العميل ولتسجيل مكان التقاط صور التسليم. تحفظ وقت ومكان كل وصول ومغادرة ونتيجة وصورة لمدة {days} يومًا (وتُحفظ الصور نفسها مدة أطول كإثبات للتسليم)، ولا تسجّل مسار رحلتك. للاستفسار: اسأل مسؤول التوزيع في {company}.',
+    'الموقع: تستخدم {company} موقع هاتفك في هذه الصفحة فقط أثناء فتحها، لبدء مؤقت التوقف عند وصولك إلى العميل ولتسجيل مكان التقاط صور التسليم. تحفظ وقت ومكان كل وصول ومغادرة ونتيجة وصورة لمدة {days} يومًا، وتحفظ صور التسليم نفسها لمدة {photoDays} يومًا (إثبات التسليم)، ولا تسجّل مسار رحلتك. للاستفسار: اسأل مسؤول التوزيع في {company}.',
   ok: 'حسنًا',
   aboutLocation: 'عن الموقع',
   loading: 'جارٍ التحميل…',

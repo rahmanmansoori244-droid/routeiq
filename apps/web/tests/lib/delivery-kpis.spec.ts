@@ -42,9 +42,10 @@ describe('delivery KPIs (spec 11.4)', () => {
       v({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0, casesPlanned: 30, arrivedAt: at(700), autoServiceMinutes: null }),
       null,
       v({ outcome: null, casesDelivered: null }),
-      v({ noPhotoReason: 'CAMERA_FAILED', outcomeLate: true }),
+      // "Camera not working" is read from the driver's own result (an office correction keeps it).
+      v({ noPhotoReason: 'CAMERA_FAILED', outcomeLate: true, driverResultOutcome: 'DELIVERED', driverNoPhotoReason: 'CAMERA_FAILED' }),
     ]);
-    expect(k).toMatchObject({ stops: 7, withResult: 5, delivered: 2, partly: 1, notDelivered: 2, noResult: 2, cameraFailed: 1, late: 1 });
+    expect(k).toMatchObject({ stops: 7, withResult: 5, delivered: 2, partly: 1, notDelivered: 2, noResult: 2, cameraFailed: 1, withoutPhoto: 1, late: 1 });
     expect(k.deliveredInFullPct).toBe(40);
     expect(k.casesPlanned).toBe(70);
     expect(k.casesDelivered).toBe(24);

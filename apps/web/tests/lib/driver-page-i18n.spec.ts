@@ -58,7 +58,13 @@ describe('the dictionary', () => {
     expect(t('ar', 'stopsLabel', { n: 9 })).toBe('المحطات: 9');
     expect(t('en', 'tripOf', { n: 1, m: 2 })).toBe('Trip 1 of 2');
     expect(t('en', 'noTrips', { truck: 'T05' })).toBe('No trips for truck T05 on {date} (yet).');
-    expect(t('en', 'locationNotice', { company: 'Synthetic Water Co', days: 90 })).toMatch(/^Location: Synthetic Water Co uses .* for 90 days .* never a track of your route\. Questions: ask your dispatcher at Synthetic Water Co\.$/);
+    // Owner decision 1 (5 Oct 2026): both periods are stated (photos 90 days by default), never "longer".
+    const notice = t('en', 'locationNotice', { company: 'Synthetic Water Co', days: 60, photoDays: 90 });
+    expect(notice).toMatch(/^Location: Synthetic Water Co uses .* for 60 days and the delivery photos themselves for 90 days \(delivery proof\), never a track of your route\. Questions: ask your dispatcher at Synthetic Water Co\.$/);
+    expect(notice).not.toMatch(/longer/);
+    const ar = t('ar', 'locationNotice', { company: 'Synthetic Water Co', days: 60, photoDays: 90 });
+    expect(ar).toContain('لمدة 60 يومًا، وتحفظ صور التسليم نفسها لمدة 90 يومًا');
+    expect(ar).not.toContain('أطول');
   });
 
   it('the toggle names the other language in its own script', () => {

@@ -311,6 +311,12 @@ export async function rebuildVisit(tx: Tx, visit: VisitRow, ctx: { dayStart: Dat
       photoCount,
       linesJson: v.lines as unknown as Prisma.InputJsonValue,
       casesDelivered: v.casesDelivered,
+      // The driver's own last Delivered / Partly (never changed by an office result): the monitor of
+      // results saved without a photo reads these (camera-exceptions.ts).
+      driverResultAt: v.driverResultAt,
+      driverResultOutcome: v.driverResultOutcome,
+      driverNoPhotoReason: v.driverNoPhotoReason,
+      driverPhotoKeys: v.driverPhotoKeys,
     },
   });
 }

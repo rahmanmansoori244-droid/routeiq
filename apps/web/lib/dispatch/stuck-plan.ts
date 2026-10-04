@@ -152,7 +152,7 @@ export async function repairEndedJobPlan(
         if (!f) return false;
         const state = stuckPlanState(f.run, f.job, f.otherActiveJob, false);
         // Only a definitely ended job: a lost QUEUED / RUNNING job is the janitor's (5 min after its
-        // last heartbeat) or a supervisor's (Reset stuck plan) to fail.
+        // last heartbeat) or a dispatcher's (Reset stuck plan) to fail.
         if (!state || state.kind === 'JOB_LOST') return false;
         const moved = await tx.runPlan.updateMany({ where: { id: runId, tenantId, status: 'OPTIMIZING', currentJobId: f.run.currentJobId }, data: { status: 'FAILED' } });
         if (moved.count !== 1) return false;

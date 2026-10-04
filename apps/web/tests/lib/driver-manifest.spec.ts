@@ -30,7 +30,7 @@ const input = (over: Partial<ManifestInput> = {}): ManifestInput => ({
   link: { expiresAt: new Date('2026-09-26T08:00:00Z'), uploadUntil: new Date('2026-09-29T08:00:00Z'), generation: 1 },
   truck: { code: 'T01', hired: false },
   casualOf: new Map([['drv1', false]]),
-  settings: { radiusM: 100, photoRequired: true, locationRetentionDays: 90, dispatcherPhone: '+968 9000 0000' },
+  settings: { radiusM: 100, photoRequired: true, locationRetentionDays: 90, photoRetentionDays: 90, dispatcherPhone: '+968 9000 0000' },
   office: null,
   ...over,
 });
@@ -143,7 +143,7 @@ describe('projectManifest', () => {
 
   it('settings and link facts for the page', () => {
     const m = projectManifest([fixture()], input({ truck: { code: 'T01', hired: true } }));
-    expect(m.settings).toEqual({ radiusM: 100, photoRequired: true, maxPhotos: 3, locationRetentionDays: 90, dispatcherPhone: '+968 9000 0000' });
+    expect(m.settings).toEqual({ radiusM: 100, photoRequired: true, maxPhotos: 3, locationRetentionDays: 90, photoRetentionDays: 90, dispatcherPhone: '+968 9000 0000' });
     expect(m.link).toEqual({ expiresAt: '2026-09-26T08:00:00.000Z', uploadUntil: '2026-09-29T08:00:00.000Z', generation: 1 });
     expect(m.truck.hired).toBe(true);
   });

@@ -52,6 +52,36 @@ describe('the result (spec section 8.4 step 1)', () => {
   });
 });
 
+describe("the driver's own last Delivered / Partly (owner decision 2 of 5 Oct 2026: results saved without a photo stay monitored)", () => {
+  const camera = (at: string, outcome = 'DELIVERED') => result(at, outcome, { photoKeys: [], noPhotoReason: 'CAMERA_FAILED' });
+  const office = (at: string, outcome: string | null, payload: Record<string, unknown> = {}) => result(at, outcome, { photoKeys: [], via: 'office', ...payload }, 'DISPATCHER', { userId: 'u1' });
+
+  it('an office Record after "Camera not working" replaces the result but never the driver facts (they come from the driver events only)', () => {
+    for (const fix of [office('11:00', 'DELIVERED'), office('11:00', 'PARTLY_DELIVERED', { reason: 'DAMAGED_GOODS', lines: [{ lineId: 'A', delivered: 20 }] }), office('11:00', 'NOT_DELIVERED', { reason: 'SHOP_CLOSED' }), office('11:00', null)]) {
+      const v = deriveVisit([camera('10:10'), fix], CTX);
+      expect(v.outcomeSource).toBe(fix.payload!.outcome === null ? null : 'DISPATCHER');
+      expect(v.noPhotoReason).toBeNull();
+      expect(v).toMatchObject({ driverResultAt: L('10:10'), driverResultOutcome: 'DELIVERED', driverNoPhotoReason: 'CAMERA_FAILED', driverPhotoKeys: 0 });
+    }
+  });
+
+  it("the driver's later Not delivered or Undo keeps the mark; only his new Delivered / Partly with a photo replaces it", () => {
+    expect(deriveVisit([camera('10:10', 'PARTLY_DELIVERED'), result('10:20', 'NOT_DELIVERED', { reason: 'SHOP_CLOSED' }), result('10:25', null)], CTX)).toMatchObject({
+      outcome: null,
+      driverResultOutcome: 'PARTLY_DELIVERED',
+      driverNoPhotoReason: 'CAMERA_FAILED',
+    });
+    const withPhoto = deriveVisit([camera('10:10'), result('10:30', 'DELIVERED', { photoKeys: ['k1'] }), office('11:00', 'DELIVERED')], CTX);
+    expect(withPhoto).toMatchObject({ driverResultAt: L('10:30'), driverResultOutcome: 'DELIVERED', driverNoPhotoReason: null, driverPhotoKeys: 1 });
+  });
+
+  it('counts the photo keys of every driver Delivered / Partly (not a Not delivered, not the office); nothing without a driver result', () => {
+    const v = deriveVisit([result('10:00', 'NOT_DELIVERED', { reason: 'SHOP_CLOSED', photoKeys: ['shutter'] }), result('10:10', 'DELIVERED', { photoKeys: ['k1', 'k2'] }), result('10:20', 'PARTLY_DELIVERED', { photoKeys: ['k2', 'k3'], lines: [] })], CTX);
+    expect(v).toMatchObject({ driverResultAt: L('10:20'), driverResultOutcome: 'PARTLY_DELIVERED', driverPhotoKeys: 3 });
+    expect(deriveVisit([office('11:00', 'DELIVERED', { noPhotoReason: 'CAMERA_FAILED' })], CTX)).toMatchObject({ driverResultAt: null, driverResultOutcome: null, driverNoPhotoReason: null, driverPhotoKeys: 0 });
+  });
+});
+
 describe('cycles, arrival and departure (steps 2-5)', () => {
   it('chooses the cycle holding the result and its earliest arrival; a departure before any arrival is ignored', () => {
     const evs = [depart('09:00'), arrive('09:30'), depart('09:35'), arrive('10:00'), arrive('10:01'), depart('10:30'), result('10:20', 'DELIVERED')];

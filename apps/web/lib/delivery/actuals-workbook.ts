@@ -6,10 +6,13 @@
  * KPIs of spec section 11.4) and a Reasons sheet. Per-driver performance data: PLANNER and above.
  * Money never appears. exceljs, like the dispatch workbook.
  *
- * "Camera not working" (owner decision 2, 5 Oct 2026): a clear column "Saved without a photo (Camera
- * not working)" (Yes, the row filled amber), the driver link's count of them that day (3 or more in
- * red), the Summary's count, share and alert days, and a "Without photo" sheet listing each one
- * (date, depot, truck, trip, stop, customer, driver, time) for the weekly review.
+ * Results saved without a photo (owner decision 2, 5 Oct 2026: "Camera not working", and a named
+ * photo that never arrived): a clear column "Saved without a photo" (Yes, the row filled amber) with
+ * the reason in "No photo reason" and what changed after (for example "corrected by office: Not
+ * delivered": an office Record keeps the row marked), the driver link's count of them that day (3 or
+ * more in red), the Summary's counts, share and alert days, and a "Without photo" sheet listing each
+ * one (date, depot, truck, trip, stop, customer, driver, why, the driver's result and its time, what
+ * changed after) for the weekly review.
  */
 import ExcelJS from 'exceljs';
 import type { Prisma } from '@prisma/client';
@@ -17,8 +20,8 @@ import { prisma } from '../db';
 import { DEFAULT_TZ, daysBetween, fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
 import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
-import { cameraCountsByTruckDay, keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
-import { CAMERA_ALERT_PER_DAY, cameraShareText, isCameraException, truckDayKey } from './camera-exceptions';
+import { cameraCountsByTruckDay, keyOfVisit, kpiVisitOf, liveRunsInRange, loadsOfRuns, outcomeSettings, photoWaitOverOf, stopsOfLoads, truckDaysWithLinkOrVisit, visitKey, visitsInRange } from './day-results';
+import { CAMERA_ALERT_PER_DAY, cameraShareText, noPhotoAfterText, noPhotoKind, truckDayKey } from './camera-exceptions';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -57,9 +60,15 @@ export interface ActualsRow {
   broughtForwardTo: string | null;
   late: string;
   photos: number;
+  /** "Camera failed (driver)", "Photo not received", "Office result" (the office recorded it without a photo). */
   noPhotoReason: string | null;
-  /** "Yes": Delivered / Partly saved without a photo ("Camera not working"). */
+  /** "Yes": the driver's Delivered / Partly saved without a photo ("Camera not working", or the photo never arrived). */
   cameraException: string;
+  /** For a row saved without a photo: what changed after the driver's result ("corrected by office: Not delivered"). */
+  noPhotoAfter: string | null;
+  /** For a row saved without a photo: the driver's result and its time (the "Without photo" sheet). */
+  driverResult: string | null;
+  driverResultTime: string | null;
   /** Results of this truck-day (its driver link, every depot) saved without a photo. */
   linkCameraCount: number;
   photoLocation: string | null;
@@ -104,7 +113,8 @@ export const ACTUALS_COLUMNS: { key: keyof ActualsRow; header: string; width: nu
   { key: 'late', header: 'Recorded after the trip closed', width: 9 },
   { key: 'photos', header: 'Photos', width: 6 },
   { key: 'noPhotoReason', header: 'No photo reason', width: 16 },
-  { key: 'cameraException', header: 'Saved without a photo (Camera not working)', width: 12 },
+  { key: 'cameraException', header: 'Saved without a photo', width: 12 },
+  { key: 'noPhotoAfter', header: 'Saved without a photo: changed after', width: 20 },
   { key: 'linkCameraCount', header: 'Driver link: saved without a photo that day', width: 12 },
   { key: 'photoLocation', header: 'Photo location', width: 11 },
   { key: 'photoDistanceM', header: 'Photo distance from pin (m)', width: 10 },
@@ -174,14 +184,17 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
     ['Arrived inside the window', pct(k.insideWindowPct)],
     ['Unloading: measured minus planned, average min', k.avgUnloadDeltaMin === null ? '-' : k.avgUnloadDeltaMin],
     ['Saved without a photo (Camera not working)', k.cameraFailed],
+    ['Saved without a photo (photo not received)', k.photoNotReceived],
     ['Saved without a photo, of the delivered results', cameraShareText(k)],
-    [`Driver links that used it ${CAMERA_ALERT_PER_DAY} times or more in a day`, k.cameraAlertDays],
+    [`Driver links with ${CAMERA_ALERT_PER_DAY} or more in a day`, k.cameraAlertDays],
     ['Recorded after the trip closed', k.late],
   ];
   for (const [a, b] of lines) sum.addRow({ a, b });
   sum.addRow({});
   sum.addRow({ a: 'Only observed arrivals count for "inside the window": an arrival found when the page was opened at the shop, or an unverified timing, does not.' });
   sum.addRow({ a: '"Camera not working" lets the driver save Delivered or Partly without a photo. Each one is on the "Without photo" sheet: check them daily, and review the drivers who use it often every week.' });
+  sum.addRow({ a: '"Photo not received": the driver\'s result named a photo that never arrived (the link was reissued or stopped, the trip was completed an hour before, or the 3 days to send it are over). It counts like "Camera not working".' });
+  sum.addRow({ a: 'A result the office corrected (Record) stays on the "Without photo" sheet: the driver\'s result is shown with what changed after.' });
 
   // Every result saved without a photo, for the daily check and the weekly review (owner decision 2).
   const wp = wb.addWorksheet('Without photo', { views: [{ state: 'frozen', ySplit: 1 }] });
@@ -194,8 +207,10 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
     { header: 'Customer code', key: 'customerCode', width: 12 },
     { header: 'Customer', key: 'customer', width: 26 },
     { header: 'Driver', key: 'driver', width: 16 },
-    { header: 'Result', key: 'result', width: 14 },
-    { header: 'Result time', key: 'resultTime', width: 8 },
+    { header: 'Why', key: 'noPhotoReason', width: 16 },
+    { header: "Driver's result", key: 'driverResult', width: 14 },
+    { header: 'Saved at', key: 'driverResultTime', width: 8 },
+    { header: 'Changed after', key: 'noPhotoAfter', width: 24 },
     { header: 'Driver link: saved without a photo that day', key: 'linkCameraCount', width: 12 },
   ];
   wp.getRow(1).font = { bold: true };
@@ -235,6 +250,7 @@ export function actualsRowOf(
         outcomeAt: Date | null;
         reasonNote: string | null;
         recordedBy: string | null;
+        driverResultAt?: Date | string | null;
       })
     | null,
   photos: readonly { positionStatus: string; distanceM: number | null }[],
@@ -254,6 +270,9 @@ export function actualsRowOf(
   const okPhotos = photos.filter((p) => p.positionStatus === 'OK' && p.distanceM !== null);
   const status = photos.length ? (okPhotos.length ? 'OK' : (photos[0]!.positionStatus ?? '')) : null;
   const notDelivered = v?.outcome && v.casesDelivered !== null ? Math.max(0, v.casesPlanned - v.casesDelivered) : null;
+  // Saved without a photo: the driver's own result (an office correction keeps the mark).
+  const kind = v ? noPhotoKind(v, !!v.photoWaitOver) : null;
+  const driverAt = kind && v?.driverResultAt ? new Date(v.driverResultAt) : null;
   // The same figure as the plan screen's Unload cell: automatic, else the office's or the manual times.
   const toDate = (d: Date | string | null | undefined) => (d ? new Date(d) : null);
   const actual = v
@@ -302,8 +321,18 @@ export function actualsRowOf(
     broughtForwardTo: stop.broughtForwardTo,
     late: yesNo(!!v?.outcomeLate),
     photos: photos.length,
-    noPhotoReason: v?.noPhotoReason === 'CAMERA_FAILED' ? 'Camera failed (driver)' : v?.outcome && v.outcome !== 'NOT_DELIVERED' && !photos.length && v.outcomeSource === 'DISPATCHER' ? 'Office result' : null,
-    cameraException: yesNo(!!v && isCameraException(v)),
+    noPhotoReason:
+      kind === 'CAMERA_FAILED'
+        ? 'Camera failed (driver)'
+        : kind === 'PHOTO_NOT_RECEIVED'
+          ? 'Photo not received'
+          : v?.outcome && v.outcome !== 'NOT_DELIVERED' && !photos.length && v.outcomeSource === 'DISPATCHER'
+            ? 'Office result'
+            : null,
+    cameraException: yesNo(!!kind),
+    noPhotoAfter: kind && v ? noPhotoAfterText({ driverResultOutcome: v.driverResultOutcome, outcome: v.outcome, outcomeSource: v.outcomeSource, photoCount: photos.length }) : null,
+    driverResult: kind && v?.driverResultOutcome ? (OUTCOME_LABEL[v.driverResultOutcome] ?? v.driverResultOutcome) : null,
+    driverResultTime: driverAt ? fmtHhmm(localMinutes(driverAt, tz)) : null,
     linkCameraCount: stop.linkCameraCount ?? 0,
     photoLocation: status ? (POSITION_TEXT[status] ?? status) : null,
     photoDistanceM: okPhotos.length ? Math.round(okPhotos[0]!.distanceM!) : null,
@@ -314,8 +343,9 @@ export function actualsRowOf(
 }
 
 /** The rows and KPIs for [from, to] (31 days at most), one depot or all. */
-export async function readActuals(tenantId: string, range: { from: string; to: string }, depotId: string | null, opts: { db?: Db } = {}): Promise<{ rows: ActualsRow[]; kpis: DeliveryKpis; depot: string | null; tz: string }> {
+export async function readActuals(tenantId: string, range: { from: string; to: string }, depotId: string | null, opts: { db?: Db; now?: Date } = {}): Promise<{ rows: ActualsRow[]; kpis: DeliveryKpis; depot: string | null; tz: string }> {
   const db = opts.db ?? prisma;
+  const now = opts.now ?? new Date();
   if (daysBetween(range.from, range.to) + 1 > ACTUALS_MAX_DAYS || range.to < range.from) throw new Error('range');
   const set = await outcomeSettings(db, tenantId);
   const runs = await liveRunsInRange(db, tenantId, range.from, range.to, depotId);
@@ -324,7 +354,10 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
   const depotCode = new Map(depots.map((d) => [d.id, d.code]));
   if (!loads.length) return { rows: [], kpis: deliveryKpis([]), depot: depotId ? (depotCode.get(depotId) ?? null) : null, tz: set.tz };
   const [stopsBy, visits] = await Promise.all([stopsOfLoads(db, loads), visitsInRange(db, tenantId, range.from, range.to, depotId)]);
-  const scoped = await truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits);
+  const [scoped, waitOver] = await Promise.all([
+    truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits),
+    photoWaitOverOf(db, tenantId, range.from, range.to, visits, { now, loads }),
+  ]);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
   const visitIds = visits.map((v) => v.id);
   const [photos, users, carried, cameraCounts] = await Promise.all([
@@ -338,7 +371,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
       return ids.length ? db.order.findMany({ where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } }, select: { id: true, carriedTo: { select: { deliveryDate: true } } } }) : [];
     })(),
     // Per driver link (truck-day), every depot: a truck that loads at two depots has one link.
-    visits.some(isCameraException) ? cameraCountsByTruckDay(db, tenantId, range.from, range.to) : new Map<string, number>(),
+    visits.some((v) => noPhotoKind(v, waitOver.has(v.id))) ? cameraCountsByTruckDay(db, tenantId, range.from, range.to, { now }) : new Map<string, number>(),
   ]);
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const carriedTo = new Map(carried.map((c) => [c.id, c.carriedTo ? isoOf(c.carriedTo.deliveryDate) : null]));
@@ -348,7 +381,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
     const inScope = inOutcomeScope(l.date, set.sinceLocal, scoped.has(`${l.date}|${l.truckId}`));
     for (const s of stopsBy.get(l.id) ?? []) {
       const v = byKey.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence })) ?? null;
-      const kv = v ? kpiVisitOf(v, set.tz) : null;
+      const kv = v ? kpiVisitOf(v, set.tz, waitOver.has(v.id)) : null;
       if (inScope) kpiStops.push(kv);
       const recordedBy = v?.outcome ? (v.outcomeSource === 'DISPATCHER' ? (v.outcomeById ? (userName.get(v.outcomeById) ?? 'Office') : 'Office') : 'Driver link') : null;
       rows.push(
@@ -386,6 +419,7 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
                 outcomeAt: v.outcomeAt,
                 reasonNote: v.reasonNote,
                 recordedBy,
+                driverResultAt: v.driverResultAt,
               }
             : null,
           v ? photos.filter((p) => p.visitId === v.id) : [],

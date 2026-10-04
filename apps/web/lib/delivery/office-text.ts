@@ -94,11 +94,15 @@ export function shortfallText(s: { outcome: string; notDelivered: number; planne
   return `Not delivered: ${why}`;
 }
 
-/** "no photo: camera failed (driver)" / "no photo (office)" / null when photos exist or are not needed. */
-export function noPhotoText(v: { outcome: string | null; noPhotoReason: string | null; outcomeSource: string | null; photoCount: number }): string | null {
+/**
+ * "no photo: camera failed (driver)" / "no photo: camera failed (driver), corrected by office" (the
+ * office recorded over the driver's "Camera not working": the mark stays) / "no photo (office)" / null
+ * when photos exist or are not needed.
+ */
+export function noPhotoText(v: { outcome: string | null; noPhotoReason: string | null; outcomeSource: string | null; photoCount: number; driverNoPhotoReason?: string | null }): string | null {
   if (!v.outcome || v.outcome === 'NOT_DELIVERED' || v.photoCount > 0) return null;
-  if (v.noPhotoReason === 'CAMERA_FAILED') return 'no photo: camera failed (driver)';
-  if (v.outcomeSource === 'DISPATCHER') return 'no photo (office)';
+  if (v.noPhotoReason === 'CAMERA_FAILED' && v.outcomeSource !== 'DISPATCHER') return 'no photo: camera failed (driver)';
+  if (v.outcomeSource === 'DISPATCHER') return v.driverNoPhotoReason === 'CAMERA_FAILED' ? 'no photo: camera failed (driver), corrected by office' : 'no photo (office)';
   return null;
 }
 

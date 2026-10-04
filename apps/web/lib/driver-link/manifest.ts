@@ -19,7 +19,7 @@ import { DEFAULT_TZ } from '../dispatch/time';
 import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
 import { dispatcherPhoneFor } from './dispatcher-phone';
-import { DEFAULT_LOCATION_RETENTION_DAYS } from '../settings-fields';
+import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import type { DriverManifest, DriverResults, LoadStatusName, ManifestLoad, ManifestOrder, ManifestStop } from './manifest-types';
 
 export const MANIFEST_MEMO_MS = 60_000;
@@ -86,7 +86,7 @@ export interface ManifestInput {
   truck: { code: string; hired: boolean };
   /** Casual (daily) flag per driver id of the truck-day's loads. */
   casualOf: ReadonlyMap<string, boolean>;
-  settings: { radiusM: number; photoRequired: boolean; locationRetentionDays: number; dispatcherPhone: string | null };
+  settings: { radiusM: number; photoRequired: boolean; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
   office: { userName: string } | null;
 }
 
@@ -187,7 +187,7 @@ export async function driverManifest(args: {
     prisma.tenant.findFirst({ where: { id: tenantId }, select: { name: true } }),
     prisma.tenantConfig.findFirst({
       where: { tenantId },
-      select: { timezone: true, geofenceRadiusM: true, photoProofRequired: true, locationRetentionDays: true, dispatcherPhone: true },
+      select: { timezone: true, geofenceRadiusM: true, photoProofRequired: true, locationRetentionDays: true, photoRetentionDays: true, dispatcherPhone: true },
     }),
     prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true, hired: true } }),
     truckDayLoads(prisma, tenantId, truckId, date),
@@ -211,6 +211,8 @@ export async function driverManifest(args: {
       radiusM: Math.min(500, Math.max(50, cfg?.geofenceRadiusM ?? 100)),
       photoRequired: cfg?.photoProofRequired ?? true,
       locationRetentionDays: cfg?.locationRetentionDays ?? DEFAULT_LOCATION_RETENTION_DAYS,
+      // The first-open location notice states both periods (photos 90 days by default, owner decision 1).
+      photoRetentionDays: cfg?.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS,
       dispatcherPhone: dispatcherPhoneFor(dayLoads, new Map(depots.map((d) => [d.id, d.dispatcherPhone])), cfg?.dispatcherPhone ?? null),
     },
     office: args.office,

@@ -42,8 +42,17 @@ describe('the actuals rows (spec 11.3)', () => {
   it('a found (not observed) arrival does not count for the window; a late result, a camera failure and a missing result say so', () => {
     const found = actualsRowOf(stop, visit({ arrivalObserved: false, autoServiceMinutes: null, autoArrivedAt: null, autoBasis: null }) as never, [], TZ);
     expect(found).toMatchObject({ arrivalBy: 'Auto, not observed', insideWindow: '-', earlyLateMin: null, actualUnloadMin: null, waitingMin: null });
-    const late = actualsRowOf(stop, visit({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', casesDelivered: 34, outcomeLate: true, noPhotoReason: 'CAMERA_FAILED' }) as never, [], TZ);
-    expect(late).toMatchObject({ result: 'Partly delivered', reason: 'Damaged goods', casesDelivered: 34, casesNotDelivered: 6, late: 'Yes', noPhotoReason: 'Camera failed (driver)', cameraException: 'Yes', photos: 0 });
+    const late = actualsRowOf(
+      stop,
+      visit({ outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', casesDelivered: 34, outcomeLate: true, noPhotoReason: 'CAMERA_FAILED', driverResultOutcome: 'PARTLY_DELIVERED', driverNoPhotoReason: 'CAMERA_FAILED', driverResultAt: at(500) }) as never,
+      [],
+      TZ,
+    );
+    expect(late).toMatchObject({ result: 'Partly delivered', reason: 'Damaged goods', casesDelivered: 34, casesNotDelivered: 6, late: 'Yes', noPhotoReason: 'Camera failed (driver)', cameraException: 'Yes', noPhotoAfter: null, driverResult: 'Partly delivered', driverResultTime: '08:20', photos: 0 });
+    // A named photo that never arrived (its wait is over) is saved without a photo too.
+    const lost = actualsRowOf(stop, visit({ driverResultOutcome: 'DELIVERED', driverPhotoKeys: 1, photoCount: 0, photoWaitOver: true }) as never, [], TZ);
+    expect(lost).toMatchObject({ noPhotoReason: 'Photo not received', cameraException: 'Yes', photos: 0 });
+    expect(actualsRowOf(stop, visit({ driverResultOutcome: 'DELIVERED', driverPhotoKeys: 1, photoCount: 0, photoWaitOver: false }) as never, [], TZ)).toMatchObject({ noPhotoReason: null, cameraException: 'No' });
     const none = actualsRowOf(stop, null, [], TZ);
     expect(none).toMatchObject({ result: 'No result', casesPlanned: 40, casesDelivered: null, insideWindow: '-', recordedBy: null });
     const office = actualsRowOf(stop, visit({ outcomeSource: 'DISPATCHER', recordedBy: 'Dispatcher Ali', arrivalSource: 'DISPATCHER' }) as never, [], TZ);
@@ -84,7 +93,7 @@ describe('the actuals rows (spec 11.3)', () => {
     const headers = (s.getRow(1).values as unknown[]).slice(1);
     expect(headers).toEqual(ACTUALS_COLUMNS.map((c) => c.header));
     expect(headers).toEqual(
-      expect.arrayContaining(['Arrival by', 'Inside window', 'Recorded after the trip closed', 'No photo reason', 'Saved without a photo (Camera not working)', 'Unverified timing', 'Hired', 'Daily driver']),
+      expect.arrayContaining(['Arrival by', 'Inside window', 'Recorded after the trip closed', 'No photo reason', 'Saved without a photo', 'Saved without a photo: changed after', 'Unverified timing', 'Hired', 'Daily driver']),
     );
     expect(s.rowCount).toBe(3);
     const all = wb.worksheets.flatMap((w) => w.getSheetValues().flat().map(String)).join(' ').toLowerCase();

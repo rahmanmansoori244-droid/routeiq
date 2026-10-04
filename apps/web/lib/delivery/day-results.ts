@@ -12,10 +12,11 @@ import type { Prisma, StopVisit } from '@prisma/client';
 import { prisma } from '../db';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, localDateIso, localMinutes, zonedDayStart } from '../dispatch/time';
 import { lateDispatchNotes } from '../driver-link/plan-notes';
+import { linkUploadUntil } from '../driver-link/token';
 import { plannedStopFromRows } from './planned-stop';
 import type { VisitLine } from './visit';
 import { deliveryKpis, inOutcomeScope, type DeliveryKpis, type KpiVisit } from './kpis';
-import { cameraExceptionOf, cameraLinkAlerts, isCameraException, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
+import { awaitsPhoto, cameraExceptionOf, cameraLinkAlerts, isCameraException, noPhotoKind, photoWaitOver, sortCameraExceptions, truckDayKey, type CameraException, type CameraLinkAlert } from './camera-exceptions';
 
 type Db = Prisma.TransactionClient | typeof prisma;
 
@@ -310,8 +311,8 @@ export function rangeEnding(to: string, days: number): { from: string; to: strin
   return { from: addDaysIso(to, -(days - 1)), to };
 }
 
-/** A stored visit as the KPIs read it (dayStart from the company's time zone). */
-export function kpiVisitOf(v: StopVisit, tz: string): KpiVisit {
+/** A stored visit as the KPIs read it (dayStart from the company's time zone). `photoWaitOver`: photoWaitOverOf has the visit. */
+export function kpiVisitOf(v: StopVisit, tz: string, photoWaitOver = false): KpiVisit {
   const date = isoOf(v.deliveryDate);
   return {
     outcome: v.outcome,
@@ -332,6 +333,11 @@ export function kpiVisitOf(v: StopVisit, tz: string): KpiVisit {
     deliveryDate: date,
     dayStart: zonedDayStart(date, tz),
     truckId: v.truckId,
+    driverResultOutcome: v.driverResultOutcome,
+    driverNoPhotoReason: v.driverNoPhotoReason,
+    driverPhotoKeys: v.driverPhotoKeys,
+    photoCount: v.photoCount,
+    photoWaitOver,
   };
 }
 
@@ -339,7 +345,7 @@ export function kpiVisitOf(v: StopVisit, tz: string): KpiVisit {
  * The KPIs of the dispatched stops of the plans in use in [from, to] (one depot or all), in outcome
  * scope (spec section 11.4).
  */
-export async function rangeKpis(db: Db, tenantId: string, range: { from: string; to: string }, depotId?: string | null): Promise<DeliveryKpis> {
+export async function rangeKpis(db: Db, tenantId: string, range: { from: string; to: string }, depotId?: string | null, opts: { now?: Date } = {}): Promise<DeliveryKpis> {
   if (range.to < range.from) return deliveryKpis([]);
   const set = await outcomeSettings(db, tenantId);
   const runs = await liveRunsInRange(db, tenantId, range.from, range.to, depotId);
@@ -349,7 +355,10 @@ export async function rangeKpis(db: Db, tenantId: string, range: { from: string;
     db.routeAssignment.findMany({ where: { loadId: { in: loads.map((l) => l.id) } }, select: { loadId: true, sequenceInTruck: true } }),
     visitsInRange(db, tenantId, range.from, range.to, depotId),
   ]);
-  const scoped = await truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits);
+  const [scoped, waitOver] = await Promise.all([
+    truckDaysWithLinkOrVisit(db, tenantId, range.from, range.to, visits),
+    photoWaitOverOf(db, tenantId, range.from, range.to, visits, { now: opts.now ?? new Date(), loads }),
+  ]);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
   const loadOf = new Map(loads.map((l) => [l.id, l]));
   const seen = new Set<string>();
@@ -361,24 +370,69 @@ export async function rangeKpis(db: Db, tenantId: string, range: { from: string;
     if (seen.has(k)) continue;
     seen.add(k);
     const v = byKey.get(k);
-    stops.push(v ? kpiVisitOf(v, set.tz) : null);
+    stops.push(v ? kpiVisitOf(v, set.tz, waitOver.has(v.id)) : null);
   }
   return deliveryKpis(stops);
 }
 
+type WaitVisit = Pick<StopVisit, 'id' | 'depotId' | 'deliveryDate' | 'truckId' | 'loadNo' | 'driverResultAt' | 'driverResultOutcome' | 'driverNoPhotoReason' | 'driverPhotoKeys' | 'photoCount'>;
+
 /**
- * "Camera not working" (owner decision 2, 5 Oct 2026): the results saved without a photo per truck-day
- * (`date|truckId`, one driver link) in [from, to], every depot (a truck that loads at two depots has
- * one link for the day).
+ * "Photo not received" (owner decision 2, review of 5 Oct 2026): the ids of the visits whose driver
+ * result named a photo that has not arrived (awaitsPhoto) and can no longer arrive (photoWaitOver:
+ * the truck-day's link reissued or revoked after the result, past its upload time, or the load
+ * COMPLETED for an hour). No query when no visit waits for a photo. `loads`: the dispatched loads the
+ * visits belong to when the caller has them; else the plans in use of [from, to], every depot.
  */
-export async function cameraCountsByTruckDay(db: Db, tenantId: string, from: string, to: string): Promise<Map<string, number>> {
+export async function photoWaitOverOf(db: Db, tenantId: string, from: string, to: string, visits: readonly WaitVisit[], opts: { now: Date; loads?: readonly RoadLoad[] }): Promise<Set<string>> {
+  const waiting = visits.filter(awaitsPhoto);
+  if (!waiting.length) return new Set();
+  const [links, loads] = await Promise.all([
+    db.driverLink.findMany({
+      where: { tenantId, deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, truckId: { in: [...new Set(waiting.map((v) => v.truckId))] } },
+      select: { truckId: true, deliveryDate: true, issuedAt: true, revokedAt: true, expiresAt: true },
+    }),
+    opts.loads ?? (async () => loadsOfRuns(db, tenantId, await liveRunsInRange(db, tenantId, from, to)))(),
+  ]);
+  const linkOf = new Map(links.map((x) => [truckDayKey(isoOf(x.deliveryDate), x.truckId), x]));
+  const loadOf = new Map(loads.map((l) => [backKey(l), l]));
+  const out = new Set<string>();
+  for (const v of waiting) {
+    const date = isoOf(v.deliveryDate);
+    const link = linkOf.get(truckDayKey(date, v.truckId));
+    const load = loadOf.get(backKey({ depotId: v.depotId, date, truckId: v.truckId, loadNo: v.loadNo })) ?? null;
+    const over = photoWaitOver({
+      resultAt: v.driverResultAt,
+      link: link ? { issuedAt: link.issuedAt, revokedAt: link.revokedAt, uploadUntil: linkUploadUntil(link.expiresAt) } : null,
+      load: load ? { status: load.status, statusChangedAt: load.statusChangedAt } : null,
+      now: opts.now,
+    });
+    if (over) out.add(v.id);
+  }
+  return out;
+}
+
+/**
+ * Results saved without a photo (owner decision 2, 5 Oct 2026: "Camera not working", and a named photo
+ * that never arrived) per truck-day (`date|truckId`, one driver link) in [from, to], every depot (a
+ * truck that loads at two depots has one link for the day). Read from the driver's own results: an
+ * office correction keeps a stop counted.
+ */
+export async function cameraCountsByTruckDay(db: Db, tenantId: string, from: string, to: string, opts: { now?: Date } = {}): Promise<Map<string, number>> {
   const rows = await db.stopVisit.findMany({
-    where: { tenantId, deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) }, noPhotoReason: 'CAMERA_FAILED', outcome: { in: ['DELIVERED', 'PARTLY_DELIVERED'] } },
-    select: { deliveryDate: true, truckId: true, outcome: true, noPhotoReason: true },
+    // Only the candidates: "Camera not working", or a named photo with no photo arrived (noPhotoKind decides).
+    where: {
+      tenantId,
+      deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
+      driverResultOutcome: { in: ['DELIVERED', 'PARTLY_DELIVERED'] },
+      OR: [{ driverNoPhotoReason: 'CAMERA_FAILED' }, { driverPhotoKeys: { gte: 1 }, photoCount: 0 }],
+    },
+    select: { id: true, depotId: true, deliveryDate: true, truckId: true, loadNo: true, driverResultAt: true, driverResultOutcome: true, driverNoPhotoReason: true, driverPhotoKeys: true, photoCount: true },
   });
+  const waitOver = await photoWaitOverOf(db, tenantId, from, to, rows, { now: opts.now ?? new Date() });
   const out = new Map<string, number>();
   for (const r of rows) {
-    if (!isCameraException(r)) continue;
+    if (!noPhotoKind(r, waitOver.has(r.id))) continue;
     const k = truckDayKey(isoOf(r.deliveryDate), r.truckId);
     out.set(k, (out.get(k) ?? 0) + 1);
   }
@@ -387,21 +441,24 @@ export async function cameraCountsByTruckDay(db: Db, tenantId: string, from: str
 
 /**
  * The day's results saved without a photo on the dispatched stops of a depot's plan in use (stop,
- * customer, driver, time), and the driver links that used it 3 times or more that day.
+ * customer, driver, time, why, what changed after), and the driver links with 3 or more that day.
  */
-export async function dayCameraExceptions(db: Db, tenantId: string, depotId: string, date: string, tz: string): Promise<{ list: CameraException[]; alerts: CameraLinkAlert[] }> {
-  const visits = (await visitsInRange(db, tenantId, date, date, depotId)).filter(isCameraException);
-  if (!visits.length) return { list: [], alerts: [] };
+export async function dayCameraExceptions(db: Db, tenantId: string, depotId: string, date: string, tz: string, opts: { now?: Date } = {}): Promise<{ list: CameraException[]; alerts: CameraLinkAlert[] }> {
+  const now = opts.now ?? new Date();
+  const candidates = (await visitsInRange(db, tenantId, date, date, depotId)).filter((v) => isCameraException(v) || awaitsPhoto(v));
+  if (!candidates.length) return { list: [], alerts: [] };
   const runs = await liveRunsInRange(db, tenantId, date, date, depotId);
-  const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
-  const loads = (await loadsOfRuns(db, tenantId, runs)).filter((l) => visits.some((v) => v.truckId === l.truckId && v.loadNo === l.loadNo && v.depotId === l.depotId));
+  const loads = (await loadsOfRuns(db, tenantId, runs)).filter((l) => candidates.some((v) => v.truckId === l.truckId && v.loadNo === l.loadNo && v.depotId === l.depotId));
   if (!loads.length) return { list: [], alerts: [] };
-  const [stops, counts] = await Promise.all([stopsOfLoads(db, loads), cameraCountsByTruckDay(db, tenantId, date, date)]);
+  const waitOver = await photoWaitOverOf(db, tenantId, date, date, candidates, { now, loads });
+  const byKey = new Map(candidates.map((v) => [keyOfVisit(v), v]));
+  const [stops, counts] = await Promise.all([stopsOfLoads(db, loads), cameraCountsByTruckDay(db, tenantId, date, date, { now })]);
   const list: CameraException[] = [];
   for (const l of loads) {
     for (const s of stops.get(l.id) ?? []) {
       const v = byKey.get(visitKey({ depotId: l.depotId, date: l.date, truckId: l.truckId, loadNo: l.loadNo, sequence: s.sequence }));
-      if (v) list.push(cameraExceptionOf(l, s, v, tz));
+      const kind = v ? noPhotoKind(v, waitOver.has(v.id)) : null;
+      if (v && kind) list.push(cameraExceptionOf(l, s, v, kind, tz));
     }
   }
   const sorted = sortCameraExceptions(list);
@@ -417,7 +474,7 @@ export interface DayDeliveries {
   kpis: DeliveryKpis;
   noResult: NoResultStop[];
   lateDispatch: { loadId: string; text: string }[];
-  /** Owner decision 2 (5 Oct 2026): results saved without a photo ("Camera not working"), every one listed. */
+  /** Owner decision 2 (5 Oct 2026): results saved without a photo ("Camera not working", or the named photo never arrived), every one listed. */
   cameraExceptions: CameraException[];
   /** The driver links (truck-days) that used it 3 times or more that day. */
   cameraAlerts: CameraLinkAlert[];
@@ -429,10 +486,10 @@ export async function dayDeliveries(tenantId: string, depotId: string, date: str
   const set = await outcomeSettings(db, tenantId);
   const beforeStart = !!set.sinceLocal && date < set.sinceLocal;
   const [kpis, noResult, late, camera] = await Promise.all([
-    rangeKpis(db, tenantId, { from: date, to: date }, depotId),
+    rangeKpis(db, tenantId, { from: date, to: date }, depotId, { now }),
     noResultStops(db, tenantId, depotId, { from: date, to: date }, { now }),
     lateDispatchOfDay(db, tenantId, depotId, date, set.tz),
-    dayCameraExceptions(db, tenantId, depotId, date, set.tz),
+    dayCameraExceptions(db, tenantId, depotId, date, set.tz, { now }),
   ]);
   return { since: set.sinceLocal, beforeStart, kpis, noResult, lateDispatch: late, cameraExceptions: camera.list, cameraAlerts: camera.alerts };
 }

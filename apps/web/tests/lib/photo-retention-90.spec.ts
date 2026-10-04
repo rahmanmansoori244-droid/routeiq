@@ -1,7 +1,9 @@
 /**
- * Owner decision 1 (5 Oct 2026): delivery photos are kept 90 DAYS (the default released on 4 Oct was
- * 365). The default is 90 in the schema, the code's fallbacks and Settings; migration
- * 20261005090000_driver_page_owner_decisions moves a company still on 365 to 90 (audited), and driver
+ * Owner decision 1 (5 Oct 2026): delivery photos are kept 90 DAYS (the driver-page migration said 365
+ * until then). The default is 90 in the schema, the code's fallbacks, Settings and the driver-page
+ * migration itself (20261004090000, not in production yet); 20261005090000_driver_page_owner_decisions
+ * moves a company still on 365 to 90 only on a database where 20261004090000 already ran with 365,
+ * never one whose admin saved the field in Settings (audited like a Settings save), and driver
  * positions are never kept longer than the photos (the Settings rule and the janitor's clamp).
  * Synthetic data only; the janitor runs on the in-memory database (fake-plan-db.ts).
  */
@@ -21,6 +23,8 @@ import { purgeOldLocations, purgeOldPhotos } from '@/lib/jobs/delivery-janitor';
 
 const WEB = path.resolve(__dirname, '../..');
 const MIGRATION = '20261005090000_driver_page_owner_decisions';
+const DRIVER_PAGE_MIGRATION = '20261004090000_delivery_outcome_driver_page';
+const NO_PHOTO_MIGRATION = '20261005100000_results_without_photo';
 const NOW = new Date('2027-01-10T08:00:00Z');
 const daysAgo = (n: number) => new Date(NOW.getTime() - n * 24 * 60 * 60_000);
 
@@ -50,23 +54,54 @@ describe('the default is 90 days', () => {
   });
 });
 
-describe('the migration (one, additive, audited)', () => {
-  const sql = () => readFileSync(path.join(WEB, 'prisma', 'migrations', MIGRATION, 'migration.sql'), 'utf8');
+describe('the migrations (additive, audited)', () => {
+  const read = (m: string) => readFileSync(path.join(WEB, 'prisma', 'migrations', m, 'migration.sql'), 'utf8');
+  const sql = () => read(MIGRATION);
 
-  it('is the newest migration', () => {
+  it("this branch's two migrations are the newest, in order", () => {
     const dirs = readdirSync(path.join(WEB, 'prisma', 'migrations')).filter((d) => /^\d{14}_/.test(d)).sort();
-    expect(dirs.at(-1)).toBe(MIGRATION);
+    expect(dirs.slice(-3)).toEqual([DRIVER_PAGE_MIGRATION, MIGRATION, NO_PHOTO_MIGRATION]);
   });
 
-  it('sets the column default to 90 and moves only the companies still on 365, positions to at most 90, with an audit row each', () => {
+  it('the driver-page migration creates the column at 90 (both ship in one deploy: no company ever has 365, no audit row is written)', () => {
+    expect(read(DRIVER_PAGE_MIGRATION)).toContain('ADD COLUMN     "photoRetentionDays" INTEGER NOT NULL DEFAULT 90;');
+    expect(read(DRIVER_PAGE_MIGRATION)).not.toMatch(/DEFAULT 365/);
+  });
+
+  it('where the driver-page migration already ran with 365: the default goes to 90, companies still on 365 move, positions to at most 90', () => {
     const s = sql();
     expect(s).toContain('ALTER TABLE "TenantConfig" ALTER COLUMN "photoRetentionDays" SET DEFAULT 90;');
-    expect(s).toMatch(/WHERE "photoRetentionDays" = 365/);
+    expect(s).toMatch(/WHERE c\."photoRetentionDays" = 365/);
     expect(s).toContain('"photoRetentionDays" = 90');
     expect(s).toContain('"locationRetentionDays" = LEAST(t."locationRetentionDays", 90)');
-    expect(s).toMatch(/INSERT INTO "AuditLog"[\s\S]*'UPDATE',\s*'TenantConfig'/);
     // Additive otherwise: no DROP, no DELETE, no column made NOT NULL.
     expect(s).not.toMatch(/\bDROP\b|\bDELETE\b|SET NOT NULL/i);
+  });
+
+  it("never a company whose admin saved \"Keep delivery photos\" in Settings (an explicit 365 stays): the audited Settings save of the field is checked", () => {
+    const s = sql().replace(/\s+/g, ' ');
+    expect(s).toContain(
+      `AND NOT EXISTS ( SELECT 1 FROM "AuditLog" a WHERE a."tenantId" = c."tenantId" AND a."entity" = 'TenantConfig' AND a."afterJson" -> 'config' -> 'photoRetentionDays' IS NOT NULL )`,
+    );
+  });
+
+  it('each change is audited the way a Settings save is: entityId = the company, { tenant, config } with the changed fields, made by the migration', () => {
+    const s = sql().replace(/\s+/g, ' ');
+    expect(s).toMatch(/INSERT INTO "AuditLog" .* 'UPDATE', 'TenantConfig', c\."tenantId", jsonb_build_object\( 'tenant', '\{\}'::jsonb, 'config', jsonb_build_object\('photoRetentionDays', 365\)/);
+    expect(s).toContain(`'config', jsonb_build_object('photoRetentionDays', 90)`);
+    expect(s).toContain(`'by', 'migration 20261005090000 (owner decision of 5 Oct 2026: photos 90 days)'`);
+    // Not the TenantConfig row id, as the first version wrote.
+    expect(s).not.toMatch(/'TenantConfig', c\."id"/);
+  });
+
+  it('the no-photo monitor migration only adds the driver columns of StopVisit and fills them from the driver events', () => {
+    const s = read(NO_PHOTO_MIGRATION);
+    for (const c of ['"driverNoPhotoReason" TEXT', '"driverPhotoKeys" INTEGER NOT NULL DEFAULT 0', '"driverResultAt" TIMESTAMPTZ(3)', '"driverResultOutcome" "DeliveryOutcome"']) expect(s).toContain(c);
+    expect(s).toContain(`e."source" <> 'DISPATCHER'`);
+    expect(s).not.toMatch(/\bDROP\b|\bDELETE\b|SET NOT NULL/i);
+    // Only the new columns are written.
+    const set = s.slice(s.indexOf('SET "driverResultAt"'), s.indexOf('FROM last'));
+    expect([...set.matchAll(/"(\w+)" =/g)].map((m) => m[1])).toEqual(['driverResultAt', 'driverResultOutcome', 'driverNoPhotoReason', 'driverPhotoKeys']);
   });
 
   it('adds the depot dispatcher phone as a nullable column (decision 3)', () => {

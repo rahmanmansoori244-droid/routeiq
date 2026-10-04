@@ -113,6 +113,16 @@ export interface VisitState {
   photoKeys: string[];
   lines: VisitLine[];
   casesDelivered: number | null;
+  /**
+   * The driver's own last Delivered or Partly result (driverFacts): an office result (Record) never
+   * changes it, so a result saved without a photo stays monitored after a correction.
+   */
+  driverResultAt: Date | null;
+  driverResultOutcome: 'DELIVERED' | 'PARTLY_DELIVERED' | null;
+  /** 'CAMERA_FAILED': that result was saved with "Camera not working". */
+  driverNoPhotoReason: string | null;
+  /** Photo keys named by the driver's Delivered and Partly results (proofPhotoKeys counts the same). */
+  driverPhotoKeys: number;
 }
 
 const AUTO: ReadonlySet<EventSource> = new Set(['PHONE_AUTO', 'AYUN']);
@@ -127,6 +137,30 @@ export function resultEvent(events: readonly VisitEvent[]): VisitEvent | null {
   const outcomes = events.filter((e) => e.kind === 'OUTCOME');
   if (!outcomes.length) return null;
   return [...outcomes].sort((a, b) => t(b.at) - t(a.at) || t(b.receivedAt) - t(a.receivedAt) || (b.source === 'DISPATCHER' ? 1 : 0) - (a.source === 'DISPATCHER' ? 1 : 0))[0]!;
+}
+
+/**
+ * The driver's own last word at a stop (owner decision 2 of 5 Oct 2026, "Camera not working" is
+ * monitored): of the OUTCOME events NOT written by the office, the latest Delivered or Partly (the
+ * latest `at`, then the latest received), and the photo keys all of them named. Only the driver can
+ * change these: an office Record is ignored here, and a later Not delivered or Undo by the driver does
+ * not remove a Delivered he saved without a photo either; a new Delivered or Partly with a photo does.
+ * The migration 20261005100000 fills the same facts for visits stored before it (keep the two equal).
+ */
+export function driverFacts(events: readonly VisitEvent[]): Pick<VisitState, 'driverResultAt' | 'driverResultOutcome' | 'driverNoPhotoReason' | 'driverPhotoKeys'> {
+  const delivered = events.filter((e) => e.kind === 'OUTCOME' && e.source !== 'DISPATCHER' && (e.payload?.outcome === 'DELIVERED' || e.payload?.outcome === 'PARTLY_DELIVERED'));
+  const keys = new Set<string>();
+  for (const e of delivered) {
+    const named = e.payload?.photoKeys;
+    if (Array.isArray(named)) for (const k of named) if (typeof k === 'string') keys.add(k);
+  }
+  const last = [...delivered].sort((a, b) => t(b.at) - t(a.at) || t(b.receivedAt) - t(a.receivedAt))[0];
+  return {
+    driverResultAt: last ? last.at : null,
+    driverResultOutcome: last ? (last.payload!.outcome as 'DELIVERED' | 'PARTLY_DELIVERED') : null,
+    driverNoPhotoReason: last ? str(last.payload?.noPhotoReason) : null,
+    driverPhotoKeys: keys.size,
+  };
 }
 
 /**
@@ -327,5 +361,6 @@ export function deriveVisit(events: readonly VisitEvent[], ctx: VisitContext): V
     photoKeys,
     lines,
     casesDelivered,
+    ...driverFacts(evs),
   };
 }

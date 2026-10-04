@@ -9,6 +9,10 @@
 -- five admin settings, and outcomesSince = the migration time for existing companies (the no-result
 -- list and the outcome KPIs ignore deliveries before it). Driver.casual (daily drivers), Truck.hired
 -- (hired trucks) and Order.carryBasisJson (Bring forward, Part 3) default to false / NULL.
+--
+-- Photos are kept 90 days by default (owner decision 1 of 5 Oct 2026, before this migration reached
+-- production; it said 365 until then). A database where this migration already ran with 365 is moved
+-- to 90 by 20261005090000_driver_page_owner_decisions.
 
 -- CreateEnum
 CREATE TYPE "StopEventKind" AS ENUM ('ARRIVED', 'DEPARTED', 'OUTCOME', 'PHOTO', 'BACK_AT_DEPOT', 'CARRY_CONFLICT');
@@ -37,7 +41,7 @@ ADD COLUMN     "geofenceRadiusM" INTEGER NOT NULL DEFAULT 100,
 ADD COLUMN     "locationRetentionDays" INTEGER NOT NULL DEFAULT 90,
 ADD COLUMN     "outcomesSince" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
 ADD COLUMN     "photoProofRequired" BOOLEAN NOT NULL DEFAULT true,
-ADD COLUMN     "photoRetentionDays" INTEGER NOT NULL DEFAULT 365;
+ADD COLUMN     "photoRetentionDays" INTEGER NOT NULL DEFAULT 90;
 
 -- AlterTable
 ALTER TABLE "Truck" ADD COLUMN     "hired" BOOLEAN NOT NULL DEFAULT false;

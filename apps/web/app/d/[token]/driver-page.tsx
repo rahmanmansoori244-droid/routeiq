@@ -785,6 +785,8 @@ export function DriverPage() {
           lang={lang}
           company={manifest.tenantName}
           days={manifest.settings.locationRetentionDays}
+          // A manifest kept on the phone from before this setting was sent has none: photos are never kept shorter than positions.
+          photoDays={manifest.settings.photoRetentionDays ?? manifest.settings.locationRetentionDays}
           onOk={() => {
             storeSet(NOTICE_KEY, '1');
             setNotice(false);
@@ -996,14 +998,14 @@ function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: Over
   );
 }
 
-function LocationNotice({ lang, company, days, onOk }: { lang: Lang; company: string; days: number; onOk: () => void }) {
+function LocationNotice({ lang, company, days, photoDays, onOk }: { lang: Lang; company: string; days: number; photoDays: number; onOk: () => void }) {
   return (
     <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/50 p-3 sm:items-center" role="dialog" aria-modal="true" aria-labelledby="loc-title">
       <div className="max-w-md rounded-2xl bg-white p-5 shadow-xl">
         <p id="loc-title" className="flex items-center gap-2 text-lg font-bold">
           <MapPin className="h-6 w-6" aria-hidden /> {t(lang, 'locationTitle')}
         </p>
-        <p className="mt-2 text-sm leading-relaxed">{t(lang, 'locationNotice', { company: company || 'RouteIQ', days })}</p>
+        <p className="mt-2 text-sm leading-relaxed">{t(lang, 'locationNotice', { company: company || 'RouteIQ', days, photoDays })}</p>
         <button type="button" onClick={onOk} className="mt-4 min-h-12 w-full rounded-lg bg-slate-900 text-lg font-semibold text-white" data-testid="notice-ok">
           {t(lang, 'ok')}
         </button>

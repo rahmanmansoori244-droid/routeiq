@@ -187,7 +187,7 @@ export interface DriverManifest {
   /** Distinct drivers of the truck-day's loads. */
   drivers: { name: string; casual: boolean }[];
   depot: { code: string; name: string; lat: number; lng: number };
-  settings: { radiusM: number; photoRequired: boolean; maxPhotos: 3; locationRetentionDays: number; dispatcherPhone: string | null };
+  settings: { radiusM: number; photoRequired: boolean; maxPhotos: 3; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
   /** Set when a signed-in RouteIQ user opened the page: results are then recorded as the office. */
   office: { userName: string } | null;
   loads: ManifestLoad[];
