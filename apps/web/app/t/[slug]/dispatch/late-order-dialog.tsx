@@ -99,7 +99,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
             <Label>Products</Label>
             {lines.map((l, i) => (
               <div key={i} className="flex gap-2">
-                <Input placeholder="Item code, e.g. TAN-500-24" value={l.productCode} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, productCode: e.target.value } : x)))} />
+                <Input placeholder="Item code, e.g. TN1.5L (6)" value={l.productCode} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, productCode: e.target.value } : x)))} />
                 <Input className="w-28" placeholder="Cases" inputMode="numeric" value={l.cases} onChange={(e) => setLines(lines.map((x, j) => (j === i ? { ...x, cases: e.target.value } : x)))} />
                 <Button variant="ghost" size="icon" onClick={() => setLines(lines.length > 1 ? lines.filter((_, j) => j !== i) : lines)} aria-label="Remove line">
                   <Trash2 className="h-4 w-4" />

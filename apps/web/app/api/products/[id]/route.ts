@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { productSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { twinsOf } from '@/lib/product-code';
 import { caseWeightChangedNote, deactivateWarning, openMasterWeighedLines, openOrders } from '@/lib/dispatch/open-orders';
 
 interface Params { params: { id: string } }
@@ -11,7 +12,8 @@ export const PATCH = (req: Request, { params }: Params) =>
       const before = notFoundIfNull(await db.product.findUnique({ where: { id: params.id } }));
       const input = await parseBody(r, productSchema.partial());
       if (input.code !== undefined && input.code !== before.code) {
-        const twin = await db.product.findFirst({ where: { code: { equals: input.code, mode: 'insensitive' }, id: { not: before.id } }, select: { code: true } });
+        // Another product whose code is the same one (letter case, spacing: lib/product-code.ts).
+        const twin = twinsOf(await db.product.findMany({ where: { id: { not: before.id } }, select: { id: true, code: true } }), input.code)[0];
         if (twin) return fail(`Product ${twin.code} already exists (codes are the same whatever the letter case).`, 409);
       }
       const after = await db.product.update({ where: { id: params.id }, data: input });

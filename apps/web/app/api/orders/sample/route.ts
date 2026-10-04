@@ -13,6 +13,15 @@
 import { withTenantApi } from '@/lib/api';
 import { NextResponse } from 'next/server';
 
+/**
+ * One CSV field. NMWC's own codes ("TN1.5L (6)", "SS5GB NRB") need no quotes; a code saved from an
+ * Excel upload before product codes had a rule can hold a comma, a quote or a line break, and is
+ * quoted so the sample file still reads back as the same columns (RFC 4180).
+ */
+function csvText(s: string): string {
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
 export const GET = withTenantApi(async (req, { db }) => {
   const url = new URL(req.url);
   const mode = url.searchParams.get('mode') ?? 'clean';
@@ -56,7 +65,7 @@ export const GET = withTenantApi(async (req, { db }) => {
     const priority = 1 + (i % 5);
     const pay = i % 7 === 0 ? (10 + i % 90).toFixed(2) : '';
     const branch = c.branchCode ?? '';
-    lines.push(`${c.code},${branch},${delivery},${p.code},${cases},${priority},${pay},`);
+    lines.push(`${c.code},${branch},${delivery},${csvText(p.code)},${cases},${priority},${pay},`);
   }
 
   if (mode === 'errors') {

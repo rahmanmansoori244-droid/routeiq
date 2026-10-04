@@ -14,6 +14,8 @@ import {
 } from '@/components/ui/dialog';
 import { Switch } from '@/components/ui/switch';
 import { errorMessage } from '@/lib/error-message';
+import { PRODUCT_CODE_HINT, PRODUCT_CODE_MAX } from '@/lib/product-code';
+import { productRequestBody } from './product-body';
 
 export interface ProductRow {
   id: string;
@@ -56,13 +58,7 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
-    const body = {
-      code: form.code,
-      name: form.name,
-      weightPerCaseKg: Number(form.weightPerCaseKg),
-      volumePerCaseL: Number(form.volumePerCaseL),
-      active: form.active,
-    };
+    const body = productRequestBody(mode, form);
     startTransition(async () => {
       const url = mode === 'create' ? '/api/products' : `/api/products/${product!.id}`;
       const method = mode === 'create' ? 'POST' : 'PATCH';
@@ -98,8 +94,14 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
                 onChange={(e) => setForm({ ...form, code: e.target.value })}
                 required
                 disabled={mode === 'edit'}
-                maxLength={32}
+                maxLength={PRODUCT_CODE_MAX}
+                aria-describedby={mode === 'create' ? 'code-hint' : undefined}
               />
+              {mode === 'create' ? (
+                <p id="code-hint" className="text-xs text-muted-foreground">
+                  {PRODUCT_CODE_HINT}
+                </p>
+              ) : null}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="name">Name</Label>

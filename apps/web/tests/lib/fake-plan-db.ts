@@ -123,6 +123,8 @@ const DEFAULTS: Record<string, () => Row> = {
   runPlan: () => ({ status: 'DRAFT', chosenScenarioId: null, supersededAt: null, currentJobId: null, finalizedAt: null, reconciliationJson: null, summaryJson: null, changeSummaryJson: null, parentRunId: null, version: 1, reason: 'INITIAL', totalOrders: 0, unservedCount: 0 }),
   planLoad: () => ({ status: 'PLANNED', carriedFromLoadId: null, driverId: null }),
   runJob: () => ({ status: 'QUEUED', attemptNo: 1, progressPct: 0, startedAt: null, finishedAt: null }),
+  // The column defaults of Product (0 kg and 0 L = unknown): a product made from an upload or a late order.
+  product: () => ({ weightPerCaseKg: 0, volumePerCaseL: 0, active: true, createdFromUpload: false }),
 };
 
 function delegate(model: string) {

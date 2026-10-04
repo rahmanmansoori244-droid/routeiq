@@ -23,6 +23,7 @@ import {
   type ResolveResult,
   type ResolvedLine,
 } from './order-intake';
+import { normalizeProductCode, productKey, twinsOf } from '../product-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { dateOnly, isAfterCutoff, isoOf, tomorrowIso } from './time';
@@ -452,18 +453,22 @@ export async function confirmIntake(
     newCustomerIds.set(customerKey(nc.code, nc.branchKey), c.id);
   }
   const newProductIds = new Map<string, string>();
-  for (const np of v.issues.newProducts) {
-    const twins = await tx.product.findMany({
-      where: { tenantId, code: { equals: np.code, mode: 'insensitive' } },
-      select: { id: true, code: true, active: true, weightPerCaseKg: true },
-    });
-    const existing = preferredProduct(twins);
-    if (existing && !existing.active) {
-      throw new IntakeConflict('MASTER_CHANGED', `Product ${existing.code} was added and deactivated after this file was checked. Upload the file again.`);
+  if (v.issues.newProducts.length) {
+    // The company's products once, matched on the code in the program (productKey: letter case and
+    // spacing, "_" is a letter): the database's case-insensitive equals is an ILIKE, which read "_"
+    // as "any character". A product made below is added, so another spelling of it reuses it.
+    const master = await tx.product.findMany({ where: { tenantId }, select: { id: true, code: true, active: true, weightPerCaseKg: true } });
+    for (const np of v.issues.newProducts) {
+      const code = normalizeProductCode(np.code);
+      const existing = preferredProduct(twinsOf(master, code));
+      if (existing && !existing.active) {
+        throw new IntakeConflict('MASTER_CHANGED', `Product ${existing.code} was added and deactivated after this file was checked. Upload the file again.`);
+      }
+      // A new product starts at 0 kg per case = unknown weight (Products page, or the next optimize asks).
+      const p = existing ?? (await tx.product.create({ data: { tenantId, code, name: np.name, createdFromUpload: true } }));
+      if (!existing) master.push({ id: p.id, code: p.code, active: true, weightPerCaseKg: 0 });
+      newProductIds.set(productKey(np.code), p.id);
     }
-    // A new product starts at 0 kg per case = unknown weight (Products page, or the next optimize asks).
-    const p = existing ?? (await tx.product.create({ data: { tenantId, code: np.code, name: np.name, createdFromUpload: true } }));
-    newProductIds.set(np.code.toUpperCase(), p.id);
   }
   const productIds = [...new Set(v.lines.map((l) => l.productId).filter(Boolean) as string[]), ...newProductIds.values()];
   const products = await tx.product.findMany({ where: { tenantId, id: { in: productIds } }, select: { id: true, weightPerCaseKg: true, volumePerCaseL: true } });
@@ -472,7 +477,7 @@ export async function confirmIntake(
   const groups = new Map<string, (ResolvedLine & { cid: string; pid: string })[]>();
   for (const l of v.lines) {
     const cid = l.customerId ?? newCustomerIds.get(l.customerKey);
-    const pid = l.productId ?? newProductIds.get(l.productCode.toUpperCase());
+    const pid = l.productId ?? newProductIds.get(productKey(l.productCode));
     if (!cid || !pid) throw new Error(`Row ${l.row}: customer/product could not be created.`);
     const k = `${cid}|${l.deliveryDate}`;
     // Added to the group's list in place: copying the list for every line took 5-40 s for one

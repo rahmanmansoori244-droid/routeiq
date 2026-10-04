@@ -1,6 +1,7 @@
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { productSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
+import { twinsOf } from '@/lib/product-code';
 
 export const GET = withTenantApi(async (_req, { db }) => {
   const products = await db.product.findMany({ orderBy: [{ active: 'desc' }, { code: 'asc' }] });
@@ -10,8 +11,10 @@ export const GET = withTenantApi(async (_req, { db }) => {
 export const POST = withTenantApi(
   async (req, { db, user, ip }) => {
     const input = await parseBody(req, productSchema);
-    // One product whatever the letter case of its code (the order intake matches it that way).
-    const twin = await db.product.findFirst({ where: { code: { equals: input.code, mode: 'insensitive' } }, select: { code: true } });
+    // One product whatever the letter case of its code (the order intake matches it that way), and
+    // whatever the spacing it was saved with. Matched on the code in the program: the database's
+    // case-insensitive equals is an ILIKE, which reads "_" as "any character" (lib/product-code.ts).
+    const twin = twinsOf(await db.product.findMany({ select: { id: true, code: true } }), input.code)[0];
     if (twin) return fail(`Product ${twin.code} already exists (codes are the same whatever the letter case).`, 409);
     const created = await db.product.create({
       data: {
