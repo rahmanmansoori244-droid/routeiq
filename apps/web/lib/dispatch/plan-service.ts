@@ -1028,7 +1028,7 @@ export class OrdersChangedError extends PlanError {
  * result that was planned with these weights is saved and applied (dispatch-job.ts) - never for a
  * probe or at the start - so a refused re-plan, and a failed or stale optimization, leave the
  * orders under the plan in use as they were (its loads keep matching them, and the "planned with
- * the old weight" warning stays). Set-based (a whole NMWC day in a few statements). Each row is
+ * the old weight" warning stays). Set-based (a whole NMWC day in a few statements). The kg arrays go to PostgreSQL as text and are cast there (::text[]::float8[]): a JS number or Decimal array sent straight as float8[] was refused in CI with 22P03 "improper binary format in array element 1". Each row is
  * changed only if it still has the kg the request was built from; otherwise OrdersChangedError.
  * One ORDER_WEIGHTS_RESOLVED audit row lists every line and order total before and after.
  */
@@ -1041,7 +1041,7 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
     const n = await tx.$executeRaw`
       UPDATE "OrderLine" AS l
       SET "weightKg" = v.after_kg, "weightFromMaster" = true
-      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg),
+      FROM unnest(${part.map((c) => c.lineId)}::text[], ${part.map((c) => String(c.beforeKg))}::text[]::float8[], ${part.map((c) => String(c.afterKg))}::text[]::float8[]) AS v(id, before_kg, after_kg),
            "Order" AS o
       WHERE l.id = v.id AND o.id = l."orderId" AND o."tenantId" = ${tenantId} AND abs(l."weightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
@@ -1051,7 +1051,7 @@ export async function applyWeightChanges(tx: Tx, tenantId: string, runId: string
     const n = await tx.$executeRaw`
       UPDATE "Order" AS o
       SET "totalWeightKg" = v.after_kg
-      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => c.beforeKg)}::float8[], ${part.map((c) => c.afterKg)}::float8[]) AS v(id, before_kg, after_kg)
+      FROM unnest(${part.map((c) => c.orderId)}::text[], ${part.map((c) => String(c.beforeKg))}::text[]::float8[], ${part.map((c) => String(c.afterKg))}::text[]::float8[]) AS v(id, before_kg, after_kg)
       WHERE o.id = v.id AND o."tenantId" = ${tenantId} AND abs(o."totalWeightKg" - v.before_kg) < 0.0005`;
     if (n !== part.length) throw new OrdersChangedError();
   }
