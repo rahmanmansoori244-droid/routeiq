@@ -217,7 +217,10 @@ describe('unknown weights (F02)', () => {
     const rp = await fetchWith(t.cookieJar, `${BASE}/api/runs/${v1}/replan`, j({ reason: 'REOPTIMIZE' }));
     expect(rp.status).toBe(202);
     const v2 = (await json(rp)).data.runId;
-    await waitForPlan(v2);
+    // The new weight is saved only with a plan that was saved (a failed or stale re-plan keeps the
+    // order kg by design): say first whether the re-plan saved one, and if not, why.
+    const done = await waitForPlan(v2);
+    expect({ run: done.run.status, job: done.job?.status }, `re-plan job: ${JSON.stringify(done.job)}`).toEqual({ run: 'READY', job: 'SUCCEEDED' });
     const line = await prisma.orderLine.findUniqueOrThrow({ where: { id: line0.id }, include: { order: true } });
     expect(line.weightKg).toBe(1.5);
     expect(line.order.totalWeightKg).toBeCloseTo(1.5, 3);
