@@ -70,6 +70,8 @@ export const AUDIT_ACTIONS = {
   DELIVERY_PHOTOS_PURGED: { label: 'Old delivery photos removed (retention)' },
   DELIVERY_LOCATIONS_PURGED: { label: 'Old driver positions removed (retention)' },
   CASUAL_DRIVERS_CLEARED: { label: 'Idle daily drivers hidden (clean-up)' },
+  // Start fresh (owner request 4 Oct 2026): a company admin removed the test orders, plans and results.
+  TEST_DATA_CLEARED: { label: 'Test data removed (Start fresh)' },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
@@ -116,7 +118,7 @@ export const AUDIT_ENTITY_NAMES = Object.keys(AUDIT_ENTITIES) as [AuditEntity, .
 
 /** Badge colour of an action on the Audit log page. */
 export function auditActionTone(action: string): 'default' | 'success' | 'warning' | 'secondary' | 'destructive' | 'outline' {
-  if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED') return 'destructive';
+  if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED' || action === 'TEST_DATA_CLEARED') return 'destructive';
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
   if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
   if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT') return 'warning';
