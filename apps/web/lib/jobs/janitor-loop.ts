@@ -9,6 +9,7 @@
 import { reapStuckJobs } from './optimize-job';
 import { reapStaleShifts } from './shift-janitor';
 import { completeReturnedLoads } from '../delivery/event-service';
+import { runDeliveryJanitor } from './delivery-janitor';
 
 const INTERVAL_MS = 60_000;
 const g = globalThis as unknown as { __routeiqJanitor?: NodeJS.Timeout };
@@ -28,6 +29,16 @@ async function sweep() {
     if (returned.completed) console.warn('janitor: returned loads completed', returned);
   } catch (err) {
     console.error('janitor: returned loads not checked', (err as Error)?.message ?? err);
+  }
+  // Retention (spec section 12.4): old photo bytes, old driver positions and idle daily drivers, at
+  // most every 10 min (the daily drivers once a day). Its own try as well.
+  try {
+    const kept = await runDeliveryJanitor();
+    if (kept && (kept.photos.count || kept.locations.events || kept.locations.visits || kept.locations.photos || kept.casual?.deactivated || kept.casual?.phonesCleared)) {
+      console.warn('janitor: delivery retention', kept);
+    }
+  } catch (err) {
+    console.error('janitor: delivery retention not run', (err as Error)?.message ?? err);
   }
 }
 

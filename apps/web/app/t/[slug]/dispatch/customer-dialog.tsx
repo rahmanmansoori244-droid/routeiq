@@ -8,6 +8,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, CUSTOMER_TYPES } from './client-api';
+import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
+import { measuredServiceValue } from '@/lib/delivery/measured';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -57,6 +59,21 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
     const f = detailsFormOf(customer);
     setInitial(f);
     setForm(f);
+  }, [open, customer]);
+
+  // Delivery outcome (owner request 4 Oct 2026, spec section 11.1): the measured unloading time next
+  // to the planned one. "Use measured time" fills the field; Save keeps it (nothing changes by itself).
+  const [stats, setStats] = useState<CustomerDeliveryStats | null>(null);
+  useEffect(() => {
+    setStats(null);
+    if (!open || !customer) return;
+    let gone = false;
+    void api<Record<string, CustomerDeliveryStats>>(`/api/customers/delivery-stats?ids=${encodeURIComponent(customer.customerId)}`).then((r) => {
+      if (!gone && r.ok && r.data) setStats(r.data[customer.customerId] ?? null);
+    });
+    return () => {
+      gone = true;
+    };
   }, [open, customer]);
 
   const set = (key: keyof DetailsForm) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
@@ -144,7 +161,28 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
             <Input id="cd-svc" inputMode="numeric" value={form.service} placeholder={serviceDefault} onChange={(e) => set('service')(e.target.value)} />
             <p className="text-xs text-muted-foreground">Empty = the customer-type or Settings default. 0 = no unloading time.</p>
           </div>
-          <div />
+          <div className="space-y-1 text-xs" data-testid="measured-unloading">
+            {stats ? (
+              <>
+                <p className={stats.measured ? '' : 'text-muted-foreground'}>{stats.text}</p>
+                {stats.measured ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs"
+                    onClick={() => {
+                      set('service')(String(measuredServiceValue(stats.measured!)));
+                      toast.info('Measured time filled in: Save to keep it.');
+                    }}
+                    data-testid="use-measured-time"
+                  >
+                    Use measured time
+                  </Button>
+                ) : null}
+              </>
+            ) : null}
+          </div>
           <div className="space-y-1">
             <Label htmlFor="cd-hs">Receiving hours — HARD (never outside)</Label>
             <div className="flex items-center gap-1">

@@ -154,6 +154,21 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 
 ---
 
+## Driver links and delivery results (4 Oct 2026)
+
+### Stopping a driver link
+- A leaked QR or a forwarded link: the dispatcher opens **Link** on any load of that truck and clicks **Reissue link** (a new link at once; the old one answers "replaced") or **Revoke** (no link works until a reissue). Both are audited (`DRIVER_LINK_REISSUED`, `DRIVER_LINK_REVOKED`).
+- Every link stops by itself at 12:00 (company time) the day after its delivery date; results saved on a phone before then can still be uploaded for 72 hours.
+- To stop **every** link of every company at once (a suspected leak of the server key): rotate `DRIVER_LINK_SECRET` (or `NEXTAUTH_SECRET` when `DRIVER_LINK_SECRET` is not set; that also signs everyone out) on the `web` service. Every link then answers "replaced"; the dispatchers reopen **Link** or print the sheets again to get new ones. No start-up rehash is needed.
+
+### Photo and position retention, and disk space
+- Settings (company admin): **keep delivery photos** (30-1095 days, default 365) and **keep driver positions** (30 days up to the photo time, default 90). The retention janitor runs in the web process at most every 10 minutes (and on `POST /api/cron/janitor`): it drops photo bytes older than the photo time (the record stays), erases positions, IPs and browser ids older than the position time (distances stay), and hides daily drivers with no load for 30 days (their phone is erased after the position time). One audit row per company and sweep.
+- **Expected growth at NMWC volume** (about 300 stops and 360 photos a day at about 220 KB, 26 working days a month): about 79 MB a day, 2.1 GB a month, and about **25 GB** in steady state at 365 days (12 GB at 180, 6 GB at 90); events and visits under 1 MB a day (about 0.3 GB a year). The database backups grow by the same amount. Watch the `postgres-volume` size (Railway → Postgres → Metrics) after the first months and lower the photo time if needed (owner question Q1).
+- **Space is not returned to the disk by itself.** PostgreSQL reuses the space of purged photo bytes (autovacuum), so the volume stops growing once the retention is reached, but it does not shrink. To shrink it after a large purge (or after lowering the photo time), an operator runs `VACUUM FULL "DeliveryPhoto";` in a quiet hour (it locks the table: the driver page cannot upload photos meanwhile; take a backup first), or `pg_repack` if it is installed.
+- **The backup horizon.** Deleted photos and positions stay in the Railway backups until those expire (daily 6 days, weekly 27 days), and in any `pg_dump` copy until it is deleted: the real deletion time is the retention plus the backup retention. Say so when someone asks how long driver data is kept.
+
+---
+
 ## Tenant isolation contract
 
 CLAUDE.md §3, §13: every business table has `tenantId`, every query goes through `tenantDb(tenantId)`. The Vitest suite at `apps/web/tests/tenant-isolation.spec.ts` runs on every PR; merge is blocked if it fails.

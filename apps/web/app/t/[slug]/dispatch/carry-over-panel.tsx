@@ -1,21 +1,24 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AlertTriangle, ArrowRightCircle, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowRightCircle, Loader2, RefreshCw, Undo2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import type { BringForwardResult, CarryCandidate, CarryPreview } from '@/lib/dispatch/carry-over';
+import type { BringForwardResult, CarryCandidate, CarryPreview, UndoableCarry } from '@/lib/dispatch/carry-over';
 import {
   CARRY_TODAY_WARNING,
   carryButtonSuffix,
   carryConfirmText,
   carryDoneText,
   carriedFromBadge,
+  carryResultNote,
   carrySelected,
   carrySelectionPayload,
   carryTodayTitle,
+  carryUndoConfirmText,
   carryWhyLabel,
+  noOutcomeGroups,
   toggleCarry,
   type CarryChoices,
 } from '@/lib/dispatch/carry-view';
@@ -123,8 +126,26 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
       </div>
     );
   }
+  async function undo(u: UndoableCarry) {
+    if (running || busy || !ready || !canPlan) return;
+    if (!window.confirm(carryUndoConfirmText(u, date))) return;
+    setRunning(true);
+    try {
+      const r = await api('/api/dispatch/carry-over/undo', { method: 'POST', json: { originalOrderId: u.originalOrderId } });
+      if (!r.ok) toast.error(r.error ?? 'Could not undo the bring forward.');
+      else {
+        toast.success(`The copy of ${u.customerCode} on ${fmtDayMonth(date)} was removed: the order is open again on ${fmtDayMonth(u.fromDate)}.`);
+        await onCarried();
+      }
+      await load();
+    } finally {
+      setRunning(false);
+    }
+  }
+
   // A day that is over lists nothing (the server answers 409 DAY_OVER to a bring forward).
-  if (!preview || preview.dayOver || preview.candidates.length === 0) return null;
+  if (!preview || preview.dayOver || (preview.candidates.length === 0 && !hasFollowUps(preview))) return null;
+  if (preview.candidates.length === 0) return <CarryFollowUps preview={preview} canPlan={canPlan} disabled={!ready || busy || running} onUndo={(u) => void undo(u)} />;
   const selected = carrySelected(preview.candidates, choices);
   const chosen = preview.candidates.filter((c) => selected.has(c.orderId));
   const chosenToday = chosen.filter((c) => c.ofToday).length;
@@ -163,9 +184,19 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
         {c.why.map((w, i) => (
           <span key={i} className="block">
             <b>{w.kind === 'UNSERVED' && w.reasonCode ? `Unserved: ${REASON_TEXT[w.reasonCode] ?? w.reasonCode}` : carryWhyLabel(w.kind, c.ofToday)}</b>
-            <span className="text-muted-foreground"> - {w.text}</span>
+            <span className="text-muted-foreground">
+              {' '}
+              - {w.text}
+              {w.where ? ` (${w.where})` : ''}
+            </span>
           </span>
         ))}
+        {/* Delivery results: why a recorded shortfall is not ticked by itself (truck still out, ...). */}
+        {carryResultNote(c) ? (
+          <span className="block text-amber-800" data-testid={`carry-result-note-${c.customerCode}`}>
+            {carryResultNote(c)}
+          </span>
+        ) : null}
       </td>
     </tr>
   );
@@ -206,8 +237,9 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
         </p>
       ) : null}
       <p className="text-xs text-muted-foreground">
-        Orders of this depot from {fmtDayMonth(preview.from)} to {fmtDayMonth(preview.to)} whose cases were not delivered: unserved, on a load that has not left the depot, or
-        never planned. Orders on dispatched or completed loads count as delivered. Brought forward, an order keeps its priority and its sales orders.
+        Orders of this depot from {fmtDayMonth(preview.from)} to {fmtDayMonth(preview.to)} whose cases were not delivered: unserved, on a load that has not left the depot, never
+        planned, or recorded as not delivered by the driver or the office. Other orders on dispatched or completed loads count as delivered. Brought forward, an order keeps its
+        priority and its sales orders.
         {preview.to < addDaysIso(date, -1) ? (
           <span data-testid="carry-over-later-note">
             {' '}
@@ -248,6 +280,66 @@ export function CarryOverPanel({ date, depotId, canPlan, ready, busy, reloadKey,
             </tbody>
           </table>
         </div>
+      ) : null}
+      {hasFollowUps(preview) ? <CarryFollowUps preview={preview} canPlan={canPlan} disabled={!ready || busy || running} onUndo={(u) => void undo(u)} inline /> : null}
+    </div>
+  );
+}
+
+function hasFollowUps(p: CarryPreview): boolean {
+  return !!(p.noOutcome?.length || p.lateShortfalls?.length || p.undoable?.length);
+}
+
+/**
+ * The information below the list (delivery outcome, spec sections 9.1 items 7 and 11, 9.4): copies on
+ * this day that are not planned yet (Undo), shortfalls recorded after an order was brought forward,
+ * and stops of loads that are back with no result recorded (counted as delivered). Never selectable.
+ */
+function CarryFollowUps({ preview, canPlan, disabled, onUndo, inline = false }: { preview: CarryPreview; canPlan: boolean; disabled: boolean; onUndo: (u: UndoableCarry) => void; inline?: boolean }) {
+  const groups = noOutcomeGroups(preview.noOutcome ?? []);
+  return (
+    <div className={`space-y-2 text-xs ${inline ? '' : 'rounded-md border p-3'}`} data-testid="carry-follow-ups">
+      {preview.undoable?.length ? (
+        <div data-testid="carry-undoable">
+          <p className="font-medium">Brought forward to {fmtDayMonth(preview.date)}, not planned yet:</p>
+          <ul className="space-y-0.5">
+            {preview.undoable.map((u) => (
+              <li key={u.copyId}>
+                {u.customerName} <span className="text-muted-foreground">{u.customerCode}{u.branchCode ? ` / ${u.branchCode}` : ''} · {u.cases} cases · from {fmtDayMonth(u.fromDate)}</span>{' '}
+                {canPlan ? (
+                  <button type="button" className="text-primary underline-offset-2 hover:underline disabled:opacity-50" disabled={disabled} onClick={() => onUndo(u)} data-testid={`carry-undo-${u.customerCode}`}>
+                    <Undo2 className="mr-0.5 inline h-3 w-3" />
+                    Undo
+                  </button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {preview.lateShortfalls?.length ? (
+        <div className="text-red-800" data-testid="carry-late-shortfalls">
+          {preview.lateShortfalls.map((s) => (
+            <p key={s.orderId}>{s.text}</p>
+          ))}
+        </div>
+      ) : null}
+      {groups.length ? (
+        <details data-testid="carry-no-outcome">
+          <summary className="cursor-pointer">
+            Dispatched, no result recorded (counted as delivered): {groups.map((g) => `${g.truckCode}${g.date !== preview.today ? ` ${fmtDayMonth(g.date)}` : ''}: ${g.stops.length} stop${g.stops.length === 1 ? '' : 's'}`).join(' · ')}
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {groups.flatMap((g) =>
+              g.stops.map((s) => (
+                <li key={`${s.date}-${s.truckCode}-${s.loadNo}-${s.sequence}`}>
+                  {s.truckCode} L{s.loadNo} stop {s.sequence}, {s.customerName} ({s.customerCode}{s.branchCode ? `/${s.branchCode}` : ''}), {s.cases} cases ({fmtDayMonth(s.date)})
+                </li>
+              )),
+            )}
+          </ul>
+          <p className="mt-1 text-muted-foreground">Record their results on the plan of that day (Record), or leave them: they count as delivered.</p>
+        </details>
       ) : null}
     </div>
   );

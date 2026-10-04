@@ -207,3 +207,14 @@ One link per truck and delivery date opens the driver's phone page (`/d/<token>`
 | CSRF | The driver API takes its credential from a header a cross-site page cannot set without a CORS preflight, which the API does not allow |
 
 **Key rotation.** Rotating `DRIVER_LINK_SECRET` (or `NEXTAUTH_SECRET` without it) changes the server key: every driver link answers "replaced" at once until the dispatcher reopens the Link dialog or prints the sheets again (a new link is made then). That is the right outcome after a credential exposure.
+
+**Driver location is personal data: what is kept, and for how long** (delivery outcome, spec section 16.3).
+
+- Stored: only events (arrival, departure, result, photo, back at depot), each with one position, its accuracy, its distance from the pin, the sender's IP and a random browser id; and the delivery photos, stripped of every piece of metadata (no EXIF GPS, no camera serial, no embedded thumbnail). Never a continuous track, a speed trace or the battery.
+- **Positions, accuracies, speeds, IP addresses and browser ids** of driver events, visits and photos are erased after `locationRetentionDays` (Settings, default 90, never more than the photo retention). The distances from the pin stay (the KPIs, the actuals Excel and the pin check need only distances). The planned pin is company data and stays.
+- **Photo bytes** are dropped after `photoRetentionDays` (Settings, default 365), counted from the time the server received the photo (a phone with a wrong clock can neither keep a photo forever nor lose it the next day). The photo's record (time, position status, distance) stays.
+- **Daily drivers**: hidden from the Driver list after 30 days without a load; their mobile number is erased after the location retention (the name stays: plans and audit rows show it).
+- On the phone: the queue, drafts and the last trip list are deleted once the truck-day's upload window ended.
+- The retention janitor (`lib/jobs/delivery-janitor.ts`) runs at most every 10 minutes and writes one audit row per company and sweep (`DELIVERY_PHOTOS_PURGED`, `DELIVERY_LOCATIONS_PURGED`, `CASUAL_DRIVERS_CLEARED`).
+- **The backup horizon.** The deletions reach the live database only. Railway's volume backups keep the old data until those backups expire (daily backups 6 days, weekly 27 days), so the real deletion time is the retention plus the backup retention. A `pg_dump` kept elsewhere extends it by its own retention.
+- Photos are served only to signed-in users of the company (`GET /api/delivery-photos/:id`, any role, private cache) and to the same valid driver link (`GET /api/d/photos/:id`), with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; sandbox`. The "Delivery actuals" Excel (per-driver performance data) is PLANNER and above; "Pin may be wrong" is company admin only.

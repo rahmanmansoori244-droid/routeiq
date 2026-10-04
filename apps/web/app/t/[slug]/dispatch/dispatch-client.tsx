@@ -16,6 +16,8 @@ import { PlanView } from './plan-view';
 import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from './day-loader';
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
+import { DeliverySummary } from './delivery-summary';
+import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
 import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
@@ -114,6 +116,8 @@ interface Day {
   dataRule?: { on: boolean; days: number };
   /** With the loading rule on: this day's customers without a usable location or a delivery window. */
   loadingGaps?: DataGap[];
+  /** Delivery results of the day (owner request 4 Oct 2026): the Deliveries card under the plan. */
+  deliveries?: DayDeliveries | null;
 }
 interface Validation {
   totalRows: number;
@@ -671,6 +675,16 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               // result; then the plan screen is loaded fresh. When the day could not be loaded, the
               // plan stays as it is (with its own Try again) until the day's Try again reloads both.
               if (await refresh()) setPlanKey((k) => k + 1);
+            }}
+          />
+          <DeliverySummary
+            deliveries={day.deliveries}
+            date={day.date}
+            depotId={day.depot.id}
+            canPlan={canPlan && dayReady}
+            onRecorded={async () => {
+              // The day's card and the plan's results again (in place: no remount).
+              if (await refresh()) setPlanReload((k) => k + 1);
             }}
           />
         </Step>

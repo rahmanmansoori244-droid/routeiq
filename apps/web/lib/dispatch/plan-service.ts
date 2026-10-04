@@ -87,6 +87,7 @@ import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { copyRowData } from './prisma-copy';
+import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
   distanceM,
   loadBreakJson,
@@ -2175,6 +2176,12 @@ export async function updateLoad(
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
     if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date());
+    // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
+    // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
+    if (load && change.status === 'LOCKED') {
+      const warnings = await lockWarningsOf(tx, tenantId, loadId);
+      if (warnings.length) return { ...load, warnings };
+    }
     return load;
   });
 }

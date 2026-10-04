@@ -26,6 +26,7 @@ import { portionPlannedKgPerCase, readPortionLines } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot } from './snapshots';
 import { dataGaps, type DataGap } from './data-collection';
 import type { ServiceArea } from './location-input';
+import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
 
 export interface IssueCustomer {
   customerId: string;
@@ -472,6 +473,17 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     take: 20,
     select: { id: true, fileName: true, status: true, uploadedAt: true, validRows: true, errorRows: true, isLate: true, lateReason: true },
   });
+  // Delivery outcome (owner request 4 Oct 2026, spec section 10.3): the day's results, the stops of
+  // loads that are back without one, the late-dispatch notes. Read on their own: a failure here never
+  // keeps the day screen from loading (the card then says it could not be read).
+  let deliveries: DayDeliveries | null = null;
+  if (plan) {
+    try {
+      deliveries = await dayDeliveries(tenantId, depot.id, date);
+    } catch (e) {
+      console.error('[day] delivery results not read', (e as Error)?.message ?? e);
+    }
+  }
   return {
     ...base,
     orders: {
@@ -521,6 +533,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * are planned, but cannot be locked, loaded or dispatched (plan-service dataGate).
      */
     loadingGaps: cfg.requireDataBeforeLoading ? dayLoadingGaps(customers, area) : ([] as DataGap[]),
+    /** Delivery results of the day (null without a plan, or when they could not be read). */
+    deliveries,
   };
 }
 

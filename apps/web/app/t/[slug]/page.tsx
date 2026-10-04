@@ -3,6 +3,7 @@ import { ListChecks, ArrowRight, Truck } from 'lucide-react';
 import type { RunStatus } from '@prisma/client';
 import { getCurrentTenant } from '@/lib/tenant';
 import { getDashboardData } from '@/lib/dashboard';
+import { reasonLabel } from '@/lib/delivery/office-text';
 import { canPlan } from '@/lib/rbac';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -121,6 +122,42 @@ export default async function DashboardPage({ params }: { params: { slug: string
           smallerIsBetter
         />
       </div>
+
+      {data.deliveries && data.deliveries.last30.stops > 0 ? (
+        <Card data-testid="dashboard-deliveries">
+          <CardHeader>
+            <CardTitle className="text-base">Deliveries</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 gap-4 text-sm md:grid-cols-2">
+            {(
+              [
+                ['Last 7 days', data.deliveries.last7],
+                ['Last 30 days', data.deliveries.last30],
+              ] as const
+            ).map(([label, k]) => (
+              <div key={label} className="space-y-1">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">{label}</p>
+                <p>
+                  Delivered in full: <b>{k.deliveredInFullPct === null ? '—' : `${k.deliveredInFullPct} %`}</b>
+                  <span className="text-muted-foreground"> of {k.withResult} stops with a result</span>
+                </p>
+                <p>
+                  Arrived inside the window: <b>{k.insideWindowPct === null ? '—' : `${k.insideWindowPct} %`}</b>
+                  <span className="text-muted-foreground"> of {k.timedArrivals} observed arrivals</span>
+                </p>
+                <p className="text-muted-foreground">
+                  {k.notDelivered} not delivered · {k.partly} partly · {k.noResult} no result recorded
+                </p>
+                {k.byReason.length ? (
+                  <p className="text-muted-foreground">
+                    Not delivered by reason: {k.byReason.slice(0, 4).map((r) => `${reasonLabel(r.reason)} ${r.stops} stops / ${r.cases} cases`).join(' · ')}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <Card className="lg:col-span-2">

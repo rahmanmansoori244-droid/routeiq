@@ -24,6 +24,15 @@ export interface ActorLoad {
   driverName: string | null;
 }
 
+/**
+ * The Audit log's "who" for a row without a user (spec section 16.4): the driver link's actor
+ * ("Driver link: Salim (T05, 5 Oct) · link #2 · phone 3f9a"), RouteIQ's own sweeps, else null.
+ */
+export function auditActorOf(afterJson: unknown): string | null {
+  const a = afterJson && typeof afterJson === 'object' && !Array.isArray(afterJson) ? (afterJson as { actor?: unknown }).actor : null;
+  return typeof a === 'string' && a.trim() ? a.trim().slice(0, 200) : null;
+}
+
 export function driverActor(link: ActorLink, load: ActorLoad, deviceId: string | null): string {
   const who = `Driver link: ${load.driverName ?? 'no driver set'} (${load.truckCode}, ${fmtDayMonth(load.date)})`;
   const made =

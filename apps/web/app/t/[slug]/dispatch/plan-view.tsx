@@ -42,6 +42,9 @@ import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
 import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
 import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
 import type { ApiResult } from './client-api';
+import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
+import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
+import { PhotoViewer } from './photo-viewer';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
 
@@ -133,6 +136,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
 
+  // Delivery results of this version's loads that left (owner request 4 Oct 2026, spec section 10):
+  // read with the plan, and every 60 s while a load is on the road and the page is in front.
+  const [overlay, setOverlay] = useState<OutcomeOverlay | null>(null);
+  const [recordFor, setRecordFor] = useState<OutcomeTarget | null>(null);
+  const [photosFor, setPhotosFor] = useState<{ title: string; photos: OverlayPhoto[] } | null>(null);
+  const overlayOrder = useRef(0);
+  // The plan's load reads the results too (a ref, so `load` keeps depending on the run only).
+  const overlayLoad = useRef<() => void>(() => undefined);
+
   // Newest answer wins (createLoadOrder): an answer older than the one on screen is dropped (null).
   const loadOrder = useRef(createLoadOrder());
   // A load newer than the answer on screen is on its way: Try again waits for it.
@@ -144,8 +156,17 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     if (!loadOrder.current.accept(ticket)) return null;
     setReloading(loadOrder.current.pending());
     setPanel((shown) => planAfterLoad(shown, r));
+    // The results follow the plan (a load completed, a result recorded): read again with it.
+    overlayLoad.current();
     return r.ok ? r.data : null;
   }, [runId]);
+
+  const loadOverlay = useCallback(async () => {
+    const ticket = ++overlayOrder.current;
+    const r = await api<OutcomeOverlay>(`/api/runs/${runId}/outcomes`);
+    if (ticket === overlayOrder.current && r.ok && r.data) setOverlay(r.data);
+  }, [runId]);
+  overlayLoad.current = () => void loadOverlay();
 
   useEffect(() => {
     void load();
@@ -251,6 +272,16 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     void loadLinks();
   }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
 
+  // Results come in from the drivers' phones while loads are on the road: read them every 60 s.
+  const onRoadNow = !!d?.loads.some((l) => l.status === 'DISPATCHED');
+  useEffect(() => {
+    if (!onRoadNow) return;
+    const t = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') void loadOverlay();
+    }, 60_000);
+    return () => clearInterval(t);
+  }, [onRoadNow, loadOverlay]);
+
   useEffect(() => {
     if (!d) return;
     const running = d.run.status === 'OPTIMIZING' || d.job?.status === 'QUEUED' || d.job?.status === 'RUNNING';
@@ -279,16 +310,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
   // user cannot race themselves (F07; plan-actions.ts).
   function setStatus(l: DetailLoad, status: string) {
+    // Delivery outcome (spec section 9.4): a brought-forward order on this load whose original result
+    // changed after the carry may not be needed. Lock asks; it is never refused.
+    const warnings = status === 'LOCKED' ? (overlay?.lockWarnings[l.id] ?? []) : [];
+    if (warnings.length && !window.confirm(`${warnings.join('\n')}\n\nLock anyway?`)) return;
     return runPlanAction(
       lock,
       l.id,
       async () => {
-        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        const r = await api<{ warnings?: string[] }>(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
         if (!r.ok) {
           toast.error(r.error ?? 'Could not change the load.');
           await load(); // show the plan as it is now (it may have changed meanwhile)
           return;
         }
+        if (r.data?.warnings?.length && !warnings.length) toast.warning(r.data.warnings.join(' '));
         toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
         await load();
         await onChanged?.();
@@ -333,6 +369,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   function lockAll() {
     if (!d) return;
     const planned = d.loads.filter((l) => l.status === 'PLANNED').sort((a, b) => a.loadNo - b.loadNo);
+    const warnings = planned.flatMap((l) => overlay?.lockWarnings[l.id] ?? []);
+    if (warnings.length && !window.confirm(`${warnings.join('\n')}\n\nLock anyway?`)) return;
     return runPlanAction(
       lock,
       'all',
@@ -1037,6 +1075,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           Changed after planning
                         </Badge>
                       ) : null}
+                      {ON_ROAD.has(l.status) && overlay?.loads[l.id] ? <LoadProgress o={overlay.loads[l.id]!} tag={`${l.truckCode}-${l.loadNo}`} tz={overlay.tz} /> : null}
                       {lateNotes.find((n) => n.loadId === l.id) ? (
                         <span className="mt-1 block text-xs text-amber-700" data-testid={`load-late-dispatch-${l.truckCode}-${l.loadNo}`}>
                           {lateNotes.find((n) => n.loadId === l.id)!.text}
@@ -1094,7 +1133,27 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
                       <td colSpan={13} className="p-3">
-                        <LoadDetail l={l} depotCode={d.run.depot.code} />
+                        <LoadDetail
+                          l={l}
+                          depotCode={d.run.depot.code}
+                          overlay={overlay}
+                          canRecord={canPlan && ON_ROAD.has(l.status)}
+                          onRecord={(st, ov) =>
+                            setRecordFor({
+                              depotId: d.run.depot.id,
+                              date: d.run.runDate,
+                              truckId: l.truckId,
+                              truckCode: l.truckCode,
+                              loadNo: l.loadNo,
+                              sequence: st.sequence,
+                              customerName: st.customerName,
+                              customerCode: st.customerCode,
+                              lines: ov.lines,
+                              current: ov.outcome ? { outcome: ov.outcome, reason: ov.reason, note: ov.note } : null,
+                            })
+                          }
+                          onPhotos={(st, ov) => setPhotosFor({ title: `${l.truckCode} L${l.loadNo} stop ${st.sequence} · ${st.customerName}`, photos: ov.photos })}
+                        />
                       </td>
                     </tr>
                   ) : null}
@@ -1244,7 +1303,6 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           if (ask) void reissueNow(ask.link);
         }}
       />
-
       <LateOrderDialog
         open={lateOpen}
         onOpenChange={setLateOpen}
@@ -1278,6 +1336,20 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           })
         }
       />
+      {/* Delivery outcome (spec section 10.2): Record outcome and the photo viewer. */}
+      <OutcomeDialog
+        open={!!recordFor}
+        onOpenChange={(v) => {
+          if (!v) setRecordFor(null);
+        }}
+        target={recordFor}
+        onSaved={() => {
+          // A result can complete a load that is back: the plan (and its results) again, in place (the
+          // open loads stay open; the day's Deliveries card reads it at its next load).
+          void load();
+        }}
+      />
+      <PhotoViewer open={!!photosFor} onOpenChange={(v) => (v ? null : setPhotosFor(null))} title={photosFor?.title ?? ''} photos={photosFor?.photos ?? []} timezone={overlay?.tz ?? d.timezone ?? 'Asia/Muscat'} />
     </div>
   );
 }
@@ -1502,9 +1574,104 @@ function BreakRow({ l }: { l: DetailLoad }) {
   );
 }
 
-function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
+/** The Loads table's delivery progress of a load that left: "Delivered 7/12", "1 not delivered", "2 no result", "Back 14:32". */
+function LoadProgress({ o, tag, tz }: { o: NonNullable<OutcomeOverlay['loads'][string]>; tag: string; tz: string }) {
+  const back = o.backAtDepotAt ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).format(new Date(o.backAtDepotAt)) : null;
+  return (
+    <span className="mt-1 flex flex-wrap gap-1" data-testid={`load-progress-${tag}`}>
+      <Badge variant="secondary" title={`${o.done} of ${o.total} stops have a result`}>
+        Delivered {o.delivered}/{o.total}
+      </Badge>
+      {o.partly ? <Badge variant="warning">{o.partly} partly</Badge> : null}
+      {o.notDelivered ? <Badge variant="destructive">{o.notDelivered} not delivered</Badge> : null}
+      {o.noResult ? <Badge variant="warning">{o.noResult} no result</Badge> : null}
+      {back ? <span className="text-xs text-muted-foreground">Back {back}</span> : null}
+    </span>
+  );
+}
+
+const fmtClock = (iso: string | null, tz: string) => (iso ? new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: tz }).format(new Date(iso)) : '—');
+
+/** The result chip of a stop: "Delivered", "Not delivered · Shop closed (driver)", "→ 6 Oct", with its notes. */
+function ResultCell({ o }: { o: OverlayStop }) {
+  const tone = o.outcome === 'DELIVERED' ? 'success' : o.outcome === 'PARTLY_DELIVERED' ? 'warning' : o.outcome === 'NOT_DELIVERED' ? 'destructive' : 'outline';
+  const label = o.outcome === 'DELIVERED' ? 'Delivered' : o.outcome === 'PARTLY_DELIVERED' ? `Partly ${o.casesDelivered ?? 0}/${o.casesPlanned}` : o.outcome === 'NOT_DELIVERED' ? 'Not delivered' : 'No result';
+  return (
+    <div className="space-y-0.5" data-testid="stop-result">
+      <Badge variant={tone}>{label}</Badge>
+      {o.reasonText ? <span className="block">{o.reasonText}</span> : null}
+      {o.source ? <span className="block text-muted-foreground">by {o.source === 'dispatcher' && o.by ? `${o.by} (office)` : o.source}</span> : null}
+      {o.carriedTo ? <span className="block font-medium">→ {fmtDayMonth(o.carriedTo)}</span> : null}
+      {o.late ? <span className="block text-amber-700">recorded after the trip closed</span> : null}
+      {o.noPhotoText ? <span className="block text-amber-700">{o.noPhotoText}</span> : null}
+      {o.carryConflict ? <span className="block font-medium text-red-700">changed after it was brought forward: {o.carryConflict}</span> : null}
+    </div>
+  );
+}
+
+/** The result columns of one stop of a load that left: Result, Arrived, Left, Unload, Photos, [Record]. */
+function StopResultCells({ o, tz, canRecord, onRecord, onPhotos }: { o: OverlayStop | null; tz: string; canRecord: boolean; onRecord: (o: OverlayStop) => void; onPhotos: (o: OverlayStop) => void }) {
+  if (!o) return <td colSpan={6} className="text-muted-foreground">—</td>;
+  return (
+    <>
+      <td className="max-w-[200px]">
+        <ResultCell o={o} />
+      </td>
+      <td data-testid="stop-arrived">
+        {fmtClock(o.arrivedAt, tz)}
+        {o.arrivalNote ? <span className="block text-muted-foreground">{o.arrivalNote}</span> : null}
+        {o.downgradedArrival ? <span className="block text-muted-foreground" title="The phone was far from the pin: the automatic arrival counts as manual">far from pin</span> : null}
+      </td>
+      <td data-testid="stop-left">
+        {fmtClock(o.departedAt, tz)}
+        {o.departureNote ? <span className="block text-muted-foreground">{o.departureNote}</span> : null}
+      </td>
+      <td data-testid="stop-unload" title={o.actualLabel ?? undefined}>
+        {o.plannedMin !== null || o.actualMin !== null ? `plan ${o.plannedMin ?? '—'} / actual ${o.actualMin ?? '—'} min` : '—'}
+        {o.timingSuspect ? <span className="block text-amber-700">unverified timing</span> : null}
+      </td>
+      <td>
+        {o.photos.length ? (
+          <button type="button" className="text-primary underline-offset-2 hover:underline" onClick={() => onPhotos(o)} data-testid="stop-photos">
+            {o.photos.length} photo{o.photos.length === 1 ? '' : 's'}
+          </button>
+        ) : (
+          '—'
+        )}
+        {o.photoMissing ? <span className="block text-muted-foreground">{o.photoMissing} not received yet</span> : null}
+      </td>
+      <td>
+        {canRecord ? (
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" onClick={() => onRecord(o)} data-testid="stop-record">
+            Record
+          </Button>
+        ) : null}
+      </td>
+    </>
+  );
+}
+
+function LoadDetail({
+  l,
+  depotCode,
+  overlay = null,
+  canRecord = false,
+  onRecord,
+  onPhotos,
+}: {
+  l: DetailLoad;
+  depotCode: string;
+  /** The delivery results (spec section 10.2); the extra columns show for loads that left. */
+  overlay?: OutcomeOverlay | null;
+  canRecord?: boolean;
+  onRecord?: (st: DetailLoad['stops'][number], o: OverlayStop) => void;
+  onPhotos?: (st: DetailLoad['stops'][number], o: OverlayStop) => void;
+}) {
   // A6 second review: an older version whose orders a later re-plan re-weighed says so (as its Excel sheet does).
   const kgNote = manifestKgNote(l);
+  const results = ON_ROAD.has(l.status) && !!overlay;
+  const tz = overlay?.tz ?? 'Asia/Muscat';
+  const span = results ? 15 : 9;
   return (
     <div className="grid gap-4 lg:grid-cols-3">
       <div>
@@ -1550,12 +1717,22 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
               <th>SKUs</th>
               <th>km</th>
               <th>cum km</th>
+              {results ? (
+                <>
+                  <th>Result</th>
+                  <th>Arrived</th>
+                  <th>Left</th>
+                  <th title="Unloading minutes: planned / actual (from the window start when the truck waited)">Unload</th>
+                  <th>Photos</th>
+                  <th />
+                </>
+              ) : null}
             </tr>
           </thead>
           <tbody>
             <tr className="border-b">
               <td className="py-1">—</td>
-              <td colSpan={9}>
+              <td colSpan={span}>
                 DEPOT {depotCode} — depart {hhmm(l.departMin)}
               </td>
             </tr>
@@ -1598,6 +1775,11 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                       {st.masterChanged.map((c) => c.text).join(' · ')}
                     </span>
                   ) : null}
+                  {overlay?.copyConflicts[`${l.id}:${st.sequence}`] ? (
+                    <Badge variant="destructive" className="mt-0.5" data-testid="stop-copy-conflict">
+                      {overlay.copyConflicts[`${l.id}:${st.sequence}`]}
+                    </Badge>
+                  ) : null}
                   {!st.snapshot ? <span className="block text-muted-foreground" title="Planned before stop details were kept with the plan">current customer data</span> : null}
                 </td>
                 <td>P{st.priority}</td>
@@ -1612,13 +1794,14 @@ function LoadDetail({ l, depotCode }: { l: DetailLoad; depotCode: string }) {
                 <td className="max-w-[220px]">{st.skus.map((k) => `${k.productCode} ×${k.cases}`).join('; ')}</td>
                 <td>{st.legKm}</td>
                 <td>{st.cumulativeKm ?? '—'}</td>
+                {results ? <StopResultCells o={overlay!.stops[`${l.id}:${st.sequence}`] ?? null} tz={tz} canRecord={canRecord} onRecord={(o) => onRecord?.(st, o)} onPhotos={(o) => onPhotos?.(st, o)} /> : null}
               </tr>
               {l.break && l.break.where === 'ROAD' && (l.break.afterSequence ?? 0) === st.sequence ? <BreakRow l={l} /> : null}
               </Fragment>
             ))}
             <tr>
               <td className="py-1">—</td>
-              <td colSpan={9}>
+              <td colSpan={span}>
                 DEPOT — return {hhmm(l.returnMin)} (+{l.returnLegKm} km)
               </td>
             </tr>

@@ -321,7 +321,7 @@ async function hadResultAtCompletion(tx: Tx, tenantId: string, visitId: string |
 }
 
 /** The copies' carry basis of the stop's brought-forward orders (an empty basis for copies made before Part 3). */
-async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop) {
+export async function carryBases(tx: Tx, tenantId: string, planned: PlannedStop) {
   const copies = planned.orders.map((o) => o.carriedToOrderId).filter((x): x is string => !!x);
   if (!copies.length) return [];
   const rows = await tx.order.findMany({ where: { tenantId, id: { in: copies } }, select: { id: true, deliveryDate: true, carryBasisJson: true } });

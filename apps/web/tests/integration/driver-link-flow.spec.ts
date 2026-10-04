@@ -17,6 +17,13 @@
  * - an automatic arrival 2 km from the pin is stored as a manual one (downgraded);
  * - a result on every stop + Back at depot complete the load (audited with the driver link);
  * - after the dispatcher completes a load: a backdated change is LOAD_COMPLETED, a gap-fill is late.
+ * Part 3 (the office side):
+ * - GET /api/runs/:id/outcomes shows the results of the loads that left; another company 404;
+ * - Record outcome (POST /api/dispatch/outcomes) corrects a stop of a completed load as the office,
+ *   once per key, audited with before and after; another company 404;
+ * - GET /api/delivery-photos/:id serves the photo to the company only;
+ * - the "Delivery actuals" Excel downloads (31 days at most).
+ * Bring forward from results (E1, E6, E10) runs on the real database in carry-over.spec.ts.
  * Synthetic data only.
  *
  * Requires: dev server (RATE_LIMITS_DISABLED=1) + solver running.
@@ -373,5 +380,61 @@ describe('Part 2: results, photos and Back at depot from the driver page', () =>
       const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[1].key.split(':')[1]) } });
       expect(v).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Part 3: the office side (Bring forward from results, E1 / E6 / E10, is covered on the real
+// database in tests/integration/carry-over.spec.ts)
+// ---------------------------------------------------------------------------------------
+
+describe('Part 3: results on the plan, Record outcome, photos and the actuals Excel', () => {
+  it('GET /api/runs/:id/outcomes shows the results of the loads that left; another company 404', async () => {
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runId}/outcomes`);
+    expect(r.status).toBe(200);
+    const o = (await json(r)).data;
+    const p = await plan();
+    const t02 = p.loads.find((l: any) => l.truckId === trucks.T02 && l.status === 'COMPLETED');
+    expect(t02).toBeTruthy();
+    expect(o.loads[t02.id]).toMatchObject({ total: t02.stops.length, done: t02.stops.length, notDelivered: t02.stops.length });
+    expect(o.stops[`${t02.id}:${t02.stops[0].sequence}`]).toMatchObject({ outcome: 'NOT_DELIVERED', reasonText: 'Shop closed', source: 'driver' });
+    expect((await fetchWith(other.cookieJar, `${BASE}/api/runs/${runId}/outcomes`)).status).toBe(404);
+  });
+
+  it('Record outcome: the office corrects a stop of a completed load; audited as the user with before and after', async () => {
+    const p = await plan();
+    const t02 = p.loads.find((l: any) => l.truckId === trucks.T02 && l.status === 'COMPLETED');
+    const seq = t02.stops[0].sequence;
+    const body = { key: crypto.randomUUID(), depotId, date: isoPlus(0), truckId: trucks.T02, loadNo: t02.loadNo, sequence: seq, outcome: 'DELIVERED', arrivedAt: null, departedAt: null };
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/outcomes`, j(body));
+    expect(r.status).toBe(200);
+    expect((await json(r)).data).toMatchObject({ result: 'ok' });
+    // A double click: recorded once.
+    expect((await json(await fetchWith(t.cookieJar, `${BASE}/api/dispatch/outcomes`, j(body)))).data).toMatchObject({ result: 'duplicate' });
+    const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T02, loadNo: t02.loadNo, sequence: seq } });
+    expect(v).toMatchObject({ outcome: 'DELIVERED', outcomeSource: 'DISPATCHER' });
+    const a = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: t.tenantId, action: 'DELIVERY_OUTCOME_SET', entityId: v.id, userId: { not: null } } });
+    expect(a.beforeJson).toMatchObject({ outcome: 'NOT_DELIVERED' });
+    expect(a.afterJson).toMatchObject({ source: 'DISPATCHER', outcome: 'DELIVERED', correction: true });
+    // Another company cannot record on it.
+    expect((await fetchWith(other.cookieJar, `${BASE}/api/dispatch/outcomes`, j({ ...body, key: crypto.randomUUID() }))).status).toBe(404);
+  });
+
+  it('GET /api/delivery-photos/:id: the company photo for a signed-in user, 404 for another company', async () => {
+    const photo = await prisma.deliveryPhoto.findFirstOrThrow({ where: { tenantId: t.tenantId } });
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/delivery-photos/${photo.id}`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toBe('image/jpeg');
+    expect(r.headers.get('x-content-type-options')).toBe('nosniff');
+    expect((await fetchWith(other.cookieJar, `${BASE}/api/delivery-photos/${photo.id}`)).status).toBe(404);
+  });
+
+  it('the "Delivery actuals" Excel downloads for the day', async () => {
+    const today = isoPlus(0);
+    const r = await fetchWith(t.cookieJar, `${BASE}/api/dispatch/delivery-actuals?from=${today}&to=${today}&depotId=${depotId}`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('content-type')).toMatch(/spreadsheetml/);
+    expect((await r.arrayBuffer()).byteLength).toBeGreaterThan(1000);
+    expect((await fetchWith(t.cookieJar, `${BASE}/api/dispatch/delivery-actuals?from=2026-01-01&to=2026-03-01`)).status).toBe(400);
   });
 });
