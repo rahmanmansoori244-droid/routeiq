@@ -15,6 +15,7 @@ import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/lib/dispatch/costs';
+import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
@@ -273,7 +274,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       async () => {
         res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
         if (!res.ok || !res.data) return;
-        toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
+        // A truck rented for the day: the same driver on its other planned loads (one day-rate driver).
+        const also = (res.data.alsoOn ?? []).map((x) => x.loadNo);
+        toast.success(
+          `${l.truckCode} Load ${l.loadNo}${also.length ? ` and ${also.map((n) => `Load ${n}`).join(', ')}` : ''}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`,
+        );
         await loadDrivers();
         const fresh = await load();
         await afterDriverChange(fresh, l, res.data.driver.id);
@@ -850,7 +855,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               testId="kpi-pallets"
             />
           ) : null}
-          <Kpi label="Fuel (l · OMR)" value={`${s.fuelLitres ?? '—'} · ${s.fuelCost.toFixed(1)}`} />
+          {(() => {
+            // Own trucks' fuel; a truck rented for the day has its fuel in the hire (sixth review).
+            const fuel = fuelKpi(s, d.loads);
+            return (
+              <Kpi
+                label="Fuel (l · OMR)"
+                value={fuel.value}
+                note={fuel.note}
+                title={fuel.note ? "Own trucks' fuel. A truck rented for the day has its fuel included in the hire: no litres or fuel cost of its own." : undefined}
+                testId="kpi-fuel"
+              />
+            );
+          })()}
           <Kpi
             label="Operating cost OMR"
             value={`${s.operatingCost.toFixed(1)}${summaryCostBasis(s) === 'MIXED_LEGACY' ? ' *' : ''}`}
@@ -1195,7 +1212,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.utilizationPct}%</td>
                     <td className="p-2">{l.distanceKm}</td>
                     <td className="p-2">{durH(l.durationMin)}</td>
-                    <td className="p-2">{l.fuelLitres ?? '—'}</td>
+                    <td className="p-2" title={typeof l.driverDayRate === 'number' ? 'Rented for the day: fuel included in the hire' : undefined}>
+                      {l.fuelLitres ?? (typeof l.driverDayRate === 'number' ? 'incl.' : '—')}
+                    </td>
                     <td
                       className="p-2"
                       title={
@@ -1452,11 +1471,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   );
 }
 
-function Kpi({ label, value, warn, title, testId }: { label: string; value: string; warn?: boolean; title?: string; testId?: string }) {
+function Kpi({ label, value, warn, title, testId, note }: { label: string; value: string; warn?: boolean; title?: string; testId?: string; note?: string | null }) {
   return (
     <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`} title={title} data-testid={testId}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-sm font-semibold">{value}</p>
+      {note ? <p className="text-[11px] text-muted-foreground">{note}</p> : null}
     </div>
   );
 }

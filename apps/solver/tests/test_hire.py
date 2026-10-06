@@ -507,11 +507,18 @@ def test_a_day_paid_trucks_load_is_put_in_order_with_its_km_weighed_as_an_own_tr
         assert after is before and a.stops == zigzag
 
 
+def in_ring_order(stops: tuple[int, ...], n: int) -> bool:
+    """A load driven round its arc of the ring one way, never back and forth."""
+    steps = {(b - a) % n for a, b in zip(stops, stops[1:])}
+    return steps <= {1} or steps <= {n - 1}
+
+
 def test_every_load_of_a_whole_day_rental_is_put_in_order_and_an_own_truck_never():
-    # A rental is for the whole day (owner answer 2): each of its loads is put in order, the loads keep
-    # their stops and their place in its day, and both come back earlier. An own truck's loads keep the
-    # search's order (its km are priced as money in the search already), and a day without rented or
-    # day-paid trucks keeps the very same plan. The km rate is the own trucks' average (A 0.2, B 0.6).
+    # A rental is for the whole day (owner answer 2): its day is routed again (sixth review: which stops
+    # go on which load too) - each load one half of the ring, driven round it, the truck back earlier. An
+    # own truck's loads keep the search's order (its km are priced as money in the search already), and a
+    # day without rented or day-paid trucks keeps the very same plan. The km rate is the own trucks'
+    # average (A 0.2, B 0.6).
     stops = ring(r_km=10.0, priorities=(1, 3, 2))
     trucks = [own("A", bays=6, max_trips=2, cost_per_km=0.2), own("B", bays=1, cost_per_km=0.6),
               hire("H", 6, 50.0, driver_day_cost=10.0, max_trips=2)]
@@ -520,9 +527,9 @@ def test_every_load_of_a_whole_day_rental_is_put_in_order_and_an_own_truck_never
     loads = [(0, 3, 1, 5, 2, 4), (6, 9, 7, 11, 8, 10)]
     _, idx, before, after = ordered_after_pick(r, {"H": loads})
     got = after.plan[idx["H"]]
-    assert [set(tl.stops) for tl in got] == [set(l) for l in loads]
-    assert [tl.stops for tl in got] == [(0, 1, 2, 3, 4, 5), (6, 7, 8, 9, 10, 11)]
-    assert [tl.return_s < tl0.return_s for tl, tl0 in zip(got, before.plan[idx["H"]])] == [True, True]
+    assert sorted(k for tl in got for k in tl.stops) == list(range(12))
+    assert len(got) == 2 and all(is_arc(set(tl.stops), 12) and in_ring_order(tl.stops, 12) for tl in got)
+    assert got[-1].return_s < before.plan[idx["H"]][-1].return_s
     assert after.score.operating == before.score.operating and after.score.metres < before.score.metres
     # The own truck A: the same loads keep their order.
     _, idx, before, after = ordered_after_pick(r, {"A": loads})
@@ -650,3 +657,210 @@ def test_a_day_the_plan_ranks_strictly_stays_strict_with_trucks_to_rent(margin, 
     assert min(tier.values()) > low
     # Still in proportion to the money: a 10-ton's day against a 3-ton's.
     assert tier["H10-0"] / tier["H3-1"] == pytest.approx((cost + 10.0) / (cost / 2 + 10.0), rel=1e-6)
+
+
+# ---------------------------------------------------------------------------------------------
+# The real-size demo and the last re-review (sixth review of the hire branch)
+# ---------------------------------------------------------------------------------------------
+# The real Muscat day (80 orders: P1 6, P2 20, P3 38, P4 10, P5 6; three own 10-tons): the what-if
+# rented 2 x 10-ton, although the same request with ONE 10-ton to rent delivered all 25 P1-P3 orders
+# left out and passed the timing check - the second truck only carried P4/P5 orders (owner answer 1),
+# and the set was not the cheapest. The Quick search stops in a local optimum: emptying a rented truck
+# needs every one of its stops moved at once, and each move alone saves nothing. After the search the
+# set is REDUCED: each rented truck, dearest first, is left out and the day solved again; the removal is
+# kept when every P1-P3 order the check's plan delivers is still delivered and the plan passes every
+# check (dispatch_solver._reduce_hire). The "one truck fewer" line comes from such a solve, never an
+# estimate (DispatchResponse.hire_check.one_fewer).
+
+def spread_day(seed: int, n: int = 30) -> list:
+    """``n`` one-pallet stops 10-60 km round the depot, P1-P5 (mostly P3), from a fixed seed: a day the
+    own truck (12 bays, two loads) cannot carry alone."""
+    import math
+    import random
+
+    from tests.test_dispatch import DEPOT
+
+    rnd = random.Random(seed)
+    out = []
+    for i in range(n):
+        a, r = rnd.uniform(0, 2 * math.pi), rnd.uniform(10, 60)
+        lat = DEPOT.lat + (r / 111.0) * math.sin(a)
+        lng = DEPOT.lng + (r / (111.0 * math.cos(math.radians(DEPOT.lat)))) * math.cos(a)
+        out.append(pstop(f"S{i:02d}", lat, lng, cases=20, units=1000, priority=rnd.choice((1, 2, 3, 3, 3, 4, 5))))
+    return out
+
+
+def ten_tons(n: int = 3, trips: int = 3) -> list[DispatchTruck]:
+    """NMWC's 10-ton to rent (12 bays, 50 OMR a day, its driver 10 OMR), ``n`` units, ``trips`` loads a day."""
+    return [hire(f"H10-{k}", 12, 50.0, driver_day_cost=10.0, max_trips=trips) for k in range(1, n + 1)]
+
+
+def high_ids(stops) -> set[str]:
+    return {s.stop_id for s in stops if s.priority <= 3}
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+def test_a_day_quick_rents_two_trucks_for_gets_the_one_that_suffices(seed):
+    # The search alone rents two 10-tons on this day (its first plan, hire_check.first); one of them,
+    # with its whole day of loads, carries every P1-P3 order: the suggestion is that one.
+    stops = spread_day(seed)
+    r = req(stops, [own("T1", max_trips=2)] + ten_tons(), time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_pallets_hold(r, sc)
+    assert hired_used(sc) == {"H10": 1}
+    assert high_ids(stops) <= served_ids(sc)
+    hc = resp.hire_check
+    assert hc is not None
+    assert len(hc.first) == 2 and len(hc.used) == 1 and set(hc.used) <= set(hc.first)
+    assert hc.solves >= 1 and hc.complete
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+    # Reported as the real money: one hire and one day rate.
+    assert sc.objective.fixed_cost == pytest.approx(35.0 + 50.0)
+
+
+def first_search_rents_smaller(monkeypatch, bays: int) -> None:
+    """The search's FIRST plan of a request with trucks to rent is made as if each could hold only
+    ``bays`` bays, so it rents more of them than the day needs (as the Quick search did on the real
+    day); every later solve - the reduction's - sees the trucks as they are."""
+    orig = ds._run_scenarios
+    calls = {"n": 0}
+
+    def first_smaller(names, rq, solvable, tds, mx, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            small = rq.model_copy(update={"trucks": [t.model_copy(update={"bays": bays}) if t.hire_candidate else t for t in rq.trucks]})
+            return orig(names, small, solvable, ds._truck_days(small), mx, *a, **kw)
+        return orig(names, rq, solvable, tds, mx, *a, **kw)
+
+    monkeypatch.setattr(ds, "_run_scenarios", first_smaller)
+
+
+@pytest.mark.parametrize("pv", ["off", "on"])
+def test_a_rented_truck_only_p4_p5_orders_need_is_given_back(monkeypatch, pv):
+    # Owner answer 1: the own 10-ton (12 pallets) + 10 pallets of P3 orders left + 3 pallets of P5
+    # orders. The first plan rents two 10-tons (all 25 pallets delivered); with ONE 10-ton every P3
+    # order is still delivered and only a P5 order stays out: one 10-ton is suggested (the solves of
+    # the reduction run the second search too, as the what-if's own search does).
+    second_search(monkeypatch, pv)
+    stops = stops_of([3, 3, 3, 3] + [2.5] * 4) + stops_of([1.5, 1.5], "L", priority=5)
+    first_search_rents_smaller(monkeypatch, bays=8)
+    r = req(stops, [own("T1")] + ten_tons(2, trips=1), time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert hired_used(sc) == {"H10": 1}
+    assert high_ids(stops) <= served_ids(sc)
+    assert len([u for u in sc.unserved if u.stop_id.startswith("L")]) == 1
+    hc = resp.hire_check
+    assert sorted(hc.first) == ["H10-1", "H10-2"] and len(hc.used) == 1
+    # The reported money is the reduced plan's: one hire.
+    assert sc.objective.fixed_cost == pytest.approx(35.0 + 50.0)
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+
+
+def test_the_reduction_never_gives_back_a_truck_a_p1_p3_order_needs():
+    # 14 pallets of P3 orders left: a 10-ton + a 3-ton (test_the_cheapest_combination). Without the
+    # 10-ton 4 orders stay out, without the 3-ton 1: both kept, and the set is complete (each tried).
+    stops = stops_of([3, 3, 3, 3] + [2] * 7)
+    r = req(stops, [own("T1")] + hire_options(), time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert unserved_map(sc) == {}
+    assert hired_used(sc) == {"H10": 1, "H3": 1}
+    hc = resp.hire_check
+    assert hc.complete and sorted(hc.used) == sorted(hc.first) and hc.solves == 2
+    # One truck fewer, SOLVED: the 3-ton (the least useful: one 2-pallet order would stay out).
+    of = hc.one_fewer
+    assert of is not None and of.without.startswith("H3-")
+    assert [s for s in of.unserved if s.startswith("S")] and len(of.unserved) == 1
+    # Exactly what a plan with the 10-ton alone leaves out.
+    ten = next(t for t in hc.used if t.startswith("H10"))
+    alone = rec(optimize_dispatch(req(stops, [own("T1"), next(t for t in r.trucks if t.id == ten)], time_limit_sec=3)))
+    assert len(alone.unserved) == len(of.unserved)
+
+
+def test_one_rented_truck_the_own_fleet_can_replace_is_given_back(monkeypatch):
+    # Never rent while an own truck could do the job: the first plan rents a 3-ton although the own
+    # 10-ton carries the whole day (9 pallets). The reduction leaves it out: nothing to hire.
+    import dispatch_solver
+
+    stops = stops_of([3, 3, 3])
+    orig = dispatch_solver._run_scenarios
+    calls = {"n": 0}
+
+    def own_too_small(names, rq, solvable, tds, mx, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            small = rq.model_copy(update={"trucks": [t.model_copy(update={"bays": 4}) if not t.hire_candidate else t for t in rq.trucks]})
+            return orig(names, small, solvable, ds._truck_days(small), mx, *a, **kw)
+        return orig(names, rq, solvable, tds, mx, *a, **kw)
+
+    monkeypatch.setattr(dispatch_solver, "_run_scenarios", own_too_small)
+    r = req(stops, [own("T1"), hire("H3-1", 6, 30.0, driver_day_cost=10.0)], time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert hired_used(sc) == {} and unserved_map(sc) == {}
+    assert resp.hire_check.first == ["H3-1"] and resp.hire_check.used == []
+
+
+def test_no_trucks_to_rent_no_reduction():
+    resp = optimize_dispatch(req(stops_of([3, 3]), [own("T1")], time_limit_sec=3))
+    assert resp.hire_check is None
+
+
+def test_the_reduction_stops_at_its_solve_limit(monkeypatch):
+    # At most HIRE_REDUCE_MAX_SOLVES extra solves (and its time budget): the set is then reported as
+    # not proven minimal, and no "one truck fewer" is given without a solve of that very set.
+    monkeypatch.setattr(ds, "HIRE_REDUCE_MAX_SOLVES", 1)
+    stops = stops_of([3, 3, 3, 3] + [2] * 7)
+    resp = optimize_dispatch(req(stops, [own("T1")] + hire_options(), time_limit_sec=3))
+    hc = resp.hire_check
+    assert hc.solves == 1 and not hc.complete
+    assert hc.one_fewer is None or hc.one_fewer.without in hc.used
+
+
+# A rented truck doing more than one load: which stops go on which load (the last re-review: only
+# the stops inside each load were put in order, and its loads still criss-crossed the area).
+
+def is_arc(ids: set[int], n: int) -> bool:
+    """``ids`` are consecutive positions round a ring of ``n``."""
+    return any(ids == {(k + i) % n for i in range(len(ids))} for k in range(n))
+
+
+@pytest.mark.parametrize("kind", ["to rent", "hired"])
+def test_a_rented_trucks_loads_share_its_stops_out_as_tidily_as_an_own_trucks(kind):
+    # 16 one-pallet stops on a ring 15 km round the depot (P1, P3 and P2 orders taking turns), a 8-bay
+    # truck to rent (or hired for the day) making two loads. Its two loads drove 249 km where an own
+    # 8-bay truck with a km cost drives 185: each load went round half of the ring's stops picked all
+    # over it. Its loads are now shared out as tidily as the own truck's (within 2%), its reported
+    # costs unchanged (no km cost, the day rate).
+    stops = ring(16, 15.0, (1, 3, 2))
+    big = btruck("H", bays=8, fixed_cost=50.0, driver_day_cost=10.0, max_trips=2, hire_candidate=kind == "to rent")
+    _, sc = solve(stops, [own("T1", bays=1), big])
+    h = sorted((ld for ld in sc.loads if ld.truck_id == "H"), key=lambda ld: ld.load_no)
+    assert len(h) == 2
+    _, mine = solve(stops, [own("O", bays=8, max_trips=2, cost_per_km=0.1)])
+    ref_km = sum(ld.distance_km for ld in mine.loads)
+    assert sum(ld.distance_km for ld in h) <= ref_km * 1.02
+    assert h[-1].return_min <= max(ld.return_min for ld in mine.loads) + 10
+    assert all((ld.distance_cost, ld.fuel_cost) == (0.0, 0.0) for ld in h)
+    assert h[0].driver_cost == pytest.approx(10.0) and h[1].driver_cost == 0.0
+
+
+def test_the_stops_of_a_whole_day_rentals_loads_are_shared_out_by_area():
+    # The loads the search left (every other stop round the ring on each): once the plan is chosen the
+    # rented truck's stops are shared out again among its loads - each load one half of the ring - with
+    # its km weighed as an own truck's. Same truck, same stops, no more money; an own truck's loads stay.
+    stops = ring(16, 15.0, (1, 3, 2))
+    trucks = [own("A", bays=8, max_trips=2, cost_per_km=0.2), hire("H", 8, 50.0, driver_day_cost=10.0, max_trips=2)]
+    r = req(stops, trucks)
+    loads = [tuple(range(0, 16, 2)), tuple(range(1, 16, 2))]
+    _, idx, before, after = ordered_after_pick(r, {"H": loads})
+    got = after.plan[idx["H"]]
+    assert sorted(k for tl in got for k in tl.stops) == list(range(16))
+    assert len(got) == 2 and all(is_arc(set(tl.stops), 16) and in_ring_order(tl.stops, 16) for tl in got)
+    assert after.score.operating == before.score.operating
+    assert after.score.metres < 0.85 * before.score.metres
+    assert after.score.service == before.score.service
+    _, idx, before, after = ordered_after_pick(r, {"A": loads})
+    assert after is before

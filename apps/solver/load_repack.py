@@ -880,19 +880,26 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
 
 
 # --------------------------------------------------------------------------------------------
-# The order of a day-paid truck's stops, once the plan is chosen (fifth review of the hire branch)
+# A day-paid truck's day routed again, once the plan is chosen (fifth and sixth reviews of the hire
+# branch)
 # --------------------------------------------------------------------------------------------
 # A truck to rent or one whose driver is paid by the day costs (almost) nothing per km in the search:
 # its fuel is in the hire, and its km carry only a tiny tie-breaker, so that they never outweigh real
-# money in WHICH truck carries what (fourth review). Within its loads, though, the customers' time
+# money in WHICH truck carries what (fourth review). Within its day, though, the customers' time
 # preferences then outweighed its km: one minute earlier at a P1 order (0.01 OMR) was worth 10 km, and
-# it drove the P1 orders first wherever they were (340 km instead of 250, back 2 hours later).
-# shorter_orders puts each of its loads in order afterwards, the plan's trucks and loads unchanged,
-# weighing its km against the time preferences at an own truck's km rate (dispatch_solver.
-# _order_km_rate): a new order is taken only when it drives fewer km, costs no more money and is
-# better on that trade-off. Service, money and every hard rule stay as they were (exact timing).
+# it drove the P1 orders first wherever they were (340 km instead of 250, back 2 hours later); and a
+# rented truck making two loads put stops from all over the area on each (sixth review: 249 km where an
+# own truck drives 185).
+# shorter_orders routes such a truck's day again afterwards, with the SAME per-km and per-hour costs as
+# an own truck's (dispatch_solver._order_km_rate, the hourly driver rate) - for routing only, never money:
+# first which of its stops go on which of its loads (no more loads than it has; _day_proposals: the
+# shortest round of all its stops cut into loads that fit, and a local search moving and swapping stops
+# between its loads), then the order inside each load. A new day is taken only when, timed exactly
+# (time_truck: every hard rule, the driver break), it drives fewer km, costs no more money and is better
+# on that trade-off. The plan's other trucks, its service and its money stay as they were.
 
 ORDER_PASSES = 40  # improving passes of the local search, per load and start
+DAY_PASSES = 200  # improving moves of the local search on a truck's whole day, per start
 
 
 def _blocks(day: Day, load: Load) -> list[Load]:
@@ -988,40 +995,245 @@ def _orders(day: Day, pricing: Pricing, td: "TruckDay", tl: TimedLoad, per_m: fl
     return [o for o, v in sorted(found.items(), key=lambda kv: (kv[1], kv[0])) if v < float("inf")][:3]
 
 
-def _order_value(day: Day, pricing: Pricing, idx: int, timed: list[TimedLoad], km_per_m: float) -> tuple[int, int, float]:
-    """(money, metres, money + time preferences + tie-breaker + ``km_per_m`` x metres) of one truck's
-    timetable (score() of that truck alone: the rest of the plan is the same either way)."""
+def _order_value(day: Day, pricing: Pricing, idx: int, timed: list[TimedLoad], km_per_m: float,
+                 span_per_s: float = 0.0) -> tuple[int, int, float]:
+    """(money, metres, money + time preferences + tie-breaker + ``km_per_m`` x metres + ``span_per_s`` x
+    its paid day) of one truck's timetable (score() of that truck alone: the rest of the plan is the same
+    either way). ``span_per_s``: a day-paid driver's day weighed as an hourly driver's (routing only)."""
     sc = score(day, pricing, {idx: timed})
-    return sc.operating, sc.metres, sc.cost + sc.tie + km_per_m * sc.metres
+    v = sc.cost + sc.tie + km_per_m * sc.metres
+    if span_per_s and timed:
+        td = day.by_idx[idx]
+        first = td.frozen_return_s if td.shift_anchor_s is not None and td.frozen_return_s is not None else timed[0].depart_s
+        v += span_per_s * max(0, timed[-1].return_s - first)
+    return sc.operating, sc.metres, v
+
+
+def _day_estimate(day: Day, pricing: Pricing, td: "TruckDay", loads: list[Load], per_m: float, per_s: float,
+                  cache: dict[Load, Facts]) -> float:
+    """A quick estimate of a truck's day of ``loads`` (in this order): each load leaving as early as it
+    can after its turnaround without waiting on the road (or at its latest when it must wait), its
+    customers' time preferences + ``per_m`` a metre + ``per_s`` a second of the day. Infinite when a load
+    does not fit the truck, misses a closing time, the truck's latest return or the shift. Only to
+    propose days: time_truck decides (the driver break included)."""
+    if len(loads) > td.trips_left:
+        return float("inf")
+    est, first, prev_ret = 0.0, None, None
+    for j, load in enumerate(loads):
+        f = cache.get(load)
+        if f is None:
+            f = cache[load] = facts(day, load)
+        if not fits_truck(f, td):
+            return float("inf")
+        earliest = _first_departure_s(day, td, f) if j == 0 else max(td.earliest_depart_s, prev_ret + f.gap)
+        if f.waits:
+            dep = f.hi
+            if dep < earliest:
+                return float("inf")
+        else:
+            dep = max(earliest, f.lo)
+            if dep > f.hi:
+                return float("inf")
+        t, prev = dep, 0
+        for k in load:
+            s = day.stops[k]
+            t = max(t + day.T[prev][k + 1], _hs(s))
+            est += _soft_cost(day, pricing, k, t)
+            t += s.service_min * 60
+            prev = k + 1
+        t += day.T[prev][0]
+        if t > td.latest_return_s:
+            return float("inf")
+        est += per_m * f.metres
+        first = dep if first is None else first
+        prev_ret = t
+    if first is None:
+        return float("inf")
+    if td.shift_anchor_s is None and prev_ret - first > day.shift_max_s:
+        return float("inf")
+    return est + per_s * (prev_ret - first)
+
+
+def _day_moves(ls: list[list[Load]]):
+    """Every day one move away (lists of block lists, one per load): a block moved anywhere in the day,
+    two blocks of two loads swapped, a run of a load reversed, the ends of two loads exchanged, two
+    loads swapped in the day. A load may become empty (the day then has a load fewer)."""
+    n_l = len(ls)
+    for a in range(n_l):
+        for i in range(len(ls[a])):
+            blk, rest = ls[a][i], ls[a][:i] + ls[a][i + 1:]
+            for b in range(n_l):
+                tgt = rest if b == a else ls[b]
+                for j in range(len(tgt) + 1):
+                    if b == a and j == i:
+                        continue
+                    new = list(ls)
+                    new[a] = rest
+                    new[b] = tgt[:j] + [blk] + tgt[j:]
+                    yield new
+    for a in range(n_l):
+        for b in range(a + 1, n_l):
+            for i in range(len(ls[a])):
+                for j in range(len(ls[b])):
+                    na, nb = list(ls[a]), list(ls[b])
+                    na[i], nb[j] = nb[j], na[i]
+                    new = list(ls)
+                    new[a], new[b] = na, nb
+                    yield new
+    for a in range(n_l):
+        n = len(ls[a])
+        for i in range(n - 1):
+            for j in range(i + 1, n):
+                new = list(ls)
+                new[a] = ls[a][:i] + ls[a][i:j + 1][::-1] + ls[a][j + 1:]
+                yield new
+    for a in range(n_l):
+        for b in range(a + 1, n_l):
+            for i in range(len(ls[a]) + 1):
+                for j in range(len(ls[b]) + 1):
+                    if (i, j) in ((0, 0), (len(ls[a]), len(ls[b]))):
+                        continue
+                    new = list(ls)
+                    new[a], new[b] = ls[a][:i] + ls[b][j:], ls[b][:j] + ls[a][i:]
+                    yield new
+            new = list(ls)
+            new[a], new[b] = ls[b], ls[a]
+            yield new
+
+
+def _day_key(ls: list[list[Load]]) -> tuple[Load, ...]:
+    return tuple(_flat(bl) for bl in ls if bl)
+
+
+def _day_improve(day: Day, pricing: Pricing, td: "TruckDay", ls: list[list[Load]], per_m: float, per_s: float,
+                 deadline: float, cache: dict[Load, Facts]) -> tuple[list[list[Load]], float]:
+    """First-improvement local search on _day_estimate of a whole day (_day_moves), from ``ls``."""
+
+    def est(x: list[list[Load]]) -> float:
+        return _day_estimate(day, pricing, td, list(_day_key(x)), per_m, per_s, cache)
+
+    best, val = [list(bl) for bl in ls], est(ls)
+    for _ in range(DAY_PASSES):
+        better = False
+        for cand in _day_moves(best):
+            if time.monotonic() > deadline:
+                return best, val
+            v = est(cand)
+            if v < val - 1e-9:
+                best, val, better = cand, v, True
+                break
+        if not better:
+            break
+    return best, val
+
+
+def _split(day: Day, td: "TruckDay", tour: list[Load], k: int, cache: dict[Load, Facts]) -> list[list[Load]] | None:
+    """``tour`` (blocks) cut into at most ``k`` consecutive loads that fit the truck, of fewest metres
+    (route first, cluster second). None when no cut fits."""
+    n, inf = len(tour), float("inf")
+    best = [[inf] * (n + 1) for _ in range(k + 1)]
+    cut = [[-1] * (n + 1) for _ in range(k + 1)]
+    best[0][0] = 0.0
+    for j in range(1, k + 1):
+        for i in range(1, n + 1):
+            for s in range(i - 1, -1, -1):
+                load = _flat(tour[s:i])
+                f = cache.get(load)
+                if f is None:
+                    f = cache[load] = facts(day, load)
+                if not fits_truck(f, td):
+                    break  # a longer run from further back fits even less
+                if best[j - 1][s] + f.metres < best[j][i]:
+                    best[j][i], cut[j][i] = best[j - 1][s] + f.metres, s
+    j = min(range(1, k + 1), key=lambda q: (best[q][n], q))
+    if best[j][n] == inf:
+        return None
+    out, i = [], n
+    while j > 0:
+        s = cut[j][i]
+        out.append(list(tour[s:i]))
+        i, j = s, j - 1
+    return out[::-1]
+
+
+def _day_proposals(day: Day, pricing: Pricing, td: "TruckDay", cur: list[TimedLoad], per_m: float, per_s: float,
+                   deadline: float) -> list[list[Load]]:
+    """At most three other days of the truck's stops (as many loads at most) worth timing exactly, best
+    estimate first: the shortest round of all its stops cut into loads that fit (_split, the loads in
+    their best order in the day) and the truck's own loads, each improved by the local search."""
+    import itertools  # noqa: PLC0415
+
+    cache: dict[Load, Facts] = {}
+    own = [_blocks(day, tl.stops) for tl in cur]
+    blocks = [b for bl in own for b in bl]
+    if len(blocks) < 2:
+        return []
+
+    def est(x: list[list[Load]]) -> float:
+        return _day_estimate(day, pricing, td, list(_day_key(x)), per_m, per_s, cache)
+
+    starts: list[list[list[Load]]] = []
+    tour, _ = _improve(_nearest(day, blocks), lambda bl: float(day.metres(_flat(bl))), deadline)
+    split = _split(day, td, tour, len(cur), cache)
+    if split is not None:
+        orders = itertools.permutations(split) if len(split) <= 3 else (split, split[::-1])
+        starts.append(min((list(p) for p in orders), key=lambda p: (est(p), _day_key(p))))
+    starts.append(own)
+    found: dict[tuple[Load, ...], float] = {}
+    for start in starts:
+        got, v = _day_improve(day, pricing, td, start, per_m, per_s, deadline, cache)
+        key = _day_key(got)
+        found[key] = min(found.get(key, float("inf")), v)
+    found.pop(tuple(tl.stops for tl in cur), None)
+    return [list(d) for d, v in sorted(found.items(), key=lambda kv: (kv[1], kv[0])) if v < float("inf")][:3]
 
 
 def shorter_orders(day: Day, pricing: Pricing, plan: TimedPlan, trucks: Iterable[int], km_per_m: float,
                    deadline: float) -> TimedPlan:
-    """``plan`` with the loads of ``trucks`` (a truck to rent, or one whose driver is paid by the day) in
-    a shorter order where it is better (see above): each load keeps its truck, stops and place in the
-    truck's day; a new order is taken when, timed exactly (time_truck: every hard rule, the driver
-    break), the truck drives fewer metres, costs no more money, and its time preferences + ``km_per_m``
-    (objective units a metre: an own truck's km rate) x its metres are lower. The same plan object when
-    nothing changed. Stops at ``deadline`` (time.monotonic) with what it has."""
+    """``plan`` with the day of each of ``trucks`` (a truck to rent, or one whose driver is paid by the day)
+    routed again where it is better (see above), its km priced at ``km_per_m`` (objective units a metre:
+    an own truck's km rate) and its paid day at the hourly driver rate (Pricing.span), as an own truck's:
+    first which of its stops go on which of its loads (_day_proposals; never more loads than it has),
+    then the order inside each load (_orders). A new day is taken when, timed exactly (time_truck: every
+    hard rule, the driver break), the truck drives fewer metres, costs no more money, and its time
+    preferences + those km and hours are lower. Each truck keeps its stops; the other trucks are not
+    touched. The same plan object when nothing changed. Stops at ``deadline`` (time.monotonic) with what
+    it has, each truck getting its share of the time left."""
     out = dict(plan)
     changed = False
-    for idx in sorted(set(trucks)):
+    idxs = sorted(set(trucks))
+    for n_left, idx in zip(range(len(idxs), 0, -1), idxs):
         loads, td, price = plan.get(idx), day.by_idx.get(idx), pricing.trucks.get(idx)
         if not loads or td is None or price is None:
             continue
+        now = time.monotonic()
+        if now > deadline:
+            break
+        until = now + (deadline - now) / n_left
+        # A day-paid driver's day weighed as an hourly driver's (an hourly one's pay is in its money).
+        own_s = float(pricing.span) if not price.hourly else 0.0
         per_m = price.per_m + price.tie_m + km_per_m
-        per_s = price.per_s(pricing.span)
-        cur, cur_v = list(loads), _order_value(day, pricing, idx, list(loads), km_per_m)
+        per_s = price.per_s(pricing.span) + own_s
+        cur, cur_v = list(loads), _order_value(day, pricing, idx, list(loads), km_per_m, own_s)
+        if len(cur) >= 2:
+            for proposal in _day_proposals(day, pricing, td, cur, per_m, per_s, until):
+                timed = time_truck(day, td, proposal, pricing)
+                if timed is None:
+                    continue
+                v = _order_value(day, pricing, idx, timed, km_per_m, own_s)
+                if v[0] <= cur_v[0] and v[1] < cur_v[1] and v[2] < cur_v[2]:
+                    cur, cur_v, changed = timed, v, True
+                    break
         for j in range(len(cur)):
-            if time.monotonic() > deadline:
+            if time.monotonic() > until:
                 break
-            for order in _orders(day, pricing, td, cur[j], per_m, per_s, deadline):
+            for order in _orders(day, pricing, td, cur[j], per_m, per_s, until):
                 trial = [tl.stops for tl in cur]
                 trial[j] = order
                 timed = time_truck(day, td, trial, pricing)
                 if timed is None:
                     continue
-                v = _order_value(day, pricing, idx, timed, km_per_m)
+                v = _order_value(day, pricing, idx, timed, km_per_m, own_s)
                 if v[0] <= cur_v[0] and v[1] < cur_v[1] and v[2] < cur_v[2]:
                     cur, cur_v, changed = timed, v, True
         out[idx] = cur

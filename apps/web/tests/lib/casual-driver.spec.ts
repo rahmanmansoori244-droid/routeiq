@@ -162,3 +162,54 @@ describe('addCasualDriver', () => {
     expect(tables.driver).toHaveLength(1);
   });
 });
+
+describe('a truck rented for the day: one day-rate driver for its whole day (sixth review of the hire branch)', () => {
+  // The demo: "+ Add daily driver" on a hired truck's load put the driver on that load only, although the
+  // truck is rented for the whole day with one casual driver at the day rate. Now on every load of that
+  // truck still to plan, and as the one-day truck's default driver - each step audited.
+  const day = new Date('2026-10-05T00:00:00Z');
+  beforeEach(() => {
+    tables.truck = [
+      { id: 'T5', tenantId: T, code: 'T05' },
+      { id: 'H1', tenantId: T, code: 'HIRE-10T-0510-1', hired: true, onlyOnDate: day, defaultDriverId: null },
+    ];
+    tables.planLoad.push(
+      { id: 'H1', tenantId: T, runId: 'P', truckId: 'H1', loadNo: 1, status: 'PLANNED', driverId: null, departMin: 400, returnMin: 600 },
+      { id: 'H2', tenantId: T, runId: 'P', truckId: 'H1', loadNo: 2, status: 'PLANNED', driverId: null, departMin: 630, returnMin: 800 },
+      { id: 'H3', tenantId: T, runId: 'P', truckId: 'H1', loadNo: 3, status: 'PLANNED', driverId: 'reg', driverSetById: 'u2', driverSetAt: new Date('2026-10-05T05:00:00Z'), departMin: 830, returnMin: 950 },
+      { id: 'HX', tenantId: T, runId: 'OTHER', truckId: 'H1', loadNo: 1, status: 'PLANNED', driverId: null, departMin: 400, returnMin: 600 },
+    );
+  });
+
+  it('goes on every planned load of the hired truck and becomes its default driver', async () => {
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'H1', name: 'Salim' }, user);
+    expect(row('planLoad', 'H1').driverId).toBe(r.driver.id);
+    expect(row('planLoad', 'H2').driverId).toBe(r.driver.id);
+    // A driver the dispatcher chose for a load stays; another plan version's load is not touched.
+    expect(row('planLoad', 'H3').driverId).toBe('reg');
+    expect(row('planLoad', 'HX').driverId).toBeNull();
+    expect(row('truck', 'H1').defaultDriverId).toBe(r.driver.id);
+    expect(r.alsoOn).toEqual([{ loadId: 'H2', loadNo: 2 }]);
+    expect(tables.auditLog.map((a) => a.action)).toEqual(['CASUAL_DRIVER_ADDED', 'LOAD_DRIVER_SET', 'LOAD_DRIVER_SET', 'HIRED_TRUCK_CHANGED']);
+    const changed = tables.auditLog.find((a) => a.action === 'HIRED_TRUCK_CHANGED')!;
+    expect(changed).toMatchObject({ entityId: 'H1', beforeJson: { defaultDriverId: null }, afterJson: { defaultDriverId: r.driver.id } });
+  });
+
+  it('a locked load of the hired truck stays as it is (frozen); the load pressed always gets the driver', async () => {
+    row('planLoad', 'H2').status = 'LOCKED';
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'H1', name: 'Salim' }, user);
+    expect(row('planLoad', 'H2').driverId).toBeNull();
+    expect(r.alsoOn).toEqual([]);
+    expect(row('truck', 'H1').defaultDriverId).toBe(r.driver.id);
+  });
+
+  it('an own truck, or a hired truck of another day: the load only, as before', async () => {
+    const own = await addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Salim' }, user);
+    expect(own.alsoOn).toEqual([]);
+    row('truck', 'H1').onlyOnDate = new Date('2026-10-06T00:00:00Z');
+    const other = await addCasualDriver(T, { runId: 'P', loadId: 'H1', name: 'Khalid' }, user);
+    expect(other.alsoOn).toEqual([]);
+    expect(row('planLoad', 'H2').driverId).toBeNull();
+    expect(row('truck', 'H1').defaultDriverId).toBeNull();
+  });
+});

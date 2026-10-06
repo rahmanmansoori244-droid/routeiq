@@ -50,7 +50,7 @@ import { admissionRefused, dayMismatch, replan, replanRefusal, weightRefusal, ty
 import { solveAdmission } from './solve-admission';
 import { basisFingerprint, cancelHireChecksOfDay, companyToday, DAY_OVER_TEXT, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
 import { DEFAULT_DRIVER_DAY_RATE, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
-import { isoOf } from './time';
+import { fmtDayMonth, isoOf } from './time';
 
 type Tx = Prisma.TransactionClient;
 
@@ -212,7 +212,7 @@ async function rentTrucks(
     const o = optionOf.get(h.optionId);
     if (o && (already[o.id] ?? 0) + h.truckIds.length > o.maxPerDay) {
       throw new PlanError(
-        `At most ${o.maxPerDay} ${o.label} truck(s) can be hired a day, and ${already[o.id] ?? 0} are hired for ${dateIso} already. Check hire options again.`,
+        `At most ${o.maxPerDay} ${o.label} truck(s) can be hired a day, and ${already[o.id] ?? 0} are hired for ${fmtDayMonth(dateIso)} already. Check hire options again.`,
         409,
         { code: 'HIRE_LIMIT' },
       );
@@ -528,7 +528,7 @@ export async function applyHireSuggestion(
       headers: res.headers,
       body: {
         ...res.body,
-        error: `The hired trucks were added for ${isoOf(run.runDate)} (${trucks.map((t) => t.code).join(', ')}), but the re-plan did not start: ${String(res.body.error ?? '')} Re-plan to plan with them.`,
+        error: `The hired trucks were added for ${fmtDayMonth(isoOf(run.runDate))} (${trucks.map((t) => t.code).join(', ')}), but the re-plan did not start: ${String(res.body.error ?? '')} Re-plan to plan with them.`,
         trucks,
         applied: 'TRUCKS_ONLY',
       },

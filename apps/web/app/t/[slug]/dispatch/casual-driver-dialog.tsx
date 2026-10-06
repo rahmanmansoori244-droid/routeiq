@@ -17,13 +17,17 @@ export interface CasualDriverBody {
 export interface CasualDriverAnswer {
   driver: { id: string; name: string; code: string };
   reused: boolean;
+  /** A truck rented for the day: its other planned loads the driver was also put on (one driver, the whole day). */
+  alsoOn?: { loadId: string; loadNo: number }[];
 }
 
 /**
  * "+ Add daily driver…" from a load's Driver list (owner rule 20: a load never leaves without a
  * driver; daily drivers exist). Name and mobile; the driver is saved as a daily driver (no account)
- * and put on this load. When the phone already belongs to a driver, the dialog asks
- * "This phone belongs to <name>. Use <name>?" - never a silent swap.
+ * and put on this load - on a truck rented for the day, on its other planned loads too and as its
+ * default driver (one day-rate driver for the whole day; sixth review of the hire branch). When the
+ * phone already belongs to a driver, the dialog asks "This phone belongs to <name>. Use <name>?" -
+ * never a silent swap.
  */
 export function CasualDriverDialog({
   load,

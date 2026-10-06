@@ -6,7 +6,9 @@
  * renting - the box says so plainly) and its depot has active hire options, startHireCheck runs a
  * what-if: the same request as a re-plan of that version (frozen loads stay exactly as they are) plus
  * one truck per unit the day may still rent (fuel in the hire, its driver at the company's daily driver
- * day rate), the recommended plan only, Quick search. It is its own job
+ * day rate), the recommended plan only, Quick search - after which the optimizer reduces the rented set
+ * to the fewest trucks that still deliver every P1-P3 order (a few more solves; sixth review of the hire
+ * branch, DispatchResponse.hire_check). It is its own job
  * (HireSuggestion, never the plan's RunJob) on the same solve admission as every optimization, as a
  * BACKGROUND solve (solve-admission.ts reserveBackground): no hourly quota, and a dispatcher's solve
  * that needs its slot takes it at once - the what-if then goes back to the queue once and runs when a
@@ -560,7 +562,15 @@ async function runHireJob(a: JobArgs): Promise<void> {
         const resp = await callSolverRetryingBusy(a.request, cur);
         const sc = resp.scenarios?.find((s) => s.name === 'RECOMMENDED') as DispatchScenario | undefined;
         if (!sc || sc.status === 'NO_SOLUTION') throw new SolverError('The hire check found no plan this time. Try again.', 200, null);
-        const summary = summarizeHire({ request: a.request, baseUnserved: a.basis.baseUnserved, baseOrders: a.basis.baseOrders, whatIf: sc, options: a.basis.options });
+        const summary = summarizeHire({
+          request: a.request,
+          baseUnserved: a.basis.baseUnserved,
+          baseOrders: a.basis.baseOrders,
+          whatIf: sc,
+          options: a.basis.options,
+          // The optimizer's reduction of the rented trucks and its solve of one truck fewer (sixth review).
+          hireCheck: resp.hire_check ?? null,
+        });
         const text = hireSuggestionText(summary);
         await prisma.$transaction(async (tx) => {
           const n = await tx.hireSuggestion.updateMany({
@@ -589,6 +599,8 @@ async function runHireJob(a: JobArgs): Promise<void> {
                 leftOut: { orders: summary.leftOut.orders, cases: summary.leftOut.cases },
                 stillLeft: { orders: summary.stillLeft.orders, cases: summary.stillLeft.cases },
                 dropped: summary.dropped?.orders ?? 0,
+                // How many trucks the search alone rented, how many the suggestion keeps (sixth review).
+                ...(summary.reduction ? { reduction: summary.reduction } : {}),
                 searchSec: resp.search?.search_sec ?? null,
               } as never,
               ip: a.ip,

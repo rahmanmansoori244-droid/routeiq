@@ -599,6 +599,19 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     expect(find(s, (t) => t === 'Total road km (3 legs estimated)', 1)).toBeTruthy();
   });
 
+  it("a truck rented for the day has its fuel in the hire: the own trucks' litres, never 'not calculated' (sixth review of the hire branch)", async () => {
+    const d = fixture();
+    const truck = d.loads[0]!.truckId;
+    d.loads = d.loads.map((l) => (l.truckId === truck ? { ...l, driverDayRate: 10, fuelLitres: null, fuelCost: 0 } : { ...l, fuelLitres: 5 }));
+    // A summary stored before the fix: its litres blank because of the rented truck.
+    d.summary = { ...d.summary!, fuelLitres: null };
+    const own = d.loads.filter((l) => l.truckId !== truck).length * 5;
+    const s = sheet(await render(d), SHEETS.summary);
+    const row = find(s, (t) => t === 'Estimated fuel (litres)', 1)!;
+    expect(text(s.getCell(row.row, 2))).toBe(String(own));
+    expect(text(s.getCell(row.row, 3))).toBe('own trucks only; rented trucks: fuel included in the hire');
+  });
+
   it("a hired truck's casual driver is paid the day rate: no paid hours on LOAD PLAN or TRUCK DAYS (third review of the hire branch)", async () => {
     const d = fixture();
     const truck = d.loads[0]!.truckId;

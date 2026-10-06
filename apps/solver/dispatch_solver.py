@@ -104,6 +104,8 @@ from dispatch_models import (
     DispatchStop,
     DispatchTruck,
     FeasibilityReport,
+    HireCheck,
+    HireOneFewer,
     ObjectiveComponents,
     PlannedBreak,
     PlannedLoad,
@@ -238,18 +240,34 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # customers' time preferences (fifth review: with the default early-arrival preference one minute
 # earlier at a P1 order, 0.01 OMR, was worth 10 km, and a hired truck drove its P1 orders first wherever
 # they were - 340 km instead of 250, back at 16:30 instead of 14:16). Once an option's plan is chosen,
-# each load of such a truck is put in order with its km weighed as an own truck's are (_order_km_rate,
-# LR.shorter_orders): fewer km, no more money, same trucks, loads and stops (_shorter_orders).
+# such a truck's day is routed again with the same per-km and per-hour costs as an own truck's
+# (_order_km_rate, the hourly driver rate; LR.shorter_orders): WHICH of its stops go on which of its
+# loads (sixth review: a rented truck making two loads still criss-crossed the area, 249 km where an own
+# truck drives 185 - only the stops inside each load were put in order), then the order inside each
+# load. Fewer km, no more money, the same truck and stops, every hard rule timed exactly
+# (_shorter_orders); these costs are never money and never decide which truck carries what.
+#
+# The REDUCTION (sixth review: on the real Muscat day the Quick search rented 2 x 10-ton where one
+# carried every P1-P3 order - the second only P4/P5 orders, and the set was not the cheapest): emptying
+# a rented truck needs all its stops moved at once and each move alone gains nothing, so the search
+# stops in such a local optimum. After it, each rented truck of its plan, dearest first, is left out and
+# the day solved again with the others (_reduce_hire, at most HIRE_REDUCE_MAX_SOLVES solves within
+# HIRE_REDUCE_SEC): the removal is kept when every P1-P3 stop the plan delivered is still delivered and
+# the plan passes every check. The suggestion is the reduced set; "one truck fewer" is such a solve.
 
 # A day-paid or rented truck's km in the search, on top of its own km charge (if any): 1 OMR per
 # 1,000 km - its route is the short one, and a whole day's km weigh well under 1 OMR (search only).
 HIRE_TIE_KM_OMR = 0.001
 # OMR per km a day-paid or rented truck's km weigh against its customers' time preferences when its
-# loads are put in order (_order_km_rate) on a day none of the own trucks has a km rate.
+# day is routed again after the pick (_order_km_rate) on a day none of the own trucks has a km rate.
 HIRE_ORDER_KM_OMR = 0.1
-# Seconds the plans of one request may spend on putting those loads in order (in-process, after the
-# pick; LR.shorter_orders keeps what it has when the time is up).
-HIRE_ORDER_SEC = 2.0
+# Seconds each chosen plan of a request may spend on routing those trucks' days again (in-process, after
+# the pick; all of them together three times that; LR.shorter_orders keeps what it has when the time is up).
+HIRE_ORDER_SEC = 3.0
+# The reduction of a what-if's rented trucks (_reduce_hire): at most this many extra solves of the day,
+# within this many seconds (and never past the request's own budget).
+HIRE_REDUCE_MAX_SOLVES = 6
+HIRE_REDUCE_SEC = 180.0
 # A day-paid driver's time in the search: 1 objective unit a second (0.036 OMR an hour, the smallest
 # whole rate the routing models take) - a compact day, room for its next load (search only).
 HIRE_TIE_HOUR_OMR = 0.036
@@ -2377,6 +2395,10 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
             pv.close()  # already closed by _run_scenarios when it ran; a no-op then
         if workers is not None:
             workers.close()  # likewise
+    # The hire suggestion's what-if: the fewest rented trucks that deliver what its plan delivers.
+    hire_check = None
+    if any(t.hire_candidate for t in req.trucks):
+        scenarios, hire_check = _reduce_hire(req, solvable, mx, drops, time_limit, started + budget, control, scenarios)
     for sc in scenarios:
         sc.window_rule = cfg.window_rule  # the echo, on empty and NO_SOLUTION scenarios too
         sc.break_rule = _break_echo(cfg)
@@ -2400,7 +2422,178 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         scenarios=scenarios,
         warnings=warnings + list(mx.warnings),
         search=search,
+        hire_check=hire_check,
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# The reduction of a what-if's rented trucks (sixth review of the hire branch)
+# ---------------------------------------------------------------------------------------------
+
+# Only P1-P3 orders justify renting a truck (owner answer 1, 6 Oct 2026).
+HIRE_MAX_PRIORITY = 3
+
+
+def _rented_of(sc: DispatchScenario, hire_ids: set[str]) -> list[str]:
+    """The rented trucks a plan uses (sorted)."""
+    return sorted({ld.truck_id for ld in sc.loads if ld.truck_id in hire_ids})
+
+
+def _served_of(sc: DispatchScenario) -> set[str]:
+    return {st.stop_id for ld in sc.loads for st in ld.stops}
+
+
+def _passes_checks(sc: DispatchScenario | None) -> bool:
+    """A plan the reduction may keep: optimized, and its timetable verified by the independent check
+    (the one "Use this plan" applies it with)."""
+    return (sc is not None and sc.status == "OPTIMIZED"
+            and (sc.feasibility is None or sc.feasibility.status == "VERIFIED"))
+
+
+@dataclass
+class _HireTrial:
+    """One solve of the reduction: ``without`` left out of the set ``against``."""
+
+    without: str
+    against: frozenset[str]
+    sc: DispatchScenario | None  # None: the plan did not pass the checks
+    lost: int  # P1-P3 stops the plan delivered that this one does not (a large number when it failed the checks)
+
+
+def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
+                time_limit: int, budget_end: float, control: SolveControl | None) -> DispatchScenario | None:
+    """The recommended plan of ``req`` (the what-if with fewer trucks to rent) on the request's own road
+    matrix and stops, searched as the what-if was (its own worker pool and second search, rule 22).
+    None when it cannot run (no worker processes, or it failed - the reduction then stops); a cancelled
+    solve raises SolveAborted as the what-if's own search does."""
+    tds = _truck_days(req)
+    workers: _Workers | None = None
+    pv: _PvRun | None = None
+    try:
+        if _parallel():
+            workers = _start_workers(1, control, req.run_id, "hire check")
+        pv = _pv_start(req, solvable, control, workers is not None)
+        scs = _run_scenarios(["RECOMMENDED"], req, solvable, tds, mx, time_limit, list(drops), budget_end,
+                             control=control, state={}, workers=workers, pv=pv)
+        return scs[0] if scs else None
+    except SolveAborted:
+        if control is not None and control.cancelled.is_set():
+            raise
+        log.warning("run=%s hire check: a solve with fewer trucks to rent did not finish; the set found is kept", req.run_id)
+        return None
+    except WorkersUnavailable:
+        log.warning("run=%s hire check: no worker processes for a solve with fewer trucks to rent; the set found is kept", req.run_id)
+        return None
+    finally:
+        if pv is not None:
+            pv.close()
+        if workers is not None:
+            workers.close()
+
+
+def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
+                 time_limit: int, budget_end: float, control: SolveControl | None,
+                 scenarios: list[DispatchScenario]) -> tuple[list[DispatchScenario], HireCheck]:
+    """The what-if's RECOMMENDED plan with the fewest rented trucks that still deliver every P1-P3 stop it
+    delivers (sixth review of the hire branch: the Quick search rented 2 x 10-ton where one carried all 25
+    P1-P3 orders left out - the second only P4/P5 orders). Each rented truck of the current set, dearest
+    first (hire_money), is left out and the day solved again with exactly the others (_hire_trial: the
+    trucks to rent the plan did not use are not offered, so a removal is never a swap); the removal is
+    kept when the plan passes every check and delivers every P1-P3 stop the current plan delivers - its
+    P4/P5 stops may stay out (owner answer 1) - and the set is then the trucks that plan uses. A truck
+    whose removal lost a P1-P3 stop is not tried again (a smaller set loses at least as much), nor is a
+    unit identical to it against the same set. When every truck of the set was tried and the last solves
+    were not against this very set, the least useful truck is left out once more, so "one truck fewer"
+    is always a solve of the suggested set (HireCheck.one_fewer: the fewest P1-P3 stops lost, then the
+    dearest truck). At most HIRE_REDUCE_MAX_SOLVES solves within HIRE_REDUCE_SEC (and the request's
+    budget); a stop request ("use the best plan found so far") ends it. Deterministic in its choices."""
+    hires = {t.id: t for t in req.trucks if t.hire_candidate}
+    rec_i = next((i for i, sc in enumerate(scenarios) if sc.name == "RECOMMENDED"), None)
+    best = scenarios[rec_i] if rec_i is not None else None
+    if best is None or best.status != "OPTIMIZED":
+        return scenarios, HireCheck()
+    first = _rented_of(best, set(hires))
+    current = list(first)
+    if not current:
+        return scenarios, HireCheck(first=[], used=[], solves=0, complete=True)
+    priority = {s.stop_id: s.priority for s in req.stops}
+    money = _hire_money_of(req.stops, req.config, req.trucks, req.depot)
+
+    def high_served(sc: DispatchScenario) -> set[str]:
+        return {sid for sid in _served_of(sc) if priority.get(sid, 5) <= HIRE_MAX_PRIORITY}
+
+    def same_unit(t: DispatchTruck) -> str:
+        """Units of one hire option are the same truck but for their id and code."""
+        return t.model_dump_json(exclude={"id", "code"})
+
+    def dearest_first(ids) -> list[str]:
+        return sorted(ids, key=lambda tid: (-round(money.get(tid, 0.0), 6), tid))
+
+    trials: list[_HireTrial] = []
+    solves = 0
+    t0 = time.monotonic()
+    end = min(budget_end - STAGE_GRACE_SEC, t0 + HIRE_REDUCE_SEC)
+    # A solve needs its search time, the load re-check's minimum and the search's own overhead.
+    need = time_limit + REPACK_MIN_SEC + REC_OVERHEAD_SEC
+
+    def tried_here(cur: frozenset[str]) -> list[_HireTrial]:
+        return [tr for tr in trials if tr.against == cur]
+
+    def untried(cur: frozenset[str]) -> list[str]:
+        failed = {tr.without for tr in trials}
+        same = {same_unit(hires[tr.without]) for tr in tried_here(cur)}
+        return [tid for tid in dearest_first(cur) if tid not in failed and same_unit(hires[tid]) not in same]
+
+    while True:
+        if control is not None and control.cancelled.is_set():
+            raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
+        if control is not None and control.stop_requested.is_set():
+            break
+        cur = frozenset(current)
+        todo = untried(cur)
+        if todo:
+            tid = todo[0]
+        elif len(cur) >= 2 and not tried_here(cur):
+            # One truck fewer of this very set: the one whose removal lost least before, solved again.
+            lost = {tr.without: tr.lost for tr in trials}
+            tid = min(cur, key=lambda u: (lost.get(u, 0), -round(money.get(u, 0.0), 6), u))
+        else:
+            break
+        if solves >= HIRE_REDUCE_MAX_SOLVES or end - time.monotonic() < need:
+            break
+        keep = cur - {tid}
+        trial_req = req.model_copy(update={"trucks": [t for t in req.trucks if not t.hire_candidate or t.id in keep]})
+        sc = _hire_trial(trial_req, solvable, mx, drops, time_limit, end, control)
+        solves += 1
+        if sc is None:
+            break
+        must = high_served(best)
+        if _passes_checks(sc) and must <= _served_of(sc):
+            log.info("run=%s hire check: %s left out, every P1-P3 stop still delivered (%d -> %d trucks to rent)",
+                     req.run_id, tid, len(cur), len(_rented_of(sc, set(hires))))
+            best = sc
+            current = _rented_of(sc, set(hires))
+            continue
+        ok = _passes_checks(sc)
+        trials.append(_HireTrial(without=tid, against=cur, sc=sc if ok else None,
+                                 lost=len(must - _served_of(sc)) if ok else 10**9))
+    cur = frozenset(current)
+    here = [tr for tr in tried_here(cur) if tr.sc is not None]
+    one = min(here, key=lambda tr: (tr.lost, -round(money.get(tr.without, 0.0), 6), tr.without)) if here else None
+    check = HireCheck(
+        first=first,
+        used=sorted(current),
+        solves=solves,
+        complete=not untried(cur),
+        one_fewer=HireOneFewer(without=one.without, unserved=sorted(u.stop_id for u in one.sc.unserved)) if one is not None else None,
+    )
+    log.info("run=%s hire check: rented first=%s used=%s solves=%d complete=%s one_fewer=%s (%.1fs)", req.run_id,
+             check.first, check.used, check.solves, check.complete, check.one_fewer.without if check.one_fewer else None,
+             time.monotonic() - t0)
+    if best is not scenarios[rec_i]:
+        scenarios = list(scenarios)
+        scenarios[rec_i] = best
+    return scenarios, check
 
 
 def _initial_assignment(routing, manager, m: _Model, stops: list[DispatchStop], loads: list[PlannedLoad], params):
@@ -3764,11 +3957,12 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
 
 
 def _shorter_orders(ctx: _StageCtx, cand: LR.Candidate, deadline: float) -> LR.Candidate:
-    """The chosen candidate with each load of a rented or day-paid truck in a shorter order where its
-    km, weighed as an own truck's (_order_km_rate), outweigh what its customers' time preferences lose
-    (LR.shorter_orders; fifth review of the hire branch): same trucks, loads and stops, no more money,
-    fewer km, every hard rule timed exactly. The same candidate when nothing changes - always on a day
-    without such trucks (planned exactly as before)."""
+    """The chosen candidate with the day of each rented or day-paid truck routed again where its km and
+    hours, weighed as an own truck's (_order_km_rate, the hourly driver rate), outweigh what its
+    customers' time preferences lose (LR.shorter_orders; fifth and sixth reviews of the hire branch):
+    which of its stops go on which of its loads, then the order inside each load. Each truck keeps its
+    stops (never more loads), no more money, fewer km, every hard rule timed exactly. The same candidate
+    when nothing changes - always on a day without such trucks (planned exactly as before)."""
     idxs = [td.idx for td in ctx.day.trucks if _hired_km(td.truck) and cand.plan.get(td.idx)]
     if not idxs or time.monotonic() > deadline:
         return cand
@@ -3996,16 +4190,18 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     def served(c: LR.Candidate) -> set[int]:
         return {k for loads in c.plan.values() for tl in loads for k in tl.stops}
 
-    # The chosen plans' rented or day-paid trucks drive their loads in a shorter order (_shorter_orders,
-    # fifth review): after the pick, so it never changes which truck carries what; each candidate once.
-    order_deadline = min(time.monotonic() + HIRE_ORDER_SEC, budget_end - 2)
+    # The chosen plans' rented or day-paid trucks get their day routed again (_shorter_orders, fifth and
+    # sixth reviews): after the pick, so it never changes which truck carries what; each candidate once,
+    # each with up to HIRE_ORDER_SEC, all of them together with up to three times that (the second
+    # search's plan and the engine's own are compared after it, so neither may starve the other).
+    orders_end = min(time.monotonic() + 3 * HIRE_ORDER_SEC, budget_end - 2)
     in_order: dict[int, LR.Candidate] = {}
 
     def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
         if c is None:
             return None
         if id(c) not in in_order:
-            in_order[id(c)] = _shorter_orders(ctx, c, order_deadline)
+            in_order[id(c)] = _shorter_orders(ctx, c, min(time.monotonic() + HIRE_ORDER_SEC, orders_end))
         return in_order[id(c)]
 
     for name in list(raw) + rescue:

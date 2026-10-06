@@ -14,7 +14,7 @@ import { prisma } from '../db';
 import { audit } from '../audit';
 import { HttpError } from '../http-error';
 import { freedCode } from './hire';
-import { DEFAULT_TZ, isoOf, todayIso } from './time';
+import { DEFAULT_TZ, fmtDayMonth, isoOf, todayIso } from './time';
 
 export class HiredTruckRefused extends HttpError {
   constructor(message: string, code: string, status = 409) {
@@ -40,7 +40,7 @@ export async function setHiredTruck(
     const cfg = await tx.tenantConfig.findFirst({ where: { tenantId }, select: { timezone: true } });
     const today = todayIso(cfg?.timezone || DEFAULT_TZ);
     if (isoOf(truck.onlyOnDate) < today) {
-      throw new HiredTruckRefused(`This truck was hired for ${isoOf(truck.onlyOnDate)}, a day that is over.`, 'DAY_OVER');
+      throw new HiredTruckRefused(`This truck was hired for ${fmtDayMonth(isoOf(truck.onlyOnDate))}, a day that is over.`, 'DAY_OVER');
     }
     const data: { code?: string; defaultDriverId?: string | null } = {};
     const freed: { id: string; from: string; to: string }[] = [];
@@ -53,7 +53,7 @@ export async function setHiredTruck(
         if (!dayOver) {
           throw new HiredTruckRefused(
             other.onlyOnDate
-              ? `Truck code ${input.code} is used by the truck hired for ${isoOf(other.onlyOnDate)}, a day that is not over. Use another code for this day (e.g. ${input.code}-2).`
+              ? `Truck code ${input.code} is used by the truck hired for ${fmtDayMonth(isoOf(other.onlyOnDate))}, a day that is not over. Use another code for this day (e.g. ${input.code}-2).`
               : `Truck code ${input.code} is already one of your trucks. Enter the hired truck's own plate.`,
             'CODE_TAKEN',
           );

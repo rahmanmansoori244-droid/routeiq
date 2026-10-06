@@ -20,8 +20,11 @@ import {
   hireTag,
   hireTruckCode,
   hireTrucksForRequest,
+  hireUseConfirmText,
   needsHireCheck,
+  oneDayBadge,
   parseVirtualHireId,
+  truckCapacityText,
   requestBasisText,
   sameDayMovedOn,
   shownTruckCode,
@@ -188,10 +191,9 @@ describe('the suggestion (summarizeHire, hireSuggestionText)', () => {
     // Owner answers 3 and 4: the running-costs line names the drivers' day rate and the loading, never fuel or km.
     expect(text.details[0]).toBe('Plus about 25 OMR running costs on the hired trucks: 2 drivers at the day rate of 10 OMR, loading about 5 OMR. Fuel is included in the hire.');
     expect(text.details[0]).not.toMatch(/\bkm\b|driver time/);
-    // One truck fewer: both trucks' most important stop is P3, so the one carrying fewer cases goes.
-    expect(s.alternative).toMatchObject({ dropped: '3-ton', hireCost: 50 });
-    expect(s.alternative!.leftOut).toMatchObject({ orders: 4, cases: 380, palletUnits: 5600 });
-    expect(text.details[1]).toBe('With one truck fewer (1 x 10-ton (12 bays), extra about 50 OMR): up to 4 orders (380 cases, 5.6 pallets) stay undelivered - what the 3-ton would carry.');
+    // One truck fewer only from a real solve (sixth review): this what-if answer carries none.
+    expect(s.alternative).toBeNull();
+    expect(text.details).toHaveLength(1);
   });
 
   it("an option's own km charge is the rental's (named so); fuel never", () => {
@@ -244,17 +246,15 @@ describe('the suggestion (summarizeHire, hireSuggestionText)', () => {
     expect(text.headline).not.toMatch(/0 orders|Check hire options/);
   });
 
-  it('the truck whose stops matter least is the one dropped: lowest priorities first', () => {
+  it('orders still left out for their receiving hours say so', () => {
     const { request, left, kept, baseUnserved } = day(4);
-    // The 10-ton carries only P5 stops (L1-L4, a what-if of before the owner's answers); the 3-ton carries P3 stops.
     const whatIf = {
-      loads: [load('OWN1', kept, 35, 60), load(virtualHireId('o10', 1), left.slice(0, 4), 50, 55), load(virtualHireId('o3', 1), left.slice(4, 8), 30, 33)],
+      loads: [load('OWN1', kept, 35, 60), load(virtualHireId('o3', 1), left.slice(4, 8), 30, 33)],
       unserved: left.slice(8).map((s) => ({ stop_id: s.stop_id, order_ids: s.order_ids, reason_code: 'HARD_WINDOW_INFEASIBLE', reason_message: '' })),
-      trucks_used: 3,
-      trips: 3,
+      trucks_used: 2,
+      trips: 2,
     } as unknown as Pick<DispatchScenario, 'loads' | 'unserved' | 'trucks_used' | 'trips'>;
     const s = summarizeHire({ request, baseUnserved, whatIf, options: [TEN, THREE] });
-    expect(s.alternative?.dropped).toBe('10-ton');
     expect(s.stillLeft.orders).toBe(6);
     expect(hireSuggestionText(s).headline).toMatch(/Still left out: 6 orders \(\d[\d,]* cases, [\d.]+ pallets\): even with every truck you can rent they do not fit \(their receiving hours or the drivers’ shift\)\./);
   });
@@ -393,85 +393,95 @@ describe('the suggestion says what the what-if found (review of the hire branch)
   });
 });
 
-describe('"with one truck fewer" (third review of the hire branch)', () => {
+describe('"with one truck fewer": a real solve or nothing (sixth review of the hire branch)', () => {
+  // The real-size demo: the line said "up to 25 orders stay undelivered" where a plan with one truck fewer
+  // left no P1-P3 order out. It is now the optimizer's own solve of the suggested set less one truck
+  // (DispatchResponse.hire_check.one_fewer), or no line at all - never an estimate.
   const stop = (id: string, cases: number, priority = 3): DispatchStop => ({
     stop_id: id, order_ids: [`ord-${id}`], customer_id: `c-${id}`, lat: 23.6, lng: 58.4, demand_cases: cases, demand_kg: 0, demand_pallet_units: cases * 10, priority,
   });
-  const out = (stops: DispatchStop[]) => stops.map((s) => ({ stop_id: s.stop_id, order_ids: s.order_ids, reason_code: 'SOLVER_DROPPED_LOW_PRIORITY', reason_message: '' }));
+  const out = (stops: DispatchStop[], reason = 'SOLVER_DROPPED_LOW_PRIORITY') => stops.map((s) => ({ stop_id: s.stop_id, order_ids: s.order_ids, reason_code: reason, reason_message: '' }));
   const req = (stops: DispatchStop[]): DispatchRequest => ({
     run_id: 'r', tenant_id: 't', depot: { id: 'd', lat: 23.6, lng: 58.4 }, stops,
     trucks: [own('OWN1'), ...hireTrucksForRequest([TEN, THREE], { tripCost: 2.5 }, {}, 10)],
     config: { scenarios: ['RECOMMENDED'] } as DispatchRequest['config'],
   });
+  const [x1, x2, x3] = [stop('X1', 400), stop('X2', 400), stop('X3', 100)];
+  const riders = Array.from({ length: 3 }, (_, i) => stop(`R${i + 1}`, 60, 5));
+  const ten = virtualHireId('o10', 1);
+  const three = virtualHireId('o3', 1);
+  const whatIf = {
+    loads: [load('OWN1', [], 35, 35), rentedLoad(ten, [x1, x2], 50), rentedLoad(three, [x3, ...riders], 30)],
+    unserved: [], trucks_used: 3, trips: 3,
+  } as unknown as WhatIf;
+  const base = { request: req([x1, x2, x3, ...riders]), baseUnserved: out([x1, x2, x3, ...riders]), baseOrders: [], whatIf, options: [TEN, THREE] };
 
-  it('a rental that carries orders the own fleet delivers today never counts more than the orders left out', () => {
-    // Review: the plan leaves out X1 and X2 (400 cases each). The what-if puts X2 on the own truck, X1 on
-    // one 3-ton and 7 small orders the plan delivers on the other: "up to 7 orders stay undelivered" -
-    // more than with no rental at all. Counted now: the orders the hire is for, at most those 2 - and by
-    // size (fourth review): the 7 small orders (3.5 pallets) take back the room of one 4-pallet order.
-    const [x1, x2] = [stop('X1', 400), stop('X2', 400)];
-    const base = Array.from({ length: 7 }, (_, i) => stop(`B${i + 1}`, 50));
-    const whatIf = {
-      loads: [load('OWN1', [x2], 35, 60), rentedLoad(virtualHireId('o3', 1), [x1], 30), rentedLoad(virtualHireId('o3', 2), base, 30)],
-      unserved: [], trucks_used: 3, trips: 3,
-    } as unknown as WhatIf;
-    const s = summarizeHire({ request: req([x1, x2, ...base]), baseUnserved: out([x1, x2]), baseOrders: base.flatMap((b) => b.order_ids), whatIf, options: [TEN, THREE] });
-    expect(s.leftOut.orders).toBe(2);
-    expect(s.alternative!.leftOut.orders).toBeLessThanOrEqual(s.leftOut.orders);
-    expect(s.alternative!.leftOut).toMatchObject({ orders: 1, cases: 400 });
+  it('the solved plan without the least useful truck: its P1-P3 orders left out, exactly, and the P4/P5 orders it delivers no more', () => {
+    const hireCheck = { first: [ten, three, virtualHireId('o10', 2)], used: [ten, three], solves: 3, complete: true, one_fewer: { without: three, unserved: ['R1', 'R2', 'X3'] } };
+    const s = summarizeHire({ ...base, hireCheck });
+    expect(s.alternative).toMatchObject({ dropped: '3-ton', hireCost: 50, solved: true, leftOut: { orders: 1, cases: 100, stopIds: ['X3'] }, low: { orders: 2 } });
+    expect(s.reduction).toEqual({ first: 3, used: 2, solves: 3, complete: true });
     expect(hireSuggestionText(s).details).toContain(
-      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 1 order (400 cases, 4.0 pallets) stays undelivered - what the 3-ton would carry or make room for.',
+      'With one truck fewer (1 x 10-ton (12 bays), extra about 50 OMR): 1 order (100 cases, 1.0 pallets) would stay undelivered - planned without the 3-ton. 2 P4/P5 orders this plan delivers would stay out too.',
     );
   });
 
-  it('the room a dropped truck frees is counted by size: one big order of the plan in use pushes out as many small ones as it takes', () => {
-    // Fourth review: the plan in use carries X1 and X2 (P1, 6 pallets each) on the own truck and leaves
-    // out s1..s12 (P3, 1 pallet each) for space. The what-if puts X1 and X2 on two 3-tons and s1..s12 on
-    // the own truck. Without the 3-ton carrying X1, X1 goes back on the own truck and pushes out 6 one-
-    // pallet orders: "up to 6", never "up to 1" (counted one stop at a time, whatever its size).
-    const big = (id: string): DispatchStop => ({ ...stop(id, 60, 1), demand_pallet_units: 6000 });
-    const [x1, x2] = [big('X1'), big('X2')];
-    const small = Array.from({ length: 12 }, (_, i) => ({ ...stop(`s${i + 1}`, 20), demand_pallet_units: 1000 }));
-    const whatIf = {
-      loads: [load('OWN1', small, 35, 60), rentedLoad(virtualHireId('o3', 1), [x1], 30), rentedLoad(virtualHireId('o3', 2), [x2], 30)],
-      unserved: [], trucks_used: 3, trips: 3,
-    } as unknown as WhatIf;
-    const s = summarizeHire({ request: req([x1, x2, ...small]), baseUnserved: out(small), baseOrders: [...x1.order_ids, ...x2.order_ids], whatIf, options: [TEN, THREE] });
-    expect(s.leftOut.orders).toBe(12);
-    expect(s.alternative).toMatchObject({ dropped: '3-ton', leftOut: { orders: 6, cases: 120, palletUnits: 6000 } });
-    expect(hireSuggestionText(s).details).toContain(
-      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 6 orders (120 cases, 6.0 pallets) stay undelivered - what the 3-ton would carry or make room for.',
-    );
-    // On a day without pallets the room is counted in cases: X1's 60 cases push out 3 orders of 20.
-    const noPallets = (st: DispatchStop): DispatchStop => ({ ...st, demand_pallet_units: undefined });
-    const c = summarizeHire({
-      request: req([x1, x2, ...small].map(noPallets)), baseUnserved: out(small), baseOrders: [...x1.order_ids, ...x2.order_ids],
-      whatIf, options: [TEN, THREE],
-    });
-    expect(c.alternative!.leftOut).toMatchObject({ orders: 3, cases: 60 });
-    // Never more than the orders left out without any rental: a huge order frees room for all 12, no more.
-    const huge = summarizeHire({
-      request: req([{ ...x1, demand_pallet_units: 50_000 }, { ...x2, demand_pallet_units: 50_000 }, ...small]), baseUnserved: out(small),
-      baseOrders: [...x1.order_ids, ...x2.order_ids], whatIf, options: [TEN, THREE],
-    });
-    expect(huge.alternative!.leftOut.orders).toBe(12);
+  it('no solve of one truck fewer (an older solver, or out of time): no line, never an estimate', () => {
+    for (const hireCheck of [undefined, null, { first: [ten, three], used: [ten, three], solves: 0, complete: false, one_fewer: null }]) {
+      const s = summarizeHire({ ...base, hireCheck });
+      expect(s.alternative).toBeNull();
+      expect(hireSuggestionText(s).details.join(' ')).not.toMatch(/one truck fewer/i);
+    }
   });
 
-  it('P4/P5 orders riding on the dropped truck are said apart, never counted as the price of one truck fewer', () => {
-    // Review: the dropped 3-ton carries 1 P3 order left out and 5 P5 riders: "up to 6 orders".
-    const x = stop('X', 400);
-    const l = stop('L', 50);
-    const riders = Array.from({ length: 5 }, (_, i) => stop(`R${i + 1}`, 60, 5));
-    const whatIf = {
-      loads: [load('OWN1', [], 35, 35), rentedLoad(virtualHireId('o10', 1), [x], 50), rentedLoad(virtualHireId('o3', 1), [l, ...riders], 30)],
-      unserved: [], trucks_used: 3, trips: 3,
-    } as unknown as WhatIf;
-    const s = summarizeHire({ request: req([x, l, ...riders]), baseUnserved: out([x, l, ...riders]), baseOrders: [], whatIf, options: [TEN, THREE] });
-    expect(s.leftOut.orders).toBe(2);
-    expect(s.alternative).toMatchObject({ dropped: '3-ton', leftOut: { orders: 1, cases: 50 }, low: { orders: 5 } });
+  it('a solve that is not of the suggested set (a truck it does not rent) is not shown', () => {
+    const s = summarizeHire({ ...base, hireCheck: { first: [ten, three], used: [ten, three], solves: 2, complete: true, one_fewer: { without: virtualHireId('o10', 2), unserved: ['X1'] } } });
+    expect(s.alternative).toBeNull();
+  });
+
+  it('one rented truck: no line (one truck fewer is the plan in use)', () => {
+    const one = { ...whatIf, loads: [load('OWN1', [], 35, 35), rentedLoad(ten, [x1, x2, x3], 50)] } as unknown as WhatIf;
+    const s = summarizeHire({ ...base, whatIf: one, hireCheck: { first: [ten], used: [ten], solves: 1, complete: true, one_fewer: { without: ten, unserved: ['X1', 'X2', 'X3'] } } });
+    expect(s.alternative).toBeNull();
+  });
+
+  it('the orders still left out with the hire count in, said so', () => {
+    const left = { ...whatIf, unserved: out([stop('X4', 50)], 'HARD_WINDOW_INFEASIBLE') } as unknown as WhatIf;
+    const x4 = stop('X4', 50);
+    const s = summarizeHire({
+      ...base,
+      request: req([x1, x2, x3, x4, ...riders]),
+      baseUnserved: out([x1, x2, x3, x4, ...riders]),
+      whatIf: left,
+      hireCheck: { first: [ten, three], used: [ten, three], solves: 2, complete: true, one_fewer: { without: three, unserved: ['X3', 'X4'] } },
+    });
+    expect(s.alternative!.leftOut).toMatchObject({ orders: 2, stopIds: ['X3', 'X4'] });
     expect(hireSuggestionText(s).details).toContain(
-      'With one truck fewer (1 x 10-ton (12 bays), extra about 50 OMR): up to 1 order (50 cases, 0.5 pallets) stays undelivered - what the 3-ton would carry. It also carries 5 P4/P5 orders, which would stay out too.',
+      'With one truck fewer (1 x 10-ton (12 bays), extra about 50 OMR): 2 orders (150 cases, 1.5 pallets) would stay undelivered, the 1 order still left out included - planned without the 3-ton.',
     );
+  });
+
+  it('"every truck you can rent in use" is the search\'s own plan, before the reduction gave trucks back', () => {
+    // The search used every unit and still left X4 out; the reduction then gave back the units that only
+    // carried P4/P5 orders. X4 is never called a search miss "although trucks you can rent stayed unused".
+    const x4 = stop('X4', 50);
+    const left = { ...whatIf, unserved: out([x4]) } as unknown as WhatIf;
+    const all = [ten, three, virtualHireId('o10', 2), virtualHireId('o10', 3), virtualHireId('o3', 2)];
+    const s = summarizeHire({
+      ...base,
+      request: req([x1, x2, x3, x4, ...riders]),
+      baseUnserved: out([x1, x2, x3, x4, ...riders]),
+      whatIf: left,
+      hireCheck: { first: all, used: [ten, three], solves: 3, complete: true, one_fewer: null },
+    });
+    expect(s.unitsUsed).toBe(2);
+    expect(hireSuggestionText(s).headline).toMatch(/Still left out: 1 order \(50 cases, 0\.5 pallets\): even with every truck you can rent it does not fit \(how many trucks you can rent\)\.$/);
+  });
+
+  it('a suggestion stored before (an estimated "up to" line) shows no such line any more', () => {
+    const s = summarizeHire({ ...base, hireCheck: null });
+    const old = { ...s, alternative: { hires: s.hires.slice(0, 1), hireCost: 50, leftOut: s.leftOut, dropped: '3-ton' } } as typeof s;
+    expect(hireSuggestionText(old).details.join(' ')).not.toMatch(/one truck fewer|up to/i);
   });
 });
 
@@ -516,6 +526,25 @@ describe('what "Use this plan" compares (requestBasisText, sameDayMovedOn)', () 
     expect(sameDayMovedOn(cfg(600), cfg(610))).toBe(false);
     expect(sameDayMovedOn(cfg(600), cfg(611))).toBe(true);
     expect(sameDayMovedOn(cfg(null), cfg(600))).toBe(true); // midnight passed: now its delivery day
+  });
+});
+
+describe('dates and sizes as the rest of the screen says them (sixth review of the hire branch)', () => {
+  it('"Use this plan" asks for "11 Oct", never 2026-10-11', () => {
+    const text = hireUseConfirmText({ hires: [{ label: '10-ton', count: 1 }, { label: '3-ton', count: 2 }] }, '2026-10-11');
+    expect(text).toMatch(/^Hire 1 x 10-ton \+ 2 x 3-ton for 11 Oct and use this plan\?\n\nThe trucks are added for 11 Oct only/);
+    expect(text).not.toMatch(/2026/);
+    expect(hireUseConfirmText({ hires: [{ label: '10-ton', count: 1 }], dropped: { orders: 2 } }, null)).toMatch(
+      /^Hire 1 x 10-ton for this day and use this plan\?[\s\S]*leaves out 2 order\(s\) your current plan delivers/,
+    );
+  });
+
+  it('the Trucks page: "1 day: 11 Oct", and a hired truck planned by bays (no case capacity) says "by bays"', () => {
+    expect(oneDayBadge(new Date('2026-10-11T00:00:00Z'))).toBe('1 day: 11 Oct');
+    expect(oneDayBadge('2026-10-11T00:00:00.000Z')).toBe('1 day: 11 Oct');
+    expect(truckCapacityText({ capacityCases: 0, bays: 12 })).toBe('by bays');
+    expect(truckCapacityText({ capacityCases: 1140, bays: 12 })).toBe('1,140');
+    expect(truckCapacityText({ capacityCases: 0, bays: null })).toBe('0');
   });
 });
 

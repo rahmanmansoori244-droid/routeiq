@@ -46,7 +46,8 @@ describe('the hire options routes keep a live rental counted (review)', () => {
     expect(r.status).toBe(409);
     const body = await r.json();
     expect(body.error).toMatchObject({ code: 'HIRE_OPTION_IN_USE' });
-    expect(body.error.message).toMatch(/hired from this option for 2099-10-07.*switch it off instead/i);
+    // The day as the rest of the screen says it (sixth review of the hire branch: "2099-10-07").
+    expect(body.error.message).toMatch(/hired from this option for 7 Oct: .*switch it off instead/i);
     expect(tables.hireOption).toHaveLength(1);
     expect(row('truck', 'H1').hireOptionId).toBe('o10');
     // Switching it off is allowed (its rented truck stays counted).

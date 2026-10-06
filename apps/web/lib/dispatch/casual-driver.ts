@@ -22,6 +22,7 @@
 import { Prisma } from '@prisma/client';
 import { audit } from '../audit';
 import { DRIVER_PUBLIC_SELECT, type DriverPublic } from '../driver-fields';
+import { isHandSetDriver } from './load-state';
 import { PlanError } from './plan-errors';
 import { inLoadChange } from './plan-service';
 import { isoOf } from './time';
@@ -94,6 +95,61 @@ export interface AddCasualDriverResult {
   driver: DriverPublic;
   load: { id: string; driverId: string | null; truckId: string; loadNo: number; status: string };
   reused: boolean;
+  /**
+   * A truck rented for the day: the other loads of its day the driver was also put on (wholeRentalDay);
+   * [] for any other truck.
+   */
+  alsoOn: { loadId: string; loadNo: number }[];
+}
+
+/**
+ * A truck rented for the day (the hire suggestion; owner answers 2 and 4, 6 Oct 2026) works the whole day
+ * with ONE casual driver at the day rate (sixth review of the hire branch: "+ Add daily driver" put the
+ * driver on the load pressed only). When the load's truck is a one-day hired truck of this plan's date,
+ * the driver also goes on every other load of that truck in this plan version still to plan (PLANNED: a
+ * locked, loading or dispatched load stays as it is) whose driver the dispatcher did not choose by hand,
+ * each audited LOAD_DRIVER_SET (setDriverTx), and becomes the truck's default driver (audited
+ * HIRED_TRUCK_CHANGED, as the plate dialog does) - so a re-plan of the day fills it in too. Returns the
+ * other loads it was put on.
+ */
+async function wholeRentalDay(
+  tx: Prisma.TransactionClient,
+  tenantId: string,
+  run: { id: string; runDate: Date },
+  load: { id: string; truckId: string },
+  driver: DriverPublic,
+  user: { id: string },
+  setDriver: (loadId: string, driverId: string | null, user: { id: string }) => Promise<unknown>,
+): Promise<{ loadId: string; loadNo: number }[]> {
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { id: true, code: true, hired: true, onlyOnDate: true, defaultDriverId: true } });
+  if (!truck?.hired || !truck.onlyOnDate || isoOf(truck.onlyOnDate) !== isoOf(run.runDate)) return [];
+  const others = await tx.planLoad.findMany({
+    where: { tenantId, runId: run.id, truckId: truck.id, status: 'PLANNED', id: { not: load.id } },
+    orderBy: { loadNo: 'asc' },
+    select: { id: true, loadNo: true, driverId: true, driverSetById: true, driverSetAt: true },
+  });
+  const alsoOn: { loadId: string; loadNo: number }[] = [];
+  for (const o of others) {
+    if (o.driverId === driver.id || isHandSetDriver(o)) continue;
+    await setDriver(o.id, driver.id, user);
+    alsoOn.push({ loadId: o.id, loadNo: o.loadNo });
+  }
+  if (truck.defaultDriverId !== driver.id) {
+    await tx.truck.update({ where: { id: truck.id }, data: { defaultDriverId: driver.id } });
+    await audit(
+      {
+        tenantId,
+        userId: user.id,
+        action: 'HIRED_TRUCK_CHANGED',
+        entity: 'Truck',
+        entityId: truck.id,
+        beforeJson: { code: truck.code, defaultDriverId: truck.defaultDriverId } as never,
+        afterJson: { code: truck.code, defaultDriverId: driver.id, date: isoOf(truck.onlyOnDate), via: 'daily driver quick add', runId: run.id } as never,
+      },
+      tx,
+    );
+  }
+  return alsoOn;
 }
 
 function isUniqueViolation(e: unknown): boolean {
@@ -153,10 +209,12 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
         await audit({ tenantId, userId: user.id, action: 'CASUAL_DRIVER_ADDED', entity: 'Driver', entityId: driver.id, afterJson: { ...auditDriver(driver), runId: run.id, loadId: load.id, date } }, tx);
       }
       const updated = await setDriver(load.id, driver.id, user);
+      const alsoOn = await wholeRentalDay(tx, tenantId, run, updated, driver, user, setDriver);
       return {
         driver,
         load: { id: updated.id, driverId: updated.driverId, truckId: updated.truckId, loadNo: updated.loadNo, status: updated.status },
         reused,
+        alsoOn,
       };
     });
   } catch (e) {

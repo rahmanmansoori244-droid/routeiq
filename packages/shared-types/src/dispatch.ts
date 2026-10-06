@@ -506,4 +506,26 @@ export interface DispatchResponse {
   warnings: string[];
   /** How the recommended plan was searched; absent from an older solver. */
   search?: SearchReport | null;
+  /**
+   * The hire suggestion's what-if only (a request with trucks to rent): how its rented trucks were
+   * reduced after the search (apps/solver dispatch_solver._reduce_hire). Absent / null on every other
+   * answer and from a solver before it.
+   */
+  hire_check?: HireCheck | null;
+}
+
+/**
+ * The reduction of a what-if's rented trucks (sixth review of the hire branch: the Quick search rented
+ * 2 x 10-ton where one carried every P1-P3 order left out). `first`: the rented trucks of the search's
+ * plan; `used`: those of the RECOMMENDED plan returned (a subset: each left out, dearest first, when
+ * every P1-P3 stop stayed delivered and the plan passed every check); `solves`: the extra solves;
+ * `complete`: every truck of `used` was tried without; `one_fewer`: the least useful truck of `used`
+ * left out, SOLVED with exactly the others - the stops that plan leaves out (all priorities).
+ */
+export interface HireCheck {
+  first: string[];
+  used: string[];
+  solves: number;
+  complete: boolean;
+  one_fewer?: { without: string; unserved: string[] } | null;
 }

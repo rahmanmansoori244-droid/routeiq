@@ -15,6 +15,7 @@
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
 import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './costs';
+import { dayFuel, FUEL_INCLUDED_NOTE } from './summary';
 import { breakLine, breakPlace, breakTimes } from './break-text';
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from './time';
@@ -429,7 +430,10 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
       kv('Pallets planned', palletsExact(s.palletUnits), FMT_PALLETS, `on ${n} load${n === 1 ? '' : 's'} of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up); orders stay in cases`);
       if (typeof s.avgBayFillPct === 'number') kv('Average bay fill %', s.avgBayFillPct, FMT_PCT, 'pallets / bays of each of those loads, averaged');
     }
-    kv('Estimated fuel (litres)', s.fuelLitres ?? 'not calculated', FMT_KM, s.fuelLitres === null ? 'trucks have no km-per-litre' : undefined);
+    // A truck rented for the day has its fuel in the hire (owner answer 3; sixth review of the hire branch).
+    const fuel = dayFuel(s, d.loads);
+    const rentedFuel = fuel.included ? `own trucks only; ${FUEL_INCLUDED_NOTE} in the hire` : undefined;
+    kv('Estimated fuel (litres)', fuel.litres ?? 'not calculated', FMT_KM, fuel.litres === null ? 'trucks have no km-per-litre' : rentedFuel);
     kv(`Fuel cost (${cur})`, s.fuelCost, FMT_MONEY);
     const basis = summaryCostBasis(s);
     kv(

@@ -54,6 +54,12 @@ export interface SummaryLoad {
    * plan and the Truck days sheet show it (fourth review). Absent / null: paid by the hour.
    */
   driverDayRate?: number | null;
+  /**
+   * A truck rented for the day (the hire suggestion): its fuel is in its hire (owner answer 3) - it has
+   * no km per litre, and the day's fuel is the own trucks' (sixth review of the hire branch: the Fuel KPI
+   * turned blank on any plan with a hired truck). Absent / false: an own truck.
+   */
+  fuelInHire?: boolean;
 }
 
 export interface DailySummary {
@@ -82,8 +88,11 @@ export interface DailySummary {
   palletUnits?: number | null;
   palletLoads?: number;
   avgBayFillPct?: number | null;
+  /** The own trucks' fuel (litres: null when one of their loads has no km per litre); a rented truck's is in its hire. */
   fuelLitres: number | null;
   fuelCost: number;
+  /** Loads of trucks rented for the day, whose fuel is in the hire (SummaryLoad.fuelInHire); absent when none. */
+  fuelIncludedLoads?: number;
   operatingCost: number;
   /** Review F17 (absent on summaries saved before it). */
   costBasis?: CostBasis;
@@ -182,8 +191,11 @@ export function computeSummary(input: {
   const allRevenue = orders.length > 0 && orders.every((o) => o.salesValue !== null);
   const allMargin = orders.length > 0 && orders.every((o) => o.marginValue !== null);
   // Like revenue/margin: a partial fuel sum would understate the day, so report it only when
-  // every load's truck has a fuel economy.
-  const fuelKnown = loads.length > 0 && loads.every((l) => l.fuelLitres !== null);
+  // every load's truck has a fuel economy - a truck rented for the day aside: its fuel is in its hire
+  // (owner answer 3; sixth review of the hire branch: the KPI turned blank with any hired truck).
+  const rented = loads.filter((l) => l.fuelInHire);
+  const fuelLoads = loads.filter((l) => !l.fuelInHire);
+  const fuelKnown = loads.length > 0 && fuelLoads.every((l) => l.fuelLitres !== null);
   const costLoads = loads.map((l) => ({
     truckId: l.truckId,
     loadNo: l.loadNo,
@@ -221,8 +233,9 @@ export function computeSummary(input: {
           avgBayFillPct: r1(bayLoads.reduce((a, l) => a + l.palletUnits / (l.bays * 10), 0) / bayLoads.length),
         }
       : {}),
-    fuelLitres: fuelKnown ? r1(loads.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null,
+    fuelLitres: fuelKnown ? r1(fuelLoads.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null,
     fuelCost: r3(loads.reduce((a, l) => a + l.fuelCost, 0)),
+    ...(rented.length ? { fuelIncludedLoads: rented.length } : {}),
     operatingCost: r3(loads.reduce((a, l) => a + l.operatingCost, 0)),
     costBasis: costBasisOf(costLoads),
     costs,
@@ -244,6 +257,41 @@ export function computeSummary(input: {
     warnings: [...new Set(input.warnings)],
     solver: input.solver,
   };
+}
+
+/** The Fuel KPI's note when trucks rented for the day are in the plan (owner answer 3: fuel is in the hire). */
+export const FUEL_INCLUDED_NOTE = 'rented trucks: fuel included';
+
+/**
+ * The plan's Fuel KPI (litres · OMR): the own trucks' fuel, and a note when trucks rented for the day are
+ * in the plan - their fuel is in the hire, never a reason to leave the litres blank (sixth review of the
+ * hire branch). A summary stored before `fuelIncludedLoads` (its litres blank because of a rented truck)
+ * is read from the plan's loads: a load whose driver is paid by the day is a rented truck's.
+ */
+export function fuelKpi(
+  s: Pick<DailySummary, 'fuelLitres' | 'fuelCost' | 'fuelIncludedLoads'>,
+  loads?: readonly FuelLoad[],
+): { value: string; note: string | null } {
+  const { litres, included } = dayFuel(s, loads);
+  return { value: `${litres ?? '—'} · ${s.fuelCost.toFixed(1)}`, note: included > 0 ? FUEL_INCLUDED_NOTE : null };
+}
+
+type FuelLoad = { fuelLitres: number | null; fuelCost: number; driverDayRate?: number | null };
+
+/**
+ * The day's own-truck fuel in litres (null: one of their loads has no km per litre) and how many loads
+ * are of trucks rented for the day (their fuel in the hire), from the summary - or, for a summary stored
+ * before `fuelIncludedLoads`, from the plan's loads (fuelKpi).
+ */
+export function dayFuel(s: Pick<DailySummary, 'fuelLitres' | 'fuelIncludedLoads'>, loads?: readonly FuelLoad[]): { litres: number | null; included: number } {
+  if (s.fuelIncludedLoads === undefined && loads?.length) {
+    const rented = loads.filter((l) => typeof l.driverDayRate === 'number');
+    if (rented.length) {
+      const own = loads.filter((l) => typeof l.driverDayRate !== 'number');
+      return { litres: own.every((l) => l.fuelLitres !== null) ? r1(own.reduce((a, l) => a + (l.fuelLitres ?? 0), 0)) : null, included: rented.length };
+    }
+  }
+  return { litres: s.fuelLitres, included: s.fuelIncludedLoads ?? 0 };
 }
 
 export interface AssignmentKey {

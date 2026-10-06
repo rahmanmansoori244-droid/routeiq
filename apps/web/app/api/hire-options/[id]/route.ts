@@ -3,6 +3,7 @@ import { hireOptionPatchSchema, hireOptionSizeProblem } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 import { liveRentalDays } from '@/lib/dispatch/hire-whatif';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 
 interface Params { params: { id: string } }
 
@@ -15,7 +16,7 @@ function inUse(days: string[], what: 'deleted' | 'moved to another depot') {
   return fail(
     {
       code: 'HIRE_OPTION_IN_USE',
-      message: `Trucks are hired from this option for ${days.join(', ')}: it cannot be ${what} until their day is over. Switch it off instead (Active) so it is not offered again.`,
+      message: `Trucks are hired from this option for ${days.map(fmtDayMonth).join(', ')}: it cannot be ${what} until their day is over. Switch it off instead (Active) so it is not offered again.`,
     },
     409,
   );

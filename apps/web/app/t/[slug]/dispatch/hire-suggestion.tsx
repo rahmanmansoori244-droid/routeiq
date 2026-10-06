@@ -21,6 +21,8 @@ import { Loader2, RefreshCw, Truck } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import type { HireView } from '@/lib/dispatch/hire-whatif';
+import { hireUseConfirmText } from '@/lib/dispatch/hire';
+import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, askOverride, type OptimizeOverrides } from './client-api';
 
 const POLL_MS = 4_000;
@@ -136,16 +138,9 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
 
   async function use() {
     if (!s?.summary) return;
-    const trucks = s.summary.hires.map((h) => `${h.count} x ${h.label}`).join(' + ');
-    const day = expect?.date ?? 'this day';
-    const drops = s.summary.dropped?.orders
-      ? `\n\nThe check's plan leaves out ${s.summary.dropped.orders} order(s) your current plan delivers, so RouteIQ re-plans the day with the hired trucks instead of taking it as it is.`
-      : '';
-    if (
-      !window.confirm(
-        `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate with Plate on its load, and pick the driver on each load). A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.${drops}`,
-      )
-    ) {
+    // The day as the rest of the screen says it ("11 Oct"; sixth review of the hire branch).
+    const day = expect?.date ? fmtDayMonth(expect.date) : 'this day';
+    if (!window.confirm(hireUseConfirmText(s.summary, expect?.date ?? null))) {
       return;
     }
     setWorking('use');
@@ -204,7 +199,7 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
         </>
       ) : running ? (
         <p className="flex items-center gap-2" data-testid="hire-running">
-          <Loader2 className="h-4 w-4 animate-spin" /> Checking which trucks to hire (Quick search, about a minute). Your plan stays as it is meanwhile.
+          <Loader2 className="h-4 w-4 animate-spin" /> Checking which trucks to hire (Quick search, then a few checks with fewer trucks: a minute or a few). Your plan stays as it is meanwhile.
         </p>
       ) : s.forOtherOption ? (
         <p data-testid="hire-other-option">

@@ -601,6 +601,37 @@ class DispatchResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     # How the recommended plan was searched (QUICK / THOROUGH). None from a solver before it.
     search: SearchReport | None = None
+    # The hire suggestion's what-if only (a request with trucks to rent, DispatchTruck.hire_candidate):
+    # how its set of rented trucks was reduced after the search (dispatch_solver._reduce_hire). None for
+    # every other request (and from a solver before it).
+    hire_check: "HireCheck | None" = None
+
+
+class HireOneFewer(BaseModel):
+    """One truck fewer than the suggested set, SOLVED (sixth review of the hire branch: an estimate said
+    "up to 25 orders stay undelivered" where none would): the day solved with the suggested rented trucks
+    but ``without``, and the stops that plan leaves out (all priorities; ``unserved`` of its scenario)."""
+
+    without: str
+    unserved: list[str] = Field(default_factory=list)
+
+
+class HireCheck(BaseModel):
+    """The REDUCTION of a what-if's rented trucks (sixth review of the hire branch: the Quick search
+    rented 2 x 10-ton on the real day where one carried every P1-P3 order; the second only carried
+    P4/P5 orders). After the search each rented truck, dearest first, is left out and the day solved
+    again with the others; the removal is kept when every P1-P3 stop the plan delivered is still
+    delivered and the plan passes every check. ``first``: the rented trucks of the search's plan;
+    ``used``: those of the plan returned as RECOMMENDED (a subset); ``solves``: the extra solves run;
+    ``complete``: every truck of ``used`` was tried without (each removal lost a P1-P3 stop) - false
+    when the solve limit or the time budget stopped it first; ``one_fewer``: the least useful truck of
+    ``used`` left out, solved with exactly the others (None when no such solve ran)."""
+
+    first: list[str] = Field(default_factory=list)
+    used: list[str] = Field(default_factory=list)
+    solves: int = 0
+    complete: bool = True
+    one_fewer: HireOneFewer | None = None
 
 
 class SearchReport(BaseModel):
@@ -670,6 +701,7 @@ class PyvrpReport(BaseModel):
 
 SearchReport.model_rebuild()
 DispatchResponse.model_rebuild()
+HireCheck.model_rebuild()
 
 
 class GeometryRequest(BaseModel):

@@ -1736,6 +1736,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       ...summaryPallets(l),
       // A hired truck's casual driver is paid by the day: no paid hours (fourth review).
       driverDayRate: dayRateOfSnapshot(l.truckSnapshotJson),
+      // A truck rented for the day (its driver at the day rate): its fuel is in its hire (sixth review).
+      ...(dayRateOfSnapshot(l.truckSnapshotJson) !== null ? { fuelInHire: true } : {}),
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,
