@@ -138,6 +138,13 @@ class DispatchTruck(BaseModel):
     # bays x config.pallet_fill_pct (pallet_room_units) and the payload; capacity_cases is then not a
     # limit. None (an older web, or a truck without bays): planned by cases, exactly as before.
     bays: int | None = Field(default=None, ge=1, le=40)
+    # A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
+    # what-if; never a truck already hired): fixed_cost is its hire for the day. The search weighs a
+    # rented truck's day cost more (dispatch_solver.hire_weight), so every own truck is used before
+    # any rented one and the cheapest set of rented trucks wins, while a stop left out still costs
+    # more than any hire; the reported costs stay the real ones. Optional and additive: an older web
+    # never sends it.
+    hire_candidate: bool = False
 
 
 class DispatchStop(BaseModel):

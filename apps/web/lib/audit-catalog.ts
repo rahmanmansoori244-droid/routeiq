@@ -74,6 +74,14 @@ export const AUDIT_ACTIONS = {
   CASUAL_DRIVERS_CLEARED: { label: 'Idle daily drivers hidden (clean-up)' },
   // Start fresh (owner request 4 Oct 2026): a company admin removed the test orders, plans and results.
   TEST_DATA_CLEARED: { label: 'Test data removed (Start fresh)' },
+  // The hire suggestion (owner request 6 Oct 2026): which trucks to rent when the fleet cannot carry the day.
+  HIRE_CHECK_STARTED: { label: 'Hire check started (a what-if with trucks to rent)' },
+  HIRE_CHECK_FINISHED: { label: 'Hire check finished (suggestion ready)' },
+  HIRE_CHECK_FAILED: { label: 'Hire check failed or stopped' },
+  HIRE_SUGGESTION_USED: { label: 'Hire suggestion used ("Use this plan")' },
+  HIRED_TRUCKS_ADDED: { label: 'One-day hired trucks added' },
+  HIRED_TRUCK_CHANGED: { label: 'One-day hired truck: plate or driver set' },
+  ONE_DAY_TRUCKS_RETIRED: { label: 'One-day hired trucks retired after their day' },
   BASELINE_UPLOADED: { label: 'Baseline uploaded (legacy run)' },
   ROUTE_MANUALLY_CHANGED: { label: 'Route changed by hand (legacy run)' },
   SECURITY_CLEANUP: { label: 'Security clean-up (migration)' },
@@ -111,6 +119,8 @@ export const AUDIT_ENTITIES = {
   ManualBaseline: { label: 'Baseline (legacy run)' },
   DriverLink: { label: 'Driver link' },
   StopVisit: { label: 'Delivery stop' },
+  HireOption: { label: 'Truck to hire (hire option)' },
+  HireSuggestion: { label: 'Hire suggestion' },
   RunJob: { label: 'Optimization job', legacy: true },
   DriverShift: { label: 'Driver shift (retired app)', legacy: true },
 } as const satisfies Record<string, AuditActionInfo>;

@@ -181,6 +181,23 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 
 ---
 
+## Trucks to hire (the hire suggestion, 6 Oct 2026)
+
+Owner request: when the day's orders are more than the fleet can carry, RouteIQ says which trucks to RENT (*hire 1 x 10-ton + 1 x 3-ton: extra about 80 OMR*). It only knows the trucks a company admin enters.
+
+- **Enter them** on the **Trucks** page, card **Trucks to hire** (company admin; everyone with the page sees them): per depot a **label** (*10-ton*, *3-ton*: the dispatcher reads it, and the rented trucks' codes take its tag, `HIRE-10T-...`), **bays** (pallet positions; or a **capacity in cases** for a truck loaded by cases), **payload** kg (0 = no weight limit), **cost per day** (the hire, more than 0), **cost per km** with fuel (empty = the depot's fleet average: cost per km + fuel price / km per litre of its trucks), **max per day** (how many of that truck you can rent on one day, 1-10) and **active**. The migration seeds NOTHING: after the deploy enter the owner's figures (rough, 6 Oct 2026: *10-ton*, 12 bays, payload 0, 50 OMR a day, at most 3; *3-ton*, 6 bays, payload 0, 30 OMR a day, at most 2). Audited `CREATE` / `UPDATE` / `DELETE` (entity *Truck to hire*). Deleting one keeps the trucks already rented with it.
+- **What happens with them.** When a plan leaves orders out because of the fleet, a what-if optimization runs on its own (Quick, its own job `HireSuggestion`, the same optimizer queue as every plan but never ahead of a dispatcher's optimization and not counted in the hourly limits) with one truck per unit the day can still rent. The optimizer weighs a rented truck's hire ten times (at most 500 OMR, half of what leaving out one stop costs), so own trucks always go first and the cheapest set of rented trucks wins; the plan reports the real costs. A dispatcher's **Use this plan** rents the trucks as **one-day trucks** (`Truck.onlyOnDate`, `hired`, linked to the option) and makes the next plan version with them, or re-plans with them when the day changed. Audited `HIRE_CHECK_STARTED` / `HIRE_CHECK_FINISHED` / `HIRE_CHECK_FAILED`, `HIRED_TRUCKS_ADDED`, `HIRE_SUGGESTION_USED`, then the usual `PLAN_VERSION_CREATED` and `SCENARIO_CHOSEN`.
+- **One-day trucks** are planned on their date only and the janitor switches them off once that day is over (`ONE_DAY_TRUCKS_RETIRED`, one row per company). They stay in the Trucks list with a *1 day: <date>* badge (plans, sheets and results name them). The dispatcher enters each one's real plate and default driver (`PATCH /api/dispatch/hired-trucks/:id`, PLANNER, `HIRED_TRUCK_CHANGED`); every other field stays yours on the Trucks page. A plate an earlier day's hired truck still carries is moved off it (that truck's code becomes `<plate>.<YYMMDD>`).
+- **A check that stopped.** A what-if lost with its web process (a deploy, a restart) shows as stopped within 2 minutes; a dispatcher's optimization that needs its optimizer slot stops it at once. The dispatcher presses **Check again**. Nothing is ever changed by a check itself.
+- **Useful query** (one company's checks of a day):
+
+```sql
+SELECT s."createdAt", s.status, s.trigger, s.message, s."usedAt", r.version
+FROM "HireSuggestion" s JOIN "RunPlan" r ON r.id = s."runId"
+WHERE s."tenantId" = '<tenantId>' AND r."runDate" = '2026-10-07'
+ORDER BY s."createdAt";
+```
+
 ## Tenant isolation contract
 
 CLAUDE.md §3, §13: every business table has `tenantId`, every query goes through `tenantDb(tenantId)`. The Vitest suite at `apps/web/tests/tenant-isolation.spec.ts` runs on every PR; merge is blocked if it fails.

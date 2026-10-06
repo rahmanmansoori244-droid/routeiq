@@ -22,6 +22,7 @@ import { queuedMessage, searchLeadMin, thoroughMaxSec, type SearchMode } from '.
 import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
 import { palletFactorGate } from './pallets';
+import { cancelHireChecksOfDay } from './hire-whatif';
 
 export interface StartResult {
   status: number;
@@ -203,6 +204,15 @@ async function prerequisites(tenantId: string, runId: string, built: BuiltReques
   }
   if (built.request.trucks.length === 0) return NO_TRUCKS;
   return null;
+}
+
+/**
+ * What a re-plan of this version would refuse before creating a version (the questions about
+ * locations and weights, products without cases per pallet, nothing to plan, no truck): the hire
+ * suggestion's "Use this plan" asks first, before it rents a truck (hire-use.ts).
+ */
+export async function replanRefusal(tenantId: string, runId: string, probe: BuiltRequest, overrides: OptimizeOverrides): Promise<StartResult | null> {
+  return gate(probe, overrides, 're-planning') ?? (await prerequisites(tenantId, runId, probe, true));
 }
 
 /**
@@ -498,6 +508,8 @@ export async function startDispatchOptimize(
     ticket.commit();
     handedOff = true;
     scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket });
+    // The hire suggestion's what-ifs of this day were for a plan that is being replaced: stopped.
+    void cancelHireChecksOfDay(tenantId, found.depotId, found.runDate, 'Stopped: a new optimization started for this day. The hire check runs again when it ends.');
     return {
       status: 202,
       body: { runJobId: job.id, status: 'QUEUED', runId, queued: ticket.waiting, searchMode: mode, maxSearchSec: mode === 'THOROUGH' ? capSec : null },

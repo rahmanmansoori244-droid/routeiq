@@ -144,6 +144,55 @@ export const truckSchema = truckFields.superRefine(truckHoursRefine);
 export const truckPatchSchema = truckFields.partial().superRefine(truckHoursRefine);
 export type TruckInput = z.infer<typeof truckSchema>;
 
+/**
+ * A truck the company can rent for a day (owner request 6 Oct 2026, the hire suggestion), per depot,
+ * company admin. Bays (pallet positions) or a case capacity; payload 0 = no weight limit; the hire for
+ * one day; OMR per km with fuel (empty = the depot's fleet average); at most maxPerDay a day. The same
+ * bounds as a truck's (and the database CHECK of migration 20261006120000).
+ */
+const hireOptionFields = z.object({
+  depotId: z.string().min(1, 'Depot is required'),
+  label: z.string().trim().min(1, 'Required').max(40, 'Max 40 chars'),
+  bays: optionalBounded(TRUCK_BOUNDS.bays),
+  capacityCases: bounded(TRUCK_BOUNDS.capacityCases).optional(),
+  payloadKg: bounded(TRUCK_BOUNDS.capacityWeightKg).optional(),
+  costPerDay: z.coerce.number().gt(0, 'The hire for one day must be more than 0').max(TRUCK_BOUNDS.fixedCostPerDay.max),
+  costPerKm: optionalBounded(TRUCK_BOUNDS.costPerKm),
+  maxPerDay: z.coerce.number().int().min(1).max(10).optional(),
+  active: z.boolean().optional(),
+});
+/** A hire option needs bays or a case capacity: the optimizer has nothing else to load it by. */
+export function hireOptionSizeProblem(v: { bays?: number | null; capacityCases?: number | null }): string | null {
+  return (v.bays ?? null) === null && !((v.capacityCases ?? 0) > 0) ? 'Enter its bays (pallet positions) or its capacity in cases.' : null;
+}
+export const hireOptionSchema = hireOptionFields.strict().superRefine((v, ctx) => {
+  const p = hireOptionSizeProblem(v);
+  if (p) ctx.addIssue({ code: 'custom', path: ['bays'], message: p });
+});
+export const hireOptionPatchSchema = hireOptionFields.partial().strict();
+export type HireOptionInput = z.infer<typeof hireOptionSchema>;
+
+/**
+ * PATCH /api/dispatch/hired-trucks/[id] (PLANNER): a one-day hired truck's real plate (its code) and
+ * its default driver. Every other truck field stays with the company admin (Trucks page).
+ */
+export const hiredTruckPatchSchema = z
+  .object({
+    code: codeSchema.optional(),
+    defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
+  })
+  .strict();
+
+/** POST /api/runs/[id]/hire-suggestion/use: the suggestion shown, the day on screen, the re-plan's answers. */
+export const hireUseSchema = z
+  .object({
+    suggestionId: z.string().min(1),
+    expect: z.object({ date: isoDateSchema, depotId: z.string().min(1) }).optional(),
+    allowMissingLocations: z.boolean().optional(),
+    allowMissingWeights: z.boolean().optional(),
+  })
+  .strict();
+
 export const driverSchema = z.object({
   code: codeSchema,
   name: nameSchema,

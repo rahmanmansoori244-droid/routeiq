@@ -7,6 +7,7 @@ import { EmptyState } from '@/components/empty-state';
 import { Button } from '@/components/ui/button';
 import { TrucksTable } from './trucks-table';
 import { AddTruckButton } from './add-truck-button';
+import { HireOptionsCard } from './hire-options';
 
 export const metadata = { title: 'Trucks — RouteIQ' };
 export const dynamic = 'force-dynamic';
@@ -57,6 +58,10 @@ export default async function TrucksPage({ params }: { params: { slug: string } 
       ) : (
         <TrucksTable initial={trucks} depots={depots} drivers={drivers} canManage={canManage} primaryUnit={tenant.primaryUnit} currency={tenant.currency} />
       )}
+      {/* The hire suggestion (owner request 6 Oct 2026): the trucks each depot can rent for a day. */}
+      <div className="mt-6">
+        <HireOptionsCard depots={depots} canManage={canManage} currency={tenant.currency} />
+      </div>
     </PageShell>
   );
 }

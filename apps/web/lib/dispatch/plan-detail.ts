@@ -34,6 +34,7 @@ import { defaultSearchMode, searchOptionOf, thoroughMaxSec, type SearchOption } 
 import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, roundKg } from './weights';
 import { DEFAULT_TZ, fmtWindow, isoOf, todayIso } from './time';
 import { carriedLoadShows } from './carry-view';
+import { shownTruckCode } from './hire';
 import { readLoadCost, type LoadCostBreakdown } from './costs';
 import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
@@ -206,6 +207,11 @@ export interface DetailLoad {
   break: LoadBreak | null;
   /** The truck is hired from outside (Truck.hired, as it is now): a badge on the plan and the sheets. */
   hired?: boolean;
+  /**
+   * A one-day truck rented with the hire suggestion: its date (YYYY-MM-DD); null / absent = an
+   * ordinary truck. The dispatcher may enter its real plate (PATCH /api/dispatch/hired-trucks/:id).
+   */
+  oneDay?: string | null;
 }
 
 export interface DetailUnserved {
@@ -441,7 +447,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, onlyOnDate: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -666,7 +672,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     return {
       id: l.id,
       truckId: l.truckId,
-      truckCode: ts?.code || l.truck.code,
+      truckCode: shownTruckCode(ts?.code, l.truck),
       truckCapacityCases: ts ? ts.capacityCases : l.truck.capacityCases,
       truckPayloadKg: ts ? ts.capacityWeightKg : l.truck.capacityWeightKg,
       driverId: l.driverId,
@@ -704,6 +710,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
+      // A one-day hired truck (the hire suggestion): the dispatcher may enter its real plate.
+      oneDay: l.truck.onlyOnDate ? isoOf(l.truck.onlyOnDate) : null,
     };
   });
 

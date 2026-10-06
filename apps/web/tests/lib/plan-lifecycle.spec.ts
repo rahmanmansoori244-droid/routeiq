@@ -1587,6 +1587,31 @@ describe('solve admission wired into the job (F16): queued solves start, every e
     await settle();
     expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
   });
+
+  it("a job that took a hire check's slot (6 Oct 2026) stops the check, waits for it and takes the optimizer's 'busy' answer again", async () => {
+    seedTwo();
+    const adm = admission();
+    const stopCheck = vi.fn();
+    const bg = adm.reserveBackground(T, 'u1', stopCheck);
+    expect(bg.ok && !bg.ticket.waiting).toBe(true);
+    // The company's one slot is the check's: the dispatcher's solve takes it at once.
+    const t1 = ticketOf(adm);
+    expect([t1.waiting, t1.preemptedOthers]).toEqual([false, true]);
+    expect(stopCheck).toHaveBeenCalledTimes(1);
+    const { SolverError } = await import('@/lib/solver-client');
+    let calls = 0;
+    solver.impl = async () => {
+      calls++;
+      // The optimizer has not freed the cancelled check's slot yet.
+      if (calls === 1) throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, null);
+      return jobResponse();
+    };
+    scheduleDispatchOptimize(argsFor('R1', 'J1', t1));
+    await g.__routeiqInflight.get('R1');
+    expect(calls).toBe(2);
+    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  }, 15_000);
 });
 
 describe('weights from the product master are saved with the applied plan only (review: failed re-plan kg)', () => {

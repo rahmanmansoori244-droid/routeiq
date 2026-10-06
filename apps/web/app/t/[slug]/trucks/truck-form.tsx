@@ -41,6 +41,8 @@ export interface TruckRow {
   active: boolean;
   /** Hired from outside (owner request 4 Oct 2026): a badge only, the planner never reads it. */
   hired?: boolean;
+  /** A one-day truck rented with the hire suggestion (owner request 6 Oct 2026): planned on this date only. */
+  onlyOnDate?: Date | string | null;
   depot?: { id: string; code: string; name: string };
 }
 

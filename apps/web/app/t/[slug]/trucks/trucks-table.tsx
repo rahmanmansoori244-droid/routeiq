@@ -87,6 +87,11 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                       hired
                     </Badge>
                   ) : null}
+                  {t.onlyOnDate ? (
+                    <Badge variant="warning" className="ml-1 font-sans text-[10px]" title="Rented with the hire suggestion: planned on this date only" data-testid={`truck-one-day-${t.code}`}>
+                      1 day: {new Date(t.onlyOnDate).toISOString().slice(0, 10)}
+                    </Badge>
+                  ) : null}
                 </TableCell>
                 <TableCell className="text-muted-foreground">{t.description ?? '—'}</TableCell>
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>

@@ -323,7 +323,8 @@ async function productsWithoutPalletFactor(
   products: { id: string; code: string; casesPerPallet: number | null }[],
 ): Promise<string[]> {
   if (!lines.length) return [];
-  const bayTrucks = await db.truck.count({ where: { depotId, active: true, bays: { not: null } } });
+  // Every-day trucks only: a one-day hired truck (the hire suggestion) is not the depot's fleet.
+  const bayTrucks = await db.truck.count({ where: { depotId, active: true, bays: { not: null }, onlyOnDate: null } });
   if (!bayTrucks) return [];
   const byId = new Map(products.map((p) => [p.id, p]));
   // One name per product: a new code spelt in another case or spacing on another row is the same one.

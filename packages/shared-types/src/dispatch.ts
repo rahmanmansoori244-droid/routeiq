@@ -69,6 +69,12 @@ export interface DispatchTruck {
    * planned by cases. Solvers without the field plan every truck by cases (and echo no pallet_unit).
    */
   bays?: number | null;
+  /**
+   * A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
+   * what-if; never a truck already hired): fixed_cost is its hire. The search weighs its day cost more,
+   * so own trucks go first and the cheapest set of rented trucks wins; the plan reports the real costs.
+   */
+  hire_candidate?: boolean;
 }
 
 export interface DispatchStop {

@@ -29,6 +29,7 @@ import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import type { SolveTicket } from '../dispatch/solve-admission';
 import { fmtSearchTime, searchLeadMin, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
+import { startHireCheckAfterPlan } from '../dispatch/hire-whatif';
 
 /**
  * Every 30 s while a job waits for a solver slot or for the optimizer, its row's heartbeatAt is
@@ -37,6 +38,15 @@ import type { DispatchScenario } from '@routeiq/shared-types';
  * THOROUGH search is never taken for a lost job, and a job whose process died is found quickly.
  */
 export const HEARTBEAT_MS = 30_000;
+
+/**
+ * A job whose solver slot was a hire check's (preempted, solve-admission.ts) waits this long before it
+ * calls the optimizer, and as long again before each of up to PREEMPT_BUSY_RETRIES retries of a
+ * "busy" answer: the optimizer frees the cancelled check's slot within about a second.
+ */
+export const PREEMPT_SETTLE_MS = 1_500;
+export const PREEMPT_BUSY_RETRIES = 3;
+const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** The jobs this process is running, by job id: the shutdown handler fails them (shutdown.ts). */
 const g = globalThis as unknown as { __routeiqActiveJobs?: Map<string, DispatchJobArgs> };
@@ -71,12 +81,20 @@ export function scheduleDispatchOptimize(args: DispatchJobArgs): boolean {
   const start = () => {
     activeDispatchJobs.set(args.runJobId, args);
     const stopHeartbeat = startHeartbeat(args.runJobId);
+    let saved = false;
     return runJob(args)
+      .then((r) => {
+        saved = r === 'SAVED';
+      })
       .catch((err) => failJob(args, err))
       .finally(() => {
         stopHeartbeat();
         activeDispatchJobs.delete(args.runJobId);
         args.ticket?.release();
+        // The hire suggestion (owner request 6 Oct 2026): a plan that leaves orders out because the
+        // fleet cannot carry them gets its what-if, once this job's solver slot is free. Its own job:
+        // it never delays or changes this plan.
+        if (saved) void startHireCheckAfterPlan(args.tenantId, args.runId, args.userId, args.ip);
       });
   };
   if (trackInflight(args.runId, start)) return true;
@@ -86,8 +104,8 @@ export function scheduleDispatchOptimize(args: DispatchJobArgs): boolean {
   return false;
 }
 
-/** Saved result and final job message, or why nothing was saved. */
-async function runJob(args: DispatchJobArgs) {
+/** Saved result and final job message, or why nothing was saved. 'SAVED' when the plan was saved. */
+async function runJob(args: DispatchJobArgs): Promise<'SAVED' | void> {
   const { runId, runJobId, tenantId, userId, built } = args;
   // Queued behind other solves (solve admission): wait for a free slot.
   if (args.ticket?.waiting) await args.ticket.ready();
@@ -119,12 +137,24 @@ async function runJob(args: DispatchJobArgs) {
     return;
   }
   let resp;
-  try {
-    // A connection the optimizer reset (it restarted), our own wait running out and the like come
-    // back as SolverError in plain words (solverCallFailure): the job fails, the plan can be retried.
-    resp = await callDispatchSolver(built.request);
-  } catch (err) {
-    throw err instanceof SolverError ? err : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);
+  // This job took the slot of a hire check (a background solve, solve-admission.ts): the optimizer
+  // frees that check's own slot about a second after its call was cancelled. Wait that moment, and
+  // take its "busy" answer a few more times, so the dispatcher's plan never fails because of a check.
+  if (args.ticket?.preemptedOthers) await pause(PREEMPT_SETTLE_MS);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      // A connection the optimizer reset (it restarted), our own wait running out and the like come
+      // back as SolverError in plain words (solverCallFailure): the job fails, the plan can be retried.
+      resp = await callDispatchSolver(built.request);
+      break;
+    } catch (err) {
+      const busy = err instanceof SolverError && err.status === 503 && err.code !== WORKERS_UNAVAILABLE;
+      if (busy && args.ticket?.preemptedOthers && attempt < PREEMPT_BUSY_RETRIES) {
+        await pause(PREEMPT_SETTLE_MS);
+        continue;
+      }
+      throw err instanceof SolverError ? err : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);
+    }
   }
   if (!resp.scenarios?.length) throw new SolverError('Solver returned no scenarios.', 200, resp);
   await prisma.runJob.updateMany({ where: { id: runJobId, status: 'RUNNING' }, data: { progressPct: 80, message: 'Saving plan', responseJson: resp as never } });
@@ -221,6 +251,7 @@ async function runJob(args: DispatchJobArgs) {
     }
     throw e;
   }
+  return 'SAVED';
 }
 
 /**

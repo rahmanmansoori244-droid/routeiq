@@ -80,6 +80,13 @@
  *   product master with cases per pallet) is TENANT_ADMIN, like editing a product. Roles unchanged on
  *   POST /api/products and PATCH /api/products/[id] (`casesPerPallet`), PATCH /api/trucks/[id] (`bays`),
  *   the plan and the exports (pallets beside the cases on loads planned by pallets).
+ * - The hire suggestion (owner request 6 Oct 2026): the trucks a depot can hire (GET /api/hire-options
+ *   any role; POST, PATCH and DELETE TENANT_ADMIN, master data); the suggestion of a plan version (GET
+ *   /api/runs/[id]/hire-suggestion any role, VIEWER reads it; POST "Check hire options" and POST
+ *   /use "Use this plan" PLANNER, the dispatcher); a one-day hired truck's plate and default driver
+ *   (PATCH /api/dispatch/hired-trucks/[id], PLANNER: only such a truck - every other truck field
+ *   stays PATCH /api/trucks/[id], TENANT_ADMIN). Roles unchanged on GET /api/runs/[id]/plan (`oneDay`
+ *   per load), GET /api/trucks (`onlyOnDate`) and the janitor route (TOKEN: retires one-day trucks).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -132,6 +139,8 @@ const EXPECTED: Record<string, string> = {
   'GET /api/dispatch/driver-links': 'PLANNER',
   'POST /api/dispatch/driver-links': 'PLANNER',
   'PATCH /api/dispatch/driver-links/[id]': 'PLANNER',
+  // Owner request 6 Oct 2026 (the hire suggestion): the dispatcher enters a one-day hired truck's plate.
+  'PATCH /api/dispatch/hired-trucks/[id]': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
   'POST /api/dispatch/outcomes': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',
@@ -148,6 +157,11 @@ const EXPECTED: Record<string, string> = {
   'POST /api/drivers/[id]/pin': 'GONE',
   'GET /api/health': 'PUBLIC',
   'GET /api/health/live': 'PUBLIC',
+  // Owner request 6 Oct 2026: the trucks a depot can hire for a day (company admin edits them).
+  'GET /api/hire-options': 'ANY',
+  'POST /api/hire-options': 'TENANT_ADMIN',
+  'PATCH /api/hire-options/[id]': 'TENANT_ADMIN',
+  'DELETE /api/hire-options/[id]': 'TENANT_ADMIN',
   'POST /api/locations/parse': 'PLANNER',
   'GET /api/orders': 'ANY',
   'GET /api/orders/[batchId]': 'ANY',
@@ -175,6 +189,10 @@ const EXPECTED: Record<string, string> = {
   'POST /api/runs/[id]/dispatch': 'PLANNER',
   'GET /api/runs/[id]/export/excel': 'ANY',
   'GET /api/runs/[id]/export/pdf': 'ANY',
+  // Owner request 6 Oct 2026: the hire suggestion (read by everyone; check and "Use this plan" PLANNER).
+  'GET /api/runs/[id]/hire-suggestion': 'ANY',
+  'POST /api/runs/[id]/hire-suggestion': 'PLANNER',
+  'POST /api/runs/[id]/hire-suggestion/use': 'PLANNER',
   'GET /api/runs/[id]/jobs/[jobId]/debug': 'SUPERVISOR',
   'GET /api/runs/[id]/live': 'GONE',
   'GET /api/runs/[id]/load-geometry': 'ANY',

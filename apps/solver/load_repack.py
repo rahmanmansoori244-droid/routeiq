@@ -130,6 +130,9 @@ class TruckPrice:
     fixed: int  # once per truck day (0 when the truck already has frozen loads today)
     trip: int  # per load
     per_m: float  # per metre driven (non-fuel cost + fuel)
+    # A truck to rent (the hire suggestion, dispatch_solver.hire_weight): what the search adds to its
+    # day cost so own trucks go first. Never money: score() counts it with the preferences.
+    extra: int = 0
 
 
 @dataclass(frozen=True)
@@ -807,6 +810,9 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
             continue
         td = day.by_idx[idx]
         used.add(idx)
+        # A rented truck's search-only weight on its hire (never money, so `operating` stays the plan's cost).
+        price = pricing.trucks.get(idx)
+        soft += price.extra if price is not None else 0
         timings = []
         for tl in loads:
             n_loads += 1
@@ -977,8 +983,8 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
             m.Add(busy <= (day.shift_max_s + gmax) * used)
         else:
             m.Add(busy <= (td.latest_return_s - td.earliest_depart_s + gmax) * used)
-        if price.fixed:
-            cost_terms.append(price.fixed * used)
+        if price.fixed or price.extra:
+            cost_terms.append((price.fixed + price.extra) * used)
         for j in js:
             c = price.trip + int(round(price.per_m * F[j].metres))
             if pricing.change:
