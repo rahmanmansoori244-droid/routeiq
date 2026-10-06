@@ -212,27 +212,84 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
     expect(audits('UPDATE')).toEqual([expect.objectContaining({ entity: 'Truck', userId: 'u-TENANT_ADMIN' })]);
   });
 
-  it("the message after a usual-driver change says what a re-plan of a plan already made does (review of 6 Oct 2026)", () => {
-    // The owner's case: Ali is away for a month and Bob covers T01; the dispatcher makes Sam the usual driver of T01.
+  it("the message after a usual-driver change promises only what a re-plan of a plan already made does (review of 6 Oct 2026, two rounds)", () => {
+    // The owner's case: Ali is away for a month and Bob covers him; Sam and Carl are free. The dispatcher makes Sam the
+    // usual driver of T1 (or clears it). T1 runs trip 1 (08:00-10:00) and trip 2 (11:00-13:00).
     const leave = leaveOnDay([{ id: 'L1', driverId: 'ALI', fromIso: '2026-10-10', untilIso: '2026-11-09', note: null, coverDriverId: 'BOB' }], '2026-10-15');
     const usable = new Set(['ALI', 'BOB', 'SAM', 'CARL']);
-    const replan = (usual: string | null, had: string | null, extra: Partial<EvidenceLoad> = {}) => {
-      const evidence: EvidenceLoad = { truckId: 'T1', loadNo: 1, driverId: had, departMin: 600, returnMin: 700, status: 'PLANNED', driverSetById: null, driverSetAt: null, ...extra };
-      return planDrivers([{ key: 'T1:1', truckId: 'T1', loadNo: 1, departMin: 600, returnMin: 700, defaultDriverId: usual }], [evidence], usable, leave).drivers.get('T1:1')!.driverId;
+    type Was = { driver: string | null; status?: string; byHand?: boolean; cover?: boolean };
+    const none: Was = { driver: null };
+    const given = (driver: string): Was => ({ driver });
+    const cover: Was = { driver: 'BOB', cover: true };
+    const byHand = (driver: string): Was => ({ driver, byHand: true });
+    const HOURS = [
+      [480, 600],
+      [660, 780],
+    ];
+    // T1's trips on the plan already made, re-planned at the same times with T1's usual driver `usual`: every trip's
+    // driver after the re-plan (a frozen trip is not re-planned and keeps its driver).
+    const replan = (usual: string | null, was: Was[]) => {
+      const evidence: EvidenceLoad[] = was.map((w, i) => ({
+        truckId: 'T1',
+        loadNo: i + 1,
+        driverId: w.driver,
+        departMin: HOURS[i][0],
+        returnMin: HOURS[i][1],
+        status: w.status ?? 'PLANNED',
+        driverSetById: w.byHand ? 'u-PLANNER' : null,
+        driverSetAt: w.byHand ? new Date('2026-10-14T06:00:00Z') : null,
+        driverIsCover: w.cover ?? false,
+      }));
+      const trips = evidence
+        .filter((e) => e.status === 'PLANNED')
+        .map((e) => ({ key: `T1:${e.loadNo}`, truckId: 'T1', loadNo: e.loadNo, departMin: e.departMin, returnMin: e.returnMin, defaultDriverId: usual }));
+      const { drivers } = planDrivers(trips, evidence, usable, leave);
+      return evidence.map((e) => (e.status === 'PLANNED' ? drivers.get(`T1:${e.loadNo}`)!.driverId : e.driverId));
     };
-    // Set: the trip the cover drove and a trip without a driver get the new usual driver; one RouteIQ gave Carl keeps him.
-    expect([replan('SAM', 'BOB', { driverIsCover: true }), replan('SAM', null), replan('SAM', 'CARL')]).toEqual(['SAM', 'SAM', 'CARL']);
-    const set = usualDriverChangedMessage('T01', 'Sam');
-    expect(set).toMatch(/^T01: usual driver Sam\. New plans use him\./);
-    expect(set).toMatch(/a re-plan gives him the trips a cover drove and the trips without a driver/);
-    expect(set).toMatch(/the other trips keep their driver until you pick another/);
-    expect(set).not.toMatch(/keep their drivers, also when you re-plan/);
-    // Cleared: the cover comes off, nothing takes his place, the other drivers stay.
-    expect([replan(null, 'BOB', { driverIsCover: true }), replan(null, null), replan(null, 'CARL')]).toEqual([null, null, 'CARL']);
-    const cleared = usualDriverChangedMessage('T01', null);
-    expect(cleared).toMatch(/^T01: usual driver cleared\./);
-    expect(cleared).toMatch(/a re-plan takes a cover off/);
-    expect(cleared).not.toMatch(/without a driver get/);
+    // What the message says a re-plan can do with trip i: a driver picked by hand stays (he is active here); a trip
+    // without a driver, a trip a cover drove and a trip whose driver is on leave that day go to the usual driver or to
+    // the driver of another trip of the truck (cleared: to the driver of another trip, or to nobody). It promises
+    // nothing about other trips (here: a free driver RouteIQ gave keeps it; a frozen trip never changes).
+    const allowed = (usual: string | null, was: Was[], after: (string | null)[], i: number): (string | null)[] => {
+      const w = was[i];
+      const others = after.filter((_, j) => j !== i);
+      if ((w.status ?? 'PLANNED') !== 'PLANNED' || w.byHand) return [w.driver];
+      if (w.driver === null || w.cover || leave.has(w.driver)) return usual ? [usual, ...others] : [...others, null];
+      return [w.driver];
+    };
+    const cases: [string, Was[], (string | null)[], (string | null)[]][] = [
+      // what T1's trips had, then every trip's driver after a re-plan with Sam made the usual driver, and with it cleared
+      ['the cover drove it', [cover], ['SAM'], [null]],
+      ['no driver', [none], ['SAM'], [null]],
+      ['RouteIQ gave Carl', [given('CARL')], ['CARL'], ['CARL']],
+      ['RouteIQ gave Ali before his leave was entered', [given('ALI')], ['SAM'], [null]],
+      ['Carl picked by hand on trip 1, trip 2 without a driver', [byHand('CARL'), none], ['CARL', 'CARL'], ['CARL', 'CARL']],
+      ['Carl picked by hand on trip 1, the cover on trip 2', [byHand('CARL'), cover], ['CARL', 'CARL'], ['CARL', 'CARL']],
+      ['trip 1 dispatched with Bob, the cover on trip 2', [{ driver: 'BOB', status: 'DISPATCHED' }, cover], ['BOB', 'BOB'], ['BOB', 'BOB']],
+      ['trip 1 without a driver, RouteIQ gave Carl trip 2', [none, given('CARL')], ['SAM', 'CARL'], [null, 'CARL']],
+      ['Ali picked by hand, on leave', [byHand('ALI')], ['ALI'], ['ALI']],
+    ];
+    for (const [name, was, withSam, cleared] of cases) {
+      for (const [usual, want] of [
+        ['SAM', withSam],
+        [null, cleared],
+      ] as const) {
+        const after = replan(usual, was);
+        expect(after, `${name}, usual driver ${usual}`).toEqual(want);
+        after.forEach((d, i) => expect(allowed(usual, was, after, i), `${name}, usual driver ${usual}, trip ${i + 1}`).toContain(d));
+      }
+    }
+
+    expect(usualDriverChangedMessage('T01', 'Sam')).toBe(
+      'T01: usual driver Sam. New plans use him. On plans already made, a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to Sam or to the driver of another trip of T01; a driver you picked by hand stays while he is active. Check the drivers after the re-plan.',
+    );
+    expect(usualDriverChangedMessage('T01', null)).toBe(
+      'T01: usual driver cleared. On plans already made, a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to the driver of another trip of T01, or leave it without a driver (pick one on the load); a driver you picked by hand stays while he is active. Check the drivers after the re-plan.',
+    );
+    // The earlier promises the cases above break: the other trips keep their driver / a cover always comes off / the new usual driver gets them.
+    for (const m of [usualDriverChangedMessage('T01', 'Sam'), usualDriverChangedMessage('T01', null)]) {
+      expect(m).not.toMatch(/keep their driver|keeps the other drivers|takes a cover off|gives him the trips|pick a driver for those trips/);
+    }
   });
 });
 

@@ -28,16 +28,21 @@ export interface UsualTruck {
 
 /**
  * The message after a truck's usual driver was set (`driverName`) or cleared (null): new plans use him,
- * and what a re-plan of a plan already made does (planDrivers; review of 6 Oct 2026). A re-plan keeps a
- * driver RouteIQ gave a trip, but a trip the cover drove is never kept for the cover (he is no longer
- * the cover of this truck's usual driver), so it and a trip without a driver get the new usual driver;
- * cleared, the cover comes off and nobody takes his place.
+ * and only what a re-plan of a plan already made can do (planDrivers; review of 6 Oct 2026, two rounds).
+ * A trip without a driver, a trip a cover drove (never kept for the cover) and a trip whose driver is on
+ * leave that day go through pass 2: (b) the driver of the truck's nearest trip that already has one
+ * (frozen, picked by hand or given earlier - so the trips' order matters, and a cover who drove a frozen
+ * trip can keep the next one), else (c) the usual driver; cleared, (b) or nobody. A driver picked by hand
+ * stays while active (pass 1). Nothing is promised about the other trips: the dispatcher checks the
+ * drivers (the yellow notes say what changed).
  */
 export function usualDriverChangedMessage(truckCode: string, driverName: string | null): string {
+  const trips = 'a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to';
+  const tail = 'a driver you picked by hand stays while he is active. Check the drivers after the re-plan.';
   if (driverName === null) {
-    return `${truckCode}: usual driver cleared. On plans already made, a re-plan takes a cover off (pick a driver for those trips) and keeps the other drivers.`;
+    return `${truckCode}: usual driver cleared. On plans already made, ${trips} the driver of another trip of ${truckCode}, or leave it without a driver (pick one on the load); ${tail}`;
   }
-  return `${truckCode}: usual driver ${driverName}. New plans use him. On plans already made, a re-plan gives him the trips a cover drove and the trips without a driver; the other trips keep their driver until you pick another on the load.`;
+  return `${truckCode}: usual driver ${driverName}. New plans use him. On plans already made, ${trips} ${driverName} or to the driver of another trip of ${truckCode}; ${tail}`;
 }
 
 /**
@@ -66,7 +71,7 @@ export function UsualDrivers({ trucks, drivers, canEdit }: { trucks: UsualTruck[
         toast.error(errorMessage(body, 'Could not change the usual driver.'));
         return;
       }
-      toast.success(usualDriverChangedMessage(t.code, driverId ? (nameOf.get(driverId) ?? 'set') : null), { duration: 10_000 });
+      toast.success(usualDriverChangedMessage(t.code, driverId ? (nameOf.get(driverId) ?? 'set') : null), { duration: 15_000 });
       router.refresh();
     });
   }
