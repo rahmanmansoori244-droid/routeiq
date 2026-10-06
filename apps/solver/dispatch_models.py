@@ -620,15 +620,17 @@ class HireCheck(BaseModel):
     """The REDUCTION of a what-if's rented trucks (sixth review of the hire branch: the Quick search
     rented 2 x 10-ton on the real day where one carried every P1-P3 order; the second only carried
     P4/P5 orders). After the search, with no solve, every rented truck carrying only P4/P5 orders is
-    given back; then the CHEAPEST set (seventh review) - every set of the trucks to rent with no more
-    trucks and less real money, cheapest first - is the first one whose plan delivers every P1-P3 stop
-    the plan delivered and passes every check, its load re-check included (dispatch_solver._reduce_hire).
-    ``first``: the rented trucks of the search's plan; ``used``: those of the plan returned as
-    RECOMMENDED (another option's units when one is cheaper); ``solves``: the extra solves run;
-    ``complete``: every cheaper set was ruled out (by its room, or a checked solve that lost a P1-P3
-    stop) - false when the solve limit, the time budget or a solve without its load re-check left one
-    untried; ``one_fewer``: the least useful truck of ``used`` left out, solved with exactly the others
-    (None when no such solve ran)."""
+    given back; then the CHEAPEST set (seventh review) - every set of the trucks to rent with less real
+    money, as many trucks as it takes (eighth review: 2 x 3-ton for 80 OMR beat 1 x 10-ton for 85),
+    cheapest first - is the first one whose plan delivers every P1-P3 stop the plan delivered and passes
+    every check, its load re-check included; a set left after trucks were given back is solved once
+    more when the limits allow, so their P4/P5 orders ride along in the trucks kept (eighth review;
+    dispatch_solver._reduce_hire). ``first``: the rented trucks of the search's plan; ``used``: those of
+    the plan returned as RECOMMENDED (another option's units when one is cheaper); ``solves``: the extra
+    solves run; ``complete``: every cheaper set was ruled out (by its room, or a checked solve that lost
+    a P1-P3 stop) - false when the solve limit, the time budget, a solve without its load re-check or
+    too many sets to list left one untried; ``one_fewer``: the least useful truck of ``used`` left out,
+    solved with exactly the others (None when no such solve ran)."""
 
     first: list[str] = Field(default_factory=list)
     used: list[str] = Field(default_factory=list)

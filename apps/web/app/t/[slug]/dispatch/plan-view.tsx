@@ -19,6 +19,7 @@ import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { hiredLoadBadgeTitle } from '@/lib/dispatch/hire';
 import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
 import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
@@ -1107,7 +1108,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
                       {l.hired ? (
-                        <Badge variant="outline" className="ml-1 text-[10px]" title={l.oneDay ? `Hired for ${l.oneDay} only (hire suggestion)` : 'Hired from outside'} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
+                        <Badge variant="outline" className="ml-1 text-[10px]" title={hiredLoadBadgeTitle(l.oneDay)} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
                           {l.oneDay ? 'hired · 1 day' : 'hired'}
                         </Badge>
                       ) : null}

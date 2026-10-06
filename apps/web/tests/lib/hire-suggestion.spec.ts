@@ -21,6 +21,7 @@ import {
   hireTruckCode,
   hireTrucksForRequest,
   hireUseConfirmText,
+  hiredLoadBadgeTitle,
   hiredTruckDescription,
   needsHireCheck,
   oneDayBadge,
@@ -557,6 +558,13 @@ describe('dates and sizes as the rest of the screen says them (sixth review of t
     // Any other description stays as the admin typed it.
     expect(truckDescriptionText('Bought 2026-01-05, rear lift')).toBe('Bought 2026-01-05, rear lift');
     expect(truckDescriptionText(null)).toBe('—');
+  });
+
+  it('the plan screen\'s "hired · 1 day" badge says its day as "11 Oct" too (eighth review: "Hired for 2026-10-11 only")', () => {
+    expect(hiredLoadBadgeTitle('2026-10-11')).toBe('Hired for 11 Oct only (hire suggestion)');
+    expect(hiredLoadBadgeTitle('2026-10-11T00:00:00.000Z')).toBe('Hired for 11 Oct only (hire suggestion)');
+    expect(hiredLoadBadgeTitle(null)).toBe('Hired from outside');
+    expect(hiredLoadBadgeTitle(undefined)).toBe('Hired from outside');
   });
 
   it('"Use this plan" says a hired truck works its whole day with one driver (seventh review: "pick the driver on each load")', () => {

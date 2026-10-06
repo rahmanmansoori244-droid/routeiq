@@ -937,6 +937,135 @@ def test_a_rented_truck_with_only_p4_p5_orders_is_given_back_without_a_solve(mon
     assert sc.objective.fixed_cost == pytest.approx(35.0 + 50.0)
 
 
+# Eighth review of the hire branch: the give-back above was the whole step whenever it applied - the set
+# it left was never solved again, so the P4/P5 orders of the truck given back were dropped although the
+# truck kept had room and loads to spare (the real Muscat day: the second 10-ton carried only P4/P5
+# orders); and the cheapest set never had more trucks than the plan's (1 x 10-ton at 85 OMR stayed where
+# 2 x 3-ton at 80 deliver every order, "complete").
+
+@pytest.mark.parametrize("trips", [1, 3])
+def test_the_p4_p5_orders_of_a_truck_given_back_ride_along_in_the_truck_kept(monkeypatch, trips):
+    # The own 10-ton full of P3 orders; the first plan rents a 10-ton for 6 pallets of P3 orders and a
+    # second 10-ton for the two P5 orders alone. The second is given back (owner answer 1) and the set
+    # left - the first 10-ton - is solved: its 6 free bays (and loads to spare, with 3 a day) carry the
+    # P5 orders (they may ride along), so nothing is left out, for the same hire money.
+    stops = stops_of([3] * 6) + stops_of([1.5, 1.5], "L", priority=5)
+    loads = {"T1": [("S0", "S1", "S2", "S3")], "H10-1": [("S4", "S5")], "H10-2": [("L0", "L1")]}
+    first_plan_is(monkeypatch, loads)
+    r = req(stops, [own("T1")] + ten_tons(2, trips=trips), time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_pallets_hold(r, sc)
+    hc = resp.hire_check
+    assert hc.first == ["H10-1", "H10-2"] and hc.used == ["H10-1"] and hc.complete
+    # No truck to rent cannot hold the 18 pallets of P3 orders (12): the one solve is the set kept.
+    assert hc.solves == 1
+    assert unserved_map(sc) == {} and hired_used(sc) == {"H10": 1}
+    assert not any("could not be placed by the optimizer" in w for w in sc.warnings)
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+    # The hire of one 10-ton (with 3 loads a day it may carry the whole day: the own truck then stays in).
+    assert sc.objective.fixed_cost == pytest.approx(35.0 + 50.0) if trips == 1 else sc.objective.fixed_cost <= 35.0 + 50.0
+
+
+def test_the_cheapest_set_may_have_more_trucks_than_the_plans(monkeypatch):
+    # The own 10-ton and 22 pallets of P3 orders; a 10-ton to rent for 75 + 10 = 85 OMR and two 3-tons
+    # for 30 + 10 = 40 each. The first plan rents the 10-ton (as a stuck search would): 2 x 3-ton (80 OMR)
+    # deliver every order too, and are cheaper. No truck (12 pallets) and one 3-ton (18) cannot hold 22.
+    stops = stops_of([3, 3, 3, 3] + [2.5] * 4)
+    first_plan_is(monkeypatch, {"T1": [("S0", "S1", "S2", "S3")], "H10-1": [("S4", "S5", "S6", "S7")]})
+    trucks = [own("T1"), hire("H10-1", 12, 75.0, driver_day_cost=10.0), hire("H3-1", 6, 30.0, driver_day_cost=10.0),
+              hire("H3-2", 6, 30.0, driver_day_cost=10.0)]
+    r = req(stops, trucks, time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_pallets_hold(r, sc)
+    hc = resp.hire_check
+    assert hc.first == ["H10-1"]
+    assert hc.used == ["H3-1", "H3-2"] and hired_used(sc) == {"H3": 2} and hc.complete
+    assert unserved_map(sc) == {}
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+    assert sc.objective.fixed_cost == pytest.approx(35.0 + 60.0)
+
+
+def test_a_cheaper_set_with_more_trucks_than_can_be_listed_is_never_called_complete(monkeypatch):
+    # A safety bound on the sets listed (each option has up to 10 units a day): past it the set found
+    # stays, never claimed the cheapest.
+    import time
+
+    monkeypatch.setattr(ds, "HIRE_REDUCE_MAX_SETS", 1)
+    r = req(stops_of([3, 3, 3, 3] + [2.5] * 4), [own("T1"), hire("H10-1", 12, 75.0, driver_day_cost=10.0),
+                                                 hire("H3-1", 6, 30.0, driver_day_cost=10.0),
+                                                 hire("H3-2", 6, 30.0, driver_day_cost=10.0)], time_limit_sec=3)
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], {"T1": [("S0", "S1", "S2", "S3")], "H10-1": [("S4", "S5", "S6", "S7")]})
+    scs, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert hc.used == hc.first == ["H10-1"] and not hc.complete and hc.solves == 0
+    assert scs[0] is first
+
+
+def test_the_stops_a_load_re_check_left_out_for_loading_time_keep_their_reason_when_a_truck_is_given_back():
+    # The plan without a rented truck that carries only P4/P5 orders is built again: a stop the load
+    # re-check had left out for the loading time between loads keeps that reason (and its warning), not
+    # "the optimizer found no truck ... Re-plan to search again".
+    stops = stops_of([3] * 6) + stops_of([1.5], "L", priority=5)
+    trucks = [own("T1"), hire("H10-1", 12, 50.0, driver_day_cost=10.0), hire("H3-1", 6, 30.0, driver_day_cost=10.0)]
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    tds = ds._truck_days(r)
+    ctx = ds._stage_ctx(r, r.stops, tds, mx, [])
+    plan = {ctx.truck_idx["T1"]: [tuple(ctx.stop_idx[s] for s in ("S0", "S1", "S2", "S3"))],
+            ctx.truck_idx["H10-1"]: [(ctx.stop_idx["S4"],)], ctx.truck_idx["H3-1"]: [(ctx.stop_idx["L0"],)]}
+    timed = LR.time_plan(ctx.day, plan, ctx.rec_pricing)
+    sc = ds._build_scenario("RECOMMENDED", r, r.stops, tds, mx, timed, ctx.values, ctx.use_margin, [],
+                            solver_status="SUCCESS", elapsed=0.0, time_limit=3,
+                            objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective,
+                            extra_warnings=ctx.value_warnings, timing_drops={ctx.stop_idx["S5"]}, exact_timing=True)
+    sc.warnings.append(ds._timing_drop_warning(r.config, 1, 0))
+    reason = {u.stop_id: u.reason_message for u in sc.unserved}["S5"]
+    assert reason.startswith(ds.TIMING_DROP_HEAD)
+    high = {s.stop_id: s.priority <= 3 for s in stops}
+    new = ds._without_low_hires(r, r.stops, mx, [], sc, {"H10-1", "H3-1"}, lambda sid: high[sid])
+    assert new is not sc and {ld.truck_id for ld in new.loads} == {"T1", "H10-1"}
+    assert {u.stop_id: u.reason_message for u in new.unserved}["S5"] == reason
+    assert ds._timing_drop_warning(r.config, 1, 0) in new.warnings
+    # Only the P5 order of the truck given back is "not placed" (this is the give-back without a solve).
+    assert [w for w in new.warnings if "could not be placed by the optimizer" in w][0].startswith("1 stop(s)")
+
+
+def test_the_least_useful_truck_is_measured_alike_for_bays_and_cases(monkeypatch):
+    # Review: a truck's room was its pallet units (1/1000 pallet) when it has bays, its cases when it has
+    # a case capacity - so a truck to rent entered by cases always looked the smallest. One measure: a
+    # 12-bay truck holds 240 cases of this day (20 cases a pallet), the 600-case truck more. "One truck
+    # fewer" is solved without the 12-bay one.
+    import time
+
+    from dispatch_models import DispatchTruck as T
+
+    stops = [pstop(f"S{i:02d}", 23.60 + 0.002 * i, 58.42, cases=20, units=1000) for i in range(20)]
+    big = T(id="HC-1", code="HC-1", capacity_cases=600, fixed_cost=40.0, driver_day_cost=10.0, hire_candidate=True, max_trips=1)
+    r = req(stops, [own("T1"), hire("H10-1", 12, 50.0, driver_day_cost=10.0), big], time_limit_sec=3)
+    tds = ds._truck_days(r)
+    room = ds._hire_room(tds)
+    assert room["H10-1"] == 240 and room["HC-1"] == 600
+    # Every truck by bays: by pallets (their bays).
+    r2 = req(stops, [own("T1"), hire("H10-1", 12, 50.0), hire("H3-1", 6, 30.0)], time_limit_sec=3)
+    assert ds._hire_room(ds._truck_days(r2)) == {"H10-1": 12000, "H3-1": 6000}
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, tds, mx, [], {"T1": [tuple(f"S{i:02d}" for i in range(12))],
+                                                 "H10-1": [tuple(f"S{i:02d}" for i in range(12, 16))],
+                                                 "HC-1": [tuple(f"S{i:02d}" for i in range(16, 20))]})
+    offered: list[list[str]] = []
+
+    def unchecked(rq, *a, **kw):
+        offered.append(sorted(t.id for t in rq.trucks if t.hire_candidate))
+        return first, False  # never re-checked: neither kept nor ruled out
+
+    monkeypatch.setattr(ds, "_hire_trial", unchecked)
+    _, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert hc.used == ["H10-1", "HC-1"] and not hc.complete
+    assert offered[-1] == ["HC-1"]
+
+
 def test_a_reduction_solve_starts_only_with_room_for_its_load_re_check(monkeypatch):
     # Review: a solve started with its search time + 23 s left, and its load re-check (about 29 s more)
     # was skipped - the raw search plan became the suggestion ("Loads were not re-checked ..."). With

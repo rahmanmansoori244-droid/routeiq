@@ -18,10 +18,12 @@
  *   money (hire + the driver's day rate), never one for P4/P5 orders alone - which still ride along
  *   in a rented truck's spare room. After its search it REDUCES the set (sixth review: on the real
  *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): a rented truck with only
- *   P4/P5 orders is given back without a solve, then every cheaper set (no more trucks, another option's
- *   trucks too) is tried cheapest first, and the first that keeps every P1-P3 order delivered is the
- *   suggestion (seventh review: the cheapest set, not the one left after the dearest truck goes;
- *   dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
+ *   P4/P5 orders is given back without a solve, then every cheaper set (as many trucks as it takes,
+ *   another option's trucks too) is tried cheapest first, and the first that keeps every P1-P3 order
+ *   delivered is the suggestion (seventh review: the cheapest set, not the one left after the dearest
+ *   truck goes; eighth review: 2 x 3-ton at 80 OMR beat 1 x 10-ton at 85); a set left after a give-back
+ *   is solved once more when the limits allow, so those P4/P5 orders ride along in the trucks kept
+ *   (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
  * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
  *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
  *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).
@@ -118,6 +120,15 @@ export function parseVirtualHireId(id: string): { optionId: string; n: number } 
 export function oneDayBadge(onlyOnDate: Date | string): string {
   const iso = typeof onlyOnDate === 'string' ? onlyOnDate.slice(0, 10) : onlyOnDate.toISOString().slice(0, 10);
   return `1 day: ${fmtDayMonth(iso)}`;
+}
+
+/**
+ * The tooltip of a load's "hired" badge on the plan screen: "Hired for 11 Oct only (hire suggestion)" for a
+ * truck rented for one day (eighth review of the hire branch: it said "Hired for 2026-10-11 only" beside
+ * "11 Oct" everywhere else), "Hired from outside" for any other hired truck.
+ */
+export function hiredLoadBadgeTitle(oneDay: string | null | undefined): string {
+  return oneDay ? `Hired for ${fmtDayMonth(oneDay)} only (hire suggestion)` : 'Hired from outside';
 }
 
 /**
