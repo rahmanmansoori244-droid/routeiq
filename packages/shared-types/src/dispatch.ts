@@ -521,8 +521,10 @@ export interface DispatchResponse {
  * trucks carrying only P4/P5 orders given back without a solve, then every set with less real money -
  * as many trucks as it takes (eighth review) - tried cheapest first, another option's units too; the
  * first whose plan delivers every P1-P3 stop and passes every check, its load re-check included; the set
- * left after a give-back solved once more when the limits allow, so the P4/P5 orders of the trucks given
- * back ride along in the trucks kept); `solves`: the extra solves;
+ * left after a give-back solved once more when the limits allow and it was not solved already, its plan
+ * taken only when it passes every check, keeps every P1-P3 stop and is cheaper, or as cheap and serving
+ * more by the day's priorities - so the P4/P5 orders of the trucks given back may ride along in the
+ * trucks kept; otherwise they stay out); `solves`: the extra solves;
  * `complete`: every cheaper set was ruled out; `one_fewer`: the least useful truck of `used` left out,
  * SOLVED with exactly the others - the stops that plan leaves out (all priorities).
  */

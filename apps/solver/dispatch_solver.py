@@ -261,8 +261,11 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # first that delivers every P1-P3 stop the plan delivered and passes every check, its load re-check
 # included, is the suggestion. A set whose trucks cannot hold those stops even full on every load they
 # may make is ruled out without a solve (_hire_room_short). When trucks were given back, the set left is
-# solved once more if the limits allow (eighth review: their P4/P5 orders were dropped although the
-# trucks kept had room and loads to spare - they may ride along). At most HIRE_REDUCE_MAX_SOLVES solves
+# solved once more if the limits allow and that set was not solved already (eighth review: their P4/P5
+# orders were dropped although the trucks kept had room and loads to spare - they may ride along); its
+# plan replaces the give-back only when it passes every check, keeps every P1-P3 stop and is cheaper, or
+# as cheap and serving more by the day's priorities (ninth review: money was never compared, and two P5
+# orders outweighed one P4) - otherwise the give-back stays. At most HIRE_REDUCE_MAX_SOLVES solves
 # within the window (_hire_reduce_window); a solve starts only with room for its search, its worker and
 # its load re-check's whole reserve (_hire_trial_need), and searches as long as the what-if up to
 # HIRE_TRIAL_FULL_SEC, half as long above it, so a big day gets solves too. "One truck fewer" is such a
@@ -2492,6 +2495,25 @@ def _served_of(sc: DispatchScenario) -> set[str]:
     return {st.stop_id for ld in sc.loads for st in ld.stops}
 
 
+def _low_hires(sc: DispatchScenario, hire_ids: set[str], high) -> set[str]:
+    """The rented trucks of a plan whose loads carry no P1-P3 stop (``high``): owner answer 1, never a
+    reason to rent."""
+    return {tid for tid in _rented_of(sc, hire_ids)
+            if not any(high(st.stop_id) for ld in sc.loads if ld.truck_id == tid for st in ld.stops)}
+
+
+def _service_rank(sc: DispatchScenario, stop_of: dict[str, DispatchStop], cfg: DispatchConfig) -> tuple:
+    """How well a plan serves the day, as the day's own priorities rank it (ninth review of the hire
+    branch: raw stop counts let two P5 orders outweigh one P4). Strict priorities (the default; the web
+    always sends them): the stops served per priority, P1 first - compared in that order, one stop of a
+    priority outweighs every lower one together. Weighted (strict_priorities=false): the served stops'
+    priority weights added up. A larger rank serves better."""
+    prios = [stop_of[sid].priority if sid in stop_of else 5 for sid in _served_of(sc)]
+    if cfg.strict_priorities:
+        return tuple(sum(1 for p in prios if p == q) for q in range(1, 6))
+    return (round(sum(cfg.priority_weights[p] for p in prios), 6),)
+
+
 def _passes_checks(sc: DispatchScenario | None) -> bool:
     """A plan the reduction may keep: optimized, and its timetable verified by the independent check
     (the one "Use this plan" applies it with)."""
@@ -2575,10 +2597,10 @@ def _without_low_hires(req: DispatchRequest, solvable: list[DispatchStop], mx: M
     not change) and checked as every plan (_build_scenario). The stops the load re-check of ``sc`` left out
     for the loading time between loads keep that reason and its warning (eighth review: they read "the
     optimizer found no truck ... Re-plan to search again"). ``sc`` itself when there is no such truck, or
-    when the plan without them cannot be timed or does not pass the checks. _reduce_hire solves the set
-    left when it still may (its P4/P5 orders may ride along in the trucks kept); this is the fallback."""
-    gone = {tid for tid in _rented_of(sc, hire_ids)
-            if not any(high(st.stop_id) for ld in sc.loads if ld.truck_id == tid for st in ld.stops)}
+    when the plan without them cannot be timed or does not pass the checks. _reduce_hire may solve the set
+    left once more (its step 3: its P4/P5 orders may ride along in the trucks kept); this plan stays
+    whenever that solve does not run or does not replace it."""
+    gone = _low_hires(sc, hire_ids, high)
     if not gone:
         return sc
     try:
@@ -2674,18 +2696,24 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
        re-check was skipped neither replaces the plan nor rules its set out. At most HIRE_REDUCE_MAX_SETS
        sets are listed.
     3. When trucks were given back (step 1, or the plan of step 2), the set left is solved exactly once
-       more if the limits allow and no solve of it was made (eighth review: the give-back alone dropped the
-       P4/P5 orders of the truck given back although the trucks kept had room and loads to spare - they
-       may ride along). Its plan, without its trucks that carry only P4/P5 orders, replaces the give-back
-       when it passes every check, delivers every P1-P3 stop the plan delivered and serves more stops;
-       otherwise the give-back stays (also when no solve may start).
+       more if the limits allow, every earlier solve could run, and no solve of a set alike was made
+       (eighth review: the give-back alone dropped the P4/P5 orders of the truck given back although the
+       trucks kept had room and loads to spare - they may ride along). Its plan must pass every check and
+       deliver every P1-P3 stop the plan delivered; then, without its trucks that carry only P4/P5
+       orders, it replaces the give-back when its set is cheaper in real money (ninth review: that solve
+       proved one 10-ton enough and the give-back's two stayed, "complete") - also when it serves fewer
+       P4/P5 orders -, or as cheap and serving more as the day's priorities rank it (_service_rank:
+       strictly, one P4 order outweighs every P5 order). A plan that still has such a truck (its
+       give-back could not be built) never replaces it, and the set is then not proven the cheapest.
+       Otherwise the give-back stays.
     4. "One truck fewer" (HireCheck.one_fewer) is a solve of the suggested set less one of its trucks: the
        one whose removal lost the fewest P1-P3 stops, then the dearest; when the solves so far hold none for
        its least useful truck (the least room, _hire_room), that set is solved once more if the limits
        allow.
 
     ``complete``: every cheaper set was ruled out (by its room, or a checked solve that lost a P1-P3 stop or
-    failed the checks), and every cheaper set was listed. At most HIRE_REDUCE_MAX_SOLVES solves within
+    failed the checks), every cheaper set was listed, and no solve showed a cheaper set it could not
+    give (step 3). At most HIRE_REDUCE_MAX_SOLVES solves within
     _hire_reduce_window (and the request's budget); each starts only with room for its load re-check
     (_hire_trial_limit). A stop request ("use the best plan found so far") ends it, a cancel raises
     SolveAborted. Deterministic in its choices."""
@@ -2707,10 +2735,6 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     money = _hire_money_of(req.stops, req.config, req.trucks, req.depot)
     tds = _truck_days(req)
     room = _hire_room(tds)
-
-    def service(sc: DispatchScenario) -> tuple[int, int]:
-        served = _served_of(sc)
-        return sum(1 for sid in served if high(sid)), len(served)
 
     # 1. No solve: the rented trucks that carry only P4/P5 orders. ``given`` is the plan given back from
     # (step 3 solves the set left).
@@ -2808,8 +2832,10 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             complete = False  # no load re-check: neither kept nor ruled out
 
     # 3. Trucks given back: the set left, solved - the P4/P5 orders they carried may ride along in the
-    # trucks kept (owner answer 1; eighth review: the give-back alone left them out). The give-back stays
-    # when no solve may start, or when the solve serves no more.
+    # trucks kept (owner answer 1; eighth review: the give-back alone left them out). Its plan replaces the
+    # give-back when its set is cheaper (ninth review: the money was never compared, so a cheaper set this
+    # solve proved was thrown away), or as cheap and serving more by the day's priorities (ninth review:
+    # raw stop counts let two P5 orders outweigh one P4); never with a truck for P4/P5 orders alone.
     if best is not given and not broken and not any(shape(tr.offered) == shape(current) for tr in trials):
         ids = tuple(current)
         got = solve(ids)
@@ -2817,11 +2843,20 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             broken = True
         elif got is not None and (sc := judge(ids, got)) is not None:
             again = _without_low_hires(req, solvable, mx, drops, sc, set(hires), high)
-            if service(again) > service(best):
-                log.info("run=%s hire check: %s solved again after the give-back: %d -> %d stops served", req.run_id,
-                         list(ids), service(best)[1], service(again)[1])
+            kept = _rented_of(again, set(hires))
+            cost, was = (price(kept), len(kept)), (price(current), len(current))
+            rank = (_service_rank(again, stop_of, req.config), _service_rank(best, stop_of, req.config))
+            if _low_hires(again, set(hires), high):
+                # Its plan without them could not be built: its trucks for P1-P3 orders may be a cheaper
+                # set than the one kept, which is then not proven the cheapest.
+                complete = False
+                log.warning("run=%s hire check: %s solved again after the give-back still rents %s for P4/P5 orders "
+                            "alone; the give-back stays", req.run_id, list(ids), sorted(_low_hires(again, set(hires), high)))
+            elif cost < was or (cost == was and rank[0] > rank[1]):
+                log.info("run=%s hire check: %s solved again after the give-back: %s at %.0f OMR (%.0f before), "
+                         "served by priority %s -> %s", req.run_id, list(ids), kept, cost[0], was[0], rank[1], rank[0])
                 best = again
-                current = _rented_of(best, set(hires))
+                current = kept
 
     # 4. One truck fewer than the suggested set, solved.
     one: tuple[int, float, str, _HireTrial] | None = None

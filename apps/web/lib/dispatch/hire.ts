@@ -22,8 +22,10 @@
  *   another option's trucks too) is tried cheapest first, and the first that keeps every P1-P3 order
  *   delivered is the suggestion (seventh review: the cheapest set, not the one left after the dearest
  *   truck goes; eighth review: 2 x 3-ton at 80 OMR beat 1 x 10-ton at 85); a set left after a give-back
- *   is solved once more when the limits allow, so those P4/P5 orders ride along in the trucks kept
- *   (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
+ *   is solved once more when the limits allow and it was not solved already, and its plan is taken only
+ *   when it passes every check, keeps every P1-P3 order and is cheaper, or as cheap and serving more by
+ *   the day's priorities - so those P4/P5 orders may ride along in the trucks kept; otherwise they stay
+ *   out (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
  * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
  *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
  *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).
@@ -164,11 +166,15 @@ export function truckDescriptionText(description: string | null | undefined): st
  * says it (sixth review of the hire branch: "for 2026-10-11"). `dateIso` null: "this day". A hired truck
  * works its whole day with one driver (seventh review: it still said "pick the driver on each load").
  */
-export function hireUseConfirmText(s: { hires: readonly Pick<HireUse, 'label' | 'count'>[]; dropped?: { orders: number } | null }, dateIso: string | null): string {
+export function hireUseConfirmText(
+  s: { hires: readonly Pick<HireUse, 'label' | 'count'>[]; dropped?: Pick<LeftOut, 'orders' | 'byPriority'> | null },
+  dateIso: string | null,
+): string {
   const trucks = s.hires.map((h) => `${h.count} x ${h.label}`).join(' + ');
   const day = dateIso ? fmtDayMonth(dateIso) : 'this day';
-  const drops = s.dropped?.orders
-    ? `\n\nThe check's plan leaves out ${s.dropped.orders} order(s) your current plan delivers, so RouteIQ re-plans the day with the hired trucks instead of taking it as it is.`
+  const w = s.dropped?.orders ? ordersWords(s.dropped.orders, s.dropped.byPriority) : null;
+  const drops = w
+    ? `\n\nThe check's plan leaves out ${w.mix ? `${w.what} (${w.mix})` : w.what} your current plan delivers, so RouteIQ re-plans the day with the hired trucks instead of taking it as it is.`
     : '';
   return `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate with Plate on its load). Each one is rented for the whole day with one driver: + Add daily driver on one of its loads puts that driver on its other loads still to plan too, and makes them its default driver. A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.${drops}`;
 }
@@ -296,6 +302,12 @@ export interface LeftOut {
   kg: number;
   /** The optimizer's stop ids (for the what-if's own comparisons). */
   stopIds: string[];
+  /**
+   * Orders per priority ("4" -> 1), where the words name them (HireSummary.dropped; ninth review of the
+   * hire branch: the box said "1 order" for a P4 order the check leaves out). Absent elsewhere and on a
+   * suggestion stored before.
+   */
+  byPriority?: Record<string, number>;
 }
 
 type UnservedLike = { stop_id: string; order_ids: string[]; reason_code: string };
@@ -321,6 +333,28 @@ export function leftOutOf(stopIds: Iterable<string>, stops: readonly DispatchSto
     }
   }
   return { orders: orders.size, cases, palletUnits: anyUnits ? units : null, kg: kgTenths / 10, stopIds: ids };
+}
+
+/**
+ * The orders of `stopIds` per priority ("4" -> 1), counted as leftOutOf counts them: an order on stops of
+ * two priorities counts once, at the higher (a stop without one is P3, as hireNeed reads it). Null when a
+ * stop is not in the request (its priority is unknown).
+ */
+export function ordersByPriority(stopIds: Iterable<string>, stops: readonly DispatchStop[]): Record<string, number> | null {
+  const byId = new Map(stops.map((s) => [s.stop_id, s]));
+  const prio = new Map<string, number>();
+  for (const id of new Set(stopIds)) {
+    const s = byId.get(id);
+    if (!s) return null;
+    const p = s.priority ?? 3;
+    for (const ref of s.order_ids) {
+      const o = orderIdOf(ref);
+      prio.set(o, Math.min(prio.get(o) ?? p, p));
+    }
+  }
+  const out: Record<string, number> = {};
+  for (const p of prio.values()) out[String(p)] = (out[String(p)] ?? 0) + 1;
+  return out;
 }
 
 /** The stops a plan option left out that a truck to rent may help (CAPACITY_REASONS). */
@@ -529,7 +563,9 @@ export function summarizeHire(input: {
   const delivered = leftOutOf([...outIds].filter((id) => served.has(id)), stops, orderIdsOf);
   const whatIfOut = whatIf.unserved.map((u) => u.stop_id);
   const stillLeft = leftOutOf(whatIfOut.filter((id) => outIds.has(id)), stops, orderIdsOf);
-  const dropped = leftOutOf(whatIfOut.filter((id) => !outIds.has(id) && !lowIds.has(id) && !otherIds.has(id)), stops, orderIdsOf);
+  const droppedIds = whatIfOut.filter((id) => !outIds.has(id) && !lowIds.has(id) && !otherIds.has(id));
+  const droppedPrio = droppedIds.length ? ordersByPriority(droppedIds, stops) : null;
+  const dropped: LeftOut = { ...leftOutOf(droppedIds, stops, orderIdsOf), ...(droppedPrio ? { byPriority: droppedPrio } : {}) };
   const stillLeftReasons: Record<string, number> = {};
   for (const u of whatIf.unserved) if (outIds.has(u.stop_id)) stillLeftReasons[u.reason_code] = (stillLeftReasons[u.reason_code] ?? 0) + 1;
   const optionOf = new Map(options.map((o) => [o.id, o]));
@@ -637,12 +673,33 @@ function round2(x: number): number {
 const n = (x: number) => x.toLocaleString('en-US');
 const plural = (k: number, one: string, many = `${one}s`) => `${n(k)} ${k === 1 ? one : many}`;
 
-/** "14 orders (1,180 cases, 17.6 pallets)"; `added`: "...; 1 of them added after this plan was made)". */
+/** Pallet units under which an amount is not said in pallets: it would read "0.0 pallets" (0.05 pallets, palletText rounds halves up). */
+const PALLETS_SAID_FROM_UNITS = 50;
+
+/**
+ * Orders with their priorities when known (LeftOut.byPriority): all of one priority "1 P4 order"; several
+ * "3 orders" with `mix` "2 P3, 1 P4" (P1 first); unknown "3 orders".
+ */
+function ordersWords(orders: number, byPriority?: Record<string, number> | null): { what: string; mix: string | null } {
+  const prios = Object.entries(byPriority ?? {})
+    .filter(([, k]) => k > 0)
+    .sort(([a], [b]) => Number(a) - Number(b));
+  if (prios.length === 1) return { what: plural(orders, `P${prios[0]![0]} order`), mix: null };
+  return { what: plural(orders, 'order'), mix: prios.length > 1 ? prios.map(([p, k]) => `${n(k)} P${p}`).join(', ') : null };
+}
+
+/**
+ * "14 orders (1,180 cases, 17.6 pallets)"; `added`: "...; 1 of them added after this plan was made)"; with
+ * the priorities known (`byPriority`) "1 P4 order (3 cases)" or "2 orders (1 P3, 1 P4; 203 cases, 3.0
+ * pallets)". Never "0.0 pallets" (ninth review of the hire branch: a 3-case order read so): under 0.05
+ * pallets the cases only.
+ */
 export function leftOutText(l: LeftOut, added = 0): string {
   const parts = [plural(l.cases, 'case')];
-  if (l.palletUnits !== null) parts.push(`${palletText(l.palletUnits)} pallets`);
+  if (l.palletUnits !== null && l.palletUnits >= PALLETS_SAID_FROM_UNITS) parts.push(`${palletText(l.palletUnits)} pallets`);
   const late = added > 0 ? `; ${added === l.orders ? (l.orders === 1 ? 'added' : 'all added') : `${n(added)} of them added`} after this plan was made` : '';
-  return `${plural(l.orders, 'order')} (${parts.join(', ')}${late})`;
+  const w = ordersWords(l.orders, l.byPriority);
+  return `${w.what} (${w.mix ? `${w.mix}; ` : ''}${parts.join(', ')}${late})`;
 }
 
 /** "1 x 10-ton (12 bays) + 1 x 3-ton (6 bays)". */

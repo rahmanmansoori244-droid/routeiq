@@ -22,6 +22,7 @@ import {
   hireTrucksForRequest,
   hireUseConfirmText,
   hiredLoadBadgeTitle,
+  leftOutText,
   hiredTruckDescription,
   needsHireCheck,
   oneDayBadge,
@@ -355,10 +356,35 @@ describe('the suggestion says what the what-if found (review of the hire branch)
     const s = summarizeHire({ request, baseUnserved: unserved([l1, l2]), baseOrders, whatIf, options: [TEN, THREE] });
     expect(s.status).toBe('HIRE');
     expect(s.stillLeft.orders).toBe(0);
-    expect(s.dropped).toMatchObject({ orders: 1, cases: 200, stopIds: ['S2'] });
+    expect(s.dropped).toMatchObject({ orders: 1, cases: 200, stopIds: ['S2'], byPriority: { 3: 1 } });
     expect(hireSuggestionText(s).headline).toBe(
-      '2 orders (160 cases, 2.4 pallets) cannot be delivered with your fleet. To deliver them, hire 1 x 10-ton (12 bays): extra about 50 OMR. Still left out: none. But this check leaves out 1 order (200 cases, 3.0 pallets) your current plan delivers: Use this plan re-plans the day with the hired trucks instead.',
+      '2 orders (160 cases, 2.4 pallets) cannot be delivered with your fleet. To deliver them, hire 1 x 10-ton (12 bays): extra about 50 OMR. Still left out: none. But this check leaves out 1 P3 order (200 cases, 3.0 pallets) your current plan delivers: Use this plan re-plans the day with the hired trucks instead.',
     );
+  });
+
+  it('an order the check leaves out that the plan in use delivers is said with its priority, and a few cases never as "0.0 pallets" (ninth review: the demo)', () => {
+    // The real-size demo: "But this check leaves out 1 order (3 cases, 0.0 pallets)" - a P4 order of 3 cases
+    // (23 pallet units). Its priority is said, and an amount under 0.05 pallets is its cases only.
+    const { request, s1, s2, l1, l2, unserved, baseOrders } = small();
+    const x = { ...s2, stop_id: 'X', order_ids: ['ord-X'], customer_id: 'c-X', demand_cases: 3, demand_pallet_units: 23, priority: 4 };
+    const req2 = { ...request, stops: [...request.stops, x] };
+    const whatIf = { loads: [load('OWN1', [s1, s2], 35, 60), load(virtualHireId('o10', 1), [l1, l2], 50, 55)], unserved: unserved([x]), trucks_used: 2, trips: 2 } as unknown as WhatIf;
+    const s = summarizeHire({ request: req2, baseUnserved: unserved([l1, l2]), baseOrders: [...baseOrders, 'ord-X'], whatIf, options: [TEN, THREE] });
+    expect(s.dropped).toMatchObject({ orders: 1, cases: 3, palletUnits: 23, byPriority: { 4: 1 } });
+    const text = hireSuggestionText(s).headline;
+    expect(text).toContain(' But this check leaves out 1 P4 order (3 cases) your current plan delivers: Use this plan re-plans the day with the hired trucks instead.');
+    expect(text).not.toMatch(/0\.0 pallets/);
+    expect(hireUseConfirmText(s, null)).toContain("\n\nThe check's plan leaves out 1 P4 order your current plan delivers, so RouteIQ re-plans");
+    // Several priorities: each said apart; 50 units (0.05 pallets) and more are said as pallets again.
+    const both = summarizeHire({
+      request: req2, baseUnserved: unserved([l1, l2]), baseOrders: [...baseOrders, 'ord-X'], options: [TEN, THREE],
+      whatIf: { ...whatIf, loads: [load('OWN1', [s1], 35, 60), load(virtualHireId('o10', 1), [l1, l2], 50, 55)], unserved: unserved([s2, x]) } as unknown as WhatIf,
+    });
+    expect(both.dropped).toMatchObject({ orders: 2, cases: 203, palletUnits: 3023, byPriority: { 3: 1, 4: 1 } });
+    expect(hireSuggestionText(both).headline).toContain(' But this check leaves out 2 orders (1 P3, 1 P4; 203 cases, 3.0 pallets) your current plan delivers:');
+    expect(hireUseConfirmText(both, null)).toContain("The check's plan leaves out 2 orders (1 P3, 1 P4) your current plan delivers");
+    expect(leftOutText({ orders: 1, cases: 4, palletUnits: 49, kg: 0, stopIds: ['a'] })).toBe('1 order (4 cases)');
+    expect(leftOutText({ orders: 1, cases: 7, palletUnits: 50, kg: 0, stopIds: ['a'] })).toBe('1 order (7 cases, 0.1 pallets)');
   });
 
   it('orders added after the plan are counted from the request the what-if used; orders gone since are not', () => {
@@ -537,8 +563,9 @@ describe('dates and sizes as the rest of the screen says them (sixth review of t
     const text = hireUseConfirmText({ hires: [{ label: '10-ton', count: 1 }, { label: '3-ton', count: 2 }] }, '2026-10-11');
     expect(text).toMatch(/^Hire 1 x 10-ton \+ 2 x 3-ton for 11 Oct and use this plan\?\n\nThe trucks are added for 11 Oct only/);
     expect(text).not.toMatch(/2026/);
+    // A suggestion stored before the priorities were kept: the orders without them.
     expect(hireUseConfirmText({ hires: [{ label: '10-ton', count: 1 }], dropped: { orders: 2 } }, null)).toMatch(
-      /^Hire 1 x 10-ton for this day and use this plan\?[\s\S]*leaves out 2 order\(s\) your current plan delivers/,
+      /^Hire 1 x 10-ton for this day and use this plan\?[\s\S]*leaves out 2 orders your current plan delivers/,
     );
   });
 
