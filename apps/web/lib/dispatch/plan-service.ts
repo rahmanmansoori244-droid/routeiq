@@ -3045,23 +3045,40 @@ async function driverGate(tx: Tx, tenantId: string, load: { id: string; truckId:
 export async function inLoadChange<T>(
   tenantId: string,
   runId: string,
-  fn: (tx: Tx, run: OpenRun, setDriver: (loadId: string, driverId: string | null, user: { id: string }) => ReturnType<typeof setDriverTx>) => Promise<T>,
+  fn: (
+    tx: Tx,
+    run: OpenRun,
+    setDriver: (loadId: string, driverId: string | null, user: { id: string }, opts?: SetDriverOpts) => ReturnType<typeof setDriverTx>,
+  ) => Promise<T>,
 ): Promise<T> {
   return inLoadTx(async (tx) => {
     const run = await lockOpenRun(tx, tenantId, runId);
-    return fn(tx, run, (loadId, driverId, user) => setDriverTx(tx, tenantId, run, loadId, driverId, user));
+    return fn(tx, run, (loadId, driverId, user, opts) => setDriverTx(tx, tenantId, run, loadId, driverId, user, opts));
   });
 }
 
-async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, driverId: string | null, user: { id: string }) {
+/**
+ * `filled`: RouteIQ fills the driver in on this load for the dispatcher's pick on another one (a truck
+ * rented for the day: one driver for its whole day, casual-driver.ts wholeRentalDay; seventh review of
+ * the hire branch). The load gets no hand-set marker - the dispatcher did not pick it there, so a
+ * re-plan that drops this trip says nothing of a pick ("Driver picked by hand, not in this plan" was
+ * false) and fills the trip in again from its evidence and the truck's default driver - and its
+ * LOAD_DRIVER_SET row says why (`via`, `fromLoadId`). Keep does not apply.
+ */
+export interface SetDriverOpts {
+  filled?: { via: string; fromLoadId: string };
+}
+
+async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, driverId: string | null, user: { id: string }, opts: SetDriverOpts = {}) {
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId: run.id, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
   // Unchanged is checked before "after dispatch": re-sending the current driver is not a change.
   const check = checkDriverChange(load, driverId);
   if (!check.ok) throw new PlanError(check.reason, 409);
+  const filled = opts.filled;
   // Keep: re-sending the driver RouteIQ filled in (no marker) on a load still at the depot makes it
   // the dispatcher's choice (the plan screen's Keep button). Any other re-send changes nothing.
-  const keep = isDriverKeep(load, driverId);
+  const keep = !filled && isDriverKeep(load, driverId);
   if (check.unchanged && !keep) return load;
   const driver = driverId ? await tx.driver.findFirst({ where: { id: driverId, tenantId } }) : null;
   if (driverId && !driver) throw new PlanError('Driver not found.', 400);
@@ -3070,10 +3087,11 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   // The dispatcher's own choice, marked with who and when - "No driver" too - so a driver note on
   // this trip ends for good (driverChangeWarnings). A driver so marked is hand-set: a re-plan or
   // "Use instead" keeps it on this truck and trip (planDrivers, pass 1). "No driver" is not (there
-  // is no driver to keep): the next plan fills that trip in like any other.
+  // is no driver to keep): the next plan fills that trip in like any other. A driver RouteIQ fills in
+  // (`filled`) carries no marker.
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { driverId, driverSetById: user.id, driverSetAt: new Date() },
+    data: filled ? { driverId, driverSetById: null, driverSetAt: null } : { driverId, driverSetById: user.id, driverSetAt: new Date() },
   });
   await audit(
     {
@@ -3083,7 +3101,15 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { driverId: load.driverId, driverName: before?.name ?? null, ...(keep ? { byHand: false } : {}) } as never,
-      afterJson: { driverId, driverName: driver?.name ?? null, runId: run.id, truckId: load.truckId, loadNo: load.loadNo, ...(keep ? { kept: true } : {}) } as never,
+      afterJson: {
+        driverId,
+        driverName: driver?.name ?? null,
+        runId: run.id,
+        truckId: load.truckId,
+        loadNo: load.loadNo,
+        ...(keep ? { kept: true } : {}),
+        ...(filled ? { via: filled.via, fromLoadId: filled.fromLoadId } : {}),
+      } as never,
     },
     tx,
   );

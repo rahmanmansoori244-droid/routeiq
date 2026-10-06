@@ -19,6 +19,7 @@ import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
 import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
   fmtSearchTime,
@@ -274,11 +275,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       async () => {
         res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
         if (!res.ok || !res.data) return;
-        // A truck rented for the day: the same driver on its other planned loads (one day-rate driver).
+        // A truck rented for the day: the same driver on its other planned loads (one day-rate driver),
+        // every load said in order ("Loads 1, 2 and 3"; seventh review: "Load 2 and Load 1, Load 3").
         const also = (res.data.alsoOn ?? []).map((x) => x.loadNo);
-        toast.success(
-          `${l.truckCode} Load ${l.loadNo}${also.length ? ` and ${also.map((n) => `Load ${n}`).join(', ')}` : ''}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`,
-        );
+        toast.success(casualDriverToast(l.truckCode, [l.loadNo, ...also], res.data.driver.name, res.data.reused));
         await loadDrivers();
         const fresh = await load();
         await afterDriverChange(fresh, l, res.data.driver.id);
@@ -1404,7 +1404,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         />
       ) : null}
       <CasualDriverDialog
-        load={casualFor ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo } : null}
+        load={
+          casualFor
+            ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo, plan: casualDriverPlan(casualFor, d.loads, d.run.runDate) }
+            : null
+        }
         onOpenChange={(o) => {
           if (!o) setCasualFor(null);
         }}

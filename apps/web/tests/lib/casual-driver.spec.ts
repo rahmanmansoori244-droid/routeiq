@@ -18,6 +18,7 @@ vi.mock('@/lib/audit', () => ({
 }));
 
 import { addCasualDriver, casualCode, maskPhone, phoneKey, sameName, samePhone } from '@/lib/dispatch/casual-driver';
+import { casualDriverDialogText, casualDriverPlan, casualDriverToast, loadsText } from '@/lib/dispatch/casual-driver-words';
 import { casualDriverSchema } from '@/lib/schemas';
 
 const T = 'tA';
@@ -195,6 +196,20 @@ describe('a truck rented for the day: one day-rate driver for its whole day (six
     expect(changed).toMatchObject({ entityId: 'H1', beforeJson: { defaultDriverId: null }, afterJson: { defaultDriverId: r.driver.id } });
   });
 
+  it('only the load pressed is "picked by hand": the others are filled in by RouteIQ, audited as such (seventh review)', async () => {
+    // Review: Loads 2 and 3 were written with the dispatcher's marker, so after a re-plan that left the
+    // truck 2 trips the plan warned "Driver picked by hand, not in this plan: you picked Salim for ... L3",
+    // a pick nobody made. Only the pressed load carries the marker; a re-plan refills the others anyway.
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'H1', name: 'Salim' }, user);
+    expect(row('planLoad', 'H1')).toMatchObject({ driverId: r.driver.id, driverSetById: 'u1' });
+    expect(row('planLoad', 'H1').driverSetAt).toBeInstanceOf(Date);
+    expect(row('planLoad', 'H2')).toMatchObject({ driverId: r.driver.id, driverSetById: null, driverSetAt: null });
+    const sets = tables.auditLog.filter((a) => a.action === 'LOAD_DRIVER_SET');
+    expect(sets.map((a) => a.entityId)).toEqual(['H1', 'H2']);
+    expect((sets[0]!.afterJson as Record<string, unknown>).via).toBeUndefined();
+    expect(sets[1]).toMatchObject({ userId: 'u1', afterJson: { driverId: r.driver.id, loadNo: 2, via: 'whole rental day', fromLoadId: 'H1' } });
+  });
+
   it('a locked load of the hired truck stays as it is (frozen); the load pressed always gets the driver', async () => {
     row('planLoad', 'H2').status = 'LOCKED';
     const r = await addCasualDriver(T, { runId: 'P', loadId: 'H1', name: 'Salim' }, user);
@@ -211,5 +226,56 @@ describe('a truck rented for the day: one day-rate driver for its whole day (six
     expect(other.alsoOn).toEqual([]);
     expect(row('planLoad', 'H2').driverId).toBeNull();
     expect(row('truck', 'H1').defaultDriverId).toBeNull();
+  });
+});
+
+describe('the quick add says what it does before saving, and its message after (seventh review of the hire branch)', () => {
+  // Review: the dialog said "put on this load" while it also swapped the hired truck's other loads and its
+  // default driver (D -> E) - the only sign a toast afterwards ("never a silent swap"). The toast read
+  // "Load 2 and Load 1, Load 3" (the pressed load first, the joining wrong).
+  const hired = { id: 'H2', truckId: 'H1', truckCode: 'HIRE-10T-1110-1', loadNo: 2, hired: true, oneDay: '2026-10-11' };
+  const day = (over: Partial<Parameters<typeof casualDriverPlan>[1][number]>[] = []) =>
+    [
+      { id: 'H1', truckId: 'H1', loadNo: 1, status: 'PLANNED', driverId: 'd', driverName: 'Darwish', driverHandSet: false },
+      { id: 'H2', truckId: 'H1', loadNo: 2, status: 'PLANNED', driverId: 'd', driverName: 'Darwish', driverHandSet: false },
+      { id: 'H3', truckId: 'H1', loadNo: 3, status: 'PLANNED', driverId: null, driverName: null, driverHandSet: false },
+      { id: 'T1', truckId: 'T5', loadNo: 1, status: 'PLANNED', driverId: null, driverName: null, driverHandSet: false },
+    ].map((l, i) => ({ ...l, ...(over[i] ?? {}) }));
+
+  it('loads said in order: "Load 2", "Loads 1 and 2", "Loads 1, 2 and 3"', () => {
+    expect(loadsText([2])).toBe('Load 2');
+    expect(loadsText([2, 1])).toBe('Loads 1 and 2');
+    expect(loadsText([2, 1, 3, 1])).toBe('Loads 1, 2 and 3');
+    expect(casualDriverToast('HIRE-10T-1110-1', [2, 1, 3], 'Salim', false)).toBe('HIRE-10T-1110-1 Loads 1, 2 and 3: daily driver Salim');
+    expect(casualDriverToast('T05', [1], 'Salim', true)).toBe('T05 Load 1: daily driver Salim (already saved)');
+  });
+
+  it('a truck rented for the day: the other loads still to plan and the default driver, named before saving', () => {
+    const plan = casualDriverPlan(hired, day(), '2026-10-11');
+    expect(plan).toEqual({ wholeDay: true, alsoOn: [1, 3], replaces: [{ loadNo: 1, driverName: 'Darwish' }], keeps: [] });
+    const text = casualDriverDialogText(hired, plan);
+    expect(text.intro).toMatch(/^HIRE-10T-1110-1 L2\. /);
+    expect(text.intro).toMatch(/rented for the whole day with one driver: the driver also goes on Loads 1 and 3 \(its other loads still to plan\) and becomes its default driver\./);
+    expect(text.intro).toMatch(/This replaces Darwish on Load 1\.$/);
+    expect(text.intro).not.toMatch(/put on this load/);
+    expect(text.button).toBe('Add and put on Loads 1, 2 and 3');
+  });
+
+  it('a locked load keeps its driver; one whose driver the dispatcher chose keeps it, said so', () => {
+    const plan = casualDriverPlan(hired, day([{ driverHandSet: true }, {}, { status: 'LOCKED' }]), '2026-10-11');
+    expect(plan).toEqual({ wholeDay: true, alsoOn: [], replaces: [], keeps: [1] });
+    const text = casualDriverDialogText(hired, plan);
+    expect(text.intro).toMatch(/rented for the whole day with one driver: the driver becomes its default driver\. Load 1 keeps the driver you chose yourself\.$/);
+    expect(text.button).toBe('Add and put on this load');
+  });
+
+  it('an own truck, or a hired truck of another day: this load only, as before', () => {
+    for (const load of [{ ...hired, hired: false, oneDay: null }, { ...hired, oneDay: '2026-10-12' }]) {
+      const plan = casualDriverPlan(load, day(), '2026-10-11');
+      expect(plan).toEqual({ wholeDay: false, alsoOn: [], replaces: [], keeps: [] });
+      const text = casualDriverDialogText(load, plan);
+      expect(text.intro).toMatch(/Saved as a daily driver with no account, and put on this load\./);
+      expect(text.button).toBe('Add and put on this load');
+    }
   });
 });

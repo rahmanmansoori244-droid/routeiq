@@ -250,10 +250,19 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # The REDUCTION (sixth review: on the real Muscat day the Quick search rented 2 x 10-ton where one
 # carried every P1-P3 order - the second only P4/P5 orders, and the set was not the cheapest): emptying
 # a rented truck needs all its stops moved at once and each move alone gains nothing, so the search
-# stops in such a local optimum. After it, each rented truck of its plan, dearest first, is left out and
-# the day solved again with the others (_reduce_hire, at most HIRE_REDUCE_MAX_SOLVES solves within
-# HIRE_REDUCE_SEC): the removal is kept when every P1-P3 stop the plan delivered is still delivered and
-# the plan passes every check. The suggestion is the reduced set; "one truck fewer" is such a solve.
+# stops in such a local optimum. After it (_reduce_hire), first without any solve, every rented truck
+# whose loads carry no P1-P3 stop is given back - its loads deleted, its stops left out, every other load
+# as it was. Then the CHEAPEST set (seventh review: leaving the dearest truck out first kept 2 x 3-ton for
+# 80 OMR where the 10-ton alone, 60 OMR, delivered every order, and never swapped a rented truck for a
+# cheaper one the plan did not use): every set of the trucks to rent - units of one option are alike -
+# with no more trucks than the plan's and cheaper in real money (hire_money; fewer trucks first on a
+# tie) is tried cheapest first, and the first that delivers every P1-P3 stop the plan delivered and
+# passes every check, its load re-check included, is the suggestion. A set whose trucks cannot hold
+# those stops even full on every load they may make is ruled out without a solve (_hire_room_short).
+# At most HIRE_REDUCE_MAX_SOLVES solves within the window (_hire_reduce_window); a solve starts only
+# with room for its search, its worker and its load re-check's whole reserve (_hire_trial_need), and
+# searches as long as the what-if up to HIRE_TRIAL_FULL_SEC, half as long above it, so a big day gets
+# solves too. "One truck fewer" is such a solve.
 
 # A day-paid or rented truck's km in the search, on top of its own km charge (if any): 1 OMR per
 # 1,000 km - its route is the short one, and a whole day's km weigh well under 1 OMR (search only).
@@ -265,9 +274,18 @@ HIRE_ORDER_KM_OMR = 0.1
 # the pick; all of them together three times that; LR.shorter_orders keeps what it has when the time is up).
 HIRE_ORDER_SEC = 3.0
 # The reduction of a what-if's rented trucks (_reduce_hire): at most this many extra solves of the day,
-# within this many seconds (and never past the request's own budget).
+# within this many seconds or the time of HIRE_REDUCE_WINDOW_SOLVES solves, whichever is longer (and
+# never past the request's own budget; _hire_reduce_window).
 HIRE_REDUCE_MAX_SOLVES = 6
 HIRE_REDUCE_SEC = 180.0
+HIRE_REDUCE_WINDOW_SOLVES = 2
+# A reduction solve searches as long as the what-if on a day searched up to this many seconds (NMWC's
+# usual 80-120-stop days), half as long above it but never less; with less time left in the window it
+# is shortened down to half of that again (never under this) - or not started (_hire_trial_limit).
+HIRE_TRIAL_FULL_SEC = 20
+# A reduction solve's own worker pool and second search start before its search (on top of
+# REC_OVERHEAD_SEC, which covers the search's model build and extraction).
+HIRE_TRIAL_START_SEC = 5
 # A day-paid driver's time in the search: 1 objective unit a second (0.036 OMR an hour, the smallest
 # whole rate the routing models take) - a compact day, room for its next load (search only).
 HIRE_TIE_HOUR_OMR = 0.036
@@ -2395,7 +2413,8 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
             pv.close()  # already closed by _run_scenarios when it ran; a no-op then
         if workers is not None:
             workers.close()  # likewise
-    # The hire suggestion's what-if: the fewest rented trucks that deliver what its plan delivers.
+    # The hire suggestion's what-if: the cheapest set of rented trucks that delivers every P1-P3 stop its
+    # plan delivers.
     hire_check = None
     if any(t.hire_candidate for t in req.trucks):
         scenarios, hire_check = _reduce_hire(req, solvable, mx, drops, time_limit, started + budget, control, scenarios)
@@ -2427,7 +2446,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
 
 
 # ---------------------------------------------------------------------------------------------
-# The reduction of a what-if's rented trucks (sixth review of the hire branch)
+# The reduction of a what-if's rented trucks (sixth and seventh reviews of the hire branch)
 # ---------------------------------------------------------------------------------------------
 
 # Only P1-P3 orders justify renting a truck (owner answer 1, 6 Oct 2026).
@@ -2450,22 +2469,114 @@ def _passes_checks(sc: DispatchScenario | None) -> bool:
             and (sc.feasibility is None or sc.feasibility.status == "VERIFIED"))
 
 
+def _hire_trial_overhead(lim: int) -> int:
+    """Seconds a reduction solve searching ``lim`` seconds needs besides its search: its worker pool's start
+    (HIRE_TRIAL_START_SEC), the search's model build and extraction (REC_OVERHEAD_SEC: rec_limit_sec keeps
+    it free) and the load re-check's whole reserve - _post_solve skips the re-check with less than
+    STAGE_GRACE_SEC + 5 s + its CP-SAT time left (seventh review of the hire branch: a solve started with
+    its search time + 23 s had no re-check, and its raw search plan became the suggestion)."""
+    cap = math.ceil(min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, lim / 2)))
+    return HIRE_TRIAL_START_SEC + REC_OVERHEAD_SEC + STAGE_GRACE_SEC + 5 + cap
+
+
+def _hire_trial_need(lim: int) -> int:
+    """Seconds a reduction solve searching ``lim`` seconds needs, its load re-check included."""
+    return lim + _hire_trial_overhead(lim)
+
+
+def _hire_trial_full(time_limit: int) -> int:
+    """A reduction solve's search time: the what-if's own (``time_limit``) up to HIRE_TRIAL_FULL_SEC,
+    half of it above, never less (seventh review: a 200-350-stop day, searched 150 s, had room for one
+    solve at most, a day above 350 stops for none)."""
+    return time_limit if time_limit <= HIRE_TRIAL_FULL_SEC else max(HIRE_TRIAL_FULL_SEC, time_limit // 2)
+
+
+def _hire_trial_limit(time_limit: int, left: float) -> int | None:
+    """The search time of the reduction's next solve with ``left`` seconds of its window left: its full
+    time (_hire_trial_full), shortened to what the window still holds besides the solve's other needs
+    (_hire_trial_overhead), down to half of the full time but never under HIRE_TRIAL_FULL_SEC (nor over
+    the full time); None: no solve fits (a shorter search would only find a poorer plan)."""
+    full = _hire_trial_full(time_limit)
+    floor = min(full, max(HIRE_TRIAL_FULL_SEC, time_limit // 4))
+    lim = min(full, int(left) - _hire_trial_overhead(full))
+    return lim if lim >= floor else None
+
+
+def _hire_reduce_window(time_limit: int) -> float:
+    """Seconds the reduction may take (the request's budget aside): HIRE_REDUCE_SEC, or the time of
+    HIRE_REDUCE_WINDOW_SOLVES full solves when that is longer (a big day)."""
+    return float(max(HIRE_REDUCE_SEC, HIRE_REDUCE_WINDOW_SOLVES * _hire_trial_need(_hire_trial_full(time_limit))))
+
+
+def _hire_room_short(tds: list[TruckDay], keep: set[str], stops: list[DispatchStop]) -> bool:
+    """The own trucks and the trucks to rent ``keep`` cannot hold ``stops`` even with every load they may
+    make full (trips_left x their room): by pallets (every truck by bays), by cases (every truck by cases)
+    or by kg (every truck with a payload). Each is a bound no plan can pass, so such a set is ruled out
+    without a solve (seventh review of the hire branch)."""
+    days = [td for td in tds if td.usable and (not td.truck.hire_candidate or td.truck.id in keep)]
+    if all(td.by_pallets for td in days) and all(s.demand_pallet_units is not None for s in stops):
+        if sum(s.demand_pallet_units or 0 for s in stops) > sum(td.trips_left * td.max_pallet_units for td in days):
+            return True
+    elif not any(td.by_pallets for td in days):
+        if sum(s.demand_cases for s in stops) > sum(td.trips_left * td.max_cases for td in days):
+            return True
+    return (all(td.max_kg_units > 0 for td in days)
+            and sum(kg_units(s.demand_kg) for s in stops) > sum(td.trips_left * td.max_kg_units for td in days))
+
+
+def _without_low_hires(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
+                       sc: DispatchScenario, hire_ids: set[str], high) -> DispatchScenario:
+    """``sc`` without its rented trucks whose loads carry no P1-P3 stop (``high``: owner answer 1, P4/P5
+    orders never justify a truck - they only ride along in one rented for P1-P3 orders), with NO solve
+    (seventh review of the hire branch: on a big day the budget allows one solve or none, and such a truck
+    stayed in the suggestion): their loads deleted, their stops left out, every other load as it was - the
+    same stops in the same order, timed exactly again (each truck's day is timed on its own, so theirs do
+    not change) and checked as every plan (_build_scenario). ``sc`` itself when there is no such truck, or
+    when the plan without them cannot be timed or does not pass the checks."""
+    gone = {tid for tid in _rented_of(sc, hire_ids)
+            if not any(high(st.stop_id) for ld in sc.loads if ld.truck_id == tid for st in ld.stops)}
+    if not gone:
+        return sc
+    try:
+        tds = _truck_days(req)
+        ctx = _stage_ctx(req, solvable, tds, mx, drops)
+        kept = {i: loads for i, loads in _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx).items()
+                if tds[i].truck.id not in gone}
+        timed = LR.time_plan(ctx.day, LR.plan_of(kept), ctx.rec_pricing)
+        new = None if timed is None else _build_scenario(
+            sc.name, req, solvable, tds, mx, timed, ctx.values, ctx.use_margin, drops,
+            solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
+            objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
+            exact_timing=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - the plan stays as it is; the solves may still leave them out
+        log.warning("run=%s hire check: the plan without %s could not be built: %s", req.run_id, sorted(gone), exc)
+        return sc
+    if not _passes_checks(new):
+        log.warning("run=%s hire check: the plan without %s does not pass the checks; kept", req.run_id, sorted(gone))
+        return sc
+    log.info("run=%s hire check: %s carried only P4/P5 orders: given back without a solve", req.run_id, sorted(gone))
+    return new  # type: ignore[return-value]
+
+
 @dataclass
 class _HireTrial:
-    """One solve of the reduction: ``without`` left out of the set ``against``."""
+    """One conclusive solve of the reduction that did not keep every P1-P3 stop: the trucks to rent
+    ``offered`` (with every own truck)."""
 
-    without: str
-    against: frozenset[str]
+    offered: tuple[str, ...]
     sc: DispatchScenario | None  # None: the plan did not pass the checks
     lost: int  # P1-P3 stops the plan delivered that this one does not (a large number when it failed the checks)
 
 
 def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
-                time_limit: int, budget_end: float, control: SolveControl | None) -> DispatchScenario | None:
-    """The recommended plan of ``req`` (the what-if with fewer trucks to rent) on the request's own road
-    matrix and stops, searched as the what-if was (its own worker pool and second search, rule 22).
-    None when it cannot run (no worker processes, or it failed - the reduction then stops); a cancelled
-    solve raises SolveAborted as the what-if's own search does."""
+                time_limit: int, budget_end: float, control: SolveControl | None) -> tuple[DispatchScenario | None, bool]:
+    """The recommended plan of ``req`` (the what-if with other trucks to rent) on the request's own road
+    matrix and stops, searched as the what-if was (its own worker pool and second search, rule 22), and
+    whether the load re-check checked it (seventh review of the hire branch: a plan the re-check skipped -
+    out of time - is the raw search plan, which neither replaces the plan nor proves a set too small).
+    (None, False) when it cannot run (no worker processes, or it failed - the reduction then stops); a
+    cancelled solve raises SolveAborted as the what-if's own search does."""
     tds = _truck_days(req)
     workers: _Workers | None = None
     pv: _PvRun | None = None
@@ -2473,17 +2584,19 @@ def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixRe
         if _parallel():
             workers = _start_workers(1, control, req.run_id, "hire check")
         pv = _pv_start(req, solvable, control, workers is not None)
+        state: dict = {}
         scs = _run_scenarios(["RECOMMENDED"], req, solvable, tds, mx, time_limit, list(drops), budget_end,
-                             control=control, state={}, workers=workers, pv=pv)
-        return scs[0] if scs else None
+                             control=control, state=state, workers=workers, pv=pv)
+        sc = scs[0] if scs else None
+        return sc, sc is not None and "RECOMMENDED" in state.get("rechecked", ())
     except SolveAborted:
         if control is not None and control.cancelled.is_set():
             raise
-        log.warning("run=%s hire check: a solve with fewer trucks to rent did not finish; the set found is kept", req.run_id)
-        return None
+        log.warning("run=%s hire check: a solve with other trucks to rent did not finish; the set found is kept", req.run_id)
+        return None, False
     except WorkersUnavailable:
-        log.warning("run=%s hire check: no worker processes for a solve with fewer trucks to rent; the set found is kept", req.run_id)
-        return None
+        log.warning("run=%s hire check: no worker processes for a solve with other trucks to rent; the set found is kept", req.run_id)
+        return None, False
     finally:
         if pv is not None:
             pv.close()
@@ -2494,98 +2607,161 @@ def _hire_trial(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixRe
 def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
                  time_limit: int, budget_end: float, control: SolveControl | None,
                  scenarios: list[DispatchScenario]) -> tuple[list[DispatchScenario], HireCheck]:
-    """The what-if's RECOMMENDED plan with the fewest rented trucks that still deliver every P1-P3 stop it
-    delivers (sixth review of the hire branch: the Quick search rented 2 x 10-ton where one carried all 25
-    P1-P3 orders left out - the second only P4/P5 orders). Each rented truck of the current set, dearest
-    first (hire_money), is left out and the day solved again with exactly the others (_hire_trial: the
-    trucks to rent the plan did not use are not offered, so a removal is never a swap); the removal is
-    kept when the plan passes every check and delivers every P1-P3 stop the current plan delivers - its
-    P4/P5 stops may stay out (owner answer 1) - and the set is then the trucks that plan uses. A truck
-    whose removal lost a P1-P3 stop is not tried again (a smaller set loses at least as much), nor is a
-    unit identical to it against the same set. When every truck of the set was tried and the last solves
-    were not against this very set, the least useful truck is left out once more, so "one truck fewer"
-    is always a solve of the suggested set (HireCheck.one_fewer: the fewest P1-P3 stops lost, then the
-    dearest truck). At most HIRE_REDUCE_MAX_SOLVES solves within HIRE_REDUCE_SEC (and the request's
-    budget); a stop request ("use the best plan found so far") ends it. Deterministic in its choices."""
+    """The what-if's RECOMMENDED plan with the CHEAPEST set of rented trucks that still delivers every
+    P1-P3 stop it delivers (sixth review of the hire branch: the Quick search rented 2 x 10-ton where one
+    carried all 25 P1-P3 orders left out - the second only P4/P5 orders).
+
+    1. With no solve, every rented truck whose loads carry no P1-P3 stop is given back (_without_low_hires;
+       owner answer 1: P4/P5 orders never justify a truck).
+    2. Every set of the trucks to rent (units of one option are alike; the request's units each option
+       has) with no more trucks than the plan's and cheaper in real money (hire_money; with as much money,
+       fewer trucks) is tried cheapest first, with fewer trucks first on a tie (seventh review: leaving the
+       dearest truck out first kept 2 x 3-ton for 80 OMR, "complete", where the 10-ton alone delivered every
+       order for 60 - and a removal was never a swap, so 1 x 10-ton stayed where 1 x 3-ton sufficed). A set
+       that cannot hold those stops even full is ruled out by its room (_hire_room_short); any other is
+       solved with exactly the own trucks and that set (_hire_trial). The first plan that passes every
+       check (OPTIMIZED, feasibility VERIFIED, its load re-check run) and delivers every P1-P3 stop the plan
+       delivers - its P4/P5 stops may stay out - is the suggestion (once more without its trucks that then
+       carry only P4/P5 orders). A solve whose load re-check was skipped neither replaces the plan nor
+       rules its set out.
+    3. "One truck fewer" (HireCheck.one_fewer) is a solve of the suggested set less one of its trucks: the
+       one whose removal lost the fewest P1-P3 stops, then the dearest; when the solves so far hold none for
+       its least useful truck (the least room), that set is solved once more if the limits allow.
+
+    ``complete``: every cheaper set was ruled out (by its room, or a checked solve that lost a P1-P3 stop or
+    failed the checks). At most HIRE_REDUCE_MAX_SOLVES solves within _hire_reduce_window (and the request's
+    budget); each starts only with room for its load re-check (_hire_trial_limit). A stop request ("use the
+    best plan found so far") ends it, a cancel raises SolveAborted. Deterministic in its choices."""
     hires = {t.id: t for t in req.trucks if t.hire_candidate}
     rec_i = next((i for i, sc in enumerate(scenarios) if sc.name == "RECOMMENDED"), None)
-    best = scenarios[rec_i] if rec_i is not None else None
-    if best is None or best.status != "OPTIMIZED":
+    found = scenarios[rec_i] if rec_i is not None else None
+    if found is None or found.status != "OPTIMIZED":
         return scenarios, HireCheck()
-    first = _rented_of(best, set(hires))
-    current = list(first)
-    if not current:
+    first = _rented_of(found, set(hires))
+    if not first:
         return scenarios, HireCheck(first=[], used=[], solves=0, complete=True)
-    priority = {s.stop_id: s.priority for s in req.stops}
+    stop_of = {s.stop_id: s for s in req.stops}
+
+    def high(sid: str) -> bool:
+        return (stop_of[sid].priority if sid in stop_of else 5) <= HIRE_MAX_PRIORITY
+
+    must = {sid for sid in _served_of(found) if high(sid)}
+    must_stops = [stop_of[sid] for sid in sorted(must)]
     money = _hire_money_of(req.stops, req.config, req.trucks, req.depot)
+    tds = _truck_days(req)
+    room = {td.truck.id: td.trips_left * (td.max_pallet_units if td.by_pallets else td.max_cases) for td in tds}
 
-    def high_served(sc: DispatchScenario) -> set[str]:
-        return {sid for sid in _served_of(sc) if priority.get(sid, 5) <= HIRE_MAX_PRIORITY}
+    # 1. No solve: the rented trucks that carry only P4/P5 orders.
+    best = _without_low_hires(req, solvable, mx, drops, found, set(hires), high)
+    current = _rented_of(best, set(hires))
 
-    def same_unit(t: DispatchTruck) -> str:
-        """Units of one hire option are the same truck but for their id and code."""
-        return t.model_dump_json(exclude={"id", "code"})
+    # 2. The cheapest set. Units of one option are the same truck but for their id and code: a set is how
+    # many of each option, made of the plan's own units first.
+    kinds: dict[str, list[str]] = {}
+    for tid in sorted(hires, key=lambda u: (u not in first, u)):
+        kinds.setdefault(hires[tid].model_dump_json(exclude={"id", "code"}), []).append(tid)
+    groups = sorted(kinds.values(), key=lambda ids: min(ids))
+    kind_of = {tid: k for k, ids in enumerate(groups) for tid in ids}
 
-    def dearest_first(ids) -> list[str]:
-        return sorted(ids, key=lambda tid: (-round(money.get(tid, 0.0), 6), tid))
+    def price(ids) -> float:
+        return round(sum(money.get(t, 0.0) for t in ids), 6)
+
+    def shape(ids) -> tuple[int, ...]:
+        return tuple(sorted(kind_of[t] for t in ids))
+
+    top = (price(current), len(current))
+    cands: list[tuple[str, ...]] = []
+
+    def walk(k: int, chosen: tuple[str, ...]) -> None:
+        if price(chosen) > top[0]:
+            return
+        if k == len(groups):
+            if (price(chosen), len(chosen)) < top:
+                cands.append(chosen)
+            return
+        for c in range(min(len(groups[k]), len(current) - len(chosen)) + 1):
+            walk(k + 1, chosen + tuple(groups[k][:c]))
+
+    walk(0, ())
+    cands.sort(key=lambda ids: (price(ids), len(ids), -sum(room.get(t, 0) for t in ids), ids))
 
     trials: list[_HireTrial] = []
     solves = 0
     t0 = time.monotonic()
-    end = min(budget_end - STAGE_GRACE_SEC, t0 + HIRE_REDUCE_SEC)
-    # A solve needs its search time, the load re-check's minimum and the search's own overhead.
-    need = time_limit + REPACK_MIN_SEC + REC_OVERHEAD_SEC
+    end = min(budget_end - STAGE_GRACE_SEC, t0 + _hire_reduce_window(time_limit))
 
-    def tried_here(cur: frozenset[str]) -> list[_HireTrial]:
-        return [tr for tr in trials if tr.against == cur]
-
-    def untried(cur: frozenset[str]) -> list[str]:
-        failed = {tr.without for tr in trials}
-        same = {same_unit(hires[tr.without]) for tr in tried_here(cur)}
-        return [tid for tid in dearest_first(cur) if tid not in failed and same_unit(hires[tid]) not in same]
-
-    while True:
+    def solve(ids: tuple[str, ...]) -> tuple[DispatchScenario | None, bool] | None:
+        """A solve with exactly the own trucks and ``ids``; None when none may start (the solve limit, the
+        window, a stop request)."""
+        nonlocal solves
         if control is not None and control.cancelled.is_set():
             raise SolveAborted(f"The optimization was cancelled ({control.why or 'the caller is gone'}).")
         if control is not None and control.stop_requested.is_set():
-            break
-        cur = frozenset(current)
-        todo = untried(cur)
-        if todo:
-            tid = todo[0]
-        elif len(cur) >= 2 and not tried_here(cur):
-            # One truck fewer of this very set: the one whose removal lost least before, solved again.
-            lost = {tr.without: tr.lost for tr in trials}
-            tid = min(cur, key=lambda u: (lost.get(u, 0), -round(money.get(u, 0.0), 6), u))
-        else:
-            break
-        if solves >= HIRE_REDUCE_MAX_SOLVES or end - time.monotonic() < need:
-            break
-        keep = cur - {tid}
+            return None
+        lim = _hire_trial_limit(time_limit, end - time.monotonic())
+        if solves >= HIRE_REDUCE_MAX_SOLVES or lim is None:
+            return None
+        keep = set(ids)
         trial_req = req.model_copy(update={"trucks": [t for t in req.trucks if not t.hire_candidate or t.id in keep]})
-        sc = _hire_trial(trial_req, solvable, mx, drops, time_limit, end, control)
         solves += 1
-        if sc is None:
+        return _hire_trial(trial_req, solvable, mx, drops, lim, end, control)
+
+    def judge(ids: tuple[str, ...], got: tuple[DispatchScenario | None, bool]) -> DispatchScenario | None:
+        """The plan when it keeps every P1-P3 stop and passes the checks; else the solve is recorded."""
+        sc, rechecked = got
+        ok = rechecked and _passes_checks(sc)
+        if ok and must <= _served_of(sc):  # type: ignore[arg-type]
+            return sc
+        if sc is not None and rechecked:
+            trials.append(_HireTrial(offered=ids, sc=sc if ok else None,
+                                     lost=len(must - _served_of(sc)) if ok else 10**9))
+        return None
+
+    complete = True
+    broken = False  # a solve could not run (no worker processes, it failed): no more solves
+    for ids in cands:
+        if _hire_room_short(tds, set(ids), must_stops):
+            continue  # ruled out by its room alone
+        got = solve(ids)
+        if got is None or got[0] is None:
+            complete = False  # out of solves or time, or it could not run: the set found stays
+            broken = got is not None
             break
-        must = high_served(best)
-        if _passes_checks(sc) and must <= _served_of(sc):
-            log.info("run=%s hire check: %s left out, every P1-P3 stop still delivered (%d -> %d trucks to rent)",
-                     req.run_id, tid, len(cur), len(_rented_of(sc, set(hires))))
-            best = sc
-            current = _rented_of(sc, set(hires))
-            continue
-        ok = _passes_checks(sc)
-        trials.append(_HireTrial(without=tid, against=cur, sc=sc if ok else None,
-                                 lost=len(must - _served_of(sc)) if ok else 10**9))
-    cur = frozenset(current)
-    here = [tr for tr in tried_here(cur) if tr.sc is not None]
-    one = min(here, key=lambda tr: (tr.lost, -round(money.get(tr.without, 0.0), 6), tr.without)) if here else None
+        sc = judge(ids, got)
+        if sc is not None:
+            log.info("run=%s hire check: %s delivers every P1-P3 stop (%s before, %.0f -> %.0f OMR)", req.run_id,
+                     list(ids), current, price(current), price(ids))
+            best = _without_low_hires(req, solvable, mx, drops, sc, set(hires), high)
+            current = _rented_of(best, set(hires))
+            break
+        if not got[1]:
+            complete = False  # no load re-check: neither kept nor ruled out
+
+    # 3. One truck fewer than the suggested set, solved.
+    one: tuple[int, float, str, _HireTrial] | None = None
+    if len(current) >= 2:
+        def fewer(u: str) -> list[_HireTrial]:
+            """The checked solves of the suggested set less ``u`` (or a unit alike)."""
+            want = shape([t for t in current if t != u])
+            return [tr for tr in trials if shape(tr.offered) == want]
+
+        least = min(current, key=lambda u: (room.get(u, 0), -money.get(u, 0.0), u))
+        if not fewer(least) and not broken:
+            rest = tuple(t for t in current if t != least)
+            got = solve(rest)
+            if got is not None and got[0] is not None:
+                judge(rest, got)
+        for u in current:
+            tr = next((t for t in fewer(u) if t.sc is not None), None)
+            if tr is not None and (one is None or (tr.lost, -money.get(u, 0.0), u) < one[:3]):
+                one = (tr.lost, -money.get(u, 0.0), u, tr)
     check = HireCheck(
         first=first,
         used=sorted(current),
         solves=solves,
-        complete=not untried(cur),
-        one_fewer=HireOneFewer(without=one.without, unserved=sorted(u.stop_id for u in one.sc.unserved)) if one is not None else None,
+        complete=complete,
+        one_fewer=HireOneFewer(without=one[2], unserved=sorted(u.stop_id for u in one[3].sc.unserved))  # type: ignore[union-attr]
+        if one is not None else None,
     )
     log.info("run=%s hire check: rented first=%s used=%s solves=%d complete=%s one_fewer=%s (%.1fs)", req.run_id,
              check.first, check.used, check.solves, check.complete, check.one_fewer.without if check.one_fewer else None,
@@ -3681,7 +3857,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
     (_watch_search) - and the alternatives and the load re-check then get THOROUGH's longer times,
     shortened to what is left. ``control``: cancel (SolveAborted) or "use the best plan found so
     far" (the alternatives are skipped, the re-check runs as QUICK's). ``state`` receives
-    RECOMMENDED's search limit, search time, status and its THOROUGH watch report (SearchReport).
+    RECOMMENDED's search limit, search time, status and its THOROUGH watch report (SearchReport), and
+    ``rechecked``: the scenarios whose plan the load re-check made (_post_solve).
 
     Every scenario runs in a worker process of ``workers``, the pool optimize_dispatch started (and
     proved to run a task) before the road matrix, rule 22. OR-Tools holds the GIL for the whole
@@ -3821,7 +3998,8 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
             else:
                 if pv.plan:  # the second search's plan, when there is one to judge
                     stage_kw["pv"] = pv
-                _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw)
+                _post_solve(req, solvable, tds, mx, time_limit, drops, results, workers, budget_end, staged, **stage_kw,
+                            rechecked=state.setdefault("rechecked", set()))
         except SolveAborted:
             raise  # cancelled: the caller is gone, nothing to fall back to
         except Exception as exc:  # noqa: BLE001 - the search's own plans stay valid
@@ -4036,7 +4214,7 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
 def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                 time_limit: int, drops: list[UnservedStop], results: dict[str, DispatchScenario], pool,
                 budget_end: float, done: set[str] | None = None, repack_cap: float | None = None,
-                pv: "_PvRun | None" = None) -> None:
+                pv: "_PvRun | None" = None, rechecked: set[str] | None = None) -> None:
     """Replace each OPTIMIZED scenario in ``results`` by the best candidate for its goal.
 
     Candidates = every raw scenario plan (re-timed exactly) + its repacks: whole loads
@@ -4054,7 +4232,9 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     When the stage cannot run or check a plan (out of time, its job failed, died or timed out),
     the raw plans get the safety net (_retime_fallback): re-timed exactly when possible, otherwise
     kept with a warning and a VIOLATED / VERIFIED feasibility report from the independent check.
-    Every scenario it replaces is added to ``done``. ``repack_cap``: seconds per CP-SAT solve
+    Every scenario it replaces is added to ``done``; ``rechecked`` receives those it replaced with a
+    plan of its own re-check (never the safety net's: the hire reduction keeps no plan the re-check
+    skipped, seventh review of the hire branch). ``repack_cap``: seconds per CP-SAT solve
     (THOROUGH, _repack_cap_sec); None = QUICK's min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, limit / 2)).
 
     ``pv``: the second search (PyVRP) with its checked plan, or None. Its plan is one more source,
@@ -4287,6 +4467,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                  new.operating_cost, len(added), len(timing_drops), best.source)
         results[name] = new
         done.add(name)
+        if rechecked is not None:
+            rechecked.add(name)
     if pv_plan:
         if pv.report.get("chosen_for"):  # type: ignore[union-attr]
             pv.report.update(status="CHOSEN", reason=None)  # type: ignore[union-attr]

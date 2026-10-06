@@ -49,7 +49,7 @@ import { isSupersededRun } from './plan-status';
 import { admissionRefused, dayMismatch, replan, replanRefusal, weightRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
 import { solveAdmission } from './solve-admission';
 import { basisFingerprint, cancelHireChecksOfDay, companyToday, DAY_OVER_TEXT, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
-import { DEFAULT_DRIVER_DAY_RATE, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
+import { DEFAULT_DRIVER_DAY_RATE, hiredTruckDescription, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
 import { fmtDayMonth, isoOf } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -235,7 +235,7 @@ async function rentTrucks(
           tenantId,
           depotId: run.depotId,
           code,
-          description: `Hired ${o.label} for ${dateIso} (hire suggestion)`,
+          description: hiredTruckDescription(o.label, dateIso),
           capacityCases: o.capacityCases,
           capacityWeightKg: o.payloadKg,
           capacityVolumeL: 0,

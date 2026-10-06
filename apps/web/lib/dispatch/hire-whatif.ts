@@ -7,8 +7,8 @@
  * what-if: the same request as a re-plan of that version (frozen loads stay exactly as they are) plus
  * one truck per unit the day may still rent (fuel in the hire, its driver at the company's daily driver
  * day rate), the recommended plan only, Quick search - after which the optimizer reduces the rented set
- * to the fewest trucks that still deliver every P1-P3 order (a few more solves; sixth review of the hire
- * branch, DispatchResponse.hire_check). It is its own job
+ * to the cheapest one that still delivers every P1-P3 order (a few more solves; sixth and seventh reviews
+ * of the hire branch, DispatchResponse.hire_check). It is its own job
  * (HireSuggestion, never the plan's RunJob) on the same solve admission as every optimization, as a
  * BACKGROUND solve (solve-admission.ts reserveBackground): no hourly quota, and a dispatcher's solve
  * that needs its slot takes it at once - the what-if then goes back to the queue once and runs when a

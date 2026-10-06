@@ -20,7 +20,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { TruckFormDialog, type TruckRow, type DepotOption, type DriverOption } from './truck-form';
 import { unitShort, fmtMoney } from '@/lib/format';
-import { oneDayBadge, truckCapacityText } from '@/lib/dispatch/hire';
+import { oneDayBadge, truckCapacityText, truckDescriptionText } from '@/lib/dispatch/hire';
 import { errorMessage } from '@/lib/error-message';
 
 interface Props {
@@ -94,7 +94,7 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                     </Badge>
                   ) : null}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{t.description ?? '—'}</TableCell>
+                <TableCell className="text-muted-foreground">{truckDescriptionText(t.description)}</TableCell>
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>
                 <TableCell className="text-right tabular-nums" title={truckCapacityText(t) === 'by bays' ? 'Planned by pallets (its bays): no case capacity of its own' : undefined}>
                   {truckCapacityText(t)}

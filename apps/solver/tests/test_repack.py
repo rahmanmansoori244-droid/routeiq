@@ -79,9 +79,9 @@ def spy_raw(monkeypatch) -> dict:
     raw: dict = {}
     orig = ds._post_solve
 
-    def spy(*a):
+    def spy(*a, **kw):
         raw.update({n: sc.model_copy(deep=True) for n, sc in a[6].items()})
-        return orig(*a)
+        return orig(*a, **kw)
 
     monkeypatch.setattr(ds, "_post_solve", spy)
     return raw
@@ -536,7 +536,7 @@ def test_recommended_only_points_to_verified_alternatives(monkeypatch):
     note = "The MIN TRUCKS option serves 1 more stop(s)"
 
     def mark(status):
-        def post(*a):
+        def post(*a, **kw):
             alt = a[6]["MIN_TRUCKS"]
             alt.feasibility = alt.feasibility.model_copy(update={"status": status, "violations": []})
         return post

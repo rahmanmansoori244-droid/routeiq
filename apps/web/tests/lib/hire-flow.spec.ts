@@ -420,6 +420,8 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
     expect(rented.map((t) => t.code).sort()).toEqual(['HIRE-10T-0710-2', 'HIRE-3T-0710-1']);
     expect(rented.find((t) => t.code === 'HIRE-10T-0710-2')).toMatchObject({
       depotId: 'D1', hired: true, onlyOnDate: DAY, hireOptionId: 'o10', bays: 12, capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 50, costPerKm: 0, kmPerLitre: null, tripCost: 3, active: true,
+      // The day as the badge next to it says it (seventh review: "for 2099-10-07" beside "1 day: 7 Oct").
+      description: 'Hired 10-ton for 7 Oct (hire suggestion)',
     });
     expect(vi.mocked(createNextVersionTx).mock.calls[0]!.slice(1)).toEqual([T, 'P1', 'REOPTIMIZE', 'Hire suggestion: 1 x 10-ton (12 bays) + 1 x 3-ton (6 bays)', 'u1']);
     const [, , runId, b, resp] = vi.mocked(persistDispatchResult).mock.calls[0]!;

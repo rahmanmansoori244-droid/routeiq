@@ -17,9 +17,11 @@
  *   dispatch_solver._service_and_hire): own trucks first, the cheapest set of rented trucks in real
  *   money (hire + the driver's day rate), never one for P4/P5 orders alone - which still ride along
  *   in a rented truck's spare room. After its search it REDUCES the set (sixth review: on the real
- *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): each rented truck, dearest
- *   first, is left out and the day solved again; kept out when every P1-P3 order stays delivered
- *   (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
+ *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): a rented truck with only
+ *   P4/P5 orders is given back without a solve, then every cheaper set (no more trucks, another option's
+ *   trucks too) is tried cheapest first, and the first that keeps every P1-P3 order delivered is the
+ *   suggestion (seventh review: the cheapest set, not the one left after the dearest truck goes;
+ *   dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
  * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
  *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
  *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).
@@ -128,8 +130,28 @@ export function truckCapacityText(t: { capacityCases: number; bays?: number | nu
 }
 
 /**
+ * The description of a truck rented with the hire suggestion (hire-use.ts): "Hired 10-ton for 11 Oct (hire
+ * suggestion)" - the day as its "1 day: 11 Oct" badge says it (seventh review of the hire branch: the
+ * Trucks page row said "for 2026-10-11" beside it).
+ */
+export function hiredTruckDescription(label: string, dateIso: string): string {
+  return `Hired ${label} for ${fmtDayMonth(dateIso)} (hire suggestion)`;
+}
+
+/**
+ * A truck's description as the Trucks page shows it: a hired truck's stored before the seventh review
+ * ("Hired 10-ton for 2026-10-11 (hire suggestion)") with its day as "11 Oct"; any other as typed; "—" none.
+ */
+export function truckDescriptionText(description: string | null | undefined): string {
+  if (!description) return '—';
+  const m = /^Hired (.+) for (\d{4}-\d{2}-\d{2}) \(hire suggestion\)$/.exec(description);
+  return m ? hiredTruckDescription(m[1]!, m[2]!) : description;
+}
+
+/**
  * "Use this plan"'s question (the hire suggestion box), the day said "11 Oct" as the rest of the screen
- * says it (sixth review of the hire branch: "for 2026-10-11"). `dateIso` null: "this day".
+ * says it (sixth review of the hire branch: "for 2026-10-11"). `dateIso` null: "this day". A hired truck
+ * works its whole day with one driver (seventh review: it still said "pick the driver on each load").
  */
 export function hireUseConfirmText(s: { hires: readonly Pick<HireUse, 'label' | 'count'>[]; dropped?: { orders: number } | null }, dateIso: string | null): string {
   const trucks = s.hires.map((h) => `${h.count} x ${h.label}`).join(' + ');
@@ -137,7 +159,7 @@ export function hireUseConfirmText(s: { hires: readonly Pick<HireUse, 'label' | 
   const drops = s.dropped?.orders
     ? `\n\nThe check's plan leaves out ${s.dropped.orders} order(s) your current plan delivers, so RouteIQ re-plans the day with the hired trucks instead of taking it as it is.`
     : '';
-  return `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate with Plate on its load, and pick the driver on each load). A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.${drops}`;
+  return `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate with Plate on its load). Each one is rented for the whole day with one driver: + Add daily driver on one of its loads puts that driver on its other loads still to plan too, and makes them its default driver. A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.${drops}`;
 }
 
 /**

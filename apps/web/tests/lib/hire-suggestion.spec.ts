@@ -21,10 +21,12 @@ import {
   hireTruckCode,
   hireTrucksForRequest,
   hireUseConfirmText,
+  hiredTruckDescription,
   needsHireCheck,
   oneDayBadge,
   parseVirtualHireId,
   truckCapacityText,
+  truckDescriptionText,
   requestBasisText,
   sameDayMovedOn,
   shownTruckCode,
@@ -545,6 +547,22 @@ describe('dates and sizes as the rest of the screen says them (sixth review of t
     expect(truckCapacityText({ capacityCases: 0, bays: 12 })).toBe('by bays');
     expect(truckCapacityText({ capacityCases: 1140, bays: 12 })).toBe('1,140');
     expect(truckCapacityText({ capacityCases: 0, bays: null })).toBe('0');
+  });
+
+  it('the Trucks page says a hired truck\'s day once, as "11 Oct" (seventh review: "Hired 10-ton for 2026-10-11" beside "1 day: 11 Oct")', () => {
+    expect(hiredTruckDescription('10-ton', '2026-10-11')).toBe('Hired 10-ton for 11 Oct (hire suggestion)');
+    // A truck rented before: its stored description is shown with the day as the badge says it.
+    expect(truckDescriptionText('Hired 10-ton for 2026-10-11 (hire suggestion)')).toBe('Hired 10-ton for 11 Oct (hire suggestion)');
+    expect(truckDescriptionText('Hired 10-ton for 11 Oct (hire suggestion)')).toBe('Hired 10-ton for 11 Oct (hire suggestion)');
+    // Any other description stays as the admin typed it.
+    expect(truckDescriptionText('Bought 2026-01-05, rear lift')).toBe('Bought 2026-01-05, rear lift');
+    expect(truckDescriptionText(null)).toBe('—');
+  });
+
+  it('"Use this plan" says a hired truck works its whole day with one driver (seventh review: "pick the driver on each load")', () => {
+    const text = hireUseConfirmText({ hires: [{ label: '10-ton', count: 1 }] }, '2026-10-11');
+    expect(text).not.toMatch(/pick the driver on each load/);
+    expect(text).toMatch(/Each one is rented for the whole day with one driver: \+ Add daily driver on one of its loads puts that driver on its other loads still to plan too, and makes them its default driver\./);
   });
 });
 

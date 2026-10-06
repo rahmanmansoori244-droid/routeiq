@@ -300,10 +300,10 @@ def test_stage_internal_error_keeps_what_it_already_rechecked(monkeypatch):
     r = f04_request(scenarios=["RECOMMENDED", "MIN_DISTANCE"])
     real = ds._post_solve
 
-    def half_then_boom(*a):
+    def half_then_boom(*a, **kw):
         results = a[6]
         only = {"RECOMMENDED": results["RECOMMENDED"]}
-        real(*a[:6], only, *a[7:])  # re-checks RECOMMENDED only (and records it as staged)
+        real(*a[:6], only, *a[7:], **kw)  # re-checks RECOMMENDED only (and records it as staged)
         results.update(only)
         raise RuntimeError("stage bug after RECOMMENDED")
 

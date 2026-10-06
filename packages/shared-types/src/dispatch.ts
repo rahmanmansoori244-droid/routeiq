@@ -517,10 +517,12 @@ export interface DispatchResponse {
 /**
  * The reduction of a what-if's rented trucks (sixth review of the hire branch: the Quick search rented
  * 2 x 10-ton where one carried every P1-P3 order left out). `first`: the rented trucks of the search's
- * plan; `used`: those of the RECOMMENDED plan returned (a subset: each left out, dearest first, when
- * every P1-P3 stop stayed delivered and the plan passed every check); `solves`: the extra solves;
- * `complete`: every truck of `used` was tried without; `one_fewer`: the least useful truck of `used`
- * left out, SOLVED with exactly the others - the stops that plan leaves out (all priorities).
+ * plan; `used`: those of the RECOMMENDED plan returned - the cheapest set found (seventh review: the
+ * trucks carrying only P4/P5 orders given back without a solve, then every set with no more trucks and
+ * less real money tried cheapest first, another option's units too; the first whose plan delivers every
+ * P1-P3 stop and passes every check, its load re-check included); `solves`: the extra solves;
+ * `complete`: every cheaper set was ruled out; `one_fewer`: the least useful truck of `used` left out,
+ * SOLVED with exactly the others - the stops that plan leaves out (all priorities).
  */
 export interface HireCheck {
   first: string[];

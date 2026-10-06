@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { casualDriverDialogText, type CasualDriverPlan } from '@/lib/dispatch/casual-driver-words';
 import type { ApiResult } from './client-api';
 
 export interface CasualDriverBody {
@@ -25,17 +26,18 @@ export interface CasualDriverAnswer {
  * "+ Add daily driver…" from a load's Driver list (owner rule 20: a load never leaves without a
  * driver; daily drivers exist). Name and mobile; the driver is saved as a daily driver (no account)
  * and put on this load - on a truck rented for the day, on its other planned loads too and as its
- * default driver (one day-rate driver for the whole day; sixth review of the hire branch). When the
- * phone already belongs to a driver, the dialog asks "This phone belongs to <name>. Use <name>?" -
- * never a silent swap.
+ * default driver (one day-rate driver for the whole day; sixth review of the hire branch), said before
+ * saving with the loads whose driver it replaces (`plan`, casualDriverPlan; seventh review: the dialog
+ * said "put on this load" only). When the phone already belongs to a driver, the dialog asks "This
+ * phone belongs to <name>. Use <name>?" - never a silent swap.
  */
 export function CasualDriverDialog({
   load,
   onOpenChange,
   submit,
 }: {
-  /** The load the driver is for; null = closed. */
-  load: { id: string; truckCode: string; loadNo: number } | null;
+  /** The load the driver is for, and what the quick add will do for it (casualDriverPlan); null = closed. */
+  load: { id: string; truckCode: string; loadNo: number; plan: CasualDriverPlan } | null;
   onOpenChange: (open: boolean) => void;
   /** Posts the body (POST /api/dispatch/casual-driver) under the plan's action lock; null when another action was running. */
   submit: (body: CasualDriverBody) => Promise<ApiResult<CasualDriverAnswer> | null>;
@@ -79,6 +81,7 @@ export function CasualDriverDialog({
   };
 
   const nameOk = name.trim().length >= 2 && name.trim().length <= 80;
+  const words = load ? casualDriverDialogText(load, load.plan) : null;
 
   return (
     <Dialog open={load !== null} onOpenChange={onOpenChange}>
@@ -87,10 +90,7 @@ export function CasualDriverDialog({
           <DialogTitle className="flex items-center gap-2">
             <UserPlus className="h-5 w-5" /> Add a daily driver
           </DialogTitle>
-          <DialogDescription>
-            {load ? `${load.truckCode} L${load.loadNo}. ` : ''}A daily (casual) driver or the driver of a hired truck. Saved as a daily driver with no account, and
-            put on this load. They open their trips with the driver link (QR).
-          </DialogDescription>
+          <DialogDescription data-testid="casual-driver-intro">{words?.intro ?? ''}</DialogDescription>
         </DialogHeader>
         {belongs ? (
           <div className="space-y-3 text-sm" data-testid="phone-belongs">
@@ -129,7 +129,7 @@ export function CasualDriverDialog({
                 Cancel
               </Button>
               <Button type="submit" disabled={busy || !nameOk} data-testid="casual-driver-save">
-                {busy ? 'Saving…' : 'Add and put on this load'}
+                {busy ? 'Saving…' : (words?.button ?? 'Add and put on this load')}
               </Button>
             </DialogFooter>
           </form>
