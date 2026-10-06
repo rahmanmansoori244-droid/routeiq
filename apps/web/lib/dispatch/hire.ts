@@ -18,14 +18,17 @@
  *   money (hire + the driver's day rate), never one for P4/P5 orders alone - which still ride along
  *   in a rented truck's spare room. After its search it REDUCES the set (sixth review: on the real
  *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): a rented truck with only
- *   P4/P5 orders is given back without a solve, then every cheaper set (as many trucks as it takes,
- *   another option's trucks too) is tried cheapest first, and the first that keeps every P1-P3 order
- *   delivered is the suggestion (seventh review: the cheapest set, not the one left after the dearest
- *   truck goes; eighth review: 2 x 3-ton at 80 OMR beat 1 x 10-ton at 85); a set left after a give-back
- *   is solved once more when the limits allow and it was not solved already, and its plan is taken only
- *   when it passes every check, keeps every P1-P3 order and is cheaper, or as cheap and serving more by
- *   the day's priorities - so those P4/P5 orders may ride along in the trucks kept; otherwise they stay
- *   out (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve.
+ *   P4/P5 orders is given back without a solve (a P4 order it carried put back on the trucks kept, in place
+ *   of P5 orders where need be: tenth review, strict priorities), then every cheaper set (as many trucks
+ *   as it takes, another option's trucks too) is tried cheapest first, and the first that keeps every
+ *   P1-P3 order delivered, with no truck for P4/P5 orders alone once given back, is the suggestion
+ *   (seventh review: the cheapest set, not the one left after the dearest truck goes; eighth review:
+ *   2 x 3-ton at 80 OMR beat 1 x 10-ton at 85); a set left after a give-back is solved once more when
+ *   the limits allow and it was not solved already, and its plan is taken only when it passes every
+ *   check, keeps every P1-P3 order and is cheaper, or as cheap and serving more by the day's priorities
+ *   - so those P4/P5 orders may ride along in the trucks kept; otherwise they stay out
+ *   (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve; when
+ *   it keeps every P1-P3 order it is the suggestion (tenth review).
  * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
  *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
  *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).

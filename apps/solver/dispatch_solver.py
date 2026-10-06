@@ -2587,6 +2587,92 @@ def _hire_room(tds: list[TruckDay]) -> dict[str, int]:
     return {td.truck.id: td.trips_left * (td.max_pallet_units if by_pallets else td.full_cases) for td in hires}
 
 
+def _outranks(cfg: DispatchConfig, s: DispatchStop, others: list[DispatchStop]) -> bool:
+    """Serving ``s`` in place of ``others`` serves the day better as its own priorities rank it
+    (_service_rank): strictly, ``s`` has a higher priority than each of them (one stop of a priority
+    outweighs every lower one together); weighted, its weight is more than theirs together."""
+    if cfg.strict_priorities:
+        return all(o.priority > s.priority for o in others)
+    w = cfg.priority_weights
+    return w[s.priority] > sum(w[o.priority] for o in others)
+
+
+# Truck days the give-back's swap (_swap_riders) may time at most: each one small LP (milliseconds).
+HIRE_SWAP_MAX_TIMINGS = 400
+
+
+def _swap_riders(ctx: _StageCtx, plan: LR.Plan, dropped: list[int]) -> tuple[LR.Plan, list[int]]:
+    """A give-back's plan (``plan``: the loads of the trucks kept) with each stop it left out
+    (``dropped``: the stops of the trucks given back) that outranks a stop those trucks still carry
+    (_outranks) put back on them, with NO solve (tenth review of the hire branch: the give-back left a
+    P4 order out while the 10-ton kept carried two P5 orders it had the room for in their place - strict
+    priorities never drop a higher priority to carry lower ones). Highest priority first, each where it
+    costs the least: into a load of a truck kept with the fewest stops it outranks taken off (the lowest
+    priority first, the biggest first; a P1-P3 stop never), or on a load of its own when the truck has
+    one to spare; then the fewest km added. The truck's whole day is timed exactly again
+    (load_repack.time_plan) - a place it cannot be timed in is not taken. A stop no load of a truck
+    kept holds even with those stops off stays out: they do not keep it out, and they stay on. The new
+    plan, and the stops it puts back."""
+    day, cfg, stops = ctx.day, ctx.req.config, ctx.solvable
+    plan = {i: list(loads) for i, loads in plan.items()}
+    put: list[int] = []
+    timings = 0
+
+    def loss(off: list[int]) -> tuple:
+        """What taking ``off`` off costs, as _service_rank ranks it (smaller is better)."""
+        if cfg.strict_priorities:
+            return tuple(sum(1 for k in off if stops[k].priority == p) for p in range(1, 6))
+        return (sum(cfg.priority_weights[stops[k].priority] for k in off),)
+
+    def timed(idx: int, loads: list[LR.Load]) -> bool:
+        nonlocal timings
+        timings += 1
+        return LR.time_plan(day, {idx: loads}, ctx.rec_pricing) is not None
+
+    for d in sorted(dropped, key=lambda k: (stops[k].priority, stops[k].stop_id)):
+        sd = stops[d]
+        if not any(stops[k].priority > sd.priority and _outranks(cfg, sd, [stops[k]])
+                   for loads in plan.values() for ld in loads for k in ld):
+            continue  # it outranks no stop the trucks kept carry
+        best: tuple | None = None  # (loss, metres added, truck idx, load no, the truck's new loads)
+        for idx in sorted(plan):
+            td = day.by_idx.get(idx)
+            if td is None:
+                continue
+            loads = plan[idx]
+            if len(loads) < td.trips_left and timings < HIRE_SWAP_MAX_TIMINGS:
+                own = loads + [(d,)]
+                cand = (loss([]), day.metres((d,)), idx, len(loads), own)
+                if (best is None or cand[:4] < best[:4]) and LR.fits_truck(LR.facts(day, (d,)), td) and timed(idx, own):
+                    best = cand
+            for j, ld in enumerate(loads):
+                riders = sorted((k for k in ld if stops[k].priority > sd.priority),
+                                key=lambda k: (-stops[k].priority, -_need_in(stops[k], td.by_pallets), stops[k].stop_id))
+                for r in range(len(riders) + 1):
+                    off = riders[:r]
+                    if not _outranks(cfg, sd, [stops[k] for k in off]) or (best is not None and loss(off) > best[0]):
+                        break
+                    base = [k for k in ld if k not in off]
+                    if not LR.fits_truck(LR.facts(day, tuple(base + [d])), td):
+                        continue  # one more off
+                    at = None
+                    for pos in sorted(range(len(base) + 1), key=lambda p: (day.metres(tuple(base[:p] + [d] + base[p:])), p)):
+                        if timings >= HIRE_SWAP_MAX_TIMINGS:
+                            break
+                        new = loads[:j] + [tuple(base[:pos] + [d] + base[pos:])] + loads[j + 1:]
+                        if timed(idx, new):
+                            at = (loss(off), day.metres(new[j]) - day.metres(ld), idx, j, new)
+                            break
+                    if at is not None:
+                        if best is None or at[:4] < best[:4]:
+                            best = at
+                        break  # the fewest off for this load
+        if best is not None:
+            plan[best[2]] = best[4]
+            put.append(d)
+    return plan, put
+
+
 def _without_low_hires(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixResult, drops: list[UnservedStop],
                        sc: DispatchScenario, hire_ids: set[str], high) -> DispatchScenario:
     """``sc`` without its rented trucks whose loads carry no P1-P3 stop (``high``: owner answer 1, P4/P5
@@ -2594,33 +2680,54 @@ def _without_low_hires(req: DispatchRequest, solvable: list[DispatchStop], mx: M
     (seventh review of the hire branch: on a big day the budget allows one solve or none, and such a truck
     stayed in the suggestion): their loads deleted, their stops left out, every other load as it was - the
     same stops in the same order, timed exactly again (each truck's day is timed on its own, so theirs do
-    not change) and checked as every plan (_build_scenario). The stops the load re-check of ``sc`` left out
-    for the loading time between loads keep that reason and its warning (eighth review: they read "the
-    optimizer found no truck ... Re-plan to search again"). ``sc`` itself when there is no such truck, or
-    when the plan without them cannot be timed or does not pass the checks. _reduce_hire may solve the set
-    left once more (its step 3: its P4/P5 orders may ride along in the trucks kept); this plan stays
-    whenever that solve does not run or does not replace it."""
+    not change) and checked as every plan (_build_scenario) - but for the stops of theirs that outrank a
+    stop the trucks kept carry (a P4 order and the P5 orders riding along): those are put back on the
+    trucks kept, in place of such stops where need be (_swap_riders; tenth review of the hire branch:
+    strict priorities never drop a P4 order to carry two P5s), when that plan passes the checks too and
+    serves the day better (_service_rank). The stops the load re-check of ``sc`` left out for the loading
+    time between loads keep that reason and its warning (eighth review: they read "the optimizer found no
+    truck ... Re-plan to search again"). ``sc`` itself when there is no such truck, or when the plan
+    without them cannot be timed or does not pass the checks. _reduce_hire may solve the set left once
+    more (its step 3: its P4/P5 orders may ride along in the trucks kept); this plan stays whenever that
+    solve does not run or does not replace it."""
     gone = _low_hires(sc, hire_ids, high)
     if not gone:
         return sc
+    stop_of = {s.stop_id: s for s in req.stops}
     try:
         tds = _truck_days(req)
         ctx = _stage_ctx(req, solvable, tds, mx, drops)
-        kept = {i: loads for i, loads in _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx).items()
-                if tds[i].truck.id not in gone}
-        timed = LR.time_plan(ctx.day, LR.plan_of(kept), ctx.rec_pricing)
+        timed_sc = _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)
+        kept = LR.plan_of({i: loads for i, loads in timed_sc.items() if tds[i].truck.id not in gone})
+        dropped = [k for i, loads in timed_sc.items() if tds[i].truck.id in gone for tl in loads for k in tl.stops]
         timing = _timing_drops_of(sc, ctx.stop_idx)
-        new = None if timed is None else _build_scenario(
-            sc.name, req, solvable, tds, mx, timed, ctx.values, ctx.use_margin, drops,
-            solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
-            objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
-            timing_drops=timing, exact_timing=True,
-        )
-        if new is not None and timing:
-            new.warnings += [w for w in sc.warnings if TIMING_DROP_NOTE in w and w not in new.warnings]
+
+        def built(plan: LR.Plan) -> DispatchScenario | None:
+            timed = LR.time_plan(ctx.day, plan, ctx.rec_pricing)
+            out = None if timed is None else _build_scenario(
+                sc.name, req, solvable, tds, mx, timed, ctx.values, ctx.use_margin, drops,
+                solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
+                objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
+                timing_drops=timing, exact_timing=True,
+            )
+            if out is not None and timing:
+                out.warnings += [w for w in sc.warnings if TIMING_DROP_NOTE in w and w not in out.warnings]
+            return out
+
+        new = built(kept)
     except Exception as exc:  # noqa: BLE001 - the plan stays as it is; the solves may still leave them out
         log.warning("run=%s hire check: the plan without %s could not be built: %s", req.run_id, sorted(gone), exc)
         return sc
+    try:
+        swapped, put = _swap_riders(ctx, kept, dropped)
+        alt = built(swapped) if put else None
+        if _passes_checks(alt) and (not _passes_checks(new) or _service_rank(alt, stop_of, req.config)  # type: ignore[arg-type]
+                                    > _service_rank(new, stop_of, req.config)):  # type: ignore[arg-type]
+            log.info("run=%s hire check: %s put back on the trucks kept, in place of lower priorities where need be, "
+                     "after the give-back of %s", req.run_id, sorted(solvable[k].stop_id for k in put), sorted(gone))
+            new = alt
+    except Exception as exc:  # noqa: BLE001 - the give-back stays as it is
+        log.warning("run=%s hire check: putting the stops of %s back on the trucks kept failed: %s", req.run_id, sorted(gone), exc)
     if not _passes_checks(new):
         log.warning("run=%s hire check: the plan without %s does not pass the checks; kept", req.run_id, sorted(gone))
         return sc
@@ -2681,7 +2788,10 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     carried all 25 P1-P3 orders left out - the second only P4/P5 orders).
 
     1. With no solve, every rented truck whose loads carry no P1-P3 stop is given back (_without_low_hires;
-       owner answer 1: P4/P5 orders never justify a truck).
+       owner answer 1: P4/P5 orders never justify a truck). A stop of theirs that outranks a stop the
+       trucks kept carry goes back on them, in place of such stops where need be (_swap_riders; tenth
+       review: the give-back left a P4 order out while the truck kept carried two P5 orders in its room).
+       Every give-back below is this one.
     2. Every set of the trucks to rent (units of one option are alike; the request's units each option
        has) cheaper in real money than the plan's (hire_money; with as much money, fewer trucks), with as
        many trucks as it takes, is tried cheapest first, with fewer trucks first on a tie (seventh review:
@@ -2692,7 +2802,9 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
        ruled out by its room (_hire_room_short); any other is solved with exactly the own trucks and that
        set (_hire_trial). The first plan that passes every check (OPTIMIZED, feasibility VERIFIED, its load
        re-check run) and delivers every P1-P3 stop the plan delivers - its P4/P5 stops may stay out - is
-       the suggestion (once more without its trucks that then carry only P4/P5 orders). A solve whose load
+       the suggestion (once more without its trucks that then carry only P4/P5 orders) - unless such a
+       truck cannot be given back while the plan held has none (tenth review: that plan, renting a truck
+       for P5 orders alone, was the suggestion, "complete"): the walk then goes on. A solve whose load
        re-check was skipped neither replaces the plan nor rules its set out. At most HIRE_REDUCE_MAX_SETS
        sets are listed.
     3. When trucks were given back (step 1, or the plan of step 2), the set left is solved exactly once
@@ -2709,11 +2821,15 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     4. "One truck fewer" (HireCheck.one_fewer) is a solve of the suggested set less one of its trucks: the
        one whose removal lost the fewest P1-P3 stops, then the dearest; when the solves so far hold none for
        its least useful truck (the least room, _hire_room), that set is solved once more if the limits
-       allow.
+       allow. When that solve passes every check and keeps every P1-P3 stop, it proves the cheaper set:
+       its plan (given back as in step 2) is the suggestion (tenth review: it was thrown away), and "one
+       truck fewer" is then told from the solves so far only.
 
-    ``complete``: every cheaper set was ruled out (by its room, or a checked solve that lost a P1-P3 stop or
-    failed the checks), every cheaper set was listed, and no solve showed a cheaper set it could not
-    give (step 3). At most HIRE_REDUCE_MAX_SOLVES solves within
+    ``complete``, worked out for the set suggested: every cheaper set was listed and ruled out (by its room,
+    or a checked solve of it or a set alike that lost a P1-P3 stop or failed the checks); no plan a solve
+    proved had cheaper trucks for P1-P3 orders and a truck for P4/P5 orders alone it could not give back
+    (steps 2-4); and the suggestion rents no truck for P4/P5 orders alone (a give-back that could not be
+    built: tenth review). At most HIRE_REDUCE_MAX_SOLVES solves within
     _hire_reduce_window (and the request's budget); each starts only with room for its load re-check
     (_hire_trial_limit). A stop request ("use the best plan found so far") ends it, a cancel raises
     SolveAborted. Deterministic in its choices."""
@@ -2810,26 +2926,41 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
                                      lost=len(must - _served_of(sc)) if ok else 10**9))
         return None
 
-    complete = listed <= HIRE_REDUCE_MAX_SETS  # past the bound a cheaper set may not have been listed
+    def low(sc: DispatchScenario) -> set[str]:
+        return _low_hires(sc, set(hires), high)
+
+    # The trucks for P1-P3 orders of each plan a solve proved whose trucks for P4/P5 orders alone could
+    # not be given back (_without_low_hires failed): that set may be cheaper than the one suggested.
+    unbuilt: list[tuple[float, int]] = []
+
+    def not_given(ids: tuple[str, ...], step: str, new: DispatchScenario) -> None:
+        p1_3 = [t for t in _rented_of(new, set(hires)) if t not in low(new)]
+        unbuilt.append((price(p1_3), len(p1_3)))
+        log.warning("run=%s hire check: the plan of %s (%s) still rents %s for P4/P5 orders alone (its give-back "
+                    "could not be built); not the suggestion", req.run_id, list(ids), step, sorted(low(new)))
+
     broken = False  # a solve could not run (no worker processes, it failed): no more solves
     for ids in cands:
         if _hire_room_short(tds, set(ids), must_stops):
             continue  # ruled out by its room alone
         got = solve(ids)
         if got is None or got[0] is None:
-            complete = False  # out of solves or time, or it could not run: the set found stays
-            broken = got is not None
+            broken = got is not None  # out of solves or time, or it could not run: the set found stays
             break
         sc = judge(ids, got)
-        if sc is not None:
-            log.info("run=%s hire check: %s delivers every P1-P3 stop (%s before, %.0f -> %.0f OMR)", req.run_id,
-                     list(ids), current, price(current), price(ids))
-            best = _without_low_hires(req, solvable, mx, drops, sc, set(hires), high)
-            given = sc
-            current = _rented_of(best, set(hires))
-            break
-        if not got[1]:
-            complete = False  # no load re-check: neither kept nor ruled out
+        if sc is None:
+            continue  # it lost a P1-P3 stop or failed the checks; or no load re-check: neither kept nor ruled out
+        new = _without_low_hires(req, solvable, mx, drops, sc, set(hires), high)
+        if low(new) and not low(best):
+            # A truck for P4/P5 orders alone (owner answer 1) is never suggested while a plan without one
+            # is at hand (tenth review: this plan was, and called complete).
+            not_given(ids, "the cheapest set", new)
+            continue
+        log.info("run=%s hire check: %s delivers every P1-P3 stop (%s before, %.0f -> %.0f OMR)", req.run_id,
+                 list(ids), current, price(current), price(ids))
+        best, given = new, sc
+        current = _rented_of(best, set(hires))
+        break
 
     # 3. Trucks given back: the set left, solved - the P4/P5 orders they carried may ride along in the
     # trucks kept (owner answer 1; eighth review: the give-back alone left them out). Its plan replaces the
@@ -2846,36 +2977,56 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             kept = _rented_of(again, set(hires))
             cost, was = (price(kept), len(kept)), (price(current), len(current))
             rank = (_service_rank(again, stop_of, req.config), _service_rank(best, stop_of, req.config))
-            if _low_hires(again, set(hires), high):
+            if low(again):
                 # Its plan without them could not be built: its trucks for P1-P3 orders may be a cheaper
                 # set than the one kept, which is then not proven the cheapest.
-                complete = False
-                log.warning("run=%s hire check: %s solved again after the give-back still rents %s for P4/P5 orders "
-                            "alone; the give-back stays", req.run_id, list(ids), sorted(_low_hires(again, set(hires), high)))
+                not_given(ids, "solved again after the give-back", again)
             elif cost < was or (cost == was and rank[0] > rank[1]):
                 log.info("run=%s hire check: %s solved again after the give-back: %s at %.0f OMR (%.0f before), "
                          "served by priority %s -> %s", req.run_id, list(ids), kept, cost[0], was[0], rank[1], rank[0])
                 best = again
                 current = kept
 
-    # 4. One truck fewer than the suggested set, solved.
-    one: tuple[int, float, str, _HireTrial] | None = None
-    if len(current) >= 2:
-        def fewer(u: str) -> list[_HireTrial]:
-            """The checked solves of the suggested set less ``u`` (or a unit alike)."""
-            want = shape([t for t in current if t != u])
-            return [tr for tr in trials if shape(tr.offered) == want]
+    # 4. One truck fewer than the suggested set, solved. A plan of it that keeps every P1-P3 stop and
+    # passes every check proves that cheaper set: it is the suggestion (tenth review: it was thrown away).
+    def fewer(u: str) -> list[_HireTrial]:
+        """The checked solves of the suggested set less ``u`` (or a unit alike) - each lost a P1-P3 stop or
+        failed the checks (a solve that did neither is the suggestion)."""
+        want = shape([t for t in current if t != u])
+        return [tr for tr in trials if shape(tr.offered) == want]
 
+    if len(current) >= 2 and not broken:
         least = min(current, key=lambda u: (room.get(u, 0), -money.get(u, 0.0), u))
-        if not fewer(least) and not broken:
+        if not fewer(least):
             rest = tuple(t for t in current if t != least)
             got = solve(rest)
-            if got is not None and got[0] is not None:
-                judge(rest, got)
+            if got is not None and got[0] is not None and (sc := judge(rest, got)) is not None:
+                new = _without_low_hires(req, solvable, mx, drops, sc, set(hires), high)
+                if low(new) and not low(best):
+                    not_given(rest, "one truck fewer", new)
+                else:
+                    log.info("run=%s hire check: one truck fewer, %s, delivers every P1-P3 stop (%.0f -> %.0f OMR)",
+                             req.run_id, list(rest), price(current), price(_rented_of(new, set(hires))))
+                    best = new
+                    current = _rented_of(best, set(hires))
+    one: tuple[int, float, str, _HireTrial] | None = None
+    if len(current) >= 2:
         for u in current:
             tr = next((t for t in fewer(u) if t.sc is not None), None)
             if tr is not None and (one is None or (tr.lost, -money.get(u, 0.0), u) < one[:3]):
                 one = (tr.lost, -money.get(u, 0.0), u, tr)
+
+    # Complete: the set suggested is proven the cheapest - every set cheaper than it was listed and ruled
+    # out by its room or by a checked solve (of it or a set alike) that lost a P1-P3 stop or failed the
+    # checks; no plan a solve proved has cheaper trucks for P1-P3 orders whose give-back could not be
+    # built; and it rents no truck for P4/P5 orders alone (tenth review: such a plan was "complete").
+    final = (price(current), len(current))
+    complete = (listed <= HIRE_REDUCE_MAX_SETS and not low(best) and not any(u < final for u in unbuilt)
+                and all(_hire_room_short(tds, set(ids), must_stops) or any(shape(tr.offered) == shape(ids) for tr in trials)
+                        for ids in cands if (price(ids), len(ids)) < final))
+    if low(best):
+        log.warning("run=%s hire check: the suggestion still rents %s for P4/P5 orders alone (its give-back could not "
+                    "be built); not complete", req.run_id, sorted(low(best)))
     check = HireCheck(
         first=first,
         used=sorted(current),
