@@ -107,6 +107,8 @@ export interface TruckFacts {
   availableFromMin: number | null;
   availableToMin: number | null;
   maxTripsPerDay: number | null;
+  /** A truck hired for the day (the hire suggestion): its casual driver's day rate (owner answer 4); absent = paid by the hour. */
+  driverDayCost?: number | null;
   /**
    * Pallets (owner decision 4 Oct 2026), on a truck with bays only: its bays, the company's Pallet
    * fill and the room they give (bays x fill x 10, in 1/1000 pallet) as planned. In a load's snapshot
@@ -150,6 +152,8 @@ export interface PlanSettings {
   maxTripsPerTruck: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
+  /** A truck hired for the day pays its casual driver this per day (owner answer 4); absent on settings stored before it. */
+  dailyDriverDayRate?: number;
   overtimeAfterMin: number;
   overtimeCostPerHour: number;
   prefWindowPenaltyPerMin: number;

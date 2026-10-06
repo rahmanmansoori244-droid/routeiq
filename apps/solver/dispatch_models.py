@@ -139,12 +139,18 @@ class DispatchTruck(BaseModel):
     # limit. None (an older web, or a truck without bays): planned by cases, exactly as before.
     bays: int | None = Field(default=None, ge=1, le=40)
     # A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
-    # what-if; never a truck already hired): fixed_cost is its hire for the day. The search adds a
-    # premium to a rented truck's day cost (dispatch_solver.hire_premium), so every own truck is used
-    # before any rented one and, between rented trucks, the hire counts in real money with the km,
-    # while a stop left out still costs more than any hire; the reported costs stay the real ones. Optional and additive: an older web
-    # never sends it.
+    # what-if; never a truck already hired): fixed_cost is its hire for the day, fuel included (its
+    # cost_per_km is the option's own charge, 0 by default; no km_per_litre). The search ranks it in
+    # the HIRE TIER (dispatch_solver._service_and_hire): above every P4/P5 order together and below one
+    # P1-P3 order, in proportion to its real money (hire + driver_day_cost) - so every own truck goes
+    # first, the cheapest set of rented trucks wins and P4/P5 orders alone never rent one; the reported
+    # costs stay the real ones. Optional and additive: an older web never sends it.
     hire_candidate: bool = False
+    # A driver paid by the DAY (owner answer 6 Oct 2026: a rented truck's casual driver, the company's
+    # "Daily driver day rate"): this many OMR per truck day, fixed - paid with the truck day's first new
+    # load (a truck with frozen loads paid it with them) - instead of config.driver_cost_per_hour and
+    # overtime. None: the company's hourly driver cost, as before. Optional and additive.
+    driver_day_cost: float | None = Field(default=None, ge=0, le=1000)
 
 
 class DispatchStop(BaseModel):

@@ -1421,7 +1421,9 @@ def test_web_setting_bounds_lie_inside_the_solver_contract():
                 continue
             for v in (spec["min"], spec["max"]):
                 v = int(v) if spec.get("int") else float(v)
-                if section == "config":
+                if field.startswith("truck."):  # a company setting sent on each truck (the driver's day rate)
+                    DispatchTruck(**{"id": "t", "capacity_cases": 10, field[len("truck."):]: v})
+                elif section == "config":
                     DispatchConfig(**{field: v})
                 elif section == "truck":
                     DispatchTruck(**{"id": "t", "capacity_cases": 10, field: v})

@@ -147,8 +147,9 @@ export type TruckInput = z.infer<typeof truckSchema>;
 /**
  * A truck the company can rent for a day (owner request 6 Oct 2026, the hire suggestion), per depot,
  * company admin. Bays (pallet positions) or a case capacity; payload 0 = no weight limit; the hire for
- * one day; OMR per km with fuel (empty = the depot's fleet average); at most maxPerDay a day. The same
- * bounds as a truck's (and the database CHECK of migration 20261006120000).
+ * one day, fuel included; the rental's own charge per km if it has one (empty = none; owner answer 3);
+ * at most maxPerDay a day. The same bounds as a truck's (and the database CHECK of migration
+ * 20261006120000).
  */
 const hireOptionFields = z.object({
   depotId: z.string().min(1, 'Depot is required'),
@@ -359,6 +360,8 @@ export const tenantConfigSchema = z
     fuelPricePerLitre: bounded(CONFIG_BOUNDS.fuelPricePerLitre),
     driverCostPerHour: bounded(CONFIG_BOUNDS.driverCostPerHour),
     overtimeCostPerHour: bounded(CONFIG_BOUNDS.overtimeCostPerHour),
+    // Owner answer 4 (6 Oct 2026): the casual driver of a truck hired for the day, per day. Company admin.
+    dailyDriverDayRate: bounded(CONFIG_BOUNDS.dailyDriverDayRate),
     prefWindowPenaltyPerMin: bounded(CONFIG_BOUNDS.prefWindowPenaltyPerMin),
     // Distances
     distanceProvider: z.enum([DistanceProvider.OSRM, DistanceProvider.HAVERSINE]),

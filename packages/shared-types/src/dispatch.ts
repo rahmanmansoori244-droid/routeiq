@@ -71,10 +71,18 @@ export interface DispatchTruck {
   bays?: number | null;
   /**
    * A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
-   * what-if; never a truck already hired): fixed_cost is its hire. The search weighs its day cost more,
-   * so own trucks go first and the cheapest set of rented trucks wins; the plan reports the real costs.
+   * what-if; never a truck already hired): fixed_cost is its hire, fuel included. The optimizer ranks it
+   * in a hire tier between the P1-P3 and the P4/P5 stops, in proportion to its real money (hire +
+   * driver_day_cost): own trucks go first, the cheapest set of rented trucks wins, P4/P5 stops alone
+   * never rent one; the plan reports the real costs.
    */
   hire_candidate?: boolean;
+  /**
+   * A driver paid by the DAY (owner answer 6 Oct 2026: a rented truck's casual driver, the company's
+   * daily driver day rate): this many OMR per truck day, fixed, instead of driver_cost_per_hour and
+   * overtime. Absent / null: paid by the hour. Solvers without the field pay every driver by the hour.
+   */
+  driver_day_cost?: number | null;
 }
 
 export interface DispatchStop {

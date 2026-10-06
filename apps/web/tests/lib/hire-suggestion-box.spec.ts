@@ -48,7 +48,9 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-const view = (extra: Partial<HireView> = {}): HireView => ({ options: 2, short: true, canCheck: true, dayOver: false, checkExpected: false, skipNote: null, suggestion: null, ...extra });
+const view = (extra: Partial<HireView> = {}): HireView => ({
+  options: 2, short: true, canCheck: true, dayOver: false, checkExpected: false, skipNote: null, lowLeftOut: 0, lowNote: null, suggestion: null, ...extra,
+});
 const suggestion = (extra: Partial<NonNullable<HireView['suggestion']>> = {}): NonNullable<HireView['suggestion']> => ({
   id: 'HS1', status: 'SUCCEEDED', trigger: 'AFTER_PLAN', message: null, createdAt: '', finishedAt: null, usedAt: null, usedRunId: null,
   headline: '2 orders (160 cases) cannot be delivered with your fleet. To deliver them, hire 1 x 10-ton (12 bays): extra about 50 OMR. Still left out: none.',
@@ -117,6 +119,31 @@ describe('the Hire suggestion box', () => {
     answers.reads = 0;
     const v = await mount(false);
     expect(v.text()).toMatch(/Stopped so that a dispatcher's optimization could start at once\. A dispatcher can check again\./);
+  });
+
+  it('a viewer never reads "press Check hire options", also mid-sentence and lowercase (review)', async () => {
+    // Review of the hire branch: the not-backed texts say "... stayed unused - press Check hire options
+    // to search again." in lowercase, which the case-sensitive filter let through to a viewer.
+    const headline =
+      '2 orders (160 cases, 2.4 pallets) cannot be delivered with your fleet. The hire check placed none of them although trucks you can rent stayed unused - press Check hire options to search again.';
+    answers.list = [{ ok: true, view: view({ suggestion: suggestion({ headline, usable: false, summary: { status: 'NO_HELP', hires: [] } as never }) }) }];
+    const v = await mount(false);
+    expect(v.text()).not.toMatch(/press Check hire options/i);
+    expect(v.text()).toMatch(/stayed unused\. A dispatcher can check again\./);
+    // Someone with the button reads it as it is.
+    answers.reads = 0;
+    const b = await mount(true);
+    expect(b.text()).toMatch(/stayed unused - press Check hire options to search again\./);
+  });
+
+  it('only P4/P5 orders left out: the box says plainly that renting is not suggested for them, with no button (owner answer 1)', async () => {
+    answers.list = [{ ok: true, view: view({ short: false, lowLeftOut: 3, lowNote: 'Left out: 3 orders, all P4/P5 - renting is not suggested for them.' }) }];
+    const b = await mount();
+    expect(b.text()).toMatch(/Hire suggestion/);
+    expect(b.text()).toMatch(/Left out: 3 orders, all P4\/P5 - renting is not suggested for them\./);
+    expect(b.button('Check hire options')).toBeFalsy();
+    expect(b.button('Use this plan')).toBeFalsy();
+    expect(polls.length).toBe(0);
   });
 
   it('a suggestion computed for another plan option is not offered; an option that leaves nothing out shows no box', async () => {

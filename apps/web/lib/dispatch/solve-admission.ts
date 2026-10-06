@@ -48,7 +48,9 @@
  *   MAX_CONCURRENT_DISPATCH=3, once its CPUs are known).
  *
  * - Background solves (the hire suggestion's what-if, owner request 6 Oct 2026; reserveBackground):
- *   never counted against the hourly quotas, at most one waiting per company, and they never hold up
+ *   never counted against the hourly quotas, at most one waiting per key - the hire check's depot-day
+ *   (review of the hire branch: one per company lost the third depot's check of a company optimizing
+ *   three depots in quick succession) - and BACKGROUND_TENANT_WAITING per company, and they never hold up
  *   a dispatcher: a waiting background solve starts only after every dispatcher's solve that can
  *   start, and a dispatcher's solve that does not fit because of running background solves takes
  *   their slots at once (preempted: the background solve's onPreempt cancels its optimizer call,
@@ -142,6 +144,9 @@ export interface AdmissionDenied {
  */
 export const PREEMPT_SETTLE_WINDOW_MS = 60_000;
 
+/** Background solves (hire checks) of one company waiting at most, over all its depot-days. */
+export const BACKGROUND_TENANT_WAITING = 5;
+
 export interface SolveTicket {
   readonly tenantId: string;
   readonly userId: string;
@@ -190,6 +195,8 @@ interface TicketState {
   promise: Promise<void>;
   /** A background solve (the hire suggestion's what-if): no quota, never ahead of a dispatcher's solve. */
   background: boolean;
+  /** A background solve's key (the hire check's depot-day): one of each may wait. */
+  bgKey?: string;
   preempted: boolean;
   preemptedOthers: boolean;
   mayMeetBusy: boolean;
@@ -290,15 +297,19 @@ export class SolveAdmission {
   /**
    * Reserve a background solve (the hire suggestion's what-if, QUICK): not counted against the hourly
    * quotas, started when a slot is free and no dispatcher's solve that can start waits for it, at most
-   * one waiting per company (more: 503, the what-if is not computed). A dispatcher's solve that needs
-   * its slot takes it: the ticket is then released and `onPreempt` is called (cancel the solve).
+   * one waiting per `key` (the hire check's depot-day; default the company) and BACKGROUND_TENANT_WAITING
+   * per company (more: 503, the what-if is not computed). A dispatcher's solve that needs its slot takes
+   * it: the ticket is then released and `onPreempt` is called (cancel the solve).
    */
-  reserveBackground(tenantId: string, userId: string, onPreempt: () => void): AdmissionResult {
+  reserveBackground(tenantId: string, userId: string, onPreempt: () => void, key: string = tenantId): AdmissionResult {
     const fits =
       this.fitsNow({ tenantId, mode: 'QUICK', background: true }, this.running) && !this.queue.some((q) => !q.background && this.fitsNow(q, this.running));
     if (!fits) {
-      const mineWaiting = this.queue.filter((q) => q.background && q.tenantId === tenantId).length;
-      if (mineWaiting >= 1 || this.queue.length >= this.limits.maxQueue) {
+      // One waiting per `key` (the hire check's depot-day; review of the hire branch: one per company lost
+      // the third depot's check when a company optimized three depots in quick succession), and at most
+      // BACKGROUND_TENANT_WAITING per company, so one company's checks never fill the shared queue.
+      const bg = this.queue.filter((q) => q.background && q.tenantId === tenantId);
+      if (bg.some((q) => q.bgKey === key) || bg.length >= BACKGROUND_TENANT_WAITING || this.queue.length >= this.limits.maxQueue) {
         return this.deny(503, 'SOLVER_BUSY', 'The route optimizer is busy with other plans, so the hire check did not run.', 120);
       }
     }
@@ -315,6 +326,7 @@ export class SolveAdmission {
       resolve,
       promise,
       background: true,
+      bgKey: key,
       preempted: false,
       preemptedOthers: false,
       mayMeetBusy: false,

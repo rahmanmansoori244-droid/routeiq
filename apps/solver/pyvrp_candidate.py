@@ -294,8 +294,11 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     loc_node = [0] + [0] * R + list(range(1, n + 1))  # location -> engine matrix node
 
     use_margin = cfg.use_margin and all(s.margin is not None for s in solvable)
-    values, _ = ds._service_values(solvable, cfg, use_margin)
-    prizes = ds._drop_penalties(values, w)
+    # Trucks to rent (the hire suggestion): their hire tier, ranked between the P1-P3 and the P4/P5
+    # stops as in the engine (dispatch_solver._service_and_hire), on top of their day cost.
+    values, _, tier = ds._service_and_hire(solvable, cfg, use_margin, req.trucks)
+    prizes = ds._drop_penalties(values, w, sum(tier.values())) if tier else ds._drop_penalties(values, w)
+    hire_mult = ds._penalty_mult(values, w, sum(tier.values())) if tier else 1
     kg_dem = [kg_units(s.demand_kg) for s in solvable]
     kg_active = any(td.max_kg_units > 0 for td in vehicles) and any(kg_dem)
     # Space: cases when a usable truck has no bays, pallet units when one has bays (both in a mixed
@@ -334,13 +337,15 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     ot_coeff = int(round(cfg.overtime_cost_per_hour * ds.COST_SCALE / 3600.0)) if cfg.overtime_after_min is not None else 0
     shift_s = cfg.shift_max_min * 60
     no_kg = sum(kg_dem) + 1  # a truck without a payload: the engine's own "unlimited"
-    hp = ds.hire_premium(req)  # trucks to rent (the hire suggestion): their search premium, as in the engine
     groups: dict[tuple, list] = {}
     for td in vehicles:
         t = td.truck
         km_key = int(round(ds._km_rate_omr(t, cfg) * w.distance * ds.COST_SCALE / 1000.0 * 1000))
         trip_units = int(round(t.trip_cost * w.trip * ds.COST_SCALE))
-        fixed = ((t.fixed_cost + ds.hire_extra_omr(t, hp)) * w.fixed if td.n_frozen == 0 else 0.0) + t.trip_cost * w.trip
+        # As the engine prices it: the day cost, a day-rate driver's pay, the first load, the hire tier.
+        fixed_u = ds._vehicle_fixed_units(td, w, tier.get(t.id, 0) * hire_mult)
+        # A driver paid by the day: no pay per second, no overtime on this truck.
+        by_day = t.driver_day_cost is not None
         gap = ds._approx_gap_s(cfg, td)
         first = td.earliest_depart_s if td.ready_s is None else max(td.earliest_depart_s, td.ready_s + gap)
         kg_cap = (td.max_kg_units if td.max_kg_units > 0 else no_kg) if kg_active else None
@@ -351,8 +356,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
         # Driver break: as in the engine's search, a DUE truck-day keeps the break's length free of
         # its shift (span and latest return); the exact timing places the break afterwards.
         end_s, span_s = ds._search_day_end(td, first, shift_s)
-        key = (tuple(space), kg_cap, km_key, trip_units, int(round(fixed * ds.COST_SCALE)), min(first, td.latest_return_s),
-               end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None)
+        key = (tuple(space), kg_cap, km_key, trip_units, fixed_u, min(first, td.latest_return_s),
+               end_s, td.trips_left, td.shift_anchor_s, td.frozen_return_s, gap, span_s, t.id if continuity else None, by_day)
         groups.setdefault(key, []).append(td)
 
     prof_of: dict[tuple, int] = {}
@@ -360,7 +365,7 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     vtypes: list[dict] = []
     type_trucks: list[list[int]] = []
     for key, members in groups.items():
-        space, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id = key
+        space, kg_cap, km_key, trip_units, fixed_u, tw_e, tw_l, trips_left, anchor, _frozen_ret, gap, span_s, cont_id, by_day = key
         pkey = (km_key, trip_units, cont_id)
         if pkey not in prof_of:
             M = np.rint(D * km_key / 1000.0).astype(np.int64)  # the engine: int(round(d * key / 1000)) per arc
@@ -375,7 +380,7 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
             prof_of[pkey] = len(dist)
             dist.append(full)
         if anchor is None:  # the longest route: the shift maximum (less a DUE truck's break)
-            if ot_coeff and cfg.overtime_after_min is not None and cfg.overtime_after_min * 60 < span_s:
+            if ot_coeff and not by_day and cfg.overtime_after_min is not None and cfg.overtime_after_min * 60 < span_s:
                 nominal, max_ot = cfg.overtime_after_min * 60, span_s - cfg.overtime_after_min * 60
             else:
                 nominal, max_ot = span_s, 0
@@ -385,14 +390,14 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
             # route start.
             span = max(0, tw_l - tw_e)
             bound = LR.overtime_bound_s(members[0], cfg.overtime_after_min * 60) if cfg.overtime_after_min is not None else None
-            if ot_coeff and bound is not None:
+            if ot_coeff and not by_day and bound is not None:
                 nominal = int(min(span, max(0, bound - tw_e)))
                 max_ot = span - nominal
             else:
                 nominal, max_ot = span, 0
         vtypes.append(dict(num_available=len(members), capacity=list(space) + ([int(kg_cap)] if kg_cap is not None else []),
                            fixed_cost=int(fixed_u), tw_early=int(tw_e), tw_late=int(tw_l), shift_duration=int(nominal),
-                           max_overtime=int(max_ot), unit_duration_cost=int(time_coeff),
+                           max_overtime=int(max_ot), unit_duration_cost=0 if by_day else int(time_coeff),
                            unit_overtime_cost=int(ot_coeff) if max_ot else 0, profile=prof_of[pkey],
                            reload_depots=[reload_of_gap[gap]] if trips_left > 1 else [],
                            max_reloads=max(0, int(trips_left) - 1)))

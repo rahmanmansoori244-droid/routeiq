@@ -248,6 +248,10 @@ model TenantConfig {
   driverBreakFromMin      Int     @default(720)
   driverBreakToMin        Int     @default(840)
   overtimeCostPerHour     Float   @default(0)
+  // Owner answer 4 (6 Oct 2026): the casual driver of a truck hired for the day (the hire suggestion) is
+  // paid this per day (OMR), fixed, instead of driverCostPerHour and overtime; own trucks keep theirs. A
+  // rough 10 OMR until the owner sets it (company admin, Settings). 0-1000 (database CHECK).
+  dailyDriverDayRate      Float   @default(10)
   prefWindowPenaltyPerMin Float   @default(0.05)
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
   splitDeliveries         Boolean @default(true) // customers bigger than the largest truck are delivered in parts
@@ -451,7 +455,8 @@ model HireOption {
   payloadKg     Float    @default(0)
   /// The hire for one day (OMR): the rented truck's fixed cost per day.
   costPerDay    Float
-  /// OMR per km, fuel included; null = the depot's fleet average (cost per km + fuel).
+  /// The rental's own charge per km (OMR), if it has one; null = none (0). Fuel is in the hire (owner
+  /// answer 3, 6 Oct 2026): a rented truck never costs fuel or the fleet's km rate.
   costPerKm     Float?
   /// How many of this truck the company can rent on one day (1-10).
   maxPerDay     Int      @default(1)

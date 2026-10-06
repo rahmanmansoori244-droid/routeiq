@@ -1,8 +1,9 @@
 /**
  * The hire suggestion's "Use this plan" (owner request 6 Oct 2026), PLANNER and above. Server only.
  *
- * 1. The suggestion must be finished, rent at least one truck, never used, and its plan version must
- *    still be the one in use (not optimizing), for a day that is not over.
+ * 1. The suggestion must be finished, rent at least one truck, never used, computed for the plan option
+ *    in use (HIRE_OTHER_OPTION otherwise), and its plan version must still be the one in use (not
+ *    optimizing), for a day that is not over.
  * 2. The day is read again as a re-plan would read it. When nothing changed since the what-if was
  *    computed (the same orders, stops, own trucks and their locked or dispatched loads, settings, hire
  *    options and trucks already rented; a plan made on its delivery day not more than
@@ -174,6 +175,8 @@ async function rentTrucks(
           capacityWeightKg: o.payloadKg,
           capacityVolumeL: 0,
           fixedCostPerDay: o.costPerDay,
+          // Fuel is in the hire (owner answer 3): only the rental's own km charge, no km per litre. Its
+          // driver is paid the company's day rate whenever it is planned (hire.ts hiredTruckDriver).
           costPerKm: t.cost_per_km ?? 0,
           tripCost: t.trip_cost ?? 0,
           kmPerLitre: null,
@@ -277,6 +280,12 @@ export async function applyHireSuggestion(
   }
   if (run.status === 'OPTIMIZING' || (await prisma.runJob.count({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } }))) {
     return refuse(409, 'OPTIMIZING', 'An optimization is running for this plan. Wait for it to finish.');
+  }
+  // Review of the hire branch: another plan option was chosen since the check ("Use instead"): its
+  // what-if, its "dropped" orders and its counts were for the option it was computed for - never applied
+  // to the option in use (a screen opened before still offered the button).
+  if (basis.scenarioId && basis.scenarioId !== run.chosenScenarioId) {
+    return refuse(409, 'HIRE_OTHER_OPTION', 'This hire suggestion was computed for another plan option than the one in use. Check hire options again.');
   }
   // Review of the hire branch: a day that is over gets no truck and no new plan version.
   if (isoOf(run.runDate) < (await companyToday(tenantId))) return refuse(409, 'DAY_OVER', DAY_OVER_TEXT);

@@ -9,7 +9,9 @@
  * Review of the hire branch: it says "Checking which trucks to hire" only while a check runs or is on
  * its way (HireView.checkExpected), keeps polling after a failed read, hides itself for a plan option
  * that leaves nothing out, never offers a suggestion computed for another option, and names one button
- * ("Check hire options") in every text - the instruction only to someone who has the button.
+ * ("Check hire options") in every text - the instruction only to someone who has the button (forViewer).
+ * Only P1-P3 orders justify renting (owner answer 1, 6 Oct 2026): when only P4/P5 orders are left out the
+ * box says "Left out: N orders, all P4/P5 - renting is not suggested for them." and offers nothing.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, RefreshCw, Truck } from 'lucide-react';
@@ -35,9 +37,18 @@ interface Props {
   onUsed: (newRunId: string) => void | Promise<void>;
 }
 
-/** A server text that tells to press the button, for someone who does not have it. */
-function forViewer(text: string, canAct: boolean): string {
-  return canAct ? text : text.replace(/\s*Press Check hire options[^.]*\./g, ' A dispatcher can check again.');
+/**
+ * A server text that tells to press the button, for someone who does not have it - a sentence of its own
+ * ("Press Check hire options to run it again.") or its end ("... stayed unused - press Check hire options
+ * to search again."), in any case (review of the hire branch: the lowercase mid-sentence form reached
+ * viewers).
+ */
+export function forViewer(text: string, canAct: boolean): string {
+  if (canAct) return text;
+  return text
+    .replace(/\s+-\s+press Check hire options[^.]*\./gi, '. A dispatcher can check again.')
+    .replace(/\s*\bpress Check hire options[^.]*\./gi, ' A dispatcher can check again.')
+    .trim();
 }
 
 export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, expect, canEditProducts, onUsed }: Props) {
@@ -74,8 +85,18 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
 
   if (!view) return null;
   const s = view.suggestion;
-  // A plan option that leaves nothing out for the fleet: no box (a check still running aside).
-  if (!view.short && !running) return null;
+  // A plan option that leaves no P1-P3 order out for the fleet: no suggestion (a check still running
+  // aside) - only P4/P5 orders left out are said plainly (owner answer 1, 6 Oct 2026), with no button.
+  if (!view.short && !running) {
+    return view.lowNote ? (
+      <div className="space-y-1 rounded-md border border-slate-300 bg-slate-50 p-3 text-sm" data-testid="hire-suggestion">
+        <p className="flex items-center gap-2 font-medium">
+          <Truck className="h-4 w-4 shrink-0" /> Hire suggestion
+        </p>
+        <p data-testid="hire-low-only">{view.lowNote}</p>
+      </div>
+    ) : null;
+  }
   const mayCheck = canPlan && !superseded && view.canCheck;
   if (!s && view.options === 0) {
     return canPlan && !superseded ? (
@@ -158,10 +179,13 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
         <Truck className="h-4 w-4 shrink-0" /> Hire suggestion
       </p>
       {!s ? (
-        <p data-testid="hire-idle">
-          {view.checkExpected ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> : null}
-          Orders are left out because the fleet cannot carry them.{idle}
-        </p>
+        <>
+          <p data-testid="hire-idle">
+            {view.checkExpected ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> : null}
+            Orders are left out because the fleet cannot carry them.{idle}
+          </p>
+          {view.lowNote ? <p className="text-xs text-slate-700">{view.lowNote}</p> : null}
+        </>
       ) : running ? (
         <p className="flex items-center gap-2" data-testid="hire-running">
           <Loader2 className="h-4 w-4 animate-spin" /> Checking which trucks to hire (Quick search, about a minute). Your plan stays as it is meanwhile.

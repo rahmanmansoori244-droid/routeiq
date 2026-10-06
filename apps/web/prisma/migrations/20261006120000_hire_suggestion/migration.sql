@@ -1,7 +1,14 @@
 -- The hire suggestion (owner request 6 Oct 2026): when the day's orders are more than the fleet can
--- carry, RouteIQ says which trucks to RENT ("hire 1 x 10-ton + 1 x 3-ton"). Additive: two new tables
--- and two nullable columns on "Truck"; no existing row needs a value, and NOTHING is seeded (a company
--- admin enters the company's own hire options on the Trucks page after the deploy).
+-- carry, RouteIQ says which trucks to RENT ("hire 1 x 10-ton + 1 x 3-ton"). Additive: two new tables,
+-- two nullable columns on "Truck" and one setting with a default on "TenantConfig"; no existing row needs
+-- a value, and NOTHING is seeded (a company admin enters the company's own hire options on the Trucks
+-- page after the deploy, and its daily driver day rate on Settings).
+
+-- AlterTable: the daily driver day rate (owner answer 4, 6 Oct 2026): the casual driver of a truck hired
+-- for the day is paid this per day (OMR), fixed, instead of the hourly driver cost and overtime; own
+-- trucks keep theirs. A rough 10 OMR for every company until its admin sets it.
+ALTER TABLE "TenantConfig" ADD COLUMN     "dailyDriverDayRate" DOUBLE PRECISION NOT NULL DEFAULT 10;
+ALTER TABLE "TenantConfig" ADD CONSTRAINT "TenantConfig_dailyDriverDayRate_range" CHECK ("dailyDriverDayRate" BETWEEN 0 AND 1000);
 
 -- AlterTable: a one-day truck ("Use this plan" rents it for one delivery date only; every plan of
 -- another day leaves it out and the janitor retires it once that day is over), and the hire option

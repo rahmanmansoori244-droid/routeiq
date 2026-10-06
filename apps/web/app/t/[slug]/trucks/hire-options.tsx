@@ -2,8 +2,9 @@
 
 /**
  * Trucks to hire (owner request 6 Oct 2026, the hire suggestion): the trucks a depot can rent for a
- * day - label, bays (or case capacity), payload (0 = no weight limit), cost per day, cost per km (empty
- * = the depot's fleet average, fuel included), max per day, active. Company admin edits; everyone with
+ * day - label, bays (or case capacity), payload (0 = no weight limit), cost per day (fuel included, owner
+ * answer 3 of 6 Oct 2026), the rental's own km charge if it has one (empty = none), max per day, active.
+ * The casual driver's day rate is a company setting (Settings). Company admin edits; everyone with
  * the Trucks page sees them. When a plan leaves orders out because the fleet cannot carry them, the
  * plan screen says which of these to rent.
  */
@@ -115,7 +116,8 @@ export function HireOptionsCard({ depots, canManage, currency }: { depots: { id:
           <CardTitle className="text-base">Trucks to hire</CardTitle>
           <p className="text-xs text-muted-foreground">
             The trucks each depot can rent for a day. When a plan leaves orders out because the fleet cannot carry them, the plan screen says which of these to hire and
-            what it costs. Cost per km empty = the depot&apos;s fleet average (fuel included).
+            what it costs. Fuel is included in the hire; enter a km charge only when the rental charges per km. Each hired truck&apos;s
+            driver is paid the daily driver day rate (Settings).
           </p>
         </div>
         {canManage && depots.length ? (
@@ -138,7 +140,7 @@ export function HireOptionsCard({ depots, canManage, currency }: { depots: { id:
                 <TableHead className="text-right">Bays / cases</TableHead>
                 <TableHead className="text-right">Payload (kg)</TableHead>
                 <TableHead className="text-right">Per day ({currency})</TableHead>
-                <TableHead className="text-right">Per km</TableHead>
+                <TableHead className="text-right">Km charge</TableHead>
                 <TableHead className="text-right">Max per day</TableHead>
                 <TableHead>Status</TableHead>
                 {canManage ? <TableHead className="w-[1%]" /> : null}
@@ -152,7 +154,7 @@ export function HireOptionsCard({ depots, canManage, currency }: { depots: { id:
                   <TableCell className="text-right tabular-nums">{o.bays !== null ? `${o.bays} bays` : `${o.capacityCases.toLocaleString()} cases`}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.payloadKg > 0 ? o.payloadKg.toLocaleString() : 'no limit'}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.costPerDay.toLocaleString()}</TableCell>
-                  <TableCell className="text-right tabular-nums">{o.costPerKm === null ? 'fleet average' : o.costPerKm}</TableCell>
+                  <TableCell className="text-right tabular-nums">{o.costPerKm === null ? 'none' : o.costPerKm}</TableCell>
                   <TableCell className="text-right tabular-nums">{o.maxPerDay}</TableCell>
                   <TableCell>{o.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Off</Badge>}</TableCell>
                   {canManage ? (
@@ -221,8 +223,8 @@ export function HireOptionsCard({ depots, canManage, currency }: { depots: { id:
               <Input id="ho-day" inputMode="decimal" value={form.costPerDay} onChange={(e) => set('costPerDay', e.target.value)} placeholder="50" required />
             </div>
             <div className="space-y-1">
-              <Label htmlFor="ho-km">Cost per km, fuel included</Label>
-              <Input id="ho-km" inputMode="decimal" value={form.costPerKm} onChange={(e) => set('costPerKm', e.target.value)} placeholder="empty: fleet average" />
+              <Label htmlFor="ho-km">Km charge of the rental ({currency} per km)</Label>
+              <Input id="ho-km" inputMode="decimal" value={form.costPerKm} onChange={(e) => set('costPerKm', e.target.value)} placeholder="empty: none (fuel is in the hire)" />
             </div>
             <div className="space-y-1">
               <Label htmlFor="ho-max">Max per day</Label>

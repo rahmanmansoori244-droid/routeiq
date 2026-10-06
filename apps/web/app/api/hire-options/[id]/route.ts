@@ -6,7 +6,7 @@ import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
 interface Params { params: { id: string } }
 
 // One truck the company can rent for a day (the hire suggestion): company admin. A field left out
-// stays as it is; null clears bays or the cost per km (= the depot's fleet average).
+// stays as it is; null clears bays or the rental's km charge (= none: fuel is in the hire).
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {

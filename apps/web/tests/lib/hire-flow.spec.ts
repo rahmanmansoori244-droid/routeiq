@@ -37,8 +37,8 @@ vi.mock('@/lib/dispatch/start-optimize', async (importOriginal) => ({
 import { callDispatchSolver, SolverError } from '@/lib/solver-client';
 import { applyScenario, buildDispatchRequest, createNextVersionTx, persistDispatchResult, type BuiltRequest } from '@/lib/dispatch/plan-service';
 import { replan, replanRefusal } from '@/lib/dispatch/start-optimize';
-import { basisFingerprint, cancelHireChecksOfDay, failLostHireChecks, hireView, retireOneDayTrucks, startHireCheck, startHireCheckAfterPlan, type HireBasis } from '@/lib/dispatch/hire-whatif';
-import { applyHireSuggestion } from '@/lib/dispatch/hire-use';
+import { basisFingerprint, cancelHireChecksOfDay, failLostHireChecks, hireCheckKey, hireView, retireOneDayTrucks, startHireCheck, startHireCheckAfterPlan, type HireBasis } from '@/lib/dispatch/hire-whatif';
+import { applyHireSuggestion, withRentedTrucks } from '@/lib/dispatch/hire-use';
 import { setHiredTruck } from '@/lib/dispatch/hired-truck';
 import { summarizeHire, virtualHireId } from '@/lib/dispatch/hire';
 import { solveAdmission } from '@/lib/dispatch/solve-admission';
@@ -63,6 +63,8 @@ function built(stops: DispatchStop[] = STOPS): BuiltRequest {
 
 function seed() {
   resetDb();
+  // The checks' start notes live in process memory (hire-whatif.ts hireStarts): none from another test.
+  (globalThis as { __routeiqHireStarts?: Map<string, unknown> }).__routeiqHireStarts?.clear();
   tables.tenantConfig = [{ id: 'cfg', tenantId: T, timezone: 'Asia/Muscat' }];
   tables.runPlan = [{ id: 'P1', tenantId: T, depotId: 'D1', runDate: DAY, status: 'READY', version: 1, chosenScenarioId: 'SC1', supersededAt: null }];
   tables.scenarioResult = [
@@ -142,9 +144,10 @@ describe('the what-if (startHireCheck)', () => {
     expect(sent.trucks.map((t) => t.id)).toEqual(['OWN', virtualHireId('o10', 1), virtualHireId('o10', 2), virtualHireId('o3', 1), virtualHireId('o3', 2)]);
     expect(sent.trucks.filter((t) => t.hire_candidate).length).toBe(4);
     expect(sent.config).toMatchObject({ scenarios: ['RECOMMENDED'], search_mode: 'QUICK', max_search_sec: null });
-    // The 10-ton is costed with the fleet's all-in km rate (0.1 + 0.26 / 3.5) and trip cost.
-    expect(sent.trucks[1]).toMatchObject({ fixed_cost: 50, trip_cost: 3, bays: 12 });
-    expect(sent.trucks[1]!.cost_per_km).toBeCloseTo(0.1 + 0.26 / 3.5, 4);
+    // Owner answers 3 and 4 (6 Oct 2026): fuel is in the hire - no km cost unless the option charges per
+    // km (the 3-ton: 0.2), never the fleet's - and the casual driver is paid the company's day rate.
+    expect(sent.trucks[1]).toMatchObject({ fixed_cost: 50, trip_cost: 3, bays: 12, cost_per_km: 0, km_per_litre: null, driver_day_cost: 10 });
+    expect(sent.trucks[3]).toMatchObject({ fixed_cost: 30, cost_per_km: 0.2, km_per_litre: null, driver_day_cost: 10 });
     expect(s.summaryJson).toMatchObject({ status: 'HIRE', hireCost: 80, leftOut: { orders: 2, cases: 900 }, stillLeft: { orders: 0 } });
     expect(s.message).toBe(
       '2 orders (900 cases, 9.0 pallets) cannot be delivered with your fleet. To deliver them, hire 1 x 10-ton (12 bays) + 1 x 3-ton (6 bays): extra about 80 OMR. Still left out: none.',
@@ -179,6 +182,47 @@ describe('the what-if (startHireCheck)', () => {
       { id: 'H4', tenantId: T, depotId: 'D1', code: 'x4', active: true, hired: true, onlyOnDate: DAY, hireOptionId: 'o3' },
     );
     expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'NO_UNITS' });
+  });
+
+  it("the trucks to rent carry the company's daily driver day rate (Settings)", async () => {
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built(), settings: { dailyDriverDayRate: 12.5 } as never }));
+    vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    await settled((r as { suggestionId: string }).suggestionId);
+    const sent = vi.mocked(callDispatchSolver).mock.calls[0]![0];
+    expect(sent.trucks.filter((t) => t.hire_candidate).map((t) => t.driver_day_cost)).toEqual([12.5, 12.5, 12.5, 12.5]);
+    expect(sent.trucks[0]!.driver_day_cost).toBeUndefined(); // an own truck keeps its hourly driver
+  });
+
+  it('only P4/P5 orders left out: no check, and the box says plainly that renting is not suggested for them (owner answer 1)', async () => {
+    const d = tables.scenarioResult![0]!.detailsJson as { scope: Record<string, unknown> };
+    d.scope = { orderPriority: { 'o-A': 3, 'o-B': 4, 'o-C': 5 } };
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    expect(r).toMatchObject({ started: false, reason: 'NOT_SHORT', message: 'Left out: 2 orders, all P4/P5 - renting is not suggested for them.' });
+    expect(callDispatchSolver).not.toHaveBeenCalled();
+    expect(tables.hireSuggestion ?? []).toEqual([]);
+    expect(await hireView(T, 'P1')).toMatchObject({ short: false, lowLeftOut: 2, lowNote: 'Left out: 2 orders, all P4/P5 - renting is not suggested for them.' });
+    // One P3 order among them: the check runs (it is for that order; the others may ride along).
+    d.scope = { orderPriority: { 'o-A': 3, 'o-B': 3, 'o-C': 5 } };
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => built([STOPS[0]!, STOPS[1]!, { ...STOPS[2]!, priority: 5 }]));
+    vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+    const r2 = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    expect(r2.started).toBe(true);
+    const s = await settled((r2 as { suggestionId: string }).suggestionId);
+    expect(s.summaryJson).toMatchObject({ status: 'HIRE', leftOut: { orders: 1 }, low: { leftOut: { orders: 1 } } });
+    expect(await hireView(T, 'P1')).toMatchObject({ short: true, lowLeftOut: 1 });
+  });
+
+  it('every order the plan left out is gone from the day (brought forward, say): no check, never "0 orders" (review)', async () => {
+    // B and C were carried to tomorrow: the day to plan has A only, and no new order.
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => built([STOPS[0]!]));
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    expect(r).toMatchObject({ started: false, reason: 'NOTHING_LEFT' });
+    expect((r as { message: string }).message).toMatch(/^Nothing is left out for lack of trucks any more/);
+    expect(callDispatchSolver).not.toHaveBeenCalled();
+    expect(tables.hireSuggestion ?? []).toEqual([]);
+    // The box stops offering the check for this plan.
+    expect(await hireView(T, 'P1')).toMatchObject({ short: false });
   });
 
   it('never two at once for a version; a new optimization of the day stops a running one', async () => {
@@ -250,7 +294,7 @@ describe('the what-if (review of the hire branch)', () => {
     seed();
     dispatcherSolve('tB');
     dispatcherSolve('tC');
-    const waiting = solveAdmission.reserveBackground(T, 'u', () => undefined);
+    const waiting = solveAdmission.reserveBackground(T, 'u', () => undefined, hireCheckKey('D1', DAY));
     expect(waiting.ok && waiting.ticket.waiting).toBe(true);
     if (waiting.ok) held.push(waiting.ticket);
     expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'BUSY' });
@@ -331,7 +375,11 @@ function finishedSuggestion(extra: Record<string, unknown> = {}) {
   const options = tables.hireOption!.filter((o) => o.active).map(({ id, label, bays, capacityCases, payloadKg, costPerDay, costPerKm, maxPerDay }) => ({ id, label, bays, capacityCases, payloadKg, costPerDay, costPerKm, maxPerDay }));
   const req: DispatchRequest = {
     ...b.request,
-    trucks: [...b.request.trucks, { id: virtualHireId('o10', 1), code: 'HIRE-10T-1', capacity_cases: 1140, bays: 12, fixed_cost: 50, cost_per_km: 0.17, trip_cost: 3, hire_candidate: true }, { id: virtualHireId('o3', 1), code: 'HIRE-3T-1', capacity_cases: 570, bays: 6, fixed_cost: 30, cost_per_km: 0.2, trip_cost: 3, hire_candidate: true }],
+    trucks: [
+      ...b.request.trucks,
+      { id: virtualHireId('o10', 1), code: 'HIRE-10T-1', capacity_cases: 1140, bays: 12, fixed_cost: 50, cost_per_km: 0, km_per_litre: null, trip_cost: 3, driver_day_cost: 10, hire_candidate: true },
+      { id: virtualHireId('o3', 1), code: 'HIRE-3T-1', capacity_cases: 570, bays: 6, fixed_cost: 30, cost_per_km: 0.2, km_per_litre: null, trip_cost: 3, driver_day_cost: 10, hire_candidate: true },
+    ],
   };
   const resp = answer(req);
   const basis: HireBasis = {
@@ -355,7 +403,7 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
     // HIRE-10T-0710-1 is taken (the 10-ton rented before): the next free number.
     expect(rented.map((t) => t.code).sort()).toEqual(['HIRE-10T-0710-2', 'HIRE-3T-0710-1']);
     expect(rented.find((t) => t.code === 'HIRE-10T-0710-2')).toMatchObject({
-      depotId: 'D1', hired: true, onlyOnDate: DAY, hireOptionId: 'o10', bays: 12, capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 50, costPerKm: 0.17, tripCost: 3, active: true,
+      depotId: 'D1', hired: true, onlyOnDate: DAY, hireOptionId: 'o10', bays: 12, capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 50, costPerKm: 0, kmPerLitre: null, tripCost: 3, active: true,
     });
     expect(vi.mocked(createNextVersionTx).mock.calls[0]!.slice(1)).toEqual([T, 'P1', 'REOPTIMIZE', 'Hire suggestion: 1 x 10-ton (12 bays) + 1 x 3-ton (6 bays)', 'u1']);
     const [, , runId, b, resp] = vi.mocked(persistDispatchResult).mock.calls[0]!;
@@ -422,6 +470,53 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
     expect(await applyHireSuggestion(T, 'P1', 'HS1', user, null, { expect: { date: '2099-10-08', depotId: 'D1' } })).toMatchObject({ status: 409, body: { code: 'DAY_MISMATCH' } });
     expect(await applyHireSuggestion('tB', 'P1', 'HS1', user, null)).toMatchObject({ status: 404 });
     expect(tables.truck!.length).toBe(2);
+  });
+
+  it('computed for another plan option than the one in use now: refused on the server too (review)', async () => {
+    // Review of the hire branch: another dispatcher chose MIN_TRUCKS ("Use instead") after the check;
+    // a screen opened before still offered Use this plan, and the server applied the check made for
+    // the other option - dropping orders the option in use delivers without the "dropped" protection.
+    finishedSuggestion();
+    tables.scenarioResult!.push({ ...tables.scenarioResult![0]!, id: 'SC9', name: 'MIN_TRUCKS' });
+    row('runPlan', 'P1').chosenScenarioId = 'SC9';
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r).toMatchObject({ status: 409, body: { code: 'HIRE_OTHER_OPTION' } });
+    expect(String(r.body.error)).toMatch(/another plan option.*Check hire options again/);
+    expect(tables.truck!.length).toBe(2);
+    expect(row('hireSuggestion', 'HS1').usedAt).toBeNull();
+    expect(persistDispatchResult).not.toHaveBeenCalled();
+    expect(replan).not.toHaveBeenCalled();
+  });
+
+  it('two options with the same size tag: each finding names its own rented truck (review)', () => {
+    // "10-ton curtain" and "10-ton box" both sent HIRE-10T-1: the first truck's code replaced both.
+    const b = built();
+    const whatIf: DispatchRequest = {
+      ...b.request,
+      trucks: [
+        ...b.request.trucks,
+        { id: virtualHireId('cur', 1), code: 'HIRE-10T-1', capacity_cases: 1140, bays: 12, fixed_cost: 50, hire_candidate: true },
+        { id: virtualHireId('box', 1), code: 'HIRE-10T-2', capacity_cases: 1140, bays: 12, fixed_cost: 55, hire_candidate: true },
+      ],
+    };
+    const resp = {
+      run_id: 'P1',
+      warnings: [],
+      scenarios: [
+        {
+          name: 'RECOMMENDED', loads: [], truck_days: [], warnings: ['HIRE-10T-2 is used for 2 loads'],
+          feasibility: { status: 'VIOLATED', violations: [{ code: 'TURNAROUND', truck_id: virtualHireId('box', 1), load_no: 2, message: 'HIRE-10T-2 L2 leaves too early' }] },
+        },
+      ],
+    } as unknown as DispatchResponse;
+    const made = new Map([
+      [virtualHireId('cur', 1), { id: 'T-CUR', code: 'HIRE-10T-0710-1' }],
+      [virtualHireId('box', 1), { id: 'T-BOX', code: 'HIRE-10T-0710-2' }],
+    ]);
+    const out = withRentedTrucks(whatIf, resp, made, b.request);
+    const v = out.response.scenarios[0]!.feasibility!.violations[0]!;
+    expect(v).toMatchObject({ truck_id: 'T-BOX', message: 'HIRE-10T-0710-2 L2 leaves too early' });
+    expect(out.response.scenarios[0]!.warnings).toEqual(['HIRE-10T-0710-2 is used for 2 loads']);
   });
 });
 

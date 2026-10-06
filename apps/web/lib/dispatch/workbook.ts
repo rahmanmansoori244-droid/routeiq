@@ -1075,6 +1075,8 @@ export interface AssumptionConfig {
   maxTripsPerTruck: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
+  /** Stored with a plan (PlanSettings): a truck hired for the day pays its casual driver this per day (owner answer 4). */
+  dailyDriverDayRate?: number;
   overtimeAfterMin: number;
   overtimeCostPerHour: number;
   prefWindowPenaltyPerMin: number;
@@ -1183,6 +1185,10 @@ export function tenantAssumptions(
       : `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)${
           rules === 'MIXED' ? '; loads kept from an earlier plan keep their earlier cost (time on the road only)' : ''
         }`,
+    // The hire suggestion (owner answers 3 and 4, 6 Oct 2026): a plan stored with the setting says it.
+    ...(typeof cfg.dailyDriverDayRate === 'number'
+      ? { 'Trucks hired for the day': `driver ${cfg.dailyDriverDayRate} ${cur} a day each (no hourly pay or overtime); fuel included in the hire` }
+      : {}),
     Overtime:
       cfg.overtimeCostPerHour > 0
         ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour${

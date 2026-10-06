@@ -1,10 +1,12 @@
 /**
  * The hire suggestion's what-if job (owner request 6 Oct 2026). Server only.
  *
- * When a plan (OPTIMIZE or RE-PLAN, any day not over yet) leaves orders out for a reason a truck more
- * may help (hire.ts CAPACITY_REASONS) and its depot has active hire options, startHireCheck runs a
+ * When a plan (OPTIMIZE or RE-PLAN, any day not over yet) leaves P1-P3 orders out for a reason a truck
+ * more may help (hire.ts CAPACITY_REASONS; owner answer 1, 6 Oct 2026: P4/P5 orders alone never justify
+ * renting - the box says so plainly) and its depot has active hire options, startHireCheck runs a
  * what-if: the same request as a re-plan of that version (frozen loads stay exactly as they are) plus
- * one truck per unit the day may still rent, the recommended plan only, Quick search. It is its own job
+ * one truck per unit the day may still rent (fuel in the hire, its driver at the company's daily driver
+ * day rate), the recommended plan only, Quick search. It is its own job
  * (HireSuggestion, never the plan's RunJob) on the same solve admission as every optimization, as a
  * BACKGROUND solve (solve-admission.ts reserveBackground): no hourly quota, and a dispatcher's solve
  * that needs its slot takes it at once - the what-if then goes back to the queue once and runs when a
@@ -15,7 +17,9 @@
  * create are one step under an advisory lock of the version, and the optimizer being busy is answered
  * before any row is made, so a refusal never hides a finished suggestion. A check that waited for a
  * slot looks at its version again when it gets one: a version no longer in use (or another plan option
- * in use) is not computed.
+ * in use) is not computed. Each depot-day keeps one check waiting for the optimizer (hireCheckKey; review:
+ * three depots optimized in quick succession lost the third one's check), and none is run when every
+ * order the plan left out is gone from the day (NOTHING_LEFT).
  */
 import { createHash } from 'node:crypto';
 import type { HireSuggestion, Prisma } from '@prisma/client';
@@ -28,10 +32,15 @@ import { buildDispatchRequest, isDispatchDetails, PlanError } from './plan-servi
 import { isSupersededRun } from './plan-status';
 import { orderIdOf } from './split';
 import {
+  DEFAULT_DRIVER_DAY_RATE,
   fleetAverages,
+  hireNeed,
   hireSuggestionText,
   hireTrucksForRequest,
+  lowPriorityOrders,
+  lowPriorityText,
   needsHireCheck,
+  NOTHING_LEFT_TEXT,
   requestBasisText,
   summarizeHire,
   type HireOptionFacts,
@@ -131,6 +140,7 @@ export type HireSkip =
   | 'DAY_OVER'
   | 'NO_OPTIONS'
   | 'NOT_SHORT'
+  | 'NOTHING_LEFT'
   | 'RUNNING'
   | 'CANNOT_BUILD'
   | 'PALLET_FACTORS'
@@ -145,6 +155,7 @@ const SKIP_TEXT: Record<Exclude<HireSkip, 'CANNOT_BUILD' | 'PALLET_FACTORS'>, st
   DAY_OVER: DAY_OVER_TEXT,
   NO_OPTIONS: 'This depot has no trucks to hire. A company admin enters them on the Trucks page (Trucks to hire).',
   NOT_SHORT: 'Nothing is left out because of the fleet: no truck needs to be hired.',
+  NOTHING_LEFT: NOTHING_LEFT_TEXT,
   RUNNING: 'The hire check is already running for this plan.',
   NOTHING_TO_PLAN: 'Nothing left to plan: every order is on a locked, loading or dispatched load.',
   NO_UNITS: 'Every truck you can hire for this day is already hired (their max per day).',
@@ -163,6 +174,15 @@ function deliveredOrders(details: { loads: { stops: { order_ids: string[] }[] }[
   return [...out].sort();
 }
 
+/**
+ * The solve admission's key of a depot-day's checks (solve-admission.ts reserveBackground): each depot-day
+ * keeps one check waiting for the optimizer, so a company optimizing several depots in quick succession
+ * loses none of their automatic checks (review of the hire branch).
+ */
+export function hireCheckKey(depotId: string, runDate: Date | string): string {
+  return `${depotId}|${typeof runDate === 'string' ? runDate.slice(0, 10) : isoOf(runDate)}`;
+}
+
 /** A what-if's own attempt at the optimizer: its admission ticket and a cancel switch (a preemption, or the job's own). */
 interface Attempt {
   ticket: SolveTicket;
@@ -174,12 +194,12 @@ interface Attempt {
 /**
  * Reserve a background solve for one attempt of a what-if: a dispatcher's solve that needs its slot
  * aborts the attempt (onPreempt); the job's own switch (`job`: a new optimization of the day) aborts
- * it too. Null when the optimizer cannot take one more waiting check of the company.
+ * it too. Null when the optimizer cannot take one more waiting check (one per depot-day, `key`).
  */
-function reserveAttempt(tenantId: string, userId: string, job: AbortController): Attempt | null {
+function reserveAttempt(tenantId: string, userId: string, job: AbortController, key: string): Attempt | null {
   const attempt = new AbortController();
   const follow = () => attempt.abort((job.signal as AbortSignal & { reason?: unknown }).reason);
-  const adm = solveAdmission.reserveBackground(tenantId, userId, () => attempt.abort());
+  const adm = solveAdmission.reserveBackground(tenantId, userId, () => attempt.abort(), key);
   if (!adm.ok) return null;
   if (job.signal.aborted) follow();
   else job.signal.addEventListener('abort', follow, { once: true });
@@ -208,7 +228,12 @@ export async function startHireCheck(
   if (!details) return skip('NO_PLAN');
   const options = await depotHireOptions(tenantId, run.depotId);
   if (!options.length) return skip('NO_OPTIONS');
-  if (!needsHireCheck(details.unserved)) return skip('NOT_SHORT');
+  // Only P1-P3 orders justify renting (owner answer 1): P4/P5 orders left out alone are said plainly.
+  const orderPriority = details.scope?.orderPriority ?? null;
+  if (!needsHireCheck(details.unserved, orderPriority)) {
+    const low = lowPriorityOrders(details.unserved, orderPriority);
+    return skip('NOT_SHORT', low ? lowPriorityText(low) : undefined);
+  }
   const running = await prisma.hireSuggestion.findFirst({ where: { tenantId, runId, status: { in: ['QUEUED', 'RUNNING'] } }, select: { id: true } });
   if (running) return skip('RUNNING', undefined, running.id);
 
@@ -227,8 +252,19 @@ export async function startHireCheck(
     return skip('PALLET_FACTORS', `The trucks to hire are loaded by pallets, but these products have no cases per pallet: ${list}. Enter them under Products, then check again.`);
   }
   if (!built.request.stops.length) return skip('NOTHING_TO_PLAN');
+  const baseUnserved = details.unserved.map((u) => ({ stop_id: u.stop_id, order_ids: u.order_ids, reason_code: u.reason_code }));
+  const baseOrders = deliveredOrders(details);
+  // Review of the hire branch: every P1-P3 order the plan left out is gone from the day to plan (brought
+  // forward to tomorrow, say) and none was added - nothing to hire for; the box stops offering the check.
+  const need = hireNeed({ request: built.request, baseUnserved, baseOrders });
+  if (!need.leftOut.orders) {
+    if (need.low.orders) return skip('NOT_SHORT', lowPriorityText(need.low.orders));
+    noteSkipped(runId, 'NOTHING_LEFT', NOTHING_LEFT_TEXT);
+    return skip('NOTHING_LEFT');
+  }
   const rented = await rentedOnDay(tenantId, run.depotId, run.runDate);
-  const hires = hireTrucksForRequest(options, fleetAverages(built.request.trucks, built.request.config?.fuel_price_per_litre ?? 0), rented);
+  // Owner answers 2-4: each for the whole day, fuel in the hire, its driver at the company's day rate.
+  const hires = hireTrucksForRequest(options, fleetAverages(built.request.trucks), rented, built.settings?.dailyDriverDayRate ?? DEFAULT_DRIVER_DAY_RATE);
   if (!hires.length) return skip('NO_UNITS');
   const request: DispatchRequest = {
     ...built.request,
@@ -244,8 +280,8 @@ export async function startHireCheck(
     dateIso: isoOf(run.runDate),
     runVersion: run.version,
     scenarioId: run.chosenScenarioId,
-    baseUnserved: details.unserved.map((u) => ({ stop_id: u.stop_id, order_ids: u.order_ids, reason_code: u.reason_code })),
-    baseOrders: deliveredOrders(details),
+    baseUnserved,
+    baseOrders,
     builtAt: builtAt.toISOString(),
     fingerprint: basisFingerprint(built.request, built.scope.frozenLoadIds),
     withPallets,
@@ -256,7 +292,8 @@ export async function startHireCheck(
   // The optimizer first (review of the hire branch): a check it cannot take is answered BUSY with no
   // row, so a refusal never becomes the newest suggestion and hides a finished one.
   const job = new AbortController();
-  const attempt = reserveAttempt(tenantId, user.id, job);
+  const key = hireCheckKey(run.depotId, run.runDate);
+  const attempt = reserveAttempt(tenantId, user.id, job, key);
   if (!attempt) return skip('BUSY');
   let row: { id: string } | { other: string };
   try {
@@ -311,8 +348,13 @@ export async function startHireCheck(
     return skip('RUNNING', undefined, row.other);
   }
   activeHireJobs.set(row.id, job);
-  void runHireJob({ id: row.id, tenantId, runId, userId: user.id, ip, request, basis, job, attempt });
+  void runHireJob({ id: row.id, tenantId, runId, userId: user.id, ip, request, basis, job, attempt, key });
   return { started: true, suggestionId: row.id };
+}
+
+/** A check not run for this version, kept for the box (hireView): why, until START_NOTE_MS. */
+function noteSkipped(runId: string, reason: HireSkip, message: string): void {
+  hireStarts.set(runId, { at: Date.now(), skipped: { reason, message } });
 }
 
 /** After a plan job saved its plan: start the what-if when the plan needs one. Never throws. */
@@ -325,6 +367,7 @@ export async function startHireCheckAfterPlan(tenantId: string, runId: string, u
     const r = await startHireCheck(tenantId, runId, { id: userId }, ip, 'AFTER_PLAN');
     const quiet = r.started || r.reason === 'NO_OPTIONS' || r.reason === 'NOT_SHORT' || r.reason === 'NOT_CURRENT' || r.reason === 'DAY_OVER' || r.reason === 'RUNNING';
     if (quiet) hireStarts.delete(runId);
+    else if (r.reason === 'NOTHING_LEFT') noteSkipped(runId, r.reason, r.message);
     else {
       hireStarts.set(runId, { at: Date.now(), skipped: { reason: r.reason, message: r.message } });
       console.warn('hire check not started after the plan', { runId, reason: r.reason });
@@ -346,6 +389,8 @@ interface JobArgs {
   /** The job's own switch (activeHireJobs): a new optimization of the day stops it for good. */
   job: AbortController;
   attempt: Attempt;
+  /** Its depot-day at the solve admission (hireCheckKey). */
+  key: string;
 }
 
 /** Stopped so a dispatcher's optimization could start at once (its solver slot was taken). */
@@ -453,7 +498,7 @@ async function runHireJob(a: JobArgs): Promise<void> {
           requeued = true;
           cur.ticket.release();
           cur.detach();
-          const next = reserveAttempt(a.tenantId, a.userId, a.job);
+          const next = reserveAttempt(a.tenantId, a.userId, a.job, a.key);
           if (next) {
             const back = await prisma.hireSuggestion.updateMany({
               where: { id: a.id, status: { in: ['QUEUED', 'RUNNING'] } },
@@ -602,6 +647,10 @@ export interface HireView {
   checkExpected: boolean;
   /** Why the automatic check of this plan did not start (products without cases per pallet, ...); null: it did, or none was due. */
   skipNote: string | null;
+  /** P4/P5 orders the plan option in use leaves out for a reason a truck more may help: never a reason to rent (owner answer 1). */
+  lowLeftOut: number;
+  /** The owner's words for them ("Left out: 3 orders, all P4/P5 - renting is not suggested for them."), or null. */
+  lowNote: string | null;
   suggestion: null | {
     id: string;
     status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED';
@@ -655,7 +704,12 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
     prisma.runJob.findFirst({ where: { tenantId, runId, status: 'SUCCEEDED' }, orderBy: { finishedAt: 'desc' }, select: { finishedAt: true } }),
   ]);
   const details = isDispatchDetails(chosen?.detailsJson) ? chosen!.detailsJson : null;
-  const short = needsHireCheck(details?.unserved);
+  // The automatic check of a plan just saved: being started, or not started and why.
+  const note = hireStarts.get(runId);
+  // P1-P3 orders left out only (owner answer 1); and not when a check found every one of them gone since.
+  const orderPriority = details?.scope?.orderPriority ?? null;
+  const short = needsHireCheck(details?.unserved, orderPriority) && note?.skipped?.reason !== 'NOTHING_LEFT';
+  const lowLeftOut = lowPriorityOrders(details?.unserved, orderPriority);
   const dayOver = isoOf(run.runDate) < today;
   const live = !isSupersededRun(run) && run.status !== 'OPTIMIZING' && run.status !== 'ARCHIVED' && !!run.chosenScenarioId && !dayOver;
   const shown = shownSuggestion(rows);
@@ -664,8 +718,6 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
   const basis = (row?.basisJson as HireBasis | null) ?? null;
   const forOtherOption = !!row && !!basis?.scenarioId && basis.scenarioId !== run.chosenScenarioId;
   const text = summary ? hireSuggestionText(summary, currency) : null;
-  // The automatic check of a plan just saved: being started, or not started and why.
-  const note = hireStarts.get(runId);
   const justSaved = !!job?.finishedAt && Date.now() - job.finishedAt.getTime() < HIRE_EXPECT_MS;
   const checkExpected = live && short && options > 0 && !rows.length && ((!!note && !note.skipped) || (!note && justSaved));
   return {
@@ -675,6 +727,8 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
     dayOver,
     checkExpected,
     skipNote: !rows.length && note?.skipped ? note.skipped.message : null,
+    lowLeftOut,
+    lowNote: lowLeftOut ? lowPriorityText(lowLeftOut, { also: short }) : null,
     suggestion: row
       ? {
           id: row.id,

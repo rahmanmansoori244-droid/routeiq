@@ -8,13 +8,18 @@
  * hire-whatif.ts and hire-use.ts.
  *
  * - A company admin enters the trucks the depot can rent (HireOption: label, bays or cases, payload,
- *   cost per day, cost per km, max per day).
- * - When a plan leaves orders out for a reason a truck more may help (CAPACITY_REASONS: the fleet's
- *   space, its loads per truck, its time, receiving hours no own truck reaches in time), a what-if
- *   optimization runs with one truck per unit it may rent (hireTrucksForRequest). The optimizer adds
- *   a premium to a rented truck's hire (apps/solver dispatch_solver.hire_premium): own trucks go
- *   first, a stop left out still costs more than any hire, and between rented trucks the hire counts
- *   in real money with their km.
+ *   cost per day, the rental's own km charge if any, max per day).
+ * - Only P1-P3 orders justify renting (owner answer 1, 6 Oct 2026): when a plan leaves P1-P3 orders out
+ *   for a reason a truck more may help (CAPACITY_REASONS: the fleet's space, its loads per truck, its
+ *   time, receiving hours no own truck reaches in time), a what-if optimization runs with one truck per
+ *   unit it may rent (hireTrucksForRequest). P4/P5 orders left out alone start nothing: the box says so
+ *   plainly (lowPriorityText). The optimizer ranks a rented truck in a hire tier (apps/solver
+ *   dispatch_solver._service_and_hire): own trucks first, the cheapest set of rented trucks in real
+ *   money (hire + the driver's day rate), never one for P4/P5 orders alone - which still ride along
+ *   in a rented truck's spare room.
+ * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
+ *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
+ *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).
  * - summarizeHire reads which rented trucks the what-if used: that is the suggestion. It counts the
  *   orders from the request the what-if used (an order added after the plan counts, one gone since
  *   does not) and says when the own fleet carried them (a re-plan, no hire) or when the what-if drops
@@ -58,9 +63,30 @@ export interface HireOptionFacts {
   /** 0 = no weight limit. */
   payloadKg: number;
   costPerDay: number;
-  /** OMR per km, fuel included; null = the depot's fleet average. */
+  /**
+   * The rental's own charge per km (OMR), if it has one; null = none (0). Fuel is always in the hire
+   * (owner answer 3, 6 Oct 2026): a rented truck never costs fuel or the fleet's km rate.
+   */
   costPerKm: number | null;
   maxPerDay: number;
+}
+
+/**
+ * The company's "Daily driver day rate" until an admin sets it (owner answer 4, 6 Oct 2026: a rough
+ * 10 OMR; TenantConfig.dailyDriverDayRate has the same default).
+ */
+export const DEFAULT_DRIVER_DAY_RATE = 10;
+
+/** Owner answer 1 (6 Oct 2026): only P1-P3 orders justify renting a truck. */
+export const HIRE_MAX_PRIORITY = 3;
+
+/**
+ * A truck hired for the day ("Use this plan": hired, Truck.onlyOnDate) is planned like the trucks the
+ * what-if offered: its driver paid the company's day rate (driver_day_cost), never by the hour; its fuel
+ * is in the hire (it was made without km per litre). Own trucks: nothing ({}).
+ */
+export function hiredTruckDriver(truck: { hired?: boolean | null; onlyOnDate?: Date | string | null }, dayRate: number | null | undefined): { driver_day_cost?: number } {
+  return truck.hired && truck.onlyOnDate ? { driver_day_cost: dayRate ?? DEFAULT_DRIVER_DAY_RATE } : {};
 }
 
 /** The ids the what-if gives its trucks to rent: never a real truck's id. */
@@ -136,50 +162,55 @@ export function shownTruckCode(snapshotCode: string | null | undefined, truck: {
   return snapshotCode || truck.code;
 }
 
-/** The depot's own trucks' averages a rented truck is costed with when its option names none. */
+/** What a rented truck takes from the depot's own trucks: the loading cost per load (the depot's work, whatever truck). */
 export interface FleetAverages {
-  /** OMR per km, fuel included (cost per km + fuel price / km per litre). */
-  costPerKm: number;
   tripCost: number;
 }
 
-/** Averages over the request's own trucks (never a truck to rent). Fuel at the request's fuel price. */
-export function fleetAverages(trucks: readonly DispatchTruck[], fuelPricePerLitre: number): FleetAverages {
+/**
+ * The average loading cost per load of the request's own trucks (never a truck to rent). Never their
+ * km or fuel: a rented truck's fuel is in its hire (owner answer 3, 6 Oct 2026).
+ */
+export function fleetAverages(trucks: readonly DispatchTruck[]): FleetAverages {
   const own = trucks.filter((t) => !t.hire_candidate);
-  if (!own.length) return { costPerKm: 0, tripCost: 0 };
-  const perKm = own.map((t) => (t.cost_per_km ?? 0) + (t.km_per_litre && fuelPricePerLitre > 0 ? fuelPricePerLitre / t.km_per_litre : 0));
-  const round = (x: number) => Math.round(x * 10_000) / 10_000;
-  return {
-    costPerKm: round(perKm.reduce((a, x) => a + x, 0) / own.length),
-    tripCost: round(own.reduce((a, t) => a + (t.trip_cost ?? 0), 0) / own.length),
-  };
+  if (!own.length) return { tripCost: 0 };
+  return { tripCost: Math.round((own.reduce((a, t) => a + (t.trip_cost ?? 0), 0) / own.length) * 10_000) / 10_000 };
 }
 
 /**
  * The trucks to rent the what-if adds to the request: one per unit of each active option the day can
  * still rent (its max per day less the one-day trucks already rented from it for that day). Each is a
- * plain truck of the option's size, its hire as the day cost, the option's cost per km (else the
- * fleet's average, fuel included) and the fleet's average trip cost; `hire_candidate` lets the
- * optimizer weigh the hire.
+ * plain truck of the option's size for the whole day (the company's max loads per truck): its hire as
+ * the day cost, fuel included (no km per litre; only the option's own km charge, else 0), its casual
+ * driver at the company's day rate (driver_day_cost) and the fleet's average loading cost per load;
+ * `hire_candidate` puts it in the optimizer's hire tier. Placeholder codes are numbered per size tag
+ * across the request (review of the hire branch: "10-ton curtain" and "10-ton box" both sent
+ * HIRE-10T-1, and a finding about one named the other).
  */
 export function hireTrucksForRequest(
   options: readonly HireOptionFacts[],
   avg: FleetAverages,
   alreadyRented: Readonly<Record<string, number>> = {},
+  driverDayRate: number = DEFAULT_DRIVER_DAY_RATE,
 ): DispatchTruck[] {
   const out: DispatchTruck[] = [];
+  const perTag = new Map<string, number>();
   for (const o of options) {
     const units = Math.max(0, o.maxPerDay - (alreadyRented[o.id] ?? 0));
+    const tag = hireTag(o.label);
     for (let n = 1; n <= units; n++) {
+      const k = (perTag.get(tag) ?? 0) + 1;
+      perTag.set(tag, k);
       out.push({
         id: virtualHireId(o.id, n),
-        code: `HIRE-${hireTag(o.label)}-${n}`,
+        code: `HIRE-${tag}-${k}`,
         capacity_cases: o.capacityCases,
         capacity_kg: o.payloadKg,
         fixed_cost: o.costPerDay,
         trip_cost: avg.tripCost,
-        cost_per_km: o.costPerKm ?? avg.costPerKm,
+        cost_per_km: o.costPerKm ?? 0,
         km_per_litre: null,
+        driver_day_cost: driverDayRate,
         ...(o.bays !== null ? { bays: o.bays } : {}),
         hire_candidate: true,
       });
@@ -229,9 +260,44 @@ export function capacityLeftOutIds(unserved: readonly UnservedLike[]): string[] 
   return unserved.filter((u) => CAPACITY_REASONS.includes(u.reason_code)).map((u) => u.stop_id);
 }
 
-/** Whether a plan option leaves anything out that a truck to rent may help: the what-if's trigger. */
-export function needsHireCheck(unserved: readonly UnservedLike[] | null | undefined): boolean {
-  return !!unserved?.some((u) => CAPACITY_REASONS.includes(u.reason_code));
+/**
+ * A left-out stop's priority from its orders as the plan was made (ScenarioDetails.scope.orderPriority;
+ * a split part reads its order's): its most important order. 3 when none is on record (an older plan).
+ */
+export function unservedPriority(u: Pick<UnservedLike, 'order_ids'>, orderPriority?: Readonly<Record<string, number>> | null): number {
+  const ps = u.order_ids.map((o) => orderPriority?.[orderIdOf(o)]).filter((p): p is number => typeof p === 'number');
+  return ps.length ? Math.min(...ps) : 3;
+}
+
+/**
+ * Whether a plan option leaves out a P1-P3 order a truck to rent may help: the what-if's trigger. Only
+ * P1-P3 orders justify renting (owner answer 1, 6 Oct 2026); P4/P5 orders left out alone are said
+ * plainly instead (lowPriorityOrders, lowPriorityText).
+ */
+export function needsHireCheck(unserved: readonly UnservedLike[] | null | undefined, orderPriority?: Readonly<Record<string, number>> | null): boolean {
+  return !!unserved?.some((u) => CAPACITY_REASONS.includes(u.reason_code) && unservedPriority(u, orderPriority) <= HIRE_MAX_PRIORITY);
+}
+
+/** The P4/P5 orders a plan option leaves out for a reason a truck more may help (never a reason to rent). */
+export function lowPriorityOrders(unserved: readonly UnservedLike[] | null | undefined, orderPriority?: Readonly<Record<string, number>> | null): number {
+  const orders = new Set<string>();
+  for (const u of unserved ?? []) {
+    if (CAPACITY_REASONS.includes(u.reason_code) && unservedPriority(u, orderPriority) > HIRE_MAX_PRIORITY) for (const o of u.order_ids) orders.add(orderIdOf(o));
+  }
+  return orders.size;
+}
+
+/**
+ * The owner's words for P4/P5 orders left out (answer 1, 6 Oct 2026): "Left out: 3 orders, all P4/P5 -
+ * renting is not suggested for them." `also`: next to a suggestion for P1-P3 orders. `delivered`: of
+ * them, the orders the check's plan still delivers (a rented truck's spare room).
+ */
+export function lowPriorityText(orders: number, opts: { also?: boolean; delivered?: number } = {}): string {
+  if (orders <= 0) return '';
+  const what = orders === 1 ? '1 order, P4/P5 - renting is not suggested for it' : `${n(orders)} orders, all P4/P5 - renting is not suggested for them`;
+  const d = opts.delivered ?? 0;
+  const carried = d > 0 ? `; this plan still delivers ${d >= orders ? (orders === 1 ? 'it' : 'all of them') : `${n(d)} of them`} with the hired trucks` : '';
+  return `${opts.also ? 'Also left out' : 'Left out'}: ${what}${carried}.`;
 }
 
 /** One option of the suggestion: how many of it to rent. */
@@ -265,8 +331,19 @@ export interface HireSummary {
   hires: HireUse[];
   /** The hires' day costs added up. */
   hireCost: number;
-  /** The other costs of the rented trucks' loads (km, fuel, trips, driver time), as the plan costs them. */
+  /** The other costs of the rented trucks' loads (their drivers' day rate, loading, the rental's km charge), as the plan costs them. */
   runningCost: number;
+  /**
+   * runningCost in parts (owner answers 3 and 4, 6 Oct 2026): the casual drivers at the company's day
+   * rate, loading, the rental's own km charge (0 unless the option has one; fuel is in the hire).
+   * Absent on a suggestion stored before them.
+   */
+  running?: { drivers: number; dayRate: number | null; driver: number; loading: number; km: number };
+  /**
+   * P4/P5 orders left out by the plan in use (or added since), never a reason to rent (owner answer 1),
+   * and of them, those the check's plan still delivers (a rented truck's spare room). Absent before it.
+   */
+  low?: { leftOut: LeftOut; delivered: LeftOut };
   /** Of what was left out, delivered with the hires. */
   delivered: LeftOut;
   /** Of what was left out, still left out with the hires. */
@@ -289,17 +366,64 @@ export interface HireSummary {
   loads: number;
 }
 
+/** What the hire is for, counted on a request (hireNeed). */
+export interface HireNeed {
+  /** P1-P3 stops: those the plan in use left out for a capacity reason that are still to plan, and the stops of orders added since. */
+  outIds: Set<string>;
+  /** The same for P4/P5 stops: never a reason to rent (owner answer 1, 6 Oct 2026). */
+  lowIds: Set<string>;
+  /** Stops of orders the plan in use does not have at all (added after it was made), both priorities. */
+  newIds: string[];
+  /** Stops the plan in use left out for another reason (a conflict with a locked plan): no truck changes them. */
+  otherIds: Set<string>;
+  leftOut: LeftOut;
+  low: LeftOut;
+  /** Of leftOut, the orders added after the plan was made. */
+  newOrders: number;
+}
+
+/**
+ * What a truck to rent may be for, on the request the what-if uses (review of the hire branch: the day
+ * may have changed since the plan): the stops the plan in use left out for a capacity reason that are
+ * still to plan, plus - with `baseOrders`, the orders the plan in use delivers (its new and its frozen
+ * loads) - every stop of an order it does not have at all (added after it was made). Split by priority:
+ * P1-P3 (`outIds`, what the hire is for) and P4/P5 (`lowIds`). startHireCheck runs no check when
+ * `leftOut` is empty (every order left out was brought forward, say).
+ */
+export function hireNeed(input: { request: Pick<DispatchRequest, 'stops'>; baseUnserved: readonly UnservedLike[]; baseOrders?: readonly string[] }): HireNeed {
+  const stops = input.request.stops;
+  const byId = new Map(stops.map((s) => [s.stop_id, s]));
+  const orderIdsOf = new Map(input.baseUnserved.map((u) => [u.stop_id, u.order_ids] as const));
+  const baseOut = new Set(input.baseUnserved.map((u) => u.stop_id));
+  const capIds = capacityLeftOutIds(input.baseUnserved).filter((id) => byId.has(id));
+  const otherIds = new Set([...baseOut].filter((id) => !capIds.includes(id)));
+  const baseOrders = input.baseOrders ? new Set(input.baseOrders.map(orderIdOf)) : null;
+  const newIds = baseOrders ? stops.filter((s) => !baseOut.has(s.stop_id) && !s.order_ids.some((o) => baseOrders.has(orderIdOf(o)))).map((s) => s.stop_id) : [];
+  const high = (id: string) => (byId.get(id)?.priority ?? 3) <= HIRE_MAX_PRIORITY;
+  const all = [...new Set([...capIds, ...newIds])];
+  const outIds = new Set(all.filter(high));
+  const lowIds = new Set(all.filter((id) => !high(id)));
+  return {
+    outIds,
+    lowIds,
+    newIds,
+    otherIds,
+    leftOut: leftOutOf(outIds, stops, orderIdsOf),
+    low: leftOutOf(lowIds, stops, orderIdsOf),
+    newOrders: leftOutOf(newIds.filter((id) => outIds.has(id)), stops).orders,
+  };
+}
+
 /**
  * The suggestion from a what-if answer (its recommended plan) and the plan in use. Counted on the
- * request the what-if used (review of the hire branch: the day may have changed since the plan):
- * "cannot be delivered with your fleet" = the stops the plan in use left out for a capacity reason
- * that are still to plan, plus - with `baseOrders`, the orders the plan in use delivers (its new and
- * its frozen loads) - every stop of an order it does not have at all (added after it was made). A stop
- * it left out for another reason (a conflict with a locked plan) stays out of every count: no truck to
- * rent changes it. A stop the plan in use delivers that the what-if leaves out is `dropped`, never
- * "still left out". The alternative is worked out from the what-if's own loads (no other
- * optimization): dropping the rented truck whose stops have the lowest priorities (then the fewest
- * cases) leaves those stops out - at most, since the other trucks might take some of them.
+ * request the what-if used (hireNeed): "cannot be delivered with your fleet" = the P1-P3 orders the
+ * plan in use left out for a capacity reason that are still to plan, and those added since; P4/P5
+ * orders are counted apart (`low`: never a reason to rent, owner answer 1). A stop it left out for
+ * another reason (a conflict with a locked plan) stays out of every count: no truck to rent changes
+ * it. A stop the plan in use delivers that the what-if leaves out is `dropped`, never "still left
+ * out". The alternative is worked out from the what-if's own loads (no other optimization): dropping
+ * the rented truck whose stops have the lowest priorities (then the fewest cases) leaves those stops
+ * out - at most, since the other trucks might take some of them.
  */
 export function summarizeHire(input: {
   request: DispatchRequest;
@@ -311,20 +435,15 @@ export function summarizeHire(input: {
 }): HireSummary {
   const { request, baseUnserved, whatIf, options } = input;
   const stops = request.stops;
-  const inRequest = new Set(stops.map((s) => s.stop_id));
   const orderIdsOf = new Map([...baseUnserved.map((u) => [u.stop_id, u.order_ids] as const), ...whatIf.unserved.map((u) => [u.stop_id, u.order_ids] as const)]);
-  const baseOut = new Set(baseUnserved.map((u) => u.stop_id));
-  const capIds = new Set(capacityLeftOutIds(baseUnserved).filter((id) => inRequest.has(id)));
-  const otherIds = new Set([...baseOut].filter((id) => !capIds.has(id)));
-  const baseOrders = input.baseOrders ? new Set(input.baseOrders.map(orderIdOf)) : null;
-  const newIds = baseOrders ? stops.filter((s) => !baseOut.has(s.stop_id) && !s.order_ids.some((o) => baseOrders.has(orderIdOf(o)))).map((s) => s.stop_id) : [];
-  const outIds = new Set([...capIds, ...newIds]);
+  const need = hireNeed(input);
+  const { outIds, lowIds, otherIds } = need;
   const leftOut = leftOutOf(outIds, stops, orderIdsOf);
   const served = new Set(whatIf.loads.flatMap((l) => l.stops.map((s) => s.stop_id)));
   const delivered = leftOutOf([...outIds].filter((id) => served.has(id)), stops, orderIdsOf);
   const whatIfOut = whatIf.unserved.map((u) => u.stop_id);
   const stillLeft = leftOutOf(whatIfOut.filter((id) => outIds.has(id)), stops, orderIdsOf);
-  const dropped = leftOutOf(whatIfOut.filter((id) => !outIds.has(id) && !otherIds.has(id)), stops, orderIdsOf);
+  const dropped = leftOutOf(whatIfOut.filter((id) => !outIds.has(id) && !lowIds.has(id) && !otherIds.has(id)), stops, orderIdsOf);
   const stillLeftReasons: Record<string, number> = {};
   for (const u of whatIf.unserved) if (outIds.has(u.stop_id)) stillLeftReasons[u.reason_code] = (stillLeftReasons[u.reason_code] ?? 0) + 1;
   const optionOf = new Map(options.map((o) => [o.id, o]));
@@ -336,7 +455,17 @@ export function summarizeHire(input: {
   }
   const hires = usesOf([...loadsByTruck.keys()], optionOf);
   const hireCost = round2(hires.reduce((a, h) => a + h.count * h.costPerDay, 0));
-  const runningCost = round2([...loadsByTruck.values()].flat().reduce((a, l) => a + (l.total_cost - l.fixed_cost), 0));
+  const rentedLoads = [...loadsByTruck.values()].flat();
+  const runningCost = round2(rentedLoads.reduce((a, l) => a + (l.total_cost - l.fixed_cost), 0));
+  const sum = (f: (l: (typeof rentedLoads)[number]) => number | null | undefined) => round2(rentedLoads.reduce((a, l) => a + (f(l) ?? 0), 0));
+  const rates = request.trucks.filter((t) => loadsByTruck.has(t.id)).map((t) => t.driver_day_cost).filter((r): r is number => typeof r === 'number');
+  const running = {
+    drivers: loadsByTruck.size,
+    dayRate: rates.length ? Math.max(...rates) : null,
+    driver: sum((l) => (l.driver_cost ?? 0) + (l.overtime_cost ?? 0)),
+    loading: sum((l) => l.trip_cost),
+    km: sum((l) => (l.distance_cost ?? 0) + (l.fuel_cost ?? 0)),
+  };
 
   let alternative: HireSummary['alternative'] = null;
   const rented = [...loadsByTruck.keys()];
@@ -360,10 +489,12 @@ export function summarizeHire(input: {
     v: 1,
     status: !delivered.stopIds.length ? 'NO_HELP' : hires.length ? 'HIRE' : 'OWN_FLEET',
     leftOut,
-    newOrders: leftOutOf(newIds, stops).orders,
+    newOrders: need.newOrders,
     hires,
     hireCost,
     runningCost,
+    running,
+    low: { leftOut: leftOutOf(lowIds, stops, orderIdsOf), delivered: leftOutOf([...lowIds].filter((id) => served.has(id)), stops, orderIdsOf) },
     delivered,
     stillLeft,
     dropped,
@@ -453,11 +584,41 @@ export function stillLeftWhy(s: Pick<HireSummary, 'stillLeftReasons' | 'unitsOff
 }
 
 /**
+ * Every order the plan in use left out is gone from the day to plan (brought forward to another day,
+ * changed or cancelled) and none was added: there is nothing to hire for (review of the hire branch: the
+ * box read "0 orders (0 cases) cannot be delivered" and asked to check again, forever).
+ */
+export const NOTHING_LEFT_TEXT =
+  'Nothing is left out for lack of trucks any more: the orders this plan left out are no longer to plan (moved to another day, changed or cancelled). No truck needs to be hired.';
+
+/**
+ * The running-costs line of a suggestion (owner answers 3 and 4, 6 Oct 2026): the hired trucks' casual
+ * drivers at the company's day rate, loading, and the rental's own km charge when its option has one -
+ * never fuel or the fleet's km cost (fuel is in the hire). Null when there is nothing to say.
+ */
+function runningText(s: HireSummary, currency: string): string | null {
+  if (s.runningCost < 0.5) return null;
+  const r = s.running;
+  // A suggestion stored before the owner's answers: its words of then.
+  if (!r) return `Plus ${aboutMoney(s.runningCost, currency)} running costs on the hired trucks' loads (km, fuel, loading, driver time, as your plan costs them).`;
+  const parts: string[] = [];
+  if (r.driver >= 0.5) parts.push(r.dayRate !== null ? `${plural(r.drivers, 'driver')} at the day rate of ${n(r.dayRate)} ${currency}` : `the drivers ${aboutMoney(r.driver, currency)}`);
+  if (r.loading >= 0.5) parts.push(`loading ${aboutMoney(r.loading, currency)}`);
+  if (r.km >= 0.5) parts.push(`the rental's km charge ${aboutMoney(r.km, currency)}`);
+  return `Plus ${aboutMoney(s.runningCost, currency)} running costs on the hired trucks${parts.length ? `: ${parts.join(', ')}` : ''}. Fuel is included in the hire.`;
+}
+
+/**
  * What the box says: the headline ("14 orders (...) cannot be delivered with your fleet. To deliver
  * them, hire 1 x 10-ton (12 bays) + 1 x 3-ton (6 bays): extra about 80 OMR. Still left out: none.")
- * and the detail lines (the running costs, one truck fewer).
+ * and the detail lines (the running costs, one truck fewer, the P4/P5 orders left out). Counts P1-P3
+ * orders only: P4/P5 orders are never what a truck is rented for (owner answer 1).
  */
 export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline: string; details: string[] } {
+  const lowLeft = s.low?.leftOut.orders ?? 0;
+  const lowLine = (hired: boolean) => (lowLeft ? [lowPriorityText(lowLeft, { also: true, delivered: hired ? s.low?.delivered.orders : 0 })] : []);
+  // Nothing for a P1-P3 order to hire for (left out since, or only P4/P5 orders): said plainly.
+  if (s.leftOut.orders === 0) return { headline: lowLeft ? lowPriorityText(lowLeft) : NOTHING_LEFT_TEXT, details: [] };
   const what = leftOutText(s.leftOut, s.newOrders ?? 0);
   const cannot = `${what} cannot be delivered with your fleet.`;
   const one = s.leftOut.orders === 1;
@@ -474,7 +635,7 @@ export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline
       headline: why.backed
         ? `${cannot} Hiring does not help: ${why.text}.`
         : `${cannot} The hire check placed none of them although trucks you can rent stayed unused - press Check hire options to search again.`,
-      details: [],
+      details: lowLine(false),
     };
   }
   if (s.status === 'OWN_FLEET') {
@@ -483,20 +644,20 @@ export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline
     const rest = s.stillLeft.orders ? ` Still left out: ${still()}.` : '';
     return {
       headline: `${what} ${one ? 'is' : 'are'} left out of this plan, but the hire check fits ${them} on your own trucks: no truck needs to be hired. Re-plan to put ${all && one ? 'it' : 'them'} on your trucks.${rest}`,
-      details: [],
+      details: lowLine(false),
     };
   }
   const headline = `${cannot} To deliver ${one ? 'it' : 'them'}, hire ${hiresText(s.hires)}: extra ${aboutMoney(s.hireCost, currency)}. Still left out: ${still()}.${dropped}`;
   const details: string[] = [];
-  if (s.runningCost >= 0.5) {
-    details.push(`Plus ${aboutMoney(s.runningCost, currency)} running costs on the hired trucks' loads (km, fuel, loading, driver time, as your plan costs them).`);
-  }
+  const running = runningText(s, currency);
+  if (running) details.push(running);
   if (s.alternative) {
     const a = s.alternative;
     details.push(
       `With one truck fewer (${hiresText(a.hires)}, extra ${aboutMoney(a.hireCost, currency)}): up to ${leftOutText(a.leftOut)} stay undelivered - what the ${a.dropped} would carry${s.stillLeft.orders ? ' and the orders still left out' : ''}.`,
     );
   }
+  details.push(...lowLine(true));
   return { headline, details };
 }
 

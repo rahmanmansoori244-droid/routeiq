@@ -92,7 +92,7 @@ import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
-import { shownTruckCode, trucksOfDayWhere } from './hire';
+import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
 import { copyRowData } from './prisma-copy';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
@@ -785,6 +785,9 @@ export async function buildDispatchRequest(
     })),
     // Pallet positions: the truck is planned by pallets (bays x Pallet fill and the payload).
     ...(t.bays !== null && t.bays !== undefined ? { bays: t.bays } : {}),
+    // A truck hired for the day (the hire suggestion): its casual driver at the company's daily driver
+    // day rate, never by the hour (owner answer 4); its fuel is in the hire (made without km per litre).
+    ...hiredTruckDriver(t, cfg.dailyDriverDayRate),
   }));
 
   // Stabilization PR8 (scenario finding S04 / N2): a plan made on its own delivery day plans new
@@ -916,6 +919,7 @@ export function planSettingsOf(
   cfg: {
     timezone: string; planningCutoffMin: number; shiftStartMin: number; driverShiftMaxMinutes: number; reloadMinutes: number;
     loadingMinPerCase: number; serviceMinPerCase: number; maxTripsPerTruck: number; fuelPricePerLitre: number; driverCostPerHour: number;
+    dailyDriverDayRate?: number;
     overtimeAfterMin: number; overtimeCostPerHour: number; prefWindowPenaltyPerMin: number; roadTimeFactor: number; distanceProvider: string;
     distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
     driverBreakMinutes?: number; driverBreakFromMin?: number; driverBreakToMin?: number;
@@ -935,6 +939,7 @@ export function planSettingsOf(
     maxTripsPerTruck: cfg.maxTripsPerTruck,
     fuelPricePerLitre: cfg.fuelPricePerLitre,
     driverCostPerHour: cfg.driverCostPerHour,
+    ...(typeof cfg.dailyDriverDayRate === 'number' ? { dailyDriverDayRate: cfg.dailyDriverDayRate } : {}),
     overtimeAfterMin: cfg.overtimeAfterMin,
     overtimeCostPerHour: cfg.overtimeCostPerHour,
     prefWindowPenaltyPerMin: cfg.prefWindowPenaltyPerMin,
@@ -989,6 +994,8 @@ export function planInputsOf(built: BuiltRequest, jobId: string | null, now: Dat
       availableFromMin: t.available_from_min ?? null,
       availableToMin: t.available_to_min ?? null,
       maxTripsPerDay: t.max_trips ?? null,
+      // A truck hired for the day: its driver's day rate as planned (owner answer 4).
+      ...(typeof t.driver_day_cost === 'number' ? { driverDayCost: t.driver_day_cost } : {}),
       // Pallets as asked (a truck with bays); a load keeps them only when the optimizer echoes the rule.
       ...(typeof t.bays === 'number' ? { bays: t.bays, palletFillPct: fill, palletRoomUnits: palletRoomUnits(t.bays, fill) } : {}),
     };
