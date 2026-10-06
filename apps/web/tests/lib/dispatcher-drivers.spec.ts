@@ -177,6 +177,23 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
     expect(audits('TRUCK_USUAL_DRIVER_SET')[0]).toMatchObject({ entity: 'Truck', entityId: 'T1', userId: 'u-PLANNER' });
   });
 
+  it('the TRUCK_USUAL_DRIVER_SET row reads for the owner: the truck code and the drivers by name ("none" when there is none), with the ids (demo of 7 Oct 2026)', async () => {
+    expect((await patchTruck(json('PATCH', { defaultDriverId: 'BOB' }), ctx)).status).toBe(200);
+    expect((await patchTruck(json('PATCH', { defaultDriverId: null }), ctx)).status).toBe(200);
+    expect((await patchTruck(json('PATCH', { defaultDriverId: 'DAY' }), ctx)).status).toBe(200);
+    const rows = audits('TRUCK_USUAL_DRIVER_SET');
+    expect(rows.map((r) => r.afterJson)).toEqual([
+      { truck: 'T01', from: 'Ali', to: 'Bob', truckId: 'T1', fromDriverId: 'ALI', toDriverId: 'BOB' },
+      { truck: 'T01', from: 'Bob', to: 'none', truckId: 'T1', fromDriverId: 'BOB', toDriverId: null },
+      { truck: 'T01', from: 'none', to: 'Salim', truckId: 'T1', fromDriverId: null, toDriverId: 'DAY' },
+    ]);
+    // Not the whole truck row with bare ids any more.
+    for (const r of rows) {
+      expect(r.beforeJson ?? null).toBeNull();
+      expect(r.afterJson).not.toHaveProperty('capacityCases');
+    }
+  });
+
   it('an inactive driver cannot become the usual driver (400)', async () => {
     expect((await patchTruck(json('PATCH', { defaultDriverId: 'OLD' }), ctx)).status).toBe(400);
     expect(row('truck', 'T1').defaultDriverId).toBe('ALI');
@@ -212,7 +229,7 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
     expect(audits('UPDATE')).toEqual([expect.objectContaining({ entity: 'Truck', userId: 'u-TENANT_ADMIN' })]);
   });
 
-  it("the message after a usual-driver change promises only what a re-plan of a plan already made does (review of 6 Oct 2026, two rounds)", () => {
+  it("after a usual-driver change: the guide promises only what a re-plan of a plan already made does (review of 6 Oct 2026, two rounds); the message is short", () => {
     // The owner's case: Ali is away for a month and Bob covers him; Sam and Carl are free. The dispatcher makes Sam the
     // usual driver of T1 (or clears it). T1 runs trip 1 (08:00-10:00) and trip 2 (11:00-13:00).
     const leave = leaveOnDay([{ id: 'L1', driverId: 'ALI', fromIso: '2026-10-10', untilIso: '2026-11-09', note: null, coverDriverId: 'BOB' }], '2026-10-15');
@@ -246,7 +263,7 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
       const { drivers } = planDrivers(trips, evidence, usable, leave);
       return evidence.map((e) => (e.status === 'PLANNED' ? drivers.get(`T1:${e.loadNo}`)!.driverId : e.driverId));
     };
-    // What the message says a re-plan can do with trip i: a driver picked by hand stays (he is active here); a trip
+    // What the guide says a re-plan can do with trip i: a driver picked by hand stays (he is active here); a trip
     // without a driver, a trip a cover drove and a trip whose driver is on leave that day go to the usual driver or to
     // the driver of another trip of the truck (cleared: to the driver of another trip, or to nobody). It promises
     // nothing about other trips (here: a free driver RouteIQ gave keeps it; a frozen trip never changes).
@@ -280,16 +297,20 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
       }
     }
 
-    expect(usualDriverChangedMessage('T01', 'Sam')).toBe(
-      'T01: usual driver Sam. New plans use him. On plans already made, a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to Sam or to the driver of another trip of T01; a driver you picked by hand stays while he is active. Check the drivers after the re-plan.',
-    );
-    expect(usualDriverChangedMessage('T01', null)).toBe(
-      'T01: usual driver cleared. On plans already made, a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to the driver of another trip of T01, or leave it without a driver (pick one on the load); a driver you picked by hand stays while he is active. Check the drivers after the re-plan.',
-    );
+    // The toast is short (demo of 7 Oct 2026: about 60 words for 15 s); what a re-plan does with each trip
+    // (the cases above) is in the guide, "Usual driver of each truck".
+    expect(usualDriverChangedMessage('T01', 'Sam')).toBe('Usual driver of T01 is now Sam. Re-plan days already planned to use him.');
+    expect(usualDriverChangedMessage('T01', null)).toBe('Usual driver of T01 cleared. Re-plan days already planned to apply it.');
     // The earlier promises the cases above break: the other trips keep their driver / a cover always comes off / the new usual driver gets them.
     for (const m of [usualDriverChangedMessage('T01', 'Sam'), usualDriverChangedMessage('T01', null)]) {
       expect(m).not.toMatch(/keep their driver|keeps the other drivers|takes a cover off|gives him the trips|pick a driver for those trips/);
+      expect(m.split(/\s+/).length).toBeLessThanOrEqual(14);
     }
+    const page = readFileSync(path.join(__dirname, '../../app/t/[slug]/drivers/usual-drivers.tsx'), 'utf8');
+    expect(page).toContain("toast.success(usualDriverChangedMessage(t.code, driverId ? (nameOf.get(driverId) ?? 'set') : null));"); // the default duration, not 15 s
+    expect(page).not.toContain('duration: 15_000');
+    const guide = readFileSync(path.join(__dirname, '../../../../docs/DISPATCHER_GUIDE.md'), 'utf8');
+    expect(guide).toContain('a re-plan can give a trip without a driver, a trip a cover drove and a trip whose driver is on leave that day to the new usual driver or to the driver of another trip of that truck');
   });
 });
 
@@ -374,6 +395,14 @@ describe('driver leave through the routes', () => {
     expect(audits('DRIVER_LEAVE_CHANGED')).toEqual([expect.objectContaining({ userId: 'u-PLANNER', afterJson: expect.objectContaining({ until: day(-1), coverName: 'Bob' }) })]);
     const fresh = await answer(await postLeave(json('POST', { from: day(30), until: day(31), coverDriverId: 'BOB' }), ali));
     expect(fresh.body.error).toMatchObject({ code: 'LEAVE_COVER_INACTIVE' });
+  });
+
+  it('the Leave dialog offers Remove only for a period that starts tomorrow or later (leaveActions; demo of 7 Oct 2026)', () => {
+    const dialog = readFileSync(path.join(__dirname, '../../app/t/[slug]/drivers/leave-dialog.tsx'), 'utf8');
+    expect(dialog).toContain('const actionsOf = (p: LeaveView) => leaveActions({ fromIso: p.from, untilIso: p.until }, today);');
+    expect(dialog).toContain('{actionsOf(p)!.change}');
+    expect(dialog).toContain('{actionsOf(p)!.remove ? (');
+    expect(dialog).not.toContain('{!started(p) ? (');
   });
 
   it('another company\'s driver or period is not found (404)', async () => {

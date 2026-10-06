@@ -22,6 +22,9 @@
  *     day, a re-plan gives the usual driver back with a COVER note.
  *  9. (review) Two depots: the cover is the usual driver of a truck of the other depot, planned that day
  *     with him; this depot's plan does not give him ("No driver: Ali is on leave ... - pick a driver").
+ * 10. (demo of 7 Oct 2026) Sam's leave entered after planning, nobody re-plans: Lock (through the route),
+ *     Loading and Dispatch are refused 409 DRIVER_ON_LEAVE until the dispatcher's answer; each answer is
+ *     in the status change's audit row; a load that left before the leave was entered completes.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -97,6 +100,7 @@ import { POST as createDriver } from '@/app/api/drivers/route';
 import { PATCH as patchTruck } from '@/app/api/trucks/[id]/route';
 import { GET as getLeave, POST as postLeave } from '@/app/api/drivers/[id]/leave/route';
 import { PATCH as patchLeave } from '@/app/api/drivers/[id]/leave/[leaveId]/route';
+import { PATCH as patchLoad } from '@/app/api/runs/[id]/loads/[loadId]/route';
 import { prisma as libPrisma } from '@/lib/db';
 import { getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
@@ -216,6 +220,10 @@ describe('the dispatcher keeps the drivers, their leave and the usual drivers; t
     ids.nasser = created.body.data.id;
     expect((await patchTruck(send('PATCH', { defaultDriverId: ids.ali }), { params: { id: ids.t1 } })).status).toBe(200);
     expect((await patchTruck(send('PATCH', { defaultDriverId: ids.sam }), { params: { id: ids.t2 } })).status).toBe(200);
+    // The audit row reads for the owner: the truck's code and the drivers by name (demo of 7 Oct 2026).
+    const set = await prisma.auditLog.findFirstOrThrow({ where: { tenantId: ids.tenant, action: 'TRUCK_USUAL_DRIVER_SET', entityId: ids.t1 } });
+    expect(set.afterJson).toEqual({ truck: 'T01', from: 'none', to: 'Ali', truckId: ids.t1, fromDriverId: null, toDriverId: ids.ali });
+    expect(set.beforeJson).toBeNull();
     const refused = await answer(await patchTruck(send('PATCH', { capacityCases: 1, defaultDriverId: ids.bob }), { params: { id: ids.t1 } }));
     expect(refused.status).toBe(403);
     expect(refused.body.error).toMatchObject({ code: 'ADMIN_ONLY_TRUCK_FIELD', fields: ['capacityCases'] });
@@ -306,7 +314,7 @@ describe('the dispatcher keeps the drivers, their leave and the usual drivers; t
     const count = (action: string, entity: string) => rows.filter((r) => r.action === action && r.entity === entity && r.userId === ids.planner).length;
     expect([count('CREATE', 'Driver'), count('TRUCK_USUAL_DRIVER_SET', 'Truck'), count('DRIVER_LEAVE_ADDED', 'DriverLeave')]).toEqual([1, 2, 3]);
     expect(rows.every((r) => r.createdAt instanceof Date)).toBe(true);
-    expect(await prisma.driverLeave.count({ where: { tenantId: ids.tenant } })).toBe(3);
+    expect(await prisma.driverLeave.count({ where: { tenantId: ids.tenant } })).toBe(3); // so far (steps 8 to 10 add more)
     expect(await prisma.driverLeave.count({ where: { tenantId: ids.other } })).toBe(1);
     // The other company's leave on the same day never reached this company's plans or lists.
     as('PLANNER');
@@ -350,5 +358,48 @@ describe('the dispatcher keeps the drivers, their leave and the usual drivers; t
     expect(await driversOf(mct)).toEqual({ 'T01:1': 'none', 'T02:1': 'Sam' });
     const detail = (await getPlanDetail(ids.tenant, mct))!;
     expect(detail.loads.find((l) => l.truckCode === 'T01')!.driverNote).toBe(`No driver: Ali is on leave until ${fmtDayMonth(day9)} - pick a driver`);
+  });
+
+  it("10. (demo of 7 Oct 2026) leave entered after planning, nobody re-plans: Lock, Loading and Dispatch ask first; the answer is audited; a load that has left is never stopped", async () => {
+    const day10 = addDaysIso(D, 14);
+    await seedOrders(day10, 2);
+    const run = await optimize(day10);
+    expect(await driversOf(run)).toEqual({ 'T01:1': 'Ali', 'T02:1': 'Sam' });
+    // Ali's load goes out first; his leave is entered afterwards.
+    const t1 = await loadOf(run, ids.t1, 1);
+    await updateLoad(ids.tenant, run, t1.id, { status: 'LOCKED' }, planner(), everyRole);
+    await updateLoad(ids.tenant, run, t1.id, { status: 'DISPATCHED' }, planner(), everyRole);
+    as('PLANNER');
+    for (const who of [ids.sam, ids.ali]) expect((await postLeave(send('POST', { from: day10, until: addDaysIso(day10, 1) }), { params: { id: who } })).status).toBe(201);
+
+    // Through the route, as the plan screen sends it: refused with the words, the driver and the day.
+    const t2 = await loadOf(run, ids.t2, 1);
+    const ctx = { params: { id: run, loadId: t2.id } };
+    const refused = await answer(await patchLoad(send('PATCH', { status: 'LOCKED' }), ctx));
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toEqual({
+      error: `T02 L1: Sam is on leave on ${fmtDayMonth(day10)} - pick another driver, or confirm that he drives.`,
+      code: 'DRIVER_ON_LEAVE',
+      driverId: ids.sam,
+      name: 'Sam',
+      day: day10,
+      until: addDaysIso(day10, 1),
+    });
+    expect((await loadOf(run, ids.t2, 1)).status).toBe('PLANNED');
+    // The answer: Lock, then Loading and Dispatch ask again and go with the answer.
+    expect((await patchLoad(send('PATCH', { status: 'LOCKED', leaveConfirmed: true }), ctx)).status).toBe(200);
+    for (const status of ['LOADING', 'DISPATCHED'] as const) {
+      await expect(updateLoad(ids.tenant, run, t2.id, { status }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'DRIVER_ON_LEAVE' } });
+      await updateLoad(ids.tenant, run, t2.id, { status, leaveConfirmed: true }, planner(), everyRole);
+    }
+    expect(await loadOf(run, ids.t2, 1)).toMatchObject({ status: 'DISPATCHED', driverId: ids.sam });
+    const order = ['LOAD_LOCKED', 'LOAD_LOADING', 'LOAD_DISPATCHED'];
+    const rows = (await prisma.auditLog.findMany({ where: { tenantId: ids.tenant, entityId: t2.id } })).sort((a, b) => order.indexOf(a.action) - order.indexOf(b.action));
+    expect(rows.map((r) => [r.action, r.userId, (r.afterJson as { driverOnLeave?: unknown }).driverOnLeave])).toEqual(
+      ['LOAD_LOCKED', 'LOAD_LOADING', 'LOAD_DISPATCHED'].map((a) => [a, ids.planner, { driverId: ids.sam, driverName: 'Sam', until: addDaysIso(day10, 1), confirmed: true }]),
+    );
+    // Ali's load left before his leave was entered: it completes without a question.
+    await updateLoad(ids.tenant, run, t1.id, { status: 'COMPLETED' }, planner(), everyRole);
+    expect((await loadOf(run, ids.t1, 1)).status).toBe('COMPLETED');
   });
 });

@@ -192,6 +192,29 @@ describe('plan screen (plan-view.tsx)', () => {
     expect(driverCell).toMatch(/const question = leaveQuestion\(v \|\| null, onLeave,/);
   });
 
+  it('the Driver list fits a driver on leave: a short label, the full text as the tooltip, a list wide enough (demo of 7 Oct 2026)', () => {
+    const driverCell = planScreen.slice(planScreen.indexOf('function LoadDriver('), planScreen.indexOf('function LoadActions('));
+    expect(driverCell).toContain('{driverOptionLabel(x, onLeave.get(x.id) ?? null)}');
+    expect(driverCell).toContain('title={onLeave.has(x.id) ? onLeaveTitle(x.name, onLeave.get(x.id)!) : undefined}');
+    expect(driverCell).not.toMatch(/\(\$\{onLeaveLabel\(/); // the long "(on leave until ..." the closed list cut off
+    // The closed list's tooltip names the leave of the driver on the load.
+    expect(driverCell).toContain('keepLeaveUntil ? onLeaveTitle(driverName, keepLeaveUntil) : undefined');
+    expect(driverCell).toMatch(/className=\{`h-7 w-48 rounded-md border/);
+  });
+
+  it('Lock, Loading and Dispatch of a load whose driver is on leave: the refusal asks, OK sends the move again with the answer (demo of 7 Oct 2026)', () => {
+    const move = planScreen.slice(planScreen.indexOf('async function moveLoad('), planScreen.indexOf('\n  }\n', planScreen.indexOf('async function moveLoad(')));
+    expect(move).toContain("json: { status }");
+    expect(move).toMatch(/const question = r\.ok \? null : onLeaveMoveQuestion\(r\.errorBody, `\$\{l\.truckCode\} · L\$\{l\.loadNo\}`, status\);\s*if \(!question \|\| !window\.confirm\(question\)\) return r;/);
+    expect(move).toContain('json: { status, leaveConfirmed: true }');
+    // Every status change of the screen goes through it: the load's buttons and Lock all.
+    const setStatus = planScreen.slice(planScreen.indexOf('function setStatus('), planScreen.indexOf('function setDriver('));
+    expect(setStatus).toContain('const r = await moveLoad(l, status);');
+    const lockAll = planScreen.slice(planScreen.indexOf('function lockAll('), planScreen.indexOf('function chooseScenario('));
+    expect(lockAll).toContain("const r = await moveLoad(l, 'LOCKED');");
+    expect(count(planScreen, /\/api\/runs\/\$\{runId\}\/loads\/\$\{l\.id\}`, \{ method: 'PATCH', json: \{ status/g)).toBe(0);
+  });
+
   it('the reload banner punctuates the server message (planReloadErrorText; fourth review of PR3)', () => {
     expect(planScreen).toContain('{planReloadErrorText(err)}');
     expect(planScreen).not.toContain('Could not reload the plan: {err}');

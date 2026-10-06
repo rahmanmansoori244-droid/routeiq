@@ -10,7 +10,7 @@ import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { errorMessage } from '@/lib/error-message';
 import { fmtDayMonth } from '@/lib/dispatch/time';
-import { coverOptionLabel, coverOptions, LEAVE_NOTE_MAX } from '@/lib/dispatch/driver-leave';
+import { coverOptionLabel, coverOptions, leaveActions, LEAVE_NOTE_MAX } from '@/lib/dispatch/driver-leave';
 import type { LeaveView } from '@/lib/dispatch/driver-leave-service';
 
 /** A driver as the Drivers page's lists offer him. */
@@ -39,7 +39,8 @@ const PHASE: Record<LeaveView['phase'], { text: string; variant: 'warning' | 'ou
 /**
  * A driver's leave (owner request 6 Oct 2026): his periods, the latest first (ended ones are kept for
  * the record), and for the dispatcher (PLANNER and up) the form to add one, change one (an ended
- * period stays as it was; a started one keeps its first day) and remove one that has not started.
+ * period stays as it was; a started one keeps its first day) and remove one that starts tomorrow or
+ * later (a period from today is "On leave now": changed or ended early, as one that started earlier).
  * Rules and messages: lib/dispatch/driver-leave.ts, enforced by the server. The periods (and the
  * company's today) are read first: until they are, or when reading fails (then with Retry), the form
  * stays off - its date limits and the "started" checks need them.
@@ -135,7 +136,10 @@ export function LeaveDialog({ driver, drivers, canEdit, onOpenChange }: Props) {
     });
   }
 
+  // Its first day is before today: it stays (the From field is off; the server's LEAVE_STARTED rule).
   const started = (p: LeaveView) => !!today && p.from < today;
+  // What the list offers: a period from today or earlier "Change / end early" only, Remove from tomorrow on (leaveActions).
+  const actionsOf = (p: LeaveView) => leaveActions({ fromIso: p.from, untilIso: p.until }, today);
 
   return (
     <Dialog open={!!driver} onOpenChange={onOpenChange}>
@@ -171,12 +175,12 @@ export function LeaveDialog({ driver, drivers, canEdit, onOpenChange }: Props) {
                   {p.coverName ? `cover ${p.coverName}${p.coverDriverId && nameOf.get(p.coverDriverId)?.active === false ? ' (inactive: he cannot cover)' : ''}` : 'no cover'}
                 </span>
                 {p.note ? <span className="text-muted-foreground">· {p.note}</span> : null}
-                {canEdit && p.phase !== 'ENDED' ? (
+                {canEdit && actionsOf(p) ? (
                   <span className="ml-auto flex gap-2 text-xs">
                     <button type="button" className="text-primary hover:underline" onClick={() => startEdit(p)} disabled={pending}>
-                      {started(p) ? 'Change / end early' : 'Change'}
+                      {actionsOf(p)!.change}
                     </button>
-                    {!started(p) ? (
+                    {actionsOf(p)!.remove ? (
                       <button type="button" className="text-destructive hover:underline" onClick={() => remove(p)} disabled={pending}>
                         Remove
                       </button>

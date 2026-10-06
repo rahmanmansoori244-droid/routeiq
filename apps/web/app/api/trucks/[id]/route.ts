@@ -16,7 +16,8 @@ export const GET = (req: Request, { params }: Params) =>
  * A company admin changes any truck field. The dispatcher (PLANNER and up, owner request 6 Oct 2026)
  * changes the usual (default) driver only - the Drivers page's "Usual driver of each truck"; any other
  * field is refused (403 ADMIN_ONLY_TRUCK_FIELD, nothing saved). A change of the usual driver alone
- * is audited TRUCK_USUAL_DRIVER_SET.
+ * is audited TRUCK_USUAL_DRIVER_SET { truck, from, to } by code and name ("none": no driver), with
+ * the ids; any other change UPDATE with the truck before and after.
  */
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
@@ -50,11 +51,29 @@ export const PATCH = (req: Request, { params }: Params) =>
       }
       const after = await db.truck.update({ where: { id: params.id }, data: input });
       const changed = (Object.keys(input) as (keyof typeof input)[]).filter((k) => input[k] !== undefined && input[k] !== (before as Record<string, unknown>)[k]);
-      const usualDriverOnly = changed.length === 1 && changed[0] === 'defaultDriverId';
+      if (changed.length === 1 && changed[0] === 'defaultDriverId') {
+        // A row the owner can read (demo of 7 Oct 2026): the truck's code and the drivers by name, as
+        // they were at the change, with the ids - not the whole truck row with bare ids.
+        const fromId = before.defaultDriverId ?? null;
+        const toId = after.defaultDriverId ?? null;
+        const ids = [fromId, toId].filter((x): x is string => !!x);
+        const names = new Map((await db.driver.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })).map((d) => [d.id, d.name]));
+        const nameOf = (id: string | null) => (id ? (names.get(id) ?? 'unknown driver') : 'none');
+        await audit({
+          tenantId: user.tenantId,
+          userId: user.id,
+          action: 'TRUCK_USUAL_DRIVER_SET',
+          entity: 'Truck',
+          entityId: after.id,
+          afterJson: { truck: after.code, from: nameOf(fromId), to: nameOf(toId), truckId: after.id, fromDriverId: fromId, toDriverId: toId },
+          ip,
+        });
+        return ok(after);
+      }
       await audit({
         tenantId: user.tenantId,
         userId: user.id,
-        action: usualDriverOnly ? 'TRUCK_USUAL_DRIVER_SET' : 'UPDATE',
+        action: 'UPDATE',
         entity: 'Truck',
         entityId: after.id,
         beforeJson: before as never,

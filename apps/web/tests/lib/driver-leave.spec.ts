@@ -17,14 +17,19 @@ import {
   coverOptionLabel,
   coverOptions,
   coverOwnTruckWarning,
+  driverOptionLabel,
   isOnLeave,
   keepTitle,
+  leaveActions,
   leaveOnDay,
   leavePhase,
   leaveQuestion,
   loadLeaveNote,
   noDriverLeaveNote,
   onLeaveLabel,
+  onLeaveMoveQuestion,
+  onLeaveMoveRefusal,
+  onLeaveTitle,
   overlappingLeave,
   periodsOverlap,
   pickOnLeaveConfirm,
@@ -173,6 +178,20 @@ describe('what may be changed and removed (past periods are kept for the record)
     expect(codeOf(checkLeaveRemove(fromToday, TODAY))).toBe('OK');
   });
 
+  it('the Leave dialog offers: a period that has started (today included) "Change / end early" only; Remove only from tomorrow on; an ended one nothing (demo of 7 Oct 2026)', () => {
+    expect(leaveActions(started, TODAY)).toEqual({ change: 'Change / end early', remove: false });
+    // Starting today: "On leave now", so the same as a period that started earlier (it showed Remove before).
+    expect(leavePhase(fromToday, TODAY)).toBe('NOW');
+    expect(leaveActions(fromToday, TODAY)).toEqual({ change: 'Change / end early', remove: false });
+    expect(leaveActions(P('M', 'ALI', '2026-10-07', '2026-10-07'), TODAY)).toEqual({ change: 'Change', remove: true }); // tomorrow
+    expect(leaveActions(coming, TODAY)).toEqual({ change: 'Change', remove: true });
+    expect(leaveActions(ended, TODAY)).toBeNull();
+    // Today not read yet: nothing offered.
+    expect(leaveActions(coming, '')).toBeNull();
+    // The server rule stays: a period from today can still be removed through the API.
+    expect(codeOf(checkLeaveRemove(fromToday, TODAY))).toBe('OK');
+  });
+
   it('a cover deactivated after the save does not block the period: it ends early or its note changes; choosing an inactive cover is refused', () => {
     // Ali's leave 1-31 Oct with Bob; Bob deactivated on the 10th; on the 15th Ali is back.
     const withBob = P('S', 'ALI', '2026-10-01', '2026-10-31', 'BOB');
@@ -289,5 +308,37 @@ describe('the texts on the plan screen', () => {
       expect(loadLeaveNote({ status, driverId: 'ALI' }, 'ALI', day, name)).toBeNull();
       expect(loadLeaveNote({ status, driverId: null }, 'SAM', day, name)).toBeNull();
     }
+  });
+
+  it('the Driver list: a short label that fits the closed list ("- on leave"), the full text as its tooltip (demo of 7 Oct 2026)', () => {
+    expect(driverOptionLabel({ name: 'Rashid Ali', active: true }, '2026-10-13')).toBe('Rashid Ali - on leave');
+    expect(driverOptionLabel({ name: 'Rashid Ali', active: true }, null)).toBe('Rashid Ali');
+    expect(driverOptionLabel({ name: 'Salim', active: true, casual: true }, null)).toBe('Salim (daily)');
+    expect(driverOptionLabel({ name: 'Old', active: false }, '2026-10-13')).toBe('Old (inactive) - on leave');
+    // The cut-off label of the demo: never the long "(on leave until ..." in the list itself.
+    expect(driverOptionLabel({ name: 'Rashid Ali', active: true }, '2026-10-13')).not.toContain('until');
+    expect(onLeaveTitle('Rashid Ali', '2026-10-13')).toBe('Rashid Ali is on leave until 13 Oct');
+  });
+});
+
+describe('Lock, Loading and Dispatch of a load whose driver is on leave that day (demo of 7 Oct 2026)', () => {
+  it('the refusal (409 DRIVER_ON_LEAVE) says what to do', () => {
+    expect(onLeaveMoveRefusal('Salim Nasser', '2026-10-13')).toBe('Salim Nasser is on leave on 13 Oct - pick another driver, or confirm that he drives.');
+  });
+
+  it('the plan screen asks after that refusal, per move; OK sends the move again with the answer', () => {
+    const body = { code: 'DRIVER_ON_LEAVE', driverId: 'SAL', name: 'Salim Nasser', day: '2026-10-13', until: '2026-10-15', error: 'x' };
+    const lock = onLeaveMoveQuestion(body, 'T03 · L1', 'LOCKED')!;
+    expect(lock).toBe(
+      'Salim Nasser is on leave on 13 Oct (until 15 Oct). Lock T03 · L1 with Salim Nasser anyway?\n\nOK only if he drives it (for example, his leave was cancelled): your answer is kept in the audit log. Cancel, then pick another driver in the Driver list.',
+    );
+    expect(onLeaveMoveQuestion(body, 'T03 · L1', 'LOADING')).toMatch(/^Salim Nasser is on leave on 13 Oct \(until 15 Oct\)\. Start loading T03 · L1 with Salim Nasser anyway\?/);
+    expect(onLeaveMoveQuestion(body, 'T03 · L1', 'DISPATCHED')).toMatch(/\. Dispatch T03 · L1 with Salim Nasser anyway\?/);
+    // A one-day leave: no "until".
+    expect(onLeaveMoveQuestion({ ...body, until: '2026-10-13' }, 'T03 · L1', 'LOCKED')).toMatch(/^Salim Nasser is on leave on 13 Oct\. Lock T03/);
+    // Any other refusal (rule 20, the location rule, the daily-driver quick add's question without a day): no question.
+    expect(onLeaveMoveQuestion({ code: 'DRIVER_REQUIRED' }, 'T03 · L1', 'DISPATCHED')).toBeNull();
+    expect(onLeaveMoveQuestion({ code: 'DRIVER_ON_LEAVE', driverId: 'SAL', name: 'Salim', until: '2026-10-15' }, 'T03 · L1', 'LOCKED')).toBeNull();
+    expect(onLeaveMoveQuestion(null, 'T03 · L1', 'LOCKED')).toBeNull();
   });
 });

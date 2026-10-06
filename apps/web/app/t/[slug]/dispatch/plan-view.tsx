@@ -14,7 +14,7 @@ import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstTex
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
-import { keepTitle, leaveQuestion, onLeaveLabel } from '@/lib/dispatch/driver-leave';
+import { driverOptionLabel, keepTitle, leaveQuestion, onLeaveMoveQuestion, onLeaveTitle } from '@/lib/dispatch/driver-leave';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
@@ -349,6 +349,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // Drivers on leave on this plan's delivery day (owner request 6 Oct 2026): driver id -> last day.
   const onLeave = useMemo(() => new Map((d?.driversOnLeave ?? []).map((x) => [x.driverId, x.until])), [d]);
 
+  /**
+   * A load's status change. Lock, Loading and Dispatch of a load whose driver is on leave that day are
+   * refused (409 DRIVER_ON_LEAVE, demo of 7 Oct 2026): the screen asks, and OK sends the same move
+   * again with the answer (`leaveConfirmed`, kept in the audit log); Cancel keeps the refusal.
+   */
+  async function moveLoad(l: DetailLoad, status: string) {
+    const url = `/api/runs/${runId}/loads/${l.id}`;
+    const r = await api<{ warnings?: string[] }>(url, { method: 'PATCH', json: { status } });
+    const question = r.ok ? null : onLeaveMoveQuestion(r.errorBody, `${l.truckCode} · L${l.loadNo}`, status);
+    if (!question || !window.confirm(question)) return r;
+    return api<{ warnings?: string[] }>(url, { method: 'PATCH', json: { status, leaveConfirmed: true } });
+  }
+
   // One action at a time: while any request of this plan runs (a load change, Lock all, Use
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
   // user cannot race themselves (F07; plan-actions.ts).
@@ -361,7 +374,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       lock,
       l.id,
       async () => {
-        const r = await api<{ warnings?: string[] }>(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        const r = await moveLoad(l, status);
         if (!r.ok) {
           toast.error(r.error ?? 'Could not change the load.');
           await load(); // show the plan as it is now (it may have changed meanwhile)
@@ -421,7 +434,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         let n = 0;
         let firstError: string | null = null;
         for (const l of planned) {
-          const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
+          // A load whose driver is on leave that day asks (moveLoad); Cancel leaves it planned.
+          const r = await moveLoad(l, 'LOCKED');
           if (r.ok) n++;
           else firstError ??= r.error;
         }
@@ -1488,11 +1502,13 @@ function LoadDriver({
   }
   return (
     <div className="space-y-1">
+      {/* A driver on leave that day reads "Rashid Ali - on leave" (driverOptionLabel: the closed list
+          cut the longer label off, demo of 7 Oct 2026); the until date is in the tooltips and the note. */}
       <select
-        className={`h-7 w-40 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
+        className={`h-7 w-48 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
         value={l.driverId ?? ''}
         disabled={!editable || busy}
-        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
+        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? (keepLeaveUntil ? onLeaveTitle(driverName, keepLeaveUntil) : undefined))}
         onChange={(e) => {
           const v = e.target.value;
           if (v === ADD_DAILY) return onAddDaily?.();
@@ -1508,11 +1524,8 @@ function LoadDriver({
       >
         <option value="">No driver</option>
         {options.map((x) => (
-          <option key={x.id} value={x.id}>
-            {x.name}
-            {x.casual ? ' (daily)' : ''}
-            {x.active ? '' : ' (inactive)'}
-            {onLeave.has(x.id) ? ` (${onLeaveLabel(onLeave.get(x.id)!)})` : ''}
+          <option key={x.id} value={x.id} title={onLeave.has(x.id) ? onLeaveTitle(x.name, onLeave.get(x.id)!) : undefined}>
+            {driverOptionLabel(x, onLeave.get(x.id) ?? null)}
           </option>
         ))}
         {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}

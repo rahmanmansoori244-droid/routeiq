@@ -52,7 +52,7 @@ const FKS: { child: string; field: string; parent: string; onDelete: 'RESTRICT' 
   { child: 'planLoad', field: 'driverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'truck', field: 'defaultDriverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'driverShift', field: 'driverId', parent: 'driver', onDelete: 'RESTRICT' },
-  // Driver leave (6 Oct 2026): NO ACTION, as every reference to a driver (migration 20261006120000_driver_leave).
+  // Driver leave (6 Oct 2026): NO ACTION, as every reference to a driver (migration 20261007090000_driver_leave).
   { child: 'driverLeave', field: 'driverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'driverLeave', field: 'coverDriverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'orderLine', field: 'productId', parent: 'product', onDelete: 'RESTRICT' },

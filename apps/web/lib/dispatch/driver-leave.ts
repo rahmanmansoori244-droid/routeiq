@@ -12,7 +12,8 @@
  *  - a truck whose usual (default) driver is on leave gets the cover driver, when one is set, is not
  *    on leave himself that day and drives no other truck that day; else no driver, and the load says
  *    "No driver: <name> is on leave until <date> - pick a driver" (rule 20 then keeps it from leaving);
- *  - the plan screen's Driver list shows him "(on leave until <date>)" and asks before he is chosen.
+ *  - the plan screen's Driver list shows him "- on leave" and asks before he is chosen;
+ *  - Lock, Loading and Dispatch of a load he is still on ask first (onLeaveMoveRefusal).
  * After the period he is used again by himself. Periods of one driver never overlap; a period that
  * has started keeps its start date and one that has ended is kept as it is, for the record.
  */
@@ -160,6 +161,18 @@ export function checkLeaveChange(
   return clash ? overlapRefusal(clash) : OK;
 }
 
+/**
+ * What the Leave dialog offers for a period (null: nothing - it has ended, or today is not read yet).
+ * A period that has started, its first day today included ("On leave now"), is changed or ended early
+ * only; Remove is offered for a period that starts tomorrow or later (demo of 7 Oct 2026: a period
+ * starting today showed Remove while one started earlier did not). The server's rule is wider
+ * (checkLeaveRemove: from today on) and stays.
+ */
+export function leaveActions(p: Pick<LeavePeriod, 'fromIso' | 'untilIso'>, todayIso: string): { change: 'Change' | 'Change / end early'; remove: boolean } | null {
+  if (!todayIso || leavePhase(p, todayIso) === 'ENDED') return null;
+  return p.fromIso <= todayIso ? { change: 'Change / end early', remove: false } : { change: 'Change', remove: true };
+}
+
 /** Removing a period: only one that has not started yet (today included); others end early or stay. */
 export function checkLeaveRemove(before: LeavePeriod, todayIso: string): LeaveCheck {
   const phase = leavePhase(before, todayIso);
@@ -195,9 +208,54 @@ export function coverFor(usualDriverId: string | null, leave: LeaveOnDay): strin
   return leave.get(usualDriverId)?.coverDriverId ?? null;
 }
 
-/** "on leave until 12 Oct" (the Driver list's label and the Drivers page). */
+/** "on leave until 12 Oct" (the Drivers page, the load's note and the questions). */
 export function onLeaveLabel(untilIso: string): string {
   return `on leave until ${fmtDayMonth(untilIso)}`;
+}
+
+/** "Ali is on leave until 12 Oct": the tooltip of the Driver list (the list itself is too narrow for it). */
+export function onLeaveTitle(name: string, untilIso: string): string {
+  return `${name} is ${onLeaveLabel(untilIso)}`;
+}
+
+/**
+ * A driver in a load's Driver list: "Rashid Ali", "Salim (daily)", "Old (inactive)", and "- on leave"
+ * when he is on leave on the plan's day (`leaveUntil`). Short, so the closed list shows it whole (demo
+ * of 7 Oct 2026: "Rashid Ali (on leave until " was cut off); the until date is in its tooltip
+ * (onLeaveTitle), in the load's note and in the question asked before he is chosen.
+ */
+export function driverOptionLabel(d: { name: string; active: boolean; casual?: boolean }, leaveUntil: string | null): string {
+  return `${d.name}${d.casual ? ' (daily)' : ''}${d.active ? '' : ' (inactive)'}${leaveUntil ? ' - on leave' : ''}`;
+}
+
+/**
+ * Lock, Loading and Dispatch of a load (PLANNED, LOCKED or LOADING) whose driver is on leave on its
+ * delivery day are refused with this (409 DRIVER_ON_LEAVE; demo of 7 Oct 2026: RouteIQ put Salim on
+ * the load, his leave was entered afterwards, nobody re-planned and the load went out without a
+ * question), unless the request carries the dispatcher's answer (`leaveConfirmed`; the dispatcher may
+ * keep him knowingly, for example when the leave was cancelled at the last minute; the status change's
+ * audit row keeps the answer). A load that has left is never stopped by it afterwards.
+ */
+export function onLeaveMoveRefusal(name: string, dayIso: string): string {
+  return `${name} is on leave on ${fmtDayMonth(dayIso)} - pick another driver, or confirm that he drives.`;
+}
+
+/** The plan screen's words for a forward move. */
+const MOVE_VERB: Record<string, string> = { LOCKED: 'Lock', LOADING: 'Start loading', DISPATCHED: 'Dispatch' };
+
+/**
+ * The question the plan screen asks after that refusal (`errorBody`: the 409's body with the driver's
+ * name, the day and the last day of his leave); OK sends the same move again with `leaveConfirmed`.
+ * Null for any other answer.
+ */
+export function onLeaveMoveQuestion(errorBody: Record<string, unknown> | null, trip: string, to: string): string | null {
+  if (errorBody?.code !== 'DRIVER_ON_LEAVE' || typeof errorBody.name !== 'string' || typeof errorBody.day !== 'string') return null;
+  const { name, day } = errorBody;
+  const until = typeof errorBody.until === 'string' && errorBody.until !== day ? ` (until ${fmtDayMonth(errorBody.until)})` : '';
+  return (
+    `${name} is on leave on ${fmtDayMonth(day)}${until}. ${MOVE_VERB[to] ?? 'Move'} ${trip} with ${name} anyway?\n\n` +
+    'OK only if he drives it (for example, his leave was cancelled): your answer is kept in the audit log. Cancel, then pick another driver in the Driver list.'
+  );
 }
 
 /** The note on a load without a driver because its truck's usual driver is on leave. */

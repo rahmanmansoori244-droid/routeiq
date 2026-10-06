@@ -2176,6 +2176,100 @@ describe('owner rule 20 (30 Sep 2026): a load never leaves without a driver', ()
   });
 });
 
+describe('a driver on leave that day: Lock, Loading and Dispatch ask first (demo of 7 Oct 2026)', () => {
+  // RouteIQ put Salim on the loads of 27 Sep; his leave (27-29 Sep, no cover) was saved afterwards and nobody re-planned.
+  const setup = () => {
+    seedAppliedPlan();
+    tables.customer = [{ id: 'c', tenantId: T, code: 'C1', branchCode: null, lat: 23.6111, lng: 58.4111, locationVerified: true, geocodeConfidence: 'HIGH' }];
+    tables.driver = [
+      { id: 'DRV1', tenantId: T, code: 'D1', name: 'Salim Nasser', phone: null, active: true, casual: false },
+      { id: 'DRV2', tenantId: T, code: 'D2', name: 'Rashid Ali', phone: null, active: true, casual: false },
+    ];
+    for (const id of ['L1', 'L2']) row('planLoad', id).driverId = 'DRV1';
+    tables.driverLeave = [
+      { id: 'LV', tenantId: T, driverId: 'DRV1', fromDate: DAY, untilDate: new Date('2026-09-29T00:00:00Z'), note: null, coverDriverId: null, createdAt: new Date(), updatedAt: new Date() },
+      // Another company's leave for a driver of the same id never counts.
+      { id: 'LX', tenantId: 'tB', driverId: 'DRV2', fromDate: DAY, untilDate: DAY, note: null, coverDriverId: null, createdAt: new Date(), updatedAt: new Date() },
+    ];
+  };
+  const refusal = (loadNo: number) => `T01 L${loadNo}: Salim Nasser is on leave on 27 Sep - pick another driver, or confirm that he drives.`;
+  const refused = (id: string, status: string) => updateLoad(T, 'P', id, { status: status as 'LOCKED' }, user, allow).catch((x) => x);
+
+  it('Lock of a planned load is refused (409 DRIVER_ON_LEAVE, nothing changes); with the answer it locks, and the audit row keeps the answer', async () => {
+    setup();
+    const e = await refused('L2', 'LOCKED');
+    expect(e).toBeInstanceOf(PlanError);
+    expect(e).toMatchObject({ status: 409, details: { code: 'DRIVER_ON_LEAVE', driverId: 'DRV1', name: 'Salim Nasser', day: '2026-09-27', until: '2026-09-29' } });
+    expect(e.message).toBe(refusal(2));
+    expect(row('planLoad', 'L2').status).toBe('PLANNED');
+    expect(tables.auditLog).toEqual([]);
+
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED', leaveConfirmed: true }, user, allow);
+    expect(row('planLoad', 'L2').status).toBe('LOCKED');
+    const a = tables.auditLog.find((x) => x.action === 'LOAD_LOCKED' && x.entityId === 'L2')!;
+    expect(a).toMatchObject({ userId: 'u1', afterJson: expect.objectContaining({ driverOnLeave: { driverId: 'DRV1', driverName: 'Salim Nasser', until: '2026-09-29', confirmed: true } }) });
+  });
+
+  it('Loading and Dispatch ask again (each step); a load locked before the leave was entered is asked too', async () => {
+    setup();
+    expect(await refused('L1', 'LOADING')).toMatchObject({ status: 409, details: { code: 'DRIVER_ON_LEAVE' }, message: refusal(1) });
+    await updateLoad(T, 'P', 'L1', { status: 'LOADING', leaveConfirmed: true }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('LOADING');
+    expect(await refused('L1', 'DISPATCHED')).toMatchObject({ status: 409, details: { code: 'DRIVER_ON_LEAVE' }, message: refusal(1) });
+    expect(row('planLoad', 'L1').status).toBe('LOADING');
+    await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED', leaveConfirmed: true }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('DISPATCHED');
+    expect(tables.auditLog.map((x) => [x.action, (x.afterJson as { driverOnLeave?: { confirmed: boolean } }).driverOnLeave?.confirmed])).toEqual([
+      ['LOAD_LOADING', true],
+      ['LOAD_DISPATCHED', true],
+    ]);
+    // Locked straight to dispatched asks too.
+    setup();
+    expect(await refused('L1', 'DISPATCHED')).toMatchObject({ details: { code: 'DRIVER_ON_LEAVE' } });
+  });
+
+  it('never retroactive: a load that has left completes; stepping back (Unlock, Back to locked) never asks', async () => {
+    setup();
+    row('planLoad', 'L1').status = 'DISPATCHED';
+    await updateLoad(T, 'P', 'L1', { status: 'COMPLETED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('COMPLETED');
+    setup();
+    row('planLoad', 'L1').status = 'LOADING';
+    await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+    expect(tables.auditLog.every((x) => !(x.afterJson as Record<string, unknown>).driverOnLeave)).toBe(true);
+  });
+
+  it('another driver, or the leave on other days: no question and no answer in the audit row; the driver picked in the same request counts', async () => {
+    setup();
+    // Rashid instead, in the same request as the Lock: allowed (the driver is set first).
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED', driverId: 'DRV2' }, user, allow);
+    expect(row('planLoad', 'L2')).toMatchObject({ status: 'LOCKED', driverId: 'DRV2' });
+    expect((tables.auditLog.find((x) => x.action === 'LOAD_LOCKED')!.afterJson as Record<string, unknown>).driverOnLeave).toBeUndefined();
+    // The leave moved to the next days: Salim drives on 27 Sep.
+    setup();
+    row('driverLeave', 'LV').fromDate = new Date('2026-09-28T00:00:00Z');
+    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('LOADING');
+    // The answer sent without a driver on leave changes nothing (and is not recorded).
+    await updateLoad(T, 'P', 'L2', { status: 'LOCKED', leaveConfirmed: true }, user, allow);
+    expect(tables.auditLog.every((x) => !(x.afterJson as Record<string, unknown>).driverOnLeave)).toBe(true);
+  });
+
+  it('rule 20 stays as it is: no driver is DRIVER_REQUIRED at Dispatch, whatever the answer', async () => {
+    setup();
+    row('planLoad', 'L1').driverId = null;
+    expect(await updateLoad(T, 'P', 'L1', { status: 'DISPATCHED', leaveConfirmed: true }, user, allow).catch((x) => x)).toMatchObject({ details: { code: 'DRIVER_REQUIRED' } });
+  });
+
+  it('the route takes the answer (leaveConfirmed) and passes it on', () => {
+    const route = readFileSync(path.resolve(__dirname, '../../app/api/runs/[id]/loads/[loadId]/route.ts'), 'utf8');
+    expect(route).toContain('leaveConfirmed: z.boolean().optional()');
+    expect(route).toMatch(/updateLoad\(user\.tenantId, params\.id, params\.loadId, \{ status, driverId, leaveConfirmed \}/);
+  });
+});
+
 describe('completeLoadAsDriver: Back at depot closes the trip (delivery outcome, spec section 8.7)', () => {
   const ref = { runId: 'P', loadId: 'L1', depotId: 'D1', date: '2026-09-27' };
   const visit = (sequence: number, outcome: string | null) => ({
