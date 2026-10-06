@@ -59,8 +59,9 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
     4.   Operating cost in real OMR: fixed truck cost (once per truck-day), per-load cost,
          distance cost (cost_per_km + fuel_price / km_per_litre - fuel is counted ONCE),
          driver time cost, overtime (a driver paid by the day, driver_day_cost: that rate once
-         per truck-day instead of the time cost and overtime; its km and time get a search-only
-         tie-breaker at the own fleet's rates, _search_km_rate, never reported as money).
+         per truck-day instead of the time cost and overtime; its km and time get a tiny
+         search-only tie-breaker, _search_km_rate / _tie_span_units, compared after the cost in
+         every goal and never reported as money).
     5.   Fewer trucks/trips/km fall out of 4 (fixed + distance costs).
     6.   Soft preferences: preferred window deviation and an early-arrival preference for
          high priorities, in OMR per minute.
@@ -226,14 +227,20 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # A truck whose driver is paid by the DAY (driver_day_cost: a truck to rent, or one hired for the day)
 # costs nothing per hour, and with its fuel in the hire nothing per km either: the search would leave
 # its stops in any order (review: 358 km instead of 232, two hours of its driver's day). Its km and
-# time are therefore priced in the SEARCH like the own fleet's - the own trucks' average km rate
-# (_tie_km_rate) when its own is lower, and the hourly driver rate on its span - as a tie-breaker that
-# is never money: the plans report its real costs (no km cost, the day rate), and the load re-check's
-# score keeps it apart (LR.Score.tie).
+# time therefore carry a TINY price in the search (HIRE_TIE_KM_OMR, HIRE_TIE_HOUR_OMR): enough to drive
+# its stops in a sensible order and keep its day compact, far too little to outweigh real money (fourth
+# review: priced at the own fleet's average km rate and the hourly driver rate, and added to the cost,
+# it kept a 10-ton hired for the day on the near stops and sent an own truck 160 km at 0.2 OMR/km -
+# 139 OMR instead of 103). It is never money: the plans report its real costs (no km cost, the day
+# rate), and the load re-check's score keeps it apart (LR.Score.tie), compared after the cost in every
+# goal (_GOALS).
 
-# A day-paid truck's km in the search when the own fleet's km cost nothing (no own truck, or none with
-# a km cost or fuel): a small rate, so its route is still the short one (search only).
-HIRE_TIE_KM_OMR = 0.1
+# A day-paid or rented truck's km in the search, on top of its own km charge (if any): 1 OMR per
+# 1,000 km - its route is the short one, and a whole day's km weigh well under 1 OMR (search only).
+HIRE_TIE_KM_OMR = 0.001
+# A day-paid driver's time in the search: 1 objective unit a second (0.036 OMR an hour, the smallest
+# whole rate the routing models take) - a compact day, room for its next load (search only).
+HIRE_TIE_HOUR_OMR = 0.036
 # OMR of hire money per unit of the hire tier, finest first (_hire_tier): 1 OMR, coarser only when the
 # strict priorities would otherwise have to be capped (a day of several hundred stops).
 HIRE_RESOLUTIONS = (1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0)
@@ -343,21 +350,22 @@ def _hired_km(t: DispatchTruck) -> bool:
     return t.driver_day_cost is not None or t.hire_candidate
 
 
-def _tie_km_rate(req: DispatchRequest) -> float:
-    """OMR per km the search prices a rented or day-paid truck's km at when its own is lower (search
-    only, never money): the average km rate (km cost + fuel) of the request's own trucks - those paid by
-    the hour, never rented - or HIRE_TIE_KM_OMR when none of them has one."""
-    own = [_km_rate_omr(t, req.config) for t in req.trucks if not _hired_km(t)]
-    avg = sum(own) / len(own) if own else 0.0
-    return avg if avg > 0 else HIRE_TIE_KM_OMR
-
-
-def _search_km_rate(t: DispatchTruck, cfg: DispatchConfig, tie_km: float) -> float:
+def _search_km_rate(t: DispatchTruck, cfg: DispatchConfig) -> float:
     """The truck's km rate in the search: its own (_km_rate_omr), and for a rented truck or one whose
-    driver is paid by the day at least ``tie_km`` (_tie_km_rate) - its route is planned as short as an
-    own truck's."""
+    driver is paid by the day HIRE_TIE_KM_OMR on top - the tie-breaker that drives its stops in a
+    sensible order, never enough to outweigh real money (fourth review: the own fleet's average rate
+    kept it off the far stops it carries for free)."""
     rate = _km_rate_omr(t, cfg)
-    return max(rate, tie_km) if _hired_km(t) else rate
+    return rate + HIRE_TIE_KM_OMR if _hired_km(t) else rate
+
+
+def _tie_span_units(t: DispatchTruck, w: "ScenarioWeights") -> int:
+    """Objective units per second of a day-paid driver's day in the search (HIRE_TIE_HOUR_OMR, at least
+    1): the tie-breaker that keeps its day compact - never money, never the hourly rate. 0 for a driver
+    paid by the hour (its real pay prices its day) and in a scenario that does not price driver time."""
+    if t.driver_day_cost is None or w.pure_distance or w.time <= 0:
+        return 0
+    return max(1, int(round(HIRE_TIE_HOUR_OMR * w.time * COST_SCALE / 3600.0)))
 
 
 def _vehicle_fixed_units(td: "TruckDay", w: "ScenarioWeights", hire_units: int) -> int:
@@ -1535,11 +1543,10 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     with frozen loads both count only NEW overtime, after the later of its day start + overtime_after
     and its last frozen return (load_repack.overtime_bound_s, audit E4). The exact OMR rates ride
     along, so the RECOMMENDED score's money equals the reported costs (costing.py). A truck whose
-    driver is paid by the day gets the search's tie-breaker apart from its money (tie_m, tie_span:
-    _search_km_rate and the hourly rate on its span, never in score().operating)."""
+    driver is paid by the day gets the search's tiny tie-breaker apart from its money (tie_m, tie_span:
+    HIRE_TIE_KM_OMR on its km, _tie_span_units on its day; never in score().operating or cost)."""
     cfg = req.config
     w = SCENARIOS[name]
-    tie_km = _tie_km_rate(req)
     # Trucks to rent (the hire suggestion): their hire tier with the service values (score) and on the
     # repack's small phase-1 weights - search only, never money.
     use_margin = cfg.use_margin and bool(stops) and all(s.margin is not None for s in stops)
@@ -1553,10 +1560,10 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
             trip=int(round(td.truck.trip_cost * w.trip * COST_SCALE)),
             per_m=_km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0,
             # A driver paid by the day: its rate as driver time (no hourly pay, no overtime) - and the
-            # search's tie-breaker on its km and time, never money (review: its stops in any order).
+            # search's tiny tie-breaker on its km and time, never money (review: its stops in any order).
             driver_day=(int(round(td.truck.driver_day_cost * w.time * COST_SCALE)) if td.truck.driver_day_cost is not None else None),
-            tie_m=(_search_km_rate(td.truck, cfg, tie_km) - _km_rate_omr(td.truck, cfg)) * w.distance * COST_SCALE / 1000.0,
-            tie_span=td.truck.driver_day_cost is not None,
+            tie_m=(_search_km_rate(td.truck, cfg) - _km_rate_omr(td.truck, cfg)) * w.distance * COST_SCALE / 1000.0,
+            tie_span=_tie_span_units(td.truck, w),
             hire=tier.get(td.truck.id, 0) if td.n_frozen == 0 else 0,
             hire_w=small.get(td.truck.id, 0) if td.n_frozen == 0 else 0,
         )
@@ -1654,10 +1661,9 @@ def _solve_scenario(
     continuity = w.soft_prefs and cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
     change_units = int(round(cfg.change_penalty_per_stop * COST_SCALE))
     cost_cb: dict[tuple, int] = {}
-    # A rented or day-paid truck's km at least at the own fleet's rate: a search-only tie-breaker (_search_km_rate).
-    tie_km = _tie_km_rate(req)
+    # A rented or day-paid truck's km with the search's tiny tie-breaker on top (_search_km_rate).
     for v, td in enumerate(vehicles):
-        rate = 1.0 if w.pure_distance else _search_km_rate(td.truck, cfg, tie_km) * w.distance * COST_SCALE / 1000.0
+        rate = 1.0 if w.pure_distance else _search_km_rate(td.truck, cfg) * w.distance * COST_SCALE / 1000.0
         trip_units = 0 if w.pure_distance else int(round(td.truck.trip_cost * w.trip * COST_SCALE))
         key = (int(round(rate * 1000)), trip_units, td.truck.id if continuity else None)
         if key not in cost_cb:
@@ -1759,14 +1765,18 @@ def _solve_scenario(
         tdim.CumulVar(end).SetRange(td.earliest_depart_s, end_max)
         if td.shift_anchor_s is None:
             tdim.SetSpanUpperBoundForVehicle(span_max, v)
-        if time_coeff:
+        if td.truck.driver_day_cost is not None:
+            # A driver paid by the day costs no hourly pay: its span carries the search's tiny
+            # tie-breaker only (a short day, room for its next load; never money, _tie_span_units).
+            tie_span = _tie_span_units(td.truck, w)
+            if tie_span:
+                tdim.SetSpanCostCoefficientForVehicle(tie_span, v)
+        elif time_coeff:
             # Driver pay = the whole truck day (costing.py): the route's span, and for a truck with
             # frozen loads also the time from its last frozen return to the first new departure
-            # (turnaround and waiting are paid too), i.e. last return - last frozen return. A driver
-            # paid by the day costs no hourly pay: its span is priced alike as the search's
-            # tie-breaker only (a short day, room for its next load; never money).
+            # (turnaround and waiting are paid too), i.e. last return - last frozen return.
             tdim.SetSpanCostCoefficientForVehicle(time_coeff, v)
-            if td.frozen_return_s is not None and td.truck.driver_day_cost is None:
+            if td.frozen_return_s is not None:
                 tdim.SetCumulVarSoftUpperBound(start, td.frozen_return_s, time_coeff)
         if ot_coeff and cfg.overtime_after_min is not None and td.truck.driver_day_cost is None:
             # Audit E4 (owner decision 14): only NEW overtime costs. A truck with frozen loads pays
@@ -3648,14 +3658,15 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
 _GOALS = {
     # Service first in every goal: the stops left out and the rented trucks' hire tier (Score.service).
     # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
-    # The search's tie-breaker on day-paid trucks (Score.tie, never money) after the cost itself.
-    "RECOMMENDED": lambda sc: (sc.service, sc.cost + sc.tie),
+    # The search's tie-breaker on day-paid trucks (Score.tie, never money) LAST in every goal, only
+    # between plans of the same cost (fourth review: added to the cost, it made plans dearer).
+    "RECOMMENDED": lambda sc: (sc.service, sc.cost, sc.tie),
     # fewest trucks, then loads, then operating cost (like its search, it ignores preferences).
     # Physical trucks (PR7, B3): a truck with a frozen load counts whether or not it gets new loads,
     # so putting new loads on it never looks like one truck more than opening a fresh one.
-    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost + sc.tie),
+    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost, sc.tie),
     # fewest km, then the RECOMMENDED objective
-    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost + sc.tie),
+    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost, sc.tie),
 }
 
 

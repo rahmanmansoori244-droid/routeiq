@@ -50,6 +50,29 @@ function summary(orders: SummaryOrder[], planned: string[], unserved: { orderId:
   });
 }
 
+describe('computeSummary - a driver paid by the day (the hire suggestion)', () => {
+  // Fourth review: the solver still reports the paid span of a hired truck's loads, and the paid hours
+  // ("Hours on road · paid", the workbook's "Paid driver hours") counted them as hourly pay, while
+  // the load plan and the Truck days sheet show "day rate" and no paid hours for that truck.
+  const cost = (driver: number, driverPaidMin: number) => ({
+    v: 2 as const, policy: 'TRUCK_DAY_SPAN' as const, fixed: 0, trip: 0, distance: 0, fuel: 0, driver, overtime: 0,
+    total: driver, driverPaidMin, paidFromMin: null, overtimeMin: 0, estimatedLegs: 0,
+  });
+
+  it('leaves the loads of a day-paid driver out of the paid hours, keeping their time on the road', () => {
+    const own = LD('t1', 1, { durationMin: 120, departMin: 420, returnMin: 540, cost: cost(4, 150) });
+    const hired = LD('h1', 1, { durationMin: 180, departMin: 420, returnMin: 600, cost: cost(10, 180), driverDayRate: 10 });
+    const hired2 = LD('h1', 2, { durationMin: 60, departMin: 630, returnMin: 690, cost: cost(0, 90), driverDayRate: 10 });
+    const s = summary([], [], [], [own, hired, hired2]);
+    expect(s.driverPaidHours).toBe(2.5); // the own truck's 150 paid minutes only
+    expect(s.onRoadHours).toBe(6); // every load's time on the road
+    expect(s.costs?.driver).toBe(14); // the day rate is still in the money
+    // Without the day rate (paid by the hour) the same loads count their paid minutes.
+    const hourly = summary([], [], [], [own, { ...hired, driverDayRate: null }, { ...hired2, driverDayRate: undefined }]);
+    expect(hourly.driverPaidHours).toBe(7);
+  });
+});
+
 describe('computeSummary', () => {
   // P1: 3 orders, 2 served. P2: 1 order, served. P3: none. P5: 1 order, unserved.
   const orders = [

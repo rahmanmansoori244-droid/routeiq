@@ -6,6 +6,7 @@ import { isDispatchDetails } from '@/lib/dispatch/plan-service';
 import { readLoadOrigin, readPlanInputs, readStopSnapshot, readTruckSnapshot } from '@/lib/dispatch/snapshots';
 import { resolveLoadGeometries, roadShapeCache, routingOffReason, type LoadPath } from '@/lib/dispatch/load-geometry';
 import { loadPath } from '@/lib/dispatch/load-path';
+import { shownTruckCode } from '@/lib/dispatch/hire';
 
 interface Params { params: { id: string } }
 
@@ -29,7 +30,7 @@ export const GET = (req: Request, { params }: Params) =>
     const loads = await db.planLoad.findMany({
       where: { runId: run.id },
       include: {
-        truck: { select: { code: true } },
+        truck: { select: { code: true, onlyOnDate: true } },
         assignments: { orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }], include: { order: { include: { customer: { select: { lat: true, lng: true } } } } } },
       },
     });
@@ -51,8 +52,11 @@ export const GET = (req: Request, { params }: Params) =>
         stops.set(a.sequenceInTruck, snap ? { lat: snap.lat, lng: snap.lng } : a.order.customer);
       }
       const inOrder = [...stops.entries()].sort(([x], [y]) => x - y).map(([, c]) => c);
-      const origin = readLoadOrigin(readTruckSnapshot(l.truckSnapshotJson)) ?? depot;
-      return { loadId: l.id, truckCode: l.truck.code, loadNo: l.loadNo, points: loadPath({ lat: origin.lat, lng: origin.lng }, inOrder) };
+      const ts = readTruckSnapshot(l.truckSnapshotJson);
+      const origin = readLoadOrigin(ts) ?? depot;
+      // The truck as the plan screen shows it (getPlanDetail): the plate a hired truck drove with, also
+      // after a later day's truck took it (shownTruckCode).
+      return { loadId: l.id, truckCode: shownTruckCode(ts?.code, l.truck), loadNo: l.loadNo, points: loadPath({ lat: origin.lat, lng: origin.lng }, inOrder) };
     });
     const rows = await resolveLoadGeometries(paths, {
       call: offReason ? null : (pts, signal) => callRouteGeometry(pts, osrmUrl, { signal }),

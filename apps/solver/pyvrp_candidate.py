@@ -338,16 +338,15 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     shift_s = cfg.shift_max_min * 60
     no_kg = sum(kg_dem) + 1  # a truck without a payload: the engine's own "unlimited"
     groups: dict[tuple, list] = {}
-    tie_km = ds._tie_km_rate(req)
     for td in vehicles:
         t = td.truck
-        # As the engine: a rented or day-paid truck's km at least at the own fleet's rate (search only).
-        km_key = int(round(ds._search_km_rate(t, cfg, tie_km) * w.distance * ds.COST_SCALE / 1000.0 * 1000))
+        # As the engine: a rented or day-paid truck's km with the tiny tie-breaker on top (search only).
+        km_key = int(round(ds._search_km_rate(t, cfg) * w.distance * ds.COST_SCALE / 1000.0 * 1000))
         trip_units = int(round(t.trip_cost * w.trip * ds.COST_SCALE))
         # As the engine prices it: the day cost, a day-rate driver's pay, the first load, the hire tier.
         fixed_u = ds._vehicle_fixed_units(td, w, tier.get(t.id, 0) * hire_mult)
-        # A driver paid by the day: no overtime on this truck, and its time priced as the engine's
-        # tie-breaker only (the hourly rate on its route's duration, never money).
+        # A driver paid by the day: no overtime on this truck, and its time priced at the engine's tiny
+        # tie-breaker only (ds._tie_span_units on its route's duration, never money).
         by_day = t.driver_day_cost is not None
         gap = ds._approx_gap_s(cfg, td)
         first = td.earliest_depart_s if td.ready_s is None else max(td.earliest_depart_s, td.ready_s + gap)
@@ -400,7 +399,8 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
                 nominal, max_ot = span, 0
         vtypes.append(dict(num_available=len(members), capacity=list(space) + ([int(kg_cap)] if kg_cap is not None else []),
                            fixed_cost=int(fixed_u), tw_early=int(tw_e), tw_late=int(tw_l), shift_duration=int(nominal),
-                           max_overtime=int(max_ot), unit_duration_cost=int(time_coeff),
+                           max_overtime=int(max_ot),
+                           unit_duration_cost=int(ds._tie_span_units(members[0].truck, w) if by_day else time_coeff),
                            unit_overtime_cost=int(ot_coeff) if max_ot else 0, profile=prof_of[pkey],
                            reload_depots=[reload_of_gap[gap]] if trips_left > 1 else [],
                            max_reloads=max(0, int(trips_left) - 1)))

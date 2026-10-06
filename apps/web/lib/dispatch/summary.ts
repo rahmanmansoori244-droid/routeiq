@@ -48,6 +48,12 @@ export interface SummaryLoad {
    */
   palletUnits?: number | null;
   bays?: number | null;
+  /**
+   * Its truck's driver is paid by the DAY (a hired truck's casual driver, owner answer 4: its truck
+   * snapshot's driverDayCost): no paid hours - the load is left out of `driverPaidHours`, as the load
+   * plan and the Truck days sheet show it (fourth review). Absent / null: paid by the hour.
+   */
+  driverDayRate?: number | null;
 }
 
 export interface DailySummary {
@@ -83,7 +89,10 @@ export interface DailySummary {
   costBasis?: CostBasis;
   costs?: CostTotals;
   onRoadHours?: number;
-  /** Paid driver hours: the whole truck days (loads costed the earlier way: their time on the road). */
+  /**
+   * Paid driver hours: the whole truck days (loads costed the earlier way: their time on the road).
+   * A driver paid by the day (SummaryLoad.driverDayRate) adds none.
+   */
   driverPaidHours?: number;
   overtimeCost?: number;
   /** Review F18: legs planned on estimated distance, and loads with any. */
@@ -185,7 +194,8 @@ export function computeSummary(input: {
     cost: l.cost ?? null,
   }));
   const costs = costTotals(costLoads);
-  const paidMin = costLoads.reduce((a, l) => a + (l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
+  // Paid driver hours: a driver paid by the day has none (its day rate is in the money, not in hours).
+  const paidMin = loads.reduce((a, l) => a + (typeof l.driverDayRate === 'number' ? 0 : l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
   // Pallets: only the loads planned by pallets (a truck with bays); a day without them says nothing.
   const bayLoads = loads.filter((l): l is SummaryLoad & { palletUnits: number; bays: number } => typeof l.palletUnits === 'number' && typeof l.bays === 'number' && l.bays > 0);
   return {

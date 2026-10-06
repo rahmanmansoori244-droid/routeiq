@@ -455,25 +455,28 @@ def test_a_rented_truck_drives_its_stops_in_a_sensible_order(monkeypatch, pv, ki
     assert rented.driver_cost == pytest.approx(10.0)
 
 
-def test_the_search_prices_a_day_paid_trucks_km_and_time_like_the_own_fleets_never_as_money():
-    # The tie-breaker: the own fleet's average km rate (0.1 + 0.3/3 = 0.2 OMR/km) and the hourly driver
-    # rate as the search's price of a day-paid truck's km and time; the money (score().operating) is
-    # the real one, and a truck whose own km costs more keeps its own rate.
+def test_the_search_prices_a_day_paid_trucks_km_and_time_at_a_tiny_tie_breaker_never_as_money():
+    # The tie-breaker (fourth review): a tiny rate on a day-paid truck's km (HIRE_TIE_KM_OMR, on top of
+    # its own km charge, if any) and time (HIRE_TIE_HOUR_OMR) - never the own fleet's rates, never
+    # money (score().operating is the real cost), and compared after the cost in every goal.
     trucks = [own("T1", cost_per_km=0.1, km_per_litre=3.0), hire("H3-1", 6, 30.0, driver_day_cost=10.0),
               hire("H3-2", 6, 30.0, driver_day_cost=10.0, cost_per_km=0.5)]
     r = req(stops_of([3, 3]), trucks, fuel_price_per_litre=0.3, driver_cost_per_hour=2.0)
-    assert ds._tie_km_rate(r) == pytest.approx(0.2)
-    assert ds._search_km_rate(r.trucks[0], r.config, 0.2) == pytest.approx(0.2)
-    assert ds._search_km_rate(r.trucks[1], r.config, 0.2) == pytest.approx(0.2)
-    assert ds._search_km_rate(r.trucks[2], r.config, 0.2) == pytest.approx(0.5)
+    assert ds.HIRE_TIE_KM_OMR <= 0.001 and ds.HIRE_TIE_HOUR_OMR <= 0.05
+    assert ds._search_km_rate(r.trucks[0], r.config) == pytest.approx(0.2)  # an own truck: its own rate only
+    assert ds._search_km_rate(r.trucks[1], r.config) == pytest.approx(ds.HIRE_TIE_KM_OMR)
+    assert ds._search_km_rate(r.trucks[2], r.config) == pytest.approx(0.5 + ds.HIRE_TIE_KM_OMR)
     # A truck to rent has its fuel in the hire whoever pays its driver: its km get the tie-breaker too.
-    assert ds._search_km_rate(hire("H3-9", 6, 30.0), r.config, 0.2) == pytest.approx(0.2)
+    assert ds._search_km_rate(hire("H3-9", 6, 30.0), r.config) == pytest.approx(ds.HIRE_TIE_KM_OMR)
     tds = ds._truck_days(r)
     p = ds._pricing("RECOMMENDED", r, tds, r.stops)
     own_p, h1, h2 = (p.trucks[td.idx] for td in tds)
-    assert (own_p.tie_m, own_p.tie_span) == (0.0, False)
-    assert h1.per_m == 0.0 and h1.tie_m == pytest.approx(0.2 * ds.COST_SCALE / 1000) and h1.tie_span
-    assert h2.per_m == pytest.approx(0.5 * ds.COST_SCALE / 1000) and h2.tie_m == 0.0 and h2.tie_span
+    tie_m = ds.HIRE_TIE_KM_OMR * ds.COST_SCALE / 1000
+    assert (own_p.tie_m, own_p.tie_span) == (0.0, 0)
+    assert h1.per_m == 0.0 and h1.tie_m == pytest.approx(tie_m) and h1.tie_span == 1
+    assert h2.per_m == pytest.approx(0.5 * ds.COST_SCALE / 1000) and h2.tie_m == pytest.approx(tie_m) and h2.tie_span == 1
+    # 1 objective unit a second against the hourly driver's 2 OMR an hour (55.6 units a second).
+    assert p.span == 56 and h1.tie_span * 50 < p.span
     ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
     h = tds[1].idx
     timed = LR.time_plan(ctx.day, {h: [(0, 1)]}, ctx.rec_pricing)
@@ -482,12 +485,47 @@ def test_the_search_prices_a_day_paid_trucks_km_and_time_like_the_own_fleets_nev
                                     [costing.LoadTiming(depart_s=t.depart_s, return_s=t.return_s, km=ctx.day.metres(t.stops) / 1000) for t in timed[h]]).total
     assert sc.operating == costing.to_units(money)  # 30 + the day rate: no km, no hours
     assert money == pytest.approx(40.0)
-    assert sc.tie > 0 and sc.objective == sc.unserved + sc.hire + sc.cost + sc.tie
+    assert 0 < sc.tie < costing.to_units(0.1)  # far below a tenth of an OMR on this short load
+    assert sc.objective == sc.unserved + sc.hire + sc.cost + sc.tie
+    # Compared after the cost in every goal: a plan 0.01 OMR cheaper wins whatever its tie.
+    cheap = LR.Score(unserved=0, cost=1_000_000, trucks=1, loads=1, metres=5000, operating=1_000_000, tie=10**9)
+    dear = LR.Score(unserved=0, cost=1_001_000, trucks=1, loads=1, metres=5000, operating=1_001_000, tie=0)
+    for goal in ds._GOALS.values():
+        assert goal(cheap) < goal(dear)
     # A request without a day-paid truck: no tie anywhere (planned exactly as before).
     r0 = req(stops_of([3, 3]), [own("T1", cost_per_km=0.1)])
     tds0 = ds._truck_days(r0)
     p0 = ds._pricing("RECOMMENDED", r0, tds0, r0.stops)
-    assert all((tp.tie_m, tp.tie_span) == (0.0, False) for tp in p0.trucks.values())
+    assert all((tp.tie_m, tp.tie_span) == (0.0, 0) for tp in p0.trucks.values())
+
+
+def cluster(prefix: str, km: float, n: int = 12) -> list:
+    """``n`` one-pallet P3 stops close together about ``km`` north of the depot."""
+    from tests.test_dispatch import DEPOT
+
+    return [pstop(f"{prefix}{i:02d}", DEPOT.lat + km / 111.0 + 0.002 * (i % 4), DEPOT.lng + 0.002 * (i // 4), cases=20, units=1000)
+            for i in range(n)]
+
+
+@pytest.mark.parametrize("pv", ["off", "on"])
+@pytest.mark.parametrize("kind", ["to rent", "hired"])
+def test_the_tie_breaker_never_makes_a_plan_dearer(monkeypatch, pv, kind):
+    # Fourth review: the tie-breaker priced a day-paid truck's km at the own fleet's average rate (A 0.2
+    # and B 0.6 OMR/km: 0.4) and its time at the hourly rate, and RECOMMENDED added it to the cost. A
+    # drove the far stops (about 160 km: 32 OMR of km and 12 of driver) and H the near ones: about 139
+    # OMR instead of 103. H (its fuel in the hire, its driver at the day rate) now drives the far stops,
+    # and the plan reports the lower total - the what-if's plan too, which "Use this plan" applies.
+    second_search(monkeypatch, pv)
+    near, far = cluster("N", 5.0), cluster("F", 60.0)
+    trucks = [own("A", cost_per_km=0.2), own("B", bays=1, cost_per_km=0.6),
+              btruck("H", bays=12, fixed_cost=50.0, driver_day_cost=10.0, max_trips=1, hire_candidate=kind == "to rent")]
+    _, sc = solve(near + far, trucks, driver_cost_per_hour=2.0)
+    assert unserved_map(sc) == {}
+    on = {ld.truck_id: {st.stop_id[0] for st in ld.stops} for ld in sc.loads}
+    assert on == {"A": {"N"}, "H": {"F"}}
+    [h] = [ld for ld in sc.loads if ld.truck_id == "H"]
+    assert (h.distance_cost, h.fuel_cost, h.driver_cost) == (0.0, 0.0, pytest.approx(10.0))
+    assert sc.operating_cost < 110.0
 
 
 @pytest.mark.parametrize("pv", ["off", "on"])

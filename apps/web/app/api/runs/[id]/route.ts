@@ -1,4 +1,5 @@
 import { withTenantApi, ok, notFoundIfNull } from '@/lib/api';
+import { shownTruckCode } from '@/lib/dispatch/hire';
 
 interface Params { params: { id: string } }
 
@@ -38,7 +39,7 @@ export const GET = (req: Request, { params }: Params) =>
           },
           routes: {
             include: {
-              truck: { select: { id: true, code: true, capacityCases: true } },
+              truck: { select: { id: true, code: true, capacityCases: true, onlyOnDate: true } },
               order: {
                 select: {
                   id: true,
@@ -53,5 +54,8 @@ export const GET = (req: Request, { params }: Params) =>
         },
       }),
     );
-    return ok(run);
+    // A hired truck whose plate a later day's truck took shows the plate it drove with (hire.ts
+    // shownTruckCode); its truck keeps the fields it always had.
+    const routes = run.routes.map(({ truck: { onlyOnDate, ...truck }, ...r }) => ({ ...r, truck: { ...truck, code: shownTruckCode(null, { code: truck.code, onlyOnDate }) } }));
+    return ok({ ...run, routes });
   })(req);

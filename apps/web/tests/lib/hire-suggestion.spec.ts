@@ -407,7 +407,8 @@ describe('"with one truck fewer" (third review of the hire branch)', () => {
   it('a rental that carries orders the own fleet delivers today never counts more than the orders left out', () => {
     // Review: the plan leaves out X1 and X2 (400 cases each). The what-if puts X2 on the own truck, X1 on
     // one 3-ton and 7 small orders the plan delivers on the other: "up to 7 orders stay undelivered" -
-    // more than with no rental at all. Counted now: the orders the hire is for, at most those 2.
+    // more than with no rental at all. Counted now: the orders the hire is for, at most those 2 - and by
+    // size (fourth review): the 7 small orders (3.5 pallets) take back the room of one 4-pallet order.
     const [x1, x2] = [stop('X1', 400), stop('X2', 400)];
     const base = Array.from({ length: 7 }, (_, i) => stop(`B${i + 1}`, 50));
     const whatIf = {
@@ -417,10 +418,43 @@ describe('"with one truck fewer" (third review of the hire branch)', () => {
     const s = summarizeHire({ request: req([x1, x2, ...base]), baseUnserved: out([x1, x2]), baseOrders: base.flatMap((b) => b.order_ids), whatIf, options: [TEN, THREE] });
     expect(s.leftOut.orders).toBe(2);
     expect(s.alternative!.leftOut.orders).toBeLessThanOrEqual(s.leftOut.orders);
-    expect(s.alternative!.leftOut).toMatchObject({ orders: 2, cases: 800 });
+    expect(s.alternative!.leftOut).toMatchObject({ orders: 1, cases: 400 });
     expect(hireSuggestionText(s).details).toContain(
-      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 2 orders (800 cases, 8.0 pallets) stay undelivered - what the 3-ton would carry or make room for.',
+      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 1 order (400 cases, 4.0 pallets) stays undelivered - what the 3-ton would carry or make room for.',
     );
+  });
+
+  it('the room a dropped truck frees is counted by size: one big order of the plan in use pushes out as many small ones as it takes', () => {
+    // Fourth review: the plan in use carries X1 and X2 (P1, 6 pallets each) on the own truck and leaves
+    // out s1..s12 (P3, 1 pallet each) for space. The what-if puts X1 and X2 on two 3-tons and s1..s12 on
+    // the own truck. Without the 3-ton carrying X1, X1 goes back on the own truck and pushes out 6 one-
+    // pallet orders: "up to 6", never "up to 1" (counted one stop at a time, whatever its size).
+    const big = (id: string): DispatchStop => ({ ...stop(id, 60, 1), demand_pallet_units: 6000 });
+    const [x1, x2] = [big('X1'), big('X2')];
+    const small = Array.from({ length: 12 }, (_, i) => ({ ...stop(`s${i + 1}`, 20), demand_pallet_units: 1000 }));
+    const whatIf = {
+      loads: [load('OWN1', small, 35, 60), rentedLoad(virtualHireId('o3', 1), [x1], 30), rentedLoad(virtualHireId('o3', 2), [x2], 30)],
+      unserved: [], trucks_used: 3, trips: 3,
+    } as unknown as WhatIf;
+    const s = summarizeHire({ request: req([x1, x2, ...small]), baseUnserved: out(small), baseOrders: [...x1.order_ids, ...x2.order_ids], whatIf, options: [TEN, THREE] });
+    expect(s.leftOut.orders).toBe(12);
+    expect(s.alternative).toMatchObject({ dropped: '3-ton', leftOut: { orders: 6, cases: 120, palletUnits: 6000 } });
+    expect(hireSuggestionText(s).details).toContain(
+      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 6 orders (120 cases, 6.0 pallets) stay undelivered - what the 3-ton would carry or make room for.',
+    );
+    // On a day without pallets the room is counted in cases: X1's 60 cases push out 3 orders of 20.
+    const noPallets = (st: DispatchStop): DispatchStop => ({ ...st, demand_pallet_units: undefined });
+    const c = summarizeHire({
+      request: req([x1, x2, ...small].map(noPallets)), baseUnserved: out(small), baseOrders: [...x1.order_ids, ...x2.order_ids],
+      whatIf, options: [TEN, THREE],
+    });
+    expect(c.alternative!.leftOut).toMatchObject({ orders: 3, cases: 60 });
+    // Never more than the orders left out without any rental: a huge order frees room for all 12, no more.
+    const huge = summarizeHire({
+      request: req([{ ...x1, demand_pallet_units: 50_000 }, { ...x2, demand_pallet_units: 50_000 }, ...small]), baseUnserved: out(small),
+      baseOrders: [...x1.order_ids, ...x2.order_ids], whatIf, options: [TEN, THREE],
+    });
+    expect(huge.alternative!.leftOut.orders).toBe(12);
   });
 
   it('P4/P5 orders riding on the dropped truck are said apart, never counted as the price of one truck fewer', () => {

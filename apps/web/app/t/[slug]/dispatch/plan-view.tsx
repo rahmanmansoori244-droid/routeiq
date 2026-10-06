@@ -839,7 +839,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <Kpi
             label="Hours on road · paid"
             value={`${s.onRoadHours ?? s.totalHours} · ${s.driverPaidHours ?? '—'}`}
-            title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on."
+            title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on; a driver paid by the day (a hired truck) adds none."
           />
           <Kpi label="Avg utilization" value={`${s.avgUtilizationPct}%`} />
           {typeof s.palletUnits === 'number' ? (

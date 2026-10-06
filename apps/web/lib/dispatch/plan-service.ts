@@ -1623,6 +1623,12 @@ export function summaryPallets(l: { palletUnits?: number | null; truckSnapshotJs
   return p ? { palletUnits: p.units, bays: p.bays } : {};
 }
 
+/** A load's truck snapshot day rate: its driver is paid by the day (a hired truck), or null (by the hour). */
+function dayRateOfSnapshot(snapshot: unknown): number | null {
+  const v = readTruckSnapshot(snapshot)?.driverDayCost;
+  return typeof v === 'number' ? v : null;
+}
+
 function pickPalletFacts(ts: TruckSnapshot | null) {
   return { bays: ts?.bays, palletRoomUnits: ts?.palletRoomUnits, palletFillPct: ts?.palletFillPct };
 }
@@ -1728,6 +1734,8 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       distanceIsEstimated: l.distanceIsEstimated,
       // Pallets only for a load planned by pallets (stored units + the bays and room kept from the echo).
       ...summaryPallets(l),
+      // A hired truck's casual driver is paid by the day: no paid hours (fourth review).
+      driverDayRate: dayRateOfSnapshot(l.truckSnapshotJson),
     })),
     warnings: [...d.response_warnings, ...d.warnings],
     distanceIsEstimated: d.distance_is_estimated,

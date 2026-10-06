@@ -151,9 +151,9 @@ class DispatchTruck(BaseModel):
     # "Daily driver day rate"): this many OMR per truck day, fixed - paid with the truck day's first new
     # load (a truck with frozen loads paid it with them) - instead of config.driver_cost_per_hour and
     # overtime. None: the company's hourly driver cost, as before. Optional and additive. Its km and
-    # time still get a search-only tie-breaker (the own fleet's km rate when its own is lower, the
-    # hourly rate on its span: dispatch_solver._search_km_rate), so its stops are driven in a sensible
-    # order; the reported costs stay the day rate and no km cost.
+    # time still get a tiny search-only tie-breaker (dispatch_solver._search_km_rate, _tie_span_units;
+    # compared after the cost in every goal), so its stops are driven in a sensible order; the reported
+    # costs stay the day rate and no km cost.
     driver_day_cost: float | None = Field(default=None, ge=0, le=1000)
 
 

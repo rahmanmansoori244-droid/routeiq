@@ -117,7 +117,7 @@ describe('role gates (F15, F23)', () => {
 
   it('GET /api/runs/[id] never selects the solver request/response JSON', async () => {
     sessionRole = 'VIEWER';
-    db.runPlan.findUnique.mockResolvedValue({ id: 'run-1', jobs: [] });
+    db.runPlan.findUnique.mockResolvedValue({ id: 'run-1', jobs: [], routes: [] });
     const run = await import('@/app/api/runs/[id]/route');
     expect((await run.GET(get('/api/runs/run-1'), { params: { id: 'run-1' } })).status).toBe(200);
     const jobs = (db.runPlan.findUnique.mock.calls[0]?.[0] as { include: { jobs: { select: Record<string, boolean> } } }).include.jobs;

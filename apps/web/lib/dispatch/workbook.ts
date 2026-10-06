@@ -420,7 +420,7 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     );
     kv('Hours on the road (loads)', s.onRoadHours ?? s.totalHours, FMT_KM, 'departure to return of each load, added up');
     if (s.driverPaidHours !== undefined) {
-      kv('Paid driver hours (truck days)', s.driverPaidHours, FMT_KM, 'first departure to last return of each truck, depot turnaround and waiting included');
+      kv('Paid driver hours (truck days)', s.driverPaidHours, FMT_KM, 'first departure to last return of each truck, depot turnaround and waiting included; a driver paid by the day (a hired truck) adds none');
     }
     kv('Average utilization %', s.avgUtilizationPct, FMT_PCT);
     // Pallets (owner decision 4 Oct 2026): only when loads were planned by pallets (trucks with bays).

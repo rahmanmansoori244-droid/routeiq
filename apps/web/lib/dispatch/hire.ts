@@ -363,7 +363,8 @@ export interface HireSummary {
    * One truck fewer: the rented truck whose P1-P3 stops matter least dropped, and the P1-P3 orders the hire
    * is for that may then stay out (third review of the hire branch: never more than leftOut, never a P4/P5
    * order). `roomFor`: P1-P3 orders the plan in use delivers that the what-if moved onto that truck (their
-   * room is counted as orders of leftOut); `low`: the P4/P5 orders riding on it, said apart.
+   * room, by size - pallets, or cases on a day without pallets - is counted as orders of leftOut, the
+   * least important and smallest first); `low`: the P4/P5 orders riding on it, said apart.
    */
   alternative: { hires: HireUse[]; hireCost: number; leftOut: LeftOut; dropped: string; roomFor?: number; low?: LeftOut } | null;
   /** The what-if's totals for the record. */
@@ -428,9 +429,10 @@ export function hireNeed(input: { request: Pick<DispatchRequest, 'stops'>; baseU
  * it. A stop the plan in use delivers that the what-if leaves out is `dropped`, never "still left
  * out". The alternative is worked out from the what-if's own loads (no other optimization): dropping
  * the rented truck whose P1-P3 stops have the lowest priorities (then the fewest P1-P3 cases) leaves at
- * most the orders still left out, its orders the hire is for and as many more of them as it carries
- * P1-P3 orders the plan in use delivers (their room) - never more than leftOut, never a P4/P5 order
- * (said apart). At most, since the other trucks might take some of them.
+ * most the orders still left out, its orders the hire is for and as many more of them as the P1-P3
+ * orders of the plan in use it carries take room back (by size: pallets, or cases on a day without
+ * pallets) - never more than leftOut, never a P4/P5 order (said apart). At most, since the other trucks
+ * might take some of them.
  */
 export function summarizeHire(input: {
   request: DispatchRequest;
@@ -491,15 +493,26 @@ export function summarizeHire(input: {
     const dropOption = optionOf.get(parseVirtualHireId(drop)!.optionId);
     // Third review of the hire branch: the what-if re-plans the whole day, so the dropped truck may carry
     // orders the plan in use delivers with the own trucks, and P4/P5 orders riding along. Up to: the
-    // orders still left out, the orders the hire is for that it carries, and for each P1-P3 order of the
-    // plan in use it carries one more of them (the room it takes back on the own trucks, least important
-    // first) - never more than the orders left out without any rental. Its P4/P5 orders are said apart.
+    // orders still left out, the orders the hire is for that it carries, and as many more of them as the
+    // P1-P3 orders of the plan in use it carries take room back on the own trucks - counted by SIZE
+    // (fourth review: one 6-pallet order pushes out six 1-pallet ones, not one), in pallets on a day
+    // planned by pallets, else in cases, least important orders first, the smallest first among them -
+    // never more than the orders left out without any rental. Its P4/P5 orders are said apart.
     const counted = new Set<string>([...stillLeft.stopIds, ...highOn(drop).filter((id) => outIds.has(id))]);
-    const roomFor = highOn(drop).filter((id) => !outIds.has(id) && !otherIds.has(id)).length;
+    const moved = highOn(drop).filter((id) => !outIds.has(id) && !otherIds.has(id));
+    const roomFor = moved.length;
+    const byPallets = stops.some((s) => typeof s.demand_pallet_units === 'number');
+    const sizeOf = (id: string) => (byPallets ? (byId.get(id)?.demand_pallet_units ?? 0) : casesOf(id));
+    const room = moved.reduce((a, id) => a + sizeOf(id), 0);
     const others = [...outIds]
       .filter((id) => !counted.has(id))
-      .sort((a, b) => priorityOf(b) - priorityOf(a) || casesOf(a) - casesOf(b) || a.localeCompare(b));
-    for (const id of others.slice(0, roomFor)) counted.add(id);
+      .sort((a, b) => priorityOf(b) - priorityOf(a) || sizeOf(a) - sizeOf(b) || casesOf(a) - casesOf(b) || a.localeCompare(b));
+    let freed = 0;
+    for (const id of others) {
+      if (freed >= room) break;
+      counted.add(id);
+      freed += sizeOf(id);
+    }
     const riders = stopsOn(drop).filter((id) => priorityOf(id) > HIRE_MAX_PRIORITY);
     alternative = {
       hires: altHires,
