@@ -880,6 +880,155 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
 
 
 # --------------------------------------------------------------------------------------------
+# The order of a day-paid truck's stops, once the plan is chosen (fifth review of the hire branch)
+# --------------------------------------------------------------------------------------------
+# A truck to rent or one whose driver is paid by the day costs (almost) nothing per km in the search:
+# its fuel is in the hire, and its km carry only a tiny tie-breaker, so that they never outweigh real
+# money in WHICH truck carries what (fourth review). Within its loads, though, the customers' time
+# preferences then outweighed its km: one minute earlier at a P1 order (0.01 OMR) was worth 10 km, and
+# it drove the P1 orders first wherever they were (340 km instead of 250, back 2 hours later).
+# shorter_orders puts each of its loads in order afterwards, the plan's trucks and loads unchanged,
+# weighing its km against the time preferences at an own truck's km rate (dispatch_solver.
+# _order_km_rate): a new order is taken only when it drives fewer km, costs no more money and is
+# better on that trade-off. Service, money and every hard rule stay as they were (exact timing).
+
+ORDER_PASSES = 40  # improving passes of the local search, per load and start
+
+
+def _blocks(day: Day, load: Load) -> list[Load]:
+    """The load's stops in runs of one customer: the parts of a split order stay together, in order."""
+    out: list[list[int]] = []
+    for k in load:
+        if out and day.stops[out[-1][-1]].customer_id == day.stops[k].customer_id:
+            out[-1].append(k)
+        else:
+            out.append([k])
+    return [tuple(b) for b in out]
+
+
+def _flat(blocks: list[Load]) -> Load:
+    return tuple(k for b in blocks for k in b)
+
+
+def _order_estimate(day: Day, pricing: Pricing, td: "TruckDay", depart: int, order: Load, per_m: float,
+                    per_s: float) -> float:
+    """A quick estimate of a load's stops in ``order`` departing at ``depart`` (waiting only for opening
+    hours): its customers' time preferences + ``per_m`` a metre + ``per_s`` a second out. Infinite when it
+    misses a closing time or the truck's latest return. Only to propose orders: time_truck decides."""
+    t, prev, est, m = depart, 0, 0.0, 0
+    for k in order:
+        s = day.stops[k]
+        m += day.D[prev][k + 1]
+        t = max(t + day.T[prev][k + 1], _hs(s))
+        if t > _he(day, s):
+            return float("inf")
+        est += _soft_cost(day, pricing, k, t)
+        t += s.service_min * 60
+        prev = k + 1
+    m += day.D[prev][0]
+    t += day.T[prev][0]
+    if t > td.latest_return_s:
+        return float("inf")
+    return est + per_m * m + per_s * (t - depart)
+
+
+def _improve(blocks: list[Load], cost, deadline: float) -> tuple[list[Load], float]:
+    """First-improvement local search on ``cost`` of a block order: reverse a run of blocks (2-opt), or
+    move one block to the other end of a run (or-opt). Stops at ``deadline`` (time.monotonic)."""
+    best = list(blocks)
+    val = cost(best)
+    n = len(best)
+    for _ in range(ORDER_PASSES):
+        better = False
+        for i in range(n - 1):
+            if time.monotonic() > deadline:
+                return best, val
+            for j in range(i + 1, n):
+                for c in (best[:i] + best[i:j + 1][::-1] + best[j + 1:],
+                          best[:i] + best[i + 1:j + 1] + [best[i]] + best[j + 1:],
+                          best[:i] + [best[j]] + best[i:j] + best[j + 1:]):
+                    v = cost(c)
+                    if v < val - 1e-9:
+                        best, val, better = c, v, True
+                        break
+        if not better:
+            break
+    return best, val
+
+
+def _nearest(day: Day, blocks: list[Load]) -> list[Load]:
+    """The blocks in nearest-neighbour order from the depot (the start of the shortest order)."""
+    left, out, prev = list(blocks), [], 0
+    while left:
+        b = min(left, key=lambda b: (day.D[prev][b[0] + 1], b))
+        out.append(b)
+        left.remove(b)
+        prev = b[-1] + 1
+    return out
+
+
+def _orders(day: Day, pricing: Pricing, td: "TruckDay", tl: TimedLoad, per_m: float, per_s: float,
+            deadline: float) -> list[Load]:
+    """At most three other orders of a load's stops worth timing exactly, best estimate first: the
+    shortest order found (by metres), and the local search on the estimate from it, from it driven the
+    other way round and from the load's own order."""
+    blocks = _blocks(day, tl.stops)
+    if len(blocks) < 2:
+        return []
+
+    def est(bl: list[Load]) -> float:
+        return _order_estimate(day, pricing, td, tl.depart_s, _flat(bl), per_m, per_s)
+
+    short, _ = _improve(_nearest(day, blocks), lambda bl: float(day.metres(_flat(bl))), deadline)
+    found: dict[Load, float] = {_flat(short): est(short)}
+    for start in (short, short[::-1], blocks):
+        got, v = _improve(start, est, deadline)
+        found[_flat(got)] = v
+    found.pop(tuple(tl.stops), None)
+    return [o for o, v in sorted(found.items(), key=lambda kv: (kv[1], kv[0])) if v < float("inf")][:3]
+
+
+def _order_value(day: Day, pricing: Pricing, idx: int, timed: list[TimedLoad], km_per_m: float) -> tuple[int, int, float]:
+    """(money, metres, money + time preferences + tie-breaker + ``km_per_m`` x metres) of one truck's
+    timetable (score() of that truck alone: the rest of the plan is the same either way)."""
+    sc = score(day, pricing, {idx: timed})
+    return sc.operating, sc.metres, sc.cost + sc.tie + km_per_m * sc.metres
+
+
+def shorter_orders(day: Day, pricing: Pricing, plan: TimedPlan, trucks: Iterable[int], km_per_m: float,
+                   deadline: float) -> TimedPlan:
+    """``plan`` with the loads of ``trucks`` (a truck to rent, or one whose driver is paid by the day) in
+    a shorter order where it is better (see above): each load keeps its truck, stops and place in the
+    truck's day; a new order is taken when, timed exactly (time_truck: every hard rule, the driver
+    break), the truck drives fewer metres, costs no more money, and its time preferences + ``km_per_m``
+    (objective units a metre: an own truck's km rate) x its metres are lower. The same plan object when
+    nothing changed. Stops at ``deadline`` (time.monotonic) with what it has."""
+    out = dict(plan)
+    changed = False
+    for idx in sorted(set(trucks)):
+        loads, td, price = plan.get(idx), day.by_idx.get(idx), pricing.trucks.get(idx)
+        if not loads or td is None or price is None:
+            continue
+        per_m = price.per_m + price.tie_m + km_per_m
+        per_s = price.per_s(pricing.span)
+        cur, cur_v = list(loads), _order_value(day, pricing, idx, list(loads), km_per_m)
+        for j in range(len(cur)):
+            if time.monotonic() > deadline:
+                break
+            for order in _orders(day, pricing, td, cur[j], per_m, per_s, deadline):
+                trial = [tl.stops for tl in cur]
+                trial[j] = order
+                timed = time_truck(day, td, trial, pricing)
+                if timed is None:
+                    continue
+                v = _order_value(day, pricing, idx, timed, km_per_m)
+                if v[0] <= cur_v[0] and v[1] < cur_v[1] and v[2] < cur_v[2]:
+                    cur, cur_v, changed = timed, v, True
+        out[idx] = cur
+    return out if changed else plan
+
+
+# --------------------------------------------------------------------------------------------
 # CP-SAT load repack
 # --------------------------------------------------------------------------------------------
 

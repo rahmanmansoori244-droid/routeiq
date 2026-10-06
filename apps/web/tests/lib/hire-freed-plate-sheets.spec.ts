@@ -2,7 +2,8 @@
  * A hired truck's plate after a later day's hired truck took it (fourth review of the hire branch): the
  * earlier day's truck is renamed "12345AB.261006" (hired-truck.ts freedCode), and the run's route sheets
  * (PDF and Excel, lib/exports/route-sheet-data.ts), its map routes (load-geometry, route-geometries) and
- * the run API show the plate it drove with ("12345AB", hire.ts shownTruckCode), as the plan screen does.
+ * the run API show the plate it drove with ("12345AB", hire.ts shownTruckCode), as the plan screen does;
+ * so does the office's download of a delivery photo (its file name, fifth review).
  * Each fake query returns only the truck fields the code selects, so a select without `onlyOnDate`
  * shows the renamed code. Synthetic data only.
  */
@@ -11,6 +12,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 type Row = Record<string, unknown>;
 const h = vi.hoisted(() => ({
   trucks: {} as Record<string, Record<string, unknown>>,
+  // The truck of the delivery visit whose photo the office downloads.
+  visitTruck: 'H6',
 }));
 
 /** The fields of `row` a Prisma `select` asks for (the whole row without one). */
@@ -69,12 +72,21 @@ vi.mock('@/lib/db', () => ({
     },
     runPlan: { findFirstOrThrow: async (a: Args) => runOf(a) },
     scenarioResult: { findFirst: async () => null },
+    // A delivery photo of stop 3 on load 1 of the visit's truck (the office's photo download).
+    deliveryPhoto: {
+      findFirst: async () => ({ id: 'ph1', visitId: 'V1', bytes: Buffer.from([0xff, 0xd8, 0xff, 0xd9]), purgedAt: null, receivedAt: new Date() }),
+      findMany: async () => [{ id: 'ph1', takenAt: new Date('2026-10-06T08:00:00Z') }],
+    },
+    stopVisit: { findFirst: async () => ({ id: 'V1', truckId: h.visitTruck, loadNo: 1, sequence: 3 }) },
+    truck: { findFirst: async (a: { where: { id: string }; select?: unknown }) => pick(h.trucks[a.where.id]!, a.select) },
+    tenantConfig: { findFirst: async () => null },
   },
 }));
 vi.mock('@/lib/dispatch/legacy-runs', async (importActual) => ({ ...(await importActual<object>()), isDispatchPlan: async () => false }));
 vi.mock('@/lib/solver-client', () => ({ callRouteGeometry: vi.fn(async () => null) }));
 
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
+import { readOfficePhoto } from '@/lib/delivery/office-service';
 import { GET as runGET } from '@/app/api/runs/[id]/route';
 import { GET as loadGeometryGET } from '@/app/api/runs/[id]/load-geometry/route';
 import { GET as routeGeometriesGET } from '@/app/api/runs/[id]/route-geometries/route';
@@ -84,6 +96,7 @@ beforeEach(() => {
     H6: { id: 'H6', code: '12345AB.261006', description: null, capacityCases: 1140, hired: true, onlyOnDate: new Date('2026-10-06T00:00:00Z') },
     OWN: { id: 'OWN', code: 'T01', description: null, capacityCases: 1140, hired: false, onlyOnDate: null },
   };
+  h.visitTruck = 'H6';
 });
 
 const req = (path: string) => new Request(`http://localhost/api/runs/R6${path}`);
@@ -120,5 +133,12 @@ describe("a past day's hired truck on the run's sheets, maps and API shows the p
       ['H6', '12345AB'],
       ['OWN', 'T01'],
     ]);
+  });
+
+  it("the office's download of a delivery photo names the plate it drove with (fifth review)", async () => {
+    // It read the renamed code and removed the dot: "12345AB261006-L1-stop3-1.jpg".
+    expect((await readOfficePhoto('tA', 'ph1')).filename).toBe('12345AB-L1-stop3-1.jpg');
+    h.visitTruck = 'OWN';
+    expect((await readOfficePhoto('tA', 'ph1')).filename).toBe('T01-L1-stop3-1.jpg');
   });
 });

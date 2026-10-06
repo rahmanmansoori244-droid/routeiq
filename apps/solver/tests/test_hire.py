@@ -418,8 +418,9 @@ def test_a_cancelled_solve_stops_waiting_for_road_routing():
 # Third review of the hire branch
 # ---------------------------------------------------------------------------------------------
 
-def ring(n: int = 12, r_km: float = 25.0) -> list:
-    """``n`` one-pallet P3 stops on a ring ``r_km`` round the depot, their ids out of the ring's order."""
+def ring(n: int = 12, r_km: float = 25.0, priorities: tuple[int, ...] = (3,)) -> list:
+    """``n`` one-pallet stops on a ring ``r_km`` round the depot, their ids out of the ring's order; their
+    priorities take turns round the ring (all P3 by default)."""
     import math
 
     from tests.test_dispatch import DEPOT
@@ -429,20 +430,26 @@ def ring(n: int = 12, r_km: float = 25.0) -> list:
         a = 2 * math.pi * i / n
         lat = DEPOT.lat + (r_km / 111.0) * math.sin(a)
         lng = DEPOT.lng + (r_km / (111.0 * math.cos(math.radians(DEPOT.lat)))) * math.cos(a)
-        out.append(pstop(f"S{(i * 5) % n:02d}", lat, lng, cases=20, units=1000))
+        out.append(pstop(f"S{(i * 5) % n:02d}", lat, lng, cases=20, units=1000, priority=priorities[i % len(priorities)]))
     return out
 
 
 @pytest.mark.parametrize("pv", ["off", "on"])
 @pytest.mark.parametrize("kind", ["to rent", "hired"])
-def test_a_rented_truck_drives_its_stops_in_a_sensible_order(monkeypatch, pv, kind):
+@pytest.mark.parametrize("priorities", [(3,), (1, 3, 2)], ids=["P3", "P1-P3-P2"])
+def test_a_rented_truck_drives_its_stops_in_a_sensible_order(monkeypatch, pv, kind, priorities):
     # Review: a truck whose fuel is in the hire and whose driver is paid by the day cost nothing per km
     # or per hour in the search, so its stops were left in any order (358 km instead of 232). The own
     # T1 (2 bays, no km cost) cannot carry the day: the 12-bay truck - to rent (the what-if), or hired
     # for the day ("Use this plan": no km cost, its driver at the day rate) - drives as short a route
     # as an own 12-bay truck with a km cost on the same stops. Search only: its reported costs stay 0.
+    # Fifth review: with P1, P3 and P2 orders taking turns round the ring, the default early-arrival
+    # preference (P1 0.01, P2 0.005 OMR a minute) outweighed the tiny tie-breaker on its km - one minute
+    # earlier at a P1 order was worth 10 km - and it drove the P1 orders first wherever they were: 340
+    # km instead of 250, back at 16:30 instead of 14:16. Its km now weigh against the customers' time
+    # preferences as an own truck's do (_order_km_rate), and it is back as early as the own truck.
     second_search(monkeypatch, pv)
-    stops = ring()
+    stops = ring(priorities=priorities)
     big = btruck("H10-1", bays=12, fixed_cost=50.0, driver_day_cost=10.0, max_trips=1, hire_candidate=kind == "to rent")
     _, sc = solve(stops, [own("T1", bays=2), big])
     assert unserved_map(sc) == {}
@@ -451,8 +458,78 @@ def test_a_rented_truck_drives_its_stops_in_a_sensible_order(monkeypatch, pv, ki
     _, mine = solve(stops, [own("O12", bays=12, cost_per_km=0.1)])
     [ref] = mine.loads
     assert rented.distance_km <= ref.distance_km * 1.02
+    assert rented.return_min <= ref.return_min + 10
     assert (rented.distance_cost, rented.fuel_cost) == (0.0, 0.0)
     assert rented.driver_cost == pytest.approx(10.0)
+
+
+def ordered_after_pick(r, plan: dict[str, list[tuple[int, ...]]]):
+    """(the plan timed exactly, the same plan once the chosen plan's day-paid loads are put in order)."""
+    import time
+
+    tds = ds._truck_days(r)
+    ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
+    idx = {td.truck.id: td.idx for td in tds}
+    timed = LR.time_plan(ctx.day, {idx[t]: loads for t, loads in plan.items()}, ctx.rec_pricing)
+    assert timed is not None
+    before = LR.Candidate("RECOMMENDED", timed, LR.score(ctx.day, ctx.rec_pricing, timed))
+    after = ds._shorter_orders(ctx, before, time.monotonic() + 10)
+    for i, loads in after.plan.items():
+        assert LR.timing_ok(ctx.day, ctx.day.by_idx[i], loads)
+    return ctx, idx, before, after
+
+
+@pytest.mark.parametrize("early, shorter", [({1: 0.01, 2: 0.005}, True), ({1: 1.0, 2: 0.5}, False)],
+                         ids=["default preference", "far above the km"])
+def test_a_day_paid_trucks_load_is_put_in_order_with_its_km_weighed_as_an_own_trucks(early, shorter):
+    # Fifth review: the order the search left on the hired truck (its P1 orders first wherever they
+    # are: 340 km, back at 16:30). Once the plan is chosen, its km weigh against the customers' time
+    # preferences as an own truck's do (_order_km_rate: 0.1 OMR/km here, no own truck has a km rate).
+    # With the default preference the ring wins (250 km, back at 14:16); with one far above the km (1
+    # OMR a minute at a P1 order) the order stays. Same truck, stops and money either way; timed exactly.
+    r = req(ring(priorities=(1, 3, 2)), [own("T1", bays=2), btruck("H", bays=12, fixed_cost=50.0, driver_day_cost=10.0, max_trips=1)],
+            early_preference_per_min={1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 5: 0.0, **early})
+    assert ds._order_km_rate(r) == pytest.approx(ds.HIRE_ORDER_KM_OMR) == pytest.approx(0.1)
+    zigzag = (6, 5, 3, 2, 0, 11, 10, 9, 8, 7, 4, 1)  # the search's order before the fix, by ring position
+    ctx, idx, before, after = ordered_after_pick(r, {"H": [zigzag]})
+    [b], [a] = before.plan[idx["H"]], after.plan[idx["H"]]
+    assert sorted(a.stops) == sorted(b.stops) and list(after.plan) == list(before.plan)
+    assert after.score.operating == before.score.operating == costing.to_units(60.0)
+    assert after.score.service == before.score.service
+    if shorter:
+        assert after.score.metres < 252_000 < 340_000 < before.score.metres
+        assert (a.return_s // 60, b.return_s // 60) == (855, 990)
+        # Better on the trade-off: the time preferences lose less than its km at 0.1 OMR/km save.
+        assert after.score.cost > before.score.cost
+        km_omr = ds._order_km_rate(r) * (before.score.metres - after.score.metres) / 1000
+        assert (after.score.cost - before.score.cost) / ds.COST_SCALE < km_omr
+    else:
+        assert after is before and a.stops == zigzag
+
+
+def test_every_load_of_a_whole_day_rental_is_put_in_order_and_an_own_truck_never():
+    # A rental is for the whole day (owner answer 2): each of its loads is put in order, the loads keep
+    # their stops and their place in its day, and both come back earlier. An own truck's loads keep the
+    # search's order (its km are priced as money in the search already), and a day without rented or
+    # day-paid trucks keeps the very same plan. The km rate is the own trucks' average (A 0.2, B 0.6).
+    stops = ring(r_km=10.0, priorities=(1, 3, 2))
+    trucks = [own("A", bays=6, max_trips=2, cost_per_km=0.2), own("B", bays=1, cost_per_km=0.6),
+              hire("H", 6, 50.0, driver_day_cost=10.0, max_trips=2)]
+    r = req(stops, trucks)
+    assert ds._order_km_rate(r) == pytest.approx(0.4)
+    loads = [(0, 3, 1, 5, 2, 4), (6, 9, 7, 11, 8, 10)]
+    _, idx, before, after = ordered_after_pick(r, {"H": loads})
+    got = after.plan[idx["H"]]
+    assert [set(tl.stops) for tl in got] == [set(l) for l in loads]
+    assert [tl.stops for tl in got] == [(0, 1, 2, 3, 4, 5), (6, 7, 8, 9, 10, 11)]
+    assert [tl.return_s < tl0.return_s for tl, tl0 in zip(got, before.plan[idx["H"]])] == [True, True]
+    assert after.score.operating == before.score.operating and after.score.metres < before.score.metres
+    # The own truck A: the same loads keep their order.
+    _, idx, before, after = ordered_after_pick(r, {"A": loads})
+    assert after is before
+    r0 = req(stops, [own("A", bays=6, max_trips=2, cost_per_km=0.2)])
+    _, _, before, after = ordered_after_pick(r0, {"A": loads})
+    assert after is before
 
 
 def test_the_search_prices_a_day_paid_trucks_km_and_time_at_a_tiny_tie_breaker_never_as_money():

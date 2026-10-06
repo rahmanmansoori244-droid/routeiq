@@ -152,8 +152,9 @@ class DispatchTruck(BaseModel):
     # load (a truck with frozen loads paid it with them) - instead of config.driver_cost_per_hour and
     # overtime. None: the company's hourly driver cost, as before. Optional and additive. Its km and
     # time still get a tiny search-only tie-breaker (dispatch_solver._search_km_rate, _tie_span_units;
-    # compared after the cost in every goal), so its stops are driven in a sensible order; the reported
-    # costs stay the day rate and no km cost.
+    # compared after the cost in every goal), and once a plan is picked its loads are put in a shorter
+    # order with its km weighed against the customers' time preferences as an own truck's km are
+    # (dispatch_solver._shorter_orders); the reported costs stay the day rate and no km cost.
     driver_day_cost: float | None = Field(default=None, ge=0, le=1000)
 
 

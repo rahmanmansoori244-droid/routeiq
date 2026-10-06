@@ -234,10 +234,22 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # 139 OMR instead of 103). It is never money: the plans report its real costs (no km cost, the day
 # rate), and the load re-check's score keeps it apart (LR.Score.tie), compared after the cost in every
 # goal (_GOALS).
+# That tiny price decides which truck carries what; it cannot order a truck's stops against the
+# customers' time preferences (fifth review: with the default early-arrival preference one minute
+# earlier at a P1 order, 0.01 OMR, was worth 10 km, and a hired truck drove its P1 orders first wherever
+# they were - 340 km instead of 250, back at 16:30 instead of 14:16). Once an option's plan is chosen,
+# each load of such a truck is put in order with its km weighed as an own truck's are (_order_km_rate,
+# LR.shorter_orders): fewer km, no more money, same trucks, loads and stops (_shorter_orders).
 
 # A day-paid or rented truck's km in the search, on top of its own km charge (if any): 1 OMR per
 # 1,000 km - its route is the short one, and a whole day's km weigh well under 1 OMR (search only).
 HIRE_TIE_KM_OMR = 0.001
+# OMR per km a day-paid or rented truck's km weigh against its customers' time preferences when its
+# loads are put in order (_order_km_rate) on a day none of the own trucks has a km rate.
+HIRE_ORDER_KM_OMR = 0.1
+# Seconds the plans of one request may spend on putting those loads in order (in-process, after the
+# pick; LR.shorter_orders keeps what it has when the time is up).
+HIRE_ORDER_SEC = 2.0
 # A day-paid driver's time in the search: 1 objective unit a second (0.036 OMR an hour, the smallest
 # whole rate the routing models take) - a compact day, room for its next load (search only).
 HIRE_TIE_HOUR_OMR = 0.036
@@ -352,11 +364,21 @@ def _hired_km(t: DispatchTruck) -> bool:
 
 def _search_km_rate(t: DispatchTruck, cfg: DispatchConfig) -> float:
     """The truck's km rate in the search: its own (_km_rate_omr), and for a rented truck or one whose
-    driver is paid by the day HIRE_TIE_KM_OMR on top - the tie-breaker that drives its stops in a
-    sensible order, never enough to outweigh real money (fourth review: the own fleet's average rate
-    kept it off the far stops it carries for free)."""
+    driver is paid by the day HIRE_TIE_KM_OMR on top - the tie-breaker between plans of the same cost,
+    never enough to outweigh real money (fourth review: the own fleet's average rate kept it off the far
+    stops it carries for free). Its loads' order against the time preferences: _shorter_orders."""
     rate = _km_rate_omr(t, cfg)
     return rate + HIRE_TIE_KM_OMR if _hired_km(t) else rate
+
+
+def _order_km_rate(req: DispatchRequest) -> float:
+    """OMR per km a rented or day-paid truck's km weigh against its customers' time preferences when its
+    loads are put in order after the pick (_shorter_orders; never money, never which truck carries
+    what): the average km rate (km cost + fuel) of the request's own trucks - paid by the hour, never
+    rented - as their own km weigh in the search, or HIRE_ORDER_KM_OMR when none of them has one."""
+    own = [_km_rate_omr(t, req.config) for t in req.trucks if not _hired_km(t)]
+    avg = sum(own) / len(own) if own else 0.0
+    return avg if avg > 0 else HIRE_ORDER_KM_OMR
 
 
 def _tie_span_units(t: DispatchTruck, w: "ScenarioWeights") -> int:
@@ -3741,6 +3763,26 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
                      rec_pricing=_pricing("RECOMMENDED", req, tds, solvable))
 
 
+def _shorter_orders(ctx: _StageCtx, cand: LR.Candidate, deadline: float) -> LR.Candidate:
+    """The chosen candidate with each load of a rented or day-paid truck in a shorter order where its
+    km, weighed as an own truck's (_order_km_rate), outweigh what its customers' time preferences lose
+    (LR.shorter_orders; fifth review of the hire branch): same trucks, loads and stops, no more money,
+    fewer km, every hard rule timed exactly. The same candidate when nothing changes - always on a day
+    without such trucks (planned exactly as before)."""
+    idxs = [td.idx for td in ctx.day.trucks if _hired_km(td.truck) and cand.plan.get(td.idx)]
+    if not idxs or time.monotonic() > deadline:
+        return cand
+    km_per_m = _order_km_rate(ctx.req) * SCENARIOS["RECOMMENDED"].distance * COST_SCALE / 1000.0
+    try:
+        plan = LR.shorter_orders(ctx.day, ctx.rec_pricing, cand.plan, idxs, km_per_m, deadline)
+    except Exception as exc:  # noqa: BLE001 - the chosen plan stays as it is
+        log.warning("ordering the loads of rented or day-paid trucks failed: %s", exc)
+        return cand
+    if plan is cand.plan:
+        return cand
+    return LR.Candidate(cand.source, plan, LR.score(ctx.day, ctx.rec_pricing, plan))
+
+
 def _retime(ctx: _StageCtx, name: str, sc: DispatchScenario) -> DispatchScenario | None:
     """The safety net when the post-solve stage did not re-check a plan (out of time, a failed or
     lost worker, an internal error): the SAME loads, re-timed exactly with the loading time between
@@ -3954,6 +3996,18 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     def served(c: LR.Candidate) -> set[int]:
         return {k for loads in c.plan.values() for tl in loads for k in tl.stops}
 
+    # The chosen plans' rented or day-paid trucks drive their loads in a shorter order (_shorter_orders,
+    # fifth review): after the pick, so it never changes which truck carries what; each candidate once.
+    order_deadline = min(time.monotonic() + HIRE_ORDER_SEC, budget_end - 2)
+    in_order: dict[int, LR.Candidate] = {}
+
+    def ordered(c: LR.Candidate | None) -> LR.Candidate | None:
+        if c is None:
+            return None
+        if id(c) not in in_order:
+            in_order[id(c)] = _shorter_orders(ctx, c, order_deadline)
+        return in_order[id(c)]
+
     for name in list(raw) + rescue:
         sc = results[name]
         own_carried = carried.get(name, set())
@@ -3963,6 +4017,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
         # other options' plans are not offered to it, as without the second search).
         best, lost = pick(name, cands if name in raw else pvc, own)
         ref, ref_lost = pick(name, eng, own) if name in raw else (None, False)
+        best, ref = ordered(best), ordered(ref)
         if (best is not None and ref is not None and best.source.startswith("PYVRP")
                 and _goal_gain(name, ref.score, best.score, len(served(best)) - len(served(ref))) is None):
             # Better only by less than the note can show (under 1 OMR or 1 km, same trucks and loads):
