@@ -27,6 +27,20 @@ export interface UsualTruck {
 }
 
 /**
+ * The message after a truck's usual driver was set (`driverName`) or cleared (null): new plans use him,
+ * and what a re-plan of a plan already made does (planDrivers; review of 6 Oct 2026). A re-plan keeps a
+ * driver RouteIQ gave a trip, but a trip the cover drove is never kept for the cover (he is no longer
+ * the cover of this truck's usual driver), so it and a trip without a driver get the new usual driver;
+ * cleared, the cover comes off and nobody takes his place.
+ */
+export function usualDriverChangedMessage(truckCode: string, driverName: string | null): string {
+  if (driverName === null) {
+    return `${truckCode}: usual driver cleared. On plans already made, a re-plan takes a cover off (pick a driver for those trips) and keeps the other drivers.`;
+  }
+  return `${truckCode}: usual driver ${driverName}. New plans use him. On plans already made, a re-plan gives him the trips a cover drove and the trips without a driver; the other trips keep their driver until you pick another on the load.`;
+}
+
+/**
  * "Usual driver of each truck" (owner request 6 Oct 2026): the dispatcher (PLANNER and up) sets or
  * clears a truck's usual driver - the only truck field he may change (PATCH /api/trucks/[id] with
  * defaultDriverId alone). New plans put the usual driver on the truck's loads; while he is on leave,
@@ -52,12 +66,7 @@ export function UsualDrivers({ trucks, drivers, canEdit }: { trucks: UsualTruck[
         toast.error(errorMessage(body, 'Could not change the usual driver.'));
         return;
       }
-      // A re-plan keeps the driver RouteIQ already gave a trip (only a cover goes): plans already made
-      // change only where the dispatcher picks the driver (planDrivers; review of 6 Oct 2026).
-      toast.success(
-        `${t.code}: usual driver ${driverId ? (nameOf.get(driverId) ?? 'set') : 'cleared'}. New plans use it. Plans already made keep their drivers, also when you re-plan: pick the driver on those loads.`,
-        { duration: 10_000 },
-      );
+      toast.success(usualDriverChangedMessage(t.code, driverId ? (nameOf.get(driverId) ?? 'set') : null), { duration: 10_000 });
       router.refresh();
     });
   }

@@ -36,6 +36,9 @@ import { GET as getLeave, POST as postLeave } from '@/app/api/drivers/[id]/leave
 import { PATCH as patchLeave, DELETE as deleteLeave } from '@/app/api/drivers/[id]/leave/[leaveId]/route';
 import { driverChangesRefused, truckFieldsRefused } from '@/lib/rbac';
 import { addDaysIso, todayIso } from '@/lib/dispatch/time';
+import { planDrivers, type EvidenceLoad } from '@/lib/dispatch/load-state';
+import { leaveOnDay } from '@/lib/dispatch/driver-leave';
+import { usualDriverChangedMessage } from '@/app/t/[slug]/drivers/usual-drivers';
 
 const T = 'tA';
 const json = (method: string, body?: unknown) =>
@@ -207,6 +210,29 @@ describe("trucks: the dispatcher sets the usual driver and nothing else", () => 
     expect((await patchTruck(json('PATCH', { bays: 12, defaultDriverId: 'BOB' }), ctx)).status).toBe(200);
     expect(row('truck', 'T1')).toMatchObject({ bays: 12, defaultDriverId: 'BOB' });
     expect(audits('UPDATE')).toEqual([expect.objectContaining({ entity: 'Truck', userId: 'u-TENANT_ADMIN' })]);
+  });
+
+  it("the message after a usual-driver change says what a re-plan of a plan already made does (review of 6 Oct 2026)", () => {
+    // The owner's case: Ali is away for a month and Bob covers T01; the dispatcher makes Sam the usual driver of T01.
+    const leave = leaveOnDay([{ id: 'L1', driverId: 'ALI', fromIso: '2026-10-10', untilIso: '2026-11-09', note: null, coverDriverId: 'BOB' }], '2026-10-15');
+    const usable = new Set(['ALI', 'BOB', 'SAM', 'CARL']);
+    const replan = (usual: string | null, had: string | null, extra: Partial<EvidenceLoad> = {}) => {
+      const evidence: EvidenceLoad = { truckId: 'T1', loadNo: 1, driverId: had, departMin: 600, returnMin: 700, status: 'PLANNED', driverSetById: null, driverSetAt: null, ...extra };
+      return planDrivers([{ key: 'T1:1', truckId: 'T1', loadNo: 1, departMin: 600, returnMin: 700, defaultDriverId: usual }], [evidence], usable, leave).drivers.get('T1:1')!.driverId;
+    };
+    // Set: the trip the cover drove and a trip without a driver get the new usual driver; one RouteIQ gave Carl keeps him.
+    expect([replan('SAM', 'BOB', { driverIsCover: true }), replan('SAM', null), replan('SAM', 'CARL')]).toEqual(['SAM', 'SAM', 'CARL']);
+    const set = usualDriverChangedMessage('T01', 'Sam');
+    expect(set).toMatch(/^T01: usual driver Sam\. New plans use him\./);
+    expect(set).toMatch(/a re-plan gives him the trips a cover drove and the trips without a driver/);
+    expect(set).toMatch(/the other trips keep their driver until you pick another/);
+    expect(set).not.toMatch(/keep their drivers, also when you re-plan/);
+    // Cleared: the cover comes off, nothing takes his place, the other drivers stay.
+    expect([replan(null, 'BOB', { driverIsCover: true }), replan(null, null), replan(null, 'CARL')]).toEqual([null, null, 'CARL']);
+    const cleared = usualDriverChangedMessage('T01', null);
+    expect(cleared).toMatch(/^T01: usual driver cleared\./);
+    expect(cleared).toMatch(/a re-plan takes a cover off/);
+    expect(cleared).not.toMatch(/without a driver get/);
   });
 });
 
