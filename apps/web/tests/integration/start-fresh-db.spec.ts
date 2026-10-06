@@ -21,6 +21,8 @@
  *     old driver app row left; its customers, products, trucks, regular drivers, depots, regions,
  *     users, settings and audit rows are kept, plus one TEST_DATA_CLEARED row with the counts and
  *     the user; the daily driver who is a truck's default driver stays; company B is untouched.
+ *  6. A one-day hired truck rented during the tests ("Use this plan") goes with its day: the plan of
+ *     that date never sees it again, and it no longer counts against its option's max per day.
  * The SQL of the locks (the outcome-day and driver-link advisory locks of the days in scope, the
  * plan rows and driver links FOR UPDATE) runs on PostgreSQL in every run.
  */
@@ -31,6 +33,8 @@ vi.mock('@/lib/auth', () => ({ auth: vi.fn(async () => (session.user ? { user: s
 
 import { GET, POST } from '@/app/api/tenant/start-fresh/route';
 import { prisma as libPrisma } from '@/lib/db';
+import { trucksOfDayWhere } from '@/lib/dispatch/hire';
+import { rentedOnDay } from '@/lib/dispatch/hire-whatif';
 import { startFreshShown } from '@/lib/start-fresh-text';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
@@ -235,6 +239,7 @@ describe('Start fresh on real PostgreSQL', () => {
       stopEvents: 2,
       deliveryPhotos: 1,
       dailyDrivers: 2,
+      hiredTrucks: 0,
       baselines: 1,
       oldDriverApp: 3,
     });
@@ -342,4 +347,27 @@ describe('Start fresh on real PostgreSQL', () => {
 
     expect(await census(B.tenantId)).toEqual(beforeB);
   });
+
+  it('6. a one-day hired truck rented during the tests goes with its day; the plan of that date never sees it', async () => {
+    const depot = await prisma.depot.findFirstOrThrow({ where: { tenantId: A.tenantId } });
+    const option = await prisma.hireOption.create({ data: { tenantId: A.tenantId, depotId: depot.id, label: '10-ton', bays: 12, costPerDay: 50, maxPerDay: 2 } });
+    const rentedDay = day('2026-10-07');
+    const hired = await prisma.truck.create({
+      data: { tenantId: A.tenantId, depotId: depot.id, code: 'HIRE-10T-0710-1', capacityCases: 1140, bays: 12, fixedCostPerDay: 50, hired: true, onlyOnDate: rentedDay, hireOptionId: option.id },
+    });
+    expect(await rentedOnDay(A.tenantId, depot.id, rentedDay)).toEqual({ [option.id]: 1 });
+    as(A, 'TENANT_ADMIN');
+    const preview = await get();
+    expect(preview.body.data.removed.hiredTrucks).toBe(1);
+    const r = await post(await runBody(A));
+    expect(r.status).toBe(200);
+    expect(r.body.data.removed.hiredTrucks).toBe(1);
+    expect(await prisma.truck.findUnique({ where: { id: hired.id } })).toBeNull();
+    // The plan of the 7th: the own truck only; the option may rent its two again.
+    expect((await prisma.truck.findMany({ where: { tenantId: A.tenantId, ...trucksOfDayWhere(depot.id, rentedDay) }, select: { code: true } })).map((t) => t.code)).toEqual(['T01']);
+    expect(await rentedOnDay(A.tenantId, depot.id, rentedDay)).toEqual({});
+    // The hire option is master data: kept.
+    expect(await prisma.hireOption.count({ where: { tenantId: A.tenantId } })).toBe(1);
+  });
+
 });

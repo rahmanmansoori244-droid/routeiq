@@ -112,7 +112,7 @@ describe('DELETE /api/depots/:id (audit F03)', () => {
     S.counts.regions = 1; // the old API deleted a depot with only a region, while its dialog said "deactivated"
     const r = await del();
     expect(r.body.data.softDeleted).toBe(true);
-    expect(S.calls[0]).toBe('count:orders,regions,runs,trucks,uploadBatches');
+    expect(S.calls[0]).toBe('count:hireOptions,orders,regions,runs,trucks,uploadBatches');
     expect(S.queries[0]).toMatch(/FROM "Depot" WHERE "id" = \? AND "tenantId" = \? FOR UPDATE/);
   });
 
@@ -147,11 +147,18 @@ describe('DELETE /api/depots/:id (audit F03)', () => {
 
 describe('the rule and its words, shared by the dialog and the API', () => {
   it('any reference means deactivate', () => {
-    expect(DEPOT_REF_COUNT).toEqual({ trucks: true, regions: true, runs: true, orders: true, uploadBatches: true });
+    expect(DEPOT_REF_COUNT).toEqual({ trucks: true, regions: true, runs: true, orders: true, uploadBatches: true, hireOptions: true });
     expect(depotDeleteOutcome({ trucks: 0 })).toBe('DELETE');
-    for (const k of ['trucks', 'regions', 'runs', 'orders', 'uploadBatches'] as const) {
+    for (const k of ['trucks', 'regions', 'runs', 'orders', 'uploadBatches', 'hireOptions'] as const) {
       expect(depotDeleteOutcome({ trucks: 0, [k]: 1 }), k).toBe('DEACTIVATE');
     }
+  });
+
+  it('a depot with only trucks to hire (the hire suggestion) is deactivated, and the dialog and the toast say why (review)', () => {
+    expect(depotReferenceText({ trucks: 0, hireOptions: 1 })).toBe('1 truck to hire');
+    expect(depotReferenceText({ trucks: 1, hireOptions: 2 })).toBe('1 truck and 2 trucks to hire');
+    expect(depotDeleteDialogText('D2', { trucks: 0, hireOptions: 1 })).toMatch(/^Depot D2 has 1 truck to hire, so it will be deactivated, not deleted/);
+    expect(depotDeleteDialogText('D2', null)).toMatch(/trucks, trucks to hire, regions, plans, orders or order files/);
   });
 
   it('the dialog says what will happen', () => {

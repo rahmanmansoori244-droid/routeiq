@@ -140,6 +140,8 @@ export async function cleanupTenant(slug: string): Promise<void> {
       prisma.$executeRaw`DELETE FROM "UnservedOrder" WHERE "orderId" IN (SELECT id FROM "Order" WHERE "tenantId" = ${t.id})`,
       prisma.$executeRaw`DELETE FROM "Order" WHERE "tenantId" = ${t.id}`,
       prisma.$executeRaw`DELETE FROM "RunPlan" WHERE "tenantId" = ${t.id}`,
+      // HireOption -> Depot is ON DELETE RESTRICT (the hire suggestion): its trucks' hireOptionId goes to null.
+      prisma.$executeRaw`DELETE FROM "HireOption" WHERE "tenantId" = ${t.id}`,
       prisma.tenant.deleteMany({ where: { id: t.id } }),
     ]);
   } catch (err) {

@@ -137,6 +137,16 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
       body: { error: `${built.blocking.length} customer(s) need a location before ${verb}.`, code: 'LOCATION_REQUIRED', blocking: built.blocking },
     };
   }
+  return weightRefusal(built, opts, verb);
+}
+
+/**
+ * The weight question of gate(): lines without a case weight on a day with a truck that has a payload
+ * (WEIGHT_REQUIRED), or with the dispatcher's go-ahead the warning that stays on the plan (added to
+ * built.warnings). The hire suggestion's "Use this plan" asks it with the trucks to rent in the
+ * request (hire-use.ts), before any truck is rented.
+ */
+export function weightRefusal(built: BuiltRequest, opts: OptimizeOverrides, verb: string): StartResult | null {
   const payloads = built.request.trucks.some((t) => (t.capacity_kg ?? 0) > 0);
   if (built.unknownWeights.length && payloads) {
     const lines = built.unknownWeights.reduce((a, u) => a + u.lines, 0);
@@ -509,7 +519,7 @@ export async function startDispatchOptimize(
     handedOff = true;
     scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket });
     // The hire suggestion's what-ifs of this day were for a plan that is being replaced: stopped.
-    void cancelHireChecksOfDay(tenantId, found.depotId, found.runDate, 'Stopped: a new optimization started for this day. The hire check runs again when it ends.');
+    void cancelHireChecksOfDay(tenantId, found.depotId, found.runDate, 'Stopped: a new optimization started for this day, so this check was for a plan no longer in use.');
     return {
       status: 202,
       body: { runJobId: job.id, status: 'QUEUED', runId, queued: ticket.waiting, searchMode: mode, maxSearchSec: mode === 'THOROUGH' ? capSec : null },

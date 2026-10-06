@@ -139,10 +139,10 @@ class DispatchTruck(BaseModel):
     # limit. None (an older web, or a truck without bays): planned by cases, exactly as before.
     bays: int | None = Field(default=None, ge=1, le=40)
     # A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
-    # what-if; never a truck already hired): fixed_cost is its hire for the day. The search weighs a
-    # rented truck's day cost more (dispatch_solver.hire_weight), so every own truck is used before
-    # any rented one and the cheapest set of rented trucks wins, while a stop left out still costs
-    # more than any hire; the reported costs stay the real ones. Optional and additive: an older web
+    # what-if; never a truck already hired): fixed_cost is its hire for the day. The search adds a
+    # premium to a rented truck's day cost (dispatch_solver.hire_premium), so every own truck is used
+    # before any rented one and, between rented trucks, the hire counts in real money with the km,
+    # while a stop left out still costs more than any hire; the reported costs stay the real ones. Optional and additive: an older web
     # never sends it.
     hire_candidate: bool = False
 

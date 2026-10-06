@@ -26,6 +26,7 @@ import logging
 import math
 import os
 import time
+from collections.abc import Callable
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from urllib.parse import quote
@@ -63,6 +64,16 @@ OSRM_MAX_SNAP_M = float(os.environ.get("OSRM_MAX_SNAP_M", "5000"))
 
 class MatrixDeadline(RuntimeError):
     """Road routing did not answer before the matrix deadline (review F19)."""
+
+
+class MatrixCancelled(RuntimeError):
+    """The solve was cancelled while its road matrix was being fetched (its caller is gone: the web
+    closed the connection, e.g. a hire check whose slot a dispatcher's optimization took). Never
+    answered with an estimate: the solve ends (dispatch_solver.SolveAborted) and frees its slot."""
+
+
+# How often a matrix being fetched looks whether its solve was cancelled (seconds).
+CANCEL_POLL_SEC = 0.2
 
 
 def haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -170,7 +181,8 @@ class OSRMProvider:
                     raise MatrixDeadline("road routing answer still arriving at the deadline")
         return json.loads(b"".join(chunks))
 
-    def _get(self, url: str, client: httpx.Client | None = None, deadline: float | None = None) -> dict:
+    def _get(self, url: str, client: httpx.Client | None = None, deadline: float | None = None,
+             cancelled: Callable[[], bool] | None = None) -> dict:
         last: Exception | None = None
         c = client or self._client
         own = c is None
@@ -178,6 +190,8 @@ class OSRMProvider:
             c = httpx.Client()
         try:
             for attempt in range(HTTP_MAX_RETRIES):
+                if cancelled is not None and cancelled():
+                    raise MatrixCancelled("the solve was cancelled")
                 if deadline is not None and time.monotonic() >= deadline:
                     raise MatrixDeadline("no time left for road routing")
                 try:
@@ -185,7 +199,7 @@ class OSRMProvider:
                     if body.get("code") != "Ok":
                         raise ValueError(f"OSRM returned code={body.get('code')!r}")
                     return body
-                except MatrixDeadline:
+                except (MatrixDeadline, MatrixCancelled):
                     raise
                 except Exception as exc:  # noqa: BLE001
                     last = exc
@@ -203,7 +217,8 @@ class OSRMProvider:
                 c.close()
 
     def _table(self, coords: list[tuple[float, float]], src: list[int], dst: list[int],
-               client: httpx.Client | None = None, deadline: float | None = None) -> tuple[list, list, dict[int, float]]:
+               client: httpx.Client | None = None, deadline: float | None = None,
+               cancelled: Callable[[], bool] | None = None) -> tuple[list, list, dict[int, float]]:
         idx = sorted(set(src) | set(dst))
         pos = {orig: p for p, orig in enumerate(idx)}
         coord_str = ";".join(f"{coords[i][1]:.6f},{coords[i][0]:.6f}" for i in idx)
@@ -213,7 +228,7 @@ class OSRMProvider:
             f"&sources={';'.join(str(pos[i]) for i in src)}"
             f"&destinations={';'.join(str(pos[i]) for i in dst)}"
         )
-        body = self._get(url, client, deadline)
+        body = self._get(url, client, deadline, cancelled)
         # Snap distance (metres from the input point to the road it was moved onto) per coordinate.
         snaps: dict[int, float] = {}
         for key, order in (("sources", src), ("destinations", dst)):
@@ -223,9 +238,12 @@ class OSRMProvider:
                     snaps[order[k]] = max(snaps.get(order[k], 0.0), float(d))
         return body.get("distances") or [], body.get("durations") or [], snaps
 
-    def get_matrix(self, coords: list[tuple[float, float]], deadline: float | None = None) -> MatrixResult:
+    def get_matrix(self, coords: list[tuple[float, float]], deadline: float | None = None,
+                   cancelled: Callable[[], bool] | None = None) -> MatrixResult:
         """Road matrix in OSRM_TABLE_TILE blocks. Raises MatrixDeadline when routing has not
-        finished at ``deadline`` (time.monotonic()), RuntimeError when OSRM fails."""
+        finished at ``deadline`` (time.monotonic()), RuntimeError when OSRM fails, MatrixCancelled
+        within CANCEL_POLL_SEC once ``cancelled()`` is true (the requests still running are abandoned
+        and the client this call opened is closed)."""
         n = len(coords)
         dist = [[0] * n for _ in range(n)]
         dur = [[0] * n for _ in range(n)]
@@ -238,13 +256,25 @@ class OSRMProvider:
         workers = _env_int("OSRM_PARALLEL", OSRM_PARALLEL, 1, 4)
         pool = ThreadPoolExecutor(max_workers=max(1, min(workers, len(tiles))), thread_name_prefix="osrm")
         try:
-            futs = {pool.submit(self._table, coords, src, dst, client, deadline): (src, dst) for src, dst in tiles}
-            timeout = None if deadline is None else max(0.0, deadline - time.monotonic())
-            done, pending = wait(futs, timeout=timeout, return_when=FIRST_EXCEPTION)
-            for f in done:
-                exc = f.exception()
-                if exc is not None:
-                    raise exc
+            futs = {pool.submit(self._table, coords, src, dst, client, deadline, cancelled): (src, dst) for src, dst in tiles}
+            # Waited for in short steps: a cancelled solve stops waiting at once (the hire check's
+            # what-if, preempted by a dispatcher's optimization, frees its optimizer slot within a
+            # second instead of after up to 90 s of road routing).
+            pending: set = set(futs)
+            while pending:
+                if cancelled is not None and cancelled():
+                    raise MatrixCancelled("the solve was cancelled")
+                left = None if deadline is None else deadline - time.monotonic()
+                if left is not None and left <= 0:
+                    break
+                step = CANCEL_POLL_SEC if cancelled is not None else left
+                if left is not None and step is not None:
+                    step = min(step, left)
+                done, pending = wait(pending, timeout=step, return_when=FIRST_EXCEPTION)
+                for f in done:
+                    exc = f.exception()
+                    if exc is not None:
+                        raise exc
             if pending:
                 raise MatrixDeadline(f"{len(pending)} of {len(tiles)} road-routing requests unanswered at the deadline")
             for f, (src, dst) in futs.items():
@@ -318,13 +348,15 @@ def resolve_matrix(
     road_time_factor: float = 1.0,
     osrm_client: httpx.Client | None = None,
     deadline: float | None = None,
+    cancelled: Callable[[], bool] | None = None,
 ) -> MatrixResult:
     """Build the matrix with the requested provider, falling back to Haversine with a warning.
 
     ``deadline`` (time.monotonic()): road routing that has not answered by then is abandoned and
     the whole matrix is estimated, with a warning - a slow routing server never eats the solver's
     time budget. ``road_time_factor`` scales real road durations only, never an estimated leg
-    (estimates already use the truck's average speed)."""
+    (estimates already use the truck's average speed). ``cancelled`` (the solve's control): once
+    true, road routing is abandoned and MatrixCancelled raised - never an estimate for nobody."""
     t0 = time.monotonic()
     fallback = HaversineProvider(haversine_multiplier, avg_speed_kmh)
     if provider.upper() == "HAVERSINE":
@@ -343,13 +375,15 @@ def resolve_matrix(
         res.seconds = time.monotonic() - t0
         return res
     try:
-        res = OSRMProvider(url, fallback=fallback, client=osrm_client).get_matrix(coords, deadline=deadline)
+        res = OSRMProvider(url, fallback=fallback, client=osrm_client).get_matrix(coords, deadline=deadline, cancelled=cancelled)
         if road_time_factor and road_time_factor != 1.0:
             est = res.estimated
             res.duration_s = [
                 [v if (i, j) in est else int(round(v * road_time_factor)) for j, v in enumerate(row)]
                 for i, row in enumerate(res.duration_s)
             ]
+    except MatrixCancelled:
+        raise
     except MatrixDeadline as exc:
         waited = time.monotonic() - t0
         log.warning("OSRM matrix too slow (%.1fs, %s); falling back to Haversine", waited, exc)

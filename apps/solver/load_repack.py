@@ -130,7 +130,7 @@ class TruckPrice:
     fixed: int  # once per truck day (0 when the truck already has frozen loads today)
     trip: int  # per load
     per_m: float  # per metre driven (non-fuel cost + fuel)
-    # A truck to rent (the hire suggestion, dispatch_solver.hire_weight): what the search adds to its
+    # A truck to rent (the hire suggestion, dispatch_solver.hire_premium): what the search adds to its
     # day cost so own trucks go first. Never money: score() counts it with the preferences.
     extra: int = 0
 

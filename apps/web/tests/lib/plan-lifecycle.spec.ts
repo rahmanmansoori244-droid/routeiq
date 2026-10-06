@@ -58,7 +58,7 @@ import { driverClashes, isHandSetDriver } from '@/lib/dispatch/load-state';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { isLockBusy, PlanBusyError } from '@/lib/dispatch/plan-locks';
 import { SolveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
-import { failJob, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
+import { failJob, PREEMPT_RETRY, scheduleDispatchOptimize, type DispatchJobArgs } from '@/lib/jobs/dispatch-job';
 import { trackInflight } from '@/lib/jobs/optimize-job';
 import { DATA_GATE_RULE, windowGateRemedy } from '@/lib/dispatch/data-collection';
 
@@ -1588,30 +1588,57 @@ describe('solve admission wired into the job (F16): queued solves start, every e
     expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
   });
 
-  it("a job that took a hire check's slot (6 Oct 2026) stops the check, waits for it and takes the optimizer's 'busy' answer again", async () => {
+  it("a job that took a hire check's slot (6 Oct 2026) stops the check, waits for it and takes the optimizer's 'busy' answer again until it has room", async () => {
     seedTwo();
     const adm = admission();
+    // Another company's solve and this company's hire check fill the optimizer.
+    const other = adm.reserve('OTHER', 'u9');
     const stopCheck = vi.fn();
     const bg = adm.reserveBackground(T, 'u1', stopCheck);
     expect(bg.ok && !bg.ticket.waiting).toBe(true);
-    // The company's one slot is the check's: the dispatcher's solve takes it at once.
+    // The dispatcher's solve takes the check's slot at once.
     const t1 = ticketOf(adm);
-    expect([t1.waiting, t1.preemptedOthers]).toEqual([false, true]);
+    expect([t1.waiting, t1.preemptedOthers, t1.mayMeetBusy]).toEqual([false, true, true]);
     expect(stopCheck).toHaveBeenCalledTimes(1);
     const { SolverError } = await import('@/lib/solver-client');
     let calls = 0;
     solver.impl = async () => {
       calls++;
-      // The optimizer has not freed the cancelled check's slot yet.
-      if (calls === 1) throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, null);
+      // Review of the hire branch: the optimizer may hold the cancelled check's slot for a while (its
+      // road matrix): more "busy" answers than the three retries that used to fail the plan.
+      if (calls <= 5) throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, null);
       return jobResponse();
+    };
+    const was = { ...PREEMPT_RETRY };
+    Object.assign(PREEMPT_RETRY, { settleMs: 20, maxWaitMs: 5_000 });
+    try {
+      scheduleDispatchOptimize(argsFor('R1', 'J1', t1));
+      await g.__routeiqInflight.get('R1');
+    } finally {
+      Object.assign(PREEMPT_RETRY, was);
+    }
+    expect(calls).toBe(6);
+    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    if (other.ok) other.ticket.release();
+    expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  }, 15_000);
+
+  it('a job that started without a preemption anywhere fails on the busy answer at once (it is a real busy optimizer)', async () => {
+    seedTwo();
+    const adm = admission();
+    const t1 = ticketOf(adm);
+    expect(t1.mayMeetBusy).toBe(false);
+    const { SolverError } = await import('@/lib/solver-client');
+    let calls = 0;
+    solver.impl = async () => {
+      calls++;
+      throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, null);
     };
     scheduleDispatchOptimize(argsFor('R1', 'J1', t1));
     await g.__routeiqInflight.get('R1');
-    expect(calls).toBe(2);
-    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
-    expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
-  }, 15_000);
+    expect(calls).toBe(1);
+    expect(row('runJob', 'J1').status).toBe('FAILED');
+  });
 });
 
 describe('weights from the product master are saved with the applied plan only (review: failed re-plan kg)', () => {

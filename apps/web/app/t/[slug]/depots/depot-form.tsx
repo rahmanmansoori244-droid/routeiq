@@ -33,7 +33,7 @@ export interface DepotRow {
   closeMin?: number | null;
   /** Owner decision 3 (5 Oct 2026): the driver page's "Call dispatcher" number for this depot (null: the company's). */
   dispatcherPhone?: string | null;
-  _count?: { trucks: number; regions?: number; runs?: number; orders?: number; uploadBatches?: number };
+  _count?: { trucks: number; regions?: number; runs?: number; orders?: number; uploadBatches?: number; hireOptions?: number };
 }
 
 interface Props {

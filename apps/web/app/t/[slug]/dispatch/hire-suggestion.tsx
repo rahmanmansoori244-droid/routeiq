@@ -5,6 +5,11 @@
  * plan leaves orders out because the fleet cannot carry them, which trucks to RENT ("hire 1 x 10-ton
  * (12 bays) + 1 x 3-ton (6 bays): extra about 80 OMR") from a what-if that runs on its own (Quick, never
  * changing the plan). "Use this plan" (PLANNER and above) rents them for the day and uses that plan.
+ *
+ * Review of the hire branch: it says "Checking which trucks to hire" only while a check runs or is on
+ * its way (HireView.checkExpected), keeps polling after a failed read, hides itself for a plan option
+ * that leaves nothing out, never offers a suggestion computed for another option, and names one button
+ * ("Check hire options") in every text - the instruction only to someone who has the button.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, RefreshCw, Truck } from 'lucide-react';
@@ -14,8 +19,8 @@ import type { HireView } from '@/lib/dispatch/hire-whatif';
 import { api, askOverride, type OptimizeOverrides } from './client-api';
 
 const POLL_MS = 4_000;
-/** After a plan is saved its what-if is created a moment later: look a few times before giving up. */
-const LOOKS_FOR_NEW = 6;
+/** Failed reads in a row before the box says it could not refresh (it keeps trying). */
+const FAILED_READS_NOTE = 3;
 
 interface Props {
   runId: string;
@@ -30,37 +35,48 @@ interface Props {
   onUsed: (newRunId: string) => void | Promise<void>;
 }
 
+/** A server text that tells to press the button, for someone who does not have it. */
+function forViewer(text: string, canAct: boolean): string {
+  return canAct ? text : text.replace(/\s*Press Check hire options[^.]*\./g, ' A dispatcher can check again.');
+}
+
 export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, expect, canEditProducts, onUsed }: Props) {
   const [view, setView] = useState<HireView | null>(null);
   const [working, setWorking] = useState<'use' | 'check' | null>(null);
-  // Looks for the check a just-saved plan starts (it is created a moment after the plan).
-  const [looks, setLooks] = useState(0);
+  // Every poll's timer fire counts (review: a failed read changed nothing the effect watched, so
+  // polling stopped for good while the box kept spinning).
+  const [tick, setTick] = useState(0);
+  const [failedReads, setFailedReads] = useState(0);
 
   const load = useCallback(async () => {
     const r = await api<HireView>(`/api/runs/${runId}/hire-suggestion`);
-    if (r.ok && r.data) setView(r.data);
+    if (r.ok && r.data) {
+      setView(r.data);
+      setFailedReads(0);
+    } else setFailedReads((n) => n + 1);
   }, [runId]);
 
   useEffect(() => {
-    setLooks(0);
     void load();
   }, [load, planKey]);
 
   const status = view?.suggestion?.status;
   const running = status === 'QUEUED' || status === 'RUNNING';
-  const expected = !!view && view.short && view.options > 0 && view.canCheck && !view.suggestion;
+  const polling = running || !!view?.checkExpected;
   useEffect(() => {
-    if (!running && !(expected && looks < LOOKS_FOR_NEW)) return;
+    if (!polling) return;
     const t = setTimeout(() => {
-      if (!running) setLooks((n) => n + 1);
+      setTick((n) => n + 1);
       void load();
     }, POLL_MS);
     return () => clearTimeout(t);
-  }, [running, expected, looks, view, load]);
+  }, [polling, tick, load]);
 
   if (!view) return null;
   const s = view.suggestion;
-  if (!s && !view.short) return null;
+  // A plan option that leaves nothing out for the fleet: no box (a check still running aside).
+  if (!view.short && !running) return null;
+  const mayCheck = canPlan && !superseded && view.canCheck;
   if (!s && view.options === 0) {
     return canPlan && !superseded ? (
       <p className="text-xs text-muted-foreground" data-testid="hire-no-options">
@@ -85,9 +101,12 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
     if (!s?.summary) return;
     const trucks = s.summary.hires.map((h) => `${h.count} x ${h.label}`).join(' + ');
     const day = expect?.date ?? 'this day';
+    const drops = s.summary.dropped?.orders
+      ? `\n\nThe check's plan leaves out ${s.summary.dropped.orders} order(s) your current plan delivers, so RouteIQ re-plans the day with the hired trucks instead of taking it as it is.`
+      : '';
     if (
       !window.confirm(
-        `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate and driver on its loads). A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.`,
+        `Hire ${trucks} for ${day} and use this plan?\n\nThe trucks are added for ${day} only (codes HIRE-...; enter each one's real plate with Plate on its load, and pick the driver on each load). A new plan version is made with them; locked and dispatched loads stay exactly as they are. If the day changed since this was computed, RouteIQ re-plans with the hired trucks instead.${drops}`,
       )
     ) {
       return;
@@ -125,24 +144,35 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
   }
 
   const canAct = canPlan && !superseded && !busy && !working;
-  const tone = s?.status === 'SUCCEEDED' && s.summary?.status === 'HIRE' ? 'border-blue-300 bg-blue-50' : 'border-amber-300 bg-amber-50';
+  const tone = s?.status === 'SUCCEEDED' && s.summary?.status === 'HIRE' && !s.forOtherOption ? 'border-blue-300 bg-blue-50' : 'border-amber-300 bg-amber-50';
+  const idle = !s
+    ? view.checkExpected
+      ? ' Checking which trucks to hire…'
+      : ` No hire check has run for this plan yet.${view.skipNote ? ` ${view.skipNote}` : ''}${
+          view.dayOver ? ' This day is over.' : mayCheck ? ' Press Check hire options to see which trucks to hire.' : view.canCheck ? ' A dispatcher can check which trucks to hire.' : ''
+        }`
+    : '';
   return (
     <div className={`space-y-1 rounded-md border p-3 text-sm ${tone}`} data-testid="hire-suggestion">
       <p className="flex items-center gap-2 font-medium">
         <Truck className="h-4 w-4 shrink-0" /> Hire suggestion
       </p>
       {!s ? (
-        <p>
-          Orders are left out because the fleet cannot carry them.
-          {view.canCheck ? (looks < LOOKS_FOR_NEW ? ' Checking which trucks to hire…' : ' Press Check hire options to see which trucks to hire.') : ''}
+        <p data-testid="hire-idle">
+          {view.checkExpected ? <Loader2 className="mr-1 inline h-4 w-4 animate-spin" /> : null}
+          Orders are left out because the fleet cannot carry them.{idle}
         </p>
       ) : running ? (
         <p className="flex items-center gap-2" data-testid="hire-running">
           <Loader2 className="h-4 w-4 animate-spin" /> Checking which trucks to hire (Quick search, about a minute). Your plan stays as it is meanwhile.
         </p>
+      ) : s.forOtherOption ? (
+        <p data-testid="hire-other-option">
+          The last hire check was computed for another plan option than the one in use.{mayCheck ? ' Press Check hire options to check this one.' : ''}
+        </p>
       ) : s.status === 'SUCCEEDED' && s.headline ? (
         <>
-          <p data-testid="hire-headline">{s.headline}</p>
+          <p data-testid="hire-headline">{forViewer(s.headline, mayCheck)}</p>
           {s.details.map((t) => (
             <p key={t} className="text-xs text-slate-700">
               {t}
@@ -153,10 +183,20 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
               Used: the hired trucks were added{s.usedRunId && s.usedRunId !== runId ? ' and a new plan version was made' : ''}.
             </p>
           ) : null}
+          {s.note ? (
+            <p className="text-xs text-slate-600" data-testid="hire-note">
+              A newer check did not finish: {forViewer(s.note, mayCheck)}
+            </p>
+          ) : null}
         </>
       ) : (
-        <p data-testid="hire-ended">{s.message ?? 'The hire check did not finish.'}</p>
+        <p data-testid="hire-ended">{forViewer(s.message ?? 'The hire check did not finish.', mayCheck)}</p>
       )}
+      {failedReads >= FAILED_READS_NOTE ? (
+        <p className="text-xs text-red-700" data-testid="hire-refresh-failed">
+          Could not refresh the hire check (still trying).
+        </p>
+      ) : null}
       {canPlan && !superseded ? (
         <div className="flex flex-wrap gap-2 pt-1">
           {s?.usable ? (
@@ -165,10 +205,10 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
               Use this plan
             </Button>
           ) : null}
-          {view.canCheck && view.short && !running ? (
+          {view.canCheck && view.short && !running && !view.checkExpected ? (
             <Button size="sm" variant="outline" disabled={!canAct} onClick={() => void check()} data-testid="hire-check-btn">
               {working === 'check' ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}
-              {s ? 'Check again' : 'Check hire options'}
+              Check hire options
             </Button>
           ) : null}
         </div>

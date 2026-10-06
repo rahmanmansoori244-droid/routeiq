@@ -2,7 +2,7 @@
  * What "Delete" does to a depot or a driver (audit F03 / F20, owner decisions 7 and 8), shared by
  * the API and the confirmation dialogs so both always say the same thing.
  *
- * - A depot that anything refers to (trucks, regions, plans, orders, order files) is DEACTIVATED,
+ * - A depot that anything refers to (trucks, trucks to hire, regions, plans, orders, order files) is DEACTIVATED,
  *   never deleted: before this rule a depot with orders but no trucks was deleted and its orders
  *   lost their depot (they fell into another depot's plan, or out of every plan). The database
  *   refuses such a delete too (migration 20260930093000_master_data_no_orphans).
@@ -10,8 +10,13 @@
  *   driver from a dispatched load, and cleared every truck's default driver without a word.
  */
 
-/** Everything that refers to a depot, as a Prisma `_count` select (the API and the Depots page). */
-export const DEPOT_REF_COUNT = { trucks: true, regions: true, runs: true, orders: true, uploadBatches: true } as const;
+/**
+ * Everything that refers to a depot, as a Prisma `_count` select (the API and the Depots page). The
+ * trucks it can hire (HireOption, the hire suggestion: its depot key is RESTRICT) too - review of the
+ * hire branch: a depot with only hire options was promised a delete, the database refused it, and
+ * the toast said "deactivated" without the reason.
+ */
+export const DEPOT_REF_COUNT = { trucks: true, regions: true, runs: true, orders: true, uploadBatches: true, hireOptions: true } as const;
 
 export interface DepotRefCounts {
   trucks: number;
@@ -19,6 +24,8 @@ export interface DepotRefCounts {
   runs?: number;
   orders?: number;
   uploadBatches?: number;
+  /** Trucks to hire (hire options) of the depot. */
+  hireOptions?: number;
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -27,6 +34,7 @@ const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one :
 export function depotReferenceText(c: DepotRefCounts): string {
   const parts = [
     c.trucks ? plural(c.trucks, 'truck', 'trucks') : '',
+    c.hireOptions ? plural(c.hireOptions, 'truck to hire', 'trucks to hire') : '',
     c.regions ? plural(c.regions, 'region', 'regions') : '',
     c.runs ? plural(c.runs, 'plan', 'plans') : '',
     c.orders ? plural(c.orders, 'order', 'orders') : '',
@@ -42,13 +50,13 @@ export function depotDeleteOutcome(c: DepotRefCounts): 'DEACTIVATE' | 'DELETE' {
 }
 
 /**
- * The confirmation dialog's text. `c` must hold every reference (the page counts trucks,
- * regions, plans, orders and order files; null = not known); the API decides again on the
+ * The confirmation dialog's text. `c` must hold every reference (the page counts trucks, trucks to
+ * hire, regions, plans, orders and order files; null = not known); the API decides again on the
  * database's own counts, and the answer's toast says what it did.
  */
 export function depotDeleteDialogText(code: string, c: DepotRefCounts | null): string {
   if (!c) {
-    return `Depot ${code} is deactivated, not deleted, if anything refers to it (trucks, regions, plans, orders or order files); otherwise it is deleted, which cannot be undone.`;
+    return `Depot ${code} is deactivated, not deleted, if anything refers to it (trucks, trucks to hire, regions, plans, orders or order files); otherwise it is deleted, which cannot be undone.`;
   }
   const refs = depotReferenceText(c);
   if (!refs) return `Nothing refers to depot ${code} yet, so it will be deleted. This cannot be undone.`;

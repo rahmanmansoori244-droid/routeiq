@@ -110,7 +110,7 @@ from dispatch_models import (
     pallet_text,
     payload_units,
 )
-from providers import MatrixResult, matrix_quality, resolve_matrix
+from providers import MatrixCancelled, MatrixResult, matrix_quality, resolve_matrix
 
 log = logging.getLogger("routeiq.dispatch")
 
@@ -192,43 +192,55 @@ POOL_CLOSE_SEC = 10.0
 NO_WORKERS_NOTE = "the planner was short of resources"
 
 # The hire suggestion (owner request 6 Oct 2026): a request may carry trucks the company could rent
-# for the day (DispatchTruck.hire_candidate; the web's what-if, one per unit it may rent). Their day
-# cost (fixed_cost = the hire) counts HIRE_WEIGHT_MAX times in the search, so an own truck - whose
-# cost is the same whether it stands in the yard or not - is always used before a rented one, and
-# among the rented trucks the cheapest set wins (one factor for all keeps their order). The weighted
-# hire never passes HIRE_SEARCH_CAP_OMR, half of what leaving out a single stop costs at the least
-# (SERVICE_BASE = 1,000 OMR, a P5 stop under strict priorities): every stop the fleet cannot carry is
-# still worth a hire. Search-only: the plan reports each truck's real costs (costing.py).
-HIRE_WEIGHT_MAX = 10.0
+# for the day (DispatchTruck.hire_candidate; the web's what-if, one per unit it may rent). In the
+# search a rented truck costs its real hire (fixed_cost) plus a PREMIUM (hire_premium), the same for
+# every rented truck; search-only: the plan reports each truck's real costs (costing.py).
+# - Own trucks first: the premium is the dearest own truck's day cost + HIRE_PREMIUM_MARGIN_OMR, so a
+#   rented truck always weighs more than any own truck's day, and the margin also covers an own
+#   truck's dearer km on the same trip. It never depends on what the options cost (review of the
+#   hire branch: one factor from the dearest option fell to 1 when an option cost 500 OMR or more,
+#   and the what-if rented while an own truck stood idle).
+# - The cheapest set: between rented trucks the hire counts in real money next to their km, trips
+#   and driver time (review: a multiplied hire chose two 3-tons that cost more than one 10-ton once
+#   their running costs were counted); each further rented truck pays the premium again, so of two
+#   sets the one with fewer rented trucks wins unless the other is dearer by more than the premium.
+# - Any stop is still worth a hire: a rented truck weighs at most HIRE_SEARCH_CAP_OMR in the search
+#   (half of what leaving out a single stop costs at the least, SERVICE_BASE = 1,000 OMR, a P5 stop
+#   under strict priorities) unless its hire alone is more: only that truck's premium shrinks.
+HIRE_PREMIUM_MARGIN_OMR = 100.0
 HIRE_SEARCH_CAP_OMR = 500.0
 
 
-def hire_weight(req: DispatchRequest) -> float:
-    """The factor the search applies to a rented truck's day cost: HIRE_WEIGHT_MAX, lowered so the
-    dearest hire of the request weighs at most HIRE_SEARCH_CAP_OMR; 1 without rented trucks."""
-    hires = [t.fixed_cost for t in req.trucks if t.hire_candidate and t.fixed_cost > 0]
-    if not hires:
-        return 1.0
-    return max(1.0, min(HIRE_WEIGHT_MAX, HIRE_SEARCH_CAP_OMR / max(hires)))
+def hire_premium(req: DispatchRequest) -> float:
+    """The search-only premium on a rented truck (OMR, before a scenario's weight on day costs): the
+    dearest own truck's day cost + HIRE_PREMIUM_MARGIN_OMR; 0 when the request rents nothing."""
+    if not any(t.hire_candidate for t in req.trucks):
+        return 0.0
+    return max((t.fixed_cost for t in req.trucks if not t.hire_candidate), default=0.0) + HIRE_PREMIUM_MARGIN_OMR
 
 
-def hire_extra_omr(t: DispatchTruck, weight: float) -> float:
+def hire_extra_omr(t: DispatchTruck, premium: float) -> float:
     """What the search adds to a rented truck's day cost (OMR, before a scenario's own weight on day
-    costs): (weight - 1) x its hire. 0 for every other truck."""
-    return (weight - 1.0) * t.fixed_cost if t.hire_candidate else 0.0
+    costs): the premium, less what would take the truck past HIRE_SEARCH_CAP_OMR (never below 0).
+    0 for every other truck."""
+    if not t.hire_candidate:
+        return 0.0
+    return max(0.0, min(premium, HIRE_SEARCH_CAP_OMR - t.fixed_cost))
 
 
-def _vehicle_fixed_omr(td: "TruckDay", w: "ScenarioWeights", hire_w: float) -> float:
+def _vehicle_fixed_omr(td: "TruckDay", w: "ScenarioWeights", premium: float) -> float:
     """The routing model's cost of using a truck-day at all (OMR): its day cost x the scenario's
     weight (a truck with frozen loads is already out: never "opened" again, B3) and its first load's
-    trip cost; MIN DISTANCE prices metres only. A truck to rent (the hire suggestion) costs its
-    weighted hire in every scenario: even MIN DISTANCE never rents a truck to save a few metres."""
+    trip cost; MIN DISTANCE prices metres only. A truck to rent (the hire suggestion) costs its hire
+    and its premium (hire_premium) in every scenario: even MIN DISTANCE never rents a truck to save
+    a few metres."""
     t = td.truck
     fixed = 0.0
     if td.n_frozen == 0:
         fixed += t.fixed_cost * (0.0 if w.pure_distance else w.fixed)
         if t.hire_candidate:
-            fixed += hire_w * t.fixed_cost if w.pure_distance else hire_extra_omr(t, hire_w) * w.fixed
+            extra = hire_extra_omr(t, premium)
+            fixed += t.fixed_cost + extra if w.pure_distance else extra * w.fixed
     if not w.pure_distance:
         fixed += t.trip_cost * w.trip  # the first new load
     return fixed
@@ -1332,7 +1344,7 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     along, so the RECOMMENDED score's money equals the reported costs (costing.py)."""
     cfg = req.config
     w = SCENARIOS[name]
-    hw = hire_weight(req)
+    hp = hire_premium(req)
     trucks = {
         td.idx: LR.TruckPrice(
             # A truck with frozen loads is already out today: no "open a truck" cost again, in any
@@ -1340,8 +1352,8 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
             fixed=int(round(td.truck.fixed_cost * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
             trip=int(round(td.truck.trip_cost * w.trip * COST_SCALE)),
             per_m=_km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0,
-            # A truck to rent (the hire suggestion): its weighted hire, search-only (never money).
-            extra=int(round(hire_extra_omr(td.truck, hw) * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
+            # A truck to rent (the hire suggestion): its premium, search-only (never money).
+            extra=int(round(hire_extra_omr(td.truck, hp) * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
         )
         for td in tds if td.usable
     }
@@ -1435,7 +1447,7 @@ def _solve_scenario(
     continuity = w.soft_prefs and cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
     change_units = int(round(cfg.change_penalty_per_stop * COST_SCALE))
     cost_cb: dict[tuple, int] = {}
-    hw = hire_weight(req)
+    hp = hire_premium(req)
     for v, td in enumerate(vehicles):
         rate = 1.0 if w.pure_distance else _km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0
         trip_units = 0 if w.pure_distance else int(round(td.truck.trip_cost * w.trip * COST_SCALE))
@@ -1459,7 +1471,7 @@ def _solve_scenario(
                 mat.append(row)
             cost_cb[key] = routing.RegisterTransitMatrix(mat)
         routing.SetArcCostEvaluatorOfVehicle(cost_cb[key], v)
-        routing.SetFixedCostOfVehicle(int(round(_vehicle_fixed_omr(td, w, hw) * COST_SCALE)), v)
+        routing.SetFixedCostOfVehicle(int(round(_vehicle_fixed_omr(td, w, hp) * COST_SCALE)), v)
 
     # --- capacity with reload reset (cases and / or pallets, kg when any payload is set) -----
     def add_capacity(name_: str, demand: list[int], caps: list[int]) -> None:
@@ -2091,16 +2103,22 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         # that cannot start it still solves). Not waited for here.
         pv = _pv_start(req, solvable, control, workers is not None)
         coords = [(req.depot.lat, req.depot.lng)] + [(s.lat, s.lng) for s in solvable]
-        mx = resolve_matrix(
-            coords,
-            provider=cfg.distance_provider,
-            osrm_url=cfg.osrm_url,
-            haversine_multiplier=cfg.haversine_multiplier,
-            avg_speed_kmh=cfg.avg_speed_kmh,
-            road_time_factor=cfg.road_time_factor,
-            osrm_client=osrm_client,
-            deadline=started + matrix_budget_sec(budget),
-        )
+        try:
+            mx = resolve_matrix(
+                coords,
+                provider=cfg.distance_provider,
+                osrm_url=cfg.osrm_url,
+                haversine_multiplier=cfg.haversine_multiplier,
+                avg_speed_kmh=cfg.avg_speed_kmh,
+                road_time_factor=cfg.road_time_factor,
+                osrm_client=osrm_client,
+                deadline=started + matrix_budget_sec(budget),
+                # Cancelled (the caller is gone) while road routing answers: stop waiting at once, so
+                # the slot frees within a second (a hire check preempted by a dispatcher's solve).
+                cancelled=control.cancelled.is_set if control is not None else None,
+            )
+        except MatrixCancelled:
+            raise SolveAborted(f"The optimization was cancelled ({control.why if control is not None and control.why else 'the caller is gone'}).") from None
         log.info("dispatch run=%s matrix provider=%s quality=%s points=%d estimated_cells=%d seconds=%.2f",
                  req.run_id, mx.provider_name, mx.quality, len(coords), mx.patched_cells if not mx.all_estimated else -1, mx.seconds)
         keep, window_drops = _window_prefilter(solvable, tds, mx, cfg)

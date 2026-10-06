@@ -52,7 +52,13 @@
  *   a dispatcher: a waiting background solve starts only after every dispatcher's solve that can
  *   start, and a dispatcher's solve that does not fit because of running background solves takes
  *   their slots at once (preempted: the background solve's onPreempt cancels its optimizer call,
- *   which frees the optimizer's slot within about a second).
+ *   which frees the optimizer's slot within about a second). For a dispatcher's solve a running
+ *   background solve counts toward the total only, never toward the company caps (review of the hire
+ *   branch: a company's own what-if was stopped for its next depot's optimization although a slot
+ *   was free) - so a what-if yields only when the optimizer is really full, and then only the fewest
+ *   that make room (the requester's own company's first, then the newest). A solve started within
+ *   PREEMPT_SETTLE_WINDOW_MS of a preemption may still find the optimizer holding the stopped solve
+ *   for a moment (SolveTicket.mayMeetBusy): its job takes the optimizer's "busy" answer again.
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy
  * overlap two processes can each admit their own solves, so the solver also refuses more than
@@ -129,6 +135,13 @@ export interface AdmissionDenied {
   retryAfterSec: number;
 }
 
+/**
+ * After a background solve was preempted, the optimizer frees its slot once the cancelled call has
+ * ended there (about a second; its road matrix is cancellable too): a solve started within this window
+ * may meet the optimizer's "busy" answer and retries it (dispatch-job.ts).
+ */
+export const PREEMPT_SETTLE_WINDOW_MS = 60_000;
+
 export interface SolveTicket {
   readonly tenantId: string;
   readonly userId: string;
@@ -154,6 +167,12 @@ export interface SolveTicket {
    * slot about a second after its call was cancelled, so the job waits a moment first (dispatch-job.ts).
    */
   readonly preemptedOthers: boolean;
+  /**
+   * The solve started while a preempted background solve may still hold its optimizer slot (it took
+   * that slot, or started within PREEMPT_SETTLE_WINDOW_MS of a preemption): its job retries the
+   * optimizer's "busy" answer for a while (dispatch-job.ts) instead of failing at once.
+   */
+  readonly mayMeetBusy: boolean;
 }
 
 export type AdmissionResult = { ok: true; ticket: SolveTicket } | AdmissionDenied;
@@ -173,6 +192,7 @@ interface TicketState {
   background: boolean;
   preempted: boolean;
   preemptedOthers: boolean;
+  mayMeetBusy: boolean;
   onPreempt?: () => void;
 }
 
@@ -184,6 +204,8 @@ export class SolveAdmission {
   /** Solves waiting for a slot, in the order they were queued. */
   private readonly queue: TicketState[] = [];
   private seq = 0;
+  /** When a background solve was last preempted (this.now()). */
+  private lastPreemptAt = Number.NEGATIVE_INFINITY;
 
   constructor(
     private readonly limits: AdmissionLimits = defaultAdmissionLimits(),
@@ -253,6 +275,7 @@ export class SolveAdmission {
       background: false,
       preempted: false,
       preemptedOthers: tookSlot,
+      mayMeetBusy: tookSlot,
     };
     const counted = !this.quotasOff();
     if (counted) {
@@ -272,7 +295,7 @@ export class SolveAdmission {
    */
   reserveBackground(tenantId: string, userId: string, onPreempt: () => void): AdmissionResult {
     const fits =
-      this.fitsNow({ tenantId, mode: 'QUICK' }, this.running) && !this.queue.some((q) => !q.background && this.fitsNow(q, this.running));
+      this.fitsNow({ tenantId, mode: 'QUICK', background: true }, this.running) && !this.queue.some((q) => !q.background && this.fitsNow(q, this.running));
     if (!fits) {
       const mineWaiting = this.queue.filter((q) => q.background && q.tenantId === tenantId).length;
       if (mineWaiting >= 1 || this.queue.length >= this.limits.maxQueue) {
@@ -294,6 +317,7 @@ export class SolveAdmission {
       background: true,
       preempted: false,
       preemptedOthers: false,
+      mayMeetBusy: false,
       onPreempt,
     };
     if (fits) this.start(st);
@@ -346,6 +370,9 @@ export class SolveAdmission {
       get preemptedOthers() {
         return st.preemptedOthers;
       },
+      get mayMeetBusy() {
+        return st.mayMeetBusy;
+      },
       ready: () => st.promise,
       position: () => (st.running || st.released ? 0 : self.startOrder().indexOf(st) + 1),
       commit: () => {
@@ -397,16 +424,18 @@ export class SolveAdmission {
    * Could a solve of this company and mode start next to `running`? The total cap; then per mode:
    * QUICK - the company's QUICK solves under tenantConcurrent; THOROUGH - the THOROUGH solves of all
    * companies under thoroughConcurrent and the company's under tenantThoroughConcurrent. A company's
-   * THOROUGH solve never counts against its QUICK cap, nor the other way round.
+   * THOROUGH solve never counts against its QUICK cap, nor the other way round. For a dispatcher's
+   * solve a running background solve counts toward the total only (it yields when the optimizer is
+   * full, never because of a company cap); for a background solve every solve counts.
    */
-  private fitsNow(st: { tenantId: string; mode: SearchMode }, running: Iterable<TicketState>): boolean {
+  private fitsNow(st: { tenantId: string; mode: SearchMode; background?: boolean }, running: Iterable<TicketState>): boolean {
     let total = 0;
     let thoroughAll = 0;
     let sameCompanyAndMode = 0;
     for (const r of running) {
       total++;
       if (r.mode === 'THOROUGH') thoroughAll++;
-      if (r.tenantId === st.tenantId && r.mode === st.mode) sameCompanyAndMode++;
+      if (r.tenantId === st.tenantId && r.mode === st.mode && (st.background || !r.background)) sameCompanyAndMode++;
     }
     if (total >= this.limits.globalConcurrent) return false;
     if (st.mode !== 'THOROUGH') return sameCompanyAndMode < this.limits.tenantConcurrent;
@@ -474,6 +503,8 @@ export class SolveAdmission {
 
   private start(st: TicketState) {
     st.running = true;
+    // A preempted solve may still hold its optimizer slot for a moment: this one retries "busy".
+    if (!st.background && this.now() - this.lastPreemptAt < PREEMPT_SETTLE_WINDOW_MS) st.mayMeetBusy = true;
     this.running.add(st);
     st.resolve();
   }
@@ -489,7 +520,10 @@ export class SolveAdmission {
       const fg = this.queue.filter((q) => !q.background);
       const i = this.nextIndex(fg, [...this.running]);
       const next = i >= 0 ? fg[i] : [...fg].sort((a, b) => a.seq - b.seq).find((st) => this.preemptFor(st));
-      if (next && i < 0) next.preemptedOthers = true;
+      if (next && i < 0) {
+        next.preemptedOthers = true;
+        next.mayMeetBusy = true;
+      }
       if (next) {
         this.queue.splice(this.queue.indexOf(next), 1);
         this.start(next);
@@ -504,35 +538,52 @@ export class SolveAdmission {
   }
 
   /**
-   * Make room for a dispatcher's solve by preempting running background solves (newest first), only
-   * when that is enough for it to start. True when it fits now. The preempted tickets are released
-   * and their onPreempt called (the what-if cancels its optimizer call).
+   * Make room for a dispatcher's solve by preempting running background solves, only when that is
+   * enough for it to start, and only the fewest that are (review of the hire branch: the newest were
+   * added one by one and all of them stopped, another company's what-if too when the requester's own
+   * was enough): the smallest set, tried the requester's own company's first, then the newest. True
+   * when it fits now. The preempted tickets are released and their onPreempt called (the what-if
+   * cancels its optimizer call).
    */
   private preemptFor(st: { tenantId: string; mode: SearchMode }): boolean {
-    const bgs = [...this.running].filter((r) => r.background).sort((a, b) => b.seq - a.seq);
+    const bgs = [...this.running]
+      .filter((r) => r.background)
+      .sort((a, b) => Number(b.tenantId === st.tenantId) - Number(a.tenantId === st.tenantId) || b.seq - a.seq);
     if (!bgs.length) return false;
-    const removed: TicketState[] = [];
-    for (const bg of bgs) {
-      removed.push(bg);
-      if (!this.fitsNow(st, [...this.running].filter((r) => !removed.includes(r)))) continue;
-      for (const r of removed) {
-        r.preempted = true;
-        r.released = true;
-        r.running = false;
-        this.running.delete(r);
-        try {
-          r.onPreempt?.();
-        } catch {
-          /* the what-if's own clean-up failed: its slot is free anyway */
+    for (let size = 1; size <= bgs.length; size++) {
+      for (const set of subsets(bgs, size)) {
+        if (!this.fitsNow(st, [...this.running].filter((r) => !set.includes(r)))) continue;
+        this.lastPreemptAt = this.now();
+        for (const r of set) {
+          r.preempted = true;
+          r.released = true;
+          r.running = false;
+          this.running.delete(r);
+          try {
+            r.onPreempt?.();
+          } catch {
+            /* the what-if's own clean-up failed: its slot is free anyway */
+          }
         }
+        return true;
       }
-      return true;
     }
     return false;
   }
 
   private deny(status: 429 | 503, code: AdmissionCode, error: string, retryAfterSec: number): AdmissionDenied {
     return { ok: false, status, code, error, retryAfterSec: Math.max(1, Math.round(retryAfterSec)) };
+  }
+}
+
+/** The subsets of `items` with `size` members, in order (the first items first). Few items: the running background solves. */
+function* subsets<T>(items: readonly T[], size: number, from = 0): Generator<T[]> {
+  if (size === 0) {
+    yield [];
+    return;
+  }
+  for (let i = from; i <= items.length - size; i++) {
+    for (const rest of subsets(items, size - 1, i + 1)) yield [items[i]!, ...rest];
   }
 }
 

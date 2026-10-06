@@ -8,12 +8,16 @@
  * order files, orders and their lines (late orders, Bring forward copies and per-order delivery
  * times are orders too), plan versions with their options, optimization jobs, loads, stops and
  * unserved rows, driver links, delivery results (stops, events, photos), manual comparison
- * baselines, the retired driver app's shifts / positions / proofs, and daily (casual) drivers that
- * no longer have any load (a daily driver who is a truck's default driver stays). Before a date, an
- * order file without orders goes only when every delivery date in it is before that day.
- * Kept: customers (locations, confirmed hours), products, trucks, regular drivers, depots, regions,
- * users, settings and customer type defaults, and the audit log, which is never deleted: the run
- * adds one TEST_DATA_CLEARED row with the counts and who did it.
+ * baselines, the retired driver app's shifts / positions / proofs, the one-day hired trucks of the
+ * days in scope (the hire suggestion's "Use this plan", Truck.onlyOnDate: deleted, or retired when a
+ * row that stays still names one - review of the hire branch: left behind, they were planned on their
+ * date as fleet nobody rented and counted against the option's max per day), and daily (casual)
+ * drivers that no longer have any load (a daily driver who is a truck's default driver stays). Before
+ * a date, an order file without orders goes only when every delivery date in it is before that day.
+ * Kept: customers (locations, confirmed hours), products, trucks (own; one-day ones of days that
+ * stay), regular drivers, depots, regions, users, settings, customer type defaults and hire options,
+ * and the audit log, which is never deleted: the run adds one TEST_DATA_CLEARED row with the counts
+ * and who did it.
  *
  * Safety: one transaction. It sets a lock timeout and takes, in the documented lock order
  * (plan-locks.ts: intake -> day locks -> outcome-day locks -> RunPlan rows -> PlanLoad rows):
@@ -26,8 +30,8 @@
  *     for a day whose plan goes. Nobody else takes both kinds, so their order cannot deadlock;
  *  3. the plan rows it removes (FOR UPDATE), then the driver links it removes (FOR UPDATE: a result
  *     sent with a link waits on its key, then fails once the run commits);
- * and only then decides: refused (409, nothing removed) while an optimization of the company is
- * queued or running, in "before a date" mode when the date would split a Bring forward or a plan
+ * and only then decides: refused (409, nothing removed) while an optimization or a hire check of the
+ * company is queued or running, in "before a date" mode when the date would split a Bring forward or a plan
  * from its orders, when there is more to remove than the preview the admin was shown
  * (PREVIEW_STALE), and when the removal includes loads that left or orders and links from today on
  * without the extra tick (LIVE_DATA_CONFIRM). Plans and orders are deleted by the exact ids read
@@ -142,6 +146,8 @@ interface Sets {
   shiftIds: string[];
   baselineIds: string[];
   casualIds: string[];
+  /** One-day hired trucks (Truck.onlyOnDate) of the days in scope. */
+  hiredTruckIds: string[];
 }
 
 /** A Bring forward between two delivery days (lo < hi): a cutoff X splits it when lo < X <= hi. */
@@ -294,6 +300,37 @@ async function removableCasualDrivers(db: Db, s: Scope, runIds: string[], shiftI
   return { casual: casual.length, removable: casual.filter((id) => !used.has(id)) };
 }
 
+/** One-day hired trucks of the days in scope (every one: "everything"; before a date: of the days before it). */
+async function oneDayTrucksOf(db: Db, s: Scope): Promise<string[]> {
+  return ids(await db.truck.findMany({ where: { tenantId: s.tenantId, onlyOnDate: s.beforeDate ? { lt: s.beforeDate } : { not: null } }, select: { id: true } }));
+}
+
+/**
+ * The one-day hired trucks in scope, once the plans, loads, links and results in scope are gone:
+ * deleted when no row names them any more, else retired (active false: never planned again, never
+ * counted against a hire option's max per day). The numbers deleted and retired.
+ */
+async function removeOneDayTrucks(tx: Db, s: Scope, truckIds: string[]): Promise<{ deleted: number; retired: number }> {
+  const t = s.tenantId;
+  let deleted = 0;
+  let retired = 0;
+  for (const part of inParts(truckIds)) {
+    const named = new Set<string>();
+    const where = { truckId: { in: part } };
+    for (const r of await tx.planLoad.findMany({ where: { tenantId: t, ...where }, select: { truckId: true } })) named.add(r.truckId);
+    for (const r of await tx.routeAssignment.findMany({ where, select: { truckId: true } })) named.add(r.truckId);
+    for (const r of await tx.driverShift.findMany({ where: { tenantId: t, ...where }, select: { truckId: true } })) named.add(r.truckId);
+    for (const r of await tx.truckLocation.findMany({ where: { tenantId: t, ...where }, select: { truckId: true } })) named.add(r.truckId);
+    for (const r of await tx.driverLink.findMany({ where: { tenantId: t, ...where }, select: { truckId: true } })) named.add(r.truckId);
+    for (const r of await tx.stopVisit.findMany({ where: { tenantId: t, ...where }, select: { truckId: true } })) named.add(r.truckId);
+    const free = part.filter((id) => !named.has(id));
+    const kept = part.filter((id) => named.has(id));
+    if (free.length) deleted += (await tx.truck.deleteMany({ where: { tenantId: t, id: { in: free }, onlyOnDate: { not: null } } })).count;
+    if (kept.length) retired += (await tx.truck.updateMany({ where: { tenantId: t, id: { in: kept }, onlyOnDate: { not: null } }, data: { active: false } })).count;
+  }
+  return { deleted, retired };
+}
+
 /** Every Bring forward of the company as a span of days (orders can be carried more than once: a chain is several spans). */
 async function carrySpans(db: Db, tenantId: string): Promise<CarrySpan[]> {
   const rows = await db.order.findMany({
@@ -343,6 +380,13 @@ async function blockersOf(db: Db, s: Scope, sets: Sets): Promise<StartFreshBlock
     out.push({
       code: 'OPTIMIZATION_RUNNING',
       message: `An optimization is queued or running for this company${days.length ? ` (plan of ${days.join(', ')})` : ''}. Nothing can be removed while it runs: wait until it has finished, or stop it, then try again.`,
+    });
+  }
+  // A hire check (the hire suggestion's what-if) is an optimization too: its "Use this plan" would rent trucks for a plan being removed.
+  if (await db.hireSuggestion.count({ where: { tenantId: s.tenantId, status: { in: ['QUEUED', 'RUNNING'] } } })) {
+    out.push({
+      code: 'HIRE_CHECK_RUNNING',
+      message: 'A hire check (which trucks to rent) is waiting or running for this company. Nothing can be removed while it runs: wait a minute until it has finished, then try again.',
     });
   }
   if (!s.before || !s.beforeDate || !sets.orderIds.length) return out;
@@ -416,7 +460,8 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
     }),
   );
   const casual = await removableCasualDrivers(db, s, runIds, shiftIds);
-  const sets: Sets = { runIds, scenarioIds, orderIds, batchIds, shiftIds, baselineIds, casualIds: casual.removable };
+  const hiredTruckIds = await oneDayTrucksOf(db, s);
+  const sets: Sets = { runIds, scenarioIds, orderIds, batchIds, shiftIds, baselineIds, casualIds: casual.removable, hiredTruckIds };
 
   const removed: StartFreshRemoved = {
     uploadBatches: batchIds.length,
@@ -436,6 +481,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
     stopEvents: await db.stopEvent.count({ where: dayWhere }),
     deliveryPhotos: await countIn(visitIds, (part) => db.deliveryPhoto.count({ where: { tenantId: t, visitId: { in: part } } })),
     dailyDrivers: casual.removable.length,
+    hiredTrucks: hiredTruckIds.length,
     baselines: baselineIds.length,
     oldDriverApp:
       shiftIds.length +
@@ -445,7 +491,7 @@ async function collect(db: Db, s: Scope): Promise<{ sets: Sets; report: StartFre
   const kept: StartFreshKept = {
     customers: await db.customer.count({ where: { tenantId: t } }),
     products: await db.product.count({ where: { tenantId: t } }),
-    trucks: await db.truck.count({ where: { tenantId: t } }),
+    trucks: (await db.truck.count({ where: { tenantId: t } })) - hiredTruckIds.length,
     drivers: await db.driver.count({ where: { tenantId: t, casual: false } }),
     dailyDrivers: casual.casual - casual.removable.length,
     depots: await db.depot.count({ where: { tenantId: t } }),
@@ -527,7 +573,11 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
   const visits = (await tx.stopVisit.deleteMany({ where: dayWhere })).count;
   const links = (await tx.driverLink.deleteMany({ where: dayWhere })).count;
 
-  // 4. Daily drivers with no load left, decided again now that the loads are gone.
+  // 4. One-day hired trucks of the days in scope, read again here (a truck rented since the check
+  // goes too): deleted, or retired while a row that stays names one.
+  const hired = await removeOneDayTrucks(tx, s, await oneDayTrucksOf(tx, s));
+
+  // 5. Daily drivers with no load left (nor a truck that still names them), decided again now that the loads are gone.
   const casual = (await removableCasualDrivers(tx, s, [], [])).removable;
   const drivers = await deleteIn(casual, (part) => tx.driver.deleteMany({ where: { tenantId: t, casual: true, id: { in: part } } }));
 
@@ -546,6 +596,7 @@ async function removeAll(tx: Db, s: Scope, sets: Sets): Promise<Partial<StartFre
     stopEvents: events,
     deliveryPhotos: photos,
     dailyDrivers: drivers,
+    hiredTrucks: hired.deleted + hired.retired,
     baselines,
     oldDriverApp: shifts + positions + proofs,
   };

@@ -7,9 +7,9 @@
  * next version when nothing changed, else re-plans with them; the dispatcher's plate; the janitor's
  * sweeps. Synthetic data only.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchStop } from '@routeiq/shared-types';
-import { fakePrisma, resetDb, row, tables } from './fake-plan-db';
+import { fakePrisma, rawLog, resetDb, row, tables } from './fake-plan-db';
 
 vi.mock('@/lib/db', async () => ({ prisma: (await import('./fake-plan-db')).fakePrisma }));
 vi.mock('@/lib/tenant', async () => {
@@ -34,10 +34,10 @@ vi.mock('@/lib/dispatch/start-optimize', async (importOriginal) => ({
   replanRefusal: vi.fn(async () => null),
 }));
 
-import { callDispatchSolver } from '@/lib/solver-client';
+import { callDispatchSolver, SolverError } from '@/lib/solver-client';
 import { applyScenario, buildDispatchRequest, createNextVersionTx, persistDispatchResult, type BuiltRequest } from '@/lib/dispatch/plan-service';
 import { replan, replanRefusal } from '@/lib/dispatch/start-optimize';
-import { basisFingerprint, cancelHireChecksOfDay, failLostHireChecks, hireView, retireOneDayTrucks, startHireCheck, type HireBasis } from '@/lib/dispatch/hire-whatif';
+import { basisFingerprint, cancelHireChecksOfDay, failLostHireChecks, hireView, retireOneDayTrucks, startHireCheck, startHireCheckAfterPlan, type HireBasis } from '@/lib/dispatch/hire-whatif';
 import { applyHireSuggestion } from '@/lib/dispatch/hire-use';
 import { setHiredTruck } from '@/lib/dispatch/hired-truck';
 import { summarizeHire, virtualHireId } from '@/lib/dispatch/hire';
@@ -72,7 +72,8 @@ function seed() {
       name: 'RECOMMENDED',
       detailsJson: {
         scope: {},
-        loads: [],
+        // The plan in use: A on the own truck; B and C left out for the fleet.
+        loads: [{ truck_id: 'OWN', load_no: 1, stops: [{ sequence: 1, stop_id: 'A', order_ids: ['o-A'] }] }],
         unserved: [
           { stop_id: 'B', order_ids: ['o-B'], reason_code: 'SOLVER_DROPPED_LOW_PRIORITY', reason_message: 'Fleet capacity shortage' },
           { stop_id: 'C', order_ids: ['o-C'], reason_code: 'SOLVER_DROPPED_LOW_PRIORITY', reason_message: 'Fleet capacity shortage' },
@@ -132,8 +133,11 @@ describe('the what-if (startHireCheck)', () => {
     const id = (r as { suggestionId: string }).suggestionId;
     const s = await settled(id);
     expect(s.status).toBe('SUCCEEDED');
-    // Built as a re-plan of the version, by pallets (an option has bays).
-    expect(vi.mocked(buildDispatchRequest).mock.calls[0]).toEqual([T, 'P1', ['RECOMMENDED'], { withPallets: true }]);
+    // Built as a re-plan of the version, by pallets (an option has bays), at a time it keeps (basis.builtAt).
+    expect(vi.mocked(buildDispatchRequest).mock.calls[0]).toEqual([T, 'P1', ['RECOMMENDED'], { withPallets: true, now: expect.any(Date) }]);
+    expect((s.basisJson as HireBasis).builtAt).toBe((vi.mocked(buildDispatchRequest).mock.calls[0]![3] as { now: Date }).now.toISOString());
+    // The orders the plan in use delivers: the summary tells orders added since apart.
+    expect((s.basisJson as HireBasis).baseOrders).toEqual(['o-A']);
     const sent = vi.mocked(callDispatchSolver).mock.calls[0]![0];
     expect(sent.trucks.map((t) => t.id)).toEqual(['OWN', virtualHireId('o10', 1), virtualHireId('o10', 2), virtualHireId('o3', 1), virtualHireId('o3', 2)]);
     expect(sent.trucks.filter((t) => t.hire_candidate).length).toBe(4);
@@ -155,7 +159,7 @@ describe('the what-if (startHireCheck)', () => {
     tables.hireOption = tables.hireOption!.map((o) => ({ ...o, active: false }));
     expect(await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN')).toMatchObject({ started: false, reason: 'NO_OPTIONS' });
     seed();
-    (tables.scenarioResult![0]!.detailsJson as { unserved: { reason_code: string }[] }).unserved.forEach((u) => (u.reason_code = 'HARD_WINDOW_INFEASIBLE'));
+    (tables.scenarioResult![0]!.detailsJson as { unserved: { reason_code: string }[] }).unserved.forEach((u) => (u.reason_code = 'LOCKED_PLAN_CONFLICT'));
     expect(await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN')).toMatchObject({ started: false, reason: 'NOT_SHORT' });
     seed();
     row('runPlan', 'P1').status = 'SUPERSEDED';
@@ -205,6 +209,119 @@ describe('the what-if (startHireCheck)', () => {
     expect(s.status).toBe('FAILED');
     expect(s.message).toMatch(/boom/);
     expect(row('runPlan', 'P1')).toMatchObject({ status: 'READY', chosenScenarioId: 'SC1', version: 1 });
+  });
+});
+
+/** The other companies' dispatchers' solves that fill the optimizer (SOLVER_MAX_CONCURRENT 2), released after the test. */
+const held: { release(): void }[] = [];
+function dispatcherSolve(tenantId: string) {
+  const r = solveAdmission.reserve(tenantId, 'u');
+  if (!r.ok) throw new Error('admission refused');
+  held.push(r.ticket);
+  return r.ticket;
+}
+afterEach(() => {
+  for (const t of held.splice(0)) t.release();
+});
+
+describe('the what-if (review of the hire branch)', () => {
+  it('a day that is over: no check, no box button (DAY_OVER), and Use this plan is refused', async () => {
+    row('runPlan', 'P1').runDate = new Date('2020-01-07T00:00:00Z');
+    expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'DAY_OVER' });
+    expect(tables.hireSuggestion ?? []).toEqual([]);
+    expect(await hireView(T, 'P1')).toMatchObject({ canCheck: false });
+    finishedSuggestion();
+    expect((await hireView(T, 'P1'))!.suggestion).toMatchObject({ usable: false });
+    expect(await applyHireSuggestion(T, 'P1', 'HS1', user, null)).toMatchObject({ status: 409, body: { code: 'DAY_OVER' } });
+    expect(tables.truck!.length).toBe(2);
+  });
+
+  it('one check at a time per version: a check created meanwhile wins; the optimizer being busy leaves no row behind', async () => {
+    // Another check of this version is created while this one builds its request (the automatic one
+    // and "Check hire options" pressed together): this one answers RUNNING, no second row.
+    vi.mocked(buildDispatchRequest).mockImplementationOnce(async () => {
+      tables.hireSuggestion = [{ id: 'OTHER', tenantId: T, runId: 'P1', status: 'QUEUED', trigger: 'AFTER_PLAN', createdAt: new Date() }];
+      return built();
+    });
+    expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'RUNNING', suggestionId: 'OTHER' });
+    expect(tables.hireSuggestion!.map((r) => r.id)).toEqual(['OTHER']);
+    expect(rawLog.some((sql) => /pg_advisory_xact_lock/.test(sql))).toBe(true);
+    // Busy: a check of this company already waits for the optimizer, which is full.
+    seed();
+    dispatcherSolve('tB');
+    dispatcherSolve('tC');
+    const waiting = solveAdmission.reserveBackground(T, 'u', () => undefined);
+    expect(waiting.ok && waiting.ticket.waiting).toBe(true);
+    if (waiting.ok) held.push(waiting.ticket);
+    expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'BUSY' });
+    expect(tables.hireSuggestion ?? []).toEqual([]);
+  });
+
+  it('a check a dispatcher preempted goes back to the queue once, and runs when a slot frees', async () => {
+    let calls = 0;
+    vi.mocked(callDispatchSolver).mockImplementation((req, opts) => {
+      calls++;
+      if (calls > 1) return Promise.resolve(answer(req));
+      return new Promise((_resolve, reject) => opts?.signal?.addEventListener('abort', () => reject(new SolverError('The optimization was cancelled.', 0, null, 'CANCELLED'))));
+    });
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    const id = (r as { suggestionId: string }).suggestionId;
+    await vi.waitFor(() => expect(row('hireSuggestion', id).status).toBe('RUNNING'));
+    // Two other companies' dispatchers fill the optimizer: the second takes the check's slot.
+    const b = dispatcherSolve('tB');
+    const c = dispatcherSolve('tC');
+    expect(c.preemptedOthers).toBe(true);
+    await vi.waitFor(() => expect(row('hireSuggestion', id).status).toBe('QUEUED'));
+    b.release();
+    const s = await settled(id);
+    expect(s.status).toBe('SUCCEEDED');
+    expect(calls).toBe(2);
+  });
+
+  it('a check waiting for a slot is not run once its version was replaced meanwhile', async () => {
+    dispatcherSolve('tB');
+    const c = dispatcherSolve('tC');
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    const id = (r as { suggestionId: string }).suggestionId;
+    expect(row('hireSuggestion', id).status).toBe('QUEUED');
+    row('runPlan', 'P1').status = 'SUPERSEDED';
+    c.release();
+    const s = await settled(id);
+    expect(s).toMatchObject({ status: 'CANCELLED' });
+    expect(s.message).toMatch(/no longer the one in use/);
+    expect(callDispatchSolver).not.toHaveBeenCalled();
+  });
+
+  it('the box shows the running check, else the last usable suggestion: a newer check that failed or was stopped is a note', async () => {
+    finishedSuggestion();
+    tables.hireSuggestion!.push({ id: 'HS2', tenantId: T, runId: 'P1', status: 'CANCELLED', trigger: 'ASKED', message: 'Stopped so that ...', basisJson: row('hireSuggestion', 'HS1').basisJson, createdAt: new Date(Date.now() + 1000) });
+    const v = await hireView(T, 'P1');
+    expect(v!.suggestion).toMatchObject({ id: 'HS1', status: 'SUCCEEDED', usable: true, note: 'Stopped so that ...' });
+    tables.hireSuggestion!.push({ id: 'HS3', tenantId: T, runId: 'P1', status: 'RUNNING', trigger: 'ASKED', basisJson: row('hireSuggestion', 'HS1').basisJson, createdAt: new Date(Date.now() - 1000) });
+    expect((await hireView(T, 'P1'))!.suggestion).toMatchObject({ id: 'HS3', status: 'RUNNING' });
+  });
+
+  it('a suggestion computed for another plan option is not offered for the option in use', async () => {
+    finishedSuggestion();
+    tables.scenarioResult!.push({ ...tables.scenarioResult![0]!, id: 'SC9', name: 'MIN_TRUCKS' });
+    row('runPlan', 'P1').chosenScenarioId = 'SC9';
+    const v = await hireView(T, 'P1');
+    expect(v!.suggestion).toMatchObject({ id: 'HS1', forOtherOption: true, usable: false });
+  });
+
+  it('says when a check is on its way (a plan just saved) and why none ran; never "checking" otherwise', async () => {
+    expect(await hireView(T, 'P1')).toMatchObject({ checkExpected: false, skipNote: null });
+    // The plan's job has just saved its plan: its check is created a moment later.
+    tables.runJob = [{ id: 'J1', tenantId: T, runId: 'P1', status: 'SUCCEEDED', finishedAt: new Date() }];
+    expect(await hireView(T, 'P1')).toMatchObject({ checkExpected: true });
+    tables.runJob = [{ id: 'J1', tenantId: T, runId: 'P1', status: 'SUCCEEDED', finishedAt: new Date(Date.now() - 5 * 60_000) }];
+    expect(await hireView(T, 'P1')).toMatchObject({ checkExpected: false });
+    // The automatic check did not start (products without cases per pallet): the box says why.
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built(), missingPalletFactors: [{ productCode: 'P-1' }] }) as never);
+    await startHireCheckAfterPlan(T, 'P1', 'u1', null);
+    const v = await hireView(T, 'P1');
+    expect(v).toMatchObject({ checkExpected: false });
+    expect(v!.skipNote).toMatch(/no cases per pallet: P-1/);
   });
 });
 
@@ -308,10 +425,121 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
   });
 });
 
+describe('"Use this plan" (review of the hire branch)', () => {
+  function planApplied() {
+    vi.mocked(createNextVersionTx).mockResolvedValue({ child: { id: 'P2', version: 2 }, frozenLoadsCarried: 1, newLoadId: new Map([['L1', 'L1-copy']]) } as never);
+    vi.mocked(persistDispatchResult).mockResolvedValue(new Map([['RECOMMENDED', 'SC2']]));
+  }
+
+  it('a same-day plan used a few minutes later keeps the times it was planned with (never the later clock)', async () => {
+    // The check was made at 10:00 (new loads from 10:00 + 30 min); Use this plan is pressed at 10:05.
+    finishedSuggestion();
+    const s = row('hireSuggestion', 'HS1');
+    s.requestJson = { ...s.requestJson, config: { ...s.requestJson.config, shift_start_min: 630, loading_from_min: 600 } };
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => {
+      const b = built();
+      b.request.config = { ...b.request.config, shift_start_min: 635, loading_from_min: 605 };
+      b.settings = { loadingFromMin: 605 } as never;
+      return b;
+    });
+    planApplied();
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r.body).toMatchObject({ applied: 'PLAN' });
+    const [, , , b] = vi.mocked(persistDispatchResult).mock.calls[0]!;
+    expect(b.request.config).toMatchObject({ shift_start_min: 630, loading_from_min: 600 });
+    expect(b.settings).toMatchObject({ loadingFromMin: 600 });
+  });
+
+  it("the optimizer's own timetable findings on a rented truck name the rented truck (and its code), so the timetable gate holds its loads", async () => {
+    finishedSuggestion();
+    const s = row('hireSuggestion', 'HS1');
+    const sc = s.responseJson.scenarios[0];
+    sc.feasibility = { status: 'VIOLATED', timing: 'EXACT', violations: [{ code: 'HARD_WINDOW', truck_id: virtualHireId('o10', 1), load_no: 1, message: 'HIRE-10T-1 L1 arrives after closing' }] };
+    sc.warnings = ['HIRE-10T-1 is used for 2 loads'];
+    planApplied();
+    await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    const ten = tables.truck!.find((t) => t.hireOptionId === 'o10' && t.id !== 'H0')!;
+    const [, , , , resp] = vi.mocked(persistDispatchResult).mock.calls[0]!;
+    const v = resp.scenarios[0]!.feasibility!.violations[0]!;
+    expect(v.truck_id).toBe(ten.id);
+    expect(v.message).toBe(`${ten.code} L1 arrives after closing`);
+    expect(resp.scenarios[0]!.warnings).toEqual([`${ten.code} is used for 2 loads`]);
+  });
+
+  it('lines without a weight: asked first when a truck to hire has a payload, before anything is rented (both ways)', async () => {
+    tables.hireOption!.forEach((o) => (o.payloadKg = o.id === 'o10' ? 10_000 : 0));
+    finishedSuggestion();
+    // The what-if's own 10-ton carries the payload, as the option said.
+    const s = row('hireSuggestion', 'HS1');
+    s.requestJson.trucks.find((t: { id: string }) => t.id === virtualHireId('o10', 1)).capacity_kg = 10_000;
+    s.basisJson.options.find((o: { id: string }) => o.id === 'o10').payloadKg = 10_000;
+    const unknownWeights = [{ productCode: 'P-1', lines: 2, cases: 40 }];
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built(), unknownWeights }) as never);
+    planApplied();
+    expect(await applyHireSuggestion(T, 'P1', 'HS1', user, null)).toMatchObject({ status: 409, body: { code: 'WEIGHT_REQUIRED' } });
+    expect(tables.truck!.length).toBe(2);
+    expect(row('hireSuggestion', 'HS1').usedAt).toBeNull();
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null, { overrides: { allowMissingWeights: true } });
+    expect(r.body).toMatchObject({ applied: 'PLAN' });
+    const [, , , b] = vi.mocked(persistDispatchResult).mock.calls[0]!;
+    expect(b.warnings.some((w) => /^Planned without weights for 2 order line\(s\)/.test(w))).toBe(true);
+    // The re-plan way asks with the trucks to rent in the request too.
+    finishedSuggestion();
+    tables.truck = tables.truck!.filter((t) => t.id === 'OWN' || t.id === 'H0');
+    row('hireSuggestion', 'HS1').requestJson.trucks.find((t: { id: string }) => t.id === virtualHireId('o10', 1)).capacity_kg = 10_000;
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built([...STOPS, stop('D', 100, 1000)]), unknownWeights }) as never);
+    vi.mocked(replanRefusal).mockClear();
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    const probe = vi.mocked(replanRefusal).mock.calls[0]![2];
+    expect(probe.request.trucks.some((t) => (t.capacity_kg ?? 0) === 10_000)).toBe(true);
+  });
+
+  it("an option's max per day lowered since: never rented past it", async () => {
+    finishedSuggestion();
+    // The 10-ton: H0 already rented for the day, and the company can now rent only 1.
+    row('hireOption', 'o10').maxPerDay = 1;
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r).toMatchObject({ status: 409, body: { code: 'HIRE_LIMIT' } });
+    expect(tables.truck!.length).toBe(2);
+    expect(row('hireSuggestion', 'HS1').usedAt).toBeNull();
+    expect(replan).not.toHaveBeenCalled();
+  });
+
+  it('the codes are given under the company lock (two depots renting at once never pick the same code)', async () => {
+    finishedSuggestion();
+    planApplied();
+    rawLog.length = 0;
+    await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(rawLog.filter((sql) => /pg_advisory_xact_lock/.test(sql)).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a check that leaves out an order the plan in use delivers re-plans with the hired trucks instead of taking that plan', async () => {
+    finishedSuggestion();
+    const s = row('hireSuggestion', 'HS1');
+    s.summaryJson = { ...s.summaryJson, dropped: { orders: 1, cases: 600, palletUnits: 6000, kg: 0, stopIds: ['A'] } };
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r.body).toMatchObject({ applied: 'REPLAN', why: ['its plan leaves out orders your plan in use delivers'] });
+    expect(persistDispatchResult).not.toHaveBeenCalled();
+  });
+
+  it('applied as a new version: a check of the day still waiting is stopped (it was for the version replaced)', async () => {
+    finishedSuggestion();
+    tables.hireSuggestion!.push({ id: 'HS2', tenantId: T, runId: 'P1', status: 'QUEUED', trigger: 'ASKED', createdAt: new Date() });
+    planApplied();
+    await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(row('hireSuggestion', 'HS2').status).toBe('CANCELLED');
+  });
+});
+
 describe("a one-day hired truck's plate (setHiredTruck, PLANNER)", () => {
   beforeEach(() => {
     tables.truck!.push(
-      { id: 'OLD', tenantId: T, depotId: 'D1', code: '12345AB', active: false, hired: true, onlyOnDate: new Date('2099-10-01T00:00:00Z'), defaultDriverId: null },
+      // A hired truck of a day that is over, and one of a day still to come (both before the 7th).
+      { id: 'OLD', tenantId: T, depotId: 'D1', code: '12345AB', active: false, hired: true, onlyOnDate: new Date('2020-01-05T00:00:00Z'), defaultDriverId: null },
+      { id: 'SOON', tenantId: T, depotId: 'D1', code: '777XY', active: true, hired: true, onlyOnDate: new Date('2099-10-06T00:00:00Z'), defaultDriverId: null },
       { id: 'PAST', tenantId: T, depotId: 'D1', code: 'HIRE-3T-0101-1', active: true, hired: true, onlyOnDate: new Date('2020-01-01T00:00:00Z'), defaultDriverId: null },
     );
     tables.driver = [{ id: 'dr', tenantId: T, name: 'Salim', active: true }];
@@ -323,11 +551,18 @@ describe("a one-day hired truck's plate (setHiredTruck, PLANNER)", () => {
     expect(tables.auditLog.at(-1)).toMatchObject({ action: 'HIRED_TRUCK_CHANGED', entity: 'Truck', entityId: 'H0' });
   });
 
-  it("frees a plate an earlier day's hired truck still has; refuses an own truck's code", async () => {
+  it("frees a plate a hired truck of a day that is over still has (audited on that truck too); refuses an own truck's code", async () => {
     await setHiredTruck(T, 'H0', { code: '12345AB' }, user, null);
     expect(row('truck', 'H0').code).toBe('12345AB');
-    expect(row('truck', 'OLD').code).toBe('12345AB.991001');
+    expect(row('truck', 'OLD').code).toBe('12345AB.200105');
+    expect(tables.auditLog.filter((a) => a.action === 'HIRED_TRUCK_CHANGED').map((a) => a.entityId).sort()).toEqual(['H0', 'OLD']);
     await expect(setHiredTruck(T, 'H0', { code: 'R1' }, user, null)).rejects.toMatchObject({ status: 409, details: { code: 'CODE_TAKEN' } });
+  });
+
+  it("never takes the plate of a hired truck whose day is not over (today's truck mid-shift, or tomorrow's)", async () => {
+    await expect(setHiredTruck(T, 'H0', { code: '777XY' }, user, null)).rejects.toMatchObject({ status: 409, details: { code: 'CODE_TAKEN' } });
+    await expect(setHiredTruck(T, 'H0', { code: '777XY' }, user, null)).rejects.toThrow(/777XY-2/);
+    expect(row('truck', 'SOON').code).toBe('777XY');
   });
 
   it('only a one-day hired truck, and not after its day', async () => {

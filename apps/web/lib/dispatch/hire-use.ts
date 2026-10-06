@@ -2,28 +2,43 @@
  * The hire suggestion's "Use this plan" (owner request 6 Oct 2026), PLANNER and above. Server only.
  *
  * 1. The suggestion must be finished, rent at least one truck, never used, and its plan version must
- *    still be the one in use (not optimizing).
+ *    still be the one in use (not optimizing), for a day that is not over.
  * 2. The day is read again as a re-plan would read it. When nothing changed since the what-if was
  *    computed (the same orders, stops, own trucks and their locked or dispatched loads, settings, hire
  *    options and trucks already rented; a plan made on its delivery day not more than
- *    SAME_DAY_SLACK_MIN later), ONE transaction rents the trucks the what-if used - one-day trucks for
- *    that date (Truck.onlyOnDate, hired, codes HIRE-10T-0710-1, the option's size and costs) - makes
- *    the next plan version (copy-forward, frozen loads exactly as they are) and applies the what-if's
- *    plan to it, with those trucks.
+ *    SAME_DAY_SLACK_MIN later) and the what-if leaves out no order the plan in use delivers, ONE
+ *    transaction rents the trucks the what-if used - one-day trucks for that date (Truck.onlyOnDate,
+ *    hired, codes HIRE-10T-0710-1, the option's size and costs) - makes the next plan version
+ *    (copy-forward, frozen loads exactly as they are) and applies the what-if's plan to it, with those
+ *    trucks and with the times it was planned with (a same-day plan's first departures stay those of
+ *    the check, so its own timetable check never blocks them), its optimizer findings under the rented
+ *    trucks' ids.
  * 3. Otherwise the trucks are rented the same way and a RE-PLAN starts (Quick): it plans the day as it
- *    is now, with them. The questions a re-plan asks (customers without a location, lines without a
- *    weight) are asked first, before any truck is rented.
- * Every step is audited (HIRED_TRUCKS_ADDED, PLAN_VERSION_CREATED, SCENARIO_CHOSEN, HIRE_SUGGESTION_USED).
+ *    is now, with them.
+ * Both ways ask the re-plan's questions first (lines without a weight, asked with the trucks to rent in
+ * the request: their payload counts), before any truck is rented. Trucks are rented under a company
+ * lock (their codes) and never past an option's max per day. Every step is audited
+ * (HIRED_TRUCKS_ADDED, PLAN_VERSION_CREATED, SCENARIO_CHOSEN, HIRE_SUGGESTION_USED).
  */
 import type { Prisma } from '@prisma/client';
 import type { DispatchRequest, DispatchResponse, DispatchTruck } from '@routeiq/shared-types';
 import { prisma } from '../db';
 import { audit } from '../audit';
-import { applyScenario, applyWeightChanges, buildDispatchRequest, createNextVersionTx, persistDispatchResult, PlanError, planErrorBody, type BuiltRequest } from './plan-service';
+import {
+  applyScenario,
+  applyWeightChanges,
+  buildDispatchRequest,
+  createNextVersionTx,
+  persistDispatchResult,
+  PlanError,
+  planErrorBody,
+  retimeSameDay,
+  type BuiltRequest,
+} from './plan-service';
 import { asPlanBusy, setLockTimeout } from './plan-locks';
 import { isSupersededRun } from './plan-status';
-import { dayMismatch, replan, replanRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
-import { basisFingerprint, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
+import { dayMismatch, replan, replanRefusal, weightRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
+import { basisFingerprint, cancelHireChecksOfDay, companyToday, DAY_OVER_TEXT, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
 import { hireTruckCode, hiresText, parseVirtualHireId, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
 import { isoOf } from './time';
 
@@ -49,7 +64,8 @@ function sameOption(a: HireOptionFacts | undefined, b: HireOptionFacts | undefin
     a.payloadKg === b.payloadKg &&
     a.costPerDay === b.costPerDay &&
     a.costPerKm === b.costPerKm &&
-    a.label === b.label
+    a.label === b.label &&
+    a.maxPerDay === b.maxPerDay
   );
 }
 
@@ -75,7 +91,34 @@ export function staleReasons(input: {
     if (!sameOption(then.get(h.optionId), now.get(h.optionId))) out.push(`the ${h.label} hire option was changed or switched off`);
     else if ((input.rentedNow[h.optionId] ?? 0) !== (input.basis.alreadyRented[h.optionId] ?? 0)) out.push(`${h.label} trucks were rented for this day since`);
   }
+  // Review of the hire branch: its plan would silently drop an order that is on a truck today.
+  if (input.summary.dropped?.orders) out.push('its plan leaves out orders your plan in use delivers');
   return [...new Set(out)];
+}
+
+/** The what-if's trucks to rent that the suggestion uses (virtual ids), as the request carried them. */
+function trucksToRent(whatIf: DispatchRequest, summary: HireSummary): DispatchTruck[] {
+  const ids = new Set(summary.hires.flatMap((h) => h.truckIds));
+  return whatIf.trucks.filter((t) => ids.has(t.id));
+}
+
+/**
+ * The PLAN way applies the what-if's own loads, timed when its request was built (review of the hire
+ * branch): the plan is stored with those times - the first departure and loading start of a same-day
+ * plan, the plan warning and the settings kept with it - never with the later clock of "now", whose
+ * timetable check would block the earliest of those loads (TURNAROUND / EARLY_DEPARTURE, up to
+ * SAME_DAY_SLACK_MIN short).
+ */
+export function keepWhatIfTiming(built: BuiltRequest, whatIf: DispatchRequest, builtAt: string | undefined): void {
+  if (builtAt && built.sameDay) retimeSameDay(built, new Date(builtAt), 0);
+  const cfg = built.request.config as Record<string, unknown> | undefined;
+  if (!cfg) return;
+  for (const k of ['shift_start_min', 'loading_from_min'] as const) {
+    const v = whatIf.config?.[k];
+    if (v === undefined || v === null) delete cfg[k];
+    else cfg[k] = v;
+  }
+  if (built.settings) built.settings.loadingFromMin = whatIf.config?.loading_from_min ?? null;
 }
 
 /** The truck rows of the trucks to rent, from the what-if's own trucks (what was planned with). */
@@ -92,6 +135,23 @@ async function rentTrucks(
   const dateIso = isoOf(run.runDate);
   const virtual = new Map(whatIf.trucks.map((t) => [t.id, t]));
   const optionOf = new Map(options.map((o) => [o.id, o]));
+  // One company-wide lock for the codes (review of the hire branch: two depots renting for the same
+  // date at once both read the free codes, and the second hit the unique code). Only "Use this plan"
+  // takes it, first among its locks (plan-locks.ts: before the day locks).
+  await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`hire-codes:${tenantId}`}, 0))`;
+  // Never past an option's max per day, also when it was lowered since the check (under the lock: two
+  // presses for the same day are counted one after the other).
+  const already = await rentedOnDay(tenantId, run.depotId, run.runDate, tx);
+  for (const h of summary.hires) {
+    const o = optionOf.get(h.optionId);
+    if (o && (already[o.id] ?? 0) + h.truckIds.length > o.maxPerDay) {
+      throw new PlanError(
+        `At most ${o.maxPerDay} ${o.label} truck(s) can be hired a day, and ${already[o.id] ?? 0} are hired for ${dateIso} already. Check hire options again.`,
+        409,
+        { code: 'HIRE_LIMIT' },
+      );
+    }
+  }
   const taken = new Set((await tx.truck.findMany({ where: { tenantId, code: { startsWith: 'HIRE-' } }, select: { code: true } })).map((t) => t.code));
   const made = new Map<string, { id: string; code: string; label: string }>();
   for (const h of summary.hires) {
@@ -142,7 +202,12 @@ async function rentTrucks(
   return made;
 }
 
-/** The what-if's request and answer with its rented trucks under their new ids (and only those used). */
+/**
+ * The what-if's request and answer with its rented trucks under their new ids (and only those used):
+ * their loads, their truck days and the optimizer's own timetable findings (review of the hire branch:
+ * a finding left on the placeholder id matched no truck, so the timetable gate let its loads go), and
+ * the placeholder codes ("HIRE-10T-1") in the findings and warnings under the real codes.
+ */
 export function withRentedTrucks(
   whatIf: DispatchRequest,
   resp: DispatchResponse,
@@ -150,6 +215,13 @@ export function withRentedTrucks(
   base: DispatchRequest,
 ): { request: DispatchRequest; response: DispatchResponse } {
   const idOf = (id: string) => made.get(id)?.id ?? id;
+  // Longest placeholder first ("HIRE-10T-10" before "HIRE-10T-1"); a whole code only.
+  const codes = whatIf.trucks
+    .filter((t) => made.has(t.id) && !!t.code)
+    .map((t) => ({ from: t.code!, to: made.get(t.id)!.code }))
+    .sort((a, b) => b.from.length - a.from.length);
+  const recode = (text: string) =>
+    codes.reduce((s, c) => s.replace(new RegExp(`${c.from.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9._-])`, 'g'), c.to), text);
   const rented: DispatchTruck[] = whatIf.trucks
     .filter((t) => made.has(t.id))
     .map((t) => {
@@ -164,8 +236,17 @@ export function withRentedTrucks(
       ...s,
       loads: s.loads.map((l) => ({ ...l, truck_id: idOf(l.truck_id) })),
       truck_days: (s.truck_days ?? []).map((d) => ({ ...d, truck_id: idOf(d.truck_id) })),
+      warnings: (s.warnings ?? []).map(recode),
+      ...(s.feasibility
+        ? {
+            feasibility: {
+              ...s.feasibility,
+              violations: (s.feasibility.violations ?? []).map((v) => ({ ...v, ...(v.truck_id ? { truck_id: idOf(v.truck_id) } : {}), message: recode(v.message) })),
+            },
+          }
+        : {}),
     }));
-  return { request, response: { ...resp, scenarios } };
+  return { request, response: { ...resp, warnings: (resp.warnings ?? []).map(recode), scenarios } };
 }
 
 /** POST /api/runs/:id/hire-suggestion/use. */
@@ -197,6 +278,8 @@ export async function applyHireSuggestion(
   if (run.status === 'OPTIMIZING' || (await prisma.runJob.count({ where: { runId, status: { in: ['QUEUED', 'RUNNING'] } } }))) {
     return refuse(409, 'OPTIMIZING', 'An optimization is running for this plan. Wait for it to finish.');
   }
+  // Review of the hire branch: a day that is over gets no truck and no new plan version.
+  if (isoOf(run.runDate) < (await companyToday(tenantId))) return refuse(409, 'DAY_OVER', DAY_OVER_TEXT);
 
   const [optionsNow, rentedNow] = await Promise.all([depotHireOptions(tenantId, run.depotId), rentedOnDay(tenantId, run.depotId, run.runDate)]);
   let now: BuiltRequest;
@@ -219,8 +302,14 @@ export async function applyHireSuggestion(
     summary,
   });
   const note = `Hire suggestion: ${hiresText(summary.hires)}`;
+  // The re-plan's weight question with the trucks to rent in the request (their payload counts), on
+  // both ways, before anything is rented (review of the hire branch: the PLAN way never asked it, and
+  // the re-plan way asked it only after the trucks were rented and the suggestion used).
+  const withHires: BuiltRequest = { ...now, request: { ...now.request, trucks: [...now.request.trucks, ...trucksToRent(whatIf, summary)] }, warnings: [...now.warnings] };
 
   if (!stale.length) {
+    const weights = weightRefusal(withHires, opts.overrides ?? {}, 're-planning');
+    if (weights) return weights;
     // Nothing changed: the trucks, the version and the what-if's plan in one transaction.
     try {
       const out = await prisma.$transaction(
@@ -234,10 +323,12 @@ export async function applyHireSuggestion(
           // The plan's own request, with the rented trucks and the frozen loads under their copies' ids.
           const built: BuiltRequest = {
             ...now,
-            request: { ...mapped.request, run_id: child.id },
+            request: { ...mapped.request, run_id: child.id, config: { ...mapped.request.config } },
             scope: { ...now.scope, ...(now.scope.frozenLoadIds ? { frozenLoadIds: now.scope.frozenLoadIds.map((id) => newLoadId.get(id) ?? id).sort() } : {}) },
-            warnings: [...now.warnings, `Planned with ${made.size} truck(s) hired for this day (hire suggestion): ${[...made.values()].map((m) => m.code).join(', ')}.`],
+            warnings: [...withHires.warnings, `Planned with ${made.size} truck(s) hired for this day (hire suggestion): ${[...made.values()].map((m) => m.code).join(', ')}.`],
+            ...(now.settings ? { settings: { ...now.settings } } : {}),
           };
+          keepWhatIfTiming(built, whatIf, basis.builtAt);
           await applyWeightChanges(tx, tenantId, child.id, built.weightChanges, user.id);
           const ids = await persistDispatchResult(tx, tenantId, child.id, built, mapped.response, { jobId: null });
           await applyScenario(tx, tenantId, child.id, ids.get('RECOMMENDED')!, user.id);
@@ -265,6 +356,8 @@ export async function applyHireSuggestion(
         },
         { timeout: 120_000, maxWait: 15_000 },
       );
+      // A check of the day still waiting or running was for the version just replaced.
+      await cancelHireChecksOfDay(tenantId, run.depotId, run.runDate, 'Stopped: a new plan version was made for this day (Use this plan), so this check was for a plan no longer in use.');
       return {
         status: 200,
         body: {
@@ -285,8 +378,8 @@ export async function applyHireSuggestion(
   }
 
   // The day changed: the trucks are rented, then a re-plan (Quick) plans the day as it is now with
-  // them. Its questions first, before anything is rented.
-  const refusal = await replanRefusal(tenantId, runId, now, opts.overrides ?? {});
+  // them. Its questions first (with the trucks to rent in the request), before anything is rented.
+  const refusal = await replanRefusal(tenantId, runId, withHires, opts.overrides ?? {});
   if (refusal) return refusal;
   let made: Map<string, { id: string; code: string; label: string }>;
   try {

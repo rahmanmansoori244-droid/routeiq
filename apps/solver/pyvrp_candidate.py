@@ -334,13 +334,13 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     ot_coeff = int(round(cfg.overtime_cost_per_hour * ds.COST_SCALE / 3600.0)) if cfg.overtime_after_min is not None else 0
     shift_s = cfg.shift_max_min * 60
     no_kg = sum(kg_dem) + 1  # a truck without a payload: the engine's own "unlimited"
-    hw = ds.hire_weight(req)  # trucks to rent (the hire suggestion): their weighted hire, as in the engine
+    hp = ds.hire_premium(req)  # trucks to rent (the hire suggestion): their search premium, as in the engine
     groups: dict[tuple, list] = {}
     for td in vehicles:
         t = td.truck
         km_key = int(round(ds._km_rate_omr(t, cfg) * w.distance * ds.COST_SCALE / 1000.0 * 1000))
         trip_units = int(round(t.trip_cost * w.trip * ds.COST_SCALE))
-        fixed = ((t.fixed_cost + ds.hire_extra_omr(t, hw)) * w.fixed if td.n_frozen == 0 else 0.0) + t.trip_cost * w.trip
+        fixed = ((t.fixed_cost + ds.hire_extra_omr(t, hp)) * w.fixed if td.n_frozen == 0 else 0.0) + t.trip_cost * w.trip
         gap = ds._approx_gap_s(cfg, td)
         first = td.earliest_depart_s if td.ready_s is None else max(td.earliest_depart_s, td.ready_s + gap)
         kg_cap = (td.max_kg_units if td.max_kg_units > 0 else no_kg) if kg_active else None

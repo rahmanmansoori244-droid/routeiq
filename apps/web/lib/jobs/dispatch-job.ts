@@ -40,12 +40,15 @@ import { startHireCheckAfterPlan } from '../dispatch/hire-whatif';
 export const HEARTBEAT_MS = 30_000;
 
 /**
- * A job whose solver slot was a hire check's (preempted, solve-admission.ts) waits this long before it
- * calls the optimizer, and as long again before each of up to PREEMPT_BUSY_RETRIES retries of a
- * "busy" answer: the optimizer frees the cancelled check's slot within about a second.
+ * A job that may meet a preempted hire check still on the optimizer (SolveTicket.mayMeetBusy: it took
+ * the check's slot, or started soon after a preemption, solve-admission.ts) takes the optimizer's
+ * "busy" answer again every `settleMs` until the optimizer has room, for up to `maxWaitMs` (review of
+ * the hire branch: three tries 1.5 s apart failed the dispatcher's plan while the cancelled check still
+ * fetched its road matrix; the solver now abandons that at once, and the wait covers the rest). One
+ * that took the check's slot waits `settleMs` before its first call. Any other job fails on "busy" at
+ * once, as before. Mutable for the tests.
  */
-export const PREEMPT_SETTLE_MS = 1_500;
-export const PREEMPT_BUSY_RETRIES = 3;
+export const PREEMPT_RETRY = { settleMs: 1_500, maxWaitMs: 90_000 };
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** The jobs this process is running, by job id: the shutdown handler fails them (shutdown.ts). */
@@ -137,11 +140,13 @@ async function runJob(args: DispatchJobArgs): Promise<'SAVED' | void> {
     return;
   }
   let resp;
-  // This job took the slot of a hire check (a background solve, solve-admission.ts): the optimizer
-  // frees that check's own slot about a second after its call was cancelled. Wait that moment, and
-  // take its "busy" answer a few more times, so the dispatcher's plan never fails because of a check.
-  if (args.ticket?.preemptedOthers) await pause(PREEMPT_SETTLE_MS);
-  for (let attempt = 0; ; attempt++) {
+  // This job took the slot of a hire check (a background solve, solve-admission.ts), or started soon
+  // after one was stopped: the optimizer frees that check's own slot once its cancelled call has ended
+  // there. Wait a moment, and take its "busy" answer again until it has room (PREEMPT_RETRY), so the
+  // dispatcher's plan never fails because of a check.
+  if (args.ticket?.preemptedOthers) await pause(PREEMPT_RETRY.settleMs);
+  const retryUntil = args.ticket?.mayMeetBusy ? Date.now() + PREEMPT_RETRY.maxWaitMs : 0;
+  for (;;) {
     try {
       // A connection the optimizer reset (it restarted), our own wait running out and the like come
       // back as SolverError in plain words (solverCallFailure): the job fails, the plan can be retried.
@@ -149,8 +154,8 @@ async function runJob(args: DispatchJobArgs): Promise<'SAVED' | void> {
       break;
     } catch (err) {
       const busy = err instanceof SolverError && err.status === 503 && err.code !== WORKERS_UNAVAILABLE;
-      if (busy && args.ticket?.preemptedOthers && attempt < PREEMPT_BUSY_RETRIES) {
-        await pause(PREEMPT_SETTLE_MS);
+      if (busy && Date.now() < retryUntil) {
+        await pause(PREEMPT_RETRY.settleMs);
         continue;
       }
       throw err instanceof SolverError ? err : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);
