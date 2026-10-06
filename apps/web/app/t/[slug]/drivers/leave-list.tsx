@@ -14,6 +14,8 @@ export interface UpcomingLeave {
   now: boolean;
   note: string | null;
   coverName: string | null;
+  /** Why that cover will not drive those days (coverCaveat: inactive, away himself, another truck's usual driver); null: he covers. */
+  coverCaveat?: string | null;
 }
 
 /** "Drivers on leave": who is away today and in the coming `days` days, the soonest first. */
@@ -38,7 +40,9 @@ export function LeaveList({ items, days }: { items: UpcomingLeave[]; days: numbe
                 <span className="text-muted-foreground">
                   {fmtDayMonth(p.from)} – {fmtDayMonth(p.until)}
                 </span>
-                <span>{p.coverName ? `Cover: ${p.coverName}` : 'No cover named'}</span>
+                <span className={p.coverName && p.coverCaveat ? 'text-amber-700' : undefined}>
+                  {p.coverName ? `Cover: ${p.coverName}${p.coverCaveat ? ` (${p.coverCaveat})` : ''}` : 'No cover named'}
+                </span>
                 {p.note ? <span className="text-muted-foreground">· {p.note}</span> : null}
               </li>
             ))}

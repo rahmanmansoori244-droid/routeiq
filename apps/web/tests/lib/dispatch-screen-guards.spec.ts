@@ -177,11 +177,19 @@ describe('plan screen (plan-view.tsx)', () => {
     expect(driverCell.slice(hand, keep)).toContain('data-testid={`driver-handset-${tag}`}');
     const button = driverCell.slice(keep, driverCell.indexOf('</button>', keep));
     expect(button).toContain('<button');
-    expect(button).toContain('onClick={onKeep}');
+    expect(button).toContain('onClick={keep}');
     expect(button).toContain('data-testid={`driver-keep-${tag}`}');
     expect(button).toContain('disabled={busy}');
     expect(button).toMatch(/>\s*Keep\s*$/);
-    expect(count(driverCell, /\bonKeep\b/g)).toBe(3); // the prop, its type, the button
+    // Driver leave (review of 6 Oct 2026): Keep on a driver RouteIQ filled in who is on leave that day
+    // asks the Driver list's question first (leaveQuestion), and its title says he is on leave.
+    expect(button).toContain('title={keepTitle(driverName, keepLeaveUntil)}');
+    const keepFn = driverCell.slice(driverCell.indexOf('const keep = () => {'), driverCell.indexOf('};', driverCell.indexOf('const keep = () => {')));
+    expect(keepFn).toMatch(/const question = leaveQuestion\(l\.driverId, onLeave, driverName, trip\);\s*if \(question && !window\.confirm\(question\)\) return;\s*onKeep\(\);/);
+    expect(driverCell).toContain('const keepLeaveUntil = l.driverId ? (onLeave.get(l.driverId) ?? null) : null;');
+    expect(count(driverCell, /\bonKeep\b/g)).toBe(3); // the prop, its type, the call after the question
+    // The Driver list asks the same question (one helper for both).
+    expect(driverCell).toMatch(/const question = leaveQuestion\(v \|\| null, onLeave,/);
   });
 
   it('the reload banner punctuates the server message (planReloadErrorText; fourth review of PR3)', () => {

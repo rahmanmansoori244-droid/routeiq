@@ -521,7 +521,9 @@ describe('planDrivers with leave: never a driver on leave, the cover when he is 
     for (const trips of both([trip('T01', 1, 360, 450, 'ALI'), trip('T02', 1, 360, 450, 'SAM')])) {
       const r = planDrivers(trips, [], USABLE_L, aliAway());
       expect(ids(r)).toEqual({ 'T01:1': 'BOB', 'T02:1': 'SAM' });
-      expect(r.drivers.get('T01:1')).toEqual({ driverId: 'BOB', driverSetById: null, driverSetAt: null }); // RouteIQ's pick, no marker
+      // RouteIQ's pick (no hand-set marker), marked as the cover: a re-plan offers him again only as the cover.
+      expect(r.drivers.get('T01:1')).toEqual({ driverId: 'BOB', driverSetById: null, driverSetAt: null, driverIsCover: true });
+      expect(r.drivers.get('T02:1')!.driverIsCover).toBeFalsy();
       expect(r.notes).toEqual([]);
     }
   });
@@ -604,5 +606,101 @@ describe('planDrivers with leave: never a driver on leave, the cover when he is 
     const trips = [trip('T01', 1, 360, 450, 'ALI'), trip('T02', 1, 360, 450, 'SAM')];
     expect(ids(planDrivers(trips, [], USABLE_L))).toEqual(ids(planDrivers(trips, [], USABLE_L, new Map())));
     expect(ids(planDrivers(trips, [], USABLE_L))).toEqual({ 'T01:1': 'ALI', 'T02:1': 'SAM' });
+  });
+});
+
+/**
+ * A re-plan of a trip the cover drives (review of 6 Oct 2026): the cover is never kept as "the driver
+ * the trip already had" - he comes again only as the cover (pass 3, with its "no other truck that day"
+ * rule), so a re-plan gives what a new plan of the same trips gives. `cover` = the load's marker
+ * (PlanLoad.driverIsCover: RouteIQ gave him as the cover).
+ */
+describe('planDrivers on a re-plan of a covered trip, and a cover busy at another depot', () => {
+  const DAY = '2026-10-15';
+  const USABLE_L = new Set(['ALI', 'SAM', 'BOB', 'CARL']);
+  const leaveOf = (periods: { driverId: string; untilIso?: string; cover: string | null }[]) =>
+    leaveOnDay(periods.map((p, i) => ({ id: `L${i}`, driverId: p.driverId, fromIso: '2026-10-10', untilIso: p.untilIso ?? '2026-10-20', note: null, coverDriverId: p.cover })), DAY);
+  const aliAway = (cover: string | null = 'BOB') => leaveOf([{ driverId: 'ALI', cover }]);
+  const coverLoad = (truckId: string, loadNo: number, driverId: string, departMin: number, returnMin: number) => was(truckId, loadNo, driverId, departMin, returnMin, { driverIsCover: true });
+  const coverNote = (key: string, departMin: number, returnMin: number, from: string, to: string | null, cover: string, other: { truckId: string; loadNo: number } | null = null) => ({
+    ...note(key, departMin, returnMin, from, to, 'COVER', other),
+    cover,
+  });
+
+  it('nothing changed: the cover drives the trip again, marked, with no note', () => {
+    const r = planDrivers([trip('T01', 1, 600, 700, 'ALI')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway());
+    expect(r.drivers.get('T01:1')).toEqual({ driverId: 'BOB', driverSetById: null, driverSetAt: null, driverIsCover: true });
+    expect(r.notes).toEqual([]);
+  });
+
+  it('the leave ended early (Until brought forward before the day): the usual driver drives again, with a COVER note', () => {
+    const back = leaveOf([{ driverId: 'ALI', untilIso: '2026-10-13', cover: 'BOB' }]);
+    expect(back.size).toBe(0);
+    const r = planDrivers([trip('T01', 1, 600, 700, 'ALI')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, back);
+    expect(r.drivers.get('T01:1')).toEqual({ driverId: 'ALI', driverSetById: null, driverSetAt: null });
+    expect(r.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', 'ALI', 'ENDED')]);
+  });
+
+  it('the cover was changed (Bob -> Carl): the new cover drives the trip', () => {
+    const r = planDrivers([trip('T01', 1, 600, 700, 'ALI')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway('CARL'));
+    expect(r.drivers.get('T01:1')).toEqual({ driverId: 'CARL', driverSetById: null, driverSetAt: null, driverIsCover: true });
+    expect(r.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', 'CARL', 'ENDED')]);
+    // The cover removed from the period: no driver (the load says why; rule 20).
+    const none = planDrivers([trip('T01', 1, 600, 700, 'ALI')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway(null));
+    expect(ids(none)).toEqual({ 'T01:1': null });
+    expect(none.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', null, 'ENDED')]);
+  });
+
+  it("the truck's usual driver was changed (Ali -> Sam): a cover goes, the new usual driver comes; a driver RouteIQ filled in otherwise stays (plan continuity)", () => {
+    const r = planDrivers([trip('T01', 1, 600, 700, 'SAM')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway());
+    expect(ids(r)).toEqual({ 'T01:1': 'SAM' });
+    expect(r.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', 'SAM', 'ENDED')]);
+    // Not a cover: the driver the trip had stays until the dispatcher picks another (the toast and the guide say so).
+    expect(ids(planDrivers([trip('T01', 1, 600, 700, 'SAM')], [was('T01', 1, 'ALI', 600, 700)], USABLE_L))).toEqual({ 'T01:1': 'ALI' });
+  });
+
+  it("the cover's own usual truck gets a trip on a re-plan (at other hours): he drives his own truck only, as a new plan gives - with or without the marker", () => {
+    for (const evidence of [[coverLoad('T01', 1, 'BOB', 600, 700)], [was('T01', 1, 'BOB', 600, 700)]]) {
+      for (const trips of both([trip('T01', 1, 600, 700, 'ALI'), trip('T03', 1, 360, 450, 'BOB')])) {
+        const r = planDrivers(trips, evidence, USABLE_L, aliAway());
+        expect(ids(r)).toEqual({ 'T01:1': null, 'T03:1': 'BOB' });
+        expect(ids(r)).toEqual(ids(planDrivers(trips, [], USABLE_L, aliAway())));
+        expect(r.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', null, 'OTHER_TRUCK', { truckId: 'T03', loadNo: 1 })]);
+      }
+    }
+  });
+
+  it("the cover's own usual truck gets an overlapping trip on a re-plan: his own truck keeps him (a CLASH note on the covered trip)", () => {
+    for (const trips of both([trip('T01', 1, 600, 700, 'ALI'), trip('T03', 1, 620, 720, 'BOB')])) {
+      const r = planDrivers(trips, [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway());
+      expect(ids(r)).toEqual({ 'T01:1': null, 'T03:1': 'BOB' });
+      expect(r.notes).toEqual([note('T01:1', 600, 700, 'BOB', null, 'CLASH', { truckId: 'T03', loadNo: 1 })]);
+    }
+  });
+
+  it("the cover is not offered as the driver of the truck's nearest trip either: he comes as the cover, by the cover's rule", () => {
+    // T01 L1 is LOCKED with Bob (the cover). T01 L2 gets him (the same truck), unless he drives T03 that day.
+    const locked = was('T01', 1, 'BOB', 360, 450, { status: 'LOCKED', driverIsCover: true });
+    expect(ids(planDrivers([trip('T01', 2, 600, 700, 'ALI')], [locked], USABLE_L, aliAway()))).toEqual({ 'T01:2': 'BOB' });
+    expect(ids(planDrivers([trip('T01', 2, 600, 700, 'ALI'), trip('T03', 1, 480, 570, 'BOB')], [locked], USABLE_L, aliAway()))).toEqual({ 'T01:2': null, 'T03:1': 'BOB' });
+  });
+
+  it('a cover who drives a truck of another depot that day is not given (busy elsewhere), on a new plan and a re-plan', () => {
+    const elsewhere = new Set(['BOB']);
+    expect(ids(planDrivers([trip('T01', 1, 600, 700, 'ALI')], [], USABLE_L, aliAway(), elsewhere))).toEqual({ 'T01:1': null });
+    const r = planDrivers([trip('T01', 1, 600, 700, 'ALI')], [coverLoad('T01', 1, 'BOB', 600, 700)], USABLE_L, aliAway(), elsewhere);
+    expect(ids(r)).toEqual({ 'T01:1': null });
+    expect(r.notes).toEqual([coverNote('T01:1', 600, 700, 'BOB', null, 'OTHER_DEPOT')]);
+    // Only the cover's rule reads it: a truck's own usual driver, its own trips and hand-set drivers are as before.
+    expect(ids(planDrivers([trip('T03', 1, 360, 450, 'BOB')], [], USABLE_L, new Map(), elsewhere))).toEqual({ 'T03:1': 'BOB' });
+    expect(ids(planDrivers([trip('T01', 1, 600, 700, 'ALI')], [], USABLE_L, aliAway(), new Set(['SAM'])))).toEqual({ 'T01:1': 'BOB' });
+  });
+
+  it("the cover kept off his covered trip for another truck's nearest-trip driver: the note says who drives the truck now", () => {
+    // T01 L1 LOCKED with Carl (picked by hand earlier); T01 L2 had Bob as the cover: the truck's own driver of the day drives it.
+    const evidence = [was('T01', 1, 'CARL', 360, 450, { status: 'LOCKED', ...HAND }), coverLoad('T01', 2, 'BOB', 600, 700)];
+    const r = planDrivers([trip('T01', 2, 600, 700, 'ALI')], evidence, USABLE_L, aliAway());
+    expect(ids(r)).toEqual({ 'T01:2': 'CARL' });
+    expect(r.notes).toEqual([coverNote('T01:2', 600, 700, 'BOB', 'CARL', 'TRUCK_DRIVER')]);
   });
 });

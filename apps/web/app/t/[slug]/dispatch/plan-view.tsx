@@ -14,7 +14,7 @@ import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstTex
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
-import { onLeaveLabel, pickOnLeaveConfirm } from '@/lib/dispatch/driver-leave';
+import { keepTitle, leaveQuestion, onLeaveLabel } from '@/lib/dispatch/driver-leave';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
@@ -271,7 +271,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       lock,
       l.id,
       async () => {
-        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
+        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', {
+          method: 'POST',
+          json: {
+            runId,
+            loadId: l.id,
+            name: body.name,
+            phone: body.phone || null,
+            ...(body.useExisting ? { useExisting: body.useExisting } : {}),
+            // The dispatcher answered the question about a driver on leave that day (409 DRIVER_ON_LEAVE).
+            ...(body.leaveConfirmed ? { leaveConfirmed: true } : {}),
+          },
+        });
         if (!res.ok || !res.data) return;
         toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
         await loadDrivers();
@@ -1460,6 +1471,15 @@ function LoadDriver({
   const driverName = l.driverName ?? current?.name ?? 'this driver';
   // "picked by hand", or the Keep link exactly when the server marks the re-sent driver (driverPickLink).
   const pick = driverPickLink(l, { editable, driverActive: !!current?.active });
+  const trip = `${l.truckCode} · L${l.loadNo}`;
+  // Keep makes the driver the dispatcher's own pick (kept through every re-plan): when RouteIQ filled in
+  // a driver who is on leave that day (planned before the leave was entered), it asks first, as the list does.
+  const keepLeaveUntil = l.driverId ? (onLeave.get(l.driverId) ?? null) : null;
+  const keep = () => {
+    const question = leaveQuestion(l.driverId, onLeave, driverName, trip);
+    if (question && !window.confirm(question)) return;
+    onKeep();
+  };
   let waTitle = '';
   if ('url' in whatsapp) {
     if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
@@ -1477,9 +1497,8 @@ function LoadDriver({
           const v = e.target.value;
           if (v === ADD_DAILY) return onAddDaily?.();
           // A driver on leave that day is put on a load only after a question (owner request 6 Oct 2026).
-          const until = v ? onLeave.get(v) : undefined;
-          const name = options.find((x) => x.id === v)?.name ?? 'This driver';
-          if (until && !window.confirm(pickOnLeaveConfirm(name, until, `${l.truckCode} · L${l.loadNo}`))) {
+          const question = leaveQuestion(v || null, onLeave, options.find((x) => x.id === v)?.name ?? 'This driver', trip);
+          if (question && !window.confirm(question)) {
             e.target.value = l.driverId ?? '';
             return;
           }
@@ -1499,7 +1518,10 @@ function LoadDriver({
         {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}
       </select>
       {l.driverNote ? (
-        <p className={`max-w-[12rem] text-xs ${l.driverId === null || onLeave.has(l.driverId) ? 'text-amber-700' : 'text-muted-foreground'}`} data-testid={`driver-note-${tag}`}>
+        <p
+          className={`max-w-[12rem] text-xs ${l.driverId === null || onLeave.has(l.driverId) || /\bpick (a|another) driver\b/.test(l.driverNote) ? 'text-amber-700' : 'text-muted-foreground'}`}
+          data-testid={`driver-note-${tag}`}
+        >
           {l.driverNote}
         </p>
       ) : null}
@@ -1548,9 +1570,9 @@ function LoadDriver({
             type="button"
             className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
             disabled={busy}
-            onClick={onKeep}
+            onClick={keep}
             data-testid={`driver-keep-${tag}`}
-            title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
+            title={keepTitle(driverName, keepLeaveUntil)}
           >
             Keep
           </button>

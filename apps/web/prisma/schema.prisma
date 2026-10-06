@@ -459,13 +459,16 @@ model DriverLeave {
   tenantId      String
   tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   driverId      String
-  /// CASCADE: a driver is only ever deleted by Start fresh (a daily driver with no load); his leave goes with him.
-  driver        Driver   @relation("DriverLeaveOf", fields: [driverId], references: [id], onDelete: Cascade)
+  /// NO ACTION, as every other reference to a driver (migration 20260930093000_master_data_no_orphans):
+  /// a driver is only ever deleted by Start fresh, which keeps a daily driver named by any leave
+  /// period (his own or as the cover), so leave and its record never change silently.
+  driver        Driver   @relation("DriverLeaveOf", fields: [driverId], references: [id], onDelete: NoAction)
   fromDate      DateTime @db.Date
   untilDate     DateTime @db.Date
   note          String?
   coverDriverId String?
-  coverDriver   Driver?  @relation("DriverLeaveCover", fields: [coverDriverId], references: [id], onDelete: SetNull)
+  /// NO ACTION too (see driverId).
+  coverDriver   Driver?  @relation("DriverLeaveCover", fields: [coverDriverId], references: [id], onDelete: NoAction)
   createdById   String?
   createdBy     User?    @relation("DriverLeaveCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt     DateTime @default(now())
@@ -886,6 +889,11 @@ model PlanLoad {
   driverSetById       String?
   driverSetBy         User?             @relation("PlanLoadDriverSetBy", fields: [driverSetById], references: [id], onDelete: SetNull)
   driverSetAt         DateTime?
+  /// (6 Oct 2026, driver leave) RouteIQ gave this driver as the cover of the truck's usual driver on
+  /// leave (planDrivers, pass 3). A re-plan offers him again only as the cover - so he goes when the
+  /// leave ends early, another cover is named or he drives another truck that day. Copied by a
+  /// re-plan's copies; false for every other driver and once the dispatcher sets the driver.
+  driverIsCover       Boolean           @default(false)
   createdAt           DateTime          @default(now())
   assignments         RouteAssignment[]
 

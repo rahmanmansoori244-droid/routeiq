@@ -955,7 +955,8 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
    * 660 = 11:00, 720 = 12:00, 740 = 12:20, 840 = 14:00.
    */
   type Trip = { truck: 'T2' | 'T3'; loadNo?: number; at: [number, number]; order: string };
-  type Held = Trip & { driver?: string | null; hand?: boolean };
+  /** `cover`: RouteIQ gave the driver as the cover of the truck's usual driver on leave (PlanLoad.driverIsCover). */
+  type Held = Trip & { driver?: string | null; hand?: boolean; cover?: boolean };
   const both = ['T2 listed first', 'T3 listed first'] as const;
   type Order = (typeof both)[number];
   const inOrder = <X,>(order: Order, list: X[]) => (order === 'T2 listed first' ? list : [...list].reverse());
@@ -995,7 +996,7 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
     for (const h of held) {
       const loadId = `${id}-${h.truck}-${h.loadNo ?? 1}`;
       const marker = h.hand ? { driverSetById: 'u1', driverSetAt: HAND_AT } : { driverSetById: null, driverSetAt: null };
-      tables.planLoad.push(load(loadId, id, h.loadNo ?? 1, 'PLANNED', { truckId: h.truck, driverId: h.driver ?? null, departMin: h.at[0], returnMin: h.at[1], ...marker }));
+      tables.planLoad.push(load(loadId, id, h.loadNo ?? 1, 'PLANNED', { truckId: h.truck, driverId: h.driver ?? null, departMin: h.at[0], returnMin: h.at[1], ...marker, ...(h.cover ? { driverIsCover: true } : {}) }));
       tables.routeAssignment.push({ ...assignment(`${loadId}-A`, id, loadId, h.order, h.loadNo ?? 1), truckId: h.truck });
     }
     tables.scenarioResult.push({ id: `${id}-rec`, runId: id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(held), loads: solverOf(held) }) });
@@ -1450,9 +1451,110 @@ describe('drivers of an optimize, a re-plan and "Use instead" (the simplified dr
       tables.driverLeave = [{ id: 'LV', tenantId: T, driverId: 'ALI', fromDate: new Date('2026-09-20T00:00:00Z'), untilDate: new Date(leaveUntil), note: null, coverDriverId: 'BOB' }];
       const res = await chooseScenario(T, 'R', 'R-rec', 'u1');
       expect(loadOf('R', 'T2')).toMatchObject({ driverId: expected, driverSetById: null, driverSetAt: null });
+      // The cover's load is marked (a re-plan offers him again only as the cover); the usual driver's is not.
+      expect(!!loadOf('R', 'T2').driverIsCover).toBe(expected === 'BOB');
       expect(loadOf('R', 'T3')).toMatchObject({ driverId: 'SAM' });
       expect(res.driverChanges).toEqual([]);
     }
+  });
+
+  /** Ali's leave around the plan's day (27 Sep): `until` its last day, Bob the cover unless given. */
+  const aliLeave = (until: string, coverDriverId: string | null = 'BOB') => () => {
+    tables.driverLeave = [{ id: 'LV-ALI', tenantId: T, driverId: 'ALI', fromDate: new Date('2026-09-20T00:00:00Z'), untilDate: new Date(`${until}T00:00:00Z`), note: null, coverDriverId }];
+  };
+
+  it("review of 6 Oct 2026 - a re-plan of the cover's trip: nothing changed, Bob covers again (marked, carried by the copies); the leave ended early, Ali drives again with a COVER note", async () => {
+    const held: Held[] = [{ truck: 'T2', at: [570, 660], order: 'O2', driver: 'BOB', cover: true }, { truck: 'T3', at: [720, 840], order: 'O3', driver: 'SAM' }];
+    const trips: Trip[] = [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [720, 840], order: 'O3' }];
+    const same = await bothPaths(held, trips, aliLeave('2026-09-30'));
+    for (const via of [same.viaUseInstead, same.viaJob]) {
+      expect(via.trips).toEqual({ 'T2:1': 'BOB', 'T3:1': 'SAM' });
+      expect(via.notes).toEqual([]);
+    }
+    expect(loadOf(jobRun(), 'T2').driverIsCover).toBe(true);
+
+    // Ali came back on the 26th: Until brought forward before the plan's day (27 Sep).
+    const back = await bothPaths(held, trips, aliLeave('2026-09-26'));
+    const note = { truckId: 'T2', truckCode: 'T02', loadNo: 1, departMin: 570, returnMin: 660, from: bob, to: ali, reason: 'COVER', other: null, cover: 'ENDED' };
+    for (const via of [back.viaUseInstead, back.viaJob]) {
+      expect(via.trips).toEqual({ 'T2:1': 'ALI', 'T3:1': 'SAM' });
+      expect(via.notes).toEqual([note]);
+      expect(via.stored).toEqual([note]);
+      expect(via.shown).toEqual([
+        "Driver changed by this plan: T02 · L1 (09:30–11:00) Bob → Ali, because Bob is no longer the cover of this truck's usual driver (the leave ended or changed, or the truck has another usual driver).",
+      ]);
+    }
+    expect(!!loadOf(jobRun(), 'T2').driverIsCover).toBe(false);
+  });
+
+  it('a cover changed on the period: a re-plan gives the new cover; the dispatcher keeping a cover makes him his own pick (the marker goes)', async () => {
+    const held: Held[] = [{ truck: 'T2', at: [570, 660], order: 'O2', driver: 'BOB', cover: true }, { truck: 'T3', at: [720, 840], order: 'O3', driver: 'SAM' }];
+    const trips: Trip[] = [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [720, 840], order: 'O3' }];
+    const { viaJob } = await bothPaths(held, trips, () => {
+      tables.driver.push({ id: 'NAS', name: 'Nasser', tenantId: T, active: true });
+      aliLeave('2026-09-30', 'NAS')();
+    });
+    expect(viaJob.trips).toEqual({ 'T2:1': 'NAS', 'T3:1': 'SAM' });
+    expect(viaJob.notes).toEqual([expect.objectContaining({ from: bob, to: { id: 'NAS', name: 'Nasser' }, reason: 'COVER', cover: 'ENDED' })]);
+    const t2 = loadOf(jobRun(), 'T2');
+    expect(t2.driverIsCover).toBe(true);
+    await updateLoad(T, jobRun(), t2.id, { driverId: 'NAS' }, user, allow); // Keep
+    expect(row('planLoad', t2.id)).toMatchObject({ driverId: 'NAS', driverSetById: 'u1', driverIsCover: false });
+  });
+
+  it('review of 6 Oct 2026 - two depots: a cover who drives a truck of the other depot that day is not given; a superseded or another day\'s plan there does not count', async () => {
+    for (const [otherStatus, otherDay, expected] of [
+      ['READY', DAY, 'none'],
+      ['DISPATCHED', DAY, 'none'],
+      ['SUPERSEDED', DAY, 'BOB'],
+      ['READY', new Date('2026-09-28T00:00:00Z'), 'BOB'],
+    ] as const) {
+      seedDay();
+      // Depot SOH: truck T9, usual driver Bob, planned that day with Bob.
+      tables.depot.push({ id: 'D2', tenantId: T, code: 'SOH', name: 'Sohar', active: true, lat: 24.3, lng: 56.7 });
+      tables.truck.push({ id: 'T9', tenantId: T, code: 'T09', depotId: 'D2', defaultDriverId: 'BOB' });
+      tables.runPlan.push({ id: 'S', tenantId: T, depotId: 'D2', runDate: otherDay, status: otherStatus, supersededAt: otherStatus === 'SUPERSEDED' ? new Date() : null, version: 1 });
+      tables.planLoad.push(load('S-T9-1', 'S', 1, 'PLANNED', { truckId: 'T9', driverId: 'BOB', departMin: 360, returnMin: 450 }));
+      version('R', [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [600, 720], order: 'O3' }]);
+      Object.assign(row('runPlan', 'R'), { status: 'DRAFT', chosenScenarioId: null });
+      tables.planLoad = tables.planLoad.filter((l) => l.runId !== 'R');
+      tables.routeAssignment = [];
+      aliLeave('2026-09-30')();
+      await chooseScenario(T, 'R', 'R-rec', 'u1');
+      expect(loadOf('R', 'T2').driverId ?? 'none', `${otherStatus} ${otherDay.toISOString()}`).toBe(expected);
+      expect(loadOf('R', 'T3')).toMatchObject({ driverId: 'SAM' });
+      const detail = (await getPlanDetail(T, 'R'))!;
+      if (expected === 'none') expect(detail.loads.find((l) => l.truckId === 'T2')!.driverNote).toBe('No driver: Ali is on leave until 30 Sep - pick a driver');
+    }
+  });
+
+  it('two depots, the other order: this depot planned first gives Bob as the cover; the other depot planned later gives him his own truck - the covering load says so', async () => {
+    seedDay();
+    version('R', [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [600, 720], order: 'O3' }]);
+    Object.assign(row('runPlan', 'R'), { status: 'DRAFT', chosenScenarioId: null });
+    tables.planLoad = [];
+    tables.routeAssignment = [];
+    aliLeave('2026-09-30')();
+    await chooseScenario(T, 'R', 'R-rec', 'u1');
+    expect(loadOf('R', 'T2')).toMatchObject({ driverId: 'BOB', driverIsCover: true });
+    const t2 = () => getPlanDetail(T, 'R').then((d) => d!.loads.find((l) => l.truckId === 'T2')!.driverNote);
+    expect(await t2()).toBe('Covers Ali (on leave until 30 Sep)');
+    // Depot SOH is planned afterwards: its truck T09 (usual driver Bob) gets Bob.
+    tables.depot.push({ id: 'D2', tenantId: T, code: 'SOH', name: 'Sohar', active: true, lat: 24.3, lng: 56.7 });
+    tables.truck.push({ id: 'T9', tenantId: T, code: 'T09', depotId: 'D2', defaultDriverId: 'BOB' });
+    tables.runPlan.push({ id: 'S', tenantId: T, depotId: 'D2', runDate: DAY, status: 'READY', supersededAt: null, version: 1 });
+    tables.planLoad.push(load('S-T9-1', 'S', 1, 'PLANNED', { truckId: 'T9', driverId: 'BOB', departMin: 360, returnMin: 450 }));
+    expect(await t2()).toBe('Covers Ali (on leave until 30 Sep) - but Bob also drives a truck of another depot that day: pick another driver');
+    // A re-plan of this depot then drops the cover (he drives the other depot's truck), with a COVER note.
+    const { child } = await createNextVersion(T, 'R', 'LATE_ORDER', null, 'u2');
+    const jobId = 'JX';
+    Object.assign(row('runPlan', child.id), { status: 'OPTIMIZING', currentJobId: jobId });
+    tables.runJob.push({ id: jobId, runId: child.id, tenantId: T, attemptNo: 1, status: 'RUNNING' });
+    const trips: Trip[] = [{ truck: 'T2', at: [570, 660], order: 'O2' }, { truck: 'T3', at: [600, 720], order: 'O3' }];
+    tables.scenarioResult.push({ id: 'JX-rec', runId: child.id, name: 'RECOMMENDED', unservedCount: 0, detailsJson: scenarioDetails({ scope: sc(trips), loads: solverOf(trips) }) });
+    const res = await applyScenario(fakePrisma as never, T, child.id, 'JX-rec', 'u2', { jobId });
+    expect(loadOf(child.id, 'T2').driverId).toBeNull();
+    expect(res.driverChanges).toEqual([expect.objectContaining({ truckCode: 'T02', from: bob, to: null, reason: 'COVER', cover: 'OTHER_DEPOT' })]);
   });
 
   it('the job message counts the driver notes', async () => {

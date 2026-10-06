@@ -14,6 +14,8 @@
  *    is refused 409, a started period is not removed;
  *  - every change is audited with the user.
  */
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { resetDb, row, tables } from './fake-plan-db';
 
@@ -96,6 +98,18 @@ describe('the role rules (pure): the dispatcher changes drivers and the usual dr
     expect(driverChangesRefused('PLANNER', regular, { casual: true })).toEqual(['casual']);
     expect(driverChangesRefused('PLANNER', daily, { casual: false })).toEqual([]);
     expect(driverChangesRefused('TENANT_ADMIN', regular, { code: 'D99', casual: true })).toEqual([]);
+  });
+
+  it("the Edit form gives the company admin what only he may change - the Code field and the Daily switch of a regular driver - and the dispatcher neither (review of 6 Oct 2026)", () => {
+    const form = readFileSync(path.join(__dirname, '../../app/t/[slug]/drivers/driver-form.tsx'), 'utf8');
+    // The code: editable on a new driver, and on an edit for the admin only.
+    expect(form).toContain("disabled={mode === 'edit' && !canAdmin}");
+    expect(form).not.toMatch(/disabled=\{mode === 'edit'\}\s*$/m);
+    // The Daily switch: on a daily driver for everyone who edits (make him regular), on a regular one for the admin.
+    expect(form).toContain("mode === 'edit' && (driver?.casual || canAdmin) ? (");
+    expect(form).toContain('disabled={!driver?.casual && !canAdmin}');
+    // The form sends the whole row on an edit, so both reach the server (driverChangesRefused decides).
+    expect(form).toContain("body: JSON.stringify(mode === 'edit' ? form :");
   });
 });
 
@@ -256,6 +270,27 @@ describe('driver leave through the routes', () => {
     expect((await answer(await patchLeave(json('PATCH', { from: day(-2), until: day(5) }), s))).body.error).toMatchObject({ code: 'LEAVE_ENDED' });
     as('VIEWER');
     expect((await deleteLeave(json('DELETE'), s)).status).toBe(403);
+  });
+
+  it("a cover who is another active truck's usual driver: saved, with a warning naming the truck (an inactive truck does not count)", async () => {
+    tables.truck!.push({ ...row('truck', 'T1'), id: 'T3', code: 'T03', defaultDriverId: 'BOB' }, { ...row('truck', 'T1'), id: 'T4', code: 'T04', defaultDriverId: 'BOB', active: false });
+    const r = await answer(await postLeave(json('POST', { from: day(1), until: day(5), coverDriverId: 'BOB' }), ali));
+    expect(r.status).toBe(201);
+    expect(r.body.data.warnings).toEqual([
+      'Bob is the usual driver of T03: RouteIQ gives him T03 first, so he covers only on days T03 does not run. Name another cover, or pick the driver on the plan.',
+    ]);
+  });
+
+  it('a cover deactivated after the save: the period still ends early (the same cover is kept, audited); choosing him anew is refused', async () => {
+    tables.driverLeave!.push({ id: 'S', tenantId: T, driverId: 'ALI', fromDate: new Date(`${day(-5)}T00:00:00.000Z`), untilDate: new Date(`${day(20)}T00:00:00.000Z`), note: null, coverDriverId: 'BOB', createdAt: new Date(), updatedAt: new Date() });
+    row('driver', 'BOB').active = false;
+    const s = { params: { id: 'ALI', leaveId: 'S' } };
+    const ended = await answer(await patchLeave(json('PATCH', { from: day(-5), until: day(-1), coverDriverId: 'BOB', note: 'back early' }), s));
+    expect(ended.status).toBe(200);
+    expect(ended.body.data.leave).toMatchObject({ until: day(-1), coverDriverId: 'BOB', note: 'back early' });
+    expect(audits('DRIVER_LEAVE_CHANGED')).toEqual([expect.objectContaining({ userId: 'u-PLANNER', afterJson: expect.objectContaining({ until: day(-1), coverName: 'Bob' }) })]);
+    const fresh = await answer(await postLeave(json('POST', { from: day(30), until: day(31), coverDriverId: 'BOB' }), ali));
+    expect(fresh.body.error).toMatchObject({ code: 'LEAVE_COVER_INACTIVE' });
   });
 
   it('another company\'s driver or period is not found (404)', async () => {

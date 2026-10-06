@@ -18,6 +18,10 @@
  *     driver (Bob is away, Ali too).
  *  6. The day after the leave, Ali and Sam drive their trucks again by themselves.
  *  7. Every change is audited with the dispatcher; another company sees none of it.
+ *  8. (review of 6 Oct 2026) The cover's load is marked (PlanLoad.driverIsCover); the leave moved off the
+ *     day, a re-plan gives the usual driver back with a COVER note.
+ *  9. (review) Two depots: the cover is the usual driver of a truck of the other depot, planned that day
+ *     with him; this depot's plan does not give him ("No driver: Ali is on leave ... - pick a driver").
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -92,6 +96,7 @@ vi.mock('@/lib/solver-client', () => {
 import { POST as createDriver } from '@/app/api/drivers/route';
 import { PATCH as patchTruck } from '@/app/api/trucks/[id]/route';
 import { GET as getLeave, POST as postLeave } from '@/app/api/drivers/[id]/leave/route';
+import { PATCH as patchLeave } from '@/app/api/drivers/[id]/leave/[leaveId]/route';
 import { prisma as libPrisma } from '@/lib/db';
 import { getOrCreatePlan, updateLoad } from '@/lib/dispatch/plan-service';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
@@ -127,7 +132,7 @@ async function jobsDone(runId: string) {
   throw new Error(`plan ${runId} still optimizing`);
 }
 
-async function seedOrders(day: string, n: number) {
+async function seedOrders(day: string, n: number, depotId = ids.depot) {
   const product = await prisma.product.findFirstOrThrow({ where: { tenantId: ids.tenant } });
   const customers = await prisma.customer.findMany({ where: { tenantId: ids.tenant }, orderBy: { code: 'asc' } });
   for (let i = 0; i < n; i++) {
@@ -135,13 +140,13 @@ async function seedOrders(day: string, n: number) {
       data: {
         tenantId: ids.tenant,
         customerId: customers[i % customers.length]!.id,
-        depotId: ids.depot,
+        depotId,
         deliveryDate: dateOf(day),
         totalCases: 10,
         totalWeightKg: 100,
         status: 'VALIDATED',
         priority: 3,
-        lines: { create: [{ productId: product.id, cases: 10, weightKg: 100, salesOrderNo: `SO-${day}-${i}` }] },
+        lines: { create: [{ productId: product.id, cases: 10, weightKg: 100, salesOrderNo: `SO-${day}-${depotId === ids.depot ? '' : 'S'}${i}` }] },
       },
     });
   }
@@ -154,8 +159,8 @@ async function driversOf(runId: string) {
 }
 const loadOf = async (runId: string, truckId: string, loadNo: number) => prisma.planLoad.findFirstOrThrow({ where: { runId, truckId, loadNo } });
 
-async function optimize(day: string) {
-  const { run } = await getOrCreatePlan(ids.tenant, ids.depot, day, ids.planner);
+async function optimize(day: string, depotId = ids.depot) {
+  const { run } = await getOrCreatePlan(ids.tenant, depotId, day, ids.planner);
   expect((await startDispatchOptimize(ids.tenant, run.id, planner(), null)).status).toBe(202);
   expect((await jobsDone(run.id)).status).toBe('READY');
   return run.id;
@@ -306,5 +311,44 @@ describe('the dispatcher keeps the drivers, their leave and the usual drivers; t
     // The other company's leave on the same day never reached this company's plans or lists.
     as('PLANNER');
     expect((await getLeave(send('GET'), { params: { id: (await prisma.driver.findFirstOrThrow({ where: { tenantId: ids.other } })).id } })).status).toBe(404);
+  });
+
+  it("8. (review) the leave moved off the day after planning: a re-plan gives Ali back - the cover's load was marked, the note says why", async () => {
+    const day8 = addDaysIso(D, 6);
+    as('PLANNER');
+    const added = await answer(await postLeave(send('POST', { from: day8, until: addDaysIso(day8, 2), coverDriverId: ids.bob }), { params: { id: ids.ali } }));
+    expect(added.status).toBe(201);
+    await seedOrders(day8, 2);
+    const run = await optimize(day8);
+    expect(await driversOf(run)).toEqual({ 'T01:1': 'Bob', 'T02:1': 'Sam' });
+    expect((await loadOf(run, ids.t1, 1)).driverIsCover).toBe(true);
+    // Ali stays one day less: the period now starts the day after.
+    const moved = await answer(await patchLeave(send('PATCH', { from: addDaysIso(day8, 1), until: addDaysIso(day8, 2), coverDriverId: ids.bob }), { params: { id: ids.ali, leaveId: added.body.data.leave.id } }));
+    expect(moved.status).toBe(200);
+    const next = await replanOf(run);
+    expect(await driversOf(next)).toEqual({ 'T01:1': 'Ali', 'T02:1': 'Sam' });
+    expect((await loadOf(next, ids.t1, 1)).driverIsCover).toBe(false);
+    const detail = (await getPlanDetail(ids.tenant, next))!;
+    expect(detail.warnings.filter((w) => w.startsWith('Driver changed'))).toEqual([
+      expect.stringMatching(/^Driver changed by this plan: T01 · L1 .* Bob → Ali, because Bob is no longer the cover of this truck's usual driver/),
+    ]);
+  });
+
+  it('9. (review) two depots: a cover who drives a truck of the other depot that day is not given; the load says why', async () => {
+    const day9 = addDaysIso(D, 10);
+    const soh = (await prisma.depot.create({ data: { tenantId: ids.tenant, code: 'SOH', name: 'Sohar', lat: 24.34, lng: 56.73 } })).id;
+    await prisma.truck.create({ data: { tenantId: ids.tenant, depotId: soh, code: 'T09', capacityCases: 200, capacityWeightKg: 3000, fixedCostPerDay: 20, costPerKm: 0.1, defaultDriverId: ids.bob } });
+    as('PLANNER');
+    const added = await answer(await postLeave(send('POST', { from: day9, until: day9, coverDriverId: ids.bob }), { params: { id: ids.ali } }));
+    expect(added.status).toBe(201);
+    expect(added.body.data.warnings).toEqual([expect.stringMatching(/^Bob is the usual driver of T09: RouteIQ gives him T09 first/)]);
+    await seedOrders(day9, 1, soh);
+    const sohRun = await optimize(day9, soh);
+    expect(await driversOf(sohRun)).toEqual({ 'T09:1': 'Bob' });
+    await seedOrders(day9, 2);
+    const mct = await optimize(day9);
+    expect(await driversOf(mct)).toEqual({ 'T01:1': 'none', 'T02:1': 'Sam' });
+    const detail = (await getPlanDetail(ids.tenant, mct))!;
+    expect(detail.loads.find((l) => l.truckCode === 'T01')!.driverNote).toBe(`No driver: Ali is on leave until ${fmtDayMonth(day9)} - pick a driver`);
   });
 });

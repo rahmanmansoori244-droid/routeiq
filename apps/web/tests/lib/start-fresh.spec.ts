@@ -52,6 +52,9 @@ const FKS: { child: string; field: string; parent: string; onDelete: 'RESTRICT' 
   { child: 'planLoad', field: 'driverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'truck', field: 'defaultDriverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'driverShift', field: 'driverId', parent: 'driver', onDelete: 'RESTRICT' },
+  // Driver leave (6 Oct 2026): NO ACTION, as every reference to a driver (migration 20261006120000_driver_leave).
+  { child: 'driverLeave', field: 'driverId', parent: 'driver', onDelete: 'NO_ACTION' },
+  { child: 'driverLeave', field: 'coverDriverId', parent: 'driver', onDelete: 'NO_ACTION' },
   { child: 'orderLine', field: 'productId', parent: 'product', onDelete: 'RESTRICT' },
   { child: 'order', field: 'customerId', parent: 'customer', onDelete: 'RESTRICT' },
   { child: 'order', field: 'depotId', parent: 'depot', onDelete: 'NO_ACTION' },
@@ -145,6 +148,7 @@ function seedCompany(tenantId: string, p: string) {
     { id: `${p}cas4`, casual: true, active: true }, // on a load of the 6th
   ]);
   push('truck', [{ id: `${p}t1`, depotId: `${p}dep`, defaultDriverId: `${p}cas2` }]);
+  push('driverLeave', []); // driver leave (6 Oct 2026): read for the daily drivers; none unless a test adds some
   push('uploadBatch', [
     { id: `${p}b1`, depotId: `${p}dep`, deliveryDate: day('2026-10-02'), uploadedAt: new Date('2026-10-01T10:00:00Z'), isLate: false },
     { id: `${p}b6`, depotId: `${p}dep`, deliveryDate: day('2026-10-06'), uploadedAt: new Date('2026-10-05T10:00:00Z'), isLate: false },
@@ -502,6 +506,24 @@ describe('run: everything', () => {
     const again = await run(null);
     expect(startFreshTotal(again.removed)).toBe(0);
     expect(tables.auditLog!.filter((a) => a.tenantId === 'tA' && a.action === 'TEST_DATA_CLEARED')).toHaveLength(2);
+  });
+
+  it('driver leave (6 Oct 2026): a daily driver named by a leave period - the cover of a coming leave, or with leave of his own, ended too - stays; leave is never changed', async () => {
+    tables.driverLeave = [
+      // Bob-like: daily driver cas1 (his only load is of the 2nd) covers the regular driver's leave from the 10th.
+      { id: 'alv1', tenantId: 'tA', driverId: 'areg1', coverDriverId: 'acas1', fromDate: day('2026-10-10'), untilDate: day('2026-10-31'), note: null },
+      // Daily driver cas3 (no load at all) had leave that ended: kept for the record.
+      { id: 'alv2', tenantId: 'tA', driverId: 'acas3', coverDriverId: null, fromDate: day('2026-09-20'), untilDate: day('2026-09-22'), note: null },
+    ];
+    const leaveBefore = structuredClone(tables.driverLeave);
+    const p = await preview(null);
+    expect(p.removed.dailyDrivers).toBe(1); // cas4 only
+    expect(p.kept.dailyDrivers).toBe(3); // cas1 (a cover), cas2 (a truck's default), cas3 (his own leave)
+    const r = await run(null);
+    expect(r.removed.dailyDrivers).toBe(1);
+    expect(idsOf('driver', 'a')).toEqual(['acas1', 'acas2', 'acas3', 'areg1']);
+    expect(tables.driverLeave).toEqual(leaveBefore);
+    expect(danglingReferences()).toEqual([]);
   });
 });
 

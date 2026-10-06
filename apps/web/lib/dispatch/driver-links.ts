@@ -259,8 +259,18 @@ export function driverChangeText(c: DriverChangeNote): string {
       ? `${from} is no longer active`
       : c.reason === 'ON_LEAVE'
         ? `${from} is on leave${c.leaveUntil ? ` until ${fmtDayMonth(c.leaveUntil)}` : ''}`
-        : `${from} is on ${other} at that time`;
+        : c.reason === 'COVER'
+          ? coverWhyText(from, to, other, c.cover ?? null)
+          : `${from} is on ${other} at that time`;
   return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
+}
+
+/** Why a cover does not drive the trip he covered again (a COVER note; review of 6 Oct 2026). */
+function coverWhyText(from: string, to: string, other: string, why: DriverChangeNote['cover']): string {
+  if (why === 'OTHER_TRUCK') return `${from}, the cover, drives ${other} that day`;
+  if (why === 'OTHER_DEPOT') return `${from}, the cover, drives a truck of another depot that day`;
+  if (why === 'TRUCK_DRIVER') return `${to} drives this truck's other trip that day`;
+  return `${from} is no longer the cover of this truck's usual driver (the leave ended or changed, or the truck has another usual driver)`;
 }
 
 /**

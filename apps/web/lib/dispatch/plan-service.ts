@@ -46,7 +46,7 @@ import {
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { leaveOnDay } from './driver-leave';
-import { leaveRowsOn } from './driver-leave-service';
+import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   caseHeavierThanAnyTruck,
@@ -1245,7 +1245,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
   // plan does not have) are kept in the plan summary (driverChanges, shown as plan warnings),
   // audited and returned. driverSetById comes from the evidence row: its foreign key keeps it valid.
-  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true } as const;
+  // driverIsCover: the row's "given as the cover" marker (a re-plan offers that driver again only as the cover).
+  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true, driverIsCover: true } as const;
   const evidence = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
   // The trucks of the new loads and of the evidence loads (named in the driver notes).
   const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...d.loads.map((l) => l.truck_id), ...evidence.map((l) => l.truckId)])] } } });
@@ -1256,6 +1257,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
   // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
   const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
+  const elsewhere = await driversOnOtherDepots(tx, tenantId, run, leave);
   const { drivers: driverOf, notes } = planDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
@@ -1268,6 +1270,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     evidence,
     new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
     leave,
+    elsewhere,
   );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
@@ -1282,6 +1285,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     reason: n.reason,
     other: n.other ? { truckCode: truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
     ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
+    ...(n.cover ? { cover: n.cover } : {}),
   }));
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
@@ -1324,6 +1328,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         // The dispatcher's hand-set choice for this truck and trip carries its marker; RouteIQ's picks have none.
         driverSetById: driver?.driverSetById ?? null,
         driverSetAt: driver?.driverSetAt ?? null,
+        // Given as the cover of the truck's usual driver on leave (the column defaults to false).
+        ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -3032,10 +3038,11 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   // The dispatcher's own choice, marked with who and when - "No driver" too - so a driver note on
   // this trip ends for good (driverChangeWarnings). A driver so marked is hand-set: a re-plan or
   // "Use instead" keeps it on this truck and trip (planDrivers, pass 1). "No driver" is not (there
-  // is no driver to keep): the next plan fills that trip in like any other.
+  // is no driver to keep): the next plan fills that trip in like any other. The dispatcher's pick is
+  // never "RouteIQ's cover" (driverIsCover), even when he keeps the cover.
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: { driverId, driverSetById: user.id, driverSetAt: new Date() },
+    data: { driverId, driverSetById: user.id, driverSetAt: new Date(), driverIsCover: false },
   });
   await audit(
     {

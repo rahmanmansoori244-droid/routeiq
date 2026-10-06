@@ -16,8 +16,10 @@ import {
   checkNewLeave,
   coverAwayDuring,
   coverAwayWarning,
+  coverOwnTruckWarning,
   leavePhase,
   type LeaveCheck,
+  type LeaveOnDay,
   type LeavePeriod,
   type LeavePhase,
 } from './driver-leave';
@@ -103,7 +105,9 @@ function auditPeriod(p: LeavePeriod, driverName: string, coverName: string | nul
 
 /**
  * Warnings saved with a period (the save goes through): the cover is on leave himself part of the
- * time, and the driver is still on loads planned on those days (live plan versions, loads not out yet).
+ * time, the cover is the usual driver of other active trucks (RouteIQ gives him those first, so he
+ * covers only on days they do not run), and the driver is still on loads planned on those days (live
+ * plan versions, loads not out yet).
  */
 async function leaveWarnings(tx: Tx, tenantId: string, period: LeavePeriod, driverName: string, cover: { name: string } | null): Promise<string[]> {
   const out: string[] = [];
@@ -111,6 +115,9 @@ async function leaveWarnings(tx: Tx, tenantId: string, period: LeavePeriod, driv
     const coverPeriods = (await tx.driverLeave.findMany({ where: { tenantId, driverId: period.coverDriverId }, select: LEAVE_SELECT })).map(toLeavePeriod);
     const away = coverAwayDuring(coverPeriods, period);
     if (away) out.push(coverAwayWarning(cover.name, away));
+    const own = await tx.truck.findMany({ where: { tenantId, defaultDriverId: period.coverDriverId, active: true }, select: { code: true }, orderBy: { code: 'asc' } });
+    const ownWarning = coverOwnTruckWarning(cover.name, own.map((t) => t.code));
+    if (ownWarning) out.push(ownWarning);
   }
   const loads = await tx.planLoad.findMany({
     where: {
@@ -259,6 +266,30 @@ export async function removeDriverLeave(tenantId: string, driverId: string, leav
  */
 export async function leaveRowsOn(db: Pick<Tx, 'driverLeave'>, tenantId: string, day: Date): Promise<LeavePeriod[]> {
   return (await db.driverLeave.findMany({ where: { tenantId, fromDate: { lte: day }, untilDate: { gte: day } }, select: LEAVE_SELECT })).map(toLeavePeriod);
+}
+
+/**
+ * The drivers on the loads of the OTHER depots' live plan versions of the same day (any load status,
+ * a driver set): plans are per depot, drivers are the company's. planDrivers does not give a cover who
+ * drives there that day, and the plan screen says when a cover's load names one (review of 6 Oct
+ * 2026). Read only when someone on leave that day has a cover (`leave`: leaveOnDay of that day).
+ */
+export async function driversOnOtherDepots(
+  db: Pick<Tx, 'runPlan' | 'planLoad'>,
+  tenantId: string,
+  run: { depotId: string; runDate: Date },
+  leave: LeaveOnDay,
+): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (![...leave.values()].some((v) => v.coverDriverId)) return out;
+  const runs = await db.runPlan.findMany({
+    where: { tenantId, runDate: run.runDate, depotId: { not: run.depotId }, status: { notIn: ['SUPERSEDED', 'ARCHIVED'] }, supersededAt: null },
+    select: { id: true },
+  });
+  if (!runs.length) return out;
+  const loads = await db.planLoad.findMany({ where: { tenantId, runId: { in: runs.map((r) => r.id) }, driverId: { not: null } }, select: { driverId: true } });
+  for (const l of loads) if (l.driverId) out.add(l.driverId);
+  return out;
 }
 
 /** The periods that touch [today, today + days]: the Drivers page's "Drivers on leave". */

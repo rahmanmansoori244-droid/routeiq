@@ -180,7 +180,8 @@ export type DriverLeaveInput = z.infer<typeof driverLeaveSchema>;
 /**
  * POST /api/dispatch/casual-driver: a daily (casual) driver added from a load (owner rule 20: a
  * load never leaves without a driver). `useExisting`: the dispatcher answered "Use <name>?" when the
- * phone belongs to another driver.
+ * phone belongs to another driver. `leaveConfirmed`: he answered "<name> is on leave until ... Put
+ * <name> on ... anyway?" (driver leave, 6 Oct 2026; else 409 DRIVER_ON_LEAVE).
  */
 export const casualDriverSchema = z
   .object({
@@ -189,6 +190,7 @@ export const casualDriverSchema = z
     name: z.string().trim().min(2, 'Name: at least 2 characters').max(80, 'Name: at most 80 characters'),
     phone: clearable(driverPhoneSchema),
     useExisting: z.string().min(1).optional(),
+    leaveConfirmed: z.boolean().optional(),
   })
   .strict();
 export type CasualDriverInput = z.infer<typeof casualDriverSchema>;

@@ -3,7 +3,7 @@ import { getCurrentTenant } from '@/lib/tenant';
 import { canManageMasterData, canPlan } from '@/lib/rbac';
 import { DRIVER_PUBLIC_SELECT } from '@/lib/driver-fields';
 import { addDaysIso, DEFAULT_TZ, todayIso } from '@/lib/dispatch/time';
-import { LEAVE_LIST_DAYS, leavePhase } from '@/lib/dispatch/driver-leave';
+import { coverAwayDuring, coverCaveat, LEAVE_LIST_DAYS, leavePhase } from '@/lib/dispatch/driver-leave';
 import { upcomingLeaveRows } from '@/lib/dispatch/driver-leave-service';
 import { PageShell } from '@/components/page-shell';
 import { EmptyState } from '@/components/empty-state';
@@ -39,8 +39,16 @@ export default async function DriversPage({ params }: { params: { slug: string }
     upcomingLeaveRows(tenant.id, today, addDaysIso(today, LEAVE_LIST_DAYS)),
   ]);
   const name = new Map(drivers.map((d) => [d.id, d.name]));
+  const byId = new Map(drivers.map((d) => [d.id, d]));
   const leaveNow = new Map(leave.filter((p) => leavePhase(p, today) === 'NOW').map((p) => [p.driverId, p]));
   const rows = drivers.map((d) => ({ ...d, leaveUntil: leaveNow.get(d.id)?.untilIso ?? null }));
+  // The cover as planDrivers will see him (review of 6 Oct 2026): inactive, on leave himself on those
+  // days, or the usual driver of other active trucks (given those first) - never "covers" when he will not.
+  const ownTrucks = (driverId: string) => trucks.filter((t) => t.defaultDriverId === driverId).map((t) => t.code);
+  const caveatOf = (coverId: string, days: { fromIso: string; untilIso: string }) => {
+    const c = byId.get(coverId);
+    return c ? coverCaveat(c, { away: coverAwayDuring(leave, { ...days, coverDriverId: coverId }), ownTrucks: ownTrucks(coverId) }) : 'not found: he cannot cover';
+  };
   const upcoming: UpcomingLeave[] = leave.map((p) => ({
     id: p.id,
     driverId: p.driverId,
@@ -50,6 +58,7 @@ export default async function DriversPage({ params }: { params: { slug: string }
     now: leavePhase(p, today) === 'NOW',
     note: p.note,
     coverName: p.coverDriverId ? (name.get(p.coverDriverId) ?? 'Unknown driver') : null,
+    coverCaveat: p.coverDriverId ? caveatOf(p.coverDriverId, p) : null,
   }));
   const usual: UsualTruck[] = trucks.map((t) => {
     const away = t.defaultDriverId ? leaveNow.get(t.defaultDriverId) : undefined;
@@ -62,6 +71,8 @@ export default async function DriversPage({ params }: { params: { slug: string }
       defaultDriverId: t.defaultDriverId,
       awayUntil: away?.untilIso ?? null,
       coverName: away?.coverDriverId ? (name.get(away.coverDriverId) ?? null) : null,
+      // Today only: is the cover himself away today, inactive, or another truck's usual driver?
+      coverCaveat: away?.coverDriverId ? caveatOf(away.coverDriverId, { fromIso: today, untilIso: today }) : null,
     };
   });
   const options = drivers.map((d) => ({ id: d.id, code: d.code, name: d.name, active: d.active, casual: d.casual }));

@@ -22,6 +22,8 @@ export interface UsualTruck {
   /** The usual driver is on leave today: until when, and his cover. */
   awayUntil: string | null;
   coverName: string | null;
+  /** Why that cover will not drive today (inactive, away himself, another truck's usual driver: coverCaveat); null: he covers. */
+  coverCaveat?: string | null;
 }
 
 /**
@@ -50,7 +52,12 @@ export function UsualDrivers({ trucks, drivers, canEdit }: { trucks: UsualTruck[
         toast.error(errorMessage(body, 'Could not change the usual driver.'));
         return;
       }
-      toast.success(`${t.code}: usual driver ${driverId ? (nameOf.get(driverId) ?? 'set') : 'cleared'}. New plans use it; plans already made keep their drivers until you re-plan.`);
+      // A re-plan keeps the driver RouteIQ already gave a trip (only a cover goes): plans already made
+      // change only where the dispatcher picks the driver (planDrivers; review of 6 Oct 2026).
+      toast.success(
+        `${t.code}: usual driver ${driverId ? (nameOf.get(driverId) ?? 'set') : 'cleared'}. New plans use it. Plans already made keep their drivers, also when you re-plan: pick the driver on those loads.`,
+        { duration: 10_000 },
+      );
       router.refresh();
     });
   }
@@ -120,7 +127,11 @@ export function UsualDrivers({ trucks, drivers, canEdit }: { trucks: UsualTruck[
                       {t.awayUntil ? (
                         <span className="text-amber-700">
                           {nameOf.get(t.defaultDriverId ?? '') ?? 'The usual driver'} is {onLeaveLabel(t.awayUntil)}:{' '}
-                          {t.coverName ? `${t.coverName} covers` : 'no cover - pick the driver on the plan'}
+                          {!t.coverName
+                            ? 'no cover - pick the driver on the plan'
+                            : t.coverCaveat
+                              ? `cover ${t.coverName} (${t.coverCaveat})`
+                              : `${t.coverName} covers`}
                         </span>
                       ) : (
                         <span className="text-muted-foreground">—</span>

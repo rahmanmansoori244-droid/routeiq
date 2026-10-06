@@ -28,7 +28,7 @@ import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { leaveOnDay, loadLeaveNote } from './driver-leave';
-import { leaveRowsOn } from './driver-leave-service';
+import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
 import { orderIdOf, portionPlannedKgPerCase, readPortionLines, readPortionPalletFactors, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
@@ -516,6 +516,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     ? new Map((await db.driver.findMany({ where: { tenantId, id: { in: [...new Set([...leave.keys(), ...[...leave.values()].map((v) => v.coverDriverId).filter((x): x is string => !!x)])] } }, select: { id: true, name: true } })).map((x) => [x.id, x.name]))
     : new Map<string, string>();
   const nameOfDriver = (id: string) => leaveNames.get(id) ?? loads.find((x) => x.driverId === id)?.driver?.name ?? 'Unknown driver';
+  // A cover who also drives for another depot that day (plans are per depot; the other depot planned
+  // later gave him his own truck): his covering load says so (review of 6 Oct 2026).
+  const elsewhere = await driversOnOtherDepots(db, tenantId, run, leave);
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -724,7 +727,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
-      driverNote: loadLeaveNote(l, l.truck.defaultDriverId ?? null, leave, nameOfDriver),
+      driverNote: loadLeaveNote(l, l.truck.defaultDriverId ?? null, leave, nameOfDriver, elsewhere),
     };
   });
 

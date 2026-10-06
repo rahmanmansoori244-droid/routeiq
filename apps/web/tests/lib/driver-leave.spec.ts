@@ -12,10 +12,16 @@ import {
   checkNewLeave,
   coverAwayDuring,
   coverAwayWarning,
+  coverCaveat,
   coverFor,
+  coverOptionLabel,
+  coverOptions,
+  coverOwnTruckWarning,
   isOnLeave,
+  keepTitle,
   leaveOnDay,
   leavePhase,
+  leaveQuestion,
   loadLeaveNote,
   noDriverLeaveNote,
   onLeaveLabel,
@@ -166,6 +172,67 @@ describe('what may be changed and removed (past periods are kept for the record)
     expect(codeOf(checkLeaveRemove(coming, TODAY))).toBe('OK');
     expect(codeOf(checkLeaveRemove(fromToday, TODAY))).toBe('OK');
   });
+
+  it('a cover deactivated after the save does not block the period: it ends early or its note changes; choosing an inactive cover is refused', () => {
+    // Ali's leave 1-31 Oct with Bob; Bob deactivated on the 10th; on the 15th Ali is back.
+    const withBob = P('S', 'ALI', '2026-10-01', '2026-10-31', 'BOB');
+    const INACTIVE_BOB = { active: false, name: 'Bob' };
+    const after = (untilIso: string, coverDriverId: string | null) => ({ driverId: 'ALI', fromIso: withBob.fromIso, untilIso, coverDriverId });
+    expect(codeOf(checkLeaveChange(withBob, after('2026-10-14', 'BOB'), [withBob], '2026-10-15', INACTIVE_BOB))).toBe('OK');
+    expect(codeOf(checkLeaveChange(withBob, after('2026-10-31', 'BOB'), [withBob], '2026-10-15', INACTIVE_BOB))).toBe('OK'); // only the note changed
+    expect(codeOf(checkLeaveChange(withBob, after('2026-10-14', null), [withBob], '2026-10-15', null))).toBe('OK');
+    // A cover chosen now must be active: on a change and on a new period.
+    const withSam = P('S', 'ALI', '2026-10-01', '2026-10-31', 'SAM');
+    expect(codeOf(checkLeaveChange(withSam, after('2026-10-31', 'BOB'), [withSam], '2026-10-15', INACTIVE_BOB))).toBe('LEAVE_COVER_INACTIVE');
+    expect(codeOf(checkNewLeave({ driverId: 'ALI', fromIso: '2026-10-20', untilIso: '2026-10-22', coverDriverId: 'BOB' }, [], '2026-10-15', INACTIVE_BOB))).toBe('LEAVE_COVER_INACTIVE');
+  });
+});
+
+describe('the Leave dialog and the Drivers page: the cover as the planner will see him', () => {
+  const drivers = [
+    { id: 'ALI', code: 'D01', name: 'Ali', active: true },
+    { id: 'BOB', code: 'D02', name: 'Bob', active: false },
+    { id: 'SAM', code: 'D03', name: 'Sam', active: true, casual: true },
+  ];
+
+  it("the cover list: the active drivers but the driver himself, plus the period's cover when he was deactivated since (marked inactive)", () => {
+    expect(coverOptions(drivers, 'ALI', null).map((d) => d.id)).toEqual(['SAM']);
+    expect(coverOptions(drivers, 'ALI', 'BOB')).toEqual([
+      { id: 'BOB', code: 'D02', name: 'Bob', active: false },
+      { id: 'SAM', code: 'D03', name: 'Sam', active: true, casual: true },
+    ]);
+    expect(coverOptionLabel(coverOptions(drivers, 'ALI', 'BOB')[0]!)).toBe('Bob (inactive)');
+    expect(coverOptionLabel(coverOptions(drivers, 'ALI', 'BOB')[1]!)).toBe('Sam (daily)');
+    // An unknown id (not in the list) is shown too, so the select never shows another choice than the one sent.
+    expect(coverOptions(drivers, 'ALI', 'GONE', 'Unknown driver').map((d) => [d.id, d.name, d.active])).toEqual([
+      ['GONE', 'Unknown driver', false],
+      ['SAM', 'Sam', true],
+    ]);
+  });
+
+  it("why a named cover will not drive: inactive, on leave himself, or another truck's usual driver; none: he covers", () => {
+    expect(coverCaveat({ name: 'Bob', active: true }, {})).toBeNull();
+    expect(coverCaveat({ name: 'Bob', active: false }, {})).toBe('inactive: he cannot cover');
+    expect(coverCaveat({ name: 'Bob', active: true }, { away: { fromIso: '2026-10-15', untilIso: '2026-10-17' } })).toBe('on leave himself 15 Oct – 17 Oct: he cannot cover those days');
+    expect(coverCaveat({ name: 'Bob', active: true }, { ownTrucks: ['T03'] })).toBe('usual driver of T03: he covers only on days T03 does not run');
+    expect(coverCaveat({ name: 'Bob', active: true }, { ownTrucks: ['T03', 'T04'] })).toBe('usual driver of T03, T04: he covers only on days T03, T04 do not run');
+    expect(coverCaveat({ name: 'Bob', active: false }, { ownTrucks: ['T03'] })).toBe('inactive: he cannot cover'); // the strongest reason
+    expect(coverOwnTruckWarning('Bob', ['T03'])).toBe(
+      'Bob is the usual driver of T03: RouteIQ gives him T03 first, so he covers only on days T03 does not run. Name another cover, or pick the driver on the plan.',
+    );
+    expect(coverOwnTruckWarning('Bob', [])).toBeNull();
+  });
+
+  it('the question before a driver on leave is put on a load: the Driver list, Keep and the daily driver all ask it; nobody on leave: none', () => {
+    const onLeave = new Map([['ALI', '2026-10-12']]);
+    expect(leaveQuestion('ALI', onLeave, 'Ali', 'T01 · L1')).toBe('Ali is on leave until 12 Oct. Put Ali on T01 · L1 anyway?');
+    expect(leaveQuestion('SAM', onLeave, 'Sam', 'T01 · L1')).toBeNull();
+    expect(leaveQuestion(null, onLeave, 'No driver', 'T01 · L1')).toBeNull();
+    expect(keepTitle('Ali', null)).toBe('RouteIQ filled in Ali. Keep makes Ali your pick: a re-plan or Use instead then keeps Ali on this truck and trip.');
+    expect(keepTitle('Ali', '2026-10-12')).toBe(
+      'RouteIQ filled in Ali, who is on leave until 12 Oct. Keep asks first, then makes Ali your pick: a re-plan or Use instead then keeps Ali on this truck and trip, leave or not.',
+    );
+  });
 });
 
 describe('the cover away himself, and the list of the coming days', () => {
@@ -207,6 +274,14 @@ describe('the texts on the plan screen', () => {
     expect(loadLeaveNote({ status: 'PLANNED', driverId: 'NAS' }, 'ALI', day, name)).toBeNull(); // someone else picked
     expect(loadLeaveNote({ status: 'PLANNED', driverId: null }, 'NAS', day, name)).toBeNull();
     expect(loadLeaveNote({ status: 'PLANNED', driverId: null }, null, day, name)).toBeNull();
+  });
+
+  it('a cover who also drives for another depot that day (that depot planned later gave him his own truck): his covering load says so', () => {
+    expect(loadLeaveNote({ status: 'PLANNED', driverId: 'BOB' }, 'ALI', day, name, new Set(['BOB']))).toBe(
+      'Covers Ali (on leave until 12 Oct) - but Bob also drives a truck of another depot that day: pick another driver',
+    );
+    expect(loadLeaveNote({ status: 'PLANNED', driverId: 'BOB' }, 'ALI', day, name, new Set(['SAM']))).toBe('Covers Ali (on leave until 12 Oct)');
+    expect(loadLeaveNote({ status: 'PLANNED', driverId: 'NAS' }, 'ALI', day, name, new Set(['NAS']))).toBeNull(); // not the cover: not this note's business
   });
 
   it('a load that has left shows no leave note', () => {
