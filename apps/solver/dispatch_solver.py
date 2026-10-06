@@ -52,12 +52,15 @@ Model (see docs/OPTIMIZER_DESIGN.md for the business explanation)
          than serving it there either.
          Trucks to RENT (the hire suggestion's what-if, DispatchTruck.hire_candidate) are ranked
          in a HIRE TIER between the P1-P3 and the P4/P5 stops, in proportion to their real money
-         (_service_and_hire): own trucks first, the cheapest set of rented trucks, never one for
-         P4/P5 stops alone. Search only; without trucks to rent nothing changes.
+         - hire, driver day rate, the option's own km charge over a rough day's km - (_service_and_hire,
+         _hire_tier): own trucks first, the cheapest set of rented trucks, never one for P4/P5 stops
+         alone, never less strict priorities than without them. Search only; without trucks to rent
+         nothing changes.
     4.   Operating cost in real OMR: fixed truck cost (once per truck-day), per-load cost,
          distance cost (cost_per_km + fuel_price / km_per_litre - fuel is counted ONCE),
          driver time cost, overtime (a driver paid by the day, driver_day_cost: that rate once
-         per truck-day instead of the time cost and overtime).
+         per truck-day instead of the time cost and overtime; its km and time get a search-only
+         tie-breaker at the own fleet's rates, _search_km_rate, never reported as money).
     5.   Fewer trucks/trips/km fall out of 4 (fixed + distance costs).
     6.   Soft preferences: preferred window deviation and an early-arrival preference for
          high priorities, in OMR per minute.
@@ -115,7 +118,7 @@ from dispatch_models import (
     pallet_text,
     payload_units,
 )
-from providers import MatrixCancelled, MatrixResult, matrix_quality, resolve_matrix
+from providers import MatrixCancelled, MatrixResult, haversine_km, matrix_quality, resolve_matrix
 
 log = logging.getLogger("routeiq.dispatch")
 
@@ -204,55 +207,157 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 #   one (owner answer 1), and once it is rented for P1-P3 stops it carries P4/P5 stops in its spare room;
 # - one P1-P3 stop weighs more than the dearest rented truck (and every P4/P5 stop): a stop the own
 #   fleet cannot carry is always worth a rented truck;
-# - within the tier a rented truck weighs in proportion to its real money for the day - its hire + its
-#   driver's day rate (hire_money), 1 OMR above every P4/P5 stop together: the cheapest set wins, two
-#   small trucks or one big one, never fewer trucks for their own sake (review: a premium on every
+# - within the tier a rented truck weighs in proportion to its real money for the day - its hire, its
+#   driver's day rate and its option's own km charge over a rough day's km (hire_money, _hire_day_km;
+#   review: an option at 50 OMR + 1 OMR/km beat one at 60 OMR with no km charge on a far day, 238 OMR
+#   instead of 70) - each unit of money (1 OMR) above every P4/P5 stop together: the cheapest set wins,
+#   two small trucks or one big one, never fewer trucks for their own sake (review: a premium on every
 #   rented truck chose a 10-ton at 85 OMR over two 3-tons at 60);
-# - own trucks always go first: their whole day's money is far below 1 OMR of the tier, so an idle own
-#   truck is never replaced by a rented one, however dear its day or its km;
+# - the tier never makes a day's priorities less strict than the plan's own: on a day of several
+#   hundred stops the money is counted in coarser units (2, 5, 10 ... OMR, _hire_tier) before the strict
+#   weights would have to be capped (review: 450 stops, one P1 worth about 7 P2 in the what-if only);
+# - own trucks always go first: their whole day's money is far below one unit of the tier, so an idle
+#   own truck is never replaced by a rented one, however dear its day or its km;
 # - search only: every plan reports each truck's real costs (costing.py) - a rented truck's fuel is in
 #   its hire (no km cost unless its option charges per km) and its driver is paid by the day.
 # A request without trucks to rent is planned exactly as before. The search, the load re-check (its
 # phase 1, _hire_repair_weights) and the second search (PyVRP) rank a rented truck alike.
+#
+# A truck whose driver is paid by the DAY (driver_day_cost: a truck to rent, or one hired for the day)
+# costs nothing per hour, and with its fuel in the hire nothing per km either: the search would leave
+# its stops in any order (review: 358 km instead of 232, two hours of its driver's day). Its km and
+# time are therefore priced in the SEARCH like the own fleet's - the own trucks' average km rate
+# (_tie_km_rate) when its own is lower, and the hourly driver rate on its span - as a tie-breaker that
+# is never money: the plans report its real costs (no km cost, the day rate), and the load re-check's
+# score keeps it apart (LR.Score.tie).
+
+# A day-paid truck's km in the search when the own fleet's km cost nothing (no own truck, or none with
+# a km cost or fuel): a small rate, so its route is still the short one (search only).
+HIRE_TIE_KM_OMR = 0.1
+# OMR of hire money per unit of the hire tier, finest first (_hire_tier): 1 OMR, coarser only when the
+# strict priorities would otherwise have to be capped (a day of several hundred stops).
+HIRE_RESOLUTIONS = (1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0, 1000.0)
 
 
-def hire_money(t: DispatchTruck) -> float:
-    """What renting the truck costs for the day in real money (OMR): its hire + its driver's day rate."""
-    return float(t.fixed_cost) + float(t.driver_day_cost or 0.0)
+def _hire_day_km(stops: list[DispatchStop], cfg: DispatchConfig, depot, t: DispatchTruck) -> float:
+    """A rough day's km of a truck to rent, for its option's own km charge in the hire tier (search
+    only): a round trip of the day's average road distance from the depot (straight line x the road
+    factor) for every load it may make - it is rented for the whole day. 0 without a depot or stops."""
+    if depot is None or not stops:
+        return 0.0
+    mean = sum(haversine_km(depot.lat, depot.lng, s.lat, s.lng) for s in stops) / len(stops) * cfg.haversine_multiplier
+    return 2.0 * mean * (t.max_trips or cfg.max_trips_per_truck)
 
 
-def _hire_units(stops: list[DispatchStop], trucks, with_margin: bool) -> tuple[dict[str, float], int]:
-    """The hire tier in strict weight units: per truck to rent, u x its money (at least 1 OMR), where
+def hire_money(t: DispatchTruck, cfg: DispatchConfig | None = None, day_km: float = 0.0) -> float:
+    """What renting the truck costs for the day in real money (OMR): its hire, its driver's day rate
+    and its option's own km charge over ``day_km`` (_hire_day_km; fuel is in the hire)."""
+    km = _km_rate_omr(t, cfg) * day_km if cfg is not None and day_km > 0 else 0.0
+    return float(t.fixed_cost) + float(t.driver_day_cost or 0.0) + km
+
+
+def _hire_money_of(stops: list[DispatchStop], cfg: DispatchConfig, trucks, depot=None) -> dict[str, float]:
+    """hire_money of every truck to rent among ``trucks`` (its km charge over its rough day's km)."""
+    return {t.id: hire_money(t, cfg, _hire_day_km(stops, cfg, depot, t) if t.cost_per_km or t.km_per_litre else 0.0)
+            for t in trucks if t.hire_candidate}
+
+
+@dataclass(frozen=True)
+class _HireTier:
+    """The hire tier in strict weight units (_hire_tier)."""
+
+    units: dict[str, float]  # per truck to rent: u x max(1, its money / res)
+    top: int  # the dearest truck's units rounded up: every P1-P3 weight carries it on top
+    res: float  # OMR of hire money per unit of money (HIRE_RESOLUTIONS)
+    u: int  # one unit of money: 1 + the weight of every P4/P5 stop
+
+
+def _strict_total(counts: Counter, w: dict[int, int], n_stops: int, with_margin: bool) -> int:
+    """The strict weights of a day added up (each stop once; with margins one unit more each)."""
+    return sum(n * w[p] for p, n in counts.items()) + (n_stops if with_margin else 0)
+
+
+def _strict_fits(total: int) -> bool:
+    """True when strict weights adding up to ``total`` stay strict: _service_and_hire scales the base
+    down at most to 100 OMR per weight unit before it must cap the weights."""
+    if total * SERVICE_BASE <= PENALTY_LIMIT:
+        return True
+    return total * max(100 * COST_SCALE, PENALTY_LIMIT // max(1, total)) <= PENALTY_LIMIT
+
+
+def _hire_tier(stops: list[DispatchStop], trucks, with_margin: bool, money: dict[str, float]) -> _HireTier | None:
+    """The hire tier: per truck to rent, u x its money in units of ``res`` OMR (at least one unit), where
     u = 1 + the weight of every P4/P5 stop (with margins each counts one unit more, as in
-    _strict_weights) - 1 OMR of hire weighs more than every P4/P5 stop together; and the dearest
-    truck's units rounded up (top), which every P1-P3 weight carries on top. ({}, 0) without trucks
-    to rent."""
+    _strict_weights) - one unit of money weighs more than every P4/P5 stop together; and the dearest
+    truck's units rounded up (top), which every P1-P3 weight carries on top. ``res`` is 1 OMR, or the
+    finest coarser one (HIRE_RESOLUTIONS) that keeps the strict weights uncapped when the day's own
+    weights are (review: the tier multiplied them by 60-150, and a 450-stop day got capped priorities
+    in the what-if only). None without trucks to rent."""
     hires = [t for t in trucks if t.hire_candidate]
     if not hires:
-        return {}, 0
+        return None
     counts = Counter(s.priority for s in stops)
-    w = _strict_weights(counts, with_margin)
+    w0 = _strict_weights(counts, with_margin)
     m = 1 if with_margin else 0
-    u = 1 + sum(counts.get(q, 0) * (w[q] + m) for q in (4, 5))
-    units = {t.id: u * max(1.0, hire_money(t)) for t in hires}
-    return units, int(math.ceil(max(units.values())))
+    u = 1 + sum(counts.get(q, 0) * (w0[q] + m) for q in (4, 5))
+    own_fits = _strict_fits(_strict_total(counts, w0, len(stops), with_margin))
+    dearest = max(max(money[t.id] for t in hires), 1.0)
+    tier = None
+    for res in [r for r in HIRE_RESOLUTIONS if r < dearest] + [dearest]:
+        units = {t.id: u * max(1.0, money[t.id] / res) for t in hires}
+        top = int(math.ceil(max(units.values())))
+        total = _strict_total(counts, _strict_weights(counts, with_margin, top), len(stops), with_margin) + int(math.ceil(sum(units.values())))
+        tier = _HireTier(units, top, res, u)
+        # A day already capped without trucks to rent keeps 1 OMR (it is capped either way).
+        if not own_fits or _strict_fits(total):
+            break
+    return tier
 
 
-def _hire_repair_weights(stops: list[DispatchStop], cfg: DispatchConfig, trucks) -> dict[str, int]:
+def _hire_repair_weights(stops: list[DispatchStop], cfg: DispatchConfig, trucks, depot=None) -> dict[str, int]:
     """The hire tier on the load re-check's small phase-1 weights (_repair_weights): per truck to rent,
-    (1 + every P4/P5 stop's weight) x its money, rounded up - above every P4/P5 stop together, and every
-    P1-P3 weight carries the dearest on top. {} without trucks to rent."""
+    (1 + every P4/P5 stop's weight) x its money in the search's units (_hire_tier), rounded up - above
+    every P4/P5 stop together, and every P1-P3 weight carries the dearest on top. {} without trucks to
+    rent."""
     hires = [t for t in trucks if t.hire_candidate]
     if not hires:
         return {}
+    money = _hire_money_of(stops, cfg, trucks, depot)
+    res = 1.0
     if cfg.strict_priorities:
         counts = Counter(s.priority for s in stops)
         w = _strict_weights(counts)
         u = 1 + sum(counts.get(q, 0) * w[q] for q in (4, 5))
+        use_margin = cfg.use_margin and bool(stops) and all(s.margin is not None for s in stops)
+        tier = _hire_tier(stops, trucks, use_margin, money)
+        res = tier.res if tier is not None else 1.0
     else:
         pw = cfg.priority_weights
         u = 1 + sum(max(1, int(round(100 * pw[s.priority] / pw[5]))) for s in stops if s.priority >= 4)
-    return {t.id: int(math.ceil(u * max(1.0, hire_money(t)))) for t in hires}
+    return {t.id: int(math.ceil(u * max(1.0, money[t.id] / res))) for t in hires}
+
+
+def _hired_km(t: DispatchTruck) -> bool:
+    """A truck whose km the search prices with the tie-breaker: its driver is paid by the day (a truck to
+    rent, or one hired for the day) or it is a truck to rent (its fuel is in the hire)."""
+    return t.driver_day_cost is not None or t.hire_candidate
+
+
+def _tie_km_rate(req: DispatchRequest) -> float:
+    """OMR per km the search prices a rented or day-paid truck's km at when its own is lower (search
+    only, never money): the average km rate (km cost + fuel) of the request's own trucks - those paid by
+    the hour, never rented - or HIRE_TIE_KM_OMR when none of them has one."""
+    own = [_km_rate_omr(t, req.config) for t in req.trucks if not _hired_km(t)]
+    avg = sum(own) / len(own) if own else 0.0
+    return avg if avg > 0 else HIRE_TIE_KM_OMR
+
+
+def _search_km_rate(t: DispatchTruck, cfg: DispatchConfig, tie_km: float) -> float:
+    """The truck's km rate in the search: its own (_km_rate_omr), and for a rented truck or one whose
+    driver is paid by the day at least ``tie_km`` (_tie_km_rate) - its route is planned as short as an
+    own truck's."""
+    rate = _km_rate_omr(t, cfg)
+    return max(rate, tie_km) if _hired_km(t) else rate
 
 
 def _vehicle_fixed_units(td: "TruckDay", w: "ScenarioWeights", hire_units: int) -> int:
@@ -1279,7 +1384,7 @@ def _strict_weights(counts: dict[int, int], with_margin: bool = False, hire_top:
     """w_5 = 1, w_p = 1 + sum_{q>p} n_q x w_q: one stop of priority p is worth more than ALL
     lower-priority stops of the day together. With margins every lower stop may carry up to 0.4
     of a unit on top, so each counts as w_q + 1 and margins can never add up past a priority.
-    ``hire_top`` (the hire suggestion's what-if, _hire_units): every P1-P3 weight carries the dearest
+    ``hire_top`` (the hire suggestion's what-if, _hire_tier): every P1-P3 weight carries the dearest
     rented truck's tier on top, so one P1-P3 stop outweighs it and every lower stop."""
     w = {5: 1}
     for p in (4, 3, 2, 1):
@@ -1287,17 +1392,19 @@ def _strict_weights(counts: dict[int, int], with_margin: bool = False, hire_top:
     return w
 
 
-def _service_values(stops: list[DispatchStop], cfg: DispatchConfig, use_margin: bool, trucks=()) -> tuple[list[int], list[str]]:
+def _service_values(stops: list[DispatchStop], cfg: DispatchConfig, use_margin: bool, trucks=(),
+                    depot=None) -> tuple[list[int], list[str]]:
     """Objective units lost when each stop is left unserved (the drop penalty), plus warnings
     (_service_and_hire without the hire tier itself)."""
-    values, warnings, _ = _service_and_hire(stops, cfg, use_margin, trucks)
+    values, warnings, _ = _service_and_hire(stops, cfg, use_margin, trucks, depot)
     return values, warnings
 
 
 def _service_and_hire(stops: list[DispatchStop], cfg: DispatchConfig, use_margin: bool,
-                      trucks=()) -> tuple[list[int], list[str], dict[str, int]]:
+                      trucks=(), depot=None) -> tuple[list[int], list[str], dict[str, int]]:
     """Objective units lost when each stop is left unserved (the drop penalty), plus warnings, and the
     hire tier of each truck to rent among ``trucks`` (truck id -> objective units; {} without any).
+    ``depot``: for the options' own km charge in the tier (_hire_day_km); None counts none.
 
     Strict: SERVICE_BASE x w_p (see _strict_weights). The weights grow like the product of the
     per-priority counts; all penalties together must stay below PENALTY_LIMIT (int64 objective).
@@ -1307,12 +1414,15 @@ def _service_and_hire(stops: list[DispatchStop], cfg: DispatchConfig, use_margin
     are orders of magnitude below the limit (400 stops with margins: ~7e17 of 4.6e18).
 
     The hire tier (trucks to rent, the hire suggestion): a level between the P1-P3 and the P4/P5 stops
-    (_hire_units), counted in the total, so the drop penalties and every rented truck's tier together
-    stay below the limit."""
+    (_hire_tier), counted in the total, so the drop penalties and every rented truck's tier together
+    stay below the limit - in money units coarse enough that a day whose own weights stay strict stays
+    strict with them."""
+    money = _hire_money_of(stops, cfg, trucks, depot)
     if not cfg.strict_priorities:
-        return _weighted_hire(stops, [_stop_value(s, cfg, use_margin) for s in stops], trucks)
+        return _weighted_hire(stops, [_stop_value(s, cfg, use_margin) for s in stops], trucks, money)
     counts = Counter(s.priority for s in stops)
-    units, top = _hire_units(stops, trucks, use_margin)
+    tier = _hire_tier(stops, trucks, use_margin, money)
+    units, top = (tier.units, tier.top) if tier is not None else ({}, 0)
     w = _strict_weights(counts, use_margin, top)
     total = sum(w[s.priority] for s in stops) + (len(stops) if use_margin else 0) + int(math.ceil(sum(units.values())))
     base, warnings = SERVICE_BASE, []
@@ -1340,7 +1450,8 @@ def _service_and_hire(stops: list[DispatchStop], cfg: DispatchConfig, use_margin
     return out, warnings, hire
 
 
-def _weighted_hire(stops: list[DispatchStop], values: list[int], trucks) -> tuple[list[int], list[str], dict[str, int]]:
+def _weighted_hire(stops: list[DispatchStop], values: list[int], trucks,
+                   money: dict[str, float] | None = None) -> tuple[list[int], list[str], dict[str, int]]:
     """The hire tier with weighted priorities (strict_priorities=false; the web always sends strict):
     1 OMR of hire weighs more than every P4/P5 stop together (+ one service unit), and every P1-P3 stop
     carries the dearest rented truck and every P4/P5 stop on top. Scaled down together when the total
@@ -1350,7 +1461,7 @@ def _weighted_hire(stops: list[DispatchStop], values: list[int], trucks) -> tupl
         return values, [], {}
     low = sum(v for v, s in zip(values, stops) if s.priority >= 4)
     unit = low + SERVICE_UNIT
-    hire = {t.id: int(math.ceil(unit * max(1.0, hire_money(t)))) for t in hires}
+    hire = {t.id: int(math.ceil(unit * max(1.0, (money or {}).get(t.id, hire_money(t))))) for t in hires}
     top = max(hire.values())
     out = [v + top + low if s.priority <= 3 else v for v, s in zip(values, stops)]
     total = sum(out) + sum(hire.values())
@@ -1388,14 +1499,14 @@ def _drop_penalties(values: list[int], w: ScenarioWeights, extra: int = 0) -> li
     return [v * mult for v in values]
 
 
-def _repair_weights(stops: list[DispatchStop], ks: set[int], cfg: DispatchConfig, trucks=()) -> dict[int, int]:
+def _repair_weights(stops: list[DispatchStop], ks: set[int], cfg: DispatchConfig, trucks=(), depot=None) -> dict[int, int]:
     """Small weights that rank the stops ``ks`` the way their service values do (the repack's
     phase 1 maximises them; the full strict values would not fit CP-SAT's objective). With trucks
     to rent (the hire suggestion) every P1-P3 weight carries the dearest rented truck's small tier
     (_hire_repair_weights) on top: phase 1 opens a rented truck for P1-P3 stops, never for P4/P5."""
     if not ks:
         return {}
-    small = _hire_repair_weights(stops, cfg, trucks)
+    small = _hire_repair_weights(stops, cfg, trucks, depot)
     top = max(small.values(), default=0)
     if cfg.strict_priorities:
         w = _strict_weights(Counter(stops[k].priority for k in ks), hire_top=top)
@@ -1423,14 +1534,17 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
     reports it (the routing model can only bound the return time from the shift start). On a truck
     with frozen loads both count only NEW overtime, after the later of its day start + overtime_after
     and its last frozen return (load_repack.overtime_bound_s, audit E4). The exact OMR rates ride
-    along, so the RECOMMENDED score's money equals the reported costs (costing.py)."""
+    along, so the RECOMMENDED score's money equals the reported costs (costing.py). A truck whose
+    driver is paid by the day gets the search's tie-breaker apart from its money (tie_m, tie_span:
+    _search_km_rate and the hourly rate on its span, never in score().operating)."""
     cfg = req.config
     w = SCENARIOS[name]
+    tie_km = _tie_km_rate(req)
     # Trucks to rent (the hire suggestion): their hire tier with the service values (score) and on the
     # repack's small phase-1 weights - search only, never money.
     use_margin = cfg.use_margin and bool(stops) and all(s.margin is not None for s in stops)
-    _, _, tier = _service_and_hire(stops, cfg, use_margin, req.trucks)
-    small = _hire_repair_weights(stops, cfg, req.trucks)
+    _, _, tier = _service_and_hire(stops, cfg, use_margin, req.trucks, req.depot)
+    small = _hire_repair_weights(stops, cfg, req.trucks, req.depot)
     trucks = {
         td.idx: LR.TruckPrice(
             # A truck with frozen loads is already out today: no "open a truck" cost again, in any
@@ -1438,8 +1552,11 @@ def _pricing(name: str, req: DispatchRequest, tds: list[TruckDay], stops: list[D
             fixed=int(round(td.truck.fixed_cost * w.fixed * COST_SCALE)) if td.n_frozen == 0 else 0,
             trip=int(round(td.truck.trip_cost * w.trip * COST_SCALE)),
             per_m=_km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0,
-            # A driver paid by the day: its rate as driver time (no hourly pay, no overtime).
+            # A driver paid by the day: its rate as driver time (no hourly pay, no overtime) - and the
+            # search's tie-breaker on its km and time, never money (review: its stops in any order).
             driver_day=(int(round(td.truck.driver_day_cost * w.time * COST_SCALE)) if td.truck.driver_day_cost is not None else None),
+            tie_m=(_search_km_rate(td.truck, cfg, tie_km) - _km_rate_omr(td.truck, cfg)) * w.distance * COST_SCALE / 1000.0,
+            tie_span=td.truck.driver_day_cost is not None,
             hire=tier.get(td.truck.id, 0) if td.n_frozen == 0 else 0,
             hire_w=small.get(td.truck.id, 0) if td.n_frozen == 0 else 0,
         )
@@ -1515,7 +1632,7 @@ def _solve_scenario(
     m = _Model(n_stops=len(stops), reload_owner=reload_owner, vehicles=vehicles)
     N = m.n_nodes
     nv = len(vehicles)
-    values, value_warnings, tier = _service_and_hire(stops, cfg, use_margin, req.trucks)
+    values, value_warnings, tier = _service_and_hire(stops, cfg, use_margin, req.trucks, req.depot)
     # The hire tier is scaled like the drop penalties (a scenario that multiplies costs multiplies both).
     mult = _penalty_mult(values, w, sum(tier.values()))
     penalties = [v * mult for v in values]
@@ -1537,8 +1654,10 @@ def _solve_scenario(
     continuity = w.soft_prefs and cfg.change_penalty_per_stop > 0 and any(s.previous_truck_id for s in stops)
     change_units = int(round(cfg.change_penalty_per_stop * COST_SCALE))
     cost_cb: dict[tuple, int] = {}
+    # A rented or day-paid truck's km at least at the own fleet's rate: a search-only tie-breaker (_search_km_rate).
+    tie_km = _tie_km_rate(req)
     for v, td in enumerate(vehicles):
-        rate = 1.0 if w.pure_distance else _km_rate_omr(td.truck, cfg) * w.distance * COST_SCALE / 1000.0
+        rate = 1.0 if w.pure_distance else _search_km_rate(td.truck, cfg, tie_km) * w.distance * COST_SCALE / 1000.0
         trip_units = 0 if w.pure_distance else int(round(td.truck.trip_cost * w.trip * COST_SCALE))
         key = (int(round(rate * 1000)), trip_units, td.truck.id if continuity else None)
         if key not in cost_cb:
@@ -1640,12 +1759,14 @@ def _solve_scenario(
         tdim.CumulVar(end).SetRange(td.earliest_depart_s, end_max)
         if td.shift_anchor_s is None:
             tdim.SetSpanUpperBoundForVehicle(span_max, v)
-        if time_coeff and td.truck.driver_day_cost is None:
+        if time_coeff:
             # Driver pay = the whole truck day (costing.py): the route's span, and for a truck with
             # frozen loads also the time from its last frozen return to the first new departure
-            # (turnaround and waiting are paid too), i.e. last return - last frozen return.
+            # (turnaround and waiting are paid too), i.e. last return - last frozen return. A driver
+            # paid by the day costs no hourly pay: its span is priced alike as the search's
+            # tie-breaker only (a short day, room for its next load; never money).
             tdim.SetSpanCostCoefficientForVehicle(time_coeff, v)
-            if td.frozen_return_s is not None:
+            if td.frozen_return_s is not None and td.truck.driver_day_cost is None:
                 tdim.SetCumulVarSoftUpperBound(start, td.frozen_return_s, time_coeff)
         if ot_coeff and cfg.overtime_after_min is not None and td.truck.driver_day_cost is None:
             # Audit E4 (owner decision 14): only NEW overtime costs. A truck with frozen loads pays
@@ -3527,13 +3648,14 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
 _GOALS = {
     # Service first in every goal: the stops left out and the rented trucks' hire tier (Score.service).
     # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
-    "RECOMMENDED": lambda sc: (sc.service, sc.cost),
+    # The search's tie-breaker on day-paid trucks (Score.tie, never money) after the cost itself.
+    "RECOMMENDED": lambda sc: (sc.service, sc.cost + sc.tie),
     # fewest trucks, then loads, then operating cost (like its search, it ignores preferences).
     # Physical trucks (PR7, B3): a truck with a frozen load counts whether or not it gets new loads,
     # so putting new loads on it never looks like one truck more than opening a fresh one.
-    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost),
+    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost + sc.tie),
     # fewest km, then the RECOMMENDED objective
-    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost),
+    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost + sc.tie),
 }
 
 
@@ -3597,7 +3719,7 @@ def _stage_ctx(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tru
                drops: list[UnservedStop]) -> _StageCtx:
     cfg = req.config
     use_margin = cfg.use_margin and all(s.margin is not None for s in solvable)
-    values, value_warnings = _service_values(solvable, cfg, use_margin, req.trucks)
+    values, value_warnings = _service_values(solvable, cfg, use_margin, req.trucks, req.depot)
     day = LR.Day(stops=solvable, trucks=[td for td in tds if td.usable], D=mx.distance_m, T=mx.duration_s,
                  shift_max_s=cfg.shift_max_min * 60, reload_s=cfg.reload_min * 60,
                  loading_s_per_case=cfg.loading_min_per_case * 60, values=values,
@@ -3712,12 +3834,12 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     sources = [LR.Source(n, _timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx)) for n, sc in raw.items()]
     carried = {src.name: {k for loads in src.plan.values() for tl in loads for k in tl.stops} for src in sources}
     left_out = set(range(n_stops)) - set.intersection(*carried.values()) if carried else set()
-    optional = _repair_weights(solvable, left_out, cfg, req.trucks) if left_out else None
+    optional = _repair_weights(solvable, left_out, cfg, req.trucks, req.depot) if left_out else None
     rec_pricing = ctx.rec_pricing
     goals = _stage_goals(raw) if raw else []
     cap = repack_cap if repack_cap is not None else min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
-    fit_weights = _repair_weights(solvable, set(range(n_stops)), cfg, req.trucks)
+    fit_weights = _repair_weights(solvable, set(range(n_stops)), cfg, req.trucks, req.depot)
 
     def fallback(why: str) -> None:
         if pv_plan:
@@ -3740,7 +3862,7 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             pv_job = dict(day=ctx.day, score_pricing=rec_pricing, plan=pv_plan,
                           gaps={td.idx: _approx_gap_s(cfg, td) for td in ctx.day.trucks},
                           goals=[(g, rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable)) for g in pv_goals],
-                          optional=_repair_weights(solvable, set(range(n_stops)) - pv_carried, cfg, req.trucks) or None,
+                          optional=_repair_weights(solvable, set(range(n_stops)) - pv_carried, cfg, req.trucks, req.depot) or None,
                           cap_s=cap, budget_s=pv_budget, fit_weights=fit_weights)
         else:
             pv.report.update(status="NOT_CHOSEN", reason="OUT_OF_TIME")  # type: ignore[union-attr]

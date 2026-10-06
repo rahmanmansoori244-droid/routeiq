@@ -26,7 +26,7 @@ import { applyScenario, applyWeightChanges, persistDispatchResult, retimeSameDay
 import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
-import type { SolveTicket } from '../dispatch/solve-admission';
+import { PREEMPT_RETRY, type SolveTicket } from '../dispatch/solve-admission';
 import { fmtSearchTime, searchLeadMin, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
 import { startHireCheckAfterPlan } from '../dispatch/hire-whatif';
@@ -42,13 +42,11 @@ export const HEARTBEAT_MS = 30_000;
 /**
  * A job that may meet a preempted hire check still on the optimizer (SolveTicket.mayMeetBusy: it took
  * the check's slot, or started soon after a preemption, solve-admission.ts) takes the optimizer's
- * "busy" answer again every `settleMs` until the optimizer has room, for up to `maxWaitMs` (review of
- * the hire branch: three tries 1.5 s apart failed the dispatcher's plan while the cancelled check still
- * fetched its road matrix; the solver now abandons that at once, and the wait covers the rest). One
- * that took the check's slot waits `settleMs` before its first call. Any other job fails on "busy" at
- * once, as before. Mutable for the tests.
+ * "busy" answer again every `settleMs` until the optimizer has room, for up to `maxWaitMs`
+ * (solve-admission.ts PREEMPT_RETRY, shared with the hire check's what-if). One that took the check's
+ * slot waits `settleMs` before its first call. Any other job fails on "busy" at once, as before.
  */
-export const PREEMPT_RETRY = { settleMs: 1_500, maxWaitMs: 90_000 };
+export { PREEMPT_RETRY };
 const pause = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** The jobs this process is running, by job id: the shutdown handler fails them (shutdown.ts). */

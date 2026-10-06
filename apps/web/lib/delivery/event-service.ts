@@ -25,6 +25,7 @@ import { completeLoadAsDriver } from '../dispatch/plan-service';
 import { isLockBusy, PlanBusyError, setLockTimeout } from '../dispatch/plan-locks';
 import { distanceM, readLoadOrigin, readTruckSnapshot } from '../dispatch/snapshots';
 import { DEFAULT_TZ, dateOnly, isoOf, zonedDayStart } from '../dispatch/time';
+import { shownTruckCode } from '../dispatch/hire';
 import { driverActor } from '../driver-link/actor';
 import { truckDayLoads, type TruckDayLoad } from '../driver-link/service';
 import type { DriverActionResult, DriverResults, NotDeliveredReasonName, StopResult } from '../driver-link/manifest-types';
@@ -139,7 +140,7 @@ export interface DayFacts {
 export async function dayFacts(ctx: Pick<DriverWriteContext, 'tenantId' | 'truckId' | 'date' | 'link'>, db: Db = prisma): Promise<DayFacts> {
   const [loads, truck, cfg] = await Promise.all([
     truckDayLoads(db, ctx.tenantId, ctx.truckId, ctx.date),
-    db.truck.findFirst({ where: { id: ctx.truckId, tenantId: ctx.tenantId }, select: { code: true } }),
+    db.truck.findFirst({ where: { id: ctx.truckId, tenantId: ctx.tenantId }, select: { code: true, onlyOnDate: true } }),
     db.tenantConfig.findFirst({ where: { tenantId: ctx.tenantId }, select: { timezone: true, geofenceRadiusM: true, photoProofRequired: true } }),
   ]);
   const tz = cfg?.timezone || DEFAULT_TZ;
@@ -152,7 +153,8 @@ export async function dayFacts(ctx: Pick<DriverWriteContext, 'tenantId' | 'truck
   }
   return {
     loads,
-    truckCode: truck?.code ?? '',
+    // The plate it drove with that day (a hired truck whose plate a later day's truck took; hire.ts shownTruckCode).
+    truckCode: truck ? shownTruckCode(null, truck) : '',
     radiusM: Math.min(500, Math.max(50, cfg?.geofenceRadiusM ?? 100)),
     photoRequired: cfg?.photoProofRequired ?? true,
     tz,
@@ -776,7 +778,8 @@ export async function maybeCompleteLoad(tenantId: string, truckId: string, date:
     let who: CompletionActor;
     if (actor?.userId) who = { userId: actor.userId, label: actor.label };
     else {
-      const truck = facts?.truckCode ?? (await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true } }))?.code ?? '';
+      const row = facts ? null : await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { code: true, onlyOnDate: true } });
+      const truck = facts?.truckCode ?? (row ? shownTruckCode(null, row) : '');
       who = { userId: null, label: actor?.label ?? `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` };
     }
     const r = await completeLoadAsDriver(tenantId, { runId: load.runId, loadId: load.id, depotId: load.depotId, date }, who);
@@ -821,7 +824,8 @@ export async function completeReturnedLoads(now: Date = new Date()): Promise<{ c
     const loads = await truckDayLoads(prisma, b.tenantId, b.truckId, date);
     const load = loads.find((l) => l.loadNo === b.loadNo);
     if (!load || load.status !== 'DISPATCHED') continue;
-    const truck = (await prisma.truck.findFirst({ where: { id: b.truckId, tenantId: b.tenantId }, select: { code: true } }))?.code ?? '';
+    const row = await prisma.truck.findFirst({ where: { id: b.truckId, tenantId: b.tenantId }, select: { code: true, onlyOnDate: true } });
+    const truck = row ? shownTruckCode(null, row) : '';
     if (await maybeCompleteLoad(b.tenantId, b.truckId, date, b.loadNo, undefined, { userId: null, label: `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` })) completed++;
   }
   return { completed };

@@ -37,11 +37,24 @@ vi.mock('@/lib/dispatch/start-optimize', async (importOriginal) => ({
 import { callDispatchSolver, SolverError } from '@/lib/solver-client';
 import { applyScenario, buildDispatchRequest, createNextVersionTx, persistDispatchResult, type BuiltRequest } from '@/lib/dispatch/plan-service';
 import { replan, replanRefusal } from '@/lib/dispatch/start-optimize';
-import { basisFingerprint, cancelHireChecksOfDay, failLostHireChecks, hireCheckKey, hireView, retireOneDayTrucks, startHireCheck, startHireCheckAfterPlan, type HireBasis } from '@/lib/dispatch/hire-whatif';
+import {
+  activeHireJobs,
+  basisFingerprint,
+  cancelHireChecksOfDay,
+  failLostHireChecks,
+  hireCheckKey,
+  hireView,
+  rentedOnDay,
+  retireOneDayTrucks,
+  startHireCheck,
+  startHireCheckAfterPlan,
+  type HireBasis,
+} from '@/lib/dispatch/hire-whatif';
 import { applyHireSuggestion, withRentedTrucks } from '@/lib/dispatch/hire-use';
 import { setHiredTruck } from '@/lib/dispatch/hired-truck';
 import { summarizeHire, virtualHireId } from '@/lib/dispatch/hire';
-import { solveAdmission } from '@/lib/dispatch/solve-admission';
+import { PREEMPT_RETRY, solveAdmission, type SolveTicket } from '@/lib/dispatch/solve-admission';
+import { failJobsForShutdown } from '@/lib/jobs/shutdown';
 import { todayIso } from '@/lib/dispatch/time';
 
 const T = 'tA';
@@ -220,7 +233,8 @@ describe('the what-if (startHireCheck)', () => {
     expect(r).toMatchObject({ started: false, reason: 'NOTHING_LEFT' });
     expect((r as { message: string }).message).toMatch(/^Nothing is left out for lack of trucks any more/);
     expect(callDispatchSolver).not.toHaveBeenCalled();
-    expect(tables.hireSuggestion ?? []).toEqual([]);
+    // Third review: recorded (never run), so the box stays quiet after a restart too.
+    expect((tables.hireSuggestion ?? []).map((h) => [h.status, h.errorJson?.reason])).toEqual([['CANCELLED', 'NOTHING_LEFT']]);
     // The box stops offering the check for this plan.
     expect(await hireView(T, 'P1')).toMatchObject({ short: false });
   });
@@ -266,6 +280,8 @@ function dispatcherSolve(tenantId: string) {
 }
 afterEach(() => {
   for (const t of held.splice(0)) t.release();
+  // The re-plan way of Use this plan hands its admission ticket to the re-plan (mocked here).
+  for (const c of vi.mocked(replan).mock.calls) (c[10] as { ticket?: SolveTicket } | undefined)?.ticket?.release();
 });
 
 describe('the what-if (review of the hire branch)', () => {
@@ -626,6 +642,223 @@ describe('"Use this plan" (review of the hire branch)', () => {
     planApplied();
     await applyHireSuggestion(T, 'P1', 'HS1', user, null);
     expect(row('hireSuggestion', 'HS2').status).toBe('CANCELLED');
+  });
+});
+
+describe('third review of the hire branch', () => {
+  function planApplied() {
+    vi.mocked(createNextVersionTx).mockResolvedValue({ child: { id: 'P2', version: 2 }, frozenLoadsCarried: 1, newLoadId: new Map([['L1', 'L1-copy']]) } as never);
+    vi.mocked(persistDispatchResult).mockResolvedValue(new Map([['RECOMMENDED', 'SC2']]));
+  }
+  /** The advisory lock keys taken, in order (the fake logs the statements without their values). */
+  function lockKeys(): { keys: string[]; stop: () => void } {
+    const keys: string[] = [];
+    const orig = fakePrisma.$queryRaw;
+    fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[]) => {
+      if (/pg_advisory_xact_lock/.test(strings.join('?'))) keys.push(String(values[0]).split(':')[0]!);
+      return orig(strings, ...values);
+    };
+    return { keys, stop: () => (fakePrisma.$queryRaw = orig) };
+  }
+
+  it('the check keeps the daily driver day rate it was computed with; a rate changed since re-plans the day (review)', async () => {
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built(), settings: { dailyDriverDayRate: 12.5 } as never }));
+    vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    const s = await settled((r as { suggestionId: string }).suggestionId);
+    expect((s.basisJson as HireBasis).dayRate).toBe(12.5);
+    // A check made at 10 OMR; the admin then sets 15: Use this plan re-plans with the rate of now.
+    finishedSuggestion();
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built(), settings: { dailyDriverDayRate: 15 } as never }));
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    planApplied();
+    const used = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(used.body).toMatchObject({ applied: 'REPLAN', why: ['the daily driver day rate was changed'] });
+    expect(persistDispatchResult).not.toHaveBeenCalled();
+  });
+
+  it("re-plan way: the trucks are rented, and the re-plan's questions asked, as the hire option is now (review)", async () => {
+    finishedSuggestion();
+    // After the check: the 3-ton's km charge is cleared (fuel in the hire) and the 10-ton gets a payload.
+    row('hireOption', 'o3').costPerKm = null;
+    row('hireOption', 'o10').payloadKg = 10_000;
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r.body).toMatchObject({ applied: 'REPLAN' });
+    const probe = vi.mocked(replanRefusal).mock.calls[0]![2];
+    expect(probe.request.trucks.find((t) => t.id === virtualHireId('o10', 1))).toMatchObject({ capacity_kg: 10_000, bays: 12, fixed_cost: 50 });
+    expect(probe.request.trucks.find((t) => t.id === virtualHireId('o3', 1))).toMatchObject({ cost_per_km: 0, km_per_litre: null });
+    const three = tables.truck!.find((t) => t.hireOptionId === 'o3')!;
+    expect(three).toMatchObject({ code: 'HIRE-3T-0710-1', costPerKm: 0, capacityWeightKg: 0 });
+    expect(tables.truck!.find((t) => t.hireOptionId === 'o10' && t.id !== 'H0')).toMatchObject({ capacityWeightKg: 10_000 });
+  });
+
+  it('nothing changed when pressed, but the day changes before the plan is applied: decided again under the locks, re-planned (review)', async () => {
+    finishedSuggestion();
+    planApplied();
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    // A colleague brings B forward to tomorrow while Use this plan is being pressed.
+    let builds = 0;
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => (++builds === 1 ? built() : built([STOPS[0]!, STOPS[2]!])));
+    const locks = lockKeys();
+    try {
+      const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+      expect(r.body).toMatchObject({ applied: 'REPLAN', why: ['the orders, trucks, loads or settings of the day changed while the plan was being applied'] });
+      expect(createNextVersionTx).not.toHaveBeenCalled();
+      expect(persistDispatchResult).not.toHaveBeenCalled();
+      // Under the intake lock first (Bring forward, a late order and a file take it), then the hire
+      // codes, then the day - the order every other writer keeps.
+      expect(locks.keys.slice(0, 3)).toEqual(['intake', 'hire-codes', 'planday']);
+    } finally {
+      locks.stop();
+    }
+    // Nothing changed: applied as it is, read again under the same locks.
+    tables.truck = tables.truck!.filter((t) => t.id === 'OWN' || t.id === 'H0');
+    finishedSuggestion();
+    vi.mocked(buildDispatchRequest).mockReset().mockImplementation(async () => built());
+    for (const c of vi.mocked(replan).mock.calls) (c[10] as { ticket?: SolveTicket } | undefined)?.ticket?.release();
+    vi.mocked(replan).mockClear();
+    const again = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(again.body).toMatchObject({ applied: 'PLAN' });
+    expect(vi.mocked(buildDispatchRequest).mock.calls.length).toBe(2);
+    expect(replan).not.toHaveBeenCalled();
+  });
+
+  it("re-plan way: the optimizer's admission is asked before anything is rented (review)", async () => {
+    finishedSuggestion();
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => built([...STOPS, stop('D', 100, 1000)]));
+    // The company already runs one Quick optimization and has two waiting: its Quick queue is full.
+    dispatcherSolve(T);
+    dispatcherSolve(T);
+    dispatcherSolve(T);
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r).toMatchObject({ status: 429, body: { code: 'SOLVE_QUEUE_TENANT' } });
+    expect(r.headers?.['Retry-After']).toBeTruthy();
+    expect(tables.truck!.length).toBe(2);
+    expect(row('hireSuggestion', 'HS1').usedAt).toBeNull();
+    expect(replan).not.toHaveBeenCalled();
+    // With room: the ticket reserved before the rental is the one the re-plan starts with.
+    for (const t of held.splice(0)) t.release();
+    vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+    await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    const pre = vi.mocked(replan).mock.calls[0]![10] as { ticket?: { searchMode: string } } | undefined;
+    expect(pre?.ticket?.searchMode).toBe('QUICK');
+  });
+
+  it('a database error while a stopped check goes back to the queue never leaks its admission ticket (review)', async () => {
+    vi.mocked(callDispatchSolver).mockImplementation(
+      (_req, opts) => new Promise((_resolve, reject) => opts?.signal?.addEventListener('abort', () => reject(new SolverError('The optimization was cancelled.', 0, null, 'CANCELLED')))),
+    );
+    const orig = fakePrisma.hireSuggestion.updateMany;
+    fakePrisma.hireSuggestion.updateMany = async (a: { data?: { status?: string } }) => {
+      if (a.data?.status === 'QUEUED') throw new Error('connection reset');
+      return orig(a);
+    };
+    try {
+      const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+      const id = (r as { suggestionId: string }).suggestionId;
+      await vi.waitFor(() => expect(row('hireSuggestion', id).status).toBe('RUNNING'));
+      const b = dispatcherSolve('tB');
+      const c = dispatcherSolve('tC'); // takes the check's slot: the check goes back to the queue ... and the write fails
+      const s = await settled(id);
+      expect(s.status).toBe('FAILED');
+      b.release();
+      c.release();
+      held.length = 0;
+      expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+    } finally {
+      fakePrisma.hireSuggestion.updateMany = orig;
+    }
+  });
+
+  it('a check started while a stopped solve may still hold the optimizer takes its "busy" answer again (review)', async () => {
+    const was = { ...PREEMPT_RETRY };
+    Object.assign(PREEMPT_RETRY, { settleMs: 10, maxWaitMs: 2_000 });
+    try {
+      // Another depot's check was stopped by a new optimization while its optimizer call ran.
+      const other = solveAdmission.reserveBackground('tZ', 'u', () => undefined, 'Z|2099-10-07');
+      if (other.ok) other.ticket.release({ abandoned: true });
+      let calls = 0;
+      vi.mocked(callDispatchSolver).mockImplementation(async (req) => {
+        if (calls++ === 0) throw new SolverError('The route optimizer is busy.', 503, null);
+        return answer(req);
+      });
+      const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+      const s = await settled((r as { suggestionId: string }).suggestionId);
+      expect(s.status).toBe('SUCCEEDED');
+      expect(calls).toBe(2);
+    } finally {
+      Object.assign(PREEMPT_RETRY, was);
+    }
+  });
+
+  it('a deploy ends the checks this process runs at once, as it ends the optimizations (review)', async () => {
+    vi.mocked(callDispatchSolver).mockImplementation(
+      (_req, opts) => new Promise((_resolve, reject) => opts?.signal?.addEventListener('abort', () => reject(new SolverError('The optimization was cancelled.', 0, null, 'CANCELLED')))),
+    );
+    const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+    const id = (r as { suggestionId: string }).suggestionId;
+    await vi.waitFor(() => expect(row('hireSuggestion', id).status).toBe('RUNNING'));
+    expect(await failJobsForShutdown(2_000)).toBe(1);
+    const s = await settled(id);
+    expect(s).toMatchObject({ status: 'FAILED', errorJson: { reason: 'SHUTDOWN' } });
+    expect(s.message).toMatch(/The server was restarted during the hire check\. Press Check hire options to run it again\./);
+    await vi.waitFor(() => expect(activeHireJobs.has(id)).toBe(false));
+    expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+    // A system ending: no request's IP on its audit row.
+    expect(tables.auditLog.filter((a) => a.action === 'HIRE_CHECK_FAILED').map((a) => a.ip)).toEqual([false]);
+  });
+
+  it("an option's max per day counts its rentals wherever the trucks are, also after the option moved depot (review)", async () => {
+    // H0 was rented from the 10-ton for the 7th at D1; the admin then moves the option to D2.
+    row('hireOption', 'o10').depotId = 'D2';
+    expect(await rentedOnDay(T, DAY)).toEqual({ o10: 1 });
+  });
+
+  it('system endings of a check (lost with its process, stopped for a new plan) record no request IP (review)', async () => {
+    const old = new Date(Date.now() - 10 * 60_000);
+    tables.hireSuggestion = [
+      { id: 'LOST', tenantId: T, runId: 'P1', status: 'RUNNING', heartbeatAt: old, createdAt: old },
+      { id: 'WAIT', tenantId: T, runId: 'P1', status: 'QUEUED', heartbeatAt: new Date(), createdAt: new Date() },
+    ];
+    await failLostHireChecks();
+    await cancelHireChecksOfDay(T, 'D1', DAY, 'Stopped: a new optimization started for this day.');
+    const rows = tables.auditLog.filter((a) => a.action === 'HIRE_CHECK_FAILED');
+    expect(rows.map((a) => a.entityId).sort()).toEqual(['LOST', 'WAIT']);
+    expect(rows.every((a) => a.ip === false)).toBe(true);
+  });
+
+  it('every order left out gone: recorded, so the box stays quiet after a restart too, and recorded once (review)', async () => {
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => built([STOPS[0]!]));
+    expect(await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN')).toMatchObject({ started: false, reason: 'NOTHING_LEFT' });
+    // A restart (or ten minutes later): the process's own notes are gone.
+    (globalThis as { __routeiqHireStarts?: Map<string, unknown> }).__routeiqHireStarts?.clear();
+    const v = await hireView(T, 'P1');
+    expect(v).toMatchObject({ short: false, checkExpected: false, suggestion: null });
+    expect(tables.hireSuggestion).toHaveLength(1);
+    expect(tables.hireSuggestion![0]).toMatchObject({ status: 'CANCELLED', errorJson: { reason: 'NOTHING_LEFT' } });
+    expect(tables.auditLog.map((a) => a.action)).toEqual(['HIRE_CHECK_FINISHED']);
+    expect(await startHireCheck(T, 'P1', user, null, 'ASKED')).toMatchObject({ started: false, reason: 'NOTHING_LEFT' });
+    expect(tables.hireSuggestion).toHaveLength(1);
+    expect(callDispatchSolver).not.toHaveBeenCalled();
+  });
+
+  it('a suggestion whose hire option was switched off is not offered, and pressing it says so plainly (review)', async () => {
+    finishedSuggestion();
+    row('hireOption', 'o3').active = false;
+    const v = await hireView(T, 'P1');
+    expect(v!.suggestion).toMatchObject({ usable: false });
+    expect(v!.suggestion!.optionNote).toBe('The 3-ton hire option was switched off or deleted since this check. Press Check hire options to check again.');
+    const r = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(r).toMatchObject({ status: 409, body: { code: 'HIRE_OPTION_GONE' } });
+    expect(String(r.body.error)).toBe('The 3-ton hire option was switched off or deleted. Check hire options again.');
+    expect(tables.truck!.length).toBe(2);
+    // The depot's last option switched off: no button to point to.
+    row('hireOption', 'o10').active = false;
+    expect((await hireView(T, 'P1'))!.suggestion!.optionNote).toBe('The 10-ton and 3-ton hire options were switched off or deleted since this check.');
+    const r2 = await applyHireSuggestion(T, 'P1', 'HS1', user, null);
+    expect(String(r2.body.error)).not.toMatch(/Check hire options/);
+    expect(String(r2.body.error)).toMatch(/A company admin can switch it on again/);
   });
 });
 

@@ -132,6 +132,23 @@ export interface CostLoad {
   durationMin: number;
   operatingCost: number;
   cost: LoadCostBreakdown | null;
+  /**
+   * Its truck's driver is paid by the day (a hired truck's casual driver, owner answer 4, 6 Oct 2026):
+   * the rate per day (its truck snapshot), paid with the truck day's first load - no paid hours. Absent
+   * or null: paid by the hour.
+   */
+  driverDayRate?: number | null;
+}
+
+/**
+ * The cost breakdown a load's cost shows on hover (the plan screen). A driver paid by the day says the
+ * day rate, paid with the truck's first load, with no paid hours or overtime (third review of the hire
+ * branch: "driver 0.00 (3:00 paid ...)" read as hourly pay at a zero rate). `dur`: minutes as h:mm.
+ */
+export function loadCostTitle(c: LoadCostBreakdown, dayRate: number | null | undefined, dur: (min: number) => string): string {
+  const head = `Fixed ${c.fixed.toFixed(2)} + trip ${c.trip.toFixed(2)} + distance ${c.distance.toFixed(2)} + fuel ${c.fuel.toFixed(2)}`;
+  if (typeof dayRate === 'number') return `${head} + driver day rate ${c.driver.toFixed(2)} (paid with the truck's first load of the day; no hours, no overtime)`;
+  return `${head} + driver ${c.driver.toFixed(2)} (${dur(c.driverPaidMin)} paid, from the truck's previous return) + overtime ${c.overtime.toFixed(2)}`;
 }
 
 /** Money of a set of loads: the breakdown of the loads that carry one, the rest as "earlier". */
@@ -162,8 +179,10 @@ export interface TruckDayRow {
   lastReturnMin: number;
   /** First departure to last return of the loads of this version. */
   spanMin: number;
-  /** Paid minutes the loads carry (whole-day policy); on-road minutes for loads costed the earlier way. */
+  /** Paid minutes the loads carry (whole-day policy); on-road minutes for loads costed the earlier way; 0 for a driver paid by the day. */
   paidMin: number;
+  /** The truck's driver is paid by the day (this rate, with its first load): no paid hours. Null: by the hour. */
+  dayRate: number | null;
   onRoadMin: number;
   driver: number;
   overtime: number;
@@ -193,7 +212,9 @@ export function truckDayRows(loads: CostLoad[]): TruckDayRow[] {
     const first = sorted[0]!;
     const last = sorted.reduce((a, l) => (l.returnMin > a.returnMin ? l : a), first);
     const spanMin = last.returnMin - first.departMin;
-    const paidMin = sorted.reduce((a, l) => a + (l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
+    // A driver paid by the day has no paid hours (third review of the hire branch).
+    const dayRate = sorted.find((l) => typeof l.driverDayRate === 'number')?.driverDayRate ?? null;
+    const paidMin = dayRate !== null ? 0 : sorted.reduce((a, l) => a + (l.cost ? l.cost.driverPaidMin : l.durationMin), 0);
     const basis = costBasisOf(sorted);
     rows.push({
       truckId,
@@ -203,6 +224,7 @@ export function truckDayRows(loads: CostLoad[]): TruckDayRow[] {
       lastReturnMin: last.returnMin,
       spanMin,
       paidMin,
+      dayRate,
       onRoadMin: sorted.reduce((a, l) => a + l.durationMin, 0),
       driver: t.driver,
       overtime: t.overtime,
@@ -213,7 +235,7 @@ export function truckDayRows(loads: CostLoad[]): TruckDayRow[] {
       earlier: t.earlier,
       total: t.total,
       basis,
-      paidVsSpanMin: basis === 'TRUCK_DAY_SPAN' && Math.abs(paidMin - spanMin) > sorted.length ? paidMin - spanMin : 0,
+      paidVsSpanMin: dayRate === null && basis === 'TRUCK_DAY_SPAN' && Math.abs(paidMin - spanMin) > sorted.length ? paidMin - spanMin : 0,
     });
   }
   return rows.sort((a, b) => a.truckCode.localeCompare(b.truckCode));

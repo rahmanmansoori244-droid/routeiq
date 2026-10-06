@@ -212,6 +212,12 @@ export interface DetailLoad {
    * ordinary truck. The dispatcher may enter its real plate (PATCH /api/dispatch/hired-trucks/:id).
    */
   oneDay?: string | null;
+  /**
+   * Its driver was paid by the day when it was planned (a hired truck's casual driver, the company's
+   * daily driver day rate; its truck snapshot): the cost and the workbook say the day rate, never paid
+   * hours (third review of the hire branch). Null / absent: paid by the hour.
+   */
+  driverDayRate?: number | null;
 }
 
 export interface DetailUnserved {
@@ -710,6 +716,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
+      // A hired truck's casual driver paid by the day, as the load was planned (its truck snapshot).
+      driverDayRate: typeof ts?.driverDayCost === 'number' ? ts.driverDayCost : null,
       // A one-day hired truck (the hire suggestion): the dispatcher may enter its real plate.
       oneDay: l.truck.onlyOnDate ? isoOf(l.truck.onlyOnDate) : null,
     };

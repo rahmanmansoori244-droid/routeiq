@@ -10,6 +10,7 @@ import {
   costTotals,
   kmLabelFor,
   loadCostFromSolver,
+  loadCostTitle,
   readLoadCost,
   summaryCostBasis,
   truckDayRows,
@@ -149,5 +150,32 @@ describe('km labels (review F18)', () => {
     expect(kmLabelFor({ distanceIsEstimated: false, estimatedLegs: 1 })).toBe('Road km (1 leg estimated)');
     expect(kmLabelFor({ distanceIsEstimated: false, estimatedLegs: 0, estimatedLoads: 2 })).toBe('Road km (2 loads partly estimated)');
     expect(kmLabelFor({ distanceIsEstimated: false })).toBe('Road km');
+  });
+});
+
+describe('a driver paid by the day (a hired truck; third review of the hire branch)', () => {
+  const dur = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
+  const first = cost({ fixed: 50, trip: 3, driver: 10, driverPaidMin: 240, paidFromMin: 360 });
+  const second = cost({ trip: 3, driver: 0, driverPaidMin: 180, paidFromMin: 600 });
+
+  it("the load's cost says the day rate, never paid hours at a strange or zero rate", () => {
+    expect(loadCostTitle(first, 10, dur)).toBe(
+      "Fixed 50.00 + trip 3.00 + distance 0.00 + fuel 0.00 + driver day rate 10.00 (paid with the truck's first load of the day; no hours, no overtime)",
+    );
+    expect(loadCostTitle(second, 10, dur)).toBe(
+      "Fixed 0.00 + trip 3.00 + distance 0.00 + fuel 0.00 + driver day rate 0.00 (paid with the truck's first load of the day; no hours, no overtime)",
+    );
+    // An hourly driver: as before.
+    expect(loadCostTitle(first, null, dur)).toBe("Fixed 50.00 + trip 3.00 + distance 0.00 + fuel 0.00 + driver 10.00 (4:00 paid, from the truck's previous return) + overtime 0.00");
+  });
+
+  it('a truck day with a day-rate driver has no paid hours; own trucks keep theirs', () => {
+    const rows = truckDayRows([
+      { ...L('h1', 1, 360, 600, first), driverDayRate: 10 },
+      { ...L('h1', 2, 630, 810, second), driverDayRate: 10 },
+      L('t1', 1, 360, 390, cost({ driver: 3, driverPaidMin: 30 })),
+    ]);
+    expect(rows.find((r) => r.truckId === 'h1')).toMatchObject({ dayRate: 10, paidMin: 0, paidVsSpanMin: 0, driver: 10, spanMin: 450 });
+    expect(rows.find((r) => r.truckId === 't1')).toMatchObject({ dayRate: null, paidMin: 30 });
   });
 });

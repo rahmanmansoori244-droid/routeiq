@@ -58,9 +58,12 @@
  *   background solve counts toward the total only, never toward the company caps (review of the hire
  *   branch: a company's own what-if was stopped for its next depot's optimization although a slot
  *   was free) - so a what-if yields only when the optimizer is really full, and then only the fewest
- *   that make room (the requester's own company's first, then the newest). A solve started within
- *   PREEMPT_SETTLE_WINDOW_MS of a preemption may still find the optimizer holding the stopped solve
- *   for a moment (SolveTicket.mayMeetBusy): its job takes the optimizer's "busy" answer again.
+ *   that make room (the requester's own company's first, then one never stopped before - a check stopped
+ *   once and queued again is not the first stopped again (third review of the hire branch) - then the
+ *   newest). A solve started within PREEMPT_SETTLE_WINDOW_MS of a preemption - or of a running background
+ *   solve stopped by its own job (release({ abandoned: true }): a new optimization of its day, third
+ *   review) - may still find the optimizer holding the stopped solve for a moment (SolveTicket.
+ *   mayMeetBusy): its job, a hire check's too, takes the optimizer's "busy" answer again (PREEMPT_RETRY).
  *
  * Process memory is a valid store: the web runs as one replica (handbook 2.7). During a deploy
  * overlap two processes can each admit their own solves, so the solver also refuses more than
@@ -144,6 +147,15 @@ export interface AdmissionDenied {
  */
 export const PREEMPT_SETTLE_WINDOW_MS = 60_000;
 
+/**
+ * A solve that may meet a stopped solve still on the optimizer (SolveTicket.mayMeetBusy) takes the
+ * optimizer's "busy" answer again every `settleMs`, for up to `maxWaitMs` (dispatch-job.ts; the hire
+ * check's what-if too, hire-whatif.ts). Review of the hire branch: three tries 1.5 s apart failed the
+ * dispatcher's plan while the cancelled check still fetched its road matrix; the solver now abandons
+ * that at once, and the wait covers the rest. Mutable for the tests.
+ */
+export const PREEMPT_RETRY = { settleMs: 1_500, maxWaitMs: 90_000 };
+
 /** Background solves (hire checks) of one company waiting at most, over all its depot-days. */
 export const BACKGROUND_TENANT_WAITING = 5;
 
@@ -163,8 +175,13 @@ export interface SolveTicket {
   position(): number;
   /** The job was created: the start counts against the hourly quotas. Idempotent. */
   commit(): void;
-  /** Give the slot (or queue place) back. Idempotent; an uncommitted ticket uses no quota. */
-  release(): void;
+  /**
+   * Give the slot (or queue place) back. Idempotent; an uncommitted ticket uses no quota. `abandoned`:
+   * a running background solve stopped by its own job while its optimizer call may still run (third
+   * review of the hire branch): like a preemption, the solves started in the next moment may meet the
+   * optimizer's "busy" answer and retry it.
+   */
+  release(opts?: { abandoned?: boolean }): void;
   /** A background ticket whose slot a dispatcher's solve took (it is released; its solve must stop). */
   readonly preempted: boolean;
   /**
@@ -197,6 +214,8 @@ interface TicketState {
   background: boolean;
   /** A background solve's key (the hire check's depot-day): one of each may wait. */
   bgKey?: string;
+  /** Times its check was stopped for a dispatcher before (queued again once): it is stopped last. */
+  preemptions: number;
   preempted: boolean;
   preemptedOthers: boolean;
   mayMeetBusy: boolean;
@@ -280,6 +299,7 @@ export class SolveAdmission {
       resolve,
       promise,
       background: false,
+      preemptions: 0,
       preempted: false,
       preemptedOthers: tookSlot,
       mayMeetBusy: tookSlot,
@@ -299,9 +319,16 @@ export class SolveAdmission {
    * quotas, started when a slot is free and no dispatcher's solve that can start waits for it, at most
    * one waiting per `key` (the hire check's depot-day; default the company) and BACKGROUND_TENANT_WAITING
    * per company (more: 503, the what-if is not computed). A dispatcher's solve that needs its slot takes
-   * it: the ticket is then released and `onPreempt` is called (cancel the solve).
+   * it: the ticket is then released and `onPreempt` is called (cancel the solve). `preemptedBefore`: the
+   * check was stopped that many times already (it is queued again): the others are stopped first.
    */
-  reserveBackground(tenantId: string, userId: string, onPreempt: () => void, key: string = tenantId): AdmissionResult {
+  reserveBackground(
+    tenantId: string,
+    userId: string,
+    onPreempt: () => void,
+    key: string = tenantId,
+    opts: { preemptedBefore?: number } = {},
+  ): AdmissionResult {
     const fits =
       this.fitsNow({ tenantId, mode: 'QUICK', background: true }, this.running) && !this.queue.some((q) => !q.background && this.fitsNow(q, this.running));
     if (!fits) {
@@ -327,6 +354,7 @@ export class SolveAdmission {
       promise,
       background: true,
       bgKey: key,
+      preemptions: opts.preemptedBefore ?? 0,
       preempted: false,
       preemptedOthers: false,
       mayMeetBusy: false,
@@ -396,10 +424,13 @@ export class SolveAdmission {
           for (const k of [userKey, tenantKey]) self.starts.set(k, [...self.window(k), t]);
         }
       },
-      release: () => {
+      release: (opts?: { abandoned?: boolean }) => {
         if (st.released) return;
         st.released = true;
         if (!st.committed) unpend();
+        // A running background solve stopped by its own job: the optimizer frees its slot a moment
+        // later, as after a preemption (the next solves may meet "busy" and retry it).
+        if (opts?.abandoned && st.background && st.running && !st.preempted) self.lastPreemptAt = self.now();
         if (st.running) {
           self.running.delete(st);
         } else {
@@ -515,8 +546,10 @@ export class SolveAdmission {
 
   private start(st: TicketState) {
     st.running = true;
-    // A preempted solve may still hold its optimizer slot for a moment: this one retries "busy".
-    if (!st.background && this.now() - this.lastPreemptAt < PREEMPT_SETTLE_WINDOW_MS) st.mayMeetBusy = true;
+    // A preempted (or abandoned) solve may still hold its optimizer slot for a moment: this one - a
+    // dispatcher's or a hire check's - retries "busy" (third review of the hire branch: a check started
+    // in that moment failed on its first "busy" and was lost).
+    if (this.now() - this.lastPreemptAt < PREEMPT_SETTLE_WINDOW_MS) st.mayMeetBusy = true;
     this.running.add(st);
     st.resolve();
   }
@@ -553,14 +586,18 @@ export class SolveAdmission {
    * Make room for a dispatcher's solve by preempting running background solves, only when that is
    * enough for it to start, and only the fewest that are (review of the hire branch: the newest were
    * added one by one and all of them stopped, another company's what-if too when the requester's own
-   * was enough): the smallest set, tried the requester's own company's first, then the newest. True
-   * when it fits now. The preempted tickets are released and their onPreempt called (the what-if
-   * cancels its optimizer call).
+   * was enough): the smallest set, tried the requester's own company's first, then the checks never
+   * stopped before (third review: a check queued again after a stop was the newest and was stopped
+   * again, for good), then the newest. True when it fits now. The preempted tickets are released and
+   * their onPreempt called (the what-if cancels its optimizer call).
    */
   private preemptFor(st: { tenantId: string; mode: SearchMode }): boolean {
     const bgs = [...this.running]
       .filter((r) => r.background)
-      .sort((a, b) => Number(b.tenantId === st.tenantId) - Number(a.tenantId === st.tenantId) || b.seq - a.seq);
+      .sort(
+        (a, b) =>
+          Number(b.tenantId === st.tenantId) - Number(a.tenantId === st.tenantId) || a.preemptions - b.preemptions || b.seq - a.seq,
+      );
     if (!bgs.length) return false;
     for (let size = 1; size <= bgs.length; size++) {
       for (const set of subsets(bgs, size)) {

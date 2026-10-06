@@ -538,7 +538,9 @@ export async function startDispatchOptimize(
  * dispatched load (409 NOTHING_TO_PLAN), no active truck (400), a job already running (409),
  * and the solve admission (429 / 503, reserved here and handed to the new version's start).
  * The new version starts as a copy of the parent's plan (createNextVersion), so a failed
- * optimization keeps the previous plan usable on it.
+ * optimization keeps the previous plan usable on it. `pre.ticket`: an admission the caller reserved
+ * already (the hire suggestion's "Use this plan" asks before it rents a truck, third review of the hire
+ * branch): used instead of reserving here, and given back on every answer that starts no job.
  */
 export async function replan(
   tenantId: string,
@@ -551,6 +553,29 @@ export async function replan(
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
   searchMode?: SearchMode,
+  pre: { ticket?: SolveTicket } = {},
+): Promise<StartResult> {
+  const handed = { done: false };
+  try {
+    return await replanInner(tenantId, runId, reason, note, user, ip, overrides, expect, clock, searchMode, pre, handed);
+  } finally {
+    if (!handed.done) pre.ticket?.release();
+  }
+}
+
+async function replanInner(
+  tenantId: string,
+  runId: string,
+  reason: 'LATE_ORDER' | 'MANUAL_ADJUSTMENT' | 'REOPTIMIZE',
+  note: string | null,
+  user: { id: string },
+  ip: string | null,
+  overrides: OptimizeOverrides,
+  expect: ExpectedDay | undefined,
+  clock: { now?: Date },
+  searchMode: SearchMode | undefined,
+  pre: { ticket?: SolveTicket },
+  handed: { done: boolean },
 ): Promise<StartResult> {
   const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!found) return { status: 404, body: { error: 'Plan not found' } };
@@ -564,7 +589,8 @@ export async function replan(
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
-    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now, searchMode });
+    handed.done = true;
+    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now, searchMode, ...(pre.ticket ? { ticket: pre.ticket } : {}) });
   }
   if (run.status === 'OPTIMIZING' || (await activeJobAnswer(runId))) {
     return { status: 409, body: { error: 'An optimization is running for this plan. Wait for it to finish.', code: 'OPTIMIZING' } };
@@ -581,7 +607,7 @@ export async function replan(
   const effectiveReason = reason === 'REOPTIMIZE' && (await pendingLateOrderIds(tenantId, run)).length ? 'LATE_ORDER' : reason;
   // Admission before the version exists: a 429 must never leave a new version behind. Reserved for
   // the search mode the new version's start then uses (the ticket carries it).
-  const adm = solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
+  const adm = pre.ticket ? { ok: true as const, ticket: pre.ticket } : solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
   if (!adm.ok) return admissionRefused(adm);
   let child;
   try {
@@ -595,6 +621,7 @@ export async function replan(
     throw e;
   }
   // The ticket is handed over: startDispatchOptimize releases it on any answer that starts no job.
+  handed.done = true;
   const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now, searchMode });
   return {
     status: res.status,

@@ -76,7 +76,7 @@ export const AUDIT_ACTIONS = {
   TEST_DATA_CLEARED: { label: 'Test data removed (Start fresh)' },
   // The hire suggestion (owner request 6 Oct 2026): which trucks to rent when the fleet cannot carry the day.
   HIRE_CHECK_STARTED: { label: 'Hire check started (a what-if with trucks to rent)' },
-  HIRE_CHECK_FINISHED: { label: 'Hire check finished (suggestion ready)' },
+  HIRE_CHECK_FINISHED: { label: 'Hire check finished (suggestion ready, or nothing left out to hire for)' },
   HIRE_CHECK_FAILED: { label: 'Hire check failed or stopped' },
   HIRE_SUGGESTION_USED: { label: 'Hire suggestion used ("Use this plan")' },
   HIRED_TRUCKS_ADDED: { label: 'One-day hired trucks added' },

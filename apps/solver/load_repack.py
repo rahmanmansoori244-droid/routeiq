@@ -140,10 +140,22 @@ class TruckPrice:
     # same rank on the repack's small phase-1 weights (dispatch_solver._hire_repair_weights).
     hire: int = 0
     hire_w: int = 0
+    # The search's tie-breaker on a truck to rent or one whose driver is paid by the day (third review
+    # of the hire branch: with its fuel in the hire it cost nothing per km or per hour, and its stops were
+    # left in any order): tie_m per metre on top of per_m, and tie_span (a day-paid driver) - its
+    # paid-day seconds at Pricing.span.
+    # Never money: score() keeps them apart (Score.tie), the reported costs are the real ones.
+    tie_m: float = 0.0
+    tie_span: bool = False
 
     @property
     def hourly(self) -> bool:
         return self.driver_day is None
+
+    @property
+    def span_priced(self) -> bool:
+        """Its day's length is priced in the search: an hourly driver's pay, or the tie-breaker."""
+        return self.driver_day is None or self.tie_span
 
 
 @dataclass(frozen=True)
@@ -601,7 +613,7 @@ def _truck_lp_solve(pywraplp, day: Day, td: "TruckDay", loads: list[Load], prici
     # driver paid by the day (TruckPrice.driver_day): no pay per second, no overtime.
     price = pricing.trucks.get(td.idx)
     hourly = price is None or price.hourly
-    per_s = pricing.span if hourly else 0
+    per_s = pricing.span if price is None or price.span_priced else 0  # a day-paid driver: the tie-breaker
     span = per_s + _TIE
     obj.SetCoefficient(last, obj.GetCoefficient(last) + span)
     paid_first = per_s if td.shift_anchor_s is None else 0
@@ -808,6 +820,9 @@ class Score:
     # The hire tier of the rented trucks the plan uses (the hire suggestion's what-if; search only,
     # never money): ranked with the service, between the P1-P3 and the P4/P5 orders (TruckPrice.hire).
     hire: int = 0
+    # The search's tie-breaker on day-paid trucks' km and time (TruckPrice.tie_m / tie_span): never
+    # money and never in `cost`, compared after it (dispatch_solver._GOALS).
+    tie: int = 0
 
     @property
     def service(self) -> int:
@@ -816,7 +831,7 @@ class Score:
 
     @property
     def objective(self) -> int:
-        return self.unserved + self.hire + self.cost
+        return self.unserved + self.hire + self.cost + self.tie
 
 
 def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
@@ -825,7 +840,7 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
     cost model, costing.truck_day_costs - fixed, trip, distance and fuel, driver pay for the whole
     truck day and overtime - so it is exactly what the plan reports (dispatch_solver._build_scenario)."""
     served: set[int] = set()
-    soft = n_loads = metres = hire = 0
+    soft = n_loads = metres = hire = tie = 0
     used: set[int] = set(day.frozen_trucks)
     money = 0.0
     rates = pricing.day_rates()
@@ -842,6 +857,8 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
             n_loads += 1
             m = day.metres(tl.stops)
             metres += m
+            if price is not None and price.tie_m:
+                tie += int(round(price.tie_m * m))
             timings.append(costing.LoadTiming(depart_s=tl.depart_s, return_s=tl.return_s, km=m / 1000.0))
             for k, start in zip(tl.stops, tl.starts):
                 served.add(k)
@@ -850,9 +867,13 @@ def score(day: Day, pricing: Pricing, plan: TimedPlan) -> Score:
                     soft += pricing.change
         money += costing.truck_day_costs(pricing.truck_rates(idx), rates, timings, anchor_s=td.shift_anchor_s,
                                          frozen_return_s=td.frozen_return_s).total
+        if price is not None and price.tie_span and pricing.span:
+            # Its paid day as an hourly driver's would run (from its last frozen return, if any).
+            first = td.frozen_return_s if td.shift_anchor_s is not None and td.frozen_return_s is not None else min(tl.depart_s for tl in loads)
+            tie += pricing.span * max(0, max(tl.return_s for tl in loads) - first)
     op = costing.to_units(money)
     unserved = sum(v for k, v in enumerate(day.values) if k not in served)
-    return Score(unserved=unserved, cost=op + soft, trucks=len(used), loads=n_loads, metres=metres, operating=op, hire=hire)
+    return Score(unserved=unserved, cost=op + soft, trucks=len(used), loads=n_loads, metres=metres, operating=op, hire=hire, tie=tie)
 
 
 # --------------------------------------------------------------------------------------------
@@ -1018,13 +1039,14 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
         if day_cost:
             cost_terms.append(day_cost * used)
         for j in js:
-            c = price.trip + int(round(price.per_m * F[j].metres))
+            c = price.trip + int(round((price.per_m + price.tie_m) * F[j].metres))
             if pricing.change:
                 c += pricing.change * sum(1 for k in F[j].stops if _moved(day, k, td))
             if c:
                 cost_terms.append(c * x[j, td.idx])
-        if pricing.span and price.hourly:
-            # Paid truck day (costing.py): first departure -> last return. A truck with frozen loads
+        if pricing.span and price.span_priced:
+            # Paid truck day (costing.py): first departure -> last return (a day-paid driver's: the
+            # search's tie-breaker, TruckPrice.tie_span). A truck with frozen loads
             # started its day earlier; the part added here runs from its last frozen return, which
             # every new load (and its turnaround) comes after.
             sp = m.NewIntVar(0, HORIZON_S, "")

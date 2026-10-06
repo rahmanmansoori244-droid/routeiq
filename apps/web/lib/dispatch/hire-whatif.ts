@@ -19,7 +19,14 @@
  * slot looks at its version again when it gets one: a version no longer in use (or another plan option
  * in use) is not computed. Each depot-day keeps one check waiting for the optimizer (hireCheckKey; review:
  * three depots optimized in quick succession lost the third one's check), and none is run when every
- * order the plan left out is gone from the day (NOTHING_LEFT).
+ * order the plan left out is gone from the day (NOTHING_LEFT, recorded as a check that did not run).
+ *
+ * Third review of the hire branch: a check queued again after a dispatcher took its slot is not the
+ * first one stopped again (and its new ticket is held at once, never leaked by a failed write); a check
+ * stopped while its optimizer call runs marks its slot abandoned, so the next solves - a check's too -
+ * retry the optimizer's "busy" answer for a moment (PREEMPT_RETRY); a deploy ends the checks this
+ * process runs at once (failHireChecksForShutdown); system endings are audited with no request IP;
+ * the box says when a suggestion's hire option was switched off.
  */
 import { createHash } from 'node:crypto';
 import type { HireSuggestion, Prisma } from '@prisma/client';
@@ -27,8 +34,9 @@ import type { DispatchRequest, DispatchScenario } from '@routeiq/shared-types';
 import { prisma } from '../db';
 import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
-import { solveAdmission, type SolveTicket } from './solve-admission';
-import { buildDispatchRequest, isDispatchDetails, PlanError } from './plan-service';
+import { WORKERS_UNAVAILABLE } from '../planner-unavailable';
+import { PREEMPT_RETRY, solveAdmission, type SolveTicket } from './solve-admission';
+import { buildDispatchRequest, isDispatchDetails, PlanError, type BuiltRequest } from './plan-service';
 import { isSupersededRun } from './plan-status';
 import { orderIdOf } from './split';
 import {
@@ -91,6 +99,12 @@ export interface HireBasis {
   options: HireOptionFacts[];
   /** One-day trucks already rented from each option for the day (their max per day counts them). */
   alreadyRented: Record<string, number>;
+  /**
+   * The company's daily driver day rate the trucks to rent were priced with (third review of the hire
+   * branch: a rate changed since was never seen - the trucks to rent are not in the fingerprint). Absent
+   * on an older row: the request's trucks to rent carry it (driver_day_cost).
+   */
+  dayRate?: number;
 }
 
 export function basisFingerprint(request: DispatchRequest, frozenLoadIds: readonly string[] | undefined): string {
@@ -112,12 +126,31 @@ export async function depotHireOptions(tenantId: string, depotId: string, db: Pr
   }));
 }
 
-/** One-day trucks rented from each option for a depot's day (active ones). */
-export async function rentedOnDay(tenantId: string, depotId: string, runDate: Date, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<Record<string, number>> {
-  const rows = await db.truck.findMany({ where: { tenantId, depotId, onlyOnDate: runDate, active: true, hireOptionId: { not: null } }, select: { hireOptionId: true } });
+/**
+ * One-day trucks rented from each option for a day (active ones), by option alone - wherever the truck
+ * is (third review of the hire branch: counted by the truck's depot, an option moved to another depot
+ * could be rented past its max per day). The hire-options routes keep the link under a live rental.
+ */
+export async function rentedOnDay(tenantId: string, runDate: Date, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<Record<string, number>> {
+  const rows = await db.truck.findMany({ where: { tenantId, onlyOnDate: runDate, active: true, hireOptionId: { not: null } }, select: { hireOptionId: true } });
   const out: Record<string, number> = {};
   for (const r of rows) if (r.hireOptionId) out[r.hireOptionId] = (out[r.hireOptionId] ?? 0) + 1;
   return out;
+}
+
+/**
+ * The days (ISO, the company's today or later) that one-day trucks are hired from a hire option for. While
+ * there is one, the option is neither deleted nor moved to another depot (hire-options routes; third
+ * review of the hire branch: the deleted link or the other depot no longer counted the rented truck, so
+ * the option could be rented past its max per day). Switching it off stays possible.
+ */
+export async function liveRentalDays(tenantId: string, optionId: string): Promise<string[]> {
+  const today = await companyToday(tenantId);
+  const rows = await prisma.truck.findMany({
+    where: { tenantId, hireOptionId: optionId, active: true, onlyOnDate: { gte: new Date(`${today}T00:00:00.000Z`) } },
+    select: { onlyOnDate: true },
+  });
+  return [...new Set(rows.flatMap((r) => (r.onlyOnDate ? [isoOf(r.onlyOnDate)] : [])))].sort();
 }
 
 /** The company's today (its time zone). */
@@ -195,11 +228,12 @@ interface Attempt {
  * Reserve a background solve for one attempt of a what-if: a dispatcher's solve that needs its slot
  * aborts the attempt (onPreempt); the job's own switch (`job`: a new optimization of the day) aborts
  * it too. Null when the optimizer cannot take one more waiting check (one per depot-day, `key`).
+ * `preemptedBefore`: the check was stopped for a dispatcher that many times (it is queued again).
  */
-function reserveAttempt(tenantId: string, userId: string, job: AbortController, key: string): Attempt | null {
+function reserveAttempt(tenantId: string, userId: string, job: AbortController, key: string, preemptedBefore = 0): Attempt | null {
   const attempt = new AbortController();
   const follow = () => attempt.abort((job.signal as AbortSignal & { reason?: unknown }).reason);
-  const adm = solveAdmission.reserveBackground(tenantId, userId, () => attempt.abort(), key);
+  const adm = solveAdmission.reserveBackground(tenantId, userId, () => attempt.abort(), key, { preemptedBefore });
   if (!adm.ok) return null;
   if (job.signal.aborted) follow();
   else job.signal.addEventListener('abort', follow, { once: true });
@@ -260,11 +294,15 @@ export async function startHireCheck(
   if (!need.leftOut.orders) {
     if (need.low.orders) return skip('NOT_SHORT', lowPriorityText(need.low.orders));
     noteSkipped(runId, 'NOTHING_LEFT', NOTHING_LEFT_TEXT);
+    // Third review of the hire branch: kept in the database, never only in process memory (a restart or
+    // ten minutes brought the box back saying no check had run).
+    await recordNothingLeft(tenantId, run, { builtAt, built, baseUnserved, baseOrders, withPallets, options }, user.id, ip, trigger);
     return skip('NOTHING_LEFT');
   }
-  const rented = await rentedOnDay(tenantId, run.depotId, run.runDate);
+  const rented = await rentedOnDay(tenantId, run.runDate);
   // Owner answers 2-4: each for the whole day, fuel in the hire, its driver at the company's day rate.
-  const hires = hireTrucksForRequest(options, fleetAverages(built.request.trucks), rented, built.settings?.dailyDriverDayRate ?? DEFAULT_DRIVER_DAY_RATE);
+  const dayRate = built.settings?.dailyDriverDayRate ?? DEFAULT_DRIVER_DAY_RATE;
+  const hires = hireTrucksForRequest(options, fleetAverages(built.request.trucks), rented, dayRate);
   if (!hires.length) return skip('NO_UNITS');
   const request: DispatchRequest = {
     ...built.request,
@@ -287,6 +325,7 @@ export async function startHireCheck(
     withPallets,
     options,
     alreadyRented: rented,
+    dayRate,
   };
 
   // The optimizer first (review of the hire branch): a check it cannot take is answered BUSY with no
@@ -348,8 +387,81 @@ export async function startHireCheck(
     return skip('RUNNING', undefined, row.other);
   }
   activeHireJobs.set(row.id, job);
-  void runHireJob({ id: row.id, tenantId, runId, userId: user.id, ip, request, basis, job, attempt, key });
+  const args: JobArgs = { id: row.id, tenantId, runId, userId: user.id, ip, request, basis, job, attempt, key };
+  // Never an unhandled rejection (third review of the hire branch): whatever escapes ends the row.
+  void runHireJob(args).catch(async (err) => {
+    console.error('hire check: ended by an unexpected error', { suggestionId: row.id, err: (err as Error)?.message ?? err });
+    await finish(row.id, { tenantId, runId, userId: user.id, ip }, 'FAILED', `The hire check failed: ${(err as Error)?.message ?? String(err)}`, { reason: 'UNKNOWN' });
+  });
   return { started: true, suggestionId: row.id };
+}
+
+/** A check recorded without running: every order the plan left out is gone from the day (NOTHING_LEFT). */
+export function isNothingLeftRecord(r: Pick<HireSuggestion, 'status' | 'errorJson'>): boolean {
+  return r.status === 'CANCELLED' && (r.errorJson as { reason?: unknown } | null)?.reason === 'NOTHING_LEFT';
+}
+
+/**
+ * Every order the plan left out is gone from the day (NOTHING_LEFT): recorded as a check that did not run
+ * (CANCELLED, reason NOTHING_LEFT, audited HIRE_CHECK_FINISHED), so the box stays quiet for this plan
+ * after a restart too (third review of the hire branch: the process note alone was lost with a deploy or
+ * after ten minutes, and the box offered a check that had nothing to do). Once per version until another
+ * check is made; under the version's check lock.
+ */
+async function recordNothingLeft(
+  tenantId: string,
+  run: { id: string; depotId: string; runDate: Date; version: number; chosenScenarioId: string | null },
+  b: { builtAt: Date; built: BuiltRequest; baseUnserved: HireBasis['baseUnserved']; baseOrders: string[]; withPallets: boolean; options: HireOptionFacts[] },
+  userId: string,
+  ip: string | null,
+  trigger: 'AFTER_PLAN' | 'ASKED',
+): Promise<void> {
+  const basis: HireBasis = {
+    v: 1,
+    depotId: run.depotId,
+    dateIso: isoOf(run.runDate),
+    runVersion: run.version,
+    scenarioId: run.chosenScenarioId ?? '',
+    baseUnserved: b.baseUnserved,
+    baseOrders: b.baseOrders,
+    builtAt: b.builtAt.toISOString(),
+    fingerprint: basisFingerprint(b.built.request, b.built.scope.frozenLoadIds),
+    withPallets: b.withPallets,
+    options: b.options,
+    alreadyRented: {},
+  };
+  await prisma.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`hire-check:${tenantId}|${run.id}`}, 0))`;
+    const newest = await tx.hireSuggestion.findFirst({ where: { tenantId, runId: run.id }, orderBy: { createdAt: 'desc' }, select: { status: true, errorJson: true } });
+    if (newest && isNothingLeftRecord(newest)) return;
+    const now = new Date();
+    const created = await tx.hireSuggestion.create({
+      data: {
+        tenantId,
+        runId: run.id,
+        status: 'CANCELLED',
+        trigger,
+        message: NOTHING_LEFT_TEXT,
+        basisJson: basis as unknown as Prisma.InputJsonValue,
+        errorJson: { reason: 'NOTHING_LEFT' },
+        createdById: userId,
+        finishedAt: now,
+        heartbeatAt: now,
+      },
+    });
+    await audit(
+      {
+        tenantId,
+        userId,
+        action: 'HIRE_CHECK_FINISHED',
+        entity: 'HireSuggestion',
+        entityId: created.id,
+        afterJson: { runId: run.id, version: run.version, trigger, status: 'NOTHING_LEFT', leftOutStops: b.baseUnserved.length } as never,
+        ip,
+      },
+      tx,
+    );
+  });
 }
 
 /** A check not run for this version, kept for the box (hireView): why, until START_NOTE_MS. */
@@ -418,14 +530,16 @@ async function runHireJob(a: JobArgs): Promise<void> {
       .catch(() => undefined);
   }, HIRE_HEARTBEAT_MS);
   beat.unref?.();
-  const who = { tenantId: a.tenantId, runId: a.runId, userId: a.userId, ip: a.ip };
+  const who = { tenantId: a.tenantId, runId: a.runId, userId: a.userId, ip: a.ip as string | null | false };
   let att = a.attempt;
   let requeued = false;
   try {
     for (;;) {
       const cur = att;
-      // Stopped while it waits for a slot: its queue place is given back at once.
-      const giveBack = () => cur.ticket.release();
+      // Stopped while it waits for a slot: its queue place is given back at once. Stopped while its
+      // optimizer call runs: the slot too, marked abandoned - the optimizer frees its own a moment
+      // later, so the next solves may meet "busy" and retry it (third review of the hire branch).
+      const giveBack = () => cur.ticket.release({ abandoned: true });
       cur.signal.addEventListener('abort', giveBack, { once: true });
       try {
         if (cur.ticket.waiting) await cur.ticket.ready();
@@ -443,7 +557,7 @@ async function runHireJob(a: JobArgs): Promise<void> {
           data: { status: 'RUNNING', startedAt: now, heartbeatAt: now, message: `Checking which trucks to hire: ${a.request.stops.length} stops, Quick search` },
         });
         if (started.count !== 1) return;
-        const resp = await callDispatchSolver(a.request, { signal: cur.signal });
+        const resp = await callSolverRetryingBusy(a.request, cur);
         const sc = resp.scenarios?.find((s) => s.name === 'RECOMMENDED') as DispatchScenario | undefined;
         if (!sc || sc.status === 'NO_SOLUTION') throw new SolverError('The hire check found no plan this time. Try again.', 200, null);
         const summary = summarizeHire({ request: a.request, baseUnserved: a.basis.baseUnserved, baseOrders: a.basis.baseOrders, whatIf: sc, options: a.basis.options });
@@ -486,6 +600,11 @@ async function runHireJob(a: JobArgs): Promise<void> {
       } catch (err) {
         const cancelled =
           err instanceof NotRun || cur.signal.aborted || cur.ticket.preempted || (err instanceof SolverError && err.code === 'CANCELLED');
+        // The server is being stopped (a deploy): ended FAILED, said plainly (failHireChecksForShutdown).
+        if (cancelled && jobReason(a.job) === HIRE_SHUTDOWN_TEXT) {
+          await finish(a.id, { ...who, userId: null, ip: false }, 'FAILED', HIRE_SHUTDOWN_TEXT, { reason: 'SHUTDOWN' });
+          return;
+        }
         if (!cancelled) {
           const message = err instanceof SolverError ? err.message : `The hire check failed: ${(err as Error)?.message ?? String(err)}`;
           console.error('hire check failed', { suggestionId: a.id, runId: a.runId, message });
@@ -498,13 +617,24 @@ async function runHireJob(a: JobArgs): Promise<void> {
           requeued = true;
           cur.ticket.release();
           cur.detach();
-          const next = reserveAttempt(a.tenantId, a.userId, a.job, a.key);
+          // Queued again as a check stopped once: the others are stopped before it (solve-admission.ts).
+          const next = reserveAttempt(a.tenantId, a.userId, a.job, a.key, 1);
           if (next) {
-            const back = await prisma.hireSuggestion.updateMany({
-              where: { id: a.id, status: { in: ['QUEUED', 'RUNNING'] } },
-              data: { status: 'QUEUED', message: REQUEUED_TEXT, heartbeatAt: new Date() },
-            });
+            // Held here before any await (third review of the hire branch: a failed write below left the
+            // new ticket to nobody - it kept a slot, and the company's later checks waited behind it).
             att = next;
+            let back: { count: number };
+            try {
+              back = await prisma.hireSuggestion.updateMany({
+                where: { id: a.id, status: { in: ['QUEUED', 'RUNNING'] } },
+                data: { status: 'QUEUED', message: REQUEUED_TEXT, heartbeatAt: new Date() },
+              });
+            } catch (e) {
+              const message = `The hire check could not go back to the queue: ${(e as Error)?.message ?? String(e)}. Press Check hire options to run it again.`;
+              console.error('hire check: not queued again', { suggestionId: a.id, runId: a.runId, message });
+              await finish(a.id, who, 'FAILED', message, { reason: 'UNKNOWN', message });
+              return;
+            }
             if (back.count === 1) continue;
             return;
           }
@@ -523,15 +653,68 @@ async function runHireJob(a: JobArgs): Promise<void> {
   }
 }
 
-function cancelledText(job: AbortController): string {
-  const why = (job.signal as AbortSignal & { reason?: unknown }).reason;
-  return job.signal.aborted && typeof why === 'string' && why ? why : PREEMPTED_TEXT;
+function jobReason(job: AbortController): unknown {
+  return job.signal.aborted ? (job.signal as AbortSignal & { reason?: unknown }).reason : undefined;
 }
 
-/** End a what-if (only while it is still QUEUED or RUNNING), with its audit row. Never throws. */
+function cancelledText(job: AbortController): string {
+  const why = jobReason(job);
+  return typeof why === 'string' && why ? why : PREEMPTED_TEXT;
+}
+
+/**
+ * The what-if's optimizer call. A check started while a stopped solve may still hold the optimizer
+ * (SolveTicket.mayMeetBusy: a preemption or an abandoned check moments before) takes its "busy" answer
+ * again, as a dispatcher's job does (PREEMPT_RETRY; third review of the hire branch: a check met that
+ * "busy" at once and was lost, FAILED). Any other "busy" ends the check as before.
+ */
+async function callSolverRetryingBusy(request: DispatchRequest, att: Attempt): Promise<Awaited<ReturnType<typeof callDispatchSolver>>> {
+  const retryUntil = att.ticket.mayMeetBusy ? Date.now() + PREEMPT_RETRY.maxWaitMs : 0;
+  for (;;) {
+    try {
+      return await callDispatchSolver(request, { signal: att.signal });
+    } catch (err) {
+      const busy = err instanceof SolverError && err.status === 503 && err.code !== WORKERS_UNAVAILABLE;
+      if (!busy || att.signal.aborted || Date.now() >= retryUntil) throw err;
+      await new Promise<void>((r) => setTimeout(r, PREEMPT_RETRY.settleMs));
+      if (att.signal.aborted) throw err;
+    }
+  }
+}
+
+/** The words a check ended by a server stop (a deploy) shows; SIGTERM ends it FAILED with them. */
+export const HIRE_SHUTDOWN_TEXT = 'The server was restarted during the hire check. Press Check hire options to run it again.';
+
+/**
+ * A web process stopped (SIGTERM, a deploy; jobs/shutdown.ts): every check it runs is stopped - its
+ * optimizer call cancelled, its slot given back - and ended FAILED at once with HIRE_SHUTDOWN_TEXT
+ * (reason SHUTDOWN, a system ending: no request IP), so Start fresh and "Check hire options" never
+ * wait minutes for the lost-check sweep (third review of the hire branch). Returns how many. Never throws.
+ */
+export async function failHireChecksForShutdown(): Promise<number> {
+  const ids = [...activeHireJobs.keys()];
+  if (!ids.length) return 0;
+  for (const id of ids) activeHireJobs.get(id)?.abort(HIRE_SHUTDOWN_TEXT);
+  try {
+    const rows = await prisma.hireSuggestion.findMany({ where: { id: { in: ids } }, select: { id: true, tenantId: true, runId: true } });
+    await Promise.allSettled(
+      rows.map((r) => finish(r.id, { tenantId: r.tenantId, runId: r.runId, userId: null, ip: false }, 'FAILED', HIRE_SHUTDOWN_TEXT, { reason: 'SHUTDOWN' })),
+    );
+  } catch (err) {
+    console.error('hire check: could not end the checks at shutdown', (err as Error)?.message ?? err);
+  }
+  return ids.length;
+}
+
+/**
+ * End a what-if (only while it is still QUEUED or RUNNING), with its audit row. Never throws. `who.ip`
+ * false: a system ending (lost with its process, stopped for a new plan, a server stop) - the audit row
+ * takes no request's IP (third review of the hire branch: a viewer's GET that ended a lost check put
+ * the viewer's address on it).
+ */
 async function finish(
   id: string,
-  who: { tenantId: string; runId: string; userId: string | null; ip: string | null },
+  who: { tenantId: string; runId: string; userId: string | null; ip: string | null | false },
   status: 'FAILED' | 'CANCELLED',
   message: string,
   errorJson: Record<string, unknown>,
@@ -566,7 +749,7 @@ export async function cancelHireChecksOfDay(tenantId: string, depotId: string, r
     for (const r of rows) {
       const ctrl = activeHireJobs.get(r.id);
       if (ctrl) ctrl.abort(why);
-      else await finish(r.id, { tenantId, runId: r.runId, userId: null, ip: null }, 'CANCELLED', why, { reason: 'CANCELLED' });
+      else await finish(r.id, { tenantId, runId: r.runId, userId: null, ip: false }, 'CANCELLED', why, { reason: 'CANCELLED' });
     }
     return rows.length;
   } catch (err) {
@@ -589,7 +772,7 @@ export async function failLostHireChecks(now: Date = new Date(), where: Prisma.H
   let n = 0;
   for (const r of rows) {
     if (activeHireJobs.has(r.id)) continue;
-    await finish(r.id, { tenantId: r.tenantId, runId: r.runId, userId: null, ip: null }, 'FAILED', 'The hire check stopped (the server restarted). Press Check hire options to run it again.', { reason: 'LOST' });
+    await finish(r.id, { tenantId: r.tenantId, runId: r.runId, userId: null, ip: false }, 'FAILED', 'The hire check stopped (the server restarted). Press Check hire options to run it again.', { reason: 'LOST' });
     n++;
   }
   return n;
@@ -667,7 +850,16 @@ export interface HireView {
     forOtherOption: boolean;
     /** A newer check that failed or was stopped, shown under this (still usable) suggestion. */
     note: string | null;
-    /** "Use this plan" is possible: finished, rents a truck, not used, for the option in use, and the version is still in use. */
+    /**
+     * A hire option the suggestion rents was switched off or deleted since the check (third review of the
+     * hire branch): the suggestion is not offered, and this says why (pointing to Check hire options only
+     * while the depot has an option left). Null otherwise.
+     */
+    optionNote: string | null;
+    /**
+     * "Use this plan" is possible: finished, rents a truck, not used, for the option in use, its hire
+     * options still active, and the version is still in use.
+     */
     usable: boolean;
   };
 }
@@ -676,10 +868,11 @@ export interface HireView {
  * The suggestion the box shows (review of the hire branch): the check running now; else the newest
  * finished one - and when the newest check failed or was stopped after a finished one that was never
  * used, the finished one stays (with the failure as a note): "Check again" never throws a usable
- * suggestion away.
+ * suggestion away. A check recorded because every order left out was gone (NOTHING_LEFT) is never shown
+ * (hireView says it by hiding the box); one newer than it is, as usual.
  */
 export function shownSuggestion(rows: readonly HireSuggestion[]): { row: HireSuggestion; note: string | null } | null {
-  const sorted = [...rows].sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
+  const sorted = [...rows].filter((r) => !isNothingLeftRecord(r)).sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
   const active = sorted.find((r) => r.status === 'QUEUED' || r.status === 'RUNNING');
   if (active) return { row: active, note: null };
   const newest = sorted[0];
@@ -696,23 +889,28 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
   if (!run) return null;
   // A what-if lost with its process is shown as stopped, never as running forever.
   await failLostHireChecks(new Date(), { tenantId, runId }).catch(() => 0);
-  const [options, chosen, rows, today, job] = await Promise.all([
-    prisma.hireOption.count({ where: { tenantId, depotId: run.depotId, active: true } }),
+  const [activeOptions, chosen, rows, today, job] = await Promise.all([
+    prisma.hireOption.findMany({ where: { tenantId, depotId: run.depotId, active: true }, select: { id: true } }),
     run.chosenScenarioId ? prisma.scenarioResult.findFirst({ where: { id: run.chosenScenarioId, runId }, select: { detailsJson: true } }) : null,
     prisma.hireSuggestion.findMany({ where: { tenantId, runId }, orderBy: { createdAt: 'desc' }, take: 20 }),
     companyToday(tenantId),
     prisma.runJob.findFirst({ where: { tenantId, runId, status: 'SUCCEEDED' }, orderBy: { finishedAt: 'desc' }, select: { finishedAt: true } }),
   ]);
+  const options = activeOptions.length;
   const details = isDispatchDetails(chosen?.detailsJson) ? chosen!.detailsJson : null;
   // The automatic check of a plan just saved: being started, or not started and why.
   const note = hireStarts.get(runId);
+  // Every order the plan left out was found gone since (NOTHING_LEFT): recorded as the newest check, so it
+  // holds after a restart too (third review of the hire branch).
+  const newestRow = [...rows].sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime())[0];
+  const nothingLeft = (!!newestRow && isNothingLeftRecord(newestRow)) || note?.skipped?.reason === 'NOTHING_LEFT';
   // P1-P3 orders left out only (owner answer 1); and not when a check found every one of them gone since.
   const orderPriority = details?.scope?.orderPriority ?? null;
-  const short = needsHireCheck(details?.unserved, orderPriority) && note?.skipped?.reason !== 'NOTHING_LEFT';
+  const short = needsHireCheck(details?.unserved, orderPriority) && !nothingLeft;
   const lowLeftOut = lowPriorityOrders(details?.unserved, orderPriority);
   const dayOver = isoOf(run.runDate) < today;
   const live = !isSupersededRun(run) && run.status !== 'OPTIMIZING' && run.status !== 'ARCHIVED' && !!run.chosenScenarioId && !dayOver;
-  const shown = shownSuggestion(rows);
+  const shown = nothingLeft ? null : shownSuggestion(rows);
   const row = shown?.row ?? null;
   const summary = (row?.summaryJson as HireSummary | null) ?? null;
   const basis = (row?.basisJson as HireBasis | null) ?? null;
@@ -720,6 +918,15 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
   const text = summary ? hireSuggestionText(summary, currency) : null;
   const justSaved = !!job?.finishedAt && Date.now() - job.finishedAt.getTime() < HIRE_EXPECT_MS;
   const checkExpected = live && short && options > 0 && !rows.length && ((!!note && !note.skipped) || (!note && justSaved));
+  // Third review of the hire branch: a hire option the suggestion rents was switched off (or deleted)
+  // since - never offered, and said so (Check hire options only while the depot has an option left).
+  const activeIds = new Set(activeOptions.map((o) => o.id));
+  const gone = row?.status === 'SUCCEEDED' && summary?.status === 'HIRE' ? summary.hires.filter((h) => !activeIds.has(h.optionId)) : [];
+  const optionNote = gone.length
+    ? `The ${gone.map((h) => h.label).join(' and ')} hire option${gone.length === 1 ? ' was' : 's were'} switched off or deleted since this check.${
+        live && options > 0 ? ' Press Check hire options to check again.' : ''
+      }`
+    : null;
   return {
     options,
     short,
@@ -744,7 +951,8 @@ export async function hireView(tenantId: string, runId: string, currency = 'OMR'
           summary,
           forOtherOption,
           note: shown?.note ?? null,
-          usable: live && !forOtherOption && row.status === 'SUCCEEDED' && !row.usedAt && summary?.status === 'HIRE' && (summary?.hires.length ?? 0) > 0,
+          optionNote,
+          usable: live && !forOtherOption && !gone.length && row.status === 'SUCCEEDED' && !row.usedAt && summary?.status === 'HIRE' && (summary?.hires.length ?? 0) > 0,
         }
       : null,
   };

@@ -584,7 +584,7 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       ins<ExcelJS.CellValue>([
         l.truckCode, l.loadNo, l.status + (l.carried ? ' (kept from previous version)' : ''), l.driverName ?? 'Not assigned',
         fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, palletsOf(l) ? 'by pallets' : l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
-        l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), l.cost ? fmtDuration(l.cost.driverPaidMin) : 'earlier costing', l.fuelLitres, l.fuelCost,
+        l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), paidTimeCell(l), l.fuelLitres, l.fuelCost,
         l.cost ? Math.round((l.cost.driver + l.cost.overtime) * 1000) / 1000 : null, l.operatingCost,
         l.timing ? (l.timing.ok ? TIMING_TEXT[l.timing.status] : NOT_VERIFIED) : '—', names.get(l.id) ?? '',
       ], loadPalletsCell(l) || 'by cases'),
@@ -600,12 +600,21 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '',
       sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '', '', '',
       sum(d.loads.map((l) => l.distanceKm)), fmtDuration(sum(d.loads.map((l) => l.durationMin))),
-      fmtDuration(sum(d.loads.map((l) => (l.cost ? l.cost.driverPaidMin : l.durationMin)))),
+      fmtDuration(sum(d.loads.map((l) => (typeof l.driverDayRate === 'number' ? 0 : l.cost ? l.cost.driverPaidMin : l.durationMin)))),
       fuelKnown ? sum(d.loads.map((l) => l.fuelLitres ?? 0)) : null, sum(d.loads.map((l) => l.fuelCost)),
       sum(d.loads.map((l) => (l.cost ? l.cost.driver + l.cost.overtime : 0))), sum(d.loads.map((l) => l.operatingCost)), '', '',
     ], `${palletText(palletTotal)} pallets`),
     fmts,
   );
+}
+
+/**
+ * A load's paid driver time: h:mm, "earlier costing" - or "day rate" for a hired truck's casual driver
+ * paid by the day (third review of the hire branch: its paid hours read as hourly pay).
+ */
+function paidTimeCell(l: DetailLoad): string {
+  if (typeof l.driverDayRate === 'number') return 'day rate';
+  return l.cost ? fmtDuration(l.cost.driverPaidMin) : 'earlier costing';
 }
 
 /**
@@ -647,13 +656,14 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
         : '',
       t.basis === 'MIXED_LEGACY' ? `${t.earlier.toFixed(3)} ${cur} from loads costed the earlier way (no depot time or overtime)` : '',
       t.paidVsSpanMin ? `paid time differs from the truck day by ${t.paidVsSpanMin} min: a locked load keeps the share it was planned with` : '',
+      t.dayRate !== null ? `driver at the day rate of ${t.dayRate} ${cur} (paid with its first load; no hours, no overtime)` : '',
     ]
       .filter(Boolean)
       .join('; ');
     tableRow(
       ws,
       r++,
-      [t.truckCode, t.loads, fmtHhmm(t.firstDepartMin), fmtHhmm(t.lastReturnMin), fmtDuration(t.spanMin), fmtDuration(t.paidMin), fmtDuration(t.onRoadMin),
+      [t.truckCode, t.loads, fmtHhmm(t.firstDepartMin), fmtHhmm(t.lastReturnMin), fmtDuration(t.spanMin), t.dayRate !== null ? 'day rate' : fmtDuration(t.paidMin), fmtDuration(t.onRoadMin),
         t.driver, t.overtime, t.fixed, t.trip, t.distance, t.fuel, t.total, note],
       fmts,
     );

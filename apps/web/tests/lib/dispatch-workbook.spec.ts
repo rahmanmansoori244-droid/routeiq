@@ -598,4 +598,21 @@ describe('buildDispatchWorkbook - costs (review F17)', () => {
     const s = sheet(await render(d), SHEETS.summary);
     expect(find(s, (t) => t === 'Total road km (3 legs estimated)', 1)).toBeTruthy();
   });
+
+  it("a hired truck's casual driver is paid the day rate: no paid hours on LOAD PLAN or TRUCK DAYS (third review of the hire branch)", async () => {
+    const d = fixture();
+    const truck = d.loads[0]!.truckId;
+    d.loads = d.loads.map((l) => (l.truckId === truck ? { ...l, driverDayRate: 10 } : l));
+    const wb = await render(d);
+    const lp = sheet(wb, SHEETS.loadPlan);
+    const paidCol = find(lp, (t) => t === 'Paid time (h:mm)')!.col;
+    const rows = cells(lp).filter((c) => c.col === 1 && c.text === d.loads[0]!.truckCode);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const r of rows) expect(text(lp.getCell(r.row, paidCol))).toBe('day rate');
+    const td = sheet(wb, SHEETS.truckDays);
+    const row = find(td, (t) => t === d.loads[0]!.truckCode, 1)!;
+    expect(text(td.getCell(row.row, 6))).toBe('day rate');
+    const noteCol = find(td, (t) => t === 'Note')!.col;
+    expect(text(td.getCell(row.row, noteCol))).toContain('driver at the day rate of 10 OMR (paid with its first load; no hours, no overtime)');
+  });
 });

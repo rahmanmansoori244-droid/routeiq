@@ -142,14 +142,18 @@ class DispatchTruck(BaseModel):
     # what-if; never a truck already hired): fixed_cost is its hire for the day, fuel included (its
     # cost_per_km is the option's own charge, 0 by default; no km_per_litre). The search ranks it in
     # the HIRE TIER (dispatch_solver._service_and_hire): above every P4/P5 order together and below one
-    # P1-P3 order, in proportion to its real money (hire + driver_day_cost) - so every own truck goes
+    # P1-P3 order, in proportion to its real money (hire + driver_day_cost + its own km charge over a
+    # rough day's km, dispatch_solver.hire_money) - so every own truck goes
     # first, the cheapest set of rented trucks wins and P4/P5 orders alone never rent one; the reported
     # costs stay the real ones. Optional and additive: an older web never sends it.
     hire_candidate: bool = False
     # A driver paid by the DAY (owner answer 6 Oct 2026: a rented truck's casual driver, the company's
     # "Daily driver day rate"): this many OMR per truck day, fixed - paid with the truck day's first new
     # load (a truck with frozen loads paid it with them) - instead of config.driver_cost_per_hour and
-    # overtime. None: the company's hourly driver cost, as before. Optional and additive.
+    # overtime. None: the company's hourly driver cost, as before. Optional and additive. Its km and
+    # time still get a search-only tie-breaker (the own fleet's km rate when its own is lower, the
+    # hourly rate on its span: dispatch_solver._search_km_rate), so its stops are driven in a sensible
+    # order; the reported costs stay the day rate and no km cost.
     driver_day_cost: float | None = Field(default=None, ge=0, le=1000)
 
 

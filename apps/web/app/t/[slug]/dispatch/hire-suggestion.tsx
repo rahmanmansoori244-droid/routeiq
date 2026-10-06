@@ -12,6 +12,9 @@
  * ("Check hire options") in every text - the instruction only to someone who has the button (forViewer).
  * Only P1-P3 orders justify renting (owner answer 1, 6 Oct 2026): when only P4/P5 orders are left out the
  * box says "Left out: N orders, all P4/P5 - renting is not suggested for them." and offers nothing.
+ * Third review: a failed first read keeps polling (and says "Could not refresh" after a few failures,
+ * in a box of its own), and a suggestion whose hire option was switched off says so instead of offering
+ * Use this plan.
  */
 import { useCallback, useEffect, useState } from 'react';
 import { Loader2, RefreshCw, Truck } from 'lucide-react';
@@ -73,7 +76,9 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
 
   const status = view?.suggestion?.status;
   const running = status === 'QUEUED' || status === 'RUNNING';
-  const polling = running || !!view?.checkExpected;
+  // Third review: also after a failed read, the first one included - a failed first read left the box
+  // out for good (no view: nothing rendered, nothing polled) until the page was reloaded.
+  const polling = failedReads > 0 || running || !!view?.checkExpected;
   useEffect(() => {
     if (!polling) return;
     const t = setTimeout(() => {
@@ -83,7 +88,18 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
     return () => clearTimeout(t);
   }, [polling, tick, load]);
 
-  if (!view) return null;
+  if (!view) {
+    return failedReads >= FAILED_READS_NOTE ? (
+      <div className="space-y-1 rounded-md border border-slate-300 bg-slate-50 p-3 text-sm" data-testid="hire-suggestion">
+        <p className="flex items-center gap-2 font-medium">
+          <Truck className="h-4 w-4 shrink-0" /> Hire suggestion
+        </p>
+        <p className="text-xs text-red-700" data-testid="hire-refresh-failed">
+          Could not refresh the hire check (still trying).
+        </p>
+      </div>
+    ) : null;
+  }
   const s = view.suggestion;
   // A plan option that leaves no P1-P3 order out for the fleet: no suggestion (a check still running
   // aside) - only P4/P5 orders left out are said plainly (owner answer 1, 6 Oct 2026), with no button.
@@ -205,6 +221,11 @@ export function HireSuggestionBox({ runId, planKey, canPlan, superseded, busy, e
           {s.usedAt ? (
             <p className="text-xs font-medium" data-testid="hire-used">
               Used: the hired trucks were added{s.usedRunId && s.usedRunId !== runId ? ' and a new plan version was made' : ''}.
+            </p>
+          ) : null}
+          {s.optionNote ? (
+            <p className="text-xs font-medium text-amber-800" data-testid="hire-option-gone">
+              {forViewer(s.optionNote, mayCheck)}
             </p>
           ) : null}
           {s.note ? (

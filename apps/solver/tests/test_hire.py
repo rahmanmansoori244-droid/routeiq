@@ -412,3 +412,126 @@ def test_a_cancelled_solve_stops_waiting_for_road_routing():
     with pytest.raises(ds.SolveAborted):
         optimize_dispatch(r, osrm_client=httpx.Client(transport=_osrm_null_transport([], set(), sleep_s=10.0)), control=control)
     assert time.monotonic() - t0 < 5.0
+
+
+# ---------------------------------------------------------------------------------------------
+# Third review of the hire branch
+# ---------------------------------------------------------------------------------------------
+
+def ring(n: int = 12, r_km: float = 25.0) -> list:
+    """``n`` one-pallet P3 stops on a ring ``r_km`` round the depot, their ids out of the ring's order."""
+    import math
+
+    from tests.test_dispatch import DEPOT
+
+    out = []
+    for i in range(n):
+        a = 2 * math.pi * i / n
+        lat = DEPOT.lat + (r_km / 111.0) * math.sin(a)
+        lng = DEPOT.lng + (r_km / (111.0 * math.cos(math.radians(DEPOT.lat)))) * math.cos(a)
+        out.append(pstop(f"S{(i * 5) % n:02d}", lat, lng, cases=20, units=1000))
+    return out
+
+
+@pytest.mark.parametrize("pv", ["off", "on"])
+@pytest.mark.parametrize("kind", ["to rent", "hired"])
+def test_a_rented_truck_drives_its_stops_in_a_sensible_order(monkeypatch, pv, kind):
+    # Review: a truck whose fuel is in the hire and whose driver is paid by the day cost nothing per km
+    # or per hour in the search, so its stops were left in any order (358 km instead of 232). The own
+    # T1 (2 bays, no km cost) cannot carry the day: the 12-bay truck - to rent (the what-if), or hired
+    # for the day ("Use this plan": no km cost, its driver at the day rate) - drives as short a route
+    # as an own 12-bay truck with a km cost on the same stops. Search only: its reported costs stay 0.
+    second_search(monkeypatch, pv)
+    stops = ring()
+    big = btruck("H10-1", bays=12, fixed_cost=50.0, driver_day_cost=10.0, max_trips=1, hire_candidate=kind == "to rent")
+    _, sc = solve(stops, [own("T1", bays=2), big])
+    assert unserved_map(sc) == {}
+    [rented] = [ld for ld in sc.loads if ld.truck_id == "H10-1"]
+    assert len(rented.stops) == 12
+    _, mine = solve(stops, [own("O12", bays=12, cost_per_km=0.1)])
+    [ref] = mine.loads
+    assert rented.distance_km <= ref.distance_km * 1.02
+    assert (rented.distance_cost, rented.fuel_cost) == (0.0, 0.0)
+    assert rented.driver_cost == pytest.approx(10.0)
+
+
+def test_the_search_prices_a_day_paid_trucks_km_and_time_like_the_own_fleets_never_as_money():
+    # The tie-breaker: the own fleet's average km rate (0.1 + 0.3/3 = 0.2 OMR/km) and the hourly driver
+    # rate as the search's price of a day-paid truck's km and time; the money (score().operating) is
+    # the real one, and a truck whose own km costs more keeps its own rate.
+    trucks = [own("T1", cost_per_km=0.1, km_per_litre=3.0), hire("H3-1", 6, 30.0, driver_day_cost=10.0),
+              hire("H3-2", 6, 30.0, driver_day_cost=10.0, cost_per_km=0.5)]
+    r = req(stops_of([3, 3]), trucks, fuel_price_per_litre=0.3, driver_cost_per_hour=2.0)
+    assert ds._tie_km_rate(r) == pytest.approx(0.2)
+    assert ds._search_km_rate(r.trucks[0], r.config, 0.2) == pytest.approx(0.2)
+    assert ds._search_km_rate(r.trucks[1], r.config, 0.2) == pytest.approx(0.2)
+    assert ds._search_km_rate(r.trucks[2], r.config, 0.2) == pytest.approx(0.5)
+    # A truck to rent has its fuel in the hire whoever pays its driver: its km get the tie-breaker too.
+    assert ds._search_km_rate(hire("H3-9", 6, 30.0), r.config, 0.2) == pytest.approx(0.2)
+    tds = ds._truck_days(r)
+    p = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    own_p, h1, h2 = (p.trucks[td.idx] for td in tds)
+    assert (own_p.tie_m, own_p.tie_span) == (0.0, False)
+    assert h1.per_m == 0.0 and h1.tie_m == pytest.approx(0.2 * ds.COST_SCALE / 1000) and h1.tie_span
+    assert h2.per_m == pytest.approx(0.5 * ds.COST_SCALE / 1000) and h2.tie_m == 0.0 and h2.tie_span
+    ctx = ds._stage_ctx(r, r.stops, tds, matrix_for(r), [])
+    h = tds[1].idx
+    timed = LR.time_plan(ctx.day, {h: [(0, 1)]}, ctx.rec_pricing)
+    sc = LR.score(ctx.day, ctx.rec_pricing, timed)
+    money = costing.truck_day_costs(ctx.rec_pricing.truck_rates(h), ctx.rec_pricing.day_rates(),
+                                    [costing.LoadTiming(depart_s=t.depart_s, return_s=t.return_s, km=ctx.day.metres(t.stops) / 1000) for t in timed[h]]).total
+    assert sc.operating == costing.to_units(money)  # 30 + the day rate: no km, no hours
+    assert money == pytest.approx(40.0)
+    assert sc.tie > 0 and sc.objective == sc.unserved + sc.hire + sc.cost + sc.tie
+    # A request without a day-paid truck: no tie anywhere (planned exactly as before).
+    r0 = req(stops_of([3, 3]), [own("T1", cost_per_km=0.1)])
+    tds0 = ds._truck_days(r0)
+    p0 = ds._pricing("RECOMMENDED", r0, tds0, r0.stops)
+    assert all((tp.tie_m, tp.tie_span) == (0.0, False) for tp in p0.trucks.values())
+
+
+@pytest.mark.parametrize("pv", ["off", "on"])
+def test_the_options_km_charge_counts_in_the_cheapest_set(monkeypatch, pv):
+    # Review: the tier ranked an option by its hire + day rate only, so HA (50 OMR a day + 1 OMR a km)
+    # beat HB (60 OMR, no km charge) on a day with far orders: 238 OMR instead of 70. The option's km
+    # charge over a rough day's km now counts in the tier's money: HB.
+    second_search(monkeypatch, pv)
+    from tests.test_dispatch import DEPOT
+
+    north = [pstop(f"N{i:02d}", DEPOT.lat + 0.8 + 0.003 * i, DEPOT.lng, cases=20, units=1000) for i in range(11)]
+    west = [pstop(f"W{i:02d}", DEPOT.lat, DEPOT.lng - 0.8 - 0.003 * i, cases=20, units=1000) for i in range(11)]
+    trucks = [own("T1"), hire("HA-1", 12, 50.0, cost_per_km=1.0, driver_day_cost=10.0), hire("HB-1", 12, 60.0, driver_day_cost=10.0)]
+    _, sc = solve(north + west, trucks)
+    assert unserved_map(sc) == {}
+    assert hired_used(sc) == {"HB": 1}
+    # The money the tier ranks by: the hire, the day rate and the km charge over the rough day's km.
+    r = req(north + west, trucks)
+    km = ds._hire_day_km(r.stops, r.config, r.depot, r.trucks[1])
+    assert 150 < km < 260  # one load a day: a round trip of the day's average road distance
+    assert ds.hire_money(r.trucks[1], r.config, km) == pytest.approx(60.0 + km)
+    assert ds.hire_money(r.trucks[2], r.config, km) == pytest.approx(70.0)
+
+
+@pytest.mark.parametrize("margin, n, cost", [(False, 90, 85.0), (True, 70, 150.0)])
+def test_a_day_the_plan_ranks_strictly_stays_strict_with_trucks_to_rent(margin, n, cost):
+    # Review: the tier multiplied the strict weights by the rented trucks' money (60-150 OMR), so a day
+    # of 450 stops (no margins) or 350 (with margins) got capped priorities in the what-if only - one
+    # P1 order was worth about 7 P2 orders. A coarser money resolution keeps it strict.
+    stops = [pstop(f"P{p}-{i}", 23.60 + 0.0001 * i, 58.42 + 0.0001 * p, cases=20, units=1000, priority=p,
+                   **({"margin": 0.2} if margin else {})) for p in (1, 2, 3, 4, 5) for i in range(n)]
+    trucks = [own("T1")] + [hire(f"H10-{k}", 12, cost, driver_day_cost=10.0) for k in range(3)] + [hire("H3-1", 6, cost / 2, driver_day_cost=10.0)]
+    r = req(stops, [own("T1")])
+    plain, warn0 = ds._service_values(r.stops, r.config, margin)
+    assert warn0 == []  # the plan in use ranks strictly
+    rh = req(stops, trucks)
+    values, warnings, tier = ds._service_and_hire(rh.stops, rh.config, margin, rh.trucks)
+    assert warnings == []
+    by = {p: [v for v, s in zip(values, rh.stops) if s.priority == p] for p in (1, 2, 3, 4, 5)}
+    low = sum(by[4]) + sum(by[5])
+    # One P1 order outweighs every lower order together and the dearest rented truck, and so on down.
+    assert min(by[1]) > sum(by[2]) + sum(by[3]) + low + max(tier.values())
+    assert min(by[2]) > sum(by[3]) + low + max(tier.values())
+    assert min(by[3]) > max(tier.values()) + low
+    assert min(tier.values()) > low
+    # Still in proportion to the money: a 10-ton's day against a 3-ton's.
+    assert tier["H10-0"] / tier["H3-1"] == pytest.approx((cost + 10.0) / (cost / 2 + 10.0), rel=1e-6)

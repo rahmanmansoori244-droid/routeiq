@@ -393,6 +393,54 @@ describe('the suggestion says what the what-if found (review of the hire branch)
   });
 });
 
+describe('"with one truck fewer" (third review of the hire branch)', () => {
+  const stop = (id: string, cases: number, priority = 3): DispatchStop => ({
+    stop_id: id, order_ids: [`ord-${id}`], customer_id: `c-${id}`, lat: 23.6, lng: 58.4, demand_cases: cases, demand_kg: 0, demand_pallet_units: cases * 10, priority,
+  });
+  const out = (stops: DispatchStop[]) => stops.map((s) => ({ stop_id: s.stop_id, order_ids: s.order_ids, reason_code: 'SOLVER_DROPPED_LOW_PRIORITY', reason_message: '' }));
+  const req = (stops: DispatchStop[]): DispatchRequest => ({
+    run_id: 'r', tenant_id: 't', depot: { id: 'd', lat: 23.6, lng: 58.4 }, stops,
+    trucks: [own('OWN1'), ...hireTrucksForRequest([TEN, THREE], { tripCost: 2.5 }, {}, 10)],
+    config: { scenarios: ['RECOMMENDED'] } as DispatchRequest['config'],
+  });
+
+  it('a rental that carries orders the own fleet delivers today never counts more than the orders left out', () => {
+    // Review: the plan leaves out X1 and X2 (400 cases each). The what-if puts X2 on the own truck, X1 on
+    // one 3-ton and 7 small orders the plan delivers on the other: "up to 7 orders stay undelivered" -
+    // more than with no rental at all. Counted now: the orders the hire is for, at most those 2.
+    const [x1, x2] = [stop('X1', 400), stop('X2', 400)];
+    const base = Array.from({ length: 7 }, (_, i) => stop(`B${i + 1}`, 50));
+    const whatIf = {
+      loads: [load('OWN1', [x2], 35, 60), rentedLoad(virtualHireId('o3', 1), [x1], 30), rentedLoad(virtualHireId('o3', 2), base, 30)],
+      unserved: [], trucks_used: 3, trips: 3,
+    } as unknown as WhatIf;
+    const s = summarizeHire({ request: req([x1, x2, ...base]), baseUnserved: out([x1, x2]), baseOrders: base.flatMap((b) => b.order_ids), whatIf, options: [TEN, THREE] });
+    expect(s.leftOut.orders).toBe(2);
+    expect(s.alternative!.leftOut.orders).toBeLessThanOrEqual(s.leftOut.orders);
+    expect(s.alternative!.leftOut).toMatchObject({ orders: 2, cases: 800 });
+    expect(hireSuggestionText(s).details).toContain(
+      'With one truck fewer (1 x 3-ton (6 bays), extra about 30 OMR): up to 2 orders (800 cases, 8.0 pallets) stay undelivered - what the 3-ton would carry or make room for.',
+    );
+  });
+
+  it('P4/P5 orders riding on the dropped truck are said apart, never counted as the price of one truck fewer', () => {
+    // Review: the dropped 3-ton carries 1 P3 order left out and 5 P5 riders: "up to 6 orders".
+    const x = stop('X', 400);
+    const l = stop('L', 50);
+    const riders = Array.from({ length: 5 }, (_, i) => stop(`R${i + 1}`, 60, 5));
+    const whatIf = {
+      loads: [load('OWN1', [], 35, 35), rentedLoad(virtualHireId('o10', 1), [x], 50), rentedLoad(virtualHireId('o3', 1), [l, ...riders], 30)],
+      unserved: [], trucks_used: 3, trips: 3,
+    } as unknown as WhatIf;
+    const s = summarizeHire({ request: req([x, l, ...riders]), baseUnserved: out([x, l, ...riders]), baseOrders: [], whatIf, options: [TEN, THREE] });
+    expect(s.leftOut.orders).toBe(2);
+    expect(s.alternative).toMatchObject({ dropped: '3-ton', leftOut: { orders: 1, cases: 50 }, low: { orders: 5 } });
+    expect(hireSuggestionText(s).details).toContain(
+      'With one truck fewer (1 x 10-ton (12 bays), extra about 50 OMR): up to 1 order (50 cases, 0.5 pallets) stays undelivered - what the 3-ton would carry. It also carries 5 P4/P5 orders, which would stay out too.',
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------------------------
 // "Nothing changed since it was computed"
 // ---------------------------------------------------------------------------------------------
@@ -622,6 +670,58 @@ describe('solve admission: background solves (the what-if)', () => {
     if (checkB.ok) checkB.ticket.release();
     expect(checkC.ok && !checkC.ticket.waiting).toBe(true);
     if (checkC.ok) checkC.ticket.release();
+    expect(a.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  });
+
+  it('a running what-if stopped by its own job (a new optimization of the day) counts as a preemption: the next solves may meet "busy" (review)', () => {
+    // Third review: the check's slot was given to the next solve at once while the optimizer still held
+    // the cancelled solve, and that solve failed on the first "busy" (mayMeetBusy false).
+    let t = 1_000_000;
+    const a = new SolveAdmission({ ...limits, globalConcurrent: 2, tenantConcurrent: 2 }, () => t, () => true);
+    const bg = a.reserveBackground('A', 'u', () => undefined);
+    expect(bg.ok && !bg.ticket.waiting).toBe(true);
+    const mine = a.reserve('A', 'u'); // fits beside its own what-if: no preemption
+    expect(mine.ok && !mine.ticket.preemptedOthers && !mine.ticket.mayMeetBusy).toBe(true);
+    // The check is stopped while its optimizer call runs: its slot is given back at once.
+    if (bg.ok) bg.ticket.release({ abandoned: true });
+    const other = a.reserve('B', 'u');
+    expect(other.ok && !other.ticket.waiting && other.ticket.mayMeetBusy).toBe(true);
+    // A background check started in that window may meet "busy" too (it retries instead of failing).
+    if (other.ok) other.ticket.release();
+    const next = a.reserveBackground('C', 'u', () => undefined);
+    expect(next.ok && !next.ticket.waiting && next.ticket.mayMeetBusy).toBe(true);
+    // A what-if that ended normally (its call returned) leaves nothing behind.
+    t += 5 * 60_000;
+    if (next.ok) next.ticket.release();
+    const later = a.reserve('D', 'u');
+    expect(later.ok && later.ticket.mayMeetBusy).toBe(false);
+    for (const r of [mine, later]) if (r.ok) r.ticket.release();
+  });
+
+  it('a check that was already stopped once is not the first one stopped again: the others take their turn (review)', () => {
+    // Third review: the requeued check was the newest, so it was stopped first again - for good.
+    const a = new SolveAdmission({ ...limits, globalConcurrent: 3, tenantConcurrent: 2 }, Date.now, () => true);
+    const x = a.reserve('X', 'u');
+    const stopC = vi.fn();
+    const stopB = vi.fn();
+    const wC = a.reserveBackground('C', 'u', stopC);
+    const wB = a.reserveBackground('B', 'u', stopB);
+    expect(wC.ok && wB.ok && !wC.ticket.waiting && !wB.ticket.waiting).toBe(true);
+    const fa = a.reserve('A', 'u'); // the optimizer is full: the newest check (B's) is stopped
+    expect(stopB).toHaveBeenCalledTimes(1);
+    expect(stopC).not.toHaveBeenCalled();
+    // B's check goes back to the queue (once), and gets the slot X frees.
+    const wB2 = a.reserveBackground('B', 'u', stopB, 'B', { preemptedBefore: 1 });
+    expect(wB2.ok && wB2.ticket.waiting).toBe(true);
+    if (x.ok) x.ticket.release();
+    expect(wB2.ok && !wB2.ticket.waiting).toBe(true);
+    // E's dispatcher needs a slot: C's check, never stopped yet, goes - not B's second run.
+    const fe = a.reserve('E', 'u');
+    expect(fe.ok && !fe.ticket.waiting).toBe(true);
+    expect(stopC).toHaveBeenCalledTimes(1);
+    expect(stopB).toHaveBeenCalledTimes(1);
+    expect(wB2.ok && wB2.ticket.preempted).toBe(false);
+    for (const r of [fa, fe, wB2]) if (r.ok) r.ticket.release();
     expect(a.snapshot()).toMatchObject({ running: 0, waiting: 0 });
   });
 

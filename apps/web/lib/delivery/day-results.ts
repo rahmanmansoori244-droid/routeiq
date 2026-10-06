@@ -11,6 +11,7 @@
 import type { Prisma, StopVisit } from '@prisma/client';
 import { prisma } from '../db';
 import { addDaysIso, dateOnly, DEFAULT_TZ, isoOf, localDateIso, localMinutes, zonedDayStart } from '../dispatch/time';
+import { shownTruckCode } from '../dispatch/hire';
 import { lateDispatchNotes } from '../driver-link/plan-notes';
 import { linkUploadUntil } from '../driver-link/token';
 import { plannedStopFromRows } from './planned-stop';
@@ -77,7 +78,7 @@ export async function loadsOfRuns(
   const truckIds = [...new Set(loads.map((l) => l.truckId))];
   const driverIds = [...new Set(loads.map((l) => l.driverId).filter((x): x is string => !!x))];
   const [trucks, drivers] = await Promise.all([
-    truckIds.length ? db.truck.findMany({ where: { tenantId, id: { in: truckIds } }, select: { id: true, code: true, hired: true } }) : [],
+    truckIds.length ? db.truck.findMany({ where: { tenantId, id: { in: truckIds } }, select: { id: true, code: true, hired: true, onlyOnDate: true } }) : [],
     driverIds.length ? db.driver.findMany({ where: { tenantId, id: { in: driverIds } }, select: { id: true, name: true, casual: true } }) : [],
   ]);
   const truckOf = new Map(trucks.map((t) => [t.id, t]));
@@ -91,7 +92,9 @@ export async function loadsOfRuns(
       depotId: run.depotId,
       date: run.date,
       truckId: l.truckId,
-      truckCode: truckOf.get(l.truckId)?.code ?? '?',
+      // The plate a hired truck drove with, also after a later day's hired truck took it (third review of
+      // the hire branch: "12345AB.261006" on the delivery results and the Bring forward list).
+      truckCode: truckOf.has(l.truckId) ? shownTruckCode(null, truckOf.get(l.truckId)!) : '?',
       hired: !!truckOf.get(l.truckId)?.hired,
       loadNo: l.loadNo,
       status: l.status,

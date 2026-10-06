@@ -54,7 +54,7 @@ const view = (extra: Partial<HireView> = {}): HireView => ({
 const suggestion = (extra: Partial<NonNullable<HireView['suggestion']>> = {}): NonNullable<HireView['suggestion']> => ({
   id: 'HS1', status: 'SUCCEEDED', trigger: 'AFTER_PLAN', message: null, createdAt: '', finishedAt: null, usedAt: null, usedRunId: null,
   headline: '2 orders (160 cases) cannot be delivered with your fleet. To deliver them, hire 1 x 10-ton (12 bays): extra about 50 OMR. Still left out: none.',
-  details: [], summary: { status: 'HIRE', hires: [{ label: '10-ton', count: 1 }] } as never, forOtherOption: false, note: null, usable: true, ...extra,
+  details: [], summary: { status: 'HIRE', hires: [{ label: '10-ton', count: 1 }] } as never, forOtherOption: false, note: null, optionNote: null, usable: true, ...extra,
 });
 
 async function mount(canPlan = true) {
@@ -144,6 +144,35 @@ describe('the Hire suggestion box', () => {
     expect(b.button('Check hire options')).toBeFalsy();
     expect(b.button('Use this plan')).toBeFalsy();
     expect(polls.length).toBe(0);
+  });
+
+  it('a failed first read never leaves the box out for good: it keeps trying and says so (third review)', async () => {
+    // Review: the first GET failed (a deploy, a timeout), the box had no view, rendered nothing and never
+    // polled - the automatic check finished unseen until the page was reloaded.
+    answers.list = [{ ok: false }, { ok: false }, { ok: false }, { ok: true, view: view({ suggestion: suggestion() }) }];
+    const b = await mount();
+    expect(polls.length).toBe(1);
+    await b.fire();
+    expect(b.text()).not.toMatch(/Could not refresh/);
+    await b.fire(); // the third failure in a row: said, still trying
+    expect(b.text()).toMatch(/Hire suggestion/);
+    expect(b.text()).toMatch(/Could not refresh the hire check \(still trying\)\./);
+    expect(polls.length).toBe(1);
+    await b.fire();
+    expect(b.text()).toMatch(/hire 1 x 10-ton/);
+    expect(b.text()).not.toMatch(/Could not refresh/);
+    expect(polls.length).toBe(0);
+  });
+
+  it('a suggestion whose hire option was switched off says so, with no Use this plan (third review)', async () => {
+    const optionNote = 'The 10-ton hire option was switched off or deleted since this check. Press Check hire options to check again.';
+    answers.list = [{ ok: true, view: view({ suggestion: suggestion({ usable: false, optionNote }) }) }];
+    const b = await mount();
+    expect(b.text()).toMatch(/The 10-ton hire option was switched off or deleted since this check\. Press Check hire options to check again\./);
+    expect(b.button('Use this plan')).toBeFalsy();
+    answers.reads = 0;
+    const v = await mount(false);
+    expect(v.text()).toMatch(/switched off or deleted since this check\. A dispatcher can check again\./);
   });
 
   it('a suggestion computed for another plan option is not offered; an option that leaves nothing out shows no box', async () => {

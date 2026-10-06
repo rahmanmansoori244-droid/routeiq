@@ -86,6 +86,17 @@ describe('ensureLink', () => {
     }
   });
 
+  it("a hired truck whose plate a later day's hired truck took still shows its plate on its own day (third review of the hire branch)", async () => {
+    // The plate went to the 6 Oct hired truck: this 5 Oct one was renamed "T05.261005" (hired-truck.ts).
+    Object.assign(row('truck', 't5'), { code: 'T05.261005', hired: true, onlyOnDate: new Date('2026-10-05T00:00:00Z') });
+    const a = await ensureLink(T, 'R1', 't5', 'u1', opts());
+    expect(a.truckCode).toBe('T05');
+    expect((await listLinks(T, 'R1', opts()))[0]).toMatchObject({ truckCode: 'T05' });
+    const r = await reissueLink(T, a.linkId, 'u1', null, opts());
+    expect(r.truckCode).toBe('T05');
+    expect(JSON.stringify(tables.auditLog)).not.toContain('T05.261005');
+  });
+
   it('a revoked link stays revoked: no token, no QR, Reissue offered', async () => {
     const a = await ensureLink(T, 'R1', 't5', 'u1', opts());
     await revokeLink(T, a.linkId, 'u1', 'QR photographed', opts());

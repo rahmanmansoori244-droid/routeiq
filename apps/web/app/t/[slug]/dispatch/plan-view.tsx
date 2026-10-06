@@ -14,7 +14,7 @@ import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstTex
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
-import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
+import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
@@ -1199,9 +1199,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td
                       className="p-2"
                       title={
-                        l.cost
-                          ? `Fixed ${l.cost.fixed.toFixed(2)} + trip ${l.cost.trip.toFixed(2)} + distance ${l.cost.distance.toFixed(2)} + fuel ${l.cost.fuel.toFixed(2)} + driver ${l.cost.driver.toFixed(2)} (${durH(l.cost.driverPaidMin)} paid, from the truck's previous return) + overtime ${l.cost.overtime.toFixed(2)}`
-                          : COST_BASIS_TEXT.MIXED_LEGACY
+                        l.cost ? loadCostTitle(l.cost, l.driverDayRate, durH) : COST_BASIS_TEXT.MIXED_LEGACY
                       }
                     >
                       {l.operatingCost.toFixed(1)}

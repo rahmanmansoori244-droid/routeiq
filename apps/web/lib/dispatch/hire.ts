@@ -359,8 +359,13 @@ export interface HireSummary {
   /** Trucks the what-if could rent, and how many of them it used. */
   unitsOffered?: number;
   unitsUsed?: number;
-  /** One truck fewer: the rented truck whose stops matter least dropped, and what it carried left out. */
-  alternative: { hires: HireUse[]; hireCost: number; leftOut: LeftOut; dropped: string } | null;
+  /**
+   * One truck fewer: the rented truck whose P1-P3 stops matter least dropped, and the P1-P3 orders the hire
+   * is for that may then stay out (third review of the hire branch: never more than leftOut, never a P4/P5
+   * order). `roomFor`: P1-P3 orders the plan in use delivers that the what-if moved onto that truck (their
+   * room is counted as orders of leftOut); `low`: the P4/P5 orders riding on it, said apart.
+   */
+  alternative: { hires: HireUse[]; hireCost: number; leftOut: LeftOut; dropped: string; roomFor?: number; low?: LeftOut } | null;
   /** The what-if's totals for the record. */
   trucksUsed: number;
   loads: number;
@@ -422,8 +427,10 @@ export function hireNeed(input: { request: Pick<DispatchRequest, 'stops'>; baseU
  * another reason (a conflict with a locked plan) stays out of every count: no truck to rent changes
  * it. A stop the plan in use delivers that the what-if leaves out is `dropped`, never "still left
  * out". The alternative is worked out from the what-if's own loads (no other optimization): dropping
- * the rented truck whose stops have the lowest priorities (then the fewest cases) leaves those stops
- * out - at most, since the other trucks might take some of them.
+ * the rented truck whose P1-P3 stops have the lowest priorities (then the fewest P1-P3 cases) leaves at
+ * most the orders still left out, its orders the hire is for and as many more of them as it carries
+ * P1-P3 orders the plan in use delivers (their room) - never more than leftOut, never a P4/P5 order
+ * (said apart). At most, since the other trucks might take some of them.
  */
 export function summarizeHire(input: {
   request: DispatchRequest;
@@ -470,19 +477,37 @@ export function summarizeHire(input: {
   let alternative: HireSummary['alternative'] = null;
   const rented = [...loadsByTruck.keys()];
   if (rented.length >= 2) {
-    const priorityOf = new Map(stops.map((s) => [s.stop_id, s.priority ?? 3]));
-    const casesOf = (id: string) => loadsByTruck.get(id)!.reduce((a, l) => a + l.cases, 0);
-    const best = (id: string) => Math.min(...loadsByTruck.get(id)!.flatMap((l) => l.stops.map((s) => priorityOf.get(s.stop_id) ?? 3)));
-    // The truck whose most important stop matters least (P5 before P1), then the one carrying least.
-    const drop = [...rented].sort((a, b) => best(b) - best(a) || casesOf(a) - casesOf(b) || a.localeCompare(b))[0]!;
+    const byId = new Map(stops.map((s) => [s.stop_id, s]));
+    const priorityOf = (id: string) => byId.get(id)?.priority ?? 3;
+    const casesOf = (id: string) => byId.get(id)?.demand_cases ?? 0;
+    const stopsOn = (truck: string) => loadsByTruck.get(truck)!.flatMap((l) => l.stops.map((s) => s.stop_id));
+    const highOn = (truck: string) => stopsOn(truck).filter((id) => priorityOf(id) <= HIRE_MAX_PRIORITY);
+    // The truck whose P1-P3 stops matter least (P3 before P1; one with only P4/P5 stops first), then the
+    // one carrying the fewest P1-P3 cases: P4/P5 orders never decide it (owner answer 1).
+    const best = (truck: string) => Math.min(HIRE_MAX_PRIORITY + 1, ...highOn(truck).map(priorityOf));
+    const highCases = (truck: string) => highOn(truck).reduce((a, id) => a + casesOf(id), 0);
+    const drop = [...rented].sort((a, b) => best(b) - best(a) || highCases(a) - highCases(b) || a.localeCompare(b))[0]!;
     const altHires = usesOf(rented.filter((id) => id !== drop), optionOf);
-    const droppedStops = loadsByTruck.get(drop)!.flatMap((l) => l.stops.map((s) => s.stop_id));
     const dropOption = optionOf.get(parseVirtualHireId(drop)!.optionId);
+    // Third review of the hire branch: the what-if re-plans the whole day, so the dropped truck may carry
+    // orders the plan in use delivers with the own trucks, and P4/P5 orders riding along. Up to: the
+    // orders still left out, the orders the hire is for that it carries, and for each P1-P3 order of the
+    // plan in use it carries one more of them (the room it takes back on the own trucks, least important
+    // first) - never more than the orders left out without any rental. Its P4/P5 orders are said apart.
+    const counted = new Set<string>([...stillLeft.stopIds, ...highOn(drop).filter((id) => outIds.has(id))]);
+    const roomFor = highOn(drop).filter((id) => !outIds.has(id) && !otherIds.has(id)).length;
+    const others = [...outIds]
+      .filter((id) => !counted.has(id))
+      .sort((a, b) => priorityOf(b) - priorityOf(a) || casesOf(a) - casesOf(b) || a.localeCompare(b));
+    for (const id of others.slice(0, roomFor)) counted.add(id);
+    const riders = stopsOn(drop).filter((id) => priorityOf(id) > HIRE_MAX_PRIORITY);
     alternative = {
       hires: altHires,
       hireCost: round2(altHires.reduce((a, h) => a + h.count * h.costPerDay, 0)),
-      leftOut: leftOutOf([...stillLeft.stopIds, ...droppedStops], stops, orderIdsOf),
+      leftOut: leftOutOf(counted, stops, orderIdsOf),
       dropped: dropOption?.label ?? 'truck',
+      ...(roomFor ? { roomFor } : {}),
+      ...(riders.length ? { low: leftOutOf(riders, stops, orderIdsOf) } : {}),
     };
   }
   return {
@@ -653,8 +678,12 @@ export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline
   if (running) details.push(running);
   if (s.alternative) {
     const a = s.alternative;
+    const fewer = `With one truck fewer (${hiresText(a.hires)}, extra ${aboutMoney(a.hireCost, currency)})`;
+    const riders = a.low?.orders ? ` It also carries ${plural(a.low.orders, 'P4/P5 order')}, which would stay out too.` : '';
     details.push(
-      `With one truck fewer (${hiresText(a.hires)}, extra ${aboutMoney(a.hireCost, currency)}): up to ${leftOutText(a.leftOut)} stay undelivered - what the ${a.dropped} would carry${s.stillLeft.orders ? ' and the orders still left out' : ''}.`,
+      a.leftOut.orders
+        ? `${fewer}: up to ${leftOutText(a.leftOut)} ${a.leftOut.orders === 1 ? 'stays' : 'stay'} undelivered - what the ${a.dropped} would carry${a.roomFor ? ' or make room for' : ''}${s.stillLeft.orders ? ' and the orders still left out' : ''}.${riders}`
+        : `${fewer}: the ${a.dropped} carries none of the orders it is rented for.${riders}`,
     );
   }
   details.push(...lowLine(true));

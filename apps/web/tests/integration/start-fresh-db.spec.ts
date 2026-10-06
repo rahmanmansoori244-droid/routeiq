@@ -355,7 +355,7 @@ describe('Start fresh on real PostgreSQL', () => {
     const hired = await prisma.truck.create({
       data: { tenantId: A.tenantId, depotId: depot.id, code: 'HIRE-10T-0710-1', capacityCases: 1140, bays: 12, fixedCostPerDay: 50, hired: true, onlyOnDate: rentedDay, hireOptionId: option.id },
     });
-    expect(await rentedOnDay(A.tenantId, depot.id, rentedDay)).toEqual({ [option.id]: 1 });
+    expect(await rentedOnDay(A.tenantId, rentedDay)).toEqual({ [option.id]: 1 });
     as(A, 'TENANT_ADMIN');
     const preview = await get();
     expect(preview.body.data.removed.hiredTrucks).toBe(1);
@@ -365,7 +365,7 @@ describe('Start fresh on real PostgreSQL', () => {
     expect(await prisma.truck.findUnique({ where: { id: hired.id } })).toBeNull();
     // The plan of the 7th: the own truck only; the option may rent its two again.
     expect((await prisma.truck.findMany({ where: { tenantId: A.tenantId, ...trucksOfDayWhere(depot.id, rentedDay) }, select: { code: true } })).map((t) => t.code)).toEqual(['T01']);
-    expect(await rentedOnDay(A.tenantId, depot.id, rentedDay)).toEqual({});
+    expect(await rentedOnDay(A.tenantId, rentedDay)).toEqual({});
     // The hire option is master data: kept.
     expect(await prisma.hireOption.count({ where: { tenantId: A.tenantId } })).toBe(1);
   });
