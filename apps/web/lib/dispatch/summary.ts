@@ -131,6 +131,8 @@ export interface DriverChangeNote {
   reason: DriverNoteReason;
   /** CLASH: the trip that got that driver at an overlapping time. */
   other: { truckCode: string; loadNo: number | null } | null;
+  /** ON_LEAVE (owner request 6 Oct 2026): the last day of that driver's leave (YYYY-MM-DD). */
+  leaveUntil?: string | null;
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;

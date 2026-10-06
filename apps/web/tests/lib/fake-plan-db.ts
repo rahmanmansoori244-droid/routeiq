@@ -125,6 +125,8 @@ const DEFAULTS: Record<string, () => Row> = {
   runJob: () => ({ status: 'QUEUED', attemptNo: 1, progressPct: 0, startedAt: null, finishedAt: null }),
   // The column defaults of Product (0 kg and 0 L = unknown): a product made from an upload or a late order.
   product: () => ({ weightPerCaseKg: 0, volumePerCaseL: 0, active: true, createdFromUpload: false }),
+  // Driver leave: the @updatedAt column Prisma fills in.
+  driverLeave: () => ({ updatedAt: new Date(), note: null, coverDriverId: null }),
 };
 
 function delegate(model: string) {
@@ -202,6 +204,8 @@ const MODELS = [
   'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
   // Start fresh (4 Oct 2026) also clears the comparison baselines and the retired driver app's rows.
   'manualBaselineAssignment', 'driverShift', 'truckLocation', 'deliveryProof',
+  // Driver leave (owner request 6 Oct 2026): the planner reads who is away on the delivery day.
+  'driverLeave',
 ];
 
 export const fakePrisma: Row = {};
@@ -214,6 +218,10 @@ fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[
     return (tables.runPlan ?? []).filter((r) => r.id === values[0] && r.tenantId === values[1]).map((r) => ({ id: r.id, status: r.status }));
   }
   if (/pg_advisory_xact_lock/.test(sql)) return [{ locked: 1 }];
+  // Driver leave (6 Oct 2026): the driver's row lock before a period is checked and saved.
+  if (/FROM "Driver" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(sql)) {
+    return (tables.driver ?? []).filter((r) => r.id === values[0] && r.tenantId === values[1]).map((r) => ({ id: r.id }));
+  }
   return [];
 };
 fakePrisma.$executeRaw = async (strings: TemplateStringsArray) => {

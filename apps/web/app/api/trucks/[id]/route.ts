@@ -2,6 +2,7 @@ import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { truckHoursProblem, truckPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { historyOnlyDepotLinkMessage } from '@/lib/master-data-delete';
+import { truckFieldsRefused } from '@/lib/rbac';
 
 interface Params { params: { id: string } }
 
@@ -11,11 +12,28 @@ export const GET = (req: Request, { params }: Params) =>
     return ok(truck);
   })(req);
 
+/**
+ * A company admin changes any truck field. The dispatcher (PLANNER and up, owner request 6 Oct 2026)
+ * changes the usual (default) driver only - the Drivers page's "Usual driver of each truck"; any other
+ * field is refused (403 ADMIN_ONLY_TRUCK_FIELD, nothing saved). A change of the usual driver alone
+ * is audited TRUCK_USUAL_DRIVER_SET.
+ */
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.truck.findUnique({ where: { id: params.id } }));
       const input = await parseBody(r, truckPatchSchema);
+      const refused = truckFieldsRefused(user.role, input);
+      if (refused.length) {
+        return fail(
+          {
+            error: `Only a company admin can change ${refused.join(', ')} of a truck. A dispatcher can change its usual driver only. Nothing was saved.`,
+            code: 'ADMIN_ONLY_TRUCK_FIELD',
+            fields: refused,
+          },
+          403,
+        );
+      }
       const hours = truckHoursProblem({ ...before, ...input });
       if (hours) return fail(hours, 400);
       if (input.depotId) {
@@ -31,10 +49,12 @@ export const PATCH = (req: Request, { params }: Params) =>
         if (!driver.active) return fail(`Driver ${driver.name} is inactive`, 400);
       }
       const after = await db.truck.update({ where: { id: params.id }, data: input });
+      const changed = (Object.keys(input) as (keyof typeof input)[]).filter((k) => input[k] !== undefined && input[k] !== (before as Record<string, unknown>)[k]);
+      const usualDriverOnly = changed.length === 1 && changed[0] === 'defaultDriverId';
       await audit({
         tenantId: user.tenantId,
         userId: user.id,
-        action: 'UPDATE',
+        action: usualDriverOnly ? 'TRUCK_USUAL_DRIVER_SET' : 'UPDATE',
         entity: 'Truck',
         entityId: after.id,
         beforeJson: before as never,
@@ -43,7 +63,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       });
       return ok(after);
     },
-    { role: 'TENANT_ADMIN' },
+    { role: 'PLANNER' },
   )(req);
 
 export const DELETE = (req: Request, { params }: Params) =>

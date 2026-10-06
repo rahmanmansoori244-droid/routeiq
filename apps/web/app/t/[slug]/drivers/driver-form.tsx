@@ -23,6 +23,8 @@ export interface DriverRow {
   active: boolean;
   /** A daily (casual) driver added from a load (owner request 4 Oct 2026). */
   casual?: boolean;
+  /** On leave today: his last day (owner request 6 Oct 2026). */
+  leaveUntil?: string | null;
 }
 
 interface Props {
@@ -30,12 +32,14 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   mode: 'create' | 'edit';
   driver?: DriverRow;
+  /** A company admin: the only one who may change a driver's code (the dispatcher edits the rest). */
+  canAdmin?: boolean;
   onSaved: () => void;
 }
 
 const blank = { code: '', name: '', phone: '', active: true, casual: false };
 
-export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: Props) {
+export function DriverFormDialog({ open, onOpenChange, mode, driver, canAdmin = false, onSaved }: Props) {
   const [form, setForm] = useState(blank);
   const [pending, startTransition] = useTransition();
 
@@ -88,6 +92,7 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
                 onChange={(e) => setForm({ ...form, code: e.target.value })}
                 required
                 disabled={mode === 'edit'}
+                title={mode === 'edit' ? (canAdmin ? 'The code stays: it is on every load and sheet of this driver.' : 'The code stays (a company admin changes codes).') : undefined}
                 maxLength={32}
               />
             </div>

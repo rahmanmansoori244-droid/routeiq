@@ -117,8 +117,9 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
         driver = await tx.driver.findFirst({ where: { id: input.useExisting, tenantId }, select: DRIVER_PUBLIC_SELECT });
         if (!driver) throw new PlanError('Driver not found.', 404);
         if (!driver.active && !driver.casual) {
-          // Only a company admin changes a regular driver's active switch (PATCH /api/drivers/[id]).
-          throw new PlanError(`Driver ${driver.name} is inactive: ask a company admin.`, 409, { code: 'DRIVER_INACTIVE', driverId: driver.id, name: driver.name });
+          // The quick add never reactivates a regular driver: that is done on the Drivers page (the
+          // dispatcher may since owner request 6 Oct 2026; PATCH /api/drivers/[id]).
+          throw new PlanError(`Driver ${driver.name} is inactive: reactivate him on the Drivers page first, or add another driver.`, 409, { code: 'DRIVER_INACTIVE', driverId: driver.id, name: driver.name });
         }
         reused = true;
       } else if (input.phone) {

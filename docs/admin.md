@@ -181,6 +181,25 @@ If you need to scale beyond one web instance, swap the inflight map for Redis-ba
 
 ---
 
+## Drivers page: the dispatcher's since 6 Oct 2026
+Owner request of 6 Oct 2026: the dispatcher (role **Planner**, and Supervisor) keeps the **Drivers** page: adds drivers, edits names and mobiles, deactivates and reactivates them, makes a daily driver a regular one, enters **leave** (from, until, an optional cover driver and note) and sets each truck's **usual (default) driver**. A **Viewer** only reads it.
+- **Still the company admin's:** a driver's **code**, making a regular driver a daily one, deleting (deactivating through `DELETE /api/drivers/:id`), adding and removing trucks, and every other truck setting (bays, capacity, costs, hours, depot, code, active, hired). The server answers 403 `ADMIN_ONLY_DRIVER_FIELD` / `ADMIN_ONLY_TRUCK_FIELD` and saves nothing.
+- **What leave does to plans:** on a delivery day inside a period RouteIQ never gives that driver a load; his usual truck gets the cover when the cover is free that day (not on leave himself, no other truck that day), else no driver, with the reason on the load; rule 20 keeps such a load from being dispatched until a driver is picked. A driver picked by hand stays; locked, loading and dispatched loads never change. Saving leave never changes a plan already made: the answer warns when the driver is still on loads of those days (re-plan, or pick another driver).
+- **"A truck had no driver this morning":** look at **Drivers on leave** (top of the Drivers page): its usual driver is away and no cover was named, or the cover was away himself or on another truck. The load's note on the plan says which.
+- **Audit:** `DRIVER_LEAVE_ADDED`, `DRIVER_LEAVE_CHANGED` (before and after), `DRIVER_LEAVE_REMOVED` (entity *Driver leave*) and `TRUCK_USUAL_DRIVER_SET` (entity *Truck*), with the user and the time; driver changes stay `CREATE` / `UPDATE` on *Driver*. Leave periods are kept after they end and cannot be removed once started; a period entered by mistake is removed before its first day, or ended early.
+- **Data:** table `DriverLeave` (migration `20261006120000_driver_leave`; CHECK: until on or after from, nobody covers himself). Who is away on a day:
+
+```sql
+SELECT d.name, l."fromDate", l."untilDate", c.name AS cover, l.note
+  FROM "DriverLeave" l
+  JOIN "Driver" d ON d.id = l."driverId"
+  LEFT JOIN "Driver" c ON c.id = l."coverDriverId"
+ WHERE l."tenantId" = $1 AND l."fromDate" <= $2::date AND l."untilDate" >= $2::date
+ ORDER BY d.name;
+```
+
+---
+
 ## Tenant isolation contract
 
 CLAUDE.md §3, §13: every business table has `tenantId`, every query goes through `tenantDb(tenantId)`. The Vitest suite at `apps/web/tests/tenant-isolation.spec.ts` runs on every PR; merge is blocked if it fails.

@@ -187,6 +187,7 @@ model Tenant {
   stopVisits           StopVisit[]
   stopEvents           StopEvent[]
   deliveryPhotos       DeliveryPhoto[]
+  driverLeaves         DriverLeave[]
 }
 
 model TenantConfig {
@@ -330,6 +331,8 @@ model User {
   stopOutcomesSet      StopVisit[]          @relation("StopVisitOutcomeBy")
   stopEvents           StopEvent[]          @relation("StopEventUser")
   deliveryPhotos       DeliveryPhoto[]      @relation("DeliveryPhotoUser")
+  driverLeavesAdded    DriverLeave[]        @relation("DriverLeaveCreatedBy")
+  driverLeavesChanged  DriverLeave[]        @relation("DriverLeaveUpdatedBy")
 
   @@index([tenantId])
 }
@@ -439,9 +442,39 @@ model Driver {
   shifts        DriverShift[]
   defaultTrucks Truck[]       @relation("TruckDefaultDriver")
   loads         PlanLoad[]
+  leaves        DriverLeave[] @relation("DriverLeaveOf")
+  covers        DriverLeave[] @relation("DriverLeaveCover")
 
   @@unique([tenantId, code])
   @@index([tenantId])
+}
+
+/// A driver's leave (owner request 6 Oct 2026: the dispatcher follows who is away). From and until
+/// are delivery dates, both included. On those days RouteIQ never puts the driver on a load; a truck
+/// whose usual (default) driver is away gets the cover driver when he is free that day (planDrivers,
+/// lib/dispatch/driver-leave.ts). One driver's periods never overlap (checked under the driver's row
+/// lock); a period that has started keeps its first day, and one that has ended is kept for the record.
+model DriverLeave {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  driverId      String
+  /// CASCADE: a driver is only ever deleted by Start fresh (a daily driver with no load); his leave goes with him.
+  driver        Driver   @relation("DriverLeaveOf", fields: [driverId], references: [id], onDelete: Cascade)
+  fromDate      DateTime @db.Date
+  untilDate     DateTime @db.Date
+  note          String?
+  coverDriverId String?
+  coverDriver   Driver?  @relation("DriverLeaveCover", fields: [coverDriverId], references: [id], onDelete: SetNull)
+  createdById   String?
+  createdBy     User?    @relation("DriverLeaveCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime @default(now())
+  updatedById   String?
+  updatedBy     User?    @relation("DriverLeaveUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  updatedAt     DateTime @updatedAt
+
+  @@index([tenantId, untilDate])
+  @@index([driverId, fromDate])
 }
 
 // Module C — driver tracking.

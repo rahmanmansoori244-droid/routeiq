@@ -23,6 +23,7 @@ import {
   type LoadStatusName,
   type PlanTrip,
 } from '@/lib/dispatch/load-state';
+import { leaveOnDay } from '@/lib/dispatch/driver-leave';
 
 const L = (loadNo: number, status: LoadStatusName, id = `L${loadNo}`): LoadRef => ({ id, loadNo, status });
 const ALL: LoadStatusName[] = ['PLANNED', 'LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED'];
@@ -502,5 +503,106 @@ describe('checkDriverChange', () => {
       if (ON_ROAD.has(status)) expect(change).toEqual({ ok: false, reason: 'Driver cannot change after dispatch.' });
       else expect(change).toEqual({ ok: true, unchanged: false });
     }
+  });
+});
+
+/**
+ * planDrivers with driver leave (owner request 6 Oct 2026; lib/dispatch/driver-leave.ts). `away` is
+ * the delivery day's view (leaveOnDay): ALI is on leave until 12 Oct, covered by BOB unless a test
+ * says otherwise. T01's usual driver is ALI, T02's is SAM.
+ */
+describe('planDrivers with leave: never a driver on leave, the cover when he is free, else no driver', () => {
+  const DAY = '2026-10-07';
+  const USABLE_L = new Set(['ALI', 'SAM', 'BOB', 'NAS']);
+  const away = (periods: Parameters<typeof leaveOnDay>[0], day = DAY) => leaveOnDay(periods, day);
+  const aliAway = (cover: string | null = 'BOB') => away([{ id: 'L1', driverId: 'ALI', fromIso: '2026-10-07', untilIso: '2026-10-12', note: null, coverDriverId: cover }]);
+
+  it('the first plan of the day: the truck whose usual driver is away gets the cover; no note', () => {
+    for (const trips of both([trip('T01', 1, 360, 450, 'ALI'), trip('T02', 1, 360, 450, 'SAM')])) {
+      const r = planDrivers(trips, [], USABLE_L, aliAway());
+      expect(ids(r)).toEqual({ 'T01:1': 'BOB', 'T02:1': 'SAM' });
+      expect(r.drivers.get('T01:1')).toEqual({ driverId: 'BOB', driverSetById: null, driverSetAt: null }); // RouteIQ's pick, no marker
+      expect(r.notes).toEqual([]);
+    }
+  });
+
+  it('no cover named: the trip has no driver (the plan screen says why; rule 20 keeps it from leaving)', () => {
+    const r = planDrivers([trip('T01', 1, 360, 450, 'ALI'), trip('T01', 2, 480, 570, 'ALI')], [], USABLE_L, aliAway(null));
+    expect(ids(r)).toEqual({ 'T01:1': null, 'T01:2': null });
+  });
+
+  it('the cover on leave himself that day: no driver', () => {
+    const leave = away([
+      { id: 'L1', driverId: 'ALI', fromIso: '2026-10-07', untilIso: '2026-10-12', note: null, coverDriverId: 'BOB' },
+      { id: 'L2', driverId: 'BOB', fromIso: '2026-10-06', untilIso: '2026-10-07', note: null, coverDriverId: null },
+    ]);
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI')], [], USABLE_L, leave))).toEqual({ 'T01:1': null });
+  });
+
+  it('the cover no longer active: no driver', () => {
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI')], [], new Set(['ALI', 'SAM']), aliAway()))).toEqual({ 'T01:1': null });
+  });
+
+  it('the cover already drives another truck that day (even at other hours): no driver - in both truck orders', () => {
+    // T03's usual driver is BOB: 06:00-07:30. T01 (ALI away, cover BOB) goes 10:00-11:40.
+    for (const trips of both([trip('T01', 1, 600, 700, 'ALI'), trip('T03', 1, 360, 450, 'BOB')])) {
+      const r = planDrivers(trips, [], USABLE_L, aliAway());
+      expect(ids(r)).toEqual({ 'T01:1': null, 'T03:1': 'BOB' });
+    }
+  });
+
+  it('the cover on a frozen load of another truck that day: no driver; on the same truck: he drives its next trip', () => {
+    const otherTruck = [was('T03', 1, 'BOB', 360, 450, { status: 'LOCKED' })];
+    expect(ids(planDrivers([trip('T01', 1, 600, 700, 'ALI')], otherTruck, USABLE_L, aliAway()))).toEqual({ 'T01:1': null });
+    const sameTruck = [was('T01', 1, 'BOB', 360, 450, { status: 'DISPATCHED' })];
+    expect(ids(planDrivers([trip('T01', 2, 600, 700, 'ALI')], sameTruck, USABLE_L, aliAway()))).toEqual({ 'T01:2': 'BOB' });
+  });
+
+  it('two trucks covered by the same driver: the trip the plan gives out first gets him, the other none', () => {
+    const leave = away([
+      { id: 'L1', driverId: 'ALI', fromIso: DAY, untilIso: DAY, note: null, coverDriverId: 'BOB' },
+      { id: 'L2', driverId: 'SAM', fromIso: DAY, untilIso: DAY, note: null, coverDriverId: 'BOB' },
+    ]);
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI'), trip('T02', 1, 600, 700, 'SAM')], [], USABLE_L, leave))).toEqual({ 'T01:1': 'BOB', 'T02:1': null });
+    expect(ids(planDrivers([trip('T02', 1, 600, 700, 'SAM'), trip('T01', 1, 360, 450, 'ALI')], [], USABLE_L, leave))).toEqual({ 'T01:1': null, 'T02:1': 'BOB' });
+  });
+
+  it('a re-plan after the leave was entered: the driver RouteIQ filled in goes, the cover comes, with an ON_LEAVE note naming the last day', () => {
+    const evidence = [was('T01', 1, 'ALI', 360, 450), was('T02', 1, 'SAM', 360, 450)];
+    const trips = [trip('T01', 1, 380, 470, 'ALI'), trip('T02', 1, 360, 450, 'SAM')];
+    const r = planDrivers(trips, evidence, USABLE_L, aliAway());
+    expect(ids(r)).toEqual({ 'T01:1': 'BOB', 'T02:1': 'SAM' });
+    expect(r.notes).toEqual([{ ...note('T01:1', 380, 470, 'ALI', 'BOB', 'ON_LEAVE'), leaveUntil: '2026-10-12' }]);
+    // Without a cover: no driver, the same note.
+    const none = planDrivers(trips, evidence, USABLE_L, aliAway(null));
+    expect(ids(none)['T01:1']).toBeNull();
+    expect(none.notes).toEqual([{ ...note('T01:1', 380, 470, 'ALI', null, 'ON_LEAVE'), leaveUntil: '2026-10-12' }]);
+  });
+
+  it("a driver on leave is never given by RouteIQ, not even as the driver of the truck's nearest trip", () => {
+    // T01 L1 is LOCKED with ALI (kept as it is); its trip 2 does not get ALI: the cover drives it.
+    const evidence = [was('T01', 1, 'ALI', 360, 450, { status: 'LOCKED' })];
+    const r = planDrivers([trip('T01', 2, 480, 570, 'ALI')], evidence, USABLE_L, aliAway());
+    expect(ids(r)).toEqual({ 'T01:2': 'BOB' });
+  });
+
+  it('a driver picked by hand stays on his trip even on leave (the dispatcher chose him): no note', () => {
+    const evidence = [was('T01', 1, 'ALI', 360, 450, HAND)];
+    const r = planDrivers([trip('T01', 1, 380, 470, 'ALI')], evidence, USABLE_L, aliAway());
+    expect(r.drivers.get('T01:1')).toEqual({ driverId: 'ALI', driverSetById: 'u1', driverSetAt: AT });
+    expect(r.notes).toEqual([]);
+  });
+
+  it('after the period he is used again by himself', () => {
+    const periods = [{ id: 'L1', driverId: 'ALI', fromIso: '2026-10-07', untilIso: '2026-10-12', note: null, coverDriverId: 'BOB' }];
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI')], [], USABLE_L, away(periods, '2026-10-12')))).toEqual({ 'T01:1': 'BOB' });
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI')], [], USABLE_L, away(periods, '2026-10-13')))).toEqual({ 'T01:1': 'ALI' });
+    expect(ids(planDrivers([trip('T01', 1, 360, 450, 'ALI')], [], USABLE_L, away(periods, '2026-10-06')))).toEqual({ 'T01:1': 'ALI' });
+  });
+
+  it('without leave, nothing changes (the default argument)', () => {
+    const trips = [trip('T01', 1, 360, 450, 'ALI'), trip('T02', 1, 360, 450, 'SAM')];
+    expect(ids(planDrivers(trips, [], USABLE_L))).toEqual(ids(planDrivers(trips, [], USABLE_L, new Map())));
+    expect(ids(planDrivers(trips, [], USABLE_L))).toEqual({ 'T01:1': 'ALI', 'T02:1': 'SAM' });
   });
 });

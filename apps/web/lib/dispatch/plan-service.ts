@@ -45,6 +45,8 @@ import {
 } from './data-collection';
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { leaveOnDay } from './driver-leave';
+import { leaveRowsOn } from './driver-leave-service';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   caseHeavierThanAnyTruck,
@@ -1252,6 +1254,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
   const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
+  // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
+  const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
   const { drivers: driverOf, notes } = planDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
@@ -1263,6 +1267,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     })),
     evidence,
     new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
+    leave,
   );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
@@ -1276,6 +1281,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     to: n.toDriverId ? person(n.toDriverId) : null,
     reason: n.reason,
     other: n.other ? { truckCode: truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
+    ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
   }));
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });

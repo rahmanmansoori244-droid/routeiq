@@ -15,6 +15,8 @@
  * Owner decision 4 (5 Oct 2026): "the dispatcher is the planner" - every move is the PLANNER's
  * (Dispatch and Completed needed a SUPERVISOR before). VIEWER is refused by the route.
  */
+import { coverFor, type LeaveOnDay } from './driver-leave';
+
 export type LoadStatusName = 'PLANNED' | 'LOCKED' | 'LOADING' | 'DISPATCHED' | 'COMPLETED';
 
 export const FROZEN: ReadonlySet<LoadStatusName> = new Set(['LOCKED', 'LOADING', 'DISPATCHED', 'COMPLETED']);
@@ -173,9 +175,10 @@ export interface TripDriver {
  * Why a trip lost or changed the driver its evidence load had:
  * - CLASH: another trip of the plan got that driver at an overlapping time;
  * - INACTIVE: that driver is no longer active;
+ * - ON_LEAVE: that driver is on leave on the delivery day (driver-leave.ts; owner request 6 Oct 2026);
  * - TRIP_GONE: the dispatcher picked that driver by hand for a trip the plan does not have.
  */
-export type DriverNoteReason = 'CLASH' | 'INACTIVE' | 'TRIP_GONE';
+export type DriverNoteReason = 'CLASH' | 'INACTIVE' | 'ON_LEAVE' | 'TRIP_GONE';
 
 /** A driver note: a trip that lost or changed its driver (never a trip that only got one). */
 export interface DriverNote {
@@ -193,10 +196,13 @@ export interface DriverNote {
   reason: DriverNoteReason;
   /** CLASH: the trip that got `fromDriverId`. */
   other: { truckId: string; loadNo: number } | null;
+  /** ON_LEAVE only: the last day of that driver's leave (YYYY-MM-DD). */
+  leaveUntil?: string;
 }
 
 const tripKey = (l: { truckId: string; loadNo: number }) => `${l.truckId}:${l.loadNo}`;
 const NO_DRIVER: TripDriver = { driverId: null, driverSetById: null, driverSetAt: null };
+const NO_LEAVE: LeaveOnDay = new Map();
 
 /**
  * Drivers for the trips of a plan being applied (an optimize, a re-plan or "Use instead"), and the
@@ -216,11 +222,24 @@ const NO_DRIVER: TripDriver = { driverId: null, driverSetById: null, driverSetAt
  *   (frozen or given a driver already), (c) the truck's default driver. None of them: no driver.
  * The first optimization of a day has no evidence: pass 2 with (b) and (c).
  *
- * Notes: a trip whose driver is not its evidence load's driver any more (CLASH, INACTIVE), and a
- * hand-set driver whose trip the plan does not have (TRIP_GONE: nothing brings it back later).
+ * Leave (owner request 6 Oct 2026; `leave` = who is on leave on the delivery day, driver-leave.ts):
+ * pass 2 never gives a driver on leave. Pass 3: a trip still without a driver whose truck's default
+ * driver is on leave gets his cover driver, when one is named, is active, is not on leave himself
+ * that day, has no overlapping trip and drives no OTHER truck of the plan that day (frozen, hand-set
+ * or given in pass 2 or earlier in pass 3, in pass 2's order). Else the trip has no driver: the plan
+ * screen says why (loadLeaveNote) and rule 20 keeps it from leaving until the dispatcher picks one.
+ * Pass 1 is unchanged: a driver picked by hand stays even on leave (the dispatcher's choice).
+ *
+ * Notes: a trip whose driver is not its evidence load's driver any more (CLASH, INACTIVE, ON_LEAVE),
+ * and a hand-set driver whose trip the plan does not have (TRIP_GONE: nothing brings it back later).
  * Filling a trip that had no driver is not a note.
  */
-export function planDrivers(trips: readonly PlanTrip[], evidence: readonly EvidenceLoad[], usable: ReadonlySet<string>): { drivers: Map<string, TripDriver>; notes: DriverNote[] } {
+export function planDrivers(
+  trips: readonly PlanTrip[],
+  evidence: readonly EvidenceLoad[],
+  usable: ReadonlySet<string>,
+  leave: LeaveOnDay = NO_LEAVE,
+): { drivers: Map<string, TripDriver>; notes: DriverNote[] } {
   const before = new Map(evidence.map((e) => [tripKey(e), e]));
   const drivers = new Map(trips.map((t) => [t.key, NO_DRIVER]));
   // The trips of the plan that have a driver, so far: the frozen loads first.
@@ -240,7 +259,7 @@ export function planDrivers(trips: readonly PlanTrip[], evidence: readonly Evide
     else filledIn.push(t);
   }
 
-  // Pass 2: RouteIQ's picks, the trip that moved least first.
+  // Pass 2: RouteIQ's picks, the trip that moved least first. Never a driver on leave that day.
   const moved = (t: PlanTrip) => {
     const e = before.get(tripKey(t));
     return e ? Math.abs(t.departMin - e.departMin) : Number.POSITIVE_INFINITY;
@@ -251,13 +270,27 @@ export function planDrivers(trips: readonly PlanTrip[], evidence: readonly Evide
       .filter((g) => g.truckId === t.truckId)
       .sort((a, b) => gap(a, t) - gap(b, t) || a.departMin - b.departMin || a.loadNo - b.loadNo)[0]?.driverId ?? null;
   const order = filledIn.map((t) => ({ t, m: moved(t) })).sort((a, b) => (a.m === b.m ? 0 : a.m < b.m ? -1 : 1));
+  const free = (d: string | null, t: PlanTrip): d is string => d !== null && usable.has(d) && !leave.has(d) && !busyWith(d, t);
   for (const { t } of order) {
     const from = before.get(tripKey(t))?.driverId ?? null;
-    const free = (d: string | null): d is string => d !== null && usable.has(d) && !busyWith(d, t);
-    const driverId = [from, nearestTripDriver(t), t.defaultDriverId].find(free) ?? null;
+    const driverId = [from, nearestTripDriver(t), t.defaultDriverId].find((d): d is string => free(d, t)) ?? null;
     if (driverId) give(t, { ...NO_DRIVER, driverId });
+  }
+
+  // Pass 3: the cover driver of a truck whose default driver is on leave that day.
+  for (const { t } of order) {
+    if (drivers.get(t.key)!.driverId !== null) continue;
+    const cover = coverFor(t.defaultDriverId, leave);
+    if (cover && free(cover, t) && !given.some((g) => g.driverId === cover && g.truckId !== t.truckId)) give(t, { ...NO_DRIVER, driverId: cover });
+  }
+
+  // The notes: a trip that lost or changed the driver its evidence load had.
+  for (const { t } of order) {
+    const from = before.get(tripKey(t))?.driverId ?? null;
+    const driverId = drivers.get(t.key)!.driverId;
     if (from === null || from === driverId) continue;
-    const other = usable.has(from) ? busyWith(from, t) : undefined;
+    const away = usable.has(from) ? leave.get(from) : undefined;
+    const other = usable.has(from) && !away ? busyWith(from, t) : undefined;
     notes.push({
       key: t.key,
       truckId: t.truckId,
@@ -266,8 +299,9 @@ export function planDrivers(trips: readonly PlanTrip[], evidence: readonly Evide
       returnMin: t.returnMin,
       fromDriverId: from,
       toDriverId: driverId,
-      reason: other ? 'CLASH' : 'INACTIVE',
+      reason: away ? 'ON_LEAVE' : other ? 'CLASH' : 'INACTIVE',
       other: other ? { truckId: other.truckId, loadNo: other.loadNo } : null,
+      ...(away ? { leaveUntil: away.untilIso } : {}),
     });
   }
 

@@ -9,7 +9,7 @@ import type { DetailLoad, DetailStop } from './plan-detail';
 import { loadPallets, palletText } from './pallets';
 import { isSupersededRun } from './plan-status';
 import type { DriverChangeNote } from './summary';
-import { fmtHhmm } from './time';
+import { fmtDayMonth, fmtHhmm } from './time';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
 export const MAX_WAYPOINTS = 9;
@@ -254,7 +254,12 @@ export function driverChangeText(c: DriverChangeNote): string {
   }
   const to = c.to?.name ?? 'no driver';
   const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : 'another trip';
-  const why = c.reason === 'INACTIVE' ? `${from} is no longer active` : `${from} is on ${other} at that time`;
+  const why =
+    c.reason === 'INACTIVE'
+      ? `${from} is no longer active`
+      : c.reason === 'ON_LEAVE'
+        ? `${from} is on leave${c.leaveUntil ? ` until ${fmtDayMonth(c.leaveUntil)}` : ''}`
+        : `${from} is on ${other} at that time`;
   return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
 }
 

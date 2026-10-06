@@ -27,6 +27,8 @@ import {
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
 import { driverChangeWarnings, noteParts } from './driver-links';
+import { leaveOnDay, loadLeaveNote } from './driver-leave';
+import { leaveRowsOn } from './driver-leave-service';
 import { orderIdOf, portionPlannedKgPerCase, readPortionLines, readPortionPalletFactors, rowLines, rowLinesKg, splitPartLabels } from './split';
 import { earlyPriorities, earlyStarts, optionTradeoffs, physicalTruckCount, planSignature, preferenceFigures, type OptionFacts } from './plan-options';
 import type { PreferencePenalties, SearchMode, SearchReport } from '@routeiq/shared-types';
@@ -206,6 +208,12 @@ export interface DetailLoad {
   break: LoadBreak | null;
   /** The truck is hired from outside (Truck.hired, as it is now): a badge on the plan and the sheets. */
   hired?: boolean;
+  /**
+   * Driver leave on the delivery day (owner request 6 Oct 2026, loadLeaveNote in driver-leave.ts),
+   * read live: "No driver: Ali is on leave until 12 Oct - pick a driver", "Ali is on leave until
+   * 12 Oct", or "Covers Ali (on leave until 12 Oct)". Absent / null: nothing to say.
+   */
+  driverNote?: string | null;
 }
 
 export interface DetailUnserved {
@@ -308,6 +316,11 @@ export interface PlanDetail {
     palletRule?: { fillPct: number } | null;
   }[];
   loads: DetailLoad[];
+  /**
+   * The drivers on leave on the plan's delivery day (owner request 6 Oct 2026): the Driver list shows
+   * them "(on leave until 12 Oct)" and asks before one is chosen. Absent on older fixtures.
+   */
+  driversOnLeave?: { driverId: string; until: string; coverDriverId: string | null }[];
   unserved: DetailUnserved[];
   /**
    * A daily dispatch plan (loads, a RECOMMENDED option or a later version; legacy-runs.ts): it has the
@@ -441,7 +454,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, defaultDriverId: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -496,6 +509,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // Pallets: the cases per pallet the option was planned with (by product code), so a factor changed
   // under Products later never changes how a planned load reads.
   const plannedFactors = inputs?.palletFactors ?? {};
+  // Driver leave on the delivery day (owner request 6 Oct 2026): the load notes and the Driver list labels.
+  const leavePeriods = await leaveRowsOn(db, tenantId, run.runDate);
+  const leave = leaveOnDay(leavePeriods, isoOf(run.runDate));
+  const leaveNames = leave.size
+    ? new Map((await db.driver.findMany({ where: { tenantId, id: { in: [...new Set([...leave.keys(), ...[...leave.values()].map((v) => v.coverDriverId).filter((x): x is string => !!x)])] } }, select: { id: true, name: true } })).map((x) => [x.id, x.name]))
+    : new Map<string, string>();
+  const nameOfDriver = (id: string) => leaveNames.get(id) ?? loads.find((x) => x.driverId === id)?.driver?.name ?? 'Unknown driver';
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -704,6 +724,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
+      driverNote: loadLeaveNote(l, l.truck.defaultDriverId ?? null, leave, nameOfDriver),
     };
   });
 
@@ -906,6 +927,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       };
     }),
     loads: detailLoads,
+    driversOnLeave: [...leave].map(([driverId, v]) => ({ driverId, until: v.untilIso, coverDriverId: v.coverDriverId })),
     unserved,
     isDispatchPlan: isDispatchPlanShape({ loadCount: loads.length, scenarioNames: scenarios.map((s) => s.name), version: run.version }),
     versions: versions.map((v) => ({

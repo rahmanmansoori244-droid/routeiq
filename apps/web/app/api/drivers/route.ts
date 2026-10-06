@@ -12,6 +12,7 @@ export const GET = withTenantApi(async (_req, { db }) => {
   return ok(drivers);
 });
 
+// The dispatcher (PLANNER) adds drivers too (owner request 6 Oct 2026: drivers change a lot). VIEWER: 403.
 export const POST = withTenantApi(
   async (req, { db, user, ip }) => {
     const input = await parseBody(req, driverSchema);
@@ -30,5 +31,5 @@ export const POST = withTenantApi(
     });
     return ok(created, 201);
   },
-  { role: 'TENANT_ADMIN' },
+  { role: 'PLANNER' },
 );

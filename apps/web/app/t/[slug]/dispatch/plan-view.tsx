@@ -14,6 +14,7 @@ import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstTex
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
+import { onLeaveLabel, pickOnLeaveConfirm } from '@/lib/dispatch/driver-leave';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
@@ -334,6 +335,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
+  // Drivers on leave on this plan's delivery day (owner request 6 Oct 2026): driver id -> last day.
+  const onLeave = useMemo(() => new Map((d?.driversOnLeave ?? []).map((x) => [x.driverId, x.until])), [d]);
 
   // One action at a time: while any request of this plan runs (a load change, Lock all, Use
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
@@ -1062,6 +1065,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       <LoadDriver
                         l={l}
                         drivers={drivers}
+                        onLeave={onLeave}
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
                         busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
@@ -1413,6 +1417,7 @@ function Kpi({ label, value, warn, title, testId }: { label: string; value: stri
 function LoadDriver({
   l,
   drivers,
+  onLeave = new Map(),
   editable,
   busy,
   onChange,
@@ -1426,6 +1431,8 @@ function LoadDriver({
 }: {
   l: DetailLoad;
   drivers: DriverOption[];
+  /** Drivers on leave on the plan's day (driver id -> last day): labelled, and chosen only after a question. */
+  onLeave?: ReadonlyMap<string, string>;
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
@@ -1466,7 +1473,18 @@ function LoadDriver({
         value={l.driverId ?? ''}
         disabled={!editable || busy}
         title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
-        onChange={(e) => (e.target.value === ADD_DAILY ? onAddDaily?.() : onChange(e.target.value || null))}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === ADD_DAILY) return onAddDaily?.();
+          // A driver on leave that day is put on a load only after a question (owner request 6 Oct 2026).
+          const until = v ? onLeave.get(v) : undefined;
+          const name = options.find((x) => x.id === v)?.name ?? 'This driver';
+          if (until && !window.confirm(pickOnLeaveConfirm(name, until, `${l.truckCode} · L${l.loadNo}`))) {
+            e.target.value = l.driverId ?? '';
+            return;
+          }
+          onChange(v || null);
+        }}
         data-testid={`driver-select-${tag}`}
       >
         <option value="">No driver</option>
@@ -1475,10 +1493,16 @@ function LoadDriver({
             {x.name}
             {x.casual ? ' (daily)' : ''}
             {x.active ? '' : ' (inactive)'}
+            {onLeave.has(x.id) ? ` (${onLeaveLabel(onLeave.get(x.id)!)})` : ''}
           </option>
         ))}
         {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}
       </select>
+      {l.driverNote ? (
+        <p className={`max-w-[12rem] text-xs ${l.driverId === null || onLeave.has(l.driverId) ? 'text-amber-700' : 'text-muted-foreground'}`} data-testid={`driver-note-${tag}`}>
+          {l.driverNote}
+        </p>
+      ) : null}
       <div className="flex gap-2 text-xs">
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
