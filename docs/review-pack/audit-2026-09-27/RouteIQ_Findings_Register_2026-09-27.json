@@ -1,0 +1,683 @@
+{
+  "repository": "rahmanmansoori244-droid/routeiq",
+  "commit": "83d8174836deb339d54f90e65b803550ed34c20d",
+  "review_date": "2026-09-27",
+  "mode": "read-only; no production access or source edits",
+  "scope": "new findings in broad audit; earlier findings listed separately in report",
+  "severity_counts": {
+    "High remediation priority": 1,
+    "Medium": 18,
+    "Low": 7
+  },
+  "findings": [
+    {
+      "id": "F01",
+      "title": "Unsupported Next.js version matches a security advisory",
+      "severity": "High remediation priority",
+      "classification": "dependency advisory match; exploitability not demonstrated",
+      "references": [
+        {
+          "path": "apps/web/package.json",
+          "lines": "50",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/package.json#L50"
+        },
+        {
+          "path": "pnpm-lock.yaml",
+          "lines": "100",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/pnpm-lock.yaml#L100"
+        }
+      ],
+      "failure_scenario": "The application and lockfile use Next.js 14.2.35. The maintainer lists Next 14 App Router in the affected range for CVE-2026-23864 / GHSA-h25m-26qc-wcjf, a denial-of-service issue. Next 14 is also outside the official supported majors.",
+      "impact": "This warrants a planned security upgrade. No deployed RouteIQ exploit, account compromise or remote code execution was demonstrated. No explicit application Server Action was established; reachable bundle paths and configuration still need assessment.",
+      "proposed_fix": "Upgrade to a currently patched supported release in a dedicated PR, with the compatible React/auth stack and full regression checks. Do not assume the advisory\u2019s first January patch is sufficient against later advisories.",
+      "evidence": "Manifest/lock inspection plus live maintainer advisory and support policy. No exploitation attempted.",
+      "acceptance_check": "Supported, patched dependency resolution; authentication, middleware, dispatch and export tests pass on the upgraded build.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F02",
+      "title": "Merging invoice rows drops priority and delivery instructions",
+      "severity": "Medium",
+      "classification": "reproduced application logic",
+      "references": [
+        {
+          "path": "apps/web/lib/dispatch/order-intake.ts",
+          "lines": "495\u2013507",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/order-intake.ts#L495-L507"
+        },
+        {
+          "path": "apps/web/lib/dispatch/intake-server.ts",
+          "lines": "397\u2013413",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/intake-server.ts#L397-L413"
+        }
+      ],
+      "failure_scenario": "Two rows for the same invoice/SKU contain 10 cases at P5 and 5 cases at P1 with an urgent receiving note. Merging retains the first row\u2019s priority and note. Reversing row order changes the saved priority, although the order-insensitive upload fingerprint stays identical. For a P3 customer, the P5-first file reaches planning as P3 instead of P1.",
+      "impact": "ERP sorting can silently change which deliveries receive priority and discard instructions. The solver cannot recover requirements already lost during intake.",
+      "proposed_fix": "Merge priority using the strongest explicit priority; preserve distinct notes and row provenance. Reject or flag metadata conflicts that have no safe merge rule.",
+      "evidence": "Actual normalize, resolve and confirm functions with synthetic database boundaries: intake/probe-intake-results.json.",
+      "acceptance_check": "Every permutation of identical source rows produces identical business meaning, priority and retained instructions.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F03",
+      "title": "Deleting a depot can transfer its demand into another depot\u2019s scope",
+      "severity": "Medium",
+      "classification": "handler reproduction plus explicit foreign-key/scope proof",
+      "references": [
+        {
+          "path": "apps/web/app/api/depots/[id]/route.ts",
+          "lines": "40\u201359",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/depots/[id]/route.ts#L40-L59"
+        },
+        {
+          "path": "apps/web/prisma/migrations/20260924090000_nmwc_dispatch_mvp/migration.sql",
+          "lines": "224\u2013227",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/prisma/migrations/20260924090000_nmwc_dispatch_mvp/migration.sql#L224-L227"
+        },
+        {
+          "path": "apps/web/lib/dispatch/plan-service.ts",
+          "lines": "174\u2013180",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-service.ts#L174-L180"
+        }
+      ],
+      "failure_scenario": "Nizwa has an uploaded 50-case order but no truck or run. Depot deletion checks trucks/runs only, then deletes Nizwa. Order and upload-batch foreign keys set depotId to NULL. If Muscat is the sole remaining active depot, its scope includes that formerly Nizwa order. With multiple remaining depots, the order instead falls out of their depot scopes.",
+      "impact": "Administrative cleanup loses explicit depot ownership, potentially sending demand to the wrong dispatch operation.",
+      "proposed_fix": "Deactivate depots with any business references. Make deletion/reference checks atomic; consider restrictive foreign keys and distinguish genuinely legacy unassigned orders. Revalidate the depot when confirming a previously validated upload.",
+      "evidence": "Actual DELETE and scope function executed. SET NULL modeled directly from checked migration DDL; no PostgreSQL deletion performed. intake/probe-intake-results.json.",
+      "acceptance_check": "An order or validated upload prevents destructive depot deletion; demand never changes depot merely because a master row is removed.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F04",
+      "title": "Partial revenue and margin become falsely complete totals",
+      "severity": "Medium",
+      "classification": "reproduced application logic",
+      "references": [
+        {
+          "path": "apps/web/lib/dispatch/order-intake.ts",
+          "lines": "503\u2013504",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/order-intake.ts#L503-L504"
+        },
+        {
+          "path": "apps/web/lib/dispatch/intake-server.ts",
+          "lines": "398\u2013435",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/intake-server.ts#L398-L435"
+        }
+      ],
+      "failure_scenario": "Merge 10 cases carrying 100 OMR revenue/20 OMR margin with 5 cases whose money fields are blank. The resulting 15-case line is saved as a complete 100/20 total. A nonmerged control correctly retains unknown order totals.",
+      "impact": "Missing money is implicitly treated as zero, and economic scoring/reporting can claim complete data where it has only a subtotal. No specific changed final route is asserted.",
+      "proposed_fix": "Track completeness separately for revenue and margin, or propagate null whenever any component is unknown. Keep a known subtotal separately if useful.",
+      "evidence": "Actual intake and persistence logic with controlled I/O: intake/probe-intake-results.json.",
+      "acceptance_check": "Merging partially known monetary rows never enables complete-money scoring; later rows cannot reset unknown to zero.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F05",
+      "title": "Customer import can overwrite a newly verified pin",
+      "severity": "Medium",
+      "classification": "reproduced concurrency schedule",
+      "references": [
+        {
+          "path": "apps/web/app/api/customers/import/route.ts",
+          "lines": "182\u2013190",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/customers/import/route.ts#L182-L190"
+        },
+        {
+          "path": "apps/web/app/api/customers/import/route.ts",
+          "lines": "235\u2013281",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/customers/import/route.ts#L235-L281"
+        }
+      ],
+      "failure_scenario": "Import reads locationVerified=false. A dispatcher then verifies a corrected point. Import subsequently uses its stale read to overwrite the coordinates, leaving locationVerified=true and the dispatcher\u2019s attribution attached to the wrong point.",
+      "impact": "A bulk import can undo a location correction and falsely present the imported coordinates as verified.",
+      "proposed_fix": "Condition coordinate writes atomically on the current unverified state, or lock/re-read the customer within the update transaction. Base kept-verified counts on actual write outcomes.",
+      "evidence": "Actual import POST with controlled read/write interleaving; parser/auth/database boundaries substituted. intake/probe-intake-results.json.",
+      "acceptance_check": "A dispatcher verification between import read and write preserves the verified coordinates and attribution.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F06",
+      "title": "A late preview can save customer A\u2019s location to customer B",
+      "severity": "Medium",
+      "classification": "reproduced component callbacks; browser mount not run",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/location-dialog.tsx",
+          "lines": "48\u201383",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/location-dialog.tsx#L48-L83"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/dispatch-client.tsx",
+          "lines": "538\u2013539",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/dispatch-client.tsx#L538-L539"
+        }
+      ],
+      "failure_scenario": "Start reading A\u2019s location, cancel, open B, then let A\u2019s response finish. The mounted dialog accepts the old result into B\u2019s state. Clicking Save submits A\u2019s coordinates to B\u2019s customer endpoint. Cancel remains available while the read is busy.",
+      "impact": "Wrong customer coordinates can be persisted and used by later plans. The dispatcher must click Save and can see the changed pin; the late response alone does not write data.",
+      "proposed_fix": "Associate every preview with a customer/input generation. Ignore obsolete responses, invalidate on close/change and abort requests where possible.",
+      "evidence": "Verbatim current preview/save callbacks with a deferred response; submission target B and point A recorded. ui/ui-results.json. No real HTTP write.",
+      "acceptance_check": "Resolve A\u2019s delayed response after B opens: B\u2019s pin remains unchanged and Save cannot use A\u2019s result.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F07",
+      "title": "Invalid receiving hours and unloading text silently become planning values",
+      "severity": "Medium",
+      "classification": "reproduced component logic and API contract",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/client-api.ts",
+          "lines": "105\u2013110",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/client-api.ts#L105-L110"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/customer-dialog.tsx",
+          "lines": "55\u201377",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/customer-dialog.tsx#L55-L77"
+        },
+        {
+          "path": "apps/web/app/api/customers/[id]/route.ts",
+          "lines": "55\u201360",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/customers/[id]/route.ts#L55-L60"
+        }
+      ],
+      "failure_scenario": "The form converts 06:90 to 450 minutes, meaning 07:30. Unloading input \u201cten\u201d becomes zero through Number(service) || 0. The API receives valid numbers and marks service time confirmed, so defaults no longer protect the plan.",
+      "impact": "Hard receiving hours can shift and unloading duration can disappear without a validation error, making schedules unrealistically optimistic.",
+      "proposed_fix": "Reuse the strict shared parseHhmm helper. Validate finite integer service minutes, distinguish blank/invalid from an explicitly chosen zero.",
+      "evidence": "Current form callbacks produced start 450 / end 600 / service 0 without errors. The existing strict parser rejects 06:90. ui/ui-results.json.",
+      "acceptance_check": "Malformed times, alphabetic unloading and blank required duration produce validation errors; intentional zero remains explicit.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F08",
+      "title": "Whole-kilogram rounding excludes physically feasible loads",
+      "severity": "Medium",
+      "classification": "exact constraint and repair-pool proof; no optimizer search run",
+      "references": [
+        {
+          "path": "apps/solver/dispatch_solver.py",
+          "lines": "712\u2013716",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/solver/dispatch_solver.py#L712-L716"
+        },
+        {
+          "path": "apps/solver/load_repack.py",
+          "lines": "860\u2013864",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/solver/load_repack.py#L860-L864"
+        }
+      ],
+      "failure_scenario": "One 3,000 kg, 300-case truck has one available trip. Three nearby 100-case deliveries weigh 999.1 + 999.1 + 1,001.8 = 3,000 kg. Routing rounds each upward, encoding 3,002 kg. Repair offers existing routes plus singleton stops and cannot combine the missing stop into the existing trip.",
+      "impact": "A genuinely feasible all-served load is excluded by the mathematical representation. More search time cannot repair an excluded route.",
+      "proposed_fix": "Choose a consistent integer weight unit, such as grams, across splitting, routing, repacking and verification. Keep any safety reserve explicit at truck level.",
+      "evidence": "Actual conversion code recorded; a manually constructed combined route passes the current feasibility check as VERIFIED; actual repair pools inspected. solver/deep_solver_checks.json. No full OR-Tools output claimed.",
+      "acceptance_check": "Serve the exact-capacity three-stop case in one trip, while a just-over-capacity control stays infeasible.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F09",
+      "title": "Job recovery can permanently strand a plan as OPTIMIZING",
+      "severity": "Medium",
+      "classification": "reproduced fault injection",
+      "references": [
+        {
+          "path": "apps/web/lib/jobs/optimize-job.ts",
+          "lines": "73\u2013107",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/jobs/optimize-job.ts#L73-L107"
+        },
+        {
+          "path": "apps/web/lib/dispatch/start-optimize.ts",
+          "lines": "244\u2013249",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/start-optimize.ts#L244-L249"
+        }
+      ],
+      "failure_scenario": "The janitor changes a job to FAILED, then updates its plan separately. If the second write fails, the plan stays OPTIMIZING. Later sweeps ignore FAILED jobs, while retrying optimize returns 202/RUNNING for that dead job and schedules nothing.",
+      "impact": "A transient database failure can become a persistent planning outage for the day until repaired manually.",
+      "proposed_fix": "Update job, plan and audit atomically, then add reconciliation for inconsistent rows already created. Retry logic must distinguish a live job from a stale plan status.",
+      "evidence": "Actual janitor and start function executed with a second-write failure. Subsequent sweep and optimize retry leave the mismatch. lifecycle/lifecycle-probes-results.json.",
+      "acceptance_check": "Injected failure rolls back both transitions, or the next sweep restores consistency; retry must create useful work or return an actionable error.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F10",
+      "title": "A retired password-reset link can overwrite a newer password",
+      "severity": "Medium",
+      "classification": "reproduced security-sensitive concurrency schedule",
+      "references": [
+        {
+          "path": "apps/web/lib/password-reset.ts",
+          "lines": "103\u2013114",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/password-reset.ts#L103-L114"
+        },
+        {
+          "path": "apps/web/app/api/users/[id]/reset-password/route.ts",
+          "lines": "46\u201357",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/users/[id]/reset-password/route.ts#L46-L57"
+        }
+      ],
+      "failure_scenario": "Token consumption reads an unused reset link. An admin reset then changes the password and retires that link. The first operation deletes the token using only its ID, succeeds despite retirement, and overwrites the newer password.",
+      "impact": "Reset revocation does not hold under this interleaving. Exploitation requires possession of an otherwise valid link and favorable timing; this is not anonymous token guessing or a demonstrated production takeover.",
+      "proposed_fix": "Use conditional atomic consumption requiring unused/unexpired state and consistent per-user serialization across issuance, consumption and administrative reset.",
+      "evidence": "Unchanged reset helper with explicit database interleaving; sequential retired-token control correctly rejects. auth/auth-race-results.json. No live database race.",
+      "acceptance_check": "A real PostgreSQL barrier test retires the token between validation and consumption; the retired link must not replace the newer password.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F11",
+      "title": "Concurrent changes can remove every active tenant administrator",
+      "severity": "Medium",
+      "classification": "reproduced handler concurrency schedule",
+      "references": [
+        {
+          "path": "apps/web/app/api/users/[id]/route.ts",
+          "lines": "33\u201358",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/users/[id]/route.ts#L33-L58"
+        }
+      ],
+      "failure_scenario": "Two active administrators are deactivated concurrently. Each independent count sees the other administrator, both pass, and both updates return 200. Zero active tenant administrators remain. The sequential single-admin control correctly returns 400.",
+      "impact": "The company loses its own ability to administer access/settings and needs platform-owner intervention.",
+      "proposed_fix": "Lock a stable tenant row, recheck the invariant, update and audit in one transaction. A default-isolation transaction without shared serialization is insufficient.",
+      "evidence": "Two actual PATCH handlers with a count barrier: auth/auth-race-results.json.",
+      "acceptance_check": "Concurrent deactivation/demotion requests always leave at least one active administrator.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F12",
+      "title": "Foreign-company pages can silently mutate the home company",
+      "severity": "Medium",
+      "classification": "reproduced wrong-target write; not unauthorized tenant escape",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/settings/page.tsx",
+          "lines": "14\u201326",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/settings/page.tsx#L14-L26"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/settings/settings-form.tsx",
+          "lines": "82\u201394",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/settings/settings-form.tsx#L82-L94"
+        },
+        {
+          "path": "apps/web/lib/api.ts",
+          "lines": "64\u201388",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/api.ts#L64-L88"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/users/users-client.tsx",
+          "lines": "246\u2013259",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/users/users-client.tsx#L246-L259"
+        },
+        {
+          "path": "apps/web/app/api/users/route.ts",
+          "lines": "24\u201345",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/users/route.ts#L24-L45"
+        }
+      ],
+      "failure_scenario": "A SUPER_ADMIN belonging to A opens company B\u2019s editable Settings. Both have reloadMinutes 30. Saving 45 sends no selected-company identity: the deliberately home-tenant API changes A to 45, leaves B 30 and returns 200. The same root cause extends to invitations, customer imports, master creation and onboarding. An invitation intended for B can create a user with the selected role, including TENANT_ADMIN, in A.",
+      "impact": "The displayed target and mutation target disagree. The administrator has permission for both companies; the defect is silent wrong-company modification, not bypassing tenant authorization. The invitation path creates an unintended company-membership risk and deserves priority alongside intake integrity.",
+      "proposed_fix": "Make foreign-company views read-only under the existing policy, or implement an explicit permission-checked and audited active-company switch end to end. Do not trust the page URL alone.",
+      "evidence": "Actual settings route and withTenantApi wrapper with two synthetic companies. auth/foreign-tenant-settings-results.json. Broader creation/invitation paths are source-confirmed in ui/coverage-gap.md; no user invitation was sent.",
+      "acceptance_check": "Open B as an A-based platform administrator: editing is disabled, or an explicit authorized switch causes only B to change. Test equal defaults.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F13",
+      "title": "Customer corrections leave a READY plan and its share warnings stale",
+      "severity": "Medium",
+      "classification": "source dependency trace plus reproduced callbacks",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/dispatch-client.tsx",
+          "lines": "138\u2013145",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/dispatch-client.tsx#L138-L145"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/dispatch-client.tsx",
+          "lines": "517\u2013539",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/dispatch-client.tsx#L517-L539"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/plan-view.tsx",
+          "lines": "94\u2013146",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/plan-view.tsx#L94-L146"
+        }
+      ],
+      "failure_scenario": "Saving a pin or receiving-hours correction refreshes the day but does not refresh the selected plan. The same PlanView stays mounted and READY plans do not poll. Locally generated WhatsApp text therefore retains old plan detail and omits the intended master-change warning until a later reload.",
+      "impact": "The screen/share message can remain stale even though the day banner updates. Server dispatch mutations recheck data, and server-generated exports reload detail; those protections are not claimed bypassed.",
+      "proposed_fix": "After customer/location save, refresh the day and explicitly invalidate the current plan detail in place.",
+      "evidence": "Actual day loader/callback and WhatsApp helper: day revision changes, plan reload signal remains 0, stale message lacks warning while fresh detail includes it. ui/ui-results.json.",
+      "acceptance_check": "Edit a customer on a READY plan and immediately check plan warnings, map and WhatsApp text without reloading the page.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F14",
+      "title": "Legacy assignment deletion bypasses closed-run and assignment locks",
+      "severity": "Medium",
+      "classification": "reproduced legacy mutation; current load-based dispatch guarded",
+      "references": [
+        {
+          "path": "apps/web/lib/route-adjust.ts",
+          "lines": "417\u2013430",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/route-adjust.ts#L417-L430"
+        },
+        {
+          "path": "apps/web/app/api/runs/[id]/routes/[assignmentId]/route.ts",
+          "lines": "68\u201387",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/runs/[id]/routes/[assignmentId]/route.ts#L68-L87"
+        },
+        {
+          "path": "apps/web/prisma/schema.prisma",
+          "lines": "445",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/prisma/schema.prisma#L445"
+        }
+      ],
+      "failure_scenario": "The legacy DELETE path permits a planner to remove a locked assignment from DISPATCHED or ARCHIVED runs, although the move path rejects the same locked assignment. Associated delivery-proof relations use cascade deletion.",
+      "impact": "Historical legacy route integrity can be changed without supervisor unlock. Proof loss is supported by the schema, not an executed database cascade. The current load-based dispatch API guard prevents this path for modern plans.",
+      "proposed_fix": "Retire legacy mutation endpoints where possible, or enforce run/assignment state under a row-locked transaction and preserve delivery-proof history.",
+      "evidence": "Actual unassign and move functions with controlled database boundaries; both closed run states reproduced. lifecycle/lifecycle-probes-results.json.",
+      "acceptance_check": "Deletion of a locked, dispatched or archived legacy assignment fails and preserves its history; authorized editable legacy deletion still works.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F15",
+      "title": "Health can report ready while every optimization is misconfigured",
+      "severity": "Medium",
+      "classification": "reproduced configuration/readiness mismatch",
+      "references": [
+        {
+          "path": "apps/web/app/api/health/route.ts",
+          "lines": "19\u201343",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/health/route.ts#L19-L43"
+        },
+        {
+          "path": "apps/web/lib/solver-client.ts",
+          "lines": "61\u201366",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/solver-client.ts#L61-L66"
+        }
+      ],
+      "failure_scenario": "With web SOLVER_TOKEN absent, a reachable database and healthy unauthenticated solver /health produce HTTP 200, ok:true and solver:up. The actual optimization client immediately throws \u201cSOLVER_TOKEN not set\u201d.",
+      "impact": "Deployment gating/monitoring can be green during a planning outage. This does not establish that the current production token is missing or wrong.",
+      "proposed_fix": "Separate liveness from dispatch readiness. Validate required configuration and use a lightweight authenticated solver capability check with a short timeout; do not solve a route during health checks.",
+      "evidence": "Current health handler and solver client with healthy external stubs: infra/health_probe_result.json.",
+      "acceptance_check": "Missing and mismatched tokens fail dispatch readiness; matched healthy configuration succeeds without starting an optimization.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F16",
+      "title": "All-unserved dispatch plans lose the dispatch Excel export",
+      "severity": "Low",
+      "classification": "confirmed source branch; workbook rendering not run",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/plan-view.tsx",
+          "lines": "345\u2013359",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/plan-view.tsx#L345-L359"
+        },
+        {
+          "path": "apps/web/app/api/runs/[id]/export/excel/route.ts",
+          "lines": "67\u201379",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/runs/[id]/export/excel/route.ts#L67-L79"
+        }
+      ],
+      "failure_scenario": "A valid applied dispatch result can have zero loads because all demand is unserved. The UI hides Excel, and a direct export request selects the legacy generator solely because load count is zero.",
+      "impact": "The dispatch reconciliation and assumptions sheets and richer exception reporting are unavailable precisely when exceptions matter most. Basic legacy unserved rows are still retained.",
+      "proposed_fix": "Use the existing isDispatchPlan discriminator, and allow dispatch Excel for zero-load results. Keep driver-only PDF availability separate.",
+      "evidence": "Current UI/API branch inspection, documented in ui/ui-results.json. ExcelJS unavailable; no binary rendering claimed.",
+      "acceptance_check": "An all-unserved dispatch result exports the dispatch workbook with reconciliation, assumptions and unserved demand.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F17",
+      "title": "Invalid DMS coordinates are accepted with high confidence",
+      "severity": "Low",
+      "classification": "reproduced parser logic",
+      "references": [
+        {
+          "path": "apps/web/lib/dispatch/location-input.ts",
+          "lines": "57\u201369",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/location-input.ts#L57-L69"
+        },
+        {
+          "path": "apps/web/lib/dispatch/location-input.ts",
+          "lines": "146\u2013149",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/location-input.ts#L146-L149"
+        }
+      ],
+      "failure_scenario": "23\u00b099'00\"N 58\u00b024'00\"E has invalid minutes but returns latitude 24.65, longitude 58.4, HIGH confidence and needsPin=false. The bad value normalizes into another valid in-region coordinate.",
+      "impact": "A transcription error can move a customer substantially without triggering the expected pin-confirmation workflow.",
+      "proposed_fix": "Validate minute/second ranges and degree/hemisphere limits before conversion; reject malformed DMS or require manual confirmation.",
+      "evidence": "Actual pure parser: intake/probe-intake-results.json.",
+      "acceptance_check": "Minutes/seconds outside [0,60) are rejected; valid boundary coordinates still parse correctly.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F18",
+      "title": "Legacy distance-cache hits mislabel estimates as road distances",
+      "severity": "Low",
+      "classification": "reproduced dormant legacy API behavior",
+      "references": [
+        {
+          "path": "apps/solver/distance.py",
+          "lines": "312\u2013316",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/solver/distance.py#L312-L316"
+        },
+        {
+          "path": "apps/solver/solver.py",
+          "lines": "523\u2013551",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/solver/solver.py#L523-L551"
+        }
+      ],
+      "failure_scenario": "A Mapbox failure causes a correctly labeled Haversine estimate. Repeating identical inputs retrieves the same matrices from cache but labels them MAPBOX_MATRIX, losing the fallback reason and estimated flag.",
+      "impact": "A legacy /optimize consumer can mistake estimates for road measurements. The current dispatch provider implementation is separate and this finding does not apply to it.",
+      "proposed_fix": "Cache provider/fallback metadata with matrices, or disable the unused legacy endpoint and remove its unnecessary dependency surface.",
+      "evidence": "Actual matrix builder/cache twice with controlled provider failure and identical numeric results: solver/deep_solver_checks.json.",
+      "acceptance_check": "Cache hits preserve original provider and fallback/estimated metadata.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F19",
+      "title": "Optional Docker OSRM healthcheck only checks the executable version",
+      "severity": "Low",
+      "classification": "confirmed configuration defect",
+      "references": [
+        {
+          "path": "infra/osrm/docker-compose.yml",
+          "lines": "19\u201323",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/infra/osrm/docker-compose.yml#L19-L23"
+        }
+      ],
+      "failure_scenario": "The compose healthcheck runs osrm-routed --version. It does not contact the running routing server or test its loaded graph, so a hung server can still satisfy this check.",
+      "impact": "False health on the optional Docker-host setup. The documented Railway /nearest healthcheck is unaffected.",
+      "proposed_fix": "Run a bounded in-region nearest/route query, checking HTTP success and OSRM code=Ok.",
+      "evidence": "Configuration inspection only; no Docker daemon or hung service tested.",
+      "acceptance_check": "Healthy graph passes; unreachable/hung/unloaded routing service fails within the healthcheck deadline.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F20",
+      "title": "Deleting a driver can race with dispatch and erase the assignment",
+      "severity": "Medium",
+      "classification": "actual functions under controlled concurrency; FK effect modeled",
+      "references": [
+        {
+          "path": "apps/web/app/api/drivers/[id]/route.ts",
+          "lines": "46\u201365",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/drivers/[id]/route.ts#L46-L65"
+        },
+        {
+          "path": "apps/web/lib/dispatch/plan-service.ts",
+          "lines": "2055\u20132075",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-service.ts#L2055-L2075"
+        },
+        {
+          "path": "apps/web/prisma/schema.prisma",
+          "lines": "696",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/prisma/schema.prisma#L696"
+        }
+      ],
+      "failure_scenario": "DELETE reads zero driver references. Before deletion, the dispatcher assigns that still-active driver and dispatches the load successfully. DELETE continues its hard-delete branch, and ON DELETE SET NULL clears the driver from the now-DISPATCHED load. Sequential deletion of an already-used driver correctly deactivates instead.",
+      "impact": "A historical driver assignment can disappear despite the load API\u2019s normal immutability protection.",
+      "proposed_fix": "Prefer deactivating every driver. If hard deletion remains, serialize it with assignment/dispatch and use a restrictive historical foreign key; a separate reference count is insufficient.",
+      "evidence": "Actual DELETE and updateLoad functions with the repository fake database and explicitly modeled schema FK action: auth/driver-delete-race-results.json. No live PostgreSQL race.",
+      "acceptance_check": "Pause deletion after zero references, assign and dispatch, then resume: the driver and dispatched history must survive.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F21",
+      "title": "A plan read can mix one scenario\u2019s totals with another scenario\u2019s loads",
+      "severity": "Medium",
+      "classification": "reproduced application read schedule; workbook consumers source-confirmed",
+      "references": [
+        {
+          "path": "apps/web/lib/dispatch/plan-detail.ts",
+          "lines": "233\u2013245",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-detail.ts#L233-L245"
+        },
+        {
+          "path": "apps/web/lib/dispatch/plan-detail.ts",
+          "lines": "515\u2013519",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-detail.ts#L515-L519"
+        },
+        {
+          "path": "apps/web/lib/dispatch/workbook.ts",
+          "lines": "364\u2013384",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/workbook.ts#L364-L384"
+        }
+      ],
+      "failure_scenario": "getPlanDetail reads run summary A, then a concurrent chooseScenario atomically applies B before the later load query. The response contains chosen A and totals 12 km / 21 OMR but B\u2019s loads 25 km / 35 OMR, with reconciliation still marked OK. The next ordinary read is consistent.",
+      "impact": "The screen or a generated workbook can combine mutually inconsistent plan facts. SUMMARY reads the old summary and LOAD PLAN reads the new loads. No actual XLSX rendering or database concurrency test was performed.",
+      "proposed_fix": "Build the complete model in a repeatable-read transaction using that transaction client throughout, or validate a revision and retry. Render documents and fetch geometry after the consistent model has been captured.",
+      "evidence": "Actual chooseScenario and getPlanDetail with a deterministic interleaving: lifecycle/mixed-read-results.json.",
+      "acceptance_check": "Switch scenarios during a plan/export read; returned summary, chosen scenario, loads and reconciliation all belong to one revision.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F22",
+      "title": "Infeasible alternatives receive favorable trade-off labels",
+      "severity": "Medium",
+      "classification": "reproduced pure helper and current usability expression",
+      "references": [
+        {
+          "path": "apps/web/lib/dispatch/plan-detail.ts",
+          "lines": "484\u2013496",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-detail.ts#L484-L496"
+        },
+        {
+          "path": "apps/web/lib/dispatch/plan-options.ts",
+          "lines": "170\u2013207",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/plan-options.ts#L170-L207"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/dispatch/plan-view.tsx",
+          "lines": "649\u2013650",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/dispatch/plan-view.tsx#L649-L650"
+        }
+      ],
+      "failure_scenario": "An OPTIMIZED alternative whose feasibility is VIOLATED enters comparisons because usability ignores feasibility. It can be advertised as serving one more order and costing 20 OMR less; the feasible recommendation then appears to offer no gain against it.",
+      "impact": "Decision support rewards an unusable option. A separate violation indicator and dispatch gate remain intact; this is not authorization to dispatch an invalid timetable.",
+      "proposed_fix": "Require VERIFIED feasibility for positive recommendations and comparison reference options. Keep invalid alternatives available for inspection with an explicit not-comparable explanation.",
+      "evidence": "Actual optionTradeoffs and source-extracted usability expression; excluded-invalid control behaves correctly. solver/options_feasibility_check.json.",
+      "acceptance_check": "A cheaper, higher-service VIOLATED alternative cannot produce a positive recommendation in either app or workbook.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F23",
+      "title": "Dashboard cost per case is rounded before its declared display precision",
+      "severity": "Low",
+      "classification": "reproduced aggregation arithmetic",
+      "references": [
+        {
+          "path": "apps/web/lib/dashboard.ts",
+          "lines": "129",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dashboard.ts#L129"
+        },
+        {
+          "path": "apps/web/app/t/[slug]/page.tsx",
+          "lines": "108",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/page.tsx#L108"
+        }
+      ],
+      "failure_scenario": "900 OMR divided by 20,000 cases is 0.045 OMR/case. Aggregation first rounds to two decimals, producing 0.05; the three-decimal UI displays 0.050.",
+      "impact": "Small unit costs lose meaningful precision and comparisons can be misleading. In this example the displayed value is approximately 11% higher than the correct three-decimal figure.",
+      "proposed_fix": "Keep full precision through aggregation and round once at the explicitly chosen display precision.",
+      "evidence": "Actual rollupRows: auth/dashboard-precision-results.json.",
+      "acceptance_check": "900/20,000 displays 0.045; aggregate calculations use unrounded totals.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F24",
+      "title": "Failed inline customer updates can remain visually applied",
+      "severity": "Medium",
+      "classification": "reproduced component callback with rejected network boundary",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/customers/customers-client.tsx",
+          "lines": "78\u2013100",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/customers/customers-client.tsx#L78-L100"
+        }
+      ],
+      "failure_scenario": "The customer table immediately changes active/priority state. It rolls back a non-OK HTTP response but has no catch for fetch rejection. A request that never reaches the server leaves the customer displayed as inactive while the server still considers it active, without notification.",
+      "impact": "An operator can believe a delivery was disabled or its priority changed when nothing was saved.",
+      "proposed_fix": "Handle rejected requests, show failed/uncertain save state and reconcile with the server. Do not automatically replay an ambiguous mutation that may already have committed.",
+      "evidence": "Actual patchRow callback with fetch rejected before sending: ui/gap-results.json. No browser mount.",
+      "acceptance_check": "A rejected request cannot leave an unqualified success state; ambiguous responses are reconciled safely.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F25",
+      "title": "Midnight truck availability prevents subsequent form saves",
+      "severity": "Low",
+      "classification": "reproduced formatting and submit callbacks",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/trucks/truck-form.tsx",
+          "lines": "134\u2013155",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/trucks/truck-form.tsx#L134-L155"
+        },
+        {
+          "path": "apps/web/lib/dispatch/time.ts",
+          "lines": "93\u2013111",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/dispatch/time.ts#L93-L111"
+        }
+      ],
+      "failure_scenario": "A valid availableToMin 1440 is initialized as \u201c00:00 +1\u201d using a display formatter. The submit parser accepts only HH:MM, so reopening the truck and changing even an unrelated field cannot save until availability is reset.",
+      "impact": "Valid master data do not round-trip through the editing form.",
+      "proposed_fix": "Use a dedicated input formatter and explicit midnight/end-of-day semantics that preserve 1440.",
+      "evidence": "Actual format/time helpers and submit callback return \u201cEnter availability as HH:MM\u201d and send no request: ui/gap-results.json.",
+      "acceptance_check": "Save midnight availability, reopen, change another property, save again and retain 1440.",
+      "status": "open_at_reviewed_commit"
+    },
+    {
+      "id": "F26",
+      "title": "Optional master fields do not have reliable clear semantics",
+      "severity": "Low",
+      "classification": "confirmed schema/form/API source trace; database execution not run",
+      "references": [
+        {
+          "path": "apps/web/app/t/[slug]/drivers/driver-form.tsx",
+          "lines": "50\u201358",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/t/[slug]/drivers/driver-form.tsx#L50-L58"
+        },
+        {
+          "path": "apps/web/lib/schemas.ts",
+          "lines": "114\u2013128",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/lib/schemas.ts#L114-L128"
+        },
+        {
+          "path": "apps/web/app/api/regions/[id]/route.ts",
+          "lines": "11\u201316",
+          "url": "https://github.com/rahmanmansoori244-droid/routeiq/blob/83d8174836deb339d54f90e65b803550ed34c20d/apps/web/app/api/regions/[id]/route.ts#L11-L16"
+        }
+      ],
+      "failure_scenario": "Clearing a driver phone sends an empty string that schema normalization turns into undefined, so Prisma leaves the old number. Choosing no region depot instead sends an empty string accepted as a foreign-key value rather than null, causing failure instead of removing the link.",
+      "impact": "A successful phone save can leave old WhatsApp contact details in use; a region association cannot be reliably cleared.",
+      "proposed_fix": "Define PATCH absence as unchanged and explicit null as clear. Normalize forms accordingly and separate creation defaults from edit semantics.",
+      "evidence": "Current form, schema and Prisma update chain inspected: ui/coverage-gap.md. No live Zod/Prisma/PostgreSQL execution for these two cases.",
+      "acceptance_check": "Clear an existing driver phone and region depot in schema/database tests; both persist null and subsequent views reflect it.",
+      "status": "open_at_reviewed_commit"
+    }
+  ],
+  "limitations": [
+    "No local full CI suites, PostgreSQL concurrency, browser mount or full optimizer run.",
+    "Controlled probes establish stated source behavior, not incident frequency or universal correctness.",
+    "Dependency version/advisory match does not establish deployed exploitability."
+  ]
+}
