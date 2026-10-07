@@ -519,9 +519,11 @@ export interface DispatchResponse {
  * 2 x 10-ton where one carried every P1-P3 order left out). `first`: the rented trucks of the search's
  * plan; `used`: those of the RECOMMENDED plan returned - the cheapest set found (seventh review: the
  * trucks carrying only P4/P5 orders given back without a solve - their orders put back on the trucks
- * kept where they fit, in place of P5 orders where need be (tenth review: strict priorities; eleventh
- * review: in free room too), a plan kept as the search found it given back from its own times
- * (eleventh review) -, then every set
+ * kept, or an own truck left idle (twelfth review: own trucks first), where they fit, in place of P5
+ * orders where need be (tenth review: strict priorities; eleventh review: in free room too; twelfth
+ * review: orders that fit nowhere never use up the tries of one that fits), one left out told that a
+ * truck is not rented for P4/P5 orders alone (twelfth review), a plan kept as the search found it
+ * given back from its own times (eleventh review) -, then every set
  * with less real money - as many trucks as it takes (eighth review) - tried cheapest first, another
  * option's units too; the first whose plan delivers every P1-P3 stop and passes every check, its load
  * re-check included, and rents no truck for P4/P5 orders alone once given back; the set left after a

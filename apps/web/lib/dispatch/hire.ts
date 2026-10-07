@@ -20,9 +20,11 @@
  *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): a rented truck with only
  *   P4/P5 orders is given back without a solve (its orders put back on the trucks kept where they fit, a
  *   P4 order in place of P5 orders where need be: tenth review, strict priorities; also from a plan kept
- *   as the search found it, and into free room: eleventh review), then every cheaper set (as many trucks
- *   as it takes, another option's trucks too) is tried cheapest first, and the first that keeps every
- *   P1-P3 order delivered, with no truck for P4/P5 orders alone once given back, is the suggestion
+ *   as the search found it, and into free room: eleventh review; also on an idle own truck, and an order
+ *   left out told that a truck is not rented for P4/P5 orders alone: twelfth review), then every cheaper
+ *   set (as many trucks as it takes, another option's trucks too) is tried cheapest first, and the first
+ *   that keeps every P1-P3 order delivered, with no truck for P4/P5 orders alone once given back, is the
+ *   suggestion
  *   (seventh review: the cheapest set, not the one left after the dearest truck goes; eighth review:
  *   2 x 3-ton at 80 OMR beat 1 x 10-ton at 85); a set left after a give-back is solved once more when
  *   the limits allow and it was not solved already, and its plan is taken only when it passes every

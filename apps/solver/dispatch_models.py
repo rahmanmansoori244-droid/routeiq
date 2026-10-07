@@ -620,10 +620,13 @@ class HireCheck(BaseModel):
     """The REDUCTION of a what-if's rented trucks (sixth review of the hire branch: the Quick search
     rented 2 x 10-ton on the real day where one carried every P1-P3 order; the second only carried
     P4/P5 orders). After the search, with no solve, every rented truck carrying only P4/P5 orders is
-    given back - a stop of theirs goes back on the trucks kept where it fits, with nothing taken off or
-    in place of stops it outranks (P5 orders riding along) where need be (tenth review: strict priorities
-    never drop a P4 order to carry two P5s; eleventh review: P4/P5 orders ride along in free room), and a
-    plan kept as the search found it (VIOLATED) is given back from its own times (eleventh review: it
+    given back - a stop of theirs goes back on the trucks kept, or an own truck the plan leaves idle
+    (twelfth review: own trucks first), where it fits, with nothing taken off or in place of stops it
+    outranks (P5 orders riding along) where need be (tenth review: strict priorities never drop a P4 order
+    to carry two P5s; eleventh review: P4/P5 orders ride along in free room; twelfth review: orders that
+    fit nowhere never use up the timings of one that fits), a P4/P5 stop it leaves out says a truck is
+    not rented for P4/P5 orders alone (twelfth review: it read "could not be placed by the optimizer"),
+    and a plan kept as the search found it (VIOLATED) is given back from its own times (eleventh review: it
     kept such a truck, counted in the box); then the CHEAPEST set (seventh review) - every
     set of the trucks to rent with less real money, as many trucks as it takes (eighth review: 2 x 3-ton
     for 80 OMR beat 1 x 10-ton for 85), cheapest first - is the first one whose plan delivers every P1-P3
