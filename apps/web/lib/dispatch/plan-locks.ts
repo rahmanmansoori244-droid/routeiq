@@ -13,6 +13,9 @@
  * check per plan version, hire-whatif.ts, no other lock in that transaction) and `hire-codes:<tenant>`
  * ("Use this plan" renting trucks, hire-use.ts: after the intake lock - its plan way takes the intake
  * lock first and reads the day again under it - and before the day lock of the version it creates).
+ * "Use this plan" then takes the plan row (FOR UPDATE) and, ISSUE 7, the hire option rows it rents
+ * from (FOR SHARE, in id order: lockAndRecheck) before its PlanLoad rows; nothing else locks a
+ * HireOption row (the admin's change or delete of an option is one statement that waits for it).
  *
  * - lockPlanDay: one depot and delivery date. Taken by everything that creates a version
  *   (createInitialPlan, createNextVersion), so a day never gets two live plans.
