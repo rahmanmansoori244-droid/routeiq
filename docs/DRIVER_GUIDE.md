@@ -28,7 +28,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 9. Drive back and tap **Back at depot**. Stops without a result are recorded by your dispatcher.
 
 **No signal?**
-10. Everything is **saved on the phone** and sent when there is signal. *Waiting to send (3)* means 3 items are waiting; *All sent* means everything arrived. Do not clear the browser before *All sent*. A delivery photo that never reaches the office counts like *Camera not working*: open the page where there is signal until *All sent*, and if your dispatcher gives you a new link, open it on the same phone so the waiting photos are sent.
+10. Open your link once where there is signal: after that the page opens again on the same phone even without signal. Everything is **saved on the phone** and sent when there is signal. *Waiting to send (3)* means 3 items are waiting; *All sent* means everything arrived. Do not clear the browser before *All sent*. A delivery photo that never reaches the office counts like *Camera not working*: open the page where there is signal until *All sent*, and if your dispatcher gives you a new link, open it on the same phone so the waiting photos are sent.
 
 **Problems**
 11. Tap **Call dispatcher**: it calls the dispatcher of your truck's depot. If the page says *This link does not work any more*, *This link was replaced* or *has expired*, ask your dispatcher for a new link and show him the list of results that were not sent.
@@ -72,7 +72,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 
 **لا توجد إشارة؟**
 
-10. كل شيء **يُحفظ في الهاتف** ويُرسل عند توفر الإشارة. **«بانتظار الإرسال (3)»** تعني أن 3 عناصر تنتظر، و**«تم إرسال الكل»** تعني أن كل شيء وصل. لا تمسح بيانات المتصفح قبل ظهور «تم إرسال الكل». صورة التسليم التي لا تصل إلى الإدارة تُحتسب مثل «الكاميرا لا تعمل»: افتح الصفحة في مكان فيه إشارة حتى يظهر «تم إرسال الكل»، وإذا أعطاك مسؤول التوزيع رابطًا جديدًا فافتحه على الهاتف نفسه لتُرسل الصور المنتظرة.
+10. افتح الرابط مرة واحدة في مكان فيه إشارة: بعد ذلك تُفتح الصفحة من جديد على الهاتف نفسه حتى بدون إشارة. كل شيء **يُحفظ في الهاتف** ويُرسل عند توفر الإشارة. **«بانتظار الإرسال (3)»** تعني أن 3 عناصر تنتظر، و**«تم إرسال الكل»** تعني أن كل شيء وصل. لا تمسح بيانات المتصفح قبل ظهور «تم إرسال الكل». صورة التسليم التي لا تصل إلى الإدارة تُحتسب مثل «الكاميرا لا تعمل»: افتح الصفحة في مكان فيه إشارة حتى يظهر «تم إرسال الكل»، وإذا أعطاك مسؤول التوزيع رابطًا جديدًا فافتحه على الهاتف نفسه لتُرسل الصور المنتظرة.
 
 **عند أي مشكلة**
 

@@ -25,7 +25,7 @@ import {
   type SentMap,
 } from '@/lib/driver-page/queue';
 import { memoryStore, openIdbStore, phoneTodayIso, photoBlob } from '@/lib/driver-page/store';
-import { dropDriverWorker, shouldRegisterWorker } from '@/lib/driver-page/worker';
+import { dropDriverWorker, forgetDriverPage, shouldRegisterWorker } from '@/lib/driver-page/worker';
 import { zonedDayStart } from '@/lib/dispatch/time';
 import { ArrivedWhen } from './arrived-when';
 import type { PhotoPlace, TakenPhoto } from './camera-button';
@@ -172,11 +172,8 @@ export function DriverPage() {
   }, []);
 
   const forgetPage = useCallback(() => {
-    try {
-      navigator.serviceWorker?.controller?.postMessage({ type: 'forget', url: window.location.pathname });
-    } catch {
-      // no worker
-    }
+    // Every worker of the registration, also one still installing on a first visit (ISSUE 8).
+    void forgetDriverPage(navigator, window.location.pathname);
   }, []);
 
   // ---------------------------------------------------------------- sending
