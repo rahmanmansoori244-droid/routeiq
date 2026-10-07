@@ -14,8 +14,10 @@
  * ("Use this plan" renting trucks, hire-use.ts: after the intake lock - its plan way takes the intake
  * lock first and reads the day again under it - and before the day lock of the version it creates).
  * "Use this plan" then takes the plan row (FOR UPDATE) and, ISSUE 7, the hire option rows it rents
- * from (FOR SHARE, in id order: lockAndRecheck) before its PlanLoad rows; nothing else locks a
- * HireOption row (the admin's change or delete of an option is one statement that waits for it).
+ * from (FOR SHARE, in id order: lockAndRecheck) before its PlanLoad rows. The only other lock on a
+ * HireOption row: the hire-options DELETE and a PATCH that moves an option to another depot take that
+ * row FOR UPDATE first, in their own transaction and before anything else (underOptionLock: then the
+ * rental count and the write); any other PATCH is one statement that waits for the FOR SHARE.
  *
  * - lockPlanDay: one depot and delivery date. Taken by everything that creates a version
  *   (createInitialPlan, createNextVersion), so a day never gets two live plans.

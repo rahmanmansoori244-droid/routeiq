@@ -325,6 +325,21 @@ def test_a_rental_day_gets_a_feasible_second_search_plan(seed):
     assert base + int(m.max_penalty) * per_unit < 2**62
 
 
+def test_a_rental_day_whose_own_fleet_suffices_rents_nothing_in_the_second_search():
+    """ISSUE 9 review: with the raised ceiling PyVRP also STARTED at its midpoint (and built its first
+    plan at the ceiling), so stiff that on a 150-stop day the own fleet carries it kept 2 rented trucks
+    (main: none) and lost to the engine - a dearer final plan. It now starts where PyVRP's defaults
+    start and may climb to the ceiling (every 100 candidates) only when it finds too few feasible plans."""
+    stops, trucks = nmwc_day(150)
+    r = req(stops, trucks + [truck(f"H{i}", cap=800, fixed_cost=50, hire_candidate=True) for i in range(3)])
+    tds, solvable, drops, mx = _prepared(r)
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings(seed=1, max_iters=800)))
+    assert out["status"] == "OK" and out["feasible"] and out["missing"] == 0
+    plan, why = PV.plan_of(out, tds, solvable)
+    by_idx = {td.idx: td for td in tds}
+    assert why is None and not [idx for idx in plan if by_idx[idx].truck.hire_candidate]
+
+
 def test_a_rental_days_ceiling_stays_below_the_64_bit_bound(monkeypatch):
     """The scaled ceiling is clamped like the shortage rule's: the worst penalised cost stays below
     2^62, and a scale that cannot fit is ModelTooLarge (PyVRP skipped, the engine's plans stand)."""
