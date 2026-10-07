@@ -18,6 +18,7 @@ import {
 } from './customer-attrs';
 import { allCasesOn, leftOutWhole, orderTimeOf, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTime } from './order-window';
 import { currentPlan, ordersInScopeWhere, type ScenarioDetails } from './plan-service';
+import { trucksOfDayWhere } from './hire';
 import { dateOnly, fmtHhmm, isoOf, todayIso, tomorrowIso } from './time';
 import { defaultSearchMode, planSearching, readResultsNow, thoroughMaxSec } from './search-mode';
 import { isRealIsoDate } from '../schemas';
@@ -508,8 +509,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
         toDates: [...new Set(away.flatMap((o) => (o.carriedTo ? [isoOf(o.carriedTo.deliveryDate)] : [])))].sort(),
       }
     : null;
+  // The day's trucks: a one-day hired truck (the hire suggestion) only on its own date.
   const trucks = await db.truck.findMany({
-    where: { depotId: depot.id, active: true },
+    where: trucksOfDayWhere(depot.id, dateOnly(date)),
     select: { id: true, code: true, capacityCases: true, capacityWeightKg: true, maxTripsPerDay: true, bays: true },
   });
   const bayTrucks = trucks.filter((t) => typeof t.bays === 'number');

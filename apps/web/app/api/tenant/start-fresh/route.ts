@@ -53,7 +53,7 @@ const runSchema = z
 /**
  * POST { confirm, before?, backupConfirmed: true, expect, liveDataConfirmed? }: run it. 400
  * CONFIRM_MISMATCH when the typed code is not the company's; 409 (nothing removed) while an
- * optimization is queued or running, when the date would split a Bring forward or a plan, when
+ * optimization or a hire check is queued or running, when the date would split a Bring forward or a plan, when
  * there is more to remove than `expect` (PREVIEW_STALE: check again), when live-looking data goes
  * without `liveDataConfirmed` (LIVE_DATA_CONFIRM), or when orders, plans or results are being
  * changed right now; 429 TOO_MANY_ATTEMPTS (with Retry-After) after START_FRESH_LIMITS.run attempts

@@ -22,6 +22,7 @@ import { queuedMessage, searchLeadMin, thoroughMaxSec, type SearchMode } from '.
 import { isoOf } from './time';
 import { describeUnknownWeights } from './weights';
 import { palletFactorGate } from './pallets';
+import { cancelHireChecksOfDay } from './hire-whatif';
 
 export interface StartResult {
   status: number;
@@ -136,6 +137,16 @@ function gate(built: BuiltRequest, opts: OptimizeOverrides, verb: string): Start
       body: { error: `${built.blocking.length} customer(s) need a location before ${verb}.`, code: 'LOCATION_REQUIRED', blocking: built.blocking },
     };
   }
+  return weightRefusal(built, opts, verb);
+}
+
+/**
+ * The weight question of gate(): lines without a case weight on a day with a truck that has a payload
+ * (WEIGHT_REQUIRED), or with the dispatcher's go-ahead the warning that stays on the plan (added to
+ * built.warnings). The hire suggestion's "Use this plan" asks it with the trucks to rent in the
+ * request (hire-use.ts), before any truck is rented.
+ */
+export function weightRefusal(built: BuiltRequest, opts: OptimizeOverrides, verb: string): StartResult | null {
   const payloads = built.request.trucks.some((t) => (t.capacity_kg ?? 0) > 0);
   if (built.unknownWeights.length && payloads) {
     const lines = built.unknownWeights.reduce((a, u) => a + u.lines, 0);
@@ -203,6 +214,15 @@ async function prerequisites(tenantId: string, runId: string, built: BuiltReques
   }
   if (built.request.trucks.length === 0) return NO_TRUCKS;
   return null;
+}
+
+/**
+ * What a re-plan of this version would refuse before creating a version (the questions about
+ * locations and weights, products without cases per pallet, nothing to plan, no truck): the hire
+ * suggestion's "Use this plan" asks first, before it rents a truck (hire-use.ts).
+ */
+export async function replanRefusal(tenantId: string, runId: string, probe: BuiltRequest, overrides: OptimizeOverrides): Promise<StartResult | null> {
+  return gate(probe, overrides, 're-planning') ?? (await prerequisites(tenantId, runId, probe, true));
 }
 
 /**
@@ -498,6 +518,8 @@ export async function startDispatchOptimize(
     ticket.commit();
     handedOff = true;
     scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket });
+    // The hire suggestion's what-ifs of this day were for a plan that is being replaced: stopped.
+    void cancelHireChecksOfDay(tenantId, found.depotId, found.runDate, 'Stopped: a new optimization started for this day, so this check was for a plan no longer in use.');
     return {
       status: 202,
       body: { runJobId: job.id, status: 'QUEUED', runId, queued: ticket.waiting, searchMode: mode, maxSearchSec: mode === 'THOROUGH' ? capSec : null },
@@ -516,7 +538,9 @@ export async function startDispatchOptimize(
  * dispatched load (409 NOTHING_TO_PLAN), no active truck (400), a job already running (409),
  * and the solve admission (429 / 503, reserved here and handed to the new version's start).
  * The new version starts as a copy of the parent's plan (createNextVersion), so a failed
- * optimization keeps the previous plan usable on it.
+ * optimization keeps the previous plan usable on it. `pre.ticket`: an admission the caller reserved
+ * already (the hire suggestion's "Use this plan" asks before it rents a truck, third review of the hire
+ * branch): used instead of reserving here, and given back on every answer that starts no job.
  */
 export async function replan(
   tenantId: string,
@@ -529,6 +553,29 @@ export async function replan(
   expect?: ExpectedDay,
   clock: { now?: Date } = {},
   searchMode?: SearchMode,
+  pre: { ticket?: SolveTicket } = {},
+): Promise<StartResult> {
+  const handed = { done: false };
+  try {
+    return await replanInner(tenantId, runId, reason, note, user, ip, overrides, expect, clock, searchMode, pre, handed);
+  } finally {
+    if (!handed.done) pre.ticket?.release();
+  }
+}
+
+async function replanInner(
+  tenantId: string,
+  runId: string,
+  reason: 'LATE_ORDER' | 'MANUAL_ADJUSTMENT' | 'REOPTIMIZE',
+  note: string | null,
+  user: { id: string },
+  ip: string | null,
+  overrides: OptimizeOverrides,
+  expect: ExpectedDay | undefined,
+  clock: { now?: Date },
+  searchMode: SearchMode | undefined,
+  pre: { ticket?: SolveTicket },
+  handed: { done: boolean },
 ): Promise<StartResult> {
   const found = await prisma.runPlan.findFirst({ where: { id: runId, tenantId } });
   if (!found) return { status: 404, body: { error: 'Plan not found' } };
@@ -542,7 +589,8 @@ export async function replan(
   if (!run) return { status: 404, body: { error: 'Plan not found' } };
   if (!run.chosenScenarioId) {
     // Nothing applied yet: optimizing this version again is still fully traceable.
-    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now, searchMode });
+    handed.done = true;
+    return startDispatchOptimize(tenantId, runId, user, ip, { ...overrides, expect, now: clock.now, searchMode, ...(pre.ticket ? { ticket: pre.ticket } : {}) });
   }
   if (run.status === 'OPTIMIZING' || (await activeJobAnswer(runId))) {
     return { status: 409, body: { error: 'An optimization is running for this plan. Wait for it to finish.', code: 'OPTIMIZING' } };
@@ -559,7 +607,7 @@ export async function replan(
   const effectiveReason = reason === 'REOPTIMIZE' && (await pendingLateOrderIds(tenantId, run)).length ? 'LATE_ORDER' : reason;
   // Admission before the version exists: a 429 must never leave a new version behind. Reserved for
   // the search mode the new version's start then uses (the ticket carries it).
-  const adm = solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
+  const adm = pre.ticket ? { ok: true as const, ticket: pre.ticket } : solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));
   if (!adm.ok) return admissionRefused(adm);
   let child;
   try {
@@ -573,6 +621,7 @@ export async function replan(
     throw e;
   }
   // The ticket is handed over: startDispatchOptimize releases it on any answer that starts no job.
+  handed.done = true;
   const res = await startDispatchOptimize(tenantId, child.id, user, ip, { ...overrides, freshVersion: true, ticket: adm.ticket, now: clock.now, searchMode });
   return {
     status: res.status,

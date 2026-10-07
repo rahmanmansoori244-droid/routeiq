@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   computeChangeSummary,
   computeSummary,
+  fuelKpi,
   type AssignmentKey,
   type SummaryLoad,
   type SummaryOrder,
@@ -49,6 +50,63 @@ function summary(orders: SummaryOrder[], planned: string[], unserved: { orderId:
     solver: { engine: 'ortools', scenario: 'BALANCED', status: 'OK', timeSec: 1.5 },
   });
 }
+
+describe("computeSummary - a rented truck's fuel is in its hire (sixth review of the hire branch)", () => {
+  // The real-size demo: the plan's Fuel KPI turned blank ('—') on any plan with a hired truck - a rented
+  // truck has no km per litre, so "every load has a fuel economy" never held. Own trucks' litres and OMR
+  // now, and the rented trucks' fuel said to be included (owner answer 3).
+  const own = LD('t1', 1, { fuelLitres: 12.5, fuelCost: 3.75 });
+  const own2 = LD('t1', 2, { fuelLitres: 7.5, fuelCost: 2.25 });
+  const hired = LD('h1', 1, { fuelLitres: null, fuelCost: 0, driverDayRate: 10, fuelInHire: true });
+
+  it("own trucks' litres and OMR, the rented truck's loads said apart - never a blank KPI", () => {
+    const s = summary([], [], [], [own, own2, hired]);
+    expect(s.fuelLitres).toBe(20);
+    expect(s.fuelCost).toBe(6);
+    expect(s.fuelIncludedLoads).toBe(1);
+    expect(fuelKpi(s)).toEqual({ value: '20 · 6.0', note: 'rented trucks: fuel included' });
+    // An own truck without km per litre still leaves the litres unknown (never a partial sum).
+    const unknown = summary([], [], [], [own, { ...own2, fuelLitres: null }, hired]);
+    expect(unknown.fuelLitres).toBeNull();
+    expect(fuelKpi(unknown)).toEqual({ value: '— · 6.0', note: 'rented trucks: fuel included' });
+    // Only rented trucks: no own litres to add, none unknown.
+    expect(summary([], [], [], [hired]).fuelLitres).toBe(0);
+    // A day without rented trucks: exactly as before (no new key, no note).
+    const plain = summary([], [], [], [own, own2]);
+    expect('fuelIncludedLoads' in plain).toBe(false);
+    expect(fuelKpi(plain)).toEqual({ value: '20 · 6.0', note: null });
+  });
+
+  it('a summary stored before reads its loads (a rented truck: its day rate)', () => {
+    const stored = { fuelLitres: null, fuelCost: 6 };
+    const loads = [own, own2, { fuelLitres: null, fuelCost: 0, driverDayRate: 10 }];
+    expect(fuelKpi(stored, loads)).toEqual({ value: '20 · 6.0', note: 'rented trucks: fuel included' });
+    expect(fuelKpi(stored, [own, own2])).toEqual({ value: '— · 6.0', note: null });
+  });
+});
+
+describe('computeSummary - a driver paid by the day (the hire suggestion)', () => {
+  // Fourth review: the solver still reports the paid span of a hired truck's loads, and the paid hours
+  // ("Hours on road · paid", the workbook's "Paid driver hours") counted them as hourly pay, while
+  // the load plan and the Truck days sheet show "day rate" and no paid hours for that truck.
+  const cost = (driver: number, driverPaidMin: number) => ({
+    v: 2 as const, policy: 'TRUCK_DAY_SPAN' as const, fixed: 0, trip: 0, distance: 0, fuel: 0, driver, overtime: 0,
+    total: driver, driverPaidMin, paidFromMin: null, overtimeMin: 0, estimatedLegs: 0,
+  });
+
+  it('leaves the loads of a day-paid driver out of the paid hours, keeping their time on the road', () => {
+    const own = LD('t1', 1, { durationMin: 120, departMin: 420, returnMin: 540, cost: cost(4, 150) });
+    const hired = LD('h1', 1, { durationMin: 180, departMin: 420, returnMin: 600, cost: cost(10, 180), driverDayRate: 10 });
+    const hired2 = LD('h1', 2, { durationMin: 60, departMin: 630, returnMin: 690, cost: cost(0, 90), driverDayRate: 10 });
+    const s = summary([], [], [], [own, hired, hired2]);
+    expect(s.driverPaidHours).toBe(2.5); // the own truck's 150 paid minutes only
+    expect(s.onRoadHours).toBe(6); // every load's time on the road
+    expect(s.costs?.driver).toBe(14); // the day rate is still in the money
+    // Without the day rate (paid by the hour) the same loads count their paid minutes.
+    const hourly = summary([], [], [], [own, { ...hired, driverDayRate: null }, { ...hired2, driverDayRate: undefined }]);
+    expect(hourly.driverPaidHours).toBe(7);
+  });
+});
 
 describe('computeSummary', () => {
   // P1: 3 orders, 2 served. P2: 1 order, served. P3: none. P5: 1 order, unserved.

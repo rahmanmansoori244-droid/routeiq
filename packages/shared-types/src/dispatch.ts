@@ -69,6 +69,20 @@ export interface DispatchTruck {
    * planned by cases. Solvers without the field plan every truck by cases (and echo no pallet_unit).
    */
   bays?: number | null;
+  /**
+   * A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
+   * what-if; never a truck already hired): fixed_cost is its hire, fuel included. The optimizer ranks it
+   * in a hire tier between the P1-P3 and the P4/P5 stops, in proportion to its real money (hire +
+   * driver_day_cost): own trucks go first, the cheapest set of rented trucks wins, P4/P5 stops alone
+   * never rent one; the plan reports the real costs.
+   */
+  hire_candidate?: boolean;
+  /**
+   * A driver paid by the DAY (owner answer 6 Oct 2026: a rented truck's casual driver, the company's
+   * daily driver day rate): this many OMR per truck day, fixed, instead of driver_cost_per_hour and
+   * overtime. Absent / null: paid by the hour. Solvers without the field pay every driver by the hour.
+   */
+  driver_day_cost?: number | null;
 }
 
 export interface DispatchStop {
@@ -492,4 +506,47 @@ export interface DispatchResponse {
   warnings: string[];
   /** How the recommended plan was searched; absent from an older solver. */
   search?: SearchReport | null;
+  /**
+   * The hire suggestion's what-if only (a request with trucks to rent): how its rented trucks were
+   * reduced after the search (apps/solver dispatch_solver._reduce_hire). Absent / null on every other
+   * answer and from a solver before it.
+   */
+  hire_check?: HireCheck | null;
+}
+
+/**
+ * The reduction of a what-if's rented trucks (sixth review of the hire branch: the Quick search rented
+ * 2 x 10-ton where one carried every P1-P3 order left out). `first`: the rented trucks of the search's
+ * plan; `used`: those of the RECOMMENDED plan returned - the cheapest set found (seventh review: the
+ * trucks carrying only P4/P5 orders given back without a solve - their orders put back on the trucks
+ * kept, or an own truck left idle (twelfth review: own trucks first), where they fit, in place of P5
+ * orders where need be (tenth review: strict priorities; eleventh review: in free room too; twelfth
+ * review: orders that fit nowhere never use up the tries of one that fits), one left out told that a
+ * truck is not rented for P4/P5 orders alone (twelfth review), a plan kept as the search found it
+ * given back from its own times (eleventh review) -, then every set
+ * with less real money - as many trucks as it takes (eighth review) - tried cheapest first, another
+ * option's units too; the first whose plan delivers every P1-P3 stop and passes every check, its load
+ * re-check included, and rents no truck for P4/P5 orders alone once given back; the set left after a
+ * give-back solved once more when the limits allow and it was not solved already, its plan taken only
+ * when it passes every check, keeps every P1-P3 stop and is cheaper, or as cheap and serving more by the
+ * day's priorities, or as cheap while the give-back fails the checks (eleventh review) - so the P4/P5
+ * orders of the trucks given back may ride along in the trucks kept;
+ * otherwise they stay out; the solve of one truck fewer taken when it keeps every P1-P3 stop and passes
+ * every check, tenth review; every plan judged, the search's own included, first repaired with no
+ * solve - a P1-P3 stop it leaves out put back in place of lower priorities where it fits, or by a chain
+ * of two moves (in place of one other stop of a load, which goes on elsewhere), and a solve
+ * still leaving one out while a lower priority rides on its trucks solved once more or never
+ * counted: thirteenth review); `solves`: the extra solves;
+ * `complete`: every set cheaper than `used` was ruled out (by a solve only when, once repaired, it
+ * still lost a P1-P3 stop with no lower priority riding along), `used` rents no truck for P4/P5 orders
+ * alone, and its give-back had a timing for every order it tried to put back (eleventh review);
+ * `one_fewer`: the least useful truck of `used` left out, SOLVED with exactly the others - the
+ * stops that plan leaves out (all priorities), as repaired.
+ */
+export interface HireCheck {
+  first: string[];
+  used: string[];
+  solves: number;
+  complete: boolean;
+  one_fewer?: { without: string; unserved: string[] } | null;
 }

@@ -33,7 +33,7 @@ const BASE_CFG: Record<string, any> = {
   reloadMinutes: 30, loadingMinPerCase: 0.04, serviceMinPerCase: 0.05, maxTripsPerTruck: 3, splitDeliveries: true,
   defaultServiceTimeMin: 10, timezone: 'Asia/Muscat', planningCutoffMin: 1080, fuelPricePerLitre: 0.26, driverCostPerHour: 2.5,
   overtimeAfterMin: 540, overtimeCostPerHour: 4, prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, osrmUrl: null,
-  driverBreakMinutes: 60, driverBreakFromMin: 720, driverBreakToMin: 840,
+  driverBreakMinutes: 60, driverBreakFromMin: 720, driverBreakToMin: 840, dailyDriverDayRate: 10,
   priorityWeightsJson: null, orderColumnMapJson: null, dateOrder: 'DMY', serviceAreaJson: null,
   // Deprecated columns still in the database (read by nothing).
   labelEstimatedDistances: true, returnToDepot: true, solverTimeLimitSeconds: 30,
@@ -87,7 +87,7 @@ const CHANGED: Record<string, unknown> = {
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
-  palletFillPct: 90,
+  palletFillPct: 90, dailyDriverDayRate: 12,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -96,6 +96,12 @@ const CHANGED: Record<string, unknown> = {
  * driver page settings of 4 Oct 2026 (arrival radius, photo proof, retention, the dispatcher phone),
  * read by the driver page and its routes only (driver-manifest.spec).
  */
+/**
+ * The daily driver day rate (owner answer 4, 6 Oct 2026) is the driver cost of a truck hired for the day
+ * (the hire suggestion) only: it changes the request of a day with such a truck (and every hire check).
+ */
+const HIRED_ONLY = new Set(['dailyDriverDayRate']);
+const HIRED_TODAY = { hired: true, onlyOnDate: new Date('2026-09-26T00:00:00Z'), kmPerLitre: null, costPerKm: 0 };
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
 
 beforeEach(() => {
@@ -109,13 +115,29 @@ describe('Settings fields drive the planner (review F21)', () => {
 
   it('every saved setting changes the optimizer request, except the order-intake ones', async () => {
     const base = await build(BASE_CFG);
+    const hiredBase = await build(BASE_CFG, { truck: HIRED_TODAY });
     for (const k of Object.keys(tenantConfigSchema.shape)) {
       expect(CHANGED, k).toHaveProperty(k);
       expect(tenantConfigSchema.partial().safeParse({ [k]: CHANGED[k] }).success, k).toBe(true);
       const changed = await build({ ...BASE_CFG, [k]: CHANGED[k] });
-      if (INTAKE_ONLY.has(k)) expect(changed, k).toBe(base);
+      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k)) expect(changed, k).toBe(base);
       else expect(changed, k).not.toBe(base);
+      if (HIRED_ONLY.has(k)) expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, { truck: HIRED_TODAY }), k).not.toBe(hiredBase);
     }
+  });
+
+  it("the daily driver day rate is the driver cost of a truck hired for the day only; own trucks keep theirs (owner answer 4)", async () => {
+    wire({ ...BASE_CFG, dailyDriverDayRate: 12 }, { truck: HIRED_TODAY });
+    const hired = (await buildDispatchRequest('TEN', 'R1')).request.trucks[0]!;
+    expect(hired).toMatchObject({ driver_day_cost: 12 });
+    wire({ ...BASE_CFG, dailyDriverDayRate: 12 });
+    const ownTruck = (await buildDispatchRequest('TEN', 'R1')).request.trucks[0]!;
+    expect('driver_day_cost' in ownTruck).toBe(false);
+    // Admin only, 0-1000 OMR; the Settings page states it.
+    expect(tenantConfigSchema.partial().safeParse({ dailyDriverDayRate: -1 }).success).toBe(false);
+    expect(tenantConfigSchema.partial().safeParse({ dailyDriverDayRate: 1001 }).success).toBe(false);
+    const row = effectivePlannerValues({ ...BASE_CFG, dailyDriverDayRate: 12 } as never, 'Oman', 'OMR').find((r) => r.label === 'Trucks hired for the day')!;
+    expect(row).toMatchObject({ value: 'driver 12 OMR a day each, fuel included in the hire', source: 'SETTING' });
   });
 
   it('the order-intake settings change their own consumer', () => {

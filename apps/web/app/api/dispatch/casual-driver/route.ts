@@ -13,6 +13,8 @@ export const dynamic = 'force-dynamic';
 // asks, then posts again with leaveConfirmed); 409 CODE_TAKEN: try again; 409 DRIVER_INACTIVE:
 // useExisting names a regular driver switched off (only a daily driver is reactivated here). PLANNER,
 // like the Driver list. Audited CASUAL_DRIVER_ADDED + LOAD_DRIVER_SET.
+// A truck rented for the day: also on its other planned loads (LOAD_DRIVER_SET each) and as its default
+// driver (HIRED_TRUCK_CHANGED) - one day-rate driver for the whole day; `alsoOn` lists those loads.
 export const POST = withTenantApi(
   async (req, { user }) => {
     const input = await parseBody(req, casualDriverSchema);

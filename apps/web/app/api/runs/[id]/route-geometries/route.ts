@@ -21,6 +21,7 @@
 import { withTenantApi, ok, fail, notFoundIfNull } from '@/lib/api';
 import { callRouteGeometry } from '@/lib/solver-client';
 import { DISPATCH_PLAN_REFUSAL, isDispatchPlan } from '@/lib/dispatch/legacy-runs';
+import { shownTruckCode } from '@/lib/dispatch/hire';
 
 interface Params { params: { id: string } }
 
@@ -34,7 +35,7 @@ export const GET = (req: Request, { params }: Params) =>
           routes: {
             orderBy: [{ truckId: 'asc' }, { sequenceInTruck: 'asc' }],
             include: {
-              truck: { select: { id: true, code: true } },
+              truck: { select: { id: true, code: true, onlyOnDate: true } },
               order: { include: { customer: { select: { lat: true, lng: true } } } },
             },
           },
@@ -51,7 +52,8 @@ export const GET = (req: Request, { params }: Params) =>
     for (const r of run.routes) {
       const c = r.order.customer;
       if (c.lat == null || c.lng == null) continue;
-      const entry = byTruck.get(r.truckId) ?? { code: r.truck.code, stops: [] };
+      // The plate a hired truck drove with, also after a later day's truck took it (shownTruckCode).
+      const entry = byTruck.get(r.truckId) ?? { code: shownTruckCode(null, r.truck), stops: [] };
       entry.stops.push({ lat: c.lat, lng: c.lng, sequence: r.sequenceInTruck });
       byTruck.set(r.truckId, entry);
     }

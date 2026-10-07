@@ -378,6 +378,11 @@ export function SettingsForm({
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {num('driverCostPerHour', 'Driver cost per hour', { step: 0.1, unit: cur })}
+          {num('dailyDriverDayRate', 'Daily driver day rate', {
+            step: 0.5,
+            unit: cur,
+            hint: 'What the casual driver of a truck hired for the day (hire suggestion) is paid for the day, instead of the hourly driver cost and overtime. Fuel is included in the hire. Your own trucks keep the driver cost per hour.',
+          })}
           {num('overtimeCostPerHour', 'Overtime cost per hour', { step: 0.1, unit: cur, hint: 'On top of the driver cost, for each hour after the overtime threshold.' })}
           {num('fuelPricePerLitre', 'Fuel price per litre', { step: 0.005, unit: cur, hint: '0 = fuel is not costed separately. Fuel use comes from each truck\'s km per litre.' })}
           {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: a penalty per minute that unloading starts before the preferred start or finishes after the preferred end. Receiving hours are never broken.' })}

@@ -62,6 +62,9 @@ const FKS: { child: string; field: string; parent: string; onDelete: 'RESTRICT' 
   { child: 'stopVisit', field: 'customerId', parent: 'customer', onDelete: 'NO_ACTION' },
   { child: 'stopVisit', field: 'truckId', parent: 'truck', onDelete: 'NO_ACTION' },
   { child: 'driverLink', field: 'truckId', parent: 'truck', onDelete: 'NO_ACTION' },
+  { child: 'planLoad', field: 'truckId', parent: 'truck', onDelete: 'RESTRICT' },
+  { child: 'routeAssignment', field: 'truckId', parent: 'truck', onDelete: 'RESTRICT' },
+  { child: 'driverShift', field: 'truckId', parent: 'truck', onDelete: 'RESTRICT' },
   { child: 'orderLine', field: 'orderId', parent: 'order', onDelete: 'CASCADE' },
   { child: 'intakeLineKey', field: 'orderLineId', parent: 'orderLine', onDelete: 'CASCADE' },
   { child: 'routeAssignment', field: 'runId', parent: 'runPlan', onDelete: 'CASCADE' },
@@ -224,6 +227,8 @@ function seedCompany(tenantId: string, p: string) {
     { id: `${p}a2`, action: 'CASUAL_DRIVER_ADDED', entity: 'Driver' },
   ]);
   push('customerTypeProfile', [{ id: `${p}ctp` }]);
+  // The hire suggestion: no check running (a running one refuses the run).
+  tables.hireSuggestion ??= [];
 }
 
 const MASTERS = ['tenant', 'tenantConfig', 'user', 'depot', 'region', 'customer', 'product', 'truck', 'customerTypeProfile'];
@@ -291,6 +296,7 @@ describe('preview (nothing is changed)', () => {
       stopEvents: 4,
       deliveryPhotos: 2,
       dailyDrivers: 3, // cas1, cas3, cas4: cas2 is a truck's default driver
+      hiredTrucks: 0,
       baselines: 1,
       oldDriverApp: 3, // a shift, its position and its proof
     });
@@ -524,6 +530,54 @@ describe('run: everything', () => {
     expect(idsOf('driver', 'a')).toEqual(['acas1', 'acas2', 'acas3', 'areg1']);
     expect(tables.driverLeave).toEqual(leaveBefore);
     expect(danglingReferences()).toEqual([]);
+  });
+});
+
+describe('one-day hired trucks (the hire suggestion, review of the hire branch)', () => {
+  /** "Use this plan" during the tests rented trucks for the 2nd and the 7th; one of the 2nd also sits on a kept load. */
+  function rent() {
+    tables.hireOption = [{ id: 'aopt', tenantId: 'tA', depotId: 'adep', label: '10-ton', maxPerDay: 2, active: true }];
+    tables.truck!.push(
+      { id: 'ah2', tenantId: 'tA', depotId: 'adep', code: 'HIRE-10T-0210-1', hired: true, onlyOnDate: day('2026-10-02'), hireOptionId: 'aopt', active: true, defaultDriverId: 'acas3' },
+      { id: 'ah7', tenantId: 'tA', depotId: 'adep', code: 'HIRE-10T-0710-1', hired: true, onlyOnDate: day('2026-10-07'), hireOptionId: 'aopt', active: true },
+      { id: 'ah2b', tenantId: 'tA', depotId: 'adep', code: 'HIRE-10T-0210-2', hired: true, onlyOnDate: day('2026-10-02'), hireOptionId: 'aopt', active: true },
+    );
+    // ah2 carried the load of the 2nd (removed with its plan).
+    row('planLoad', 'ald2').truckId = 'ah2';
+    // ah2b is named by a load of the 6th (a plan that stays when only before the 4th is removed).
+    tables.planLoad!.push({ id: 'ald6b', tenantId: 'tA', runId: 'ap6', truckId: 'ah2b', loadNo: 2, driverId: null, status: 'PLANNED' });
+  }
+  const row = (m: string, id: string) => tables[m]!.find((r) => r.id === id)!;
+
+  it('everything: the one-day trucks go with the test data (never planned on their date as fleet, never counted against max per day)', async () => {
+    rent();
+    const p = await preview(null);
+    expect(p.removed.hiredTrucks).toBe(3);
+    expect(p.kept.trucks).toBe(1);
+    const r = await run(null);
+    expect(r.removed.hiredTrucks).toBe(3);
+    expect(idsOf('truck', 'a')).toEqual(['at1']);
+    expect(danglingReferences()).toEqual([]);
+    // The daily driver who was only the rented truck's default driver goes too.
+    expect(idsOf('driver', 'a')).toEqual(['acas2', 'areg1']);
+    expect(tables.auditLog!.filter((a) => a.tenantId === 'tA').at(-1)!.afterJson).toMatchObject({ removed: { hiredTrucks: 3 } });
+  });
+
+  it('only before a date: the trucks of those days go; one still named by a kept load is retired (never planned again); later ones stay', async () => {
+    rent();
+    const r = await run('2026-10-04');
+    expect(r.removed.hiredTrucks).toBe(2);
+    expect(idsOf('truck', 'a')).toEqual(['ah2b', 'ah7', 'at1']);
+    expect(row('truck', 'ah2b').active).toBe(false);
+    expect(row('truck', 'ah7').active).toBe(true);
+    expect(danglingReferences()).toEqual([]);
+  });
+
+  it('refused while a hire check of this company waits or runs', async () => {
+    tables.hireSuggestion = [{ id: 'hs', tenantId: 'tA', runId: 'ap6', status: 'RUNNING' }];
+    const p = await preview(null);
+    expect(p.blockers.map((b) => b.code)).toEqual(['HIRE_CHECK_RUNNING']);
+    await expect(run(null)).rejects.toMatchObject({ status: 409, details: { code: 'HIRE_CHECK_RUNNING' } });
   });
 });
 

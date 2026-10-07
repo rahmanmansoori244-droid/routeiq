@@ -15,6 +15,7 @@
 import ExcelJS from 'exceljs';
 import type { DetailLoad, PlanDetail } from './plan-detail';
 import { COST_BASIS_TEXT, costTotals, summaryCostBasis, truckDayRows } from './costs';
+import { dayFuel, FUEL_INCLUDED_NOTE } from './summary';
 import { breakLine, breakPlace, breakTimes } from './break-text';
 import { TIMING_TEXT } from './feasibility-view';
 import { DEFAULT_TZ, fmtDayMonth, fmtHhmm, localDateIso, localMinutes } from './time';
@@ -420,7 +421,7 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
     );
     kv('Hours on the road (loads)', s.onRoadHours ?? s.totalHours, FMT_KM, 'departure to return of each load, added up');
     if (s.driverPaidHours !== undefined) {
-      kv('Paid driver hours (truck days)', s.driverPaidHours, FMT_KM, 'first departure to last return of each truck, depot turnaround and waiting included');
+      kv('Paid driver hours (truck days)', s.driverPaidHours, FMT_KM, 'first departure to last return of each truck, depot turnaround and waiting included; a driver paid by the day (a hired truck) adds none');
     }
     kv('Average utilization %', s.avgUtilizationPct, FMT_PCT);
     // Pallets (owner decision 4 Oct 2026): only when loads were planned by pallets (trucks with bays).
@@ -429,7 +430,10 @@ function addSummarySheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, r
       kv('Pallets planned', palletsExact(s.palletUnits), FMT_PALLETS, `on ${n} load${n === 1 ? '' : 's'} of trucks with bays (mixed pallets: each product's cases / its cases per pallet, added up); orders stay in cases`);
       if (typeof s.avgBayFillPct === 'number') kv('Average bay fill %', s.avgBayFillPct, FMT_PCT, 'pallets / bays of each of those loads, averaged');
     }
-    kv('Estimated fuel (litres)', s.fuelLitres ?? 'not calculated', FMT_KM, s.fuelLitres === null ? 'trucks have no km-per-litre' : undefined);
+    // A truck rented for the day has its fuel in the hire (owner answer 3; sixth review of the hire branch).
+    const fuel = dayFuel(s, d.loads);
+    const rentedFuel = fuel.included ? `own trucks only; ${FUEL_INCLUDED_NOTE} in the hire` : undefined;
+    kv('Estimated fuel (litres)', fuel.litres ?? 'not calculated', FMT_KM, fuel.litres === null ? 'trucks have no km-per-litre' : rentedFuel);
     kv(`Fuel cost (${cur})`, s.fuelCost, FMT_MONEY);
     const basis = summaryCostBasis(s);
     kv(
@@ -584,7 +588,7 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       ins<ExcelJS.CellValue>([
         l.truckCode, l.loadNo, l.status + (l.carried ? ' (kept from previous version)' : ''), l.driverName ?? 'Not assigned',
         fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, palletsOf(l) ? 'by pallets' : l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
-        l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), l.cost ? fmtDuration(l.cost.driverPaidMin) : 'earlier costing', l.fuelLitres, l.fuelCost,
+        l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), paidTimeCell(l), l.fuelLitres, l.fuelCost,
         l.cost ? Math.round((l.cost.driver + l.cost.overtime) * 1000) / 1000 : null, l.operatingCost,
         l.timing ? (l.timing.ok ? TIMING_TEXT[l.timing.status] : NOT_VERIFIED) : '—', names.get(l.id) ?? '',
       ], loadPalletsCell(l) || 'by cases'),
@@ -600,12 +604,21 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '',
       sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '', '', '',
       sum(d.loads.map((l) => l.distanceKm)), fmtDuration(sum(d.loads.map((l) => l.durationMin))),
-      fmtDuration(sum(d.loads.map((l) => (l.cost ? l.cost.driverPaidMin : l.durationMin)))),
+      fmtDuration(sum(d.loads.map((l) => (typeof l.driverDayRate === 'number' ? 0 : l.cost ? l.cost.driverPaidMin : l.durationMin)))),
       fuelKnown ? sum(d.loads.map((l) => l.fuelLitres ?? 0)) : null, sum(d.loads.map((l) => l.fuelCost)),
       sum(d.loads.map((l) => (l.cost ? l.cost.driver + l.cost.overtime : 0))), sum(d.loads.map((l) => l.operatingCost)), '', '',
     ], `${palletText(palletTotal)} pallets`),
     fmts,
   );
+}
+
+/**
+ * A load's paid driver time: h:mm, "earlier costing" - or "day rate" for a hired truck's casual driver
+ * paid by the day (third review of the hire branch: its paid hours read as hourly pay).
+ */
+function paidTimeCell(l: DetailLoad): string {
+  if (typeof l.driverDayRate === 'number') return 'day rate';
+  return l.cost ? fmtDuration(l.cost.driverPaidMin) : 'earlier costing';
 }
 
 /**
@@ -647,13 +660,14 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
         : '',
       t.basis === 'MIXED_LEGACY' ? `${t.earlier.toFixed(3)} ${cur} from loads costed the earlier way (no depot time or overtime)` : '',
       t.paidVsSpanMin ? `paid time differs from the truck day by ${t.paidVsSpanMin} min: a locked load keeps the share it was planned with` : '',
+      t.dayRate !== null ? `driver at the day rate of ${t.dayRate} ${cur} (paid with its first load; no hours, no overtime)` : '',
     ]
       .filter(Boolean)
       .join('; ');
     tableRow(
       ws,
       r++,
-      [t.truckCode, t.loads, fmtHhmm(t.firstDepartMin), fmtHhmm(t.lastReturnMin), fmtDuration(t.spanMin), fmtDuration(t.paidMin), fmtDuration(t.onRoadMin),
+      [t.truckCode, t.loads, fmtHhmm(t.firstDepartMin), fmtHhmm(t.lastReturnMin), fmtDuration(t.spanMin), t.dayRate !== null ? 'day rate' : fmtDuration(t.paidMin), fmtDuration(t.onRoadMin),
         t.driver, t.overtime, t.fixed, t.trip, t.distance, t.fuel, t.total, note],
       fmts,
     );
@@ -1075,6 +1089,8 @@ export interface AssumptionConfig {
   maxTripsPerTruck: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
+  /** Stored with a plan (PlanSettings): a truck hired for the day pays its casual driver this per day (owner answer 4). */
+  dailyDriverDayRate?: number;
   overtimeAfterMin: number;
   overtimeCostPerHour: number;
   prefWindowPenaltyPerMin: number;
@@ -1183,6 +1199,10 @@ export function tenantAssumptions(
       : `${cfg.driverCostPerHour} ${cur} per hour of the whole truck day (first departure to last return, depot turnaround and waiting included)${
           rules === 'MIXED' ? '; loads kept from an earlier plan keep their earlier cost (time on the road only)' : ''
         }`,
+    // The hire suggestion (owner answers 3 and 4, 6 Oct 2026): a plan stored with the setting says it.
+    ...(typeof cfg.dailyDriverDayRate === 'number'
+      ? { 'Trucks hired for the day': `driver ${cfg.dailyDriverDayRate} ${cur} a day each (no hourly pay or overtime); fuel included in the hire` }
+      : {}),
     Overtime:
       cfg.overtimeCostPerHour > 0
         ? `after ${fmtDuration(cfg.overtimeAfterMin)} from the first departure, +${cfg.overtimeCostPerHour} ${cur} per hour${

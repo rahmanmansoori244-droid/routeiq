@@ -20,6 +20,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { TruckFormDialog, type TruckRow, type DepotOption, type DriverOption } from './truck-form';
 import { unitShort, fmtMoney } from '@/lib/format';
+import { oneDayBadge, truckCapacityText, truckDescriptionText } from '@/lib/dispatch/hire';
 import { errorMessage } from '@/lib/error-message';
 
 interface Props {
@@ -87,10 +88,17 @@ export function TrucksTable({ initial, depots, drivers, canManage, primaryUnit, 
                       hired
                     </Badge>
                   ) : null}
+                  {t.onlyOnDate ? (
+                    <Badge variant="warning" className="ml-1 font-sans text-[10px]" title="Rented with the hire suggestion: planned on this date only" data-testid={`truck-one-day-${t.code}`}>
+                      {oneDayBadge(new Date(t.onlyOnDate))}
+                    </Badge>
+                  ) : null}
                 </TableCell>
-                <TableCell className="text-muted-foreground">{t.description ?? '—'}</TableCell>
+                <TableCell className="text-muted-foreground">{truckDescriptionText(t.description)}</TableCell>
                 <TableCell className="font-mono text-xs">{t.depot?.code ?? '—'}</TableCell>
-                <TableCell className="text-right tabular-nums">{t.capacityCases.toLocaleString()}</TableCell>
+                <TableCell className="text-right tabular-nums" title={truckCapacityText(t) === 'by bays' ? 'Planned by pallets (its bays): no case capacity of its own' : undefined}>
+                  {truckCapacityText(t)}
+                </TableCell>
                 <TableCell className="text-right tabular-nums" title={t.capacityWeightKg > 0 ? undefined : 'Payload 0 = no weight limit'}>
                   {t.capacityWeightKg > 0 ? t.capacityWeightKg.toLocaleString() : 'no limit'}
                 </TableCell>

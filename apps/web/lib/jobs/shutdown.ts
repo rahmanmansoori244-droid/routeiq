@@ -16,6 +16,7 @@
  * minutes after the last one and the janitor fails it 5 minutes after (optimize-job.ts).
  */
 import { SolverError } from '../solver-client';
+import { activeHireJobs, failHireChecksForShutdown } from '../dispatch/hire-whatif';
 import { activeDispatchJobs, failJob } from './dispatch-job';
 
 /** The longest the handler waits for the failure writes before the process exits. */
@@ -23,20 +24,26 @@ export const SHUTDOWN_FAIL_MS = 8_000;
 
 export const SHUTDOWN_MESSAGE = 'The server was restarted (an update) during this optimization. Nothing was saved - optimize again.';
 
-/** Fail every job this process runs (see above). Returns how many there were. Never throws. */
+/**
+ * Fail every job this process runs (see above) - the hire suggestion's checks too (third review of the
+ * hire branch: they stayed "running" until the lost-check sweep, 2-3 minutes, blocking Start fresh and
+ * "Check hire options"; hire-whatif.ts failHireChecksForShutdown), in the same race. Returns how many
+ * there were. Never throws.
+ */
 export async function failJobsForShutdown(timeoutMs = SHUTDOWN_FAIL_MS): Promise<number> {
   const jobs = [...activeDispatchJobs.values()];
-  if (!jobs.length) return 0;
+  const checks = activeHireJobs.size;
+  if (!jobs.length && !checks) return 0;
   const err = new SolverError(SHUTDOWN_MESSAGE, 0, { reason: 'SHUTDOWN' });
   let timer: NodeJS.Timeout | undefined;
   await Promise.race([
-    Promise.allSettled(jobs.map((j) => failJob(j, err))),
+    Promise.allSettled([...jobs.map((j) => failJob(j, err)), failHireChecksForShutdown()]),
     new Promise<void>((resolve) => {
       timer = setTimeout(resolve, timeoutMs);
     }),
   ]);
   clearTimeout(timer);
-  return jobs.length;
+  return jobs.length + checks;
 }
 
 const g = globalThis as unknown as { __routeiqShutdownHandler?: boolean };

@@ -10,6 +10,7 @@ import { reapStuckJobs } from './optimize-job';
 import { reapStaleShifts } from './shift-janitor';
 import { completeReturnedLoads } from '../delivery/event-service';
 import { runDeliveryJanitor } from './delivery-janitor';
+import { failLostHireChecks, retireOneDayTrucks } from '../dispatch/hire-whatif';
 
 const INTERVAL_MS = 60_000;
 /** The returned-loads sweep: the last result already completes a load at once; this is the safety net. */
@@ -36,6 +37,14 @@ async function sweep() {
     } catch (err) {
       console.error('janitor: returned loads not checked', (err as Error)?.message ?? err);
     }
+  }
+  // The hire suggestion (owner request 6 Oct 2026): a what-if lost with its process is ended, and
+  // one-day hired trucks whose day is over are retired. Its own try as well.
+  try {
+    const [lost, retired] = await Promise.all([failLostHireChecks(), retireOneDayTrucks()]);
+    if (lost || retired) console.warn('janitor: hire', { lostChecks: lost, oneDayTrucksRetired: retired });
+  } catch (err) {
+    console.error('janitor: hire sweep not run', (err as Error)?.message ?? err);
   }
   // Retention (spec section 12.4): old photo bytes, old driver positions and idle daily drivers, at
   // most every 10 min (the daily drivers once a day). Its own try as well.

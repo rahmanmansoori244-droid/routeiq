@@ -47,6 +47,9 @@ const TENANT_SCOPED_MODELS = new Set([
   'StopVisit',
   'StopEvent',
   'DeliveryPhoto',
+  // The hire suggestion (owner request 6 Oct 2026)
+  'HireOption',
+  'HireSuggestion',
   // Driver leave (owner request 6 Oct 2026)
   'DriverLeave',
 ]);

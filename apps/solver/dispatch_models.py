@@ -138,6 +138,24 @@ class DispatchTruck(BaseModel):
     # bays x config.pallet_fill_pct (pallet_room_units) and the payload; capacity_cases is then not a
     # limit. None (an older web, or a truck without bays): planned by cases, exactly as before.
     bays: int | None = Field(default=None, ge=1, le=40)
+    # A truck the company could RENT for the day (owner request 6 Oct 2026, the hire suggestion's
+    # what-if; never a truck already hired): fixed_cost is its hire for the day, fuel included (its
+    # cost_per_km is the option's own charge, 0 by default; no km_per_litre). The search ranks it in
+    # the HIRE TIER (dispatch_solver._service_and_hire): above every P4/P5 order together and below one
+    # P1-P3 order, in proportion to its real money (hire + driver_day_cost + its own km charge over a
+    # rough day's km, dispatch_solver.hire_money) - so every own truck goes
+    # first, the cheapest set of rented trucks wins and P4/P5 orders alone never rent one; the reported
+    # costs stay the real ones. Optional and additive: an older web never sends it.
+    hire_candidate: bool = False
+    # A driver paid by the DAY (owner answer 6 Oct 2026: a rented truck's casual driver, the company's
+    # "Daily driver day rate"): this many OMR per truck day, fixed - paid with the truck day's first new
+    # load (a truck with frozen loads paid it with them) - instead of config.driver_cost_per_hour and
+    # overtime. None: the company's hourly driver cost, as before. Optional and additive. Its km and
+    # time still get a tiny search-only tie-breaker (dispatch_solver._search_km_rate, _tie_span_units;
+    # compared after the cost in every goal), and once a plan is picked its loads are put in a shorter
+    # order with its km weighed against the customers' time preferences as an own truck's km are
+    # (dispatch_solver._shorter_orders); the reported costs stay the day rate and no km cost.
+    driver_day_cost: float | None = Field(default=None, ge=0, le=1000)
 
 
 class DispatchStop(BaseModel):
@@ -583,6 +601,66 @@ class DispatchResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     # How the recommended plan was searched (QUICK / THOROUGH). None from a solver before it.
     search: SearchReport | None = None
+    # The hire suggestion's what-if only (a request with trucks to rent, DispatchTruck.hire_candidate):
+    # how its set of rented trucks was reduced after the search (dispatch_solver._reduce_hire). None for
+    # every other request (and from a solver before it).
+    hire_check: "HireCheck | None" = None
+
+
+class HireOneFewer(BaseModel):
+    """One truck fewer than the suggested set, SOLVED (sixth review of the hire branch: an estimate said
+    "up to 25 orders stay undelivered" where none would): the day solved with the suggested rented trucks
+    but ``without``, and the stops that plan leaves out (all priorities; ``unserved`` of its scenario)."""
+
+    without: str
+    unserved: list[str] = Field(default_factory=list)
+
+
+class HireCheck(BaseModel):
+    """The REDUCTION of a what-if's rented trucks (sixth review of the hire branch: the Quick search
+    rented 2 x 10-ton on the real day where one carried every P1-P3 order; the second only carried
+    P4/P5 orders). After the search, with no solve, every rented truck carrying only P4/P5 orders is
+    given back - a stop of theirs goes back on the trucks kept, or an own truck the plan leaves idle
+    (twelfth review: own trucks first), where it fits, with nothing taken off or in place of stops it
+    outranks (P5 orders riding along) where need be (tenth review: strict priorities never drop a P4 order
+    to carry two P5s; eleventh review: P4/P5 orders ride along in free room; twelfth review: orders that
+    fit nowhere never use up the timings of one that fits), a P4/P5 stop it leaves out says a truck is
+    not rented for P4/P5 orders alone (twelfth review: it read "could not be placed by the optimizer"),
+    and a plan kept as the search found it (VIOLATED) is given back from its own times (eleventh review: it
+    kept such a truck, counted in the box); then the CHEAPEST set (seventh review) - every
+    set of the trucks to rent with less real money, as many trucks as it takes (eighth review: 2 x 3-ton
+    for 80 OMR beat 1 x 10-ton for 85), cheapest first - is the first one whose plan delivers every P1-P3
+    stop the plan delivered and passes every check, its load re-check included, and whose trucks for
+    P4/P5 orders alone can be given back (tenth review); a set left after trucks were given back is
+    solved once more when the limits allow and that set was not solved already, and its plan replaces
+    the give-back only when it passes every check, keeps every P1-P3 stop and is cheaper, or as cheap and
+    serving more by the day's priorities, or as cheap while the give-back fails the checks (eleventh
+    review) - so their P4/P5 orders may ride along in the trucks kept
+    (eighth and ninth reviews; dispatch_solver._reduce_hire); otherwise the give-back stays and they stay
+    out. The solve of one truck fewer (``one_fewer``) that keeps every P1-P3 stop and passes every check
+    makes that cheaper set the suggestion (tenth review: it was thrown away). Every plan judged - the
+    search's own and each solve's - is first repaired with no solve: a P1-P3 stop it leaves out goes back
+    where it fits, in place of lower priorities where need be, or by a chain of two moves (in place of one
+    other stop of a load, which goes on elsewhere) (thirteenth review: a solve of 1 x 10-ton
+    left a P3 order out while it carried a P4/P5 order more in its place, and ruled the 10-ton out; 2 x
+    3-ton was suggested, "complete"); a solve that still leaves one out while a lower priority rides on its
+    trucks proves nothing - it is solved once more when the limits allow, and never rules its set out.
+    ``first``: the rented trucks of the search's plan; ``used``: those of the plan returned as
+    RECOMMENDED (another option's units when one is cheaper); ``solves``: the extra solves run;
+    ``complete``: every set cheaper than ``used`` was ruled out (by its room, or a checked solve that
+    lost a P1-P3 stop once repaired) - false when the solve limit, the time budget, a solve without its
+    load re-check, a solve that proved nothing (thirteenth review), too many sets to list, or a solve
+    whose cheaper set could not be given left one unproven, or when ``used`` still rents a truck for
+    P4/P5 orders alone (its give-back could not be built: tenth review), or its give-back had no timing
+    left to try a stop on the trucks kept (eleventh review); ``one_fewer``: the least useful truck of
+    ``used`` left out, solved with exactly the others, as repaired (None when no such solve ran, when it
+    proved nothing, or when that solve became the suggestion)."""
+
+    first: list[str] = Field(default_factory=list)
+    used: list[str] = Field(default_factory=list)
+    solves: int = 0
+    complete: bool = True
+    one_fewer: HireOneFewer | None = None
 
 
 class SearchReport(BaseModel):
@@ -652,6 +730,7 @@ class PyvrpReport(BaseModel):
 
 SearchReport.model_rebuild()
 DispatchResponse.model_rebuild()
+HireCheck.model_rebuild()
 
 
 class GeometryRequest(BaseModel):

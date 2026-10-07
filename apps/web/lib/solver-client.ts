@@ -46,8 +46,13 @@ export function postJsonLong(
   headers: Record<string, string>,
   body: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<{ status: number; text: string }> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new CancelledSolve());
+      return;
+    }
     const u = new URL(urlStr);
     const mod = u.protocol === 'https:' ? https : http;
     let timer: NodeJS.Timeout | undefined;
@@ -72,6 +77,11 @@ export function postJsonLong(
       },
     );
     timer = setTimeout(() => req.destroy(new Error(`no answer after ${Math.round(timeoutMs / 1000)} s`)), timeoutMs);
+    // Cancelled by the caller (the hire suggestion's what-if when a dispatcher's solve needs its slot):
+    // the connection closes and the solver cancels that solve within about a second.
+    const onAbort = () => req.destroy(new CancelledSolve());
+    signal?.addEventListener('abort', onAbort, { once: true });
+    req.on('close', () => signal?.removeEventListener('abort', onAbort));
     req.on('socket', (s) => s.setKeepAlive(true, SOLVER_KEEPALIVE_MS));
     req.on('error', (e) => {
       clearTimeout(timer);
@@ -81,6 +91,13 @@ export function postJsonLong(
   });
 }
 
+/** The caller cancelled the optimizer call (postJsonLong's signal). */
+export class CancelledSolve extends Error {
+  constructor() {
+    super('cancelled by the caller');
+  }
+}
+
 /**
  * A failed solver call (no HTTP answer) in plain words: a reset connection is the optimizer being
  * restarted or updated mid-search; a refused one is the optimizer not up; our own timer is no answer
@@ -88,6 +105,7 @@ export function postJsonLong(
  */
 export function solverCallFailure(err: unknown, waitMs: number): SolverError {
   if (err instanceof SolverError) return err;
+  if (err instanceof CancelledSolve) return new SolverError('The optimization was cancelled.', 0, null, 'CANCELLED');
   const e = err as { code?: string; message?: string } | null;
   const code = String(e?.code ?? '');
   const msg = String(e?.message ?? err ?? '');
@@ -119,7 +137,7 @@ export function solverCallFailure(err: unknown, waitMs: number): SolverError {
  * A redirect is never followed (node:http), and /api/health does not follow one either (third
  * review of audit PR4).
  */
-export async function callDispatchSolver(req: DispatchRequest): Promise<DispatchResponse> {
+export async function callDispatchSolver(req: DispatchRequest, opts: { signal?: AbortSignal } = {}): Promise<DispatchResponse> {
   const { url, token } = solverEnv();
   if (!url) throw new SolverError('SOLVER_URL not set', 0, null);
   // Fourth review of audit PR4: say why, instead of node:http's "Protocol not supported" or
@@ -133,7 +151,7 @@ export async function callDispatchSolver(req: DispatchRequest): Promise<Dispatch
   const waitMs = solverWaitMs(req.config?.search_mode, req.config?.max_search_sec);
   let res: { status: number; text: string };
   try {
-    res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), waitMs);
+    res = await postJsonLong(`${url}/optimize-dispatch`, { 'X-Solver-Token': token }, JSON.stringify(req), waitMs, opts.signal);
   } catch (err) {
     throw solverCallFailure(err, waitMs);
   }

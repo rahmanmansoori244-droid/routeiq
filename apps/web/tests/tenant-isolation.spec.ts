@@ -265,6 +265,38 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     expect((await tenantDb(tenantBId).driverLink.findFirst())?.revokedAt).toBeNull();
   });
 
+  it('HireOption and HireSuggestion (the hire suggestion, owner request 6 Oct 2026) are scoped both ways', async () => {
+    const seedHire = async (tid: string, uid: string, tag: string) => {
+      const db = tenantDb(tid);
+      const depot = await db.depot.create({ data: { code: 'DEP-HIRE', name: `${tag} hire depot`, lat: 23.5, lng: 58.4 } as Any });
+      // The same label in both companies: unique per company and depot only.
+      const option = await db.hireOption.create({ data: { depotId: depot.id, label: '10-ton', bays: 12, costPerDay: 50, maxPerDay: 3 } as Any });
+      const run = await db.runPlan.create({ data: { depotId: depot.id, runDate: new Date('2026-10-07T00:00:00Z'), createdById: uid } as Any });
+      const suggestion = await db.hireSuggestion.create({ data: { runId: run.id, trigger: 'ASKED', basisJson: { v: 1 } } as Any });
+      // A one-day truck rented from the option.
+      await db.truck.create({ data: { code: 'HIRE-10T-0710-1', depotId: depot.id, capacityCases: 1140, capacityWeightKg: 0, capacityVolumeL: 0, fixedCostPerDay: 50, costPerKm: 0.1, bays: 12, hired: true, onlyOnDate: new Date('2026-10-07T00:00:00Z'), hireOptionId: option.id } as Any });
+      return { option, suggestion };
+    };
+    const a = await seedHire(tenantAId, userAId, 'A');
+    const b = await seedHire(tenantBId, userBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect((await db.hireOption.findMany()).map((o) => o.id)).toEqual([own.option.id]);
+      expect((await db.hireSuggestion.findMany()).map((s) => s.id)).toEqual([own.suggestion.id]);
+      expect(await db.hireOption.findUnique({ where: { id: other.option.id } })).toBeNull();
+      expect(await db.hireSuggestion.findUnique({ where: { id: other.suggestion.id } })).toBeNull();
+      expect(await db.truck.count({ where: { onlyOnDate: { not: null } } })).toBe(1);
+    }
+    // A write through one company cannot touch the other's rows.
+    await tenantDb(tenantAId).hireOption.updateMany({ data: { active: false } });
+    expect((await tenantDb(tenantBId).hireOption.findFirst())?.active).toBe(true);
+    await tenantDb(tenantAId).hireSuggestion.updateMany({ data: { status: 'CANCELLED' } });
+    expect((await tenantDb(tenantBId).hireSuggestion.findFirst())?.status).toBe('QUEUED');
+  });
+
   it('DriverLeave (owner request 6 Oct 2026) is scoped both ways: reads, writes and the leave of a delivery day', async () => {
     const seedLeave = async (tid: string, tag: string) => {
       const db = tenantDb(tid);

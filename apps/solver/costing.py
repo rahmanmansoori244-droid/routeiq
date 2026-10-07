@@ -16,6 +16,10 @@ Policy ``TRUCK_DAY_SPAN``
 * Overtime is the paid time after that first departure + ``overtime_after_min``, priced at
   ``overtime_cost_per_hour`` ON TOP of the driver rate.
 * The truck's fixed cost is paid once per truck day; trip, distance and fuel costs per load.
+* A driver paid by the DAY (``TruckRates.driver_day``; owner answer 6 Oct 2026: a rented truck's casual
+  driver, the company's "Daily driver day rate"): that rate once per truck day, with its first load,
+  and no hourly pay or overtime on that truck. A rented truck's fuel is in its hire (no km_per_litre,
+  its per_km the hire's own km charge, 0 by default).
 
 Allocation to loads (documented rule, additive across plan versions)
 -------------------------------------------------------------------
@@ -25,7 +29,7 @@ Allocation to loads (documented rule, additive across plan versions)
 * driver cost = length of that interval x driver rate; overtime = the part of the interval after
   first departure + overtime_after, x overtime rate.
 * The fixed cost goes to the truck day's load 1 (a truck that already has frozen loads paid it with
-  its first frozen load). Trip, distance and fuel are the load's own.
+  its first frozen load), and so does a day-rate driver's pay. Trip, distance and fuel are the load's own.
 
 Earlier loads' shares never change when later loads are added, so a re-plan's frozen loads keep the
 costs they were planned with and frozen + new = the whole truck day, nothing counted twice. (The
@@ -68,10 +72,14 @@ class TruckRates:
     trip: float = 0.0  # OMR per load
     per_km: float = 0.0  # OMR per km, fuel excluded when km_per_litre is set
     km_per_litre: float | None = None
+    # A driver paid by the day (OMR per truck day, with the day's first load); None = by the hour.
+    driver_day: float | None = None
 
     @classmethod
     def from_truck(cls, t) -> "TruckRates":
-        return cls(fixed=float(t.fixed_cost), trip=float(t.trip_cost), per_km=float(t.cost_per_km), km_per_litre=t.km_per_litre)
+        day = getattr(t, "driver_day_cost", None)
+        return cls(fixed=float(t.fixed_cost), trip=float(t.trip_cost), per_km=float(t.cost_per_km), km_per_litre=t.km_per_litre,
+                   driver_day=float(day) if day is not None else None)
 
 
 @dataclass(frozen=True)
@@ -134,7 +142,9 @@ def truck_day_costs(truck: TruckRates, rates: DayRates, loads: Sequence[LoadTimi
         raise ValueError("truck_day_costs needs at least one load")
     anchored = anchor_s is not None
     day_start = anchor_s if anchored else loads[0].depart_s
-    ot_from = day_start + rates.overtime_after_s if rates.overtime_after_s is not None and rates.overtime_per_hour > 0 else None
+    by_day = truck.driver_day is not None  # a driver paid by the day: no hourly pay, no overtime
+    ot_from = (day_start + rates.overtime_after_s
+               if not by_day and rates.overtime_after_s is not None and rates.overtime_per_hour > 0 else None)
     out: list[LoadCost] = []
     prev_return = frozen_return_s if anchored and frozen_return_s is not None else None
     for j, ld in enumerate(loads):
@@ -150,7 +160,8 @@ def truck_day_costs(truck: TruckRates, rates: DayRates, loads: Sequence[LoadTimi
             fuel_litres=litres,
             paid_from_s=start,
             paid_to_s=end,
-            driver=(end - start) / 3600.0 * rates.driver_per_hour,
+            driver=((truck.driver_day if (j == 0 and not anchored) else 0.0) if by_day
+                    else (end - start) / 3600.0 * rates.driver_per_hour),
             overtime_s=ot_s,
             overtime=ot_s / 3600.0 * rates.overtime_per_hour,
         ))

@@ -70,6 +70,9 @@ export const CONFIG_BOUNDS = {
   palletFillPct: { solver: 'pallet_fill_pct', min: 50, max: 100, int: true },
   fuelPricePerLitre: { solver: 'fuel_price_per_litre', min: 0, max: 10 },
   driverCostPerHour: { solver: 'driver_cost_per_hour', min: 0, max: 100 },
+  // Owner answer 4 (6 Oct 2026): a truck hired for the day pays its casual driver this per day; sent on
+  // each such truck (the solver's DispatchTruck.driver_day_cost).
+  dailyDriverDayRate: { solver: 'truck.driver_day_cost', min: 0, max: 1000 },
   prefWindowPenaltyPerMin: { solver: 'pref_window_penalty_per_min', min: 0, max: 100 },
   distanceMultiplier: { solver: 'haversine_multiplier', min: 1, max: 3 },
   avgSpeedKmh: { solver: 'avg_speed_kmh', min: 5, max: 120 },

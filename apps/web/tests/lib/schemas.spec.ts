@@ -196,6 +196,8 @@ describe('tenantConfigSchema', () => {
     locationRetentionDays: 90,
     dispatcherPhone: null,
     palletFillPct: 95,
+    // The casual driver of a truck hired for the day (owner answer 4, 6 Oct 2026).
+    dailyDriverDayRate: 10,
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

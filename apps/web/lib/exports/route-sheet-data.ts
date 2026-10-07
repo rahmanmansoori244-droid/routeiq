@@ -3,6 +3,7 @@
  * Excel or PDF rendering. Pull once, render twice.
  */
 import { prisma } from '../db';
+import { shownTruckCode } from '../dispatch/hire';
 
 export interface RouteStop {
   sequence: number;
@@ -87,7 +88,8 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
       routes: {
         orderBy: [{ truckId: 'asc' }, { sequenceInTruck: 'asc' }],
         include: {
-          truck: { select: { id: true, code: true, description: true, capacityCases: true } },
+          // onlyOnDate: a hired truck whose plate a later day's truck took shows the plate it drove with.
+          truck: { select: { id: true, code: true, onlyOnDate: true, description: true, capacityCases: true } },
           order: {
             select: {
               id: true,
@@ -139,7 +141,7 @@ export async function buildRouteSheet(tenantId: string, runId: string): Promise<
     if (!truck) {
       truck = {
         truckId: r.truckId,
-        truckCode: r.truck.code,
+        truckCode: shownTruckCode(null, r.truck),
         truckDescription: r.truck.description,
         stops: [],
         totalCases: 0,

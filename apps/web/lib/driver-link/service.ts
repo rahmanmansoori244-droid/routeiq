@@ -23,6 +23,7 @@ import { HttpError } from '../http-error';
 import { qrPath } from '../dispatch/qr';
 import { asPlanBusy, setLockTimeout } from '../dispatch/plan-locks';
 import { DEFAULT_TZ, dateOnly, isoOf } from '../dispatch/time';
+import { shownTruckCode } from '../dispatch/hire';
 import {
   deriveToken,
   driverLinkBaseUrl,
@@ -305,10 +306,12 @@ export interface LinkCallOptions {
 async function planTruck(tenantId: string, runId: string, truckId: string) {
   const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { id: true, runDate: true } });
   if (!run) throw new DriverLinkError('Plan not found.', 404, 'NOT_FOUND');
-  const truck = await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { id: true, code: true, hired: true } });
-  const onPlan = truck ? await prisma.planLoad.count({ where: { tenantId, runId, truckId } }) : 0;
-  if (!truck || !onPlan) throw new DriverLinkError('This truck has no load in this plan.', 404, 'NOT_FOUND');
-  return { date: isoOf(run.runDate), truck };
+  const row = await prisma.truck.findFirst({ where: { id: truckId, tenantId }, select: { id: true, code: true, hired: true, onlyOnDate: true } });
+  const onPlan = row ? await prisma.planLoad.count({ where: { tenantId, runId, truckId } }) : 0;
+  if (!row || !onPlan) throw new DriverLinkError('This truck has no load in this plan.', 404, 'NOT_FOUND');
+  // The plate it drives with that day, also after a later day's hired truck took it (third review of the
+  // hire branch: the link, its page and its messages said "12345AB.261006").
+  return { date: isoOf(run.runDate), truck: { id: row.id, hired: row.hired, code: shownTruckCode(null, row) } };
 }
 
 /**
@@ -430,8 +433,8 @@ export async function listLinks(tenantId: string, runId: string, opts: LinkCallO
   if (!truckIds.length) return [];
   const links = await prisma.driverLink.findMany({ where: { tenantId, deliveryDate: dateOnly(date), truckId: { in: truckIds } } });
   if (!links.length) return [];
-  const trucks = await prisma.truck.findMany({ where: { tenantId, id: { in: links.map((l) => l.truckId) } }, select: { id: true, code: true, hired: true } });
-  const truckOf = new Map(trucks.map((t) => [t.id, t]));
+  const trucks = await prisma.truck.findMany({ where: { tenantId, id: { in: links.map((l) => l.truckId) } }, select: { id: true, code: true, hired: true, onlyOnDate: true } });
+  const truckOf = new Map(trucks.map((t) => [t.id, { ...t, code: shownTruckCode(null, t) }]));
   const base = driverLinkBaseUrl(env, opts.origin ?? null);
   // Every truck's loads at once, and the names of drivers no longer on a load in one query.
   const loadsOf = await truckDayLoadsMany(prisma, tenantId, links.map((l) => l.truckId), date);
@@ -452,8 +455,8 @@ export async function listLinks(tenantId: string, runId: string, opts: LinkCallO
 async function linkForChange(tenantId: string, linkId: string) {
   const link = await prisma.driverLink.findFirst({ where: { id: linkId, tenantId } });
   if (!link) throw new DriverLinkError('Driver link not found.', 404, 'NOT_FOUND');
-  const truck = await prisma.truck.findFirst({ where: { id: link.truckId, tenantId }, select: { code: true, hired: true } });
-  return { link, truck: truck ?? { code: link.truckId, hired: false } };
+  const row = await prisma.truck.findFirst({ where: { id: link.truckId, tenantId }, select: { code: true, hired: true, onlyOnDate: true } });
+  return { link, truck: row ? { code: shownTruckCode(null, row), hired: row.hired } : { code: link.truckId, hired: false } };
 }
 
 /**

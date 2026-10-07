@@ -204,6 +204,8 @@ const MODELS = [
   'driverLink', 'stopVisit', 'stopEvent', 'deliveryPhoto', 'user',
   // Start fresh (4 Oct 2026) also clears the comparison baselines and the retired driver app's rows.
   'manualBaselineAssignment', 'driverShift', 'truckLocation', 'deliveryProof',
+  // The hire suggestion (6 Oct 2026): a plan job that saved its plan looks for hire options.
+  'hireOption', 'hireSuggestion',
   // Driver leave (owner request 6 Oct 2026): the planner reads who is away on the delivery day.
   'driverLeave',
 ];

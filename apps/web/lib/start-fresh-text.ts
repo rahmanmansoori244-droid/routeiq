@@ -23,6 +23,7 @@ export const START_FRESH_REMOVED = [
   { key: 'stopEvents', label: 'Arrivals, departures and result records' },
   { key: 'deliveryPhotos', label: 'Delivery photos' },
   { key: 'dailyDrivers', label: 'Daily drivers with no load left' },
+  { key: 'hiredTrucks', label: 'One-day hired trucks (hire suggestion: Use this plan)' },
   { key: 'baselines', label: 'Manual comparison baselines' },
   { key: 'oldDriverApp', label: 'Old driver app records (retired app)' },
 ] as const;
@@ -34,7 +35,7 @@ export const START_FRESH_REMOVED = [
 export const START_FRESH_KEPT = [
   { key: 'customers', label: 'Customers (with their locations and confirmed hours)' },
   { key: 'products', label: 'Products' },
-  { key: 'trucks', label: 'Trucks' },
+  { key: 'trucks', label: 'Trucks (your own, and one-day hired trucks of days that stay)' },
   { key: 'drivers', label: 'Drivers (regular)' },
   { key: 'dailyDrivers', label: "Daily drivers still on a kept load, a truck's usual driver, or named in driver leave" },
   { key: 'depots', label: 'Depots' },
@@ -50,7 +51,7 @@ export type StartFreshRemoved = Record<StartFreshRemovedKey, number>;
 export type StartFreshKept = Record<StartFreshKeptKey, number>;
 
 /** Why Start fresh cannot run now. */
-export type StartFreshBlockerCode = 'OPTIMIZATION_RUNNING' | 'CARRIED_ACROSS_DATE' | 'PLAN_ACROSS_DATE';
+export type StartFreshBlockerCode = 'OPTIMIZATION_RUNNING' | 'HIRE_CHECK_RUNNING' | 'CARRIED_ACROSS_DATE' | 'PLAN_ACROSS_DATE';
 
 export interface StartFreshBlocker {
   code: StartFreshBlockerCode;

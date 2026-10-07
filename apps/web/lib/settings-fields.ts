@@ -25,6 +25,8 @@ export const SETTINGS_FIELDS = [
   'fuelPricePerLitre',
   'driverCostPerHour',
   'overtimeCostPerHour',
+  // The daily driver day rate of a truck hired for the day (owner answer 4, 6 Oct 2026): company admin only.
+  'dailyDriverDayRate',
   'prefWindowPenaltyPerMin',
   'distanceProvider',
   'roadTimeFactor',

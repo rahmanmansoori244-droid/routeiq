@@ -187,6 +187,8 @@ model Tenant {
   stopVisits           StopVisit[]
   stopEvents           StopEvent[]
   deliveryPhotos       DeliveryPhoto[]
+  hireOptions          HireOption[]
+  hireSuggestions      HireSuggestion[]
   driverLeaves         DriverLeave[]
 }
 
@@ -247,6 +249,10 @@ model TenantConfig {
   driverBreakFromMin      Int     @default(720)
   driverBreakToMin        Int     @default(840)
   overtimeCostPerHour     Float   @default(0)
+  // Owner answer 4 (6 Oct 2026): the casual driver of a truck hired for the day (the hire suggestion) is
+  // paid this per day (OMR), fixed, instead of driverCostPerHour and overtime; own trucks keep theirs. A
+  // rough 10 OMR until the owner sets it (company admin, Settings). 0-1000 (database CHECK).
+  dailyDriverDayRate      Float   @default(10)
   prefWindowPenaltyPerMin Float   @default(0.05)
   roadTimeFactor          Float   @default(1.25) // trucks vs cars on OSRM durations
   splitDeliveries         Boolean @default(true) // customers bigger than the largest truck are delivered in parts
@@ -379,6 +385,7 @@ model Depot {
   runs          RunPlan[]
   orders        Order[]
   uploadBatches UploadBatch[]
+  hireOptions   HireOption[]
 
   @@unique([tenantId, code])
   @@index([tenantId])
@@ -413,6 +420,13 @@ model Truck {
   /// Hired from outside (owner request 4 Oct 2026): a badge on the plan, the driver sheets and the
   /// driver page. The planner never reads it.
   hired            Boolean           @default(false)
+  /// A one-day truck (owner request 6 Oct 2026, the hire suggestion's "Use this plan"): available on
+  /// this delivery date only - every plan of another day leaves it out, and the janitor retires it
+  /// (active false) once the day is over. Null: an ordinary truck, every day.
+  onlyOnDate       DateTime?         @db.Date
+  /// The hire option a one-day truck was rented from (its max per day counts it).
+  hireOptionId     String?
+  hireOption       HireOption?       @relation(fields: [hireOptionId], references: [id], onDelete: SetNull)
   routes           RouteAssignment[]
   shifts           DriverShift[]
   locations        TruckLocation[]
@@ -422,6 +436,73 @@ model Truck {
 
   @@unique([tenantId, code])
   @@index([tenantId, depotId])
+  @@index([tenantId, onlyOnDate])
+}
+
+/// A truck the company can rent for a day (owner request 6 Oct 2026, the hire suggestion): company
+/// admin, Trucks page, per depot. When a plan leaves orders out because the fleet cannot carry them,
+/// a what-if optimization adds one truck per unit (maxPerDay) and says which ones to rent
+/// (lib/dispatch/hire.ts). Nothing is seeded: the admin enters the company's own figures.
+model HireOption {
+  id            String   @id @default(cuid())
+  tenantId      String
+  tenant        Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  depotId       String
+  depot         Depot    @relation(fields: [depotId], references: [id])
+  /// "10-ton", "3-ton": the dispatcher reads it in the suggestion and the truck codes (HIRE-10T-...).
+  label         String
+  /// Pallet positions (planned by pallets, like a truck with bays); null = planned by capacityCases.
+  bays          Int?
+  capacityCases Int      @default(0)
+  /// Payload in kg; 0 = no weight limit.
+  payloadKg     Float    @default(0)
+  /// The hire for one day (OMR): the rented truck's fixed cost per day.
+  costPerDay    Float
+  /// The rental's own charge per km (OMR), if it has one; null = none (0). Fuel is in the hire (owner
+  /// answer 3, 6 Oct 2026): a rented truck never costs fuel or the fleet's km rate.
+  costPerKm     Float?
+  /// How many of this truck the company can rent on one day (1-10).
+  maxPerDay     Int      @default(1)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  trucks        Truck[]
+
+  @@unique([tenantId, depotId, label])
+  @@index([tenantId, depotId])
+}
+
+/// One what-if optimization of the hire suggestion (owner request 6 Oct 2026): the plan version it
+/// was computed for, its own job state (never the plan's RunJob: it never delays or changes the
+/// dispatcher's plan), the request and the answer, and the suggestion the dispatcher reads
+/// (summaryJson, lib/dispatch/hire.ts). usedAt / usedRunId: "Use this plan" made that version.
+model HireSuggestion {
+  id           String       @id @default(cuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  runId        String
+  run          RunPlan      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  status       RunJobStatus @default(QUEUED)
+  /// AFTER_PLAN (started by a plan that left orders out) or ASKED ("Check hire options").
+  trigger      String
+  message      String?
+  /// What the plan in use left out, the request's fingerprint and the hire options as they were.
+  basisJson    Json
+  requestJson  Json?
+  responseJson Json?
+  summaryJson  Json?
+  errorJson    Json?
+  createdById  String?
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  startedAt    DateTime?    @db.Timestamptz(3)
+  finishedAt   DateTime?    @db.Timestamptz(3)
+  heartbeatAt  DateTime?    @db.Timestamptz(3)
+  usedAt       DateTime?    @db.Timestamptz(3)
+  usedById     String?
+  usedRunId    String?
+
+  @@index([tenantId, runId])
+  @@index([tenantId, status])
 }
 
 model Driver {
@@ -831,6 +912,7 @@ model RunPlan {
   /// on the next load change).
   feasibilityJson    Json?
   loads              PlanLoad[]
+  hireSuggestions    HireSuggestion[]
 
   @@index([tenantId, runDate])
   @@index([tenantId, currentJobId])

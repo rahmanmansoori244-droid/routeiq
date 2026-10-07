@@ -8,7 +8,11 @@
  * comes first. The outcome-day lock (lib/delivery/locks.ts: every delivery result, arrival and
  * photo; Bring forward and Undo bring forward take it after their day locks) comes before the
  * RunPlan row; a driver or dispatcher result takes only it (the load completion that may follow runs
- * in its own transaction). Nobody takes them in another order, so two mutators never deadlock.
+ * in its own transaction). Nobody takes them in another order, so two mutators never deadlock. The
+ * hire suggestion's own advisory locks are taken by nothing else: `hire-check:<tenant>|<run>` (one
+ * check per plan version, hire-whatif.ts, no other lock in that transaction) and `hire-codes:<tenant>`
+ * ("Use this plan" renting trucks, hire-use.ts: after the intake lock - its plan way takes the intake
+ * lock first and reads the day again under it - and before the day lock of the version it creates).
  *
  * - lockPlanDay: one depot and delivery date. Taken by everything that creates a version
  *   (createInitialPlan, createNextVersion), so a day never gets two live plans.

@@ -9,6 +9,7 @@ import type { DispatchConfig, DispatchScenarioName } from '@routeiq/shared-types
 import { autoTimeLimitSec, CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, outOfBounds, SEARCH_TIME_SCHEDULE, type ConfigBoundKey } from '../planner-bounds';
 import { parsePriorityWeights, routingProviderFor } from './customer-attrs';
 import { PALLET_FILL_DEFAULT } from './pallets';
+import { DEFAULT_DRIVER_DAY_RATE } from './hire';
 import { fmtHhmm } from './time';
 
 /** The TenantConfig fields the planner reads (a Prisma TenantConfig row satisfies it). */
@@ -30,6 +31,8 @@ export interface TenantPlannerConfig {
   defaultServiceTimeMin: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
+  /** Owner answer 4 (6 Oct 2026): a truck hired for the day pays its casual driver this per day; absent = 10 (DEFAULT_DRIVER_DAY_RATE). */
+  dailyDriverDayRate?: number;
   prefWindowPenaltyPerMin: number;
   priorityWeightsJson: unknown;
   distanceProvider: string;
@@ -92,6 +95,7 @@ export const SETTING_LABELS: Record<ConfigBoundKey, string> = {
   palletFillPct: 'Pallet fill',
   fuelPricePerLitre: 'Fuel price per litre',
   driverCostPerHour: 'Driver cost per hour',
+  dailyDriverDayRate: 'Daily driver day rate',
   prefWindowPenaltyPerMin: 'Preferred-window penalty per minute',
   distanceMultiplier: 'Straight-line distance multiplier',
   avgSpeedKmh: 'Average speed for estimates',
@@ -262,6 +266,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       value: `${cfg.driverCostPerHour} ${currency} per hour`,
       source: 'SETTING',
       note: 'paid for the whole truck day: first departure to last return, depot turnaround and waiting included',
+    },
+    {
+      label: 'Trucks hired for the day',
+      value: `driver ${cfg.dailyDriverDayRate ?? DEFAULT_DRIVER_DAY_RATE} ${currency} a day each, fuel included in the hire`,
+      source: 'SETTING',
+      note: "the hire suggestion's rented trucks: the casual driver is paid the daily driver day rate, never by the hour or overtime; fuel and km are in the hire unless the hire option has its own km charge",
     },
     {
       label: 'Overtime',

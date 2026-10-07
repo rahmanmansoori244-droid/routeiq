@@ -28,6 +28,7 @@ import { reapStuckJobs } from '@/lib/jobs/optimize-job';
 import { reapStaleShifts } from '@/lib/jobs/shift-janitor';
 import { completeReturnedLoads } from '@/lib/delivery/event-service';
 import { runDeliveryJanitor } from '@/lib/jobs/delivery-janitor';
+import { failLostHireChecks, retireOneDayTrucks } from '@/lib/dispatch/hire-whatif';
 import { janitorAuthorized } from '@/lib/janitor-auth';
 
 export const dynamic = 'force-dynamic';
@@ -42,7 +43,9 @@ async function runJanitor() {
   const returnedLoads = await completeReturnedLoads();
   // Retention: old photo bytes, old driver positions, idle daily drivers (run now, not every 10 min).
   const deliveryRetention = await runDeliveryJanitor(new Date(), { force: true });
-  return { jobs, shifts, returnedLoads, deliveryRetention };
+  // The hire suggestion: what-ifs lost with their process; one-day hired trucks whose day is over.
+  const hire = { lostChecks: await failLostHireChecks(), oneDayTrucksRetired: await retireOneDayTrucks() };
+  return { jobs, shifts, returnedLoads, deliveryRetention, hire };
 }
 
 export async function POST(req: Request) {

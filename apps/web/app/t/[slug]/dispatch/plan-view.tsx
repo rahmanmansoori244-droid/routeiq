@@ -15,10 +15,13 @@ import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
 import { driverOptionLabel, keepTitle, leaveQuestion, onLeaveMoveQuestion, onLeaveTitle } from '@/lib/dispatch/driver-leave';
-import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
+import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/lib/dispatch/costs';
+import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
 import { fmtDayMonth } from '@/lib/dispatch/time';
+import { hiredLoadBadgeTitle } from '@/lib/dispatch/hire';
+import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
 import { breakLine, breakTimes } from '@/lib/dispatch/break-text';
 import {
   fmtSearchTime,
@@ -51,6 +54,7 @@ import { officeTimesPrefill } from '@/lib/delivery/office-text';
 import { OutcomeDialog, type OutcomeTarget } from './outcome-dialog';
 import { PhotoViewer } from './photo-viewer';
 import { CameraExceptions } from './camera-exceptions';
+import { HireSuggestionBox } from './hire-suggestion';
 import { CAMERA_ALERT_PER_DAY } from '@/lib/delivery/camera-exceptions';
 
 const PlanMap = dynamic(() => import('@/components/plan-map').then((m) => m.PlanMap), { ssr: false });
@@ -284,7 +288,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           },
         });
         if (!res.ok || !res.data) return;
-        toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
+        // A truck rented for the day: the same driver on its other planned loads (one day-rate driver),
+        // every load said in order ("Loads 1, 2 and 3"; seventh review: "Load 2 and Load 1, Load 3").
+        const also = (res.data.alsoOn ?? []).map((x) => x.loadNo);
+        toast.success(casualDriverToast(l.truckCode, [l.loadNo, ...also], res.data.driver.name, res.data.reused));
         await loadDrivers();
         const fresh = await load();
         await afterDriverChange(fresh, l, res.data.driver.id);
@@ -417,6 +424,27 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         const clash = fresh ? driverClashNotes(fresh.loads).find((c) => c.loadIds.includes(l.id)) : undefined;
         if (clash) toast.warning(clash.text);
         if (!keep) await afterDriverChange(fresh, l, driverId);
+      },
+      failed,
+    );
+  }
+
+  /**
+   * A one-day hired truck (the hire suggestion): the dispatcher enters its real plate, which becomes the
+   * truck code on the plan, the driver sheets and the driver page (PLANNER and above, audited).
+   */
+  function setPlate(l: DetailLoad) {
+    const plate = window.prompt(`Real plate of the hired truck ${l.truckCode} (letters, digits, dot, dash, underscore; no spaces):`, l.truckCode.startsWith('HIRE-') ? '' : l.truckCode);
+    if (plate === null || !plate.trim() || plate.trim() === l.truckCode) return;
+    return runPlanAction(
+      lock,
+      `plate-${l.truckId}`,
+      async () => {
+        const r = await api<{ code: string }>(`/api/dispatch/hired-trucks/${l.truckId}`, { method: 'PATCH', json: { code: plate.trim() } });
+        if (!r.ok) toast.error(r.error ?? 'Could not save the plate.');
+        else toast.success(`${l.truckCode} is now ${r.data?.code ?? plate.trim()}. Print the driver sheets again if they were printed.`);
+        await load();
+        await loadLinks();
       },
       failed,
     );
@@ -810,6 +838,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ))}
         </div>
       ) : null}
+      {applied && !running ? (
+        <HireSuggestionBox
+          runId={runId}
+          planKey={`${d.run.status}|${d.run.chosenScenario ?? ''}|${d.job?.status ?? ''}|${d.loads.length}`}
+          canPlan={canPlan}
+          superseded={superseded}
+          busy={!!busy}
+          expect={{ date: d.run.runDate, depotId: d.run.depot.id }}
+          canEditProducts={canEditProducts}
+          onUsed={async (newRunId) => {
+            await load();
+            await onChanged?.(newRunId);
+          }}
+        />
+      ) : null}
       {clashes.length && !superseded ? (
         <div className="space-y-1 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm" data-testid="driver-clashes">
           {clashes.map((c) => (
@@ -830,7 +873,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           <Kpi
             label="Hours on road · paid"
             value={`${s.onRoadHours ?? s.totalHours} · ${s.driverPaidHours ?? '—'}`}
-            title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on."
+            title="On the road: departure to return of each load. Paid: each truck's first departure to its last return (depot turnaround and waiting included), what driver cost is charged on; a driver paid by the day (a hired truck) adds none."
           />
           <Kpi label="Avg utilization" value={`${s.avgUtilizationPct}%`} />
           {typeof s.palletUnits === 'number' ? (
@@ -841,7 +884,19 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               testId="kpi-pallets"
             />
           ) : null}
-          <Kpi label="Fuel (l · OMR)" value={`${s.fuelLitres ?? '—'} · ${s.fuelCost.toFixed(1)}`} />
+          {(() => {
+            // Own trucks' fuel; a truck rented for the day has its fuel in the hire (sixth review).
+            const fuel = fuelKpi(s, d.loads);
+            return (
+              <Kpi
+                label="Fuel (l · OMR)"
+                value={fuel.value}
+                note={fuel.note}
+                title={fuel.note ? "Own trucks' fuel. A truck rented for the day has its fuel included in the hire: no litres or fuel cost of its own." : undefined}
+                testId="kpi-fuel"
+              />
+            );
+          })()}
           <Kpi
             label="Operating cost OMR"
             value={`${s.operatingCost.toFixed(1)}${summaryCostBasis(s) === 'MIXED_LEGACY' ? ' *' : ''}`}
@@ -1081,9 +1136,25 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2 font-medium">
                       {l.truckCode} · L{l.loadNo}
                       {l.hired ? (
-                        <Badge variant="outline" className="ml-1 text-[10px]" title="Hired from outside" data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
-                          hired
+                        <Badge variant="outline" className="ml-1 text-[10px]" title={hiredLoadBadgeTitle(l.oneDay)} data-testid={`load-hired-${l.truckCode}-${l.loadNo}`}>
+                          {l.oneDay ? 'hired · 1 day' : 'hired'}
                         </Badge>
+                      ) : null}
+                      {l.oneDay && canPlan && !superseded && !ON_ROAD.has(l.status) ? (
+                        <Button
+                          size="sm"
+                          variant="link"
+                          className="ml-1 h-auto p-0 text-xs"
+                          disabled={!!busy}
+                          title="Enter the hired truck's real plate (its truck code)"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void setPlate(l);
+                          }}
+                          data-testid={`load-plate-${l.truckCode}-${l.loadNo}`}
+                        >
+                          Plate
+                        </Button>
                       ) : null}
                     </td>
                     <td className="p-2" onClick={(e) => e.stopPropagation()}>
@@ -1171,13 +1242,13 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{l.utilizationPct}%</td>
                     <td className="p-2">{l.distanceKm}</td>
                     <td className="p-2">{durH(l.durationMin)}</td>
-                    <td className="p-2">{l.fuelLitres ?? '—'}</td>
+                    <td className="p-2" title={typeof l.driverDayRate === 'number' ? 'Rented for the day: fuel included in the hire' : undefined}>
+                      {l.fuelLitres ?? (typeof l.driverDayRate === 'number' ? 'incl.' : '—')}
+                    </td>
                     <td
                       className="p-2"
                       title={
-                        l.cost
-                          ? `Fixed ${l.cost.fixed.toFixed(2)} + trip ${l.cost.trip.toFixed(2)} + distance ${l.cost.distance.toFixed(2)} + fuel ${l.cost.fuel.toFixed(2)} + driver ${l.cost.driver.toFixed(2)} (${durH(l.cost.driverPaidMin)} paid, from the truck's previous return) + overtime ${l.cost.overtime.toFixed(2)}`
-                          : COST_BASIS_TEXT.MIXED_LEGACY
+                        l.cost ? loadCostTitle(l.cost, l.driverDayRate, durH) : COST_BASIS_TEXT.MIXED_LEGACY
                       }
                     >
                       {l.operatingCost.toFixed(1)}
@@ -1363,7 +1434,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         />
       ) : null}
       <CasualDriverDialog
-        load={casualFor ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo } : null}
+        load={
+          casualFor
+            ? { id: casualFor.id, truckCode: casualFor.truckCode, loadNo: casualFor.loadNo, plan: casualDriverPlan(casualFor, d.loads, d.run.runDate) }
+            : null
+        }
         onOpenChange={(o) => {
           if (!o) setCasualFor(null);
         }}
@@ -1430,11 +1505,12 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   );
 }
 
-function Kpi({ label, value, warn, title, testId }: { label: string; value: string; warn?: boolean; title?: string; testId?: string }) {
+function Kpi({ label, value, warn, title, testId, note }: { label: string; value: string; warn?: boolean; title?: string; testId?: string; note?: string | null }) {
   return (
     <div className={`rounded-md border p-2 ${warn ? 'border-amber-400 bg-amber-50' : 'bg-card'}`} title={title} data-testid={testId}>
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="text-sm font-semibold">{value}</p>
+      {note ? <p className="text-[11px] text-muted-foreground">{note}</p> : null}
     </div>
   );
 }

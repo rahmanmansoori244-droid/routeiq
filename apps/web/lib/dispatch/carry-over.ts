@@ -68,6 +68,7 @@ import { customerKey, lineDupKey, normSalesOrder } from './order-intake';
 import { portionMoney, readPortionLines } from './split';
 import { addDaysIso, dateOnly, DEFAULT_TZ, fmtDayMonth, isAfterCutoff, isoOf, todayIso } from './time';
 import { orderUsesLineWeights } from './weights';
+import { shownTruckCode } from './hire';
 import { lockOutcomesDay } from '../delivery/locks';
 import { readVisitLines } from '../delivery/visit';
 import { readCarryBasis } from '../delivery/outcome-rules';
@@ -832,7 +833,7 @@ async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string
     }
     const loads = await db.planLoad.findMany({
       where: { runId: run.id, tenantId },
-      select: { truckId: true, loadNo: true, status: true, truck: { select: { code: true } }, assignments: { select: { orderId: true, portionLinesJson: true, sequenceInTruck: true } } },
+      select: { truckId: true, loadNo: true, status: true, truck: { select: { code: true, onlyOnDate: true } }, assignments: { select: { orderId: true, portionLinesJson: true, sequenceInTruck: true } } },
       orderBy: [{ truckId: 'asc' }, { loadNo: 'asc' }],
     });
     const sc = run.chosenScenarioId
@@ -846,7 +847,8 @@ async function dayPlans(db: Db, tenantId: string, depotId: string, dates: string
         status: run.status,
         chosen: !!run.chosenScenarioId,
         scopeOrderIds: details ? [...details.scope.orderIds, ...details.scope.frozenOrderIds, ...(details.scope.frozenLoadOrderIds ?? [])] : null,
-        loads: loads.map((l) => ({ truckId: l.truckId, truckCode: l.truck.code, loadNo: l.loadNo, status: l.status, assignments: l.assignments })),
+        // The plate a hired truck drove with, also after a later day's truck took it (hire.ts shownTruckCode).
+        loads: loads.map((l) => ({ truckId: l.truckId, truckCode: shownTruckCode(null, l.truck), loadNo: l.loadNo, status: l.status, assignments: l.assignments })),
         unserved: (sc?.unservedOrders ?? []).map((u) => ({ orderId: u.orderId, reasonCode: u.reasonCode, reasonMessage: u.reasonMessage, portionLinesJson: u.portionLinesJson })),
       },
     });
@@ -993,8 +995,8 @@ async function carryFollowUps(
     });
     const copyOf = new Map(copies.map((c) => [c.id, c]));
     const results = await outcomeShortfalls(db, tenantId, depotId, window);
-    const trucks = await db.truck.findMany({ where: { tenantId, id: { in: [...new Set(results.map((r) => r.v.truckId))] } }, select: { id: true, code: true } });
-    const truckCode = new Map(trucks.map((t) => [t.id, t.code]));
+    const trucks = await db.truck.findMany({ where: { tenantId, id: { in: [...new Set(results.map((r) => r.v.truckId))] } }, select: { id: true, code: true, onlyOnDate: true } });
+    const truckCode = new Map(trucks.map((t) => [t.id, shownTruckCode(null, t)]));
     for (const o of carried) {
       const copy = copyOf.get(o.carriedToOrderId!);
       if (!copy) continue;

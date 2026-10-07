@@ -27,6 +27,7 @@ import { DEFAULT_TZ, dateOnly, fmtDayMonth, parseHhmm, zonedDayStart } from '../
 import { isoDateSchema } from '../schemas';
 import { DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import { lockForUndo, undoCheck, undoCarryTx, type UndoCarryResult } from '../dispatch/carry-over';
+import { shownTruckCode } from '../dispatch/hire';
 import { truckDayLoads } from '../driver-link/service';
 import { NOT_DELIVERED_REASONS } from '../driver-link/manifest-types';
 import { lockOutcomesDay } from './locks';
@@ -336,10 +337,12 @@ export async function readOfficePhoto(tenantId: string, photoId: string): Promis
     throw new OfficeOutcomeError(`Photo removed after ${cfg?.photoRetentionDays ?? DEFAULT_PHOTO_RETENTION_DAYS} days (retention).`, 404, 'PHOTO_PURGED');
   }
   const [truck, siblings] = await Promise.all([
-    prisma.truck.findFirst({ where: { id: visit.truckId, tenantId }, select: { code: true } }),
+    prisma.truck.findFirst({ where: { id: visit.truckId, tenantId }, select: { code: true, onlyOnDate: true } }),
     prisma.deliveryPhoto.findMany({ where: { tenantId, visitId: visit.id }, select: { id: true, takenAt: true } }),
   ]);
   const n = [...siblings].sort((a, b) => a.takenAt.getTime() - b.takenAt.getTime()).findIndex((s) => s.id === photo.id) + 1;
-  const code = (truck?.code ?? 'truck').replace(/[^A-Za-z0-9_-]/g, '');
+  // The plate it drove with that day: a past day's hired truck whose plate a later day's truck took is
+  // "12345AB.261006" (hire.ts shownTruckCode), as on the plan, the sheets and the day's results.
+  const code = (truck ? shownTruckCode(null, truck) : 'truck').replace(/[^A-Za-z0-9_-]/g, '');
   return { bytes: new Uint8Array(photo.bytes), filename: `${code}-L${visit.loadNo}-stop${visit.sequence}-${Math.max(1, n)}.jpg` };
 }
