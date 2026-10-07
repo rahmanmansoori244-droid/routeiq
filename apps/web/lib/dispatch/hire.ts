@@ -521,9 +521,11 @@ export interface HireSummary {
   /**
    * The optimizer's reduction of the rented trucks after its search (hire_check): how many its search's
    * plan rented, how many the suggestion keeps, the extra solves, and whether every kept truck was tried
-   * without. Absent from a solver before it.
+   * without. Absent from a solver before it. `note` (BUG 5, 7 Oct 2026): the optimizer's plain words when
+   * its limits stopped it before every set of trucks that might cost less on its km charge was tried - the
+   * set suggested is then not proven the cheapest (shown in the box); absent otherwise.
    */
-  reduction?: { first: number; used: number; solves: number; complete: boolean };
+  reduction?: { first: number; used: number; solves: number; complete: boolean; note?: string };
   /** The what-if's totals for the record. */
   trucksUsed: number;
   loads: number;
@@ -683,7 +685,9 @@ export function summarizeHire(input: {
     unitsOffered: request.trucks.filter((t) => t.hire_candidate).length,
     unitsUsed: rented.length,
     alternative,
-    ...(hc ? { reduction: { first: hc.first.length, used: hc.used.length, solves: hc.solves, complete: hc.complete } } : {}),
+    ...(hc
+      ? { reduction: { first: hc.first.length, used: hc.used.length, solves: hc.solves, complete: hc.complete, ...(hc.note ? { note: hc.note } : {}) } }
+      : {}),
     trucksUsed: whatIf.trucks_used,
     loads: whatIf.trips,
   };
@@ -855,6 +859,8 @@ export function hireSuggestionText(s: HireSummary, currency = 'OMR'): { headline
   }
   const headline = `${cannot} To deliver ${one ? 'it' : 'them'}, hire ${hiresText(s.hires)}: extra ${aboutMoney(s.hireCost, currency)}. Still left out: ${still()}.${dropped}`;
   const details: string[] = [];
+  // Not proven the cheapest (BUG 5): a km charge left sets that might cost less untried - said first.
+  if (s.reduction?.note) details.push(s.reduction.note);
   const running = runningText(s, currency);
   if (running) details.push(running);
   // One truck fewer: the optimizer's own solve only (`solved`); an estimate stored before is never shown
