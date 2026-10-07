@@ -305,6 +305,22 @@ def test_pyvrp_plan_maps_back_and_is_verified():
     assert_reconciled(r, sc)
 
 
+def test_the_missing_count_is_our_stops_not_planned():
+    """ISSUE 10: every client of the model is optional (each stop has its prize), and PyVRP 0.14's
+    Solution.num_missing_clients() counts only REQUIRED clients, so the report said 0 missing for a
+    plan that served 2 of 6 stops. It is now our own stops less the ones the extracted routes serve."""
+    stops = [stop(f"S{i}", 23.60 + i / 100, 58.40, cases=50) for i in range(6)]
+    r = req(stops, [truck("T", cap=100, max_trips=1)])
+    tds, solvable, drops, mx = _prepared(r)
+    assert len(solvable) == 6 and not drops
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings()))
+    assert out["status"] == "OK" and out["feasible"]
+    served = sum(len(load) for route in out["routes"] for load in route["trips"])
+    assert served == 2
+    assert out["missing"] == 4
+    assert out["missing"] == len(solvable) - served
+
+
 def _raw_engine(r, limit=1):
     tds, solvable, drops, mx = _prepared(r)
     results = {"RECOMMENDED": ds._scenario_worker(("RECOMMENDED", r, solvable, tds, mx, limit, drops))}

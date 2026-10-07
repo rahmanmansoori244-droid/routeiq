@@ -551,6 +551,15 @@ def routes_of(sol) -> list[dict]:
     return out
 
 
+def missing_of(routes: list[dict], n_stops: int) -> int:
+    """Our stops the extracted routes do not serve (ISSUE 10). Not Solution.num_missing_clients():
+    in PyVRP 0.14 that counts REQUIRED clients only, and every client of this model is optional
+    (each stop has its prize), so it said 0 for a plan that served 2 of 6 stops. Without a feasible
+    plan no route is extracted, so every stop counts as missing, as the report's routes and loads say."""
+    served = {k for r in routes for load in r["trips"] for k in load}
+    return n_stops - len(served)
+
+
 def solve_in_worker(job) -> dict:
     """``job`` = (req, solvable, tds, mx, PvSettings). Builds the model and runs PyVRP's own solver
     (pyvrp.solve, default parameters; max_penalty raised only on capacity-shortage days). Returns
@@ -603,7 +612,7 @@ def solve_in_worker(job) -> dict:
         type_trucks=model.type_trucks, iterations=int(res.num_iterations), search_sec=round(time.perf_counter() - t_search, 1),
         stop_reason=stop.reason or "SEARCH_END", last_improvement_sec=round(stop.last_sec, 1) if stop.last_sec is not None else None,
         points=stop.report_points(), penalty_mode=model.penalty_mode, summary=model.summary,
-        routes_used=len(routes), loads=sum(len(r["trips"]) for r in routes), missing=int(best.num_missing_clients()),
+        routes_used=len(routes), loads=sum(len(r["trips"]) for r in routes), missing=missing_of(routes, len(model.clients)),
         cpu_sec=round(time.process_time() - c0, 1), wall_sec=round(time.perf_counter() - t0, 1),
     )
 
