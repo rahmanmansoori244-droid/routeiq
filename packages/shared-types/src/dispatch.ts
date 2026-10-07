@@ -532,11 +532,16 @@ export interface DispatchResponse {
  * day's priorities, or as cheap while the give-back fails the checks (eleventh review) - so the P4/P5
  * orders of the trucks given back may ride along in the trucks kept;
  * otherwise they stay out; the solve of one truck fewer taken when it keeps every P1-P3 stop and passes
- * every check, tenth review); `solves`: the extra solves;
- * `complete`: every set cheaper than `used` was ruled out, `used` rents no truck for P4/P5 orders
+ * every check, tenth review; every plan judged, the search's own included, first repaired with no
+ * solve - a P1-P3 stop it leaves out put back in place of lower priorities where it fits, or by a chain
+ * of two moves (in place of one other stop of a load, which goes on elsewhere), and a solve
+ * still leaving one out while a lower priority rides on its trucks solved once more or never
+ * counted: thirteenth review); `solves`: the extra solves;
+ * `complete`: every set cheaper than `used` was ruled out (by a solve only when, once repaired, it
+ * still lost a P1-P3 stop with no lower priority riding along), `used` rents no truck for P4/P5 orders
  * alone, and its give-back had a timing for every order it tried to put back (eleventh review);
  * `one_fewer`: the least useful truck of `used` left out, SOLVED with exactly the others - the
- * stops that plan leaves out (all priorities).
+ * stops that plan leaves out (all priorities), as repaired.
  */
 export interface HireCheck {
   first: string[];

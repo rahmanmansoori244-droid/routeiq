@@ -638,16 +638,23 @@ class HireCheck(BaseModel):
     review) - so their P4/P5 orders may ride along in the trucks kept
     (eighth and ninth reviews; dispatch_solver._reduce_hire); otherwise the give-back stays and they stay
     out. The solve of one truck fewer (``one_fewer``) that keeps every P1-P3 stop and passes every check
-    makes that cheaper set the suggestion (tenth review: it was thrown away).
+    makes that cheaper set the suggestion (tenth review: it was thrown away). Every plan judged - the
+    search's own and each solve's - is first repaired with no solve: a P1-P3 stop it leaves out goes back
+    where it fits, in place of lower priorities where need be, or by a chain of two moves (in place of one
+    other stop of a load, which goes on elsewhere) (thirteenth review: a solve of 1 x 10-ton
+    left a P3 order out while it carried a P4/P5 order more in its place, and ruled the 10-ton out; 2 x
+    3-ton was suggested, "complete"); a solve that still leaves one out while a lower priority rides on its
+    trucks proves nothing - it is solved once more when the limits allow, and never rules its set out.
     ``first``: the rented trucks of the search's plan; ``used``: those of the plan returned as
     RECOMMENDED (another option's units when one is cheaper); ``solves``: the extra solves run;
     ``complete``: every set cheaper than ``used`` was ruled out (by its room, or a checked solve that
-    lost a P1-P3 stop) - false when the solve limit, the time budget, a solve without its load re-check,
-    too many sets to list, or a solve whose cheaper set could not be given left one unproven, or when
-    ``used`` still rents a truck for P4/P5 orders alone (its give-back could not be built: tenth
-    review), or its give-back had no timing left to try a stop on the trucks kept (eleventh review);
-    ``one_fewer``: the least useful truck of ``used`` left out, solved with exactly the others
-    (None when no such solve ran, or when that solve became the suggestion)."""
+    lost a P1-P3 stop once repaired) - false when the solve limit, the time budget, a solve without its
+    load re-check, a solve that proved nothing (thirteenth review), too many sets to list, or a solve
+    whose cheaper set could not be given left one unproven, or when ``used`` still rents a truck for
+    P4/P5 orders alone (its give-back could not be built: tenth review), or its give-back had no timing
+    left to try a stop on the trucks kept (eleventh review); ``one_fewer``: the least useful truck of
+    ``used`` left out, solved with exactly the others, as repaired (None when no such solve ran, when it
+    proved nothing, or when that solve became the suggestion)."""
 
     first: list[str] = Field(default_factory=list)
     used: list[str] = Field(default_factory=list)

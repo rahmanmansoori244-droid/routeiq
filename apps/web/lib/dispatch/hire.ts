@@ -31,7 +31,12 @@
  *   check, keeps every P1-P3 order and is cheaper, or as cheap and serving more by the day's priorities
  *   - so those P4/P5 orders may ride along in the trucks kept; otherwise they stay out
  *   (dispatch_solver._reduce_hire, DispatchResponse.hire_check). "One truck fewer" is such a solve; when
- *   it keeps every P1-P3 order it is the suggestion (tenth review).
+ *   it keeps every P1-P3 order it is the suggestion (tenth review). Every plan it judges, the search's
+ *   own included, is first repaired with no solve: a P1-P3 order it leaves out goes back in place of
+ *   lower priorities where it fits, or in place of one other order of a load that goes on elsewhere; a
+ *   solve still leaving one out while a lower priority rides along is
+ *   solved once more, or never rules its set out (thirteenth review: such a solve ruled 1 x 10-ton out
+ *   and 2 x 3-ton was suggested, "complete").
  * - A rented truck is rented for the whole day (as many loads as its max loads per truck, owner answer
  *   2), its fuel is in the hire (no fuel, no km cost unless the option charges per km, answer 3), and
  *   its casual driver is paid the company's daily driver day rate (Settings, answer 4).
