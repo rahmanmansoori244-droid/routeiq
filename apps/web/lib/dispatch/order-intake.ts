@@ -14,6 +14,7 @@
  */
 import { normalizeBranchKey } from '../schemas';
 import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
+import { customerKey } from '../customer-code';
 
 // The header matching (aliases, the order-sheet test) lives in order-headers.ts, which has no
 // dependencies, so the upload parser process can use it (audit P5); it is re-exported here.
@@ -380,11 +381,12 @@ export interface ResolveResult {
   totals: { lines: number; cases: number; customers: number; salesOrders: number; deliveryDates: string[] };
 }
 
-/** Case-insensitive identity of a delivery location (customer code + branch): exports often
- * change case ("c001" vs "C001"); treating those as different customers would create duplicates. */
-export function customerKey(code: string, branchKey: string) {
-  return `${code.trim().toUpperCase()}::${branchKey.trim().toUpperCase()}`;
-}
+/**
+ * Case-insensitive identity of a delivery location (customer code + branch): exports often change
+ * case ("c001" vs "C001"); treating those as different customers would create duplicates. The one
+ * rule is lib/customer-code.ts (matched in the program, never with a database ILIKE), re-exported here.
+ */
+export { customerKey };
 
 /** A sales-order number as it identifies a line: trimmed, upper-case; null when blank. */
 export function normSalesOrder(so: string | null | undefined): string | null {

@@ -7,9 +7,10 @@ export const dynamic = 'force-dynamic';
 // screen ("Record outcome", owner request 4 Oct 2026, spec sections 8.3 and 10.2): any stop of a load
 // that left (DISPATCHED or COMPLETED), at any time, with optional Arrived / Left times; stored as the
 // office (source DISPATCHER, the user's id) and audited with before and after. 404 STOP_NOT_FOUND,
-// 409 LOAD_NOT_DISPATCHED, 422 INVALID, 409 OUTCOME_CARRIED { copyId, copyDate, undoable } when the
-// change would shrink cases already brought forward (with `undoCarry: true` the copy - on no plan
-// yet - is removed and the result recorded in one transaction), 409 PLAN_BUSY.
+// 409 LOAD_NOT_DISPATCHED, 422 INVALID, 409 OUTCOME_CARRIED { copyId, copyDate, undoable, copies }
+// when the change would shrink cases already brought forward (with `undoCarry: true` the copies - all
+// on no plan yet - are removed and the result recorded in one transaction; when one of them cannot be
+// removed, nothing is removed or recorded), 409 PLAN_BUSY.
 export const POST = withTenantApi(
   async (req, { user, ip }) => {
     const input = await parseBody(req, officeOutcomeSchema);

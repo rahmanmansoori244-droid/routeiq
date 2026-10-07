@@ -3,6 +3,7 @@ import { customerSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { parseLocationInput } from '@/lib/dispatch/location-input';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
+import { customerTwinsOf } from '@/lib/customer-code';
 
 export const GET = withTenantApi(async (req, { db }) => {
   const url = new URL(req.url);
@@ -69,11 +70,10 @@ export const POST = withTenantApi(
     }
     const branchKey = normalizeBranchKey(input.branchCode);
     // Codes are one customer whatever their letter case (the order intake matches them that way):
-    // "c001" next to "C001" would split one customer's orders between two rows.
-    const twin = await db.customer.findFirst({
-      where: { code: { equals: input.code, mode: 'insensitive' }, branchKey: { equals: branchKey, mode: 'insensitive' } },
-      select: { code: true, branchCode: true },
-    });
+    // "c001" next to "C001" would split one customer's orders between two rows. Matched in the
+    // program (lib/customer-code.ts): the database's case-insensitive equals is an ILIKE, which read
+    // "_" as "any character", so "C_1" was refused because "CX1" exists.
+    const twin = customerTwinsOf(await db.customer.findMany({ select: { code: true, branchCode: true, branchKey: true } }), input.code, branchKey)[0];
     if (twin) {
       return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
     }

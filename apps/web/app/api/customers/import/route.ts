@@ -7,7 +7,8 @@ import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '
 import { MAX_SERVICE_MIN, normalizeBranchKey } from '@/lib/schemas';
 import { hasRole } from '@/lib/api';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
-import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
+import { preferredCustomer } from '@/lib/dispatch/order-intake';
+import { customerKey } from '@/lib/customer-code';
 import { fileAgreesWithSaved, pointsElsewhereText, readImportedPair, type ImportedPair } from '@/lib/dispatch/import-location';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { LOCATION_ADMIN_ONLY_MESSAGE, locationBlocksDelivery, savedLocationLocked } from '@/lib/dispatch/customer-attrs';

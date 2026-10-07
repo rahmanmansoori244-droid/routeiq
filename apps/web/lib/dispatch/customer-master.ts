@@ -9,7 +9,8 @@ import { OPEN } from './open-orders';
 import { tenantServiceArea } from './service-area';
 import { dateOnly, isoOf, todayIso } from './time';
 import type { TypeProfileLike } from './customer-attrs';
-import { customerKey, preferredCustomer } from './order-intake';
+import { preferredCustomer } from './order-intake';
+import { customerKey } from '../customer-code';
 import {
   buildWorklist,
   changedSince,

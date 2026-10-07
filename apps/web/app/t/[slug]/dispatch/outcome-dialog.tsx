@@ -87,7 +87,7 @@ export function OutcomeDialog({ open, onOpenChange, target, onSaved }: { open: b
     }
     const started = shown.current;
     setBusy(true);
-    const r = await api<{ result: string; loadCompleted?: boolean; carryUndone?: { copyDate: string } }>('/api/dispatch/outcomes', {
+    const r = await api<{ result: string; loadCompleted?: boolean; carryUndone?: { copyDate: string }; carriesUndone?: { copyDate: string }[] }>('/api/dispatch/outcomes', {
       method: 'POST',
       json: {
         key: newKey(),
@@ -115,8 +115,10 @@ export function OutcomeDialog({ open, onOpenChange, target, onSaved }: { open: b
       toast.error(r.error ?? 'Could not save the result.');
       return;
     }
+    // Every copy removed (several orders of the stop may have been brought forward).
+    const undoneDays = [...new Set((r.data?.carriesUndone ?? (r.data?.carryUndone ? [r.data.carryUndone] : [])).map((u) => fmtDayMonth(u.copyDate)))];
     toast.success(
-      `${target.truckCode} L${target.loadNo} stop ${target.sequence}: ${outcome ? 'result recorded' : 'result cleared'}${r.data?.carryUndone ? ` (the bring forward to ${fmtDayMonth(r.data.carryUndone.copyDate)} was undone)` : ''}${r.data?.loadCompleted ? ' · the load is completed' : ''}.`,
+      `${target.truckCode} L${target.loadNo} stop ${target.sequence}: ${outcome ? 'result recorded' : 'result cleared'}${undoneDays.length ? ` (the bring forward to ${undoneDays.join(' and ')} was undone)` : ''}${r.data?.loadCompleted ? ' · the load is completed' : ''}.`,
     );
     onOpenChange(false);
     onSaved();
