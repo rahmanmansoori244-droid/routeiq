@@ -49,10 +49,10 @@ describe('keys and backoff', () => {
 
 describe('nextBatch: order', () => {
   it('ready actions in creation order (up to 50); a photo only after the actions created before it, and after its position or 15 s', () => {
-    const a1 = actionItem(NS, arrive('1:1'), T0);
-    const a2 = actionItem(NS, result('1:1'), T0 + 10);
-    const p = photo('1:1', T0 + 20, { body: { key: 'k', stop: '1:1', takenAt: '', positionStatus: 'TIMEOUT', positionUntil: T0 + 15_020 } });
-    const held = actionItem(NS, arrive('2:1'), T0 + 5, true);
+    const a1 = actionItem(NS, arrive('D1:1:1'), T0);
+    const a2 = actionItem(NS, result('D1:1:1'), T0 + 10);
+    const p = photo('D1:1:1', T0 + 20, { body: { key: 'k', stop: 'D1:1:1', takenAt: '', positionStatus: 'TIMEOUT', positionUntil: T0 + 15_020 } });
+    const held = actionItem(NS, arrive('D1:2:1'), T0 + 5, true);
     const items = [p, a2, held, a1];
     expect(nextBatch(items, T0 + 100)).toEqual({ actions: [a1, a2], photo: null });
     // Once the actions went: the photo waits for its position (at most 15 s).
@@ -60,14 +60,14 @@ describe('nextBatch: order', () => {
     expect(nextBatch([p], T0 + 15_100).photo).toBe(p);
     // An action waiting for its backoff still holds a later photo back.
     const waiting = { ...a1, nextAt: T0 + 60_000 };
-    expect(nextBatch([waiting, photo('1:1', T0 + 30)], T0 + 100)).toEqual({ actions: [], photo: null });
-    expect(nextBatch(Array.from({ length: 60 }, (_, i) => actionItem(NS, arrive('1:1'), T0 + i)), T0 + 100).actions).toHaveLength(50);
+    expect(nextBatch([waiting, photo('D1:1:1', T0 + 30)], T0 + 100)).toEqual({ actions: [], photo: null });
+    expect(nextBatch(Array.from({ length: 60 }, (_, i) => actionItem(NS, arrive('D1:1:1'), T0 + i)), T0 + 100).actions).toHaveLength(50);
   });
 });
 
 describe('the answers', () => {
   it('ok / duplicate remove; refused removes and reports; LOAD_NOT_DISPATCHED for an arrival is held; an error retries with backoff', () => {
-    const items = [actionItem(NS, arrive('1:1'), T0), actionItem(NS, result('1:1'), T0 + 1), actionItem(NS, result('1:2'), T0 + 2), actionItem(NS, arrive('2:1'), T0 + 3), actionItem(NS, arrive('1:3'), T0 + 4)];
+    const items = [actionItem(NS, arrive('D1:1:1'), T0), actionItem(NS, result('D1:1:1'), T0 + 1), actionItem(NS, result('D1:1:2'), T0 + 2), actionItem(NS, arrive('D1:2:1'), T0 + 3), actionItem(NS, arrive('D1:1:3'), T0 + 4)];
     const out = applyResults(
       items,
       [
@@ -80,9 +80,9 @@ describe('the answers', () => {
       T0 + 100,
     );
     expect(out.remove).toEqual([items[0]!.key, items[1]!.key, items[2]!.key]);
-    expect(out.report).toEqual([expect.objectContaining({ key: items[2]!.key, stopKey: '1:2', code: 'PHOTO_REQUIRED', type: 'OUTCOME' })]);
+    expect(out.report).toEqual([expect.objectContaining({ key: items[2]!.key, stopKey: 'D1:1:2', code: 'PHOTO_REQUIRED', type: 'OUTCOME' })]);
     expect(out.update).toEqual([expect.objectContaining({ key: items[3]!.key, state: 'held' }), expect.objectContaining({ key: items[4]!.key, attempts: 1, nextAt: T0 + 100 + 5_000 })]);
-    expect(out.sent).toEqual({ '1:1': { outcome: 'DELIVERED', at: new Date(T0).toISOString() } });
+    expect(out.sent).toEqual({ 'D1:1:1': { outcome: 'DELIVERED', at: new Date(T0).toISOString() } });
     expect(classify(undefined)).toBe('retry');
   });
 
@@ -103,8 +103,8 @@ describe('flushQueue on the memory store', () => {
 
   it('sends the actions, then the photo; reports refusals; keeps everything on 429 and waits Retry-After', async () => {
     const store = memoryStore();
-    const a = actionItem(NS, result('1:1'), T0);
-    const p = photo('1:1', T0 + 1);
+    const a = actionItem(NS, result('D1:1:1'), T0);
+    const p = photo('D1:1:1', T0 + 1);
     await store.put([a, p]);
     let posted = 0;
     const r429 = await flushQueue({ store, ns: NS, now: () => T0 + 10, postActions: async () => ({ status: 429, body: null, retryAfter: '30' }), postPhoto: async () => ok({}) });
@@ -116,41 +116,41 @@ describe('flushQueue on the memory store', () => {
       now: () => T0 + 10,
       postActions: async (actions) => {
         posted += actions.length;
-        return ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: { '1:1': { outcome: 'DELIVERED' } }, back: {} });
+        return ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: { 'D1:1:1': { outcome: 'DELIVERED' } }, back: {} });
       },
       postPhoto: async (item) => ok({ photoId: item.key, status: 'ok', stops: {}, back: {} }),
     });
     expect(posted).toBe(1);
     expect(r.sent).toBe(2);
-    expect(r.sentMap['1:1']).toMatchObject({ outcome: 'DELIVERED' });
+    expect(r.sentMap['D1:1:1']).toMatchObject({ outcome: 'DELIVERED' });
     expect(await store.items(NS)).toEqual([]);
   });
 
   it("each round's results reach the page BEFORE its sent items leave the phone (a sent result never disappears in between)", async () => {
     const store = memoryStore();
-    const a = actionItem(NS, result('1:1'), T0);
-    const p = photo('1:1', T0 + 1);
+    const a = actionItem(NS, result('D1:1:1'), T0);
+    const p = photo('D1:1:1', T0 + 1);
     await store.put([a, p]);
     const seen: string[] = [];
     await flushQueue({
       store,
       ns: NS,
       now: () => T0 + 20_000,
-      postActions: async (actions) => ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: { '1:1': { outcome: 'DELIVERED' } }, back: {} }),
-      postPhoto: async (item) => ok({ photoId: item.key, status: 'ok', stops: { '1:1': { outcome: 'DELIVERED', photoIds: [item.key] } }, back: {} }),
+      postActions: async (actions) => ok({ results: actions.map((x) => ({ key: x.key, status: 'ok' })), stops: { 'D1:1:1': { outcome: 'DELIVERED' } }, back: {} }),
+      postPhoto: async (item) => ok({ photoId: item.key, status: 'ok', stops: { 'D1:1:1': { outcome: 'DELIVERED', photoIds: [item.key] } }, back: {} }),
       onResults: async (r) => {
         // When the results arrive, the item they answer is still on the phone.
         const keys = (await store.items(NS)).map((i) => i.key);
         seen.push(`${Object.keys(r.stops).join(',')}:${keys.includes(a.key) ? 'action kept' : 'action gone'}:${keys.includes(p.key) ? 'photo kept' : 'photo gone'}`);
       },
     });
-    expect(seen).toEqual(['1:1:action kept:photo kept', '1:1:action gone:photo kept']);
+    expect(seen).toEqual(['D1:1:1:action kept:photo kept', 'D1:1:1:action gone:photo kept']);
     expect(await store.items(NS)).toEqual([]);
   });
 
   it('409 / 5xx keep the items for a retry; 404 / 410 stop sending; UPLOAD_CLOSED is reported', async () => {
     const store = memoryStore();
-    const a = actionItem(NS, arrive('1:1'), T0);
+    const a = actionItem(NS, arrive('D1:1:1'), T0);
     await store.put([a]);
     const busy = await flushQueue({ store, ns: NS, now: () => T0, postActions: async () => ({ status: 409, body: { error: { code: 'PLAN_BUSY' } }, retryAfter: null }), postPhoto: async () => ok({}) });
     expect(busy.sent).toBe(0);
@@ -164,7 +164,7 @@ describe('flushQueue on the memory store', () => {
 
   it('a photo refused for good (too large, not a JPEG, over the limit) is dropped and reported', async () => {
     const store = memoryStore();
-    const p = photo('1:1', T0);
+    const p = photo('D1:1:1', T0);
     await store.put([p]);
     const r = await flushQueue({ store, ns: NS, now: () => T0 + 10, postActions: async () => ok({ results: [] }), postPhoto: async () => ({ status: 409, body: { error: { code: 'PHOTO_LIMIT' } }, retryAfter: null }) });
     expect(r.reports).toEqual([expect.objectContaining({ key: p.key, code: 'PHOTO_LIMIT', type: 'PHOTO' })]);
@@ -174,36 +174,36 @@ describe('flushQueue on the memory store', () => {
 
 describe('held items, drafts, namespaces', () => {
   it('held arrivals become ready once their trip is dispatched, with their original times; they are not counted as waiting', () => {
-    const h1 = actionItem(NS, arrive('1:1'), T0, true);
-    const h2 = actionItem(NS, arrive('2:1'), T0 + 1, true);
+    const h1 = actionItem(NS, arrive('D1:1:1'), T0, true);
+    const h2 = actionItem(NS, arrive('D1:2:1'), T0 + 1, true);
     expect(waitingCount([h1, h2])).toBe(0);
-    const released = releaseHeld([h1, h2], new Set([1]), T0 + 500);
+    const released = releaseHeld([h1, h2], new Set(['D1:1']), T0 + 500);
     expect(released).toEqual([expect.objectContaining({ key: h1.key, state: 'ready', body: h1.body })]);
   });
 
   it('Save commits the draft photos and the result in one step; other drafts of the stop go; Cancel drops them', async () => {
     const store = memoryStore();
-    const used = photo('1:1', T0, { state: 'draft' });
-    const retaken = photo('1:1', T0 + 1, { state: 'draft' });
-    const otherStop = photo('1:2', T0 + 2, { state: 'draft' });
+    const used = photo('D1:1:1', T0, { state: 'draft' });
+    const retaken = photo('D1:1:1', T0 + 1, { state: 'draft' });
+    const otherStop = photo('D1:1:2', T0 + 2, { state: 'draft' });
     await store.put([used, retaken, otherStop]);
-    await store.putDraft(NS, '1:1', { outcome: 'DELIVERED', reason: null, note: '', lines: {}, photoKeys: [used.key], pendingPhotoKey: null, noPhoto: false, savedAt: T0 });
-    const action = actionItem(NS, { ...result('1:1'), photoKeys: [used.key] } as DriverAction, T0 + 10);
-    await store.commit(NS, '1:1', [used.key], action);
+    await store.putDraft(NS, 'D1:1:1', { outcome: 'DELIVERED', reason: null, note: '', lines: {}, photoKeys: [used.key], pendingPhotoKey: null, noPhoto: false, savedAt: T0 });
+    const action = actionItem(NS, { ...result('D1:1:1'), photoKeys: [used.key] } as DriverAction, T0 + 10);
+    await store.commit(NS, 'D1:1:1', [used.key], action);
     const after = await store.items(NS);
     expect(after.find((i) => i.key === used.key)).toMatchObject({ state: 'ready', createdAt: T0 + 11 });
     expect(after.find((i) => i.key === retaken.key)).toBeUndefined();
     expect(after.find((i) => i.key === action.key)).toMatchObject({ state: 'ready' });
-    expect(await store.getDraft(NS, '1:1')).toBeNull();
+    expect(await store.getDraft(NS, 'D1:1:1')).toBeNull();
     // The photo goes after its result.
     expect(nextBatch(after, T0 + 100).actions.map((i) => i.key)).toEqual([action.key]);
-    await store.dropDrafts(NS, '1:2');
+    await store.dropDrafts(NS, 'D1:1:2');
     expect((await store.items(NS)).find((i) => i.key === otherStop.key)).toBeUndefined();
   });
 
   it('a reissued link on the same phone picks up the waiting items (the namespace is the truck-day, not the link)', async () => {
     const store = memoryStore();
-    await store.put([actionItem(NS, result('1:1'), T0)]);
+    await store.put([actionItem(NS, result('D1:1:1'), T0)]);
     await store.putLink('old-link-hash', { ns: NS, trackingOn: true });
     await store.putLink('new-link-hash', { ns: NS, trackingOn: false });
     expect((await store.getLink('new-link-hash'))!.ns).toBe(NS);
@@ -213,7 +213,7 @@ describe('held items, drafts, namespaces', () => {
   it('truck-days 5 or more days before the phone\'s date are deleted with everything they kept', async () => {
     const store = memoryStore();
     const old = 't5|2026-09-29';
-    await store.put([{ ...actionItem(old, result('1:1'), T0) }, actionItem(NS, result('1:1'), T0)]);
+    await store.put([{ ...actionItem(old, result('D1:1:1'), T0) }, actionItem(NS, result('D1:1:1'), T0)]);
     await store.putManifest(old, { manifest: {}, savedAt: T0, sent: {} });
     await store.putLink('h', { ns: old, trackingOn: false });
     expect(staleNamespaces(await store.namespaces(), '2026-10-04').sort()).toEqual([old]);

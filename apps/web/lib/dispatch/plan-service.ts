@@ -329,6 +329,25 @@ export interface BuildOptions {
    * missingPalletFactors, as on a depot with bay trucks.
    */
   withPallets?: boolean;
+  /**
+   * More trucks the plan may use, counted only when a customer's parts are sized (the hire suggestion's
+   * what-if: every truck it may rent, fix of 7 Oct 2026). A customer that fits one of them in its own
+   * measure stays one visit; parts are sized with them too. Before, the parts were cut for the own fleet
+   * and the bigger trucks to rent added afterwards: a 300-case order on 100-case own trucks became three
+   * visits of the full stop time each, and the what-if rented two 300-case trucks where one sufficed.
+   * Never used for anything else (the heavier-than-any-truck rule stays the depot's own trucks').
+   */
+  splitFleet?: readonly SplitFleetTruck[];
+}
+
+/** A truck the parts of a split delivery may be sized for, besides the depot's own (BuildOptions.splitFleet). */
+export interface SplitFleetTruck {
+  code: string;
+  capacityCases: number;
+  /** null or 0 = no weight limit. */
+  payloadKg: number | null;
+  /** Bays (planned by pallets at the company's Pallet fill), null = planned by cases. */
+  bays: number | null;
 }
 
 export async function buildDispatchRequest(
@@ -490,8 +509,20 @@ export async function buildDispatchRequest(
     tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
     ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
   }));
-  const available = fleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
-  const pool = available.length ? available : fleet;
+  // The trucks the parts may be sized for: the own fleet, and the trucks the hire what-if may rent (each
+  // for the whole day, as many loads as the company's max loads per truck).
+  const splitFleet: FleetTruck[] = [
+    ...fleet,
+    ...(opts.splitFleet ?? []).map((t) => ({
+      code: t.code,
+      cases: t.capacityCases,
+      kg: t.payloadKg !== null && t.payloadKg > 0 ? t.payloadKg : null,
+      tripsLeft: cfg.maxTripsPerTruck,
+      ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+    })),
+  ];
+  const available = splitFleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
+  const pool = available.length ? available : splitFleet;
   const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number): { cap: PartCapacity; truckCode: string } | null => {
     if (!cfg.splitDeliveries || !pool.some(hasRoom)) return null;
     // A customer that fits one truck, in that truck's own measure, is never split.

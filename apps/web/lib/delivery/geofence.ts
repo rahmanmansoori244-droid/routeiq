@@ -65,7 +65,7 @@ export interface Fix {
 }
 
 export interface TrackStop {
-  /** `${loadNo}:${sequence}` */
+  /** `<depotId>:<loadNo>:<sequence>` (stop-key.ts) */
   key: string;
   loadNo: number;
   sequence: number;
@@ -439,6 +439,8 @@ export function restoreTracker(inProgress: { key: string; arrivedAt: number; obs
 // ---------------------------------------------------------------------------------------
 
 export interface TripLoad {
+  /** `<depotId>:<loadNo>` (stop-key.ts): a truck can have a Load 1 at two depots on one date. */
+  key: string;
   loadNo: number;
   status: string;
   departMin: number;
@@ -452,14 +454,15 @@ export interface TripLoad {
  * planned departure is at most 30 min away or past (its events are HELD on the phone until it is
  * dispatched); else none.
  */
-export function currentTrip(loads: readonly TripLoad[], local: { started: boolean; nowMin: number }): { loadNo: number; held: boolean } | null {
-  const out = loads.filter((l) => l.status === 'DISPATCHED' && !l.back).sort((a, b) => b.loadNo - a.loadNo)[0];
-  if (out) return { loadNo: out.loadNo, held: false };
+export function currentTrip(loads: readonly TripLoad[], local: { started: boolean; nowMin: number }): { key: string; loadNo: number; held: boolean } | null {
+  // The same number at two depots: the later departure first (the truck left for it last).
+  const out = loads.filter((l) => l.status === 'DISPATCHED' && !l.back).sort((a, b) => b.loadNo - a.loadNo || b.departMin - a.departMin || a.key.localeCompare(b.key))[0];
+  if (out) return { key: out.key, loadNo: out.loadNo, held: false };
   if (!local.started) return null;
   const waiting = loads
     .filter((l) => (l.status === 'LOCKED' || l.status === 'LOADING') && l.departMin - 30 <= local.nowMin)
-    .sort((a, b) => a.departMin - b.departMin || a.loadNo - b.loadNo)[0];
-  return waiting ? { loadNo: waiting.loadNo, held: true } : null;
+    .sort((a, b) => a.departMin - b.departMin || a.loadNo - b.loadNo || a.key.localeCompare(b.key))[0];
+  return waiting ? { key: waiting.key, loadNo: waiting.loadNo, held: true } : null;
 }
 
 /**

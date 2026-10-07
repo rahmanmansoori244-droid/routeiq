@@ -263,8 +263,8 @@ describe('the guard (spec section 5)', () => {
     const m = await manifestGET(req('/api/d/manifest', { token }));
     expect(m.status).toBe(410);
     expect((await m.json()).error).toMatchObject({ code: 'LINK_EXPIRED', uploadOnly: true });
-    const before = outcome('1:1', { at: new Date(expiresAt.getTime() - 10 * 60_000).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
-    const after = outcome('1:2', { at: iso(60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const before = outcome('D1:1:1', { at: new Date(expiresAt.getTime() - 10 * 60_000).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const after = outcome('D1:1:2', { at: iso(60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
     const r = await act(token, [before, after]);
     expect(r.body.data!.results).toEqual([
       { key: before.key, status: 'ok' },
@@ -277,11 +277,11 @@ describe('the guard (spec section 5)', () => {
   it('a signed-in browser is the office: a planner records as DISPATCHER with the user id; a viewer is refused 403; another company 403', async () => {
     const token = makeLink('t5');
     session.value = { user: { id: 'u-viewer', name: 'Vera', role: 'VIEWER', tenantId: T } };
-    expect((await act(token, [outcome('1:1')])).body.error).toMatchObject({ code: 'SIGNED_IN_READ_ONLY' });
+    expect((await act(token, [outcome('D1:1:1')])).body.error).toMatchObject({ code: 'SIGNED_IN_READ_ONLY' });
     session.value = { user: { id: 'u-x', name: 'Xavi', role: 'PLANNER', tenantId: 'other' } };
-    expect((await act(token, [outcome('1:1')])).body.error).toMatchObject({ code: 'SIGNED_IN_OTHER_TENANT' });
+    expect((await act(token, [outcome('D1:1:1')])).body.error).toMatchObject({ code: 'SIGNED_IN_OTHER_TENANT' });
     session.value = { user: { id: 'u-ali', name: 'Ali', role: 'PLANNER', tenantId: T } };
-    const r = await act(token, [outcome('1:1', { photoKeys: [] })]);
+    const r = await act(token, [outcome('D1:1:1', { photoKeys: [] })]);
     expect(r.body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopEvent.find((e) => e.kind === 'OUTCOME')).toMatchObject({ source: 'DISPATCHER', userId: 'u-ali' });
     const a = tables.auditLog.find((x) => x.action === 'DELIVERY_OUTCOME_SET');
@@ -294,14 +294,14 @@ describe('the guard (spec section 5)', () => {
 describe('POST /api/d/actions (spec section 8)', () => {
   it('an automatic arrival at the pin and a result with a photo key; the same batch again answers duplicate and stores nothing more', async () => {
     const token = makeLink('t5');
-    const batch = [arrive('1:1'), outcome('1:1')];
+    const batch = [arrive('D1:1:1'), outcome('D1:1:1')];
     const first = await act(token, batch);
     expect(first.status).toBe(200);
     expect(first.body.data!.results.map((r) => r.status)).toEqual(['ok', 'ok']);
     expect(tables.stopEvent.map((e) => e.idempotencyKey).sort()).toEqual(batch.map((a) => `dl:${a.key}`).sort());
     const v = tables.stopVisit[0];
     expect(v).toMatchObject({ sequence: 1, arrivalSource: 'PHONE_AUTO', outcome: 'DELIVERED', casesDelivered: 40, casesPlanned: 40, autoBasis: 'RESULT' });
-    expect(first.body.data!.stops['1:1']).toMatchObject({ outcome: 'DELIVERED', editable: true });
+    expect(first.body.data!.stops['D1:1:1']).toMatchObject({ outcome: 'DELIVERED', editable: true });
     const again = await act(token, batch);
     expect(again.body.data!.results.map((r) => r.status)).toEqual(['duplicate', 'duplicate']);
     expect(tables.stopEvent).toHaveLength(2);
@@ -316,29 +316,29 @@ describe('POST /api/d/actions (spec section 8)', () => {
     const token = makeLink('t5');
     const other = makeLink('t6');
     const shared = randomUUID();
-    expect((await act(other, [arrive('1:1', { key: shared })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await act(other, [arrive('D1:1:1', { key: shared })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
     const r = await act(token, [
-      arrive('1:1', { key: 'ayun:1000' }),
-      arrive('1:1', { key: shared.toUpperCase() }),
-      arrive('1:1', { key: shared }),
+      arrive('D1:1:1', { key: 'ayun:1000' }),
+      arrive('D1:1:1', { key: shared.toUpperCase() }),
+      arrive('D1:1:1', { key: shared }),
       arrive('9:1'),
-      outcome('1:2', { photoKeys: [] }),
-      outcome('1:2', { at: new Date(Date.now() - 3 * 86_400_000).toISOString() }),
+      outcome('D1:1:2', { photoKeys: [] }),
+      outcome('D1:1:2', { at: new Date(Date.now() - 3 * 86_400_000).toISOString() }),
     ]);
     expect(r.body.data!.results.map((x) => x.code)).toEqual(['INVALID', 'INVALID', 'INVALID', 'STOP_NOT_FOUND', 'PHOTO_REQUIRED', 'TIME_OUT_OF_RANGE']);
     // Nothing about the other link's event is echoed, and nothing was stored for this link.
     expect(JSON.stringify(r.body.data!.results[2])).not.toContain('t6');
     expect(tables.stopEvent.filter((e) => e.driverLinkId === tables.driverLink[0].id)).toEqual([]);
     // "Camera not working" saves without a photo.
-    const cam = await act(token, [outcome('1:2', { photoKeys: [], noPhotoReason: 'CAMERA_FAILED' })]);
+    const cam = await act(token, [outcome('D1:1:2', { photoKeys: [], noPhotoReason: 'CAMERA_FAILED' })]);
     expect(cam.body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit.find((v) => v.sequence === 2)).toMatchObject({ noPhotoReason: 'CAMERA_FAILED' });
   });
 
   it('an automatic arrival 2 km from the pin is stored as a manual one (downgraded); a manual arrival is audited', async () => {
     const token = makeLink('t5');
-    const far = arrive('1:1', { pos: { lat: ACME.lat + 0.018, lng: ACME.lng, accuracyM: 10, at: iso(20 * 60_000) } });
-    await act(token, [far, arrive('1:2', { mode: 'MANUAL', pos: undefined })]);
+    const far = arrive('D1:1:1', { pos: { lat: ACME.lat + 0.018, lng: ACME.lng, accuracyM: 10, at: iso(20 * 60_000) } });
+    await act(token, [far, arrive('D1:1:2', { mode: 'MANUAL', pos: undefined })]);
     expect(tables.stopEvent.find((e) => e.idempotencyKey === `dl:${far.key}`)).toMatchObject({ source: 'PHONE_MANUAL', payloadJson: expect.objectContaining({ downgraded: true }) });
     expect(tables.auditLog.filter((x) => x.action === 'STOP_ARRIVAL_MANUAL')).toHaveLength(1);
   });
@@ -346,7 +346,7 @@ describe('POST /api/d/actions (spec section 8)', () => {
   it('a LOADING load: arrivals are kept on the phone (transient LOAD_NOT_DISPATCHED); results are refused', async () => {
     row('planLoad', 'L1').status = 'LOADING';
     const token = makeLink('t5');
-    const r = await act(token, [arrive('1:1'), outcome('1:1')]);
+    const r = await act(token, [arrive('D1:1:1'), outcome('D1:1:1')]);
     expect(r.body.data!.results).toEqual([
       expect.objectContaining({ status: 'refused', code: 'LOAD_NOT_DISPATCHED', transient: true }),
       expect.objectContaining({ status: 'refused', code: 'LOAD_NOT_DISPATCHED' }),
@@ -354,12 +354,12 @@ describe('POST /api/d/actions (spec section 8)', () => {
     expect(r.body.data!.results[1]!.transient).toBeUndefined();
     expect(tables.stopVisit).toEqual([]);
     row('planLoad', 'L1').status = 'DISPATCHED';
-    expect((await act(token, [arrive('1:1')])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await act(token, [arrive('D1:1:1')])).body.data!.results[0]).toMatchObject({ status: 'ok' });
   });
 
   it('E10: after the trip closed, a backdated change of a stop that had a result is refused; a stop without one is filled in, late', async () => {
     const token = makeLink('t5');
-    await act(token, [outcome('1:1', { at: iso(90 * 60_000) })]);
+    await act(token, [outcome('D1:1:1', { at: iso(90 * 60_000) })]);
     // Completed after stop 1's result was received (from the stored receipt time, never the clock's
     // resolution); stop 2 had none.
     const received = tables.stopEvent.find((e) => e.kind === 'OUTCOME')!.receivedAt as Date;
@@ -368,43 +368,43 @@ describe('POST /api/d/actions (spec section 8)', () => {
     // clamped to its receipt, which must not fall in the same millisecond as the first request's.
     while (Date.now() <= received.getTime() + 1) await new Promise((res) => setTimeout(res, 1));
     const r = await act(token, [
-      outcome('1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }),
-      outcome('1:2', { at: iso(45 * 60_000), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }),
-      arrive('1:2', { at: new Date(Date.now() + 1000).toISOString() }), // dated after the completion
+      outcome('D1:1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }),
+      outcome('D1:1:2', { at: iso(45 * 60_000), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }),
+      arrive('D1:1:2', { at: new Date(Date.now() + 1000).toISOString() }), // dated after the completion
     ]);
     expect(r.body.data!.results.map((x) => x.code ?? x.status)).toEqual(['LOAD_COMPLETED', 'ok', 'LOAD_COMPLETED']);
     expect(tables.stopVisit.find((v) => v.sequence === 1)).toMatchObject({ outcome: 'DELIVERED' });
     expect(tables.stopVisit.find((v) => v.sequence === 2)).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
-    expect(r.body.data!.stops['1:2']).toMatchObject({ editable: false });
+    expect(r.body.data!.stops['D1:1:2']).toMatchObject({ editable: false });
   });
 
   it('Back at depot, then the last result: the load is completed by the driver link', async () => {
     const token = makeLink('t5');
-    await act(token, [outcome('1:1'), { key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000), pos: { lat: 23.55, lng: 58.35, accuracyM: 15, at: iso(60_000) } }]);
+    await act(token, [outcome('D1:1:1'), { key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, depot: 'D1', at: iso(60_000), pos: { lat: 23.55, lng: 58.35, accuracyM: 15, at: iso(60_000) } }]);
     expect(tables.stopEvent.find((e) => e.kind === 'BACK_AT_DEPOT')).toMatchObject({ sequence: null, visitId: null, distanceM: 0 });
     expect(tables.auditLog.some((a) => a.action === 'DRIVER_BACK_AT_DEPOT' && a.entityId === 'L1')).toBe(true);
     completeLoad.mockClear();
-    await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
+    await act(token, [outcome('D1:1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
     expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { userId: null, label: 'Driver link: Salim (T05, back at depot)' });
   });
 
   it('a signed-in planner recording the last result on the driver page closes the trip as themselves, not as the driver link', async () => {
     const token = makeLink('t5');
-    await act(token, [outcome('1:1'), { key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000) }]);
+    await act(token, [outcome('D1:1:1'), { key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000) }]);
     completeLoad.mockClear();
     session.value = { user: { id: 'u-ali', name: 'Ali', role: 'PLANNER', tenantId: T } };
-    await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
+    await act(token, [outcome('D1:1:2', { outcome: 'NOT_DELIVERED', reason: 'CUSTOMER_REFUSED', photoKeys: [] })]);
     expect(completeLoad).toHaveBeenCalledWith(T, { runId: 'R1', loadId: 'L1', depotId: 'D1', date: D }, { userId: 'u-ali', label: null });
   });
 
   it('a result cleared before the trip closed is no result at completion: a queued result for that stop still fills the gap', async () => {
     const token = makeLink('t5');
-    await act(token, [outcome('1:1', { at: iso(100 * 60_000) })]);
-    await act(token, [outcome('1:1', { at: iso(99 * 60_000), outcome: null, photoKeys: [] })]);
+    await act(token, [outcome('D1:1:1', { at: iso(100 * 60_000) })]);
+    await act(token, [outcome('D1:1:1', { at: iso(99 * 60_000), outcome: null, photoKeys: [] })]);
     expect(tables.stopVisit[0]).toMatchObject({ outcome: null });
     const lastReceipt = Math.max(...tables.stopEvent.map((e) => (e.receivedAt as Date).getTime()));
     Object.assign(row('planLoad', 'L1'), { status: 'COMPLETED', statusChangedAt: new Date(lastReceipt + 1) });
-    const late = await act(token, [outcome('1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] })]);
+    const late = await act(token, [outcome('D1:1:1', { at: iso(40 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] })]);
     expect(late.body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
   });
@@ -412,15 +412,15 @@ describe('POST /api/d/actions (spec section 8)', () => {
   it('changing a result needs no new photo when an earlier Delivered or Partly of the driver named one', async () => {
     const token = makeLink('t5');
     const p1 = randomUUID();
-    const first = await act(token, [outcome('1:1', { photoKeys: [p1] })]);
+    const first = await act(token, [outcome('D1:1:1', { photoKeys: [p1] })]);
     expect(first.body.data!.results[0]).toMatchObject({ status: 'ok' });
-    expect((await sendPhoto(token, photoMeta('1:1', p1))).body.data).toMatchObject({ status: 'ok' });
-    const change = await act(token, [outcome('1:1', { at: iso(2 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] })]);
+    expect((await sendPhoto(token, photoMeta('D1:1:1', p1))).body.data).toMatchObject({ status: 'ok' });
+    const change = await act(token, [outcome('D1:1:1', { at: iso(2 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] })]);
     expect(change.body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 38, noPhotoReason: null });
-    expect(change.body.data!.stops['1:1']).toMatchObject({ proofPhotos: 1 });
+    expect(change.body.data!.stops['D1:1:1']).toMatchObject({ proofPhotos: 1 });
     // A stop without any photo still needs one.
-    expect((await act(token, [outcome('1:2', { photoKeys: [] })])).body.data!.results[0]).toMatchObject({ code: 'PHOTO_REQUIRED' });
+    expect((await act(token, [outcome('D1:1:2', { photoKeys: [] })])).body.data!.results[0]).toMatchObject({ code: 'PHOTO_REQUIRED' });
   });
 
   it('a result changed while the first result\'s photo is still on the phone: sent in one batch before the photo, the change is accepted', async () => {
@@ -429,26 +429,26 @@ describe('POST /api/d/actions (spec section 8)', () => {
     const token = makeLink('t5');
     const p1 = randomUUID();
     const batch = await act(token, [
-      outcome('1:1', { photoKeys: [p1] }),
-      outcome('1:1', { at: iso(4 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] }),
+      outcome('D1:1:1', { photoKeys: [p1] }),
+      outcome('D1:1:1', { at: iso(4 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LB', delivered: 8 }], photoKeys: [] }),
     ]);
     expect(batch.body.data!.results.map((r) => r.status)).toEqual(['ok', 'ok']);
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', casesDelivered: 38 });
-    expect(batch.body.data!.stops['1:1']).toMatchObject({ proofPhotos: 1 });
-    expect((await sendPhoto(token, photoMeta('1:1', p1))).body.data).toMatchObject({ status: 'ok' });
+    expect(batch.body.data!.stops['D1:1:1']).toMatchObject({ proofPhotos: 1 });
+    expect((await sendPhoto(token, photoMeta('D1:1:1', p1))).body.data).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'PARTLY_DELIVERED', photoCount: 1 });
   });
 
   it('a photo taken for Not delivered is no proof for a later Delivered: the return visit needs its own photo', async () => {
     const token = makeLink('t5');
     const shutter = randomUUID();
-    expect((await act(token, [outcome('1:1', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [shutter] })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
-    expect((await sendPhoto(token, photoMeta('1:1', shutter))).body.data).toMatchObject({ status: 'ok' });
-    const back = await act(token, [outcome('1:1', { at: iso(60_000), photoKeys: [] })]);
+    expect((await act(token, [outcome('D1:1:1', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [shutter] })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await sendPhoto(token, photoMeta('D1:1:1', shutter))).body.data).toMatchObject({ status: 'ok' });
+    const back = await act(token, [outcome('D1:1:1', { at: iso(60_000), photoKeys: [] })]);
     expect(back.body.data!.results[0]).toMatchObject({ status: 'refused', code: 'PHOTO_REQUIRED' });
-    expect(back.body.data!.stops['1:1']).toMatchObject({ outcome: 'NOT_DELIVERED', proofPhotos: 0 });
+    expect(back.body.data!.stops['D1:1:1']).toMatchObject({ outcome: 'NOT_DELIVERED', proofPhotos: 0 });
     // With a delivery photo of its own it is stored.
-    expect((await act(token, [outcome('1:1', { at: iso(60_000) })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await act(token, [outcome('D1:1:1', { at: iso(60_000) })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
     expect(tables.stopVisit[0]).toMatchObject({ outcome: 'DELIVERED' });
   });
 
@@ -460,7 +460,7 @@ describe('POST /api/d/actions (spec section 8)', () => {
         token,
         ip: '203.0.113.7',
         headers: { 'x-driver-device': '3f9a1234abcd5678'.repeat(2) },
-        body: JSON.stringify({ clientNow: new Date().toISOString(), actions: [outcome('1:1'), arrive('1:2', { mode: 'MANUAL', pos: undefined })] }),
+        body: JSON.stringify({ clientNow: new Date().toISOString(), actions: [outcome('D1:1:1'), arrive('D1:1:2', { mode: 'MANUAL', pos: undefined })] }),
       }),
     );
     expect(res.status).toBe(200);
@@ -494,7 +494,7 @@ describe('POST /api/d/actions (spec section 8)', () => {
       return rows(a);
     };
     try {
-      await act(token, [outcome('1:1')]);
+      await act(token, [outcome('D1:1:1')]);
     } finally {
       fakePrisma.$queryRaw = raw;
       fakePrisma.planLoad.findFirst = find;
@@ -546,7 +546,7 @@ describe('a flood from one link (security review)', () => {
 
   it('the per-link limit counts actions, not requests (120 a minute)', async () => {
     const token = makeLink('t5');
-    const fifty = () => Array.from({ length: 50 }, () => arrive('1:1'));
+    const fifty = () => Array.from({ length: 50 }, () => arrive('D1:1:1'));
     expect((await act(token, fifty())).status).toBe(200);
     expect((await act(token, fifty())).status).toBe(200);
     const third = await act(token, fifty());
@@ -556,15 +556,15 @@ describe('a flood from one link (security review)', () => {
 
   it('at most 2 requests of one link are handled at once', async () => {
     const token = makeLink('t5');
-    const statuses = (await Promise.all([1, 2, 3].map(() => act(token, [arrive('1:2')])))).map((r) => r.status).sort();
+    const statuses = (await Promise.all([1, 2, 3].map(() => act(token, [arrive('D1:1:2')])))).map((r) => r.status).sort();
     expect(statuses).toEqual([200, 200, 429]);
     // Once they finished, the link sends again.
-    expect((await act(token, [arrive('1:2')])).status).toBe(200);
+    expect((await act(token, [arrive('D1:1:2')])).status).toBe(200);
   });
 
   it('stores at most 40 arrivals, departures and results per stop and 5 Back at depot per load; the rest is refused INVALID', async () => {
     const token = makeLink('t5');
-    const r = await act(token, Array.from({ length: 42 }, () => arrive('1:1')));
+    const r = await act(token, Array.from({ length: 42 }, () => arrive('D1:1:1')));
     expect(r.body.data!.results.filter((x) => x.status === 'ok')).toHaveLength(40);
     expect(r.body.data!.results.slice(40).map((x) => x.code)).toEqual(['INVALID', 'INVALID']);
     const backs = await act(token, Array.from({ length: 6 }, () => ({ key: randomUUID(), type: 'BACK_AT_DEPOT', load: 1, at: iso(60_000) })));
@@ -573,20 +573,20 @@ describe('a flood from one link (security review)', () => {
 
   it('the same result again with a fresh key is answered ok and stores nothing (no event, no audit row)', async () => {
     const token = makeLink('t5');
-    const nd = () => outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const nd = () => outcome('D1:1:2', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
     const r = await act(token, [nd(), nd(), nd()]);
     expect(r.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok']);
     expect(tables.stopEvent.filter((e) => e.kind === 'OUTCOME')).toHaveLength(1);
     expect(tables.auditLog.filter((a) => a.action === 'DELIVERY_OUTCOME_SET')).toHaveLength(1);
     // A different result is stored.
-    await act(token, [outcome('1:2', { outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] })]);
+    await act(token, [outcome('D1:1:2', { outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] })]);
     expect(tables.stopEvent.filter((e) => e.kind === 'OUTCOME')).toHaveLength(2);
   });
 
   it('a body that cannot be read answers 400; more than 50 actions 400', async () => {
     const token = makeLink('t5');
     expect((await actionsPOST(req('/api/d/actions', { method: 'POST', token, body: 'not json' }))).status).toBe(400);
-    const many = Array.from({ length: 51 }, () => arrive('1:1'));
+    const many = Array.from({ length: 51 }, () => arrive('D1:1:1'));
     expect((await act(token, many)).status).toBe(400);
   });
 });
@@ -594,10 +594,10 @@ describe('a flood from one link (security review)', () => {
 describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () => {
   it('411 without Content-Length, 413 over 1.6 MB, 415 for a file that is not a JPEG', async () => {
     const token = makeLink('t5');
-    expect((await photosPOST(await photoReq(token, photoMeta('1:1'), jpeg(), { noLength: true }))).status).toBe(411);
-    expect((await photosPOST(await photoReq(token, photoMeta('1:1'), jpeg(), { length: 1_700_000 }))).status).toBe(413);
+    expect((await photosPOST(await photoReq(token, photoMeta('D1:1:1'), jpeg(), { noLength: true }))).status).toBe(411);
+    expect((await photosPOST(await photoReq(token, photoMeta('D1:1:1'), jpeg(), { length: 1_700_000 }))).status).toBe(413);
     const html = Uint8Array.from(ascii('<!doctype html><script>alert(1)</script>'));
-    const r = await photosPOST(await photoReq(token, photoMeta('1:1'), html));
+    const r = await photosPOST(await photoReq(token, photoMeta('D1:1:1'), html));
     expect(r.status).toBe(415);
     expect(tables.deliveryPhoto).toEqual([]);
   });
@@ -605,7 +605,7 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
   it('stores the photo stripped of its metadata; the same key and bytes answer duplicate; other bytes 409 KEY_REUSED; a photo key equal to an action key is a different key', async () => {
     const token = makeLink('t5');
     const key = randomUUID();
-    const ok = await sendPhoto(token, photoMeta('1:1', key));
+    const ok = await sendPhoto(token, photoMeta('D1:1:1', key));
     expect(ok.body.data).toMatchObject({ status: 'ok' });
     const p = tables.deliveryPhoto[0];
     expect(p).toMatchObject({ idempotencyKey: `dlphoto:${key}`, positionStatus: 'OK', width: 160, height: 120 });
@@ -613,21 +613,21 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
     expect(p.distanceM).toBeLessThan(100);
     expect(tables.stopEvent.find((e) => e.kind === 'PHOTO')).toMatchObject({ idempotencyKey: `dlphoto:${key}` });
     expect(tables.stopVisit[0]).toMatchObject({ photoCount: 1 });
-    expect((await sendPhoto(token, photoMeta('1:1', key))).body.data).toMatchObject({ status: 'duplicate', photoId: p.id });
-    const reused = await sendPhoto(token, photoMeta('1:1', key), jpeg([], [9, 9, 9]));
+    expect((await sendPhoto(token, photoMeta('D1:1:1', key))).body.data).toMatchObject({ status: 'duplicate', photoId: p.id });
+    const reused = await sendPhoto(token, photoMeta('D1:1:1', key), jpeg([], [9, 9, 9]));
     expect(reused.status).toBe(409);
     expect(reused.body.error).toMatchObject({ code: 'KEY_REUSED' });
     // The same UUID as an action key: both are stored (dl: and dlphoto: never collide).
-    expect((await act(token, [arrive('1:1', { key })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await act(token, [arrive('D1:1:1', { key })])).body.data!.results[0]).toMatchObject({ status: 'ok' });
   });
 
   it('"taken earlier" is decided on the server clock: a phone running 20 min slow does not flag a genuine photo', async () => {
     const token = makeLink('t5');
     // Arrived 10 min ago (server time, the phone's clock right at that moment).
-    await act(token, [arrive('1:1', { at: iso(10 * 60_000), pos: { lat: ACME.lat + 0.0002, lng: ACME.lng, accuracyM: 8, at: iso(10 * 60_000) } })]);
+    await act(token, [arrive('D1:1:1', { at: iso(10 * 60_000), pos: { lat: ACME.lat + 0.0002, lng: ACME.lng, accuracyM: 8, at: iso(10 * 60_000) } })]);
     // Now the phone runs 20 min slow: the photo, taken 2 min after the arrival, carries phone times.
     const slow = (msAgo: number) => new Date(Date.now() - msAgo - 20 * 60_000).toISOString();
-    const meta = { ...photoMeta('1:1'), clientNow: slow(0), takenAt: slow(8 * 60_000), fileLastModified: slow(8 * 60_000), oldPhoto: true };
+    const meta = { ...photoMeta('D1:1:1'), clientNow: slow(0), takenAt: slow(8 * 60_000), fileLastModified: slow(8 * 60_000), oldPhoto: true };
     expect((await sendPhoto(token, meta)).body.data).toMatchObject({ status: 'ok' });
     expect(tables.deliveryPhoto[0]).toMatchObject({ oldPhoto: false });
   });
@@ -644,20 +644,20 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
 
   it('at most 3 driver photos per stop, and 3 x the truck-day\'s stops + 10 per link', async () => {
     const token = makeLink('t5');
-    for (let i = 0; i < 3; i++) expect((await sendPhoto(token, photoMeta('1:1'), jpeg([], [i + 1]))).body.data).toMatchObject({ status: 'ok' });
-    const fourth = await sendPhoto(token, photoMeta('1:1'), jpeg([], [7]));
+    for (let i = 0; i < 3; i++) expect((await sendPhoto(token, photoMeta('D1:1:1'), jpeg([], [i + 1]))).body.data).toMatchObject({ status: 'ok' });
+    const fourth = await sendPhoto(token, photoMeta('D1:1:1'), jpeg([], [7]));
     expect(fourth.status).toBe(409);
     expect(fourth.body.error).toMatchObject({ code: 'PHOTO_LIMIT' });
     const linkId = tables.driverLink[0].id;
     for (let i = 0; i < 13; i++) tables.deliveryPhoto.push({ id: `old${i}`, tenantId: T, visitId: 'elsewhere', driverLinkId: linkId, source: 'PHONE_MANUAL', takenAt: new Date() });
-    const daily = await sendPhoto(token, photoMeta('1:2'), jpeg([], [8]));
+    const daily = await sendPhoto(token, photoMeta('D1:1:2'), jpeg([], [8]));
     expect(daily.status).toBe(409);
     expect(daily.body.error).toMatchObject({ code: 'PHOTO_LIMIT', daily: true });
   });
 
   it('a retry of a photo already stored answers duplicate, also once the daily cap is reached (its answer was lost)', async () => {
     const token = makeLink('t5');
-    const meta = photoMeta('1:1');
+    const meta = photoMeta('D1:1:1');
     expect((await sendPhoto(token, meta)).body.data).toMatchObject({ status: 'ok' });
     // That photo was the last one under the cap (3 x 2 stops + 10 = 16).
     const linkId = tables.driverLink[0].id;
@@ -666,7 +666,7 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
     expect(again.status).toBe(200);
     expect(again.body.data).toMatchObject({ status: 'duplicate' });
     // A new photo is still refused.
-    const fresh = await sendPhoto(token, photoMeta('1:2'), jpeg([], [9]));
+    const fresh = await sendPhoto(token, photoMeta('D1:1:2'), jpeg([], [9]));
     expect(fresh.status).toBe(409);
     expect(fresh.body.error).toMatchObject({ code: 'PHOTO_LIMIT', daily: true });
   });
@@ -674,7 +674,7 @@ describe('POST /api/d/photos and GET /api/d/photos/<id> (spec section 12)', () =
   it('serves a photo of this truck-day only, as an inline JPEG with nosniff and a sandbox CSP; a purged one is 404 PHOTO_PURGED', async () => {
     const token = makeLink('t5');
     const other = makeLink('t6');
-    const sent = await sendPhoto(token, photoMeta('1:1'));
+    const sent = await sendPhoto(token, photoMeta('D1:1:1'));
     const id = sent.body.data!.photoId!;
     const res = await photoGET(req(`/api/d/photos/${id}`, { token }));
     expect(res.status).toBe(200);

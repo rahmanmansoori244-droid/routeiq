@@ -14,6 +14,7 @@
  * - 404 / 410 stop sending (the page lists what was not sent); 410 UPLOAD_CLOSED clears the truck-day.
  */
 import type { DriverAction, DriverActionResult, DriverResults, LinkStateCode, OutcomeName, PhotoPositionStatusName } from '../driver-link/manifest-types';
+import { loadKeyOf, loadKeyOfStop, parseStopKey } from '../driver-link/stop-key';
 
 export type QueueItemState = 'ready' | 'held' | 'draft';
 
@@ -43,9 +44,11 @@ export interface QueueItem {
   createdAt: number;
   attempts: number;
   nextAt: number;
-  /** The stop (`loadNo:sequence`); null for Back at depot. */
+  /** The stop (`<depotId>:<loadNo>:<sequence>`, stop-key.ts; `loadNo:sequence` on an item saved before 7 Oct 2026); null for Back at depot. */
   stopKey: string | null;
   loadNo: number;
+  /** The load (`<depotId>:<loadNo>`); absent on an item saved before 7 Oct 2026 (itemLoadKey). */
+  loadKey?: string;
   body: DriverAction | PhotoBody;
   /** The photo (a Blob; a base64 string where storing a Blob failed). */
   blob?: Blob | string | null;
@@ -198,9 +201,24 @@ export function retryAll(batch: readonly QueueItem[], now: number): QueueItem[] 
   });
 }
 
-/** Held arrivals and departures of trips now on the road (or done) become ready, with their original times (pure). */
-export function releaseHeld(items: readonly QueueItem[], outLoads: ReadonlySet<number>, now: number): QueueItem[] {
-  return items.filter((i) => i.state === 'held' && outLoads.has(i.loadNo)).map((i) => ({ ...i, state: 'ready' as const, nextAt: now, attempts: 0 }));
+/**
+ * The load an item belongs to: its load key, or for an item saved before 7 Oct 2026 (no depot in its
+ * keys) the load number alone (`"1"`), which `outLoads` of releaseHeld lists too.
+ */
+export function itemLoadKey(i: Pick<QueueItem, 'loadKey' | 'stopKey' | 'loadNo' | 'body'>): string {
+  if (i.loadKey) return i.loadKey;
+  const b = i.body as DriverAction;
+  if (b.type === 'BACK_AT_DEPOT') return b.depot ? loadKeyOf(b.depot, b.load) : String(b.load);
+  return i.stopKey ? loadKeyOfStop(i.stopKey) || String(i.loadNo) : String(i.loadNo);
+}
+
+/**
+ * Held arrivals and departures of trips now on the road (or done) become ready, with their original
+ * times (pure). `outLoads`: those trips' load keys, and their load numbers for items saved before the
+ * depot was in the keys (the server refuses such an item when two trips of that number fit it).
+ */
+export function releaseHeld(items: readonly QueueItem[], outLoads: ReadonlySet<string>, now: number): QueueItem[] {
+  return items.filter((i) => i.state === 'held' && outLoads.has(itemLoadKey(i))).map((i) => ({ ...i, state: 'ready' as const, nextAt: now, attempts: 0 }));
 }
 
 /** "Waiting to send (n)": ready items (held arrivals and drafts are not counted). */
@@ -379,6 +397,7 @@ export function newKey(c: Pick<Crypto, 'getRandomValues'> & { randomUUID?: () =>
 /** A queue item for an action. */
 export function actionItem(ns: string, action: DriverAction, now: number, held = false): QueueItem {
   const stopKey = action.type === 'BACK_AT_DEPOT' ? null : action.stop;
-  const loadNo = action.type === 'BACK_AT_DEPOT' ? action.load : Number(action.stop.split(':')[0]);
-  return { key: action.key, ns, kind: 'action', state: held ? 'held' : 'ready', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo, body: action };
+  const loadNo = action.type === 'BACK_AT_DEPOT' ? action.load : (parseStopKey(action.stop)?.loadNo ?? 0);
+  const item: QueueItem = { key: action.key, ns, kind: 'action', state: held ? 'held' : 'ready', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo, body: action };
+  return { ...item, loadKey: itemLoadKey(item) };
 }

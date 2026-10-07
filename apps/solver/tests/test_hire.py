@@ -1966,3 +1966,49 @@ def test_the_stops_of_a_whole_day_rentals_loads_are_shared_out_by_area():
     assert after.score.service == before.score.service
     _, idx, before, after = ordered_after_pick(r, {"A": loads})
     assert after is before
+
+
+# --------------------------------------------------------------------------------------
+# A customer that fits one truck to rent is one visit (fix of 7 Oct 2026). The web used to cut a
+# customer's order into parts for the OWN fleet before the trucks to rent were added; each part is a
+# visit with the full stop time. Controlled case: own truck 100 cases (out until 10:00), the order
+# 300 cases, trucks to rent 300 cases at 60 OMR, 60 min a visit, receiving 08:00-09:30. The web now
+# sizes the parts with the trucks to rent too (buildDispatchRequest splitFleet), so it sends one stop.
+# --------------------------------------------------------------------------------------
+
+def _case_rental(n: int) -> DispatchTruck:
+    return DispatchTruck(id=f"H{n}", code=f"HIRE-300-{n}", capacity_cases=300, fixed_cost=60.0, hire_candidate=True,
+                         driver_day_cost=0.0, cost_per_km=0.0, km_per_litre=None)
+
+
+def _visit(sid: str, cases: int, order: str):
+    from tests.test_dispatch import stop
+    return stop(sid, 23.60, 58.42, cases=cases, service_min=60, hard_start_min=480, hard_end_min=570, priority=2).model_copy(
+        update={"order_ids": [order], "customer_id": "C"})
+
+
+def _rented(r, sc) -> tuple[list[str], float]:
+    hired = {t.id: t for t in r.trucks if t.hire_candidate}
+    used = sorted({ld.truck_id for ld in sc.loads if ld.truck_id in hired})
+    return used, sum(hired[t].fixed_cost for t in used)
+
+
+@pytest.mark.parametrize("units", [2, 1])
+def test_a_customer_that_fits_one_truck_to_rent_is_one_visit_one_rental(units):
+    own_truck = DispatchTruck(id="OWN", code="OWN", capacity_cases=100, fixed_cost=20.0, max_trips=1, available_from_min=600)
+    one = [_visit("C", 300, "O1")]
+    r = req(one, [own_truck] + [_case_rental(n + 1) for n in range(units)], time_limit_sec=3)
+    sc = rec(optimize_dispatch(r))
+    assert _rented(r, sc) == (["H1"], 60.0)
+    assert sc.unserved == [] and sum(ld.cases for ld in sc.loads) == 300
+    # The same order cut for the own fleet (three 100-case parts, 60 min each): two visits fit the
+    # window per truck, so it took two rentals (120 OMR), or left 100 cases out with one to rent.
+    parts = [_visit(f"C#{k}", 100, f"O1~{k}") for k in (1, 2, 3)]
+    r3 = req(parts, [own_truck] + [_case_rental(n + 1) for n in range(units)], time_limit_sec=3)
+    sc3 = rec(optimize_dispatch(r3))
+    if units == 2:
+        assert _rented(r3, sc3) == (["H1", "H2"], 120.0)
+        assert sc3.unserved == []
+    else:
+        assert sum(ld.cases for ld in sc3.loads) == 200
+        assert [u.stop_id for u in sc3.unserved] in (["C#1"], ["C#2"], ["C#3"])

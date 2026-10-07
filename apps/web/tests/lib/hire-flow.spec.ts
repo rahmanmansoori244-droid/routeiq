@@ -149,7 +149,25 @@ describe('the what-if (startHireCheck)', () => {
     const s = await settled(id);
     expect(s.status).toBe('SUCCEEDED');
     // Built as a re-plan of the version, by pallets (an option has bays), at a time it keeps (basis.builtAt).
-    expect(vi.mocked(buildDispatchRequest).mock.calls[0]).toEqual([T, 'P1', ['RECOMMENDED'], { withPallets: true, now: expect.any(Date) }]);
+    // The customers' parts are sized with every truck the day may still rent too (fix of 7 Oct 2026).
+    const tenTon = { capacityCases: 1140, payloadKg: 0, bays: 12 };
+    const threeTon = { capacityCases: 570, payloadKg: 0, bays: 6 };
+    expect(vi.mocked(buildDispatchRequest).mock.calls[0]).toEqual([
+      T,
+      'P1',
+      ['RECOMMENDED'],
+      {
+        withPallets: true,
+        now: expect.any(Date),
+        splitFleet: [
+          { code: 'HIRE-10T-1', ...tenTon },
+          { code: 'HIRE-10T-2', ...tenTon },
+          { code: 'HIRE-3T-1', ...threeTon },
+          { code: 'HIRE-3T-2', ...threeTon },
+        ],
+      },
+    ]);
+    expect((s.basisJson as HireBasis).splitWithHires).toBe(true);
     expect((s.basisJson as HireBasis).builtAt).toBe((vi.mocked(buildDispatchRequest).mock.calls[0]![3] as { now: Date }).now.toISOString());
     // The orders the plan in use delivers: the summary tells orders added since apart.
     expect((s.basisJson as HireBasis).baseOrders).toEqual(['o-A']);
@@ -439,6 +457,32 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
     expect(replan).not.toHaveBeenCalled();
     // Used once: the second press is refused.
     expect(await applyHireSuggestion(T, 'P1', 'HS1', user, null)).toMatchObject({ status: 409, body: { code: 'ALREADY_USED' } });
+  });
+
+  it('reads the day again as the what-if did: with its trucks to rent sizing the parts (a suggestion stored before that flag: as before)', async () => {
+    vi.mocked(createNextVersionTx).mockResolvedValue({ child: { id: 'P2', version: 2 }, frozenLoadsCarried: 1, newLoadId: new Map([['L1', 'L1-copy']]) } as never);
+    vi.mocked(persistDispatchResult).mockResolvedValue(new Map([['RECOMMENDED', 'SC2']]));
+    finishedSuggestion();
+    (tables.hireSuggestion![0]!.basisJson as HireBasis).splitWithHires = true;
+    expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).status).toBe(200);
+    const fleet = [
+      { code: 'HIRE-10T-1', capacityCases: 1140, payloadKg: null, bays: 12 },
+      { code: 'HIRE-3T-1', capacityCases: 570, payloadKg: null, bays: 6 },
+    ];
+    // Read before the locks and again under them: both times the what-if's way.
+    expect(vi.mocked(buildDispatchRequest).mock.calls.map((c) => c[3])).toEqual([
+      { withPallets: true, now: undefined, splitFleet: fleet },
+      { withPallets: true, now: undefined, splitFleet: fleet },
+    ]);
+    seed();
+    finishedSuggestion();
+    vi.mocked(createNextVersionTx).mockResolvedValue({ child: { id: 'P2', version: 2 }, frozenLoadsCarried: 1, newLoadId: new Map([['L1', 'L1-copy']]) } as never);
+    vi.mocked(persistDispatchResult).mockResolvedValue(new Map([['RECOMMENDED', 'SC2']]));
+    expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).status).toBe(200);
+    expect(vi.mocked(buildDispatchRequest).mock.calls.map((c) => c[3])).toEqual([
+      { withPallets: true, now: undefined },
+      { withPallets: true, now: undefined },
+    ]);
   });
 
   it('the day changed since: rents the trucks, then a Quick RE-PLAN plans the day with them', async () => {

@@ -6,7 +6,8 @@ import type { DriverAction, DriverManifest, DriverResults, LinkStateCode, NotDel
 import { deviceId, fetchManifest, photoUrl, postActions, postPhoto, safeLocalStorage, tokenFromPath } from '@/lib/driver-page/api';
 import { driverNames, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
 import { clockTime, fmtDate, fmtHours, hhmm, LANG_TOGGLE, pickLang, statusLabel, t, type Lang } from '@/lib/driver-page/i18n';
-import { applyQueued, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
+import { applyQueued, keyedManifest, manifestStopKey, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
+import { loadKeyOfStop, parseStopKey } from '@/lib/driver-link/stop-key';
 import { betterFix, freshFix, positionStatus } from '@/lib/driver-page/photo';
 import {
   actionItem,
@@ -101,7 +102,7 @@ function withResults(m: DriverManifest, r: DriverResults): DriverManifest {
     ...m,
     loads: m.loads.map((l) => ({
       ...l,
-      backAtDepotAt: r.back[String(l.loadNo)] ?? l.backAtDepotAt,
+      backAtDepotAt: r.back[l.key] ?? l.backAtDepotAt,
       stops: l.stops.map((s) => ({ ...s, result: r.stops[s.key] ?? s.result })),
     })),
   };
@@ -137,7 +138,8 @@ export function DriverPage() {
   const [notice, setNotice] = useState(false);
   const [resume, setResume] = useState(false);
   const [cameraSlow, setCameraSlow] = useState(false);
-  const [confirmBack, setConfirmBack] = useState<number | null>(null);
+  /** The load key of the trip whose "Back at depot?" is asked. */
+  const [confirmBack, setConfirmBack] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
 
@@ -263,7 +265,8 @@ export function DriverPage() {
       // Arrivals kept for a trip not dispatched yet go out now that it is.
       const s = store.current;
       if (s) {
-        const out = new Set(m.loads.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED').map((l) => l.loadNo));
+        // Load keys, and the numbers for items saved before the depot was in the keys (queue.ts itemLoadKey).
+        const out = new Set(m.loads.filter((l) => l.status === 'DISPATCHED' || l.status === 'COMPLETED').flatMap((l) => [l.key, String(l.loadNo)]));
         const released = releaseHeld(await s.items(n), out, Date.now());
         if (released.length) await s.put(released);
       }
@@ -333,8 +336,10 @@ export function DriverPage() {
           if (kept && !manifestRef.current) {
             sentRef.current = kept.sent ?? {};
             setSent(sentRef.current);
-            manifestRef.current = kept.manifest;
-            setManifest(kept.manifest);
+            // A manifest kept by the page before the update of 7 Oct 2026 has no load keys (overlay.ts keyedManifest).
+            const km = keyedManifest(kept.manifest);
+            manifestRef.current = km;
+            setManifest(km);
             setStaleAt(kept.savedAt);
             setPhase({ kind: 'ready' });
           }
@@ -459,8 +464,10 @@ export function DriverPage() {
   // ---------------------------------------------------------------- results
   const stopOf = (key: string | null): { load: OverlayLoad; stop: OverlayStop } | null => {
     if (!key || !overlay) return null;
+    // A draft kept before the update of 7 Oct 2026 names its stop without the depot: the one stop it fits.
+    const k = manifestStopKey(overlay, key) ?? key;
     for (const l of overlay) {
-      const s = l.stops.find((x) => x.key === key);
+      const s = l.stops.find((x) => x.key === k);
       if (s) return { load: l, stop: s };
     }
     return null;
@@ -565,7 +572,7 @@ export function DriverPage() {
       width: p.width,
       height: p.height,
     };
-    await s.put([{ key: p.key, ns: n, kind: 'photo', state: 'draft', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo: Number(stopKey.split(':')[0]), body, blob: p.blob }]);
+    await s.put([{ key: p.key, ns: n, kind: 'photo', state: 'draft', createdAt: now, attempts: 0, nextAt: now, stopKey, loadNo: parseStopKey(stopKey)?.loadNo ?? 0, loadKey: loadKeyOfStop(stopKey), body, blob: p.blob }]);
     setDraftPhotos((prev) => ({ ...prev, [p.key]: { url: URL.createObjectURL(p.blob), positionStatus: null } }));
     await putDraft(stopKey, { ...entering.draft, photoKeys: [...entering.draft.photoKeys, p.key], pendingPhotoKey: null, savedAt: Date.now() });
     // The position asked when the photo came back (never where "Use photo" was tapped); Save never
@@ -594,11 +601,13 @@ export function DriverPage() {
     await putDraft(entering.stopKey, { ...entering.draft, photoKeys: entering.draft.photoKeys.filter((k) => k !== key), savedAt: Date.now() });
   };
 
-  const backAtDepot = (loadNo: number) => {
+  const backAtDepot = (loadKey: string) => {
     setConfirmBack(null);
-    const l = overlay?.find((x) => x.loadNo === loadNo);
-    const missing = l ? l.stops.filter((s) => s.view.doneAt === null).length : 0;
-    void enqueue({ key: newKey(), type: 'BACK_AT_DEPOT', load: loadNo, at: new Date().toISOString(), pos: posOf(tracker.lastFix()) }, false);
+    const l = overlay?.find((x) => x.key === loadKey);
+    if (!l) return;
+    const missing = l.stops.filter((s) => s.view.doneAt === null).length;
+    // The load's depot too: the truck can have a Load 1 at two depots today.
+    void enqueue({ key: newKey(), type: 'BACK_AT_DEPOT', load: l.loadNo, ...(l.depotId ? { depot: l.depotId } : {}), at: new Date().toISOString(), pos: posOf(tracker.lastFix()) }, false);
     tracker.dismissBack();
     if (missing) setInfo(t(lang, 'tripClosesWhenAll'));
   };
@@ -634,9 +643,9 @@ export function DriverPage() {
   const unsent = linkDown && overlay ? unsentList(overlay, items) : [];
 
   const flow =
-    entering && open && entering.stopKey === open.stop.key ? (
+    entering && open && stopOf(entering.stopKey)?.stop.key === open.stop.key ? (
       <>
-        {restored && restored.stopKey === open.stop.key ? (
+        {restored && stopOf(restored.stopKey)?.stop.key === open.stop.key ? (
           <p className="rounded-xl bg-blue-50 p-3 text-sm font-semibold" data-testid="draft-restored">
             {t(lang, 'draftRestored')} {restored.lostPhoto ? t(lang, 'lastPhotoLost') : ''}
           </p>
@@ -744,15 +753,15 @@ export function DriverPage() {
           ) : null}
           {overlay.map((l, i) => (
             <TripCard
-              key={l.loadNo}
+              key={l.key}
               lang={lang}
               manifest={manifest}
               load={l}
               open={i === tripIndex}
-              current={tracker.trip?.loadNo === l.loadNo}
+              current={tracker.trip?.key === l.key}
               onToggle={() => setOpenTrip(i === tripIndex ? -1 : i)}
               onStop={(s) => setOpenStop(s.key)}
-              onBack={() => setConfirmBack(l.loadNo)}
+              onBack={() => setConfirmBack(l.key)}
             />
           ))}
         </main>
@@ -768,10 +777,10 @@ export function DriverPage() {
       ) : null}
       {whenStop && !tracker.whichCustomer ? <ArrivedWhen lang={lang} customer={whenStop.stop.customerName} onAnswer={(m) => tracker.answerWhen(whenStop.stop.key, m)} /> : null}
       {/* The suggestion names the trip it was raised for, and only while that trip is still the current one. */}
-      {(confirmBack !== null || (tracker.backSuggested !== null && tracker.trip?.loadNo === tracker.backSuggested)) && overlay ? (
+      {(confirmBack !== null || (tracker.backSuggested !== null && tracker.trip?.key === tracker.backSuggested)) && overlay ? (
         <BackAtDepotDialog
           lang={lang}
-          load={overlay.find((l) => l.loadNo === (confirmBack ?? tracker.backSuggested)) ?? null}
+          load={overlay.find((l) => l.key === (confirmBack ?? tracker.backSuggested)) ?? null}
           onYes={(n) => backAtDepot(n)}
           onNo={() => {
             setConfirmBack(null);
@@ -976,7 +985,7 @@ function TripCard({
   );
 }
 
-function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: OverlayLoad | null; onYes: (loadNo: number) => void; onNo: () => void }) {
+function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: OverlayLoad | null; onYes: (loadKey: string) => void; onNo: () => void }) {
   if (!load || load.status !== 'DISPATCHED' || load.back) return null;
   const missing = load.stops.filter((s) => s.view.doneAt === null).length;
   return (
@@ -987,7 +996,7 @@ function BackAtDepotDialog({ lang, load, onYes, onNo }: { lang: Lang; load: Over
       <p className="mt-1 text-sm">{t(lang, 'tripOf', { n: load.loadNo, m: Math.max(load.trips, load.loadNo) })}</p>
       {missing ? <p className="mt-2 rounded-lg bg-amber-50 p-2 text-sm font-semibold">{t(lang, 'stopsWithoutResult', { n: missing })}</p> : null}
       <div className="mt-3 grid grid-cols-2 gap-2">
-        <button type="button" onClick={() => onYes(load.loadNo)} className="min-h-14 rounded-xl bg-slate-900 text-lg font-bold text-white">
+        <button type="button" onClick={() => onYes(load.key)} className="min-h-14 rounded-xl bg-slate-900 text-lg font-bold text-white">
           {t(lang, 'backAtDepot')}
         </button>
         <button type="button" onClick={onNo} className="min-h-14 rounded-xl border border-slate-400 text-lg font-semibold">

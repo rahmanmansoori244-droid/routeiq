@@ -350,7 +350,7 @@ describe('Part 2: results, photos and Back at depot from the driver page', () =>
     const before = await prisma.stopEvent.count({ where: { tenantId: t.tenantId } });
     expect((await post(token, [a, o])).results.map((r) => r.status)).toEqual(['duplicate', 'duplicate']);
     expect(await prisma.stopEvent.count({ where: { tenantId: t.tenantId } })).toBe(before);
-    const visit = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[0]!.key.split(':')[1]) } });
+    const visit = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[0]!.key.split(':').at(-1)) } });
     expect(visit).toMatchObject({ outcome: 'DELIVERED', photoCount: 1 });
     // The photo of this truck-day is served to its link only.
     expect((await driverGet(`/api/d/photos/${photo.photoId}`, token)).status).toBe(200);
@@ -371,7 +371,7 @@ describe('Part 2: results, photos and Back at depot from the driver page', () =>
     const load = m.loads.find((l: any) => l.status === 'DISPATCHED');
     expect(load).toBeTruthy();
     const actions: unknown[] = load.stops.map((s: any) => ({ key: uuid(), type: 'OUTCOME', stop: s.key, at: ago(30), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] }));
-    actions.push({ key: uuid(), type: 'BACK_AT_DEPOT', load: load.loadNo, at: ago(10) });
+    actions.push({ key: uuid(), type: 'BACK_AT_DEPOT', load: load.loadNo, depot: load.depotId, at: ago(10) });
     expect((await post(t02Token, actions)).results.every((r) => r.status === 'ok')).toBe(true);
     const row = await prisma.planLoad.findFirstOrThrow({ where: { runId, truckId: trucks.T02, loadNo: load.loadNo } });
     expect(row.status).toBe('COMPLETED');
@@ -388,7 +388,7 @@ describe('Part 2: results, photos and Back at depot from the driver page', () =>
     if (stops[1]) {
       const fill = await post(token, [{ key: uuid(), type: 'OUTCOME', stop: stops[1].key, at: ago(4), outcome: 'NOT_DELIVERED', reason: 'NO_ONE_TO_RECEIVE', photoKeys: [] }]);
       expect(fill.results[0]).toMatchObject({ status: 'ok' });
-      const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[1].key.split(':')[1]) } });
+      const v = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId: t.tenantId, truckId: trucks.T01, loadNo: t01LoadNo, sequence: Number(stops[1].key.split(':').at(-1)) } });
       expect(v).toMatchObject({ outcome: 'NOT_DELIVERED', outcomeLate: true });
     }
   });

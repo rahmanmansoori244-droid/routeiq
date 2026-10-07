@@ -331,12 +331,12 @@ describe('trips, the depot and reloads (spec section 7.4)', () => {
   it('19. trip 1 stop 7 without a result and trip 2 dispatched to the same customer -> the arrival goes to trip 2\'s stop', () => {
     const trip = currentTrip(
       [
-        { loadNo: 1, status: 'DISPATCHED', departMin: 420, back: false },
-        { loadNo: 2, status: 'DISPATCHED', departMin: 780, back: false },
+        { key: 'd1:1', loadNo: 1, status: 'DISPATCHED', departMin: 420, back: false },
+        { key: 'd1:2', loadNo: 2, status: 'DISPATCHED', departMin: 780, back: false },
       ],
       { started: true, nowMin: 800 },
     );
-    expect(trip).toEqual({ loadNo: 2, held: false });
+    expect(trip).toEqual({ key: 'd1:2', loadNo: 2, held: false });
     const stops = trackStops(2, [{ key: '2:1', sequence: 1, lat: ACME.lat, lng: ACME.lng, doneAt: null, visited: false }], DEPOT, P);
     const r = feed(fresh(), [...track(-30, -5, ACME, 400), ...track(0, 25, ACME)], stops);
     expect(arrivals(r)).toEqual([expect.objectContaining({ key: '2:1' })]);
@@ -367,35 +367,35 @@ describe('trips, the depot and reloads (spec section 7.4)', () => {
 
   it('25. currentTrip: a LOCKED load after Start -> held; the highest DISPATCHED load wins over an earlier one with stops left', () => {
     const loads = [
-      { loadNo: 1, status: 'LOCKED', departMin: 430, back: false },
-      { loadNo: 2, status: 'PLANNED', departMin: 800, back: false },
+      { key: 'd1:1', loadNo: 1, status: 'LOCKED', departMin: 430, back: false },
+      { key: 'd1:2', loadNo: 2, status: 'PLANNED', departMin: 800, back: false },
     ];
     expect(currentTrip(loads, { started: false, nowMin: 420 })).toBeNull();
     expect(currentTrip(loads, { started: true, nowMin: 395 })).toBeNull(); // 35 min before departure
-    expect(currentTrip(loads, { started: true, nowMin: 405 })).toEqual({ loadNo: 1, held: true });
+    expect(currentTrip(loads, { started: true, nowMin: 405 })).toEqual({ key: 'd1:1', loadNo: 1, held: true });
     expect(
       currentTrip(
         [
-          { loadNo: 1, status: 'DISPATCHED', departMin: 430, back: false },
-          { loadNo: 2, status: 'DISPATCHED', departMin: 800, back: false },
+          { key: 'd1:1', loadNo: 1, status: 'DISPATCHED', departMin: 430, back: false },
+          { key: 'd1:2', loadNo: 2, status: 'DISPATCHED', departMin: 800, back: false },
         ],
         { started: false, nowMin: 820 },
       ),
-    ).toEqual({ loadNo: 2, held: false });
+    ).toEqual({ key: 'd1:2', loadNo: 2, held: false });
     // Trip 2 back at the depot: trip 1 (still out) is the current trip again.
     expect(
       currentTrip(
         [
-          { loadNo: 1, status: 'DISPATCHED', departMin: 430, back: false },
-          { loadNo: 2, status: 'DISPATCHED', departMin: 800, back: true },
+          { key: 'd1:1', loadNo: 1, status: 'DISPATCHED', departMin: 430, back: false },
+          { key: 'd1:2', loadNo: 2, status: 'DISPATCHED', departMin: 800, back: true },
         ],
         { started: false, nowMin: 900 },
       ),
-    ).toEqual({ loadNo: 1, held: false });
+    ).toEqual({ key: 'd1:1', loadNo: 1, held: false });
   });
 
   it('timerStep: the last trip back stops the watch; a trip on the road again restarts it; a timer the driver stopped stays stopped', () => {
-    const loads = (back: boolean, status = 'DISPATCHED') => [{ loadNo: 1, status, departMin: 430, back }];
+    const loads = (back: boolean, status = 'DISPATCHED') => [{ key: 'd1:1', loadNo: 1, status, departMin: 430, back }];
     const live = (on: boolean, autoStopped: boolean, l: ReturnType<typeof loads>, nowMin = 600) => {
       const trip = currentTrip(l, { started: on, nowMin });
       return timerStep({ on, trip, autoStopped, loadsKnown: true });
@@ -406,7 +406,7 @@ describe('trips, the depot and reloads (spec section 7.4)', () => {
     // A held trip (LOCKED, the driver tapped Start deliveries) is still something to wait for.
     expect(live(true, false, loads(false, 'LOCKED'), 420)).toBe('NONE');
     // Stopped by itself; trip 2 is dispatched later: RESTART. Still nothing to time: NONE.
-    const two = [{ loadNo: 1, status: 'DISPATCHED', departMin: 430, back: true }, { loadNo: 2, status: 'LOCKED', departMin: 900, back: false }];
+    const two = [{ key: 'd1:1', loadNo: 1, status: 'DISPATCHED', departMin: 430, back: true }, { key: 'd1:2', loadNo: 2, status: 'LOCKED', departMin: 900, back: false }];
     expect(live(false, true, two, 700)).toBe('NONE');
     expect(live(false, true, [two[0]!, { ...two[1]!, status: 'DISPATCHED' }], 900)).toBe('RESTART');
     // Stopped by hand: never restarted by itself.

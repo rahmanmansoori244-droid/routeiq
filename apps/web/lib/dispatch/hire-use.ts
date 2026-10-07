@@ -49,7 +49,7 @@ import { isSupersededRun } from './plan-status';
 import { admissionRefused, dayMismatch, replan, replanRefusal, weightRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
 import { solveAdmission } from './solve-admission';
 import { basisFingerprint, cancelHireChecksOfDay, companyToday, DAY_OVER_TEXT, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
-import { DEFAULT_DRIVER_DAY_RATE, hiredTruckDescription, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
+import { DEFAULT_DRIVER_DAY_RATE, hiredTruckDescription, hireSplitFleet, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
 import { fmtDayMonth, isoOf } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -374,7 +374,10 @@ export async function applyHireSuggestion(
   if (isoOf(run.runDate) < (await companyToday(tenantId))) return refuse(409, 'DAY_OVER', DAY_OVER_TEXT);
 
   const [optionsNow, rentedNow] = await Promise.all([depotHireOptions(tenantId, run.depotId), rentedOnDay(tenantId, run.runDate)]);
-  const build = () => buildDispatchRequest(tenantId, runId, ['RECOMMENDED'], { withPallets: basis.withPallets, now: opts.now });
+  // The day read again as the what-if read it: with its trucks to rent sizing the customers' parts
+  // (HireBasis.splitWithHires), so a customer kept as one visit for a rented truck is the same stop.
+  const splitFleet = basis.splitWithHires ? hireSplitFleet(whatIf.trucks) : undefined;
+  const build = () => buildDispatchRequest(tenantId, runId, ['RECOMMENDED'], { withPallets: basis.withPallets, now: opts.now, ...(splitFleet ? { splitFleet } : {}) });
   let now: BuiltRequest;
   try {
     now = await build();

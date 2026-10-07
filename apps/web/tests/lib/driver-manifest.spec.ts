@@ -73,7 +73,7 @@ describe('projectManifest', () => {
   it('carries the order lines per order (no aggregation) and the structured hours', () => {
     const m = projectManifest([fixture()], input());
     const s1 = m.loads[0].stops[0];
-    expect(s1).toMatchObject({ key: '1:1', sequence: 1, customerCode: 'C001', branchCode: 'B1', etaMin: 400, untilMin: 425, cases: 70 });
+    expect(s1).toMatchObject({ key: 'd1:1:1', sequence: 1, customerCode: 'C001', branchCode: 'B1', etaMin: 400, untilMin: 425, cases: 70 });
     expect(s1.orders).toEqual([
       {
         orderId: 'o1',
@@ -212,7 +212,7 @@ describe('Part 2: results merged into the manifest', () => {
     const key = first.stops[0]!.key;
     const merged = mergeResults(m, {
       stops: { [key]: { state: 'DONE', arrivedAt: null, arrivalObserved: true, departedAt: null, minutes: null, outcome: 'DELIVERED', reason: null, note: null, outcomeAt: null, by: 'DRIVER', casesDelivered: 1, lines: null, photoIds: [], proofPhotos: 0, noPhotoReason: null, late: false, editable: true, carriedTo: null } },
-      back: { [String(first.loadNo)]: '2026-10-05T12:00:00.000Z' },
+      back: { [first.key]: '2026-10-05T12:00:00.000Z' },
     });
     expect(merged.loads[0]!.stops[0]!.result).toMatchObject({ outcome: 'DELIVERED' });
     expect(merged.loads[0]!.stops[1]?.result ?? null).toBeNull();

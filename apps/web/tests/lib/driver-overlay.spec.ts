@@ -20,7 +20,7 @@ const T0 = Date.parse('2026-10-05T06:00:00Z');
 
 function stop(seq: number, name: string, result: StopResult | null = null): ManifestStop {
   return {
-    key: `1:${seq}`,
+    key: `D1:1:${seq}`,
     sequence: seq,
     customerName: name,
     customerCode: name,
@@ -69,24 +69,24 @@ function serverResult(over: Partial<StopResult>): StopResult {
 }
 
 function manifest(stops: ManifestStop[], backAtDepotAt: string | null = null): Pick<DriverManifest, 'loads'> {
-  return { loads: [{ loadNo: 1, trips: 1, status: 'DISPATCHED', actionable: true, departMin: 430, returnMin: 900, driverName: 'Salim', cases: 80, backAtDepotAt, stops }] };
+  return { loads: [{ key: 'D1:1', depotId: 'D1', loadNo: 1, trips: 1, status: 'DISPATCHED', actionable: true, departMin: 430, returnMin: 900, driverName: 'Salim', cases: 80, backAtDepotAt, stops }] };
 }
 
 const item = (a: DriverAction, at = T0, held = false): QueueItem => actionItem(NS, a, at, held);
 
 describe('applyQueued', () => {
   it('an unsent result shows "saved on phone" and ends the stop for the tracker; it is never offered again', () => {
-    const r = item({ key: newKey(), type: 'OUTCOME', stop: '1:1', at: new Date(T0).toISOString(), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'B1', delivered: 4 }], photoKeys: [] });
+    const r = item({ key: newKey(), type: 'OUTCOME', stop: 'D1:1:1', at: new Date(T0).toISOString(), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'B1', delivered: 4 }], photoKeys: [] });
     const [l] = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [r]);
     expect(l!.stops[0]!.view).toMatchObject({ outcome: 'PARTLY_DELIVERED', pending: true, doneAt: T0, casesDelivered: 34, state: 'DONE', reason: 'DAMAGED_GOODS' });
     expect(l!.stops[1]!.view).toMatchObject({ outcome: null, pending: false, doneAt: null });
   });
 
   it('an unsent arrival shows its time and the running timer', () => {
-    const a = item({ key: newKey(), type: 'ARRIVE', stop: '1:2', at: new Date(T0 + 60_000).toISOString(), mode: 'AUTO', observed: false });
+    const a = item({ key: newKey(), type: 'ARRIVE', stop: 'D1:1:2', at: new Date(T0 + 60_000).toISOString(), mode: 'AUTO', observed: false });
     const [l] = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [a]);
     expect(l!.stops[1]!.view).toMatchObject({ arrivedAt: T0 + 60_000, arrivalObserved: false, state: 'ARRIVED', pending: true });
-    expect(stopInProgress([l!], 1)).toEqual({ key: '1:2', arrivedAt: T0 + 60_000, observed: false });
+    expect(stopInProgress([l!], 'D1:1')).toEqual({ key: 'D1:1:2', arrivedAt: T0 + 60_000, observed: false });
   });
 
   it('an unsent Back at depot closes the trip on the phone', () => {
@@ -99,27 +99,27 @@ describe('applyQueued', () => {
 
   it('a server result that differs from what this phone sent, with nothing left to send, shows "changed by office / another phone"', () => {
     const m = manifest([stop(1, 'ACME', serverResult({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', by: 'OFFICE', casesDelivered: 0 }))]);
-    const sent = { '1:1': { outcome: 'DELIVERED' as const, at: new Date(T0).toISOString() } };
+    const sent = { 'D1:1:1': { outcome: 'DELIVERED' as const, at: new Date(T0).toISOString() } };
     expect(applyQueued(m, [], sent)[0]!.stops[0]!.view).toMatchObject({ outcome: 'NOT_DELIVERED', changedByOffice: true });
     // The same result: nothing to flag. Something still to send: the phone's own result shows.
     expect(applyQueued(manifest([stop(1, 'ACME', serverResult({}))]), [], sent)[0]!.stops[0]!.view.changedByOffice).toBe(false);
-    const pending = item({ key: newKey(), type: 'OUTCOME', stop: '1:1', at: new Date(T0 + 1).toISOString(), outcome: 'DELIVERED', photoKeys: [] });
+    const pending = item({ key: newKey(), type: 'OUTCOME', stop: 'D1:1:1', at: new Date(T0 + 1).toISOString(), outcome: 'DELIVERED', photoKeys: [] });
     expect(applyQueued(m, [pending], sent)[0]!.stops[0]!.view).toMatchObject({ outcome: 'DELIVERED', pending: true, changedByOffice: false });
   });
 
   it('draft photos do not count; queued photos are counted per stop; a server ARRIVED stop is in progress', () => {
-    const draft: QueueItem = { ...item({ key: newKey(), type: 'ARRIVE', stop: '1:1', at: new Date(T0).toISOString(), mode: 'AUTO' }), kind: 'photo', state: 'draft' };
+    const draft: QueueItem = { ...item({ key: newKey(), type: 'ARRIVE', stop: 'D1:1:1', at: new Date(T0).toISOString(), mode: 'AUTO' }), kind: 'photo', state: 'draft' };
     const ready: QueueItem = { ...draft, key: newKey(), state: 'ready' };
     const m = manifest([stop(1, 'ACME', serverResult({ state: 'ARRIVED', outcome: null, outcomeAt: null, casesDelivered: null, arrivedAt: new Date(T0).toISOString() }))]);
     const [l] = applyQueued(m, [draft, ready]);
     expect(l!.stops[0]!.view).toMatchObject({ localPhotos: 1, state: 'ARRIVED', doneAt: null });
-    expect(stopInProgress([l!], 1)).toEqual({ key: '1:1', arrivedAt: T0, observed: true });
+    expect(stopInProgress([l!], 'D1:1')).toEqual({ key: 'D1:1:1', arrivedAt: T0, observed: true });
   });
 
   it('lists the unsent results for the "link replaced" page', () => {
-    const r = item({ key: newKey(), type: 'OUTCOME', stop: '1:2', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const r = item({ key: newKey(), type: 'OUTCOME', stop: 'D1:1:2', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
     const loads = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [r]);
-    expect(unsentList(loads, [r])).toEqual([{ stopKey: '1:2', customer: 'BETA', outcome: 'NOT_DELIVERED', at: new Date(T0).toISOString() }]);
+    expect(unsentList(loads, [r])).toEqual([{ stopKey: 'D1:1:2', customer: 'BETA', outcome: 'NOT_DELIVERED', at: new Date(T0).toISOString() }]);
   });
 });
 
@@ -128,7 +128,7 @@ describe('applyQueued', () => {
 // ---------------------------------------------------------------------------------------
 describe('useTracker on the page', () => {
   const DEPOT = { lat: 23.6, lng: 58.3 };
-  const queuedArrive = () => item({ key: newKey(), type: 'ARRIVE', stop: '1:2', at: new Date(T0 + 60_000).toISOString(), mode: 'AUTO' });
+  const queuedArrive = () => item({ key: newKey(), type: 'ARRIVE', stop: 'D1:1:2', at: new Date(T0 + 60_000).toISOString(), mode: 'AUTO' });
   const base = (loads: ReturnType<typeof applyQueued>, over: { ready?: boolean } = {}): Parameters<typeof useTracker>[0] => ({
     loads,
     depot: DEPOT,
@@ -154,7 +154,7 @@ describe('useTracker on the page', () => {
     host.render();
     expect(host.tree.state.phase).toBe('SEEKING');
     host.render({ loads: applyQueued(m, [queuedArrive()]), ready: true });
-    expect(host.tree.state).toMatchObject({ phase: 'AT_STOP', key: '1:2', arrivedAt: T0 + 60_000 });
+    expect(host.tree.state).toMatchObject({ phase: 'AT_STOP', key: 'D1:1:2', arrivedAt: T0 + 60_000 });
   });
 
   it('"Back at depot?" belongs to the trip it was raised for: dispatching trip 2 clears it', () => {
@@ -172,9 +172,9 @@ describe('useTracker on the page', () => {
       watcher!({ coords: { latitude: DEPOT.lat, longitude: DEPOT.lng, accuracy: 10, speed: 0 }, timestamp: Date.now() });
       host.flush();
     }
-    expect(host.tree.backSuggested).toBe(1);
+    expect(host.tree.backSuggested).toBe('D1:1');
     // The dispatcher dispatches trip 2: the suggestion is not carried over to it.
-    const twoTrips = { loads: [...done.loads, { ...done.loads[0]!, loadNo: 2, trips: 2, stops: [{ ...stop(1, 'GAMMA'), key: '2:1' }] }] };
+    const twoTrips = { loads: [...done.loads, { ...done.loads[0]!, key: 'D1:2', loadNo: 2, trips: 2, stops: [{ ...stop(1, 'GAMMA'), key: 'D1:2:1' }] }] };
     host.render({ loads: applyQueued(twoTrips, []) });
     expect(host.tree.trip).toMatchObject({ loadNo: 2 });
     expect(host.tree.backSuggested).toBeNull();
@@ -196,7 +196,7 @@ describe('useTracker on the page', () => {
       },
     });
     const first = manifest([stop(1, 'ACME'), stop(2, 'BETA')]).loads[0]!;
-    const trip = (loadNo: number, over: Partial<typeof first> = {}) => ({ ...first, loadNo, trips: 3, stops: [{ ...stop(1, 'GAMMA'), key: `${loadNo}:1` }], ...over });
+    const trip = (loadNo: number, over: Partial<typeof first> = {}) => ({ ...first, key: `D1:${loadNo}`, loadNo, trips: 3, stops: [{ ...stop(1, 'GAMMA'), key: `D1:${loadNo}:1` }], ...over });
     const backAt = new Date(T0 + 3_600_000).toISOString();
     const host = new Host(useTracker, { ...base(applyQueued({ loads: [first] }, [])), onTrackingChange: (on: boolean) => void saved.push(on) });
     host.render();
@@ -240,7 +240,7 @@ describe('the result sheet (review of 4 Oct 2026)', () => {
     expect(canSave(l!.stops[1]!, draft(), true)).toBe(false);
     expect(canSave(l!.stops[1]!, draft({ noPhoto: true }), true)).toBe(true);
     // Delivered with P1 is still on the phone (weak signal), its photo too: the change counts it, as the server will.
-    const queued = item({ key: newKey(), type: 'OUTCOME', stop: '1:2', at: new Date(T0).toISOString(), outcome: 'DELIVERED', photoKeys: [newKey()] });
+    const queued = item({ key: newKey(), type: 'OUTCOME', stop: 'D1:1:2', at: new Date(T0).toISOString(), outcome: 'DELIVERED', photoKeys: [newKey()] });
     const [q] = applyQueued(manifest([stop(1, 'ACME'), stop(2, 'BETA')]), [queued]);
     expect(proofPhotos(q!.stops[1]!)).toBe(1);
     expect(canSave(q!.stops[1]!, draft(), true)).toBe(true);
@@ -276,7 +276,7 @@ describe('the result sheet (review of 4 Oct 2026)', () => {
     expect(proofPhotos(l!.stops[0]!)).toBe(0);
     expect(canSave(l!.stops[0]!, draft({ outcome: 'DELIVERED', reason: null }), true)).toBe(false);
     // The same on the phone: a queued Not delivered with a photo.
-    const queued = item({ key: newKey(), type: 'OUTCOME', stop: '1:1', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [newKey()] });
+    const queued = item({ key: newKey(), type: 'OUTCOME', stop: 'D1:1:1', at: new Date(T0).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [newKey()] });
     const [q] = applyQueued(manifest([stop(1, 'ACME')]), [queued]);
     expect(proofPhotos(q!.stops[0]!)).toBe(0);
     expect(canSave(q!.stops[0]!, draft({ outcome: 'DELIVERED', reason: null }), true)).toBe(false);
