@@ -14,9 +14,10 @@
  *    over) - rents the trucks the what-if used - one-day trucks for that date (Truck.onlyOnDate, hired,
  *    codes HIRE-10T-0710-1, the option's size and costs) - makes the next plan version (copy-forward,
  *    frozen loads exactly as they are) and applies the what-if's plan to it, with those trucks and with
- *    the times it was planned with (a same-day plan's first departures stay those of the check, so its
- *    own timetable check never blocks them), its optimizer findings under the rented trucks' ids. A day
- *    found changed under the locks takes the re-plan way below instead.
+ *    the times it was planned with (a same-day plan's first departures stay those of the check's search,
+ *    timed when it really started - HireBasis.timedAt -, so its own timetable check never blocks them),
+ *    its optimizer findings under the rented trucks' ids. A day found changed under the locks takes the
+ *    re-plan way below instead.
  * 3. Otherwise the trucks are rented and a RE-PLAN starts (Quick): it plans the day as it is now, with
  *    them. The trucks are made from the hire option AS IT IS NOW (size, payload, cost per day, its own
  *    km charge - third review: a changed option once rented a truck with the check's old km charge), the
@@ -159,14 +160,15 @@ function withTrucks(now: BuiltRequest, trucks: DispatchTruck[]): BuiltRequest {
 }
 
 /**
- * The PLAN way applies the what-if's own loads, timed when its request was built (review of the hire
- * branch): the plan is stored with those times - the first departure and loading start of a same-day
- * plan, the plan warning and the settings kept with it - never with the later clock of "now", whose
- * timetable check would block the earliest of those loads (TURNAROUND / EARLY_DEPARTURE, up to
+ * The PLAN way applies the what-if's own loads, timed when its search started (`timedAt`:
+ * HireBasis.timedAt, ISSUE 6; an older row: when its request was built - review of the hire branch):
+ * the plan is stored with those times - the first departure and loading start of a same-day plan, the
+ * plan warning and the settings kept with it - never with the later clock of "now", whose timetable
+ * check would block the earliest of those loads (TURNAROUND / EARLY_DEPARTURE, up to
  * SAME_DAY_SLACK_MIN short).
  */
-export function keepWhatIfTiming(built: BuiltRequest, whatIf: DispatchRequest, builtAt: string | undefined): void {
-  if (builtAt && built.sameDay) retimeSameDay(built, new Date(builtAt), 0);
+export function keepWhatIfTiming(built: BuiltRequest, whatIf: DispatchRequest, timedAt: string | undefined): void {
+  if (timedAt && built.sameDay) retimeSameDay(built, new Date(timedAt), 0);
   const cfg = built.request.config as Record<string, unknown> | undefined;
   if (!cfg) return;
   for (const k of ['shift_start_min', 'loading_from_min'] as const) {
@@ -429,7 +431,7 @@ export async function applyHireSuggestion(
             warnings: [...withHires.warnings, `Planned with ${made.size} truck(s) hired for this day (hire suggestion): ${[...made.values()].map((m) => m.code).join(', ')}.`],
             ...(now.settings ? { settings: { ...now.settings } } : {}),
           };
-          keepWhatIfTiming(built, whatIf, basis.builtAt);
+          keepWhatIfTiming(built, whatIf, basis.timedAt ?? basis.builtAt);
           await applyWeightChanges(tx, tenantId, child.id, built.weightChanges, user.id);
           const ids = await persistDispatchResult(tx, tenantId, child.id, built, mapped.response, { jobId: null });
           await applyScenario(tx, tenantId, child.id, ids.get('RECOMMENDED')!, user.id);

@@ -50,12 +50,12 @@ vi.mock('@/lib/solver-client', async (orig) => {
   };
 });
 /** The request is built for this delivery day at the start's clock (a plan for it made on the day moves its times). */
-const build = vi.hoisted(() => ({ runDateIso: null as string | null }));
+const build = vi.hoisted(() => ({ runDateIso: null as string | null, prepMin: 30, perCase: 0.04 }));
 function builtFor(now: Date = new Date()) {
   // The same-day rule exactly as buildDispatchRequest applies it (plan-service sameDayBasis): 06:00
-  // first departure, 30 min turnaround, 0.04 min per case, 800-case trucks.
+  // first departure, 30 min turnaround, 0.04 min per case, 800-case trucks (a test may set others).
   const basis = build.runDateIso
-    ? sameDayBasis({ runDateIso: build.runDateIso, timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 30, depotCloseMin: null, loading: { perCase: 0.04, exampleCases: 800 } }, 360, now)
+    ? sameDayBasis({ runDateIso: build.runDateIso, timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: build.prepMin, depotCloseMin: null, loading: { perCase: build.perCase, exampleCases: 800 } }, 360, now)
     : undefined;
   const t = basis?.timing;
   return {
@@ -92,7 +92,7 @@ vi.mock('@/lib/dispatch/plan-service', async (orig) => {
 
 import { JOB_LOST_AFTER_MS, jobRunningText, lastSignOfLife, resetStuckPlan, stuckPlanState } from '@/lib/dispatch/stuck-plan';
 import { trackInflight } from '@/lib/jobs/optimize-job';
-import { startDispatchOptimize } from '@/lib/dispatch/start-optimize';
+import { replan, startDispatchOptimize } from '@/lib/dispatch/start-optimize';
 import { solveAdmission } from '@/lib/dispatch/solve-admission';
 import { stopSearch } from '@/lib/dispatch/stop-search';
 import { activeDispatchJobs } from '@/lib/jobs/dispatch-job';
@@ -137,6 +137,8 @@ beforeEach(() => {
   solverFake.sent = [];
   solverFake.hold = null;
   build.runDateIso = null;
+  build.prepMin = 30;
+  build.perCase = 0.04;
   activeDispatchJobs.clear();
   // These tests state the default 20-minute cap. CI runs the unit suite with THOROUGH_MAX_SEC=60 (set
   // for the integration suite in the same job): unset here, so every start uses the default.
@@ -211,7 +213,7 @@ describe('a same-day THOROUGH is timed from the end of its search, never from th
   });
 
   for (const mode of ['THOROUGH', 'QUICK'] as const) {
-    it(`the job: ${mode === 'THOROUGH' ? 'after 25 minutes in the queue it is timed from when it really starts' : 'QUICK is sent exactly as it was built, however long it waited'}`, async () => {
+    it(`the job: after 25 minutes in the queue it is timed from when it really starts (${mode}; ISSUE 6: QUICK too)`, async () => {
       seed('2026-09-29');
       build.runDateIso = '2026-09-29';
       // Another company's solve of the same mode holds the slot this start needs: it queues.
@@ -250,11 +252,87 @@ describe('a same-day THOROUGH is timed from the end of its search, never from th
         expect(args.built.warnings[0]).toMatch(/^Planned from 20:15 \(now 19:25 \+ up to 20 min Thorough search/);
         expect(args.built.settings).toMatchObject({ planFrom: { fromMin: 1215 }, loadingFromMin: 1185 });
       } else {
-        expect(JSON.stringify(sent)).toBe(built);
-        expect(sent).toMatchObject({ shift_start_min: 1170, loading_from_min: 1140 });
+        // ISSUE 6: built at 19:00 (19:30 / 19:00), sent as of 19:25 - never "exactly as built".
+        expect(JSON.parse(built)).toMatchObject({ shift_start_min: 1170, loading_from_min: 1140 });
+        expect(sent).toMatchObject({ shift_start_min: 1195, loading_from_min: 1165 }); // 19:25 + 30; 19:25
+        expect(job.requestJson.config).toMatchObject({ shift_start_min: 1195, loading_from_min: 1165 });
+        expect(args.built.warnings[0]).toMatch(/^Planned from 19:55 \(now 19:25 \+ 30 min preparation\)/);
+        expect(args.built.settings).toMatchObject({ planFrom: { fromMin: 1195 }, loadingFromMin: 1165 });
       }
       expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
     }, 20_000);
+  }
+});
+
+describe('ISSUE 6: a solve queued at 09:05 that really starts at 09:20 lets no load leave before 09:20, Quick or Thorough', () => {
+  const g = globalThis as unknown as { __routeiqInflight: Map<string, Promise<unknown>> };
+  const AT_0905 = new Date('2026-09-29T05:05:00Z'); // 09:05 in Muscat
+  const AT_0920 = new Date('2026-09-29T05:20:00Z');
+  const MIN_0920 = 9 * 60 + 20;
+  /** The earliest a new load may leave, read as the optimizer reads it (dispatch_solver._new_load_start_min, turnaround 0 here). */
+  const earliestDeparture = (c: Record<string, any>) => Math.max(c.shift_start_min, typeof c.loading_from_min === 'number' ? c.loading_from_min + build.prepMin : 0);
+
+  /** A plan already applied (a re-plan makes the next version of it). */
+  function seedApplied() {
+    seed('2026-09-29');
+    Object.assign(tables.runPlan[0], { status: 'READY', chosenScenarioId: 'sc1', optimizationMode: 'BALANCED', finalizedAt: null, totalOrders: 1, unservedCount: 0, summaryJson: null, reconciliationJson: { ok: true }, changeSummaryJson: null });
+    tables.routeAssignment = [];
+    tables.unservedOrder = [];
+    tables.scenarioResult = [{ id: 'sc1', runId: 'P', name: 'RECOMMENDED', trucksUsed: 1, totalDistanceKm: 1, totalTimeMin: 1, totalCost: 1, avgUtilizationPct: 1, unservedCount: 0, detailsJson: { name: 'RECOMMENDED', status: 'OPTIMIZED', loads: [], scope: { orderIds: ['O2'], frozenOrderIds: [], orderPriority: {}, frozenLoadIds: [] } }, createdAt: AT_0905 }];
+  }
+
+  for (const via of ['OPTIMIZE', 'RE-PLAN'] as const) {
+    for (const mode of ['QUICK', 'THOROUGH'] as const) {
+      it(`${via}, ${mode}: queued at 09:05, its search starts at 09:20 - the optimizer is sent 09:20 as now, never 09:05`, async () => {
+        if (via === 'OPTIMIZE') seed('2026-09-29');
+        else seedApplied();
+        build.runDateIso = '2026-09-29';
+        // Turnaround and loading per case 0: the bound is "now" itself, so a stale one lets a load leave at 09:05.
+        build.prepMin = 0;
+        build.perCase = 0;
+        // Other companies' solves of the same mode hold the slots this start needs: it queues.
+        const blockers = [solveAdmission.reserve('OTHER', 'x', mode), ...(mode === 'QUICK' ? [solveAdmission.reserve('THIRD', 'y', mode)] : [])];
+        const freeBlockers = () => blockers.forEach((b) => b.ok && b.ticket.release());
+        let args!: Record<string, any>;
+        vi.useFakeTimers({ toFake: ['Date'] });
+        try {
+          vi.setSystemTime(AT_0905);
+          const res =
+            via === 'OPTIMIZE'
+              ? await startDispatchOptimize(T, 'P', { id: 'u1' }, null, { now: AT_0905, searchMode: mode })
+              : await replan(T, 'P', 'REOPTIMIZE', null, { id: 'u1' }, null, {}, undefined, { now: AT_0905 }, mode);
+          expect(res.status).toBe(202);
+          expect(res.body).toMatchObject({ queued: true });
+          args = scheduled.args[0];
+          // Queued at 09:05 with 09:05's times (Thorough: 09:05 + its cap).
+          expect(args.built.request.config.loading_from_min).toBe(mode === 'QUICK' ? 545 : 565);
+          scheduled.real!(args);
+          await new Promise((r) => setTimeout(r, 5));
+          expect(solverFake.sent).toHaveLength(0);
+          vi.setSystemTime(AT_0920); // the slot frees at 09:20: the search really starts now
+          freeBlockers();
+          await g.__routeiqInflight.get(args.runId);
+          for (let i = 0; i < 20 && row('runJob', args.runJobId).status !== 'FAILED'; i++) await new Promise((r) => setTimeout(r, 5));
+        } finally {
+          vi.useRealTimers();
+          freeBlockers();
+        }
+        expect(solverFake.sent).toHaveLength(1);
+        const sent = solverFake.sent[0].config;
+        const job = row('runJob', args.runJobId);
+        expect(job.startedAt).toEqual(AT_0920);
+        // No new load may leave before the search started.
+        expect(earliestDeparture(sent)).toBeGreaterThanOrEqual(MIN_0920);
+        expect(sent.loading_from_min).toBeGreaterThanOrEqual(MIN_0920);
+        const lead = mode === 'THOROUGH' ? 20 : 0; // Thorough: + its 20-min cap, as before
+        expect(sent).toMatchObject({ shift_start_min: MIN_0920 + lead, loading_from_min: MIN_0920 + lead });
+        // What was sent is what is stored, and the plan's warning and settings say the same time.
+        expect(job.requestJson.config).toMatchObject({ shift_start_min: MIN_0920 + lead, loading_from_min: MIN_0920 + lead });
+        expect(args.built.settings).toMatchObject({ planFrom: { fromMin: MIN_0920 + lead }, loadingFromMin: MIN_0920 + lead });
+        expect(args.built.warnings[0]).toMatch(mode === 'QUICK' ? /^Planned from 09:20 \(now 09:20 \+ 0 min preparation\)/ : /^Planned from 09:40 \(now 09:20 \+ up to 20 min Thorough search/);
+        expect(solveAdmission.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+      }, 20_000);
+    }
   }
 });
 

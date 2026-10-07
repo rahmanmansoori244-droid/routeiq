@@ -26,7 +26,8 @@
  * (20 min) before the plan exists, so "now" is not when its loads can start: they count from the end
  * of the search at the latest - the job's real start (after any wait for a solver slot) + the cap
  * (`searchMin`). Loading starts then too. QUICK (seconds to a couple of minutes, inside the
- * preparation time) keeps counting from now, exactly as before.
+ * preparation time) counts from now - the job's real start as well (ISSUE 6: a Quick queued at 09:05
+ * that started at 09:20 let a load leave at 09:05; plan-service retimeAtStart).
  *
  * Pure: no database; `now` is a parameter so tests can fix the clock.
  */

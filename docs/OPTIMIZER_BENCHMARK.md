@@ -697,7 +697,7 @@ still skip the alternatives: production keeps 10 minutes or more (default 20). T
 unchanged: with a cap under about 9 minutes the recommended search rarely runs 5 minutes without improving, so it usually
 ends at its limit and says so ("all the time allowed").
 
-**Same-day plans.** A same-day plan starts from now (turnaround and loading counted from the button press). A THOROUGH search
+**Same-day plans.** A same-day plan starts from now (turnaround and loading counted from the button press; since 7 Oct 2026, ISSUE 6, from when its search really starts, after any wait in the queue - Quick and Thorough). A THOROUGH search
 first takes up to its cap: the review measured a small synthetic same-day day that converged after about 6 minutes (the plan
 existed at 14:58 for a 14:52 press, its first load planned at 15:25: 7 of the 30 preparation minutes gone), and the real day
 takes 1,061-1,101 s (§11.3: about 18 minutes gone); queued behind another THOROUGH, departures were planned before the plan
