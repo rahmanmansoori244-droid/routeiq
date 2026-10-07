@@ -236,27 +236,41 @@ describe('the driver service worker', () => {
   const src = readFileSync(path.resolve(__dirname, '../../public/driver-sw.js'), 'utf8');
   type Listener = (e: Record<string, unknown>) => void;
   type Cache = { match: (r: unknown) => Promise<Response | undefined>; put: (r: unknown, res: Response) => Promise<void>; keys: () => Promise<unknown[]>; delete: (r: unknown) => Promise<boolean> };
-  type Storage = { open: (name?: string) => Promise<Cache>; keys?: () => Promise<string[]>; delete?: (n: string) => Promise<boolean> };
+  type Storage = { open: (name?: string) => Promise<Cache>; keys?: () => Promise<string[]>; delete?: (n: string) => Promise<boolean>; match?: (r: unknown) => Promise<Response | undefined> };
 
   /**
    * The worker's script in a context with the given CacheStorage (undefined: none at all) and fetch.
-   * `windows`: the browser's open windows of this origin (clients.matchAll; null: no matchAll at all).
+   * `windows`: the browser's open windows of this origin (clients.matchAll; null: no matchAll at all),
+   * none of them controlled by a worker (a first visit) unless given as { url, controlled: true }: as
+   * a browser, matchAll lists the uncontrolled ones only with includeUncontrolled. `build`: the ?v= of
+   * the registration (a new build registers a new one).
    */
-  function boot(storage: Storage | undefined, fetchImpl: (r: unknown, init?: unknown) => Promise<Response>, windows: string[] | null = []) {
+  function boot(
+    storage: Storage | undefined,
+    fetchImpl: (r: unknown, init?: unknown) => Promise<Response>,
+    windows: (string | { url: string; controlled: boolean })[] | null = [],
+    build = 'b1',
+  ) {
     const listeners: Record<string, Listener> = {};
     const claimed = { n: 0 };
+    const wins = (windows ?? []).map((w) => (typeof w === 'string' ? { url: w, controlled: false } : w));
     const self = {
-      location: { href: 'https://app.test/driver-sw.js?v=b1', origin: 'https://app.test' },
+      location: { href: `https://app.test/driver-sw.js?v=${build}`, origin: 'https://app.test' },
       addEventListener: (type: string, l: Listener) => {
         listeners[type] = l;
       },
       skipWaiting: () => undefined,
       clients: {
         claim: async () => void claimed.n++,
-        ...(windows ? { matchAll: async () => windows.map((url) => ({ url, type: 'window' })) } : {}),
+        ...(windows
+          ? {
+              matchAll: async (opts?: { type?: string; includeUncontrolled?: boolean }) =>
+                wins.filter((w) => (opts?.includeUncontrolled || w.controlled) && (!opts?.type || opts.type === 'window' || opts.type === 'all')).map((w) => ({ url: w.url, type: 'window' })),
+            }
+          : {}),
       },
     };
-    const globals: Record<string, unknown> = { self, fetch: fetchImpl, URL, Response, setTimeout, clearTimeout };
+    const globals: Record<string, unknown> = { self, fetch: fetchImpl, URL, Response, setTimeout, clearTimeout, crypto: globalThis.crypto, TextEncoder };
     if (storage) globals.caches = storage;
     vm.runInContext(src, vm.createContext(globals));
     return { listeners, claimed };
@@ -363,7 +377,15 @@ describe('the driver service worker', () => {
         delete: async (r) => m.delete(keyOf(r)),
       };
     };
-    const storage = { open, keys: async () => [...stores.keys()], delete: async (n: string) => stores.delete(n) } as Storage;
+    /** CacheStorage.match: every cache, in the order they were made. */
+    const matchAny = async (r: unknown) => {
+      for (const m of stores.values()) {
+        const hit = m.get(keyOf(r));
+        if (hit) return hit.clone();
+      }
+      return undefined;
+    };
+    const storage = { open, keys: async () => [...stores.keys()], delete: async (n: string) => stores.delete(n), match: matchAny } as Storage;
     /** Every kept URL, by cache. */
     const kept = () => Object.fromEntries([...stores].map(([n, m]) => [n, [...m.keys()]]));
     return { storage, stores, kept };
@@ -487,6 +509,51 @@ describe('the driver service worker', () => {
     expect(await text(await ask(w.listeners, PAGE, 'navigate'))).toBe(HTML);
     await new Promise((r) => setTimeout(r, 0));
     expect(c.kept()['riq-driver-pages-b1'] ?? []).toEqual([]);
+  });
+
+  it('ISSUE 8 review: a link forgotten under one build is not kept again by the next build\'s worker, though its dead tab is still open', async () => {
+    const c = memoryCaches();
+    const { fetchImpl } = site();
+    const DEAD = 'https://app.test/d/YesterdayTokenXXXXXXXXXX';
+    const LIVE = 'https://app.test/d/TodayTokenYYYYYYYYYYYYYY';
+    const b1 = boot(c.storage, fetchImpl, [DEAD]);
+    await installAndActivate(b1);
+    const waits: Promise<unknown>[] = [];
+    b1.listeners.message!({ data: { type: 'forget', url: '/d/YesterdayTokenXXXXXXXXXX' }, waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    await Promise.all(waits);
+    expect(c.kept()['riq-driver-pages-b1']).toEqual([]);
+    // A deploy; the driver opens today's link: the new build's worker installs with the dead tab still open.
+    const b2 = boot(c.storage, fetchImpl, [{ url: DEAD, controlled: true }, LIVE], 'b2');
+    await installAndActivate(b2);
+    expect(c.kept()['riq-driver-pages-b2']).toEqual([LIVE]);
+    // Its navigation handler keeps it out too; no token in any cache key of what it remembers.
+    await ask(b2.listeners, DEAD, 'navigate');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(c.kept()['riq-driver-pages-b2']).toEqual([LIVE]);
+    expect(Object.values(c.kept()).flat().filter((k) => k.includes('YesterdayToken'))).toEqual([]);
+  });
+
+  it('ISSUE 8 review: install fetches each file once, whatever the number of driver tabs open', async () => {
+    const c = memoryCaches();
+    const { net, fetchImpl } = site();
+    const tabs = ['A', 'B', 'C'].map((x) => `https://app.test/d/${x.repeat(24)}`);
+    await installAndActivate(boot(c.storage, fetchImpl, [...tabs, tabs[0]!]));
+    const counts: Record<string, number> = {};
+    for (const u of net.calls) counts[new URL(u).pathname] = (counts[new URL(u).pathname] ?? 0) + 1;
+    for (const a of [...ASSETS, CSS_FONT]) expect(counts[new URL(a, 'https://app.test').pathname], a).toBe(1);
+    for (const t of tabs) expect(counts[new URL(t).pathname], t).toBe(1);
+  });
+
+  it('ISSUE 8 review: a new build installed without signal keeps what the old build kept, so the reload still works offline', async () => {
+    const c = memoryCaches();
+    const { net, fetchImpl } = site();
+    await installAndActivate(boot(c.storage, fetchImpl, [PAGE]));
+    net.online = false; // a deploy, and the signal is gone while the new worker installs
+    const b2 = boot(c.storage, fetchImpl, [{ url: PAGE, controlled: true }], 'b2');
+    await installAndActivate(b2);
+    expect(Object.keys(c.kept()).filter((n) => n.endsWith('-b1'))).toEqual([]); // the old build's caches are gone
+    expect(await text(await ask(b2.listeners, PAGE, 'navigate'))).toBe(HTML);
+    for (const a of [...ASSETS.slice(1), CSS_FONT]) expect((await ask(b2.listeners, new URL(a, 'https://app.test').href))?.status, a).toBe(200);
   });
 
   it('ISSUE 8: at most 8 driver pages are kept (the oldest go first)', async () => {
