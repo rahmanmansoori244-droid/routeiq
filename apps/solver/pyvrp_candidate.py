@@ -422,10 +422,18 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     # Section 7: default penalties unless the fleet is short of capacity; then 10 x the largest prize,
     # clamped so that the worst penalised cost stays below 2^62.
     # space: cases, pallets on an all-bay fleet, or each truck's own measure on a mixed fleet (_mixed_space_proven)
+    # Trucks to rent (ISSUE 9): the hire tier lifts the prizes and a rented truck's fixed cost to ~1e9-1e10
+    # units, so one unit of excess load or time warp must cost more than the dearest of them, or overloading
+    # an own truck beats renting and the search ends with no feasible plan. The ceiling (and PyVRP's starting
+    # penalty, the midpoint) is then 10 x the request's own scale - the largest prize or fixed cost -, clamped
+    # the same way. A day without trucks to rent keeps exactly the rule above.
     short_space, short_kg = ds._fleet_shortage(solvable, tds)
     base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, Tf, clients, depots)
-    if short_space or short_kg:
-        safe = (INT62 - base) // max(1, per_unit)
+    safe = (INT62 - base) // max(1, per_unit)
+    if tier:
+        scale = max(max(prizes), max(v["fixed_cost"] for v in vtypes))
+        max_penalty, mode = float(min(10 * scale, safe)), "RAISED"
+    elif short_space or short_kg:
         max_penalty, mode = float(min(10 * max(prizes), safe)), "RAISED"
     else:
         max_penalty, mode = DEFAULT_MAX_PENALTY, "DEFAULT"
@@ -562,10 +570,11 @@ def missing_of(routes: list[dict], n_stops: int) -> int:
 
 def solve_in_worker(job) -> dict:
     """``job`` = (req, solvable, tds, mx, PvSettings). Builds the model and runs PyVRP's own solver
-    (pyvrp.solve, default parameters; max_penalty raised only on capacity-shortage days). Returns
-    plain data: status OK / SKIPPED / FAILED with a reason, the routes as client indices per load and
-    vehicle type, and what the search report needs. Test hooks: ROUTEIQ_TEST_FAIL_PYVRP (raises),
-    ROUTEIQ_TEST_HANG_PYVRP (sleeps, ignoring every flag), ROUTEIQ_TEST_KILL_PYVRP (the process dies),
+    (pyvrp.solve, default parameters; max_penalty raised only on capacity-shortage days and on days
+    with trucks to rent). Returns plain data: status OK / SKIPPED / FAILED with a reason, the routes as
+    client indices per load and vehicle type, and what the search report needs. Test hooks:
+    ROUTEIQ_TEST_FAIL_PYVRP (raises), ROUTEIQ_TEST_HANG_PYVRP (sleeps, ignoring every flag),
+    ROUTEIQ_TEST_KILL_PYVRP (the process dies),
     ROUTEIQ_TEST_PYVRP_IMPORT_FAIL and ROUTEIQ_TEST_PYVRP_PLAN (a JSON plan {truck idx: [[stop k, ...],
     ...]} returned instead of searching)."""
     import dispatch_solver as ds  # noqa: PLC0415
