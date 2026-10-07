@@ -36,7 +36,7 @@ export const START_FRESH_KEPT = [
   { key: 'products', label: 'Products' },
   { key: 'trucks', label: 'Trucks' },
   { key: 'drivers', label: 'Drivers (regular)' },
-  { key: 'dailyDrivers', label: 'Daily drivers still on a kept load' },
+  { key: 'dailyDrivers', label: "Daily drivers still on a kept load, a truck's usual driver, or named in driver leave" },
   { key: 'depots', label: 'Depots' },
   { key: 'regions', label: 'Regions' },
   { key: 'users', label: 'Users' },

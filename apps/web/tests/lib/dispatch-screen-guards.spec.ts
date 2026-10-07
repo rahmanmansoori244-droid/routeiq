@@ -177,11 +177,42 @@ describe('plan screen (plan-view.tsx)', () => {
     expect(driverCell.slice(hand, keep)).toContain('data-testid={`driver-handset-${tag}`}');
     const button = driverCell.slice(keep, driverCell.indexOf('</button>', keep));
     expect(button).toContain('<button');
-    expect(button).toContain('onClick={onKeep}');
+    expect(button).toContain('onClick={keep}');
     expect(button).toContain('data-testid={`driver-keep-${tag}`}');
     expect(button).toContain('disabled={busy}');
     expect(button).toMatch(/>\s*Keep\s*$/);
-    expect(count(driverCell, /\bonKeep\b/g)).toBe(3); // the prop, its type, the button
+    // Driver leave (review of 6 Oct 2026): Keep on a driver RouteIQ filled in who is on leave that day
+    // asks the Driver list's question first (leaveQuestion), and its title says he is on leave.
+    expect(button).toContain('title={keepTitle(driverName, keepLeaveUntil)}');
+    const keepFn = driverCell.slice(driverCell.indexOf('const keep = () => {'), driverCell.indexOf('};', driverCell.indexOf('const keep = () => {')));
+    expect(keepFn).toMatch(/const question = leaveQuestion\(l\.driverId, onLeave, driverName, trip\);\s*if \(question && !window\.confirm\(question\)\) return;\s*onKeep\(\);/);
+    expect(driverCell).toContain('const keepLeaveUntil = l.driverId ? (onLeave.get(l.driverId) ?? null) : null;');
+    expect(count(driverCell, /\bonKeep\b/g)).toBe(3); // the prop, its type, the call after the question
+    // The Driver list asks the same question (one helper for both).
+    expect(driverCell).toMatch(/const question = leaveQuestion\(v \|\| null, onLeave,/);
+  });
+
+  it('the Driver list fits a driver on leave: a short label, the full text as the tooltip, a list wide enough (demo of 7 Oct 2026)', () => {
+    const driverCell = planScreen.slice(planScreen.indexOf('function LoadDriver('), planScreen.indexOf('function LoadActions('));
+    expect(driverCell).toContain('{driverOptionLabel(x, onLeave.get(x.id) ?? null)}');
+    expect(driverCell).toContain('title={onLeave.has(x.id) ? onLeaveTitle(x.name, onLeave.get(x.id)!) : undefined}');
+    expect(driverCell).not.toMatch(/\(\$\{onLeaveLabel\(/); // the long "(on leave until ..." the closed list cut off
+    // The closed list's tooltip names the leave of the driver on the load.
+    expect(driverCell).toContain('keepLeaveUntil ? onLeaveTitle(driverName, keepLeaveUntil) : undefined');
+    expect(driverCell).toMatch(/className=\{`h-7 w-48 rounded-md border/);
+  });
+
+  it('Lock, Loading and Dispatch of a load whose driver is on leave: the refusal asks, OK sends the move again with the answer (demo of 7 Oct 2026)', () => {
+    const move = planScreen.slice(planScreen.indexOf('async function moveLoad('), planScreen.indexOf('\n  }\n', planScreen.indexOf('async function moveLoad(')));
+    expect(move).toContain("json: { status }");
+    expect(move).toMatch(/const question = r\.ok \? null : onLeaveMoveQuestion\(r\.errorBody, `\$\{l\.truckCode\} · L\$\{l\.loadNo\}`, status\);\s*if \(!question \|\| !window\.confirm\(question\)\) return r;/);
+    expect(move).toContain('json: { status, leaveConfirmed: true }');
+    // Every status change of the screen goes through it: the load's buttons and Lock all.
+    const setStatus = planScreen.slice(planScreen.indexOf('function setStatus('), planScreen.indexOf('function setDriver('));
+    expect(setStatus).toContain('const r = await moveLoad(l, status);');
+    const lockAll = planScreen.slice(planScreen.indexOf('function lockAll('), planScreen.indexOf('function chooseScenario('));
+    expect(lockAll).toContain("const r = await moveLoad(l, 'LOCKED');");
+    expect(count(planScreen, /\/api\/runs\/\$\{runId\}\/loads\/\$\{l\.id\}`, \{ method: 'PATCH', json: \{ status/g)).toBe(0);
   });
 
   it('the reload banner punctuates the server message (planReloadErrorText; fourth review of PR3)', () => {

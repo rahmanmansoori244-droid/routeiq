@@ -11,7 +11,7 @@
  * before that model) keep their stored cost and label the day MIXED_LEGACY.
  */
 import type { SearchReport } from '@routeiq/shared-types';
-import type { DriverNoteReason } from './load-state';
+import type { DriverCoverWhy, DriverNoteReason } from './load-state';
 import { costBasisOf, costTotals, type CostBasis, type CostTotals, type LoadCostBreakdown } from './costs';
 
 export interface SummaryOrder {
@@ -129,8 +129,12 @@ export interface DriverChangeNote {
   /** The driver the plan gave it (null: none, for the dispatcher to fill; TRIP_GONE: no trip). */
   to: { id: string; name: string } | null;
   reason: DriverNoteReason;
-  /** CLASH: the trip that got that driver at an overlapping time. */
+  /** CLASH: the trip that got that driver at an overlapping time; COVER (OTHER_TRUCK): the other truck's trip he drives that day. */
   other: { truckCode: string; loadNo: number | null } | null;
+  /** ON_LEAVE (owner request 6 Oct 2026): the last day of that driver's leave (YYYY-MM-DD). */
+  leaveUntil?: string | null;
+  /** COVER (review of 6 Oct 2026): why the cover does not drive the trip again (DriverCoverWhy). */
+  cover?: DriverCoverWhy | null;
 }
 
 const r1 = (v: number) => Math.round(v * 10) / 10;

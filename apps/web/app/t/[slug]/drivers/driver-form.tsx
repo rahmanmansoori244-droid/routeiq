@@ -23,6 +23,8 @@ export interface DriverRow {
   active: boolean;
   /** A daily (casual) driver added from a load (owner request 4 Oct 2026). */
   casual?: boolean;
+  /** On leave today: his last day (owner request 6 Oct 2026). */
+  leaveUntil?: string | null;
 }
 
 interface Props {
@@ -30,12 +32,18 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   mode: 'create' | 'edit';
   driver?: DriverRow;
+  /**
+   * A company admin: the only one who may change a driver's code or make a regular driver a daily one
+   * (the dispatcher edits the rest; the server refuses those two to him, 403 ADMIN_ONLY_DRIVER_FIELD).
+   * Both are on this form for the admin: the Code field and the Daily driver switch.
+   */
+  canAdmin?: boolean;
   onSaved: () => void;
 }
 
 const blank = { code: '', name: '', phone: '', active: true, casual: false };
 
-export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: Props) {
+export function DriverFormDialog({ open, onOpenChange, mode, driver, canAdmin = false, onSaved }: Props) {
   const [form, setForm] = useState(blank);
   const [pending, startTransition] = useTransition();
 
@@ -87,7 +95,14 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
                 value={form.code}
                 onChange={(e) => setForm({ ...form, code: e.target.value })}
                 required
-                disabled={mode === 'edit'}
+                disabled={mode === 'edit' && !canAdmin}
+                title={
+                  mode === 'edit'
+                    ? canAdmin
+                      ? 'The driver code. Loads and sheets show the driver by name; the audit log keeps the old code.'
+                      : 'Only a company admin changes a driver code: ask them on the Drivers page.'
+                    : undefined
+                }
                 maxLength={32}
               />
             </div>
@@ -122,13 +137,19 @@ export function DriverFormDialog({ open, onOpenChange, mode, driver, onSaved }: 
             </Label>
             <Switch id="active" checked={form.active} onCheckedChange={(v) => setForm({ ...form, active: v })} />
           </div>
-          {mode === 'edit' && driver?.casual ? (
+          {/* Daily driver: anyone who edits drivers makes a daily driver regular; only a company admin
+              makes a regular driver daily (the server refuses it to the dispatcher). */}
+          {mode === 'edit' && (driver?.casual || canAdmin) ? (
             <div className="flex items-center justify-between rounded-md border px-3 py-2">
               <Label htmlFor="casual" className="text-sm">
                 Daily driver
-                <span className="block text-xs font-normal text-muted-foreground">Added from a load by a dispatcher. Switch off to make them a regular driver.</span>
+                <span className="block text-xs font-normal text-muted-foreground">
+                  {driver?.casual
+                    ? 'Added from a load by a dispatcher. Switch off to make them a regular driver.'
+                    : 'A regular driver. Switch on to make them a daily driver (company admin only).'}
+                </span>
               </Label>
-              <Switch id="casual" checked={form.casual} onCheckedChange={(v) => setForm({ ...form, casual: v })} />
+              <Switch id="casual" checked={form.casual} disabled={!driver?.casual && !canAdmin} onCheckedChange={(v) => setForm({ ...form, casual: v })} />
             </div>
           ) : null}
           <DialogFooter>

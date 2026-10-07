@@ -9,7 +9,8 @@
  * times are orders too), plan versions with their options, optimization jobs, loads, stops and
  * unserved rows, driver links, delivery results (stops, events, photos), manual comparison
  * baselines, the retired driver app's shifts / positions / proofs, and daily (casual) drivers that
- * no longer have any load (a daily driver who is a truck's default driver stays). Before a date, an
+ * no longer have any load (a daily driver who is a truck's default driver, or is named by a leave
+ * period - his own or as the cover - stays; leave is never removed). Before a date, an
  * order file without orders goes only when every delivery date in it is before that day.
  * Kept: customers (locations, confirmed hours), products, trucks, regular drivers, depots, regions,
  * users, settings and customer type defaults, and the audit log, which is never deleted: the run
@@ -271,7 +272,10 @@ async function removableBatches(db: Db, s: Scope, orders: OrderRow[]): Promise<s
 
 /**
  * Daily drivers that will have no load left once the plans in `runIds` are gone: not a truck's
- * default driver, and not named by an old driver app shift that stays.
+ * default driver, not named by an old driver app shift that stays, and not named by any leave period
+ * (his own, ended ones included, or as a cover: driver leave, 6 Oct 2026). Leave is never removed or
+ * changed here: it is kept for the record, and a cover cleared without an audit row would leave a
+ * truck without its driver (the keys are NO ACTION too).
  */
 async function removableCasualDrivers(db: Db, s: Scope, runIds: string[], shiftIds: string[]): Promise<{ casual: number; removable: string[] }> {
   const casual = ids(await db.driver.findMany({ where: { tenantId: s.tenantId, casual: true }, select: { id: true } }));
@@ -290,6 +294,14 @@ async function removableCasualDrivers(db: Db, s: Scope, runIds: string[], shiftI
       select: { driverId: true },
     });
     for (const sh of shifts) used.add(sh.driverId);
+    const leave = await db.driverLeave.findMany({
+      where: { tenantId: s.tenantId, OR: [{ driverId: { in: part } }, { coverDriverId: { in: part } }] },
+      select: { driverId: true, coverDriverId: true },
+    });
+    for (const lv of leave) {
+      used.add(lv.driverId);
+      if (lv.coverDriverId) used.add(lv.coverDriverId);
+    }
   }
   return { casual: casual.length, removable: casual.filter((id) => !used.has(id)) };
 }

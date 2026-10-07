@@ -16,15 +16,21 @@
  * - The audit rows of a daily driver (CASUAL_DRIVER_ADDED, a reactivation) keep only the last 3 digits
  *   of the mobile (maskPhone): the number on the driver row is erased after the location retention, an
  *   audit row is not.
- * - Only a daily driver is ever reactivated here. An inactive regular driver (a company admin switched
- *   them off) is not offered, and `useExisting` naming one is refused 409 DRIVER_INACTIVE.
+ * - Only a daily driver is ever reactivated here. An inactive regular driver (switched off on the
+ *   Drivers page) is not offered, and `useExisting` naming one is refused 409 DRIVER_INACTIVE.
+ * - Driver leave (6 Oct 2026): a driver used again (the same phone and name, or `useExisting`) who is
+ *   on leave on the plan's day is put on the load only when the dispatcher answered the question
+ *   (`leaveConfirmed`); else 409 DRIVER_ON_LEAVE { driverId, name, until }, nothing saved - as the
+ *   Driver list asks. PHONE_BELONGS_TO names his leave too (`leaveUntil`), so "Use <name>" answers both.
  */
 import { Prisma } from '@prisma/client';
 import { audit } from '../audit';
 import { DRIVER_PUBLIC_SELECT, type DriverPublic } from '../driver-fields';
+import { leaveOnDay, pickOnLeaveConfirm } from './driver-leave';
+import { leaveRowsOn } from './driver-leave-service';
 import { PlanError } from './plan-errors';
 import { inLoadChange } from './plan-service';
-import { isoOf } from './time';
+import { fmtDayMonth, isoOf } from './time';
 
 /** "2026-10-05" -> "261005". */
 function yymmdd(dateIso: string): string {
@@ -88,6 +94,8 @@ export interface AddCasualDriverInput {
   name: string;
   phone?: string | null;
   useExisting?: string;
+  /** The dispatcher answered "<name> is on leave until ... Put <name> on ... anyway?" (driver leave, 6 Oct 2026). */
+  leaveConfirmed?: boolean;
 }
 
 export interface AddCasualDriverResult {
@@ -110,6 +118,8 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
       }
       const date = isoOf(run.runDate);
       await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`casual-driver:${tenantId}|${date}`}, 0))`;
+      // Who is on leave on the plan's day (a driver used again is asked about first).
+      const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), date);
 
       let driver: DriverPublic | null = null;
       let reused = false;
@@ -117,8 +127,9 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
         driver = await tx.driver.findFirst({ where: { id: input.useExisting, tenantId }, select: DRIVER_PUBLIC_SELECT });
         if (!driver) throw new PlanError('Driver not found.', 404);
         if (!driver.active && !driver.casual) {
-          // Only a company admin changes a regular driver's active switch (PATCH /api/drivers/[id]).
-          throw new PlanError(`Driver ${driver.name} is inactive: ask a company admin.`, 409, { code: 'DRIVER_INACTIVE', driverId: driver.id, name: driver.name });
+          // The quick add never reactivates a regular driver: that is done on the Drivers page (the
+          // dispatcher may since owner request 6 Oct 2026; PATCH /api/drivers/[id]).
+          throw new PlanError(`Driver ${driver.name} is inactive: reactivate him on the Drivers page first, or add another driver.`, 409, { code: 'DRIVER_INACTIVE', driverId: driver.id, name: driver.name });
         }
         reused = true;
       } else if (input.phone) {
@@ -132,12 +143,18 @@ export async function addCasualDriver(tenantId: string, input: AddCasualDriverIn
           reused = true;
         } else if (matches.length) {
           const other = matches.find((d) => d.casual) ?? matches[0]!;
+          const otherAway = leave.get(other.id);
           throw new PlanError(
-            `This phone belongs to ${other.casual ? 'daily driver' : 'driver'} ${other.name}. Use ${other.name}, or change the phone.`,
+            `This phone belongs to ${other.casual ? 'daily driver' : 'driver'} ${other.name}${otherAway ? `, who is on leave until ${fmtDayMonth(otherAway.untilIso)}` : ''}. Use ${other.name}, or change the phone.`,
             409,
-            { code: 'PHONE_BELONGS_TO', driverId: other.id, name: other.name, casual: other.casual },
+            { code: 'PHONE_BELONGS_TO', driverId: other.id, name: other.name, casual: other.casual, ...(otherAway ? { leaveUntil: otherAway.untilIso } : {}) },
           );
         }
+      }
+      // A driver used again who is on leave that day: only when the dispatcher answered the question.
+      const away = driver ? leave.get(driver.id) : undefined;
+      if (driver && away && !input.leaveConfirmed) {
+        throw new PlanError(pickOnLeaveConfirm(driver.name, away.untilIso, 'this load'), 409, { code: 'DRIVER_ON_LEAVE', driverId: driver.id, name: driver.name, until: away.untilIso });
       }
       if (driver && !driver.active && driver.casual) {
         const before = driver;

@@ -47,6 +47,8 @@ const TENANT_SCOPED_MODELS = new Set([
   'StopVisit',
   'StopEvent',
   'DeliveryPhoto',
+  // Driver leave (owner request 6 Oct 2026)
+  'DriverLeave',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

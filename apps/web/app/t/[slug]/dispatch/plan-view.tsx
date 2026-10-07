@@ -14,6 +14,7 @@ import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstTex
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
 import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
+import { driverOptionLabel, keepTitle, leaveQuestion, onLeaveMoveQuestion, onLeaveTitle } from '@/lib/dispatch/driver-leave';
 import { COST_BASIS_TEXT, kmLabelFor, summaryCostBasis } from '@/lib/dispatch/costs';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
@@ -270,7 +271,18 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       lock,
       l.id,
       async () => {
-        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', { method: 'POST', json: { runId, loadId: l.id, name: body.name, phone: body.phone || null, ...(body.useExisting ? { useExisting: body.useExisting } : {}) } });
+        res = await api<CasualDriverAnswer>('/api/dispatch/casual-driver', {
+          method: 'POST',
+          json: {
+            runId,
+            loadId: l.id,
+            name: body.name,
+            phone: body.phone || null,
+            ...(body.useExisting ? { useExisting: body.useExisting } : {}),
+            // The dispatcher answered the question about a driver on leave that day (409 DRIVER_ON_LEAVE).
+            ...(body.leaveConfirmed ? { leaveConfirmed: true } : {}),
+          },
+        });
         if (!res.ok || !res.data) return;
         toast.success(`${l.truckCode} Load ${l.loadNo}: daily driver ${res.data.driver.name}${res.data.reused ? ' (already saved)' : ''}`);
         await loadDrivers();
@@ -334,6 +346,21 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const trips = useMemo(() => tripsByTruck(d?.loads ?? []), [d]);
   const clashes = useMemo(() => driverClashNotes(d?.loads ?? []), [d]);
+  // Drivers on leave on this plan's delivery day (owner request 6 Oct 2026): driver id -> last day.
+  const onLeave = useMemo(() => new Map((d?.driversOnLeave ?? []).map((x) => [x.driverId, x.until])), [d]);
+
+  /**
+   * A load's status change. Lock, Loading and Dispatch of a load whose driver is on leave that day are
+   * refused (409 DRIVER_ON_LEAVE, demo of 7 Oct 2026): the screen asks, and OK sends the same move
+   * again with the answer (`leaveConfirmed`, kept in the audit log); Cancel keeps the refusal.
+   */
+  async function moveLoad(l: DetailLoad, status: string) {
+    const url = `/api/runs/${runId}/loads/${l.id}`;
+    const r = await api<{ warnings?: string[] }>(url, { method: 'PATCH', json: { status } });
+    const question = r.ok ? null : onLeaveMoveQuestion(r.errorBody, `${l.truckCode} · L${l.loadNo}`, status);
+    if (!question || !window.confirm(question)) return r;
+    return api<{ warnings?: string[] }>(url, { method: 'PATCH', json: { status, leaveConfirmed: true } });
+  }
 
   // One action at a time: while any request of this plan runs (a load change, Lock all, Use
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
@@ -347,7 +374,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
       lock,
       l.id,
       async () => {
-        const r = await api<{ warnings?: string[] }>(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status } });
+        const r = await moveLoad(l, status);
         if (!r.ok) {
           toast.error(r.error ?? 'Could not change the load.');
           await load(); // show the plan as it is now (it may have changed meanwhile)
@@ -407,7 +434,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         let n = 0;
         let firstError: string | null = null;
         for (const l of planned) {
-          const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { status: 'LOCKED' } });
+          // A load whose driver is on leave that day asks (moveLoad); Cancel leaves it planned.
+          const r = await moveLoad(l, 'LOCKED');
           if (r.ok) n++;
           else firstError ??= r.error;
         }
@@ -1062,6 +1090,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                       <LoadDriver
                         l={l}
                         drivers={drivers}
+                        onLeave={onLeave}
                         editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
                         busy={!!busy}
                         onChange={(id) => setDriver(l, id)}
@@ -1413,6 +1442,7 @@ function Kpi({ label, value, warn, title, testId }: { label: string; value: stri
 function LoadDriver({
   l,
   drivers,
+  onLeave = new Map(),
   editable,
   busy,
   onChange,
@@ -1426,6 +1456,8 @@ function LoadDriver({
 }: {
   l: DetailLoad;
   drivers: DriverOption[];
+  /** Drivers on leave on the plan's day (driver id -> last day): labelled, and chosen only after a question. */
+  onLeave?: ReadonlyMap<string, string>;
   editable: boolean;
   busy: boolean;
   onChange: (driverId: string | null) => void;
@@ -1453,6 +1485,15 @@ function LoadDriver({
   const driverName = l.driverName ?? current?.name ?? 'this driver';
   // "picked by hand", or the Keep link exactly when the server marks the re-sent driver (driverPickLink).
   const pick = driverPickLink(l, { editable, driverActive: !!current?.active });
+  const trip = `${l.truckCode} · L${l.loadNo}`;
+  // Keep makes the driver the dispatcher's own pick (kept through every re-plan): when RouteIQ filled in
+  // a driver who is on leave that day (planned before the leave was entered), it asks first, as the list does.
+  const keepLeaveUntil = l.driverId ? (onLeave.get(l.driverId) ?? null) : null;
+  const keep = () => {
+    const question = leaveQuestion(l.driverId, onLeave, driverName, trip);
+    if (question && !window.confirm(question)) return;
+    onKeep();
+  };
   let waTitle = '';
   if ('url' in whatsapp) {
     if (!l.driverPhone) waTitle = 'No phone for this driver: WhatsApp asks who to send it to';
@@ -1461,24 +1502,42 @@ function LoadDriver({
   }
   return (
     <div className="space-y-1">
+      {/* A driver on leave that day reads "Rashid Ali - on leave" (driverOptionLabel: the closed list
+          cut the longer label off, demo of 7 Oct 2026); the until date is in the tooltips and the note. */}
       <select
-        className={`h-7 w-40 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
+        className={`h-7 w-48 rounded-md border px-1 text-xs disabled:opacity-70 ${clash ? 'border-amber-500 bg-amber-50' : 'bg-background'}`}
         value={l.driverId ?? ''}
         disabled={!editable || busy}
-        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? undefined)}
-        onChange={(e) => (e.target.value === ADD_DAILY ? onAddDaily?.() : onChange(e.target.value || null))}
+        title={ON_ROAD.has(l.status) ? 'The load has left: the driver cannot change any more.' : (clash ?? (keepLeaveUntil ? onLeaveTitle(driverName, keepLeaveUntil) : undefined))}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v === ADD_DAILY) return onAddDaily?.();
+          // A driver on leave that day is put on a load only after a question (owner request 6 Oct 2026).
+          const question = leaveQuestion(v || null, onLeave, options.find((x) => x.id === v)?.name ?? 'This driver', trip);
+          if (question && !window.confirm(question)) {
+            e.target.value = l.driverId ?? '';
+            return;
+          }
+          onChange(v || null);
+        }}
         data-testid={`driver-select-${tag}`}
       >
         <option value="">No driver</option>
         {options.map((x) => (
-          <option key={x.id} value={x.id}>
-            {x.name}
-            {x.casual ? ' (daily)' : ''}
-            {x.active ? '' : ' (inactive)'}
+          <option key={x.id} value={x.id} title={onLeave.has(x.id) ? onLeaveTitle(x.name, onLeave.get(x.id)!) : undefined}>
+            {driverOptionLabel(x, onLeave.get(x.id) ?? null)}
           </option>
         ))}
         {editable && onAddDaily ? <option value={ADD_DAILY}>+ Add daily driver…</option> : null}
       </select>
+      {l.driverNote ? (
+        <p
+          className={`max-w-[12rem] text-xs ${l.driverId === null || onLeave.has(l.driverId) || /\bpick (a|another) driver\b/.test(l.driverNote) ? 'text-amber-700' : 'text-muted-foreground'}`}
+          data-testid={`driver-note-${tag}`}
+        >
+          {l.driverNote}
+        </p>
+      ) : null}
       <div className="flex gap-2 text-xs">
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
@@ -1524,9 +1583,9 @@ function LoadDriver({
             type="button"
             className="text-primary underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-50"
             disabled={busy}
-            onClick={onKeep}
+            onClick={keep}
             data-testid={`driver-keep-${tag}`}
-            title={`RouteIQ filled in ${driverName}. Keep makes ${driverName} your pick: a re-plan or Use instead then keeps ${driverName} on this truck and trip.`}
+            title={keepTitle(driverName, keepLeaveUntil)}
           >
             Keep
           </button>

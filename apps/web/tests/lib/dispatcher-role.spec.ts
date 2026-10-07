@@ -67,16 +67,29 @@ const DISPATCH_WORK: Record<string, string> = {
   'GET /api/dispatch/delivery-actuals': 'PLANNER',
 };
 
+/**
+ * The Drivers page (owner request 6 Oct 2026: "it will be his job to monitor those"): adding and
+ * editing drivers, their leave, and a truck's usual driver - only that truck field (truckFieldsRefused;
+ * runtime checks in dispatcher-drivers.spec.ts).
+ */
+const DRIVER_WORK: Record<string, string> = {
+  'POST /api/drivers': 'PLANNER',
+  'PATCH /api/drivers/[id]': 'PLANNER',
+  'POST /api/drivers/[id]/leave': 'PLANNER',
+  'PATCH /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
+  'DELETE /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
+  'PATCH /api/trucks/[id]': 'PLANNER',
+};
+
 /** What stays the company admin's (owner: "like changing a location"). */
 const ADMIN_ONLY: Record<string, string> = {
   'POST /api/depots': 'TENANT_ADMIN',
   'PATCH /api/depots/[id]': 'TENANT_ADMIN',
   'POST /api/trucks': 'TENANT_ADMIN',
-  'PATCH /api/trucks/[id]': 'TENANT_ADMIN',
+  'DELETE /api/trucks/[id]': 'TENANT_ADMIN',
   'POST /api/products': 'TENANT_ADMIN',
   'PATCH /api/products/[id]': 'TENANT_ADMIN',
-  'POST /api/drivers': 'TENANT_ADMIN',
-  'PATCH /api/drivers/[id]': 'TENANT_ADMIN',
+  'DELETE /api/drivers/[id]': 'TENANT_ADMIN',
   'GET /api/users': 'TENANT_ADMIN',
   'POST /api/users': 'TENANT_ADMIN',
   'PATCH /api/users/[id]': 'TENANT_ADMIN',
@@ -91,6 +104,13 @@ describe('owner decision 4 (5 Oct 2026): the dispatcher (PLANNER) does every Dai
   it('every dispatch route admits PLANNER', () => {
     const actual = Object.fromEntries(Object.keys(DISPATCH_WORK).map((k) => [k, matrix[k]]));
     expect(actual).toEqual(DISPATCH_WORK);
+  });
+
+  it("the Drivers page routes admit PLANNER (owner request 6 Oct 2026); deleting a driver and the other truck fields stay the admin's", () => {
+    const actual = Object.fromEntries(Object.keys(DRIVER_WORK).map((k) => [k, matrix[k]]));
+    expect(actual).toEqual(DRIVER_WORK);
+    expect(read('app/api/trucks/[id]/route.ts')).toContain('const refused = truckFieldsRefused(user.role, input);');
+    expect(read('app/api/drivers/[id]/route.ts')).toContain('const refused = driverChangesRefused(user.role, before, input);');
   });
 
   it('no route needs SUPERVISOR any more except the solver debug JSON (revenue and margins: support, not dispatch)', () => {

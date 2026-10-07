@@ -6,12 +6,15 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { onLeaveLabel, pickOnLeaveConfirm } from '@/lib/dispatch/driver-leave';
 import type { ApiResult } from './client-api';
 
 export interface CasualDriverBody {
   name: string;
   phone: string;
   useExisting?: string;
+  /** The dispatcher answered "<name> is on leave until ... Put <name> on ... anyway?" (driver leave, 6 Oct 2026). */
+  leaveConfirmed?: boolean;
 }
 
 export interface CasualDriverAnswer {
@@ -23,7 +26,10 @@ export interface CasualDriverAnswer {
  * "+ Add daily driver…" from a load's Driver list (owner rule 20: a load never leaves without a
  * driver; daily drivers exist). Name and mobile; the driver is saved as a daily driver (no account)
  * and put on this load. When the phone already belongs to a driver, the dialog asks
- * "This phone belongs to <name>. Use <name>?" - never a silent swap.
+ * "This phone belongs to <name>. Use <name>?" - never a silent swap. A driver used again who is on
+ * leave that day (driver leave, 6 Oct 2026) is put on the load only after the question the Driver
+ * list asks: the server answers 409 DRIVER_ON_LEAVE (or names the leave in PHONE_BELONGS_TO), and
+ * "Use <name>" then sends the answer (`leaveConfirmed`).
  */
 export function CasualDriverDialog({
   load,
@@ -40,7 +46,8 @@ export function CasualDriverDialog({
   const [phone, setPhone] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [belongs, setBelongs] = useState<{ driverId: string; name: string; casual: boolean } | null>(null);
+  // The question to answer: the phone belongs to a driver, and/or the driver used again is on leave that day.
+  const [belongs, setBelongs] = useState<{ driverId: string; name: string; casual: boolean; leaveUntil: string | null; onlyLeave: boolean } | null>(null);
 
   // A fresh form for each load the dialog opens for (the parent passes a new object on every render).
   const loadId = load?.id ?? null;
@@ -53,10 +60,10 @@ export function CasualDriverDialog({
     }
   }, [loadId]);
 
-  const send = async (useExisting?: string) => {
+  const send = async (useExisting?: string, leaveConfirmed = false) => {
     setBusy(true);
     setError(null);
-    const r = await submit({ name: name.trim(), phone: phone.trim(), ...(useExisting ? { useExisting } : {}) });
+    const r = await submit({ name: name.trim(), phone: phone.trim(), ...(useExisting ? { useExisting } : {}), ...(leaveConfirmed ? { leaveConfirmed: true } : {}) });
     setBusy(false);
     if (!r) {
       setError('Another change of this plan is running. Try again in a moment.');
@@ -68,7 +75,11 @@ export function CasualDriverDialog({
     }
     const b = r.errorBody;
     if (r.status === 409 && b?.code === 'PHONE_BELONGS_TO' && typeof b.driverId === 'string' && typeof b.name === 'string') {
-      setBelongs({ driverId: b.driverId, name: b.name, casual: b.casual === true });
+      setBelongs({ driverId: b.driverId, name: b.name, casual: b.casual === true, leaveUntil: typeof b.leaveUntil === 'string' ? b.leaveUntil : null, onlyLeave: false });
+      return;
+    }
+    if (r.status === 409 && b?.code === 'DRIVER_ON_LEAVE' && typeof b.driverId === 'string' && typeof b.name === 'string' && typeof b.until === 'string') {
+      setBelongs({ driverId: b.driverId, name: b.name, casual: true, leaveUntil: b.until, onlyLeave: true });
       return;
     }
     setError(r.error ?? 'Could not add the daily driver.');
@@ -90,15 +101,25 @@ export function CasualDriverDialog({
         </DialogHeader>
         {belongs ? (
           <div className="space-y-3 text-sm" data-testid="phone-belongs">
-            <p>
-              This phone belongs to {belongs.casual ? 'daily driver' : 'driver'} <strong>{belongs.name}</strong>. Use {belongs.name}?
-            </p>
+            {belongs.onlyLeave ? (
+              <p className="text-amber-700" data-testid="casual-on-leave">
+                {pickOnLeaveConfirm(belongs.name, belongs.leaveUntil!, load ? `${load.truckCode} · L${load.loadNo}` : 'this load')}
+              </p>
+            ) : (
+              <p>
+                This phone belongs to {belongs.casual ? 'daily driver' : 'driver'} <strong>{belongs.name}</strong>
+                {belongs.leaveUntil ? <span className="text-amber-700">, who is {onLeaveLabel(belongs.leaveUntil)}</span> : null}. Use {belongs.name}
+                {belongs.leaveUntil ? ' anyway' : ''}?
+              </p>
+            )}
             <div className="flex flex-wrap gap-2">
-              <Button disabled={busy} onClick={() => void send(belongs.driverId)}>
+              {/* With the leave named in the question, "Use" is the answer to it too. */}
+              <Button disabled={busy} onClick={() => void send(belongs.driverId, !!belongs.leaveUntil)}>
                 Use {belongs.name}
+                {belongs.leaveUntil ? ' anyway' : ''}
               </Button>
               <Button variant="outline" disabled={busy} onClick={() => setBelongs(null)}>
-                Change the phone
+                {belongs.onlyLeave ? 'Back' : 'Change the phone'}
               </Button>
             </div>
           </div>

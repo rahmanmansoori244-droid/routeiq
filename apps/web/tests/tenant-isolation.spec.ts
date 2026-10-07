@@ -265,6 +265,39 @@ describe('tenantDb isolation (Phase 1 scope)', () => {
     expect((await tenantDb(tenantBId).driverLink.findFirst())?.revokedAt).toBeNull();
   });
 
+  it('DriverLeave (owner request 6 Oct 2026) is scoped both ways: reads, writes and the leave of a delivery day', async () => {
+    const seedLeave = async (tid: string, tag: string) => {
+      const db = tenantDb(tid);
+      // The same driver codes in both companies.
+      const driver = await db.driver.create({ data: { code: 'LV-1', name: `${tag} driver` } as Any, select: { id: true } });
+      const cover = await db.driver.create({ data: { code: 'LV-2', name: `${tag} cover` } as Any, select: { id: true } });
+      const leave = await db.driverLeave.create({
+        data: { driverId: driver.id, coverDriverId: cover.id, fromDate: new Date('2026-10-07T00:00:00Z'), untilDate: new Date('2026-10-20T00:00:00Z'), note: `${tag} leave` } as Any,
+      });
+      return { leave };
+    };
+    const a = await seedLeave(tenantAId, 'A');
+    const b = await seedLeave(tenantBId, 'B');
+    for (const [tid, own, other] of [
+      [tenantAId, a, b],
+      [tenantBId, b, a],
+    ] as const) {
+      const db = tenantDb(tid);
+      expect(await db.driverLeave.count()).toBe(1);
+      expect((await db.driverLeave.findFirst())?.id).toBe(own.leave.id);
+      expect(await db.driverLeave.findUnique({ where: { id: other.leave.id } })).toBeNull();
+      // The planner's read of a delivery day (leaveRowsOn): only the company's own periods.
+      const day = new Date('2026-10-10T00:00:00Z');
+      const onDay = await db.driverLeave.findMany({ where: { fromDate: { lte: day }, untilDate: { gte: day } } });
+      expect(onDay.map((l) => l.id)).toEqual([own.leave.id]);
+    }
+    // A write through one company cannot touch the other's rows.
+    await tenantDb(tenantAId).driverLeave.updateMany({ data: { note: 'changed by A' } });
+    expect((await tenantDb(tenantBId).driverLeave.findFirst())?.note).toBe('B leave');
+    await tenantDb(tenantAId).driverLeave.deleteMany({});
+    expect(await tenantDb(tenantBId).driverLeave.count()).toBe(1);
+  });
+
   it('tenantDb refuses an empty tenantId', () => {
     expect(() => tenantDb('')).toThrow(/tenantId/i);
   });
