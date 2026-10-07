@@ -261,7 +261,11 @@ NO_WORKERS_NOTE = "the planner was short of resources"
 # trucks as it takes (eighth review: capped at the plan's count, 1 x 10-ton at 85 OMR stayed where
 # 2 x 3-ton at 80 delivered every order), is tried cheapest first (fewer trucks first on a tie), and the
 # first that delivers every P1-P3 stop the plan delivered and passes every check, its load re-check
-# included, is the suggestion. A set whose trucks cannot hold those stops even full on every load they
+# included, is the suggestion. With a km charge (BUG 5, 7 Oct 2026: the rough day of the tier priced a
+# rental for a near customer as if it drove to the far ones, 123.13 OMR kept where 87.59 delivered the
+# same) "cheaper" is by each set's LEAST cost (_hire_floor_money, _hire_km_floor) and a plan is judged by
+# the real cost of its routed km (_hire_routed_money): a set is kept only when no untried set's least
+# cost is below the best real cost found; a flat-rate option costs the same in all three. A set whose trucks cannot hold those stops even full on every load they
 # may make is ruled out without a solve (_hire_room_short). When trucks were given back, the set left is
 # solved once more if the limits allow and that set was not solved already (eighth review: their P4/P5
 # orders were dropped although the trucks kept had room and loads to spare - they may ride along); its
@@ -327,6 +331,48 @@ def _hire_money_of(stops: list[DispatchStop], cfg: DispatchConfig, trucks, depot
     """hire_money of every truck to rent among ``trucks`` (its km charge over its rough day's km)."""
     return {t.id: hire_money(t, cfg, _hire_day_km(stops, cfg, depot, t) if t.cost_per_km or t.km_per_litre else 0.0)
             for t in trucks if t.hire_candidate}
+
+
+# Km taken off the reduction's floor of a rented truck's day (_hire_km_floor): a plan reports each load's
+# km to the metre x 10 (0.01 km), so the floor stays under the km a plan reports.
+HIRE_KM_FLOOR_SLACK = 0.01
+
+
+def _hire_km_floor(mx: MatrixResult) -> float:
+    """The fewest km a rented truck drives for the day if it carries any stop (the reduction's lower bound,
+    BUG 5 of 7 Oct 2026): out of the depot to the stop nearest to it and back from the stop nearest to it,
+    on the request's own road matrix. Every load leaves the depot for one of the day's stops and comes back
+    from one, whatever its order (no triangle rule needed), so no truck that carries a stop drives less.
+    0 without stops."""
+    n = len(mx.distance_m)
+    if n <= 1:
+        return 0.0
+    out = min(mx.distance_m[0][i] for i in range(1, n))
+    back = min(mx.distance_m[i][0] for i in range(1, n))
+    return max(0.0, (out + back) / 1000.0 - HIRE_KM_FLOOR_SLACK)
+
+
+def _km_charged(t: DispatchTruck) -> bool:
+    """The truck to rent has a km charge (its option's cost per km; a km per litre is never sent for one)."""
+    return bool(t.cost_per_km or t.km_per_litre)
+
+
+def _hire_floor_money(trucks, cfg: DispatchConfig, km_floor: float) -> dict[str, float]:
+    """Per truck to rent among ``trucks``, the LEAST its day can cost if it is used (hire_money over the
+    floor of its km, _hire_km_floor): never above what any plan that uses it pays for it. A flat-rate
+    truck (no km charge): its hire + its driver's day rate, exactly as _hire_money_of."""
+    return {t.id: hire_money(t, cfg, km_floor if _km_charged(t) else 0.0) for t in trucks if t.hire_candidate}
+
+
+def _hire_routed_money(sc: DispatchScenario, hires: dict[str, DispatchTruck], cfg: DispatchConfig) -> dict[str, float]:
+    """Per rented truck ``sc`` uses, what its day really costs in that plan: its hire, its driver's day rate
+    and its km charge over the km its loads drive (hire_money over the routed km; a flat-rate truck: its
+    hire + its driver's day rate)."""
+    km: dict[str, float] = {}
+    for ld in sc.loads:
+        if ld.truck_id in hires:
+            km[ld.truck_id] = km.get(ld.truck_id, 0.0) + ld.distance_km
+    return {tid: hire_money(hires[tid], cfg, k if _km_charged(hires[tid]) else 0.0) for tid, k in km.items()}
 
 
 @dataclass(frozen=True)
@@ -2523,6 +2569,11 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
 
 # Only P1-P3 orders justify renting a truck (owner answer 1, 6 Oct 2026).
 HIRE_MAX_PRIORITY = 3
+# The hire check's words when its limits stopped it before every set of trucks to rent that might cost less
+# on its km charge was tried or ruled out (HireCheck.note; BUG 5, 7 Oct 2026).
+HIRE_NOT_PROVEN_NOTE = ("Not proven the cheapest: the hire check ran out of time or tries before it could check every "
+                        "set of trucks to rent that might cost less once its km charge is counted. A cheaper set may "
+                        "exist - press Check hire options to check again.")
 
 
 def _rented_of(sc: DispatchScenario, hire_ids: set[str]) -> list[str]:
@@ -3217,7 +3268,12 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
        truck cannot be given back while the plan held has none (tenth review: that plan, renting a truck
        for P5 orders alone, was the suggestion, "complete"): the walk then goes on. A solve whose load
        re-check was skipped neither replaces the plan nor rules its set out. At most HIRE_REDUCE_MAX_SETS
-       sets are listed.
+       sets are listed. Money (BUG 5, 7 Oct 2026): "cheaper" before a solve is a set's LEAST cost (its
+       hire, day rates and km charge over the fewest km a used truck drives, _hire_floor_money), never the
+       search's rough day of a rental; a plan is judged by what its rented trucks really cost on their
+       routed km (_hire_routed_money). With a km charge the walk goes on past a set that delivers while an
+       untried set's least cost is below the best real cost found, and keeps the cheapest by real cost; a
+       flat-rate day (the three costs alike) stops right after the first set that delivers, as before.
     3. When trucks were given back (step 1, or the plan of step 2), the set left is solved exactly once
        more if the limits allow, every earlier solve could run, and no solve of a set alike was made
        (eighth review: the give-back alone dropped the P4/P5 orders of the truck given back although the
@@ -3238,9 +3294,11 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
        its plan (given back as in step 2) is the suggestion (tenth review: it was thrown away), and "one
        truck fewer" is then told from the solves so far only.
 
-    ``complete``, worked out for the set suggested: every cheaper set was listed and ruled out (by its room,
-    or a checked solve of it or a set alike that lost a P1-P3 stop - once repaired, with no lower
-    priority riding on its trucks - or failed the checks); no plan a solve
+    ``complete``, worked out for the set suggested: every set whose least cost is below its real cost was
+    listed and ruled out (by its room, or a checked solve of it or a set alike that lost a P1-P3 stop - once
+    repaired, with no lower priority riding on its trucks - or failed the checks, or that delivered at a
+    real cost no lower); ``note`` (HIRE_NOT_PROVEN_NOTE) says so plainly when such a set was left untried
+    and an option charges per km; no plan a solve
     proved had cheaper trucks for P1-P3 orders and a truck for P4/P5 orders alone it could not give back
     (steps 2-4); the suggestion rents no truck for P4/P5 orders alone (a give-back that could not be
     built: tenth review); and its give-back's swap had a timing for every stop it tried to put back
@@ -3283,7 +3341,12 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             found, _ = repaired(req, found, lost_first, False, "the plan found")
     must = {sid for sid in _served_of(found) if high(sid)}
     must_stops = [stop_of[sid] for sid in sorted(must)]
-    money = _hire_money_of(req.stops, req.config, req.trucks, req.depot)
+    # BUG 5 (7 Oct 2026): a set is ruled out or ordered before its solve by the LEAST its trucks can cost
+    # (_hire_floor_money: a km charge over the floor of a rented truck's km, never the rough day of the
+    # search's tier, which priced a rental for a near customer as if it drove to the far ones - 123.13 OMR
+    # kept where 87.59 delivered the same), and a plan is judged by what its trucks really cost on the km
+    # they drive (_hire_routed_money). A flat-rate option costs the same in both: as before.
+    money = _hire_floor_money(req.trucks, req.config, _hire_km_floor(mx))
     tds = _truck_days(req)
     room = _hire_room(tds)
 
@@ -3318,13 +3381,20 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     def shape(ids) -> tuple[int, ...]:
         return tuple(sorted(kind_of[t] for t in ids))
 
-    top = (price(current), len(current))
+    def cost(sc: DispatchScenario) -> float:
+        """What the rented trucks of ``sc`` really cost: hire, driver day rate, km charge on their routed km."""
+        routed = _hire_routed_money(sc, hires, req.config)
+        return round(sum(routed[t] for t in _rented_of(sc, set(hires))), 6)
+
+    best_cost = cost(best)
+    top = (best_cost, len(current))
     cands: list[tuple[str, ...]] = []
     listed = 0  # the sets the walk reached (HIRE_REDUCE_MAX_SETS)
 
     def walk(k: int, chosen: tuple[str, ...]) -> None:
-        """Every set cheaper than ``top`` (or as cheap with fewer trucks), as many units of each option as
-        the request has - bounded by the price, never by the plan's count of trucks (eighth review)."""
+        """Every set whose least cost (``price``) is below ``top`` - what the plan's trucks really cost - (or
+        as much with fewer trucks), as many units of each option as the request has - bounded by the price,
+        never by the plan's count of trucks (eighth review)."""
         nonlocal listed
         if k == len(groups):
             listed += 1
@@ -3341,6 +3411,9 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     cands.sort(key=lambda ids: (price(ids), len(ids), -sum(room.get(t, 0) for t in ids), ids))
 
     trials: list[_HireTrial] = []
+    # The sets solved to a plan that delivers every P1-P3 stop the plan delivers and passes every check:
+    # their real cost was weighed, so none of them is left untried (BUG 5).
+    tried: list[tuple[str, ...]] = []
     solves = 0
     broken = False  # a solve could not run (no worker processes, it failed): no more solves
     t0 = time.monotonic()
@@ -3405,6 +3478,12 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
                     "could not be built); not the suggestion", req.run_id, list(ids), step, sorted(low(new)))
 
     for ids in cands:
+        if (price(ids), len(ids)) >= (best_cost, len(current)):
+            # No set left can cost less than the plan held (BUG 5: with a km charge the first set that
+            # delivers is not always the cheapest; a flat-rate day stops right after it, as before).
+            break
+        if shape(ids) == shape(current):
+            continue  # the set held (its least cost is below its real cost when it has a km charge)
         if _hire_room_short(tds, set(ids), must_stops):
             continue  # ruled out by its room alone
         got = solve(ids)
@@ -3422,11 +3501,16 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             # is at hand (tenth review: this plan was, and called complete).
             not_given(ids, "the cheapest set", new)
             continue
-        log.info("run=%s hire check: %s delivers every P1-P3 stop (%s before, %.0f -> %.0f OMR)", req.run_id,
-                 list(ids), current, price(current), price(ids))
+        tried.append(ids)
+        kept, paid = _rented_of(new, set(hires)), cost(new)
+        if (paid, len(kept)) >= (best_cost, len(current)):
+            log.info("run=%s hire check: %s delivers every P1-P3 stop but costs %.2f OMR on its routed km "
+                     "(%.2f held); kept looking", req.run_id, list(ids), paid, best_cost)
+            continue
+        log.info("run=%s hire check: %s delivers every P1-P3 stop (%s before, %.2f -> %.2f OMR)", req.run_id,
+                 list(ids), current, best_cost, paid)
         best, given = new, sc
-        current = _rented_of(best, set(hires))
-        break
+        current, best_cost = kept, paid
 
     # 3. Trucks given back: the set left, solved - the P4/P5 orders they carried may ride along in the
     # trucks kept (owner answer 1; eighth review: the give-back alone left them out). Its plan replaces the
@@ -3441,19 +3525,20 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
         if got is not None and got[0] is None:
             broken = True
         elif got is not None and (sc := judge(ids, got)) is not None:
+            tried.append(ids)
             again = give_back(sc)
             kept = _rented_of(again, set(hires))
-            cost, was = (price(kept), len(kept)), (price(current), len(current))
+            paid, was = (cost(again), len(kept)), (best_cost, len(current))
             rank = (_service_rank(again, stop_of, req.config), _service_rank(best, stop_of, req.config))
             if low(again):
                 # Its plan without them could not be built: its trucks for P1-P3 orders may be a cheaper
                 # set than the one kept, which is then not proven the cheapest.
                 not_given(ids, "solved again after the give-back", again)
-            elif cost < was or (cost == was and (rank[0] > rank[1] or not _passes_checks(best))):
-                log.info("run=%s hire check: %s solved again after the give-back: %s at %.0f OMR (%.0f before), "
-                         "served by priority %s -> %s", req.run_id, list(ids), kept, cost[0], was[0], rank[1], rank[0])
+            elif paid < was or (paid == was and (rank[0] > rank[1] or not _passes_checks(best))):
+                log.info("run=%s hire check: %s solved again after the give-back: %s at %.2f OMR (%.2f before), "
+                         "served by priority %s -> %s", req.run_id, list(ids), kept, paid[0], was[0], rank[1], rank[0])
                 best = again
-                current = kept
+                current, best_cost = kept, paid[0]
 
     # 4. One truck fewer than the suggested set, solved. A plan of it that keeps every P1-P3 stop and
     # passes every check proves that cheaper set: it is the suggestion (tenth review: it was thrown away).
@@ -3470,13 +3555,21 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
             got = solve(rest)
             if got is not None and got[0] is not None and (sc := judge(rest, got)) is not None:
                 new = give_back(sc)
+                kept, paid = _rented_of(new, set(hires)), cost(new)
                 if low(new) and not low(best):
                     not_given(rest, "one truck fewer", new)
+                elif (paid, len(kept)) >= (best_cost, len(current)):
+                    # Fewer trucks but more km at their charge (BUG 5): it costs more. A flat-rate set with a
+                    # truck fewer always costs less.
+                    tried.append(rest)
+                    log.info("run=%s hire check: one truck fewer, %s, delivers every P1-P3 stop but costs %.2f OMR "
+                             "on its routed km (%.2f held)", req.run_id, list(rest), paid, best_cost)
                 else:
-                    log.info("run=%s hire check: one truck fewer, %s, delivers every P1-P3 stop (%.0f -> %.0f OMR)",
-                             req.run_id, list(rest), price(current), price(_rented_of(new, set(hires))))
+                    tried.append(rest)
+                    log.info("run=%s hire check: one truck fewer, %s, delivers every P1-P3 stop (%.2f -> %.2f OMR)",
+                             req.run_id, list(rest), best_cost, paid)
                     best = new
-                    current = _rented_of(best, set(hires))
+                    current, best_cost = kept, paid
     one: tuple[int, float, str, _HireTrial] | None = None
     if len(current) >= 2:
         for u in current:
@@ -3491,12 +3584,22 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
     # no plan a solve proved has cheaper trucks for P1-P3 orders whose give-back could not be built; it
     # rents no truck for P4/P5 orders alone (tenth review: such a plan was "complete"); and its give-back's
     # swap had a timing for every stop it tried to put back (eleventh review).
-    final = (price(current), len(current))
+    final = (best_cost, len(current))
     swap_cut = any(best is s for s in cut_short)
+    # The sets whose least cost is below what the suggestion really costs and that nothing ruled out: not
+    # tried (the solve limit, the window, a stop request) or tried with no proof (BUG 5: they may cost less).
+    untried = [ids for ids in cands if (price(ids), len(ids)) < final and shape(ids) != shape(current)
+               and not _hire_room_short(tds, set(ids), must_stops)
+               and not any(shape(tr.offered) == shape(ids) and tr.proven for tr in trials)
+               and not any(shape(t) == shape(ids) for t in tried)]
     complete = (listed <= HIRE_REDUCE_MAX_SETS and not low(best) and not any(u < final for u in unbuilt) and not swap_cut
-                and all(_hire_room_short(tds, set(ids), must_stops)
-                        or any(shape(tr.offered) == shape(ids) and tr.proven for tr in trials)
-                        for ids in cands if (price(ids), len(ids)) < final))
+                and not untried)
+    # Said plainly when a km charge leaves sets that may cost less untried (BUG 5); a flat-rate day says
+    # nothing new (``complete`` as before).
+    note = HIRE_NOT_PROVEN_NOTE if untried and any(_km_charged(t) for t in hires.values()) else None
+    if note:
+        log.warning("run=%s hire check: %d set(s) that may cost less on their km were not tried or ruled out "
+                    "(solves=%d); not proven the cheapest", req.run_id, len(untried), solves)
     if low(best):
         log.warning("run=%s hire check: the suggestion still rents %s for P4/P5 orders alone (its give-back could not "
                     "be built); not complete", req.run_id, sorted(low(best)))
@@ -3508,6 +3611,7 @@ def _reduce_hire(req: DispatchRequest, solvable: list[DispatchStop], mx: MatrixR
         used=sorted(current),
         solves=solves,
         complete=complete,
+        note=note,
         one_fewer=HireOneFewer(without=one[2], unserved=sorted(u.stop_id for u in one[3].sc.unserved))  # type: ignore[union-attr]
         if one is not None else None,
     )

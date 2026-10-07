@@ -542,11 +542,17 @@ export interface DispatchResponse {
  * alone, and its give-back had a timing for every order it tried to put back (eleventh review);
  * `one_fewer`: the least useful truck of `used` left out, SOLVED with exactly the others - the
  * stops that plan leaves out (all priorities), as repaired.
+ * Money (BUG 5, 7 Oct 2026): sets are ordered and ruled out by the LEAST their trucks can cost (a km
+ * charge over the fewest km a used truck drives), plans judged by what their trucks really cost on
+ * their routed km; `note`: plain words when the limits stopped the check before every set that might
+ * cost less on its km charge was tried (then `complete` is false); absent or null otherwise, and always
+ * on a day of flat-rate options.
  */
 export interface HireCheck {
   first: string[];
   used: string[];
   solves: number;
   complete: boolean;
+  note?: string | null;
   one_fewer?: { without: string; unserved: string[] } | null;
 }

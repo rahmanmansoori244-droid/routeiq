@@ -2012,3 +2012,207 @@ def test_a_customer_that_fits_one_truck_to_rent_is_one_visit_one_rental(units):
     else:
         assert sum(ld.cases for ld in sc3.loads) == 200
         assert [u.stop_id for u in sc3.unserved] in (["C#1"], ["C#2"], ["C#3"])
+
+
+# ---------------------------------------------------------------------------------------------
+# BUG 5 (7 Oct 2026): a rental's km charge never rules out the cheaper set
+# ---------------------------------------------------------------------------------------------
+# The reduction ranked the sets to rent by hire_money over a rough day's km (_hire_day_km: a round trip of
+# the average distance to ALL the day's customers for every load it may make), so a rental that would only
+# serve a near customer was priced as if it drove to the far ones. The sets were tried cheapest first by
+# that estimate and the first that passed was kept: 123.13 OMR kept where a set with the same deliveries
+# and assignments cost 87.59, "complete". Now a set is ruled out or ordered by the LEAST it can cost (its
+# km charge over the fewest km a used truck drives, _hire_km_floor), a plan is judged by what its trucks
+# really cost on their routed km, and a set is kept only when no untried set could cost less.
+
+def near_far_day(ha: dict, hb: dict):
+    """The own 10-ton and two P3 customers: F, 10 pallets about 60 km out (the own truck's one load), and N,
+    5 pallets about 5 km out (one rented truck's). HA and HB: one unit each of two options to rent (6 bays)."""
+    from tests.test_dispatch import DEPOT
+
+    stops = [pstop("F", DEPOT.lat + 60.0 / 111.0, DEPOT.lng, cases=50, units=10_000),
+             pstop("N", DEPOT.lat + 5.0 / 111.0, DEPOT.lng, cases=20, units=5_000)]
+    return stops, [own("T1"), hire("HA-1", 6, **ha), hire("HB-1", 6, **hb)]
+
+
+NEAR_ON = {"HA": {"T1": [("F",)], "HA-1": [("N",)]}, "HB": {"T1": [("F",)], "HB-1": [("N",)]}}
+
+
+def km_options() -> tuple[dict, dict]:
+    """HA: 20 OMR a day + 1 OMR a km; HB: 50 + 0.2 a km. On the near customer's 13 km: HA about 33, HB about
+    52.6 OMR; over the rough day's km of the tier (about 85 km) HA looks like 105, HB like 67."""
+    return dict(cost=20.0, cost_per_km=1.0), dict(cost=50.0, cost_per_km=0.2)
+
+
+def test_the_estimate_of_a_rentals_day_ranks_the_dearer_set_first_on_this_day():
+    # The day of the counterexample, as the old ranking saw it: HB cheaper by the rough day's km, HA by far
+    # the cheaper on the km it really drives (one round trip to N).
+    stops, trucks = near_far_day(*km_options())
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    rough = ds._hire_money_of(r.stops, r.config, r.trucks, r.depot)
+    assert rough["HB-1"] < rough["HA-1"]
+    tds = ds._truck_days(r)
+    hires = {t.id: t for t in trucks if t.hire_candidate}
+    routed = {h: ds._hire_routed_money(given_plan(r, r.stops, tds, mx, [], NEAR_ON[h[:2]]), hires, r.config)[h]
+              for h in ("HA-1", "HB-1")}
+    assert routed["HA-1"] < routed["HB-1"] - 15.0
+    floor = ds._hire_floor_money(r.trucks, r.config, ds._hire_km_floor(mx))
+    assert floor["HA-1"] <= routed["HA-1"] < routed["HB-1"]
+
+
+def test_the_cheaper_set_on_its_routed_km_is_the_suggestion(monkeypatch):
+    # The first plan rents HB for N (the tier's rough day ranked it cheaper). Before: HA was never a set to
+    # try (its rough money was above HB's), and HB was kept, "complete". Now HA's least cost (20 + 1 OMR/km
+    # over one round trip to the nearest stop) is below what HB really costs, so HA is solved: the same
+    # deliveries and the same truck for each customer, about 20 OMR cheaper - the suggestion.
+    import time
+
+    stops, trucks = near_far_day(*km_options())
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], NEAR_ON["HB"])
+    offered = solves_are(monkeypatch, {("HA-1",): NEAR_ON["HA"]})
+    scs, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert offered == [["HA-1"]]
+    assert hc.first == ["HB-1"] and hc.used == ["HA-1"] and hc.solves == 1 and hc.complete and hc.note is None
+    sc = scs[0]
+    assert hired_used(sc) == {"HA": 1} and unserved_map(sc) == {}
+    assert {ld.truck_id: [st.stop_id for st in ld.stops] for ld in sc.loads} == {"T1": ["F"], "HA-1": ["N"]}
+    hires = {t.id: t for t in trucks if t.hire_candidate}
+    paid = {k: sum(ds._hire_routed_money(p, hires, r.config).values()) for k, p in (("HA", sc), ("HB", first))}
+    assert paid["HA"] < paid["HB"] - 15.0
+
+
+def test_the_cheaper_set_on_its_routed_km_is_the_suggestion_through_a_real_solve(monkeypatch):
+    # The same day end to end: the search's plan rents HB (given), the reduction's solve of HA is the real
+    # search - it delivers both customers, and HA is suggested with its km charge on its routed km.
+    stops, trucks = near_far_day(*km_options())
+    first_plan_is(monkeypatch, NEAR_ON["HB"])
+    r = req(stops, trucks, time_limit_sec=3)
+    resp = optimize_dispatch(r)
+    sc = rec(resp)
+    assert_pallets_hold(r, sc)
+    hc = resp.hire_check
+    assert hc.first == ["HB-1"] and hc.used == ["HA-1"] and hc.complete and hc.note is None
+    assert unserved_map(sc) == {} and hired_used(sc) == {"HA": 1}
+    assert sc.feasibility is not None and sc.feasibility.status == "VERIFIED"
+    [ha] = [ld for ld in sc.loads if ld.truck_id == "HA-1"]
+    assert [st.stop_id for st in ha.stops] == ["N"] and ha.distance_cost == pytest.approx(ha.distance_km, abs=0.01)
+
+
+def test_a_set_that_delivers_but_costs_more_on_its_km_never_replaces_the_cheaper_plan(monkeypatch):
+    # The other way round: the first plan rents HA (cheap on its km). HB's least cost (about 52.6 OMR) is
+    # above what HA really costs (about 33): never solved. HC (a 10-ton, 5 OMR + 2 OMR a km) may cost less -
+    # at least 31 OMR - so it is solved; its plan delivers every order but sends HC to the far customer,
+    # about 317 OMR on its routed km: HA stays, and the check is complete (HC was tried).
+    import time
+
+    stops, trucks = near_far_day(*km_options())
+    trucks.append(hire("HC-1", 12, 5.0, cost_per_km=2.0))
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], NEAR_ON["HA"])
+    hires = {t.id: t for t in trucks if t.hire_candidate}
+    ha = sum(ds._hire_routed_money(first, hires, r.config).values())
+    floor = ds._hire_floor_money(r.trucks, r.config, ds._hire_km_floor(mx))
+    assert floor["HB-1"] > ha > floor["HC-1"]
+    offered = solves_are(monkeypatch, {("HC-1",): {"T1": [("N",)], "HC-1": [("F",)]}})
+    scs, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert offered == [["HC-1"]]
+    assert hc.used == ["HA-1"] and hc.solves == 1 and hc.complete and hc.note is None and scs[0] is first
+
+
+def test_when_the_limit_stops_the_search_the_suggestion_says_it_is_not_proven_the_cheapest(monkeypatch):
+    # No solve allowed: HA may cost less (its least cost is below HB's real cost) but cannot be tried. HB
+    # stays - never called complete - and the check says so in plain words.
+    import time
+
+    monkeypatch.setattr(ds, "HIRE_REDUCE_MAX_SOLVES", 0)
+    stops, trucks = near_far_day(*km_options())
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], NEAR_ON["HB"])
+    scs, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert hc.used == ["HB-1"] and hc.solves == 0 and not hc.complete
+    assert hc.note == ds.HIRE_NOT_PROVEN_NOTE
+    assert hc.note.startswith("Not proven the cheapest") and "km charge" in hc.note and "_" not in hc.note
+    assert scs[0] is first
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_the_least_cost_of_a_rented_truck_is_never_above_what_its_routed_day_costs(monkeypatch, seed):
+    # Property: on small random days with km-charged options, every plan the reduction prices (the search's,
+    # every solve's) pays at least the least cost of each rented truck it uses, so a set ruled out or left
+    # for later by its least cost can never be the cheaper one.
+    import random
+
+    from tests.test_dispatch import DEPOT
+
+    rnd = random.Random(seed)
+    stops = [pstop(f"S{i:02d}", DEPOT.lat + rnd.uniform(-0.5, 0.5), DEPOT.lng + rnd.uniform(-0.5, 0.5), cases=20,
+                   units=rnd.choice([1000, 2000, 3000]), priority=rnd.choice([1, 2, 3, 3, 4])) for i in range(10)]
+    trucks = [own("T1", bays=6), hire("HA-1", 6, 20.0, cost_per_km=rnd.choice([0.5, 1.0])),
+              hire("HA-2", 6, 20.0, cost_per_km=1.0), hire("HB-1", 12, 45.0, cost_per_km=0.1, driver_day_cost=10.0),
+              hire("HC-1", 6, 35.0)]
+    r = req(stops, trucks, time_limit_sec=2)
+    priced: list[dict[str, float]] = []
+    orig = ds._hire_routed_money
+
+    def watched(sc, hires, cfg):
+        out = orig(sc, hires, cfg)
+        priced.append(out)
+        return out
+
+    monkeypatch.setattr(ds, "_hire_routed_money", watched)
+    resp = optimize_dispatch(r)
+    assert resp.hire_check is not None
+    floor = ds._hire_floor_money(r.trucks, r.config, ds._hire_km_floor(matrix_for(r)))
+    assert priced  # the search rented a truck and the reduction priced its plans
+    for routed in priced:
+        for tid, money in routed.items():
+            assert floor[tid] <= money + 1e-9, (tid, floor[tid], money)
+    # Measured on the plan returned too, from its loads' own km.
+    sc = rec(resp)
+    for tid in {ld.truck_id for ld in sc.loads if ld.truck_id.startswith("H")}:
+        km = sum(ld.distance_km for ld in sc.loads if ld.truck_id == tid)
+        t = next(t for t in trucks if t.id == tid)
+        assert floor[tid] <= ds.hire_money(t, r.config, km) + 1e-9
+
+
+def test_flat_rate_options_cost_the_same_least_rough_and_routed():
+    # A flat-rate option (no km charge, as production is set today): its least cost, the tier's rough money
+    # and what a plan pays for it are all its hire + its driver's day rate - the reduction lists, orders and
+    # keeps sets exactly as before.
+    stops, trucks = near_far_day(dict(cost=40.0, driver_day_cost=10.0), dict(cost=50.0, driver_day_cost=10.0))
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    assert ds._hire_floor_money(r.trucks, r.config, ds._hire_km_floor(mx)) == ds._hire_money_of(r.stops, r.config, r.trucks, r.depot) \
+        == {"HA-1": 50.0, "HB-1": 60.0}
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], NEAR_ON["HB"])
+    assert ds._hire_routed_money(first, {t.id: t for t in trucks if t.hire_candidate}, r.config) == {"HB-1": 60.0}
+
+
+@pytest.mark.parametrize("limit", [6, 0])
+def test_a_flat_rate_day_keeps_the_first_cheaper_set_that_delivers_and_stops_as_before(monkeypatch, limit):
+    # Flat rates: three options, the first plan rents the dearest (HC, 60 + 10); HA (30 + 10) and HB (40 + 10)
+    # both deliver. As before: the cheapest set is solved first, kept, and the walk stops there (one solve,
+    # HB never solved), complete, no note. With no solve allowed: HC stays, not complete - and no note, as
+    # before (the words are for a km charge only).
+    import time
+
+    monkeypatch.setattr(ds, "HIRE_REDUCE_MAX_SOLVES", limit)
+    stops, trucks = near_far_day(dict(cost=30.0, driver_day_cost=10.0), dict(cost=40.0, driver_day_cost=10.0))
+    trucks.append(hire("HC-1", 6, 60.0, driver_day_cost=10.0))
+    r = req(stops, trucks, time_limit_sec=3)
+    mx = matrix_for(r)
+    first = given_plan(r, r.stops, ds._truck_days(r), mx, [], {"T1": [("F",)], "HC-1": [("N",)]})
+    offered = solves_are(monkeypatch, {("HA-1",): NEAR_ON["HA"], ("HB-1",): NEAR_ON["HB"]})
+    scs, hc = ds._reduce_hire(r, r.stops, mx, [], 3, time.monotonic() + 600, None, [first])
+    assert hc.note is None
+    if limit:
+        assert offered == [["HA-1"]]
+        assert hc.used == ["HA-1"] and hc.solves == 1 and hc.complete
+        assert hired_used(scs[0]) == {"HA": 1}
+    else:
+        assert offered == [] and hc.used == ["HC-1"] and hc.solves == 0 and not hc.complete and scs[0] is first

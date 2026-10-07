@@ -463,6 +463,31 @@ describe('"with one truck fewer": a real solve or nothing (sixth review of the h
     }
   });
 
+  // BUG 5 (7 Oct 2026): a km charge can leave sets that may cost less untried when the limits stop the
+  // reduction; the optimizer says so (hire_check.note) and the box shows it - never on a complete check.
+  const NOTE =
+    'Not proven the cheapest: the hire check ran out of time or tries before it could check every set of trucks to rent that might cost less once its km charge is counted. A cheaper set may exist - press Check hire options to check again.';
+
+  it('a check its limits cut short on a km charge says the set is not proven the cheapest', () => {
+    const s = summarizeHire({ ...base, hireCheck: { first: [ten, three], used: [ten, three], solves: 6, complete: false, note: NOTE, one_fewer: null } });
+    expect(s.reduction).toEqual({ first: 2, used: 2, solves: 6, complete: false, note: NOTE });
+    const text = hireSuggestionText(s);
+    expect(text.details[0]).toBe(NOTE);
+    expect(text.headline).toMatch(/^.* To deliver them, hire 1 x 10-ton \(12 bays\) \+ 1 x 3-ton \(6 bays\): extra about 80 OMR\./);
+  });
+
+  it('no note (a complete check, a flat-rate day, an older solver): no such line, and the figures as before', () => {
+    for (const hireCheck of [
+      { first: [ten, three], used: [ten, three], solves: 1, complete: true, one_fewer: null },
+      { first: [ten, three], used: [ten, three], solves: 0, complete: false, note: null, one_fewer: null },
+      { first: [ten, three], used: [ten, three], solves: 0, complete: false, one_fewer: null },
+    ]) {
+      const s = summarizeHire({ ...base, hireCheck });
+      expect(s.reduction).toEqual({ first: 2, used: 2, solves: hireCheck.solves, complete: hireCheck.complete });
+      expect(hireSuggestionText(s).details.join(' ')).not.toMatch(/proven the cheapest/i);
+    }
+  });
+
   it('a solve that is not of the suggested set (a truck it does not rent) is not shown', () => {
     const s = summarizeHire({ ...base, hireCheck: { first: [ten, three], used: [ten, three], solves: 2, complete: true, one_fewer: { without: virtualHireId('o10', 2), unserved: ['X1'] } } });
     expect(s.alternative).toBeNull();

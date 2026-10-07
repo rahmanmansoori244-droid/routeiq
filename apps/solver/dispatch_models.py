@@ -654,12 +654,21 @@ class HireCheck(BaseModel):
     P4/P5 orders alone (its give-back could not be built: tenth review), or its give-back had no timing
     left to try a stop on the trucks kept (eleventh review); ``one_fewer``: the least useful truck of
     ``used`` left out, solved with exactly the others, as repaired (None when no such solve ran, when it
-    proved nothing, or when that solve became the suggestion)."""
+    proved nothing, or when that solve became the suggestion).
+
+    Money (BUG 5, 7 Oct 2026): a set is ordered and ruled out before its solve by the LEAST its trucks can
+    cost - hire, driver day rate and a km charge over the fewest km a used truck drives (out to the stop
+    nearest the depot and back) - and a plan by what its trucks really cost on the km they drive; a set is
+    kept only when no set left untried could cost less. With options charging per km the cheapest set is
+    therefore not always the first that delivers. ``note``: plain words for the dispatcher when the limits
+    stopped the check before every set that might cost less on its km charge was tried or ruled out (then
+    ``complete`` is false too); None otherwise, and always on a day of flat-rate options."""
 
     first: list[str] = Field(default_factory=list)
     used: list[str] = Field(default_factory=list)
     solves: int = 0
     complete: bool = True
+    note: str | None = None
     one_fewer: HireOneFewer | None = None
 
 
