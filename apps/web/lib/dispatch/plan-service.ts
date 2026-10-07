@@ -90,6 +90,7 @@ import { MAX_DISPATCH_STOPS } from '../planner-bounds';
 import { loadCostFromSolver, readLoadCost } from './costs';
 import { dateOnly, DEFAULT_TZ, isoOf, todayIso } from './time';
 import { sameDayTiming, type PlanFrom, type SameDayInput, type SameDayTiming } from './plan-from';
+import { searchLeadMin } from './search-mode';
 import { PlanError } from './plan-errors';
 import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
@@ -208,8 +209,9 @@ export interface BuiltRequest {
   /** The tenant settings this request was built with (kept with every option for the ASSUMPTIONS sheet, F08). */
   settings?: PlanSettings;
   /**
-   * What the same-day times were computed from (plan-from.ts), so a THOROUGH start and its job can
-   * time them again from the end of the search (retimeSameDay). Absent on unit-test stubs.
+   * What the same-day times were computed from (plan-from.ts), so the job can time them again when its
+   * search really starts (retimeAtStart, both modes; a THOROUGH start also from the press + its cap).
+   * Absent on unit-test stubs.
    */
   sameDay?: SameDayBasis;
   /**
@@ -240,18 +242,13 @@ export function sameDayBasis(input: SameDayInput, baseShiftStartMin: number, now
 }
 
 /**
- * A same-day THOROUGH plan cannot be used before its search ends (review of the long-search PR): time
- * its new loads again as a plan made at `now` whose search takes up to `searchMin` minutes - the
- * first departure (config.shift_start_min), loading (config.loading_from_min), the plan warning and
- * the settings kept with it (ASSUMPTIONS). The start calls it with the press + the cap, and the job
- * again when it really starts (after any wait for a solver slot). A plan for a later day changes only
- * when its job starts on the delivery day itself (after midnight): loading then starts when its search
- * ends. True when anything changed. QUICK never calls it: its request stays exactly as built.
+ * Time a request's new loads again as a plan made at `now` whose search takes up to `searchMin`
+ * minutes: the first departure (config.shift_start_min) and loading (config.loading_from_min), from
+ * the inputs kept with it (`basis`, which then holds the new timing). Null when nothing changed, else
+ * the timing it had before. Used by retimeSameDay and, for the hire what-if (whose request is its own
+ * copy), by retimeRequestAt.
  */
-export function retimeSameDay(built: BuiltRequest, now: Date, searchMin: number): boolean {
-  const basis = built.sameDay;
-  const cfg = built.request?.config;
-  if (!basis || !cfg) return false;
+function retimeConfig(cfg: DispatchRequest['config'], basis: SameDayBasis, now: Date, searchMin: number): SameDayTiming | null {
   const was = basis.timing;
   const next = sameDayTiming(basis.input, now, searchMin, { wasSameDay: was.loadingFromMin !== null });
   const shiftStart = next.planFrom ? next.planFrom.fromMin : basis.baseShiftStartMin;
@@ -260,10 +257,30 @@ export function retimeSameDay(built: BuiltRequest, now: Date, searchMin: number)
     (cfg.loading_from_min ?? null) !== next.loadingFromMin ||
     was.warning !== next.warning ||
     was.searchMin !== next.searchMin;
-  if (!changed) return false;
+  if (!changed) return null;
   cfg.shift_start_min = shiftStart;
   if (next.loadingFromMin !== null) cfg.loading_from_min = next.loadingFromMin;
   else delete cfg.loading_from_min;
+  basis.timing = next;
+  return was;
+}
+
+/**
+ * Time a request's new loads again as a plan made at `now` whose search takes up to `searchMin`
+ * minutes - the first departure (config.shift_start_min), loading (config.loading_from_min), the plan
+ * warning and the settings kept with it (ASSUMPTIONS). A THOROUGH start calls it with the press + the
+ * cap (a same-day THOROUGH plan cannot be used before its search ends, review of the long-search PR);
+ * every job calls it again when its search really starts (retimeAtStart, both modes). A plan for a
+ * later day changes only when its job starts on the delivery day itself (after midnight): loading then
+ * starts when its search starts (QUICK) or ends (THOROUGH). True when anything changed.
+ */
+export function retimeSameDay(built: BuiltRequest, now: Date, searchMin: number): boolean {
+  const basis = built.sameDay;
+  const cfg = built.request?.config;
+  if (!basis || !cfg) return false;
+  const was = retimeConfig(cfg, basis, now, searchMin);
+  if (!was) return false;
+  const next = basis.timing;
   const at = was.warning ? built.warnings.indexOf(was.warning) : -1;
   if (at >= 0) built.warnings.splice(at, 1, ...(next.warning ? [next.warning] : []));
   else if (next.warning) built.warnings.unshift(next.warning);
@@ -272,8 +289,32 @@ export function retimeSameDay(built: BuiltRequest, now: Date, searchMin: number)
     built.settings.loadingFromMin = next.loadingFromMin;
     built.settings.searchLeadMin = next.searchMin || null;
   }
-  basis.timing = next;
   return true;
+}
+
+/** Minutes of search a request counts before its new loads: THOROUGH its cap, QUICK none. */
+function searchLeadOf(cfg: DispatchRequest['config'] | undefined): number {
+  return cfg?.search_mode === 'THOROUGH' ? searchLeadMin(cfg.max_search_sec) : 0;
+}
+
+/**
+ * ISSUE 6: a solve's times are those of the moment its search really starts - after any wait for a
+ * solver slot or behind the plan's previous job -, never the moment it was queued. Both modes: QUICK
+ * counts its new loads from that moment, THOROUGH from it + its cap. A search queued at 09:05 that
+ * starts at 09:20 lets no new load leave before 09:20. Called by the job right before each call to the
+ * optimizer; true when the request changed (the job stores what it sends).
+ */
+export function retimeAtStart(built: BuiltRequest, now: Date): boolean {
+  return retimeSameDay(built, now, searchLeadOf(built.request?.config));
+}
+
+/**
+ * retimeAtStart for a request kept apart from its BuiltRequest (the hire what-if sends its own copy):
+ * its config and `basis` only. True when the request changed.
+ */
+export function retimeRequestAt(request: DispatchRequest, basis: SameDayBasis | undefined, now: Date): boolean {
+  if (!basis || !request.config) return false;
+  return retimeConfig(request.config, basis, now, searchLeadOf(request.config)) !== null;
 }
 
 export interface WeightChanges {
@@ -832,7 +873,8 @@ export async function buildDispatchRequest(
   // PR8 review: on its delivery day loading starts now too. Sent as loading_from_min, so every new
   // load - on a truck standing at the depot as on one coming back - leaves no earlier than now +
   // turnaround + loading per case x its cases (the optimizer, its check and the dispatch gate).
-  // Built as QUICK (from now); a THOROUGH start times them again from the end of its search
+  // Built as QUICK (from now). The job times them again when its search really starts, after any wait
+  // in the queue (retimeAtStart, ISSUE 6), and a THOROUGH start from the end of its search
   // (retimeSameDay), which is why the inputs are kept with the request (BuiltRequest.sameDay).
   const sameDayIn: SameDayInput = {
     runDateIso: isoOf(run.runDate),

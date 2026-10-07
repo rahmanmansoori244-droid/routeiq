@@ -38,7 +38,7 @@ import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
 import { WORKERS_UNAVAILABLE } from '../planner-unavailable';
 import { PREEMPT_RETRY, solveAdmission, type SolveTicket } from './solve-admission';
-import { buildDispatchRequest, isDispatchDetails, PlanError, type BuiltRequest } from './plan-service';
+import { buildDispatchRequest, isDispatchDetails, PlanError, retimeRequestAt, type BuiltRequest, type SameDayBasis } from './plan-service';
 import { isSupersededRun } from './plan-status';
 import { orderIdOf } from './split';
 import {
@@ -93,8 +93,14 @@ export interface HireBasis {
   baseUnserved: { stop_id: string; order_ids: string[]; reason_code: string }[];
   /** The orders the plan in use delivers (its new loads' and its frozen loads'); absent on an older row. */
   baseOrders?: string[];
-  /** When the request was built (ISO): a same-day plan's times are from then (hire-use.ts keeps them). */
+  /** When the request was built (ISO): the day's orders and trucks are those of then. */
   builtAt?: string;
+  /**
+   * When the check's search really started (ISO; ISSUE 6): a same-day plan's times are from then - the
+   * request was timed again at that moment, after any wait for a slot - and "Use this plan" keeps them.
+   * Absent on an older row: builtAt.
+   */
+  timedAt?: string;
   /** sha256 of requestBasisText(the request without the trucks to rent, the frozen loads' ids). */
   fingerprint: string;
   /** Built by pallets for a hire option with bays (buildDispatchRequest withPallets). */
@@ -153,9 +159,9 @@ export async function rentedOnDay(tenantId: string, runDate: Date, db: Prisma.Tr
  * review of the hire branch: the deleted link or the other depot no longer counted the rented truck, so
  * the option could be rented past its max per day). Switching it off stays possible.
  */
-export async function liveRentalDays(tenantId: string, optionId: string): Promise<string[]> {
-  const today = await companyToday(tenantId);
-  const rows = await prisma.truck.findMany({
+export async function liveRentalDays(tenantId: string, optionId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<string[]> {
+  const today = await companyToday(tenantId, db);
+  const rows = await db.truck.findMany({
     where: { tenantId, hireOptionId: optionId, active: true, onlyOnDate: { gte: new Date(`${today}T00:00:00.000Z`) } },
     select: { onlyOnDate: true },
   });
@@ -401,7 +407,7 @@ export async function startHireCheck(
     return skip('RUNNING', undefined, row.other);
   }
   activeHireJobs.set(row.id, job);
-  const args: JobArgs = { id: row.id, tenantId, runId, userId: user.id, ip, request, basis, job, attempt, key };
+  const args: JobArgs = { id: row.id, tenantId, runId, userId: user.id, ip, request, basis, sameDay: built.sameDay, job, attempt, key };
   // Never an unhandled rejection (third review of the hire branch): whatever escapes ends the row.
   void runHireJob(args).catch(async (err) => {
     console.error('hire check: ended by an unexpected error', { suggestionId: row.id, err: (err as Error)?.message ?? err });
@@ -513,6 +519,8 @@ interface JobArgs {
   ip: string | null;
   request: DispatchRequest;
   basis: HireBasis;
+  /** What the request's same-day times were computed from (BuiltRequest.sameDay): timed again at the start. */
+  sameDay?: SameDayBasis;
   /** The job's own switch (activeHireJobs): a new optimization of the day stops it for good. */
   job: AbortController;
   attempt: Attempt;
@@ -567,12 +575,34 @@ async function runHireJob(a: JobArgs): Promise<void> {
           return;
         }
         const now = new Date();
+        // ISSUE 6: a check that waited for a slot (or was queued again) is timed from now, when its
+        // search really starts - a same-day check queued at 09:05 that starts at 09:20 lets no new load
+        // leave before 09:20. Stored as sent, with that moment ("Use this plan" keeps those times).
+        const retimed = retimeRequestAt(a.request, a.sameDay, now);
+        a.basis.timedAt = now.toISOString();
         const started = await prisma.hireSuggestion.updateMany({
           where: { id: a.id, status: 'QUEUED' },
-          data: { status: 'RUNNING', startedAt: now, heartbeatAt: now, message: `Checking which trucks to hire: ${a.request.stops.length} stops, Quick search` },
+          data: {
+            status: 'RUNNING',
+            startedAt: now,
+            heartbeatAt: now,
+            message: `Checking which trucks to hire: ${a.request.stops.length} stops, Quick search`,
+            basisJson: a.basis as unknown as Prisma.InputJsonValue,
+            ...(retimed ? { requestJson: a.request as unknown as Prisma.InputJsonValue } : {}),
+          },
         });
         if (started.count !== 1) return;
-        const resp = await callSolverRetryingBusy(a.request, cur);
+        // Its search starts with the call the optimizer takes: a "busy" answer retried later is timed again.
+        const retime = async () => {
+          const at = new Date();
+          if (!retimeRequestAt(a.request, a.sameDay, at)) return;
+          a.basis.timedAt = at.toISOString();
+          await prisma.hireSuggestion.updateMany({
+            where: { id: a.id, status: 'RUNNING' },
+            data: { basisJson: a.basis as unknown as Prisma.InputJsonValue, requestJson: a.request as unknown as Prisma.InputJsonValue },
+          });
+        };
+        const resp = await callSolverRetryingBusy(a.request, cur, retime);
         const sc = resp.scenarios?.find((s) => s.name === 'RECOMMENDED') as DispatchScenario | undefined;
         if (!sc || sc.status === 'NO_SOLUTION') throw new SolverError('The hire check found no plan this time. Try again.', 200, null);
         const summary = summarizeHire({
@@ -693,7 +723,11 @@ function cancelledText(job: AbortController): string {
  * again, as a dispatcher's job does (PREEMPT_RETRY; third review of the hire branch: a check met that
  * "busy" at once and was lost, FAILED). Any other "busy" ends the check as before.
  */
-async function callSolverRetryingBusy(request: DispatchRequest, att: Attempt): Promise<Awaited<ReturnType<typeof callDispatchSolver>>> {
+async function callSolverRetryingBusy(
+  request: DispatchRequest,
+  att: Attempt,
+  beforeRetry: () => Promise<void> = async () => undefined,
+): Promise<Awaited<ReturnType<typeof callDispatchSolver>>> {
   const retryUntil = att.ticket.mayMeetBusy ? Date.now() + PREEMPT_RETRY.maxWaitMs : 0;
   for (;;) {
     try {
@@ -703,6 +737,7 @@ async function callSolverRetryingBusy(request: DispatchRequest, att: Attempt): P
       if (!busy || att.signal.aborted || Date.now() >= retryUntil) throw err;
       await new Promise<void>((r) => setTimeout(r, PREEMPT_RETRY.settleMs));
       if (att.signal.aborted) throw err;
+      await beforeRetry();
     }
   }
 }

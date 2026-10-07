@@ -22,12 +22,12 @@ import { audit } from '../audit';
 import { callDispatchSolver, SolverError } from '../solver-client';
 import { plannerUnavailableAlert, WORKERS_UNAVAILABLE } from '../planner-unavailable';
 import { trackInflight, whenIdle } from './optimize-job';
-import { applyScenario, applyWeightChanges, persistDispatchResult, retimeSameDay, type BuiltRequest } from '../dispatch/plan-service';
+import { applyScenario, applyWeightChanges, persistDispatchResult, retimeAtStart, type BuiltRequest } from '../dispatch/plan-service';
 import { lockPlanRow, lockRunForWrite, StaleJobError } from '../dispatch/plan-locks';
 import { isPlanFoundStatus, solverStatusText } from '../dispatch/solver-status';
 import { frozenOfRequest, physicalTruckCount } from '../dispatch/plan-options';
 import { PREEMPT_RETRY, type SolveTicket } from '../dispatch/solve-admission';
-import { fmtSearchTime, searchLeadMin, searchResultText } from '../dispatch/search-mode';
+import { fmtSearchTime, searchResultText } from '../dispatch/search-mode';
 import type { DispatchScenario } from '@routeiq/shared-types';
 import { startHireCheckAfterPlan } from '../dispatch/hire-whatif';
 
@@ -72,6 +72,11 @@ export interface DispatchJobArgs {
   built: BuiltRequest;
   /** Solve admission: the job waits for its slot, and gives it back when it ends. */
   ticket?: SolveTicket;
+  /**
+   * The clock its search's start is read from (startDispatchOptimize: the press + the time since).
+   * Absent: the wall clock.
+   */
+  clock?: () => Date;
 }
 
 /**
@@ -117,11 +122,14 @@ async function runJob(args: DispatchJobArgs): Promise<'SAVED' | void> {
       : cfg?.search_mode === 'QUICK'
         ? ' - Quick'
         : '';
+  const clock = args.clock ?? (() => new Date());
   const now = new Date();
-  // A THOROUGH plan for today is timed from when its search really starts (after any wait for a
-  // solver slot, up to 20 minutes behind another THOROUGH) + its cap: never from the button press
-  // (review of the long-search PR). The stored request is what is sent. QUICK: sent as built.
-  const retimed = cfg?.search_mode === 'THOROUGH' && retimeSameDay(built, now, searchLeadMin(cfg.max_search_sec));
+  // A plan for today is timed from when its search really starts (after any wait for a solver slot,
+  // up to 20 minutes behind another THOROUGH, or behind the plan's previous job): QUICK from that
+  // moment, THOROUGH from it + its cap - never from the button press (review of the long-search PR;
+  // ISSUE 6: a Quick queued at 09:05 that started at 09:20 let a load leave at 09:05). The stored
+  // request is what is sent.
+  const retimed = retimeAtStart(built, clock());
   const started = await prisma.runJob.updateMany({
     where: { id: runJobId, status: 'QUEUED' },
     data: {
@@ -154,6 +162,11 @@ async function runJob(args: DispatchJobArgs): Promise<'SAVED' | void> {
       const busy = err instanceof SolverError && err.status === 503 && err.code !== WORKERS_UNAVAILABLE;
       if (busy && Date.now() < retryUntil) {
         await pause(PREEMPT_RETRY.settleMs);
+        // Its search starts with the next call (up to PREEMPT_RETRY.maxWaitMs later): timed from then,
+        // and stored as sent.
+        if (retimeAtStart(built, clock())) {
+          await prisma.runJob.updateMany({ where: { id: runJobId, status: 'RUNNING' }, data: { requestJson: built.request as never } });
+        }
         continue;
       }
       throw err instanceof SolverError ? err : new SolverError(`Solver call failed: ${(err as Error).message}`, 0, null);

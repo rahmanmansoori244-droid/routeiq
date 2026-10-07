@@ -35,7 +35,7 @@ vi.mock('@/lib/dispatch/start-optimize', async (importOriginal) => ({
 }));
 
 import { callDispatchSolver, SolverError } from '@/lib/solver-client';
-import { applyScenario, buildDispatchRequest, createNextVersionTx, persistDispatchResult, type BuiltRequest } from '@/lib/dispatch/plan-service';
+import { applyScenario, buildDispatchRequest, createNextVersionTx, persistDispatchResult, sameDayBasis, type BuiltRequest } from '@/lib/dispatch/plan-service';
 import { replan, replanRefusal } from '@/lib/dispatch/start-optimize';
 import {
   activeHireJobs,
@@ -354,6 +354,60 @@ describe('the what-if (review of the hire branch)', () => {
     const s = await settled(id);
     expect(s.status).toBe('SUCCEEDED');
     expect(calls).toBe(2);
+  });
+
+  it('ISSUE 6: a check queued at 09:05 that runs at 09:20 sends the optimizer 09:20 as now, and Use this plan keeps those times', async () => {
+    /** The day built at `now` with the same-day rule (plan-service sameDayBasis): 06:00 first departure, turnaround and loading 0. */
+    const builtSameDay = (now: Date): BuiltRequest => {
+      const b = built();
+      const basis = sameDayBasis({ runDateIso: '2099-10-07', timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 0, depotCloseMin: null, loading: { perCase: 0, exampleCases: 0 } }, 360, now);
+      const t = basis.timing;
+      b.request.config = { ...b.request.config, shift_start_min: t.planFrom?.fromMin ?? 360, ...(t.loadingFromMin !== null ? { loading_from_min: t.loadingFromMin } : {}) };
+      b.sameDay = basis;
+      b.warnings = t.warning ? [t.warning] : [];
+      b.settings = { timezone: 'Asia/Muscat', planFrom: t.planFrom, loadingFromMin: t.loadingFromMin } as never;
+      return b;
+    };
+    /** The earliest a new load may leave, as the optimizer reads it (dispatch_solver._new_load_start_min, turnaround 0). */
+    const earliestDeparture = (c: Record<string, any>) => Math.max(c.shift_start_min, typeof c.loading_from_min === 'number' ? c.loading_from_min : 0);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2099-10-07T05:05:00Z')); // 09:05 in Muscat, on the delivery day
+      vi.mocked(buildDispatchRequest).mockImplementation(async (_t, _r, _s, o) => builtSameDay(o?.now ?? new Date()));
+      vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+      // Two other companies' dispatchers fill the optimizer: the check waits for a slot.
+      dispatcherSolve('tB');
+      const c = dispatcherSolve('tC');
+      const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+      const id = (r as { suggestionId: string }).suggestionId;
+      expect(row('hireSuggestion', id).status).toBe('QUEUED');
+      expect(row('hireSuggestion', id).requestJson.config.loading_from_min).toBe(545); // built at 09:05
+      vi.setSystemTime(new Date('2099-10-07T05:20:00Z')); // the slot frees at 09:20: its search starts now
+      c.release();
+      const s = await settled(id);
+      expect(s.status).toBe('SUCCEEDED');
+      const sent = vi.mocked(callDispatchSolver).mock.calls[0]![0].config as Record<string, any>;
+      expect(earliestDeparture(sent)).toBeGreaterThanOrEqual(560);
+      expect(sent).toMatchObject({ shift_start_min: 560, loading_from_min: 560 });
+      // What was sent is what is stored, with the moment the search started.
+      expect(JSON.parse(JSON.stringify(s.requestJson.config))).toMatchObject({ shift_start_min: 560, loading_from_min: 560 });
+      // (vi.waitFor moves the faked clock on a few milliseconds while it waits.)
+      expect((s.basisJson as HireBasis).timedAt).toMatch(/^2099-10-07T05:20:00\./);
+
+      // "Use this plan" at 09:22, nothing changed: the check's loads are saved with the times they were
+      // planned with - the plan's warning and settings say 09:20 too, never the 09:05 of the queue.
+      vi.setSystemTime(new Date('2099-10-07T05:22:00Z'));
+      vi.mocked(createNextVersionTx).mockResolvedValue({ child: { id: 'P2', version: 2 }, frozenLoadsCarried: 1, newLoadId: new Map([['L1', 'L1-copy']]) } as never);
+      vi.mocked(persistDispatchResult).mockResolvedValue(new Map([['RECOMMENDED', 'SC2']]));
+      const u = await applyHireSuggestion(T, 'P1', id, user, null);
+      expect(u.body).toMatchObject({ applied: 'PLAN' });
+      const [, , , b] = vi.mocked(persistDispatchResult).mock.calls[0]!;
+      expect(b.request.config).toMatchObject({ shift_start_min: 560, loading_from_min: 560 });
+      expect(b.settings).toMatchObject({ planFrom: { fromMin: 560 }, loadingFromMin: 560 });
+      expect(b.warnings[0]).toMatch(/^Planned from 09:20 \(now 09:20 \+ 0 min preparation\)/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('a check waiting for a slot is not run once its version was replaced meanwhile', async () => {
@@ -770,6 +824,45 @@ describe('third review of the hire branch', () => {
     expect(replan).not.toHaveBeenCalled();
   });
 
+  it('ISSUE 7: both ways lock the plan row (FOR UPDATE) and the hire options used (FOR SHARE) after the hire codes, before the suggestion is claimed', async () => {
+    /** The statements in order: the advisory keys, the row locks and the claim (logged as CLAIM). */
+    const steps = () =>
+      rawLog
+        .map((sql) => (/pg_advisory_xact_lock/.test(sql) ? 'advisory' : /FROM "RunPlan" .*FOR UPDATE/.test(sql) ? 'RunPlan FOR UPDATE' : /FROM "HireOption" .*FOR SHARE/.test(sql) ? 'HireOption FOR SHARE' : sql === 'CLAIM' ? 'claim' : null))
+        .filter(Boolean);
+    const realUpdateMany = fakePrisma.hireSuggestion.updateMany;
+    const claim = vi.spyOn(fakePrisma.hireSuggestion, 'updateMany').mockImplementation(async (args: unknown) => {
+      const data = (args as { data?: Record<string, unknown> } | undefined)?.data;
+      if (data && 'usedAt' in data) rawLog.push('CLAIM');
+      return realUpdateMany(args);
+    });
+    const locks = lockKeys();
+    try {
+      // The plan way: intake, hire codes, day, then the plan row and the options, then the claim.
+      finishedSuggestion();
+      planApplied();
+      rawLog.length = 0;
+      expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).body).toMatchObject({ applied: 'PLAN' });
+      expect(locks.keys.slice(0, 3)).toEqual(['intake', 'hire-codes', 'planday']);
+      expect(steps().slice(0, 6)).toEqual(['advisory', 'advisory', 'advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE', 'claim']);
+      // The re-plan way (the day changed): the hire codes, then the plan row and the options.
+      tables.truck = tables.truck!.filter((t) => t.id === 'OWN' || t.id === 'H0');
+      row('runPlan', 'P1').status = 'READY';
+      finishedSuggestion();
+      vi.mocked(buildDispatchRequest).mockImplementation(async () => built([...STOPS, stop('D', 100, 1000)]));
+      vi.mocked(replan).mockResolvedValue({ status: 202, body: { runId: 'P2' } });
+      locks.keys.length = 0;
+      rawLog.length = 0;
+      expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).body).toMatchObject({ applied: 'REPLAN' });
+      expect(locks.keys[0]).toBe('hire-codes');
+      // The hire codes before the claim, as the plan way (one press each way never deadlocks).
+      expect(steps().slice(0, 4)).toEqual(['advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE', 'claim']);
+    } finally {
+      locks.stop();
+      claim.mockRestore();
+    }
+  });
+
   it("re-plan way: the optimizer's admission is asked before anything is rented (review)", async () => {
     finishedSuggestion();
     vi.mocked(buildDispatchRequest).mockImplementation(async () => built([...STOPS, stop('D', 100, 1000)]));
@@ -834,6 +927,45 @@ describe('third review of the hire branch', () => {
       expect(s.status).toBe('SUCCEEDED');
       expect(calls).toBe(2);
     } finally {
+      Object.assign(PREEMPT_RETRY, was);
+    }
+  });
+
+  it("ISSUE 6: a same-day check that meets that 'busy' answer is timed again for the call that really starts its search", async () => {
+    const was = { ...PREEMPT_RETRY };
+    Object.assign(PREEMPT_RETRY, { settleMs: 10, maxWaitMs: 5_000 });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2099-10-07T05:05:58Z')); // 09:05:58 in Muscat, on the delivery day
+      vi.mocked(buildDispatchRequest).mockImplementation(async (_t, _r, _s, o) => {
+        const b = built();
+        const basis = sameDayBasis({ runDateIso: '2099-10-07', timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 0, depotCloseMin: null, loading: { perCase: 0, exampleCases: 0 } }, 360, o?.now ?? new Date());
+        b.request.config = { ...b.request.config, shift_start_min: basis.timing.planFrom!.fromMin, loading_from_min: basis.timing.loadingFromMin! };
+        b.sameDay = basis;
+        return b;
+      });
+      const other = solveAdmission.reserveBackground('tZ', 'u', () => undefined, 'Z|2099-10-07');
+      if (other.ok) other.ticket.release({ abandoned: true });
+      const sent: Record<string, any>[] = [];
+      vi.mocked(callDispatchSolver).mockImplementation(async (req) => {
+        sent.push(JSON.parse(JSON.stringify(req.config)));
+        if (sent.length === 1) {
+          vi.setSystemTime(new Date('2099-10-07T05:06:01Z')); // the optimizer takes the next call at 09:06:01
+          throw new SolverError('The route optimizer is busy.', 503, null);
+        }
+        return answer(req);
+      });
+      const r = await startHireCheck(T, 'P1', user, null, 'ASKED');
+      const s = await settled((r as { suggestionId: string }).suggestionId);
+      expect(s.status).toBe('SUCCEEDED');
+      expect(sent.map((c) => [c.shift_start_min, c.loading_from_min])).toEqual([
+        [545, 545],
+        [546, 546],
+      ]);
+      expect(JSON.parse(JSON.stringify(s.requestJson.config))).toMatchObject({ shift_start_min: 546, loading_from_min: 546 });
+      expect((s.basisJson as HireBasis).timedAt).toMatch(/^2099-10-07T05:06:01\./);
+    } finally {
+      vi.useRealTimers();
       Object.assign(PREEMPT_RETRY, was);
     }
   });

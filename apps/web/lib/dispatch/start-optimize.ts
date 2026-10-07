@@ -407,10 +407,17 @@ export async function startDispatchOptimize(
     const mode = ticket?.searchMode ?? requestedSearchMode(opts.searchMode);
     const capSec = thoroughMaxSec();
     applySearchMode(built, mode, capSec);
+    // The press, and the clock the job reads when its search really starts: the press + the time since
+    // (the wall clock in production; a test's fixed press moves on with real time).
+    const pressedAt = opts.now ?? new Date();
+    const pressedWall = Date.now();
+    const clock = () => new Date(pressedAt.getTime() + (Date.now() - pressedWall));
     // A THOROUGH plan for today cannot be used before its search ends (up to the cap): its new loads
     // count from now + the cap, never from the button press (review of the long-search PR). The job
-    // times them again when it really starts, after any wait for a slot. QUICK: exactly as built.
-    if (mode === 'THOROUGH') retimeSameDay(built, opts.now ?? new Date(), searchLeadMin(capSec));
+    // times every request again when its search really starts, after any wait for a slot - QUICK from
+    // that moment, THOROUGH from it + the cap (ISSUE 6: a Quick queued at 09:05 that started at 09:20
+    // still let a load leave at 09:05).
+    if (mode === 'THOROUGH') retimeSameDay(built, pressedAt, searchLeadMin(capSec));
 
     if (!ticket) {
       const adm = solveAdmission.reserve(tenantId, user.id, mode);
@@ -517,7 +524,7 @@ export async function startDispatchOptimize(
     }
     ticket.commit();
     handedOff = true;
-    scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket });
+    scheduleDispatchOptimize({ runId, runJobId: job.id, tenantId, userId: user.id, ip, built, ticket, clock });
     // The hire suggestion's what-ifs of this day were for a plan that is being replaced: stopped.
     void cancelHireChecksOfDay(tenantId, found.depotId, found.runDate, 'Stopped: a new optimization started for this day, so this check was for a plan no longer in use.');
     return {

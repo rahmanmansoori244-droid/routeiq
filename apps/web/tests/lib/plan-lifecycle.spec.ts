@@ -28,16 +28,16 @@ vi.mock('@/lib/audit', () => ({
     return (tx ?? fakePrisma).auditLog.create({ data: { ...input } });
   }),
 }));
-const solver = { impl: null as null | (() => Promise<unknown>) };
+const solver = { impl: null as null | ((req?: any) => Promise<unknown>) };
 vi.mock('@/lib/solver-client', () => ({
   SolverError: class SolverError extends Error {
     constructor(message: string, public status = 0, public responseBody: unknown = null) {
       super(message);
     }
   },
-  callDispatchSolver: vi.fn(async () => {
+  callDispatchSolver: vi.fn(async (req: unknown) => {
     if (!solver.impl) throw new Error('no solver in this test');
-    return solver.impl();
+    return solver.impl(req);
   }),
 }));
 
@@ -52,6 +52,7 @@ import {
   noLocationLoadRemedy,
   PlanError,
   replacedPinRemedy,
+  sameDayBasis,
   updateLoad,
 } from '@/lib/dispatch/plan-service';
 import { driverClashes, isHandSetDriver } from '@/lib/dispatch/load-state';
@@ -1808,6 +1809,56 @@ describe('solve admission wired into the job (F16): queued solves start, every e
     }
     expect(calls).toBe(6);
     expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    if (other.ok) other.ticket.release();
+    expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
+  }, 15_000);
+
+  it("ISSUE 6: a same-day job that meets the optimizer's 'busy' answer is timed again for the call that really starts its search", async () => {
+    seedTwo();
+    const adm = admission();
+    const other = adm.reserve('OTHER', 'u9');
+    const bg = adm.reserveBackground(T, 'u1', vi.fn());
+    expect(bg.ok && !bg.ticket.waiting).toBe(true);
+    const t1 = ticketOf(adm);
+    expect(t1.mayMeetBusy).toBe(true);
+    // R1 is planned on its own delivery day: built at 09:05:58 (turnaround 0, so the bound is "now").
+    const AT_0905 = new Date('2026-09-27T05:05:58Z');
+    const sameDay = sameDayBasis({ runDateIso: '2026-09-27', timezone: 'Asia/Muscat', firstDepartureMin: 360, prepMin: 0, depotCloseMin: null, loading: { perCase: 0, exampleCases: 0 } }, 360, AT_0905);
+    const built = {
+      ...jobBuilt,
+      request: { ...jobBuilt.request, config: { search_mode: 'QUICK', shift_start_min: 545, loading_from_min: 545 } },
+      warnings: [sameDay.timing.warning],
+      sameDay,
+    };
+    const { SolverError } = await import('@/lib/solver-client');
+    const sent: Record<string, any>[] = [];
+    solver.impl = async (req) => {
+      sent.push(JSON.parse(JSON.stringify(req.config)));
+      // The optimizer still holds the stopped check's slot for a few seconds: the call it takes at 09:06:01
+      // starts the search (within PREEMPT_RETRY's wait, set to 5 s here).
+      if (sent.length === 1) {
+        vi.setSystemTime(new Date('2026-09-27T05:06:01Z'));
+        throw new SolverError('The route optimizer is busy with other plans right now. Optimize again in a minute.', 503, null);
+      }
+      return jobResponse();
+    };
+    const was = { ...PREEMPT_RETRY };
+    Object.assign(PREEMPT_RETRY, { settleMs: 20, maxWaitMs: 5_000 });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(AT_0905);
+      scheduleDispatchOptimize({ ...argsFor('R1', 'J1', t1), built: built as never });
+      await g.__routeiqInflight.get('R1');
+    } finally {
+      vi.useRealTimers();
+      Object.assign(PREEMPT_RETRY, was);
+    }
+    expect(sent.map((c) => [c.shift_start_min, c.loading_from_min])).toEqual([
+      [545, 545],
+      [546, 546],
+    ]);
+    expect(row('runJob', 'J1').status).toBe('SUCCEEDED');
+    expect(row('runJob', 'J1').requestJson.config).toMatchObject({ shift_start_min: 546, loading_from_min: 546 });
     if (other.ok) other.ticket.release();
     expect(adm.snapshot()).toMatchObject({ running: 0, waiting: 0 });
   }, 15_000);

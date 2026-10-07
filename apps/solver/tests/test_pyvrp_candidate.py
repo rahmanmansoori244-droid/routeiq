@@ -285,6 +285,101 @@ def test_shortage_day_serves_p1_before_p5(inprocess):
     assert resp.search.pyvrp.penalty_mode == "RAISED"
 
 
+def _rental_day():
+    """ISSUE 9: a feasible day with trucks to rent - ten P2 stops of 2 pallets (20 pallets), one own
+    12-bay truck, NMWC's options to rent (12 bays for 50 OMR, 6 bays for 30 OMR)."""
+    from tests.test_hire import hire_options, own, stops_of
+
+    return req(stops_of([2.0] * 10, priority=2), [own("T1")] + hire_options())
+
+
+def _model_digest(m) -> str:
+    """Everything PyVRP prices (prizes, vehicle types, depots, matrices) and its penalty bounds."""
+    import hashlib
+
+    d = dict(clients=m.clients, vtypes=m.vehicle_types, depots=m.depots, max_penalty=m.max_penalty, mode=m.penalty_mode,
+             dist=[x.tolist() for x in m.dist], dur=m.dur.tolist())
+    return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:16]
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_a_rental_day_gets_a_feasible_second_search_plan(seed):
+    """ISSUE 9: with trucks to rent, the prizes and a rented truck's fixed cost carry the hire tier
+    (~5e9 units here) while PyVRP's penalty ceiling stayed at its default 100,000 (only a shortage
+    day raised it): overloading the own truck cost less than renting or leaving a stop out, so the
+    search ended with no feasible plan on a day a rented truck carries. The ceiling now follows the
+    request's own scale, below the 64-bit bound."""
+    r = _rental_day()
+    tds, solvable, drops, mx = _prepared(r)
+    assert not drops and ds._fleet_shortage(solvable, tds) == (False, False)
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings(seed=seed)))
+    assert out["status"] == "OK" and out["feasible"], out.get("reason")
+    plan, why = PV.plan_of(out, tds, solvable)
+    assert why is None and out["missing"] == 0
+    by_idx = {td.idx: td for td in tds}
+    assert any(by_idx[idx].truck.hire_candidate for idx in plan)
+    m = PV.build_model(r, solvable, tds, mx)
+    scale = max(max(c["prize"] for c in m.clients), max(v["fixed_cost"] for v in m.vehicle_types))
+    assert m.penalty_mode == "RAISED" and m.max_penalty >= scale
+    base, per_unit = PV.worst_case(sum(c["prize"] for c in m.clients), m.vehicle_types, m.dist, m.dur, m.clients, m.depots)
+    assert base + int(m.max_penalty) * per_unit < 2**62
+
+
+def test_a_rental_day_whose_own_fleet_suffices_rents_nothing_in_the_second_search():
+    """ISSUE 9 review: with the raised ceiling PyVRP also STARTED at its midpoint (and built its first
+    plan at the ceiling), so stiff that on a 150-stop day the own fleet carries it kept 2 rented trucks
+    (main: none) and lost to the engine - a dearer final plan. It now starts where PyVRP's defaults
+    start and may climb to the ceiling (every 100 candidates) only when it finds too few feasible plans."""
+    stops, trucks = nmwc_day(150)
+    r = req(stops, trucks + [truck(f"H{i}", cap=800, fixed_cost=50, hire_candidate=True) for i in range(3)])
+    tds, solvable, drops, mx = _prepared(r)
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings(seed=1, max_iters=800)))
+    assert out["status"] == "OK" and out["feasible"] and out["missing"] == 0
+    plan, why = PV.plan_of(out, tds, solvable)
+    by_idx = {td.idx: td for td in tds}
+    assert why is None and not [idx for idx in plan if by_idx[idx].truck.hire_candidate]
+
+
+def test_a_rental_days_ceiling_stays_below_the_64_bit_bound(monkeypatch):
+    """The scaled ceiling is clamped like the shortage rule's: the worst penalised cost stays below
+    2^62, and a scale that cannot fit is ModelTooLarge (PyVRP skipped, the engine's plans stand)."""
+    r = _rental_day()
+    tds, solvable, _, mx = _prepared(r)
+    monkeypatch.setattr(ds, "_drop_penalties", lambda values, w, extra=0: [int(2.42e15)] * len(values))
+    m = PV.build_model(r, solvable, tds, mx)
+    base, per_unit = PV.worst_case(sum(c["prize"] for c in m.clients), m.vehicle_types, m.dist, m.dur, m.clients, m.depots)
+    assert m.penalty_mode == "RAISED" and 1 <= m.max_penalty < 10 * 2.42e15 and base + int(m.max_penalty) * per_unit < 2**62
+    monkeypatch.setattr(ds, "_drop_penalties", lambda values, w, extra=0: [2**61] * len(values))
+    with pytest.raises(PV.ModelTooLarge):
+        PV.build_model(r, solvable, tds, mx)
+
+
+# Taken on main 01b616e, before ISSUE 9's fix: (penalty mode, ceiling, _model_digest).
+_NO_RENTAL_MODELS = {
+    "normal": ("DEFAULT", 100_000.0, "372a9383dc7bd0f2"),
+    "shortage": ("RAISED", 270_000_000_000.0, "7a5d3ee159517784"),
+    "pallets": ("DEFAULT", 100_000.0, "e508981c740d1d71"),
+    "pallets_short": ("RAISED", 1_000_000_000.0, "e0d877c5f0b9efa6"),
+}
+
+
+@pytest.mark.parametrize("day", ["normal", "shortage", "pallets", "pallets_short"])
+def test_days_without_trucks_to_rent_keep_exactly_the_same_model_and_penalties(day):
+    """ISSUE 9's guard: without trucks to rent the model is byte for byte the one main built before
+    the fix: the default ceiling, or 10 x the largest prize on a shortage day."""
+    from tests.test_hire import own, stops_of
+
+    r = {
+        "normal": lambda: req(*nmwc_day(20)),
+        "shortage": lambda: req(nmwc_day(20)[0], [truck("T", cap=100, max_trips=1)]),
+        "pallets": lambda: req(stops_of([2.0] * 10, priority=2), [own("T1"), own("T2")]),
+        "pallets_short": lambda: req(stops_of([2.0] * 10, priority=2), [own("T1")]),
+    }[day]()
+    tds, solvable, _, mx = _prepared(r)
+    m = PV.build_model(r, solvable, tds, mx)
+    assert (m.penalty_mode, m.max_penalty, _model_digest(m)) == _NO_RENTAL_MODELS[day]
+
+
 # ---------------------------------------------------------------------------------------------
 # Round trip and the judge
 # ---------------------------------------------------------------------------------------------
@@ -303,6 +398,22 @@ def test_pyvrp_plan_maps_back_and_is_verified():
                             elapsed=1, time_limit=1, objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective)
     assert sc.feasibility.status == "VERIFIED"
     assert_reconciled(r, sc)
+
+
+def test_the_missing_count_is_our_stops_not_planned():
+    """ISSUE 10: every client of the model is optional (each stop has its prize), and PyVRP 0.14's
+    Solution.num_missing_clients() counts only REQUIRED clients, so the report said 0 missing for a
+    plan that served 2 of 6 stops. It is now our own stops less the ones the extracted routes serve."""
+    stops = [stop(f"S{i}", 23.60 + i / 100, 58.40, cases=50) for i in range(6)]
+    r = req(stops, [truck("T", cap=100, max_trips=1)])
+    tds, solvable, drops, mx = _prepared(r)
+    assert len(solvable) == 6 and not drops
+    out = PV.solve_in_worker((r, solvable, tds, mx, _settings()))
+    assert out["status"] == "OK" and out["feasible"]
+    served = sum(len(load) for route in out["routes"] for load in route["trips"])
+    assert served == 2
+    assert out["missing"] == 4
+    assert out["missing"] == len(solvable) - served
 
 
 def _raw_engine(r, limit=1):

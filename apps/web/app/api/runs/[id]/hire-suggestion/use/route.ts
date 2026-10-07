@@ -13,7 +13,9 @@ interface Params { params: { id: string } }
 // used as one-day trucks for the plan's date, then applies the what-if's plan as the next version when
 // nothing changed since it was computed (200, applied PLAN), else starts a RE-PLAN with them (202,
 // applied REPLAN). 409 ALREADY_USED / NOT_READY / NOTHING_TO_HIRE / SUPERSEDED / OPTIMIZING /
-// DAY_MISMATCH, and a re-plan's own questions (LOCATION_REQUIRED, WEIGHT_REQUIRED) before anything is rented.
+// DAY_MISMATCH / HIRE_CHANGED (the hire options or the plan changed after the checks, found under the
+// transaction's locks), and a re-plan's own questions (LOCATION_REQUIRED, WEIGHT_REQUIRED) before
+// anything is rented.
 export const POST = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { user, ip }) => {

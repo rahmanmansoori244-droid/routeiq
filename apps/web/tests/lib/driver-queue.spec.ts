@@ -23,7 +23,7 @@ import {
   type QueueItem,
 } from '@/lib/driver-page/queue';
 import { memoryStore } from '@/lib/driver-page/store';
-import { dropDriverWorker, shouldRegisterWorker } from '@/lib/driver-page/worker';
+import { dropDriverWorker, forgetDriverPage, shouldRegisterWorker } from '@/lib/driver-page/worker';
 import type { DriverAction } from '@/lib/driver-link/manifest-types';
 
 const NS = 't5|2026-10-05';
@@ -236,21 +236,41 @@ describe('the driver service worker', () => {
   const src = readFileSync(path.resolve(__dirname, '../../public/driver-sw.js'), 'utf8');
   type Listener = (e: Record<string, unknown>) => void;
   type Cache = { match: (r: unknown) => Promise<Response | undefined>; put: (r: unknown, res: Response) => Promise<void>; keys: () => Promise<unknown[]>; delete: (r: unknown) => Promise<boolean> };
-  type Storage = { open: () => Promise<Cache>; keys?: () => Promise<string[]>; delete?: (n: string) => Promise<boolean> };
+  type Storage = { open: (name?: string) => Promise<Cache>; keys?: () => Promise<string[]>; delete?: (n: string) => Promise<boolean>; match?: (r: unknown) => Promise<Response | undefined> };
 
-  /** The worker's script in a context with the given CacheStorage (undefined: none at all) and fetch. */
-  function boot(storage: Storage | undefined, fetchImpl: (r: unknown) => Promise<Response>) {
+  /**
+   * The worker's script in a context with the given CacheStorage (undefined: none at all) and fetch.
+   * `windows`: the browser's open windows of this origin (clients.matchAll; null: no matchAll at all),
+   * none of them controlled by a worker (a first visit) unless given as { url, controlled: true }: as
+   * a browser, matchAll lists the uncontrolled ones only with includeUncontrolled. `build`: the ?v= of
+   * the registration (a new build registers a new one).
+   */
+  function boot(
+    storage: Storage | undefined,
+    fetchImpl: (r: unknown, init?: unknown) => Promise<Response>,
+    windows: (string | { url: string; controlled: boolean })[] | null = [],
+    build = 'b1',
+  ) {
     const listeners: Record<string, Listener> = {};
     const claimed = { n: 0 };
+    const wins = (windows ?? []).map((w) => (typeof w === 'string' ? { url: w, controlled: false } : w));
     const self = {
-      location: { href: 'https://app.test/driver-sw.js?v=b1', origin: 'https://app.test' },
+      location: { href: `https://app.test/driver-sw.js?v=${build}`, origin: 'https://app.test' },
       addEventListener: (type: string, l: Listener) => {
         listeners[type] = l;
       },
       skipWaiting: () => undefined,
-      clients: { claim: async () => void claimed.n++ },
+      clients: {
+        claim: async () => void claimed.n++,
+        ...(windows
+          ? {
+              matchAll: async (opts?: { type?: string; includeUncontrolled?: boolean }) =>
+                wins.filter((w) => (opts?.includeUncontrolled || w.controlled) && (!opts?.type || opts.type === 'window' || opts.type === 'all')).map((w) => ({ url: w.url, type: 'window' })),
+            }
+          : {}),
+      },
     };
-    const globals: Record<string, unknown> = { self, fetch: fetchImpl, URL, Response };
+    const globals: Record<string, unknown> = { self, fetch: fetchImpl, URL, Response, setTimeout, clearTimeout, crypto: globalThis.crypto, TextEncoder };
     if (storage) globals.caches = storage;
     vm.runInContext(src, vm.createContext(globals));
     return { listeners, claimed };
@@ -337,6 +357,249 @@ describe('the driver service worker', () => {
     w.listeners.message!({ data: { type: 'forget', url: '/d/token123' }, waitUntil: (p: Promise<unknown>) => void waits.push(p) });
     await expect(Promise.all(waits)).resolves.toHaveLength(2);
     expect(w.claimed.n).toBe(1);
+  });
+
+  // ---- ISSUE 8: the first visit prepares an offline reload ----------------------------------------
+  /** A CacheStorage in memory, keyed by URL as the browser's (a request or a string). */
+  function memoryCaches() {
+    const stores = new Map<string, Map<string, Response>>();
+    const keyOf = (r: unknown) => new URL(typeof r === 'string' ? r : (r as { url: string }).url, 'https://app.test').href;
+    const open = async (name: string): Promise<Cache> => {
+      if (!stores.has(name)) stores.set(name, new Map());
+      const m = stores.get(name)!;
+      return {
+        match: async (r) => m.get(keyOf(r))?.clone(),
+        put: async (r, res) => {
+          m.delete(keyOf(r));
+          m.set(keyOf(r), res);
+        },
+        keys: async () => [...m.keys()].map((url) => ({ url })),
+        delete: async (r) => m.delete(keyOf(r)),
+      };
+    };
+    /** CacheStorage.match: every cache, in the order they were made. */
+    const matchAny = async (r: unknown) => {
+      for (const m of stores.values()) {
+        const hit = m.get(keyOf(r));
+        if (hit) return hit.clone();
+      }
+      return undefined;
+    };
+    const storage = { open, keys: async () => [...stores.keys()], delete: async (n: string) => stores.delete(n), match: matchAny } as Storage;
+    /** Every kept URL, by cache. */
+    const kept = () => Object.fromEntries([...stores].map(([n, m]) => [n, [...m.keys()]]));
+    return { storage, stores, kept };
+  }
+  const TOKEN = 'AbCdEfGhIjKlMnOpQrStUvWx'; // 24 characters, as a driver link's (synthetic)
+  const PAGE = `https://app.test/d/${TOKEN}`;
+  // The shell as Next.js 14 writes it: its CSS, the font it preloads, the page's chunks (one with a
+  // query written &amp;), and a file of another origin that is never kept.
+  const ASSETS = ['/_next/static/css/app-1a2b.css', '/_next/static/media/inter-3c4d.woff2', '/_next/static/chunks/webpack-5e6f.js', '/_next/static/chunks/app/d/%5Btoken%5D/page-7a8b.js?dpl=b1&v=2'];
+  const HTML =
+    '<!DOCTYPE html><html><head>' +
+    `<link rel="stylesheet" href="${ASSETS[0]}" data-precedence="next"/>` +
+    `<link rel="preload" href="${ASSETS[1]}" as="font" crossorigin="" type="font/woff2"/>` +
+    `<script src="${ASSETS[2]}" async=""></script>` +
+    `<script src="${ASSETS[3]!.replace('&', '&amp;')}" async=""></script>` +
+    '<script src="https://cdn.other.test/_next/static/chunks/other.js" async=""></script>' +
+    '</head><body><div id="driver-page"></div><script>self.__next_f.push([1,"..."])</script></body></html>';
+  // A font only the stylesheet names (a subset of next/font the HTML does not preload; seen in Chromium).
+  const CSS_FONT = '/_next/static/media/e4af-s.p.woff2';
+  /** The site as the network serves it: the page under any token, its assets, the API, a tenant page. */
+  function site() {
+    const net = { online: true, calls: [] as string[], hold: null as Promise<void> | null, pageStatus: 200, redirected: false };
+    const fetchImpl = async (r: unknown) => {
+      const url = new URL(typeof r === 'string' ? r : (r as { url: string }).url, 'https://app.test');
+      net.calls.push(url.href);
+      if (net.hold) await net.hold;
+      if (!net.online) throw new TypeError('Failed to fetch');
+      if (url.origin !== 'https://app.test') return new Response('other origin', { status: 200 });
+      if (url.pathname.startsWith('/d/')) {
+        const res = new Response(net.pageStatus === 200 ? HTML : 'error page', { status: net.pageStatus, headers: { 'content-type': 'text/html; charset=utf-8' } });
+        if (net.redirected) Object.defineProperty(res, 'redirected', { value: true });
+        return res;
+      }
+      if (url.pathname === ASSETS[0]) return new Response(`@font-face{font-family:Inter;src:url(${CSS_FONT}) format("woff2")}body{color:#000}`, { status: 200, headers: { 'content-type': 'text/css' } });
+      if (url.pathname === CSS_FONT) return new Response(`asset ${url.pathname}`, { status: 200 });
+      if (ASSETS.some((a) => new URL(a, 'https://app.test').href === url.href)) return new Response(`asset ${url.pathname}`, { status: 200 });
+      if (url.pathname.startsWith('/api/')) return new Response('{"data":{"stops":[]}}', { status: 200, headers: { 'content-type': 'application/json' } });
+      return new Response('tenant page', { status: 200, headers: { 'content-type': 'text/html' } });
+    };
+    return { net, fetchImpl };
+  }
+  /** Install then activate, as the browser runs them after the page registered the worker. */
+  async function installAndActivate(w: { listeners: Record<string, Listener> }) {
+    for (const type of ['install', 'activate']) {
+      const waits: Promise<unknown>[] = [];
+      w.listeners[type]!({ waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+      await Promise.all(waits);
+    }
+  }
+
+  it('ISSUE 8: a fresh first visit can reload offline - install keeps the open driver page and the files it loads', async () => {
+    const c = memoryCaches();
+    const { net, fetchImpl } = site();
+    // The first visit loaded the page and its files from the network before any worker existed; the
+    // page then registered the worker. Another window of the site shows a tenant page.
+    const w = boot(c.storage, fetchImpl, [PAGE, 'https://app.test/t/acme/dispatch']);
+    await installAndActivate(w);
+    net.online = false; // the driver loses signal and reopens the link
+    const page = await ask(w.listeners, PAGE, 'navigate');
+    expect(page?.status).toBe(200);
+    expect(await text(page)).toBe(HTML);
+    expect(await text(await ask(w.listeners, `${PAGE}?from=qr`, 'navigate'))).toBe(HTML);
+    for (const a of [...ASSETS.slice(1), CSS_FONT]) {
+      const res = await ask(w.listeners, new URL(a, 'https://app.test').href);
+      expect(res?.status, a).toBe(200);
+      expect(await text(res), a).toBe(`asset ${new URL(a, 'https://app.test').pathname}`);
+    }
+    expect(await text(await ask(w.listeners, `https://app.test${ASSETS[0]}`))).toMatch(/^@font-face/);
+    // Only the driver page and its own files: no API answer, no tenant page, no other origin.
+    const keys = Object.values(c.kept()).flat();
+    expect(keys.filter((k) => k.includes('/api/') || k.includes('/t/') || !k.startsWith('https://app.test/'))).toEqual([]);
+    expect(c.kept()['riq-driver-pages-b1']).toEqual([`https://app.test/d/${TOKEN}`]);
+  });
+
+  it('ISSUE 8: install never fails over it - broken or missing storage, no network, no clients list: it installs and serves later', async () => {
+    const cases: [string, Storage | undefined, boolean, string[] | null][] = [
+      ['open rejects', { open: async () => Promise.reject(new Error('QuotaExceededError')), keys: async () => [] }, true, [PAGE]],
+      ['no CacheStorage', undefined, true, [PAGE]],
+      ['network down', memoryCaches().storage, false, [PAGE]],
+      ['no clients.matchAll', memoryCaches().storage, true, null],
+    ];
+    for (const [name, storage, online, windows] of cases) {
+      const { net, fetchImpl } = site();
+      net.online = online;
+      const w = boot(storage, fetchImpl, windows);
+      await expect(installAndActivate(w), name).resolves.toBeUndefined();
+      expect(w.claimed.n, name).toBe(1);
+    }
+  });
+
+  it('ISSUE 8: an error page, a redirect or a page that is not HTML is not kept as the driver page', async () => {
+    for (const make of [(n: ReturnType<typeof site>['net']) => (n.pageStatus = 404), (n: ReturnType<typeof site>['net']) => (n.pageStatus = 500), (n: ReturnType<typeof site>['net']) => (n.redirected = true)]) {
+      const c = memoryCaches();
+      const { net, fetchImpl } = site();
+      make(net);
+      const w = boot(c.storage, fetchImpl, [PAGE]);
+      await installAndActivate(w);
+      expect(c.kept()['riq-driver-pages-b1'] ?? []).toEqual([]);
+    }
+  });
+
+  it('ISSUE 8: a link forgotten (revoked, replaced, expired) while install fetches its page is not kept, in any build\'s cache, and never again', async () => {
+    const c = memoryCaches();
+    // A copy kept by the worker of an older build (its caches not deleted yet).
+    await (await c.storage.open('riq-driver-pages-old')).put(PAGE, new Response(HTML));
+    const { net, fetchImpl } = site();
+    let release!: () => void;
+    net.hold = new Promise<void>((r) => (release = r));
+    const w = boot(c.storage, fetchImpl, [PAGE]);
+    const waits: Promise<unknown>[] = [];
+    w.listeners.install!({ waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    await new Promise((r) => setTimeout(r, 0));
+    // The page found the link revoked and asked the (still installing) worker to forget it.
+    w.listeners.message!({ data: { type: 'forget', url: `/d/${TOKEN}` }, waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    release();
+    net.hold = null;
+    await Promise.all(waits);
+    expect(c.kept()['riq-driver-pages-b1'] ?? []).toEqual([]);
+    expect(c.kept()['riq-driver-pages-old']).toEqual([]);
+    // Opened again online: the network's page is shown, and still not kept.
+    expect(await text(await ask(w.listeners, PAGE, 'navigate'))).toBe(HTML);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(c.kept()['riq-driver-pages-b1'] ?? []).toEqual([]);
+  });
+
+  it('ISSUE 8 review: a link forgotten under one build is not kept again by the next build\'s worker, though its dead tab is still open', async () => {
+    const c = memoryCaches();
+    const { fetchImpl } = site();
+    const DEAD = 'https://app.test/d/YesterdayTokenXXXXXXXXXX';
+    const LIVE = 'https://app.test/d/TodayTokenYYYYYYYYYYYYYY';
+    const b1 = boot(c.storage, fetchImpl, [DEAD]);
+    await installAndActivate(b1);
+    const waits: Promise<unknown>[] = [];
+    b1.listeners.message!({ data: { type: 'forget', url: '/d/YesterdayTokenXXXXXXXXXX' }, waitUntil: (p: Promise<unknown>) => void waits.push(p) });
+    await Promise.all(waits);
+    expect(c.kept()['riq-driver-pages-b1']).toEqual([]);
+    // A deploy; the driver opens today's link: the new build's worker installs with the dead tab still open.
+    const b2 = boot(c.storage, fetchImpl, [{ url: DEAD, controlled: true }, LIVE], 'b2');
+    await installAndActivate(b2);
+    expect(c.kept()['riq-driver-pages-b2']).toEqual([LIVE]);
+    // Its navigation handler keeps it out too; no token in any cache key of what it remembers.
+    await ask(b2.listeners, DEAD, 'navigate');
+    await new Promise((r) => setTimeout(r, 5));
+    expect(c.kept()['riq-driver-pages-b2']).toEqual([LIVE]);
+    expect(Object.values(c.kept()).flat().filter((k) => k.includes('YesterdayToken'))).toEqual([]);
+  });
+
+  it('ISSUE 8 review: install fetches each file once, whatever the number of driver tabs open', async () => {
+    const c = memoryCaches();
+    const { net, fetchImpl } = site();
+    const tabs = ['A', 'B', 'C'].map((x) => `https://app.test/d/${x.repeat(24)}`);
+    await installAndActivate(boot(c.storage, fetchImpl, [...tabs, tabs[0]!]));
+    const counts: Record<string, number> = {};
+    for (const u of net.calls) counts[new URL(u).pathname] = (counts[new URL(u).pathname] ?? 0) + 1;
+    for (const a of [...ASSETS, CSS_FONT]) expect(counts[new URL(a, 'https://app.test').pathname], a).toBe(1);
+    for (const t of tabs) expect(counts[new URL(t).pathname], t).toBe(1);
+  });
+
+  it('ISSUE 8 review: a new build installed without signal keeps what the old build kept, so the reload still works offline', async () => {
+    const c = memoryCaches();
+    const { net, fetchImpl } = site();
+    await installAndActivate(boot(c.storage, fetchImpl, [PAGE]));
+    net.online = false; // a deploy, and the signal is gone while the new worker installs
+    const b2 = boot(c.storage, fetchImpl, [{ url: PAGE, controlled: true }], 'b2');
+    await installAndActivate(b2);
+    expect(Object.keys(c.kept()).filter((n) => n.endsWith('-b1'))).toEqual([]); // the old build's caches are gone
+    expect(await text(await ask(b2.listeners, PAGE, 'navigate'))).toBe(HTML);
+    for (const a of [...ASSETS.slice(1), CSS_FONT]) expect((await ask(b2.listeners, new URL(a, 'https://app.test').href))?.status, a).toBe(200);
+  });
+
+  it('ISSUE 8: at most 8 driver pages are kept (the oldest go first)', async () => {
+    const c = memoryCaches();
+    const { fetchImpl } = site();
+    const w = boot(c.storage, fetchImpl, []);
+    for (let i = 0; i < 10; i++) {
+      await ask(w.listeners, `https://app.test/d/${String(i).padStart(24, 'x')}`, 'navigate');
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    const pages = c.kept()['riq-driver-pages-b1']!;
+    expect(pages).toHaveLength(8);
+    expect(pages[0]).toBe(`https://app.test/d/${'2'.padStart(24, 'x')}`);
+  });
+
+  it('ISSUE 8: the page asks every worker of its registration to forget it (on a first visit none controls the page yet), once each, and never throws', async () => {
+    const got: string[] = [];
+    const worker = (name: string) => ({ postMessage: (m: { type: string; url: string }) => void got.push(`${name}:${m.type}:${m.url}`) });
+    const active = worker('active');
+    await forgetDriverPage({ serviceWorker: { controller: active, getRegistration: async () => ({ installing: worker('installing'), waiting: null, active }) } } as never, `/d/${TOKEN}`);
+    expect(got).toEqual([`active:forget:/d/${TOKEN}`, `installing:forget:/d/${TOKEN}`]);
+    got.length = 0;
+    await forgetDriverPage({ serviceWorker: { controller: null, getRegistration: async () => ({ installing: worker('installing'), waiting: null, active: null }) } } as never, `/d/${TOKEN}`);
+    expect(got).toEqual([`installing:forget:/d/${TOKEN}`]);
+    // The link found dead before the page's registration even exists (seen in Chromium): no worker yet,
+    // so the message goes to the worker once it is active - after its install kept the page.
+    got.length = 0;
+    let activate!: (reg: unknown) => void;
+    const ready = new Promise((r) => (activate = r));
+    await forgetDriverPage({ serviceWorker: { controller: null, getRegistration: async () => undefined, ready } } as never, `/d/${TOKEN}`);
+    expect(got).toEqual([]);
+    activate({ installing: null, waiting: null, active: worker('active') });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(got).toEqual([`active:forget:/d/${TOKEN}`]);
+    // Already sent to that worker while it installed: not sent twice.
+    got.length = 0;
+    const same = worker('w');
+    await forgetDriverPage({ serviceWorker: { controller: null, getRegistration: async () => ({ installing: same, waiting: null, active: null }), ready: Promise.resolve({ active: same }) } } as never, `/d/${TOKEN}`);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(got).toEqual([`w:forget:/d/${TOKEN}`]);
+    await expect(forgetDriverPage({ serviceWorker: { controller: null, getRegistration: async () => Promise.reject(new Error('x')) } } as never, '/d/x')).resolves.toBeUndefined();
+    await expect(forgetDriverPage({ serviceWorker: { controller: null, ready: Promise.reject(new Error('x')) } } as never, '/d/x')).resolves.toBeUndefined();
+    await expect(forgetDriverPage({} as never, '/d/x')).resolves.toBeUndefined();
+    await expect(forgetDriverPage(null, '/d/x')).resolves.toBeUndefined();
+    // The page uses it.
+    expect(readFileSync(path.resolve(__dirname, '../../app/d/[token]/driver-page.tsx'), 'utf8')).toMatch(/forgetDriverPage\(navigator, window\.location\.pathname\)/);
   });
 
   it('only production builds register it (next dev chunk URLs are not hashed: cache first would serve stale JS); a dev build removes an old one', async () => {

@@ -220,6 +220,10 @@ fakePrisma.$queryRaw = async (strings: TemplateStringsArray, ...values: unknown[
     return (tables.runPlan ?? []).filter((r) => r.id === values[0] && r.tenantId === values[1]).map((r) => ({ id: r.id, status: r.status }));
   }
   if (/pg_advisory_xact_lock/.test(sql)) return [{ locked: 1 }];
+  // A hire option's row lock before a delete or a move to another depot (review of ISSUE 7).
+  if (/FROM "HireOption" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(sql)) {
+    return (tables.hireOption ?? []).filter((r) => r.id === values[0] && r.tenantId === values[1]).map((r) => ({ id: r.id }));
+  }
   // Driver leave (6 Oct 2026): the driver's row lock before a period is checked and saved.
   if (/FROM "Driver" WHERE id = \? AND "tenantId" = \? FOR UPDATE/.test(sql)) {
     return (tables.driver ?? []).filter((r) => r.id === values[0] && r.tenantId === values[1]).map((r) => ({ id: r.id }));

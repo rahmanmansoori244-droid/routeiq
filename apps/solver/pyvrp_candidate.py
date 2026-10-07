@@ -72,6 +72,10 @@ STALL_SHARE = 0.1
 FLAG_CHECK_SEC = 0.25  # the stop flags (pipes, dispatch_solver._PipeFlag) are polled at most this often
 INT62 = 2**62  # PyVRP's costs are int64: every penalised cost must stay below this (section 7)
 DEFAULT_MAX_PENALTY = 100_000.0  # pyvrp.PenaltyParams().max_penalty
+# Days with trucks to rent (ISSUE 9 review): the penalties start where PyVRP's defaults start and are
+# updated every this many candidates (PyVRP's default: 500), so they climb to the raised ceiling within
+# a Quick search when too few plans are feasible, and stay low when the own fleet carries the day.
+HIRE_PENALTY_UPDATES = 100
 # Plan continuity needs one distance profile per truck; above this many MB of profiles the PyVRP
 # model leaves continuity out (the judge still prices every moved stop).
 CONTINUITY_PROFILE_MB = 64
@@ -237,6 +241,8 @@ class PvModel:
     max_penalty: float
     penalty_mode: str  # DEFAULT or RAISED
     summary: dict = field(default_factory=dict)
+    # Trucks to rent: start the penalties at PyVRP's default start, not at the raised ceiling's midpoint.
+    start_low: bool = False
 
 
 def _local_xy(req: DispatchRequest, stops: list[DispatchStop]) -> list[tuple[float, float]]:
@@ -422,10 +428,24 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
     # Section 7: default penalties unless the fleet is short of capacity; then 10 x the largest prize,
     # clamped so that the worst penalised cost stays below 2^62.
     # space: cases, pallets on an all-bay fleet, or each truck's own measure on a mixed fleet (_mixed_space_proven)
+    # Trucks to rent (ISSUE 9): the hire tier lifts the prizes and a rented truck's fixed cost to ~1e9-1e13
+    # units; with the default ceiling (100,000) overloading an own truck cost less than renting or leaving a
+    # stop out, so the search ended with no feasible plan on a day a rented truck carries. The ceiling is
+    # then 10 x the request's own scale - the largest prize or fixed cost -, as high as the 64-bit bound
+    # allows (a big day clamps it below that: the penalty of an overload of many units still outweighs a
+    # rental). PyVRP builds its first plan at the ceiling (feasible, with rented trucks when they help) but
+    # STARTS its search where its defaults start (start_low, HIRE_PENALTY_UPDATES; review: starting at the
+    # raised ceiling's midpoint kept 2-4 rented trucks on a 150-stop day the own fleet carries, where main
+    # rented none). A day without trucks to rent keeps exactly the rule above.
     short_space, short_kg = ds._fleet_shortage(solvable, tds)
     base, per_unit = worst_case(int(sum(prizes)), vtypes, dist, Tf, clients, depots)
-    if short_space or short_kg:
-        safe = (INT62 - base) // max(1, per_unit)
+    safe = (INT62 - base) // max(1, per_unit)
+    if tier:
+        scale = max(max(prizes), max(v["fixed_cost"] for v in vtypes))
+        max_penalty, mode = float(min(10 * scale, safe)), "RAISED"
+        if max_penalty < 10 * scale:
+            log.info("pyvrp model: penalty ceiling %.3g clamped below 10 x the hire scale %.3g (64-bit bound)", max_penalty, scale)
+    elif short_space or short_kg:
         max_penalty, mode = float(min(10 * max(prizes), safe)), "RAISED"
     else:
         max_penalty, mode = DEFAULT_MAX_PENALTY, "DEFAULT"
@@ -435,9 +455,9 @@ def build_model(req: DispatchRequest, solvable: list[DispatchStop], tds: list, m
                    pallets="on" if pal_active else "off",
                    prefhard=n_tight, shortage="yes" if (short_space or short_kg) else "no", continuity=bool(continuity),
                    penalty=mode if mode == "DEFAULT" else f"RAISED {max_penalty:.2g}",
-                   prizes=f"{min(prizes):.1e}..{max(prizes):.1e}")
+                   prizes=f"{min(prizes):.1e}..{max(prizes):.1e}", **({"penalty_start": "default"} if tier else {}))
     return PvModel(depots=depots, clients=clients, vehicle_types=vtypes, coords=coords, dist=dist, dur=Tf.astype(np.int64),
-                   type_trucks=type_trucks, max_penalty=max_penalty, penalty_mode=mode, summary=summary)
+                   type_trucks=type_trucks, max_penalty=max_penalty, penalty_mode=mode, summary=summary, start_low=bool(tier))
 
 
 def problem_data(m: PvModel):
@@ -551,12 +571,38 @@ def routes_of(sol) -> list[dict]:
     return out
 
 
+def missing_of(routes: list[dict], n_stops: int) -> int:
+    """Our stops the extracted routes do not serve (ISSUE 10). Not Solution.num_missing_clients():
+    in PyVRP 0.14 that counts REQUIRED clients only, and every client of this model is optional
+    (each stop has its prize), so it said 0 for a plan that served 2 of 6 stops. Without a feasible
+    plan no route is extracted, so every stop counts as missing, as the report's routes and loads say."""
+    served = {k for r in routes for load in r["trips"] for k in load}
+    return n_stops - len(served)
+
+
+def penalty_params(model: PvModel):
+    """PyVRP's penalty parameters of a model whose ceiling is raised (imports pyvrp). A shortage day as
+    before: the ceiling, started at its midpoint. A day with trucks to rent (start_low): the ceiling, but
+    started where PyVRP's defaults start and updated every HIRE_PENALTY_UPDATES candidates."""
+    import pyvrp  # noqa: PLC0415
+
+    if not model.start_low:
+        return pyvrp.PenaltyParams(max_penalty=model.max_penalty)
+
+    class StartLow(pyvrp.PenaltyParams):
+        def midpoint_penalties(self, data):
+            return pyvrp.PenaltyParams().midpoint_penalties(data)
+
+    return StartLow(max_penalty=model.max_penalty, solutions_between_updates=HIRE_PENALTY_UPDATES)
+
+
 def solve_in_worker(job) -> dict:
     """``job`` = (req, solvable, tds, mx, PvSettings). Builds the model and runs PyVRP's own solver
-    (pyvrp.solve, default parameters; max_penalty raised only on capacity-shortage days). Returns
-    plain data: status OK / SKIPPED / FAILED with a reason, the routes as client indices per load and
-    vehicle type, and what the search report needs. Test hooks: ROUTEIQ_TEST_FAIL_PYVRP (raises),
-    ROUTEIQ_TEST_HANG_PYVRP (sleeps, ignoring every flag), ROUTEIQ_TEST_KILL_PYVRP (the process dies),
+    (pyvrp.solve, default parameters; max_penalty raised only on capacity-shortage days and on days
+    with trucks to rent, penalty_params). Returns plain data: status OK / SKIPPED / FAILED with a reason, the routes as
+    client indices per load and vehicle type, and what the search report needs. Test hooks:
+    ROUTEIQ_TEST_FAIL_PYVRP (raises), ROUTEIQ_TEST_HANG_PYVRP (sleeps, ignoring every flag),
+    ROUTEIQ_TEST_KILL_PYVRP (the process dies),
     ROUTEIQ_TEST_PYVRP_IMPORT_FAIL and ROUTEIQ_TEST_PYVRP_PLAN (a JSON plan {truck idx: [[stop k, ...],
     ...]} returned instead of searching)."""
     import dispatch_solver as ds  # noqa: PLC0415
@@ -590,8 +636,7 @@ def solve_in_worker(job) -> dict:
     except ValueError as exc:
         return dict(base, status="SKIPPED", reason="NOTHING_TO_PLAN", error=str(exc))
     data = problem_data(model)
-    params = SolveParams() if model.penalty_mode == "DEFAULT" else SolveParams(
-        penalty=pyvrp.PenaltyParams(max_penalty=model.max_penalty))
+    params = SolveParams() if model.penalty_mode == "DEFAULT" else SolveParams(penalty=penalty_params(model))
     stop = Stopper(s, t0, ds._STOP_FLAG, getattr(ds, "_SEARCH_OVER", None))
     t_search = time.perf_counter()
     res = pyvrp.solve(data, stop=stop, seed=s.seed, collect_stats=False, display=False, params=params)
@@ -603,7 +648,7 @@ def solve_in_worker(job) -> dict:
         type_trucks=model.type_trucks, iterations=int(res.num_iterations), search_sec=round(time.perf_counter() - t_search, 1),
         stop_reason=stop.reason or "SEARCH_END", last_improvement_sec=round(stop.last_sec, 1) if stop.last_sec is not None else None,
         points=stop.report_points(), penalty_mode=model.penalty_mode, summary=model.summary,
-        routes_used=len(routes), loads=sum(len(r["trips"]) for r in routes), missing=int(best.num_missing_clients()),
+        routes_used=len(routes), loads=sum(len(r["trips"]) for r in routes), missing=missing_of(routes, len(model.clients)),
         cpu_sec=round(time.process_time() - c0, 1), wall_sec=round(time.perf_counter() - t0, 1),
     )
 

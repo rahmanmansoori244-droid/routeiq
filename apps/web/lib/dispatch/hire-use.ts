@@ -14,9 +14,10 @@
  *    over) - rents the trucks the what-if used - one-day trucks for that date (Truck.onlyOnDate, hired,
  *    codes HIRE-10T-0710-1, the option's size and costs) - makes the next plan version (copy-forward,
  *    frozen loads exactly as they are) and applies the what-if's plan to it, with those trucks and with
- *    the times it was planned with (a same-day plan's first departures stay those of the check, so its
- *    own timetable check never blocks them), its optimizer findings under the rented trucks' ids. A day
- *    found changed under the locks takes the re-plan way below instead.
+ *    the times it was planned with (a same-day plan's first departures stay those of the check's search,
+ *    timed when it really started - HireBasis.timedAt -, so its own timetable check never blocks them),
+ *    its optimizer findings under the rented trucks' ids. A day found changed under the locks takes the
+ *    re-plan way below instead.
  * 3. Otherwise the trucks are rented and a RE-PLAN starts (Quick): it plans the day as it is now, with
  *    them. The trucks are made from the hire option AS IT IS NOW (size, payload, cost per day, its own
  *    km charge - third review: a changed option once rented a truck with the check's old km charge), the
@@ -25,7 +26,11 @@
  *    left the trucks rented and the suggestion used, with no re-plan).
  * Both ways ask the re-plan's questions first (lines without a weight, asked with the trucks to rent in
  * the request: their payload counts), before any truck is rented. Trucks are rented under a company
- * lock (their codes) and never past an option's max per day. Every step is audited
+ * lock (their codes) and never past an option's max per day. Inside the transaction that rents them,
+ * both ways lock and check again the plan row and the hire options used (lockAndRecheck, ISSUE 7): a
+ * change committed after the first checks - the option switched off or changed, its max per day
+ * lowered, another plan option chosen, a newer version or an optimization - is refused (409
+ * HIRE_CHANGED, HIRE_CHANGED_TEXT) with nothing rented or applied. Every step is audited
  * (HIRED_TRUCKS_ADDED, PLAN_VERSION_CREATED, SCENARIO_CHOSEN, HIRE_SUGGESTION_USED).
  */
 import type { Prisma } from '@prisma/client';
@@ -43,7 +48,7 @@ import {
   retimeSameDay,
   type BuiltRequest,
 } from './plan-service';
-import { asPlanBusy, lockPlanDay, setLockTimeout } from './plan-locks';
+import { asPlanBusy, lockPlanDay, lockPlanRow, setLockTimeout } from './plan-locks';
 import { lockIntake } from './intake-server';
 import { isSupersededRun } from './plan-status';
 import { admissionRefused, dayMismatch, replan, replanRefusal, weightRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
@@ -88,6 +93,52 @@ function dayRateOf(basis: HireBasis, whatIf: DispatchRequest): number | undefine
 
 /** Why "Use this plan" re-plans: the day changed between the first read and the transaction's locks. */
 export const CHANGED_UNDER_LOCK = 'the orders, trucks, loads or settings of the day changed while the plan was being applied';
+
+/** ISSUE 7: the refusal when the hire options or the plan changed between the press's checks and its transaction. */
+export const HIRE_CHANGED_TEXT = 'The hire options or the plan changed since this suggestion. Press Check hire options again.';
+
+/**
+ * ISSUE 7: everything the press decided on, checked again inside its transaction under locks, so a
+ * change committed after its first checks is never applied over (reproduced: a suggestion used after
+ * its hire option was switched off, past an option's newly lowered max per day, and after another
+ * plan option was chosen). In the dispatch writers' order (plan-locks.ts), after the hire codes lock
+ * (and the plan way's intake and day locks):
+ * - the plan row FOR UPDATE (lockPlanRow, the lock every writer of a version takes first): still this
+ *   version, not superseded, not optimizing and no job of it waiting or running, and the plan option
+ *   the suggestion was computed for still the one in use (HireBasis.runVersion, scenarioId);
+ * - the hire options used FOR SHARE, in id order (an admin's change or delete waits for this
+ *   transaction, or committed before it and is read here): each still an active option of the depot
+ *   with the same size, costs and max per day as `decided` (what the press read: the what-if's options
+ *   in the plan way, the options as they are now in the re-plan way).
+ * Throws PlanError 409 HIRE_CHANGED (with `why`) when anything differs; else the options as read under
+ * the lock, which the trucks are made from (rentTrucks: its max per day check counts under the hire codes lock).
+ */
+export async function lockAndRecheck(
+  tx: Tx,
+  tenantId: string,
+  run: { id: string; depotId: string },
+  basis: Pick<HireBasis, 'runVersion' | 'scenarioId'>,
+  summary: Pick<HireSummary, 'hires'>,
+  decided: readonly HireOptionFacts[],
+): Promise<HireOptionFacts[]> {
+  if (!(await lockPlanRow(tx, tenantId, run.id))) throw new PlanError('Plan not found.', 404);
+  const plan = await tx.runPlan.findFirstOrThrow({ where: { id: run.id, tenantId }, select: { version: true, status: true, supersededAt: true, chosenScenarioId: true } });
+  const jobs = await tx.runJob.count({ where: { runId: run.id, status: { in: ['QUEUED', 'RUNNING'] } } });
+  const why: string[] = [];
+  if (isSupersededRun(plan) || plan.version !== basis.runVersion) why.push('a newer plan version is in use');
+  else if (plan.status === 'OPTIMIZING' || plan.status === 'ARCHIVED' || jobs > 0) why.push('the plan is being optimized again');
+  if (basis.scenarioId && plan.chosenScenarioId !== basis.scenarioId) why.push('another plan option was chosen');
+  const ids = [...new Set(summary.hires.map((h) => h.optionId))].sort();
+  if (ids.length) await tx.$queryRaw`SELECT id FROM "HireOption" WHERE "tenantId" = ${tenantId} AND id = ANY(${ids}) ORDER BY id FOR SHARE`;
+  const now = await depotHireOptions(tenantId, run.depotId, tx);
+  const nowOf = new Map(now.map((o) => [o.id, o]));
+  const then = new Map(decided.map((o) => [o.id, o]));
+  for (const h of summary.hires) {
+    if (!sameOption(then.get(h.optionId), nowOf.get(h.optionId))) why.push(`the ${h.label} hire option was changed or switched off`);
+  }
+  if (why.length) throw new PlanError(HIRE_CHANGED_TEXT, 409, { code: 'HIRE_CHANGED', why: [...new Set(why)] });
+  return now;
+}
 
 /**
  * Whether the what-if still holds for the day as it is now: the reasons it does not, in plain words
@@ -159,14 +210,15 @@ function withTrucks(now: BuiltRequest, trucks: DispatchTruck[]): BuiltRequest {
 }
 
 /**
- * The PLAN way applies the what-if's own loads, timed when its request was built (review of the hire
- * branch): the plan is stored with those times - the first departure and loading start of a same-day
- * plan, the plan warning and the settings kept with it - never with the later clock of "now", whose
- * timetable check would block the earliest of those loads (TURNAROUND / EARLY_DEPARTURE, up to
+ * The PLAN way applies the what-if's own loads, timed when its search started (`timedAt`:
+ * HireBasis.timedAt, ISSUE 6; an older row: when its request was built - review of the hire branch):
+ * the plan is stored with those times - the first departure and loading start of a same-day plan, the
+ * plan warning and the settings kept with it - never with the later clock of "now", whose timetable
+ * check would block the earliest of those loads (TURNAROUND / EARLY_DEPARTURE, up to
  * SAME_DAY_SLACK_MIN short).
  */
-export function keepWhatIfTiming(built: BuiltRequest, whatIf: DispatchRequest, builtAt: string | undefined): void {
-  if (builtAt && built.sameDay) retimeSameDay(built, new Date(builtAt), 0);
+export function keepWhatIfTiming(built: BuiltRequest, whatIf: DispatchRequest, timedAt: string | undefined): void {
+  if (timedAt && built.sameDay) retimeSameDay(built, new Date(timedAt), 0);
   const cfg = built.request.config as Record<string, unknown> | undefined;
   if (!cfg) return;
   for (const k of ['shift_start_min', 'loading_from_min'] as const) {
@@ -414,12 +466,31 @@ export async function applyHireSuggestion(
           await lockIntake(tx, tenantId);
           await lockHireCodes(tx, tenantId);
           await lockPlanDay(tx, tenantId, run.depotId, run.runDate);
+          // ISSUE 7: the plan row and the hire options used, locked and checked again (refused when changed).
+          const optionsLocked = await lockAndRecheck(tx, tenantId, run, basis, summary, optionsNow);
+          // Everything the first read decided the plan way on, read again under the locks (review of
+          // ISSUE 7: a daily driver day rate changed in between was applied over, with the set costed at
+          // the old rate): the day's fingerprint, the same-day timing, the day rate, the trucks of the
+          // options already rented for the day (counted under the hire codes lock) and the orders the
+          // check's plan leaves out. Changed: nothing is written, the press takes the re-plan way.
           const again = await build();
-          if (basisFingerprint(again.request, again.scope.frozenLoadIds) !== basis.fingerprint) throw new DayChanged(again);
+          const changedNow = staleReasons({
+            basis,
+            whatIfRequest: whatIf,
+            nowRequest: again.request,
+            nowFingerprint: basisFingerprint(again.request, again.scope.frozenLoadIds),
+            optionsNow: optionsLocked,
+            rentedNow: await rentedOnDay(tenantId, run.runDate, tx),
+            summary,
+            dayRateNow: again.settings?.dailyDriverDayRate,
+          });
+          if (changedNow.length) throw new DayChanged(again);
           const claimed = await tx.hireSuggestion.updateMany({ where: { id: s.id, tenantId, usedAt: null, status: 'SUCCEEDED' }, data: { usedAt: new Date(), usedById: user.id } });
           if (!claimed.count) throw new PlanError('This hire suggestion was already used.', 409, { code: 'ALREADY_USED' });
-          const made = await rentTrucks(tx, tenantId, run, summary, whatIf, optionsNow, user, ip);
+          const made = await rentTrucks(tx, tenantId, run, summary, whatIf, optionsLocked, user, ip);
           const { child, newLoadId } = await createNextVersionTx(tx, tenantId, runId, 'REOPTIMIZE', note, user.id);
+          // The first read (its weight question answered): the read under the locks was checked above to be
+          // the same in all that counts.
           const mapped = withRentedTrucks(whatIf, resp, made, now.request);
           // The plan's own request, with the rented trucks and the frozen loads under their copies' ids.
           const built: BuiltRequest = {
@@ -429,7 +500,7 @@ export async function applyHireSuggestion(
             warnings: [...withHires.warnings, `Planned with ${made.size} truck(s) hired for this day (hire suggestion): ${[...made.values()].map((m) => m.code).join(', ')}.`],
             ...(now.settings ? { settings: { ...now.settings } } : {}),
           };
-          keepWhatIfTiming(built, whatIf, basis.builtAt);
+          keepWhatIfTiming(built, whatIf, basis.timedAt ?? basis.builtAt);
           await applyWeightChanges(tx, tenantId, child.id, built.weightChanges, user.id);
           const ids = await persistDispatchResult(tx, tenantId, child.id, built, mapped.response, { jobId: null });
           await applyScenario(tx, tenantId, child.id, ids.get('RECOMMENDED')!, user.id);
@@ -495,9 +566,13 @@ export async function applyHireSuggestion(
     made = await prisma.$transaction(
       async (tx) => {
         await setLockTimeout(tx);
+        // The hire codes lock before the suggestion row, as the plan way takes them (two presses of one
+        // suggestion, one each way, never deadlock); then ISSUE 7's re-check of the plan and the options.
+        await lockHireCodes(tx, tenantId);
+        const optionsLocked = await lockAndRecheck(tx, tenantId, run, basis, summary, optionsNow);
         const claimed = await tx.hireSuggestion.updateMany({ where: { id: s.id, tenantId, usedAt: null, status: 'SUCCEEDED' }, data: { usedAt: new Date(), usedById: user.id } });
         if (!claimed.count) throw new PlanError('This hire suggestion was already used.', 409, { code: 'ALREADY_USED' });
-        const m = await rentTrucks(tx, tenantId, run, summary, whatIf, optionsNow, user, ip);
+        const m = await rentTrucks(tx, tenantId, run, summary, whatIf, optionsLocked, user, ip);
         await audit(
           {
             tenantId,
