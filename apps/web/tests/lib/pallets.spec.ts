@@ -137,10 +137,12 @@ describe('split deliveries by pallets (split.ts)', () => {
       expect(p.reduce((a, x) => a + x.weightKg, 0)).toBeLessThanOrEqual(10_000);
     }
     expect(parts.flat().reduce((a, x) => a + x.cases, 0)).toBe(1200);
-    // Part 1: all 600 cases of A (6,250 units) + B cut at the room left (200 cases, 5,129 units) = 11,379;
-    // part 2: the other 400 cases of B (10,257 units, 4,000 kg).
-    expect(parts.map((p) => p.map((x) => [x.lineId, x.cases]))).toEqual([[['A', 600], ['B', 200]], [['B', 400]]]);
-    expect(linesPalletUnits(parts[0], cpp)).toBe(11_379);
+    // First fit decreasing by pallet units (7 Oct 2026): B (15,385 units) first, cut at the room (444
+    // cases, 11,385 units) and its other 156 cases (4,000 units); then all 600 cases of A (6,250 units)
+    // whole into part 2 with them (10,250 units, 7,560 kg). Still two parts, one line cut.
+    expect(parts.map((p) => p.map((x) => [x.lineId, x.cases]))).toEqual([[['B', 444]], [['B', 156], ['A', 600]]]);
+    expect(linesPalletUnits(parts[0], cpp)).toBe(11_385);
+    expect(linesPalletUnits(parts[1], cpp)).toBe(10_250);
   });
 
   it('the part keeps the factor each line was cut with', () => {

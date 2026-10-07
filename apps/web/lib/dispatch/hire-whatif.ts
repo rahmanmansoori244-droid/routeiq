@@ -46,6 +46,7 @@ import {
   fleetAverages,
   hireNeed,
   hireSuggestionText,
+  hireSplitFleet,
   hireTrucksForRequest,
   lowPriorityOrders,
   lowPriorityText,
@@ -107,6 +108,12 @@ export interface HireBasis {
    * on an older row: the request's trucks to rent carry it (driver_day_cost).
    */
   dayRate?: number;
+  /**
+   * The request sized the customers' parts with the trucks to rent too (hireSplitFleet, fix of 7 Oct
+   * 2026): "Use this plan" reads the day again the same way. Absent on an older row (parts cut for the
+   * own fleet only).
+   */
+  splitWithHires?: boolean;
 }
 
 export function basisFingerprint(request: DispatchRequest, frozenLoadIds: readonly string[] | undefined): string {
@@ -274,11 +281,16 @@ export async function startHireCheck(
   if (running) return skip('RUNNING', undefined, running.id);
 
   const withPallets = options.some((o) => o.bays !== null);
+  // Every truck the day may still rent sizes the customers' parts with the own fleet (fix of 7 Oct 2026):
+  // a customer that fits one rented truck stays one visit (one stop time), never parts cut for the own
+  // trucks. Their trip cost does not matter here (hireSplitFleet reads their size only).
+  const rented = await rentedOnDay(tenantId, run.runDate);
+  const splitFleet = hireSplitFleet(hireTrucksForRequest(options, { tripCost: 0 }, rented));
   // Built at a time it keeps: "Use this plan" times a same-day plan's new loads as this request did.
   const builtAt = new Date();
   let built;
   try {
-    built = await buildDispatchRequest(tenantId, runId, ['RECOMMENDED'], { withPallets, now: builtAt });
+    built = await buildDispatchRequest(tenantId, runId, ['RECOMMENDED'], { withPallets, now: builtAt, splitFleet });
   } catch (e) {
     if (e instanceof PlanError) return skip('CANNOT_BUILD', e.message);
     throw e;
@@ -301,7 +313,6 @@ export async function startHireCheck(
     await recordNothingLeft(tenantId, run, { builtAt, built, baseUnserved, baseOrders, withPallets, options }, user.id, ip, trigger);
     return skip('NOTHING_LEFT');
   }
-  const rented = await rentedOnDay(tenantId, run.runDate);
   // Owner answers 2-4: each for the whole day, fuel in the hire, its driver at the company's day rate.
   const dayRate = built.settings?.dailyDriverDayRate ?? DEFAULT_DRIVER_DAY_RATE;
   const hires = hireTrucksForRequest(options, fleetAverages(built.request.trucks), rented, dayRate);
@@ -328,6 +339,7 @@ export async function startHireCheck(
     options,
     alreadyRented: rented,
     dayRate,
+    splitWithHires: true,
   };
 
   // The optimizer first (review of the hire branch): a check it cannot take is answered BUSY with no
@@ -431,6 +443,7 @@ async function recordNothingLeft(
     withPallets: b.withPallets,
     options: b.options,
     alreadyRented: {},
+    splitWithHires: true,
   };
   await prisma.$transaction(async (tx) => {
     await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`hire-check:${tenantId}|${run.id}`}, 0))`;

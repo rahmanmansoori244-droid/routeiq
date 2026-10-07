@@ -304,6 +304,42 @@ export function hireTrucksForRequest(
   return out;
 }
 
+/**
+ * The trucks to rent of a what-if request as the request builder sizes a customer's parts with them
+ * (buildDispatchRequest `splitFleet`, fix of 7 Oct 2026): every truck it may rent, so a customer that
+ * fits one of them stays one visit. "Use this plan" reads the day again with the same trucks, so its
+ * stops are the what-if's.
+ */
+export function hireSplitFleet(trucks: readonly DispatchTruck[]): { code: string; capacityCases: number; payloadKg: number | null; bays: number | null }[] {
+  return trucks
+    .filter((t) => t.hire_candidate)
+    .map((t) => ({ code: t.code ?? t.id, capacityCases: t.capacity_cases, payloadKg: t.capacity_kg ?? null, bays: typeof t.bays === 'number' ? t.bays : null }));
+}
+
+/**
+ * The plan in use's left-out stops in the stop ids of the request the what-if sent (pure). The what-if
+ * sizes a customer's parts with the trucks to rent too (hireSplitFleet), so a customer the plan in use
+ * split into parts ("C#1", "C#2", "C#3") can be one stop ("C") there. A left-out stop the request does
+ * not have stands for the request's stops that hold one of its orders, with its reason; a stop the
+ * request has keeps its own row.
+ */
+export function alignUnserved<U extends UnservedLike>(base: readonly U[], stops: readonly Pick<DispatchStop, 'stop_id' | 'order_ids'>[]): UnservedLike[] {
+  const ids = new Set(stops.map((s) => s.stop_id));
+  const out = new Map<string, UnservedLike>();
+  for (const u of base) {
+    if (ids.has(u.stop_id)) {
+      if (!out.has(u.stop_id)) out.set(u.stop_id, { stop_id: u.stop_id, order_ids: u.order_ids, reason_code: u.reason_code });
+      continue;
+    }
+    const orders = new Set(u.order_ids.map(orderIdOf));
+    for (const s of stops) {
+      if (out.has(s.stop_id) || !s.order_ids.some((o) => orders.has(orderIdOf(o)))) continue;
+      out.set(s.stop_id, { stop_id: s.stop_id, order_ids: s.order_ids, reason_code: u.reason_code });
+    }
+  }
+  return [...out.values()];
+}
+
 /** Orders (and their cases, pallets and kg) of some unserved stops. */
 export interface LeftOut {
   orders: number;
@@ -520,9 +556,11 @@ export interface HireNeed {
 export function hireNeed(input: { request: Pick<DispatchRequest, 'stops'>; baseUnserved: readonly UnservedLike[]; baseOrders?: readonly string[] }): HireNeed {
   const stops = input.request.stops;
   const byId = new Map(stops.map((s) => [s.stop_id, s]));
-  const orderIdsOf = new Map(input.baseUnserved.map((u) => [u.stop_id, u.order_ids] as const));
-  const baseOut = new Set(input.baseUnserved.map((u) => u.stop_id));
-  const capIds = capacityLeftOutIds(input.baseUnserved).filter((id) => byId.has(id));
+  // In the request's stop ids: a customer split in the plan in use can be one stop here (alignUnserved).
+  const baseUnserved = alignUnserved(input.baseUnserved, stops);
+  const orderIdsOf = new Map(baseUnserved.map((u) => [u.stop_id, u.order_ids] as const));
+  const baseOut = new Set(baseUnserved.map((u) => u.stop_id));
+  const capIds = capacityLeftOutIds(baseUnserved).filter((id) => byId.has(id));
   const otherIds = new Set([...baseOut].filter((id) => !capIds.includes(id)));
   const baseOrders = input.baseOrders ? new Set(input.baseOrders.map(orderIdOf)) : null;
   const newIds = baseOrders ? stops.filter((s) => !baseOut.has(s.stop_id) && !s.order_ids.some((o) => baseOrders.has(orderIdOf(o)))).map((s) => s.stop_id) : [];
@@ -564,8 +602,9 @@ export function summarizeHire(input: {
   /** The optimizer's reduction of the rented trucks (DispatchResponse.hire_check); absent from a solver before it. */
   hireCheck?: HireCheck | null;
 }): HireSummary {
-  const { request, baseUnserved, whatIf, options } = input;
+  const { request, whatIf, options } = input;
   const stops = request.stops;
+  const baseUnserved = alignUnserved(input.baseUnserved, stops);
   const orderIdsOf = new Map([...baseUnserved.map((u) => [u.stop_id, u.order_ids] as const), ...whatIf.unserved.map((u) => [u.stop_id, u.order_ids] as const)]);
   const need = hireNeed(input);
   const { outIds, lowIds, otherIds } = need;

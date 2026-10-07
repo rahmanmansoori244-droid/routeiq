@@ -45,15 +45,17 @@ describe('fitsCapacity', () => {
 
 describe('splitIntoParts', () => {
   it('fills full trucks first and leaves the remainder last, cutting a line only when needed', () => {
+    // First fit decreasing (7 Oct 2026): a (120) first, then c (70) whole into part 2, then b (60) cut
+    // over part 2's room left and a last part.
     const parts = splitIntoParts([L('a', 'O1', 120), L('b', 'O1', 60), L('c', 'O2', 70)], { cases: 100, kg: null });
     expect(parts.map(casesIn)).toEqual([100, 100, 50]);
     expect(parts[0]).toEqual([{ orderId: 'O1', lineId: 'a', cases: 100, weightKg: 1000 }]);
     expect(parts[1]).toEqual([
       { orderId: 'O1', lineId: 'a', cases: 20, weightKg: 200 },
-      { orderId: 'O1', lineId: 'b', cases: 60, weightKg: 600 },
-      { orderId: 'O2', lineId: 'c', cases: 20, weightKg: 200 },
+      { orderId: 'O2', lineId: 'c', cases: 70, weightKg: 700 },
+      { orderId: 'O1', lineId: 'b', cases: 10, weightKg: 100 },
     ]);
-    expect(parts[2]).toEqual([{ orderId: 'O2', lineId: 'c', cases: 50, weightKg: 500 }]);
+    expect(parts[2]).toEqual([{ orderId: 'O1', lineId: 'b', cases: 50, weightKg: 500 }]);
   });
 
   it('never loses or invents a case (per line)', () => {

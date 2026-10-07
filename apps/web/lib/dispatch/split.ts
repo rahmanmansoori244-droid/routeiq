@@ -6,8 +6,9 @@
  * exactly which SKU lines (and how many cases of each) it contains, so loading manifests and
  * the case reconciliation stay exact. The optimizer just sees ordinary stops at the same place.
  *
- * Strategy: fill part 1 up to one full largest truck, then part 2, ... (lines in order, a line is
- * cut only when it does not fit). The last part is the remainder, which the optimizer can
+ * Strategy (splitIntoParts): first fit decreasing over whole cases - the biggest lines first, each
+ * line whole into the first part with room for it, else cut over the room left; the parts never
+ * depend on the order of the SKU lines, and the last part is the remainder, which the optimizer can
  * combine with other customers.
  *
  * Pallets (owner decision 4 Oct 2026): a truck with bays is measured in pallet units (1/1000 pallet,
@@ -78,12 +79,17 @@ export function linesPalletUnits(lines: { lineId: string; cases: number }[], cpp
 }
 
 /**
- * Cut the lines into parts that each fit `cap`. Lines keep their order; a line is split only
- * when it does not fit the current part. A single case heavier than `cap.kg` still goes into a
- * part of its own, so the loop always ends. That part is sent with its true kg (partDemandKg):
- * the optimizer puts it on a truck that can carry it, or reports it as unserved. (Cases heavier
- * than every truck never get here: buildDispatchRequest leaves them unserved first, with
- * "check the product weight".)
+ * Cut the lines into parts that each fit `cap`: first fit decreasing over whole cases (fix of 7 Oct
+ * 2026). The lines go biggest first in the part's measure - pallet units with bays, else cases - then
+ * the heavier, then by line id, so the parts never depend on the order the SKU lines came in; each
+ * line goes whole into the first part it fits, else is cut over the parts' room left, first part
+ * first, and a new part only takes what is still left. Before, the lines were cut in input order into
+ * one part at a time: a pallet line that did not fit the room left closed the part, and the same six
+ * cases made three parts in one order and two in another (with a tight receiving window, a visit more
+ * meant a case left out). A single case heavier than `cap.kg` still goes into a part of its own, so
+ * the loop always ends. That part is sent with its true kg (partDemandKg): the optimizer puts it on a
+ * truck that can carry it, or reports it as unserved. (Cases heavier than every truck never get here:
+ * buildDispatchRequest leaves them unserved first, with "check the product weight".)
  */
 export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAllocation[][] {
   const kgPerCase = new Map(lines.map((l) => [l.lineId, l.kgPerCase] as const));
@@ -92,54 +98,64 @@ export function splitIntoParts(lines: OpenLine[], cap: PartCapacity): LineAlloca
   if (roomUnits !== null ? !(roomUnits > 0) : !(cap.cases > 0)) {
     return [roundPart(lines.filter((l) => l.cases > 0).map((l) => ({ orderId: l.orderId, lineId: l.lineId, cases: l.cases, weightKg: 0 })), kgPerCase)];
   }
-  const parts: LineAllocation[][] = [];
-  let cur: LineAllocation[] = [];
-  let curCases = 0;
-  let curKg = 0;
-  let curUnits = 0; // each take rounded up on its own: never less than the part's true need
-  const flush = () => {
-    if (cur.length) parts.push(cur);
-    cur = [];
-    curCases = 0;
-    curKg = 0;
-    curUnits = 0;
+  const cppOf = (l: OpenLine) => (roomUnits !== null ? (l.casesPerPallet ?? null) : null);
+  const size = (l: OpenLine) => (roomUnits !== null ? palletUnits(l.cases, cppOf(l)) : l.cases);
+  const order = lines
+    .filter((l) => l.cases > 0)
+    .sort((a, b) => size(b) - size(a) || b.cases * b.kgPerCase - a.cases * a.kgPerCase || cmp(a.lineId, b.lineId) || cmp(a.orderId, b.orderId));
+  interface Part {
+    allocs: LineAllocation[];
+    cases: number;
+    kg: number;
+    units: number; // each take rounded up on its own: never less than the part's true need
+  }
+  const parts: Part[] = [];
+  /** Whole cases of `l` (at most `left`) the part has room for, in its measure and its kg. */
+  const room = (p: Part, l: OpenLine, left: number): number => {
+    const roomCases = roomUnits !== null ? Number.POSITIVE_INFINITY : cap.cases - p.cases;
+    const roomKg = cap.kg === null ? Number.POSITIVE_INFINITY : cap.kg - p.kg;
+    const byKg = l.kgPerCase > 0 ? Math.floor((roomKg + 1e-6) / l.kgPerCase) : Number.POSITIVE_INFINITY;
+    // Whole cases whose units fit the pallet room left: floor(room x cpp / 1000) cases need at most
+    // `room` units, rounded up (integers). A line without a factor counts 0 (the day is refused first).
+    const cpp = cppOf(l);
+    const byPallets = roomUnits !== null && cpp ? Math.floor(((roomUnits - p.units) * cpp) / 1000) : Number.POSITIVE_INFINITY;
+    return Math.max(0, Math.min(left, roomCases, byKg, byPallets));
   };
-  for (const l of lines) {
+  const add = (p: Part, l: OpenLine, take: number) => {
+    p.allocs.push({ orderId: l.orderId, lineId: l.lineId, cases: take, weightKg: take * l.kgPerCase });
+    p.cases += take;
+    p.kg += take * l.kgPerCase;
+    p.units += palletUnits(take, cppOf(l));
+  };
+  for (const l of order) {
     let left = l.cases;
-    const cpp = roomUnits !== null ? (l.casesPerPallet ?? null) : null;
+    // Whole into the first part it fits; a line is cut only when it fits no part whole.
+    const whole = parts.find((p) => room(p, l, left) >= left);
+    if (whole) {
+      add(whole, l, left);
+      continue;
+    }
+    for (const p of parts) {
+      const take = room(p, l, left);
+      if (take > 0) {
+        add(p, l, take);
+        left -= take;
+      }
+      if (left <= 0) break;
+    }
     while (left > 0) {
-      const roomCases = roomUnits !== null ? Number.POSITIVE_INFINITY : cap.cases - curCases;
-      const roomKg = cap.kg === null ? Number.POSITIVE_INFINITY : cap.kg - curKg;
-      const byKg = l.kgPerCase > 0 ? Math.floor((roomKg + 1e-6) / l.kgPerCase) : Number.POSITIVE_INFINITY;
-      // Whole cases whose units fit the pallet room left: floor(room x cpp / 1000) cases need at most
-      // `room` units, rounded up (integers). A line without a factor counts 0 (the day is refused first).
-      const byPallets = roomUnits !== null && cpp ? Math.floor(((roomUnits - curUnits) * cpp) / 1000) : Number.POSITIVE_INFINITY;
-      let take = Math.min(left, roomCases, byKg, byPallets);
-      if (take <= 0) {
-        if (cur.length) {
-          flush();
-          continue;
-        }
-        take = 1; // one case alone is over the payload: keep it visible rather than loop forever
-      }
-      const prev = cur[cur.length - 1];
-      if (prev && prev.lineId === l.lineId) {
-        prev.cases += take;
-        prev.weightKg += take * l.kgPerCase;
-      } else {
-        cur.push({ orderId: l.orderId, lineId: l.lineId, cases: take, weightKg: take * l.kgPerCase });
-      }
-      curCases += take;
-      curKg += take * l.kgPerCase;
-      curUnits += palletUnits(take, cpp);
+      const p: Part = { allocs: [], cases: 0, kg: 0, units: 0 };
+      parts.push(p);
+      // One case alone over the payload: kept visible in a part of its own rather than looping forever.
+      const take = room(p, l, left) || 1;
+      add(p, l, take);
       left -= take;
-      const spaceFull = roomUnits !== null ? curUnits >= roomUnits : curCases >= cap.cases;
-      if (spaceFull || (cap.kg !== null && curKg >= cap.kg - 1e-6)) flush();
     }
   }
-  flush();
-  return parts.map((p) => roundPart(p, kgPerCase));
+  return parts.map((p) => roundPart(p.allocs, kgPerCase));
 }
+
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
  * The true kg of a part (to 0.1 kg), from the exact case weights of its lines. Never capped at
