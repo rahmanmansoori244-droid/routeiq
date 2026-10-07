@@ -518,18 +518,22 @@ export interface DispatchResponse {
  * The reduction of a what-if's rented trucks (sixth review of the hire branch: the Quick search rented
  * 2 x 10-ton where one carried every P1-P3 order left out). `first`: the rented trucks of the search's
  * plan; `used`: those of the RECOMMENDED plan returned - the cheapest set found (seventh review: the
- * trucks carrying only P4/P5 orders given back without a solve - a P4 order of theirs put back on the
- * trucks kept in place of P5 orders where need be (tenth review: strict priorities) -, then every set
+ * trucks carrying only P4/P5 orders given back without a solve - their orders put back on the trucks
+ * kept where they fit, in place of P5 orders where need be (tenth review: strict priorities; eleventh
+ * review: in free room too), a plan kept as the search found it given back from its own times
+ * (eleventh review) -, then every set
  * with less real money - as many trucks as it takes (eighth review) - tried cheapest first, another
  * option's units too; the first whose plan delivers every P1-P3 stop and passes every check, its load
  * re-check included, and rents no truck for P4/P5 orders alone once given back; the set left after a
  * give-back solved once more when the limits allow and it was not solved already, its plan taken only
  * when it passes every check, keeps every P1-P3 stop and is cheaper, or as cheap and serving more by the
- * day's priorities - so the P4/P5 orders of the trucks given back may ride along in the trucks kept;
+ * day's priorities, or as cheap while the give-back fails the checks (eleventh review) - so the P4/P5
+ * orders of the trucks given back may ride along in the trucks kept;
  * otherwise they stay out; the solve of one truck fewer taken when it keeps every P1-P3 stop and passes
  * every check, tenth review); `solves`: the extra solves;
- * `complete`: every set cheaper than `used` was ruled out, and `used` rents no truck for P4/P5 orders
- * alone; `one_fewer`: the least useful truck of `used` left out, SOLVED with exactly the others - the
+ * `complete`: every set cheaper than `used` was ruled out, `used` rents no truck for P4/P5 orders
+ * alone, and its give-back had a timing for every order it tried to put back (eleventh review);
+ * `one_fewer`: the least useful truck of `used` left out, SOLVED with exactly the others - the
  * stops that plan leaves out (all priorities).
  */
 export interface HireCheck {

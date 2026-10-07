@@ -620,16 +620,19 @@ class HireCheck(BaseModel):
     """The REDUCTION of a what-if's rented trucks (sixth review of the hire branch: the Quick search
     rented 2 x 10-ton on the real day where one carried every P1-P3 order; the second only carried
     P4/P5 orders). After the search, with no solve, every rented truck carrying only P4/P5 orders is
-    given back - a stop of theirs that outranks a stop the trucks kept carry (a P4 order, P5 orders
-    riding along) goes back on those trucks, in place of such stops where need be (tenth review: strict
-    priorities never drop a P4 order to carry two P5s); then the CHEAPEST set (seventh review) - every
+    given back - a stop of theirs goes back on the trucks kept where it fits, with nothing taken off or
+    in place of stops it outranks (P5 orders riding along) where need be (tenth review: strict priorities
+    never drop a P4 order to carry two P5s; eleventh review: P4/P5 orders ride along in free room), and a
+    plan kept as the search found it (VIOLATED) is given back from its own times (eleventh review: it
+    kept such a truck, counted in the box); then the CHEAPEST set (seventh review) - every
     set of the trucks to rent with less real money, as many trucks as it takes (eighth review: 2 x 3-ton
     for 80 OMR beat 1 x 10-ton for 85), cheapest first - is the first one whose plan delivers every P1-P3
     stop the plan delivered and passes every check, its load re-check included, and whose trucks for
     P4/P5 orders alone can be given back (tenth review); a set left after trucks were given back is
     solved once more when the limits allow and that set was not solved already, and its plan replaces
     the give-back only when it passes every check, keeps every P1-P3 stop and is cheaper, or as cheap and
-    serving more by the day's priorities - so their P4/P5 orders may ride along in the trucks kept
+    serving more by the day's priorities, or as cheap while the give-back fails the checks (eleventh
+    review) - so their P4/P5 orders may ride along in the trucks kept
     (eighth and ninth reviews; dispatch_solver._reduce_hire); otherwise the give-back stays and they stay
     out. The solve of one truck fewer (``one_fewer``) that keeps every P1-P3 stop and passes every check
     makes that cheaper set the suggestion (tenth review: it was thrown away).
@@ -639,7 +642,8 @@ class HireCheck(BaseModel):
     lost a P1-P3 stop) - false when the solve limit, the time budget, a solve without its load re-check,
     too many sets to list, or a solve whose cheaper set could not be given left one unproven, or when
     ``used`` still rents a truck for P4/P5 orders alone (its give-back could not be built: tenth
-    review); ``one_fewer``: the least useful truck of ``used`` left out, solved with exactly the others
+    review), or its give-back had no timing left to try a stop on the trucks kept (eleventh review);
+    ``one_fewer``: the least useful truck of ``used`` left out, solved with exactly the others
     (None when no such solve ran, or when that solve became the suggestion)."""
 
     first: list[str] = Field(default_factory=list)

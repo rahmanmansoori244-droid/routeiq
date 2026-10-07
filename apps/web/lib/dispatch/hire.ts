@@ -18,8 +18,9 @@
  *   money (hire + the driver's day rate), never one for P4/P5 orders alone - which still ride along
  *   in a rented truck's spare room. After its search it REDUCES the set (sixth review: on the real
  *   Muscat day Quick rented 2 x 10-ton where one carried every P1-P3 order): a rented truck with only
- *   P4/P5 orders is given back without a solve (a P4 order it carried put back on the trucks kept, in place
- *   of P5 orders where need be: tenth review, strict priorities), then every cheaper set (as many trucks
+ *   P4/P5 orders is given back without a solve (its orders put back on the trucks kept where they fit, a
+ *   P4 order in place of P5 orders where need be: tenth review, strict priorities; also from a plan kept
+ *   as the search found it, and into free room: eleventh review), then every cheaper set (as many trucks
  *   as it takes, another option's trucks too) is tried cheapest first, and the first that keeps every
  *   P1-P3 order delivered, with no truck for P4/P5 orders alone once given back, is the suggestion
  *   (seventh review: the cheapest set, not the one left after the dearest truck goes; eighth review:
