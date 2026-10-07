@@ -12,12 +12,13 @@
  * days in scope (the hire suggestion's "Use this plan", Truck.onlyOnDate: deleted, or retired when a
  * row that stays still names one - review of the hire branch: left behind, they were planned on their
  * date as fleet nobody rented and counted against the option's max per day), and daily (casual)
- * drivers that no longer have any load (a daily driver who is a truck's default driver stays). Before
- * a date, an order file without orders goes only when every delivery date in it is before that day.
+ * drivers that no longer have any load (a daily driver who is a truck's default driver, or is named by
+ * a leave period - his own or as the cover - stays; leave is never removed). Before a date, an order
+ * file without orders goes only when every delivery date in it is before that day.
  * Kept: customers (locations, confirmed hours), products, trucks (own; one-day ones of days that
- * stay), regular drivers, depots, regions, users, settings, customer type defaults and hire options,
- * and the audit log, which is never deleted: the run adds one TEST_DATA_CLEARED row with the counts
- * and who did it.
+ * stay), regular drivers, driver leave, depots, regions, users, settings, customer type defaults and
+ * hire options, and the audit log, which is never deleted: the run adds one TEST_DATA_CLEARED row with
+ * the counts and who did it.
  *
  * Safety: one transaction. It sets a lock timeout and takes, in the documented lock order
  * (plan-locks.ts: intake -> day locks -> outcome-day locks -> RunPlan rows -> PlanLoad rows):
@@ -277,7 +278,10 @@ async function removableBatches(db: Db, s: Scope, orders: OrderRow[]): Promise<s
 
 /**
  * Daily drivers that will have no load left once the plans in `runIds` are gone: not a truck's
- * default driver, and not named by an old driver app shift that stays.
+ * default driver, not named by an old driver app shift that stays, and not named by any leave period
+ * (his own, ended ones included, or as a cover: driver leave, 6 Oct 2026). Leave is never removed or
+ * changed here: it is kept for the record, and a cover cleared without an audit row would leave a
+ * truck without its driver (the keys are NO ACTION too).
  */
 async function removableCasualDrivers(db: Db, s: Scope, runIds: string[], shiftIds: string[]): Promise<{ casual: number; removable: string[] }> {
   const casual = ids(await db.driver.findMany({ where: { tenantId: s.tenantId, casual: true }, select: { id: true } }));
@@ -296,6 +300,14 @@ async function removableCasualDrivers(db: Db, s: Scope, runIds: string[], shiftI
       select: { driverId: true },
     });
     for (const sh of shifts) used.add(sh.driverId);
+    const leave = await db.driverLeave.findMany({
+      where: { tenantId: s.tenantId, OR: [{ driverId: { in: part } }, { coverDriverId: { in: part } }] },
+      select: { driverId: true, coverDriverId: true },
+    });
+    for (const lv of leave) {
+      used.add(lv.driverId);
+      if (lv.coverDriverId) used.add(lv.coverDriverId);
+    }
   }
   return { casual: casual.length, removable: casual.filter((id) => !used.has(id)) };
 }

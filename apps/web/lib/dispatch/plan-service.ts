@@ -45,6 +45,8 @@ import {
 } from './data-collection';
 import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
+import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
+import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   caseHeavierThanAnyTruck,
@@ -1257,7 +1259,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   // first. The driver notes (a trip that lost or changed its driver, a hand-set driver whose trip the
   // plan does not have) are kept in the plan summary (driverChanges, shown as plan warnings),
   // audited and returned. driverSetById comes from the evidence row: its foreign key keeps it valid.
-  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true } as const;
+  // driverIsCover: the row's "given as the cover" marker (a re-plan offers that driver again only as the cover).
+  const driverSel = { truckId: true, loadNo: true, status: true, driverId: true, departMin: true, returnMin: true, driverSetById: true, driverSetAt: true, driverIsCover: true } as const;
   const evidence = await tx.planLoad.findMany({ where: { runId, tenantId }, select: driverSel });
   // The trucks of the new loads and of the evidence loads (named in the driver notes).
   const trucks = await tx.truck.findMany({ where: { tenantId, id: { in: [...new Set([...d.loads.map((l) => l.truck_id), ...evidence.map((l) => l.truckId)])] } } });
@@ -1266,6 +1269,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   const tenantDrivers = await tx.driver.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
   const driverName = new Map(tenantDrivers.map((x) => [x.id, x.name]));
   const loadKey = (truckId: string, loadNo: number) => `${truckId}:${loadNo}`;
+  // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
+  const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
+  const elsewhere = await driversOnOtherDepots(tx, tenantId, run, leave);
   const { drivers: driverOf, notes } = planDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
@@ -1277,6 +1283,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     })),
     evidence,
     new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
+    leave,
+    elsewhere,
   );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
@@ -1290,6 +1298,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     to: n.toDriverId ? person(n.toDriverId) : null,
     reason: n.reason,
     other: n.other ? { truckCode: truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
+    ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
+    ...(n.cover ? { cover: n.cover } : {}),
   }));
 
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
@@ -1332,6 +1342,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         // The dispatcher's hand-set choice for this truck and trip carries its marker; RouteIQ's picks have none.
         driverSetById: driver?.driverSetById ?? null,
         driverSetAt: driver?.driverSetAt ?? null,
+        // Given as the cover of the truck's usual driver on leave (the column defaults to false).
+        ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -2380,6 +2392,11 @@ export interface LoadChange {
   status?: LoadStatusName;
   /** null = no driver */
   driverId?: string | null;
+  /**
+   * The dispatcher answered "<name> is on leave on <day>. Lock ... anyway?": Lock, Loading or Dispatch
+   * of a load whose driver is on leave that day goes through (else 409 DRIVER_ON_LEAVE; leaveGate).
+   */
+  leaveConfirmed?: boolean;
 }
 
 /**
@@ -2401,7 +2418,7 @@ export async function updateLoad(
     const run = await lockOpenRun(tx, tenantId, runId);
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
-    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date());
+    if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true);
     // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
     // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
     if (load && change.status === 'LOCKED') {
@@ -2426,8 +2443,8 @@ export function noPlanApplied(loadStatuses: readonly string[]): PlanError {
   return new PlanError(`This plan version has no optimized plan yet, so its loads cannot be locked, loaded or dispatched. ${advice}`, 409, { code: 'NO_PLAN_APPLIED' });
 }
 
-async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date) {
-  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now);
+async function changeStatusTx(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, user: { id: string }, hasRole: RoleCheck, now: Date, leaveConfirmed = false) {
+  return changeStatusCore(tx, tenantId, run, loadId, to, { userId: user.id, label: null }, hasRole, now, leaveConfirmed);
 }
 
 /**
@@ -2443,9 +2460,20 @@ export interface StatusActor {
 /**
  * The status change of one load, shared by the dispatcher's buttons (changeStatusTx) and the driver's
  * Back at depot (completeLoadAsDriver). `hasRole` null skips the role check: only the driver path,
- * which completes a DISPATCHED load whose every stop has a result.
+ * which completes a DISPATCHED load whose every stop has a result. `leaveConfirmed`: the dispatcher's
+ * answer about a driver on leave that day (leaveGate).
  */
-async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: string, to: LoadStatusName, actor: StatusActor, hasRole: RoleCheck | null, now: Date) {
+async function changeStatusCore(
+  tx: Tx,
+  tenantId: string,
+  run: OpenRun,
+  loadId: string,
+  to: LoadStatusName,
+  actor: StatusActor,
+  hasRole: RoleCheck | null,
+  now: Date,
+  leaveConfirmed = false,
+) {
   const runId = run.id;
   const load = await tx.planLoad.findFirst({ where: { id: loadId, runId, tenantId } });
   if (!load) throw new PlanError('Load not found.', 404);
@@ -2484,6 +2512,10 @@ async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: 
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
+  // Driver leave (demo of 7 Oct 2026): Lock, Loading and Dispatch of a load whose driver is on leave
+  // that day ask first (409 DRIVER_ON_LEAVE) - after the other gates, so their refusals keep their
+  // words. Stepping back and Completed never: a load that has left is not judged afterwards.
+  const driverOnLeave = isGatedMove(load.status, to) ? await leaveGate(tx, tenantId, run, load, leaveConfirmed) : null;
   // Owner rule 20 (30 Sep 2026): a load never leaves without a driver. Checked LAST, after every
   // other gate (their refusals keep their words), on the load as it is after the driver step of the
   // same request (updateLoad sets the driver first). Lock, Loading and Completed are not affected.
@@ -2521,7 +2553,16 @@ async function changeStatusCore(tx: Tx, tenantId: string, run: OpenRun, loadId: 
       entity: 'PlanLoad',
       entityId: loadId,
       beforeJson: { status: load.status } as never,
-      afterJson: { status: to, runId, truckId: load.truckId, loadNo: load.loadNo, ...(timing ? { timing } : {}), ...(actor.label ? { actor: actor.label } : {}) } as never,
+      afterJson: {
+        status: to,
+        runId,
+        truckId: load.truckId,
+        loadNo: load.loadNo,
+        ...(timing ? { timing } : {}),
+        ...(actor.label ? { actor: actor.label } : {}),
+        // The dispatcher's answer: this driver drives although he is on leave that day.
+        ...(driverOnLeave ? { driverOnLeave } : {}),
+      } as never,
       // A row without a user (the driver link, the janitor) keeps no IP: a driver's IP is erased with
       // the stop events after the location retention, audit rows are kept for good.
       ...(actor.userId === null ? { ip: false as const } : {}),
@@ -3038,6 +3079,39 @@ async function driverGate(tx: Tx, tenantId: string, load: { id: string; truckId:
 }
 
 /**
+ * Driver leave (demo of 7 Oct 2026; onLeaveMoveRefusal in driver-leave.ts): the load's driver - as he
+ * is after the driver step of the same request - is on leave on the plan's day. Without the
+ * dispatcher's answer: 409 DRIVER_ON_LEAVE { driverId, name, day, until }, nothing changes. With it:
+ * what the status change's audit row keeps (the driver, until when, confirmed). Null: no driver, or
+ * not on leave that day. Called for Lock, Loading and Dispatch only (isGatedMove).
+ */
+async function leaveGate(
+  tx: Tx,
+  tenantId: string,
+  run: { runDate: Date },
+  load: { truckId: string; loadNo: number; driverId: string | null },
+  confirmed: boolean,
+): Promise<{ driverId: string; driverName: string; until: string; confirmed: true } | null> {
+  if (!load.driverId) return null;
+  const day = isoOf(run.runDate);
+  const away = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), day).get(load.driverId);
+  if (!away) return null;
+  const driver = await tx.driver.findFirst({ where: { id: load.driverId, tenantId }, select: { name: true } });
+  const name = driver?.name ?? 'This driver';
+  if (!confirmed) {
+    const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+    throw new PlanError(`${truck?.code ?? 'Truck'} L${load.loadNo}: ${onLeaveMoveRefusal(name, day)}`, 409, {
+      code: 'DRIVER_ON_LEAVE',
+      driverId: load.driverId,
+      name,
+      day,
+      until: away.untilIso,
+    });
+  }
+  return { driverId: load.driverId, driverName: name, until: away.untilIso, confirmed: true };
+}
+
+/**
  * The daily-driver quick add (lib/dispatch/casual-driver.ts, owner rule 20): its own reads and writes
  * and the driver setting of the load in ONE load-change transaction under the plan's row lock, as
  * updateLoad. A refusal anywhere rolls back the new driver too.
@@ -3088,10 +3162,13 @@ async function setDriverTx(tx: Tx, tenantId: string, run: OpenRun, loadId: strin
   // this trip ends for good (driverChangeWarnings). A driver so marked is hand-set: a re-plan or
   // "Use instead" keeps it on this truck and trip (planDrivers, pass 1). "No driver" is not (there
   // is no driver to keep): the next plan fills that trip in like any other. A driver RouteIQ fills in
-  // (`filled`) carries no marker.
+  // (`filled`) carries no marker. The dispatcher's pick - or a driver filled in for it - is never
+  // "RouteIQ's cover" (driverIsCover), even when he keeps the cover.
   const updated = await tx.planLoad.update({
     where: { id: loadId },
-    data: filled ? { driverId, driverSetById: null, driverSetAt: null } : { driverId, driverSetById: user.id, driverSetAt: new Date() },
+    data: filled
+      ? { driverId, driverSetById: null, driverSetAt: null, driverIsCover: false }
+      : { driverId, driverSetById: user.id, driverSetAt: new Date(), driverIsCover: false },
   });
   await audit(
     {

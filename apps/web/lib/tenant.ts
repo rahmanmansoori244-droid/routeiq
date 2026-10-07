@@ -50,6 +50,8 @@ const TENANT_SCOPED_MODELS = new Set([
   // The hire suggestion (owner request 6 Oct 2026)
   'HireOption',
   'HireSuggestion',
+  // Driver leave (owner request 6 Oct 2026)
+  'DriverLeave',
 ]);
 
 const SCOPED_WRITE_OPS = new Set(['create', 'createMany', 'upsert']);

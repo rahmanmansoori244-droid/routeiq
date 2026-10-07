@@ -85,8 +85,17 @@
  *   /api/runs/[id]/hire-suggestion any role, VIEWER reads it; POST "Check hire options" and POST
  *   /use "Use this plan" PLANNER, the dispatcher); a one-day hired truck's plate and default driver
  *   (PATCH /api/dispatch/hired-trucks/[id], PLANNER: only such a truck - every other truck field
- *   stays PATCH /api/trucks/[id], TENANT_ADMIN). Roles unchanged on GET /api/runs/[id]/plan (`oneDay`
+ *   stays PATCH /api/trucks/[id], TENANT_ADMIN but for the usual driver, below). Roles unchanged on GET /api/runs/[id]/plan (`oneDay`
  *   per load), GET /api/trucks (`onlyOnDate`) and the janitor route (TOKEN: retires one-day trucks).
+ * - The Drivers page for the dispatcher (owner request 6 Oct 2026): POST /api/drivers and PATCH
+ *   /api/drivers/[id] are PLANNER (a new code or making a regular driver daily stays the admin's inside
+ *   the route: driverChangesRefused, 403 ADMIN_ONLY_DRIVER_FIELD); DELETE /api/drivers/[id] stays
+ *   TENANT_ADMIN. PATCH /api/trucks/[id] is PLANNER for the usual driver ONLY (truckFieldsRefused, 403
+ *   ADMIN_ONLY_TRUCK_FIELD for any other field); POST /api/trucks and DELETE stay TENANT_ADMIN. Driver
+ *   leave: GET /api/drivers/[id]/leave is readable by every role, like the page; POST, and PATCH /
+ *   DELETE /api/drivers/[id]/leave/[leaveId], are PLANNER. Roles unchanged on the plan (GET
+ *   /api/runs/[id]/plan: `driversOnLeave`, a load's `driverNote`) and the re-plan / optimize routes
+ *   (a driver on leave is never given by RouteIQ).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -150,10 +159,15 @@ const EXPECTED: Record<string, string> = {
   'POST /api/driver/shift/end': 'GONE',
   'POST /api/driver/stop': 'GONE',
   'GET /api/drivers': 'ANY',
-  'POST /api/drivers': 'TENANT_ADMIN',
+  // Owner request 6 Oct 2026: the dispatcher keeps the drivers (a new code stays the admin's in the route).
+  'POST /api/drivers': 'PLANNER',
   'GET /api/drivers/[id]': 'ANY',
-  'PATCH /api/drivers/[id]': 'TENANT_ADMIN',
+  'PATCH /api/drivers/[id]': 'PLANNER',
   'DELETE /api/drivers/[id]': 'TENANT_ADMIN',
+  'GET /api/drivers/[id]/leave': 'ANY',
+  'POST /api/drivers/[id]/leave': 'PLANNER',
+  'PATCH /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
+  'DELETE /api/drivers/[id]/leave/[leaveId]': 'PLANNER',
   'POST /api/drivers/[id]/pin': 'GONE',
   'GET /api/health': 'PUBLIC',
   'GET /api/health/live': 'PUBLIC',
@@ -215,7 +229,7 @@ const EXPECTED: Record<string, string> = {
   'GET /api/trucks': 'ANY',
   'POST /api/trucks': 'TENANT_ADMIN',
   'GET /api/trucks/[id]': 'ANY',
-  'PATCH /api/trucks/[id]': 'TENANT_ADMIN',
+  'PATCH /api/trucks/[id]': 'PLANNER', // the dispatcher saves the usual driver only (truckFieldsRefused)
   'DELETE /api/trucks/[id]': 'TENANT_ADMIN',
   'GET /api/users': 'TENANT_ADMIN',
   'POST /api/users': 'TENANT_ADMIN',

@@ -9,7 +9,7 @@ import type { DetailLoad, DetailStop } from './plan-detail';
 import { loadPallets, palletText } from './pallets';
 import { isSupersededRun } from './plan-status';
 import type { DriverChangeNote } from './summary';
-import { fmtHhmm } from './time';
+import { fmtDayMonth, fmtHhmm } from './time';
 
 /** A Google Maps directions URL takes at most 9 waypoints, so longer trips get several links. */
 export const MAX_WAYPOINTS = 9;
@@ -254,8 +254,23 @@ export function driverChangeText(c: DriverChangeNote): string {
   }
   const to = c.to?.name ?? 'no driver';
   const other = c.other ? `${c.other.truckCode}${c.other.loadNo !== null ? ` · L${c.other.loadNo}` : ''}` : 'another trip';
-  const why = c.reason === 'INACTIVE' ? `${from} is no longer active` : `${from} is on ${other} at that time`;
+  const why =
+    c.reason === 'INACTIVE'
+      ? `${from} is no longer active`
+      : c.reason === 'ON_LEAVE'
+        ? `${from} is on leave${c.leaveUntil ? ` until ${fmtDayMonth(c.leaveUntil)}` : ''}`
+        : c.reason === 'COVER'
+          ? coverWhyText(from, to, other, c.cover ?? null)
+          : `${from} is on ${other} at that time`;
   return `Driver changed by this plan: ${trip} ${from} → ${to}, because ${why}.`;
+}
+
+/** Why a cover does not drive the trip he covered again (a COVER note; review of 6 Oct 2026). */
+function coverWhyText(from: string, to: string, other: string, why: DriverChangeNote['cover']): string {
+  if (why === 'OTHER_TRUCK') return `${from}, the cover, drives ${other} that day`;
+  if (why === 'OTHER_DEPOT') return `${from}, the cover, drives a truck of another depot that day`;
+  if (why === 'TRUCK_DRIVER') return `${to} drives this truck's other trip that day`;
+  return `${from} is no longer the cover of this truck's usual driver (the leave ended or changed, or the truck has another usual driver)`;
 }
 
 /**

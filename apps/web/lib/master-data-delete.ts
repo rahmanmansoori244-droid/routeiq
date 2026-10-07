@@ -97,5 +97,5 @@ export function historyOnlyDepotLinkMessage(code: string, what: 'truck' | 'regio
 export function driverDeactivatedWarning(defaultOfTrucks: string[]): string | null {
   if (!defaultOfTrucks.length) return null;
   const list = defaultOfTrucks.slice(0, 10).join(', ') + (defaultOfTrucks.length > 10 ? ', ...' : '');
-  return `This driver is still the default driver of ${defaultOfTrucks.length === 1 ? 'truck' : 'trucks'} ${list}. New plans do not use an inactive driver: choose another default driver under Trucks, or reactivate the driver.`;
+  return `This driver is still the default driver of ${defaultOfTrucks.length === 1 ? 'truck' : 'trucks'} ${list}. New plans do not use an inactive driver: choose another usual driver on the Drivers page, or reactivate the driver.`;
 }

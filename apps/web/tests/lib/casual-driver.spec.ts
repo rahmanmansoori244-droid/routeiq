@@ -157,6 +157,37 @@ describe('addCasualDriver', () => {
     expect(tables.auditLog.some((a) => a.entityId === 'gone')).toBe(false);
   });
 
+  it('driver leave (6 Oct 2026): a daily driver on leave that day is never reused silently - 409 DRIVER_ON_LEAVE, nothing saved; confirmed, he is used', async () => {
+    tables.driver.push({ id: 'old', tenantId: T, code: 'DAY-260901-1', name: 'Salim', phone: '+968 9000 1111', casual: true, active: true });
+    tables.driverLeave = [{ id: 'LV', tenantId: T, driverId: 'old', fromDate: new Date('2026-10-04T00:00:00Z'), untilDate: new Date('2026-10-07T00:00:00Z'), note: null, coverDriverId: null }];
+    // The same phone and name (the silent reuse before): asked first.
+    await expect(addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Salim', phone: '9000 1111' }, user)).rejects.toMatchObject({
+      status: 409,
+      details: { code: 'DRIVER_ON_LEAVE', driverId: 'old', name: 'Salim', until: '2026-10-07' },
+    });
+    expect(row('planLoad', 'L1').driverId).toBeNull();
+    expect(tables.auditLog ?? []).toHaveLength(0);
+    // "Use Salim" sent by id without the answer: asked again.
+    await expect(addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Salim', useExisting: 'old' }, user)).rejects.toMatchObject({ details: { code: 'DRIVER_ON_LEAVE' } });
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Salim', useExisting: 'old', leaveConfirmed: true }, user);
+    expect(r).toMatchObject({ reused: true, driver: { id: 'old' } });
+    expect(row('planLoad', 'L1').driverId).toBe('old');
+    // Another day (his leave over): no question.
+    tables.driverLeave[0]!.untilDate = new Date('2026-10-04T00:00:00Z');
+    Object.assign(row('planLoad', 'L1'), { driverId: null, driverSetById: null, driverSetAt: null });
+    expect((await addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Salim', phone: '9000 1111' }, user)).driver.id).toBe('old');
+  });
+
+  it('driver leave: "This phone belongs to ..." says he is on leave that day, so "Use <name>" is the answer to both', async () => {
+    tables.driverLeave = [{ id: 'LV', tenantId: T, driverId: 'reg', fromDate: new Date('2026-10-05T00:00:00Z'), untilDate: new Date('2026-10-09T00:00:00Z'), note: null, coverDriverId: null }];
+    await expect(addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Khalid', phone: '9000 2222' }, user)).rejects.toMatchObject({
+      details: { code: 'PHONE_BELONGS_TO', driverId: 'reg', name: 'Hamad', casual: false, leaveUntil: '2026-10-09' },
+    });
+    expect(casualDriverSchema.safeParse({ runId: 'P', loadId: 'L1', name: 'Khalid', useExisting: 'reg', leaveConfirmed: true }).success).toBe(true);
+    const r = await addCasualDriver(T, { runId: 'P', loadId: 'L1', name: 'Khalid', useExisting: 'reg', leaveConfirmed: true }, user);
+    expect(r.driver.id).toBe('reg');
+  });
+
   it('refused on a load on the road; a load of another plan is not found', async () => {
     await expect(addCasualDriver(T, { runId: 'P', loadId: 'L2', name: 'Salim' }, user)).rejects.toMatchObject({ status: 409, details: { code: 'LOAD_ON_ROAD' } });
     await expect(addCasualDriver(T, { runId: 'P', loadId: 'nope', name: 'Salim' }, user)).rejects.toMatchObject({ status: 404 });

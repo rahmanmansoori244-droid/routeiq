@@ -1,9 +1,10 @@
-import { withTenantApi, ok, parseBody, notFoundIfNull } from '@/lib/api';
+import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
 import { driverPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { DRIVER_PUBLIC_SELECT } from '@/lib/driver-fields';
 import { driverDeactivatedWarning } from '@/lib/master-data-delete';
 import type { TenantDb } from '@/lib/tenant';
+import { driverChangesRefused } from '@/lib/rbac';
 
 interface Params { params: { id: string } }
 
@@ -25,6 +26,10 @@ export const GET = (req: Request, { params }: Params) =>
  * Only the fields sent change (owner decision 10, audit F26): a field left out stays as it is,
  * and an empty or null phone clears it (before, an emptied phone said "saved" and kept the old
  * number, which WhatsApp links kept using).
+ *
+ * The dispatcher (PLANNER and up, owner request 6 Oct 2026) changes the name, the phone and the
+ * active switch, and makes a daily driver a regular one; a new code, or making a regular driver a
+ * daily one, stays the company admin's (403 ADMIN_ONLY_DRIVER_FIELD, nothing saved).
  */
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
@@ -32,6 +37,17 @@ export const PATCH = (req: Request, { params }: Params) =>
       const before = notFoundIfNull(await db.driver.findUnique({ where: { id: params.id }, select: DRIVER_PUBLIC_SELECT }));
       // casual: false makes a daily driver (added from a load) a regular driver (owner request 4 Oct 2026).
       const input = await parseBody(r, driverPatchSchema);
+      const refused = driverChangesRefused(user.role, before, input);
+      if (refused.length) {
+        return fail(
+          {
+            error: `Only a company admin can change ${refused.map((f) => (f === 'casual' ? 'a regular driver into a daily one' : 'the driver code')).join(' or ')}. A dispatcher can change the name, the phone and Active, and make a daily driver a regular one. Nothing was saved.`,
+            code: 'ADMIN_ONLY_DRIVER_FIELD',
+            fields: refused,
+          },
+          403,
+        );
+      }
       const after = await db.driver.update({ where: { id: params.id }, data: input, select: DRIVER_PUBLIC_SELECT });
       await audit({
         tenantId: user.tenantId,
@@ -47,7 +63,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       const warning = before.active && !after.active ? driverDeactivatedWarning(await defaultOfTrucks(db, after.id)) : null;
       return ok(warning ? { ...after, warning } : after);
     },
-    { role: 'TENANT_ADMIN' },
+    { role: 'PLANNER' },
   )(req);
 
 /**

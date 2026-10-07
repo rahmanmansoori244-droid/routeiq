@@ -9,6 +9,7 @@ import {
 import { MAX_SERVICE_MIN } from './dispatch/service-time';
 import { DATA_COLLECT_DAYS_MAX } from './dispatch/data-collection';
 import { PALLET_FACTOR_MAX } from './dispatch/pallets';
+import { LEAVE_NOTE_MAX } from './dispatch/driver-leave';
 import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner-bounds';
 import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
@@ -204,15 +205,33 @@ export const driverSchema = z.object({
 export type DriverInput = z.infer<typeof driverSchema>;
 
 /**
- * PATCH /api/drivers/[id] (company admin): any driver field, and `casual` - a daily driver added from
- * a load is made a regular driver by clearing it (owner request 4 Oct 2026).
+ * PATCH /api/drivers/[id]: any driver field, and `casual` - a daily driver added from a load is made a
+ * regular driver by clearing it (owner request 4 Oct 2026). The dispatcher (PLANNER) may change the
+ * name, phone and active switch and clear `casual`; a new code or `casual: true` stays the company
+ * admin's (driverChangesRefused, owner request 6 Oct 2026).
  */
 export const driverPatchSchema = driverSchema.partial().extend({ casual: z.boolean().optional() });
 
 /**
+ * A driver's leave period (owner request 6 Oct 2026; lib/dispatch/driver-leave.ts): POST
+ * /api/drivers/[id]/leave and PATCH /api/drivers/[id]/leave/[leaveId] (the whole period is sent).
+ * From and until are delivery dates, both included; the cover driver is optional ('' or null = none).
+ */
+export const driverLeaveSchema = z
+  .object({
+    from: isoDateSchema,
+    until: isoDateSchema,
+    note: clearable(z.string().trim().max(LEAVE_NOTE_MAX, `Note: at most ${LEAVE_NOTE_MAX} characters`)),
+    coverDriverId: clearable(z.string().min(1)),
+  })
+  .strict();
+export type DriverLeaveInput = z.infer<typeof driverLeaveSchema>;
+
+/**
  * POST /api/dispatch/casual-driver: a daily (casual) driver added from a load (owner rule 20: a
  * load never leaves without a driver). `useExisting`: the dispatcher answered "Use <name>?" when the
- * phone belongs to another driver.
+ * phone belongs to another driver. `leaveConfirmed`: he answered "<name> is on leave until ... Put
+ * <name> on ... anyway?" (driver leave, 6 Oct 2026; else 409 DRIVER_ON_LEAVE).
  */
 export const casualDriverSchema = z
   .object({
@@ -221,6 +240,7 @@ export const casualDriverSchema = z
     name: z.string().trim().min(2, 'Name: at least 2 characters').max(80, 'Name: at most 80 characters'),
     phone: clearable(driverPhoneSchema),
     useExisting: z.string().min(1).optional(),
+    leaveConfirmed: z.boolean().optional(),
   })
   .strict();
 export type CasualDriverInput = z.infer<typeof casualDriverSchema>;
