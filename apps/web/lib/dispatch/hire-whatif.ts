@@ -159,9 +159,9 @@ export async function rentedOnDay(tenantId: string, runDate: Date, db: Prisma.Tr
  * review of the hire branch: the deleted link or the other depot no longer counted the rented truck, so
  * the option could be rented past its max per day). Switching it off stays possible.
  */
-export async function liveRentalDays(tenantId: string, optionId: string): Promise<string[]> {
-  const today = await companyToday(tenantId);
-  const rows = await prisma.truck.findMany({
+export async function liveRentalDays(tenantId: string, optionId: string, db: Prisma.TransactionClient | typeof prisma = prisma): Promise<string[]> {
+  const today = await companyToday(tenantId, db);
+  const rows = await db.truck.findMany({
     where: { tenantId, hireOptionId: optionId, active: true, onlyOnDate: { gte: new Date(`${today}T00:00:00.000Z`) } },
     select: { onlyOnDate: true },
   });

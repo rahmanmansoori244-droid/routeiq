@@ -825,23 +825,26 @@ describe('third review of the hire branch', () => {
   });
 
   it('ISSUE 7: both ways lock the plan row (FOR UPDATE) and the hire options used (FOR SHARE) after the hire codes, before the suggestion is claimed', async () => {
-    /** The statements in order: the advisory keys, the row locks and the claim. */
+    /** The statements in order: the advisory keys, the row locks and the claim (logged as CLAIM). */
     const steps = () =>
       rawLog
-        .map((sql) => (/pg_advisory_xact_lock/.test(sql) ? 'advisory' : /FROM "RunPlan" .*FOR UPDATE/.test(sql) ? 'RunPlan FOR UPDATE' : /FROM "HireOption" .*FOR SHARE/.test(sql) ? 'HireOption FOR SHARE' : null))
+        .map((sql) => (/pg_advisory_xact_lock/.test(sql) ? 'advisory' : /FROM "RunPlan" .*FOR UPDATE/.test(sql) ? 'RunPlan FOR UPDATE' : /FROM "HireOption" .*FOR SHARE/.test(sql) ? 'HireOption FOR SHARE' : sql === 'CLAIM' ? 'claim' : null))
         .filter(Boolean);
+    const realUpdateMany = fakePrisma.hireSuggestion.updateMany;
+    const claim = vi.spyOn(fakePrisma.hireSuggestion, 'updateMany').mockImplementation(async (args: unknown) => {
+      const data = (args as { data?: Record<string, unknown> } | undefined)?.data;
+      if (data && 'usedAt' in data) rawLog.push('CLAIM');
+      return realUpdateMany(args);
+    });
     const locks = lockKeys();
     try {
-      // The plan way: intake, hire codes, day, then the plan row and the options.
+      // The plan way: intake, hire codes, day, then the plan row and the options, then the claim.
       finishedSuggestion();
       planApplied();
       rawLog.length = 0;
-      const claim = vi.spyOn(fakePrisma.hireSuggestion, 'updateMany');
       expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).body).toMatchObject({ applied: 'PLAN' });
       expect(locks.keys.slice(0, 3)).toEqual(['intake', 'hire-codes', 'planday']);
-      expect(steps().slice(0, 5)).toEqual(['advisory', 'advisory', 'advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE']);
-      expect(claim).toHaveBeenCalled();
-      claim.mockRestore();
+      expect(steps().slice(0, 6)).toEqual(['advisory', 'advisory', 'advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE', 'claim']);
       // The re-plan way (the day changed): the hire codes, then the plan row and the options.
       tables.truck = tables.truck!.filter((t) => t.id === 'OWN' || t.id === 'H0');
       row('runPlan', 'P1').status = 'READY';
@@ -852,9 +855,11 @@ describe('third review of the hire branch', () => {
       rawLog.length = 0;
       expect((await applyHireSuggestion(T, 'P1', 'HS1', user, null)).body).toMatchObject({ applied: 'REPLAN' });
       expect(locks.keys[0]).toBe('hire-codes');
-      expect(steps().slice(0, 3)).toEqual(['advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE']);
+      // The hire codes before the claim, as the plan way (one press each way never deadlocks).
+      expect(steps().slice(0, 4)).toEqual(['advisory', 'RunPlan FOR UPDATE', 'HireOption FOR SHARE', 'claim']);
     } finally {
       locks.stop();
+      claim.mockRestore();
     }
   });
 

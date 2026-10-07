@@ -289,6 +289,19 @@ async function patchOption(f: Fixture, body: Record<string, unknown>) {
   const res = await optionRoute.PATCH(send(`/api/hire-options/${f.optionId}`, 'PATCH', body), { params: { id: f.optionId } });
   return res.status;
 }
+/** The admin deletes the option, or moves it to another depot (the real routes): status and error code. */
+async function removeOption(f: Fixture, how: 'delete' | 'move') {
+  m.auth.mockResolvedValueOnce(sessionOf(f.admin));
+  let res: Response;
+  if (how === 'delete') {
+    res = await optionRoute.DELETE(send(`/api/hire-options/${f.optionId}`, 'DELETE'), { params: { id: f.optionId } });
+  } else {
+    const other = await prisma.depot.create({ data: { tenantId: f.tenantId, code: `SOH-${seq++}`, name: 'Sohar', lat: 24.34, lng: 56.73 } });
+    res = await optionRoute.PATCH(send(`/api/hire-options/${f.optionId}`, 'PATCH', { depotId: other.id }), { params: { id: f.optionId } });
+  }
+  const body = (await res.json()) as { error?: { code?: string } };
+  return { status: res.status, code: body.error?.code ?? null };
+}
 
 const press = (f: Fixture) => hireUse.applyHireSuggestion(f.tenantId, f.runId, f.suggestionId, { id: f.planner.id }, null, { expect: { date: f.day, depotId: f.depotId } });
 
@@ -382,6 +395,38 @@ describe('ISSUE 7: "Use this plan" refuses a change committed after its checks (
     b.release();
     await refusedAndNothingApplied(f, await p, before);
   });
+
+  it('the daily driver day rate is changed after the press read the day: it re-plans with the trucks (as when changed before), never applies the check costed at the old rate', async () => {
+    const f = await suggested('rate', 6);
+    const b = barrier('TenantConfig.findUniqueOrThrow', 'after'); // the press read the day (its settings); no transaction yet
+    const p = press(f);
+    await b.reached;
+    await prisma.tenantConfig.update({ where: { tenantId: f.tenantId }, data: { dailyDriverDayRate: 40 } });
+    b.release();
+    const r = await p;
+    expect(r.status, JSON.stringify(r.body)).toBe(202);
+    expect(r.body).toMatchObject({ applied: 'REPLAN' });
+    expect(await prisma.auditLog.count({ where: { tenantId: f.tenantId, action: 'HIRE_SUGGESTION_USED', afterJson: { path: ['how'], equals: 'PLAN_APPLIED' } } })).toBe(0);
+    await jobsDone(String(r.body.runId));
+  });
+
+  for (const how of ['delete', 'move'] as const) {
+    it(`an admin's ${how === 'delete' ? 'delete of the option' : 'move of the option to another depot'} while the press rents from it waits for it, then is refused: the rented trucks keep their option`, async () => {
+      const f = await suggested(how === 'delete' ? 'del' : 'mov', 7);
+      const b = barrier('HireSuggestion.updateMany', 'before'); // inside the press's transaction, after its locks
+      const p = press(f);
+      await b.reached;
+      const removal = removeOption(f, how);
+      expect(await someoneWaitsOnLock('HireOption')).toBe(true);
+      b.release();
+      const r = await p;
+      expect(r.status, JSON.stringify(r.body)).toBe(200);
+      expect(await removal).toEqual({ status: 409, code: 'HIRE_OPTION_IN_USE' });
+      const rented = await prisma.truck.findMany({ where: { tenantId: f.tenantId, onlyOnDate: { not: null } }, select: { hireOptionId: true } });
+      expect(rented.map((t) => t.hireOptionId)).toEqual([f.optionId, f.optionId]);
+      expect(await prisma.hireOption.findUniqueOrThrow({ where: { id: f.optionId }, select: { depotId: true } })).toEqual({ depotId: f.depotId });
+    });
+  }
 
   it('while the press holds its locks, the admin\'s change and "Use instead" wait for it: the press applies, then they run (no deadlock)', async () => {
     const f = await suggested('lck', 5);

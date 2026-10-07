@@ -468,12 +468,29 @@ export async function applyHireSuggestion(
           await lockPlanDay(tx, tenantId, run.depotId, run.runDate);
           // ISSUE 7: the plan row and the hire options used, locked and checked again (refused when changed).
           const optionsLocked = await lockAndRecheck(tx, tenantId, run, basis, summary, optionsNow);
+          // Everything the first read decided the plan way on, read again under the locks (review of
+          // ISSUE 7: a daily driver day rate changed in between was applied over, with the set costed at
+          // the old rate): the day's fingerprint, the same-day timing, the day rate, the trucks of the
+          // options already rented for the day (counted under the hire codes lock) and the orders the
+          // check's plan leaves out. Changed: nothing is written, the press takes the re-plan way.
           const again = await build();
-          if (basisFingerprint(again.request, again.scope.frozenLoadIds) !== basis.fingerprint) throw new DayChanged(again);
+          const changedNow = staleReasons({
+            basis,
+            whatIfRequest: whatIf,
+            nowRequest: again.request,
+            nowFingerprint: basisFingerprint(again.request, again.scope.frozenLoadIds),
+            optionsNow: optionsLocked,
+            rentedNow: await rentedOnDay(tenantId, run.runDate, tx),
+            summary,
+            dayRateNow: again.settings?.dailyDriverDayRate,
+          });
+          if (changedNow.length) throw new DayChanged(again);
           const claimed = await tx.hireSuggestion.updateMany({ where: { id: s.id, tenantId, usedAt: null, status: 'SUCCEEDED' }, data: { usedAt: new Date(), usedById: user.id } });
           if (!claimed.count) throw new PlanError('This hire suggestion was already used.', 409, { code: 'ALREADY_USED' });
           const made = await rentTrucks(tx, tenantId, run, summary, whatIf, optionsLocked, user, ip);
           const { child, newLoadId } = await createNextVersionTx(tx, tenantId, runId, 'REOPTIMIZE', note, user.id);
+          // The first read (its weight question answered): the read under the locks was checked above to be
+          // the same in all that counts.
           const mapped = withRentedTrucks(whatIf, resp, made, now.request);
           // The plan's own request, with the rented trucks and the frozen loads under their copies' ids.
           const built: BuiltRequest = {
