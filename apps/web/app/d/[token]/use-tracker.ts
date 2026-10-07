@@ -18,6 +18,7 @@ import {
 } from '@/lib/delivery/geofence';
 import { stopInProgress, type OverlayLoad } from '@/lib/driver-page/overlay';
 import { newKey } from '@/lib/driver-page/queue';
+import { loadKeyOfStop } from '@/lib/driver-link/stop-key';
 
 /**
  * The automatic stop timer on the phone (owner request 4 Oct 2026, spec section 7.3). It reads the
@@ -55,11 +56,11 @@ export interface TrackerApi {
   on: boolean;
   gps: GpsStatus;
   state: TrackerState;
-  trip: { loadNo: number; held: boolean } | null;
+  trip: { key: string; loadNo: number; held: boolean } | null;
   whichCustomer: string[] | null;
   arrivedWhen: string | null;
-  /** "Back at depot?" suggested for this trip (load number), null = none; cleared when the trip changes. */
-  backSuggested: number | null;
+  /** "Back at depot?" suggested for this trip (its load key), null = none; cleared when the trip changes. */
+  backSuggested: string | null;
   lastFix: () => Fix | null;
   start: () => void;
   stop: () => void;
@@ -86,7 +87,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   const [state, setState] = useState<TrackerState>(initialTracker());
   const [whichCustomer, setWhich] = useState<string[] | null>(null);
   const [arrivedWhen, setWhen] = useState<string | null>(null);
-  const [backSuggested, setBack] = useState<number | null>(null);
+  const [backSuggested, setBack] = useState<string | null>(null);
   const stateRef = useRef<TrackerState>(state);
   const fixRef = useRef<Fix | null>(null);
   const watchRef = useRef<number | null>(null);
@@ -101,7 +102,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   const trip = useMemo(() => {
     if (!opts.loads) return null;
     return currentTrip(
-      opts.loads.map((l) => ({ loadNo: l.loadNo, status: l.status, departMin: l.departMin, back: l.back })),
+      opts.loads.map((l) => ({ key: l.key, loadNo: l.loadNo, status: l.status, departMin: l.departMin, back: l.back })),
       { started: on, nowMin: opts.nowMinOf(Date.now()) },
     );
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -111,7 +112,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
 
   const stops = useMemo(() => {
     if (!trip || !opts.loads) return [];
-    const load = opts.loads.find((l) => l.loadNo === trip.loadNo);
+    const load = opts.loads.find((l) => l.key === trip.key);
     if (!load) return [];
     return trackStops(
       trip.loadNo,
@@ -132,10 +133,10 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
   // once the phone's queue was read (an unsent arrival restores its stop with its own time).
   const ready = opts.ready !== false;
   useEffect(() => {
-    const k = trip ? `${trip.loadNo}|${trip.held}` : '';
+    const k = trip ? `${trip.key}|${trip.held}` : '';
     if (k === tripKey.current || !opts.loads || !ready) return;
     tripKey.current = k;
-    setTracker(trip ? restoreTracker(stopInProgress(opts.loads, trip.loadNo)) : initialTracker());
+    setTracker(trip ? restoreTracker(stopInProgress(opts.loads, trip.key)) : initialTracker());
     setWhich(null);
     setWhen(null);
     // A "Back at depot?" raised for the trip before belongs to that trip only.
@@ -172,7 +173,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
     for (const p of r.prompts) {
       if (p.kind === 'WHICH_CUSTOMER') setWhich(p.keys);
       else if (p.kind === 'ARRIVED_WHEN') setWhen(p.key);
-      else if (tripRef.current && !tripRef.current.held) setBack(tripRef.current.loadNo);
+      else if (tripRef.current && !tripRef.current.held) setBack(tripRef.current.key);
     }
     if (r.state.phase === 'SEEKING' && !r.state.ambiguous) setWhich(null);
     const f = fixRef.current;
@@ -310,7 +311,7 @@ export function useTracker(opts: TrackerOptions): TrackerApi {
     (key: string) => {
       const now = Date.now();
       setTracker(manualInTracker(stateRef.current, key, now));
-      const held = !!tripRef.current?.held && tripRef.current.loadNo === Number(key.split(':')[0]);
+      const held = !!tripRef.current?.held && tripRef.current.key === loadKeyOfStop(key);
       optsRef.current.enqueue({ key: newKey(), type: 'ARRIVE', stop: key, at: new Date(now).toISOString(), mode: 'MANUAL', pos: posOf(currentFix()) }, held);
     },
     [currentFix, setTracker],

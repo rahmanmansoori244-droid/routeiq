@@ -349,7 +349,7 @@ export async function recordOfficeOutcome(
   // A load that is back at the depot closes once every stop has a result (the driver's rule, section
   // 8.7). The dispatcher recorded that last result: the LOAD_COMPLETED row is theirs.
   if (answer.result === 'ok' && load.status === 'DISPATCHED') {
-    const completed = await maybeCompleteLoad(tenantId, input.truckId, input.date, input.loadNo, undefined, { userId: user.id, label: null });
+    const completed = await maybeCompleteLoad(tenantId, input.truckId, input.date, { depotId: load.depotId, loadNo: input.loadNo }, undefined, { userId: user.id, label: null });
     if (completed) answer.loadCompleted = true;
   }
   return answer;

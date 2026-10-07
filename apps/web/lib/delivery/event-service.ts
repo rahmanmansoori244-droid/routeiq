@@ -28,6 +28,7 @@ import { DEFAULT_TZ, dateOnly, isoOf, zonedDayStart } from '../dispatch/time';
 import { shownTruckCode } from '../dispatch/hire';
 import { driverActor } from '../driver-link/actor';
 import { truckDayLoads, type TruckDayLoad } from '../driver-link/service';
+import { loadKeyOf, parseStopKey as readStopKey, stopKeyOf, type StopRef } from '../driver-link/stop-key';
 import type { DriverActionResult, DriverResults, NotDeliveredReasonName, StopResult } from '../driver-link/manifest-types';
 import { lockOutcomesDay } from './locks';
 import { plannedStopOf, type PlannedStop } from './planned-stop';
@@ -52,7 +53,6 @@ type Db = Tx | typeof prisma;
 
 /** A lowercase UUID: the only idempotency key a phone may send (stored as dl:<uuid> / dlphoto:<uuid>). */
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const STOP_RE = /^(\d{1,3}):(\d{1,4})$/;
 export const MAX_ACTIONS = 50;
 
 // ---------------------------------------------------------------------------------------
@@ -69,7 +69,8 @@ const posSchema = z.object({
   speedMps: z.number().gte(0).lte(200).nullish(),
 });
 const key = z.string().regex(UUID_RE);
-const stop = z.string().regex(STOP_RE);
+/** `<depotId>:<loadNo>:<sequence>`, or the old `<loadNo>:<sequence>` of a phone that saved before the update (stop-key.ts). */
+const stop = z.string().max(80).refine((s) => readStopKey(s) !== null);
 const actionSchema = z.discriminatedUnion('type', [
   z.object({
     key,
@@ -101,7 +102,15 @@ const actionSchema = z.discriminatedUnion('type', [
     photoKeys: z.array(key).max(10),
     noPhotoReason: z.literal('CAMERA_FAILED').nullish(),
   }),
-  z.object({ key, type: z.literal('BACK_AT_DEPOT'), load: z.number().int().min(1).max(999), at: isoString, pos: posSchema.optional() }),
+  z.object({
+    key,
+    type: z.literal('BACK_AT_DEPOT'),
+    load: z.number().int().min(1).max(999),
+    // The load's depot; absent on an action queued before the update (accepted when one load matches).
+    depot: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/).optional(),
+    at: isoString,
+    pos: posSchema.optional(),
+  }),
 ]);
 export type ParsedAction = z.infer<typeof actionSchema>;
 type Pos = z.infer<typeof posSchema>;
@@ -178,14 +187,64 @@ export function writerAudit(ctx: DriverWriteContext, facts: DayFacts, load: Truc
   return { userId: null, ip: false, extra: { actor, linkGeneration: ctx.link.generation } };
 }
 
-export function parseStopKey(s: string): { loadNo: number; sequence: number } | null {
-  const m = STOP_RE.exec(s);
-  return m ? { loadNo: Number(m[1]), sequence: Number(m[2]) } : null;
+/** A stop key of either form (stop-key.ts), or null. */
+export function parseStopKey(s: string): StopRef | null {
+  return readStopKey(s);
 }
 
-/** The live load of a load number on the truck-day (the first by departure when two depots share it). */
-export function liveLoad(facts: DayFacts, loadNo: number): TruckDayLoad | null {
-  return facts.loads.find((l) => l.loadNo === loadNo) ?? null;
+/** What an action or a photo points at: a load of the truck-day (`sequence` null: the load itself, Back at depot). */
+export interface Target {
+  depotId: string | null;
+  loadNo: number;
+  sequence: number | null;
+}
+
+export type Resolved = { ok: true; load: TruckDayLoad } | { ok: false; code: 'STOP_NOT_FOUND' | 'STOP_AMBIGUOUS' };
+
+/**
+ * The truck-day's live loads a target may mean (pure): its depot's load of that number, or for a key of
+ * the old form (no depot) every load of that number - a truck loading at two depots can have a Load 1
+ * at each (fix of 7 Oct 2026; before, the first by departure was taken, and a result for the second
+ * depot's customer was recorded against the first depot's).
+ */
+export function candidateLoads(loads: readonly TruckDayLoad[], t: Target): TruckDayLoad[] {
+  return loads.filter((l) => l.loadNo === t.loadNo && (t.depotId === null || l.depotId === t.depotId));
+}
+
+/**
+ * The one load of the truck-day a target names, or why there is none. Never a guess: a target that
+ * matches more than one stop (or, for Back at depot, more than one load) is refused STOP_AMBIGUOUS. A
+ * stop key of the old form is accepted when only one of the loads of its number has that stop.
+ * `stopsOn`: the loads (of those given) that have a stop at `sequence` (read from the plan rows).
+ */
+export async function resolveTarget(
+  loads: readonly TruckDayLoad[],
+  t: Target,
+  stopsOn: (loadIds: string[], sequence: number) => Promise<Set<string>>,
+): Promise<Resolved> {
+  let found = candidateLoads(loads, t);
+  if (found.length > 1 && t.sequence !== null) {
+    const has = await stopsOn(
+      found.map((l) => l.id),
+      t.sequence,
+    );
+    found = found.filter((l) => has.has(l.id));
+  }
+  if (found.length > 1) return { ok: false, code: 'STOP_AMBIGUOUS' };
+  return found.length === 1 ? { ok: true, load: found[0]! } : { ok: false, code: 'STOP_NOT_FOUND' };
+}
+
+/** The loads (of `loadIds`) with a stop at `sequence`, from their plan rows. */
+export async function loadsWithStop(db: Db, loadIds: string[], sequence: number): Promise<Set<string>> {
+  if (!loadIds.length) return new Set();
+  const rows = await db.routeAssignment.findMany({ where: { loadId: { in: loadIds }, sequenceInTruck: sequence }, select: { loadId: true } });
+  return new Set(rows.map((r) => r.loadId).filter((x): x is string => !!x));
+}
+
+/** A load of the truck-day, by depot and number (the identity of Back at depot and completion). */
+export interface LoadRef {
+  depotId: string;
+  loadNo: number;
 }
 
 function refused(k: string, code: RefusalCode, transient = false): DriverActionResult {
@@ -399,7 +458,7 @@ export function repeatsCurrentResult(
 interface Applied {
   result: DriverActionResult;
   /** A load to try completing after the commit (Back at depot, or a result on a returned load). */
-  completeLoadNo?: number;
+  completeLoad?: LoadRef;
 }
 
 const kindOf: Record<ParsedAction['type'], WriteKind> = { ARRIVE: 'ARRIVE', DEPART: 'DEPART', OUTCOME: 'OUTCOME', BACK_AT_DEPOT: 'BACK_AT_DEPOT' };
@@ -409,10 +468,12 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
   const storedKey = `dl:${a.key}`;
   const at = actionTime(new Date(a.at), skew, { receivedAt: ctx.now, dayStart: facts.dayStart, expiresAt: ctx.link.expiresAt });
   if (at === 'TIME_OUT_OF_RANGE') return { result: refused(a.key, 'TIME_OUT_OF_RANGE') };
-  const where = a.type === 'BACK_AT_DEPOT' ? { loadNo: a.load, sequence: null } : parseStopKey(a.stop);
+  const where: Target | null = a.type === 'BACK_AT_DEPOT' ? { depotId: a.depot ?? null, loadNo: a.load, sequence: null } : parseStopKey(a.stop);
   if (!where) return { result: refused(a.key, 'INVALID') };
-  const dayLoad = liveLoad(facts, where.loadNo);
-  if (!dayLoad) return { result: refused(a.key, 'STOP_NOT_FOUND') };
+  const found = await resolveTarget(facts.loads, where, (ids, seq) => loadsWithStop(prisma, ids, seq));
+  if (!found.ok) return { result: refused(a.key, found.code) };
+  const dayLoad = found.load;
+  const here: LoadRef = { depotId: dayLoad.depotId, loadNo: dayLoad.loadNo };
   const pos = a.pos;
   const posAt = posDate(pos, skew);
 
@@ -501,12 +562,12 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
             action: 'DRIVER_BACK_AT_DEPOT',
             entity: 'PlanLoad',
             entityId: dayLoad.id,
-            afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, date: ctx.date, at: at.toISOString(), late, ...who.extra } as Prisma.InputJsonValue,
+            afterJson: { truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, date: ctx.date, at: at.toISOString(), late, ...who.extra } as Prisma.InputJsonValue,
             ip: who.ip,
           },
           tx,
         );
-        return { result: { key: a.key, status: 'ok' }, completeLoadNo: load.status === 'DISPATCHED' ? where.loadNo : undefined };
+        return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' ? here : undefined };
       }
 
       const p = planned!;
@@ -535,7 +596,9 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
           }
           if (a.chained) {
             const from = a.from ? parseStopKey(a.from) : null;
-            const fromStop = from && from.loadNo === where.loadNo ? await plannedStopOf(tx, load, from.sequence) : null;
+            // The same load only: its depot too (an old key without one is read on this load's depot).
+            const sameLoad = !!from && from.loadNo === where.loadNo && (from.depotId ?? dayLoad.depotId) === dayLoad.depotId;
+            const fromStop = from && sameLoad ? await plannedStopOf(tx, load, from.sequence) : null;
             const ok = !!fromStop?.pin && !!pin && distanceM(fromStop.pin, pin) <= facts.radiusM + 50;
             if (ok) payload.chained = true;
             else if (posAt) arriveAt = new Date(Math.min(posAt.getTime(), ctx.now.getTime())); // chained between distant pins: ignored, the arrival takes its own fix
@@ -554,7 +617,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
               action: 'STOP_ARRIVAL_MANUAL',
               entity: 'StopVisit',
               entityId: v.id,
-              afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, at: arriveAt.toISOString(), customerCode: p.customerCode, when: !!a.when, late, ...who.extra } as Prisma.InputJsonValue,
+              afterJson: { truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, at: arriveAt.toISOString(), customerCode: p.customerCode, when: !!a.when, late, ...who.extra } as Prisma.InputJsonValue,
               ip: who.ip,
             },
             tx,
@@ -611,7 +674,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
           noPhotoReason: a.noPhotoReason ?? null,
         })
       ) {
-        return { result: { key: a.key, status: 'ok' }, completeLoadNo: load.status === 'DISPATCHED' && norm.outcome !== null ? where.loadNo : undefined };
+        return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' && norm.outcome !== null ? here : undefined };
       }
       const payload: Record<string, unknown> =
         norm.outcome === null
@@ -651,7 +714,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
               action: 'DELIVERY_CARRY_CONFLICT',
               entity: 'StopVisit',
               entityId: visit.id,
-              afterJson: { truckId: ctx.truckId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, refusedOutcome: norm.outcome, copyDate: c.copyDate, lines: check.lines, ...who.extra } as Prisma.InputJsonValue,
+              afterJson: { truckId: ctx.truckId, depotId: dayLoad.depotId, loadNo: where.loadNo, sequence: where.sequence, date: ctx.date, refusedOutcome: norm.outcome, copyDate: c.copyDate, lines: check.lines, ...who.extra } as Prisma.InputJsonValue,
               ip: who.ip,
             },
             tx,
@@ -675,6 +738,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
           beforeJson: before as Prisma.InputJsonValue,
           afterJson: {
             truckId: ctx.truckId,
+            depotId: dayLoad.depotId,
             loadNo: where.loadNo,
             sequence: where.sequence,
             date: ctx.date,
@@ -693,7 +757,7 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
         },
         tx,
       );
-      return { result: { key: a.key, status: 'ok' }, completeLoadNo: load.status === 'DISPATCHED' ? where.loadNo : undefined };
+      return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' ? here : undefined };
     },
     { timeout: 15_000, maxWait: 5_000 },
   );
@@ -715,7 +779,7 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
   const facts = await dayFacts(ctx);
   const skew = clockSkewMs(ctx.now, new Date(body.clientNow));
   const results: DriverActionResult[] = [];
-  const toComplete = new Set<number>();
+  const toComplete = new Map<string, LoadRef>();
   for (const raw of body.actions) {
     const parsed = actionSchema.safeParse(raw);
     if (!parsed.success) {
@@ -727,7 +791,7 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
     try {
       const r = await applyAction(ctx, facts, a, skew);
       results.push(r.result);
-      if (r.completeLoadNo !== undefined) toComplete.add(r.completeLoadNo);
+      if (r.completeLoad) toComplete.set(loadKeyOf(r.completeLoad.depotId, r.completeLoad.loadNo), r.completeLoad);
     } catch (e) {
       if (isLockBusy(e)) throw new PlanBusyError();
       if (isUniqueViolation(e)) {
@@ -742,7 +806,7 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
   }
   // A signed-in office user on the driver page closes the trip as themselves, not as the driver link.
   const closer = ctx.session ? { userId: ctx.session.userId, label: null } : undefined;
-  for (const loadNo of toComplete) await maybeCompleteLoad(ctx.tenantId, ctx.truckId, ctx.date, loadNo, facts, closer);
+  for (const ref of toComplete.values()) await maybeCompleteLoad(ctx.tenantId, ctx.truckId, ctx.date, ref, facts, closer);
   const res = await truckDayResultsFromDb(prisma, ctx.tenantId, ctx.truckId, ctx.date, ctx.session ? 'OFFICE' : 'DRIVER');
   return { results, ...res };
 }
@@ -769,12 +833,13 @@ export interface CompletionActor {
  * `actor`: the office user who recorded the last result ({ userId, label: null }); without it the
  * row says "Driver link: <driver> (<truck>, back at depot)" with no user (the driver link, the janitor).
  */
-export async function maybeCompleteLoad(tenantId: string, truckId: string, date: string, loadNo: number, facts?: DayFacts, actor?: CompletionActor): Promise<boolean> {
+export async function maybeCompleteLoad(tenantId: string, truckId: string, date: string, ref: LoadRef, facts?: DayFacts, actor?: CompletionActor): Promise<boolean> {
   try {
     const loads = facts?.loads ?? (await truckDayLoads(prisma, tenantId, truckId, date));
-    const load = loads.find((l) => l.loadNo === loadNo);
+    // By depot and number: the truck can have a Load 1 at two depots that day.
+    const load = loads.find((l) => l.loadNo === ref.loadNo && l.depotId === ref.depotId);
     if (!load || load.status !== 'DISPATCHED') return false;
-    if (!(await isBack(prisma, tenantId, load.depotId, date, truckId, loadNo))) return false;
+    if (!(await isBack(prisma, tenantId, load.depotId, date, truckId, ref.loadNo))) return false;
     let who: CompletionActor;
     if (actor?.userId) who = { userId: actor.userId, label: actor.label };
     else {
@@ -801,7 +866,7 @@ export async function completeReturnedLoads(now: Date = new Date()): Promise<{ c
   const since = new Date(now.getTime() - 4 * 24 * 60 * 60_000);
   const backs = await prisma.stopEvent.findMany({
     where: { kind: 'BACK_AT_DEPOT', receivedAt: { gte: since } },
-    select: { tenantId: true, deliveryDate: true, truckId: true, loadNo: true },
+    select: { tenantId: true, depotId: true, deliveryDate: true, truckId: true, loadNo: true },
     orderBy: [{ receivedAt: 'desc' }],
     take: 2000,
   });
@@ -818,15 +883,17 @@ export async function completeReturnedLoads(now: Date = new Date()): Promise<{ c
   let completed = 0;
   for (const b of backs) {
     const date = isoOf(b.deliveryDate);
-    const k = `${b.tenantId}|${b.truckId}|${date}|${b.loadNo}`;
-    if (seen.has(k) || !stillOut.has(k)) continue;
+    if (!stillOut.has(`${b.tenantId}|${b.truckId}|${date}|${b.loadNo}`)) continue;
+    // Per depot too: the truck can have a Load 1 at two depots that day.
+    const k = `${b.tenantId}|${b.truckId}|${date}|${b.depotId}|${b.loadNo}`;
+    if (seen.has(k)) continue;
     seen.add(k);
     const loads = await truckDayLoads(prisma, b.tenantId, b.truckId, date);
-    const load = loads.find((l) => l.loadNo === b.loadNo);
+    const load = loads.find((l) => l.loadNo === b.loadNo && l.depotId === b.depotId);
     if (!load || load.status !== 'DISPATCHED') continue;
     const row = await prisma.truck.findFirst({ where: { id: b.truckId, tenantId: b.tenantId }, select: { code: true, onlyOnDate: true } });
     const truck = row ? shownTruckCode(null, row) : '';
-    if (await maybeCompleteLoad(b.tenantId, b.truckId, date, b.loadNo, undefined, { userId: null, label: `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` })) completed++;
+    if (await maybeCompleteLoad(b.tenantId, b.truckId, date, { depotId: b.depotId, loadNo: b.loadNo }, undefined, { userId: null, label: `Driver link: ${load.driverName ?? 'no driver set'} (${truck}, back at depot)` })) completed++;
   }
   return { completed };
 }
@@ -851,10 +918,10 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
     db.stopVisit.findMany({ where: { tenantId, truckId, deliveryDate: dateOnly(date) } }),
     db.stopEvent.findMany({ where: { tenantId, truckId, deliveryDate: dateOnly(date), kind: 'BACK_AT_DEPOT' }, select: { depotId: true, loadNo: true, at: true } }),
   ]);
-  const depotOf = new Map(loads.map((l) => [l.loadNo, l.depotId]));
+  const live = new Set(loads.map((l) => loadKeyOf(l.depotId, l.loadNo)));
   for (const b of backs) {
-    if (depotOf.get(b.loadNo) !== b.depotId) continue;
-    const k = String(b.loadNo);
+    const k = loadKeyOf(b.depotId, b.loadNo);
+    if (!live.has(k)) continue;
     if (!back[k] || b.at.toISOString() < back[k]!) back[k] = b.at.toISOString();
   }
   const visitIds = visits.map((v) => v.id);
@@ -882,7 +949,7 @@ export async function truckDayResults(db: Db, tenantId: string, truckId: string,
       const copies = s.orderIds.map((id) => carriedOf.get(id)).filter((c): c is NonNullable<typeof c> => !!c);
       const carriedTo = copies.length ? copies.map((c) => isoOf(c.deliveryDate)).sort().at(-1)! : null;
       const inBasis = !!v && copies.some((c) => inCarryBasis(readCarryBasis(c.carryBasisJson), v.id));
-      const key = `${l.loadNo}:${s.sequence}`;
+      const key = stopKeyOf(l.depotId, l.loadNo, s.sequence);
       if (!v) {
         if (carriedTo) stops[key] = emptyResult(l.status === 'DISPATCHED', carriedTo);
         continue;

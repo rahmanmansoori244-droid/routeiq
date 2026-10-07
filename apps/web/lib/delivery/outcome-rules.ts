@@ -23,6 +23,7 @@ export const EARLY_START_MS = 6 * 60 * 60_000;
 /** The refusal codes of a driver action (spec section 8.1). */
 export type RefusalCode =
   | 'STOP_NOT_FOUND'
+  | 'STOP_AMBIGUOUS'
   | 'LOAD_COMPLETED'
   | 'OUTCOME_CARRIED'
   | 'PHOTO_REQUIRED'
@@ -33,6 +34,12 @@ export type RefusalCode =
 /** The words of each refusal, for the driver page (English and Arabic). */
 export const REFUSAL_TEXT: Record<RefusalCode, { en: string; ar: string }> = {
   STOP_NOT_FOUND: { en: 'This stop is no longer on your trip. Call your dispatcher.', ar: 'هذه المحطة لم تعد في رحلتك. اتصل بمسؤول التوزيع.' },
+  // An entry saved by the page before the update of 7 Oct 2026 names a trip by its number only, and this
+  // truck has that trip number at two depots today: it is not recorded against either (stop-key.ts).
+  STOP_AMBIGUOUS: {
+    en: 'Not recorded: this entry was saved before an update and fits two trips with the same number today. Call your dispatcher to record it.',
+    ar: 'لم يتم التسجيل: هذا الإدخال حُفظ قبل تحديث ويطابق رحلتين بنفس الرقم اليوم. اتصل بمسؤول التوزيع لتسجيله.',
+  },
   LOAD_COMPLETED: { en: 'This trip is already closed. Call your dispatcher to change it.', ar: 'هذه الرحلة مغلقة. اتصل بمسؤول التوزيع لتغييرها.' },
   OUTCOME_CARRIED: { en: 'Already moved to another day by the office. Call your dispatcher.', ar: 'تم نقلها إلى يوم آخر من المكتب. اتصل بمسؤول التوزيع.' },
   PHOTO_REQUIRED: { en: 'A photo is required for this result.', ar: 'الصورة مطلوبة لهذه النتيجة.' },

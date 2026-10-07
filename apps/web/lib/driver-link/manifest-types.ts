@@ -98,7 +98,11 @@ export type DriverAction =
       photoKeys: string[];
       noPhotoReason?: 'CAMERA_FAILED' | null;
     }
-  | { key: string; type: 'BACK_AT_DEPOT'; load: number; at: string; pos?: DriverPos };
+  /**
+   * `depot` names the load's depot (a truck can load at two depots on one date, each with its own
+   * Load 1); an action queued before it was sent has none and is accepted only when one load matches.
+   */
+  | { key: string; type: 'BACK_AT_DEPOT'; load: number; depot?: string; at: string; pos?: DriverPos };
 
 /** The answer per action: ok, a duplicate of one already stored, or refused (with the driver's words). */
 export interface DriverActionResult {
@@ -112,8 +116,9 @@ export interface DriverActionResult {
 
 /** POST /api/d/actions and the photo route answer with the truck-day's results, merged into the stored manifest. */
 export interface DriverResults {
+  /** Per stop key (`<depotId>:<loadNo>:<sequence>`, stop-key.ts). */
   stops: Record<string, StopResult>;
-  /** Back at depot per load number (ISO time). */
+  /** Back at depot per load key (`<depotId>:<loadNo>`, stop-key.ts) (ISO time). */
   back: Record<string, string>;
 }
 
@@ -131,7 +136,7 @@ export interface ManifestOrder {
 }
 
 export interface ManifestStop {
-  /** `${loadNo}:${sequence}` */
+  /** `<depotId>:<loadNo>:<sequence>` (stop-key.ts): the depot too, a truck can have a Load 1 at two depots. */
   key: string;
   sequence: number;
   customerName: string;
@@ -161,6 +166,9 @@ export interface ManifestStop {
 }
 
 export interface ManifestLoad {
+  /** `<depotId>:<loadNo>` (stop-key.ts): the load's identity on the page; the number is for display. */
+  key: string;
+  depotId: string;
   loadNo: number;
   /** Trips of the truck that day ("Trip 1 of 2"). */
   trips: number;

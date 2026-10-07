@@ -104,7 +104,7 @@ describe('language choice and formats', () => {
 });
 
 describe('page helpers', () => {
-  const load = { loadNo: 1, trips: 2, status: 'DISPATCHED' as const, actionable: true, departMin: 430, returnMin: 700, driverName: 'Salim', cases: 412, backAtDepotAt: null, stops: Array.from({ length: 9 }, () => ({}) as never) };
+  const load = { key: 'd1:1', depotId: 'd1', loadNo: 1, trips: 2, status: 'DISPATCHED' as const, actionable: true, departMin: 430, returnMin: 700, driverName: 'Salim', cases: 412, backAtDepotAt: null, stops: Array.from({ length: 9 }, () => ({}) as never) };
   it('the trip line', () => {
     expect(tripLine('en', load)).toBe('Trip 1 of 2 · Depart 07:10 · Stops: 9 · Cases: 412');
     expect(tripLine('ar', load)).toBe('الرحلة 1 من 2 · المغادرة 07:10 · المحطات: 9 · الكراتين: 412');

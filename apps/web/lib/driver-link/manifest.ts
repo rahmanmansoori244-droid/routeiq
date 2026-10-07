@@ -21,6 +21,7 @@ import { truckDayLoads } from './service';
 import { dispatcherPhoneFor } from './dispatcher-phone';
 import { DEFAULT_LOCATION_RETENTION_DAYS, DEFAULT_PHOTO_RETENTION_DAYS } from '../settings-fields';
 import type { DriverManifest, DriverResults, LoadStatusName, ManifestLoad, ManifestOrder, ManifestStop } from './manifest-types';
+import { loadKeyOf, stopKeyOf } from './stop-key';
 
 export const MANIFEST_MEMO_MS = 60_000;
 const MEMO_MAX = 200;
@@ -50,9 +51,10 @@ function ordersOf(s: DetailStop): ManifestOrder[] {
   return [...out.values()];
 }
 
-function stopOf(l: DetailLoad, s: DetailStop): ManifestStop {
+function stopOf(depotId: string, l: DetailLoad, s: DetailStop): ManifestStop {
   return {
-    key: `${l.loadNo}:${s.sequence}`,
+    // The depot too (stop-key.ts): two depots' plans can both give this truck a Load 1.
+    key: stopKeyOf(depotId, l.loadNo, s.sequence),
     sequence: s.sequence,
     customerName: s.customerName,
     customerCode: s.customerCode,
@@ -108,7 +110,9 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
   for (const { l } of loads) {
     if (l.driverId && l.driverName && !drivers.has(l.driverId)) drivers.set(l.driverId, { name: l.driverName, casual: input.casualOf.get(l.driverId) ?? false });
   }
-  const manifestLoads: ManifestLoad[] = loads.map(({ l }) => ({
+  const manifestLoads: ManifestLoad[] = loads.map(({ d, l }) => ({
+    key: loadKeyOf(d.run.depot.id, l.loadNo),
+    depotId: d.run.depot.id,
     loadNo: l.loadNo,
     trips,
     status: l.status as LoadStatusName,
@@ -118,7 +122,7 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     driverName: l.driverName,
     cases: l.cases,
     backAtDepotAt: null,
-    stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(l, s)),
+    stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s)),
   }));
   return {
     date: input.date,
@@ -217,8 +221,8 @@ export async function driverManifest(args: {
     },
     office: args.office,
   });
-  // Results are read live, never memoised (Part 2).
-  const depotOf = new Map(dayLoads.map((l) => [l.loadNo, l.depotId]));
+  // Results are read live, never memoised (Part 2). Each load with its own depot: a map by load number
+  // gave both depots' Load 1 the same depot (fix of 7 Oct 2026).
   const results = await truckDayResults(
     prisma,
     tenantId,
@@ -226,7 +230,7 @@ export async function driverManifest(args: {
     date,
     manifest.loads.map((l) => ({
       loadNo: l.loadNo,
-      depotId: depotOf.get(l.loadNo) ?? '',
+      depotId: l.depotId,
       status: l.status,
       stops: l.stops.map((s) => ({ sequence: s.sequence, orderIds: s.orders.map((o) => o.orderId) })),
     })),
@@ -241,7 +245,7 @@ export function mergeResults(manifest: DriverManifest, results: DriverResults): 
     ...manifest,
     loads: manifest.loads.map((l) => ({
       ...l,
-      backAtDepotAt: results.back[String(l.loadNo)] ?? null,
+      backAtDepotAt: results.back[l.key] ?? null,
       stops: l.stops.map((s) => ({ ...s, result: results.stops[s.key] ?? null })),
     })),
   };

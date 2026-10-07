@@ -25,7 +25,7 @@ import { PHOTO_POSITION_STATUSES, type DriverActionResult } from '../driver-link
 import { lockOutcomesDay } from './locks';
 import { plannedStopOf } from './planned-stop';
 import { clockSkewMs, MAX_DRIVER_PHOTOS_PER_STOP, photoTime, REFUSAL_TEXT, writeRule } from './outcome-rules';
-import { dayFacts, ensureVisit, findVisit, liveLoad, parseStopKey, rebuildVisit, UUID_RE, writerAudit, type DriverWriteContext } from './event-service';
+import { dayFacts, ensureVisit, findVisit, loadsWithStop, parseStopKey, rebuildVisit, resolveTarget, UUID_RE, writerAudit, type DriverWriteContext } from './event-service';
 import { inspectJpeg, readExif, startsLikeJpeg, stripJpeg } from './jpeg';
 
 /** The request limit (multipart overhead included) and the file limit. */
@@ -39,7 +39,8 @@ export const PHOTO_OK_ACCURACY_M = 100;
 const iso = z.string().min(10).max(40);
 export const photoMetaSchema = z.object({
   key: z.string().max(64),
-  stop: z.string().regex(/^\d{1,3}:\d{1,4}$/),
+  // `<depotId>:<loadNo>:<sequence>`, or the old `<loadNo>:<sequence>` of a photo queued before the update (stop-key.ts).
+  stop: z.string().max(80).refine((v) => parseStopKey(v) !== null),
   takenAt: iso,
   clientNow: iso,
   positionStatus: z.enum(PHOTO_POSITION_STATUSES),
@@ -117,8 +118,11 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
   const hash = sha256(stored);
   const storedKey = `dlphoto:${meta.key}`;
   const where = parseStopKey(meta.stop);
-  const dayLoad = where ? liveLoad(facts, where.loadNo) : null;
-  if (!where || !dayLoad) return refusedPhoto({ key: meta.key, status: 'refused', code: 'STOP_NOT_FOUND', message: REFUSAL_TEXT.STOP_NOT_FOUND });
+  if (!where) return refusedPhoto({ key: meta.key, status: 'refused', code: 'STOP_NOT_FOUND', message: REFUSAL_TEXT.STOP_NOT_FOUND });
+  // The stop's depot too (stop-key.ts): an old key that fits two trips of the same number is refused.
+  const found = await resolveTarget(facts.loads, where, (ids, seq) => loadsWithStop(prisma, ids, seq));
+  if (!found.ok) return refusedPhoto({ key: meta.key, status: 'refused', code: found.code, message: REFUSAL_TEXT[found.code] });
+  const dayLoad = found.load;
   const skew = clockSkewMs(ctx.now, date(meta.clientNow));
   const rawTakenAt = date(meta.takenAt);
   const takenAt = photoTime(rawTakenAt ?? ctx.now, skew, { receivedAt: ctx.now, dayStart: facts.dayStart });
@@ -251,6 +255,7 @@ export async function recordDriverPhoto(ctx: DriverWriteContext, meta: PhotoMeta
           afterJson: {
             photoId: photo.id,
             truckId: ctx.truckId,
+            depotId: dayLoad.depotId,
             loadNo: where.loadNo,
             sequence: where.sequence,
             date: ctx.date,

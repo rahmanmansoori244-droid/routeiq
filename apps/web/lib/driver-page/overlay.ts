@@ -11,7 +11,8 @@
  *   shows "Changed by office / another phone" instead of flipping silently.
  */
 import type { DriverAction, DriverManifest, ManifestLoad, ManifestStop, NotDeliveredReasonName, OutcomeName } from '../driver-link/manifest-types';
-import type { QueueItem, SentMap } from './queue';
+import { parseStopKey } from '../driver-link/stop-key';
+import { itemLoadKey, type QueueItem, type SentMap } from './queue';
 
 export interface StopView {
   state: 'PENDING' | 'ARRIVED' | 'DONE';
@@ -73,12 +74,47 @@ function queuedProofKeys(outcomes: readonly QueueItem[]): Set<string> {
   return keys;
 }
 
+type KeyedLoad = Pick<ManifestLoad, 'key' | 'loadNo'> & { stops: readonly Pick<ManifestStop, 'key' | 'sequence'>[] };
+
+/**
+ * The manifest stop a queued stop key means (pure): the key itself, or for a key saved before the
+ * update of 7 Oct 2026 (no depot, stop-key.ts) the one stop of that trip number and stop - null when
+ * two trips of that number have it (the server refuses such an entry: STOP_AMBIGUOUS) or none does.
+ */
+export function manifestStopKey(loads: readonly KeyedLoad[], key: string): string | null {
+  const r = parseStopKey(key);
+  if (!r) return null;
+  if (r.depotId !== null) return key;
+  const fits = loads.flatMap((l) => (l.loadNo === r.loadNo ? l.stops.filter((s) => s.sequence === r.sequence).map((s) => s.key) : []));
+  return fits.length === 1 ? fits[0]! : null;
+}
+
+/** The manifest load a queued item belongs to (pure): its load key, or for an old item the one load of that number. */
+export function manifestLoadKey(loads: readonly KeyedLoad[], item: QueueItem): string | null {
+  const k = itemLoadKey(item);
+  if (k.includes(':')) return k;
+  const fits = loads.filter((l) => String(l.loadNo) === k);
+  return fits.length === 1 ? fits[0]!.key : null;
+}
+
+/**
+ * A manifest the page kept on the phone before the update of 7 Oct 2026 has no load keys and old stop
+ * keys (`loadNo:sequence`): its loads take their number as the key until the next manifest arrives, and
+ * entries made from it are sent with the old keys, which the server accepts only when one stop fits.
+ */
+export function keyedManifest<M extends Pick<DriverManifest, 'loads'>>(m: M): M {
+  if (m.loads.every((l) => typeof l.key === 'string' && typeof l.depotId === 'string')) return m;
+  return { ...m, loads: m.loads.map((l) => ({ ...l, key: typeof l.key === 'string' ? l.key : String(l.loadNo), depotId: typeof l.depotId === 'string' ? l.depotId : '' })) };
+}
+
 /** The overlay of the unsent and held items on the last manifest (pure). */
 export function applyQueued(m: Pick<DriverManifest, 'loads'>, items: readonly QueueItem[], sent: SentMap = {}): OverlayLoad[] {
   const live = items.filter((i) => i.state !== 'draft');
   const actions = live.filter((i) => i.kind === 'action').sort((a, b) => a.createdAt - b.createdAt);
+  // The stop each item is for, read once (an old key without the depot only where one stop fits it).
+  const stopOf = new Map(live.map((i) => [i, i.stopKey ? manifestStopKey(m.loads, i.stopKey) : null] as const));
   return m.loads.map((l) => {
-    const backItem = actions.find((i) => (i.body as DriverAction).type === 'BACK_AT_DEPOT' && i.loadNo === l.loadNo);
+    const backItem = actions.find((i) => (i.body as DriverAction).type === 'BACK_AT_DEPOT' && manifestLoadKey(m.loads, i) === l.key);
     const serverBack = ms(l.backAtDepotAt);
     const backAt = serverBack ?? (backItem ? ms((backItem.body as DriverAction).at) : null);
     return {
@@ -86,7 +122,7 @@ export function applyQueued(m: Pick<DriverManifest, 'loads'>, items: readonly Qu
       back: backAt !== null,
       backAt,
       backPending: serverBack === null && !!backItem,
-      stops: l.stops.map((s) => ({ ...s, view: stopView(s, l, actions.filter((i) => i.stopKey === s.key), live.filter((i) => i.kind === 'photo' && i.stopKey === s.key).length, sent[s.key]) })),
+      stops: l.stops.map((s) => ({ ...s, view: stopView(s, l, actions.filter((i) => stopOf.get(i) === s.key), live.filter((i) => i.kind === 'photo' && stopOf.get(i) === s.key).length, sent[s.key]) })),
     };
   });
 }
@@ -142,8 +178,8 @@ function stopView(s: ManifestStop, l: ManifestLoad, mine: QueueItem[], localPhot
 }
 
 /** The stop in progress for restoreTracker: a server ARRIVED stop or an unsent arrival without a result. */
-export function stopInProgress(loads: readonly OverlayLoad[], loadNo: number): { key: string; arrivedAt: number; observed: boolean } | null {
-  const l = loads.find((x) => x.loadNo === loadNo);
+export function stopInProgress(loads: readonly OverlayLoad[], loadKey: string): { key: string; arrivedAt: number; observed: boolean } | null {
+  const l = loads.find((x) => x.key === loadKey);
   const s = l?.stops.find((x) => x.view.state === 'ARRIVED' && x.view.arrivedAt !== null && x.view.doneAt === null);
   return s ? { key: s.key, arrivedAt: s.view.arrivedAt!, observed: s.view.arrivalObserved } : null;
 }
@@ -155,6 +191,7 @@ export function unsentList(loads: readonly OverlayLoad[], items: readonly QueueI
     .filter((i) => i.kind === 'action' && i.state !== 'draft' && (i.body as DriverAction).type === 'OUTCOME')
     .map((i) => {
       const b = i.body as Extract<DriverAction, { type: 'OUTCOME' }>;
-      return { stopKey: b.stop, customer: names.get(b.stop) ?? b.stop, outcome: b.outcome, at: b.at };
+      const k = manifestStopKey(loads, b.stop);
+      return { stopKey: b.stop, customer: (k ? names.get(k) : undefined) ?? b.stop, outcome: b.outcome, at: b.at };
     });
 }
