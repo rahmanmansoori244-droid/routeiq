@@ -3,7 +3,8 @@ import { customerPatchSchema, normalizeBranchKey } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { deactivateWarning, openOrders } from '@/lib/dispatch/open-orders';
 import { CUSTOMER_SERVICE_COLUMN_DEFAULT, savedLocationLocked } from '@/lib/dispatch/customer-attrs';
-import { customerKey, preferredCustomer } from '@/lib/dispatch/order-intake';
+import { preferredCustomer } from '@/lib/dispatch/order-intake';
+import { customerKey, customerTwinsOf } from '@/lib/customer-code';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { canManageMasterData } from '@/lib/rbac';
 
@@ -97,13 +98,15 @@ export const PATCH = (req: Request, { params }: Params) =>
       // where they are delivered: only an admin does it. Moving them to the one with the saved point,
       // from a twin without a usable one, only fills a missing location and stays allowed.
       if (!isAdmin && input.active !== undefined && input.active !== before.active) {
-        const key = customerKey(before.code, before.branchKey);
-        const twins = (
+        // Matched in the program (lib/customer-code.ts), never with the database's ILIKE.
+        const twins = customerTwinsOf(
           await db.customer.findMany({
-            where: { id: { not: before.id }, code: { equals: before.code, mode: 'insensitive' }, branchKey: { equals: before.branchKey, mode: 'insensitive' } },
+            where: { id: { not: before.id } },
             select: { id: true, code: true, branchCode: true, branchKey: true, name: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true },
-          })
-        ).filter((t) => customerKey(t.code, t.branchKey) === key);
+          }),
+          before.code,
+          before.branchKey,
+        );
         const matched = twins.length ? preferredCustomer([before, ...twins]) : undefined;
         const next = twins.length ? preferredCustomer([{ ...before, active: input.active }, ...twins]) : undefined;
         if (matched && next && matched.id !== next.id && savedLocationLocked(isAdmin, matched, await tenantServiceArea(user.tenantId))) {
@@ -118,11 +121,13 @@ export const PATCH = (req: Request, { params }: Params) =>
         }
       }
       if (code !== before.code || branchKey !== before.branchKey) {
-        // Codes are one customer whatever their letter case (the order intake matches them so).
-        const twin = await db.customer.findFirst({
-          where: { id: { not: before.id }, code: { equals: code, mode: 'insensitive' }, branchKey: { equals: branchKey, mode: 'insensitive' } },
-          select: { code: true, branchCode: true },
-        });
+        // Codes are one customer whatever their letter case (the order intake matches them so). Matched
+        // in the program (lib/customer-code.ts): the database's ILIKE read "_" as "any character".
+        const twin = customerTwinsOf(
+          await db.customer.findMany({ where: { id: { not: before.id } }, select: { code: true, branchCode: true, branchKey: true } }),
+          code,
+          branchKey,
+        )[0];
         if (twin) return fail(`Customer ${twin.code}${twin.branchCode ? ` / ${twin.branchCode}` : ''} already exists (codes are the same whatever the letter case).`, 409);
       }
       // A dispatcher setting these explicitly confirms them (no more "default" warnings). Only the

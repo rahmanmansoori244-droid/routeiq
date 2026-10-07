@@ -5,7 +5,7 @@
  */
 import { DICT } from '../driver-page/i18n';
 import { NOT_DELIVERED_REASONS, type NotDeliveredReasonName } from '../driver-link/manifest-types';
-import { addDaysIso, daysBetween, fmtHhmm, localMinutes } from '../dispatch/time';
+import { addDaysIso, daysBetween, fmtDayMonth, fmtHhmm, localMinutes } from '../dispatch/time';
 
 /** "1 stop" / "2 stops" / "0 stops" (`many` for a plural that is not just an s). */
 export function countOf(n: number, one: string, many = `${one}s`): string {
@@ -92,6 +92,51 @@ export function shortfallText(s: { outcome: string; notDelivered: number; planne
   const why = `${reasonText(s.reason, s.note)} (${sourceWord(s.source)})`;
   if (s.outcome === 'PARTLY_DELIVERED') return `Partly delivered: ${s.notDelivered} of ${s.planned} cases not delivered: ${why}`;
   return `Not delivered: ${why}`;
+}
+
+/** A copy brought forward from a stop whose cases a result change would shrink (the basis rule, spec section 9.4). */
+export interface CarriedCopy {
+  copyId: string;
+  /** The day the copy is on (YYYY-MM-DD). */
+  copyDate: string;
+  /** It can be removed by "Undo the bring forward": on no plan, its day not being optimized, not brought forward again. */
+  undoable: boolean;
+  /** Why it cannot be removed, with what to do (undoCheck's words); '' when it can. */
+  text: string;
+}
+
+/** "6 Oct", "6 Oct and 8 Oct", "6 Oct, 7 Oct and 8 Oct". */
+function andList(items: readonly string[]): string {
+  return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
+}
+
+/**
+ * The words of Record outcome's 409 OUTCOME_CARRIED. One copy: as before. Several: the copies are
+ * undone all together or not at all (an undo never removes some of them and then refuses the result),
+ * so the words name every copy that blocks it, why, and what to do.
+ */
+export function carriedRefusalText(copies: readonly CarriedCopy[]): string {
+  const day = (c: CarriedCopy) => fmtDayMonth(c.copyDate);
+  const days = (list: readonly CarriedCopy[]) => andList([...new Set(list.map(day))]);
+  if (copies.length === 1) {
+    const c = copies[0]!;
+    return c.undoable
+      ? `These cases were brought forward to ${day(c)} and that copy is not planned yet. Undo the bring forward to record this result.`
+      : c.text || `These cases were brought forward to ${day(c)}: the result cannot shrink them.`;
+  }
+  const n = copies.length;
+  if (copies.every((c) => c.undoable)) {
+    return `These cases were brought forward in ${n} orders (to ${days(copies)}) and none of the copies is planned yet. Undo the bring forward to record this result: all ${n} copies are removed together.`;
+  }
+  const free = copies.filter((c) => c.undoable);
+  const parts = [`This result was not recorded and nothing was changed: it would shrink ${n} orders brought forward from this stop (to ${days(copies)}).`];
+  for (const c of copies) if (!c.undoable) parts.push(c.text || `The copy on ${day(c)} cannot be removed.`);
+  if (free.length) {
+    parts.push(
+      `${free.length === 1 ? 'The copy' : 'The copies'} on ${days(free)} ${free.length === 1 ? 'is' : 'are'} not planned yet, but the bring forward can only be undone for all the copies together.`,
+    );
+  }
+  return parts.join(' ');
 }
 
 /**

@@ -24,6 +24,7 @@ import {
   type ResolvedLine,
 } from './order-intake';
 import { normalizeProductCode, productKey, twinsOf } from '../product-code';
+import { customerTwinsOf } from '../customer-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { validPalletFactor } from './pallets';
@@ -461,13 +462,16 @@ export async function confirmIntake(
   late: { isLate: boolean; reason: string | null },
 ) {
   const newCustomerIds = new Map<string, string>();
+  // The company's customers once, matched on code and branch in the program (customerKey: letter case
+  // aside, as the check matched them), so a customer created meanwhile as "c001" is reused. Never the
+  // database's case-insensitive equals: an ILIKE, which read "_" as "any character", so a new "C_1"
+  // was attached to an existing "CX1" and its location (lib/customer-code.ts). A customer made below
+  // is added, so another spelling of it reuses it.
+  const master = v.issues.newCustomers.length
+    ? await tx.customer.findMany({ where: { tenantId }, select: { id: true, code: true, branchCode: true, branchKey: true, active: true, lat: true, lng: true } })
+    : [];
   for (const nc of v.issues.newCustomers) {
-    // Case-insensitive, like the file intake: a customer created meanwhile as "c001" is reused.
-    const twins = await tx.customer.findMany({
-      where: { tenantId, code: { equals: nc.code, mode: 'insensitive' }, branchKey: { equals: nc.branchKey, mode: 'insensitive' } },
-      select: { id: true, code: true, branchCode: true, active: true, lat: true, lng: true },
-    });
-    const existing = preferredCustomer(twins);
+    const existing = preferredCustomer(customerTwinsOf(master, nc.code, nc.branchKey));
     if (existing && !existing.active) {
       throw new IntakeConflict('MASTER_CHANGED', `Customer ${existing.code}${existing.branchCode ? ` / ${existing.branchCode}` : ''} was added and deactivated after this file was checked. Upload the file again.`);
     }
@@ -485,6 +489,7 @@ export async function confirmIntake(
           geocodeConfidence: 'MISSING',
         },
       }));
+    if (!existing) master.push({ id: c.id, code: c.code, branchCode: c.branchCode, branchKey: c.branchKey, active: true, lat: null, lng: null });
     newCustomerIds.set(customerKey(nc.code, nc.branchKey), c.id);
   }
   const newProductIds = new Map<string, string>();

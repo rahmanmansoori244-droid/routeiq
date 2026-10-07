@@ -5,6 +5,8 @@ import { audit } from '@/lib/audit';
 import { hasRole, fail, ok } from '@/lib/api';
 import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '@/lib/upload-parse';
 import { normalizeBranchKey } from '@/lib/schemas';
+import { customerKey } from '@/lib/customer-code';
+import { preferredCustomer } from '@/lib/dispatch/order-intake';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/client-ip';
 
@@ -53,8 +55,12 @@ export async function POST(req: Request, { params }: Params) {
     timeMin: number | null;
   }
 
-  const customers = await db.customer.findMany({ select: { id: true, code: true, branchKey: true } });
-  const custByKey = new Map(customers.map((c) => [`${c.code}::${c.branchKey}`, c]));
+  // Customers by code and branch whatever the letter case, the one customer identity (lib/customer-code.ts);
+  // case-variant twins resolve to the row the order intake uses.
+  const customers = await db.customer.findMany({ select: { id: true, code: true, branchKey: true, active: true, lat: true, lng: true } });
+  const twinsByKey = new Map<string, typeof customers>();
+  for (const c of customers) twinsByKey.set(customerKey(c.code, c.branchKey), [...(twinsByKey.get(customerKey(c.code, c.branchKey)) ?? []), c]);
+  const custByKey = new Map([...twinsByKey].map(([k, list]) => [k, preferredCustomer(list)!]));
 
   // Orders on this run date so we can link assignments to actual orders.
   const orders = await db.order.findMany({
@@ -111,7 +117,7 @@ export async function POST(req: Request, { params }: Params) {
       notes: warnings.length > 0 ? `Warnings: ${warnings.length}${parsed.warnings.length ? ` - ${parsed.warnings.join(' ')}` : ''}` : null,
       assignments: {
         create: rows.map((r2) => {
-          const cust = custByKey.get(`${r2.customer_code}::${r2.branchKey}`);
+          const cust = custByKey.get(customerKey(r2.customer_code, r2.branchKey));
           const order = cust ? ordersByCust.get(cust.id) : null;
           return {
             orderId: order?.id ?? null,

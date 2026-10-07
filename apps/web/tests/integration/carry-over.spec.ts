@@ -38,6 +38,12 @@
  *     refused, not undoable, and kept as a conflict. E10: after the trip closed a backdated change
  *     of a stop with a result is refused, a stop without one is filled in late and never ticked.
  *     Loads are dispatched with a driver (owner rule 20: `withDriver`).
+ *  8. (Undo all or nothing) A stop with two orders, both recorded as not delivered and brought forward:
+ *     one to a day with no plan, the other to a day planned with it. "Undo the bring forward and record
+ *     this result" removes neither copy and records no result (before, the unplanned copy was removed
+ *     and committed, then the request was refused); the refusal names the planned copy and each copy
+ *     keeps a CARRY_CONFLICT. Another stop's two orders brought forward to a day with no plan: both
+ *     copies are removed and the result recorded together.
  *
  * Bring forward never looks past the company's today; today's orders are listed as their own
  * group. Every carry here runs with the clock on the day it carries to (`onDay`), after the days it
@@ -791,5 +797,95 @@ describe('bring forward the orders not delivered on earlier days (PR9)', () => {
     expect(pv.candidates.find((x) => x.orderId === d.id)).toMatchObject({ late: true, confirmed: false });
     expect(defaultCarrySelection(pv.candidates).has(d.id)).toBe(false);
     expect(pv.candidates.some((x) => x.orderId === c.id)).toBe(false);
+  });
+
+  it('two orders of one stop brought forward: "Undo and record" is all or nothing (a planned copy blocks it, nothing is removed or recorded; two unplanned copies go together)', async () => {
+    const T = isoPlus(160);
+    const N1 = isoPlus(161);
+    const N2 = isoPlus(162);
+    const at = (hhmmZ: string) => new Date(`${T}T${hhmmZ}:00Z`); // UTC; Muscat is +4
+    // C2's stop holds two orders (a, b), C3's two more (c, d): one stop per customer, one load each.
+    const a = await addOrder('C2', T, 30, 'SO-81');
+    const b = await addOrder('C2', T, 12, 'SO-82');
+    const c = await addOrder('C3', T, 25, 'SO-83');
+    const d = await addOrder('C3', T, 9, 'SO-84');
+    const planT = await optimize(T, morningBefore(T));
+    const lab = await loadOf(planT.id, a.id);
+    expect((await loadOf(planT.id, b.id)).id).toBe(lab.id);
+    const lcd = await loadOf(planT.id, c.id);
+    expect((await loadOf(planT.id, d.id)).id).toBe(lcd.id);
+    expect(lcd.id).not.toBe(lab.id);
+    await withDriver(tenantId, [lab.id, lcd.id]);
+    for (const l of [lab, lcd]) for (const s of ['LOCKED', 'DISPATCHED'] as const) await updateLoad(tenantId, planT.id, l.id, { status: s }, user(), everyRole, { now: at('03:00') });
+    const office = { id: userId, name: 'Planner' };
+    const record = (l: { truckId: string; loadNo: number }, over: Record<string, unknown>) =>
+      recordOfficeOutcome(tenantId, office, { key: crypto.randomUUID(), depotId, date: T, truckId: l.truckId, loadNo: l.loadNo, sequence: 1, ...over } as never);
+    // The office records both stops as Not delivered (shop closed); the trips are closed.
+    for (const l of [lab, lcd]) {
+      expect(await record(l, { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED' })).toMatchObject({ result: 'ok' });
+      await updateLoad(tenantId, planT.id, l.id, { status: 'COMPLETED' }, user(), everyRole, { now: at('13:00') });
+    }
+    const visitAB = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId: lab.truckId, loadNo: lab.loadNo, sequence: 1, deliveryDate: new Date(`${T}T00:00:00Z`) } });
+    const visitCD = await prisma.stopVisit.findFirstOrThrow({ where: { tenantId, truckId: lcd.truckId, loadNo: lcd.loadNo, sequence: 1, deliveryDate: new Date(`${T}T00:00:00Z`) } });
+
+    // On N1: a is brought forward to N1 (no plan: undoable), b to N2, and N2 is planned with b's copy.
+    const onN1 = onDay(N1);
+    expect((await bringForward(tenantId, depotId, N1, [{ orderId: a.id, cases: 30 }], { id: userId }, { now: onN1 })).orders).toBe(1);
+    expect((await bringForward(tenantId, depotId, N2, [{ orderId: b.id, cases: 12 }], { id: userId }, { now: onN1 })).orders).toBe(1);
+    await optimize(N2, onN1);
+    const copyA = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: a.id } });
+    const copyB = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: b.id } });
+    expect(await prisma.routeAssignment.count({ where: { orderId: copyA.id } })).toBe(0);
+    expect(await prisma.routeAssignment.count({ where: { orderId: copyB.id } })).toBeGreaterThan(0);
+    const outcomeEvents = (visitId: string) => prisma.stopEvent.count({ where: { tenantId, visitId, kind: 'OUTCOME' } });
+    const auditCount = (action: string) => prisma.auditLog.count({ where: { tenantId, action } });
+    const before = { events: await outcomeEvents(visitAB.id), undone: await auditCount('ORDERS_CARRY_UNDONE'), set: await auditCount('DELIVERY_OUTCOME_SET') };
+
+    // "Undo the bring forward and record this result" (Delivered): b's copy is planned, so nothing at
+    // all changes - a's copy is not removed (before, it was removed and committed, then the request
+    // refused), and no result is recorded. The refusal names the planned copy.
+    const refused = (await record(lab, { outcome: 'DELIVERED', undoCarry: true }).catch((e: unknown) => e)) as PlanError;
+    expect(refused.status).toBe(409);
+    expect(await prisma.order.count({ where: { id: { in: [copyA.id, copyB.id] } } })).toBe(2);
+    expect((await prisma.order.findMany({ where: { id: { in: [a.id, b.id] } }, select: { id: true, carriedToOrderId: true } })).sort((x, y) => (x.id === a.id ? -1 : y.id === a.id ? 1 : 0))).toEqual([
+      { id: a.id, carriedToOrderId: copyA.id },
+      { id: b.id, carriedToOrderId: copyB.id },
+    ]);
+    expect(await prisma.stopVisit.findUniqueOrThrow({ where: { id: visitAB.id } })).toMatchObject({ outcome: 'NOT_DELIVERED', casesDelivered: 0 });
+    expect({ events: await outcomeEvents(visitAB.id), undone: await auditCount('ORDERS_CARRY_UNDONE'), set: await auditCount('DELIVERY_OUTCOME_SET') }).toEqual(before);
+    expect(refused.details).toMatchObject({
+      code: 'OUTCOME_CARRIED',
+      undoable: false,
+      copyId: copyB.id,
+      copyDate: N2,
+      copies: expect.arrayContaining([
+        { copyId: copyA.id, copyDate: N1, undoable: true },
+        { copyId: copyB.id, copyDate: N2, undoable: false, code: 'COPY_PLANNED' },
+      ]),
+    });
+    expect(refused.message).toContain('This result was not recorded and nothing was changed');
+    expect(refused.message).toContain(`${fmtDayMonth(N2)} is already planned with it`);
+    expect(refused.message).toContain(`The copy on ${fmtDayMonth(N1)} is not planned yet`);
+    // Each copy keeps the refusal (its day warns), as one copy did before.
+    const conflicts = await prisma.stopEvent.findMany({ where: { tenantId, visitId: visitAB.id, kind: 'CARRY_CONFLICT' }, select: { payloadJson: true } });
+    expect(conflicts.map((e) => (e.payloadJson as { copyId: string }).copyId).sort()).toEqual([copyA.id, copyB.id].sort());
+
+    // c and d both brought forward to N1 (no plan): "Undo and record" removes both copies and records
+    // the result, together.
+    expect((await bringForward(tenantId, depotId, N1, [{ orderId: c.id, cases: 25 }, { orderId: d.id, cases: 9 }], { id: userId }, { now: onN1 })).orders).toBe(2);
+    const copyC = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: c.id } });
+    const copyD = await prisma.order.findFirstOrThrow({ where: { tenantId, carriedFromOrderId: d.id } });
+    const plain = (await record(lcd, { outcome: 'DELIVERED' }).catch((e: unknown) => e)) as PlanError;
+    expect(plain.details).toMatchObject({ code: 'OUTCOME_CARRIED', undoable: true });
+    expect(await prisma.order.count({ where: { id: { in: [copyC.id, copyD.id] } } })).toBe(2);
+    const done = await record(lcd, { outcome: 'DELIVERED', undoCarry: true });
+    expect(done).toMatchObject({ result: 'ok', visitId: visitCD.id });
+    expect((done.carriesUndone ?? []).map((u) => u.copyId).sort()).toEqual([copyC.id, copyD.id].sort());
+    expect(await prisma.order.count({ where: { id: { in: [copyC.id, copyD.id] } } })).toBe(0);
+    expect(await prisma.order.count({ where: { id: { in: [c.id, d.id] }, carriedToOrderId: null } })).toBe(2);
+    expect(await prisma.stopVisit.findUniqueOrThrow({ where: { id: visitCD.id } })).toMatchObject({ outcome: 'DELIVERED', casesDelivered: 34 });
+    expect(await prisma.auditLog.count({ where: { tenantId, action: 'ORDERS_CARRY_UNDONE', entityId: { in: [c.id, d.id] } } })).toBe(2);
+    // a's copy on N1 was never touched by any of it.
+    expect(await prisma.order.count({ where: { id: copyA.id } })).toBe(1);
   });
 });

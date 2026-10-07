@@ -15,6 +15,11 @@
  *  4. F20: "Delete" on a driver on a dispatched load and on a driver never used both deactivate;
  *     the loads and the trucks' default driver keep them; the database refuses a raw delete.
  *  5. F26: a driver's phone is cleared; a region's depot is cleared and a region created without one.
+ *  6. Customer identity (lib/customer-code.ts): an order file brings the new customer codes C_1 and C%
+ *     while CX1 (with a location) exists. Confirm creates C_1 and C% (LOCATION REQUIRED on the day
+ *     screen) and never attaches their orders to CX1 (it used the database's ILIKE, where "_" and
+ *     "%" are wildcards); cx1 is CX1. The late order, the Customers page and the customer import
+ *     treat C_2, C_3 and C_4 as new customers next to CX2, CX3 and CX4.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -28,6 +33,9 @@ import { POST as importCustomers } from '@/app/api/customers/import/route';
 import { DELETE as deleteDriver, PATCH as patchDriver } from '@/app/api/drivers/[id]/route';
 import { PATCH as patchRegion } from '@/app/api/regions/[id]/route';
 import { POST as createRegion } from '@/app/api/regions/route';
+import { POST as createCustomer } from '@/app/api/customers/route';
+import { POST as lateOrder } from '@/app/api/dispatch/late-order/route';
+import { getDayOverview } from '@/lib/dispatch/day-overview';
 import { prisma as libPrisma } from '@/lib/db';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
@@ -239,5 +247,71 @@ describe('5. clearing optional fields (F26)', () => {
     const c = await createRegion(jreq('/api/regions', 'POST', { code: 'RG2', name: 'Seeb', depotId: null }));
     expect(c.status).toBe(201);
     expect((await c.json()).data.depotId).toBeNull();
+  });
+});
+
+describe('6. a customer code with "_" or "%" is itself, never a pattern (lib/customer-code.ts)', () => {
+  const located = (code: string) =>
+    prisma.customer.create({ data: { tenantId, code, name: `Shop ${code}`, branchKey: '__MAIN__', lat: 23.6123, lng: 58.4123, geocodeConfidence: 'HIGH', locationVerified: true, priority: 3, priorityConfirmed: true } });
+
+  it('an order file brings C_1 and C% while CX1 (with a location) exists: confirm makes new customers (LOCATION REQUIRED) and never attaches their orders to CX1; cx1 is CX1', async () => {
+    const cx1 = await located('CX1');
+    // The trap on PostgreSQL itself: the case-insensitive equals the confirm used is an ILIKE.
+    expect((await prisma.customer.findMany({ where: { tenantId, code: { equals: 'C_1', mode: 'insensitive' } }, select: { id: true } })).map((c) => c.id)).toEqual([cx1.id]);
+    as('PLANNER');
+    const up = await upload(
+      csv([
+        ['SO Number', 'Delivery Date', 'Customer Code', 'Product Code', 'Cases'],
+        ['7101', DAY, 'C_1', 'JA1.5L', 11],
+        ['7102', DAY, 'C%', 'JA1.5L', 12],
+        ['7103', DAY, 'cx1', 'JA1.5L', 13],
+      ]),
+      depotId,
+    );
+    expect(up.status).toBe(200);
+    expect(up.body.data.validation.errorRows).toBe(0);
+    expect(up.body.data.validation.issues.newCustomers.map((c: { code: string }) => c.code)).toEqual(['C_1', 'C%']);
+    const c = await confirm(up.body.data.batchId);
+    expect(c.status).toBe(200);
+    const created = await prisma.customer.findMany({ where: { tenantId, code: { in: ['C_1', 'C%'] } }, select: { code: true, lat: true, lng: true, geocodeConfidence: true, createdFromUpload: true }, orderBy: { code: 'asc' } });
+    expect(created).toEqual([
+      { code: 'C%', lat: null, lng: null, geocodeConfidence: 'MISSING', createdFromUpload: true },
+      { code: 'C_1', lat: null, lng: null, geocodeConfidence: 'MISSING', createdFromUpload: true },
+    ]);
+    const orders = await prisma.order.findMany({ where: { tenantId, uploadBatchId: up.body.data.batchId }, select: { totalCases: true, customer: { select: { code: true } } } });
+    expect(orders.map((o) => [o.customer.code, o.totalCases]).sort()).toEqual([['C%', 12], ['CX1', 13], ['C_1', 11]]);
+    // CX1 keeps its location and gets only its own order; the day screen asks for C_1's and C%'s locations.
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: cx1.id } })).toMatchObject({ code: 'CX1', lat: 23.6123, lng: 58.4123, locationVerified: true });
+    expect(await prisma.order.count({ where: { tenantId, customerId: cx1.id } })).toBe(1);
+    const cards = (await getDayOverview(tenantId, { date: DAY, depotId })).customers;
+    const card = (code: string) => cards.find((x) => x.code === code)!;
+    for (const code of ['C_1', 'C%']) expect([code, card(code).issues.find((i) => i.blocking)?.code]).toEqual([code, 'LOCATION_REQUIRED']);
+    expect(card('CX1').blocking).toBe(false);
+  });
+
+  it('the late order, the Customers page and the customer import treat C_2 / C_3 / C_4 as new customers next to CX2 / CX3 / CX4', async () => {
+    const [cx2, , cx4] = [await located('CX2'), await located('CX3'), await located('CX4')];
+    as('PLANNER');
+    const late = await lateOrder(jreq('/api/dispatch/late-order', 'POST', { date: DAY, depotId, customerCode: 'C_2', reason: 'Phoned in after the cutoff', lines: [{ productCode: 'JA1.5L', cases: 3, salesOrderNo: 'LO-71' }] }));
+    expect(late.status).toBe(201);
+    const lateData = (await late.json()).data;
+    expect(lateData).toMatchObject({ customerCreated: true, locationRequired: true });
+    expect(lateData.customerId).not.toBe(cx2.id);
+    expect(await prisma.order.count({ where: { tenantId, customerId: cx2.id } })).toBe(0);
+    const same = await lateOrder(jreq('/api/dispatch/late-order', 'POST', { date: DAY, depotId, customerCode: 'cx2', reason: 'Phoned in after the cutoff', lines: [{ productCode: 'JA1.5L', cases: 2, salesOrderNo: 'LO-72' }] }));
+    expect((await same.json()).data).toMatchObject({ customerId: cx2.id, customerCreated: false });
+
+    const made = await createCustomer(jreq('/api/customers', 'POST', { code: 'C_3', name: 'Shop C_3' }));
+    expect(made.status).toBe(201);
+    expect((await createCustomer(jreq('/api/customers', 'POST', { code: 'cx3', name: 'Twin' }))).status).toBe(409);
+
+    as('TENANT_ADMIN');
+    const fd = new FormData();
+    fd.set('file', new File([csv([['code', 'name', 'priority'], ['C_4', 'Shop C_4', 2], ['cx4', 'Shop CX4 renamed', 3]])], 'customers.csv', { type: 'text/csv' }));
+    const imp = await importCustomers(new Request('http://localhost/api/customers/import', { method: 'POST', body: fd }));
+    expect(imp.status).toBe(200);
+    expect(await prisma.customer.findFirst({ where: { tenantId, code: 'C_4' }, select: { name: true, priority: true } })).toEqual({ name: 'Shop C_4', priority: 2 });
+    expect(await prisma.customer.findUniqueOrThrow({ where: { id: cx4.id } })).toMatchObject({ code: 'CX4', name: 'Shop CX4 renamed', lat: 23.6123 });
+    expect(await prisma.customer.count({ where: { tenantId, code: { in: ['C_2', 'C_3', 'C_4'] } } })).toBe(3);
   });
 });

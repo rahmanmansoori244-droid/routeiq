@@ -4,6 +4,7 @@ import { prisma } from '@/lib/db';
 import { audit } from '@/lib/audit';
 import { isoDateSchema, normalizeBranchKey } from '@/lib/schemas';
 import { normalizeProductCode, productCodeProblem, productKey, twinsOf } from '@/lib/product-code';
+import { customerTwinsOf } from '@/lib/customer-code';
 import { currentPlan } from '@/lib/dispatch/plan-service';
 import { createIntakeKeys, INTAKE_BUSY, isIntakeKeyConflict, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
 import { normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
@@ -85,10 +86,15 @@ export const POST = withTenantApi(
       result = await prisma.$transaction(async (tx) => {
         await lockIntake(tx, tenantId);
         // Codes are matched case-insensitively, like the file intake (c001 == C001); case-variant
-        // twins resolve to the same row the file intake would use.
-        const twins = await tx.customer.findMany({
-          where: { tenantId, code: { equals: input.customerCode, mode: 'insensitive' }, branchKey: { equals: branchKey, mode: 'insensitive' } },
-        });
+        // twins resolve to the same row the file intake would use. Matched in the program on the
+        // company's customers (lib/customer-code.ts), never with the database's case-insensitive
+        // equals: an ILIKE, which read "_" and "%" as wildcards (a new "C_1" became the existing "CX1").
+        const twinIds = customerTwinsOf(
+          await tx.customer.findMany({ where: { tenantId }, select: { id: true, code: true, branchKey: true } }),
+          input.customerCode,
+          branchKey,
+        ).map((c) => c.id);
+        const twins = twinIds.length ? await tx.customer.findMany({ where: { tenantId, id: { in: twinIds } } }) : [];
         let customer = preferredCustomer(twins) ?? null;
         let customerCreated = false;
         if (!customer) {
