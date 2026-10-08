@@ -8,7 +8,7 @@ The files are kept as they were written. They record what was true **on their da
 
 1. **`docs/PROJECT_HANDBOOK.md`:** the main reference. It covers what RouteIQ does, the owner's rules, every module, the test tables and the timeline of changes.
 2. **`docs/LOCAL_DEV.md`:** how to run it locally. `.github/workflows/ci.yml` shows exactly what CI runs.
-3. **The pull requests on GitHub (#1 to #62):** each description gives the reason for the change, the design and the tests.
+3. **The pull requests on GitHub (#1 onward):** each description gives the reason for the change, the design and the tests.
 4. **This folder:** the history behind the decisions.
 
 ## What is here
@@ -19,6 +19,7 @@ The files are kept as they were written. They record what was true **on their da
 | `design/` | The specs written before building three features: delivery outcomes and the driver phone page, pallet capacity, and the planning rules. Each spec was revised after critiques. |
 | `build-notes/` | Notes taken during three builds (dispatcher drivers, driver page, hire suggestion). They include end-to-end demo results and the issues found in them. |
 | `benchmarks/` | Optimizer benchmarks: OR-Tools alone against the PyVRP hybrid, bounds, public instances, and the accuracy replays from the P6 work. |
+| `benchmark-2026-10-08/` | The outside simulation and optimization benchmark of 8 Oct 2026 (report only; findings F01-F07, see below). Its evidence bundle, with the synthetic days, the saved runs and an independent checker that imports no RouteIQ code, stays on the archive branch `evidence/benchmark-2026-10-08` (not merged). The three requests the fixes replay are in `apps/solver/tests/fixtures/benchmark-2026-10-08/`. |
 | `operational-rules-19-26-gap.md` | The gap analysis of the owner's operational rules 19 to 26 (29 Sep). |
 | `RouteIQ_Progress_and_Test_Guide_2026-09-25.md` | The progress and test guide as of 25 Sep. |
 | `RouteIQ_Project_Brain_2026-09-28.html` | An interactive map of the project as of 28 Sep. Open it in a browser. |
@@ -39,6 +40,17 @@ Please don't report these again unless the fix is wrong.
 | 8 | The driver page could not reload offline after the first QR visit. | #62 (the service worker pre-caches the first visit) |
 | 9 | Rental cost scaling could stop PyVRP finding any feasible plan. | #62 (penalty ceiling follows the request's scale) |
 | 10 | PyVRP's missing-stop count was always 0. | #62 |
+| 11 | Benchmark F02: a stop the route search planned, lost when exact timing removed its load, was never offered back on its own, so it stayed unserved while a truck stood idle (P02: C3, 54 cases). | Branch `fix-replan-recovery-and-fallback` (wider fit pool; recovery of left-out stops in strict priority order) |
+| 12 | Benchmark F07: a same-day re-plan whose search plan broke the driver breaks kept 84 of 180 stops, with 3 P1 and 20 P2 left out, while a checked plan serving all 180 existed (D5). | Branch `fix-replan-recovery-and-fallback` (a fully timed incumbent before the fit repack, recovery, more of the request's time when P1-P3 work is still out, a constructive fallback) |
+| 13 | Benchmark F01: with a short time limit an option could keep only a plan that breaks the rules (VIOLATED), so the dispatcher had nothing usable (D3 at 60 s). | Branch `fix-replan-recovery-and-fallback` (a checked partial plan whose left-out orders say why; VIOLATED only when nothing of the plan can be timed) |
+
+## Benchmark of 8 Oct 2026: what is fixed and what is not
+
+- **F01, F02 and F07** are fixed (rows 11-13 above). The handbook's section 4.11 gives the recovery and fallback rules.
+- **F03 is owner policy, not a bug.** A customer whose order fits one truck (own or rental) stays one visit, even when splitting it between an own truck and a small rental would be cheaper (the report's 110 against 30 OMR example). The owner decided this on 8 Oct 2026 (handbook 6.2).
+- **F04 and F05 matter only with kg limits.** Both are about weight: greedy packing of items by kg (F04), and a heavy case checked against the own fleet's payload before a rental is considered (F05). NMWC plans by pallets with payload 0 (no kg limit), so neither affects its plans today.
+- **F06 is wording.** The search report describes the main engine's last improvement as the history of the chosen plan, also when the chosen plan came from PyVRP. It does not change any plan.
+- **Next fix:** PyVRP's penalty scaling (its default ceiling is far below the strict service values, so it can find no feasible plan on a tight day) and its preferred windows, which it treats as hard windows. These are in `pyvrp_candidate.py` and are deliberately not part of the F01/F02/F07 fix.
 
 ## Known open items (not bugs, or not built yet)
 
