@@ -25,8 +25,14 @@ What it does
 * Fit fallback (``build_candidates`` with ``fit_weights``): the route search only estimates the
   loading time between loads (80% of a full truck). On a day without slack a plan of fuller loads
   then breaks the exact turnaround, and no re-assignment keeping all its stops exists. It is
-  repacked once more with every stop optional (whole loads, each load minus one stop, one-stop
-  loads), so phase 1 keeps the most strict-priority value that fits.
+  repacked once more with every stop optional (fit_pool: whole loads, every stop alone, loads
+  shortened by one or two stops or cut in two), so phase 1 keeps the most strict-priority value that
+  fits.
+* Recovery (``trim``, ``recover``; benchmark of 8 Oct 2026, F01 / F02 / F07): such a plan is first cut
+  to the part that times exactly, and the stops it loses are inserted again in strict priority order
+  wherever exact timing still passes (an idle truck, spare time after a truck's last return, an
+  existing load) - a fully timed incumbent before the fit repack, which starts from it. Every job's
+  best candidate gets the same recovery of the stops it leaves out.
 
 Driver break (config.break_min; TruckDay.break_state DUE)
 -------------------------------------------------------
@@ -1625,33 +1631,288 @@ class Source:
     plan: TimedPlan  # timetable as the search reported it (used as the repack hint)
 
 
-def fit_pool(loads: list[Load], extra: Iterable[int] = ()) -> list[Load]:
-    """The loads a plan can fall back to when it does not fit the day once timed exactly: each
-    load as it is, each load without one of its stops (dropping one stop shortens the load and its
-    loading time), and one-stop loads for the ``extra`` stops."""
+# The fit pool holds at most this many entries per stop it covers, + one per load + FIT_POOL_MIN (a
+# small day gets every variant): its CP-SAT model grows with trucks x entries, and the fit repack has
+# seconds (benchmark of 8 Oct 2026, F02/F07).
+FIT_POOL_PER_STOP = 3
+FIT_POOL_MIN = 60
+
+
+def fit_pool(loads: list[Load], extra: Iterable[int] = (), weights: dict[int, int] | None = None,
+             cap: int | None = None) -> list[Load]:
+    """The loads a plan can fall back to when it does not fit the day once timed exactly, most
+    useful first, until the pool holds ``cap`` entries (default FIT_POOL_PER_STOP x its stops + its
+    loads + FIT_POOL_MIN, so the CP-SAT model stays small enough to solve in the repair's seconds):
+
+    1. each load as it is;
+    2. a one-stop load for EVERY stop - those of the loads and the ``extra`` ones. Benchmark F02
+       (8 Oct 2026, P02): a stop the route search carried whose load did not survive the exact
+       timing used to have no load of its own here, so it stayed unserved while a truck was idle;
+    3. each load without one of its stops (a shorter load, and a shorter loading time);
+    4. each load cut in two: its first stops and its last stops (every prefix and suffix);
+    5. each load without two of its stops - the pairs of least service value (``weights``) first.
+    """
     pool: list[Load] = []
     seen: set[Load] = set()
+    stops = {k for load in loads for k in load} | set(extra)
+    limit = cap if cap is not None else FIT_POOL_PER_STOP * len(stops) + len(loads) + FIT_POOL_MIN
+    w = weights or {}
 
-    def put(load: Load) -> None:
+    def put(load: Load) -> bool:
+        if len(pool) >= limit:
+            return False
         if load and load not in seen:
             seen.add(load)
             pool.append(load)
+        return True
 
     for load in loads:
         put(load)
+    for k in sorted(stops):
+        put((k,))
     for load in loads:
         if len(load) > 1:
             for i in range(len(load)):
                 put(load[:i] + load[i + 1:])
-    for k in sorted(extra):
-        put((k,))
+    for load in loads:
+        for i in range(1, len(load)):
+            put(load[:i])
+            put(load[i:])
+    pairs = [(w.get(load[a], 0) + w.get(load[b], 0), n, a, b) for n, load in enumerate(loads) if len(load) > 2
+             for a in range(len(load)) for b in range(a + 1, len(load))]
+    for _, n, a, b in sorted(pairs):
+        load = loads[n]
+        if not put(load[:a] + load[a + 1:b] + load[b + 1:]):
+            break
     return pool
+
+
+# --------------------------------------------------------------------------------------------
+# Recovery after the exact stage (benchmark of 8 Oct 2026, F01 / F02 / F07)
+# --------------------------------------------------------------------------------------------
+# The repacks keep loads as the route search built them. When a search's plan breaks the exact timing
+# (the loading time between loads, a driver break it never holds), the fit repack keeps what fits of its
+# loads - and on a large same-day re-plan it could leave most of the pending work out while trucks
+# stood idle (D5: 84 of 180 stops; P02: one customer with an unused truck), or find nothing in its
+# seconds, so the option kept a plan that breaks the rules (D3 at 60 s). Three plain steps close that:
+#   trim()    - a fully timed part of a plan: a truck whose loads cannot be timed loses its least
+#               valuable stops, one at a time, until they can;
+#   recover() - left-out stops in strict priority order (P1 first), each inserted where exact timing
+#               still passes: into an existing load, as a new load before, between or after a truck's
+#               loads (spare time after its last return), or on an idle truck;
+#   recover() of an empty plan is the constructive fallback (the report's "greedy witness").
+# Every insertion is re-timed exactly (time_truck: breaks, loading readiness and turnaround, shift,
+# depot hours, frozen reservations) and fits the truck (fits_truck: pallets / cases / kg). Frozen
+# (locked, loading, dispatched) loads are never in a plan: they are the trucks' reservations
+# (TruckDay), so nothing here can move or change them.
+
+RECOVER_TRIES = 24  # timed insertions tried per stop, cheapest estimate first
+RECOVER_KEEP = 3  # feasible insertions compared per stop, on the goal
+RECOVER_POSITIONS = 3  # positions kept per existing load (the cheapest detours)
+
+
+def goal_key(goal: str):
+    """The goal's comparison of two scored plans (dispatch_solver._GOALS): service first everywhere."""
+    return GOALS[goal]
+
+
+GOALS = {
+    # Service first in every goal: the stops left out and the rented trucks' hire tier (Score.service).
+    # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
+    # The search's tie-breaker on day-paid trucks (Score.tie, never money) LAST in every goal, only
+    # between plans of the same cost (fourth review: added to the cost, it made plans dearer).
+    "RECOMMENDED": lambda sc: (sc.service, sc.cost, sc.tie),
+    # fewest trucks, then loads, then operating cost (like its search, it ignores preferences).
+    # Physical trucks (PR7, B3): a truck with a frozen load counts whether or not it gets new loads,
+    # so putting new loads on it never looks like one truck more than opening a fresh one.
+    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost, sc.tie),
+    # fewest km, then the RECOMMENDED objective
+    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost, sc.tie),
+}
+
+
+def served_of(plan: TimedPlan | Plan) -> set[int]:
+    return {k for loads in plan.values() for l in loads for k in (l.stops if isinstance(l, TimedLoad) else l)}
+
+
+def trim(day: Day, pricing: Pricing, plan: Plan, deadline: float) -> TimedPlan:
+    """A fully timed part of ``plan``: each truck's loads as they are when they can be timed exactly;
+    otherwise the truck loses its least valuable stop (strict priority value; on a tie the one whose
+    leaving out saves the most km), one at a time, until they can (a load left empty is dropped). Past
+    ``deadline`` a truck that does not time is left out whole. Fast: about one timing per stop removed."""
+    out: TimedPlan = {}
+    for idx in sorted(plan):
+        td = day.by_idx.get(idx)
+        loads = [tuple(l) for l in plan[idx] if l]
+        if td is None or not loads:
+            continue
+        loads = loads[:td.trips_left]
+        while loads:
+            ok = all(fits_truck(facts(day, l), td) for l in loads)
+            timed = time_truck(day, td, loads, pricing) if ok else None
+            if timed is not None:
+                out[idx] = timed
+                break
+            if time.perf_counter() > deadline:
+                break
+            # The stop to leave out: least value first; on a tie, the longest detour.
+            best = None
+            for j, l in enumerate(loads):
+                for i, k in enumerate(l):
+                    a = l[i - 1] + 1 if i else 0
+                    b = l[i + 1] + 1 if i + 1 < len(l) else 0
+                    save = day.D[a][k + 1] + day.D[k + 1][b] - day.D[a][b]
+                    key = (day.values[k], -save, -j)
+                    if best is None or key < best[0]:
+                        best = (key, j, i)
+            _, j, i = best  # type: ignore[misc]
+            rest = loads[j][:i] + loads[j][i + 1:]
+            loads = loads[:j] + ([rest] if rest else []) + loads[j + 1:]
+    return out
+
+
+def _insertions(day: Day, pricing: Pricing, plan: TimedPlan, k: int) -> list[tuple[float, int, list[Load]]]:
+    """Where stop ``k`` may go, cheapest estimate first: (estimate, truck idx, the truck's new loads).
+    Into each load of a truck at its RECOVER_POSITIONS cheapest positions (the detour in km), or as a
+    new one-stop load before, between or after the truck's loads (a free trip). A truck that cannot
+    take ``k`` alone - over its room, or no departure meets its hours - gets no option at all."""
+    out: list[tuple[float, int, list[Load]]] = []
+    single = facts(day, (k,))
+    node = k + 1
+    for td in day.trucks:
+        if not fits_truck(single, td) or depart_range(day, single, td) is None:
+            continue
+        price = pricing.trucks[td.idx]
+        per_m = price.per_m + price.tie_m
+        loads = [tl.stops for tl in plan.get(td.idx, [])]
+        for j, load in enumerate(loads):
+            if not fits_truck(facts(day, load + (k,)), td):
+                continue
+            pos = []
+            for p in range(len(load) + 1):
+                a = load[p - 1] + 1 if p else 0
+                b = load[p] + 1 if p < len(load) else 0
+                pos.append((day.D[a][node] + day.D[node][b] - day.D[a][b], p))
+            for detour, p in sorted(pos)[:RECOVER_POSITIONS]:
+                new = load[:p] + (k,) + load[p:]
+                out.append((per_m * detour, td.idx, loads[:j] + [new] + loads[j + 1:]))
+        if len(loads) < td.trips_left:
+            opened = 0 if loads else price.fixed + ((price.driver_day or 0) if td.n_frozen == 0 else 0) + price.hire
+            est = opened + price.trip + per_m * (day.D[0][node] + day.D[node][0])
+            for q in range(len(loads), -1, -1):  # after the last load first: the spare time at the end
+                out.append((est + 0.001 * (len(loads) - q), td.idx, loads[:q] + [(k,)] + loads[q:]))
+    out.sort(key=lambda o: o[0])
+    return out
+
+
+def _swaps(day: Day, plan: TimedPlan, k: int) -> list[tuple[float, int, list[Load], int]]:
+    """Where stop ``k`` may take the place of a stop of lower service value: (estimate, truck idx, the
+    truck's new loads, the stop it puts out), the smallest km change first. ``k`` goes where the other
+    stop was, or at its cheapest position in that load without it."""
+    out: list[tuple[float, int, list[Load], int]] = []
+    single = facts(day, (k,))
+    node = k + 1
+    for td in day.trucks:
+        if not fits_truck(single, td) or depart_range(day, single, td) is None:
+            continue
+        loads = [tl.stops for tl in plan.get(td.idx, [])]
+        for j, load in enumerate(loads):
+            for i, q in enumerate(load):
+                if day.values[q] >= day.values[k]:
+                    continue
+                rest = load[:i] + load[i + 1:]
+                if not fits_truck(facts(day, rest + (k,)), td):
+                    continue
+                for p in sorted({i, *range(len(rest) + 1)}, key=lambda p: (p != i, p))[:RECOVER_POSITIONS + 1]:
+                    new = rest[:p] + (k,) + rest[p:]
+                    out.append((float(day.metres(new) - day.metres(load)), td.idx, loads[:j] + [new] + loads[j + 1:], q))
+    out.sort(key=lambda o: o[0])
+    return out
+
+
+def recover(day: Day, pricing: Pricing, plan: TimedPlan, missing: Iterable[int], deadline: float,
+            goal: str = "RECOMMENDED", tries: int | None = RECOVER_TRIES, swaps: bool = False,
+            farthest_first: bool = False) -> TimedPlan:
+    """``plan`` with as many of the ``missing`` stops as can be inserted, in strict priority order
+    (service value, highest first; then the earliest latest start, then the most cases - or, with
+    ``farthest_first`` (the constructive fallback), the farthest from the depot first). Each stop
+    takes, among up to RECOVER_KEEP insertions that time exactly (of the ``tries`` cheapest estimates;
+    None: all of them), the one best for ``goal``; one that does not serve more (Score.service: a
+    rented truck is not opened for P4/P5 orders alone) is never taken. With ``swaps`` a stop that fits
+    nowhere may take the place of a stop of LOWER priority (strict service value: the plan always serves
+    more), which then waits for its own turn to be inserted again. The plan's other trucks are not
+    touched, and a stop that fits nowhere is left out. Stops at ``deadline``. A new dict; ``plan`` is
+    unchanged."""
+    cur: TimedPlan = {idx: list(v) for idx, v in plan.items() if v}
+    key = goal_key(goal)
+    base = score(day, pricing, cur)
+
+    def rank(k: int) -> tuple:
+        second = -day.D[0][k + 1] if farthest_first else _he(day, day.stops[k])
+        return (-day.values[k], second, -day.stops[k].demand_cases, k)
+
+    pending = sorted(set(missing) - served_of(cur), key=rank)
+    while pending:
+        k = pending.pop(0)
+        if time.perf_counter() > deadline:
+            break
+        best: tuple[Score, int, list[TimedLoad], int | None] | None = None
+        n = found = 0
+        for _, idx, loads in _insertions(day, pricing, cur, k):
+            if (tries is not None and n >= tries) or found >= RECOVER_KEEP or time.perf_counter() > deadline:
+                break
+            n += 1
+            timed = time_truck(day, day.by_idx[idx], loads, pricing)
+            if timed is None:
+                continue
+            trial = dict(cur)
+            trial[idx] = timed
+            sc = score(day, pricing, trial)
+            if sc.service >= base.service:
+                continue
+            found += 1
+            if best is None or key(sc) < key(best[0]):
+                best = (sc, idx, timed, None)
+        if best is None and swaps:
+            n = 0
+            for _, idx, loads, out_k in _swaps(day, cur, k):
+                if (tries is not None and n >= tries) or time.perf_counter() > deadline:
+                    break
+                n += 1
+                timed = time_truck(day, day.by_idx[idx], loads, pricing)
+                if timed is None:
+                    continue
+                trial = dict(cur)
+                trial[idx] = timed
+                sc = score(day, pricing, trial)
+                if sc.service < base.service:
+                    best = (sc, idx, timed, out_k)
+                    break
+        if best is not None:
+            base, cur[best[1]] = best[0], best[2]
+            if best[3] is not None:
+                pending.append(best[3])
+                pending.sort(key=rank)
+    return cur
+
+
+# The recovery's share of a source's repack time when the source's plan cannot be timed exactly (the
+# incumbent: trim + recover), and the time the closing recovery may use on a day whose plans timed
+# cleanly (a day short of trucks leaves stops out that fit nowhere: never slower for it).
+INCUMBENT_SHARE = 0.4
+CLEAN_RECOVER_SEC = 2.0
+# Benchmark F07: a repair whose best plan still leaves stops out - P1-P3 stops, or any stop when its fit
+# repack proved no bound - may use the request's remaining time (extra_s, _post_solve), never more: the
+# deep recovery (every insertion, and swaps), then, while P1-P3 stops are still out, the constructive
+# fallback and a longer fit repack, each at most this long.
+EXTENDED_STEP_MAX_SEC = 60.0
 
 
 def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: Pricing,
                      sources: list[Source], optional: dict[int, int] | None, cap_s: float,
                      budget_s: float, time_raw: bool,
-                     fit_weights: dict[int, int] | None = None) -> tuple[list[Candidate], list[str]]:
+                     fit_weights: dict[int, int] | None = None, extra_s: float = 0.0,
+                     fallback: bool = True) -> tuple[list[Candidate], list[str]]:
     """Repack every distinct raw plan with ``goal_pricing``; time every result (and the raw
     plans when ``time_raw``) exactly; score everything on ``score_pricing`` (RECOMMENDED).
 
@@ -1659,9 +1920,24 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
       repair), or None. Only stops a plan does not already carry are optional for it.
     fit_weights: stop -> phase-1 weight of EVERY stop, ranked like the strict service values.
       When a raw plan breaks the exact timing (the route search only estimates the loading time
-      between loads) and no re-assignment of its loads carries all its stops, it is repacked once
-      more with every stop optional ("+fit" candidates): whole loads or single stops are left out,
-      lowest priorities first, until the rest fits. None: no such fallback.
+      between loads, and never holds a driver break) and no re-assignment of its loads carries all its
+      stops, it is repaired (benchmark of 8 Oct 2026, F01 / F02 / F07):
+      * first a fully timed incumbent, at once: the plan trimmed until it times (trim), then its
+        left-out stops inserted again in strict priority order (recover; "+recover" candidates), so
+        the option always has a plan that keeps every rule, partial if need be;
+      * then repacked once more with every stop optional ("+fit" candidates), from a wider pool
+        (fit_pool: every stop alone, loads shortened or cut in two) that also holds the incumbent's
+        loads, with the incumbent as the hint: CP-SAT starts from it. None: no such repair.
+    After the sources, the job's best candidate for ``goal`` gets the stops it leaves out inserted
+    where they still fit (recover; on a day whose plans timed cleanly for CLEAN_RECOVER_SEC at most).
+    extra_s: more seconds the job may use on a repair day whose best plan still leaves stops out - P1-P3
+      stops, or any stop when its fit repack did not prove its answer (F07): a deep recovery (every
+      insertion tried, and swaps: a stop may take the place of one of lower priority, which is then
+      inserted again where it fits); then, while P1-P3 stops are still out, the constructive fallback
+      (``fallback``: recover() of an empty plan, "FALLBACK" candidates; one job per request builds it)
+      and a longer fit repack hinted with the best plan, each at most EXTENDED_STEP_MAX_SEC.
+    Every candidate is fully timed and scored; the caller keeps the best by the goal's service-first
+    comparison, so a later candidate replaces an earlier one only when it is better.
     Returns (candidates, log lines)."""
     t0 = time.perf_counter()
     lp0 = dict(LP_STATS)
@@ -1670,6 +1946,9 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
     seen: set[tuple] = set()
     timed_of: dict[tuple, TimedPlan | None] = {}
     done_pools: set[frozenset] = set()
+    key = goal_key(goal)
+    repair_day = False  # a source's plan could not be timed exactly
+    weak = False  # a fit repack ended without proving its answer (FEASIBLE with a gap, UNKNOWN, none)
 
     def timed(plan: Plan) -> TimedPlan | None:
         sig = plan_signature(plan)
@@ -1690,10 +1969,53 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
         out.append(Candidate(source, tp, score(day, score_pricing, tp)))
         return True
 
+    def add_timed(source: str, tp: TimedPlan) -> None:
+        """Add a plan recover() / trim() timed already (each truck timed exactly by time_truck)."""
+        plan = plan_of(tp)
+        sig = plan_signature(plan)
+        if not plan or sig in seen:
+            return
+        timed_of.setdefault(sig, {idx: v for idx, v in tp.items() if v})
+        seen.add(sig)
+        out.append(Candidate(source, timed_of[sig], score(day, score_pricing, timed_of[sig])))  # type: ignore[arg-type]
+
     def share(n: int) -> float:
         # Share what is left fairly with the plans still to come.
         left = budget_s - (time.perf_counter() - t0)
         return min(cap_s, left / max(1, len(order) - n))
+
+    everyone = range(len(day.stops))
+
+    def best_of() -> Candidate | None:
+        return min(out, key=lambda c: key(c.score)) if out else None
+
+    def fit(src_name: str, loads: list[Load], opt: dict[int, int], hint: TimedPlan, limit: float, tag: str) -> None:
+        nonlocal weak
+        fp = fit_pool([tl.stops for v in hint.values() for tl in v] + loads, opt, fit_weights)
+        try:
+            res = repack(day, goal_pricing, fp, set(), {k: fit_weights[k] for l in fp for k in l}, hint, limit)  # type: ignore[index]
+            notes.append(f"{src_name}: {goal} {tag}fit repack {res.status} in {res.seconds:.1f}s")
+            weak = weak or not res.status.startswith("OPTIMAL")
+            if res.plan is not None:
+                add(f"{src_name}+fit:{goal}", res.plan)
+            else:
+                log.warning("fit repack %s after %.1fs (limit %.1fs) for %s/%s: no fitting plan from these loads",
+                            res.status, res.seconds, limit, src_name, goal)
+        except Exception as exc:  # noqa: BLE001
+            weak = True
+            log.warning("fit repack %s/%s failed: %s", src_name, goal, exc)
+            notes.append(f"{src_name}: {goal} fit repack failed ({exc})")
+
+    def recovered(name: str, base: TimedPlan, until: float) -> None:
+        missing = [k for k in everyone if k not in served_of(base)]
+        if not missing or time.perf_counter() >= until:
+            return
+        t = time.perf_counter()
+        got = recover(day, score_pricing, base, missing, until, goal)
+        gained = len(served_of(got)) - len(served_of(base))
+        notes.append(f"{name}: {goal} recovery +{gained} of {len(missing)} stop(s) left out in {time.perf_counter() - t:.1f}s")
+        if gained:
+            add_timed(f"{name}+recover:{goal}", got)
 
     breaks = any(break_due(td) for td in day.trucks)
     if time_raw:
@@ -1707,14 +2029,33 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
         carried = {k for l in loads for k in l}
         opt = {k: w for k, w in (optional or {}).items() if k not in carried}
         pool = loads + [(k,) for k in sorted(opt) if (k,) not in set(loads)]
-        key = frozenset(pool)
-        if key in done_pools:
+        key_pool = frozenset(pool)
+        if key_pool in done_pools:
             continue
-        done_pools.add(key)
+        done_pools.add(key_pool)
         limit = share(n)
         if limit < 0.5:
             notes.append(f"{src.name}: no time left for the {goal} repack")
             continue
+        raw_ok = timed(plan_of(src.plan)) is not None
+        incumbent: TimedPlan | None = None
+        if fit_weights and not raw_ok:
+            # The search's plan breaks the exact timing: a fully timed incumbent first, in a fraction
+            # of this source's time (benchmark F01: the option never keeps only a plan that breaks
+            # the rules because the repacks below used the time up).
+            repair_day = True
+            until = time.perf_counter() + max(0.5, INCUMBENT_SHARE * limit)
+            try:
+                kept = trim(day, score_pricing, plan_of(src.plan), until)
+                incumbent = recover(day, score_pricing, kept, everyone, until, goal)
+                notes.append(f"{src.name}: {goal} incumbent keeps {len(served_of(kept))}, recovers to "
+                             f"{len(served_of(incumbent))} of {len(day.stops)} stop(s)")
+                add_timed(f"{src.name}+recover:{goal}", incumbent)
+            except Exception as exc:  # noqa: BLE001 - only this candidate is lost
+                log.warning("incumbent %s/%s failed: %s", src.name, goal, exc)
+                notes.append(f"{src.name}: {goal} incumbent failed ({exc})")
+                incumbent = None
+            limit = share(n)
         ok = False
         # With driver breaks the search's own times hold none: hint the plan as time_plan places
         # its breaks (a DEPOT break as the depot interval, a ROAD break as its variant).
@@ -1737,34 +2078,75 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
             if res.plan is None:
                 # Audit E5: no answer (UNKNOWN, out of time). A repack never makes a plan worse: the
                 # plan it started from stays a candidate of this job whenever it times exactly.
-                kept = add(src.name, plan_of(src.plan))
+                kept_raw = add(src.name, plan_of(src.plan))
                 log.warning("repack %s after %.1fs (limit %.1fs) for %s/%s: %s", res.status, res.seconds, limit, src.name, goal,
-                            "kept the plan it started from" if kept else
+                            "kept the plan it started from" if kept_raw else
                             "the plan it started from breaks the exact loading time between loads")
             ok = res.plan is not None and add(f"{src.name}+repack:{goal}", res.plan)
         except Exception as exc:  # noqa: BLE001 - a failed repack only loses this candidate
             log.warning("repack %s/%s failed: %s", src.name, goal, exc)
             notes.append(f"{src.name}: {goal} repack failed ({exc})")
-        if ok or not fit_weights or timed(plan_of(src.plan)) is not None:
+        if ok or not fit_weights or raw_ok:
             continue
         # The search's plan breaks the exact turnaround and keeping all its stops is impossible
-        # (typically: loads over 80% full on a day without slack). Keep the most priority value
-        # that fits instead of returning departure times no truck can make.
+        # (typically: loads over 80% full on a day without slack, or no room for a driver break). Keep
+        # the most priority value that fits instead of returning departure times no truck can make.
         limit = share(n)
         if limit < 0.5:
             notes.append(f"{src.name}: no time left for the {goal} fit repack")
+            weak = True
             continue
-        fp = fit_pool(loads, opt)
+        fit(src.name, loads, opt, incumbent or hint, limit, "")
+    # The job's best plan, with the stops it leaves out inserted where they still fit.
+    end = t0 + budget_s
+    best = best_of()
+    if best is not None:
+        until = end if repair_day else min(end, time.perf_counter() + CLEAN_RECOVER_SEC)
         try:
-            res = repack(day, goal_pricing, fp, set(), {k: fit_weights[k] for l in fp for k in l}, hint, limit)
-            notes.append(f"{src.name}: {goal} fit repack {res.status} in {res.seconds:.1f}s")
-            if res.plan is not None:
-                add(f"{src.name}+fit:{goal}", res.plan)
-            else:
-                log.warning("fit repack %s after %.1fs (limit %.1fs) for %s/%s: no fitting plan from these loads",
-                            res.status, res.seconds, limit, src.name, goal)
+            recovered(best.source, best.plan, until)
         except Exception as exc:  # noqa: BLE001
-            log.warning("fit repack %s/%s failed: %s", src.name, goal, exc)
-            notes.append(f"{src.name}: {goal} fit repack failed ({exc})")
+            log.warning("recovery %s/%s failed: %s", best.source, goal, exc)
+            notes.append(f"{best.source}: {goal} recovery failed ({exc})")
+    # Benchmark F07: on a repair day whose best plan still leaves stops out (P1-P3 stops, or any when the
+    # fit repack proved no bound), use more of the request's time. A day whose plans timed cleanly, or
+    # whose repair serves every stop, never gets here.
+    def high_left(c: Candidate | None) -> bool:
+        return c is None or any(day.stops[k].priority <= 3 for k in everyone if k not in served_of(c.plan))
+
+    best = best_of()
+    left_out = best is None or len(served_of(best.plan)) < len(day.stops)
+    if repair_day and extra_s > 0 and fit_weights and left_out and (high_left(best) or weak):
+        end = t0 + budget_s + extra_s
+        notes.append(f"{goal}: repair extended by up to {extra_s:.0f}s (" +
+                     ("P1-P3 stops left out" if high_left(best) else "the fit repack proved no bound") + ")")
+        step = lambda: min(end, time.perf_counter() + EXTENDED_STEP_MAX_SEC)  # noqa: E731
+        try:
+            if best is not None:
+                # Every insertion of each stop left out, and swaps: a P1-P3 stop may take the place of
+                # a lower priority one, which is then inserted again where it fits.
+                t = time.perf_counter()
+                missing = [k for k in everyone if k not in served_of(best.plan)]
+                deep = recover(day, score_pricing, best.plan, missing, step(), goal, tries=None, swaps=True)
+                notes.append(f"{best.source}: {goal} deep recovery +{len(served_of(deep)) - len(served_of(best.plan))} "
+                             f"of {len(missing)} stop(s) left out in {time.perf_counter() - t:.1f}s")
+                add_timed(f"{best.source}+recover:{goal}", deep)
+            if fallback and high_left(best_of()):
+                t = time.perf_counter()
+                built = recover(day, score_pricing, {}, everyone, step(), goal, swaps=True, farthest_first=True)
+                notes.append(f"FALLBACK: {goal} constructive plan serves {len(served_of(built))} of {len(day.stops)} "
+                             f"stop(s) in {time.perf_counter() - t:.1f}s")
+                add_timed(f"FALLBACK:{goal}", built)
+            best = best_of()
+            if best is not None and high_left(best) and step() - time.perf_counter() >= 1.0:
+                src0 = order[0] if order else None
+                loads0 = [tl.stops for v in src0.plan.values() for tl in v] if src0 is not None else []
+                fit(best.source.split("+")[0], loads0, dict.fromkeys(everyone, 0), best.plan,
+                    step() - time.perf_counter(), "extended ")
+                best = best_of()
+                if best is not None:
+                    recovered(best.source, best.plan, step())
+        except Exception as exc:  # noqa: BLE001 - the candidates found so far stay
+            log.warning("extended repair %s failed: %s", goal, exc)
+            notes.append(f"{goal}: extended repair failed ({exc})")
     notes.append(f"{goal}: {LP_STATS['lps'] - lp0['lps']} timing LPs in {LP_STATS['sec'] - lp0['sec']:.2f}s")
     return out, notes

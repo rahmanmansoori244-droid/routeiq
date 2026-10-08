@@ -745,8 +745,11 @@ def stage_in_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
         if left < 0.5:
             notes.append(f"PYVRP: no time left for the {goal} repack")
             continue
+        # extra_s: the repair's extension (benchmark F07), as the engine's job gets it; the constructive
+        # fallback is built once per request, by the engine's RECOMMENDED job.
         c, n = LR.build_candidates(day, pricing, goal, goal_pricing, src, job["optional"], job["cap_s"],
-                                   left / (len(goals) - i), time_raw=i == 0, fit_weights=job["fit_weights"])
+                                   left / (len(goals) - i), time_raw=i == 0, fit_weights=job["fit_weights"],
+                                   extra_s=job.get("extra_s", 0.0), fallback=False)
         cands += c
         notes += n
     return cands, notes
