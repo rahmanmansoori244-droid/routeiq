@@ -27,7 +27,12 @@ export default async function AuditPage({ params }: { params: { slug: string } }
     include: { user: { select: { id: true, name: true, email: true } } },
   });
 
-  // Also pull tenant users for the user filter dropdown.
+  // The user filter: the 25 users with the most audit rows, most rows first. The counts are read
+  // from the index on (tenantId, userId, createdAt) alone, then the names of those 25 ids only.
+  // Review db-schema-2: the names came from an auditLog.findMany with `distinct`, which Prisma
+  // does in memory - it read every row these users ever wrote, JSON included, to name 25 users.
+  // By id, not by company: a platform admin who looked at this company (CROSS_TENANT_VIEW) has
+  // rows here too and stays in the list; every id comes from this company's own audit rows.
   const tenantUsers = await db.auditLog.groupBy({
     by: ['userId'],
     where: { userId: { not: null } },
@@ -36,15 +41,14 @@ export default async function AuditPage({ params }: { params: { slug: string } }
     take: 25,
   });
   const userIds = tenantUsers.map((t) => t.userId).filter((v): v is string => v !== null);
-  const userOptions = userIds.length
-    ? (await db.auditLog.findMany({
-        where: { userId: { in: userIds } },
-        distinct: ['userId'],
-        include: { user: { select: { id: true, name: true, email: true } } },
-      }))
-        .map((r) => r.user)
-        .filter((u): u is NonNullable<typeof u> => u !== null)
+  const named = userIds.length
+    ? await db.user.findMany({ where: { id: { in: userIds } }, select: { id: true, name: true, email: true } })
     : [];
+  const byId = new Map(named.map((u) => [u.id, u]));
+  const userOptions = userIds.flatMap((id) => {
+    const u = byId.get(id);
+    return u ? [u] : [];
+  });
 
   return (
     <PageShell

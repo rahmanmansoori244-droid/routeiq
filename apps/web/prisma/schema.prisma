@@ -826,6 +826,9 @@ model Order {
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])
   @@index([tenantId, depotId, deliveryDate])
+  // An order file's orders: the file delete, the files list's order counts and the SET NULL key
+  // when a file row itself is deleted (review db-schema-1).
+  @@index([uploadBatchId])
 }
 
 model OrderLine {
@@ -1045,6 +1048,10 @@ model RouteAssignment {
   @@unique([runId, truckId, loadNo, sequenceInTruck, orderInStop])
   @@index([runId, truckId])
   @@index([loadId])
+  // The RESTRICT key on orderId: deleting an order looks here once per order. Every plan version
+  // copies all its stops and nothing prunes them, so without this index a wrong file's delete
+  // scanned the whole table per order and timed out after a few months (review db-schema-1).
+  @@index([orderId])
 }
 
 model RunJob {
@@ -1115,6 +1122,8 @@ model ManualBaselineAssignment {
   estimatedTimeMin    Int?
 
   @@index([baselineId, truckCode])
+  // SET NULL on orderId: an order delete looks here once per order (review db-schema-1).
+  @@index([orderId])
 }
 
 model UnservedOrder {
@@ -1153,6 +1162,9 @@ model AuditLog {
 
   @@index([tenantId, createdAt])
   @@index([tenantId, entity, entityId])
+  // The Audit log page's user list (rows per user, read from this index alone) and the API's
+  // filter by user, newest first (review db-schema-2).
+  @@index([tenantId, userId, createdAt])
 }
 
 // --- Delivery outcome & driver page (owner request 4 Oct 2026) ---------------------------------
