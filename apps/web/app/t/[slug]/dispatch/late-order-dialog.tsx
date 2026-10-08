@@ -22,7 +22,10 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
   const [code, setCode] = useState('');
   const [branch, setBranch] = useState('');
   const [name, setName] = useState('');
-  const [priority, setPriority] = useState(1);
+  // null = the customer's own priority (the server falls back to it). Review of 8 Oct 2026: the
+  // dialog opened at P1 and always sent it, so every late order saved as it opened beat any number
+  // of P2-P5 orders (strict priority), and its re-plan could leave a whole P2 order out to fit it.
+  const [priority, setPriority] = useState<number | null>(null);
   const [reason, setReason] = useState('');
   const [so, setSo] = useState('');
   const [lines, setLines] = useState([{ productCode: '', cases: '' }]);
@@ -41,7 +44,17 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
     setBusy(true);
     const r = await api<{ orderId: string; replanNeeded: boolean; locationRequired: boolean; planId: string | null; productsWithoutWeight?: string[] }>('/api/dispatch/late-order', {
       method: 'POST',
-      json: { date, depotId, customerCode: code.trim(), branchCode: branch.trim() || undefined, customerName: name.trim() || undefined, priority, reason: reason.trim(), lines: parsed },
+      json: {
+        date,
+        depotId,
+        customerCode: code.trim(),
+        branchCode: branch.trim() || undefined,
+        customerName: name.trim() || undefined,
+        // Only a priority the dispatcher picked; it can only raise the customer's own (plan-service.ts).
+        ...(priority !== null ? { priority } : {}),
+        reason: reason.trim(),
+        lines: parsed,
+      },
     });
     setBusy(false);
     if (!r.ok || !r.data) {
@@ -52,6 +65,7 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
     setCode('');
     setBranch('');
     setName('');
+    setPriority(null);
     setReason('');
     setSo('');
     setLines([{ productCode: '', cases: '' }]);
@@ -81,7 +95,14 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
           </div>
           <div className="space-y-1">
             <Label htmlFor="lo-prio">Priority</Label>
-            <select id="lo-prio" className="h-9 w-full rounded-md border bg-background px-2 text-sm" value={priority} onChange={(e) => setPriority(Number(e.target.value))}>
+            <select
+              id="lo-prio"
+              className="h-9 w-full rounded-md border bg-background px-2 text-sm"
+              value={priority ?? ''}
+              onChange={(e) => setPriority(e.target.value === '' ? null : Number(e.target.value))}
+              aria-describedby="lo-prio-hint"
+            >
+              <option value="">Customer&apos;s own priority</option>
               {[1, 2, 3, 4, 5].map((p) => (
                 <option key={p} value={p}>
                   P{p}
@@ -89,6 +110,9 @@ export function LateOrderDialog({ open, onOpenChange, date, depotId, onSaved }: 
                 </option>
               ))}
             </select>
+            <p id="lo-prio-hint" className="text-xs text-muted-foreground">
+              Pick one only to raise this order above the customer&apos;s own priority (it never lowers it).
+            </p>
           </div>
           <div className="space-y-1">
             <Label htmlFor="lo-so">Sales order no. (optional)</Label>

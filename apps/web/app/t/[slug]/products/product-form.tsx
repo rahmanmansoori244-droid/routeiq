@@ -36,7 +36,14 @@ interface Props {
   onSaved: () => void;
 }
 
-const blank = { code: '', name: '', weightPerCaseKg: '12', volumePerCaseL: '15', casesPerPallet: '', active: true };
+// Weight and volume start empty: 0 kg per case means UNKNOWN (weights.ts), and an empty field is sent
+// as 0, as every other way a product is made does (file intake, late order, import). The dialog used
+// to start at 12 kg / 15 L: a product saved untouched got a made-up weight, so Optimize never asked
+// for it (WEIGHT_REQUIRED) and the day's "no weight" list left it out (review of 8 Oct 2026).
+const blank = { code: '', name: '', weightPerCaseKg: '', volumePerCaseL: '', casesPerPallet: '', active: true };
+
+/** A stored 0 (unknown) shows as an empty field with "unknown" in it, never as a weight of 0. */
+const knownOrEmpty = (v: number) => (v > 0 ? String(v) : '');
 
 export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }: Props) {
   const [form, setForm] = useState(blank);
@@ -48,8 +55,8 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
         setForm({
           code: product.code,
           name: product.name,
-          weightPerCaseKg: String(product.weightPerCaseKg),
-          volumePerCaseL: String(product.volumePerCaseL),
+          weightPerCaseKg: knownOrEmpty(product.weightPerCaseKg),
+          volumePerCaseL: knownOrEmpty(product.volumePerCaseL),
           casesPerPallet: product.casesPerPallet != null ? String(product.casesPerPallet) : '',
           active: product.active,
         });
@@ -126,8 +133,9 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
                 min="0"
                 step="0.01"
                 value={form.weightPerCaseKg}
+                placeholder="unknown"
                 onChange={(e) => setForm({ ...form, weightPerCaseKg: e.target.value })}
-                required
+                aria-describedby="weightPerCaseKg-hint"
               />
             </div>
             <div className="space-y-1.5">
@@ -138,10 +146,13 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
                 min="0"
                 step="0.01"
                 value={form.volumePerCaseL}
+                placeholder="unknown"
                 onChange={(e) => setForm({ ...form, volumePerCaseL: e.target.value })}
-                required
               />
             </div>
+            <p id="weightPerCaseKg-hint" className="col-span-2 text-xs text-muted-foreground">
+              Leave empty if not known yet: it is saved as 0 (unknown), and Daily dispatch shows its cases under &quot;No weight&quot; until it is entered.
+            </p>
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="casesPerPallet">Cases per pallet</Label>

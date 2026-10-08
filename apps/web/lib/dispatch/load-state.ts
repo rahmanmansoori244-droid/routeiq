@@ -16,6 +16,7 @@
  * (Dispatch and Completed needed a SUPERVISOR before). VIEWER is refused by the route.
  */
 import { coverFor, type LeaveOnDay } from './driver-leave';
+import { fmtDayMonth } from './time';
 
 export type LoadStatusName = 'PLANNED' | 'LOCKED' | 'LOADING' | 'DISPATCHED' | 'COMPLETED';
 
@@ -100,6 +101,37 @@ export function isCarriedFrozen(l: { status: string; carriedFromLoadId: string |
 /** Loads that can still be unlocked (LOCKED) or put back to locked (LOADING): the way back to a re-plan. */
 export function canStepBack(statuses: readonly string[]): boolean {
   return statuses.some((s) => s === 'LOCKED' || s === 'LOADING');
+}
+
+/**
+ * The question the plan screen asks before a move that can never be undone (review of 8 Oct 2026,
+ * ui-dispatch-3): DISPATCHED (nothing leads back from it: no unlock, no re-plan, no other driver)
+ * and COMPLETED (the trip is closed: the driver's phone can no longer change its results). Both were
+ * one click on small buttons next to Loading and Unlock, so a mis-click froze a load for good.
+ * Lock, Loading and the ways back are not asked: each can be undone. Null = no question.
+ * `day` (YYYY-MM-DD): a load of a later day than the company's today says so - it would leave the
+ * evening before its delivery day.
+ */
+export function oneWayMoveQuestion(
+  l: { truckCode: string; loadNo: number; driverName: string | null; stops: number; cases: number },
+  to: string,
+  day?: { runDate: string; today: string | null },
+): string | null {
+  const who = l.driverName ?? 'no driver';
+  const later = day?.today && day.runDate.slice(0, 10) > day.today ? ` This load is for ${fmtDayMonth(day.runDate)}, not today.` : '';
+  if (to === 'DISPATCHED') {
+    return (
+      `Dispatch ${l.truckCode} L${l.loadNo} (${who}, ${l.stops} stop(s), ${l.cases} cases)?${later}\n\n` +
+      'This cannot be undone: a dispatched load can never be unlocked, re-planned or given another driver. Press OK only when the truck has left.'
+    );
+  }
+  if (to === 'COMPLETED') {
+    return (
+      `Mark ${l.truckCode} L${l.loadNo} (${who}, ${l.stops} stop(s)) as Completed?\n\n` +
+      "This cannot be undone: the trip is closed and the driver's phone can no longer change its results (a stop with no result can still be recorded with Record)."
+    );
+  }
+  return null;
 }
 
 /**
