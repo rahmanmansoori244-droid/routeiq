@@ -7,8 +7,10 @@
  * the idempotency check (`dl:<uuid>`, a duplicate only for the same link), the rules (section 8.3),
  * the caps (40 arrivals, departures and results per stop, 5 Back at depot per load), the StopEvent,
  * the StopVisit rebuilt from all its events (visit.ts), the audit row. A result equal to the stop's
- * current one is answered ok and stores nothing. After the commit a load that is back at the depot
- * with a result on every stop is completed (completeLoadAsDriver).
+ * current one and not dated after its latest stored result is answered ok and stores nothing. After
+ * an action answered 'error', the later actions of its stop in the same request are answered 'error'
+ * unapplied (the phone sends them again in their order). After the commit a load that is back at the
+ * depot with a result on every stop is completed (completeLoadAsDriver).
  *
  * A unique-key error (P2002) aborts the transaction; it is answered from a fresh read OUTSIDE it,
  * never retried inside it (PostgreSQL refuses every statement after the first error).
@@ -28,7 +30,7 @@ import { DEFAULT_TZ, dateOnly, isoOf, zonedDayStart } from '../dispatch/time';
 import { shownTruckCode } from '../dispatch/hire';
 import { driverActor } from '../driver-link/actor';
 import { truckDayLoads, type TruckDayLoad } from '../driver-link/service';
-import { loadKeyOf, parseStopKey as readStopKey, stopKeyOf, type StopRef } from '../driver-link/stop-key';
+import { loadKeyOf, maybeSameStop, parseStopKey as readStopKey, stopKeyOf, type StopRef } from '../driver-link/stop-key';
 import type { DriverActionResult, DriverResults, NotDeliveredReasonName, StopResult } from '../driver-link/manifest-types';
 import { lockOutcomesDay } from './locks';
 import { plannedStopOf, type PlannedStop } from './planned-stop';
@@ -436,7 +438,11 @@ export const MAX_EVENTS_PER_VISIT = 40;
 /** At most this many Back at depot events per load. */
 export const MAX_BACK_EVENTS_PER_LOAD = 5;
 
-/** Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note, lines, photos). */
+/**
+ * Whether a result repeats the visit's current one exactly (same source kind, outcome, reason, note,
+ * lines, photos). The content only: applyAction drops a repeat only when it is not newer than the
+ * stop's latest stored OUTCOME as well.
+ */
 export function repeatsCurrentResult(
   visit: { outcome: string | null; reason: string | null; reasonNote: string | null; outcomeSource: string | null; noPhotoReason: string | null; photoKeysJson: unknown; linesJson: unknown } | null,
   next: { source: EventSource; outcome: string | null; reason: string | null; note: string | null; lines: { lineId: string; delivered: number }[]; photoKeys: readonly string[]; noPhotoReason: string | null },
@@ -662,8 +668,16 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
       const after = new Map(p.lines.map((l) => [l.lineId, 0]));
       if (norm.outcome !== null) for (const l of norm.lines) after.set(l.lineId, l.planned - l.delivered);
       const source: EventSource = office ? 'DISPATCHER' : 'PHONE_MANUAL';
-      // The same result again (a phone repeating itself, or a flood with fresh keys): nothing to store.
+      // The same result again (a phone repeating itself, or a flood with fresh keys): nothing to store,
+      // but only when it is not dated after the stop's latest stored result or clear. The result is the
+      // OUTCOME with the latest `at` (visit.ts resultEvent) and results can arrive out of order (an
+      // item backed off on the phone, an 'error' answer, two phones on one link): a newer repeat that
+      // was dropped let an older change (or Undo) arriving after it become the result, though the
+      // driver's last word was this one (review of 8 Oct 2026). So a newer repeat is stored and holds
+      // its time, and a clear with no stored result yet is stored too (it creates the visit): the
+      // result it cleared may still be on its way. The 40 events per stop still cap a flood.
       if (
+        visit &&
         repeatsCurrentResult(visit, {
           source,
           outcome: norm.outcome,
@@ -674,7 +688,10 @@ async function applyAction(ctx: DriverWriteContext, facts: DayFacts, a: ParsedAc
           noPhotoReason: a.noPhotoReason ?? null,
         })
       ) {
-        return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' && norm.outcome !== null ? here : undefined };
+        const latest = await tx.stopEvent.findFirst({ where: { tenantId: ctx.tenantId, visitId: visit.id, kind: 'OUTCOME' }, orderBy: { at: 'desc' }, select: { at: true } });
+        if (latest && at.getTime() <= latest.at.getTime()) {
+          return { result: { key: a.key, status: 'ok' }, completeLoad: load.status === 'DISPATCHED' && norm.outcome !== null ? here : undefined };
+        }
       }
       const payload: Record<string, unknown> =
         norm.outcome === null
@@ -780,6 +797,12 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
   const skew = clockSkewMs(ctx.now, new Date(body.clientNow));
   const results: DriverActionResult[] = [];
   const toComplete = new Map<string, LoadRef>();
+  // The stops with an action answered 'error' in this request. Their later actions are answered
+  // 'error' too, unapplied, so the phone sends them again after it, in the order they were made
+  // (review of 8 Oct 2026): applied ahead of it, a later result is judged on a visit without it (the
+  // photo proof, the repeat check) and an office correction of an arrival is overtaken by it (the
+  // newest received wins). The phone's queue keeps the same order (queue.ts nextBatch).
+  const failedStops: StopRef[] = [];
   for (const raw of body.actions) {
     const parsed = actionSchema.safeParse(raw);
     if (!parsed.success) {
@@ -788,6 +811,11 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
       continue;
     }
     const a = parsed.data;
+    const stopRef = a.type === 'BACK_AT_DEPOT' ? null : parseStopKey(a.stop);
+    if (stopRef && failedStops.some((f) => maybeSameStop(f, stopRef))) {
+      results.push({ key: a.key, status: 'error' });
+      continue;
+    }
     try {
       const r = await applyAction(ctx, facts, a, skew);
       results.push(r.result);
@@ -799,9 +827,10 @@ export async function recordDriverActions(ctx: DriverWriteContext, body: { clien
         continue;
       }
       if (e instanceof HttpError) throw e;
-      // One faulty action never blocks the others: it stays on the phone and is sent again.
+      // One faulty action never blocks the other stops: it stays on the phone and is sent again.
       console.error('[delivery] action failed', a.type, (e as Error)?.message ?? e);
       results.push({ key: a.key, status: 'error' });
+      if (stopRef) failedStops.push(stopRef);
     }
   }
   // A signed-in office user on the driver page closes the trip as themselves, not as the driver link.

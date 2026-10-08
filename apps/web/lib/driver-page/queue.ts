@@ -10,11 +10,12 @@
  * - held items (arrivals on a trip not dispatched yet) wait until the trip shows DISPATCHED;
  * - draft items are photos of a result being entered: Save turns them ready with the result;
  * - backoff per item 5 s, 15 s, 30 s, 60 s, then every 5 min; never given up while the link works;
+ *   a stop's actions still go out in the order they were made (nextBatch);
  * - 429 is transient: every item stays and the queue waits Retry-After;
  * - 404 / 410 stop sending (the page lists what was not sent); 410 UPLOAD_CLOSED clears the truck-day.
  */
 import type { DriverAction, DriverActionResult, DriverResults, LinkStateCode, OutcomeName, PhotoPositionStatusName } from '../driver-link/manifest-types';
-import { loadKeyOf, loadKeyOfStop, parseStopKey } from '../driver-link/stop-key';
+import { loadKeyOf, loadKeyOfStop, maybeSameStop, parseStopKey, type StopRef } from '../driver-link/stop-key';
 
 export type QueueItemState = 'ready' | 'held' | 'draft';
 
@@ -128,11 +129,27 @@ const byCreated = (a: QueueItem, b: QueueItem) => a.createdAt - b.createdAt || a
 /**
  * What to send now: the due ready actions in creation order (up to 50), and the earliest due ready
  * photo that no earlier ready action is still waiting for, once its position came or its wait is over.
+ *
+ * The actions of one stop go out in the order they were made: a due action takes with it the earlier
+ * actions of its stop still waiting for their retry, before it in the same request (review of 8 Oct
+ * 2026). Each item backs off on its own (an 'error' answer, a failed request), so a result made later
+ * was otherwise sent ahead of an earlier one still waiting, which then reached the server after it.
+ * Nothing waits longer and no request is added: they ride in a request that is made anyway.
  */
 export function nextBatch(items: readonly QueueItem[], now: number, max = MAX_BATCH): { actions: QueueItem[]; photo: QueueItem | null } {
   const ready = items.filter((i) => i.state === 'ready').sort(byCreated);
-  const actions = ready.filter((i) => i.kind === 'action' && i.nextAt <= now).slice(0, max);
   const pendingActions = ready.filter((i) => i.kind === 'action');
+  // From the newest back: the stops with a due action made after this one.
+  const dueLater: StopRef[] = [];
+  const take = pendingActions.map(() => false);
+  for (let n = pendingActions.length - 1; n >= 0; n--) {
+    const i = pendingActions[n]!;
+    const ref = i.stopKey ? parseStopKey(i.stopKey) : null;
+    const due = i.nextAt <= now;
+    take[n] = due || (!!ref && dueLater.some((d) => maybeSameStop(d, ref)));
+    if (due && ref) dueLater.push(ref);
+  }
+  const actions = pendingActions.filter((_, n) => take[n]).slice(0, max);
   const photo =
     ready.find((i) => {
       if (i.kind !== 'photo' || i.nextAt > now) return false;
