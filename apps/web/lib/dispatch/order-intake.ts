@@ -15,6 +15,7 @@
 import { normalizeBranchKey } from '../schemas';
 import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
 import { customerKey } from '../customer-code';
+import { daysBetween } from './time';
 
 // The header matching (aliases, the order-sheet test) lives in order-headers.ts, which has no
 // dependencies, so the upload parser process can use it (audit P5); it is re-exported here.
@@ -109,6 +110,76 @@ export function parseDateCell(raw: string, order: DateOrder = 'DMY'): string | n
   return null;
 }
 
+const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2026-10-06" -> "6 Oct 2026": a date nobody can read day-first or month-first. */
+export function dayText(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  return m ? `${Number(m[3])} ${MONTH_NAMES[Number(m[2]) - 1]} ${m[1]}` : iso;
+}
+
+/**
+ * The other reading of a date cell that can be read day-first and month-first ("10/12/2026": 10 Dec
+ * or 12 Oct), or null when the cell is not such a date (both numbers 12 or under and not the same).
+ * The company's date order (Settings, "Dates in order files") always decides how a cell is read: the
+ * other reading is only named in the messages, never used, so a date never changes its reading
+ * without a word (review s6-messy-intake-2).
+ */
+export function otherDateReading(raw: string, order: DateOrder = 'DMY'): string | null {
+  const m = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:\s.*)?$/.exec((raw ?? '').trim());
+  if (!m || +m[1] === +m[2] || +m[1] > 12 || +m[2] > 12) return null;
+  return parseDateCell(raw, order === 'MDY' ? 'DMY' : 'MDY');
+}
+
+/**
+ * Delivery dates more than this many days after the company's today are a warning: most likely a
+ * wrong date (a typo in the year, or a date read the other way round). The original spec's rule was
+ * "within the next 14 days"; a date that far ahead is not refused, as an order may be booked early.
+ */
+export const FAR_AHEAD_DAYS = 14;
+
+/** How a date cell was read, when it could be read the other way round as well (see otherDateReading). */
+function readingNote(raw: string, order: DateOrder | undefined): string {
+  const other = otherDateReading(raw, order);
+  if (!other) return '';
+  const used = order === 'MDY' ? 'month/day' : 'day/month';
+  const not = order === 'MDY' ? 'day/month' : 'month/day';
+  return ` "${raw}" is read as ${used} (Settings, "Dates in order files"); read as ${not} it would be ${dayText(other)}.`;
+}
+
+/** A date cell as the messages name it: its text and the day it was read as (an Excel date cell, a serial number, as the day only). */
+function dateCellText(raw: string, iso: string): string {
+  return /^\d{5}(\.\d+)?$/.test(raw.trim()) ? dayText(iso) : `"${raw}" (${dayText(iso)})`;
+}
+
+/** "row 2" / "rows 2, 3, 5" (the first ten, then "..."). */
+function rowsText(rows: number[]): string {
+  return `row${rows.length > 1 ? 's' : ''} ${rows.slice(0, 10).join(', ')}${rows.length > 10 ? ', ...' : ''}`;
+}
+
+/**
+ * "2", "2 and 3", "2, 3 and 7"; past ten rows the first ten "and N more". A message that names the
+ * rows of a line stays short however many rows the line has (one file may hold 50,000).
+ */
+export function rowList(rows: readonly number[]): string {
+  if (rows.length <= 1) return rows.join('');
+  if (rows.length <= 10) return `${rows.slice(0, -1).join(', ')} and ${rows[rows.length - 1]}`;
+  return `${rows.slice(0, 10).join(', ')} and ${rows.length - 10} more`;
+}
+
+/**
+ * NormalizeOptions.rowNumbers when it gives one file row per row, increasing, from row 2 at least (the
+ * header is a row above them); else null, and rows are numbered as before (i + 2).
+ */
+function usableRowNumbers(nums: readonly number[] | null | undefined, count: number): readonly number[] | null {
+  if (!nums || nums.length !== count) return null;
+  for (let i = 0; i < count; i++) {
+    const n = nums[i]!;
+    if (!Number.isSafeInteger(n) || n < 2 || (i > 0 && n <= nums[i - 1]!)) return null;
+  }
+  return nums;
+}
+
 function num(raw: string | undefined): number | null {
   const s = (raw ?? '').trim().replace(/,/g, '');
   if (!s) return null;
@@ -127,6 +198,21 @@ export interface NormalizeOptions {
   defaultDeliveryDate?: string | null;
   dateOrder?: DateOrder;
   extraAliases?: Partial<Record<CanonicalField, string[]>>;
+  /**
+   * The company's today (YYYY-MM-DD in its timezone: todayIso). Given (validateIntake always gives
+   * it), a delivery date before it is a row error - that day is over, the rest of the app refuses it
+   * too (carry-over DAY_OVER) - and one more than FAR_AHEAD_DAYS after it a warning (review
+   * s6-messy-intake-2: a past date only got the "after the cutoff" late note, and a date years ahead
+   * or read the other way round nothing). Not given: dates are not compared with today.
+   */
+  today?: string | null;
+  /**
+   * The file row of each of `rows` (lib/csv ParsedFile.rowNumbers). The reader leaves blank rows out,
+   * so row i is i + 2 only in a file without them: with blank separator rows (ERP report exports)
+   * errors, warnings and OrderLine.sourceRow named rows above the real ones (review web-intake-4).
+   * Not given, or not one increasing row per row: i + 2, as before.
+   */
+  rowNumbers?: readonly number[] | null;
 }
 
 export function normalizeOrderRows(rows: Record<string, string>[], opts: NormalizeOptions = {}): NormalizeResult {
@@ -136,6 +222,9 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
   const warnings: string[] = [];
   const lines: NormalizedLine[] = [];
   const zeroWeightRows: number[] = [];
+  const fileRows = usableRowNumbers(opts.rowNumbers, rows.length);
+  // Delivery dates far ahead (FAR_AHEAD_DAYS): one warning per date, with its rows.
+  const farAhead = new Map<string, { rows: number[]; raw: string }>();
   let fileCases = 0;
 
   if (rows.length === 0) {
@@ -164,7 +253,7 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
   };
 
   rows.forEach((r, i) => {
-    const row = i + 2;
+    const row = fileRows ? fileRows[i]! : i + 2;
     const blank = Object.values(r).every((v) => (v ?? '').toString().trim() === '');
     if (blank) return;
     const casesRaw = get(r, 'cases');
@@ -186,6 +275,18 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
     const dRaw = get(r, 'delivery_date');
     const deliveryDate = dRaw ? parseDateCell(dRaw, opts.dateOrder) : opts.defaultDeliveryDate ?? null;
     if (!deliveryDate) return err(`Delivery date "${dRaw}" is not a date.`);
+    // A date is read by the company's date order and never turned round: a cell read the wrong way
+    // round lands about a month or more away from the date meant, so it is caught here as a past
+    // day (an error) or a day far ahead (a warning), each naming how it was read.
+    const ahead = opts.today ? daysBetween(opts.today, deliveryDate) : 0;
+    if (opts.today && ahead < 0) {
+      const today = dayText(opts.today);
+      return err(
+        dRaw
+          ? `Delivery date ${dateCellText(dRaw, deliveryDate)} is before today (${today}): that day is over, so its orders cannot be added. Correct the date in the file.${readingNote(dRaw, opts.dateOrder)}`
+          : `Delivery date ${dayText(deliveryDate)}, the date chosen on the upload screen, is before today (${today}): that day is over, so its orders cannot be added. Choose another date.`,
+      );
+    }
     const oRaw = get(r, 'order_date');
     const orderDate = oRaw ? parseDateCell(oRaw, opts.dateOrder) : null;
     if (oRaw && !orderDate) warnings.push(`Row ${row}: order date "${oRaw}" ignored (not a date).`);
@@ -201,6 +302,14 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
     // 0 kg is "unknown" everywhere (product and line weights): a 0 in the file must not
     // override the product's case weight.
     if (w === 0) zeroWeightRows.push(row);
+    if (ahead > FAR_AHEAD_DAYS) {
+      const far = farAhead.get(deliveryDate);
+      if (!far) farAhead.set(deliveryDate, { rows: [row], raw: dRaw });
+      else {
+        far.rows.push(row);
+        if (!far.raw) far.raw = dRaw;
+      }
+    }
     const branchCode = get(r, 'branch_code') || null;
     lines.push({
       row,
@@ -223,6 +332,11 @@ export function normalizeOrderRows(rows: Record<string, string>[], opts: Normali
       customerType: get(r, 'customer_type') || null,
     });
   });
+  for (const [date, far] of [...farAhead].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    warnings.push(
+      `Delivery date ${dayText(date)} (${rowsText(far.rows)}) is ${daysBetween(opts.today as string, date).toLocaleString('en-US')} days after today (${dayText(opts.today as string)}): check the date.${far.raw ? readingNote(far.raw, opts.dateOrder) : ''}`,
+    );
+  }
   if (zeroWeightRows.length) {
     warnings.push(
       `${zeroWeightRows.length} row(s) have weight 0 (row${zeroWeightRows.length > 1 ? 's' : ''} ${zeroWeightRows.slice(0, 10).join(', ')}${zeroWeightRows.length > 10 ? ', ...' : ''}): treated as blank, so the product's case weight is used.`,
@@ -447,6 +561,53 @@ function weightLooksWrong(lineKg: number, cases: number, masterKgPerCase: number
   return perCase < masterKgPerCase / 2 || perCase > masterKgPerCase * 2;
 }
 
+/** Two rows of one product whose file weights cannot both be the kg of their line (see weightColumnEvidence). */
+export interface WeightColumnEvidence {
+  productCode: string;
+  rows: [NormalizedLine, NormalizedLine];
+}
+
+/**
+ * Evidence in the file itself that its weight column is not the kg of each line (review
+ * web-intake-5), or null. The kg of a line is in proportion to its cases, so two rows of one product
+ * give it away when
+ *  - they carry the same weight for different case counts (a per-case or per-unit column: 21.5 on
+ *    a row of 100 cases and on a row of 4), or
+ *  - their kg per case is more than twice apart (the tolerance of the case-weight check).
+ * Rows are looked at in file order, so the same file always gives the same rows. A product with one
+ * weighed row, or rows of the same cases, proves nothing either way.
+ */
+export function weightColumnEvidence(lines: readonly NormalizedLine[]): WeightColumnEvidence | null {
+  // Grouped in one pass with push (groupBy above copies its list for every item: fine for the
+  // master, too slow for 50,000 rows of one product).
+  const byProduct = new Map<string, NormalizedLine[]>();
+  for (const l of lines) {
+    if (l.weightKg === null || !(l.weightKg > 0) || !(l.cases > 0)) continue;
+    const k = productKey(l.productCode);
+    const list = byProduct.get(k);
+    if (list) list.push(l);
+    else byProduct.set(k, [l]);
+  }
+  const perCase = (l: NormalizedLine) => (l.weightKg as number) / l.cases;
+  for (const list of byProduct.values()) {
+    if (list.length < 2) continue;
+    const firstOfWeight = new Map<number, NormalizedLine>();
+    for (const l of list) {
+      const same = firstOfWeight.get(l.weightKg as number);
+      if (same && same.cases !== l.cases) return { productCode: same.productCode, rows: [same, l] };
+      if (!same) firstOfWeight.set(l.weightKg as number, l);
+    }
+    let lo = list[0]!;
+    let hi = list[0]!;
+    for (const l of list) {
+      if (perCase(l) < perCase(lo)) lo = l;
+      if (perCase(l) > perCase(hi)) hi = l;
+    }
+    if (perCase(hi) > 2 * perCase(lo)) return { productCode: lo.productCode, rows: lo.row < hi.row ? [lo, hi] : [hi, lo] };
+  }
+  return null;
+}
+
 export function resolveOrderLines(
   norm: NormalizeResult,
   customers: KnownCustomer[],
@@ -485,6 +646,33 @@ export function resolveOrderLines(
   // Messages name the master codes ("S05-C05"), not the file's spelling ("s05-c05").
   const custName = (l: NormalizedLine, c: KnownCustomer | undefined) => `${c?.code ?? l.customerCode}${l.branchCode ? ` / ${l.branchCode}` : ''}`;
 
+  // The depots the rows of each sales-order line name (review web-intake-6). Rows of one line for
+  // different depots were added together into a line kept at the first row's depot: uploaded for
+  // that depot, the other depot's cases were planned and loaded there (and the other depot's upload
+  // then skipped the line as confirmed); uploaded for the other one, the whole line was refused, by
+  // row order. A sales-order line is planned at one depot only (its IntakeLineKey has no depot), so
+  // such rows are not added together: each is an error naming the rows and their depots, whatever
+  // the row order. A row without a depot names none: it is added to the line, which keeps the depot
+  // its other rows name (validateIntake then decides whether that is the upload's depot).
+  // Each line's rows, and its rows by depot (trimmed, upper-case; '' = no depot) with the depot as the
+  // file first spells it. The error's text is made once per line and names at most ten rows and five
+  // depots, so a large line cannot make its rows' messages grow with its size squared.
+  const lineDepots = new Map<string, { rows: number[]; byDepot: Map<string, { name: string; rows: number[] }>; message?: string }>();
+  if (norm.lines.some((l) => l.depotCode)) {
+    for (const l of norm.lines) {
+      if (!l.salesOrderNo) continue;
+      const k = lineDupKey(l.deliveryDate, l.salesOrderNo, customerKey(l.customerCode, l.branchKey), l.productCode);
+      let g = lineDepots.get(k);
+      if (!g) lineDepots.set(k, (g = { rows: [], byDepot: new Map() }));
+      g.rows.push(l.row);
+      const d = (l.depotCode ?? '').trim().toUpperCase();
+      const at = g.byDepot.get(d);
+      if (at) at.rows.push(l.row);
+      else g.byDepot.set(d, { name: d ? (l.depotCode as string) : 'no depot', rows: [l.row] });
+    }
+  }
+  const namesTwoDepots = (g: { byDepot: Map<string, unknown> }) => g.byDepot.size - (g.byDepot.has('') ? 1 : 0) > 1;
+
   for (const l of norm.lines) {
     const ck = customerKey(l.customerCode, l.branchKey);
     const cust = custByKey.get(ck);
@@ -498,15 +686,27 @@ export function resolveOrderLines(
       errors.push({ row: l.row, message: `Item code ${JSON.stringify(l.productCode)} cannot be used: ${badCode}. Correct it in the file.`, cases: l.cases });
       continue;
     }
+    // The line's identity: rows with the same one are one line (added together below). Rows without
+    // a sales-order number are never added together (no evidence they are the same line).
+    const mk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
+    const depots = lineDepots.get(mk);
+    if (depots && namesTwoDepots(depots)) {
+      const byDepot = [...depots.byDepot.values()];
+      depots.message ??=
+        `Rows ${rowList(depots.rows)} are one sales-order line (sales order ${l.salesOrderNo}, ${prod?.code ?? l.productCode} for ${custName(l, cust)} on ${l.deliveryDate}) ` +
+        `for different depots (${byDepot.slice(0, 5).map((d) => `${d.name} on ${rowsText(d.rows)}`).join(', ')}${byDepot.length > 5 ? ', ...' : ''}). ` +
+        'A sales-order line is planned at one depot: correct the depot column, or send the rows under their own sales-order numbers.';
+      errors.push({ row: l.row, message: depots.message, cases: l.cases });
+      continue;
+    }
     const inactive: 'CUSTOMER' | 'PRODUCT' | null = cust && !cust.active ? 'CUSTOMER' : prod && !prod.active ? 'PRODUCT' : null;
     if (inactive) {
-      const bk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
-      const g = blocked.get(bk);
+      const g = blocked.get(mk);
       if (g) {
         g.rows.push(l);
         g.cases += l.cases;
       } else {
-        blocked.set(bk, { rows: [l], cases: l.cases, kind: inactive, customerCode: custName(l, cust), productCode: prod?.code ?? l.productCode });
+        blocked.set(mk, { rows: [l], cases: l.cases, kind: inactive, customerCode: custName(l, cust), productCode: prod?.code ?? l.productCode });
       }
       continue;
     }
@@ -526,11 +726,12 @@ export function resolveOrderLines(
     // Rows without a sales-order number are never merged (no evidence they are the same line).
     // Whatever the row order: the highest priority of the rows, every distinct note, and money
     // only when every row has it (audit F02 / F04); each row is kept in `mergedRows`.
-    const mk = l.salesOrderNo ? lineDupKey(l.deliveryDate, l.salesOrderNo, ck, l.productCode) : `row:${l.row}`;
     const rowOf: MergedRow = { row: l.row, cases: l.cases, priority: l.priority, notes: l.notes, salesValue: l.salesValue, margin: l.margin };
     const existing = merged.get(mk);
     if (existing) {
       existing.cases += l.cases;
+      // The depot its rows name (they name one at most, see lineDepots), whichever row names it.
+      if (!existing.depotCode && l.depotCode) existing.depotCode = l.depotCode;
       if (l.weightKg !== null) existing.weightKg = (existing.weightKg ?? 0) + l.weightKg;
       else existing.weightMissingCases = (existing.weightMissingCases ?? 0) + l.cases;
       existing.salesValue = sumKnown(existing.salesValue, l.salesValue);
@@ -603,6 +804,23 @@ export function resolveOrderLines(
   }
   duplicates.sort((a, b) => a.row - b.row);
 
+  // A weight column that is not the kg of each line (review web-intake-5). The file kg of a line is
+  // kept for good (weightFromMaster = false: a case weight entered later never re-weighs it), and
+  // the only check that it is per line compares it with the product's case weight - which NMWC's
+  // products do not have yet (handbook 7.1 #1). So a per-case "Weight" column (21.5 for a 4 x 5 L
+  // case) was stored as 21.5 kg for 100 cases, the payload never bound and an overloaded truck
+  // passed the dispatch gate. The built-in aliases ("weight", "kg", "net weight", "gross weight")
+  // cannot tell what the column means, and nothing shows what NMWC's export carries. When the file
+  // itself shows the column is not per line (weightColumnEvidence), its weights are therefore NOT
+  // used for products without a case weight - ignored, not only warned about, because a warned
+  // wrong kg would still be planned and dispatched: their lines are weighed from the master like
+  // lines without a file weight, so the product is listed as without weight, OPTIMIZE asks for its
+  // case weight (WEIGHT_REQUIRED) and the lines follow it once entered. A product with a case weight
+  // keeps the per-row check below. With no such evidence (each product on one row, say) the column is
+  // taken as kg per line, as the dispatcher guide says it must be.
+  const weightEvidence = weightColumnEvidence(norm.lines);
+  const weightNotUsed = new Set<string>();
+
   const otherDateWarned = new Set<string>();
   for (const l of lines) {
     const cust = custByKey.get(l.customerKey);
@@ -615,6 +833,11 @@ export function resolveOrderLines(
       else newCustomers.set(l.customerKey, { code: l.customerCode, branchCode: l.branchCode, branchKey: l.branchKey, name: l.customerName || l.customerCode, customerType: l.customerType, rows: [...l.sourceRows] });
     } else if (cust.lat === null || cust.lng === null) {
       noLoc.add(`${cust.code}${l.branchCode ? ` / ${l.branchCode}` : ''} ${cust.name}`);
+    }
+    if (weightEvidence && l.weightKg !== null && !(prod && prod.weightPerCaseKg > 0)) {
+      l.weightKg = null;
+      l.weightMissingCases = l.cases;
+      weightNotUsed.add(prod?.code ?? newProducts.get(productKey(l.productCode))?.code ?? l.productCode);
     }
     const missingWeight = (l.weightMissingCases ?? 0) > 0;
     if (!prod) {
@@ -642,6 +865,16 @@ export function resolveOrderLines(
         );
       }
     }
+  }
+
+  if (weightEvidence && weightNotUsed.size) {
+    const [a, b] = weightEvidence.rows;
+    const code = prodByCode.get(productKey(weightEvidence.productCode))?.code ?? weightEvidence.productCode;
+    const kgPerCase = (l: NormalizedLine) => Math.round(((l.weightKg as number) / l.cases) * 10) / 10;
+    warnings.push(
+      `The weight column does not look like the kg of each line: rows ${a.row} and ${b.row} of ${code} have ${a.weightKg} kg for ${a.cases} cases and ${b.weightKg} kg for ${b.cases} cases (${kgPerCase(a)} and ${kgPerCase(b)} kg per case). ` +
+        `Its weights are not used for products without a case weight (${[...weightNotUsed].sort().join(', ')}): enter their case weights under Products (OPTIMIZE asks for them). If the column is the kg of each line, correct those rows and upload the file again.`,
+    );
   }
 
   const dates = [...new Set(lines.map((l) => l.deliveryDate))].sort();

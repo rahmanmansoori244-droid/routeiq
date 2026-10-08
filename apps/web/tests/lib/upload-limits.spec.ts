@@ -667,7 +667,8 @@ describe('A1 v3: a file that begins with "ID" is refused only when SheetJS reads
       { id: 'C', p: 'Y1', __parsed_extra: 'X1,K1' },
       { id: '1', p: '2', __parsed_extra: '3' },
     ]);
-    expect(parsed.warnings).toEqual(['CSV parse warning at row 0: Too many fields: expected 2 fields but parsed 4', 'CSV parse warning at row 1: Too many fields: expected 2 fields but parsed 3']);
+    // Named by their file rows (review web-intake-4): Papa's own count starts at 0 with the header left out.
+    expect(parsed.warnings).toEqual(['CSV parse warning at row 2: Too many fields: expected 2 fields but parsed 4', 'CSV parse warning at row 3: Too many fields: expected 2 fields but parsed 3']);
     expect(readSpy).not.toHaveBeenCalled();
     expect(await refusal(parseUpload(asExcel('ID;PWXL;N;E\nC;Y1;X1;K"a"\nC;Y2;X1;K5\nE\n', 'orders.xls')))).toBe(NOT_EXCEL);
   });
@@ -1172,7 +1173,8 @@ describe('P5 second review: a CSV sent as text has the column and cell caps too'
     expect(await refusal(parseUpload(csv(`code,cases\n${fields(1_000_000, () => '1')}\n`)))).toBe(WIDE(1_000_000, 2));
     const read = await parseUpload(csv(`code,cases\nC1,2\n${fields(MAX_COLS, () => 'x')}\n`));
     expect(read.rows).toHaveLength(2);
-    expect(read.warnings).toEqual([`CSV parse warning at row 1: Too many fields: expected 2 fields but parsed ${MAX_COLS}`]);
+    // The file row (review web-intake-4: Papa's own count from the first data row said "row 1").
+    expect(read.warnings).toEqual([`CSV parse warning at row 3: Too many fields: expected 2 fields but parsed ${MAX_COLS}`]);
   });
 
   it(`more than ${MAX_CELLS.toLocaleString('en-US')} cells in all are refused with the words of a CSV sent as Excel; exactly that many are read`, async () => {

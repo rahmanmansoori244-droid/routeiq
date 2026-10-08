@@ -18,6 +18,7 @@ import {
   preferredCustomer,
   preferredProduct,
   resolveOrderLines,
+  rowList,
   type CanonicalField,
   type DateOrder,
   type ResolveResult,
@@ -28,7 +29,7 @@ import { customerTwinsOf } from '../customer-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { validPalletFactor } from './pallets';
-import { dateOnly, isAfterCutoff, isoOf, tomorrowIso } from './time';
+import { dateOnly, isAfterCutoff, isoOf, todayIso, tomorrowIso } from './time';
 
 type Tx = Prisma.TransactionClient;
 
@@ -244,7 +245,8 @@ async function lateReasons(tenantId: string, cfg: Pick<TenantConfig, 'planningCu
 export async function validateIntake(
   tenantId: string,
   rows: Record<string, string>[],
-  opts: { depotId?: string | null; defaultDeliveryDate?: string | null; now?: Date },
+  /** `rowNumbers`: the file row of each of `rows` (the parsed file's rowNumbers), so messages and OrderLine.sourceRow name the real rows. */
+  opts: { depotId?: string | null; defaultDeliveryDate?: string | null; now?: Date; rowNumbers?: readonly number[] | null },
 ): Promise<IntakeValidation> {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
@@ -254,6 +256,9 @@ export async function validateIntake(
     defaultDeliveryDate: opts.defaultDeliveryDate || tomorrowIso(cfg.timezone, opts.now),
     dateOrder: (cfg.dateOrder as DateOrder) ?? 'DMY',
     extraAliases: extra,
+    // The company's today: a delivery date before it is a row error, one far ahead a warning.
+    today: todayIso(cfg.timezone, opts.now),
+    rowNumbers: opts.rowNumbers,
   });
   const customers = await db.customer.findMany({ select: { id: true, code: true, branchKey: true, name: true, active: true, lat: true, lng: true } });
   const products = await db.product.findMany({ select: { id: true, code: true, name: true, active: true, weightPerCaseKg: true, casesPerPallet: true } });
@@ -282,10 +287,15 @@ export async function validateIntake(
   }
   const res = resolveOrderLines(norm, customers, products, already, { confirmedOnOtherDates: otherDates });
 
-  // Depot column: rows for another depot are an error (they belong to another plan).
+  // Depot column: rows for another depot are an error (they belong to another plan). A line added
+  // together from several rows names them all (resolveOrderLines never adds up rows for different
+  // depots; a row without a depot takes the depot its line's other rows name).
   if (norm.mapping.used.depot_code) {
     const bad = res.lines.filter((l) => l.depotCode && l.depotCode.toUpperCase() !== depot.code.toUpperCase());
-    for (const l of bad) res.errors.push({ row: l.row, message: `Row is for depot ${l.depotCode}, but you are uploading for ${depot.code}.`, cases: l.cases });
+    for (const l of bad) {
+      const rows = l.sourceRows.length > 1 ? `Rows ${rowList(l.sourceRows)} (one sales-order line) are` : 'Row is';
+      res.errors.push({ row: l.row, message: `${rows} for depot ${l.depotCode}, but you are uploading for ${depot.code}.`, cases: l.cases });
+    }
     const badRows = new Set(bad.map((l) => l.row));
     res.lines = res.lines.filter((l) => !badRows.has(l.row));
   }

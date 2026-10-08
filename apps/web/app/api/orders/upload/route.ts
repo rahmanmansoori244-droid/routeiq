@@ -61,7 +61,8 @@ export async function POST(req: Request) {
 
   let v;
   try {
-    v = await validateIntake(tenantId, parsed.rows, { depotId, defaultDeliveryDate: deliveryDate });
+    // rowNumbers: the file row of each row (blank rows the reader left out counted), for the messages and OrderLine.sourceRow.
+    v = await validateIntake(tenantId, parsed.rows, { depotId, defaultDeliveryDate: deliveryDate, rowNumbers: parsed.rowNumbers });
   } catch (err) {
     // Owner rule (audit PR A5): every order file is for one depot. No active depot, or no choice
     // among two or more, or a chosen depot that is not active: 422, nothing is saved.

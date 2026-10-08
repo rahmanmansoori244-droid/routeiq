@@ -33,11 +33,12 @@ vi.mock('@/lib/audit', () => ({ audit: vi.fn(async () => undefined) }));
 
 import { POST as uploadPost } from '@/app/api/orders/upload/route';
 import { confirmIntake, IN_LIST_PART, INTAKE_CHECK_FAILED, inParts, validateIntake } from '@/lib/dispatch/intake-server';
-import { dateOnly } from '@/lib/dispatch/time';
+import { addDaysIso, dateOnly, todayIso } from '@/lib/dispatch/time';
 
 const T = 'tA';
-const DAY = '2026-10-07';
-const EARLIER = '2026-10-05';
+// Ahead of the company's today: an order file for a day that is over is refused (review s6-messy-intake-2).
+const DAY = addDaysIso(todayIso('Asia/Muscat'), 2);
+const EARLIER = addDaysIso(DAY, -2);
 /** PostgreSQL's limit of bind parameters in one query. */
 const PG_MAX_BINDS = 32_767;
 const RAW_PRISMA_TEXT =

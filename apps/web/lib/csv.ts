@@ -87,6 +87,14 @@ export interface ParsedFile {
   warnings: string[];
   /** Excel: the sheet the rows were read from. */
   sheetName?: string;
+  /**
+   * The file row of each of `rows`, as the file shows it: an Excel sheet's own row numbers; for a
+   * CSV, its records counted as a spreadsheet shows them, one row each, blank ones included. The
+   * readers leave blank rows out of `rows`, so a row's place in them (+ 2) is its row only in a file
+   * without blank rows (review web-intake-4: ERP exports have blank separator rows, and the order
+   * check named rows above the real ones). Absent when it could not be worked out.
+   */
+  rowNumbers?: number[];
 }
 
 /** One non-empty sheet of a workbook: its name and its rows (keys = the sheet's header row). */
@@ -160,7 +168,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
   const workbook = reader === 'zip' || reader === 'cfb' || reader === 'biff' || (!text && sentAsExcel);
 
   if (workbook) {
-    const { sheets, showDecimals } = readWorkbook(bytes, opts.decimalTextColumns);
+    const { sheets, showDecimals, rowNumbers } = readWorkbook(bytes, opts.decimalTextColumns);
     const pick = pickSheet(sheets, opts);
     // The row limit is for the sheet that is read: a large sheet that is not read (a customer
     // list next to the orders) is only named in the warning, never a reason to refuse the file.
@@ -173,6 +181,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
     // review: every sheet's were worked out, also those of the sheets that are not read).
     const chosen = sheets.find((s) => s.rows === pick.rows);
     if (chosen) showDecimals(chosen);
+    const nums = chosen ? rowNumbers(chosen) : undefined;
     // A sheet name could carry a U+0000 too (an "_x0000_" escape): see normalizeKeys.
     return {
       fileName,
@@ -180,6 +189,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
       rows: pick.rows,
       warnings: pick.warnings.map(withoutNul),
       ...(pick.name ? { sheetName: withoutNul(pick.name) } : {}),
+      ...(nums ? { rowNumbers: nums } : {}),
     };
   }
 
@@ -196,14 +206,20 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
   if (result.rows.length > MAX_ROWS) {
     throw new Error(`Too many rows: ${result.rows.length}. Max ${MAX_ROWS}.`);
   }
-  // After the row limit, so a file refused for its rows is refused as before.
-  checkCsvCells(result.rows, result.header);
+  // After the row limit, so a file refused for its rows is refused as before. A row it refuses is
+  // named by its file row, worked out only then (csvFileRows reads the text once more).
+  checkCsvCells(result.rows, result.header, (i) => csvFileRows(decoded.text, result)?.[i] ?? i + 2);
+  const rowNumbers = csvFileRows(decoded.text, result);
   if (result.errors.length) {
     for (const e of result.errors.slice(0, 5)) {
-      warnings.push(`CSV parse warning at row ${e.row}: ${e.message}`);
+      // Papa numbers a row of the wrong width by its place among the rows (from 0, blank lines left
+      // out), an unclosed quote by its record (from 0, the header and blank lines counted): both as
+      // the file's row (review web-intake-4; the first was two rows off even without blank lines).
+      const row = typeof e.row !== 'number' ? e.row : e.type === 'FieldMismatch' ? (rowNumbers?.[e.row] ?? e.row + 2) : e.type === 'Quotes' ? e.row + 1 : e.row;
+      warnings.push(`CSV parse warning at row ${row}: ${e.message}`);
     }
   }
-  return { fileName, fileType: 'csv', rows: result.rows.map(normalizeKeys), warnings };
+  return { fileName, fileType: 'csv', rows: result.rows.map(normalizeKeys), warnings, ...(rowNumbers ? { rowNumbers } : {}) };
 }
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -362,7 +378,10 @@ type ShownMode = 'format' | 'text';
  * the sheet it reads, and on no other (A5 fourth review: every sheet's cells were formatted, also
  * those of the sheets that are not read).
  */
-function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { sheets: ParsedSheet[]; showDecimals: (sheet: ParsedSheet) => void } {
+function readWorkbook(
+  bytes: Uint8Array,
+  decimalTextColumns: string[] = [],
+): { sheets: ParsedSheet[]; showDecimals: (sheet: ParsedSheet) => void; rowNumbers: (sheet: ParsedSheet) => number[] | undefined } {
   // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
   // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
   // given a Buffer it takes views.
@@ -402,6 +421,9 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
   const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false, ...shownRead });
   const out: ParsedSheet[] = [];
   const shownOf = new Map<ParsedSheet, { columns: ShownColumn[]; rowNums: (number | undefined)[] }>();
+  // Each sheet's rows as the sheet numbers them (ParsedFile.rowNumbers): sheet_to_json leaves blank
+  // rows out of the rows it gives.
+  const rowNumbersOf = new Map<ParsedSheet, number[]>();
   for (const { name, sheet, range, clamped } of sheetRanges(wb)) {
     // Where the decimal columns' number cells are and what they show (nothing is formatted), taken
     // before the sheet is turned into rows, which are then read exactly as without these columns.
@@ -417,8 +439,10 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
     if (rows.length) {
       const parsed: ParsedSheet = { name, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) };
       out.push(parsed);
-      // sheet_to_json gives each row the sheet row it was read from (not enumerable).
-      if (columns.length) shownOf.set(parsed, { columns, rowNums: rows.map((r) => (r as { __rowNum__?: number }).__rowNum__) });
+      // sheet_to_json gives each row the sheet row it was read from (not enumerable), counted from 0.
+      const rowNums = rows.map((r) => (r as { __rowNum__?: number }).__rowNum__);
+      if (columns.length) shownOf.set(parsed, { columns, rowNums });
+      if (rowNums.every((n) => typeof n === 'number')) rowNumbersOf.set(parsed, (rowNums as number[]).map((n) => n + 1));
     }
   }
   const formats = new ShownFormats();
@@ -441,7 +465,7 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
       }
     });
   };
-  return { sheets: out, showDecimals };
+  return { sheets: out, showDecimals, rowNumbers: (sheet) => rowNumbersOf.get(sheet) };
 }
 
 /**
@@ -697,7 +721,7 @@ const HEADER_LINES = 10;
  * no column or cell cap, so a row of a million columns, a 7.6 MB file, was read and sent to the web
  * process as one object of a million keys). The rows are checked by checkCsvCells.
  */
-function parseCsv(text: string): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean } {
+function parseCsv(text: string): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean; delimiter: string; linebreak: string } {
   // The header first, before Papa makes an object with a key for every header name for each row,
   // and renames repeated names one by one (a 2.9 MB header of 1.5 million repeated names took it
   // 3.4 s). The same Papa over the first lines only, with no row objects, reads them as the parse
@@ -716,7 +740,39 @@ function parseCsv(text: string): { rows: Record<string, unknown>[]; header: numb
   });
   const header = res.meta.fields?.length ?? 0;
   if (header > MAX_COLS) throw tooManyCsvColumns(header);
-  return { rows: res.data, header, errors: res.errors, truncated: !!res.meta.truncated };
+  return { rows: res.data, header, errors: res.errors, truncated: !!res.meta.truncated, delimiter: res.meta.delimiter, linebreak: res.meta.linebreak };
+}
+
+/**
+ * The file row of each row parseCsv kept (ParsedFile.rowNumbers, review web-intake-4). Papa leaves
+ * blank lines out of the rows (skipEmptyLines 'greedy': empty, or only separators and spaces), so a
+ * row's place among them is its row only in a file without blank lines. A spreadsheet shows every
+ * record of a CSV as one row, blank ones included (a quoted value with a line break stays in its
+ * row), and so does this: the same Papa, with the delimiter and line break the parse found, goes over
+ * the records again one at a time - no row objects, nothing kept but the count - with the same
+ * blank-line test, up to the last row kept. Undefined when it does not find one record per row.
+ */
+function csvFileRows(text: string, csv: { rows: unknown[]; delimiter: string; linebreak: string }): number[] | undefined {
+  const want = csv.rows.length;
+  if (!want) return [];
+  const out: number[] = [];
+  let record = 0;
+  let header = false;
+  Papa.parse<string[]>(text, {
+    delimiter: csv.delimiter,
+    newline: csv.linebreak as Papa.ParseConfig['newline'],
+    step: (r, parser) => {
+      record += 1;
+      if (r.data.join('').trim() === '') return; // a blank line, as the parse skipped it
+      if (!header) {
+        header = true; // the first line that is not blank is the header (row `record`)
+        return;
+      }
+      out.push(record);
+      if (out.length >= want) parser.abort();
+    },
+  });
+  return out.length === want ? out : undefined;
 }
 
 /**
@@ -725,15 +781,16 @@ function parseCsv(text: string): { rows: Record<string, unknown>[]; header: numb
  * more values than its header keeps the extra ones in one list (Papa's "__parsed_extra", joined into
  * one text by normalizeKeys): each of them counts. Every value is counted as it is in the file, empty
  * ones too (a CSV saved from Excel writes the empty columns after the data on every line; SheetJS,
- * which read the same text sent as Excel until the review of 8 Oct 2026, dropped them).
+ * which read the same text sent as Excel until the review of 8 Oct 2026, dropped them). `fileRow(i)`:
+ * the file row of row i, for the refusal's words.
  */
-function checkCsvCells(rows: Record<string, unknown>[], header: number): void {
+function checkCsvCells(rows: Record<string, unknown>[], header: number, fileRow: (i: number) => number): void {
   let cells = header;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
     const extra = row.__parsed_extra;
     const values = Object.keys(row).length + (Array.isArray(extra) ? extra.length - 1 : 0);
-    if (values > MAX_COLS) throw tooManyCsvColumns(values, i + 2);
+    if (values > MAX_COLS) throw tooManyCsvColumns(values, fileRow(i));
     cells += values;
   }
   if (cells > MAX_CELLS) throw tooManyTextCells(cells, MAX_CELLS);

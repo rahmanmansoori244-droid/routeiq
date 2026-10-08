@@ -31,6 +31,7 @@ import { POST as lateOrder } from '@/app/api/dispatch/late-order/route';
 import { POST as uploadPost } from '@/app/api/orders/upload/route';
 import { GET as sampleCsv } from '@/app/api/orders/sample/route';
 import { confirmIntake, type IntakeValidation } from '@/lib/dispatch/intake-server';
+import { addDaysIso, todayIso } from '@/lib/dispatch/time';
 import { buildDispatchWorkbook, SHEETS, type WorkbookMeta } from '@/lib/dispatch/workbook';
 import { productRequestBody } from '@/app/t/[slug]/products/product-body';
 import { fixture } from './plan-detail-fixture';
@@ -328,8 +329,10 @@ describe('the order file with real codes: check, then confirm', () => {
     ['S5', 'INVOMAN330(24)', '2'],
     ['S6', 'ss5gb  nrb', '5'],
   ];
+  // DD/MM/YYYY, two days ahead of the company's today: a day that is over is refused (review s6-messy-intake-2).
+  const fileDay = addDaysIso(todayIso('Asia/Muscat'), 2).split('-').reverse().join('/');
   const csv = (rows: [string, string, string][] = FILE_ROWS) =>
-    ['SO No,Req. Delivery Date,Customer Code,Item Code,Qty (Cases)', ...rows.map(([so, item, cases]) => `${so},07/10/2026,C001,"${item}",${cases}`)].join('\n');
+    ['SO No,Req. Delivery Date,Customer Code,Item Code,Qty (Cases)', ...rows.map(([so, item, cases]) => `${so},${fileDay},C001,"${item}",${cases}`)].join('\n');
   const upload = (text: string) => {
     const fd = new FormData();
     fd.set('file', new File([text], 'orders.csv', { type: 'text/csv' }));
