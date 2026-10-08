@@ -16,6 +16,12 @@ export async function register() {
         if (problem) console.error(`[config] ${problem}`);
         else console.log('[upload-parse] the file reader works (startup check)');
       });
+      // Review M3: the same for the PDF renderer process that makes the driver sheets.
+      const { checkPdfRenderer } = await import('./lib/pdf-render');
+      void checkPdfRenderer().then((problem) => {
+        if (problem) console.error(`[config] ${problem}`);
+        else console.log('[pdf-render] the driver sheet maker works (startup check)');
+      });
     }
     const { startJanitor } = await import('./lib/jobs/janitor-loop');
     startJanitor();

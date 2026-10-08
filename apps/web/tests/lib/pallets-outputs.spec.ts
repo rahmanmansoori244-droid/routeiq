@@ -26,7 +26,8 @@ import {
 } from '@/lib/dispatch/pallets';
 import type { PlanDetail } from '@/lib/dispatch/plan-detail';
 import { buildDispatchWorkbook, loadPalletsCell, solverRules, tenantAssumptions, type WorkbookMeta } from '@/lib/dispatch/workbook';
-import { driverPackModel, renderDriverPackPdf } from '@/lib/dispatch/driver-pack';
+import { driverPackModel } from '@/lib/dispatch/driver-pack';
+import { renderDriverPackPdf } from '@/lib/dispatch/driver-pack-pdf';
 import { whatsappText } from '@/lib/dispatch/driver-links';
 import { computeSummary } from '@/lib/dispatch/summary';
 import { readPortionPalletFactors } from '@/lib/dispatch/split';

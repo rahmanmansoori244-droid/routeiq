@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev -H 127.0.0.1",
-    "build": "prisma generate && next build && node scripts/build-upload-parser.mjs && node scripts/remove-public-source-maps.mjs",
+    "build": "prisma generate && next build && node scripts/build-upload-parser.mjs && node scripts/build-pdf-renderer.mjs && node scripts/remove-public-source-maps.mjs",
     "start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",

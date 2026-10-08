@@ -519,6 +519,45 @@ describe('the web process never reads an upload itself (audit P5)', () => {
   });
 });
 
+describe('the web process never lays out the driver sheets itself (review M3)', () => {
+  const rel = (f: string) => path.relative(WEB, f).split(path.sep).join('/');
+  const code = () => [
+    ...walk(path.join(WEB, 'app'), /\.(ts|tsx)$/),
+    ...walk(path.join(WEB, 'lib'), /\.(ts|tsx)$/),
+    ...walk(path.join(WEB, 'components'), /\.(ts|tsx)$/),
+    path.join(WEB, 'middleware.ts'),
+    path.join(WEB, 'instrumentation.ts'),
+  ];
+  /** The modules a file imports as values (an `import type` brings no code in). */
+  const valueImports = (src: string) =>
+    [...src.matchAll(/^\s*(?:import|export)\s+(?!type\s)(?:[^'";]*?\sfrom\s+)?['"]([^'"]+)['"]/gm), ...src.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]!);
+
+  it('only the renderer process (lib/pdf-render/handler.ts) loads the layout, lib/dispatch/driver-pack-pdf', () => {
+    const layout = /(^@\/lib\/dispatch\/|(^|\/))driver-pack-pdf$/;
+    const offenders = code().filter((f) => valueImports(readFileSync(f, 'utf8')).some((m) => layout.test(m))).map(rel);
+    expect(offenders).toEqual(['lib/pdf-render/handler.ts']);
+  });
+
+  it('only the layout and the legacy route sheet (lib/exports/pdf.tsx, legacy runs) load @react-pdf/renderer', () => {
+    const offenders = code().filter((f) => valueImports(readFileSync(f, 'utf8')).includes('@react-pdf/renderer')).map(rel);
+    expect(offenders.sort()).toEqual(['lib/dispatch/driver-pack-pdf.tsx', 'lib/exports/pdf.tsx']);
+  });
+
+  it('what the web process loads of lib/pdf-render brings in no layout code', () => {
+    for (const f of ['lib/pdf-render/index.ts', 'lib/pdf-render/config.ts', 'lib/pdf-render/protocol.ts', 'lib/dispatch/driver-pack.tsx']) {
+      const imports = valueImports(readFileSync(path.join(WEB, f), 'utf8'));
+      expect([f, imports.filter((m) => /(^|\/)(driver-pack-pdf|handler|child)$|^@react-pdf\/renderer$|^react$/.test(m))]).toEqual([f, []]);
+    }
+  });
+
+  it('the export route makes the driver sheets through renderDriverPackIsolated and answers its refusals', () => {
+    const src = readFileSync(path.join(WEB, 'app/api/runs/[id]/export/pdf/route.ts'), 'utf8');
+    expect(/await renderDriverPackIsolated\(driverPackModel\(/.test(src)).toBe(true);
+    expect(/if \(err instanceof PdfRenderRefused\) return pdfRefusedResponse\(err\);/.test(src)).toBe(true);
+    expect(src).not.toMatch(/renderDriverPackPdf/);
+  });
+});
+
 describe('the driver link and the driver page (owner request 4 Oct 2026)', () => {
   const rel = (f: string) => path.relative(WEB, f).split(path.sep).join('/');
 
