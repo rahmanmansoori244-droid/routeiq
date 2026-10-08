@@ -1823,7 +1823,9 @@ def _swaps(day: Day, plan: TimedPlan, k: int) -> list[tuple[float, int, list[Loa
                 rest = load[:i] + load[i + 1:]
                 if not fits_truck(facts(day, rest + (k,)), td):
                     continue
-                for p in sorted({i, *range(len(rest) + 1)}, key=lambda p: (p != i, p))[:RECOVER_POSITIONS + 1]:
+                detour = {p: day.D[rest[p - 1] + 1 if p else 0][node] + day.D[node][rest[p] + 1 if p < len(rest) else 0]
+                          for p in range(len(rest) + 1)}
+                for p in [i] + [p for p in sorted(detour, key=detour.get) if p != i][:RECOVER_POSITIONS]:
                     new = rest[:p] + (k,) + rest[p:]
                     out.append((float(day.metres(new) - day.metres(load)), td.idx, loads[:j] + [new] + loads[j + 1:], q))
     out.sort(key=lambda o: o[0])
