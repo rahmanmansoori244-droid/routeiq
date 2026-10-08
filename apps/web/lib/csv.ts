@@ -195,21 +195,26 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
 
   const decoded = decodeCsvText(bytes);
   const warnings: string[] = [...decoded.warnings];
-  const result = parseCsv(decoded.text);
+  // Excel's "sep=;" first line names the separator and is not a row (follow-up to the CSV intake
+  // review, 9 Oct 2026: it was read as the header, and the file refused for missing columns). The
+  // rows are counted as Excel shows them, without that line; a "Line N" counts it, as the file does.
+  const hint = separatorHint(decoded.text);
+  const csvText = hint ? hint.rest : decoded.text;
+  const result = parseCsv(csvText, hint?.delimiter);
   // A quote that is never closed takes every line after it into one value: the file read as a
   // few rows, the last one's note holding the rest of the file, and no error (review web-intake-2:
   // 390 of 400 orders never reached the day). Refused, naming the line; before the row limit, since
   // the rows Papa made of such a file mean nothing.
   const quote = result.errors.find((e) => e.type === 'Quotes');
-  if (quote) throw unclosedQuote(lineOf(decoded.text, quote));
+  if (quote) throw unclosedQuote(lineOf(csvText, quote) + (hint ? 1 : 0));
   if (result.truncated) throw tooManyRowsCut(result.rows.length, '', 'file');
   if (result.rows.length > MAX_ROWS) {
     throw new Error(`Too many rows: ${result.rows.length}. Max ${MAX_ROWS}.`);
   }
   // After the row limit, so a file refused for its rows is refused as before. A row it refuses is
   // named by its file row, worked out only then (csvFileRows reads the text once more).
-  checkCsvCells(result.rows, result.header, (i) => csvFileRows(decoded.text, result)?.[i] ?? i + 2);
-  const rowNumbers = csvFileRows(decoded.text, result);
+  checkCsvCells(result.rows, result.header, (i) => csvFileRows(csvText, result)?.[i] ?? i + 2);
+  const rowNumbers = csvFileRows(csvText, result);
   if (result.errors.length) {
     for (const e of result.errors.slice(0, 5)) {
       // Papa numbers a row of the wrong width by its place among the rows (from 0, blank lines left
@@ -219,7 +224,7 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
       warnings.push(`CSV parse warning at row ${row}: ${e.message}`);
     }
   }
-  return { fileName, fileType: 'csv', rows: result.rows.map(normalizeKeys), warnings, ...(rowNumbers ? { rowNumbers } : {}) };
+  return { fileName, fileType: 'csv', rows: result.rows.map((r) => normalizeKeys(r, true)), warnings, ...(rowNumbers ? { rowNumbers } : {}) };
 }
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
@@ -232,6 +237,10 @@ const withoutNul = (s: string) => (s.includes('\u0000') ? s.replace(/\u0000/g, '
 const READ_AS_ARABIC_WINDOWS =
   'This file is not saved as UTF-8, so its text was read as Arabic Windows text (Windows-1256). Check the names and notes; ' +
   'if they look wrong, save the file in Excel as "CSV UTF-8 (Comma delimited)" and upload that.';
+/** The warning for a UTF-8 file with a few places that are not UTF-8 (decodeCsvText): `n` of them, each read as U+FFFD. */
+const notUtf8Places = (n: number) =>
+  `This file is saved as UTF-8, but ${n.toLocaleString('en-US')} ${n === 1 ? 'character in it is' : 'characters in it are'} not UTF-8 text ` +
+  `and ${n === 1 ? 'was' : 'were'} read as "\uFFFD". Look for "\uFFFD" in the names and notes; if it matters, correct the file and upload it again.`;
 /** Refusals of decodeCsvText: text that says it is UTF-16 and is not, and (a Node without windows-1256) text that is not UTF-8. */
 const DAMAGED_UTF16 =
   'This file says it is UTF-16 text, but its text is damaged, so it cannot be read. Open it in Excel, save it as "CSV UTF-8 (Comma delimited)" and upload that.';
@@ -245,11 +254,19 @@ const NOT_UTF8 = 'This file is not saved as UTF-8, so it cannot be read. Open it
  *  - a UTF-16 byte-order mark (Excel's "Unicode Text"): UTF-16 of that byte order; text that is not
  *    UTF-16 after all (an odd number of bytes) is refused, never read with replacement characters;
  *  - otherwise (a UTF-8 mark taken off) strict UTF-8;
- *  - and when that fails, windows-1256, what Excel's "CSV (Comma delimited)" writes on a PC set to
- *    Arabic, which maps every byte: read, with a warning that says so (READ_AS_ARABIC_WINDOWS).
+ *  - when that fails, a file that is mostly UTF-8 (utf8Counts: more UTF-8 letters of two to four
+ *    bytes than places that are not UTF-8) is still read as UTF-8, each such place as U+FFFD, with a
+ *    warning naming how many (follow-up to the CSV intake review, 9 Oct 2026: one stray byte made the
+ *    whole file read as windows-1256, every Arabic letter of it garbled);
+ *  - else windows-1256, what Excel's "CSV (Comma delimited)" writes on a PC set to Arabic, which maps
+ *    every byte: read, with a warning that says so (READ_AS_ARABIC_WINDOWS).
  * U+0000 is taken out of the text (withoutNul): UTF-16 text without its mark then reads as its
- * letters. Text that holds the control characters of binary content (an image, a PDF, random bytes
- * named .csv) is refused: no CSV has them, and Papa would make rows of them.
+ * letters. Every line break is made a line feed: Papa takes one kind of line break for a whole file,
+ * so a line ending in a bare line feed inside a file of CR LF lines was joined onto the line before
+ * (follow-up to the CSV intake review; SheetJS, which read a CSV sent as Excel until then, took both).
+ * A line break inside a quoted value stays in its value, as a line feed, as Excel keeps one in a cell.
+ * Text that holds the control characters of binary content (an image, a PDF, random bytes named .csv)
+ * is refused: no CSV has them, and Papa would make rows of them.
  */
 function decodeCsvText(bytes: Uint8Array): { text: string; warnings: string[] } {
   const strict = (encoding: string, b: Uint8Array) => new TextDecoder(encoding, { fatal: true, ignoreBOM: true }).decode(b);
@@ -266,18 +283,62 @@ function decodeCsvText(bytes: Uint8Array): { text: string; warnings: string[] } 
     try {
       text = strict('utf-8', body);
     } catch {
-      try {
-        text = new TextDecoder('windows-1256').decode(body);
-      } catch {
-        // A Node built without the full ICU data has no windows-1256: say so, never guess.
-        throw new WorkbookRefusedError(NOT_UTF8);
+      const { letters, notUtf8 } = utf8Counts(body);
+      if (letters > notUtf8) {
+        // The decoder puts one U+FFFD where utf8Counts counted one place that is not UTF-8.
+        text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(body);
+        warnings.push(notUtf8Places(notUtf8));
+      } else {
+        try {
+          text = new TextDecoder('windows-1256').decode(body);
+        } catch {
+          // A Node built without the full ICU data has no windows-1256: say so, never guess.
+          throw new WorkbookRefusedError(NOT_UTF8);
+        }
+        warnings.push(READ_AS_ARABIC_WINDOWS);
       }
-      warnings.push(READ_AS_ARABIC_WINDOWS);
     }
   }
-  text = withoutNul(text);
+  text = withoutNul(text).replace(/\r\n?/g, '\n');
   checkCsvText(text);
   return { text, warnings };
+}
+
+/**
+ * How UTF-8 the bytes are: `letters`, the well-formed UTF-8 letters of two to four bytes, and
+ * `notUtf8`, the places that are not UTF-8, counted as TextDecoder counts them (a byte that cannot
+ * begin a letter, or a letter cut short, with its bytes so far: one U+FFFD each). A UTF-8 file with a
+ * stray byte has many letters and few such places. A windows-1256 file is the other way round: an
+ * Arabic letter there is one byte from 0xC1 up, which UTF-8 can only follow with a byte from 0x80 to
+ * 0xBF, and the next letter is never one, so nearly every Arabic letter is a place that is not UTF-8
+ * and a UTF-8 letter happens only by chance (a letter followed by the Arabic comma, 0xA1). The larger
+ * count decides (decodeCsvText); a tie, or a file with no UTF-8 letter at all, is read as windows-1256.
+ */
+function utf8Counts(b: Uint8Array): { letters: number; notUtf8: number } {
+  let letters = 0;
+  let notUtf8 = 0;
+  for (let i = 0; i < b.length; ) {
+    const c = b[i]!;
+    if (c < 0x80) {
+      i += 1;
+      continue;
+    }
+    // The bytes that must follow c, and the range of the first of them (no overlong form, no
+    // surrogate, nothing past U+10FFFF), as the UTF-8 decoder of the Encoding standard checks them.
+    const need = c >= 0xc2 && c <= 0xdf ? 1 : c >= 0xe0 && c <= 0xef ? 2 : c >= 0xf0 && c <= 0xf4 ? 3 : 0;
+    let lo = c === 0xe0 ? 0xa0 : c === 0xf0 ? 0x90 : 0x80;
+    let hi = c === 0xed ? 0x9f : c === 0xf4 ? 0x8f : 0xbf;
+    let j = i + 1;
+    while (j - i - 1 < need && j < b.length && b[j]! >= lo && b[j]! <= hi) {
+      j += 1;
+      lo = 0x80;
+      hi = 0xbf;
+    }
+    if (need && j - i - 1 === need) letters += 1;
+    else notUtf8 += 1; // the byte that broke it off is looked at again, as the start of the next
+    i = j;
+  }
+  return { letters, notUtf8 };
 }
 
 /** Control characters no text file has (tab, line feed, vertical tab, form feed and carriage return aside). */
@@ -298,6 +359,17 @@ function checkCsvText(text: string): void {
       'This file is not a CSV text file or an Excel workbook, so it cannot be read. Save it in Excel as .xlsx or as CSV and upload that.',
     );
   }
+}
+
+/**
+ * Excel's separator hint: a first line "sep=" and one character ("sep=;", "sep=|", a tab) tells Excel
+ * which separator the file uses, and Excel reads the file so and does not show that line. Read the
+ * same way here (parseUpload): the separator, and the text after that line. Undefined when the first
+ * line is anything else.
+ */
+function separatorHint(text: string): { delimiter: string; rest: string } | undefined {
+  const m = /^sep=([^"\n])(?:\n|$)/i.exec(text);
+  return m ? { delimiter: m[1]!, rest: text.slice(m[0].length) } : undefined;
 }
 
 /** The line of the file (the header is line 1) where a Papa Parse error was found, from its position in the text. */
@@ -719,20 +791,26 @@ const HEADER_LINES = 10;
  * (normalizeKeys comes after the checks), the width of its header, Papa's warnings, and whether it
  * goes on past READ_ROWS rows. A header wider than MAX_COLS is refused (P5 second review: a CSV had
  * no column or cell cap, so a row of a million columns, a 7.6 MB file, was read and sent to the web
- * process as one object of a million keys). The rows are checked by checkCsvCells.
+ * process as one object of a million keys). The rows are checked by checkCsvCells. `delimiter`: the
+ * separator a "sep=" line named (separatorHint); without it Papa guesses it from the text.
  */
-function parseCsv(text: string): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean; delimiter: string; linebreak: string } {
+function parseCsv(
+  text: string,
+  delimiter?: string,
+): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean; delimiter: string; linebreak: string } {
+  const sep = delimiter ? { delimiter } : {};
   // The header first, before Papa makes an object with a key for every header name for each row,
   // and renames repeated names one by one (a 2.9 MB header of 1.5 million repeated names took it
   // 3.4 s). The same Papa over the first lines only, with no row objects, reads them as the parse
   // below does (the same delimiter and line break it guesses from the whole text, the same blank
   // lines skipped), so the first line it keeps is that parse's header. A header after more blank
   // lines than that is checked once the file is parsed.
-  const first = Papa.parse<string[]>(text, { skipEmptyLines: 'greedy', preview: HEADER_LINES }).data[0];
+  const first = Papa.parse<string[]>(text, { ...sep, skipEmptyLines: 'greedy', preview: HEADER_LINES }).data[0];
   if (first && first.length > MAX_COLS) throw tooManyCsvColumns(first.length);
   // Synchronous: Papa parses a string in one go. `preview` stops it after READ_ROWS rows (empty
   // lines count towards it); meta.truncated says that it stopped there.
   const res = Papa.parse<Record<string, unknown>>(text, {
+    ...sep,
     header: true,
     skipEmptyLines: 'greedy',
     preview: READ_ROWS,
@@ -807,15 +885,32 @@ function tooManyCsvColumns(columns: number, row?: number): WorkbookRefusedError 
 /**
  * A row's keys trimmed and in small letters, its values as trimmed text. U+0000 is taken out of both
  * (withoutNul): a workbook cell can hold one (an "_x0000_" escape), and PostgreSQL refused the upload
- * batch that kept it, answering an empty 500 (review s5-security-1).
+ * batch that kept it, answering an empty 500 (review s5-security-1). `csv`: the row is a CSV's, and
+ * a value written as Excel's ="..." reads as the text inside (excelText).
  */
-function normalizeKeys(row: Record<string, unknown>): Record<string, string> {
+function normalizeKeys(row: Record<string, unknown>, csv = false): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(row)) {
     const key = withoutNul(k).trim().toLowerCase();
-    out[key] = v == null ? '' : withoutNul(String(v)).trim();
+    const value = v == null ? '' : withoutNul(String(v)).trim();
+    out[key] = csv ? excelText(value) : value;
   }
   return out;
+}
+
+/** A whole value ="..." (a quote inside written twice): Excel's text formula. */
+const EXCEL_TEXT = /^="((?:[^"]|"")*)"$/;
+
+/**
+ * A CSV value written as ="00123" reads as 00123, the text inside (a doubled quote in it as one quote,
+ * trimmed like every value), as Excel shows it. ERP exports write codes so, to keep their leading
+ * zeros when the file is opened in Excel (follow-up to the CSV intake review, 9 Oct 2026: SheetJS
+ * read them so when the browser sent the CSV as Excel; Papa kept ="00123", a code that matches no
+ * customer). Any other value that begins with "=" is kept as written.
+ */
+function excelText(value: string): string {
+  const m = EXCEL_TEXT.exec(value);
+  return m ? m[1]!.replace(/""/g, '"').trim() : value;
 }
 
 /** The file name as stored on the upload batch: no path separators, no U+0000, runs of spaces as one, at most 200 characters. */

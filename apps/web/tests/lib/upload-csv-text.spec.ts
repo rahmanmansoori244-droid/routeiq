@@ -16,6 +16,13 @@
  *    answered an empty 500), and binary content named .csv is refused.
  *  - A .csv / .xlsx / .xls sent with a type that says nothing (application/octet-stream, text/plain,
  *    ...) is no longer refused for its type; its content decides.
+ *
+ * Follow-up (the review of that fix, 9 Oct 2026, "csv-intake-edges"): files SheetJS read when the
+ * browser sent them as Excel, and Papa then read wrongly. A bare line feed in a file of CR LF lines
+ * ends its row; Excel's ="00123" reads as 00123; a "sep=;" first line names the separator and is not
+ * the header; a UTF-8 file with a few bytes that are not UTF-8 stays UTF-8 (each such place read as
+ * U+FFFD, with a warning naming how many), and only a file that is clearly not UTF-8 is read as
+ * windows-1256.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -130,7 +137,9 @@ describe('a quote that is never closed refuses the file, naming the line (web-in
     const text = [head, 'C1,P1,5,"Gate 2\r\nonly"', 'C2,P1,3,"Say ""hello"""', 'C3,P1,4,5" pipe', 'C4,P1,1,ok'].join('\r\n');
     for (const type of ['text/csv', XLS]) {
       const parsed = await parseUpload(file(text, 'orders.csv', type));
-      expect([type, parsed.rows.map((r) => r.notes), parsed.warnings]).toEqual([type, ['Gate 2\r\nonly', 'Say "hello"', '5" pipe', 'ok'], []]);
+      // The line break inside the value is kept as a line feed (every line break is one since the
+      // follow-up on mixed line endings, below).
+      expect([type, parsed.rows.map((r) => r.notes), parsed.warnings]).toEqual([type, ['Gate 2\nonly', 'Say "hello"', '5" pipe', 'ok'], []]);
     }
   });
 });
@@ -226,5 +235,163 @@ describe('the type check lets a spreadsheet through when the browser sends a typ
       expect((await parseUpload(f)).rows).toEqual([{ code: 'C1', cases: '3' }]);
       expect((await parseUploadIsolated(f)).rows).toEqual([{ code: 'C1', cases: '3' }]);
     }
+  });
+});
+
+describe('line breaks of mixed kinds end their rows, as SheetJS read them (follow-up: mixed line endings)', () => {
+  const head = 'sales_order_no,customer_code,product_code,cases,notes';
+  const read = (rows: Record<string, string>[]) => rows.map((r) => [r.sales_order_no, r.cases, r.notes]);
+
+  it.each(['text/csv', XLS])('sent as "%s": a bare line feed inside a file of CR LF lines ends its row, and so does a lone CR', async (type) => {
+    // The reviewer's file. Before: Papa took CR LF as the line break of the whole file, so SO2 (6
+    // cases) was read into SO1's note as "ok\nSO2,C2,P1,6,ok2", with only a "Too many fields" warning.
+    const text = `${head}\r\nSO1,C1,P1,5,ok\nSO2,C2,P1,6,ok2\r\nSO3,C3,P1,7,ok3\rSO4,C4,P1,8,ok4\r\n`;
+    const parsed = await parseUpload(file(text, 'orders.csv', type));
+    expect(parsed.warnings).toEqual([]);
+    expect(read(parsed.rows)).toEqual([['SO1', '5', 'ok'], ['SO2', '6', 'ok2'], ['SO3', '7', 'ok3'], ['SO4', '8', 'ok4']]);
+    expect(parsed.rowNumbers).toEqual([2, 3, 4, 5]);
+  });
+
+  it('a CR LF header over LF lines: every order is read (before: one order of a small file, a large one refused for 2,001 columns)', async () => {
+    const small = `${head}\r\nSO1,C1,P1,5,ok\nSO2,C2,P1,6,ok\n`;
+    expect(read((await parseUpload(file(small, 'orders.csv', XLS))).rows)).toEqual([['SO1', '5', 'ok'], ['SO2', '6', 'ok']]);
+    const large = `${head}\r\n${Array.from({ length: 500 }, (_, i) => `SO${i + 1},C${i + 1},P1,${(i % 9) + 1},ok`).join('\n')}\n`;
+    const parsed = await parseUpload(file(large, 'orders.csv', XLS));
+    expect([parsed.rows.length, parsed.warnings, parsed.rows[499]]).toEqual([500, [], { sales_order_no: 'SO500', customer_code: 'C500', product_code: 'P1', cases: '5', notes: 'ok' }]);
+    // parseUploadIsolated, which the upload routes call, gives the same rows.
+    expect((await parseUploadIsolated(file(large, 'orders.csv', XLS))).rows).toHaveLength(500);
+  });
+
+  it('a line break inside a quoted value stays in its value, as a line feed, whichever kind it is', async () => {
+    const text = `${head}\r\nSO1,C1,P1,5,"Gate 2\r\nonly"\r\nSO2,C2,P1,6,"Gate 3\nonly"\r\nSO3,C3,P1,7,"Gate 4\ronly"\r\nSO4,C4,P1,8,ok\r\n`;
+    for (const type of ['text/csv', XLS]) {
+      const parsed = await parseUpload(file(text, 'orders.csv', type));
+      expect([type, read(parsed.rows), parsed.rowNumbers, parsed.warnings]).toEqual([
+        type,
+        [['SO1', '5', 'Gate 2\nonly'], ['SO2', '6', 'Gate 3\nonly'], ['SO3', '7', 'Gate 4\nonly'], ['SO4', '8', 'ok']],
+        [2, 3, 4, 5],
+        [],
+      ]);
+    }
+  });
+});
+
+describe('Excel\'s ="..." text values read as the text inside (follow-up: leading zeros kept by an ERP)', () => {
+  it.each(['text/csv', XLS])('sent as "%s": ="00123" keeps its zeros and matches the customer; the quoted form "=""..."""" too', async (type) => {
+    const text = [
+      'sales_order_no,delivery_date,customer_code,branch_code,product_code,cases',
+      '="000456",11/10/2026,="00123",="01",="0500",5',
+      '"=""SO-2""",09/10/2026,"=""C77""",,"=""1-2""",3',
+    ].join('\r\n');
+    const parsed = await parseUpload(file(text, 'orders.csv', type));
+    expect(parsed.warnings).toEqual([]);
+    const { lines, errors } = normalizeOrderRows(parsed.rows, { dateOrder: 'DMY' });
+    // Before: customer_code '="00123"' was accepted and became a new customer with no location.
+    expect(errors).toEqual([]);
+    expect(lines.map((l) => [l.salesOrderNo, l.deliveryDate, l.customerCode, l.branchCode, l.productCode, l.cases])).toEqual([
+      ['000456', '2026-10-11', '00123', '01', '0500', 5],
+      ['SO-2', '2026-10-09', 'C77', null, '1-2', 3],
+    ]);
+  });
+
+  it('a quote inside is written twice; only a whole ="..." value is unwrapped, any other value with "=" kept as written', async () => {
+    const text = 'code,notes\nC1,="Say ""hi"""\nC2,=""\nC3,="  P7 "\nC4,="a"&"b"\nC5,=SUM(A1:A2)\nC6,x="1"\nC7,="open\n';
+    const parsed = await parseUpload(file(text, 'notes.csv', 'text/csv'));
+    expect(parsed.rows.map((r) => r.notes)).toEqual(['Say "hi"', '', 'P7', '="a"&"b"', '=SUM(A1:A2)', 'x="1"', '="open']);
+  });
+
+  it('the text path only: a workbook cell holding the text ="00123" is read as it is', async () => {
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['code'], ['="00123"']]), 'Customers');
+    const bytes = new Uint8Array(XLSX.write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer);
+    expect((await parseUpload(file(bytes, 'customers.xlsx', XLSX_TYPE))).rows).toEqual([{ code: '="00123"' }]);
+  });
+});
+
+describe('Excel\'s "sep=" first line names the separator and is not the header (follow-up)', () => {
+  it.each(['text/csv', XLS])('sent as "%s": "sep=;" over a semicolon file with commas in its values', async (type) => {
+    // Before: the header was "sep=;", and the check said "Missing required column(s) ... Found columns: sep=;".
+    const text = 'sep=;\r\ncustomer_code;product_code;cases;notes\r\nC1;P1;5;Ruwi, near the roundabout\r\nC2;P1;3;Gate 2, call first\r\n';
+    const parsed = await parseUpload(file(text, 'orders.csv', type));
+    expect(parsed.warnings).toEqual([]);
+    expect(parsed.rows).toEqual([
+      { customer_code: 'C1', product_code: 'P1', cases: '5', notes: 'Ruwi, near the roundabout' },
+      { customer_code: 'C2', product_code: 'P1', cases: '3', notes: 'Gate 2, call first' },
+    ]);
+    // Rows as Excel shows the file: it does not show the "sep=" line, so the header is row 1.
+    expect(parsed.rowNumbers).toEqual([2, 3]);
+  });
+
+  it('the separator named is used where Papa would guess another; any one character, after a byte-order mark too', async () => {
+    // Guessing, Papa splits these lines at the commas (two values on every line either way).
+    const tie = await parseUpload(file('sep=;\ncode;address, area\nC1;Noor, Ruwi\nC2;Seeb, Muscat\n', 'customers.csv', 'text/csv'));
+    expect(tie.rows).toEqual([
+      { code: 'C1', 'address, area': 'Noor, Ruwi' },
+      { code: 'C2', 'address, area': 'Seeb, Muscat' },
+    ]);
+    for (const sep of ['|', '\t', ',', ';']) {
+      const parsed = await parseUpload(file(`\ufeffSEP=${sep}\r\ncode${sep}cases\r\nC1${sep}3\r\n`, 'orders.csv', XLS));
+      expect([sep, parsed.rows, parsed.warnings]).toEqual([sep, [{ code: 'C1', cases: '3' }], []]);
+    }
+  });
+
+  it('a "Line N" refusal counts the sep= line, as the file does; a first line that is more than the hint is the header', async () => {
+    const bad = 'sep=,\ncustomer_code,product_code,cases,notes\nC1,P1,5,ok\nC2,P1,3,"open\nC3,P1,4,ok\n';
+    expect(await refusal(parseUpload(file(bad, 'orders.csv', 'text/csv')))).toMatch(/^Line 4 of this file has a quote \("\) that is not closed/);
+    expect((await parseUpload(file('sep=;x,cases\nC1,3\n', 'orders.csv', 'text/csv'))).rows).toEqual([{ 'sep=;x': 'C1', cases: '3' }]);
+  });
+});
+
+describe('a UTF-8 file with a few bytes that are not UTF-8 stays UTF-8 (follow-up: one stray byte garbled the whole file)', () => {
+  const NAME = 'مؤسسة النور التجارية';
+  const NOTE = 'اتصل قبل الوصول';
+  const enc = (s: string) => [...new TextEncoder().encode(s)];
+  const places = (n: number, word: string, verb: string) =>
+    `This file is saved as UTF-8, but ${n} ${word} not UTF-8 text and ${verb} read as "\uFFFD". ` +
+    'Look for "\uFFFD" in the names and notes; if it matters, correct the file and upload it again.';
+  const ARABIC_WINDOWS =
+    'This file is not saved as UTF-8, so its text was read as Arabic Windows text (Windows-1256). Check the names and notes; ' +
+    'if they look wrong, save the file in Excel as "CSV UTF-8 (Comma delimited)" and upload that.';
+
+  it.each(['text/csv', XLS])('sent as "%s": one stray byte (0xA0) reads as U+FFFD, the Arabic as written, with a warning naming 1 character', async (type) => {
+    const bytes = Uint8Array.from([...enc(`code,name,notes\r\nC1,${NAME},${NOTE}\r\nC2,Al Noor`), 0xa0, ...enc('Store,ok\r\n')]);
+    const parsed = await parseUpload(file(bytes, 'customers.csv', type));
+    // Before: the whole file was read as windows-1256, every Arabic letter garbled ("ظ…ط¤ط³ط³ط©").
+    expect(parsed.rows).toEqual([
+      { code: 'C1', name: NAME, notes: NOTE },
+      { code: 'C2', name: 'Al Noor\uFFFDStore', notes: 'ok' },
+    ]);
+    expect(parsed.warnings).toEqual([places(1, 'character in it is', 'was')]);
+  });
+
+  it('the places are counted as the decoder replaces them: a stray byte, a letter cut short, a byte that never begins a letter', async () => {
+    const bytes = Uint8Array.from([
+      ...enc(`code,name,notes\r\nC1,${NAME},${NOTE}\r\nC2,a`),
+      0xa0, // a byte that only continues a letter
+      ...enc('b,c'),
+      0xe2, 0x82, // the first two bytes of a three-byte letter (one place)
+      ...enc('d'),
+      0xd8, // the first byte of a two-byte letter, cut by the line break
+      ...enc('\r\nC3,'),
+      0xff, // never in UTF-8
+      ...enc(`${NOTE},ok\r\n`),
+    ]);
+    const parsed = await parseUpload(file(bytes, 'customers.csv', 'text/csv'));
+    expect(parsed.rows).toEqual([
+      { code: 'C1', name: NAME, notes: NOTE },
+      { code: 'C2', name: 'a\uFFFDb', notes: 'c\uFFFDd\uFFFD' },
+      { code: 'C3', name: `\uFFFD${NOTE}`, notes: 'ok' },
+    ]);
+    // As many as the warning names: one U+FFFD for each place.
+    expect(parsed.warnings).toEqual([places(4, 'characters in it are', 'were')]);
+    expect(JSON.stringify(parsed.rows).match(/\uFFFD/g)).toHaveLength(4);
+  });
+
+  it('a file that is clearly not UTF-8 is still read as windows-1256: Arabic with commas that make a UTF-8 letter by chance, Latin letters', async () => {
+    const arabic = 'code,name,notes\r\nC1,مسقط، روي،,النور، الخوض؛ اتصل؟\r\n';
+    const parsed = await parseUpload(file(cp1256(arabic), 'customers.csv', XLS));
+    expect([parsed.rows, parsed.warnings]).toEqual([[{ code: 'C1', name: 'مسقط، روي،', notes: 'النور، الخوض؛ اتصل؟' }], [ARABIC_WINDOWS]]);
+    const latin = await parseUpload(file(cp1256('code,name\r\nC1,Café Muscat\r\n'), 'customers.csv', 'text/csv'));
+    expect([latin.rows, latin.warnings]).toEqual([[{ code: 'C1', name: 'Café Muscat' }], [ARABIC_WINDOWS]]);
   });
 });
