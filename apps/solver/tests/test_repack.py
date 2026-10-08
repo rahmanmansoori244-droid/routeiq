@@ -382,6 +382,118 @@ def test_shortage_warning_stays_when_an_unserved_stop_fits_a_load():
     assert any("more than the shortage alone explains" in w for w in sc.warnings), sc.warnings
 
 
+# --------------------------------------------------------------------------------------
+# Strict priorities after the search on a clean shortage day (review solver-pipeline-1,
+# scenario s3-shortage-hire): the route search's plan times exactly, but it carries a lower
+# priority where a higher one left out fits in its place.
+# --------------------------------------------------------------------------------------
+
+def _named_raw(r, name, plan):
+    """The route search's plan for option ``name``, timed exactly (a clean day: VERIFIED)."""
+    day, tds = _day_for(r)
+    timed = LR.time_plan(day, plan, ds._pricing("RECOMMENDED", r, tds, r.stops))
+    assert timed is not None
+    return ds._build_scenario(name, r, r.stops, tds, matrix_for(r), timed, day.values, False, [],
+                              solver_status="ROUTING_SUCCESS", elapsed=1.0, time_limit=2, objective_value=0)
+
+
+def test_a_clean_day_puts_a_left_out_p3_in_place_of_a_p4_in_every_option():
+    """One truck with one 100-case load. The search's plan carries A (P1, 40 cases) and LOW (P4, 60
+    cases) and leaves HIGH (P3, 60 cases) out: no room beside them and no trip left, so only a swap
+    serves it. The plan times exactly, so before this review only the insert-only recovery ran (the
+    swaps were for repair days) and every option delivered the P4 while the P3 stayed out, its reason
+    saying "Lower priorities are left out first (this is P3)"."""
+    stops = [stop("A", 23.600, 58.420, cases=40, priority=1), stop("LOW", 23.610, 58.425, cases=60, priority=4),
+             stop("HIGH", 23.615, 58.430, cases=60, priority=3)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1)], scenarios=ALL)
+    results = {n: _named_raw(r, n, {0: [(0, 1)]}) for n in ALL}
+    assert all(sc.feasibility.status == "VERIFIED" for sc in results.values())
+    ds._post_solve(r, r.stops, ds._truck_days(r), matrix_for(r), 2, [], results, None, time.monotonic() + 60)
+    for name, sc in results.items():
+        assert served_ids(sc) == {"A", "HIGH"}, (name, served_ids(sc))
+        assert unserved_map(sc) == {"LOW": "SOLVER_DROPPED_LOW_PRIORITY"}, name
+        # LOW is now the lowest priority left out, and nothing of a lower priority rides: no false claim.
+        assert sc.unserved[0].reason_message.startswith("Fleet capacity shortage"), sc.unserved[0].reason_message
+        assert "lower-priority stop" not in sc.unserved[0].reason_message
+        assert any("1 stop(s) the route search had left out were planned after the search" in w for w in sc.warnings), sc.warnings
+        assert_plan_rules(r, sc)
+
+
+def test_a_swap_may_take_several_lower_priority_stops_off_one_load():
+    """One 100-case load carrying a P4 and a P5 of 50 cases; the P3 left out needs 90 cases: it fits
+    only with both of them off (the skeptic's seed 12: S027 in place of S145 and S005, two P4 orders).
+    Before, a swap put one stop out only. A stop of the same or a higher priority is never taken off."""
+    stops = [stop("P4", 23.600, 58.420, cases=50, priority=4), stop("P5", 23.605, 58.425, cases=50, priority=5),
+             stop("P3", 23.610, 58.430, cases=90, priority=3)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    base = LR.time_plan(day, {0: [(0, 1)]}, pricing)
+    got = LR.recover(day, pricing, base, [2], time.perf_counter() + 10, swaps=True)
+    assert LR.served_of(got) == {2}
+    assert LR.time_plan(day, LR.plan_of(got), pricing) is not None
+    # With a P1 in the P4's place, taking the P5 off alone leaves no room: the P1 stays, the P3 stays out.
+    stops[0] = stop("P1", 23.600, 58.420, cases=50, priority=1)
+    r = req(stops, [truck("T1", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    base = LR.time_plan(day, {0: [(0, 1)]}, pricing)
+    assert LR.served_of(LR.recover(day, pricing, base, [2], time.perf_counter() + 10, swaps=True)) == {0, 1}
+
+
+def test_the_closing_swap_gets_time_when_the_repacks_use_the_whole_budget(monkeypatch):
+    """The reviewer's demo: the repacks used the job's whole budget, so the closing recovery never ran
+    (no "recovery" line in the notes) and the P3 stayed out. A day whose plans leave a stop out while
+    they carry a lower priority now keeps CLEAN_RECOVER_SEC of the job for it."""
+    stops = [stop("A", 23.600, 58.420, cases=40, priority=1), stop("LOW", 23.610, 58.425, cases=60, priority=4),
+             stop("HIGH", 23.615, 58.430, cases=60, priority=3)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    src = LR.Source("RECOMMENDED", LR.time_plan(day, {0: [(0, 1)]}, pricing))
+
+    def slow(day_, pricing_, pool, required, optional, hint, time_limit, **kw):
+        # A repack that uses its whole limit and ends without an answer (the demo's UNKNOWN): the plan
+        # it started from stays the job's candidate.
+        time.sleep(max(0.0, time_limit))
+        return LR.RepackResult(None, "UNKNOWN", time_limit)
+
+    monkeypatch.setattr(LR, "repack", slow)
+    t = time.perf_counter()
+    cands, notes = LR.build_candidates(day, pricing, "RECOMMENDED", pricing, [src], {2: 1}, cap_s=10.0, budget_s=4.0,
+                                       time_raw=True, fit_weights=None)
+    took = time.perf_counter() - t
+    best = min(cands, key=lambda c: LR.GOALS["RECOMMENDED"](c.score))
+    assert LR.served_of(best.plan) == {0, 2}, notes
+    assert any("recovery" in n for n in notes), notes
+    assert took < 4.0 + 1.5, took  # within the job's budget (CP-SAT's last phase may end up to 0.5 s late)
+
+
+def test_the_shortage_reason_says_lower_priorities_go_first_only_when_true():
+    """Scenario s3-shortage-hire-2 (the verifier's tenant A): one truck, one 100-case load. EAST and WEST
+    (P1, 25 cases) are 20 km apart, both received 07:00-07:10, so one load cannot reach both; C1-C3 and
+    D (P3) and E (P5) are near the depot, open all day. 175 cases on 100: a fleet shortage. The plan
+    carries EAST and C1-C3. WEST's reason used to say "Lower priorities are left out first (this is
+    P1)" while three P3 stops ride; E (P5, the lowest priority of the day) read the same tail."""
+    win = dict(hard_start_min=hm("07:00"), hard_end_min=hm("07:10"))
+    stops = [stop("EAST", 23.585, 58.490, cases=25, priority=1, **win),
+             stop("WEST", 23.585, 58.290, cases=25, priority=1, **win)]
+    stops += [stop(f"C{i}", 23.590 + 0.002 * i, 58.395, cases=25, priority=3) for i in range(1, 4)]
+    stops += [stop("D", 23.580, 58.395, cases=25, priority=3), stop("E", 23.578, 58.392, cases=25, priority=5)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1)])
+    sc = _named_raw(r, "RECOMMENDED", {0: [(0, 2, 3, 4)]})
+    why = {u.stop_id: u.reason_message for u in sc.unserved}
+    assert set(why) == {"WEST", "D", "E"}
+    assert all(m.startswith("Fleet capacity shortage: 175 cases requested vs 100 cases") for m in why.values()), why
+    # WEST is out while three lower-priority stops ride: never "lower priorities are left out first".
+    assert "Lower priorities are left out first" not in why["WEST"], why["WEST"]
+    assert "This P1 stop was left out although 3 lower-priority stops are planned" in why["WEST"], why["WEST"]
+    # D (P3) is out, and the only lower priority of the day (E, P5) is out too: the claim is true.
+    assert why["D"].endswith("Lower priorities are left out first (this is P3)."), why["D"]
+    # E is of the lowest priority of the day: there is nothing lower to leave out first.
+    assert "Lower priorities are left out first" not in why["E"] and why["E"].endswith("This P5 stop was left out."), why["E"]
+
+
 def test_repack_failure_falls_back_to_the_search_plan(monkeypatch):
     monkeypatch.setenv("SOLVER_PARALLEL", "0")
     stops, trucks = half_load_day(n=24)

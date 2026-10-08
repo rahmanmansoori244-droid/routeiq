@@ -315,9 +315,10 @@ def test_mixed_fleet_proofs_are_sound():
     sc = rec(optimize_dispatch(six))
     assert len(sc.unserved) == 4 and len(sc.loads) == 2
     for u in sc.unserved:
+        # Every stop is P3: no lower priority to leave out first (scenario s3-shortage-hire-2).
         assert u.reason_message == (
             "Fleet capacity shortage: the 2 loads the trucks have left cannot carry every stop of the day (measured in "
-            "pallets on the trucks with bays and in cases on the others). Lower priorities are left out first (this is P3)."), u.reason_message
+            "pallets on the trucks with bays and in cases on the others). This P3 stop was left out."), u.reason_message
     assert not any("short today" in w or "no check proves" in w for w in sc.warnings), sc.warnings
     assert_pallets_hold(six, sc)
 
