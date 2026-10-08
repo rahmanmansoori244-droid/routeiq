@@ -40,9 +40,9 @@ Please don't report these again unless the fix is wrong.
 | 8 | The driver page could not reload offline after the first QR visit. | #62 (the service worker pre-caches the first visit) |
 | 9 | Rental cost scaling could stop PyVRP finding any feasible plan. | #62 (penalty ceiling follows the request's scale) |
 | 10 | PyVRP's missing-stop count was always 0. | #62 |
-| 11 | Benchmark F02: a stop the route search planned, lost when exact timing removed its load, was never offered back on its own, so it stayed unserved while a truck stood idle (P02: C3, 54 cases). | Branch `fix-replan-recovery-and-fallback` (wider fit pool; recovery of left-out stops in strict priority order) |
-| 12 | Benchmark F07: a same-day re-plan whose search plan broke the driver breaks kept 84 of 180 stops, with 3 P1 and 20 P2 left out, while a checked plan serving all 180 existed (D5). | Branch `fix-replan-recovery-and-fallback` (a fully timed incumbent before the fit repack, recovery, more of the request's time when P1-P3 work is still out, a constructive fallback) |
-| 13 | Benchmark F01: with a short time limit an option could keep only a plan that breaks the rules (VIOLATED), so the dispatcher had nothing usable (D3 at 60 s). | Branch `fix-replan-recovery-and-fallback` (a checked partial plan whose left-out orders say why; VIOLATED only when nothing of the plan can be timed) |
+| 11 | Benchmark F02: a stop the route search planned, lost when exact timing removed its load, was never offered back on its own, so it stayed unserved while a truck stood idle (P02: C3, 54 cases). | #64 (wider fit pool; recovery of left-out stops in strict priority order) |
+| 12 | Benchmark F07: a same-day re-plan whose search plan broke the driver breaks kept 84 of 180 stops, with 3 P1 and 20 P2 left out, while a checked plan serving all 180 existed (D5). | #64 (a fully timed incumbent before the fit repack, recovery, more of the request's time when P1-P3 work is still out, a constructive fallback) |
+| 13 | Benchmark F01: with a short time limit an option could keep only a plan that breaks the rules (VIOLATED), so the dispatcher had nothing usable (D3 at 60 s). | #64 (a checked partial plan whose left-out orders say why; VIOLATED only when nothing of the plan can be timed) |
 
 ## Benchmark of 8 Oct 2026: what is fixed and what is not
 
