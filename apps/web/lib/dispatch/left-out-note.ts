@@ -7,6 +7,7 @@
  * Also the orders a plan left out for their customer's data (no usable location, a deactivated
  * customer) whose data was fixed since: the plan in use still leaves them out until a re-plan
  * (review of 9 Oct 2026: the day said "up to date" and RE-PLAN was off after the pin was added).
+ * And which unserved orders a re-plan could place now (replanCouldPlace), for the day screen's Step 3.
  */
 import { locationBlocksDelivery } from './customer-attrs';
 import type { ServiceArea } from './location-input';
@@ -78,4 +79,19 @@ export function unservedNowPlannable(
   area: ServiceArea,
 ): boolean {
   return CUSTOMER_DATA_REASONS.includes(reasonCode) && customer.active && !locationBlocksDelivery(customer, area);
+}
+
+/**
+ * Whether a re-plan could place an order the plan left unserved, as things are now: the day screen's
+ * Step 3 keeps RE-PLAN on, and stays not done, only for these (review of 5614ba9: any unserved order
+ * kept it on, so a day with a customer still without a pin never showed done). Not an order left out
+ * for its customer's data until that is fixed (`nowPlannable`, unservedNowPlannable above), nor cases
+ * heavier than any truck while they still are (`stillTooHeavy`: the case weight or the payloads now).
+ * Any other reason is one a re-plan tries again: no room or no time slot found (a truck added since,
+ * another search), receiving hours or the shift (a truck free from the start of the day may reach it).
+ */
+export function replanCouldPlace(reasonCode: string, nowPlannable: boolean, stillTooHeavy: boolean): boolean {
+  if (CUSTOMER_DATA_REASONS.includes(reasonCode)) return nowPlannable;
+  if (reasonCode === 'EXCEEDS_ANY_TRUCK_CAPACITY') return !stillTooHeavy;
+  return true;
 }

@@ -65,9 +65,9 @@ const day = (loadStatus: 'PLANNED' | 'LOCKED') => ({
   serviceArea: AREA,
 });
 
-async function mountDay(loadStatus: 'PLANNED' | 'LOCKED') {
+async function mountDay(loadStatus: 'PLANNED' | 'LOCKED', canPlan = true) {
   answers.day = day(loadStatus);
-  const host: Host<any> = new Host(DispatchClient as any, { slug: 'nmwc', canPlan: true, canDispatch: true, canEditProducts: true, initialDate: '2026-09-28', initialDepot: 'd1', phoneCountryCode: '968' });
+  const host: Host<any> = new Host(DispatchClient as any, { slug: 'nmwc', canPlan, canDispatch: canPlan, canEditProducts: true, initialDate: '2026-09-28', initialDepot: 'd1', phoneCountryCode: '968' });
   host.render();
   await host.settle();
   const els = () => elements(host.tree);
@@ -130,19 +130,66 @@ describe('Step 3 while the plan in use leaves orders unserved (review of 9 Oct 2
     expect(byId(t, 'optimize-btn').props.disabled).toBe(true);
     expect(step3(t).props.done).toBe(true);
 
-    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90 } };
+    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90, replan: 2 } };
     t.dialog('LocationDialog').props.onSaved(); // any refresh of the day
     await t.host.settle();
     expect(textOf(step3(t))).not.toContain('The plan is up to date with all orders.');
-    expect(textOf(byId(t, 'unserved-left'))).toContain('2 order(s) (90 cases) are left unserved by this plan: their reasons are under the plan below. RE-PLAN');
+    expect(textOf(byId(t, 'unserved-left'))).toBe(
+      "2 order(s) (90 cases) are left unserved by this plan: their reasons are under the plan below. RE-PLAN tries them again, for example after a truck was added or a customer's data was fixed.",
+    );
     expect(byId(t, 'optimize-btn').props.disabled).toBe(false);
     expect(step3(t).props.done).toBe(false);
     expect(step3(t).props.summary).toBe('Plan version 1 ready · 2 order(s) unserved');
   });
 
+  it('review of 5614ba9: unserved orders no re-plan can place now (a customer still without a pin, cases heavier than any truck) leave RE-PLAN off and the step done, and say so', async () => {
+    const t = await mountDay('PLANNED');
+    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90, replan: 0 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    // Before: RE-PLAN on and the step never done while any order was unserved.
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(true);
+    expect(step3(t).props.done).toBe(true);
+    // Still said: how many are unserved, never "up to date with all orders".
+    expect(step3(t).props.summary).toBe('Plan version 1 ready · 2 order(s) unserved');
+    expect(textOf(step3(t))).not.toContain('The plan is up to date with all orders.');
+    expect(textOf(byId(t, 'unserved-left'))).toBe(
+      "2 order(s) (90 cases) are left unserved by this plan: their reasons are under the plan below. RE-PLAN cannot place them until what their reasons say is fixed (for example a customer's location, or a case weight heavier than any truck).",
+    );
+
+    // Some of them: RE-PLAN on for those.
+    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90, replan: 1 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(false);
+    expect(step3(t).props.done).toBe(false);
+    expect(textOf(byId(t, 'unserved-left'))).toContain('RE-PLAN tries 1 of them again; the others stay unserved until what their reasons say is fixed');
+  });
+
+  it('review of 5614ba9: on a day that is over, Step 3 points to Bring forward, not RE-PLAN', async () => {
+    const t = await mountDay('PLANNED');
+    // 28 Sep seen on 29 Sep (the server counts no re-plan work on a day that is over).
+    answers.day = { ...day('PLANNED'), today: '2026-09-29', tomorrow: '2026-09-30', unserved: { orders: 1, cases: 40, replan: 0 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(true);
+    expect(textOf(byId(t, 'unserved-left'))).toBe(
+      '1 order(s) (40 cases) are left unserved by this plan: their reasons are under the plan below. This day is over: bring them forward to a later day, from that day\'s screen ("Not delivered on earlier days").',
+    );
+  });
+
+  it('review of 5614ba9: someone who cannot plan is told how many are unserved, never "RE-PLAN tries them again" (there is no RE-PLAN button for them)', async () => {
+    const t = await mountDay('PLANNED', false);
+    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90, replan: 2 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    expect(byId(t, 'optimize-btn')).toBeUndefined();
+    expect(textOf(byId(t, 'unserved-left'))).toBe('2 order(s) (90 cases) are left unserved by this plan: their reasons are under the plan below.');
+  });
+
   it('a pin saved (or the customer reactivated) for an unserved order, and a truck taken out of service: the out-of-date banner says so', async () => {
     const t = await mountDay('PLANNED');
-    answers.day = { ...day('PLANNED'), outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, unservedNowPlannable: 1, trucksInactive: 1 }, unserved: { orders: 1, cases: 40 } };
+    answers.day = { ...day('PLANNED'), outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, unservedNowPlannable: 1, trucksInactive: 1 }, unserved: { orders: 1, cases: 40, replan: 1 } };
     t.dialog('LocationDialog').props.onSaved();
     await t.host.settle();
     const banner = textOf(byId(t, 'plan-outdated'));

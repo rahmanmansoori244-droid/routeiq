@@ -10,9 +10,13 @@
  * The header and footer stick where the content's p-6 puts them anyway (a sticky box stops at the
  * scroll container's padding: top-0 / bottom-0) and use no margins, so a dialog that fits the window
  * looks exactly as before.
+ *
+ * Review of da76343: the Close (X) button was absolute inside the scrolling content, so it scrolled
+ * away with the text (250 px above the window in Edit truck at 1366x657, scrolled 300 px). Now the
+ * dialog scrolls in a box inside it and the X sits outside that box, in the dialog's own corner.
  */
 import { describe, expect, it } from 'vitest';
-import { elements } from './hook-host';
+import { elements, textOf } from './hook-host';
 import { DialogContent, DialogFooter, DialogHeader } from '@/components/ui/dialog';
 import { AlertDialogContent } from '@/components/ui/alert-dialog';
 
@@ -25,14 +29,41 @@ function contentClasses(Comp: any, props: Record<string, unknown>): Set<string> 
   return classesOf(el.props.className);
 }
 
+/** DialogContent's parts: the Radix Content (the dialog on screen), the boxes that scroll, and the Close (X) button. */
+function dialogParts(props: Record<string, unknown> = {}) {
+  const tree = (DialogContent as any).render({ ...props, children: 'BODY' }, null);
+  const els = elements(tree);
+  const withClass = (c: string) => els.filter((e) => typeof e.props?.className === 'string' && classesOf(e.props.className).has(c));
+  const content = withClass('fixed')[0];
+  const scrolling = withClass('overflow-y-auto');
+  const close = els.find((e) => typeof e.props?.className === 'string' && e.props.className.includes('absolute right-4 top-4'));
+  return { content, scrolling, close };
+}
+
 describe('dialogs scroll inside themselves (ui-rest-4)', () => {
   it('DialogContent is at most 90% of the window high and scrolls (also with a width from the call site)', () => {
     for (const className of [undefined, 'sm:max-w-lg', 'max-w-2xl']) {
-      const c = contentClasses(DialogContent, { className });
+      const { content, scrolling } = dialogParts({ className });
+      const c = classesOf(content.props.className);
       expect(c.has('max-h-[90dvh]'), String(className)).toBe(true);
-      expect(c.has('overflow-y-auto'), String(className)).toBe(true);
-      expect(c.has('p-6')).toBe(true); // the sticky offsets below assume the content's padding
+      if (className) expect(c.has(className), className).toBe(true);
+      // One box scrolls, and the dialog's content is in it.
+      expect(scrolling, String(className)).toHaveLength(1);
+      expect(textOf(scrolling[0])).toBe('BODY');
+      // The sticky offsets below assume the scrolling box's padding; the content keeps its gap-4 grid.
+      expect([...classesOf(scrolling[0].props.className)]).toEqual(expect.arrayContaining(['grid', 'gap-4', 'p-6']));
     }
+  });
+
+  it('the Close (X) button stays in view when the dialog is scrolled: it is outside the box that scrolls (review of da76343)', () => {
+    const { content, scrolling, close } = dialogParts();
+    expect(close).toBeDefined();
+    // Before: the dialog itself scrolled (overflow-y-auto on it), with the X absolute inside it.
+    expect(classesOf(content.props.className).has('overflow-y-auto')).toBe(false);
+    expect(scrolling).toHaveLength(1);
+    expect(elements(scrolling[0].props.children)).not.toContain(close);
+    // In the dialog's own corner: a direct child of the Radix Content, beside the scrolling box.
+    expect([content.props.children].flat()).toEqual(expect.arrayContaining([scrolling[0], close]));
   });
 
   it('AlertDialogContent too', () => {

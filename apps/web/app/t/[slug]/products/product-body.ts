@@ -12,6 +12,12 @@ export interface ProductFormState {
   /** Cases per pallet as typed; empty = not set. */
   casesPerPallet: string;
   active: boolean;
+  /**
+   * Edit only: "Weight not known" ticked on a product that has a case weight. The weight is then sent
+   * as 0 (unknown) with `clearWeight`, which PATCH /api/products/[id] needs before it saves 0 over a
+   * known weight (an emptied field is refused, never saved as unknown by accident).
+   */
+  clearWeight?: boolean;
 }
 
 export function productRequestBody(mode: 'create' | 'edit', form: ProductFormState) {
@@ -23,5 +29,6 @@ export function productRequestBody(mode: 'create' | 'edit', form: ProductFormSta
     casesPerPallet: form.casesPerPallet.trim() === '' ? null : Number(form.casesPerPallet),
     active: form.active,
   };
-  return mode === 'create' ? { code: form.code, ...fields } : fields;
+  if (mode === 'create') return { code: form.code, ...fields };
+  return form.clearWeight ? { ...fields, weightPerCaseKg: 0, clearWeight: true } : fields;
 }

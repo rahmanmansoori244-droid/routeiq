@@ -26,7 +26,7 @@ import { lineWeightStatus, orderUsesLineWeights, plannedKgDiffers, planningKgPer
 import { PALLET_FILL_DEFAULT, palletRoomUnits, validPalletFactor } from './pallets';
 import { caseHeavierThanAnyTruck, maxCasePayloadKg, portionPlannedKgPerCase, readPortionLines, rowPalletUnitsNow, type FleetTruck } from './split';
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot, truckOutOfService } from './snapshots';
-import { unservedNowPlannable } from './left-out-note';
+import { replanCouldPlace, unservedNowPlannable } from './left-out-note';
 import { dataGaps, type DataGap } from './data-collection';
 import type { ServiceArea } from './location-input';
 import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
@@ -166,6 +166,12 @@ export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
 export interface DayUnserved {
   orders: number;
   cases: number;
+  /**
+   * Of them, the orders a re-plan could place now (left-out-note.ts replanCouldPlace): not those left
+   * out for their customer's data until it is fixed, nor cases still heavier than any truck, and none
+   * on a day that is over (bring them forward instead). Step 3 keeps RE-PLAN on only for these.
+   */
+  replan: number;
 }
 
 /** PR9: an order of this day brought forward from an earlier day (badge "Carried over from 26 Sep"). */
@@ -214,7 +220,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0, replan: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -293,6 +299,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     if (now) outdated.palletFactorCases += now.cases;
   }
   const openCasesOf = new Map<string, number>();
+  // The case weight each open line is planned with now (planningKgPerCase), for the unserved cases
+  // heavier than any truck below.
+  const kgPerCaseNow = new Map<string, number>();
   for (const o of orders) {
     if (frozenWhole.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED') continue;
     const orderLevel = !orderUsesLineWeights(o);
@@ -308,6 +317,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       totalWeightKg: o.totalWeightKg,
       lines: o.lines.map((l) => ({ id: l.id, cases: l.cases, weightKg: l.weightKg, fromMaster: l.weightFromMaster, productKgPerCase: l.product.weightPerCaseKg })),
     });
+    for (const [lineId, kg] of kgPerCaseOf) kgPerCaseNow.set(lineId, kg);
     let open = 0;
     for (const l of o.lines) {
       const cases = Math.max(0, l.cases - (frozenLineCases.get(l.id) ?? 0));
@@ -353,12 +363,23 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const unservedOpen = new Set<string>();
   const nowPlannable = new Set<string>();
   let unservedCases = 0;
+  // Review of 5614ba9: of them, the orders a re-plan could place now (`unserved.replan`, which keeps
+  // Step 3's RE-PLAN on; replanCouldPlace). Cases left out as heavier than any truck count only once
+  // they are not any more (a case weight corrected, a bigger payload): checked below with the day's
+  // trucks (`heavyLines`: the lines each row left out, every line of the order when it names none).
+  const replan = new Set<string>();
+  const heavyLines = new Map<string, string[]>();
   for (const u of chosen?.unservedOrders ?? []) {
     const o = orderById.get(u.orderId);
     if (!o || !openCasesOf.has(o.id)) continue;
     unservedOpen.add(o.id);
     unservedCases += u.portionCases ?? o.totalCases;
-    if (unservedNowPlannable(u.reasonCode, o.customer, area)) nowPlannable.add(o.id);
+    const plannable = unservedNowPlannable(u.reasonCode, o.customer, area);
+    if (plannable) nowPlannable.add(o.id);
+    if (u.reasonCode === 'EXCEEDS_ANY_TRUCK_CAPACITY') {
+      const ids = readPortionLines(u.portionLinesJson)?.map((x) => x.lineId) ?? o.lines.map((l) => l.id);
+      heavyLines.set(o.id, [...(heavyLines.get(o.id) ?? []), ...ids]);
+    } else if (replanCouldPlace(u.reasonCode, plannable, false)) replan.add(o.id);
   }
   outdated.unservedNowPlannable = nowPlannable.size;
   // Review F08: customers on PLANNED loads whose pin or receiving hours were corrected after the
@@ -570,13 +591,12 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     select: { id: true, code: true, capacityCases: true, capacityWeightKg: true, maxTripsPerDay: true, bays: true },
   });
   const bayTrucks = trucks.filter((t) => typeof t.bays === 'number');
-  // Pallets: the products OPTIMIZE / RE-PLAN refuse for (PALLET_FACTOR_REQUIRED), only with trucks with
-  // bays. buildDispatchRequest looks for factors after it has left out the orders of deactivated
-  // customers, of customers without a usable location and the cases heavier than any truck (pallets
-  // review: the red list named them although OPTIMIZE does not refuse for them), so this list does too.
-  const noFactor = new Map<string, PalletFactorGap>();
-  if (bayTrucks.length && factorGaps.length) {
-    // The loads each truck has left today, as the builder counts them (its locked / loading / dispatched loads).
+  // The heaviest case a truck of the day can take (maxCasePayloadKg; null = no limit), as
+  // buildDispatchRequest reads it: with the loads each truck has left today (its locked / loading /
+  // dispatched loads counted). Read only when needed, once.
+  let maxCaseKg: number | null | undefined;
+  const maxCaseKgNow = async () => {
+    if (maxCaseKg !== undefined) return maxCaseKg;
     const frozenTrips = plan
       ? await db.planLoad.groupBy({ by: ['truckId'], where: { runId: plan.id, status: { not: 'PLANNED' } }, _count: { _all: true } })
       : [];
@@ -588,7 +608,23 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenOf.get(t.id) ?? 0),
       ...(typeof t.bays === 'number' ? { palletUnits: palletRoomUnits(t.bays, cfg.palletFillPct ?? PALLET_FILL_DEFAULT) } : {}),
     }));
-    const maxKg = maxCasePayloadKg(fleet);
+    maxCaseKg = maxCasePayloadKg(fleet);
+    return maxCaseKg;
+  };
+  // Unserved cases heavier than any truck: a re-plan places them once one of their lines fits a truck
+  // now (the case weight corrected, or a truck with a bigger payload).
+  for (const [orderId, lineIds] of heavyLines) {
+    const maxKg = await maxCaseKgNow();
+    const stillTooHeavy = lineIds.every((id) => caseHeavierThanAnyTruck(kgPerCaseNow.get(id) ?? 0, maxKg));
+    if (replanCouldPlace('EXCEEDS_ANY_TRUCK_CAPACITY', false, stillTooHeavy)) replan.add(orderId);
+  }
+  // Pallets: the products OPTIMIZE / RE-PLAN refuse for (PALLET_FACTOR_REQUIRED), only with trucks with
+  // bays. buildDispatchRequest looks for factors after it has left out the orders of deactivated
+  // customers, of customers without a usable location and the cases heavier than any truck (pallets
+  // review: the red list named them although OPTIMIZE does not refuse for them), so this list does too.
+  const noFactor = new Map<string, PalletFactorGap>();
+  if (bayTrucks.length && factorGaps.length) {
+    const maxKg = await maxCaseKgNow();
     for (const g of factorGaps) {
       if (!g.o.customer.active || locationBlocksDelivery(g.o.customer, area) || caseHeavierThanAnyTruck(g.kgPerCase, maxKg)) continue;
       const f = noFactor.get(g.code) ?? { code: g.code, name: g.name, lines: 0, cases: 0 };
@@ -655,9 +691,13 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     /**
      * Review of 9 Oct 2026 (ui-dispatch-2): the orders the plan in use leaves unserved that are still
      * open on this day, with their cases. Step 3 never says "up to date with all orders" while there
-     * are any, and keeps RE-PLAN on, as the plan screen's Re-plan does (nothingToReplan).
+     * are any. It keeps RE-PLAN on, and the step not done, only for `replan`: those a re-plan could
+     * place now (review of 5614ba9; before, any unserved order did, also a customer still without a
+     * pin). None on a day that is over: its orders are brought forward to a later day, not re-planned.
      */
-    unserved: (plan?.chosenScenarioId ? { orders: unservedOpen.size, cases: unservedCases } : { orders: 0, cases: 0 }) as DayUnserved,
+    unserved: (plan?.chosenScenarioId
+      ? { orders: unservedOpen.size, cases: unservedCases, replan: date < base.today ? 0 : replan.size }
+      : { orders: 0, cases: 0, replan: 0 }) as DayUnserved,
     carriedIn,
     carriedOut,
     /**

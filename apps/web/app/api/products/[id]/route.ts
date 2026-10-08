@@ -1,5 +1,5 @@
 import { withTenantApi, ok, parseBody, notFoundIfNull, fail } from '@/lib/api';
-import { productSchema } from '@/lib/schemas';
+import { productPatchSchema } from '@/lib/schemas';
 import { audit } from '@/lib/audit';
 import { twinsOf } from '@/lib/product-code';
 import { caseWeightChangedNote, deactivateWarning, openMasterWeighedLines, openOrders } from '@/lib/dispatch/open-orders';
@@ -11,7 +11,21 @@ export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
     async (r, { db, user, ip }) => {
       const before = notFoundIfNull(await db.product.findUnique({ where: { id: params.id } }));
-      const input = await parseBody(r, productSchema.partial());
+      const { clearWeight, ...input } = await parseBody(r, productPatchSchema);
+      // A known case weight becomes 0 (unknown) only on purpose: the Edit dialog's "Weight not known"
+      // sends clearWeight. An emptied or 0 weight without it is refused, never saved: with payload 0
+      // on every truck OPTIMIZE never asks for a weight (WEIGHT_REQUIRED), so a weight lost by
+      // accident would go unnoticed (review of da76343).
+      const clearsWeight = before.weightPerCaseKg > 0 && input.weightPerCaseKg !== undefined && !(input.weightPerCaseKg > 0);
+      if (clearsWeight && clearWeight !== true) {
+        return fail(
+          {
+            code: 'WEIGHT_CLEAR_UNCONFIRMED',
+            message: `${before.code} has a case weight of ${before.weightPerCaseKg} kg. Enter the correct weight, or tick "Weight not known" to clear it.`,
+          },
+          422,
+        );
+      }
       if (input.code !== undefined && input.code !== before.code) {
         // Another product whose code is the same one (letter case, spacing: lib/product-code.ts).
         const twin = twinsOf(await db.product.findMany({ where: { id: { not: before.id } }, select: { id: true, code: true } }), input.code)[0];
@@ -32,8 +46,13 @@ export const PATCH = (req: Request, { params }: Params) =>
       const deactivated = before.active && !after.active ? deactivateWarning('product', await openOrders(user.tenantId, { productId: after.id })) : null;
       // A new or corrected case weight reaches the open lines weighed from it at the next
       // optimize or re-plan (say how many, so a correction is not expected to show at once).
-      const weightNote =
-        after.weightPerCaseKg > 0 && after.weightPerCaseKg !== before.weightPerCaseKg ? caseWeightChangedNote(await openMasterWeighedLines(user.tenantId, after.id)) : null;
+      // A weight cleared on purpose: lines already weighed keep their kg (weights.ts masterLineKg),
+      // new ones come in at 0 kg (unknown).
+      const weightNote = clearsWeight
+        ? `The case weight of ${after.code} was cleared (unknown). Order lines already weighed with it keep their kg; new order lines of it with no weight of their own come in at 0 kg (unknown) until a case weight is entered.`
+        : after.weightPerCaseKg > 0 && after.weightPerCaseKg !== before.weightPerCaseKg
+          ? caseWeightChangedNote(await openMasterWeighedLines(user.tenantId, after.id))
+          : null;
       // Cases per pallet changed: loads already planned keep the pallets they were planned with.
       const palletNote = palletFactorChangedNote(before.casesPerPallet, after.casesPerPallet);
       const warning = [deactivated, weightNote, palletNote].filter(Boolean).join(' ') || null;

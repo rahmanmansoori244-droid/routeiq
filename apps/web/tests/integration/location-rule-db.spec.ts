@@ -340,11 +340,13 @@ describe('3b. a pin saved after "optimize anyway" (review of 9 Oct 2026)', () =>
       expect(await prisma.unservedOrder.findFirstOrThrow({ where: { scenarioId: plan.chosenScenarioId!, orderId: oNone.id } })).toMatchObject({ reasonCode: 'MISSING_COORDINATES' });
       const before = await getDayOverview(tenantId, { date: day, depotId });
       expect(before.outdated).toEqual(UP_TO_DATE);
-      expect(before.unserved).toEqual({ orders: 1, cases: 10 });
+      // Unserved, but no re-plan work while the customer has no pin (review of 5614ba9: RE-PLAN stays off).
+      expect(before.unserved).toEqual({ orders: 1, cases: 10, replan: 0 });
 
       expect((await put(none.id, { lat: 23.6402, lng: 58.4403, source: 'MAP_PIN' })).status).toBe(200);
       const after = await getDayOverview(tenantId, { date: day, depotId });
       expect(after.outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+      expect(after.unserved).toEqual({ orders: 1, cases: 10, replan: 1 });
       expect((await getPlanDetail(tenantId, run.id))!.warnings).toContain(
         'A usable location was saved, or the customer reactivated, after this plan was made: L4. Its order is still unserved in this plan (the reason shown is from when it was made) - re-plan to plan it.',
       );

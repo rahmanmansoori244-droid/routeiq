@@ -2,10 +2,11 @@
  * The plan screen's warning when a plan leaves out priority 1-3 orders while trucks stand unused
  * (outside benchmark of 8 Oct 2026, F02 / F07; lib/dispatch/left-out-note.ts), counting only the
  * orders a longer search or an unused truck could still place (review of 9 Oct 2026); and the orders
- * left out for their customer's data that a re-plan would plan now.
+ * left out for their customer's data that a re-plan would plan now; and (review of 5614ba9) which
+ * unserved orders a re-plan could place now, the ones that keep the day screen's RE-PLAN on.
  */
 import { describe, expect, it } from 'vitest';
-import { idleTrucksNote, unservedNowPlannable } from '@/lib/dispatch/left-out-note';
+import { idleTrucksNote, replanCouldPlace, unservedNowPlannable } from '@/lib/dispatch/left-out-note';
 import { DEFAULT_SERVICE_AREA } from '@/lib/dispatch/location-input';
 
 describe('idleTrucksNote', () => {
@@ -98,6 +99,26 @@ describe('unservedNowPlannable (review of 9 Oct 2026)', () => {
   it('other reasons are not about the customer data: never', () => {
     for (const reason of ['SOLVER_DROPPED_LOW_PRIORITY', 'EXCEEDS_ANY_TRUCK_CAPACITY', 'HARD_WINDOW_INFEASIBLE']) {
       expect(unservedNowPlannable(reason, pin, DEFAULT_SERVICE_AREA), reason).toBe(false);
+    }
+  });
+});
+
+describe('replanCouldPlace: the unserved orders that keep Step 3 RE-PLAN on (review of 5614ba9)', () => {
+  it('customer data: only once fixed (a pin saved, the customer reactivated)', () => {
+    for (const reason of ['MISSING_COORDINATES', 'INVALID_LOCATION', 'INVALID_CUSTOMER']) {
+      expect(replanCouldPlace(reason, false, false), reason).toBe(false);
+      expect(replanCouldPlace(reason, true, false), reason).toBe(true);
+    }
+  });
+
+  it('cases heavier than any truck: only once they are not any more (a case weight corrected, a bigger payload)', () => {
+    expect(replanCouldPlace('EXCEEDS_ANY_TRUCK_CAPACITY', false, true)).toBe(false);
+    expect(replanCouldPlace('EXCEEDS_ANY_TRUCK_CAPACITY', false, false)).toBe(true);
+  });
+
+  it('any other reason is one a re-plan tries again (a truck added, another search, a truck free from the start of the day)', () => {
+    for (const reason of ['SOLVER_DROPPED_LOW_PRIORITY', 'LATE_ORDER_NO_CAPACITY', 'NO_AVAILABLE_TRUCK', 'TRIP_LIMIT', 'HARD_WINDOW_INFEASIBLE', 'SHIFT_LIMIT', 'INFEASIBLE', 'UNKNOWN']) {
+      expect(replanCouldPlace(reason, false, false), reason).toBe(true);
     }
   });
 });

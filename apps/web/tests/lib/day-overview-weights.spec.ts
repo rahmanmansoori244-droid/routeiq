@@ -14,9 +14,12 @@
  * Review of 9 Oct 2026: a truck with PLANNED loads taken out of service since (`outdated.trucksInactive`),
  * and an order left unserved for its customer's data that a re-plan would plan now - a pin saved or the
  * customer reactivated since (`outdated.unservedNowPlannable`) - make the plan out of date too; the
- * plan's still-open unserved orders are counted (`unserved`) for Step 3.
+ * plan's still-open unserved orders are counted (`unserved`) for Step 3. Review of 5614ba9: of them,
+ * `unserved.replan` counts only those a re-plan could place now (not a customer still without a pin,
+ * cases still heavier than any truck, nor any on a day that is over), the ones that keep RE-PLAN on.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { addDaysIso, todayIso } from '@/lib/dispatch/time';
 
 interface State {
   orders: unknown[];
@@ -27,6 +30,8 @@ interface State {
   inputs?: unknown;
   /** The chosen option's unserved rows. */
   unserved: unknown[];
+  /** The depot's trucks of the day (default: one truck of 600 cases, no payload). */
+  trucks?: unknown[];
 }
 const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [], unserved: [] };
 
@@ -52,7 +57,7 @@ vi.mock('@/lib/tenant', () => ({
     customerTypeProfile: { findMany: async () => [] },
     runJob: { findFirst: async () => null },
     planLoad: { groupBy: async () => [] },
-    truck: { findMany: async () => [{ capacityCases: 600 }] },
+    truck: { findMany: async () => state.trucks ?? [{ capacityCases: 600 }] },
     uploadBatch: { findMany: async () => [] },
   }),
 }));
@@ -88,8 +93,8 @@ function part(status: string, cases: number, kgPerCase: number | undefined, port
   };
 }
 
-async function day() {
-  return getDayOverview('tA', { date: '2026-09-27', depotId: 'D1' });
+async function day(date = '2026-09-27') {
+  return getDayOverview('tA', { date, depotId: 'D1' });
 }
 
 beforeEach(() => {
@@ -97,6 +102,7 @@ beforeEach(() => {
   state.plannedLoads = [];
   state.inputs = undefined;
   state.unserved = [];
+  state.trucks = undefined;
 });
 
 describe('day overview: case weights of a split order partly on a frozen load (PR4 review)', () => {
@@ -274,46 +280,106 @@ describe('day overview: unserved orders whose customer data was fixed since (rev
     lines: [{ id: 'ln1', cases: 1000, weightKg: 10000, weightFromMaster: false, product: { code: 'P1', name: 'Water', weightPerCaseKg: 10 } }],
   });
   const left = (reasonCode: string) => [{ orderId: 'O1', reasonCode, portionLinesJson: null, portionCases: null }];
+  // A day that is not over (tomorrow in the company's time zone): its unserved orders can be re-planned.
+  const DAY = addDaysIso(todayIso('Asia/Muscat'), 1);
 
   it('a pin saved since for an order left out without a location: out of date, RE-PLAN plans it (before: "up to date", RE-PLAN off)', async () => {
     state.orders = [known()];
     state.assignments = [];
     state.unserved = left('MISSING_COORDINATES');
-    const d = await day();
+    const d = await day(DAY);
     expect(d.outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
-    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000, replan: 1 });
   });
 
   it('a customer reactivated since: the same', async () => {
     state.orders = [known()];
     state.assignments = [];
     state.unserved = left('INVALID_CUSTOMER');
-    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+    const d = await day(DAY);
+    expect(d.outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000, replan: 1 });
   });
 
-  it('still without a usable location, or left out by the search: not out of date, but still unserved for Step 3', async () => {
+  it('still without a usable location: not out of date, still unserved for Step 3, but no re-plan work (review of 5614ba9: it kept RE-PLAN on)', async () => {
     state.orders = [known({ lat: null, lng: null, locationVerified: false, geocodeConfidence: 'MISSING' })];
     state.assignments = [];
     state.unserved = left('MISSING_COORDINATES');
-    let d = await day();
+    const d = await day(DAY);
     expect(d.outdated).toEqual(UP_TO_DATE);
-    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000, replan: 0 });
+  });
+
+  it('left out by the search: not out of date, still unserved, and re-plan work (a truck added, another search)', async () => {
     state.orders = [known()];
+    state.assignments = [];
     state.unserved = left('SOLVER_DROPPED_LOW_PRIORITY');
-    d = await day();
+    const d = await day(DAY);
     expect(d.outdated).toEqual(UP_TO_DATE);
-    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000, replan: 1 });
   });
 
   it("not an order no longer open on this day: dispatched since, or brought forward to a later day (not among the day's orders)", async () => {
     state.orders = [known({}, 'DISPATCHED')];
     state.assignments = [];
     state.unserved = left('MISSING_COORDINATES');
-    let d = await day();
+    let d = await day(DAY);
     expect(d.outdated).toEqual(UP_TO_DATE);
-    expect(d.unserved).toEqual({ orders: 0, cases: 0 });
+    expect(d.unserved).toEqual({ orders: 0, cases: 0, replan: 0 });
     state.orders = [];
-    d = await day();
-    expect(d.unserved).toEqual({ orders: 0, cases: 0 });
+    d = await day(DAY);
+    expect(d.unserved).toEqual({ orders: 0, cases: 0, replan: 0 });
+  });
+});
+
+describe('day overview: which unserved orders a re-plan could place now (review of 5614ba9)', () => {
+  const left = (reasonCode: string) => [{ orderId: 'O1', reasonCode, portionLinesJson: null, portionCases: null }];
+  const DAY = addDaysIso(todayIso('Asia/Muscat'), 1);
+  // The depot's one truck, with a payload of `kg` (0 = no weight limit), two loads a day.
+  const payload = (kg: number) => [{ id: 't1', code: 'T01', capacityCases: 600, capacityWeightKg: kg, maxTripsPerDay: 2, bays: null }];
+
+  it('cases heavier than any truck (1500 kg per case, typed per pallet; payload 1,000 kg): no re-plan work while they still are', async () => {
+    state.orders = [order(1500, 1_500_000)];
+    state.assignments = [];
+    state.trucks = payload(1000);
+    state.unserved = left('EXCEEDS_ANY_TRUCK_CAPACITY');
+    expect((await day(DAY)).unserved).toEqual({ orders: 1, cases: 1000, replan: 0 });
+  });
+
+  it('re-plan work once they fit a truck: the case weight corrected (1.5 kg), a bigger payload, or no payload at all (no weight limit)', async () => {
+    state.unserved = left('EXCEEDS_ANY_TRUCK_CAPACITY');
+    state.assignments = [];
+    state.orders = [order(1.5, 1_500_000)]; // the line follows the master's corrected weight
+    state.trucks = payload(1000);
+    expect((await day(DAY)).unserved.replan).toBe(1);
+    state.orders = [order(1500, 1_500_000)];
+    state.trucks = payload(2000);
+    expect((await day(DAY)).unserved.replan).toBe(1);
+    state.trucks = payload(0);
+    expect((await day(DAY)).unserved.replan).toBe(1);
+  });
+
+  it('only the lines the row left out are judged (a split order: the heavy line, not the rest of the order)', async () => {
+    state.orders = [
+      {
+        ...order(10),
+        lines: [
+          { id: 'ln1', cases: 10, weightKg: 15000, weightFromMaster: true, product: { code: 'P1', name: 'Water', weightPerCaseKg: 1500 } },
+          { id: 'ln2', cases: 990, weightKg: 9900, weightFromMaster: true, product: { code: 'P2', name: 'Small', weightPerCaseKg: 10 } },
+        ],
+      },
+    ];
+    state.assignments = [];
+    state.trucks = payload(1000);
+    state.unserved = [{ orderId: 'O1', reasonCode: 'EXCEEDS_ANY_TRUCK_CAPACITY', portionLinesJson: [{ lineId: 'ln1', cases: 10 }], portionCases: 10 }];
+    expect((await day(DAY)).unserved).toEqual({ orders: 1, cases: 10, replan: 0 });
+  });
+
+  it('a day that is over: its unserved orders are still counted, but none is re-plan work (bring them forward instead); today still is', async () => {
+    state.orders = [order(10, 10000)];
+    state.assignments = [];
+    state.unserved = left('SOLVER_DROPPED_LOW_PRIORITY');
+    expect((await day(addDaysIso(todayIso('Asia/Muscat'), -1))).unserved).toEqual({ orders: 1, cases: 1000, replan: 0 });
+    expect((await day(todayIso('Asia/Muscat'))).unserved).toEqual({ orders: 1, cases: 1000, replan: 1 });
   });
 });

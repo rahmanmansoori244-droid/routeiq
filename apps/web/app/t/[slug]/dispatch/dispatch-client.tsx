@@ -117,8 +117,12 @@ interface Day {
   pending: { count: number; cases: number; late: number; carried?: number };
   /** Orders with cases not yet on a locked, loading or dispatched load (0 = nothing left to plan). */
   openOrders?: number;
-  /** The orders the plan in use leaves unserved that are still open on this day (a re-plan tries them again). */
-  unserved?: { orders: number; cases: number };
+  /**
+   * The orders the plan in use leaves unserved that are still open on this day; `replan`: of them, those
+   * a re-plan could place now (not a customer still without a pin, cases still heavier than any truck,
+   * or any on a day that is over).
+   */
+  unserved?: { orders: number; cases: number; replan: number };
   /** PR9: orders of this day brought forward from earlier days (badge "Carried over from 26 Sep"). */
   carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
   /** PR9: orders of this day brought forward to later days (no longer open here). */
@@ -461,10 +465,13 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       (outdated.palletFactorCases ?? 0) > 0 ||
       (outdated.trucksInactive ?? 0) > 0 ||
       (outdated.unservedNowPlannable ?? 0) > 0);
-  // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved are work a re-plan
-  // tries again (the plan screen's Re-plan is on for them, nothingToReplan), for example after a truck
-  // was added: Step 3 keeps RE-PLAN on and says so, never "up to date with all orders" and a green tick.
+  // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved: Step 3 says how many,
+  // never "up to date with all orders". It keeps RE-PLAN on, and the step not done, only for those a
+  // re-plan could place now (`unserved.replan`, review of 5614ba9), for example after a truck was added
+  // or a pin was saved - not for a customer still without a pin, cases still heavier than any truck, or
+  // a day that is over (bring them forward instead), where RE-PLAN would change nothing.
   const unservedLeft = day.plan?.chosen ? (day.unserved?.orders ?? 0) : 0;
+  const unservedReplan = day.plan?.chosen ? (day.unserved?.replan ?? 0) : 0;
   // Every order is already on a locked, loading or dispatched load, or was brought forward to a
   // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
   // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
@@ -487,7 +494,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
   // FAILED, holding the plan that was dispatched).
   const allOut = loadCount > 0 && (byStatus.DISPATCHED ?? 0) + (byStatus.COMPLETED ?? 0) === loadCount;
-  const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || unservedLeft > 0 || planOutdated || lastFailed);
+  const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || unservedReplan > 0 || planOutdated || lastFailed);
   const fixWeight = weightFixText(canEditProducts);
   const selectedDate = date ?? day.date;
   const selectedDepot = depotId ?? day.depot.id;
@@ -657,7 +664,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       <Step
         n={3}
         title="Optimize"
-        done={!!day.plan?.chosen && day.pending.count === 0 && unservedLeft === 0 && !planOutdated && !running}
+        done={!!day.plan?.chosen && day.pending.count === 0 && unservedReplan === 0 && !planOutdated && !running}
         summary={
           running
             ? (day.plan?.job ? searchProgressText(day.plan.job, now, day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT) : null) ?? `Optimizing… ${day.plan?.job?.message ?? ''}`
@@ -716,8 +723,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </p>
         ) : unservedLeft > 0 && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="unserved-left">
-            {unservedLeft} order(s) ({(day.unserved?.cases ?? 0).toLocaleString()} cases) are left unserved by this plan: their reasons are under the plan below. RE-PLAN
-            tries them again, for example after a truck was added or a customer&apos;s data was fixed.
+            {unservedLeft} order(s) ({(day.unserved?.cases ?? 0).toLocaleString()} cases) are left unserved by this plan: their reasons are under the plan below.
+            {/* What to do next is said only to those who can plan (no RE-PLAN button otherwise). */}
+            {canPlan ? ` ${unservedNextStep(unservedLeft, unservedReplan, day.date < day.today)}` : null}
           </p>
         ) : !needsPlan && day.plan?.chosen ? (
           <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>
@@ -946,6 +954,18 @@ function ValidationPanel({ v, slug, fixWeight, lateReason, setLateReason, onConf
       </div>
     </div>
   );
+}
+
+/**
+ * Step 3's next step for the orders the plan leaves unserved (`total`), for a dispatcher who can plan:
+ * RE-PLAN only for those it could place now (`replan`, day-overview `unserved.replan`); on a day that
+ * is over, bring them forward to a later day instead (review of 5614ba9).
+ */
+function unservedNextStep(total: number, replan: number, dayOver: boolean): string {
+  if (dayOver) return 'This day is over: bring them forward to a later day, from that day\'s screen ("Not delivered on earlier days").';
+  if (replan >= total) return "RE-PLAN tries them again, for example after a truck was added or a customer's data was fixed.";
+  const fix = "until what their reasons say is fixed (for example a customer's location, or a case weight heavier than any truck)";
+  return replan > 0 ? `RE-PLAN tries ${replan} of them again; the others stay unserved ${fix}.` : `RE-PLAN cannot place them ${fix}.`;
 }
 
 /** "1,140 cases", "148 bays" or "120 bays and 570 cases": a load round of the depot's active trucks. */

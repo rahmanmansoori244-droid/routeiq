@@ -210,6 +210,46 @@ describe('Products: edit (the weight of JA1.5L(6) can be saved)', () => {
   });
 });
 
+describe('Products: edit never clears a known case weight by accident (review of da76343)', () => {
+  // JA1.5L(6) weighs 9.6 kg per case; SS5GB NRB has no weight yet (0 = unknown).
+  beforeEach(() => seedProducts([{ code: 'JA1.5L(6)', weightPerCaseKg: 9.6 }, { code: 'SS5GB NRB' }]));
+  const answer = async (res: Response) => (await res.json()) as { data: { weightPerCaseKg: number; warning?: string } | null; error: any };
+
+  it('a 0, empty or null weight without clearWeight is refused (422 WEIGHT_CLEAR_UNCONFIRMED), the weight kept, nothing audited (before: saved as 0)', async () => {
+    for (const weightPerCaseKg of [0, '', null]) {
+      const res = await edit('p1', { name: 'Jabal', weightPerCaseKg, volumePerCaseL: 9, active: true });
+      expect(res.status, JSON.stringify(weightPerCaseKg)).toBe(422);
+      expect((await answer(res)).error).toEqual({
+        code: 'WEIGHT_CLEAR_UNCONFIRMED',
+        message: 'JA1.5L(6) has a case weight of 9.6 kg. Enter the correct weight, or tick "Weight not known" to clear it.',
+      });
+    }
+    expect(tables.product![0]).toMatchObject({ code: 'JA1.5L(6)', name: 'JA1.5L(6)', weightPerCaseKg: 9.6 });
+    expect(auditCalls).toEqual([]);
+  });
+
+  it('with clearWeight (the dialog\'s "Weight not known") it is cleared, audited, and the answer says what that means', async () => {
+    const res = await edit('p1', { name: 'Jabal', weightPerCaseKg: 0, volumePerCaseL: 9, active: true, clearWeight: true });
+    expect(res.status).toBe(200);
+    expect(tables.product![0]).toMatchObject({ weightPerCaseKg: 0, name: 'Jabal' });
+    expect('clearWeight' in tables.product![0]!).toBe(false);
+    expect(auditCalls[0]).toMatchObject({ action: 'UPDATE', entity: 'Product', entityId: 'p1', afterJson: { weightPerCaseKg: 0 } });
+    expect((await answer(res)).data!.warning).toBe(
+      'The case weight of JA1.5L(6) was cleared (unknown). Order lines already weighed with it keep their kg; new order lines of it with no weight of their own come in at 0 kg (unknown) until a case weight is entered.',
+    );
+  });
+
+  it('controls: a corrected weight, a save without the weight field, and a product with no weight saved at 0 again pass as before', async () => {
+    expect((await edit('p1', { weightPerCaseKg: 9.2 })).status).toBe(200);
+    expect(tables.product![0]!.weightPerCaseKg).toBe(9.2);
+    expect((await edit('p1', { name: 'Jabal 1.5L x6' })).status).toBe(200);
+    expect(tables.product![0]).toMatchObject({ name: 'Jabal 1.5L x6', weightPerCaseKg: 9.2 });
+    const res = await edit('p2', { name: 'Bottle', weightPerCaseKg: 0, volumePerCaseL: 0, active: true });
+    expect(res.status).toBe(200);
+    expect((await answer(res)).data!.warning).toBeUndefined();
+  });
+});
+
 describe('the Products dialog: what the Edit call sends', () => {
   const form = { code: 'JA1.5L(6)', name: 'Jabal 1.5L x6', weightPerCaseKg: '9.6', volumePerCaseL: '9', casesPerPallet: '', active: true };
 
@@ -226,6 +266,14 @@ describe('the Products dialog: what the Edit call sends', () => {
   it('cases per pallet: the number typed, or null when the field is empty (pallets)', () => {
     expect(productRequestBody('edit', { ...form, casesPerPallet: ' 96 ' }).casesPerPallet).toBe(96);
     expect(productRequestBody('edit', { ...form, casesPerPallet: '  ' }).casesPerPallet).toBeNull();
+  });
+
+  it('"Weight not known" (review of da76343): edit sends 0 with clearWeight; create never sends clearWeight', () => {
+    expect(productRequestBody('edit', { ...form, weightPerCaseKg: '', clearWeight: true })).toEqual({
+      name: 'Jabal 1.5L x6', weightPerCaseKg: 0, volumePerCaseL: 9, casesPerPallet: null, active: true, clearWeight: true,
+    });
+    expect('clearWeight' in productRequestBody('edit', { ...form, clearWeight: false })).toBe(false);
+    expect('clearWeight' in productRequestBody('create', { ...form, clearWeight: true })).toBe(false);
   });
 });
 

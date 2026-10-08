@@ -30,10 +30,16 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
  * content is at most 90% of the window high and scrolls, and its header and footer stay in view
  * (sticky), so the title and Save / Cancel are always on screen. Before, the Edit truck dialog
  * (about 1,180 px) put both off-screen on a laptop with no way to scroll to them.
- * A sticky box stops at the content's p-6 (top-0 / bottom-0 are 1.5rem inside the border), where
- * the header and footer are anyway, so a dialog that fits looks exactly as before. Their flat
+ * A sticky box stops at the scrolling box's p-6 (top-0 / bottom-0 are 1.5rem inside the border),
+ * where the header and footer are anyway, so a dialog that fits looks exactly as before. Their flat
  * background-coloured shadows cover that 1.5rem edge, and 0.75rem on the content side, so text
  * scrolled under them does not show around them (no margins: the layout does not change).
+ *
+ * The scrolling happens in a box inside the dialog (the gap-4 grid in p-6 the content itself used
+ * to be), and the Close (X) button sits outside that box, in the dialog's corner, so it stays in view
+ * however far the dialog is scrolled (review of da76343: inside the scrolling content it scrolled
+ * away with the text, 250 px above the window in the Edit truck dialog). The dialog itself does not
+ * scroll; it keeps the size limit, border, rounded corners and the call site's width.
  */
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
@@ -44,13 +50,13 @@ const DialogContent = React.forwardRef<
     <DialogPrimitive.Content
       ref={ref}
       className={cn(
-        'fixed left-[50%] top-[50%] z-50 grid max-h-[90dvh] w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out sm:rounded-lg',
+        'fixed left-[50%] top-[50%] z-50 flex max-h-[90dvh] w-full max-w-lg translate-x-[-50%] translate-y-[-50%] flex-col overflow-hidden border bg-background shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out sm:rounded-lg',
         className,
       )}
       {...props}
     >
-      {children}
-      {/* Above the sticky header (z-10). */}
+      <div className="grid min-h-0 gap-4 overflow-y-auto p-6">{children}</div>
+      {/* Outside the scrolling box, so it never scrolls away; above the sticky header (z-10). */}
       <DialogPrimitive.Close className="absolute right-4 top-4 z-20 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2">
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
