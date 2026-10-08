@@ -228,6 +228,17 @@ export type DriverNoteReason = 'CLASH' | 'INACTIVE' | 'ON_LEAVE' | 'COVER' | 'TR
  */
 export type DriverCoverWhy = 'ENDED' | 'OTHER_TRUCK' | 'OTHER_DEPOT' | 'TRUCK_DRIVER';
 
+/**
+ * A load of ANOTHER depot's live plan that day with its driver (review web-plan-service-1; cross-depot.ts
+ * driverTripsElsewhere): its times already widened by the drive between the two depots, so a trip here
+ * that overlaps them cannot be driven by the same driver. `truckCode` names it with its depot.
+ */
+export interface OtherDepotTrip extends DriverTime {
+  driverId: string;
+  loadNo: number;
+  truckCode: string;
+}
+
 /** A driver note: a trip that lost or changed its driver (never a trip that only got one). */
 export interface DriverNote {
   /** The plan trip's key; null for TRIP_GONE (no such trip in the plan). */
@@ -242,8 +253,8 @@ export interface DriverNote {
   /** The driver the plan gave the trip (null: none, for the dispatcher to fill; TRIP_GONE: no trip). */
   toDriverId: string | null;
   reason: DriverNoteReason;
-  /** CLASH: the trip that got `fromDriverId`. */
-  other: { truckId: string; loadNo: number } | null;
+  /** CLASH: the trip that got `fromDriverId` (`truckCode`: a trip of another depot, named with its depot). */
+  other: { truckId: string; loadNo: number; truckCode?: string } | null;
   /** ON_LEAVE only: the last day of that driver's leave (YYYY-MM-DD). */
   leaveUntil?: string;
   /** COVER only: why the cover does not drive the trip again. */
@@ -292,6 +303,12 @@ const NO_ONE: ReadonlySet<string> = new Set();
  * Notes: a trip whose driver is not its evidence load's driver any more (CLASH, INACTIVE, ON_LEAVE,
  * COVER), and a hand-set driver whose trip the plan does not have (TRIP_GONE: nothing brings it back
  * later). Filling a trip that had no driver is not a note.
+ *
+ * Other depots (review web-plan-service-1): `otherDepots` = the loads of the other depots' live plans of
+ * that day that have a driver, their times widened by the drive between the depots (OtherDepotTrip).
+ * Passes 2 and 3 never give a driver one of them overlaps: he cannot drive both. A trip that loses its
+ * driver to one gets a CLASH note naming that load. Pass 1 is unchanged (the dispatcher's choice; LOCK
+ * refuses it with DRIVER_BUSY_ELSEWHERE while that other load is locked or out).
  */
 export function planDrivers(
   trips: readonly PlanTrip[],
@@ -299,6 +316,7 @@ export function planDrivers(
   usable: ReadonlySet<string>,
   leave: LeaveOnDay = NO_LEAVE,
   elsewhere: ReadonlySet<string> = NO_ONE,
+  otherDepots: readonly OtherDepotTrip[] = [],
 ): { drivers: Map<string, TripDriver>; notes: DriverNote[] } {
   const before = new Map(evidence.map((e) => [tripKey(e), e]));
   const drivers = new Map(trips.map((t) => [t.key, NO_DRIVER]));
@@ -309,6 +327,8 @@ export function planDrivers(
     given.push({ truckId: t.truckId, loadNo: t.loadNo, driverId: d.driverId, departMin: t.departMin, returnMin: t.returnMin });
   };
   const busyWith = (driverId: string, t: PlanTrip) => given.find((g) => g.driverId === driverId && timesOverlap(g, t));
+  // On a load of another depot at an overlapping time (the drive between the depots included).
+  const busyAway = (driverId: string, t: PlanTrip) => otherDepots.find((o) => o.driverId === driverId && timesOverlap(o, t));
   const notes: DriverNote[] = [];
 
   // Pass 1: the dispatcher's own choices.
@@ -330,7 +350,7 @@ export function planDrivers(
       .filter((g) => g.truckId === t.truckId)
       .sort((a, b) => gap(a, t) - gap(b, t) || a.departMin - b.departMin || a.loadNo - b.loadNo)[0]?.driverId ?? null;
   const order = filledIn.map((t) => ({ t, m: moved(t) })).sort((a, b) => (a.m === b.m ? 0 : a.m < b.m ? -1 : 1));
-  const free = (d: string | null, t: PlanTrip): d is string => d !== null && usable.has(d) && !leave.has(d) && !busyWith(d, t);
+  const free = (d: string | null, t: PlanTrip): d is string => d !== null && usable.has(d) && !leave.has(d) && !busyWith(d, t) && !busyAway(d, t);
   // The cover of the trip's truck that day (its usual driver on leave), and "the trip's driver was the cover".
   const coverNow = (t: PlanTrip) => coverFor(t.defaultDriverId, leave);
   const wasCover = (t: PlanTrip, e: EvidenceLoad | undefined) =>
@@ -358,7 +378,7 @@ export function planDrivers(
     const driverId = drivers.get(t.key)!.driverId;
     if (from === null || from === driverId) continue;
     const away = usable.has(from) ? leave.get(from) : undefined;
-    const clash = usable.has(from) && !away ? busyWith(from, t) : undefined;
+    const clash = usable.has(from) && !away ? (busyWith(from, t) ?? busyAway(from, t)) : undefined;
     const cover: DriverCoverWhy | null =
       !usable.has(from) || away || clash || !wasCover(t, e)
         ? null
@@ -370,6 +390,8 @@ export function planDrivers(
               ? 'OTHER_DEPOT'
               : 'TRUCK_DRIVER';
     const other = clash ?? (cover === 'OTHER_TRUCK' ? otherTruckOf(from, t) : undefined);
+    // A load of another depot is named with its depot (OtherDepotTrip.truckCode).
+    const otherCode = (other as Partial<OtherDepotTrip> | undefined)?.truckCode;
     notes.push({
       key: t.key,
       truckId: t.truckId,
@@ -379,7 +401,7 @@ export function planDrivers(
       fromDriverId: from,
       toDriverId: driverId,
       reason: away ? 'ON_LEAVE' : clash ? 'CLASH' : cover ? 'COVER' : 'INACTIVE',
-      other: other ? { truckId: other.truckId, loadNo: other.loadNo } : null,
+      other: other ? { truckId: other.truckId, loadNo: other.loadNo, ...(otherCode ? { truckCode: otherCode } : {}) } : null,
       ...(away ? { leaveUntil: away.untilIso } : {}),
       ...(cover ? { cover } : {}),
     });

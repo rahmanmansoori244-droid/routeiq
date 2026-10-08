@@ -75,6 +75,8 @@ function wire(trucks: Record<string, any>[], orders: unknown[]) {
   fake.prisma.tenant = { findUniqueOrThrow: async () => ({ country: 'Oman' }) };
   fake.prisma.order = { findMany: async () => orders };
   fake.prisma.routeAssignment = { findMany: async () => [] };
+  // No other depot has a plan this day (buildDispatchRequest reads them: cross-depot.ts).
+  fake.prisma.runPlan = { findMany: async () => [] };
 }
 
 const NOW = new Date('2026-10-07T12:00:00Z');

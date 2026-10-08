@@ -250,6 +250,8 @@ describe('buildDispatchRequest: an unverified LOW location is never sent to the 
     fake.prisma.depot = { count: async () => 1 };
     fake.prisma.order = { findMany: async () => orders };
     fake.prisma.routeAssignment = { findMany: async () => [] };
+    // No other depot has a plan this day (buildDispatchRequest reads them: cross-depot.ts).
+    fake.prisma.runPlan = { findMany: async () => [] };
   }
 
   it('its orders are left unserved (INVALID_LOCATION, "drop the pin") and it is blocking; the others are planned', async () => {

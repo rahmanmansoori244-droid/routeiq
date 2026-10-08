@@ -77,6 +77,8 @@ function wire(opts: { frozen?: unknown[]; cfg?: Record<string, any>; depot?: Par
   fake.prisma.depot = { count: async () => 1 };
   fake.prisma.order = { findMany: async () => [order('O0', C0, 90), order('O1', C1, 50), order('O2', C2, 60, true)] };
   fake.prisma.routeAssignment = { findMany: async () => [] };
+  // No other depot has a plan this day (buildDispatchRequest reads them: cross-depot.ts).
+  fake.prisma.runPlan = { findMany: async () => [] };
 }
 
 beforeEach(() => wire());

@@ -236,6 +236,8 @@ describe('item 1: the planner plans the visit with the order time, and keeps it 
     fake.prisma.depot = { count: async () => 1 };
     fake.prisma.order = { findMany: async () => orders };
     fake.prisma.routeAssignment = { findMany: async () => [] };
+    // No other depot has a plan this day (buildDispatchRequest reads them: cross-depot.ts).
+    fake.prisma.runPlan = { findMany: async () => [] };
   }
 
   it("an urgent order: its customer's visit goes within the order's time; the others keep their hours; the plan inputs keep it", async () => {

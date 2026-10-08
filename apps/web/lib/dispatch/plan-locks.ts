@@ -18,6 +18,10 @@
  * HireOption row: the hire-options DELETE and a PATCH that moves an option to another depot take that
  * row FOR UPDATE first, in their own transaction and before anything else (underOptionLock: then the
  * rental count and the write); any other PATCH is one statement that waits for the FOR SHARE.
+ * The truck-day and driver-day locks (lockTruckDriverDay, review web-plan-service-1) are taken LAST, by
+ * LOCK, LOADING and DISPATCH of a load only, after its plan row (and the load's own row, when the same
+ * request set its driver first), in key order. Their holder then writes only rows of its own plan
+ * version, which nobody can hold without that plan row, so they never close a cycle.
  *
  * - lockPlanDay: one depot and delivery date. Taken by everything that creates a version
  *   (createInitialPlan, createNextVersion), so a day never gets two live plans.
@@ -58,6 +62,19 @@ export class StaleJobError extends Error {
 export async function lockPlanDay(tx: Tx, tenantId: string, depotId: string, runDate: Date | string): Promise<void> {
   const day = typeof runDate === 'string' ? runDate.slice(0, 10) : isoOf(runDate);
   await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${`planday:${tenantId}|${depotId}|${day}`}, 0))`;
+}
+
+/**
+ * Review web-plan-service-1: one truck and one driver can be on the live plans of two depots on one
+ * delivery date. LOCK, LOADING and DISPATCH of a load take the advisory lock of its truck's day and of
+ * its driver's day (sorted, one statement each) before they read the other depots' loads, so two
+ * depots moving the same truck or driver at the same moment are checked one after the other: the
+ * second sees the first one's load locked and is refused (cross-depot.ts otherDepotClash).
+ */
+export async function lockTruckDriverDay(tx: Tx, tenantId: string, runDate: Date | string, truckId: string, driverId: string | null): Promise<void> {
+  const day = typeof runDate === 'string' ? runDate.slice(0, 10) : isoOf(runDate);
+  const keys = [`truckday:${tenantId}|${truckId}|${day}`, ...(driverId ? [`driverday:${tenantId}|${driverId}|${day}`] : [])].sort();
+  for (const key of keys) await tx.$queryRaw`SELECT 1 AS locked FROM pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
 }
 
 /** Row locks in this transaction wait at most `ms` (default 5 s), then fail with SQLSTATE 55P03. */

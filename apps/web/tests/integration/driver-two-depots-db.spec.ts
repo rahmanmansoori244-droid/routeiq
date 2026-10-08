@@ -42,7 +42,9 @@ vi.mock('@/lib/solver-client', () => {
       const k = perTruck.get(truck.id) ?? 0;
       perTruck.set(truck.id, k + 1);
       const loadNo = (frozenNos.get(truck.id) ?? 0) + k + 1;
-      const depart = 360 + loadNo * 150;
+      // Never before the truck's own hours, as the optimizer: South gets T05 only once it is back from
+      // its North loads and has driven over (review web-plan-service-1, cross-depot.ts).
+      const depart = Math.max(360 + loadNo * 150, truck.available_from_min ?? 0);
       return {
         truck_id: truck.id,
         load_no: loadNo,
@@ -189,7 +191,9 @@ const jpeg = () =>
 beforeAll(async () => {
   const t = await prisma.tenant.create({ data: { slug, name: `Two depots ${slug}`, country: 'Oman' } });
   tenantId = t.id;
-  await prisma.tenantConfig.create({ data: { tenantId, timezone: 'Asia/Muscat', distanceProvider: 'HAVERSINE', osrmUrl: null, shiftStartMin: 360, reloadMinutes: 30 } });
+  // A 12-hour day (latest return 18:00): T05 is back from its North loads at 12:30 and needs the drive
+  // to South and its reload before its South load, which a 9-hour day (back by 15:00) has no room for.
+  await prisma.tenantConfig.create({ data: { tenantId, timezone: 'Asia/Muscat', distanceProvider: 'HAVERSINE', osrmUrl: null, shiftStartMin: 360, reloadMinutes: 30, driverShiftMaxMinutes: 720 } });
   userId = (await prisma.user.create({ data: { tenantId, email: `planner@${slug}.test`, passwordHash: 'x', name: 'Planner', role: 'TENANT_ADMIN' } })).id;
   depots.north = (await prisma.depot.create({ data: { tenantId, code: 'NORTH', name: 'North depot', lat: 23.58, lng: 58.39 } })).id;
   depots.south = (await prisma.depot.create({ data: { tenantId, code: 'SOUTH', name: 'South depot', lat: 23.3, lng: 58.6 } })).id;
@@ -221,6 +225,8 @@ describe('a truck with a Load 1 at two depots on one date: every result goes to 
     await prisma.truck.update({ where: { id: truckId }, data: { depotId: depots.south } });
     const south = await planAndDispatch(depots.south);
     expect(south.loads.map((l) => [l.loadNo, l.assignments.map((a) => a.orderId)])).toEqual([[1, [delta.id]]]);
+    // Its South Load 1 leaves only after its North loads are back (review web-plan-service-1).
+    expect(south.loads[0]!.departMin).toBeGreaterThan(Math.max(...north.loads.map((l) => l.returnMin)));
     const linkRow = await prisma.driverLink.create({
       data: { tenantId, truckId, deliveryDate: new Date(`${T}T00:00:00Z`), salt: 'test', keyId: 'test0000', tokenHash: `test-${uniqueSuffix()}`, expiresAt: new Date(`${isoPlus(161)}T08:00:00Z`) },
     });
