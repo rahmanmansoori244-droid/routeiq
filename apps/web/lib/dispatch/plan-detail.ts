@@ -43,6 +43,7 @@ import { isDispatchPlanShape } from './legacy-runs';
 import { stuckPlanState, type StuckState } from './stuck-plan';
 import { isOptimizing } from '../jobs/optimize-job';
 import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
+import { idleTrucksNote } from './left-out-note';
 
 export interface DetailStop {
   sequence: number;
@@ -990,6 +991,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
               ),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),
+              // Benchmark F02 / F07: P1-P3 orders left out while trucks the plan was given carry no load.
+              ...(inputs ? [idleTrucksNote(unserved, Object.keys(inputs.trucks), loads.map((l) => l.truckId))].filter((w): w is string => !!w) : []),
             ]),
           ]
         : [],

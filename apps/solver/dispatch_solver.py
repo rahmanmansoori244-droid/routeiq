@@ -4899,20 +4899,9 @@ def _run_scenarios(names, req, solvable, tds, mx, time_limit, drops, budget_end:
 # ---------------------------------------------------------------------------------------------
 
 # Each scenario returns the best candidate for its OWN goal. Service comes first everywhere
-# (priority value of the unserved stops), then:
-_GOALS = {
-    # Service first in every goal: the stops left out and the rented trucks' hire tier (Score.service).
-    # the RECOMMENDED objective (operating cost + preferred hours, early arrival, continuity)
-    # The search's tie-breaker on day-paid trucks (Score.tie, never money) LAST in every goal, only
-    # between plans of the same cost (fourth review: added to the cost, it made plans dearer).
-    "RECOMMENDED": lambda sc: (sc.service, sc.cost, sc.tie),
-    # fewest trucks, then loads, then operating cost (like its search, it ignores preferences).
-    # Physical trucks (PR7, B3): a truck with a frozen load counts whether or not it gets new loads,
-    # so putting new loads on it never looks like one truck more than opening a fresh one.
-    "MIN_TRUCKS": lambda sc: (sc.service, sc.trucks, sc.loads, sc.operating, sc.cost, sc.tie),
-    # fewest km, then the RECOMMENDED objective
-    "MIN_DISTANCE": lambda sc: (sc.service, sc.metres, sc.cost, sc.tie),
-}
+# (priority value of the unserved stops), then the goal's own measures (load_repack.GOALS: the
+# worker-side recovery chooses its insertions on the same comparison).
+_GOALS = LR.GOALS
 
 
 def _plan_hire(ctx: "_StageCtx", sc: DispatchScenario) -> int:
@@ -5027,12 +5016,47 @@ def _retime(ctx: _StageCtx, name: str, sc: DispatchScenario) -> DispatchScenario
     )
 
 
+# Benchmark F01 (8 Oct 2026): the safety net's trim (load_repack.trim) runs in the API process, so it
+# is bounded: about one timing per stop it leaves out, never longer than this.
+TRIM_FALLBACK_SEC = 1.5
+PARTIAL_PLAN_NOTE = ("The complete plan could not be timed with every rule, so this option is the part of it that "
+                     "can: ")
+
+
+def _trimmed(ctx: _StageCtx, name: str, sc: DispatchScenario, why: str) -> DispatchScenario | None:
+    """Benchmark F01: the raw plan ``sc`` cannot be timed exactly. The part of it that can (load_repack.
+    trim: each truck that breaks a rule loses its least valuable stops until it keeps every rule), as
+    a checked partial plan whose left-out stops say why (TIMING_DROP_HEAD). None when nothing of it
+    can be timed (the raw plan then stays, flagged VIOLATED: never dispatched)."""
+    try:
+        plan = LR.plan_of(_timed_from_scenario(sc, ctx.stop_idx, ctx.truck_idx))
+        timed = LR.trim(ctx.day, ctx.rec_pricing, plan, time.perf_counter() + TRIM_FALLBACK_SEC)
+    except Exception as exc:  # noqa: BLE001 - the raw plan stays, flagged by its feasibility report
+        log.warning("trimming %s failed: %s", name, exc)
+        return None
+    if not LR.served_of(timed):
+        return None
+    own = LR.served_of(plan)
+    drops = own - LR.served_of(timed)
+    new = _build_scenario(
+        name, ctx.req, ctx.solvable, ctx.tds, ctx.mx, timed, ctx.values, ctx.use_margin, ctx.drops,
+        solver_status=sc.solver_status, elapsed=sc.solver_time_sec, time_limit=sc.time_limit_sec,
+        objective_value=LR.score(ctx.day, ctx.rec_pricing, timed).objective, extra_warnings=ctx.value_warnings,
+        timing_drops=drops, exact_timing=True,
+    )
+    if drops:
+        new.warnings.append(PARTIAL_PLAN_NOTE + why + " " + _timing_drop_warning(ctx.req.config, len(drops), 0))
+    return new
+
+
 def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: list[TruckDay], mx: MatrixResult,
                      drops: list[UnservedStop], results: dict[str, DispatchScenario], why: str,
                      skip: set[str] | None = None, ctx: _StageCtx | None = None) -> None:
     """The post-solve stage did not check these plans: say so, and re-time each one exactly
-    (_retime). A plan that cannot be re-timed stays as the route search found it; its feasibility
-    report says what it breaks (VIOLATED), so the web never lets it be locked or dispatched."""
+    (_retime). A plan that cannot be re-timed is trimmed to the part that can (_trimmed, benchmark F01:
+    a checked partial plan whose left-out stops say why); only when nothing of it can be timed does it
+    stay as the route search found it, its feasibility report saying what it breaks (VIOLATED), so the
+    web never lets it be locked or dispatched."""
     skip = skip or set()
     raw = {n: sc for n, sc in results.items() if sc.status == "OPTIMIZED" and n not in skip}
     if not raw or not solvable:
@@ -5055,6 +5079,11 @@ def _retime_fallback(req: DispatchRequest, solvable: list[DispatchStop], tds: li
             if new is not None:
                 new.warnings.append(msg + f" Departure times were re-timed exactly with {what}.")
                 results[name] = new
+                continue
+            part = _trimmed(ctx, name, sc, f"its times did not hold {what}.")
+            if part is not None:
+                part.warnings.append(msg)
+                results[name] = part
                 continue
             sc.warnings.append(msg + f" Its times do not hold {what} and could not be re-timed exactly: "
                                      + ("the driver breaks could not be timed: re-plan." if brk else
@@ -5119,6 +5148,17 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     cap = repack_cap if repack_cap is not None else min(REPACK_CAP_SEC, max(REPACK_MIN_SEC, time_limit / 2))
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
     fit_weights = _repair_weights(solvable, set(range(n_stops)), cfg, req.trucks, req.depot)
+    # Benchmark F07 (8 Oct 2026): a repair that still leaves out P1-P3 stops, or whose fit repack proved
+    # no bound, may use more of the request's time (up to the cap minus the grace, at most
+    # LR.EXTENDED_MAX_SEC), shared by the rounds of jobs. Granted - and waited for - only when a search
+    # plan failed the independent check (VIOLATED: a VERIFIED plan always times exactly, so only then
+    # can a repair be needed), so a hung worker on any other day is abandoned as before. A job uses it
+    # only then (build_candidates): a day whose plans time cleanly, or whose repair keeps every P1-P3
+    # stop with a proven fit, ends as before.
+    rounds_of = (lambda n: -(-n // max(1, pool.size))) if pool is not None else (lambda n: max(1, n))
+    repair = (not raw and bool(rescue)) or any(
+        sc.feasibility is None or sc.feasibility.status != "VERIFIED" for sc in raw.values())
+    stage_room = max(0.0, budget_end - t0 - STAGE_GRACE_SEC - 5) if repair else 0.0
 
     def fallback(why: str) -> None:
         if pv_plan:
@@ -5142,20 +5182,26 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                           gaps={td.idx: _approx_gap_s(cfg, td) for td in ctx.day.trucks},
                           goals=[(g, rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable)) for g in pv_goals],
                           optional=_repair_weights(solvable, set(range(n_stops)) - pv_carried, cfg, req.trucks, req.depot) or None,
-                          cap_s=cap, budget_s=pv_budget, fit_weights=fit_weights)
+                          cap_s=cap, budget_s=pv_budget, fit_weights=fit_weights,
+                          # Its own process, beside the engine's jobs: the same extension, never longer.
+                          extra_s=min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room - pv_budget) / max(1, len(pv_goals))))
         else:
             pv.report.update(status="NOT_CHOSEN", reason="OUT_OF_TIME")  # type: ignore[union-attr]
+    extra = min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room / rounds_of(len(goals)) - job_budget)) if goals else 0.0
     jobs = {g: dict(day=ctx.day, score_pricing=rec_pricing, goal=g,
                     goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
                     sources=sources, optional=optional, cap_s=cap, budget_s=job_budget, time_raw=g == "RECOMMENDED",
-                    fit_weights=fit_weights)
+                    fit_weights=fit_weights, extra_s=extra,
+                    # The constructive fallback (one per request): RECOMMENDED's job builds it.
+                    fallback=g == "RECOMMENDED")
             for g in goals}
     outputs: dict[str, tuple[list[LR.Candidate], list[str]]] = {}
     pv_proc: _PvProcess | None = pv.proc if pv_job is not None and pv is not None else None
     if pv_proc is not None:
         # Its own process (idle since its search ended): starts now, beside the engine's jobs.
         pv_proc.submit(PV.stage_in_worker, pv_job)
-    pv_deadline = min(time.monotonic() + (pv_job["budget_s"] if pv_job else 0) + STAGE_GRACE_SEC, budget_end - 2)
+    pv_deadline = min(time.monotonic() + (pv_job["budget_s"] + len(pv_job["goals"]) * pv_job["extra_s"] if pv_job else 0)
+                      + STAGE_GRACE_SEC, budget_end - 2)
     if pool is None:
         for g, job in jobs.items():
             try:
@@ -5163,8 +5209,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             except Exception as exc:  # noqa: BLE001 - the raw plans stay valid
                 log.warning("post-solve %s failed: %s", g, exc)
     else:
-        rounds = -(-len(jobs) // max(1, pool.size))
-        deadline = min(time.monotonic() + rounds * job_budget + STAGE_GRACE_SEC, budget_end - 2)
+        rounds = rounds_of(len(jobs))
+        deadline = min(time.monotonic() + rounds * (job_budget + extra) + STAGE_GRACE_SEC, budget_end - 2)
         # In completion order: a MIN_TRUCKS job whose worker dies (out of memory) no longer costs
         # RECOMMENDED its exact re-check, nor the rest of the budget (review L23).
         got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline) if jobs else {}
@@ -5278,6 +5324,13 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
             best, lost, new = ref, ref_lost, None
             ref = None
         if best is None or new is None:
+            part = _trimmed(ctx, name, sc, "no re-assignment of its loads could be timed in the time available.") \
+                if name in raw else None
+            if part is not None:
+                # Benchmark F01: a checked partial plan, never only one that breaks the rules.
+                results[name] = part
+                done.add(name)
+                continue
             if name in raw:
                 # No plan of this day could be timed exactly (not even this one): kept as found. Its
                 # feasibility report (built with the raw plan) lists what it breaks.

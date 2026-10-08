@@ -268,8 +268,16 @@ def test_stage_failure_with_loading_time_is_retimed_or_flagged(monkeypatch):
     assert sc.feasibility.status == "VERIFIED" and sc.feasibility.timing == "EXACT"
     assert any("re-timed exactly" in w for w in sc.warnings), sc.warnings
     assert_plan_rules(r, sc)
-    # Without the safety net the route search's times come back - flagged, never passed off.
+    # Without the exact re-timing of the same loads: the part of the plan that times (benchmark of
+    # 8 Oct 2026, F01) - here all of it, timed exactly by the trim.
     monkeypatch.setattr(ds, "_retime", lambda *a, **kw: None)
+    sc = rec(optimize_dispatch(r))
+    l1, l2 = by_truck(sc)["T1"]
+    assert l2.depart_min >= l1.return_min + 130 - 1, (l1.return_min, l2.depart_min)
+    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.timing == "EXACT"
+    assert_plan_rules(r, sc)
+    # Without any safety net the route search's times come back - flagged, never passed off.
+    monkeypatch.setattr(ds, "_trimmed", lambda *a, **kw: None)
     sc = rec(optimize_dispatch(r))
     l1, l2 = by_truck(sc)["T1"]
     assert l2.depart_min < l1.return_min + 130 - 1  # the search's 110-min estimate
