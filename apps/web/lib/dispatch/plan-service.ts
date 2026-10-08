@@ -110,6 +110,7 @@ import {
   readTruckSnapshot,
   rulesFrom,
   SNAPSHOT_VERSION,
+  truckOutOfService,
   usableWindow,
   type LoadOrigin,
   type PlanInputs,
@@ -2568,6 +2569,11 @@ async function changeStatusCore(
   if (isGatedMove(load.status, to) && run.chosenScenarioId && !recon?.ok) {
     throw new PlanError('Cases do not reconcile for this plan - re-plan before locking or loading.', 409, { code: 'NOT_RECONCILED' });
   }
+  // Review of 9 Oct 2026 (owner rule 19 "On hold" is still open): a PLANNED load on a truck taken out
+  // of service since the plan was made (deactivated under Trucks) does not leave (409 TRUCK_INACTIVE).
+  // A locked or loading load is frozen and kept as it is (the plan screen says how to move its orders);
+  // stepping back and Completed are never refused.
+  if (load.status === 'PLANNED' && isGatedMove(load.status, to)) await truckGate(tx, tenantId, load, now);
   // PR9: an order of this load that was brought forward to a later day is planned there now, so
   // this load cannot move forward with it (it would be delivered twice). Stepping back and
   // Completed are never refused (a load that left keeps its orders: they are never carried).
@@ -3139,6 +3145,27 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     ...(stored && stored.inputHash !== fresh.inputHash ? { reportWasStale: true } : {}),
     ...(!ok ? { overridden: 'FEASIBILITY_GATE=warn', violations: blocking.slice(0, 10).map((v) => `${v.code}: ${v.message}`) } : {}),
   };
+}
+
+/** Why LOCK, LOADING and DISPATCH refuse a PLANNED load on a truck taken out of service (truckGate). */
+export const TRUCK_INACTIVE_RULE =
+  'its planned loads cannot be locked, loaded or dispatched. Re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks (a company admin).';
+
+/**
+ * Review of 9 Oct 2026: 409 TRUCK_INACTIVE when the load's truck was taken out of service (deactivated
+ * under Trucks) after the plan was made - truckOutOfService, so a one-day hired truck retired after its
+ * day (a past day's load recorded late) is not refused. Called for a PLANNED load only (see changeStatusCore).
+ */
+async function truckGate(tx: Tx, tenantId: string, load: { truckId: string; loadNo: number }, now: Date) {
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true, active: true, onlyOnDate: true } });
+  if (!truck || truck.active !== false) return;
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { timezone: true } });
+  if (!truckOutOfService(truck, todayIso(cfg?.timezone || DEFAULT_TZ, now))) return;
+  throw new PlanError(`${truck.code} L${load.loadNo}: this truck was taken out of service (deactivated under Trucks) after the plan was made, so ${TRUCK_INACTIVE_RULE}`, 409, {
+    code: 'TRUCK_INACTIVE',
+    truckId: load.truckId,
+    truckCode: truck.code,
+  });
 }
 
 /** The words of the 409 DRIVER_REQUIRED refusal (and the plan screen's Dispatch title, without the load). */

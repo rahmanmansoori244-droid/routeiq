@@ -21,6 +21,7 @@
 import type { DispatchConfig } from '@routeiq/shared-types';
 import type { PlanFrom } from './plan-from';
 import { promisedText } from './order-window';
+import { isoOf } from './time';
 
 export const SNAPSHOT_VERSION = 1;
 
@@ -329,7 +330,8 @@ export function plannedTruckFacts(facts: TruckFacts, echoed: boolean): TruckFact
 // "Changed after planning"
 // ---------------------------------------------------------------------------------------
 
-export type MasterChangeKind = 'LOCATION' | 'HOURS' | 'NAME' | 'ADDRESS' | 'CAPACITY' | 'DEPOT';
+/** INACTIVE: the load's truck was deactivated (taken out of service) after planning (truckMasterChanges). */
+export type MasterChangeKind = 'LOCATION' | 'HOURS' | 'NAME' | 'ADDRESS' | 'CAPACITY' | 'DEPOT' | 'INACTIVE';
 
 export interface MasterChange {
   kind: MasterChangeKind;
@@ -440,12 +442,13 @@ export function stopMasterChanges(snapIn: StopSnapshot, liveIn: LiveStopFacts): 
 /**
  * Why the plan in use is out of date on its PLANNED loads because master data was corrected since
  * it was made (the day screen's "out of date, RE-PLAN", review F08): customers whose pin or
- * receiving hours changed, and trucks whose capacity or payload changed. Rows without a snapshot
- * (planned before snapshots existed) say nothing.
+ * receiving hours changed, trucks whose capacity or payload changed, and trucks taken out of service
+ * since (`trucksInactive`; counted there only, review of 9 Oct 2026). Rows without a snapshot
+ * (planned before snapshots existed) say nothing about capacity; a truck out of service needs none.
  */
 export function plannedLoadsMasterChanged(
   stops: { customerId: string; stopSnapshotJson: unknown; live: LiveStopFacts }[],
-  loads: { truckId: string; truckSnapshotJson: unknown; live: { capacityCases: number; capacityWeightKg: number; bays?: number | null } | null }[],
+  loads: { truckId: string; truckSnapshotJson: unknown; live: LiveTruckFacts | null }[],
   depotNow?: { lat: number; lng: number } | null,
   /**
    * The depot pin the plan's option was optimized from (its inputs.depot): the origin of a load
@@ -453,7 +456,7 @@ export function plannedLoadsMasterChanged(
    * day is out of date exactly when the plan notes say "still planned from the old depot pin" (A6 review).
    */
   plannedFrom?: { lat: number; lng: number } | null,
-): { customers: number; trucks: number; depotMoved: number } {
+): { customers: number; trucks: number; depotMoved: number; trucksInactive: number } {
   const customers = new Set<string>();
   for (const s of stops) {
     const snap = readStopSnapshot(s.stopSnapshotJson);
@@ -461,14 +464,18 @@ export function plannedLoadsMasterChanged(
     if (stopMasterChanges(snap, s.live).some((c) => c.kind === 'LOCATION' || c.kind === 'HOURS')) customers.add(s.customerId);
   }
   const trucks = new Set<string>();
+  const inactive = new Set<string>();
   let depotMoved = 0;
   for (const l of loads) {
     const snap = readTruckSnapshot(l.truckSnapshotJson);
-    if (snap && l.live && truckMasterChanges(snap, l.live).length) trucks.add(l.truckId);
+    const changes = l.live ? truckMasterChanges(snap, l.live) : [];
+    // A truck out of service is that, whatever else changed on it: a re-plan moves its loads anyway.
+    if (changes.some((c) => c.kind === 'INACTIVE')) inactive.add(l.truckId);
+    else if (changes.length) trucks.add(l.truckId);
     // Audit E1: a PLANNED load still drawn from a depot pin moved since: a re-plan uses the new pin.
     if (depotNow && depotMovedChange(readLoadOrigin(snap) ?? plannedFrom ?? null, depotNow)) depotMoved++;
   }
-  return { customers: customers.size, trucks: trucks.size, depotMoved };
+  return { customers: customers.size, trucks: trucks.size, depotMoved, trucksInactive: inactive.size };
 }
 
 /**
@@ -491,12 +498,40 @@ export function depotMovedChange(origin: { lat: number; lng: number } | null, li
   };
 }
 
+/** The truck as it is now (Truck), as truckMasterChanges compares it with the load's snapshot. */
+export interface LiveTruckFacts {
+  capacityCases: number;
+  capacityWeightKg: number;
+  /** Absent = not read. */
+  bays?: number | null;
+  /** Taken out of service since (truckOutOfService); absent = not read. */
+  outOfService?: boolean;
+}
+
 /**
- * What changed on the truck since the load was planned (capacity / payload; and for a load planned
- * by pallets its bays - `live.bays` absent = not read).
+ * A truck taken out of service: deactivated under Trucks (owner rule 19 "On hold" for a breakdown is
+ * still open; until then deactivating is the only way to say a truck cannot go). Not a one-day hired
+ * truck retired because its day is over (retireOneDayTrucks, before the company's `todayIso`): its
+ * day's loads are history, never a truck that broke down. Only `active === false` counts (a row that
+ * does not say is in service). `todayIso`: the company's today (YYYY-MM-DD).
  */
-export function truckMasterChanges(snap: TruckSnapshot, live: { capacityCases: number; capacityWeightKg: number; bays?: number | null }): MasterChange[] {
+export function truckOutOfService(truck: { active?: boolean | null; onlyOnDate?: Date | string | null }, todayIso: string): boolean {
+  if (truck.active !== false) return false;
+  const day = truck.onlyOnDate ? (typeof truck.onlyOnDate === 'string' ? truck.onlyOnDate.slice(0, 10) : isoOf(truck.onlyOnDate)) : null;
+  return !(day && day < todayIso);
+}
+
+/**
+ * What changed on the truck since the load was planned: taken out of service (needs no snapshot: a
+ * truck is planned only while active), capacity / payload, and for a load planned by pallets its bays
+ * (`live.bays` absent = not read). Without a snapshot (a load planned before snapshots existed) only
+ * the first can be said.
+ */
+export function truckMasterChanges(snap: TruckSnapshot | null, live: LiveTruckFacts): MasterChange[] {
   const out: MasterChange[] = [];
+  // Review of 9 Oct 2026: a truck deactivated after planning was silent - its loads could still be locked and sent out.
+  if (live.outOfService) out.push({ kind: 'INACTIVE', text: 'Truck taken out of service (deactivated under Trucks) after planning.' });
+  if (!snap) return out;
   if (typeof snap.palletRoomUnits === 'number' && live.bays !== undefined && (live.bays ?? null) !== (snap.bays ?? null)) {
     out.push({
       kind: 'CAPACITY',

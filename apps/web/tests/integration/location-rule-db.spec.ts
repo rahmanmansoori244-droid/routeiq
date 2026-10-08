@@ -26,6 +26,10 @@
  *     refused (409 STOP_PIN_REPLACED) until a re-plan gives the stop the new pin - also when a second
  *     customer file replaced the flagged point; an ordinary pin correction is not refused. A5 fourth
  *     review: nor is the correction of a flagged point that was confirmed where it was.
+ *  6. Review of 9 Oct 2026: a pin saved after "optimize anyway" makes the plan out of date
+ *     (outdated.unservedNowPlannable) and the plan says a re-plan plans the order (3b); a truck taken
+ *     out of service after planning makes it out of date (outdated.trucksInactive), LOCK of its
+ *     PLANNED load is refused (409 TRUCK_INACTIVE) and RE-PLAN moves the load (end of 5).
  */
 import { afterAll, beforeAll, beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import type { DispatchRequest, DispatchResponse, DispatchScenario, PlannedLoad } from '@routeiq/shared-types';
@@ -320,6 +324,36 @@ describe('3. planning never sends a LOW location nobody confirmed (L4)', () => {
   });
 });
 
+describe('3b. a pin saved after "optimize anyway" (review of 9 Oct 2026)', () => {
+  it('the day says the plan is out of date (RE-PLAN plans the order now) and the plan says why; before: "up to date", RE-PLAN off', async () => {
+    const day = isoPlus(9);
+    const none = await cust('L4', { lat: null, lng: null });
+    const ok = await cust('L5', { lat: 23.5901, lng: 58.4101, geocodeConfidence: 'HIGH', locationVerified: true });
+    const oNone = await orderFor(none.id, day, 'SO-L4');
+    await orderFor(ok.id, day, 'SO-L5');
+    solverMode.mode = 'plan';
+    try {
+      const { run } = await getOrCreatePlan(tenantId, depotId, day, session.user.id);
+      expect((await startDispatchOptimize(tenantId, run.id, { id: session.user.id }, null, { allowMissingLocations: true })).status).toBe(202);
+      expect((await jobsDone(run.id)).status).toBe('READY');
+      const plan = await prisma.runPlan.findUniqueOrThrow({ where: { id: run.id } });
+      expect(await prisma.unservedOrder.findFirstOrThrow({ where: { scenarioId: plan.chosenScenarioId!, orderId: oNone.id } })).toMatchObject({ reasonCode: 'MISSING_COORDINATES' });
+      const before = await getDayOverview(tenantId, { date: day, depotId });
+      expect(before.outdated).toEqual(UP_TO_DATE);
+      expect(before.unserved).toEqual({ orders: 1, cases: 10 });
+
+      expect((await put(none.id, { lat: 23.6402, lng: 58.4403, source: 'MAP_PIN' })).status).toBe(200);
+      const after = await getDayOverview(tenantId, { date: day, depotId });
+      expect(after.outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+      expect((await getPlanDetail(tenantId, run.id))!.warnings).toContain(
+        'A usable location was saved, or the customer reactivated, after this plan was made: L4. Its order is still unserved in this plan (the reason shown is from when it was made) - re-plan to plan it.',
+      );
+    } finally {
+      solverMode.mode = 'unserved';
+    }
+  });
+});
+
 describe('4. a legacy run is not dispatched with a customer without a location (L5)', () => {
   it('409 LOCATION_REQUIRED and nothing dispatched; after the pin is placed, dispatched', async () => {
     const day = isoPlus(10);
@@ -604,5 +638,30 @@ describe('5. a planned customer whose location stops being usable is never locke
     // Control: B2's flagged point replaced by a pin about 2 km away is still refused.
     expect((await put(b2.id, { lat: 23.5301, lng: 58.3051, source: 'MAP_PIN' })).status).toBe(200);
     await expect(updateLoad(tenantId, runId, l2.id, { status: 'LOCKED' }, planner(), everyRole)).rejects.toMatchObject({ status: 409, details: { code: 'STOP_PIN_REPLACED', customers: ['B2'] } });
+  });
+
+  it('review of 9 Oct 2026: a truck taken out of service after planning: the day says RE-PLAN, LOCK of its PLANNED load is refused (409 TRUCK_INACTIVE); RE-PLAN moves it', async () => {
+    const day = isoPlus(24);
+    const k9 = await cust('K9', { lat: 23.588, lng: 58.41, geocodeConfidence: 'HIGH', locationVerified: true });
+    await orderFor(k9.id, day, 'SO-K9');
+    const runId = await planDay(day);
+    const l9 = await loadOf(runId, k9.id);
+    expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual(UP_TO_DATE);
+    await prisma.truck.update({ where: { id: l9.truckId }, data: { active: false } });
+    try {
+      // Before: every count 0, and the load was locked and dispatched on a truck out of service.
+      expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual({ ...UP_TO_DATE, trucksInactive: 1 });
+      const refused = await updateLoad(tenantId, runId, l9.id, { status: 'LOCKED' }, planner(), everyRole).catch((e) => e);
+      expect(refused).toMatchObject({ status: 409, details: { code: 'TRUCK_INACTIVE', truckId: l9.truckId, truckCode: l9.truck.code } });
+      expect(await statusOf(l9.id)).toBe('PLANNED');
+      const again = await replan(tenantId, runId, 'REOPTIMIZE', null, planner(), null);
+      expect(again.status).toBe(202);
+      const childId = again.body.runId as string;
+      expect((await jobsDone(childId)).status).toBe('READY');
+      expect((await loadOf(childId, k9.id)).truckId).not.toBe(l9.truckId);
+      expect((await getDayOverview(tenantId, { date: day, depotId })).outdated).toEqual(UP_TO_DATE);
+    } finally {
+      await prisma.truck.update({ where: { id: l9.truckId }, data: { active: true } });
+    }
   });
 });

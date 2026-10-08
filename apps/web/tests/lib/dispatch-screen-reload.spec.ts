@@ -119,6 +119,49 @@ describe("a planned customer whose location is not usable any more (owner's loca
   });
 });
 
+describe('Step 3 while the plan in use leaves orders unserved (review of 9 Oct 2026)', () => {
+  const step3 = (t: Awaited<ReturnType<typeof mountDay>>) => elements(t.host.tree).find((e) => typeName(e) === 'Step' && e.props.n === 3);
+  const byId = (t: Awaited<ReturnType<typeof mountDay>>, id: string) => elements(t.host.tree).find((e) => e.props?.['data-testid'] === id);
+
+  it('orders left unserved (e.g. a truck was added since): RE-PLAN stays on and Step 3 says so - never "up to date with all orders" and a green tick', async () => {
+    const t = await mountDay('PLANNED');
+    // Control: nothing unserved - up to date, RE-PLAN off, the step done.
+    expect(textOf(step3(t))).toContain('The plan is up to date with all orders.');
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(true);
+    expect(step3(t).props.done).toBe(true);
+
+    answers.day = { ...day('PLANNED'), unserved: { orders: 2, cases: 90 } };
+    t.dialog('LocationDialog').props.onSaved(); // any refresh of the day
+    await t.host.settle();
+    expect(textOf(step3(t))).not.toContain('The plan is up to date with all orders.');
+    expect(textOf(byId(t, 'unserved-left'))).toContain('2 order(s) (90 cases) are left unserved by this plan: their reasons are under the plan below. RE-PLAN');
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(false);
+    expect(step3(t).props.done).toBe(false);
+    expect(step3(t).props.summary).toBe('Plan version 1 ready · 2 order(s) unserved');
+  });
+
+  it('a pin saved (or the customer reactivated) for an unserved order, and a truck taken out of service: the out-of-date banner says so', async () => {
+    const t = await mountDay('PLANNED');
+    answers.day = { ...day('PLANNED'), outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, unservedNowPlannable: 1, trucksInactive: 1 }, unserved: { orders: 1, cases: 40 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    const banner = textOf(byId(t, 'plan-outdated'));
+    expect(banner).toContain('1 truck(s) with planned loads were taken out of service (deactivated under Trucks; their planned loads cannot be locked)');
+    expect(banner).toContain('a usable location was saved, or the customer reactivated, for 1 of its unserved order(s) (RE-PLAN plans them now)');
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(false);
+  });
+
+  it('a truck taken out of service alone (nothing unserved) makes the plan out of date too', async () => {
+    const t = await mountDay('PLANNED');
+    answers.day = { ...day('PLANNED'), outdated: { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, trucksInactive: 1 } };
+    t.dialog('LocationDialog').props.onSaved();
+    await t.host.settle();
+    expect(byId(t, 'plan-outdated')).toBeDefined();
+    expect(byId(t, 'optimize-btn').props.disabled).toBe(false);
+    expect(textOf(step3(t))).not.toContain('The plan is up to date with all orders.');
+  });
+});
+
 function whatsappOf(tree: unknown, truckCode: string, loadNo: number): string {
   const row = elements(tree).find((e) => typeName(e) === 'LoadDriver' && e.props.l.truckCode === truckCode && e.props.l.loadNo === loadNo);
   return 'url' in row.props.whatsapp ? decodeURIComponent(row.props.whatsapp.url) : row.props.whatsapp.off;

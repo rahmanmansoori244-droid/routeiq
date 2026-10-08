@@ -422,3 +422,90 @@ describe('snapshots (F08)', () => {
     expect(after.feasibility!.violations.filter((v) => v.code === 'CAPACITY_CHANGED').map((v) => v.message.replace(/^.*\)\. /, ''))).toEqual(['Re-plan to use the new capacity.']);
   });
 });
+
+describe('a truck taken out of service after planning (review of 9 Oct 2026)', () => {
+  const OUT = "T01 L1: this truck was taken out of service (deactivated under Trucks) after the plan was made, so its planned loads cannot be locked, loaded or dispatched. Re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks (a company admin).";
+
+  it('LOCK of its PLANNED load is refused with 409 TRUCK_INACTIVE and nothing changes; another truck still locks (before: 200 LOCKED)', async () => {
+    seed();
+    row('truck', 'T1').active = false;
+    const e = await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow).catch((x) => x);
+    expect(e.status).toBe(409);
+    expect(e.details).toMatchObject({ code: 'TRUCK_INACTIVE', truckId: 'T1', truckCode: 'T01' });
+    expect(e.message).toBe(OUT);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+    expect(tables.auditLog.some((a) => a.action === 'LOAD_LOCKED')).toBe(false);
+    await updateLoad(T, 'P', 'M1', { status: 'LOCKED' }, user, allow);
+    expect(row('planLoad', 'M1').status).toBe('LOCKED');
+  });
+
+  it('a load already locked on it is frozen and kept as it is: it moves on, and stepping back is never refused', async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    row('truck', 'T1').active = false;
+    await updateLoad(T, 'P', 'L1', { status: 'LOADING' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('LOADING');
+    await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow);
+    await updateLoad(T, 'P', 'L1', { status: 'PLANNED' }, user, allow);
+    expect(row('planLoad', 'L1').status).toBe('PLANNED');
+  });
+
+  it("a one-day hired truck retired because its day is over is not refused (a past day's load recorded late); deactivated on its own day it is", async () => {
+    seed();
+    Object.assign(row('truck', 'T1'), { active: false, onlyOnDate: DAY });
+    await updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow, { now: new Date('2026-09-28T08:00:00Z') });
+    expect(row('planLoad', 'L1').status).toBe('LOCKED');
+    seed();
+    Object.assign(row('truck', 'T1'), { active: false, onlyOnDate: DAY });
+    await expect(updateLoad(T, 'P', 'L1', { status: 'LOCKED' }, user, allow, { now: new Date('2026-09-27T05:00:00Z') })).rejects.toMatchObject({
+      status: 409,
+      details: { code: 'TRUCK_INACTIVE' },
+    });
+  });
+
+  it('the plan says so on its loads still at the depot: PLANNED ones re-plan, locked ones unlock first (before: no word)', async () => {
+    seed();
+    row('planLoad', 'L2').status = 'LOCKED';
+    row('truck', 'T1').active = false;
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.loads.find((l) => l.id === 'L1')!.masterChanged.map((c) => c.kind)).toEqual(['INACTIVE']);
+    expect(d.loads.find((l) => l.id === 'M1')!.masterChanged).toEqual([]);
+    expect(d.warnings).toContain(
+      'Truck taken out of service (deactivated under Trucks) after this plan was made: T01 L1. These loads cannot be locked, loaded or dispatched - re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks.',
+    );
+    expect(d.warnings.some((w) => w.startsWith('Truck taken out of service (deactivated under Trucks) after these locked or loading loads were planned: T01 L2.'))).toBe(true);
+    expect(d.warnings.some((w) => w.startsWith('Truck capacity changed'))).toBe(false);
+    // A load that has left is history: no change on it.
+    row('planLoad', 'L2').status = 'DISPATCHED';
+    const later = (await getPlanDetail(T, 'P'))!;
+    expect(later.loads.find((l) => l.id === 'L2')!.masterChanged).toEqual([]);
+  });
+});
+
+describe('an order left unserved for its customer data, fixed since (review of 9 Oct 2026)', () => {
+  /** O4 of customer c2, left out by the option in use for `reasonCode`; c2 as it is now. */
+  function seedLeftOut(reasonCode: string, now: Record<string, unknown>) {
+    seed();
+    const c2 = customer({ id: 'c2', code: 'C2', name: 'Al Fair', ...now });
+    tables.customer.push(c2);
+    tables.order.push({ ...tables.order[0], id: 'O4', customerId: 'c2', customer: c2, lines: lines('O4'), status: 'UNSERVED' });
+    tables.unservedOrder = [{ id: 'U4', scenarioId: 'sc1', orderId: 'O4', reasonCode, reasonMessage: 'Location missing - add a Google Maps link, coordinates or a map pin.', portionCases: null, portionWeightKg: null, portionLinesJson: null }];
+  }
+
+  it('a pin saved since: the plan says a re-plan plans it (before: only the stale "Location missing")', async () => {
+    seedLeftOut('MISSING_COORDINATES', {});
+    const d = (await getPlanDetail(T, 'P'))!;
+    expect(d.warnings).toContain(
+      'A usable location was saved, or the customer reactivated, after this plan was made: C2. Its order is still unserved in this plan (the reason shown is from when it was made) - re-plan to plan it.',
+    );
+  });
+
+  it('a customer reactivated since: the same; still without a location, or still deactivated: no such line', async () => {
+    seedLeftOut('INVALID_CUSTOMER', {});
+    expect((await getPlanDetail(T, 'P'))!.warnings.some((w) => w.startsWith('A usable location was saved'))).toBe(true);
+    seedLeftOut('MISSING_COORDINATES', { lat: null, lng: null, locationVerified: false });
+    expect((await getPlanDetail(T, 'P'))!.warnings.some((w) => w.startsWith('A usable location was saved'))).toBe(false);
+    seedLeftOut('INVALID_CUSTOMER', { active: false });
+    expect((await getPlanDetail(T, 'P'))!.warnings.some((w) => w.startsWith('A usable location was saved'))).toBe(false);
+  });
+});

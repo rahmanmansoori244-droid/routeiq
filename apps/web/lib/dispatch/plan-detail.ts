@@ -4,7 +4,7 @@
  */
 import { Prisma } from '@prisma/client';
 import { tenantDb } from '../tenant';
-import { effectiveAttrs, describeWindows, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
+import { effectiveAttrs, describeWindows, parseServiceArea, type EffectiveAttrs, type TypeProfileLike } from './customer-attrs';
 import { leftOutWhole, plannedVisitOrders, promisedText, stopWindowFor, type OrderPlacement, type OrderTimeColumns } from './order-window';
 import { aggregateSkus, type Reconciliation } from './reconcile';
 import type { ChangeSummary, DailySummary } from './summary';
@@ -19,6 +19,7 @@ import {
   readTruckSnapshot,
   stopMasterChanges,
   truckMasterChanges,
+  truckOutOfService,
   type LoadBreak,
   type MasterChange,
   type PlanSettings,
@@ -43,7 +44,7 @@ import { isDispatchPlanShape } from './legacy-runs';
 import { stuckPlanState, type StuckState } from './stuck-plan';
 import { isOptimizing } from '../jobs/optimize-job';
 import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
-import { idleTrucksNote } from './left-out-note';
+import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 
 export interface DetailStop {
   sequence: number;
@@ -197,7 +198,10 @@ export interface DetailLoad {
    * map, the road shapes, the route links, WhatsApp text and sheets draw the load from here.
    */
   origin: { lat: number; lng: number };
-  /** Truck capacity changed since planning; the depot pin moved since planning (kind DEPOT). */
+  /**
+   * Truck capacity changed since planning; the truck taken out of service since (kind INACTIVE, only on
+   * a load still at the depot); the depot pin moved since planning (kind DEPOT).
+   */
   masterChanged: MasterChange[];
   /** The timetable check of this load's truck-day (review F04); null = the version has no applied plan. */
   timing: { status: TruckTiming; ok: boolean } | null;
@@ -467,7 +471,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     where: { runId },
     orderBy: [{ truck: { code: 'asc' } }, { loadNo: 'asc' }],
     include: {
-      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, onlyOnDate: true, defaultDriverId: true } },
+      truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, onlyOnDate: true, defaultDriverId: true, active: true } },
       driver: { select: { name: true, phone: true } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
@@ -532,6 +536,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // A cover who also drives for another depot that day (plans are per depot; the other depot planned
   // later gave him his own truck): his covering load says so (review of 6 Oct 2026).
   const elsewhere = await driversOnOtherDepots(db, tenantId, run, leave);
+  // The company's today: a one-day hired truck retired after its day is not "taken out of service" (truckOutOfService).
+  const today = todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date());
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -735,7 +741,17 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       ...(palletNotes.length ? { palletNotes } : {}),
       truckSnapshot: !!ts,
       origin: { lat: origin.lat, lng: origin.lng },
-      masterChanged: [...(ts ? truckMasterChanges(ts, l.truck) : []), ...(depotMoved ? [depotMoved] : [])],
+      // A truck taken out of service since (review of 9 Oct 2026): only on a load still at the depot; a
+      // load that left is history (its truck may have broken down on the way, after it was planned).
+      masterChanged: [
+        ...truckMasterChanges(ts, {
+          capacityCases: l.truck.capacityCases,
+          capacityWeightKg: l.truck.capacityWeightKg,
+          bays: l.truck.bays,
+          outOfService: carriedLoadShows(l.status) && truckOutOfService(l.truck, today),
+        }),
+        ...(depotMoved ? [depotMoved] : []),
+      ],
       timing: null,
       carriedAway: carriedAwayOrders.size,
       break: parseLoadBreak(l.breakJson),
@@ -840,7 +856,21 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const stuck = run.status === 'OPTIMIZING' ? await stuckOf(db, run, job, liveAtStart, clock.now ?? new Date()) : null;
   const live = !isSupersededRun(run);
   const rulesNote = live && chosenDetails ? plannerRulesNote(chosenDetails) : null;
-  const outdated = live && chosenDetails ? [...outdatedNotes(loads), ...(rulesNote ? [rulesNote] : [])] : [];
+  // Review of 9 Oct 2026: orders this plan left out for their customer's data (no usable location, a
+  // deactivated customer) that a re-plan would plan now - a pin saved or the customer reactivated since.
+  // The area is read only when such a row exists (most plan reads have none).
+  const fixedSince = live && chosenDetails ? unservedRows.filter((u) => CUSTOMER_DATA_REASONS.includes(u.reasonCode) && uo.get(u.orderId)?.customer.active && !uo.get(u.orderId)?.carriedTo) : [];
+  let fixedNote: string | null = null;
+  if (fixedSince.length) {
+    const tenant = await db.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
+    const area = parseServiceArea(cfg?.serviceAreaJson, tenant?.country);
+    const now = fixedSince.flatMap((u) => {
+      const o = uo.get(u.orderId);
+      return o && unservedNowPlannable(u.reasonCode, o.customer, area) ? [{ orderId: o.id, customer: o.customer.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : o.customer.code }] : [];
+    });
+    fixedNote = customerDataFixedNote([...new Set(now.map((x) => x.customer))], new Set(now.map((x) => x.orderId)).size);
+  }
+  const outdated = live && chosenDetails ? [...outdatedNotes(loads), ...(fixedNote ? [fixedNote] : []), ...(rulesNote ? [rulesNote] : [])] : [];
   let pendingOrders = 0;
   if (live && chosenDetails) {
     const inPlan = [...new Set([...chosenDetails.scope.orderIds, ...chosenDetails.scope.frozenOrderIds, ...(chosenDetails.scope.frozenLoadOrderIds ?? [])])];
@@ -1034,8 +1064,13 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
   const trucks: string[] = [];
   const depotPlanned: DepotMovedLoad[] = [];
   const depotKept: DepotMovedLoad[] = [];
+  // Review of 9 Oct 2026: loads still at the depot on a truck taken out of service since (the change is
+  // only on such loads: plan-detail). PLANNED ones cannot be locked (truckGate); locked or loading ones are kept.
+  const outPlanned: string[] = [];
+  const outKept: string[] = [];
   for (const l of loads) {
-    if (l.masterChanged.some((c) => c.kind !== 'DEPOT')) trucks.push(`${l.truckCode} L${l.loadNo}`);
+    if (l.masterChanged.some((c) => c.kind === 'CAPACITY')) trucks.push(`${l.truckCode} L${l.loadNo}`);
+    if (l.masterChanged.some((c) => c.kind === 'INACTIVE')) (l.status === 'PLANNED' ? outPlanned : outKept).push(`${l.truckCode} L${l.loadNo}`);
     const depot = l.masterChanged.find((c) => c.kind === 'DEPOT');
     if (depot) {
       // Each load its own distance: loads kept through two depot moves were planned from different pins (A6 review).
@@ -1058,11 +1093,32 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
   if (frozen.length) {
     out.push(`Location or receiving hours changed after these locked or dispatched loads were planned: ${frozen.join(', ')}. Their sheets show the planned stop with the change noted; unlock and re-plan to adopt it (not possible once a load has left).`);
   }
+  if (outPlanned.length) {
+    out.push(
+      `Truck taken out of service (deactivated under Trucks) after this plan was made: ${outPlanned.join(', ')}. These loads cannot be locked, loaded or dispatched - re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks.`,
+    );
+  }
+  if (outKept.length) {
+    out.push(
+      `Truck taken out of service (deactivated under Trucks) after these locked or loading loads were planned: ${outKept.join(', ')}. They are kept as they are; to move their orders to the trucks in service, unlock them (put them back to Planned) and re-plan, or reactivate the truck under Trucks.`,
+    );
+  }
   if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
   // Audit E1 (owner decision 13): its own sentence, never "truck capacity changed".
   if (depotKept.length) out.push(depotMovedSentence(depotKept, true));
   if (depotPlanned.length) out.push(depotMovedSentence(depotPlanned, false));
   return out;
+}
+
+/**
+ * Review of 9 Oct 2026: the plan's line for the orders it left out for their customer's data (no
+ * usable location, a deactivated customer) that a re-plan would plan now - the reason under Unserved
+ * orders is the one from when the plan was made. Null when there are none.
+ */
+export function customerDataFixedNote(customers: string[], orders: number): string | null {
+  if (!customers.length || orders <= 0) return null;
+  const list = `${customers.slice(0, 8).join(', ')}${customers.length > 8 ? ', ...' : ''}`;
+  return `A usable location was saved, or the customer reactivated, after this plan was made: ${list}. ${orders === 1 ? 'Its order is' : `Their ${orders} orders are`} still unserved in this plan (the reason shown is from when it was made) - re-plan to plan ${orders === 1 ? 'it' : 'them'}.`;
 }
 
 /** A load whose depot pin moved since it was planned: its label, how far (null: unknown) and the pin it was planned from. */

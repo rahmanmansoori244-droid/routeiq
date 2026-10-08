@@ -10,6 +10,11 @@
  * Also (owner's location rule, A5 second review): a customer on a PLANNED load whose location is not
  * usable any more (a saved point an import marked LOW after planning) makes the plan out of date
  * (`outdated.locationBlocked`), so RE-PLAN is offered; its load cannot be locked meanwhile.
+ *
+ * Review of 9 Oct 2026: a truck with PLANNED loads taken out of service since (`outdated.trucksInactive`),
+ * and an order left unserved for its customer's data that a re-plan would plan now - a pin saved or the
+ * customer reactivated since (`outdated.unservedNowPlannable`) - make the plan out of date too; the
+ * plan's still-open unserved orders are counted (`unserved`) for Step 3.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,8 +25,10 @@ interface State {
   /** PLANNED loads of the plan in use (truckSnapshotJson), and the inputs its option was optimized from. */
   plannedLoads: unknown[];
   inputs?: unknown;
+  /** The chosen option's unserved rows. */
+  unserved: unknown[];
 }
-const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [] };
+const state: State = { orders: [], assignments: [], scope: [], plannedLoads: [], unserved: [] };
 
 vi.mock('@/lib/db', () => ({
   prisma: {
@@ -29,7 +36,11 @@ vi.mock('@/lib/db', () => ({
     order: { findMany: async () => state.orders },
     routeAssignment: { findMany: async () => state.assignments },
     scenarioResult: {
-      findUnique: async () => ({ id: 'sc1', detailsJson: { scope: { orderIds: state.scope, frozenOrderIds: [] }, ...(state.inputs ? { inputs: state.inputs } : {}) } }),
+      findUnique: async () => ({
+        id: 'sc1',
+        detailsJson: { scope: { orderIds: state.scope, frozenOrderIds: [] }, ...(state.inputs ? { inputs: state.inputs } : {}) },
+        unservedOrders: state.unserved,
+      }),
     },
     planLoad: { findMany: async () => state.plannedLoads },
   },
@@ -85,6 +96,7 @@ beforeEach(() => {
   state.scope = ['O1'];
   state.plannedLoads = [];
   state.inputs = undefined;
+  state.unserved = [];
 });
 
 describe('day overview: case weights of a split order partly on a frozen load (PR4 review)', () => {
@@ -132,7 +144,8 @@ describe('day overview: case weights of a split order partly on a frozen load (P
   it('`outdated` has exactly the keys of UP_TO_DATE on every path (the integration specs compare against it)', async () => {
     // depotMoved: audit A6 (E1), PLANNED loads still drawn from a depot pin moved since.
     // palletFactorCases: pallets review, cases per pallet corrected since planning (day-overview-pallets.spec).
-    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0 });
+    // trucksInactive, unservedNowPlannable: review of 9 Oct 2026 (below).
+    expect(UP_TO_DATE).toEqual({ weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0 });
     state.orders = [order(10)];
     state.assignments = [part('PLANNED', 1000, 0, 0)];
     expect(Object.keys((await day()).outdated).sort()).toEqual(Object.keys(UP_TO_DATE).sort());
@@ -226,5 +239,81 @@ describe('day overview: a PLANNED load planned before origins were kept, on a de
     expect((await day()).outdated).toEqual(UP_TO_DATE);
     state.inputs = undefined; // an option from before inputs were kept: the plan notes use the live pin too
     expect((await day()).outdated).toEqual(UP_TO_DATE);
+  });
+});
+
+describe('day overview: a truck with PLANNED loads taken out of service since (review of 9 Oct 2026)', () => {
+  const snapT = { v: 1, code: 'T01', capacityCases: 600, capacityWeightKg: 0, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z' };
+  const onTruck = (truckId: string, truck: Record<string, unknown>, snap: unknown = snapT) => ({ truckId, truckSnapshotJson: snap, truck: { capacityCases: 600, capacityWeightKg: 0, ...truck } });
+
+  it('makes the plan out of date, so RE-PLAN is offered (before: "up to date", and its loads could be locked)', async () => {
+    state.orders = [];
+    state.assignments = [];
+    state.plannedLoads = [
+      onTruck('t1', { active: false, onlyOnDate: null }),
+      onTruck('t1', { active: false, onlyOnDate: null }), // its second load: one truck
+      onTruck('t2', { active: false, onlyOnDate: null }, null), // a load planned before snapshots: still said
+    ];
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, trucksInactive: 2 });
+  });
+
+  it('not a truck in service, nor a one-day hired truck retired because its day is over', async () => {
+    state.orders = [];
+    state.assignments = [];
+    state.plannedLoads = [onTruck('t1', { active: true, onlyOnDate: null }), onTruck('t3', { active: false, onlyOnDate: new Date('2026-09-27T00:00:00Z') })];
+    expect((await day()).outdated).toEqual(UP_TO_DATE);
+  });
+});
+
+describe('day overview: unserved orders whose customer data was fixed since (review of 9 Oct 2026)', () => {
+  // O1 with a known weight (nothing else out of date), its customer as it is now.
+  const known = (over: Record<string, unknown> = {}, status = 'UNSERVED') => ({
+    ...order(10),
+    status,
+    customer: { ...customer, ...over },
+    lines: [{ id: 'ln1', cases: 1000, weightKg: 10000, weightFromMaster: false, product: { code: 'P1', name: 'Water', weightPerCaseKg: 10 } }],
+  });
+  const left = (reasonCode: string) => [{ orderId: 'O1', reasonCode, portionLinesJson: null, portionCases: null }];
+
+  it('a pin saved since for an order left out without a location: out of date, RE-PLAN plans it (before: "up to date", RE-PLAN off)', async () => {
+    state.orders = [known()];
+    state.assignments = [];
+    state.unserved = left('MISSING_COORDINATES');
+    const d = await day();
+    expect(d.outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+  });
+
+  it('a customer reactivated since: the same', async () => {
+    state.orders = [known()];
+    state.assignments = [];
+    state.unserved = left('INVALID_CUSTOMER');
+    expect((await day()).outdated).toEqual({ ...UP_TO_DATE, unservedNowPlannable: 1 });
+  });
+
+  it('still without a usable location, or left out by the search: not out of date, but still unserved for Step 3', async () => {
+    state.orders = [known({ lat: null, lng: null, locationVerified: false, geocodeConfidence: 'MISSING' })];
+    state.assignments = [];
+    state.unserved = left('MISSING_COORDINATES');
+    let d = await day();
+    expect(d.outdated).toEqual(UP_TO_DATE);
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+    state.orders = [known()];
+    state.unserved = left('SOLVER_DROPPED_LOW_PRIORITY');
+    d = await day();
+    expect(d.outdated).toEqual(UP_TO_DATE);
+    expect(d.unserved).toEqual({ orders: 1, cases: 1000 });
+  });
+
+  it("not an order no longer open on this day: dispatched since, or brought forward to a later day (not among the day's orders)", async () => {
+    state.orders = [known({}, 'DISPATCHED')];
+    state.assignments = [];
+    state.unserved = left('MISSING_COORDINATES');
+    let d = await day();
+    expect(d.outdated).toEqual(UP_TO_DATE);
+    expect(d.unserved).toEqual({ orders: 0, cases: 0 });
+    state.orders = [];
+    d = await day();
+    expect(d.unserved).toEqual({ orders: 0, cases: 0 });
   });
 });
