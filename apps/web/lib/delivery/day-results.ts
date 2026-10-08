@@ -155,12 +155,23 @@ export async function stopsOfLoads(db: Db, loads: readonly { id: string; breakJs
       },
     },
   });
+  // The rows grouped once, by load and then by stop (in the query's order), never a scan of every row
+  // per load and per stop: a month of every depot has thousands of loads and tens of thousands of
+  // rows (review of 8 Oct 2026: seconds of the actuals Excel's time, the web process blocked).
+  const byLoad = new Map<string | null, Map<number, typeof rows>>();
+  for (const r of rows) {
+    let bySeq = byLoad.get(r.loadId);
+    if (!bySeq) byLoad.set(r.loadId, (bySeq = new Map()));
+    const at = bySeq.get(r.sequenceInTruck);
+    if (at) at.push(r);
+    else bySeq.set(r.sequenceInTruck, [r]);
+  }
   for (const l of loads) {
-    const mine = rows.filter((r) => r.loadId === l.id);
-    const seqs = [...new Set(mine.map((r) => r.sequenceInTruck))].sort((a, b) => a - b);
+    const bySeq = byLoad.get(l.id);
+    const seqs = [...(bySeq?.keys() ?? [])].sort((a, b) => a - b);
     const stops: PlannedStopRow[] = [];
     for (const s of seqs) {
-      const at = mine.filter((r) => r.sequenceInTruck === s);
+      const at = bySeq!.get(s)!;
       const p = plannedStopFromRows(at as never, l.breakJson ?? null);
       if (!p) continue;
       const snap = (at[0]?.stopSnapshotJson ?? null) as { branchCode?: string | null } | null;

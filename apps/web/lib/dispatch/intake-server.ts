@@ -30,6 +30,7 @@ import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { validPalletFactor } from './pallets';
 import { dateOnly, isAfterCutoff, isoOf, todayIso, tomorrowIso } from './time';
+import { inParts } from '../in-parts';
 
 type Tx = Prisma.TransactionClient;
 
@@ -100,20 +101,9 @@ export const INTAKE_BUSY = {
 export const INTAKE_CHECK_FAILED =
   'RouteIQ could not check this file. Nothing was saved. Try again in a moment. If it happens again, tell your administrator.';
 
-/**
- * PostgreSQL takes at most 32,767 bind parameters in one query, and Prisma does not split an `in`
- * list that comes with other conditions (it fails with P2035 or P2029). An order file may hold
- * 50,000 rows, so a list that grows with the file is asked for in parts of this many values (third
- * review of audit P5: a file of 32,766 or more sales orders was refused with Prisma's text).
- */
-export const IN_LIST_PART = 10_000;
-
-/** `values` in order, in parts of at most `size` (see IN_LIST_PART). */
-export function inParts<T>(values: readonly T[], size = IN_LIST_PART): T[][] {
-  const parts: T[][] = [];
-  for (let i = 0; i < values.length; i += size) parts.push(values.slice(i, i + size));
-  return parts;
-}
+// Long `in` lists are asked for in parts (PostgreSQL's limit of bind parameters). The helper lives in
+// lib/in-parts.ts since the delivery actuals use it too; its old home still exports it.
+export { IN_LIST_PART, inParts } from '../in-parts';
 
 /** An order file that cannot be linked to a depot (owner rule, audit PR A5): 422, nothing saved. */
 export class DepotRequired extends Error {

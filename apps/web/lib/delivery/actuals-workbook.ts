@@ -14,9 +14,11 @@
  * one (date, depot, truck, trip, stop, customer, driver, why, the driver's result and its time, what
  * changed after) for the weekly review.
  */
+import { PassThrough } from 'node:stream';
 import ExcelJS from 'exceljs';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../db';
+import { findInParts } from '../in-parts';
 import { DEFAULT_TZ, daysBetween, fmtHhmm, isoOf, localDateIso, localMinutes } from '../dispatch/time';
 import { arrivalIsObserved, arrivedInsideWindow, deliveryKpis, inOutcomeScope, minutesFromDayStart, type DeliveryKpis, type KpiVisit } from './kpis';
 import { ACTUALS_MAX_DAYS, actualMinutes, arrivalByText, OUTCOME_LABEL, POSITION_TEXT, reasonLabel, timedByText } from './office-text';
@@ -140,23 +142,51 @@ export function madeAtText(at: Date, tz: string = DEFAULT_TZ): string {
   return `${localDateIso(at, tz)} ${fmtHhmm(localMinutes(at, tz))}`;
 }
 
-/** The workbook (pure: rows in, bytes out). */
+/**
+ * Rows made (readActuals) or written (buildActualsWorkbook) between two turns of the web process: a
+ * few milliseconds of work, so dispatcher screens and driver phones are answered during an export.
+ */
+const ROWS_PER_TURN = 200;
+const nextTurn = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/**
+ * The workbook (pure: rows in, bytes out). Written as a stream (ExcelJS's WorkbookWriter): each row
+ * of a sheet goes out to the zip as soon as it is added, and the web process gets a turn every
+ * ROWS_PER_TURN rows. Before, the whole workbook was built in memory and then written in one go:
+ * for 12,000-40,000 stops 0.3-1.1 GB more memory and one block of 2-10 s, while every dispatcher
+ * screen and driver phone waited (review of 8 Oct 2026). The sheets, cells and styles are the same.
+ */
 export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: ActualsMeta): Promise<Buffer> {
-  const wb = new ExcelJS.Workbook();
+  const out = new PassThrough();
+  const chunks: Buffer[] = [];
+  out.on('data', (c: Buffer) => chunks.push(c));
+  const ended = new Promise<void>((resolve, reject) => {
+    out.on('end', resolve);
+    out.on('error', reject);
+  });
+  ended.catch(() => undefined); // awaited below; never an unhandled rejection when a step before it throws
+  // Shared strings and styles, as the in-memory writer has them. Compression level 6 like that writer
+  // (the streaming zip's own default is 1: a file a third larger); zlib works off the event loop.
+  const wb = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: out, useStyles: true, useSharedStrings: true, zip: { zlib: { level: 6 } } });
   wb.creator = 'RouteIQ';
+  wb.lastModifiedBy = 'RouteIQ';
   wb.created = meta.generatedAt;
   const stops = wb.addWorksheet('Stops', { views: [{ state: 'frozen', ySplit: 1, xSplit: 3 }] });
   stops.columns = ACTUALS_COLUMNS.map((c) => ({ header: c.header, key: c.key, width: c.width }));
   stops.getRow(1).font = { bold: true };
   stops.getRow(1).alignment = { wrapText: true, vertical: 'top' };
+  stops.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ACTUALS_COLUMNS.length } };
   const countCol = ACTUALS_COLUMNS.findIndex((c) => c.key === 'linkCameraCount') + 1;
+  let n = 0;
   for (const r of rows) {
     const added = stops.addRow(r);
     // A result saved without a photo stands out; a driver link that used it 3 times or more that day is red.
     if (r.cameraException === 'Yes') added.eachCell({ includeEmpty: true }, (c) => (c.fill = AMBER));
     if (r.linkCameraCount >= CAMERA_ALERT_PER_DAY) added.getCell(countCol).font = { bold: true, color: { argb: 'FFC00000' } };
+    added.commit();
+    if (++n % ROWS_PER_TURN === 0) await nextTurn();
   }
-  stops.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: ACTUALS_COLUMNS.length } };
+  stops.commit();
 
   const k = meta.kpis;
   const sum = wb.addWorksheet('Summary');
@@ -195,6 +225,7 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
   sum.addRow({ a: '"Camera not working" lets the driver save Delivered or Partly without a photo. Each one is on the "Without photo" sheet: check them daily, and review the drivers who use it often every week.' });
   sum.addRow({ a: '"Photo not received": the driver\'s result named a photo that never arrived (the link was reissued or stopped, the trip was completed an hour before, or the 3 days to send it are over). It counts like "Camera not working".' });
   sum.addRow({ a: 'A result the office corrected (Record) stays on the "Without photo" sheet: the driver\'s result is shown with what changed after.' });
+  sum.commit();
 
   // Every result saved without a photo, for the daily check and the weekly review (owner decision 2).
   const wp = wb.addWorksheet('Without photo', { views: [{ state: 'frozen', ySplit: 1 }] });
@@ -215,10 +246,15 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
   ];
   wp.getRow(1).font = { bold: true };
   wp.getRow(1).alignment = { wrapText: true, vertical: 'top' };
-  for (const r of rows.filter((x) => x.cameraException === 'Yes')) {
+  n = 0;
+  for (const r of rows) {
+    if (r.cameraException !== 'Yes') continue;
     const added = wp.addRow(r);
     if (r.linkCameraCount >= CAMERA_ALERT_PER_DAY) added.getCell('linkCameraCount').font = { bold: true, color: { argb: 'FFC00000' } };
+    added.commit();
+    if (++n % ROWS_PER_TURN === 0) await nextTurn();
   }
+  wp.commit();
 
   const rs = wb.addWorksheet('Reasons');
   rs.columns = [
@@ -228,8 +264,10 @@ export async function buildActualsWorkbook(rows: readonly ActualsRow[], meta: Ac
   ];
   rs.getRow(1).font = { bold: true };
   for (const r of k.byReason) rs.addRow({ reason: reasonLabel(r.reason), stops: r.stops, cases: r.cases });
-  const buf = await wb.xlsx.writeBuffer();
-  return Buffer.from(buf as ArrayBuffer);
+  rs.commit();
+  await wb.commit();
+  await ended;
+  return Buffer.concat(chunks);
 }
 
 const yesNo = (b: boolean) => (b ? 'Yes' : 'No');
@@ -359,22 +397,35 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
     photoWaitOverOf(db, tenantId, range.from, range.to, visits, { now, loads }),
   ]);
   const byKey = new Map(visits.map((v) => [keyOfVisit(v), v]));
-  const visitIds = visits.map((v) => v.id);
+  // The visits' photos and the brought-forward orders are asked for in parts of IN_LIST_PART ids: a
+  // month of every depot has more visits and orders than PostgreSQL's 32,767 bind parameters, and
+  // Prisma cannot split a list that comes with other conditions (review of 8 Oct 2026: 500).
   const [photos, users, carried, cameraCounts] = await Promise.all([
-    visitIds.length ? db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: visitIds } }, select: { visitId: true, positionStatus: true, distanceM: true, takenAt: true }, orderBy: [{ takenAt: 'asc' }] }) : [],
+    findInParts(
+      visits.map((v) => v.id),
+      (part) => db.deliveryPhoto.findMany({ where: { tenantId, visitId: { in: part } }, select: { visitId: true, positionStatus: true, distanceM: true, takenAt: true }, orderBy: [{ takenAt: 'asc' }] }),
+    ),
     (async () => {
       const ids = [...new Set(visits.map((v) => v.outcomeById).filter((x): x is string => !!x))];
       return ids.length ? db.user.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } }) : [];
     })(),
-    (async () => {
-      const ids = [...new Set([...stopsBy.values()].flat().flatMap((s) => s.orderIds))];
-      return ids.length ? db.order.findMany({ where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } }, select: { id: true, carriedTo: { select: { deliveryDate: true } } } }) : [];
-    })(),
+    findInParts(
+      [...new Set([...stopsBy.values()].flat().flatMap((s) => s.orderIds))],
+      (part) => db.order.findMany({ where: { tenantId, id: { in: part }, carriedToOrderId: { not: null } }, select: { id: true, carriedTo: { select: { deliveryDate: true } } } }),
+    ),
     // Per driver link (truck-day), every depot: a truck that loads at two depots has one link.
     visits.some((v) => noPhotoKind(v, waitOver.has(v.id))) ? cameraCountsByTruckDay(db, tenantId, range.from, range.to, { now }) : new Map<string, number>(),
   ]);
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const carriedTo = new Map(carried.map((c) => [c.id, c.carriedTo ? isoOf(c.carriedTo.deliveryDate) : null]));
+  // A visit's photos, oldest first, grouped once (never every photo of the range scanned per stop: a
+  // month of one depot spent 5-10 s on that, the web process blocked).
+  const photosOf = new Map<string, typeof photos>();
+  for (const p of photos) {
+    const list = photosOf.get(p.visitId);
+    if (list) list.push(p);
+    else photosOf.set(p.visitId, [p]);
+  }
   const rows: ActualsRow[] = [];
   const kpiStops: (KpiVisit | null)[] = [];
   for (const l of [...loads].sort((a, b) => a.date.localeCompare(b.date) || a.truckCode.localeCompare(b.truckCode) || a.loadNo - b.loadNo)) {
@@ -422,10 +473,13 @@ export async function readActuals(tenantId: string, range: { from: string; to: s
                 driverResultAt: v.driverResultAt,
               }
             : null,
-          v ? photos.filter((p) => p.visitId === v.id) : [],
+          v ? (photosOf.get(v.id) ?? []) : [],
           set.tz,
         ),
       );
+      // A month of every depot is tens of thousands of stops (about 45 us each): the web process gets
+      // a turn between them, as while the workbook is written.
+      if (rows.length % ROWS_PER_TURN === 0) await nextTurn();
     }
   }
   return { rows, kpis: deliveryKpis(kpiStops), depot: depotId ? (depotCode.get(depotId) ?? null) : null, tz: set.tz };

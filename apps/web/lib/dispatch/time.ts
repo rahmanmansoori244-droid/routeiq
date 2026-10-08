@@ -6,16 +6,34 @@
 
 export const DEFAULT_TZ = 'Asia/Muscat';
 
+/**
+ * One formatter per time zone, made once. Making an Intl.DateTimeFormat (0.15-0.23 ms) costs about
+ * 50 times more than formatting with one, and the delivery actuals Excel formats about four times
+ * per stop: a month of one depot blocked the web process for seconds on this alone (review of 8 Oct
+ * 2026). A formatter holds no state, so a reused one answers exactly as a new one. A zone it refuses
+ * throws on every call, as before (it is never kept); the cache is emptied if it holds many zones.
+ */
+const formatters = new Map<string, Intl.DateTimeFormat>();
+function formatterOf(tz: string): Intl.DateTimeFormat {
+  let fmt = formatters.get(tz);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat('en-GB', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    if (formatters.size >= 64) formatters.clear();
+    formatters.set(tz, fmt);
+  }
+  return fmt;
+}
+
 function parts(date: Date, tz: string) {
-  const fmt = new Intl.DateTimeFormat('en-GB', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hourCycle: 'h23',
-  });
+  const fmt = formatterOf(tz);
   const p = Object.fromEntries(fmt.formatToParts(date).map((x) => [x.type, x.value]));
   return { y: p.year, m: p.month, d: p.day, h: Number(p.hour), min: Number(p.minute) };
 }
