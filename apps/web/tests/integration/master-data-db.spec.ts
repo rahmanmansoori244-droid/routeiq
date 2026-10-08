@@ -20,6 +20,11 @@
  *     screen) and never attaches their orders to CX1 (it used the database's ILIKE, where "_" and
  *     "%" are wildcards); cx1 is CX1. The late order, the Customers page and the customer import
  *     treat C_2, C_3 and C_4 as new customers next to CX2, CX3 and CX4.
+ *  7. Review ui-rest-1 / web-day-data-3 / M10 (9 Oct 2026): the Customers page's list
+ *     (lib/customer-list.ts) on 1,050 customers searches, filters, pages and counts in PostgreSQL
+ *     through tenantDb: customer 1,049 is found in any letter case by code, name or branch, every
+ *     page holds each customer once, the badges count the whole company, and another company's
+ *     customer with the same code never shows.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -36,6 +41,9 @@ import { POST as createRegion } from '@/app/api/regions/route';
 import { POST as createCustomer } from '@/app/api/customers/route';
 import { POST as lateOrder } from '@/app/api/dispatch/late-order/route';
 import { getDayOverview } from '@/lib/dispatch/day-overview';
+import { loadCustomerList, readCustomerListParams } from '@/lib/customer-list';
+import { DEFAULT_SERVICE_AREA } from '@/lib/dispatch/location-input';
+import { tenantDb } from '@/lib/tenant';
 import { prisma as libPrisma } from '@/lib/db';
 import { cleanupTenant, prisma, uniqueSuffix } from './helpers';
 
@@ -313,5 +321,68 @@ describe('6. a customer code with "_" or "%" is itself, never a pattern (lib/cus
     expect(await prisma.customer.findFirst({ where: { tenantId, code: 'C_4' }, select: { name: true, priority: true } })).toEqual({ name: 'Shop C_4', priority: 2 });
     expect(await prisma.customer.findUniqueOrThrow({ where: { id: cx4.id } })).toMatchObject({ code: 'CX4', name: 'Shop CX4 renamed', lat: 23.6123 });
     expect(await prisma.customer.count({ where: { tenantId, code: { in: ['C_2', 'C_3', 'C_4'] } } })).toBe(3);
+  });
+});
+
+describe('7. the Customers page past 1,000 customers (review ui-rest-1 / web-day-data-3 / M10)', () => {
+  // A company of its own with 1,050 customers, and another company with the same code next to it.
+  const bigSlug = `mbig-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
+  const otherSlug = `moth-${uniqueSuffix()}`.toLowerCase().slice(0, 32);
+  afterAll(async () => {
+    await cleanupTenant(bigSlug);
+    await cleanupTenant(otherSlug);
+  });
+
+  it('search, filters, pages and counts run in PostgreSQL over every customer of the company, never another company', async () => {
+    const big = (await prisma.tenant.create({ data: { slug: bigSlug, name: 'Big', country: 'Oman' } })).id;
+    const other = (await prisma.tenant.create({ data: { slug: otherSlug, name: 'Other', country: 'Oman' } })).id;
+    const region = await prisma.region.create({ data: { tenantId: big, code: 'MCT', name: 'Muscat' } });
+    await prisma.customerTypeProfile.create({ data: { tenantId: big, customerType: 'GROCERY', defaultPriority: 4 } });
+    // S0001..S1000 located; S1001..S1040 without a location; S1041..S1045 at 0,0 (need a pin);
+    // S1049 a GROCERY at branch Nizwa-7, priority 3 not confirmed. Every second one is in MCT.
+    await prisma.customer.createMany({
+      data: Array.from({ length: 1050 }, (_, k) => {
+        const i = k + 1;
+        const at = i <= 1000 ? { lat: 23.5 + (i % 100) / 1000, lng: 58.3 + (i % 100) / 1000 } : i <= 1040 ? { lat: null, lng: null } : i <= 1045 ? { lat: 0, lng: 0 } : { lat: 23.61, lng: 58.41 };
+        return {
+          tenantId: big,
+          code: `S${String(i).padStart(4, '0')}`,
+          name: `Shop ${i}`,
+          branchCode: i === 1049 ? 'Nizwa-7' : null,
+          branchKey: i === 1049 ? 'Nizwa-7' : '__MAIN__',
+          regionId: i % 2 === 0 ? region.id : null,
+          geocodeConfidence: at.lat === null ? 'MISSING' : 'HIGH',
+          customerType: i === 1049 ? ('GROCERY' as const) : null,
+          ...at,
+        };
+      }),
+    });
+    await prisma.customer.create({ data: { tenantId: other, code: 'S1049', name: 'Shop 1049', branchKey: '__MAIN__' } });
+    const db = tenantDb(big);
+    const load = (sp: Record<string, string>) => loadCustomerList(db, readCustomerListParams(sp), { collect: null, area: DEFAULT_SERVICE_AREA });
+
+    const first = await load({});
+    expect({ all: first.all, total: first.total, pages: first.pages, rows: first.rows.length }).toEqual({ all: 1050, total: 1050, pages: 6, rows: 200 });
+    expect(first.counts).toEqual({ missingLocation: 40, needsPin: 5 });
+    expect(first.rows[0]).toMatchObject({ code: 'S0001', region: null });
+    expect(first.rows[1]).toMatchObject({ code: 'S0002', region: { id: region.id, code: 'MCT', name: 'Muscat' } });
+
+    // Past the first 1000, in any letter case, by code, name or branch: only this company's S1049.
+    for (const q of ['s1049', 'SHOP 1049', 'nizwa-7']) {
+      const found = await load({ q });
+      expect([q, found.rows.map((r) => [r.code, r.plannedPriority, r.plannedPrioritySource])]).toEqual([q, [['S1049', 4, 'TYPE']]]);
+    }
+
+    // Every page, once each, nothing of the other company.
+    const seen = new Set<string>();
+    for (let page = 1; page <= 6; page++) for (const r of (await load({ page: String(page) })).rows) seen.add(r.id);
+    expect(seen.size).toBe(1050);
+    expect((await load({ page: '9' })).params.page).toBe(6);
+
+    expect((await load({ region: region.id })).total).toBe(525);
+    // Odd numbers have no region: S0104 and the even S104x are in MCT.
+    expect((await load({ region: '__noregion__', q: 'shop 104' })).rows.map((r) => r.code)).toEqual(['S1041', 'S1043', 'S1045', 'S1047', 'S1049']);
+    expect((await load({ show: 'missing' })).total).toBe(40);
+    expect((await load({ show: 'pin' })).rows.map((r) => r.code)).toEqual(['S1041', 'S1042', 'S1043', 'S1044', 'S1045']);
   });
 });

@@ -9,21 +9,23 @@ import { EmptyState } from '@/components/empty-state';
 import { Button } from '@/components/ui/button';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { loadWorklist } from '@/lib/dispatch/customer-master';
+import { loadCustomerList, readCustomerListParams } from '@/lib/customer-list';
 import { CustomersClient } from './customers-client';
 
 export const metadata = { title: 'Customers — RouteIQ' };
 export const dynamic = 'force-dynamic';
 
-export default async function CustomersPage({ params, searchParams }: { params: { slug: string }; searchParams?: { show?: string } }) {
+export default async function CustomersPage({
+  params,
+  searchParams,
+}: {
+  params: { slug: string };
+  searchParams?: Record<string, string | string[] | undefined>;
+}) {
   const { db, user, tenant } = await getCurrentTenant(params.slug);
   const canEdit = canPlan(user.role);
 
-  const [listed, regions, serviceArea, worklist, measured] = await Promise.all([
-    db.customer.findMany({
-      orderBy: [{ active: 'desc' }, { code: 'asc' }],
-      include: { region: { select: { id: true, code: true, name: true } } },
-      take: 1000,
-    }),
+  const [regions, serviceArea, worklist, measured] = await Promise.all([
     db.region.findMany({ orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),
     // The company's delivery area: a saved point outside it that nobody confirmed needs a pin.
     tenantServiceArea(tenant.id),
@@ -36,12 +38,6 @@ export default async function CustomersPage({ params, searchParams }: { params: 
       return {};
     }),
   ]);
-  // Every customer of the data-to-collect list is on the page, also past the first 1000.
-  const shown = new Set(listed.map((c) => c.id));
-  const extra = worklist?.rows.filter((r) => !shown.has(r.customerId)).map((r) => r.customerId) ?? [];
-  const customers = extra.length
-    ? [...listed, ...(await db.customer.findMany({ where: { id: { in: extra } }, include: { region: { select: { id: true, code: true, name: true } } } }))]
-    : listed;
   const collect = worklist
     ? {
         from: worklist.from,
@@ -51,8 +47,12 @@ export default async function CustomersPage({ params, searchParams }: { params: 
         rows: Object.fromEntries(worklist.rows.map((r) => [r.customerId, { missing: r.missing, firstDelivery: r.firstDelivery, depots: r.depots }])),
       }
     : null;
+  // Searched, filtered and paged in the database over every customer of the company (review
+  // ui-rest-1 / web-day-data-3 / M10). It used to be the first 1000, searched in the browser: a
+  // customer past them could not be found, and the header and the badges counted only those.
+  const list = await loadCustomerList(db, readCustomerListParams(searchParams), { collect: collect?.rows ?? null, area: serviceArea });
 
-  if (customers.length === 0) {
+  if (list.all === 0) {
     return (
       <PageShell
         title="Customers"
@@ -90,7 +90,7 @@ export default async function CustomersPage({ params, searchParams }: { params: 
   return (
     <PageShell
       title="Customers"
-      description={`${customers.length} customers · click a row to edit on the map.`}
+      description={`${list.all.toLocaleString('en-US')} customers · click a row to edit on the map.`}
       actions={
         canEdit ? (
           <Button asChild variant="outline" size="sm">
@@ -106,12 +106,12 @@ export default async function CustomersPage({ params, searchParams }: { params: 
       {canManageMasterData(user.role) ? <PinCheckPanel slug={params.slug} /> : null}
       <CustomersClient
         slug={params.slug}
-        initial={customers}
+        initial={list.rows}
+        list={{ params: list.params, total: list.total, pages: list.pages, pageSize: list.pageSize, counts: list.counts }}
         regions={regions}
         canEdit={canEdit}
         serviceArea={serviceArea}
         collect={collect}
-        initialCollectOnly={searchParams?.show === 'collect'}
         measured={measured}
       />
     </PageShell>

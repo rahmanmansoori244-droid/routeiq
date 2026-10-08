@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState, useTransition } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Download, Search, MapPin, MapPinOff } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Search, MapPin, MapPinOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import type { PaymentType } from '@prisma/client';
@@ -13,7 +13,8 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 import { runInlineUpdate } from '@/lib/customer-inline-update';
-import { locationIssue } from '@/lib/dispatch/customer-attrs';
+import { CUSTOMER_SEARCH_MAX, NO_REGION, customerListQuery, type CustomerListParams } from '@/lib/customer-list';
+import { locationIssue, unconfirmedPriorityText, type AttrSource } from '@/lib/dispatch/customer-attrs';
 import type { ServiceArea } from '@/lib/dispatch/location-input';
 import { MASTER_SINCE_MAX_DAYS } from '@/lib/dispatch/data-collection';
 import { addDaysIso } from '@/lib/dispatch/time';
@@ -33,7 +34,12 @@ interface CustomerRow {
   lng: number | null;
   geocodeConfidence: string | null;
   locationVerified: boolean;
+  /** The stored priority. */
   priority: number;
+  priorityConfirmed: boolean;
+  /** The priority the planner uses (review ui-rest-2): the type default wins over an unconfirmed stored one. */
+  plannedPriority: number;
+  plannedPrioritySource: AttrSource;
   avgServiceTimeMin: number;
   paymentType: PaymentType;
   active: boolean;
@@ -54,33 +60,49 @@ export interface CollectInfo {
   rows: Record<string, { missing: string; firstDelivery: string; depots: string[] }>;
 }
 
+/** The page of the list the server read (lib/customer-list.ts), and the company's counts. */
+export interface CustomerListInfo {
+  /** The search, filters and page these rows are for. */
+  params: CustomerListParams;
+  /** Customers matching the filters, on every page. */
+  total: number;
+  pages: number;
+  pageSize: number;
+  /** Every customer of the company without a location, and with a saved point that needs a pin. */
+  counts: { missingLocation: number; needsPin: number };
+}
+
 const ALL = '__all__';
-const NO_REGION = '__noregion__';
+/** The search starts once the typing pauses this long (each search reads the database). */
+export const SEARCH_DELAY_MS = 300;
+
+const fmt = (n: number) => n.toLocaleString('en-US');
 
 export function CustomersClient({
   slug,
   initial,
+  list,
   regions,
   canEdit,
   serviceArea,
   collect = null,
-  initialCollectOnly = false,
   measured = {},
 }: {
   slug: string;
+  /** This page's rows, searched and filtered in the database over every customer of the company. */
   initial: CustomerRow[];
+  list: CustomerListInfo;
   regions: RegionOption[];
   canEdit: boolean;
   /** The company's delivery area: a saved point outside it that nobody confirmed needs a pin. */
   serviceArea: ServiceArea;
   /** Dispatchers and up: the data to collect (customers with open orders soon that miss data). */
   collect?: CollectInfo | null;
-  /** Opened from "Open on Customers" (?show=collect): only the data to collect. */
-  initialCollectOnly?: boolean;
   /** Measured unloading times (delivery outcome, spec section 11.1), by customer id: only customers that have one. */
   measured?: Record<string, CustomerDeliveryStats>;
 }) {
   const router = useRouter();
+  const { params } = list;
   const [rows, setRows] = useState(initial);
   // Rows whose last change the server did not confirm (no answer or a server error) and that could not be reloaded (audit F24).
   const [uncertain, setUncertain] = useState<ReadonlySet<string>>(new Set());
@@ -89,42 +111,50 @@ export function CustomersClient({
     setRows(initial);
     setUncertain(new Set());
   }, [initial]);
-  const [q, setQ] = useState('');
-  const [regionFilter, setRegionFilter] = useState<string>(ALL);
-  const [onlyActive, setOnlyActive] = useState(false);
-  const [collectOnly, setCollectOnly] = useState(initialCollectOnly && !!collect);
+  const [q, setQ] = useState(params.q);
   const [since, setSince] = useState('');
   const [updating, startUpdate] = useTransition();
+  const [navigating, startNavigation] = useTransition();
   const toCollect = useMemo(() => collect?.rows ?? {}, [collect]);
-
-  const filtered = useMemo(() => {
-    const lower = q.trim().toLowerCase();
-    const list = rows.filter((c) => {
-      if (collectOnly && !toCollect[c.id]) return false;
-      if (onlyActive && !c.active) return false;
-      if (regionFilter === NO_REGION && c.regionId !== null) return false;
-      if (regionFilter !== ALL && regionFilter !== NO_REGION && c.regionId !== regionFilter) return false;
-      if (lower) {
-        return (
-          c.code.toLowerCase().includes(lower) ||
-          c.name.toLowerCase().includes(lower) ||
-          (c.branchCode?.toLowerCase().includes(lower) ?? false)
-        );
-      }
-      return true;
-    });
-    // The data to collect: soonest delivery first (as the day screen and the Excel).
-    if (collectOnly) list.sort((a, b) => (toCollect[a.id]?.firstDelivery ?? '').localeCompare(toCollect[b.id]?.firstDelivery ?? '') || a.code.localeCompare(b.code));
-    return list;
-  }, [rows, q, regionFilter, onlyActive, collectOnly, toCollect]);
   const collectCount = Object.keys(toCollect).length;
+
+  // The search, the filters and the page are the page's address: the server reads that page of
+  // every customer of the company (review ui-rest-1 / web-day-data-3 / M10). A new search or
+  // filter starts at the first page.
+  const asked = useRef(params.q);
+  const go = useCallback(
+    (next: Partial<CustomerListParams>) => {
+      const target: CustomerListParams = { ...params, q: q.trim(), page: 1, ...next };
+      asked.current = target.q;
+      startNavigation(() => router.replace(`/t/${slug}/customers${customerListQuery(target)}`, { scroll: false }));
+    },
+    [params, q, router, slug],
+  );
+  // The address changed without the search box (a link, Show all): the box shows its search.
+  useEffect(() => {
+    if (params.q !== asked.current) {
+      asked.current = params.q;
+      setQ(params.q);
+    }
+  }, [params.q]);
+  // Typing searches once it pauses (Enter at once).
+  useEffect(() => {
+    const want = q.trim();
+    if (want === asked.current) return;
+    const t = setTimeout(() => go({ q: want }), SEARCH_DELAY_MS);
+    return () => clearTimeout(t);
+  }, [q, go]);
+  const filtered = !!(params.q || params.region || params.active || params.show);
 
   function patchRow(id: string, patch: Partial<CustomerRow>) {
     const before = rows.find((r) => r.id === id);
     if (!before) return;
+    // A priority saved here is confirmed (the PATCH sets priorityConfirmed), so it is the one planned (review ui-rest-2).
+    const planned = (r: CustomerRow): CustomerRow =>
+      patch.priority === undefined ? r : { ...r, priorityConfirmed: true, plannedPriority: r.priority, plannedPrioritySource: 'CUSTOMER' };
     // Optimistic update; runInlineUpdate then shows what the server has (saved, refused, or - with
     // no answer or a server error - reloaded or marked "not confirmed"). It never throws and never re-sends (audit F24).
-    setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+    setRows((rs) => rs.map((r) => (r.id === id ? planned({ ...r, ...patch }) : r)));
     startUpdate(async () => {
       const result = await runInlineUpdate(before, patch, {
         fetchImpl: fetch,
@@ -138,14 +168,17 @@ export function CustomersClient({
           }),
         notify: { success: (m) => toast.success(m), error: (m) => toast.error(m, { duration: 10_000 }), warning: (m) => toast.warning(m, { duration: 10_000 }) },
       });
-      if (result === 'SAVED') router.refresh();
+      if (result === 'SAVED') {
+        setRows((rs) => rs.map((r) => (r.id === id ? planned(r) : r)));
+        router.refresh();
+      }
     });
   }
 
-  const missingCoords = rows.filter((c) => c.lat === null || c.lng === null).length;
   // A5 third review: a saved point that blocks delivery (LOW or outside the area and never
   // confirmed, or 0,0) is not "missing", but its orders are not planned or sent out either. The
-  // day card's test and words (locationIssue), so the dispatcher can find them before they have orders.
+  // day card's test and words (locationIssue), so the dispatcher can find them before they have
+  // orders. The rows of this page are flagged here; the badges count the whole company (server).
   const needsPinMessage = useMemo(() => {
     const out = new Map<string, string>();
     for (const c of rows) {
@@ -155,6 +188,9 @@ export function CustomersClient({
     }
     return out;
   }, [rows, serviceArea]);
+  const { counts } = list;
+  const first = list.total ? (params.page - 1) * list.pageSize + 1 : 0;
+  const last = Math.min(params.page * list.pageSize, list.total);
 
   return (
     <div className="space-y-3">
@@ -164,11 +200,16 @@ export function CustomersClient({
           <Input
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search code, name, branch…"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') go({ q: q.trim() });
+            }}
+            maxLength={CUSTOMER_SEARCH_MAX}
+            placeholder="Search all customers: code, name, branch…"
             className="ps-8 w-72"
+            data-testid="customers-search"
           />
         </div>
-        <Select value={regionFilter} onValueChange={setRegionFilter}>
+        <Select value={params.region || ALL} onValueChange={(v) => go({ region: v === ALL ? '' : v })}>
           <SelectTrigger className="w-56">
             <SelectValue placeholder="All regions" />
           </SelectTrigger>
@@ -183,26 +224,53 @@ export function CustomersClient({
           </SelectContent>
         </Select>
         <label className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Switch checked={onlyActive} onCheckedChange={setOnlyActive} />
+          <Switch checked={params.active} onCheckedChange={(v) => go({ active: v })} data-testid="active-only" />
           Active only
         </label>
         {collect ? (
           <label className="flex items-center gap-2 text-sm text-muted-foreground" title={`Customers with open orders from ${collect.from} to ${collect.to} that miss a usable location or confirmed receiving hours`}>
-            <Switch checked={collectOnly} onCheckedChange={setCollectOnly} data-testid="collect-only" />
+            <Switch checked={params.show === 'collect'} onCheckedChange={(v) => go({ show: v ? 'collect' : null })} data-testid="collect-only" />
             Data to collect ({collectCount})
           </label>
         ) : null}
-        {needsPinMessage.size > 0 ? (
-          <Badge variant="destructive" className="ms-auto" data-testid="customers-need-pin" title="Their saved location is not usable. Open each one and use Set location to drop the pin.">
-            <MapPin className="me-1 h-3 w-3" />
-            {needsPinMessage.size} need a pin
-          </Badge>
+        {/* The company's counts (not only this page's); each opens its customers, a second click shows all again. */}
+        {counts.needsPin > 0 ? (
+          <button
+            type="button"
+            className="ms-auto rounded-full"
+            aria-pressed={params.show === 'pin'}
+            onClick={() => go({ show: params.show === 'pin' ? null : 'pin' })}
+            data-testid="show-need-pin"
+          >
+            <Badge
+              variant="destructive"
+              className={params.show === 'pin' ? 'ring-2 ring-destructive ring-offset-1' : ''}
+              data-testid="customers-need-pin"
+              title="Their saved location is not usable. Click to list them; open each one and use Set location to drop the pin."
+            >
+              <MapPin className="me-1 h-3 w-3" />
+              {counts.needsPin} need a pin
+            </Badge>
+          </button>
         ) : null}
-        {missingCoords > 0 ? (
-          <Badge variant="warning" className={needsPinMessage.size > 0 ? '' : 'ms-auto'} data-testid="customers-missing-location">
-            <MapPinOff className="me-1 h-3 w-3" />
-            {missingCoords} missing geocode
-          </Badge>
+        {counts.missingLocation > 0 ? (
+          <button
+            type="button"
+            className={counts.needsPin > 0 ? 'rounded-full' : 'ms-auto rounded-full'}
+            aria-pressed={params.show === 'missing'}
+            onClick={() => go({ show: params.show === 'missing' ? null : 'missing' })}
+            data-testid="show-missing-location"
+          >
+            <Badge
+              variant="warning"
+              className={params.show === 'missing' ? 'ring-2 ring-amber-500 ring-offset-1' : ''}
+              data-testid="customers-missing-location"
+              title="Click to list the customers without a location."
+            >
+              <MapPinOff className="me-1 h-3 w-3" />
+              {counts.missingLocation} missing geocode
+            </Badge>
+          </button>
         ) : null}
       </div>
 
@@ -250,14 +318,16 @@ export function CustomersClient({
               <TableHead>Name</TableHead>
               <TableHead>Region</TableHead>
               <TableHead className="text-right">Lat/Lng</TableHead>
-              <TableHead className="text-center">Priority</TableHead>
+              <TableHead className="text-center" title="The stored priority; under it the one the planner uses when that is not a confirmed priority (P1 = highest)">
+                Priority
+              </TableHead>
               {Object.keys(measured).length ? <TableHead title="Planned unloading time, and the time measured by the driver page (median of the last timed visits)">Unloading</TableHead> : null}
               <TableHead>Payment</TableHead>
               <TableHead className="text-center">Active</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {filtered.map((c) => (
+            {rows.map((c) => (
               <TableRow key={c.id} className="cursor-default">
                 <TableCell className="font-mono text-xs">
                   <Link className="hover:underline" href={`/t/${slug}/customers/${c.id}`}>
@@ -295,10 +365,11 @@ export function CustomersClient({
                 </TableCell>
                 <TableCell className="text-center">
                   {canEdit ? (
-                    <PriorityCell value={c.priority} disabled={updating} onChange={(v) => patchRow(c.id, { priority: v })} />
+                    <PriorityCell value={c.priority} confirmed={c.priorityConfirmed} disabled={updating} onChange={(v) => patchRow(c.id, { priority: v })} />
                   ) : (
                     <Badge variant="outline">{c.priority}</Badge>
                   )}
+                  <PlannedPriority row={c} canEdit={canEdit} />
                 </TableCell>
                 {Object.keys(measured).length ? (
                   <TableCell className="text-xs" data-testid="customer-measured" data-customer={c.code}>
@@ -353,9 +424,59 @@ export function CustomersClient({
             ))}
           </TableBody>
         </Table>
-        {filtered.length === 0 ? (
-          <div className="px-3 py-8 text-center text-sm text-muted-foreground">No customers match the filters.</div>
+        {rows.length === 0 ? (
+          <div className="px-3 py-8 text-center text-sm text-muted-foreground" data-testid="customers-none">
+            No customers match the filters.
+            {filtered ? (
+              <Button
+                variant="link"
+                size="sm"
+                onClick={() => {
+                  setQ('');
+                  go({ q: '', region: '', active: false, show: null });
+                }}
+                data-testid="customers-show-all"
+              >
+                Show all customers
+              </Button>
+            ) : null}
+          </div>
         ) : null}
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2 text-xs text-muted-foreground" data-testid="customers-paging">
+          <span data-testid="customers-shown">
+            {list.total ? `${fmt(first)}–${fmt(last)} of ${fmt(list.total)}${filtered ? ' matching' : ''}` : 'None'}
+            {navigating ? ' · loading…' : ''}
+          </span>
+          {list.pages > 1 ? (
+            <span className="flex items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2"
+                disabled={params.page <= 1}
+                onClick={() => go({ q: params.q, page: params.page - 1 })}
+                data-testid="customers-prev"
+              >
+                <ChevronLeft className="h-4 w-4" />
+                Previous
+              </Button>
+              <span>
+                Page {params.page} of {list.pages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 px-2"
+                disabled={params.page >= list.pages}
+                onClick={() => go({ q: params.q, page: params.page + 1 })}
+                data-testid="customers-next"
+              >
+                Next
+                <ChevronRight className="h-4 w-4" />
+              </Button>
+            </span>
+          ) : null}
+        </div>
       </div>
     </div>
   );
@@ -363,17 +484,22 @@ export function CustomersClient({
 
 function PriorityCell({
   value,
+  confirmed,
   disabled,
   onChange,
 }: {
   value: number;
+  confirmed: boolean;
   disabled: boolean;
   onChange: (v: number) => void;
 }) {
+  // An unconfirmed priority is not selected: the stored one shows as the placeholder, and picking
+  // any priority - also that one - confirms it (review ui-rest-2). Radix calls onValueChange only
+  // for a value other than the selected one, so picking the shown value used to send nothing.
   return (
-    <Select value={String(value)} onValueChange={(v) => onChange(Number(v))} disabled={disabled}>
-      <SelectTrigger className="h-7 w-16 px-2 py-0 text-xs">
-        <SelectValue />
+    <Select value={confirmed ? String(value) : ''} onValueChange={(v) => onChange(Number(v))} disabled={disabled}>
+      <SelectTrigger className="mx-auto h-7 w-16 px-2 py-0 text-xs" aria-label={confirmed ? `Priority ${value}` : `Priority ${value}, not confirmed`}>
+        <SelectValue placeholder={String(value)} />
       </SelectTrigger>
       <SelectContent>
         {[1, 2, 3, 4, 5].map((n) => (
@@ -383,5 +509,25 @@ function PriorityCell({
         ))}
       </SelectContent>
     </Select>
+  );
+}
+
+/**
+ * The priority the planner uses when the stored one is not confirmed (review ui-rest-2): the
+ * customer type's default wins (customer-attrs.ts effectivePriority), so a grocery stored as 3 with
+ * a P4 type default is planned - and dropped first when trucks are short - as P4.
+ */
+function PlannedPriority({ row, canEdit }: { row: CustomerRow; canEdit: boolean }) {
+  const text = unconfirmedPriorityText({ priority: row.plannedPriority, prioritySource: row.plannedPrioritySource });
+  if (!text) return null;
+  return (
+    <span
+      className="mt-0.5 block whitespace-nowrap text-[11px] text-muted-foreground"
+      title={`The planner uses ${text}.${canEdit ? ' Pick a priority to confirm it.' : ''}`}
+      data-testid="customer-planned-priority"
+      data-customer={row.code}
+    >
+      {row.plannedPriority !== row.priority ? `planned P${row.plannedPriority}` : 'not confirmed'}
+    </span>
   );
 }

@@ -52,6 +52,7 @@ import { CustomerEditor } from '@/app/t/[slug]/customers/[id]/customer-editor';
 import { CustomerDetailsButton } from '@/app/t/[slug]/customers/[id]/customer-details-button';
 import { windowGateRemedy } from '@/lib/dispatch/data-collection';
 import { CustomersClient } from '@/app/t/[slug]/customers/customers-client';
+import { DEFAULT_CUSTOMER_LIST, needsPinIds } from '@/lib/customer-list';
 import { LOW_LOCATION_MESSAGE, OUTSIDE_AREA_LOCATION_MESSAGE } from '@/lib/dispatch/customer-attrs';
 
 const T = 'tA';
@@ -687,6 +688,9 @@ describe('the customers list flags saved points that need a pin (A5 third review
     region: null,
     address: null,
     priority: 3,
+    priorityConfirmed: true,
+    plannedPriority: 3,
+    plannedPrioritySource: 'CUSTOMER',
     avgServiceTimeMin: 10,
     paymentType: 'CREDIT',
   });
@@ -700,7 +704,12 @@ describe('the customers list flags saved points that need a pin (A5 third review
       listRow('OKLOW', { geocodeConfidence: 'LOW', locationVerified: true }),
       listRow('NONE', { lat: null, lng: null, geocodeConfidence: 'MISSING' }),
     ];
-    const host = new Host(CustomersClient as any, { slug: 'acme', initial: rows, regions: [], canEdit: false, serviceArea: DEFAULT_SERVICE_AREA });
+    // The badges count the whole company on the server (lib/customer-list.ts, review ui-rest-1): the
+    // same test as the row flags. Here the company is these rows.
+    const needsPin = needsPinIds(rows as any, DEFAULT_SERVICE_AREA);
+    expect(needsPin).toEqual(['LOW', 'AWAY', 'ZERO']);
+    const list = { params: DEFAULT_CUSTOMER_LIST, total: rows.length, pages: 1, pageSize: 200, counts: { missingLocation: 1, needsPin: needsPin.length } };
+    const host = new Host(CustomersClient as any, { slug: 'acme', initial: rows, list, regions: [], canEdit: false, serviceArea: DEFAULT_SERVICE_AREA });
     host.render();
     const flagged = elements(host.tree).filter((e) => e.props?.['data-testid'] === 'customer-needs-pin');
     // Before: the coordinates only, with no flag, and the header counted only the missing one.
