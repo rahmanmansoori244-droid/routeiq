@@ -1906,6 +1906,8 @@ CLEAN_RECOVER_SEC = 2.0
 # deep recovery (every insertion, and swaps), then, while P1-P3 stops are still out, the constructive
 # fallback and a longer fit repack, each at most this long.
 EXTENDED_STEP_MAX_SEC = 60.0
+# The most the extension can use (its four steps): what _post_solve grants and waits for, at most.
+EXTENDED_MAX_SEC = 4 * EXTENDED_STEP_MAX_SEC
 
 
 def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: Pricing,

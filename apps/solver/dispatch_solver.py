@@ -5149,11 +5149,16 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     job_budget = min(cap * len(sources), budget_end - t0 - STAGE_GRACE_SEC - 5)
     fit_weights = _repair_weights(solvable, set(range(n_stops)), cfg, req.trucks, req.depot)
     # Benchmark F07 (8 Oct 2026): a repair that still leaves out P1-P3 stops, or whose fit repack proved
-    # no bound, may use the rest of the request's time (up to the cap minus the grace), shared by the
-    # rounds of jobs. A job uses it only then (build_candidates): a day whose plans time cleanly, or
-    # whose repair keeps every P1-P3 stop with a proven fit, ends as before.
+    # no bound, may use more of the request's time (up to the cap minus the grace, at most
+    # LR.EXTENDED_MAX_SEC), shared by the rounds of jobs. Granted - and waited for - only when a search
+    # plan failed the independent check (VIOLATED: a VERIFIED plan always times exactly, so only then
+    # can a repair be needed), so a hung worker on any other day is abandoned as before. A job uses it
+    # only then (build_candidates): a day whose plans time cleanly, or whose repair keeps every P1-P3
+    # stop with a proven fit, ends as before.
     rounds_of = (lambda n: -(-n // max(1, pool.size))) if pool is not None else (lambda n: max(1, n))
-    stage_room = max(0.0, budget_end - t0 - STAGE_GRACE_SEC - 5)
+    repair = (not raw and bool(rescue)) or any(
+        sc.feasibility is None or sc.feasibility.status != "VERIFIED" for sc in raw.values())
+    stage_room = max(0.0, budget_end - t0 - STAGE_GRACE_SEC - 5) if repair else 0.0
 
     def fallback(why: str) -> None:
         if pv_plan:
@@ -5179,10 +5184,10 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                           optional=_repair_weights(solvable, set(range(n_stops)) - pv_carried, cfg, req.trucks, req.depot) or None,
                           cap_s=cap, budget_s=pv_budget, fit_weights=fit_weights,
                           # Its own process, beside the engine's jobs: the same extension, never longer.
-                          extra_s=max(0.0, stage_room - pv_budget) / max(1, len(pv_goals)))
+                          extra_s=min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room - pv_budget) / max(1, len(pv_goals))))
         else:
             pv.report.update(status="NOT_CHOSEN", reason="OUT_OF_TIME")  # type: ignore[union-attr]
-    extra = max(0.0, stage_room / rounds_of(len(goals)) - job_budget) if goals else 0.0
+    extra = min(LR.EXTENDED_MAX_SEC, max(0.0, stage_room / rounds_of(len(goals)) - job_budget)) if goals else 0.0
     jobs = {g: dict(day=ctx.day, score_pricing=rec_pricing, goal=g,
                     goal_pricing=rec_pricing if g == "RECOMMENDED" else _pricing(g, req, tds, solvable),
                     sources=sources, optional=optional, cap_s=cap, budget_s=job_budget, time_raw=g == "RECOMMENDED",

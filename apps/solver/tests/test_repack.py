@@ -547,9 +547,17 @@ def test_recommended_only_points_to_verified_alternatives(monkeypatch):
     monkeypatch.setattr(ds, "_post_solve", mark("VIOLATED"))
     assert not any(note in w for w in rec(optimize_dispatch(r)).warnings)
     monkeypatch.setattr(ds, "_post_solve", post_solve)
-    # The whole stage failing: RECOMMENDED keeps its (exact) plan; MIN_TRUCKS keeps the route
-    # search's three loads, which cannot be re-timed exactly - reported, never advertised.
+    # The whole stage failing: RECOMMENDED keeps its (exact) plan; MIN_TRUCKS's three loads cannot be
+    # re-timed exactly, so it keeps the part that times (benchmark F01: a checked partial plan), which
+    # serves no more than RECOMMENDED - nothing is advertised.
     monkeypatch.setenv("ROUTEIQ_TEST_FAIL_REPACK", "1")
+    resp = optimize_dispatch(r)
+    by = {s.name: s for s in resp.scenarios}
+    assert not any(note in w for w in rec(resp).warnings)
+    assert by["MIN_TRUCKS"].feasibility.status == "VERIFIED"
+    assert any(w.startswith(ds.PARTIAL_PLAN_NOTE) for w in by["MIN_TRUCKS"].warnings), by["MIN_TRUCKS"].warnings
+    # And when nothing of it could be timed, the route search's three loads stay - reported, never advertised.
+    monkeypatch.setattr(ds, "_trimmed", lambda *a, **kw: None)
     resp = optimize_dispatch(r)
     by = {s.name: s for s in resp.scenarios}
     assert not any(note in w for w in rec(resp).warnings)
