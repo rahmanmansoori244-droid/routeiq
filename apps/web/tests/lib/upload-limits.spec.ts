@@ -261,9 +261,11 @@ describe('CSV: read to at most READ_ROWS rows', () => {
     expect(await refusal(parseUpload(csv(body(200_000))))).toBe('Too many rows: more than 50000. Max 50000.');
   });
 
-  it('a CSV sent as Excel (Windows browsers do) is read by SheetJS with the same row cap', async () => {
+  it('a CSV sent as Excel (Windows browsers do) has the same row cap', async () => {
+    // Since the review of 8 Oct 2026 it is read by Papa Parse like any CSV (upload-csv-text.spec.ts).
     const file = new File([body(120_000).join('\n')], 'orders.csv', { type: 'application/vnd.ms-excel' });
     expect(await refusal(parseUpload(file))).toBe('Too many rows: more than 50000. Max 50000.');
+    expect(readSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -478,19 +480,29 @@ describe('A1 review: SheetJS reads only the formats these checks bound', () => {
     expect(readSpy).not.toHaveBeenCalled();
   });
 
-  it('a CSV sent as Excel is still read by SheetJS, also with a byte-order mark or as UTF-16 text', async () => {
+  it('a CSV sent as Excel is still read, also with a byte-order mark or as UTF-16 text (by Papa Parse since the review of 8 Oct 2026)', async () => {
     const want = [{ code: 'C1', cases: '3' }];
     expect((await parseUpload(asExcel('code,cases\nC1,3\n', 'orders.csv'))).rows).toEqual(want);
     const bom = Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from('code,cases\nC1,3\n')]);
     expect((await parseUpload(asExcel(bom, 'orders.csv'))).rows).toEqual(want);
     const utf16 = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('code\tcases\nC1\t3\n', 'utf16le')]);
     expect((await parseUpload(asExcel(utf16, 'orders.xls'))).rows).toEqual(want);
+    // SheetJS guessed the type of every value of a CSV sent as Excel (11/10/2026 read month first,
+    // 00123 as 123): it no longer reads CSV text (upload-csv-text.spec.ts).
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
-  it(`a CSV sent as Excel with more than ${MAX_CELLS.toLocaleString('en-US')} cells is refused before SheetJS reads it`, async () => {
-    // SheetJS's CSV reader tries every value as a number and a date: 5 million cells (9.5 MB) took 20 s.
+  it(`a CSV sent as Excel has the caps of a CSV: more than ${MAX_COLS} columns, more than ${MAX_CELLS.toLocaleString('en-US')} cells refused; SheetJS never reads it`, async () => {
+    // SheetJS's CSV reader tries every value as a number and a date: 5 million cells (9.5 MB) took
+    // 20 s, so the guard counted a CSV sent as Excel from its separators. Since the review of 8 Oct
+    // 2026 such a file is read by Papa Parse, with the caps of a CSV sent as text (P5 second review).
     expect(await refusal(parseUpload(asExcel(`a${',a'.repeat(MAX_CELLS)}`, 'orders.csv')))).toBe(
-      'This file is too large to read: it has about 2,500,001 cells (rows x columns); at most 2,500,000 can be read. Split the file, or remove the columns you do not need, and upload again.',
+      'This file has 2,500,001 columns; at most 200 can be read. Delete the columns you do not need (also empty columns after your data) and upload again.',
+    );
+    const fields = (n: number, v: (c: number) => string) => Array.from({ length: n }, (_, c) => v(c)).join(',');
+    const rows = [fields(100, (c) => `h${c}`), ...Array.from({ length: 25_000 }, () => fields(100, () => '1'))];
+    expect(await refusal(parseUpload(asExcel(rows.join('\n'), 'orders.csv')))).toBe(
+      'This file is too large to read: it has about 2,500,100 cells (rows x columns); at most 2,500,000 can be read. Split the file, or remove the columns you do not need, and upload again.',
     );
     expect(readSpy).not.toHaveBeenCalled();
   });
@@ -647,10 +659,16 @@ describe('A1 v3: a file that begins with "ID" is refused only when SheetJS reads
   });
 
   it('a SYLK record with a small row, then CSV, is read as CSV; a real SYLK file stays refused', async () => {
-    expect((await parseUpload(asExcel('ID;P\nC;Y1;X1;K1\n1;2;3\n', 'orders.csv'))).rows).toEqual([
-      { id: 'C', p: 'Y1', __empty: 'X1', __empty_1: 'K1' },
-      { id: '1', p: '2', __empty: '3', __empty_1: '' },
+    // Read as CSV by Papa Parse since the review of 8 Oct 2026 (SheetJS's SYLK and CSV readers no
+    // longer see CSV text): the values past the header's two columns are kept together, as for any
+    // CSV, and named in a warning.
+    const parsed = await parseUpload(asExcel('ID;P\nC;Y1;X1;K1\n1;2;3\n', 'orders.csv'));
+    expect(parsed.rows).toEqual([
+      { id: 'C', p: 'Y1', __parsed_extra: 'X1,K1' },
+      { id: '1', p: '2', __parsed_extra: '3' },
     ]);
+    expect(parsed.warnings).toEqual(['CSV parse warning at row 0: Too many fields: expected 2 fields but parsed 4', 'CSV parse warning at row 1: Too many fields: expected 2 fields but parsed 3']);
+    expect(readSpy).not.toHaveBeenCalled();
     expect(await refusal(parseUpload(asExcel('ID;PWXL;N;E\nC;Y1;X1;K"a"\nC;Y2;X1;K5\nE\n', 'orders.xls')))).toBe(NOT_EXCEL);
   });
 });
@@ -1086,7 +1104,9 @@ describe('A5 fifth review: a file that begins with "ID", read for the customer i
   it('a CSV whose first header is "ID" is read with its cells\' own text, like any other CSV sent as Excel', async () => {
     const parsed = await parseUpload(asExcel('ID;code;lat;lng\n1;C1;23.5850;58.4150\n', 'customers.csv'), decimals);
     expect(parsed.rows).toEqual([{ id: '1', code: 'C1', lat: '23.5850', lng: '58.4150' }]);
-    expect(cellTextReads()).toBe(1);
+    // Since the review of 8 Oct 2026 by Papa Parse, which keeps every value's text, not by SheetJS
+    // with cellText (upload-csv-text.spec.ts).
+    expect(readSpy).not.toHaveBeenCalled();
   });
 
   it('a file whose SYLK reader formats a value before it reads the file as CSV is read without the cells\' text, as without the decimal columns', async () => {
@@ -1167,9 +1187,11 @@ describe('P5 second review: a CSV sent as text has the column and cell caps too'
     expect(await refusal(parseUpload(csv(body)))).toBe('Too many rows: 50001. Max 50000.');
   });
 
-  it('empty columns after the data count: a CSV saved with 250 columns, 2 of them used, is refused as text (sent as Excel, SheetJS drops them and reads it)', async () => {
+  it('empty columns after the data count: a CSV saved with 250 columns, 2 of them used, is refused, also sent as Excel', async () => {
+    // Sent as Excel, SheetJS dropped them and read it; since the review of 8 Oct 2026 every CSV is
+    // read by Papa Parse (upload-csv-text.spec.ts), with the same caps whatever the browser sends.
     const text = `code,cases${','.repeat(248)}\nC1,2${','.repeat(248)}\n`;
     expect(await refusal(parseUpload(csv(text)))).toBe(WIDE(250));
-    expect((await parseUpload(asExcel(text, 'orders.csv'))).rows).toEqual([{ code: 'C1', cases: '2' }]);
+    expect(await refusal(parseUpload(asExcel(text, 'orders.csv')))).toBe(WIDE(250));
   });
 });

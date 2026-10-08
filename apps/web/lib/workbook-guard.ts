@@ -105,7 +105,8 @@ const SAVE_AGAIN = 'Save only the sheet you need as a new workbook or as CSV and
 
 const damaged = () =>
   new WorkbookRefusedError('This workbook is damaged and cannot be read. Open it in Excel, save it again as .xlsx and upload it again.');
-const notExcel = () => new WorkbookRefusedError('This file is not an Excel workbook. Save it in Excel as .xlsx or as CSV and upload that.');
+/** Also lib/csv's, for CSV text that is no CSV (a SocialCalc file): the same words whatever the file was sent as. */
+export const notExcel = () => new WorkbookRefusedError('This file is not an Excel workbook. Save it in Excel as .xlsx or as CSV and upload that.');
 const passwordProtected = () =>
   new WorkbookRefusedError('This workbook is password-protected. Remove the password in Excel, save it and upload it again.');
 const tooManyCells = (cells: number, max: number, remedy: string) =>
@@ -388,7 +389,8 @@ export function sameSheetList(guarded: string[] | undefined, names: string[]): v
   if (guarded && (guarded.length !== names.length || guarded.some((n, i) => n !== names[i]))) throw damaged();
 }
 
-const webPageOrXml = () =>
+/** Also lib/csv's, for CSV text that is a web page or XML file (see notExcel). */
+export const webPageOrXml = () =>
   new WorkbookRefusedError(
     'This file is a web page or an XML file, not an Excel workbook or CSV. Open it in Excel, save it as .xlsx and upload that.',
   );
