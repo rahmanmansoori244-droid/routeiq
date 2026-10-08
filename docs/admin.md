@@ -14,7 +14,7 @@ Operational guide for tenant admins, on-call, and support. Pairs with [`CLAUDE.m
 5. **Stopwatched onboarding target: <30 minutes** for a planner with the right CSV prepared.
 
 ### Platform admins (`SUPER_ADMIN`)
-Since stabilization PR1 a platform admin needs BOTH the email in `SUPER_ADMIN_EMAILS` (comma-separated, web service) AND the role, granted only by the owner-run `apps/web/prisma/grant-platform-admin.ts <email> [--revoke]` (see [`SECURITY.md`](./SECURITY.md) section 3; it writes an audit row). Either one alone grants nothing. They can:
+Since stabilization PR1 a platform admin needs BOTH the email in `SUPER_ADMIN_EMAILS` (comma-separated, web service) AND the role, granted only by the owner-run `apps/web/prisma/grant-platform-admin.ts <email> --tenant <company slug> [--allow-self-signup]` or `<email> --revoke` (see [`SECURITY.md`](./SECURITY.md) section 3; it writes an audit row). Either one alone grants nothing. Run the script first with the email alone: it shows the account and its company and changes nothing. It grants only when `--tenant` names that account's own company, and refuses a company made through public sign-up unless `--allow-self-signup` is passed (an outsider can register any address through sign-up). Platform admins can:
 - See every tenant in `/admin`
 - Open any `/t/{slug}` page; each view writes a `CROSS_TENANT_VIEW` row in that tenant's audit log
 - Suspend/restore tenants (read-only in the UI; see below)
