@@ -61,7 +61,8 @@ export async function POST(req: Request) {
 
   let v;
   try {
-    v = await validateIntake(tenantId, parsed.rows, { depotId, defaultDeliveryDate: deliveryDate });
+    // rowNumbers: the file row of each row (blank rows the reader left out counted), for the messages and OrderLine.sourceRow.
+    v = await validateIntake(tenantId, parsed.rows, { depotId, defaultDeliveryDate: deliveryDate, rowNumbers: parsed.rowNumbers });
   } catch (err) {
     // Owner rule (audit PR A5): every order file is for one depot. No active depot, or no choice
     // among two or more, or a chosen depot that is not active: 422, nothing is saved.
@@ -81,49 +82,59 @@ export async function POST(req: Request) {
   // (for the same dates), so a file confirmed before the deploy is not added a second time.
   const hash = v.contentHash ?? null;
   v.legacyHash = legacyRowsHash(parsed.rows);
-  const sameFile = await findSameConfirmedFile(prisma, tenantId, {
-    depotId: v.depotId,
-    contentHash: hash,
-    legacyHash: v.legacyHash,
-    deliveryDates: v.totals.deliveryDates,
-  });
-  if (sameFile) {
-    v.errors.unshift({
-      row: 1,
-      // Every line of a re-sent file is skipped, so name the file's own dates (never "this date").
-      message: `These orders were already confirmed for ${(v.totals.deliveryDates.length ? v.totals.deliveryDates : v.fileDeliveryDates ?? []).join(', ') || 'this date'} (file ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC).`,
-    });
-  }
-  const topDate = v.totals.deliveryDates[0] ?? deliveryDate;
-
-  const batch = await db.uploadBatch.create({
-    data: {
-      tenantId,
-      fileName: parsed.fileName,
-      fileType: parsed.fileType,
-      uploadedById: session.user.id,
-      deliveryDate: topDate ? dateOnly(topDate) : null,
-      status: v.errors.length > 0 ? 'PARSED' : 'VALIDATED',
-      totalRows: parsed.rows.length,
-      validRows: v.lines.length,
-      errorRows: v.errors.length,
-      warningRows: v.warnings.length + v.duplicates.length,
-      validationJson: v as never,
+  let batch;
+  try {
+    const sameFile = await findSameConfirmedFile(prisma, tenantId, {
       depotId: v.depotId,
-      fileHash: hash,
-      isLate: v.late.isLate,
-    },
-  });
+      contentHash: hash,
+      legacyHash: v.legacyHash,
+      deliveryDates: v.totals.deliveryDates,
+    });
+    if (sameFile) {
+      v.errors.unshift({
+        row: 1,
+        // Every line of a re-sent file is skipped, so name the file's own dates (never "this date").
+        message: `These orders were already confirmed for ${(v.totals.deliveryDates.length ? v.totals.deliveryDates : v.fileDeliveryDates ?? []).join(', ') || 'this date'} (file ${sameFile.fileName}, ${sameFile.uploadedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC).`,
+      });
+    }
+    const topDate = v.totals.deliveryDates[0] ?? deliveryDate;
 
-  await audit({
-    tenantId,
-    userId: session.user.id,
-    action: 'CREATE',
-    entity: 'UploadBatch',
-    entityId: batch.id,
-    afterJson: { fileName: batch.fileName, rows: parsed.rows.length, lines: v.lines.length, errors: v.errors.length, cases: v.totals.cases, late: v.late.isLate } as never,
-    ip,
-  });
+    batch = await db.uploadBatch.create({
+      data: {
+        tenantId,
+        fileName: parsed.fileName,
+        fileType: parsed.fileType,
+        uploadedById: session.user.id,
+        deliveryDate: topDate ? dateOnly(topDate) : null,
+        status: v.errors.length > 0 ? 'PARSED' : 'VALIDATED',
+        totalRows: parsed.rows.length,
+        validRows: v.lines.length,
+        errorRows: v.errors.length,
+        warningRows: v.warnings.length + v.duplicates.length,
+        validationJson: v as never,
+        depotId: v.depotId,
+        fileHash: hash,
+        isLate: v.late.isLate,
+      },
+    });
+
+    await audit({
+      tenantId,
+      userId: session.user.id,
+      action: 'CREATE',
+      entity: 'UploadBatch',
+      entityId: batch.id,
+      afterJson: { fileName: batch.fileName, rows: parsed.rows.length, lines: v.lines.length, errors: v.errors.length, cases: v.totals.cases, late: v.late.isLate } as never,
+      ip,
+    });
+  } catch (err) {
+    // As for the check above: the database refused a write (review s5-security-1: a U+0000 in the
+    // file, which PostgreSQL cannot store, made this an uncaught error and an EMPTY 500, shown as
+    // "HTTP 500"; the parser now takes U+0000 out), or a bug. Plain words and the CHECK_FAILED body;
+    // Prisma's text only in the server log. No order is written before confirm, so none was saved.
+    console.error('[orders-upload] saving the checked file failed', err);
+    return NextResponse.json({ data: null, error: { code: 'CHECK_FAILED', message: INTAKE_CHECK_FAILED } }, { status: 500 });
+  }
 
   return NextResponse.json({
     data: {

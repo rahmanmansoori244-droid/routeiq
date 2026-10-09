@@ -63,6 +63,23 @@ describe('nextBatch: order', () => {
     expect(nextBatch([waiting, photo('D1:1:1', T0 + 30)], T0 + 100)).toEqual({ actions: [], photo: null });
     expect(nextBatch(Array.from({ length: 60 }, (_, i) => actionItem(NS, arrive('D1:1:1'), T0 + i)), T0 + 100).actions).toHaveLength(50);
   });
+
+  it("a stop's actions go out in the order they were made: a due one takes the earlier ones of its stop still backing off, before it; another stop's keep waiting (review of 8 Oct 2026)", () => {
+    // Delivered failed (an 'error' answer, or the whole request) and waits 5 min; the driver then changes it.
+    const first = { ...actionItem(NS, result('D1:1:1'), T0), attempts: 5, nextAt: T0 + 300_000 };
+    const other = { ...actionItem(NS, result('D1:1:2'), T0 + 5), attempts: 5, nextAt: T0 + 300_000 };
+    const change = actionItem(NS, { ...result('D1:1:1'), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED' } as DriverAction, T0 + 10);
+    expect(nextBatch([change, other, first], T0 + 100).actions).toEqual([first, change]);
+    // A key of the old form (no depot) of that load and stop counts as the same stop; another depot's does not.
+    const legacy = { ...actionItem(NS, arrive('1:1'), T0 - 5), attempts: 5, nextAt: T0 + 300_000 };
+    const otherDepot = { ...actionItem(NS, arrive('D2:1:1'), T0 - 4), attempts: 5, nextAt: T0 + 300_000 };
+    expect(nextBatch([change, otherDepot, legacy, first], T0 + 100).actions).toEqual([legacy, first, change]);
+    // Nothing of the stop due: everything waits; a later item waiting never pulls an earlier due one back.
+    expect(nextBatch([first, other], T0 + 100).actions).toEqual([]);
+    const later = { ...change, nextAt: T0 + 300_000 };
+    const due = actionItem(NS, result('D1:1:1'), T0);
+    expect(nextBatch([later, due], T0 + 100).actions).toEqual([due]);
+  });
 });
 
 describe('the answers', () => {
@@ -160,6 +177,25 @@ describe('flushQueue on the memory store', () => {
     expect(await store.items(NS)).toHaveLength(1); // kept for a new link of the same truck-day
     const closed = await flushQueue({ store, ns: NS, now: () => T0 + 60_000, postActions: async () => ({ status: 410, body: { error: { code: 'UPLOAD_CLOSED' } }, retryAfter: null }), postPhoto: async () => ok({}) });
     expect(closed.closed).toBe(true);
+  });
+
+  it("after an 'error' answer, a result changed meanwhile is never sent ahead of the one that failed (review of 8 Oct 2026)", async () => {
+    const store = memoryStore();
+    const delivered = actionItem(NS, result('D1:1:1'), T0);
+    await store.put([delivered]);
+    const posted: string[][] = [];
+    const answer = (status: 'ok' | 'error') => async (actions: DriverAction[]) => {
+      posted.push(actions.map((x) => x.key));
+      return ok({ results: actions.map((x) => ({ key: x.key, status })), stops: {}, back: {} });
+    };
+    await flushQueue({ store, ns: NS, now: () => T0, postActions: answer('error'), postPhoto: async () => ok({}) });
+    expect((await store.items(NS))[0]).toMatchObject({ key: delivered.key, attempts: 1, nextAt: T0 + 5_000 });
+    // 1 s later the driver changes it to Not delivered, while Delivered still waits for its retry.
+    const change = actionItem(NS, { ...result('D1:1:1'), at: new Date(T0 + 1_000).toISOString(), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED' } as DriverAction, T0 + 1_000);
+    await store.put([change]);
+    await flushQueue({ store, ns: NS, now: () => T0 + 2_000, postActions: answer('ok'), postPhoto: async () => ok({}) });
+    expect(posted).toEqual([[delivered.key], [delivered.key, change.key]]);
+    expect(await store.items(NS)).toEqual([]);
   });
 
   it('a photo refused for good (too large, not a JPEG, over the limit) is dropped and reported', async () => {

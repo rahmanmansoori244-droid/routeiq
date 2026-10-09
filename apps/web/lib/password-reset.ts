@@ -17,8 +17,8 @@
  * /forgot then says reset by email is unavailable, and a tenant admin resets the password from the
  * Users screen ("Reset password", POST /api/users/:id/reset-password, a new one-time password).
  * Outside production the link is logged for local testing. The handler never leaks whether an
- * email exists — same 200 response either way, and delivery runs after the response
- * (fire-and-forget).
+ * email exists — same 200 response either way, and issuing the link (createResetTokenForEmail)
+ * and its delivery both run after the response (fire-and-forget; review s5-security-2).
  */
 import { createHash, randomBytes } from 'crypto';
 import { prisma } from './db';

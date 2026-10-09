@@ -71,6 +71,8 @@ function wire(cfg: Record<string, any>, opts: { country?: string; truck?: Record
   // O2 is bigger than the truck (1,000 cases): what "split deliveries" decides about.
   fake.prisma.order = { findMany: async () => opts.orders ?? [order('O1', customers[0]!, 50), order('O2', customers[1]!, 1500)] };
   fake.prisma.routeAssignment = { findMany: async () => [] };
+  // No other depot has a plan this day (buildDispatchRequest reads them: cross-depot.ts).
+  fake.prisma.runPlan = { findMany: async () => [] };
 }
 
 async function build(cfg: Record<string, any>, opts: Parameters<typeof wire>[1] = {}) {

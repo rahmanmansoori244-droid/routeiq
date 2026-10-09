@@ -62,22 +62,38 @@ export interface EffectiveAttrs {
   windowConfirmed: boolean;
 }
 
+/**
+ * The priority the planner uses: the customer's confirmed one, else its type's default, else the
+ * stored (unconfirmed) one. effectiveAttrs uses it, and so does the Customers list (review
+ * ui-rest-2), so the list shows the same number the plan is made with.
+ */
+export function effectivePriority(
+  c: Pick<CustomerForPlanning, 'priority' | 'priorityConfirmed' | 'customerType'>,
+  profiles: Map<string, Pick<TypeProfileLike, 'defaultPriority'>>,
+): Pick<EffectiveAttrs, 'priority' | 'prioritySource'> {
+  if (c.priorityConfirmed) return { priority: c.priority, prioritySource: 'CUSTOMER' };
+  const p = c.customerType ? profiles.get(c.customerType) : undefined;
+  if (p?.defaultPriority) return { priority: p.defaultPriority, prioritySource: 'TYPE' };
+  return { priority: c.priority, prioritySource: 'DEFAULT' };
+}
+
+/**
+ * What a screen says next to a customer's stored priority when the planner does not use it as a
+ * confirmed value (review ui-rest-2), in the Details dialog's words: "P4 - customer type default,
+ * not confirmed". Null for a confirmed priority (the stored one is the one used).
+ */
+export function unconfirmedPriorityText(eff: Pick<EffectiveAttrs, 'priority' | 'prioritySource'>): string | null {
+  if (eff.prioritySource === 'CUSTOMER') return null;
+  return `P${eff.priority} - ${eff.prioritySource === 'TYPE' ? 'customer type default' : 'default'}, not confirmed`;
+}
+
 export function effectiveAttrs(
   c: CustomerForPlanning,
   profiles: Map<string, TypeProfileLike>,
   defaults: { serviceTimeMin: number },
 ): EffectiveAttrs {
   const p = c.customerType ? profiles.get(c.customerType) : undefined;
-  let priority = c.priority;
-  let prioritySource: AttrSource = 'CUSTOMER';
-  if (!c.priorityConfirmed) {
-    if (p?.defaultPriority) {
-      priority = p.defaultPriority;
-      prioritySource = 'TYPE';
-    } else {
-      prioritySource = 'DEFAULT';
-    }
-  }
+  const { priority, prioritySource } = effectivePriority(c, profiles);
   // Unloading time: a confirmed customer value (entered by a planner, or an imported column)
   // wins; else the customer type's; else the company default from Settings. An unconfirmed stored
   // value is only the column default (10 min) - it used to win over the Settings default, which

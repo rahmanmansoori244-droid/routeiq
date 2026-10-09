@@ -19,6 +19,24 @@ export function resetDb() {
 
 const eq = (a: unknown, b: unknown) => (a instanceof Date && b instanceof Date ? a.getTime() === b.getTime() : (a ?? null) === (b ?? null));
 
+/**
+ * A long `in` list of ids (the actuals Excel of every depot for a month asks for tens of thousands)
+ * is looked up in a Set built once per list, not scanned once per row: the same answer as `eq` for
+ * strings, in linear time. Built again when the list's length changed; other lists are scanned.
+ */
+const inSets = new WeakMap<unknown[], { n: number; set: Set<unknown> | null }>();
+function inList(list: unknown[], value: unknown): boolean {
+  if (list.length > 32) {
+    let built = inSets.get(list);
+    if (built?.n !== list.length) {
+      built = { n: list.length, set: list.every((x) => typeof x === 'string') ? new Set(list) : null };
+      inSets.set(list, built);
+    }
+    if (built.set) return typeof value === 'string' && built.set.has(value);
+  }
+  return list.some((x) => eq(value, x));
+}
+
 function match(row: Row, where: Row | undefined): boolean {
   if (!where) return true;
   for (const [k, v] of Object.entries(where)) {
@@ -38,7 +56,7 @@ function match(row: Row, where: Row | undefined): boolean {
       if ('lte' in v && !(row[k] != null && val(row[k]) <= val(v.lte))) return false;
       if ('gt' in v && !(row[k] != null && val(row[k]) > val(v.gt))) return false;
       if ('lt' in v && !(row[k] != null && val(row[k]) < val(v.lt))) return false;
-      if ('in' in v && !(v.in as unknown[]).some((x) => eq(row[k], x))) return false;
+      if ('in' in v && !inList(v.in as unknown[], row[k])) return false;
       if ('notIn' in v && (v.notIn as unknown[]).some((x) => eq(row[k], x))) return false;
       if ('not' in v) {
         const n = v.not;
@@ -71,8 +89,29 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
   routeAssignment: { load: (r) => (tables.planLoad ?? []).find((l) => l.id === r.loadId) ?? null, order: (r) => orderOf(r.orderId) },
 };
 
+/**
+ * An order by id through an index of tables.order (a month of every depot reads tens of thousands of
+ * route assignments with their order). The row at the indexed position is checked on every read, and
+ * a miss builds the index again (the table changed, or no such order), so it answers as find() does.
+ */
+const orderIndex = new WeakMap<Row[], Map<string, number>>();
+function findOrder(id: string): Row | undefined {
+  const all = tables.order ?? [];
+  const at = (idx: Map<string, number>) => {
+    const i = idx.get(id);
+    return i !== undefined && all[i]?.id === id ? all[i] : undefined;
+  };
+  const cached = orderIndex.get(all);
+  const hit = cached ? at(cached) : undefined;
+  if (hit) return hit;
+  const idx = new Map<string, number>();
+  for (let i = all.length - 1; i >= 0; i--) idx.set(all[i]!.id, i); // the first row of an id wins, as in find()
+  orderIndex.set(all, idx);
+  return at(idx);
+}
+
 function orderOf(id: string) {
-  const o = (tables.order ?? []).find((x) => x.id === id);
+  const o = findOrder(id);
   const customer = { id: 'c', code: 'C', branchKey: '__MAIN__', branchCode: null, name: 'Customer C' };
   return o
     ? { lines: [], customer: { ...customer, id: o.customerId ?? 'c' }, ...o, customerId: o.customerId ?? 'c' }

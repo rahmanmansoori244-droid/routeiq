@@ -36,11 +36,23 @@ interface Props {
   onSaved: () => void;
 }
 
-const blank = { code: '', name: '', weightPerCaseKg: '12', volumePerCaseL: '15', casesPerPallet: '', active: true };
+// Weight and volume start empty: 0 kg per case means UNKNOWN (weights.ts), and an empty field is sent
+// as 0, as every other way a product is made does (file intake, late order, import). The dialog used
+// to start at 12 kg / 15 L: a product saved untouched got a made-up weight, so Optimize never asked
+// for it (WEIGHT_REQUIRED) and the day's "no weight" list left it out (review of 8 Oct 2026).
+const blank = { code: '', name: '', weightPerCaseKg: '', volumePerCaseL: '', casesPerPallet: '', active: true, clearWeight: false };
+
+/** A stored 0 (unknown) shows as an empty field with "unknown" in it, never as a weight of 0. */
+const knownOrEmpty = (v: number) => (v > 0 ? String(v) : '');
 
 export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }: Props) {
   const [form, setForm] = useState(blank);
   const [pending, startTransition] = useTransition();
+  // Editing a product that has a case weight (review of da76343): the weight stays required, so an
+  // emptied field never saves it as 0 (unknown) by accident - with payload 0 on every truck nothing
+  // would ask for it again. Clearing it is its own choice: "Weight not known".
+  const hadWeight = mode === 'edit' && !!product && product.weightPerCaseKg > 0;
+  const weightRequired = hadWeight && !form.clearWeight;
 
   useEffect(() => {
     if (open) {
@@ -48,10 +60,11 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
         setForm({
           code: product.code,
           name: product.name,
-          weightPerCaseKg: String(product.weightPerCaseKg),
-          volumePerCaseL: String(product.volumePerCaseL),
+          weightPerCaseKg: knownOrEmpty(product.weightPerCaseKg),
+          volumePerCaseL: knownOrEmpty(product.volumePerCaseL),
           casesPerPallet: product.casesPerPallet != null ? String(product.casesPerPallet) : '',
           active: product.active,
+          clearWeight: false,
         });
       } else {
         setForm(blank);
@@ -61,6 +74,11 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
 
   function submit(e: React.FormEvent) {
     e.preventDefault();
+    // The browser's own check (required, at least 0.01) stops this first; this is the backstop.
+    if (weightRequired && !(Number(form.weightPerCaseKg) > 0)) {
+      toast.error(`${product?.code} has a case weight: enter the correct one, or tick "Weight not known" to clear it.`);
+      return;
+    }
     const body = productRequestBody(mode, form);
     startTransition(async () => {
       const url = mode === 'create' ? '/api/products' : `/api/products/${product!.id}`;
@@ -123,11 +141,14 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
               <Input
                 id="weightPerCaseKg"
                 type="number"
-                min="0"
+                min={weightRequired ? '0.01' : '0'}
                 step="0.01"
                 value={form.weightPerCaseKg}
+                placeholder="unknown"
+                required={weightRequired}
+                disabled={form.clearWeight}
                 onChange={(e) => setForm({ ...form, weightPerCaseKg: e.target.value })}
-                required
+                aria-describedby="weightPerCaseKg-hint"
               />
             </div>
             <div className="space-y-1.5">
@@ -138,10 +159,35 @@ export function ProductFormDialog({ open, onOpenChange, mode, product, onSaved }
                 min="0"
                 step="0.01"
                 value={form.volumePerCaseL}
+                placeholder="unknown"
                 onChange={(e) => setForm({ ...form, volumePerCaseL: e.target.value })}
-                required
               />
             </div>
+            {hadWeight ? (
+              <>
+                <label className="col-span-2 flex items-start gap-2 text-sm">
+                  <input
+                    id="clearWeight"
+                    type="checkbox"
+                    className="mt-1"
+                    checked={form.clearWeight}
+                    onChange={(e) =>
+                      setForm({ ...form, clearWeight: e.target.checked, weightPerCaseKg: e.target.checked ? '' : knownOrEmpty(product!.weightPerCaseKg) })
+                    }
+                  />
+                  <span>Weight not known: clear it</span>
+                </label>
+                <p id="weightPerCaseKg-hint" className="col-span-2 text-xs text-muted-foreground">
+                  This product has a case weight ({product!.weightPerCaseKg} kg): correct it here. Tick &quot;Weight not known&quot; only to clear it: it is
+                  saved as 0 (unknown), lines already weighed keep their kg, and new order lines of it with no weight of their own come in without one
+                  (Daily dispatch shows them under &quot;No weight&quot;).
+                </p>
+              </>
+            ) : (
+              <p id="weightPerCaseKg-hint" className="col-span-2 text-xs text-muted-foreground">
+                Leave empty if not known yet: it is saved as 0 (unknown), and Daily dispatch shows its cases under &quot;No weight&quot; until it is entered.
+              </p>
+            )}
           </div>
           <div className="space-y-1.5">
             <Label htmlFor="casesPerPallet">Cases per pallet</Label>

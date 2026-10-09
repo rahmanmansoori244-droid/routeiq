@@ -281,6 +281,11 @@ export const productSchema = z.object({
   active: z.boolean().optional(),
 });
 export type ProductInput = z.infer<typeof productSchema>;
+/**
+ * PATCH /api/products/[id]: any field of productSchema, and `clearWeight` - a known case weight is
+ * cleared (saved as 0 = unknown) only with it (the Edit product dialog's "Weight not known").
+ */
+export const productPatchSchema = productSchema.partial().extend({ clearWeight: z.boolean().optional() });
 
 export const customerSchema = z.object({
   code: codeSchema,

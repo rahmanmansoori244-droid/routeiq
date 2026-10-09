@@ -47,6 +47,7 @@ import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
+import { driverTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
 import { reconcile, type Reconciliation } from './reconcile';
 import {
   caseHeavierThanAnyTruck,
@@ -92,7 +93,7 @@ import { dateOnly, DEFAULT_TZ, isoOf, todayIso } from './time';
 import { sameDayTiming, type PlanFrom, type SameDayInput, type SameDayTiming } from './plan-from';
 import { searchLeadMin } from './search-mode';
 import { PlanError } from './plan-errors';
-import { asPlanBusy, lockPlanDay, lockRunForWrite, setLockTimeout } from './plan-locks';
+import { asPlanBusy, lockPlanDay, lockRunForWrite, lockTruckDriverDay, setLockTimeout } from './plan-locks';
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
@@ -110,6 +111,7 @@ import {
   readTruckSnapshot,
   rulesFrom,
   SNAPSHOT_VERSION,
+  truckOutOfService,
   usableWindow,
   type LoadOrigin,
   type PlanInputs,
@@ -439,6 +441,21 @@ export async function buildDispatchRequest(
   const trucks = await db.truck.findMany({ where: trucksOfDayWhere(run.depotId, run.runDate), orderBy: { code: 'asc' } });
   const frozenByTruck = new Map<string, typeof frozenLoads>();
   for (const l of frozenLoads) frozenByTruck.set(l.truckId, [...(frozenByTruck.get(l.truckId) ?? []), l]);
+  // Review web-plan-service-1: a truck lent to this depot for the day can still be on another depot's
+  // live plan (cross-depot.ts). Its new loads here go only in the time it has free of those loads -
+  // its own hours narrowed to the longest such time, the drive between the depots and the loading
+  // counted, or no new load at all - so the two depots never send it out at the same time.
+  const firstDepartureMin = Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0);
+  // The optimizer's own day end: the depot's closing, and the latest return (first departure + shift).
+  const dayEndMin = Math.min(run.depot.closeMin && run.depot.closeMin > 0 ? run.depot.closeMin : 1440, cfg.shiftStartMin + cfg.driverShiftMaxMinutes);
+  const awayLoads = await loadsOnOtherDepots(prisma, tenantId, run, { truckIds: trucks.map((t) => t.id) });
+  const hoursAround = new Map<string, TruckHoursAround>();
+  for (const t of trucks) {
+    // Before the truck's own locked or dispatched loads here are back, no new load leaves anyway.
+    const ownBack = Math.max(firstDepartureMin, ...(frozenByTruck.get(t.id) ?? []).map((l) => l.returnMin));
+    const h = truckHoursAround(t, awayLoads.filter((f) => f.truckId === t.id), cfg, { from: ownBack, to: dayEndMin });
+    if (h) hoursAround.set(t.id, h);
+  }
   // Plan continuity: on a re-plan, tell the optimizer which truck carried each order line in the
   // previous version so one late order does not reshuffle every unlocked load. Per line (not per
   // order) so each part of a split delivery is steered to the truck it was on.
@@ -547,7 +564,8 @@ export async function buildDispatchRequest(
     code: t.code,
     cases: t.capacityCases,
     kg: t.capacityWeightKg > 0 ? t.capacityWeightKg : null,
-    tripsLeft: (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
+    // A truck with no time left here (on another depot's plan all day) has no load left today.
+    tripsLeft: hoursAround.get(t.id)?.none ? 0 : (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
     ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
   }));
   // The trucks the parts may be sized for: the own fleet, and the trucks the hire what-if may rent (each
@@ -844,8 +862,9 @@ export async function buildDispatchRequest(
     trip_cost: t.tripCost,
     cost_per_km: t.costPerKm,
     km_per_litre: t.kmPerLitre,
-    available_from_min: t.availableFromMin,
-    available_to_min: t.availableToMin,
+    // Narrowed around the truck's loads on another depot's plan of the day (hoursAround), else its own.
+    available_from_min: hoursAround.has(t.id) ? hoursAround.get(t.id)!.availableFromMin : t.availableFromMin,
+    available_to_min: hoursAround.has(t.id) ? hoursAround.get(t.id)!.availableToMin : t.availableToMin,
     max_trips: t.maxTripsPerDay,
     frozen_trips: (frozenByTruck.get(t.id) ?? []).map((l) => ({
       load_no: l.loadNo,
@@ -869,7 +888,6 @@ export async function buildDispatchRequest(
   // as the day's first departure, which the optimizer applies to every truck together with its
   // locked / dispatched loads' return + turnaround; those loads keep their times.
   const now = opts.now ?? new Date();
-  const firstDepartureMin = Math.max(cfg.shiftStartMin, run.depot.openMin ?? 0);
   // PR8 review: on its delivery day loading starts now too. Sent as loading_from_min, so every new
   // load - on a truck standing at the depot as on one coming back - leaves no earlier than now +
   // turnaround + loading per case x its cases (the optimizer, its check and the dispatch gate).
@@ -901,6 +919,7 @@ export async function buildDispatchRequest(
   if (splitNotes.length) {
     warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
   }
+  for (const h of hoursAround.values()) warnings.push(h.note);
   if (cfg.distanceProvider === 'MAPBOX_MATRIX') warnings.push('Mapbox matrix is not used by the dispatch planner; OSRM/Haversine is used instead.');
   if (badWindows.length) {
     warnings.push(`Time window ignored because it ends before it starts: ${badWindows.join(', ')}. Fix it in the customer master.`);
@@ -1345,6 +1364,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
   // Who is on leave on the delivery day, and who covers them (owner request 6 Oct 2026, driver-leave.ts).
   const leave = leaveOnDay(await leaveRowsOn(tx, tenantId, run.runDate), isoOf(run.runDate));
   const elsewhere = await driversOnOtherDepots(tx, tenantId, run, leave);
+  // Review web-plan-service-1: a driver on a load of another depot's plan that day is not given a trip
+  // here at an overlapping time, the drive between the depots included (cross-depot.ts).
+  const otherDepots = await driverTripsElsewhere(tx, tenantId, run);
   const { drivers: driverOf, notes } = planDrivers(
     d.loads.map((ld) => ({
       key: loadKey(ld.truck_id, ld.load_no),
@@ -1358,6 +1380,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     new Set(tenantDrivers.filter((x) => x.active).map((x) => x.id)),
     leave,
     elsewhere,
+    otherDepots,
   );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
@@ -1370,7 +1393,8 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     from: person(n.fromDriverId),
     to: n.toDriverId ? person(n.toDriverId) : null,
     reason: n.reason,
-    other: n.other ? { truckCode: truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
+    // A trip of another depot carries its own name ("T03 (North depot)").
+    other: n.other ? { truckCode: n.other.truckCode ?? truckCode(n.other.truckId), loadNo: n.other.loadNo } : null,
     ...(n.leaveUntil ? { leaveUntil: n.leaveUntil } : {}),
     ...(n.cover ? { cover: n.cover } : {}),
   }));
@@ -2568,6 +2592,11 @@ async function changeStatusCore(
   if (isGatedMove(load.status, to) && run.chosenScenarioId && !recon?.ok) {
     throw new PlanError('Cases do not reconcile for this plan - re-plan before locking or loading.', 409, { code: 'NOT_RECONCILED' });
   }
+  // Review of 9 Oct 2026 (owner rule 19 "On hold" is still open): a PLANNED load on a truck taken out
+  // of service since the plan was made (deactivated under Trucks) does not leave (409 TRUCK_INACTIVE).
+  // A locked or loading load is frozen and kept as it is (the plan screen says how to move its orders);
+  // stepping back and Completed are never refused.
+  if (load.status === 'PLANNED' && isGatedMove(load.status, to)) await truckGate(tx, tenantId, load, now);
   // PR9: an order of this load that was brought forward to a later day is planned there now, so
   // this load cannot move forward with it (it would be delivered twice). Stepping back and
   // Completed are never refused (a load that left keeps its orders: they are never carried).
@@ -2585,6 +2614,10 @@ async function changeStatusCore(
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
+  // Review web-plan-service-1: the load's truck and driver are not on a locked or dispatched load of
+  // another depot's plan that day at a clashing time (409 TRUCK_BUSY_ELSEWHERE / DRIVER_BUSY_ELSEWHERE).
+  // A hard refusal, so before the leave question; after the other gates, whose refusals keep their words.
+  if (isGatedMove(load.status, to)) await otherDepotGate(tx, tenantId, run, load);
   // Driver leave (demo of 7 Oct 2026): Lock, Loading and Dispatch of a load whose driver is on leave
   // that day ask first (409 DRIVER_ON_LEAVE) - after the other gates, so their refusals keep their
   // words. Stepping back and Completed never: a load that has left is not judged afterwards.
@@ -3139,6 +3172,47 @@ async function timingGate(tx: Tx, tenantId: string, run: OpenRun, load: { truckI
     ...(stored && stored.inputHash !== fresh.inputHash ? { reportWasStale: true } : {}),
     ...(!ok ? { overridden: 'FEASIBILITY_GATE=warn', violations: blocking.slice(0, 10).map((v) => `${v.code}: ${v.message}`) } : {}),
   };
+}
+
+/** Why LOCK, LOADING and DISPATCH refuse a PLANNED load on a truck taken out of service (truckGate). */
+export const TRUCK_INACTIVE_RULE =
+  'its planned loads cannot be locked, loaded or dispatched. Re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks (a company admin).';
+
+/**
+ * Review of 9 Oct 2026: 409 TRUCK_INACTIVE when the load's truck was taken out of service (deactivated
+ * under Trucks) after the plan was made - truckOutOfService, so a one-day hired truck retired after its
+ * day (a past day's load recorded late) is not refused. Called for a PLANNED load only (see changeStatusCore).
+ */
+async function truckGate(tx: Tx, tenantId: string, load: { truckId: string; loadNo: number }, now: Date) {
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true, active: true, onlyOnDate: true } });
+  if (!truck || truck.active !== false) return;
+  const cfg = await tx.tenantConfig.findUnique({ where: { tenantId }, select: { timezone: true } });
+  if (!truckOutOfService(truck, todayIso(cfg?.timezone || DEFAULT_TZ, now))) return;
+  throw new PlanError(`${truck.code} L${load.loadNo}: this truck was taken out of service (deactivated under Trucks) after the plan was made, so ${TRUCK_INACTIVE_RULE}`, 409, {
+    code: 'TRUCK_INACTIVE',
+    truckId: load.truckId,
+    truckCode: truck.code,
+  });
+}
+
+/**
+ * Review web-plan-service-1 (cross-depot.ts): LOCK, LOADING and DISPATCH of a load whose truck or
+ * driver - as it is after the driver step of the same request - is on a LOCKED, LOADING, DISPATCHED or
+ * COMPLETED load of another depot's live plan that day, at a time both cannot be driven (the drive
+ * between the depots counted), is refused: 409 TRUCK_BUSY_ELSEWHERE or DRIVER_BUSY_ELSEWHERE. Read under
+ * the truck-day and driver-day locks, so of two depots moving the same truck or driver at once the
+ * second sees the first one's load and is refused. The operator switch FEASIBILITY_GATE=warn does not
+ * apply: this is one truck or person in two places, not a timetable rule.
+ */
+async function otherDepotGate(
+  tx: Tx,
+  tenantId: string,
+  run: OpenRun,
+  load: { truckId: string; loadNo: number; status: string; driverId: string | null; departMin: number; returnMin: number },
+) {
+  await lockTruckDriverDay(tx, tenantId, run.runDate, load.truckId, load.driverId);
+  const refusal = await otherDepotClash(tx, tenantId, run, load);
+  if (refusal) throw new PlanError(refusal.message, 409, refusal.body);
 }
 
 /** The words of the 409 DRIVER_REQUIRED refusal (and the plan screen's Dispatch title, without the load). */

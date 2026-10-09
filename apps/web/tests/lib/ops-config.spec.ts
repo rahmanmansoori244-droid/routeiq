@@ -71,6 +71,17 @@ describe('startup configuration checks', () => {
     ]);
   });
 
+  it('review M3: a PDF renderer setting that is not usable is named (its default is used), in production and outside it', () => {
+    const ok = { NODE_ENV: 'production', RESEND_API_KEY: 're_x', AUTH_URL: 'https://r.example', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' };
+    expect(configProblems(env({ ...ok, PDF_RENDER_MAX_HEAP_MB: '768', PDF_RENDER_TIMEOUT_MS: '60000', PDF_RENDER_CONCURRENCY: '1' }))).toEqual([]);
+    expect(configProblems(env({ ...ok, PDF_RENDER_TIMEOUT_MS: '2min' }))).toEqual([
+      { level: 'warn', message: 'PDF_RENDER_TIMEOUT_MS="2min" is not a whole number from 1000 to 600000: the default 120000 is used.' },
+    ]);
+    expect(configProblems(env({ NODE_ENV: 'development', PDF_RENDER_MAX_HEAP_MB: '64' })).map((p) => p.message)).toEqual([
+      'PDF_RENDER_MAX_HEAP_MB="64" is not a whole number from 128 to 16384: the default 1024 is used.',
+    ]);
+  });
+
   it('reports RATE_LIMITS_DISABLED on a production server as an error', () => {
     const p = configProblems(env({ NODE_ENV: 'production', RATE_LIMITS_DISABLED: '1', RESEND_API_KEY: 'k', AUTH_URL: 'u', JANITOR_TOKEN: 'j', SOLVER_URL: 'http://solver', SOLVER_TOKEN: 's' }));
     expect(p).toHaveLength(1);

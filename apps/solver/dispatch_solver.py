@@ -1209,10 +1209,27 @@ def _mixed_space_proven(needs: list[tuple[int, int | None]], usable_tds: list[Tr
     return total > trips or (halves and big > trips)
 
 
-def _shortage_reason(priority: int, f: _Fleet, short_space: bool, short_kg: bool, demand_cases: int) -> str:
+def _shortage_reason(priority: int, f: _Fleet, short_space: bool, short_kg: bool, demand_cases: int,
+                     lower_served: int = 0, lower_on_day: bool = True) -> str:
     """The unserved reason on a fleet-shortage day, in cases / pallets and / or kg - whichever the
-    trucks are short of (scenario test S03: a weight-bound day was explained in cases only)."""
-    tail = f" Lower priorities are left out first (this is P{priority})."
+    trucks are short of (scenario test S03: a weight-bound day was explained in cases only).
+
+    "Lower priorities are left out first" only when it is true, as _no_room_reason says it (A6 review):
+    the day has stops of a lower priority (``lower_on_day``) and none of them is planned
+    (``lower_served``, how many are). Scenario s3-shortage-hire-2: a P1 order kept out by its receiving
+    hours read "Lower priorities are left out first (this is P1)" while P3 and P4 orders were delivered,
+    so the dispatcher did not look for a fix; and a P3 order on a day without P4/P5 orders read the same.
+    The shortage itself stays in the text (it is true); the tail says what the planner did not find."""
+    if lower_served:
+        n = lower_served
+        tail = (f" This P{priority} stop was left out although {n} lower-priority stop{'' if n == 1 else 's'} "
+                f"{'is' if n == 1 else 'are'} planned: the planner found no load that could take it in their place "
+                "(its receiving hours, the trucks' hours or their room). Add a truck, widen its receiving hours, "
+                "or add it by hand.")
+    elif lower_on_day:
+        tail = f" Lower priorities are left out first (this is P{priority})."
+    else:
+        tail = f" This P{priority} stop was left out."
     demand_kg, cap_kg = f.demand_kg_u / 10, f.cap_kg_u / 10
     fill = f" (the bays at {f.fill_pct}% Pallet fill)" if f.by_pallets else ""
     if f.space is None and short_space:
@@ -2232,8 +2249,12 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
             hire_left += 1
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", _hire_drop_reason(s.priority)))
         elif shortage:
+            # "Lower priorities are left out first" only when no lower priority rides (s3-shortage-hire-2).
+            lower_served = sum(1 for ld in loads for st in ld.stops if priority_of[st.stop_id] > s.priority)
+            lower_on_day = any(p > s.priority for p in priority_of.values())
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY",
-                                      _shortage_reason(s.priority, fleet, short_space, short_kg, demand_cases)))
+                                      _shortage_reason(s.priority, fleet, short_space, short_kg, demand_cases,
+                                                       lower_served, lower_on_day)))
         elif (no_room := _no_room_reason(s, usable_tds, loads, priority_of)) is not None:
             # No load of this plan and no free trip has room for it (cases / pallets or kg), even without
             # its lower-priority stops, and a check proves no other packing could carry it (A6
@@ -4922,6 +4943,10 @@ def _stage_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
         time.sleep(3600)
     if os.environ.get("ROUTEIQ_TEST_KILL_REPACK") == job.get("goal"):
         os._exit(137)
+    # CP-SAT before the job's clock starts: its cold import (1.3-2 s in a fresh worker; these workers
+    # imported only the routing modules) is worker start-up, inside STAGE_GRACE_SEC, not time taken from
+    # the job's repacks or its closing recovery (review of the strict-priority fix).
+    LR.warm_up()
     return LR.build_candidates(**job)
 
 
@@ -5200,8 +5225,11 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     if pv_proc is not None:
         # Its own process (idle since its search ended): starts now, beside the engine's jobs.
         pv_proc.submit(PV.stage_in_worker, pv_job)
+    # A job's closing recovery may end up to LR.CLOSING_LATE_SEC past its budget (load_repack.build_candidates,
+    # when its repacks ended late): waited for, once per round of jobs (the second search's goals share one
+    # budget, a goal's late end shortens the next), never past the solve's deadline.
     pv_deadline = min(time.monotonic() + (pv_job["budget_s"] + len(pv_job["goals"]) * pv_job["extra_s"] if pv_job else 0)
-                      + STAGE_GRACE_SEC, budget_end - 2)
+                      + LR.CLOSING_LATE_SEC + STAGE_GRACE_SEC, budget_end - 2)
     if pool is None:
         for g, job in jobs.items():
             try:
@@ -5210,7 +5238,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 log.warning("post-solve %s failed: %s", g, exc)
     else:
         rounds = rounds_of(len(jobs))
-        deadline = min(time.monotonic() + rounds * (job_budget + extra) + STAGE_GRACE_SEC, budget_end - 2)
+        deadline = min(time.monotonic() + rounds * (job_budget + extra + LR.CLOSING_LATE_SEC) + STAGE_GRACE_SEC,
+                       budget_end - 2)
         # In completion order: a MIN_TRUCKS job whose worker dies (out of memory) no longer costs
         # RECOMMENDED its exact re-check, nor the rest of the budget (review L23).
         got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline) if jobs else {}

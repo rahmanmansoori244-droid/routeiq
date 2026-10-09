@@ -7,7 +7,7 @@ import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { describeServiceTime, effectiveAttrs, windowLabel, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
+import { describeServiceTime, effectiveAttrs, unconfirmedPriorityText, windowLabel, type TypeProfileLike } from '@/lib/dispatch/customer-attrs';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
@@ -45,6 +45,9 @@ export default async function CustomerDetailPage({
     serviceTimeMin: cfg?.defaultServiceTimeMin ?? 10,
   });
   const service = describeServiceTime(customer, eff);
+  // The priority the planner uses when the stored one is not confirmed (review ui-rest-2): the
+  // Details card showed only the stored one, while the plan used the customer type's default.
+  const plannedPriority = unconfirmedPriorityText(eff);
 
   // Where the map looks when the customer has no pin: the company's first active depot, else Muscat.
   const depot = await db.depot.findFirst({ where: { active: true }, orderBy: { code: 'asc' }, select: { lat: true, lng: true } });
@@ -134,7 +137,14 @@ export default async function CustomerDetailPage({
               </Field>
               <Field label="Region">{customer.region ? `${customer.region.code} — ${customer.region.name}` : '—'}</Field>
               <Field label="Priority">
-                <Badge variant="outline">{customer.priority}</Badge>
+                <span data-testid="customer-priority">
+                  <Badge variant="outline">{customer.priority}</Badge>
+                  {plannedPriority ? (
+                    <span className="block max-w-xs text-xs text-muted-foreground" data-testid="customer-priority-note">
+                      The planner uses {plannedPriority}.{canEdit ? ' Confirm a priority in Details.' : ''}
+                    </span>
+                  ) : null}
+                </span>
               </Field>
               <Field label="Service time">
                 <span data-testid="customer-service-time">

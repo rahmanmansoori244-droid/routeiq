@@ -59,3 +59,24 @@ export const TRUCK_COLORS = [
 export function truckColor(idx: number): string {
   return TRUCK_COLORS[idx % TRUCK_COLORS.length]!;
 }
+
+/**
+ * A point a MapLibre map can show: finite, latitude within ±90 and longitude within ±180.
+ * MapLibre's setLngLat throws for a latitude outside ±90, and inside a map effect that throw took
+ * the whole page down to its error screen (review of 8 Oct 2026, ui-rest-3).
+ */
+export function isMapPoint(lat: number, lng: number): boolean {
+  return Number.isFinite(lat) && Number.isFinite(lng) && Math.abs(lat) <= 90 && Math.abs(lng) <= 180;
+}
+
+/**
+ * A coordinate typed into a field: a complete number ("-23", "58.4059") within ±`limit`, or null
+ * while it is not one yet ("", "-", "23." on its way to "23.6") or is not a coordinate ("236" as a
+ * latitude, "23,5"). The map picker moves the pin only for a number.
+ */
+export function typedCoordinate(text: string, limit: 90 | 180): number | null {
+  const t = text.trim();
+  if (!/^-?\d+(\.\d+)?$/.test(t)) return null;
+  const v = Number(t);
+  return Number.isFinite(v) && Math.abs(v) <= limit ? v : null;
+}

@@ -5,7 +5,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 
 import { useEffect, useRef } from 'react';
 import maplibregl from 'maplibre-gl';
-import { OSM_RASTER_STYLE } from '@/lib/maps';
+import { isMapPoint, OSM_RASTER_STYLE } from '@/lib/maps';
 
 interface Props {
   /** current pin (null = no pin yet) */
@@ -53,7 +53,9 @@ export function PinMap({ lat, lng, center, onChange, height = 280, readOnly = fa
   }, []);
 
   useEffect(() => {
-    if (lat === null || lng === null || !map.current) return;
+    // A point MapLibre cannot show (a latitude past ±90 throws) is never placed: a throw in this
+    // effect took the whole page down to its error screen (review of 8 Oct 2026, ui-rest-3).
+    if (lat === null || lng === null || !map.current || !isMapPoint(lat, lng)) return;
     place(lat, lng);
     map.current.easeTo({ center: [lng, lat], zoom: Math.max(map.current.getZoom(), 15) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -64,7 +66,7 @@ export function PinMap({ lat, lng, center, onChange, height = 280, readOnly = fa
   }, [readOnly]);
 
   function place(la: number, ln: number) {
-    if (!map.current) return;
+    if (!map.current || !isMapPoint(la, ln)) return;
     if (!marker.current) {
       marker.current = new maplibregl.Marker({ color: '#dc2626', draggable: !ro.current }).setLngLat([ln, la]).addTo(map.current);
       marker.current.on('dragend', () => {

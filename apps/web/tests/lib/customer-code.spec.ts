@@ -38,9 +38,11 @@ import { PATCH as patchCustomer } from '@/app/api/customers/[id]/route';
 import { POST as lateOrder } from '@/app/api/dispatch/late-order/route';
 import { POST as uploadPost } from '@/app/api/orders/upload/route';
 import { confirmIntake, type IntakeValidation } from '@/lib/dispatch/intake-server';
+import { addDaysIso, todayIso } from '@/lib/dispatch/time';
 
 const T = 'tA';
-const DAY = '2026-10-07';
+// Two days ahead of the company's today: an order file for a day that is over is refused (review s6-messy-intake-2).
+const DAY = addDaysIso(todayIso('Asia/Muscat'), 2);
 const json = (method: string, body: unknown) => ({ method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 /** CX1 (with a usable, verified location), CYZ and a branch "XXMAINYY" of B1: every one an ILIKE trap. */

@@ -731,6 +731,9 @@ def stage_in_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
         time.sleep(3600)
     if os.environ.get("ROUTEIQ_TEST_KILL_PYVRP_STAGE"):
         os._exit(137)
+    # CP-SAT before this job's clock starts, as the engine's stage jobs do (load_repack.warm_up): its cold
+    # import is the process's start-up, not time taken from the repacks or the closing recovery.
+    LR.warm_up()
     t0 = time.perf_counter()
     day, plan, pricing = job["day"], job["plan"], job["score_pricing"]
     timed = LR.time_plan(day, plan, pricing)

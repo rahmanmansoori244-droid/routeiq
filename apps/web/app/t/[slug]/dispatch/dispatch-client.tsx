@@ -87,9 +87,20 @@ interface Day {
   weightsToApply?: WeightGap[];
   /**
    * The plan in use is out of date without a new order: weights changed, customers deactivated,
-   * master data corrected, or customers on planned loads whose location is not usable any more.
+   * master data corrected, customers on planned loads whose location is not usable any more, trucks
+   * with planned loads taken out of service, or unserved orders whose customer data was fixed since.
    */
-  outdated?: { weightCases: number; inactiveOrders: number; masterChanged?: number; trucksChanged?: number; locationBlocked?: number; depotMoved?: number; palletFactorCases?: number };
+  outdated?: {
+    weightCases: number;
+    inactiveOrders: number;
+    masterChanged?: number;
+    trucksChanged?: number;
+    locationBlocked?: number;
+    depotMoved?: number;
+    palletFactorCases?: number;
+    trucksInactive?: number;
+    unservedNowPlannable?: number;
+  };
   plan: null | {
     id: string;
     version: number;
@@ -106,6 +117,12 @@ interface Day {
   pending: { count: number; cases: number; late: number; carried?: number };
   /** Orders with cases not yet on a locked, loading or dispatched load (0 = nothing left to plan). */
   openOrders?: number;
+  /**
+   * The orders the plan in use leaves unserved that are still open on this day; `replan`: of them, those
+   * a re-plan could place now (not a customer still without a pin, cases still heavier than any truck,
+   * or any on a day that is over).
+   */
+  unserved?: { orders: number; cases: number; replan: number };
   /** PR9: orders of this day brought forward from earlier days (badge "Carried over from 26 Sep"). */
   carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
   /** PR9: orders of this day brought forward to later days (no longer open here). */
@@ -436,7 +453,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0 };
   const planOutdated =
     !!day.plan?.chosen &&
     (outdated.weightCases > 0 ||
@@ -445,7 +462,16 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       (outdated.trucksChanged ?? 0) > 0 ||
       (outdated.locationBlocked ?? 0) > 0 ||
       (outdated.depotMoved ?? 0) > 0 ||
-      (outdated.palletFactorCases ?? 0) > 0);
+      (outdated.palletFactorCases ?? 0) > 0 ||
+      (outdated.trucksInactive ?? 0) > 0 ||
+      (outdated.unservedNowPlannable ?? 0) > 0);
+  // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved: Step 3 says how many,
+  // never "up to date with all orders". It keeps RE-PLAN on, and the step not done, only for those a
+  // re-plan could place now (`unserved.replan`, review of 5614ba9), for example after a truck was added
+  // or a pin was saved - not for a customer still without a pin, cases still heavier than any truck, or
+  // a day that is over (bring them forward instead), where RE-PLAN would change nothing.
+  const unservedLeft = day.plan?.chosen ? (day.unserved?.orders ?? 0) : 0;
+  const unservedReplan = day.plan?.chosen ? (day.unserved?.replan ?? 0) : 0;
   // Every order is already on a locked, loading or dispatched load, or was brought forward to a
   // later day (PR9): OPTIMIZE / RE-PLAN would have nothing to plan (the server answers 409
   // NOTHING_TO_PLAN), so the button is off (review F03) and Step 3 says why - never "unlock it" or
@@ -468,7 +494,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   // Every load is out: the day is dispatched even when the last re-plan failed (its version stays
   // FAILED, holding the plan that was dispatched).
   const allOut = loadCount > 0 && (byStatus.DISPATCHED ?? 0) + (byStatus.COMPLETED ?? 0) === loadCount;
-  const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || planOutdated || lastFailed);
+  const needsPlan = day.orders.count > 0 && !nothingLeft && (!day.plan?.chosen || day.pending.count > 0 || unservedReplan > 0 || planOutdated || lastFailed);
   const fixWeight = weightFixText(canEditProducts);
   const selectedDate = date ?? day.date;
   const selectedDepot = depotId ?? day.depot.id;
@@ -638,12 +664,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       <Step
         n={3}
         title="Optimize"
-        done={!!day.plan?.chosen && day.pending.count === 0 && !planOutdated && !running}
+        done={!!day.plan?.chosen && day.pending.count === 0 && unservedReplan === 0 && !planOutdated && !running}
         summary={
           running
             ? (day.plan?.job ? searchProgressText(day.plan.job, now, day.thoroughMaxSec ?? THOROUGH_MAX_SEC_DEFAULT) : null) ?? `Optimizing… ${day.plan?.job?.message ?? ''}`
             : day.plan?.chosen
-              ? `Plan version ${day.plan.version} ${lastFailed ? 'in use: the last optimization failed, the previous plan was kept' : 'ready'}${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
+              ? `Plan version ${day.plan.version} ${lastFailed ? 'in use: the last optimization failed, the previous plan was kept' : 'ready'}${day.pending.count ? ` · ${day.pending.count} new order(s) not planned yet` : ''}${unservedLeft ? ` · ${unservedLeft} order(s) unserved` : ''}${planOutdated ? ' · out of date, RE-PLAN' : ''}`
               : 'Not optimized yet'
         }
       >
@@ -667,6 +693,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               outdated.inactiveOrders ? `${outdated.inactiveOrders} of its order(s) on planned loads had their customer deactivated` : '',
               outdated.masterChanged ? `the location or receiving hours of ${outdated.masterChanged} customer(s) on planned loads were changed (master data changed since optimization)` : '',
               outdated.trucksChanged ? `the capacity or payload of ${outdated.trucksChanged} truck(s) with planned loads was changed` : '',
+              // Review of 9 Oct 2026: their planned loads cannot be locked; RE-PLAN moves them to the trucks in service.
+              outdated.trucksInactive
+                ? `${outdated.trucksInactive} truck(s) with planned loads were taken out of service (deactivated under Trucks; their planned loads cannot be locked)`
+                : '',
+              // Review of 9 Oct 2026: a pin saved, or the customer reactivated, after the plan left their orders out.
+              outdated.unservedNowPlannable
+                ? `a usable location was saved, or the customer reactivated, for ${outdated.unservedNowPlannable} of its unserved order(s) (RE-PLAN plans them now)`
+                : '',
               // Audit E1: locked and dispatched loads keep the pin they were planned from; RE-PLAN moves the rest.
               outdated.depotMoved ? `the depot pin was moved (${outdated.depotMoved} planned load(s) still start from the old pin)` : '',
               // Pallets: a load the new figure puts over its bays cannot be locked meanwhile.
@@ -686,6 +720,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         {nothingLeftText && !running ? (
           <p className="text-xs text-muted-foreground" data-testid="nothing-to-plan">
             {nothingLeftText}
+          </p>
+        ) : unservedLeft > 0 && !running ? (
+          <p className="text-xs text-muted-foreground" data-testid="unserved-left">
+            {unservedLeft} order(s) ({(day.unserved?.cases ?? 0).toLocaleString()} cases) are left unserved by this plan: their reasons are under the plan below.
+            {/* What to do next is said only to those who can plan (no RE-PLAN button otherwise). */}
+            {canPlan ? ` ${unservedNextStep(unservedLeft, unservedReplan, day.date < day.today)}` : null}
           </p>
         ) : !needsPlan && day.plan?.chosen ? (
           <p className="text-xs text-muted-foreground">The plan is up to date with all orders.</p>
@@ -914,6 +954,18 @@ function ValidationPanel({ v, slug, fixWeight, lateReason, setLateReason, onConf
       </div>
     </div>
   );
+}
+
+/**
+ * Step 3's next step for the orders the plan leaves unserved (`total`), for a dispatcher who can plan:
+ * RE-PLAN only for those it could place now (`replan`, day-overview `unserved.replan`); on a day that
+ * is over, bring them forward to a later day instead (review of 5614ba9).
+ */
+function unservedNextStep(total: number, replan: number, dayOver: boolean): string {
+  if (dayOver) return 'This day is over: bring them forward to a later day, from that day\'s screen ("Not delivered on earlier days").';
+  if (replan >= total) return "RE-PLAN tries them again, for example after a truck was added or a customer's data was fixed.";
+  const fix = "until what their reasons say is fixed (for example a customer's location, or a case weight heavier than any truck)";
+  return replan > 0 ? `RE-PLAN tries ${replan} of them again; the others stay unserved ${fix}.` : `RE-PLAN cannot place them ${fix}.`;
 }
 
 /** "1,140 cases", "148 bays" or "120 bays and 570 cases": a load round of the depot's active trucks. */

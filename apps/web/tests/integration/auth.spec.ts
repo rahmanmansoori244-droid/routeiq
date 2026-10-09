@@ -9,7 +9,7 @@
  * Requires the dev server (`pnpm dev`) running at TEST_BASE_URL (default
  * http://localhost:3000) and a Postgres reachable via DATABASE_URL.
  */
-import { afterAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it, vi } from 'vitest';
 import {
   BASE,
   CookieJar,
@@ -156,8 +156,12 @@ describe('auth: password reset', () => {
     });
     expect(res.status).toBe(200);
 
-    const after = await prisma.passwordResetToken.count({ where: { userId: h.userId } });
-    expect(after).toBe(before + 1);
+    // The link is issued after the answer (review s5-security-2: the answer's timing must not tell
+    // a known address from an unknown one), so wait for it.
+    await vi.waitFor(
+      async () => expect(await prisma.passwordResetToken.count({ where: { userId: h.userId } })).toBe(before + 1),
+      { timeout: 10_000, interval: 100 },
+    );
 
     // Pull the latest token to verify it's hashed (we can't see the raw one
     // because the email isn't sent in test mode). Generate one synthetically

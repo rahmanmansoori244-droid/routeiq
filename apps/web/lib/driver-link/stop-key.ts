@@ -43,6 +43,16 @@ export function parseStopKey(s: string): StopRef | null {
   return { depotId: m[1] ?? null, loadNo: Number(m[2]), sequence: Number(m[3]) };
 }
 
+/**
+ * Whether two stop refs may name the same stop: the same load number and stop, at the same depot
+ * unless one of them is of the old form (no depot). The driver API and the phone's queue keep the
+ * actions of one stop in the order they were made with it (review of 8 Oct 2026); for an old key it
+ * errs on the side of "the same", which only makes an action wait for another one.
+ */
+export function maybeSameStop(a: StopRef, b: StopRef): boolean {
+  return a.loadNo === b.loadNo && a.sequence === b.sequence && (a.depotId === null || b.depotId === null || a.depotId === b.depotId);
+}
+
 /** A load key (`<depotId>:<loadNo>`), or null. */
 export function parseLoadKey(s: string): { depotId: string; loadNo: number } | null {
   const m = LOAD_RE.exec(s);

@@ -4,7 +4,8 @@ import { prisma } from '@/lib/db';
 import { buildRouteSheet } from '@/lib/exports/route-sheet-data';
 import { buildRouteSheetPdf } from '@/lib/exports/pdf';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
-import { driverPackModel, renderDriverPackPdf, type SheetDriverLink } from '@/lib/dispatch/driver-pack';
+import { driverPackModel, type SheetDriverLink } from '@/lib/dispatch/driver-pack';
+import { PdfRenderRefused, pdfRefusedResponse, renderDriverPackIsolated } from '@/lib/pdf-render';
 import { isDispatchPlan } from '@/lib/dispatch/legacy-runs';
 import { ensureLink, listLinks } from '@/lib/driver-link/service';
 
@@ -78,7 +79,15 @@ async function driverSheets(r: Request, runId: string, { user }: AuthedContext) 
   // dispatcher"). Each truck-day in its own transaction; a failure prints the same placeholder on that
   // truck's sheets and never fails the pack. Revoked: "Driver link stopped"; its day over: nothing.
   const driverLinks = hasRole(user.role, 'PLANNER') ? await packDriverLinks(user, runId, [...new Set(loads.map((l) => l.truckId))], new URL(r.url).origin) : undefined;
-  const buf = await renderDriverPackPdf(driverPackModel(detail, { tenantName: tenant?.name ?? '', loadIds: loads.map((l) => l.id), driverLinks }));
+  // Laid out in the PDF renderer process (review M3): seconds of CPU per pack that would otherwise
+  // freeze the web process for every user. Too long, too much memory, the maker stopped, or busy (503).
+  let buf: Buffer;
+  try {
+    buf = await renderDriverPackIsolated(driverPackModel(detail, { tenantName: tenant?.name ?? '', loadIds: loads.map((l) => l.id), driverLinks }));
+  } catch (err) {
+    if (err instanceof PdfRenderRefused) return pdfRefusedResponse(err);
+    throw err;
+  }
   // A filtered pack is one truck (and, for ?load=, one trip of it).
   const suffix = loadId || truck ? `-${safe(loads[0].truckCode)}${loadId ? `-trip${loads[0].loadNo}` : ''}` : '';
   // Inline: opens in the browser's PDF viewer, ready to print or share; the name is used on save.

@@ -18,6 +18,7 @@ import {
   preferredCustomer,
   preferredProduct,
   resolveOrderLines,
+  rowList,
   type CanonicalField,
   type DateOrder,
   type ResolveResult,
@@ -28,7 +29,8 @@ import { customerTwinsOf } from '../customer-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { validPalletFactor } from './pallets';
-import { dateOnly, isAfterCutoff, isoOf, tomorrowIso } from './time';
+import { dateOnly, isAfterCutoff, isoOf, todayIso, tomorrowIso } from './time';
+import { inParts } from '../in-parts';
 
 type Tx = Prisma.TransactionClient;
 
@@ -99,20 +101,9 @@ export const INTAKE_BUSY = {
 export const INTAKE_CHECK_FAILED =
   'RouteIQ could not check this file. Nothing was saved. Try again in a moment. If it happens again, tell your administrator.';
 
-/**
- * PostgreSQL takes at most 32,767 bind parameters in one query, and Prisma does not split an `in`
- * list that comes with other conditions (it fails with P2035 or P2029). An order file may hold
- * 50,000 rows, so a list that grows with the file is asked for in parts of this many values (third
- * review of audit P5: a file of 32,766 or more sales orders was refused with Prisma's text).
- */
-export const IN_LIST_PART = 10_000;
-
-/** `values` in order, in parts of at most `size` (see IN_LIST_PART). */
-export function inParts<T>(values: readonly T[], size = IN_LIST_PART): T[][] {
-  const parts: T[][] = [];
-  for (let i = 0; i < values.length; i += size) parts.push(values.slice(i, i + size));
-  return parts;
-}
+// Long `in` lists are asked for in parts (PostgreSQL's limit of bind parameters). The helper lives in
+// lib/in-parts.ts since the delivery actuals use it too; its old home still exports it.
+export { IN_LIST_PART, inParts } from '../in-parts';
 
 /** An order file that cannot be linked to a depot (owner rule, audit PR A5): 422, nothing saved. */
 export class DepotRequired extends Error {
@@ -244,7 +235,8 @@ async function lateReasons(tenantId: string, cfg: Pick<TenantConfig, 'planningCu
 export async function validateIntake(
   tenantId: string,
   rows: Record<string, string>[],
-  opts: { depotId?: string | null; defaultDeliveryDate?: string | null; now?: Date },
+  /** `rowNumbers`: the file row of each of `rows` (the parsed file's rowNumbers), so messages and OrderLine.sourceRow name the real rows. */
+  opts: { depotId?: string | null; defaultDeliveryDate?: string | null; now?: Date; rowNumbers?: readonly number[] | null },
 ): Promise<IntakeValidation> {
   const db = tenantDb(tenantId);
   const cfg = await db.tenantConfig.findUniqueOrThrow({ where: { tenantId } });
@@ -254,6 +246,9 @@ export async function validateIntake(
     defaultDeliveryDate: opts.defaultDeliveryDate || tomorrowIso(cfg.timezone, opts.now),
     dateOrder: (cfg.dateOrder as DateOrder) ?? 'DMY',
     extraAliases: extra,
+    // The company's today: a delivery date before it is a row error, one far ahead a warning.
+    today: todayIso(cfg.timezone, opts.now),
+    rowNumbers: opts.rowNumbers,
   });
   const customers = await db.customer.findMany({ select: { id: true, code: true, branchKey: true, name: true, active: true, lat: true, lng: true } });
   const products = await db.product.findMany({ select: { id: true, code: true, name: true, active: true, weightPerCaseKg: true, casesPerPallet: true } });
@@ -282,10 +277,15 @@ export async function validateIntake(
   }
   const res = resolveOrderLines(norm, customers, products, already, { confirmedOnOtherDates: otherDates });
 
-  // Depot column: rows for another depot are an error (they belong to another plan).
+  // Depot column: rows for another depot are an error (they belong to another plan). A line added
+  // together from several rows names them all (resolveOrderLines never adds up rows for different
+  // depots; a row without a depot takes the depot its line's other rows name).
   if (norm.mapping.used.depot_code) {
     const bad = res.lines.filter((l) => l.depotCode && l.depotCode.toUpperCase() !== depot.code.toUpperCase());
-    for (const l of bad) res.errors.push({ row: l.row, message: `Row is for depot ${l.depotCode}, but you are uploading for ${depot.code}.`, cases: l.cases });
+    for (const l of bad) {
+      const rows = l.sourceRows.length > 1 ? `Rows ${rowList(l.sourceRows)} (one sales-order line) are` : 'Row is';
+      res.errors.push({ row: l.row, message: `${rows} for depot ${l.depotCode}, but you are uploading for ${depot.code}.`, cases: l.cases });
+    }
     const badRows = new Set(bad.map((l) => l.row));
     res.lines = res.lines.filter((l) => !badRows.has(l.row));
   }

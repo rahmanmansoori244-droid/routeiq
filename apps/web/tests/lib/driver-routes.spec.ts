@@ -504,6 +504,96 @@ describe('POST /api/d/actions (spec section 8)', () => {
   });
 });
 
+describe('results arriving out of order (review of 8 Oct 2026)', () => {
+  // Each item backs off on its own on the phone (an 'error' answer, a failed request), and two phones
+  // can share a link: a later result can reach the server before an earlier one. The result is the
+  // one with the latest `at`, whatever the order of arrival.
+  const visitOf = (sequence: number) => tables.stopVisit.find((v) => v.sequence === sequence);
+  const outcomes = (sequence: number) => tables.stopEvent.filter((e) => e.kind === 'OUTCOME' && e.sequence === sequence);
+  // "Camera not working": the same Delivered entered twice is the same result exactly.
+  const delivered = (msAgo: number) => outcome('D1:1:1', { at: iso(msAgo), photoKeys: [], noPhotoReason: 'CAMERA_FAILED' });
+  const undo = (msAgo: number) => outcome('D1:1:1', { at: iso(msAgo), outcome: null, photoKeys: [] });
+
+  it('Delivered, Undo, Delivered again, the Undo arriving last: the second Delivered (the latest) stays the result', async () => {
+    const token = makeLink('t5');
+    const first = delivered(30 * 60_000);
+    const again = delivered(10 * 60_000); // the stored result exactly, dated after it
+    const between = undo(20 * 60_000); // backed off on the phone, it arrives last
+    const answers = [await act(token, [first]), await act(token, [again]), await act(token, [between])];
+    expect(answers.map((r) => r.body.data!.results[0]!.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(outcomes(1).map((e) => e.idempotencyKey)).toEqual([first, again, between].map((a) => `dl:${a.key}`));
+    expect(visitOf(1)).toMatchObject({ outcome: 'DELIVERED', casesDelivered: 40, noPhotoReason: 'CAMERA_FAILED' });
+    expect((visitOf(1)!.outcomeAt as Date).toISOString()).toBe(again.at);
+    expect(answers[2]!.body.data!.stops['D1:1:1']).toMatchObject({ outcome: 'DELIVERED' });
+  });
+
+  it('Not delivered, Partly, Not delivered again, the Partly arriving last: Not delivered stays, nothing delivered (Bring forward carries all 40)', async () => {
+    const token = makeLink('t5');
+    const nd = (msAgo: number) => outcome('D1:1:1', { at: iso(msAgo), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    expect((await act(token, [nd(30 * 60_000)])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect((await act(token, [nd(5 * 60_000)])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    const partly = outcome('D1:1:1', { at: iso(15 * 60_000), outcome: 'PARTLY_DELIVERED', reason: 'DAMAGED_GOODS', lines: [{ lineId: 'LA', delivered: 24 }] });
+    expect((await act(token, [partly])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(outcomes(1)).toHaveLength(3);
+    expect(visitOf(1)).toMatchObject({ outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', casesDelivered: 0, casesPlanned: 40 });
+  });
+
+  it('an Undo sent before the result it cleared is stored (the stop gets its visit, no result); the result arriving after it stays cleared', async () => {
+    const token = makeLink('t5');
+    expect((await act(token, [undo(10 * 60_000)])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(outcomes(1)).toHaveLength(1);
+    expect(visitOf(1)).toMatchObject({ outcome: null });
+    expect((await act(token, [delivered(20 * 60_000)])).body.data!.results[0]).toMatchObject({ status: 'ok' });
+    expect(outcomes(1)).toHaveLength(2);
+    expect(visitOf(1)).toMatchObject({ outcome: null, casesDelivered: null });
+  });
+
+  it('a repeat dated at or before the latest stored result (or clear) still stores nothing', async () => {
+    const token = makeLink('t5');
+    const latest = delivered(10 * 60_000);
+    await act(token, [latest]);
+    const r = await act(token, [delivered(20 * 60_000), { ...delivered(0), at: latest.at }]);
+    expect(r.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok']);
+    expect(outcomes(1)).toHaveLength(1);
+    // A clear repeated: stored once, then a clear dated before it stores nothing.
+    await act(token, [undo(5 * 60_000)]);
+    await act(token, [undo(8 * 60_000)]);
+    expect(outcomes(1)).toHaveLength(2);
+    expect(visitOf(1)).toMatchObject({ outcome: null });
+  });
+
+  it("an action answered 'error' holds back the later actions of its stop in the same request (answered 'error', unapplied); other stops go on", async () => {
+    const token = makeLink('t5');
+    const create = fakePrisma.stopEvent.create;
+    let failed = false;
+    fakePrisma.stopEvent.create = async (a: { data: { kind: string } }) => {
+      if (!failed && a.data.kind === 'OUTCOME') {
+        failed = true;
+        throw new Error('Connection terminated unexpectedly');
+      }
+      return create(a);
+    };
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const first = outcome('D1:1:1', { at: iso(20 * 60_000) });
+    const change = outcome('D1:1:1', { at: iso(10 * 60_000), outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const left = { key: randomUUID(), type: 'DEPART', stop: 'D1:1:1', at: iso(9 * 60_000), mode: 'AUTO', reason: 'LEFT' };
+    const elsewhere = outcome('D1:1:2', { at: iso(10 * 60_000) });
+    try {
+      const r = await act(token, [first, change, left, elsewhere]);
+      expect(r.body.data!.results.map((x) => x.status)).toEqual(['error', 'error', 'error', 'ok']);
+      expect(tables.stopEvent.filter((e) => e.sequence === 1)).toEqual([]);
+      expect(visitOf(2)).toMatchObject({ outcome: 'DELIVERED' });
+    } finally {
+      fakePrisma.stopEvent.create = create;
+      quiet.mockRestore();
+    }
+    // Sent again in their order, all are stored and the change is the result.
+    const again = await act(token, [first, change, left]);
+    expect(again.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok']);
+    expect(visitOf(1)).toMatchObject({ outcome: 'NOT_DELIVERED', casesDelivered: 0 });
+  });
+});
+
 describe('the returned-loads janitor sweep', () => {
   it('completes a load still out that reported Back at depot; a truck-day whose load is no longer DISPATCHED is dropped before any per-load work', async () => {
     const back = (truckId: string, loadNo: number, minAgo: number) => ({
@@ -571,10 +661,11 @@ describe('a flood from one link (security review)', () => {
     expect(backs.body.data!.results.map((x) => x.code ?? x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'INVALID']);
   });
 
-  it('the same result again with a fresh key is answered ok and stores nothing (no event, no audit row)', async () => {
+  it('the same result again with a fresh key, not dated after the stored one, is answered ok and stores nothing (no event, no audit row)', async () => {
     const token = makeLink('t5');
-    const nd = () => outcome('D1:1:2', { outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
-    const r = await act(token, [nd(), nd(), nd()]);
+    const at = iso(5 * 60_000);
+    const nd = (when = at) => outcome('D1:1:2', { at: when, outcome: 'NOT_DELIVERED', reason: 'SHOP_CLOSED', photoKeys: [] });
+    const r = await act(token, [nd(), nd(), nd(iso(6 * 60_000))]);
     expect(r.body.data!.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok']);
     expect(tables.stopEvent.filter((e) => e.kind === 'OUTCOME')).toHaveLength(1);
     expect(tables.auditLog.filter((a) => a.action === 'DELIVERY_OUTCOME_SET')).toHaveLength(1);

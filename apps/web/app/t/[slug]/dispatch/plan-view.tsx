@@ -13,7 +13,7 @@ import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
-import { canStepBack, driverPickLink } from '@/lib/dispatch/load-state';
+import { canStepBack, driverPickLink, oneWayMoveQuestion } from '@/lib/dispatch/load-state';
 import { driverOptionLabel, keepTitle, leaveQuestion, onLeaveMoveQuestion, onLeaveTitle } from '@/lib/dispatch/driver-leave';
 import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/lib/dispatch/costs';
 import { fuelKpi } from '@/lib/dispatch/summary';
@@ -373,6 +373,10 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   // instead, Re-plan) and until the day shows its result, every other action is disabled, so one
   // user cannot race themselves (F07; plan-actions.ts).
   function setStatus(l: DetailLoad, status: string) {
+    // Dispatch and Completed can never be undone (load-state.ts): they ask first, naming the truck,
+    // load, driver and stops (review of 8 Oct 2026: a mis-click next to Loading froze a load for good).
+    const oneWay = oneWayMoveQuestion({ ...l, stops: l.stops.length }, status, d ? { runDate: d.run.runDate, today: today ?? d.today ?? null } : undefined);
+    if (oneWay && !window.confirm(oneWay)) return;
     // Delivery outcome (spec section 9.4): a brought-forward order on this load whose original result
     // changed after the carry may not be needed. Lock asks; it is never refused.
     const warnings = status === 'LOCKED' ? (overlay?.lockWarnings[l.id] ?? []) : [];

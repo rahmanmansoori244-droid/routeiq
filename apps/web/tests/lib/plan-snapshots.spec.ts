@@ -15,12 +15,13 @@ import {
   readTruckSnapshot,
   stopMasterChanges,
   truckMasterChanges,
+  truckOutOfService,
   usableWindow,
   type StopSnapshot,
   type TruckSnapshot,
 } from '@/lib/dispatch/snapshots';
 import { planInputsOf, planSettingsOf, type BuiltRequest } from '@/lib/dispatch/plan-service';
-import { masterChangedNotes } from '@/lib/dispatch/plan-detail';
+import { customerDataFixedNote, masterChangedNotes } from '@/lib/dispatch/plan-detail';
 import { jobMessage } from '@/lib/jobs/dispatch-job';
 import { configProblems } from '@/lib/startup-checks';
 import { fixture } from './plan-detail-fixture';
@@ -90,8 +91,8 @@ describe('plannedLoadsMasterChanged (the day screen: out of date, RE-PLAN)', () 
         { truckId: 'T5', truckSnapshotJson: null, live: { capacityCases: 1, capacityWeightKg: 1 } },
       ],
     );
-    expect(r).toEqual({ customers: 1, trucks: 1, depotMoved: 0 });
-    expect(plannedLoadsMasterChanged([{ customerId: 'c1', stopSnapshotJson: snap, live }], [])).toEqual({ customers: 0, trucks: 0, depotMoved: 0 });
+    expect(r).toEqual({ customers: 1, trucks: 1, depotMoved: 0, trucksInactive: 0 });
+    expect(plannedLoadsMasterChanged([{ customerId: 'c1', stopSnapshotJson: snap, live }], [])).toEqual({ customers: 0, trucks: 0, depotMoved: 0, trucksInactive: 0 });
   });
 });
 
@@ -102,6 +103,50 @@ describe('truckMasterChanges', () => {
     expect(truckMasterChanges(t, { capacityCases: 100, capacityWeightKg: 0 })[0].text).toBe(
       'Truck capacity changed after planning: now 100 cases / no payload set (planned with 100 cases / 1000 kg)',
     );
+  });
+
+  it('review of 9 Oct 2026: a truck taken out of service since is a change, also on a load planned before snapshots', () => {
+    const t = { capacityCases: 100, capacityWeightKg: 1000 } as TruckSnapshot;
+    const out = { kind: 'INACTIVE', text: 'Truck taken out of service (deactivated under Trucks) after planning.' };
+    expect(truckMasterChanges(t, { capacityCases: 100, capacityWeightKg: 1000, outOfService: true })).toEqual([out]);
+    expect(truckMasterChanges(null, { capacityCases: 1, capacityWeightKg: 1, outOfService: true })).toEqual([out]);
+    // Without a snapshot nothing else can be said; in service: nothing.
+    expect(truckMasterChanges(null, { capacityCases: 1, capacityWeightKg: 1 })).toEqual([]);
+    expect(truckMasterChanges(t, { capacityCases: 100, capacityWeightKg: 1000, outOfService: false })).toEqual([]);
+  });
+});
+
+describe('truckOutOfService (review of 9 Oct 2026)', () => {
+  const today = '2026-10-09';
+  it('a truck deactivated under Trucks; a row that does not say is in service', () => {
+    expect(truckOutOfService({ active: false, onlyOnDate: null }, today)).toBe(true);
+    expect(truckOutOfService({ active: true, onlyOnDate: null }, today)).toBe(false);
+    expect(truckOutOfService({}, today)).toBe(false);
+  });
+
+  it('not a one-day hired truck the janitor retired after its day; one deactivated on its day or before it is', () => {
+    expect(truckOutOfService({ active: false, onlyOnDate: new Date('2026-10-08T00:00:00Z') }, today)).toBe(false);
+    expect(truckOutOfService({ active: false, onlyOnDate: new Date('2026-10-09T00:00:00Z') }, today)).toBe(true);
+    expect(truckOutOfService({ active: false, onlyOnDate: '2026-10-10' }, today)).toBe(true);
+  });
+});
+
+describe('plannedLoadsMasterChanged: trucks taken out of service (review of 9 Oct 2026)', () => {
+  const truck = { v: 1, code: 'T03', capacityCases: 100, capacityWeightKg: 3000, fixedCostPerDay: 0, tripCost: 0, costPerKm: 0, kmPerLitre: null,
+    availableFromMin: null, availableToMin: null, maxTripsPerDay: null, rules: null, source: 'PLAN', capturedAt: '2026-09-26T12:00:00Z' };
+
+  it('counts each truck once, apart from the capacity changes, also a load planned before snapshots (before: silent)', () => {
+    const r = plannedLoadsMasterChanged(
+      [],
+      [
+        { truckId: 'T3', truckSnapshotJson: truck, live: { capacityCases: 100, capacityWeightKg: 3000, outOfService: true } },
+        { truckId: 'T3', truckSnapshotJson: truck, live: { capacityCases: 100, capacityWeightKg: 3000, outOfService: true } }, // its second load
+        { truckId: 'T4', truckSnapshotJson: truck, live: { capacityCases: 90, capacityWeightKg: 3000, outOfService: true } }, // also resized: out of service it is
+        { truckId: 'T5', truckSnapshotJson: null, live: { capacityCases: 1, capacityWeightKg: 1, outOfService: true } },
+        { truckId: 'T6', truckSnapshotJson: truck, live: { capacityCases: 90, capacityWeightKg: 3000, outOfService: false } }, // resized only
+      ],
+    );
+    expect(r).toEqual({ customers: 0, trucks: 1, depotMoved: 0, trucksInactive: 3 });
   });
 });
 
@@ -196,6 +241,32 @@ describe('masterChangedNotes', () => {
   });
 });
 
+describe('masterChangedNotes: a truck taken out of service (review of 9 Oct 2026)', () => {
+  const out = { kind: 'INACTIVE' as const, text: 'Truck taken out of service (deactivated under Trucks) after planning.' };
+
+  it('a PLANNED load: re-plan to move it; a locked one is kept: unlock first - never "truck capacity changed"', () => {
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], masterChanged: [out] }; // LOCKED
+    d.loads[1] = { ...d.loads[1], masterChanged: [out] }; // PLANNED
+    expect(masterChangedNotes(d.loads)).toEqual([
+      'Truck taken out of service (deactivated under Trucks) after this plan was made: T01 L2. These loads cannot be locked, loaded or dispatched - re-plan to move their orders to the trucks in service, or reactivate the truck under Trucks.',
+      'Truck taken out of service (deactivated under Trucks) after these locked or loading loads were planned: T01 L1. They are kept as they are; to move their orders to the trucks in service, unlock them (put them back to Planned) and re-plan, or reactivate the truck under Trucks.',
+    ]);
+  });
+});
+
+describe('customerDataFixedNote (review of 9 Oct 2026)', () => {
+  it('names the customers whose orders a re-plan would plan now, in the singular for one order', () => {
+    expect(customerDataFixedNote([], 0)).toBeNull();
+    expect(customerDataFixedNote(['C1113'], 1)).toBe(
+      'A usable location was saved, or the customer reactivated, after this plan was made: C1113. Its order is still unserved in this plan (the reason shown is from when it was made) - re-plan to plan it.',
+    );
+    expect(customerDataFixedNote(['C1113', 'C1200/B2'], 3)).toBe(
+      'A usable location was saved, or the customer reactivated, after this plan was made: C1113, C1200/B2. Their 3 orders are still unserved in this plan (the reason shown is from when it was made) - re-plan to plan them.',
+    );
+  });
+});
+
 describe('load origin: the depot pin a load was planned from (audit E1, owner decision 13)', () => {
   const snap = { v: 1, code: 'T01', capacityCases: 100, capacityWeightKg: 1000, fixedCostPerDay: 20, tripCost: 0, costPerKm: 0.1, kmPerLitre: null,
     availableFromMin: null, availableToMin: null, maxTripsPerDay: null, rules: null, source: 'PLAN' as const, capturedAt: '2026-09-26T12:00:00Z' };
@@ -222,13 +293,13 @@ describe('load origin: the depot pin a load was planned from (audit E1, owner de
     const live = { capacityCases: 100, capacityWeightKg: 1000 };
     const withOrigin = { ...snap, origin: { depotId: 'D1', lat: 23.58, lng: 58.39 } };
     const loads = [{ truckId: 't1', truckSnapshotJson: withOrigin, live }, { truckId: 't2', truckSnapshotJson: snap, live }];
-    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1 });
-    expect(plannedLoadsMasterChanged([], loads, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 0 });
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1, trucksInactive: 0 });
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 0, trucksInactive: 0 });
     // A6 review: a load planned before origins were kept (t2) was planned from the pin its option was
     // optimized from - the plan screen's rule (readLoadOrigin ?? the option's inputs.depot), so the
     // day and the plan notes agree.
-    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 2 });
-    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1 });
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.58, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 2, trucksInactive: 0 });
+    expect(plannedLoadsMasterChanged([], loads, { lat: 23.6, lng: 58.39 }, { lat: 23.6, lng: 58.39 })).toEqual({ customers: 0, trucks: 0, depotMoved: 1, trucksInactive: 0 });
   });
 });
 

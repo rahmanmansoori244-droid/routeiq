@@ -2,7 +2,17 @@ import Papa from 'papaparse';
 import * as XLSX from 'xlsx';
 import { MultipleSheetsError, sheetList } from './upload-errors';
 import { fileRefusal, MAX_CELLS, MAX_COLS } from './upload-limits';
-import { guardSpreadsheet, idFileFormatsCells, safeDecodeRange, sameSheetList, sheetjsReader, tooManyTextCells, WorkbookRefusedError } from './workbook-guard';
+import {
+  guardSpreadsheet,
+  idFileFormatsCells,
+  notExcel,
+  safeDecodeRange,
+  sameSheetList,
+  sheetjsReader,
+  tooManyTextCells,
+  webPageOrXml,
+  WorkbookRefusedError,
+} from './workbook-guard';
 
 // Kept here as well, so `@/lib/csv` still has them (one class: `instanceof` holds either way).
 export { MultipleSheetsError } from './upload-errors';
@@ -15,9 +25,10 @@ export { MAX_FILE_BYTES } from './upload-limits';
  * 200 columns per sheet, 2,500,000 cells (for example 50,000 rows of 49 columns), links over
  * 200,000 cells, 10,000 comments; the A1 v3 review 1,000 metadata entries of each kind and 1,000
  * comment authors. Since the P5 second review a CSV sent as text (read by Papa Parse, not SheetJS)
- * has the column and cell caps too (parseCsv, checkCsvCells). An upload read as Excel must be an
- * .xlsx, an old .xls or CSV text; web pages, XML, OpenDocument, .xlsb and other formats are
- * refused (lib/workbook-guard). Since the A1 v4
+ * has the column and cell caps too (parseCsv, checkCsvCells); since the review of 8 Oct 2026 every
+ * CSV is read so, also one the browser sends as Excel (parseUpload). An upload read as Excel must be
+ * an .xlsx or an old .xls; web pages, XML, OpenDocument, .xlsb and other formats are refused
+ * (lib/workbook-guard), and so is CSV text that is a web page or binary content. Since the A1 v4
  * review a part SheetJS reads more than once (for another sheet, another spelling of its name, an
  * external link listed again) counts again against these caps, two sheets that read one worksheet
  * part are refused, and so is a workbook with a chart, dialog or macro sheet.
@@ -76,6 +87,14 @@ export interface ParsedFile {
   warnings: string[];
   /** Excel: the sheet the rows were read from. */
   sheetName?: string;
+  /**
+   * The file row of each of `rows`, as the file shows it: an Excel sheet's own row numbers; for a
+   * CSV, its records counted as a spreadsheet shows them, one row each, blank ones included. The
+   * readers leave blank rows out of `rows`, so a row's place in them (+ 2) is its row only in a file
+   * without blank rows (review web-intake-4: ERP exports have blank separator rows, and the order
+   * check named rows above the real ones). Absent when it could not be worked out.
+   */
+  rowNumbers?: number[];
 }
 
 /** One non-empty sheet of a workbook: its name and its rows (keys = the sheet's header row). */
@@ -124,6 +143,14 @@ function tooManyRowsCut(rows: number, where: string, what: 'sheet' | 'file'): Er
 /**
  * Reads an uploaded file. Synchronous once the file is in memory: an upload route never calls it
  * itself but through parseUploadIsolated (lib/upload-parse), which runs it in the parser process.
+ *
+ * The reader is chosen by the file's content, never by the type the browser sends (review of
+ * 8 Oct 2026, web-intake-1): Chrome and Edge on a Windows PC with Excel send every .csv as
+ * application/vnd.ms-excel, and SheetJS's CSV reader guesses each value's type, so "11/10/2026"
+ * became 10 Nov (month first, before the company's date order was ever applied), "00123" became
+ * 123 and the item "1-2" a date serial. A real .xlsx or .xls (zip or compound-file bytes, or an old
+ * bare BIFF stream) goes to SheetJS through the guard; every file that is text goes to Papa Parse,
+ * which keeps every value as the text in the file, whatever the file was sent as.
  */
 export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<ParsedFile> {
   // Size and type (lib/upload-limits): the web process checks them too, before the file is sent.
@@ -131,13 +158,17 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
   if (refused) throw new Error(refused);
 
   const fileName = sanitizeFileName(file.name);
-  const isExcel =
-    file.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    file.type === 'application/vnd.ms-excel' ||
-    /\.xlsx?$/i.test(file.name);
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const reader = sheetjsReader(bytes);
+  const text = reader === 'text' || reader === 'text-ws' || reader === 'text-utf16';
+  // Neither a workbook nor text as SheetJS sees it (a web page, SYLK, DIF, an image ...): a file sent
+  // as Excel is refused by the guard, with its words, as before; one sent as CSV (or as nothing) is
+  // read as text as before, and refused below when it is not text.
+  const sentAsExcel = file.type === XLSX_MIME || file.type === XLS_MIME || /\.xlsx?$/i.test(file.name);
+  const workbook = reader === 'zip' || reader === 'cfb' || reader === 'biff' || (!text && sentAsExcel);
 
-  if (isExcel) {
-    const { sheets, showDecimals } = readWorkbook(new Uint8Array(await file.arrayBuffer()), opts.decimalTextColumns);
+  if (workbook) {
+    const { sheets, showDecimals, rowNumbers } = readWorkbook(bytes, opts.decimalTextColumns);
     const pick = pickSheet(sheets, opts);
     // The row limit is for the sheet that is read: a large sheet that is not read (a customer
     // list next to the orders) is only named in the warning, never a reason to refuse the file.
@@ -150,24 +181,209 @@ export async function parseUpload(file: File, opts: ParseOptions = {}): Promise<
     // review: every sheet's were worked out, also those of the sheets that are not read).
     const chosen = sheets.find((s) => s.rows === pick.rows);
     if (chosen) showDecimals(chosen);
-    return { fileName, fileType: 'xlsx', rows: pick.rows, warnings: pick.warnings, ...(pick.name ? { sheetName: pick.name } : {}) };
+    const nums = chosen ? rowNumbers(chosen) : undefined;
+    // A sheet name could carry a U+0000 too (an "_x0000_" escape): see normalizeKeys.
+    return {
+      fileName,
+      fileType: 'xlsx',
+      rows: pick.rows,
+      warnings: pick.warnings.map(withoutNul),
+      ...(pick.name ? { sheetName: withoutNul(pick.name) } : {}),
+      ...(nums ? { rowNumbers: nums } : {}),
+    };
   }
 
-  const warnings: string[] = [];
-  const text = await file.text();
-  const result = parseCsv(text);
+  const decoded = decodeCsvText(bytes);
+  const warnings: string[] = [...decoded.warnings];
+  // Excel's "sep=;" first line names the separator and is not a row (follow-up to the CSV intake
+  // review, 9 Oct 2026: it was read as the header, and the file refused for missing columns). The
+  // rows are counted as Excel shows them, without that line; a "Line N" counts it, as the file does.
+  const hint = separatorHint(decoded.text);
+  const csvText = hint ? hint.rest : decoded.text;
+  const result = parseCsv(csvText, hint?.delimiter);
+  // A quote that is never closed takes every line after it into one value: the file read as a
+  // few rows, the last one's note holding the rest of the file, and no error (review web-intake-2:
+  // 390 of 400 orders never reached the day). Refused, naming the line; before the row limit, since
+  // the rows Papa made of such a file mean nothing.
+  const quote = result.errors.find((e) => e.type === 'Quotes');
+  if (quote) throw unclosedQuote(lineOf(csvText, quote) + (hint ? 1 : 0));
   if (result.truncated) throw tooManyRowsCut(result.rows.length, '', 'file');
   if (result.rows.length > MAX_ROWS) {
     throw new Error(`Too many rows: ${result.rows.length}. Max ${MAX_ROWS}.`);
   }
-  // After the row limit, so a file refused for its rows is refused as before.
-  checkCsvCells(result.rows, result.header);
+  // After the row limit, so a file refused for its rows is refused as before. A row it refuses is
+  // named by its file row, worked out only then (csvFileRows reads the text once more).
+  checkCsvCells(result.rows, result.header, (i) => csvFileRows(csvText, result)?.[i] ?? i + 2);
+  const rowNumbers = csvFileRows(csvText, result);
   if (result.errors.length) {
     for (const e of result.errors.slice(0, 5)) {
-      warnings.push(`CSV parse warning at row ${e.row}: ${e.message}`);
+      // Papa numbers a row of the wrong width by its place among the rows (from 0, blank lines left
+      // out), an unclosed quote by its record (from 0, the header and blank lines counted): both as
+      // the file's row (review web-intake-4; the first was two rows off even without blank lines).
+      const row = typeof e.row !== 'number' ? e.row : e.type === 'FieldMismatch' ? (rowNumbers?.[e.row] ?? e.row + 2) : e.type === 'Quotes' ? e.row + 1 : e.row;
+      warnings.push(`CSV parse warning at row ${row}: ${e.message}`);
     }
   }
-  return { fileName, fileType: 'csv', rows: result.rows.map(normalizeKeys), warnings };
+  return { fileName, fileType: 'csv', rows: result.rows.map((r) => normalizeKeys(r, true)), warnings, ...(rowNumbers ? { rowNumbers } : {}) };
+}
+
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const XLS_MIME = 'application/vnd.ms-excel';
+
+/** U+0000 taken out: PostgreSQL stores no U+0000 in a text or jsonb value (review s5-security-1). */
+const withoutNul = (s: string) => (s.includes('\u0000') ? s.replace(/\u0000/g, '') : s);
+
+/** The warning for a file read as windows-1256 (decodeCsvText). */
+const READ_AS_ARABIC_WINDOWS =
+  'This file is not saved as UTF-8, so its text was read as Arabic Windows text (Windows-1256). Check the names and notes; ' +
+  'if they look wrong, save the file in Excel as "CSV UTF-8 (Comma delimited)" and upload that.';
+/** The warning for a UTF-8 file with a few places that are not UTF-8 (decodeCsvText): `n` of them, each read as U+FFFD. */
+const notUtf8Places = (n: number) =>
+  `This file is saved as UTF-8, but ${n.toLocaleString('en-US')} ${n === 1 ? 'character in it is' : 'characters in it are'} not UTF-8 text ` +
+  `and ${n === 1 ? 'was' : 'were'} read as "\uFFFD". Look for "\uFFFD" in the names and notes; if it matters, correct the file and upload it again.`;
+/** Refusals of decodeCsvText: text that says it is UTF-16 and is not, and (a Node without windows-1256) text that is not UTF-8. */
+const DAMAGED_UTF16 =
+  'This file says it is UTF-16 text, but its text is damaged, so it cannot be read. Open it in Excel, save it as "CSV UTF-8 (Comma delimited)" and upload that.';
+const NOT_UTF8 = 'This file is not saved as UTF-8, so it cannot be read. Open it in Excel, save it as "CSV UTF-8 (Comma delimited)" and upload that.';
+
+/**
+ * The text of a CSV file, decoded explicitly (review web-intake-3, s6-messy-intake-3). Before, the
+ * bytes were decoded as UTF-8 with every byte that is not UTF-8 replaced by U+FFFD, and a CSV sent as
+ * Excel was read by SheetJS as Latin-1: Arabic names and notes were stored garbled for good, with no
+ * word. Now:
+ *  - a UTF-16 byte-order mark (Excel's "Unicode Text"): UTF-16 of that byte order; text that is not
+ *    UTF-16 after all (an odd number of bytes) is refused, never read with replacement characters;
+ *  - otherwise (a UTF-8 mark taken off) strict UTF-8;
+ *  - when that fails, a file that is mostly UTF-8 (utf8Counts: more UTF-8 letters of two to four
+ *    bytes than places that are not UTF-8) is still read as UTF-8, each such place as U+FFFD, with a
+ *    warning naming how many (follow-up to the CSV intake review, 9 Oct 2026: one stray byte made the
+ *    whole file read as windows-1256, every Arabic letter of it garbled);
+ *  - else windows-1256, what Excel's "CSV (Comma delimited)" writes on a PC set to Arabic, which maps
+ *    every byte: read, with a warning that says so (READ_AS_ARABIC_WINDOWS).
+ * U+0000 is taken out of the text (withoutNul): UTF-16 text without its mark then reads as its
+ * letters. Every line break is made a line feed: Papa takes one kind of line break for a whole file,
+ * so a line ending in a bare line feed inside a file of CR LF lines was joined onto the line before
+ * (follow-up to the CSV intake review; SheetJS, which read a CSV sent as Excel until then, took both).
+ * A line break inside a quoted value stays in its value, as a line feed, as Excel keeps one in a cell.
+ * Text that holds the control characters of binary content (an image, a PDF, random bytes named .csv)
+ * is refused: no CSV has them, and Papa would make rows of them.
+ */
+function decodeCsvText(bytes: Uint8Array): { text: string; warnings: string[] } {
+  const strict = (encoding: string, b: Uint8Array) => new TextDecoder(encoding, { fatal: true, ignoreBOM: true }).decode(b);
+  let text: string;
+  const warnings: string[] = [];
+  if ((bytes[0] === 0xff && bytes[1] === 0xfe) || (bytes[0] === 0xfe && bytes[1] === 0xff)) {
+    try {
+      text = strict(bytes[0] === 0xff ? 'utf-16le' : 'utf-16be', bytes.subarray(2));
+    } catch {
+      throw new WorkbookRefusedError(DAMAGED_UTF16);
+    }
+  } else {
+    const body = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? bytes.subarray(3) : bytes;
+    try {
+      text = strict('utf-8', body);
+    } catch {
+      const { letters, notUtf8 } = utf8Counts(body);
+      if (letters > notUtf8) {
+        // The decoder puts one U+FFFD where utf8Counts counted one place that is not UTF-8.
+        text = new TextDecoder('utf-8', { ignoreBOM: true }).decode(body);
+        warnings.push(notUtf8Places(notUtf8));
+      } else {
+        try {
+          text = new TextDecoder('windows-1256').decode(body);
+        } catch {
+          // A Node built without the full ICU data has no windows-1256: say so, never guess.
+          throw new WorkbookRefusedError(NOT_UTF8);
+        }
+        warnings.push(READ_AS_ARABIC_WINDOWS);
+      }
+    }
+  }
+  text = withoutNul(text).replace(/\r\n?/g, '\n');
+  checkCsvText(text);
+  return { text, warnings };
+}
+
+/**
+ * How UTF-8 the bytes are: `letters`, the well-formed UTF-8 letters of two to four bytes, and
+ * `notUtf8`, the places that are not UTF-8, counted as TextDecoder counts them (a byte that cannot
+ * begin a letter, or a letter cut short, with its bytes so far: one U+FFFD each). A UTF-8 file with a
+ * stray byte has many letters and few such places. A windows-1256 file is the other way round: an
+ * Arabic letter there is one byte from 0xC1 up, which UTF-8 can only follow with a byte from 0x80 to
+ * 0xBF, and the next letter is never one, so nearly every Arabic letter is a place that is not UTF-8
+ * and a UTF-8 letter happens only by chance (a letter followed by the Arabic comma, 0xA1). The larger
+ * count decides (decodeCsvText); a tie, or a file with no UTF-8 letter at all, is read as windows-1256.
+ */
+function utf8Counts(b: Uint8Array): { letters: number; notUtf8: number } {
+  let letters = 0;
+  let notUtf8 = 0;
+  for (let i = 0; i < b.length; ) {
+    const c = b[i]!;
+    if (c < 0x80) {
+      i += 1;
+      continue;
+    }
+    // The bytes that must follow c, and the range of the first of them (no overlong form, no
+    // surrogate, nothing past U+10FFFF), as the UTF-8 decoder of the Encoding standard checks them.
+    const need = c >= 0xc2 && c <= 0xdf ? 1 : c >= 0xe0 && c <= 0xef ? 2 : c >= 0xf0 && c <= 0xf4 ? 3 : 0;
+    let lo = c === 0xe0 ? 0xa0 : c === 0xf0 ? 0x90 : 0x80;
+    let hi = c === 0xed ? 0x9f : c === 0xf4 ? 0x8f : 0xbf;
+    let j = i + 1;
+    while (j - i - 1 < need && j < b.length && b[j]! >= lo && b[j]! <= hi) {
+      j += 1;
+      lo = 0x80;
+      hi = 0xbf;
+    }
+    if (need && j - i - 1 === need) letters += 1;
+    else notUtf8 += 1; // the byte that broke it off is looked at again, as the start of the next
+    i = j;
+  }
+  return { letters, notUtf8 };
+}
+
+/** Control characters no text file has (tab, line feed, vertical tab, form feed and carriage return aside). */
+const BINARY_CHARS = /[\u0001-\u0008\u000e-\u001f\u007f]/g;
+
+/**
+ * Refuses decoded text that is no CSV, with the words a file sent as Excel gets (lib/workbook-guard):
+ * a web page or XML file (it begins with "<", after spaces and line breaks), a SocialCalc file; and
+ * binary content: more than 8 control characters, and more than 1 in 100 characters (a CSV has none;
+ * random bytes about 1 in 9).
+ */
+function checkCsvText(text: string): void {
+  if (/^\s*</.test(text)) throw webPageOrXml();
+  if (text.startsWith('socialcalc:version:')) throw notExcel();
+  const controls = text.match(BINARY_CHARS)?.length ?? 0;
+  if (controls > 8 && controls * 100 > text.length) {
+    throw new WorkbookRefusedError(
+      'This file is not a CSV text file or an Excel workbook, so it cannot be read. Save it in Excel as .xlsx or as CSV and upload that.',
+    );
+  }
+}
+
+/**
+ * Excel's separator hint: a first line "sep=" and one character ("sep=;", "sep=|", a tab) tells Excel
+ * which separator the file uses, and Excel reads the file so and does not show that line. Read the
+ * same way here (parseUpload): the separator, and the text after that line. Undefined when the first
+ * line is anything else.
+ */
+function separatorHint(text: string): { delimiter: string; rest: string } | undefined {
+  const m = /^sep=([^"\n])(?:\n|$)/i.exec(text);
+  return m ? { delimiter: m[1]!, rest: text.slice(m[0].length) } : undefined;
+}
+
+/** The line of the file (the header is line 1) where a Papa Parse error was found, from its position in the text. */
+function lineOf(text: string, e: Papa.ParseError): number {
+  if (typeof e.index !== 'number') return (e.row ?? 0) + 1;
+  return 1 + (text.slice(0, e.index).match(/\r\n|\r|\n/g)?.length ?? 0);
+}
+
+/** Refusal of a CSV with a quote that is not closed where it should be (see parseUpload). */
+function unclosedQuote(line: number): WorkbookRefusedError {
+  return new WorkbookRefusedError(
+    `Line ${line} of this file has a quote (") that is not closed where it should be, so the lines after it would be read as part of one value. ` +
+      'The file was not read. Fix that quote (a quote inside a value is written twice: ""), or save the file again from Excel as CSV, and upload again.',
+  );
 }
 
 /**
@@ -234,7 +450,10 @@ type ShownMode = 'format' | 'text';
  * the sheet it reads, and on no other (A5 fourth review: every sheet's cells were formatted, also
  * those of the sheets that are not read).
  */
-function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { sheets: ParsedSheet[]; showDecimals: (sheet: ParsedSheet) => void } {
+function readWorkbook(
+  bytes: Uint8Array,
+  decimalTextColumns: string[] = [],
+): { sheets: ParsedSheet[]; showDecimals: (sheet: ParsedSheet) => void; rowNumbers: (sheet: ParsedSheet) => number[] | undefined } {
   // A Buffer (a view of the upload, or with a zip's binary parts left out). Given a Uint8Array,
   // SheetJS copies the rest of the file for every part it unpacks (5,000 small parts took 8 s);
   // given a Buffer it takes views.
@@ -274,6 +493,9 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
   const wb = XLSX.read(buf, { ...read, cellDates: false, cellNF: false, ...shownRead });
   const out: ParsedSheet[] = [];
   const shownOf = new Map<ParsedSheet, { columns: ShownColumn[]; rowNums: (number | undefined)[] }>();
+  // Each sheet's rows as the sheet numbers them (ParsedFile.rowNumbers): sheet_to_json leaves blank
+  // rows out of the rows it gives.
+  const rowNumbersOf = new Map<ParsedSheet, number[]>();
   for (const { name, sheet, range, clamped } of sheetRanges(wb)) {
     // Where the decimal columns' number cells are and what they show (nothing is formatted), taken
     // before the sheet is turned into rows, which are then read exactly as without these columns.
@@ -289,8 +511,10 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
     if (rows.length) {
       const parsed: ParsedSheet = { name, rows: rows.map((r) => normalizeKeys(r)), ...(truncated ? { truncated: true } : {}) };
       out.push(parsed);
-      // sheet_to_json gives each row the sheet row it was read from (not enumerable).
-      if (columns.length) shownOf.set(parsed, { columns, rowNums: rows.map((r) => (r as { __rowNum__?: number }).__rowNum__) });
+      // sheet_to_json gives each row the sheet row it was read from (not enumerable), counted from 0.
+      const rowNums = rows.map((r) => (r as { __rowNum__?: number }).__rowNum__);
+      if (columns.length) shownOf.set(parsed, { columns, rowNums });
+      if (rowNums.every((n) => typeof n === 'number')) rowNumbersOf.set(parsed, (rowNums as number[]).map((n) => n + 1));
     }
   }
   const formats = new ShownFormats();
@@ -313,7 +537,7 @@ function readWorkbook(bytes: Uint8Array, decimalTextColumns: string[] = []): { s
       }
     });
   };
-  return { sheets: out, showDecimals };
+  return { sheets: out, showDecimals, rowNumbers: (sheet) => rowNumbersOf.get(sheet) };
 }
 
 /**
@@ -413,7 +637,9 @@ function zerosShown(z: string, probe: 1 | -1): number | null {
  * record came before it (and throws where a format cannot be applied); such a file - never a CSV -
  * counts the numbers' own decimals (idFileFormatsCells). A CSV whose first header is "ID" is read
  * with its text like any other (A5 fifth review: every "ID;" file was, so a semicolon CSV lost its
- * trailing zeros only when the browser sent it as Excel).
+ * trailing zeros only when the browser sent it as Excel). Since the review of 8 Oct 2026 parseUpload
+ * gives SheetJS no text at all (CSV text goes to Papa Parse, which keeps every value's text), so the
+ * text branch is no longer reached from an upload; it is kept unchanged for readWorkbook's sake.
  */
 function shownTextRead(buf: Buffer): { cellNF: true } | { cellText: true } | Record<string, never> {
   const reader = sheetjsReader(buf);
@@ -560,24 +786,31 @@ function goesPastReadRows(sheet: XLSX.WorkSheet): boolean {
 const HEADER_LINES = 10;
 
 /**
- * A CSV sent as text (Papa Parse; a CSV sent as Excel goes to SheetJS): its rows as Papa makes them
+ * A CSV (Papa Parse, whatever the file was sent as since the review of 8 Oct 2026; before, a CSV
+ * sent as Excel went to SheetJS), from its decoded text (decodeCsvText): its rows as Papa makes them
  * (normalizeKeys comes after the checks), the width of its header, Papa's warnings, and whether it
  * goes on past READ_ROWS rows. A header wider than MAX_COLS is refused (P5 second review: a CSV had
  * no column or cell cap, so a row of a million columns, a 7.6 MB file, was read and sent to the web
- * process as one object of a million keys). The rows are checked by checkCsvCells.
+ * process as one object of a million keys). The rows are checked by checkCsvCells. `delimiter`: the
+ * separator a "sep=" line named (separatorHint); without it Papa guesses it from the text.
  */
-function parseCsv(text: string): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean } {
+function parseCsv(
+  text: string,
+  delimiter?: string,
+): { rows: Record<string, unknown>[]; header: number; errors: Papa.ParseError[]; truncated: boolean; delimiter: string; linebreak: string } {
+  const sep = delimiter ? { delimiter } : {};
   // The header first, before Papa makes an object with a key for every header name for each row,
   // and renames repeated names one by one (a 2.9 MB header of 1.5 million repeated names took it
   // 3.4 s). The same Papa over the first lines only, with no row objects, reads them as the parse
   // below does (the same delimiter and line break it guesses from the whole text, the same blank
   // lines skipped), so the first line it keeps is that parse's header. A header after more blank
   // lines than that is checked once the file is parsed.
-  const first = Papa.parse<string[]>(text, { skipEmptyLines: 'greedy', preview: HEADER_LINES }).data[0];
+  const first = Papa.parse<string[]>(text, { ...sep, skipEmptyLines: 'greedy', preview: HEADER_LINES }).data[0];
   if (first && first.length > MAX_COLS) throw tooManyCsvColumns(first.length);
   // Synchronous: Papa parses a string in one go. `preview` stops it after READ_ROWS rows (empty
   // lines count towards it); meta.truncated says that it stopped there.
   const res = Papa.parse<Record<string, unknown>>(text, {
+    ...sep,
     header: true,
     skipEmptyLines: 'greedy',
     preview: READ_ROWS,
@@ -585,7 +818,39 @@ function parseCsv(text: string): { rows: Record<string, unknown>[]; header: numb
   });
   const header = res.meta.fields?.length ?? 0;
   if (header > MAX_COLS) throw tooManyCsvColumns(header);
-  return { rows: res.data, header, errors: res.errors, truncated: !!res.meta.truncated };
+  return { rows: res.data, header, errors: res.errors, truncated: !!res.meta.truncated, delimiter: res.meta.delimiter, linebreak: res.meta.linebreak };
+}
+
+/**
+ * The file row of each row parseCsv kept (ParsedFile.rowNumbers, review web-intake-4). Papa leaves
+ * blank lines out of the rows (skipEmptyLines 'greedy': empty, or only separators and spaces), so a
+ * row's place among them is its row only in a file without blank lines. A spreadsheet shows every
+ * record of a CSV as one row, blank ones included (a quoted value with a line break stays in its
+ * row), and so does this: the same Papa, with the delimiter and line break the parse found, goes over
+ * the records again one at a time - no row objects, nothing kept but the count - with the same
+ * blank-line test, up to the last row kept. Undefined when it does not find one record per row.
+ */
+function csvFileRows(text: string, csv: { rows: unknown[]; delimiter: string; linebreak: string }): number[] | undefined {
+  const want = csv.rows.length;
+  if (!want) return [];
+  const out: number[] = [];
+  let record = 0;
+  let header = false;
+  Papa.parse<string[]>(text, {
+    delimiter: csv.delimiter,
+    newline: csv.linebreak as Papa.ParseConfig['newline'],
+    step: (r, parser) => {
+      record += 1;
+      if (r.data.join('').trim() === '') return; // a blank line, as the parse skipped it
+      if (!header) {
+        header = true; // the first line that is not blank is the header (row `record`)
+        return;
+      }
+      out.push(record);
+      if (out.length >= want) parser.abort();
+    },
+  });
+  return out.length === want ? out : undefined;
 }
 
 /**
@@ -594,15 +859,16 @@ function parseCsv(text: string): { rows: Record<string, unknown>[]; header: numb
  * more values than its header keeps the extra ones in one list (Papa's "__parsed_extra", joined into
  * one text by normalizeKeys): each of them counts. Every value is counted as it is in the file, empty
  * ones too (a CSV saved from Excel writes the empty columns after the data on every line; SheetJS,
- * reading the same text sent as Excel, drops them).
+ * which read the same text sent as Excel until the review of 8 Oct 2026, dropped them). `fileRow(i)`:
+ * the file row of row i, for the refusal's words.
  */
-function checkCsvCells(rows: Record<string, unknown>[], header: number): void {
+function checkCsvCells(rows: Record<string, unknown>[], header: number, fileRow: (i: number) => number): void {
   let cells = header;
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
     const extra = row.__parsed_extra;
     const values = Object.keys(row).length + (Array.isArray(extra) ? extra.length - 1 : 0);
-    if (values > MAX_COLS) throw tooManyCsvColumns(values, i + 2);
+    if (values > MAX_COLS) throw tooManyCsvColumns(values, fileRow(i));
     cells += values;
   }
   if (cells > MAX_CELLS) throw tooManyTextCells(cells, MAX_CELLS);
@@ -616,17 +882,40 @@ function tooManyCsvColumns(columns: number, row?: number): WorkbookRefusedError 
   );
 }
 
-function normalizeKeys(row: Record<string, unknown>): Record<string, string> {
+/**
+ * A row's keys trimmed and in small letters, its values as trimmed text. U+0000 is taken out of both
+ * (withoutNul): a workbook cell can hold one (an "_x0000_" escape), and PostgreSQL refused the upload
+ * batch that kept it, answering an empty 500 (review s5-security-1). `csv`: the row is a CSV's, and
+ * a value written as Excel's ="..." reads as the text inside (excelText).
+ */
+function normalizeKeys(row: Record<string, unknown>, csv = false): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(row)) {
-    const key = k.trim().toLowerCase();
-    out[key] = v == null ? '' : String(v).trim();
+    const key = withoutNul(k).trim().toLowerCase();
+    const value = v == null ? '' : withoutNul(String(v)).trim();
+    out[key] = csv ? excelText(value) : value;
   }
   return out;
 }
 
+/** A whole value ="..." (a quote inside written twice): Excel's text formula. */
+const EXCEL_TEXT = /^="((?:[^"]|"")*)"$/;
+
+/**
+ * A CSV value written as ="00123" reads as 00123, the text inside (a doubled quote in it as one quote,
+ * trimmed like every value), as Excel shows it. ERP exports write codes so, to keep their leading
+ * zeros when the file is opened in Excel (follow-up to the CSV intake review, 9 Oct 2026: SheetJS
+ * read them so when the browser sent the CSV as Excel; Papa kept ="00123", a code that matches no
+ * customer). Any other value that begins with "=" is kept as written.
+ */
+function excelText(value: string): string {
+  const m = EXCEL_TEXT.exec(value);
+  return m ? m[1]!.replace(/""/g, '"').trim() : value;
+}
+
+/** The file name as stored on the upload batch: no path separators, no U+0000, runs of spaces as one, at most 200 characters. */
 export function sanitizeFileName(name: string): string {
-  return name
+  return withoutNul(name)
     .replace(/[/\\]/g, '_')
     .replace(/\s+/g, ' ')
     .slice(0, 200);

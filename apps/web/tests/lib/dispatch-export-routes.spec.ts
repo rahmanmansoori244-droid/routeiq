@@ -6,6 +6,8 @@
  * RECONCILIATION and ASSUMPTIONS sheets. The driver sheets (PDF) stay one sheet per load: none for
  * such a plan (404 NO_LOADS), never the legacy route sheet. The run lookup below evaluates the real
  * where clause (DISPATCH_PLAN_WHERE) and refuses any shape it does not model.
+ * Review M3: the driver sheets are made in the PDF renderer process (lib/pdf-render), and its
+ * refusals (busy, too long, too much memory, stopped, missing) are answered with their status.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ExcelJS from 'exceljs';
@@ -84,17 +86,29 @@ vi.mock('@/lib/driver-link/service', () => ({
 vi.mock('@/lib/dispatch/driver-pack', () => ({
   driverPackModel: vi.fn((_d: unknown, opts: unknown) => {
     state.packOpts = opts;
-    return {};
-  }),
-  renderDriverPackPdf: vi.fn(async () => {
-    state.driverPacks++;
-    return Buffer.from('%PDF-driver');
+    return { sheets: [] };
   }),
 }));
+// Review M3: the pack is made in the PDF renderer process (lib/pdf-render), never in the route; its
+// refusals (and their answers) are the real ones.
+const render = vi.hoisted(() => ({ refuse: null as string | null, models: [] as unknown[] }));
+vi.mock('@/lib/pdf-render', async (importActual) => {
+  const actual = (await importActual()) as typeof import('@/lib/pdf-render');
+  return {
+    ...actual,
+    renderDriverPackIsolated: vi.fn(async (model: unknown) => {
+      render.models.push(model);
+      if (render.refuse) throw new actual.PdfRenderRefused(render.refuse as PdfRefusalCode);
+      state.driverPacks++;
+      return Buffer.from('%PDF-driver');
+    }),
+  };
+});
 
 import { GET as excelGet } from '@/app/api/runs/[id]/export/excel/route';
 import { GET as pdfGet } from '@/app/api/runs/[id]/export/pdf/route';
 import { DISPATCH_PLAN_WHERE, isDispatchPlanShape } from '@/lib/dispatch/legacy-runs';
+import { PDF_REFUSALS, type PdfRefusalCode } from '@/lib/pdf-render';
 
 function allUnserved(): PlanDetail {
   const d = fixture();
@@ -134,6 +148,8 @@ beforeEach(() => {
   session.role = 'VIEWER';
   links.calls = [];
   links.failFor = null;
+  render.refuse = null;
+  render.models = [];
 });
 
 describe('GET /api/runs/:id/export/excel (audit F16)', () => {
@@ -225,5 +241,32 @@ describe('GET /api/runs/:id/export/pdf prints the driver link for PLANNER and ab
     } finally {
       links.known = [];
     }
+  });
+});
+
+describe('GET /api/runs/:id/export/pdf makes the pack in the PDF renderer process (review M3)', () => {
+  it('the route hands over the model it built, and sends the PDF it gets back', async () => {
+    state.detail = fixture();
+    const res = await get(pdfGet, 'withLoads');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('application/pdf');
+    expect(Buffer.from(await res.arrayBuffer()).toString('latin1')).toBe('%PDF-driver');
+    expect(render.models).toEqual([{ sheets: [] }]);
+  });
+
+  it.each(['PDF_BUSY', 'PDF_TIMEOUT', 'PDF_OUT_OF_MEMORY', 'PDF_CRASHED', 'PDF_UNAVAILABLE'] as const)('%s: answered with its status and words, no PDF', async (code) => {
+    state.detail = fixture();
+    render.refuse = code;
+    const res = await get(pdfGet, 'withLoads');
+    expect(res.status).toBe(PDF_REFUSALS[code].status);
+    expect(res.headers.get('content-type')).toMatch(/^application\/json/);
+    expect(res.headers.get('retry-after')).toBe(code === 'PDF_BUSY' ? '30' : null);
+    expect(await res.json()).toEqual({ data: null, error: { code, message: PDF_REFUSALS[code].message } });
+    expect(state.driverPacks).toBe(0);
+  });
+
+  it('the words say what to do', () => {
+    expect(PDF_REFUSALS.PDF_BUSY).toEqual({ status: 503, retryAfterSec: 30, message: 'RouteIQ is making other driver sheets right now. Try again in a moment.' });
+    for (const code of ['PDF_TIMEOUT', 'PDF_OUT_OF_MEMORY'] as const) expect(PDF_REFUSALS[code].message).toMatch(/so they were not made\. Print them one truck or one load at a time/);
   });
 });

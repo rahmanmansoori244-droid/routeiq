@@ -10,12 +10,14 @@
  *    serves to anyone).
  *
  * Used by tests/lib/build-hardening.spec.ts (source) and scripts/check-build-output.ts (CI, after
- * `next build`).
+ * `next build`). So are the checks of the two bundles `pnpm build` adds after `next build`: the
+ * upload parser (audit P5) and the PDF renderer (review M3).
  */
 import { fork } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
+import { CHECK_MODEL, isRenderReply } from '../lib/pdf-render/protocol';
 import { ReplyCollector, type ParseReply } from '../lib/upload-parse/protocol';
 
 /** Skipped at any depth: dependencies and build output. */
@@ -187,5 +189,73 @@ export function uploadParserSmokeProblem(bundle: string, timeoutMs = 30_000): Pr
     child.on('error', (err) => done(`the upload parser could not be started: ${err.message}`));
     child.on('exit', (code, signal) => setTimeout(() => done(`the upload parser ended without an answer (exit ${code}, signal ${signal}): ${stderr.trim()}`), 500));
     child.send({ name: 'check.csv', type: 'text/csv', bytes: new Uint8Array(Buffer.from('code,name\nC1,One\n')), spec: {} });
+  });
+}
+
+// ---------------------------------------------------------------------------------------------
+// The PDF renderer (review M3)
+// ---------------------------------------------------------------------------------------------
+
+/** What scripts/pdf-renderer-build.cjs finds wrong with a bundle's inputs (the one list of what it may hold). */
+function rendererInputProblems(inputs: string[], imports: Record<string, string[]>): string[] {
+  const builder = createRequire(__filename)(path.join(__dirname, 'pdf-renderer-build.cjs')) as { inputProblems(inputs: string[], imports: Record<string, string[]>): string[] };
+  return builder.inputProblems(inputs, imports);
+}
+
+/**
+ * Everything wrong with the PDF renderer bundle of a built app (empty = passes): `next start` forks
+ * <webDir>/.next/pdf-renderer/render.cjs for each driver pack (lib/pdf-render), so without it every
+ * driver sheet is refused. It must be there, built only from the renderer's own modules and what
+ * React, @react-pdf/renderer and qrcode bring in (its stamp.json), with no source map beside it.
+ */
+export function pdfRendererProblems(webDir: string): string[] {
+  const rel = (p: string) => path.relative(webDir, p);
+  const dir = path.join(webDir, '.next', 'pdf-renderer');
+  const bundle = path.join(dir, 'render.cjs');
+  if (!existsSync(bundle)) {
+    return [`${rel(bundle)} is missing: run \`pnpm build\` (its step scripts/build-pdf-renderer.mjs makes it); without it every driver sheet is refused`];
+  }
+  const problems: string[] = [];
+  const stampPath = path.join(dir, 'stamp.json');
+  try {
+    const stamp = JSON.parse(readFileSync(stampPath, 'utf8')) as { inputs?: Record<string, unknown>; imports?: Record<string, string[]> };
+    for (const p of rendererInputProblems(Object.keys(stamp.inputs ?? {}), stamp.imports ?? {})) problems.push(`pdf renderer: ${p}`);
+  } catch {
+    problems.push(`${rel(stampPath)} is missing or unreadable: build the PDF renderer again`);
+  }
+  for (const name of readdirSync(dir)) if (name.endsWith('.map')) problems.push(`source map beside the PDF renderer: ${rel(path.join(dir, name))}`);
+  return problems;
+}
+
+/**
+ * Runs the renderer bundle once as `next start` does (forked, with a heap cap, no secrets) on the
+ * smallest pack (CHECK_MODEL). Null when it answered a PDF; else what went wrong.
+ */
+export function pdfRendererSmokeProblem(bundle: string, timeoutMs = 60_000): Promise<string | null> {
+  return new Promise((resolve) => {
+    const child = fork(bundle, [], {
+      execArgv: ['--max-old-space-size=512'],
+      env: { NODE_ENV: 'production', ...(process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}) },
+      stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+      serialization: 'advanced',
+    });
+    let stderr = '';
+    let finished = false;
+    const done = (problem: string | null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      child.kill('SIGKILL');
+      resolve(problem);
+    };
+    const timer = setTimeout(() => done(`the PDF renderer did not answer within ${timeoutMs} ms`), timeoutMs);
+    child.stderr?.on('data', (d: Buffer) => (stderr = (stderr + d.toString('utf8')).slice(-2_000)));
+    child.on('message', (m: unknown) => {
+      const ok = isRenderReply(m) && m.ok && Buffer.from(m.pdf.subarray(0, 5)).toString('latin1') === '%PDF-';
+      done(ok ? null : `the PDF renderer answered ${JSON.stringify(m, (_k, v: unknown) => (v instanceof Uint8Array ? `<${v.byteLength} bytes>` : v)).slice(0, 300)}`);
+    });
+    child.on('error', (err) => done(`the PDF renderer could not be started: ${err.message}`));
+    child.on('exit', (code, signal) => setTimeout(() => done(`the PDF renderer ended without an answer (exit ${code}, signal ${signal}): ${stderr.trim()}`), 500));
+    child.send({ model: CHECK_MODEL });
   });
 }

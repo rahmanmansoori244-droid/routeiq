@@ -82,4 +82,18 @@ describe('POST /api/auth/signup', () => {
     vi.stubEnv('SIGNUP_MODE', 'open');
     expect((await post('open@company.example')).status).toBe(201);
   });
+
+  // Review web-auth-security-1 (9 Oct 2026): the 409 still tells that the address has an account.
+  // Hiding that needs email verification (deferred by the owner), because the documented flow signs
+  // the new admin in straight after the 201. The answer must at least never say which company holds it.
+  it('a taken email answers 409 without naming the company that holds it, and creates nothing', async () => {
+    tx.user.findUnique.mockResolvedValueOnce({ id: 'u-nmwc', email: 'planner@nmwc.example', tenantId: 't-nmwc', name: 'Planner' } as never);
+    const res = await post('Planner@NMWC.example');
+    expect(res.status).toBe(409);
+    const text = await res.text();
+    expect(JSON.parse(text)).toEqual({ data: null, error: 'An account with that email already exists.' });
+    expect(text).not.toMatch(/t-nmwc|u-nmwc|Planner/);
+    expect(created.tenants).toHaveLength(0);
+    expect(created.users).toHaveLength(0);
+  });
 });

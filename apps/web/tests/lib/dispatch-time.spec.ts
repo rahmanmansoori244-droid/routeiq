@@ -110,6 +110,21 @@ describe('localDateIso / localMinutes / todayIso / tomorrowIso', () => {
     // New year's eve in Muscat.
     expect(tomorrowIso('Asia/Muscat', utc('2026-12-31T10:00:00'))).toBe('2027-01-01');
   });
+
+  it('one formatter per zone, reused (review of 8 Oct 2026): zones in turn keep their own answers, an unknown zone is refused every time', () => {
+    const t = utc('2026-09-24T20:30:00');
+    for (let i = 0; i < 3; i++) {
+      expect(localMinutes(t, 'Asia/Muscat')).toBe(30);
+      expect(localMinutes(t, 'UTC')).toBe(20 * 60 + 30);
+      expect(localMinutes(t, 'Asia/Kolkata')).toBe(2 * 60); // UTC+5:30
+      expect(localDateIso(t, 'America/New_York')).toBe('2026-09-24');
+      expect(() => localMinutes(t, 'Not/AZone')).toThrow(RangeError);
+    }
+    // More zones than the cache keeps: still right.
+    const zones = Intl.supportedValuesOf('timeZone').slice(0, 80);
+    for (const z of [...zones, ...zones]) expect(localDateIso(t, z)).toMatch(/^2026-09-2[45]$/);
+    expect(localMinutes(t, 'Asia/Muscat')).toBe(30);
+  });
 });
 
 describe('addDaysIso / daysBetween', () => {
