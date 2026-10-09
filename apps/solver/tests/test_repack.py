@@ -469,6 +469,277 @@ def test_the_closing_swap_gets_time_when_the_repacks_use_the_whole_budget(monkey
     assert took < 4.0 + 1.5, took  # within the job's budget (CP-SAT's last phase may end up to 0.5 s late)
 
 
+def test_the_closing_swap_still_runs_when_a_repack_overruns_its_limit(monkeypatch):
+    """Review of the strict-priority fix: the real repack runs past its limit (a cold CP-SAT import of
+    1.3-2 s before its clock started, CP-SAT's last phase up to 0.5 s), so on the reviewer's next-day
+    150-stop plan under load the closing recovery's reserve was gone before it started, it never ran, and
+    the P3 stayed out while the P4 rode (3 of 4 runs). A repack that overruns its limit by 2 s now still
+    leaves the recovery its reserve from when it starts, and the job ends at most CLOSING_LATE_SEC past
+    its budget."""
+    stops = [stop("A", 23.600, 58.420, cases=40, priority=1), stop("LOW", 23.610, 58.425, cases=60, priority=4),
+             stop("HIGH", 23.615, 58.430, cases=60, priority=3)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    src = LR.Source("RECOMMENDED", LR.time_plan(day, {0: [(0, 1)]}, pricing))
+
+    def late(day_, pricing_, pool, required, optional, hint, time_limit, **kw):
+        time.sleep(max(0.0, time_limit) + 2.0)  # 2 s past its limit, then no answer (UNKNOWN)
+        return LR.RepackResult(None, "UNKNOWN", time_limit + 2.0)
+
+    given: list[float] = []
+    real_recover = LR.recover
+
+    def spy(day_, pricing_, plan, missing, deadline, *a, **kw):
+        given.append(deadline - time.perf_counter())
+        return real_recover(day_, pricing_, plan, missing, deadline, *a, **kw)
+
+    monkeypatch.setattr(LR, "repack", late)
+    monkeypatch.setattr(LR, "recover", spy)
+    t = time.perf_counter()
+    cands, notes = LR.build_candidates(day, pricing, "RECOMMENDED", pricing, [src], {2: 1}, cap_s=10.0, budget_s=4.0,
+                                       time_raw=True, fit_weights=None)
+    took = time.perf_counter() - t
+    best = min(cands, key=lambda c: LR.GOALS["RECOMMENDED"](c.score))
+    assert LR.served_of(best.plan) == {0, 2}, notes
+    assert any("recovery" in n for n in notes), notes
+    closing = min(LR.CLEAN_RECOVER_SEC, LR.CLOSING_SHARE * 4.0)
+    assert given and given[0] > closing - 0.5, given  # its reserve from when it started
+    assert took < 4.0 + LR.CLOSING_LATE_SEC + 1.0, took
+
+
+def _fresh_python(code: str) -> str:
+    """Run ``code`` in a fresh Python process (nothing imported yet, like a new worker) from the solver
+    directory; its last line of output."""
+    import os
+    import subprocess
+    import sys
+
+    solver_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    done = subprocess.run([sys.executable, "-c", code], cwd=solver_dir, capture_output=True, text=True, timeout=180)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip().splitlines()[-1]
+
+
+def test_a_cold_cp_sat_import_counts_in_the_repack_time():
+    """Review of the strict-priority fix: repack() imported CP-SAT before its clock started, so a fresh
+    worker's first solve ran 1.3-2 s past its limit, outside its seconds too."""
+    out = _fresh_python(
+        "import sys, time\n"
+        "from tests.test_dispatch import req, stop, truck\n"
+        "from tests.test_repack import _day_for\n"
+        "import dispatch_solver as ds, load_repack as LR\n"
+        "r = req([stop('A', 23.60, 58.42, cases=40)], [truck('T1', cap=100)])\n"
+        "day, tds = _day_for(r)\n"
+        "pricing = ds._pricing('RECOMMENDED', r, tds, r.stops)\n"
+        "cold = 'ortools.sat.python.cp_model' not in sys.modules\n"
+        "t = time.perf_counter()\n"
+        "res = LR.repack(day, pricing, [(0,)], {0}, {}, None, 5.0)\n"
+        "print(cold, res.plan is not None, round(time.perf_counter() - t - res.seconds, 3))\n")
+    cold, planned, outside = out.split()  # cold: CP-SAT was not imported yet (1.3-2 s to import)
+    assert planned == "True", out
+    assert float(outside) < 0.5, out  # the import is inside res.seconds (and the limit)
+
+
+@pytest.mark.parametrize("job", ["engine", "pyvrp"])
+def test_the_stage_jobs_import_cp_sat_before_their_clocks_start(job):
+    """Review of the strict-priority fix: the stage's workers had imported only the routing modules, so
+    the first repack of every stage job paid the cold CP-SAT import (1.3-2 s) inside the job's budget,
+    and the closing recovery's reserve was gone. Each stage job (the engine's, the second search's) now
+    imports it when it starts, before its clock: worker start-up, inside the stage's grace."""
+    call = ("ds._stage_worker(dict(day=None, score_pricing=None, goal='RECOMMENDED', goal_pricing=None, sources=[],\n"
+            "                     optional=None, cap_s=1.0, budget_s=1.0, time_raw=True))\n" if job == "engine" else
+            "PV.stage_in_worker({'day': None, 'plan': None, 'score_pricing': None})\n")
+    out = _fresh_python(
+        "import sys, time\n"
+        "import dispatch_solver as ds, pyvrp_candidate as PV\n"
+        "MOD = 'ortools.sat.python.cp_model'\n"
+        "cold = MOD not in sys.modules\n"
+        "seen = []\n"
+        "class Clock(Exception):\n"
+        "    pass\n"
+        "def clock():\n"
+        "    seen.append(MOD in sys.modules)\n"
+        "    raise Clock\n"
+        "time.perf_counter = clock  # the job's clock starts at its first reading\n"
+        "try:\n"
+        "    " + call +
+        "except Clock:\n"
+        "    pass\n"
+        "print(cold, seen)\n")
+    assert out.endswith(" [True]"), out  # imported when the job's clock starts (cold: the modules had not imported it)
+
+
+@pytest.mark.xfail(strict=True, reason="known limit, note (b) of the first strict-priority review: recover() keeps "
+                   "the first swap that times; choosing among several (least value put out, or the stops that go back in) "
+                   "was about even on random days without a deadline and clearly worse when the closing recovery's 2 s "
+                   "run out (third and fourth reviews)")
+def test_a_swap_takes_off_the_least_valuable_stop_first():
+    """Review of the strict-priority fix, note (b): the swaps are tried by the number of stops taken off,
+    then the km change, and recover() keeps the first that serves more. T1 carries FAR (P4, 100 cases,
+    20 km out), T2 carries X (P1) and NEAR5 (P5). P3 (40 cases, by the depot) fits in FAR's place, the
+    cheapest km by far, or in NEAR5's: FAR comes off, and fits nowhere again (NEAR5's place is too small),
+    so the plan delivers the P5 and leaves the P4 out (no 1-for-1 inversion: FAR does not fit in NEAR5's
+    place). Two fixes that chose among the swaps were tried and dropped (see the reason);
+    this test stays as the record of the case, strict, so a fix that serves it shows up."""
+    stops = [stop("FAR", 23.585, 58.590, cases=100, priority=4), stop("X", 23.600, 58.420, cases=60, priority=1),
+             stop("NEAR5", 23.602, 58.422, cases=40, priority=5), stop("P3", 23.590, 58.395, cases=40, priority=3)]
+    r = req(stops, [truck("T1", cap=100, max_trips=1), truck("T2", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    base = LR.time_plan(day, {0: [(0,)], 1: [(1, 2)]}, pricing)
+    assert base is not None
+    swaps = LR._swaps(day, base, 3)
+    assert [o[3] for o in swaps][:1] == [(0,)], swaps  # FAR's place is tried first (cheapest km) ...
+    got = LR.recover(day, pricing, base, [3], time.perf_counter() + 10, swaps=True)
+    assert LR.served_of(got) == {0, 1, 3}  # ... but NEAR5 comes off: FAR still rides
+    assert LR.time_plan(day, LR.plan_of(got), pricing) is not None
+
+
+def test_a_swap_that_fits_is_not_starved_by_cheaper_value_options():
+    """Second review of the strict-priority fix (rv-spt/swap_starve.py): sorting _swaps by the value taken
+    off first let a load of many cheap stops use up recover()'s RECOVER_TRIES, so the one swap that times
+    was never tried. T1 carries seven small P5 stops near the depot (received 06:00-07:30); T2 carries P4
+    (60 cases) at exactly the P3's place, 14 km out. P3 (60 cases, received 06:00-06:40) fits T2 only in
+    place of P4, and T1 only by taking a P5 off, which never times (the P5s' hours break). On that sort P3
+    stayed out while P4 rode; now P3 goes in place of P4, and P4 goes on T1 after the P5s."""
+    p5 = [stop(f"N{i}", 23.585 + 0.004 * (i + 1), 58.390 + 0.002 * (i % 3), cases=10, priority=5,
+               hard_start_min=hm("06:00"), hard_end_min=hm("07:30")) for i in range(7)]
+    far = (23.585 - 0.12, 58.39 - 0.05)
+    stops = p5 + [stop("P4", *far, cases=60, priority=4),
+                  stop("P3", *far, cases=60, priority=3, hard_start_min=hm("06:00"), hard_end_min=hm("06:40"))]
+    r = req(stops, [truck("T1", cap=200, max_trips=1), truck("T2", cap=100, max_trips=1)])
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    p4, p3 = 7, 8
+    base = LR.time_plan(day, {0: [tuple(range(7))], 1: [(p4,)]}, pricing)
+    assert base is not None
+    swaps = LR._swaps(day, base, p3)
+    assert len(swaps) > LR.RECOVER_TRIES and any(o[3] == (p4,) for o in swaps), [o[3] for o in swaps]
+    got = LR.recover(day, pricing, base, [p3], time.perf_counter() + 10, swaps=True)
+    assert LR.served_of(got) == set(range(9))
+    assert LR.time_plan(day, LR.plan_of(got), pricing) is not None
+    # The same day through a stage job: the closing recovery of the job's best plan serves P3 too.
+    cands, _ = LR.build_candidates(day, pricing, "RECOMMENDED", pricing, [LR.Source("RECOMMENDED", base)], {p3: 1},
+                                   cap_s=5.0, budget_s=6.0, time_raw=True, fit_weights=None)
+    best = min(cands, key=lambda c: LR.GOALS["RECOMMENDED"](c.score))
+    assert p3 in LR.served_of(best.plan), best.source
+
+
+def _random_day(seed: int):
+    """A random day and a random plan of it that times exactly (the third review's fuzz generator,
+    rv-v3/fuzz_inv.py mode a): 25-50 stops, P1-P5, 40 % with a hard window, 2-4 trucks of 1-2 trips."""
+    rnd = random.Random(seed)
+    stops = []
+    for i in range(rnd.randint(25, 50)):
+        kw = {}
+        if rnd.random() < 0.4:
+            a = rnd.choice([hm("06:00"), hm("07:00"), hm("08:00"), hm("10:00")])
+            kw = dict(hard_start_min=a, hard_end_min=a + rnd.choice([45, 60, 120, 240]))
+        stops.append(stop(f"S{i}", 23.50 + rnd.random() * 0.2, 58.28 + rnd.random() * 0.25,
+                          cases=rnd.randint(10, 60), priority=rnd.choice([1, 2, 3, 3, 4, 4, 5, 5, 5]), **kw))
+    trucks = [truck(f"T{j}", cap=rnd.choice([150, 200, 300]), max_trips=rnd.randint(1, 2))
+              for j in range(rnd.randint(2, 4))]
+    r = req(stops, trucks)
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    plan: dict = {}
+    order = list(range(len(stops)))
+    rnd.shuffle(order)
+    for k in order:
+        td = rnd.choice(day.trucks)
+        loads = [list(l) for l in plan.get(td.idx, [])]
+        if loads and (len(loads) >= td.trips_left or rnd.random() < 0.7):
+            j = rnd.randrange(len(loads))
+            loads[j].insert(rnd.randint(0, len(loads[j])), k)
+        elif len(loads) < td.trips_left:
+            loads.append([k])
+        else:
+            continue
+        trial = [tuple(l) for l in loads]
+        if all(LR.fits_truck(LR.facts(day, l), td) for l in trial) and LR.time_truck(day, td, trial, pricing) is not None:
+            plan[td.idx] = trial
+    return stops, day, pricing, LR.time_plan(day, plan, pricing)
+
+
+def _one_for_one(day, pricing, stops, plan) -> list[tuple[str, str]]:
+    """Every (left-out stop, riding stop of a strictly lower priority) where the first fits in the
+    second's place at any position of its load, the truck's whole day timed exactly."""
+    served = LR.served_of(plan)
+    out = []
+    for d in (k for k in range(len(stops)) if k not in served):
+        for idx, tls in plan.items():
+            td = day.by_idx[idx]
+            loads = [tl.stops for tl in tls]
+            for j, load in enumerate(loads):
+                for q in load:
+                    rest = [x for x in load if x != q]
+                    if stops[q].priority <= stops[d].priority or not LR.fits_truck(LR.facts(day, tuple(rest) + (d,)), td):
+                        continue
+                    if any(LR.time_truck(day, td, loads[:j] + [tuple(rest[:p] + [d] + rest[p:])] + loads[j + 1:], pricing)
+                           is not None for p in range(len(rest) + 1)):
+                        out.append((f"{stops[d].stop_id} P{stops[d].priority}", f"{stops[q].stop_id} P{stops[q].priority}"))
+    return out
+
+
+@pytest.mark.parametrize("seed", [304, 426, 817])
+def test_a_stop_that_fits_nowhere_gets_another_turn(seed):
+    """Third review of the strict-priority fix: recover() tried each left-out stop once. On these random days
+    a P1 / P2 order failed its turn (its 24 cheapest swaps did not time), a later stop of a lower priority
+    changed that truck's day, and the P1 / P2 then fitted in place of a P3-P5 order that rode: the plan kept
+    the inversion, and the shortage reason said no load could take it. Now the stops that fit nowhere get
+    another round once the queue is empty, those that failed before the last placement: the result has no
+    such inversion, and a second recover() on it serves no more."""
+    stops, day, pricing, base = _random_day(seed)
+    assert base is not None
+    missing = [k for k in range(len(stops)) if k not in LR.served_of(base)]
+    got = LR.recover(day, pricing, base, missing, time.perf_counter() + 60, swaps=True)
+    assert LR.time_plan(day, LR.plan_of(got), pricing) is not None
+    assert _one_for_one(day, pricing, stops, got) == []
+    again = LR.recover(day, pricing, got, [k for k in range(len(stops)) if k not in LR.served_of(got)],
+                       time.perf_counter() + 60, swaps=True)
+    assert LR.score(day, pricing, again).service == LR.score(day, pricing, got).service
+
+
+def test_the_retry_rounds_cost_about_one_more_pass_on_a_shortage_day():
+    """Fourth review of the strict-priority fix (rv-v4-hunt/stormday.py): retrying every failed stop after
+    each placement of a lower stop cost failed stops x placements timings. Four trucks carry a full 06:00
+    load of P1 stops each; 20 more P1 stops (07:00-07:20, 15-20 km out) fit nowhere, every truck is out
+    then; 80 small P5 stops by the depot fit easily. That retry needed 40,614 timing LPs and placed 16 of
+    the 80 P5 orders in the closing recovery's 2 s (the first pass alone: 404). Now the 20 get one more
+    round after the queue empties: every P5 order is placed, none of the 20, in a few times the LPs of a
+    single pass."""
+    stops = []
+    for t in range(4):
+        for i in range(3):
+            a = 2 * math.pi * (t * 3 + i) / 12
+            stops.append(stop(f"B{t}{i}", 23.585 + 0.09 * math.sin(a), 58.39 + 0.09 * math.cos(a), cases=133, priority=1,
+                              hard_start_min=hm("06:00"), hard_end_min=hm("07:40")))
+    for i in range(20):
+        a = 2 * math.pi * i / 20 + 0.3
+        stops.append(stop(f"O{i}", 23.585 + 0.15 * math.sin(a), 58.39 + 0.17 * math.cos(a), cases=20, priority=1,
+                          hard_start_min=hm("07:00"), hard_end_min=hm("07:20")))
+    for i in range(80):
+        a = 2 * math.pi * i / 80
+        stops.append(stop(f"F{i}", 23.585 + 0.04 * math.sin(a) * (1 + i % 3) / 3, 58.39 + 0.04 * math.cos(a) * (1 + i % 2),
+                          cases=12, priority=5))
+    r = req(stops, [truck(f"T{j}", cap=400, max_trips=3, fixed_cost=20, cost_per_km=0.1) for j in range(4)],
+            driver_cost_per_hour=2.5)
+    day, tds = _day_for(r)
+    pricing = ds._pricing("RECOMMENDED", r, tds, r.stops)
+    base = LR.time_plan(day, {t: [(3 * t, 3 * t + 1, 3 * t + 2)] for t in range(4)}, pricing)
+    assert base is not None
+    missing = [k for k in range(len(stops)) if k not in LR.served_of(base)]
+    lps = LR.LP_STATS["lps"]
+    got = LR.recover(day, pricing, base, missing, time.perf_counter() + 60, swaps=True)
+    used = LR.LP_STATS["lps"] - lps
+    served = {stops[k].stop_id[0]: 0 for k in range(len(stops))}
+    for k in LR.served_of(got):
+        served[stops[k].stop_id[0]] += 1
+    assert served == {"B": 12, "O": 0, "F": 80}, served
+    assert LR.time_plan(day, LR.plan_of(got), pricing) is not None
+    assert used <= 3000, used
+
 def test_the_shortage_reason_says_lower_priorities_go_first_only_when_true():
     """Scenario s3-shortage-hire-2 (the verifier's tenant A): one truck, one 100-case load. EAST and WEST
     (P1, 25 cases) are 20 km apart, both received 07:00-07:10, so one load cannot reach both; C1-C3 and

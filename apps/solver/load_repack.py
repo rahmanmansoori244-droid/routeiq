@@ -1258,6 +1258,15 @@ class RepackResult:
     seconds: float
 
 
+def warm_up() -> None:
+    """Import CP-SAT now. Cold, in a fresh worker process, it takes 1.3-2 s (review of the strict-priority
+    fix: the stage's workers had imported only the routing modules, so the first repack of every stage job
+    paid it, past its limit, and the closing recovery's reserve was gone). Each stage job calls this before
+    its clock starts (dispatch_solver._stage_worker, pyvrp_candidate.stage_in_worker): worker start-up,
+    inside the stage's grace."""
+    from ortools.sat.python import cp_model  # noqa: F401, PLC0415
+
+
 def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], optional: dict[int, int],
            hint: TimedPlan | None, time_limit: float, workers: int = 2, soft_breaks: bool = False,
            model_breaks: bool = True) -> RepackResult:
@@ -1277,9 +1286,11 @@ def repack(day: Day, pricing: Pricing, pool: list[Load], required: set[int], opt
     model_breaks: False = the break-free model (as before the break rule): much faster; time_plan
       then places the breaks where the proposal leaves room (build_candidates tries it first).
     """
+    # The clock starts before the import: a cold CP-SAT import (1.3-2 s, see warm_up) counts in this
+    # solve's limit and its seconds. It used to run before them, outside both.
+    t0 = time.perf_counter()
     from ortools.sat.python import cp_model  # noqa: PLC0415
 
-    t0 = time.perf_counter()
     m = cp_model.CpModel()
     # Pool entries: every load as it is, then road-break variants of loads that may have to hold a
     # truck-day's driver break on the road (the same stops, with the break as a pause on one leg).
@@ -1808,12 +1819,15 @@ def _insertions(day: Day, pricing: Pricing, plan: TimedPlan, k: int) -> list[tup
 
 def _swaps(day: Day, plan: TimedPlan, k: int) -> list[tuple[float, int, list[Load], tuple[int, ...]]]:
     """Where stop ``k`` may take the place of stops of lower service value: (estimate, truck idx, the
-    truck's new loads, the stops it puts out), one stop out before two, then the smallest km change
-    first. ``k`` goes where the (first) other stop was, or at its cheapest position in that load without
-    them. When one stop off leaves too little room, more of the load's lower stops come off, the least
-    valuable first, then the biggest, as long as together they are worth less than ``k`` (review
-    solver-pipeline-1, the skeptic's seed 12: a P3 order fitted only in place of two P4 orders, and a
-    swap put one stop out only). A stop of the same or a higher value is never taken off."""
+    truck's new loads, the stops it puts out), one stop out before two, then the smallest km change first:
+    the order recover() tries them in, keeping the first that times. Sorting by the value put out first let
+    the cheap options of far loads use up the tries, so a P3 order stayed out while the P4 order it fits
+    in place of rode (second review of the strict-priority fix). ``k`` goes where
+    the (first) other stop was, or at its cheapest position in that load without them. When one stop off
+    leaves too little room, more of the load's lower stops come off, the least valuable first, then the
+    biggest, as long as together they are worth less than ``k`` (review solver-pipeline-1, the skeptic's
+    seed 12: a P3 order fitted only in place of two P4 orders, and a swap put one stop out only). A stop of
+    the same or a higher value is never taken off."""
     out: list[tuple[float, int, list[Load], tuple[int, ...]]] = []
     seen: set[tuple] = set()
     single = facts(day, (k,))
@@ -1860,10 +1874,12 @@ def recover(day: Day, pricing: Pricing, plan: TimedPlan, missing: Iterable[int],
     takes, among up to RECOVER_KEEP insertions that time exactly (of the ``tries`` cheapest estimates;
     None: all of them), the one best for ``goal``; one that does not serve more (Score.service: a
     rented truck is not opened for P4/P5 orders alone) is never taken. With ``swaps`` a stop that fits
-    nowhere may take the place of stops of LOWER priority on one load (_swaps; strict service value: the
-    plan always serves more), which then wait for their own turn to be inserted again. The plan's other
-    trucks are not touched, and a stop that fits nowhere is left out. Stops at ``deadline``. A new dict;
-    ``plan`` is unchanged."""
+    nowhere may take the place of stops of LOWER priority on one load (_swaps, in their order; the first
+    that times and serves more by strict service value), and the stops put out then wait for their own
+    turn to be inserted again. Stops that fit nowhere get another round after the queue empties, those
+    that failed before the last placement. The plan's other trucks are not touched, and a stop that fits
+    nowhere is left out. Every step serves strictly more, so this ends; it also stops at ``deadline``. A
+    new dict; ``plan`` is unchanged."""
     cur: TimedPlan = {idx: list(v) for idx, v in plan.items() if v}
     key = goal_key(goal)
     base = score(day, pricing, cur)
@@ -1873,7 +1889,20 @@ def recover(day: Day, pricing: Pricing, plan: TimedPlan, missing: Iterable[int],
         return (-day.values[k], second, -day.stops[k].demand_cases, k)
 
     pending = sorted(set(missing) - served_of(cur), key=rank)
-    while pending:
+    # A stop that fits nowhere waits in `failed`, with the number of placements made before its turn.
+    # Once the queue is empty, the failed stops that saw fewer placements than there are now get another
+    # round: a later placement may have changed a truck's day so that one of them now fits, or now takes
+    # the place of a stop placed after it (third review of the strict-priority fix: a P1 order failed its
+    # turn, a P5 order went in later, and the P1 fitted in its place). A stop that failed after the last
+    # placement would only fail again on the same plan. Retrying after every placement instead cost
+    # failed stops x placements timings and ran the closing recovery out of its time on shortage days
+    # (fourth review).
+    failed: list[tuple[int, int]] = []
+    placed = 0
+    while pending or any(seen < placed for _, seen in failed):
+        if not pending:
+            pending = sorted((x for x, seen in failed if seen < placed), key=rank)
+            failed = [(x, seen) for x, seen in failed if seen >= placed]
         k = pending.pop(0)
         if time.perf_counter() > deadline:
             break
@@ -1911,9 +1940,12 @@ def recover(day: Day, pricing: Pricing, plan: TimedPlan, missing: Iterable[int],
                     break
         if best is not None:
             base, cur[best[1]] = best[0], best[2]
+            placed += 1
             if best[3]:
                 pending.extend(best[3])
                 pending.sort(key=rank)
+        else:
+            failed.append((k, placed))
     return cur
 
 
@@ -1923,10 +1955,16 @@ def recover(day: Day, pricing: Pricing, plan: TimedPlan, missing: Iterable[int],
 INCUMBENT_SHARE = 0.4
 CLEAN_RECOVER_SEC = 2.0
 # Review solver-pipeline-1 (strict priorities on a clean shortage day): when a source's plan leaves a
-# stop out while it carries a stop of a lower priority, the repacks leave the closing recovery this
-# share of the job's budget at least (CLEAN_RECOVER_SEC at most): in the reviewer's demo they used all of
-# it, the recovery never ran, and a P3 order stayed out while a P4 order that it fits in place of rode.
+# stop out while it carries a stop of a lower priority, the repacks leave the closing recovery exactly
+# min(CLEAN_RECOVER_SEC, this share of the job's budget) (`closing` in build_candidates): in the
+# reviewer's demo they used all of it, the recovery never ran, and a P3 order stayed out while a P4 order
+# that it fits in place of rode.
 CLOSING_SHARE = 1 / 3
+# The closing recovery gets that time from when it actually starts: the repacks may end late (CP-SAT's
+# last phase may run up to 0.5 s over its limit, then their plans are timed exactly). Under load the
+# reserve was gone before it started (review of the strict-priority fix). It may then end up to this
+# long past the job's budget, never later; _post_solve waits for it, inside the solve's deadline.
+CLOSING_LATE_SEC = CLEAN_RECOVER_SEC
 # Benchmark F07: a repair whose best plan still leaves stops out - P1-P3 stops, or any stop when its fit
 # repack proved no bound - may use the request's remaining time (extra_s, _post_solve), never more: the
 # deep recovery (every insertion, and swaps), then, while P1-P3 stops are still out, the constructive
@@ -1962,7 +2000,8 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
     strict priorities on every day, review solver-pipeline-1 - before, only a repair day's extension
     swapped, so a clean shortage day delivered P4 orders while a P3 order that fits in their place was
     left out). When a source's plan has such a stop, the repacks leave the closing recovery its time
-    (CLOSING_SHARE of the budget, CLEAN_RECOVER_SEC at most), inside ``budget_s``.
+    (min(CLEAN_RECOVER_SEC, CLOSING_SHARE of the budget)), and it gets that time from when it starts:
+    when the repacks ended late it may end up to CLOSING_LATE_SEC past ``budget_s``, never later.
     extra_s: more seconds the job may use on a repair day whose best plan still leaves stops out - P1-P3
       stops, or any stop when its fit repack did not prove its answer (F07): a deep recovery (every
       insertion tried, and swaps: a stop may take the place of one of lower priority, which is then
@@ -2153,7 +2192,14 @@ def build_candidates(day: Day, score_pricing: Pricing, goal: str, goal_pricing: 
     end = t0 + budget_s
     best = best_of()
     if best is not None:
-        until = end if repair_day else min(end, time.perf_counter() + CLEAN_RECOVER_SEC)
+        now = time.perf_counter()
+        until = end if repair_day else min(end, now + CLEAN_RECOVER_SEC)
+        if closing:
+            # Its `closing` seconds from when it actually starts, also when the repacks ended late, but
+            # never more than CLOSING_LATE_SEC past the job's budget (review of the strict-priority fix:
+            # under load the recovery's time was gone before it started, and a P3 order stayed out while
+            # a P4 order it fits in place of rode).
+            until = max(until, min(now + closing, end + CLOSING_LATE_SEC))
         try:
             recovered(best.source, best.plan, until)
         except Exception as exc:  # noqa: BLE001

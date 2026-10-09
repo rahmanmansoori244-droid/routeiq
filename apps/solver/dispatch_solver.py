@@ -4943,6 +4943,10 @@ def _stage_worker(job: dict) -> tuple[list[LR.Candidate], list[str]]:
         time.sleep(3600)
     if os.environ.get("ROUTEIQ_TEST_KILL_REPACK") == job.get("goal"):
         os._exit(137)
+    # CP-SAT before the job's clock starts: its cold import (1.3-2 s in a fresh worker; these workers
+    # imported only the routing modules) is worker start-up, inside STAGE_GRACE_SEC, not time taken from
+    # the job's repacks or its closing recovery (review of the strict-priority fix).
+    LR.warm_up()
     return LR.build_candidates(**job)
 
 
@@ -5221,8 +5225,11 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
     if pv_proc is not None:
         # Its own process (idle since its search ended): starts now, beside the engine's jobs.
         pv_proc.submit(PV.stage_in_worker, pv_job)
+    # A job's closing recovery may end up to LR.CLOSING_LATE_SEC past its budget (load_repack.build_candidates,
+    # when its repacks ended late): waited for, once per round of jobs (the second search's goals share one
+    # budget, a goal's late end shortens the next), never past the solve's deadline.
     pv_deadline = min(time.monotonic() + (pv_job["budget_s"] + len(pv_job["goals"]) * pv_job["extra_s"] if pv_job else 0)
-                      + STAGE_GRACE_SEC, budget_end - 2)
+                      + LR.CLOSING_LATE_SEC + STAGE_GRACE_SEC, budget_end - 2)
     if pool is None:
         for g, job in jobs.items():
             try:
@@ -5231,7 +5238,8 @@ def _post_solve(req: DispatchRequest, solvable: list[DispatchStop], tds: list[Tr
                 log.warning("post-solve %s failed: %s", g, exc)
     else:
         rounds = rounds_of(len(jobs))
-        deadline = min(time.monotonic() + rounds * (job_budget + extra) + STAGE_GRACE_SEC, budget_end - 2)
+        deadline = min(time.monotonic() + rounds * (job_budget + extra + LR.CLOSING_LATE_SEC) + STAGE_GRACE_SEC,
+                       budget_end - 2)
         # In completion order: a MIN_TRUCKS job whose worker dies (out of memory) no longer costs
         # RECOMMENDED its exact re-check, nor the rest of the budget (review L23).
         got = _await_all(pool, {g: pool.submit(_stage_worker, job, f"stage:{g}") for g, job in jobs.items()}, deadline) if jobs else {}
