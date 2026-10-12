@@ -465,7 +465,7 @@ describe('lib/customer-list.ts', () => {
     expect(Object.keys(l.rows[0]!).sort()).toEqual(
       [
         'id', 'code', 'name', 'branchCode', 'branchKey', 'regionId', 'region', 'address', 'lat', 'lng', 'geocodeConfidence', 'locationVerified',
-        'priority', 'priorityConfirmed', 'avgServiceTimeMin', 'paymentType', 'active', 'plannedPriority', 'plannedPrioritySource',
+        'priority', 'priorityConfirmed', 'avgServiceTimeMin', 'paymentType', 'smallTruckOnly', 'active', 'plannedPriority', 'plannedPrioritySource',
       ].sort(),
     );
     expect(l.rows[0]!.region).toEqual({ id: 'r1', code: 'MCT', name: 'Muscat' });
