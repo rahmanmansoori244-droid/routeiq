@@ -1096,7 +1096,16 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
   // only on such loads: plan-detail). PLANNED ones cannot be locked (truckGate); locked or loading ones are kept.
   const outPlanned: string[] = [];
   const outKept: string[] = [];
+  // Owner request 13 Oct 2026: "small truck only" customers on a truck that is not small now (marked, or
+  // the setting lowered, after planning): LOCK / LOADING / DISPATCH refuse these loads (smallTruckGate).
+  const bigPlanned: string[] = [];
+  const bigKept: string[] = [];
   for (const l of loads) {
+    if (l.status === 'PLANNED' || l.status === 'LOCKED' || l.status === 'LOADING') {
+      for (const s of l.stops) {
+        if (s.smallTruckBreach) (l.status === 'PLANNED' ? bigPlanned : bigKept).push(`${s.customerCode}${s.branchCode ? `/${s.branchCode}` : ''} (${l.truckCode} L${l.loadNo})`);
+      }
+    }
     if (l.masterChanged.some((c) => c.kind === 'CAPACITY')) trucks.push(`${l.truckCode} L${l.loadNo}`);
     if (l.masterChanged.some((c) => c.kind === 'INACTIVE')) (l.status === 'PLANNED' ? outPlanned : outKept).push(`${l.truckCode} L${l.loadNo}`);
     const depot = l.masterChanged.find((c) => c.kind === 'DEPOT');
@@ -1130,6 +1139,12 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
     out.push(
       `Truck taken out of service (deactivated under Trucks) after these locked or loading loads were planned: ${outKept.join(', ')}. They are kept as they are; to move their orders to the trucks in service, unlock them (put them back to Planned) and re-plan, or reactivate the truck under Trucks.`,
     );
+  }
+  if (bigPlanned.length) {
+    out.push(`Small truck only customers on a truck that is not small: ${bigPlanned.join(', ')}. These loads cannot be locked, loaded or dispatched - re-plan to put them on a small truck.`);
+  }
+  if (bigKept.length) {
+    out.push(`Small truck only customers on a locked or loading truck that is not small: ${bigKept.join(', ')}. These loads cannot go on - put them back to Planned and re-plan.`);
   }
   if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
   // Audit E1 (owner decision 13): its own sentence, never "truck capacity changed".

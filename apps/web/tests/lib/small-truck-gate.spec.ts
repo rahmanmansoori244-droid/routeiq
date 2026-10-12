@@ -182,6 +182,12 @@ describe('the plan screen and the sheets show it', () => {
     const small = d.loads.find((l) => l.id === 'M1')!.stops[0]!;
     expect([big.smallTruckOnly, big.smallTruckBreach]).toEqual([true, true]);
     expect([small.smallTruckOnly, small.smallTruckBreach]).toEqual([true, undefined]);
+    // The plan says it before anyone presses Lock.
+    expect(d.warnings).toContain(
+      'Small truck only customers on a truck that is not small: C1 (BIG L1). These loads cannot be locked, loaded or dispatched - re-plan to put them on a small truck.',
+    );
+    row('planLoad', 'L1').status = 'LOCKED';
+    expect((await getPlanDetail(T, 'P'))!.warnings.some((w) => w.startsWith('Small truck only customers on a locked or loading truck that is not small: C1 (BIG L1).'))).toBe(true);
     seed();
     const plain = (await getPlanDetail(T, 'P'))!.loads.find((l) => l.id === 'L1')!.stops[0]!;
     expect('smallTruckOnly' in plain).toBe(false);
