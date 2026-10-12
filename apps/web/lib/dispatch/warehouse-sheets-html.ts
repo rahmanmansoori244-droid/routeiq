@@ -102,7 +102,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
       (i) =>
         `<tr><td class="n">${i.stop}</td><td><b>${esc(i.invoiceNo)}</b></td><td>${customer(i.customerName, i.customerCode, i.branchCode)}${
           i.split ? `<br><span class="muted">split delivery: ${esc(i.split)}</span>` : ''
-        }${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
+        }${i.smallTruck ? `<br><small><b>${esc(i.smallTruck)}</b></small>` : ''}${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
     )
     .join('');
   return `<section class="sheet">

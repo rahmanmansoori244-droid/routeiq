@@ -25,6 +25,7 @@ import { fmtHhmm } from './time';
 import { carriedStopText } from './carry-view';
 import { breakLine, breakTimes } from './break-text';
 import { loadPallets, palletsOverBays, palletText } from './pallets';
+import { SMALL_TRUCK_BADGE } from './small-truck';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -44,6 +45,12 @@ export interface SheetStop {
    * the driver calls before arrival); live, like accessNotes. Null = none (nothing printed).
    */
   phone: string | null;
+  /**
+   * "SMALL TRUCK ONLY", printed in small text under the customer (owner request 13 Oct 2026): its
+   * unloading area takes small trucks only (live, as the plan screen). The words travel in the model:
+   * the renderer process bundles only its own modules. Absent = nothing printed.
+   */
+  smallTruck?: string;
   notes: string[];
   /** Split delivery: this stop is part `part` of `parts`; `others` says where the other parts go. */
   split: { part: number; parts: number; others: string[]; restUnserved: boolean } | null;
@@ -227,6 +234,7 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     // Through pdfSafe like every text (a phone is checked to digits and + - ( ) / when saved, but the
     // sheet never trusts that): Latin only.
     phone: t.maybe(s.customerPhone)?.trim() || null,
+    ...(s.smallTruckOnly ? { smallTruck: SMALL_TRUCK_BADGE } : {}),
     notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,
