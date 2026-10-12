@@ -26,8 +26,34 @@ export type CanonicalField =
 
 /** Built-in aliases (normalized: lowercase, letters+digits only). Tenants can add more. */
 export const HEADER_ALIASES: Record<CanonicalField, string[]> = {
-  sales_order_no: ['salesorderno', 'salesorder', 'salesordernumber', 'sono', 'sonumber', 'orderno', 'ordernumber', 'orderid', 'docno', 'documentno', 'documentnumber', 'so'],
-  order_date: ['orderdate', 'sodate', 'documentdate', 'docdate', 'salesorderdate'],
+  // Owner decision 12 Oct 2026: RouteIQ only ever gets sales INVOICES (the ERP turns the sales order
+  // into an invoice; the number uploaded is the invoice number), so an invoice column is the document
+  // number, and it wins over a sales-order column in the same file.
+  sales_order_no: [
+    'invoiceno',
+    'invoicenumber',
+    'invoice',
+    'invno',
+    'invoiceid',
+    'salesinvoiceno',
+    'salesinvoicenumber',
+    'salesinvoice',
+    'taxinvoiceno',
+    'taxinvoicenumber',
+    'salesorderno',
+    'salesorder',
+    'salesordernumber',
+    'sono',
+    'sonumber',
+    'orderno',
+    'ordernumber',
+    'orderid',
+    'docno',
+    'documentno',
+    'documentnumber',
+    'so',
+  ],
+  order_date: ['orderdate', 'sodate', 'documentdate', 'docdate', 'salesorderdate', 'invoicedate', 'invdate'],
   delivery_date: ['deliverydate', 'requesteddeliverydate', 'reqdeliverydate', 'requesteddate', 'reqdate', 'deliverydt', 'shipdate', 'dispatchdate', 'deliveryon', 'date'],
   customer_code: ['customercode', 'custcode', 'customerno', 'customernumber', 'customerid', 'customer', 'accountcode', 'account', 'cust', 'soldto', 'soldtocode'],
   branch_code: ['branchcode', 'branch', 'branchno', 'shiptocode', 'shipto', 'shiptono', 'outletcode', 'outlet', 'site', 'sitecode', 'locationcode'],
