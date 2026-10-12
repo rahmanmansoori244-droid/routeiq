@@ -203,6 +203,9 @@ const EXPECTED: Record<string, string> = {
   'POST /api/runs/[id]/dispatch': 'PLANNER',
   'GET /api/runs/[id]/export/excel': 'ANY',
   'GET /api/runs/[id]/export/pdf': 'ANY',
+  // Owner request 12 Oct 2026: the warehouse load sheets and the return notes (gate pass), read like the driver sheets.
+  'GET /api/runs/[id]/export/load-sheet': 'ANY',
+  'GET /api/runs/[id]/export/return-note': 'ANY',
   // Owner request 6 Oct 2026: the hire suggestion (read by everyone; check and "Use this plan" PLANNER).
   'GET /api/runs/[id]/hire-suggestion': 'ANY',
   'POST /api/runs/[id]/hire-suggestion': 'PLANNER',
