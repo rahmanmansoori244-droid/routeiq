@@ -32,6 +32,9 @@
  *   carried at most once (unique carriedFromOrderId / carriedToOrderId): running it twice, or twice
  *   at the same time, carries nothing new.
  *
+ * A cancelled order (Cancel order, owner request 12 Oct 2026) is never a candidate (windowOrders), and
+ * a copy that was cancelled on its day is not in the Undo list (undo the cancel first: COPY_CANCELLED).
+ *
  * Not carried, and listed with the reason: orders of a deactivated customer, a sales-order line
  * already confirmed for D (entered again), a sales-order line that is also on an order of a LATER
  * delivery date - open, brought forward, dispatched or delivered, any depot (entered again: only
@@ -74,6 +77,7 @@ import { readVisitLines } from '../delivery/visit';
 import { readCarryBasis } from '../delivery/outcome-rules';
 import { reasonText, shortfallText, sourceWord } from '../delivery/office-text';
 import { noResultStops, type NoResultStop } from '../delivery/day-results';
+import { NOT_CANCELLED } from './order-cancel-rules';
 
 type Tx = Prisma.TransactionClient;
 type Db = Tx | typeof prisma;
@@ -299,6 +303,8 @@ export interface LaterLine {
   status: string;
   /** Brought forward: the date its copy is on ('' when not known); null when not brought forward. */
   carriedTo: string | null;
+  /** Cancelled (Cancel order): the line was entered again there and that order was cancelled. */
+  cancelled?: boolean;
 }
 
 export interface CarryTarget {
@@ -341,6 +347,7 @@ function neverPlannedText(plan: CarryPlanIn | null, date: string, orderId: strin
 
 /** What became of a later order with the same sales-order line: " (brought forward to 27 Sep)", " (delivered)", ... */
 function laterState(x: LaterLine): string {
+  if (x.cancelled) return ' (cancelled)';
   if (x.carriedTo !== null) return x.carriedTo ? ` (brought forward to ${fmtDayMonth(x.carriedTo)})` : ' (brought forward)';
   if (x.status === 'DELIVERED') return ' (delivered)';
   if (x.status === 'DISPATCHED') return ' (dispatched)';
@@ -798,12 +805,14 @@ async function windowOrders(db: Db, tenantId: string, depotId: string, window: {
   if (to < from) return [];
   // The depot's orders (the same scope as ordersInScopeWhere; every order has a depot). An order that
   // left (DISPATCHED) is read only when a recorded result says some of its cases were not delivered.
+  // A cancelled order is never brought forward (and never ticked by default): it is not open.
   return db.order.findMany({
     where: {
       tenantId,
       deliveryDate: { gte: dateOnly(from), lte: dateOnly(to) },
       depotId,
       carriedToOrderId: null,
+      ...NOT_CANCELLED,
       ...(shortIds.length
         ? { OR: [{ status: { notIn: ['DISPATCHED', 'DELIVERED'] } }, { status: 'DISPATCHED', id: { in: [...shortIds] } }] }
         : { status: { notIn: ['DISPATCHED', 'DELIVERED'] } }),
@@ -869,7 +878,7 @@ async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType
   const after = dateOnly(from);
   const out: LaterLine[] = [];
   const add = (
-    o: { id: string; deliveryDate: Date; status: string; carriedToOrderId: string | null; carriedTo?: { deliveryDate: Date } | null; customer: { code: string; branchKey: string } },
+    o: { id: string; deliveryDate: Date; status: string; carriedToOrderId: string | null; cancelledAt?: Date | null; carriedTo?: { deliveryDate: Date } | null; customer: { code: string; branchKey: string } },
     so: string | null,
     productCode: string,
   ) => {
@@ -880,6 +889,7 @@ async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType
       orderId: o.id,
       status: o.status,
       carriedTo: o.carriedToOrderId ? (o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : '') : null,
+      ...(o.cancelledAt ? { cancelled: true } : {}),
     });
   };
   const orderSelect = {
@@ -887,6 +897,7 @@ async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType
     deliveryDate: true,
     status: true,
     carriedToOrderId: true,
+    cancelledAt: true,
     carriedTo: { select: { deliveryDate: true } },
     customer: { select: { code: true, branchKey: true } },
   } as const;
@@ -905,8 +916,8 @@ async function laterLinesOf(db: Db, tenantId: string, orders: Awaited<ReturnType
   return out;
 }
 
-/** lineDupKey of every sales-order line confirmed for `date` (any depot, like the file intake). */
-async function confirmedKeysOn(db: Db, tenantId: string, date: string): Promise<Set<string>> {
+/** lineDupKey of every sales-order line confirmed for `date` (any depot, like the file intake). Also Postpone's duplicate check. */
+export async function confirmedKeysOn(db: Db, tenantId: string, date: string): Promise<Set<string>> {
   const rows = await db.orderLine.findMany({
     where: { salesOrderNo: { not: null }, order: { tenantId, deliveryDate: dateOnly(date) } },
     select: { salesOrderNo: true, product: { select: { code: true } }, order: { select: { customer: { select: { code: true, branchKey: true } } } } },
@@ -1029,9 +1040,9 @@ async function carryFollowUps(
     }
   }
   // Copies on day D that no plan version refers to (no route row, no unserved row) and that were not
-  // brought forward again themselves: Undo can remove them.
+  // brought forward again or cancelled themselves: Undo can remove them.
   const copiesOnD = await db.order.findMany({
-    where: { tenantId, depotId, deliveryDate: dateOnly(date), carriedFromOrderId: { not: null }, carriedToOrderId: null },
+    where: { tenantId, depotId, deliveryDate: dateOnly(date), carriedFromOrderId: { not: null }, carriedToOrderId: null, ...NOT_CANCELLED },
     select: { id: true, carriedFromOrderId: true, totalCases: true, carriedFrom: { select: { deliveryDate: true } }, customer: { select: { code: true, branchCode: true, name: true } } },
   });
   const undoable: UndoableCarry[] = [];
@@ -1250,17 +1261,7 @@ export async function bringForward(
             data: carryCopyData(src, c, { tenantId, depotId: depot.id, date, late, userId: user.id, now }),
             include: { lines: { select: { id: true, salesOrderNo: true, productId: true } } },
           });
-          // The copy's sales-order lines are confirmed for D (IntakeLineKey), so a file or late order
-          // for D with the same line is a duplicate. The original keeps its own keys on its day. A
-          // line twice on one older order keeps one key, like the migration's backfill.
-          const seen = new Set<string>();
-          const keys = copy.lines.flatMap((l) => {
-            const so = normSalesOrder(l.salesOrderNo);
-            if (!so || seen.has(`${so}|${l.productId}`)) return [];
-            seen.add(`${so}|${l.productId}`);
-            return [{ tenantId, deliveryDate: dateOnly(date), salesOrderNorm: so, customerId: src.customerId, productId: l.productId, orderLineId: l.id, uploadBatchId: null }];
-          });
-          if (keys.length) await tx.intakeLineKey.createMany({ data: keys });
+          await copyIntakeKeys(tx, tenantId, date, src.customerId, copy.lines);
           const marked = await tx.order.updateMany({
             where: { id: src.id, tenantId, carriedToOrderId: null },
             data: { carriedToOrderId: copy.id, carriedAt: now, carriedById: user.id },
@@ -1336,11 +1337,33 @@ export async function bringForward(
   }
 }
 
+/**
+ * The copy's sales-order lines are confirmed for D (IntakeLineKey), so a file or late order for D with
+ * the same line is a duplicate. The original keeps its own keys on its day. A line twice on one older
+ * order keeps one key, like the migration's backfill. Bring forward and Postpone (order-cancel.ts).
+ */
+export async function copyIntakeKeys(
+  tx: Tx,
+  tenantId: string,
+  date: string,
+  customerId: string,
+  lines: readonly { id: string; salesOrderNo: string | null; productId: string }[],
+): Promise<void> {
+  const seen = new Set<string>();
+  const keys = lines.flatMap((l) => {
+    const so = normSalesOrder(l.salesOrderNo);
+    if (!so || seen.has(`${so}|${l.productId}`)) return [];
+    seen.add(`${so}|${l.productId}`);
+    return [{ tenantId, deliveryDate: dateOnly(date), salesOrderNorm: so, customerId, productId: l.productId, orderLineId: l.id, uploadBatchId: null }];
+  });
+  if (keys.length) await tx.intakeLineKey.createMany({ data: keys });
+}
+
 // ---------------------------------------------------------------------------------------
 // Undo bring forward (delivery outcome, spec section 9.4)
 // ---------------------------------------------------------------------------------------
 
-export type UndoRefusalCode = 'COPY_NOT_FOUND' | 'COPY_PLANNED' | 'COPY_ON_ROAD' | 'COPY_CARRIED_AGAIN' | 'PLAN_BUSY';
+export type UndoRefusalCode = 'COPY_NOT_FOUND' | 'COPY_PLANNED' | 'COPY_ON_ROAD' | 'COPY_CARRIED_AGAIN' | 'COPY_CANCELLED' | 'PLAN_BUSY';
 
 export interface UndoCarryResult {
   undone: true;
@@ -1373,12 +1396,23 @@ export async function undoCheck(
   if (!original?.carriedToOrderId) return none;
   const copy = await db.order.findFirst({
     where: { id: original.carriedToOrderId, tenantId },
-    select: { id: true, deliveryDate: true, depotId: true, totalCases: true, carriedFromOrderId: true, carriedToOrderId: true, customer: { select: { code: true, branchCode: true } } },
+    select: { id: true, deliveryDate: true, depotId: true, totalCases: true, carriedFromOrderId: true, carriedToOrderId: true, cancelledAt: true, customer: { select: { code: true, branchCode: true } } },
   });
   if (!copy || copy.carriedFromOrderId !== original.id) return none;
   const copyDate = isoOf(copy.deliveryDate);
   const day = fmtDayMonth(copyDate);
   const who = custLabel(copy.customer);
+  // The copy was cancelled on its day (Cancel order): removing it would open the original again
+  // although the customer cancelled. Undo the cancel first, on that day.
+  if (copy.cancelledAt) {
+    return {
+      ok: false,
+      code: 'COPY_CANCELLED',
+      text: `${who}'s copy on ${day} was cancelled: undo the cancel first (on ${day}'s screen, Cancelled orders), then undo the move.`,
+      copyId: copy.id,
+      copyDate,
+    };
+  }
   // The copy was itself brought forward again (O -> C -> C2): C2 points at C, so C cannot go first.
   if (copy.carriedToOrderId) {
     const next = await db.order.findFirst({ where: { id: copy.carriedToOrderId, tenantId }, select: { deliveryDate: true } });

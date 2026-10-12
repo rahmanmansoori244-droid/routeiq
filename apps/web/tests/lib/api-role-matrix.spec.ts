@@ -96,6 +96,13 @@
  *   DELETE /api/drivers/[id]/leave/[leaveId], are PLANNER. Roles unchanged on the plan (GET
  *   /api/runs/[id]/plan: `driversOnLeave`, a load's `driverNote`) and the re-plan / optimize routes
  *   (a driver on leave is never given by RouteIQ).
+ * - Cancel and postpone one order (owner request of the first live night, 12 Oct 2026): POST
+ *   /api/dispatch/orders/[id]/cancel, /uncancel and /postpone are PLANNER, like Bring forward and late
+ *   orders. Roles unchanged on GET /api/dispatch/day (`cancelled`, `outdated.cancelledOnPlan`), GET
+ *   /api/runs/[id]/plan (cancelled marks), PATCH /api/runs/[id]/loads/[loadId] (409 ORDERS_CANCELLED),
+ *   PUT /api/dispatch/delivery-time (409 ORDER_CANCELLED), POST /api/dispatch/carry-over/undo (409
+ *   COPY_CANCELLED), GET /api/orders (status=CANCELLED) and the optimize / re-plan routes (cancelled
+ *   orders are never planned).
  */
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -151,6 +158,10 @@ const EXPECTED: Record<string, string> = {
   // Owner request 6 Oct 2026 (the hire suggestion): the dispatcher enters a one-day hired truck's plate.
   'PATCH /api/dispatch/hired-trucks/[id]': 'PLANNER',
   'POST /api/dispatch/late-order': 'PLANNER',
+  // Owner request 12 Oct 2026: cancel, undo the cancel of, and postpone one order (like Bring forward).
+  'POST /api/dispatch/orders/[id]/cancel': 'PLANNER',
+  'POST /api/dispatch/orders/[id]/postpone': 'PLANNER',
+  'POST /api/dispatch/orders/[id]/uncancel': 'PLANNER',
   'POST /api/dispatch/outcomes': 'PLANNER',
   'POST /api/dispatch/plan': 'PLANNER',
   'POST /api/driver/login': 'GONE',
