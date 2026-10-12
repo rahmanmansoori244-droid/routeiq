@@ -321,6 +321,9 @@ export const customerSchema = z.object({
   accessNotes: clearable(z.string().trim().max(500)),
   // Owner request 12 Oct 2026: the phone the driver calls before arrival (optional).
   phone: clearable(customerPhoneSchema),
+  // Owner request 13 Oct 2026: the unloading area takes small trucks only (3-ton): planned on trucks with
+  // at most TenantConfig.smallTruckMaxBays bays (lib/dispatch/small-truck.ts). A JSON boolean only.
+  smallTruckOnly: z.boolean().optional(),
   active: z.boolean().optional(),
 });
 export type CustomerInput = z.infer<typeof customerSchema>;
@@ -396,6 +399,8 @@ export const tenantConfigSchema = z
     maxTripsPerTruck: bounded(CONFIG_BOUNDS.maxTripsPerTruck),
     // Pallet fill (owner decision 4 Oct 2026): the share of a truck's bays the planner may fill.
     palletFillPct: bounded(CONFIG_BOUNDS.palletFillPct),
+    // Owner decision 13 Oct 2026: "a small truck has at most N bays" (small-truck-only customers). Company admin.
+    smallTruckMaxBays: bounded(CONFIG_BOUNDS.smallTruckMaxBays),
     splitDeliveries: z.boolean(),
     planningCutoffMin: bounded(CONFIG_BOUNDS.planningCutoffMin),
     dateOrder: z.enum(['DMY', 'MDY']),

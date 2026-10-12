@@ -19,6 +19,8 @@ export const SETTINGS_FIELDS = [
   'maxTripsPerTruck',
   // Pallet fill (owner decision 4 Oct 2026): company admin only.
   'palletFillPct',
+  // "A small truck has at most N bays" (owner decision 13 Oct 2026, small-truck-only customers): company admin only.
+  'smallTruckMaxBays',
   'splitDeliveries',
   'planningCutoffMin',
   'dateOrder',

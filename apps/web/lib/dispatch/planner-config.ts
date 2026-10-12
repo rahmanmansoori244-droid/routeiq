@@ -10,6 +10,7 @@ import { autoTimeLimitSec, CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, o
 import { parsePriorityWeights, routingProviderFor } from './customer-attrs';
 import { PALLET_FILL_DEFAULT } from './pallets';
 import { DEFAULT_DRIVER_DAY_RATE } from './hire';
+import { smallTruckMaxBaysOf } from './small-truck';
 import { fmtHhmm } from './time';
 
 /** The TenantConfig fields the planner reads (a Prisma TenantConfig row satisfies it). */
@@ -28,6 +29,8 @@ export interface TenantPlannerConfig {
   splitDeliveries: boolean;
   /** Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill; absent = 100 (PALLET_FILL_DEFAULT). */
   palletFillPct?: number;
+  /** Owner decision 13 Oct 2026: a small truck has at most this many bays; absent = 6 (SMALL_TRUCK_MAX_BAYS_DEFAULT). */
+  smallTruckMaxBays?: number;
   defaultServiceTimeMin: number;
   fuelPricePerLitre: number;
   driverCostPerHour: number;
@@ -93,6 +96,7 @@ export const SETTING_LABELS: Record<ConfigBoundKey, string> = {
   loadingMinPerCase: 'Loading minutes per case',
   maxTripsPerTruck: 'Max loads per truck per day',
   palletFillPct: 'Pallet fill',
+  smallTruckMaxBays: 'Small truck = at most N bays',
   fuelPricePerLitre: 'Fuel price per litre',
   driverCostPerHour: 'Driver cost per hour',
   dailyDriverDayRate: 'Daily driver day rate',
@@ -305,6 +309,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       note: "a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases",
     },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
+    {
+      label: 'Small truck only customers',
+      value: `on trucks with at most ${smallTruckMaxBaysOf(cfg)} bays only`,
+      source: 'SETTING',
+      note: 'customers marked "Small truck only (3-ton)": own and hired trucks with bays entered and at most that many; a truck without bays is never small. LOCK, LOADING and DISPATCH refuse such a customer on a bigger truck',
+    },
     { label: 'Fuel price', value: cfg.fuelPricePerLitre > 0 ? `${cfg.fuelPricePerLitre} ${currency} per litre` : '0 (fuel not costed separately)', source: 'SETTING' },
     {
       label: 'Preferred-window penalty',

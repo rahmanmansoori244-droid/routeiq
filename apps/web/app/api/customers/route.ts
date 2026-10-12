@@ -97,6 +97,8 @@ export const POST = withTenantApi(
         accessNotes: input.accessNotes,
         // Owner request 12 Oct 2026: the phone the driver calls (checked by the schema, customer-phone.ts).
         phone: input.phone,
+        // Owner request 13 Oct 2026: small trucks only (3-ton); lib/dispatch/small-truck.ts.
+        smallTruckOnly: input.smallTruckOnly ?? false,
         active: input.active ?? true,
       },
     });
