@@ -219,7 +219,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
           <div className="col-span-2 space-y-1">
             <Label htmlFor="cd-phone">Phone (for the driver to call)</Label>
             <Input id="cd-phone" type="tel" inputMode="tel" autoComplete="off" placeholder="+968 9123 4567" value={form.phone ?? ''} onChange={(e) => set('phone')(e.target.value)} />
-            <p className="text-xs text-muted-foreground">Printed on the driver sheet and called from the driver page before arrival. {CUSTOMER_PHONE_RULE} Empty = no phone.</p>
+            <p className="text-xs text-muted-foreground">Optional: printed on the driver sheet and called from the driver page before arrival. {CUSTOMER_PHONE_RULE} Empty = no phone.</p>
           </div>
         </div>
         <DialogFooter>

@@ -21,7 +21,7 @@ export const CUSTOMER_PHONE_MAX_DIGITS = 20;
 export const CUSTOMER_PHONE_MAX_LENGTH = 40;
 
 /** The rule in words: the dialog's hint, the import page and the workbooks' About sheet. */
-export const CUSTOMER_PHONE_RULE = 'Digits, spaces and + - ( ) / only, 6 to 20 digits. Optional.';
+export const CUSTOMER_PHONE_RULE = 'Digits, spaces and + - ( ) / only, 6 to 20 digits.';
 
 /** The short instruction of the phone column in the customer master and the data-to-collect Excel. */
 export const CUSTOMER_PHONE_COLUMN_TEXT = "customer's phone, for the driver to call before arrival - optional";
