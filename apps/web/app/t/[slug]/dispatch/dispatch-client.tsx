@@ -17,6 +17,7 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { DeliverySummary } from './delivery-summary';
+import { CrewReport } from './crew-report';
 import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
@@ -771,6 +772,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           />
         </Step>
       ) : null}
+
+      {/* Owner request 13 Oct 2026: who were the driver and the helpers on each truck and load. */}
+      <CrewReport key={`${day.date}|${day.depot.id}`} date={day.date} depotId={day.depot.id} depotCode={day.depot.code} />
 
       <LocationDialog
         open={locOpen}
