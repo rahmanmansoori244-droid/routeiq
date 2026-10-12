@@ -142,6 +142,8 @@ const truckFields = z.object({
     bays: optionalBounded(TRUCK_BOUNDS.bays),
     // Driver who usually drives this truck: new plans put them on its loads. null / '' = none.
     defaultDriverId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
+    // Helper who usually goes out on this truck (owner request 13 Oct 2026): new loads get him. null / '' = none.
+    defaultHelperId: z.union([z.string().min(1), z.literal('').transform(() => null), z.null()]).optional(),
     active: z.boolean().optional(),
     // Hired from outside (owner request 4 Oct 2026): a badge only; the planner never reads it.
     hired: z.boolean().optional(),
@@ -227,6 +229,35 @@ export type DriverInput = z.infer<typeof driverSchema>;
  * admin's (driverChangesRefused, owner request 6 Oct 2026).
  */
 export const driverPatchSchema = driverSchema.partial().extend({ casual: z.boolean().optional() });
+
+/**
+ * A helper (truck crew), owner request 13 Oct 2026: kept like a driver - code (letters, digits and
+ * . _ -, unique per company), name, optional phone (the drivers' phone rule; '' or null clears it), active.
+ * POST /api/helpers and PATCH /api/helpers/[id] (only the fields sent change; a new code is the
+ * company admin's: helperChangesRefused).
+ */
+export const helperSchema = z
+  .object({
+    code: codeSchema,
+    name: nameSchema,
+    phone: clearable(driverPhoneSchema),
+    active: z.boolean().optional(),
+  })
+  .strict();
+export type HelperInput = z.infer<typeof helperSchema>;
+export const helperPatchSchema = helperSchema.partial().strict();
+
+/** At most this many helpers go out on one load (the database CHECK of migration 20261013150000). */
+export const MAX_HELPERS_PER_LOAD = 3;
+
+/**
+ * A load's helpers in the order shown (PATCH /api/runs/[id]/loads/[loadId] `helperIds`): 0 to 3 ids,
+ * each once; [] = no helpers.
+ */
+export const loadHelperIdsSchema = z
+  .array(z.string().min(1))
+  .max(MAX_HELPERS_PER_LOAD, `At most ${MAX_HELPERS_PER_LOAD} helpers on a load.`)
+  .refine((ids) => new Set(ids).size === ids.length, 'A helper is listed twice.');
 
 /**
  * A driver's leave period (owner request 6 Oct 2026; lib/dispatch/driver-leave.ts): POST

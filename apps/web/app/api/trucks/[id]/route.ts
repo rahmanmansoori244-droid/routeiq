@@ -14,10 +14,12 @@ export const GET = (req: Request, { params }: Params) =>
 
 /**
  * A company admin changes any truck field. The dispatcher (PLANNER and up, owner request 6 Oct 2026)
- * changes the usual (default) driver only - the Drivers page's "Usual driver of each truck"; any other
- * field is refused (403 ADMIN_ONLY_TRUCK_FIELD, nothing saved). A change of the usual driver alone
- * is audited TRUCK_USUAL_DRIVER_SET { truck, from, to } by code and name ("none": no driver), with
- * the ids; any other change UPDATE with the truck before and after.
+ * changes the usual (default) driver - the Drivers page's "Usual driver of each truck" - and the usual
+ * helper (owner request 13 Oct 2026, the Helpers page); any other field is refused (403
+ * ADMIN_ONLY_TRUCK_FIELD, nothing saved). A change of the usual driver alone is audited
+ * TRUCK_USUAL_DRIVER_SET { truck, from, to } by code and name ("none": no driver), with the ids; of the
+ * usual helper alone TRUCK_USUAL_HELPER_SET the same way; any other change UPDATE with the truck
+ * before and after.
  */
 export const PATCH = (req: Request, { params }: Params) =>
   withTenantApi(
@@ -28,7 +30,7 @@ export const PATCH = (req: Request, { params }: Params) =>
       if (refused.length) {
         return fail(
           {
-            error: `Only a company admin can change ${refused.join(', ')} of a truck. A dispatcher can change its usual driver only. Nothing was saved.`,
+            error: `Only a company admin can change ${refused.join(', ')} of a truck. A dispatcher can change its usual driver and usual helper only. Nothing was saved.`,
             code: 'ADMIN_ONLY_TRUCK_FIELD',
             fields: refused,
           },
@@ -49,6 +51,12 @@ export const PATCH = (req: Request, { params }: Params) =>
         if (!driver) return fail('Driver not found in this tenant', 400);
         if (!driver.active) return fail(`Driver ${driver.name} is inactive`, 400);
       }
+      // The usual helper (owner request 13 Oct 2026), as the usual driver: a new one must be active.
+      if (input.defaultHelperId && input.defaultHelperId !== before.defaultHelperId) {
+        const helper = await db.helper.findUnique({ where: { id: input.defaultHelperId }, select: { id: true, name: true, active: true } });
+        if (!helper) return fail('Helper not found in this tenant', 400);
+        if (!helper.active) return fail(`Helper ${helper.name} is inactive`, 400);
+      }
       const after = await db.truck.update({ where: { id: params.id }, data: input });
       const changed = (Object.keys(input) as (keyof typeof input)[]).filter((k) => input[k] !== undefined && input[k] !== (before as Record<string, unknown>)[k]);
       if (changed.length === 1 && changed[0] === 'defaultDriverId') {
@@ -66,6 +74,24 @@ export const PATCH = (req: Request, { params }: Params) =>
           entity: 'Truck',
           entityId: after.id,
           afterJson: { truck: after.code, from: nameOf(fromId), to: nameOf(toId), truckId: after.id, fromDriverId: fromId, toDriverId: toId },
+          ip,
+        });
+        return ok(after);
+      }
+      if (changed.length === 1 && changed[0] === 'defaultHelperId') {
+        // As TRUCK_USUAL_DRIVER_SET: the truck's code and the helpers by name, with the ids.
+        const fromId = before.defaultHelperId ?? null;
+        const toId = after.defaultHelperId ?? null;
+        const ids = [fromId, toId].filter((x): x is string => !!x);
+        const names = new Map((await db.helper.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })).map((h) => [h.id, h.name]));
+        const nameOf = (id: string | null) => (id ? (names.get(id) ?? 'unknown helper') : 'none');
+        await audit({
+          tenantId: user.tenantId,
+          userId: user.id,
+          action: 'TRUCK_USUAL_HELPER_SET',
+          entity: 'Truck',
+          entityId: after.id,
+          afterJson: { truck: after.code, from: nameOf(fromId), to: nameOf(toId), truckId: after.id, fromHelperId: fromId, toHelperId: toId },
           ip,
         });
         return ok(after);

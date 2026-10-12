@@ -38,6 +38,8 @@ export interface TruckRow {
   /** Pallet positions (owner decision 4 Oct 2026): set = planned by pallets; null = by cases. */
   bays?: number | null;
   defaultDriverId: string | null;
+  /** The usual helper (owner request 13 Oct 2026): new loads get him. */
+  defaultHelperId?: string | null;
   active: boolean;
   /** Hired from outside (owner request 4 Oct 2026): a badge only, the planner never reads it. */
   hired?: boolean;
@@ -50,6 +52,9 @@ export interface DepotOption { id: string; code: string; name: string }
 
 export interface DriverOption { id: string; code: string; name: string; active: boolean }
 
+/** A helper for the Default helper list (owner request 13 Oct 2026). */
+export type HelperOption = DriverOption;
+
 // Radix Select items cannot have an empty value.
 const NO_DRIVER = '__none__';
 
@@ -60,6 +65,8 @@ interface Props {
   truck?: TruckRow;
   depots: DepotOption[];
   drivers: DriverOption[];
+  /** The company's helpers (owner request 13 Oct 2026); none = only "None" offered. */
+  helpers?: HelperOption[];
   primaryUnit?: CapacityUnit;
   currency?: string;
   onSaved: () => void;
@@ -81,6 +88,7 @@ interface FormState {
   availableTo: string; // HH:MM, '' = to the end of the day
   bays: string; // '' = planned by cases
   defaultDriverId: string;
+  defaultHelperId: string;
   active: boolean;
   hired: boolean;
 }
@@ -103,6 +111,7 @@ function buildBlank(depots: DepotOption[]): FormState {
     availableTo: '',
     bays: '',
     defaultDriverId: NO_DRIVER,
+    defaultHelperId: NO_DRIVER,
     active: true,
     hired: false,
   };
@@ -115,6 +124,7 @@ export function TruckFormDialog({
   truck,
   depots,
   drivers,
+  helpers = [],
   primaryUnit = 'CASES',
   currency = '',
   onSaved,
@@ -125,6 +135,8 @@ export function TruckFormDialog({
   // Active drivers, plus the truck's current one if it was deactivated since (so it still shows).
   const current = truck?.defaultDriverId ?? null;
   const driverOptions = drivers.filter((d) => d.active || (mode === 'edit' && d.id === current));
+  const currentHelper = truck?.defaultHelperId ?? null;
+  const helperOptions = helpers.filter((h) => h.active || (mode === 'edit' && h.id === currentHelper));
 
   useEffect(() => {
     if (open) {
@@ -146,6 +158,7 @@ export function TruckFormDialog({
           availableTo: timeInputValue(truck.availableToMin, 'until'),
           bays: truck.bays != null ? String(truck.bays) : '',
           defaultDriverId: truck.defaultDriverId ?? NO_DRIVER,
+          defaultHelperId: truck.defaultHelperId ?? NO_DRIVER,
           active: truck.active,
           hired: !!truck.hired,
         });
@@ -193,6 +206,7 @@ export function TruckFormDialog({
       // Empty = planned by cases (the bays are cleared).
       bays: form.bays.trim() === '' ? null : Number(form.bays),
       defaultDriverId: form.defaultDriverId === NO_DRIVER ? null : form.defaultDriverId,
+      defaultHelperId: form.defaultHelperId === NO_DRIVER ? null : form.defaultHelperId,
       active: form.active,
       hired: form.hired,
     };
@@ -416,6 +430,23 @@ export function TruckFormDialog({
               </SelectContent>
             </Select>
             <p className="text-xs text-muted-foreground">New plans put this driver on the truck&apos;s loads. You can still change the driver per load on the plan.</p>
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="defaultHelper">Default helper</Label>
+            <Select value={form.defaultHelperId} onValueChange={(v) => setForm({ ...form, defaultHelperId: v })}>
+              <SelectTrigger id="defaultHelper">
+                <SelectValue placeholder="None" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DRIVER}>None</SelectItem>
+                {helperOptions.map((h) => (
+                  <SelectItem key={h.id} value={h.id}>
+                    {h.name} ({h.code}){h.active ? '' : ' - inactive'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">New plans put this helper on the truck&apos;s loads. You can still change the helpers per load on the plan.</p>
           </div>
           <div className="flex items-center justify-between rounded-md border px-3 py-2">
             <Label htmlFor="active" className="text-sm">

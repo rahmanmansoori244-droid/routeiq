@@ -68,6 +68,9 @@ export const AUDIT_ACTIONS = {
   DRIVER_LEAVE_CHANGED: { label: 'Driver leave changed' },
   DRIVER_LEAVE_REMOVED: { label: 'Driver leave removed' },
   TRUCK_USUAL_DRIVER_SET: { label: 'Usual driver of a truck changed' },
+  // Helpers (truck crew), owner request 13 Oct 2026: a truck's usual helper and the helpers of a load.
+  TRUCK_USUAL_HELPER_SET: { label: 'Usual helper of a truck changed' },
+  LOAD_HELPERS_CHANGED: { label: 'Load helpers changed' },
   DELIVERY_OUTCOME_SET: { label: 'Delivery result recorded or corrected' },
   DELIVERY_PHOTO_ADDED: { label: 'Delivery photo added' },
   STOP_ARRIVAL_MANUAL: { label: 'Arrival at a stop recorded by hand' },
@@ -113,6 +116,7 @@ export const AUDIT_ENTITIES = {
   Depot: { label: 'Depot' },
   Truck: { label: 'Truck' },
   Driver: { label: 'Driver' },
+  Helper: { label: 'Helper' },
   DriverLeave: { label: 'Driver leave' },
   Region: { label: 'Region' },
   Customer: { label: 'Customer' },
