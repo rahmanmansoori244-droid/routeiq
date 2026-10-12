@@ -4,6 +4,7 @@
  * database) so the plan screen, the driver sheets PDF and the tests share one version.
  */
 import { breakLine } from './break-text';
+import { CUSTOMER_PHONE_MIN_DIGITS } from './customer-phone';
 import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
 import { loadPallets, palletText } from './pallets';
@@ -215,6 +216,25 @@ export function whatsappNumber(phone: string | null | undefined, callingCode: st
   if (digits.length > 10 && !digits.startsWith('0')) return digits;
   const local = digits.replace(/^0+/, '');
   return callingCode && local ? `${callingCode}${local}` : null;
+}
+
+/**
+ * The tel: link of a customer's phone (owner request 12 Oct 2026: the driver calls the customer before
+ * arrival; the driver page's "Call customer"). The first number when a "/" separates two, with its
+ * country code worked out as for the WhatsApp links (whatsappNumber): "+968 ...", "00968 ..." and a
+ * long number carry it, a local number gets `callingCode` (the company's country, phoneCountryCode),
+ * so "9123 4567" in Oman dials +968 9123 4567. Without a calling code a local number is dialled as
+ * written (a local call; never a guessed country). Null without enough digits.
+ */
+export function telUrl(phone: string | null | undefined, callingCode: string | null = null): string | null {
+  const raw = (phone ?? '').trim();
+  const first = raw.split('/')[0]!.trim();
+  // "968/9123 4567" is one number written with a "/": its first part alone is too short to dial.
+  const number = first.replace(/\D/g, '').length >= CUSTOMER_PHONE_MIN_DIGITS ? first : raw;
+  const digits = number.replace(/\D/g, '');
+  if (digits.length < CUSTOMER_PHONE_MIN_DIGITS) return null;
+  const international = whatsappNumber(number, callingCode);
+  return international ? `tel:+${international}` : `tel:${digits}`;
 }
 
 /** wa.me link: opens the driver's chat when the number is known (see whatsappNumber), else lets

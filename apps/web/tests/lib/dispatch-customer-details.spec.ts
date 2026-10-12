@@ -59,6 +59,7 @@ vi.mock('@/lib/tenant', () => ({
 
 import { CustomerDialog } from '@/app/t/[slug]/dispatch/customer-dialog';
 import { PATCH } from '@/app/api/customers/[id]/route';
+import { audit } from '@/lib/audit';
 
 beforeEach(() => {
   calls.length = 0;
@@ -85,7 +86,7 @@ const CONFIRMED = { ...UNCONFIRMED, customerId: 'c2', name: 'Carrefour Seeb', pr
 
 describe('the Details form helpers (customer-details.ts)', () => {
   it('opens with defaults shown as defaults (blank), and own values as typed values', () => {
-    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false });
+    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '' });
     expect(detailsFormOf(CONFIRMED)).toMatchObject({ priority: '2', service: '25' });
     // A customer without the sources (older callers) is shown as before.
     const plain: DetailsCustomer = { ...UNCONFIRMED, prioritySource: undefined, serviceSource: undefined };
@@ -355,5 +356,83 @@ describe('a window saved from a form opened before someone else changed it (A2 r
     expect(body).toEqual({ hardWindowStartMin: 540, hardWindowEndMin: 600 });
     expect((await send(body)).status).toBe(200);
     expect(route.updates).toEqual([{ hardWindowStartMin: 540, hardWindowEndMin: 600, windowConfirmedAt: expect.any(Date), windowConfirmedById: 'u1' }]);
+  });
+});
+
+/**
+ * Owner request 12 Oct 2026: "Phone (for the driver to call)" in Details (Daily dispatch and the
+ * customer page: the same dialog), saved through PATCH /api/customers/:id like the other fields - the
+ * same roles (PLANNER and up), audited UPDATE with the customer before and after, sent only when it
+ * changed, refused with the reason when it is not a phone number (customer-phone.ts).
+ */
+describe('the phone for the driver to call (owner request 12 Oct 2026)', () => {
+  const send = (body: unknown) =>
+    PATCH(new Request('http://localhost/api/customers/c1', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }), { params: { id: 'c1' } });
+  const WITH_PHONE = { ...UNCONFIRMED, phone: '9123 4567' };
+
+  it('opens with the saved phone and sends it only when it changed, as the server stores it', () => {
+    const f = detailsFormOf(WITH_PHONE);
+    expect(f.phone).toBe('9123 4567');
+    expect(detailsPatch(f, { ...f })).toEqual({ ok: true, patch: {} });
+    expect(detailsPatch(f, { ...f, phone: ' 9123   4567 ' })).toEqual({ ok: true, patch: {} });
+    expect(detailsPatch(f, { ...f, phone: '+968 9123 4567' })).toEqual({ ok: true, patch: { phone: '+968 9123 4567' } });
+    expect(detailsPatch(f, { ...f, phone: '' })).toEqual({ ok: true, patch: { phone: null } });
+    const none = detailsFormOf(UNCONFIRMED);
+    expect(none.phone).toBe('');
+    expect(detailsPatch(none, { ...none, phone: '٩١٢٣ ٤٥٦٧' })).toEqual({ ok: true, patch: { phone: '9123 4567' } });
+    // With "Open all day" (which returns early) the phone is still sent.
+    expect(detailsPatch(none, { ...none, openAllDay: true, phone: '9123 4567' })).toEqual({
+      ok: true,
+      patch: { phone: '9123 4567', hardWindowStartMin: null, hardWindowEndMin: null, prefWindowStartMin: null, prefWindowEndMin: null, windowConfirmed: true },
+    });
+  });
+
+  it('a phone that is not a phone number is refused with the reason: nothing is sent', () => {
+    const f = detailsFormOf(UNCONFIRMED);
+    expect(detailsPatch(f, { ...f, hardEnd: '11:00', phone: 'call the manager' })).toEqual({ ok: false, error: 'Phone "call the manager": use only digits, spaces and + - ( ) /.' });
+    expect(detailsPatch(f, { ...f, phone: '12345' })).toEqual({ ok: false, error: 'Phone "12345": a phone number has 6 to 20 digits (this has 5).' });
+  });
+
+  it('the dialog has "Phone (for the driver to call)"; a typed phone is saved alone', () => {
+    const t = setup();
+    expect(t.field('cd-phone').props.value).toBe('');
+    t.type('cd-phone', '9123 4567');
+    t.save();
+    expect(t.patches()).toHaveLength(1);
+    expect(t.patches()[0].init.json).toEqual({ phone: '9123 4567' });
+    const u = setup(WITH_PHONE);
+    expect(u.field('cd-phone').props.value).toBe('9123 4567');
+    u.type('cd-phone', '');
+    u.save();
+    expect(calls.at(-1)!.init.json).toEqual({ phone: null });
+  });
+
+  it('the dialog refuses a bad phone with its reason and stays open', () => {
+    const t = setup();
+    t.type('cd-phone', '9123 4567 ext 2');
+    t.save();
+    expect(t.patches()).toEqual([]);
+    expect(toasts.at(-1)).toBe('error: Phone "9123 4567 ext 2": use only digits, spaces and + - ( ) /.');
+    expect(t.host.props.open).toBe(true);
+  });
+
+  it('PATCH stores it as the dialog shows it and audits it like the other fields; empty clears it; a bad one is 400', async () => {
+    route.before = {
+      id: 'c1', code: 'C001', branchKey: '__MAIN__', active: true, avgServiceTimeMin: 10, serviceTimeConfirmed: false, priority: 3, priorityConfirmed: false,
+      hardWindowStartMin: 360, hardWindowEndMin: 600, prefWindowStartMin: null, prefWindowEndMin: null, phone: null,
+    };
+    route.updates = [];
+    vi.mocked(audit).mockClear();
+    expect((await send({ phone: ' 9123  4567 ' })).status).toBe(200);
+    // Only the phone: no hours, priority or unloading time confirmed by it.
+    expect(route.updates).toEqual([{ phone: '9123 4567' }]);
+    expect(vi.mocked(audit).mock.calls.at(-1)![0]).toMatchObject({ action: 'UPDATE', entity: 'Customer', entityId: 'c1', beforeJson: { phone: null }, afterJson: { phone: '9123 4567' } });
+    route.before = { ...route.before, phone: '9123 4567' };
+    expect((await send({ phone: '' })).status).toBe(200);
+    expect(route.updates.at(-1)).toEqual({ phone: null });
+    const bad = await send({ phone: 'abc' });
+    expect(bad.status).toBe(400);
+    expect(JSON.stringify(await bad.json())).toContain('use only digits, spaces and + - ( ) /');
+    expect(route.updates).toHaveLength(2);
   });
 });

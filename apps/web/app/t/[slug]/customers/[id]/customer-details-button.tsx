@@ -10,7 +10,8 @@ import { CustomerDialog, type EditableCustomer } from '../../dispatch/customer-d
  * Details on the customer page, the same dialog as on Daily dispatch (data collection review: the
  * Lock refusal and the Data to collect list send the dispatcher here to confirm receiving hours):
  * customer type, priority, unloading time and the receiving hours - with "Open all day" and "These
- * hours are confirmed with the customer". Saved through PATCH /api/customers/:id.
+ * hours are confirmed with the customer" - and the phone for the driver to call (owner request 12 Oct
+ * 2026). Saved through PATCH /api/customers/:id.
  */
 export function CustomerDetailsButton({ customer }: { customer: EditableCustomer }) {
   const router = useRouter();

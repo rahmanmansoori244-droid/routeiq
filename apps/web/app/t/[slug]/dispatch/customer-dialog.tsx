@@ -10,6 +10,7 @@ import { fmtDayMonth } from '@/lib/dispatch/time';
 import { api, CUSTOMER_TYPES } from './client-api';
 import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
 import { measuredServiceValue } from '@/lib/delivery/measured';
+import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -35,7 +36,8 @@ const PRIORITY_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type def
 const SERVICE_DEFAULT_TEXT: Record<string, string> = { TYPE: 'customer type default', DEFAULT: 'Settings default' };
 
 /**
- * Confirm priority / type / service time / receiving hours. Saved on the customer master.
+ * Confirm priority / type / service time / receiving hours, and the phone the driver calls before
+ * arrival (owner request 12 Oct 2026). Saved on the customer master.
  *
  * Audit F07 (owner decision 9, customer-details.ts): times are checked strictly (HH:MM), unloading
  * time is whole minutes or blank (= the default, not confirmed), and Save sends only what the
@@ -212,6 +214,12 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
               </label>
             ) : null}
             <p className="text-xs text-muted-foreground">Hours you type here are saved as confirmed by you. To give one order a different time (urgent or promised), use Delivery times on the day screen: the customer&apos;s hours do not change.</p>
+          </div>
+          {/* Owner request 12 Oct 2026: the driver calls the customer before arrival (driver sheet and driver page). */}
+          <div className="col-span-2 space-y-1">
+            <Label htmlFor="cd-phone">Phone (for the driver to call)</Label>
+            <Input id="cd-phone" type="tel" inputMode="tel" autoComplete="off" placeholder="+968 9123 4567" value={form.phone ?? ''} onChange={(e) => set('phone')(e.target.value)} />
+            <p className="text-xs text-muted-foreground">Printed on the driver sheet and called from the driver page before arrival. {CUSTOMER_PHONE_RULE} Empty = no phone.</p>
           </div>
         </div>
         <DialogFooter>

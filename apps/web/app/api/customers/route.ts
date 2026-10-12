@@ -95,6 +95,8 @@ export const POST = withTenantApi(
         serviceTimeConfirmed: serviceTimeGiven,
         paymentType: input.paymentType,
         accessNotes: input.accessNotes,
+        // Owner request 12 Oct 2026: the phone the driver calls (checked by the schema, customer-phone.ts).
+        phone: input.phone,
         active: input.active ?? true,
       },
     });
