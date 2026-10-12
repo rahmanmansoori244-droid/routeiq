@@ -127,6 +127,8 @@ const ROW_SELECT = {
   customerType: true,
   avgServiceTimeMin: true,
   paymentType: true,
+  // Owner request 13 Oct 2026: the list's SMALL TRUCK ONLY badge.
+  smallTruckOnly: true,
   active: true,
 } satisfies Prisma.CustomerSelect;
 

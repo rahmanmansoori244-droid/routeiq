@@ -68,6 +68,8 @@ export interface IssueCustomer {
   windowConfirmedBy: string | null;
   /** The customer's phone for the driver (owner request 12 Oct 2026), as the Details dialog opens with it; null = none. */
   phone: string | null;
+  /** Small trucks only (owner request 13 Oct 2026), as the Details dialog opens with it. */
+  smallTruckOnly: boolean;
   /** The hours in use (own, else customer type, else none): what an order's delivery time starts from. */
   effWindow: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
   /** Each order of the customer on this day, with its own delivery time (urgent / promised) if it has one. */
@@ -498,6 +500,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       windowConfirmedAt: c.windowConfirmedAt ? c.windowConfirmedAt.toISOString() : null,
       windowConfirmedBy: c.windowConfirmedBy?.name ?? null,
       phone: c.phone ?? null,
+      smallTruckOnly: !!c.smallTruckOnly,
       effWindow: { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd },
       orderTimes: [orderTimeRow(o)],
     });

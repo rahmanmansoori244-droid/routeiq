@@ -56,6 +56,11 @@ export default async function CustomerImportPage({ params }: { params: { slug: s
               name="phone"
               hint={`The customer's phone, for the driver to call before arrival - optional. ${CUSTOMER_PHONE_RULE} Also read from a mobile, contact_phone, tel or customer_phone column. A blank cell keeps the saved phone.`}
             />
+            {/* Owner request 13 Oct 2026: an unloading area that takes small trucks only (3-ton). */}
+            <Field
+              name="small_truck_only"
+              hint="yes = the unloading area takes small trucks only (3-ton): planned only on trucks with at most the bays set in Settings (Small truck = at most N bays). no = any truck. Also read from a small truck only, small_truck or small truck column. A blank cell keeps the saved value."
+            />
             <Field name="priority_confirmed" hint="yes = confirmed. Blank = not confirmed yet: an unchanged priority stays as it is, a changed one is confirmed by you. no = store without confirming. Without this column every priority in the file is confirmed." />
             <Field name="hard_from / hard_to" hint="Receiving hours, HARD (never outside), HH:MM." />
             <Field name="preferred_from / preferred_to" hint="Preferred hours (soft), HH:MM. When any of the four hour cells is filled in, the four are the customer's own hours (a blank one = no limit)." />

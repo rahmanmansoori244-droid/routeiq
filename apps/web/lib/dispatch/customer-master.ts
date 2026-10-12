@@ -54,6 +54,8 @@ const CUSTOMER_SELECT = {
   accessNotes: true,
   // Owner request 12 Oct 2026: the phone for the driver, a column of both workbooks.
   phone: true,
+  // Owner request 13 Oct 2026: small trucks only, a column of both workbooks.
+  smallTruckOnly: true,
   paymentType: true,
   active: true,
   locationSource: true,

@@ -17,6 +17,7 @@ import { canManageMasterData } from '@/lib/rbac';
 import { clientIp } from '@/lib/client-ip';
 import { HOURS_COLUMNS, importedPriority, readImportedHours, rowVersion, yesNo, type PriorityConfirm } from '@/lib/dispatch/data-collection';
 import { importedPhoneCell, readCustomerPhone } from '@/lib/dispatch/customer-phone';
+import { importedSmallTruckCell, readSmallTruckCell } from '@/lib/dispatch/small-truck';
 
 const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartMin', 'prefWindowEndMin'] as const;
 
@@ -80,6 +81,13 @@ const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartM
 // digits); a bad one is an error of its row, like a bad payment_type. As every optional field, a blank
 // cell or no such column keeps the saved phone: an import never clears one (Details does). Written,
 // and audited with the row's other fields, only when it differs from the saved one; part of row_version.
+//
+// Owner request 13 Oct 2026 ("small truck only" customers): an optional yes / no column
+// `small_truck_only` (as the downloaded master and data-to-collect files have it), or `small truck only`,
+// `small_truck`, `small truck` (any letter case; small-truck.ts importedSmallTruckCell). yes = the
+// unloading area takes small trucks only, no = any truck; anything else is an error of its row. A blank
+// cell or no such column keeps the saved value. Written and audited only when it differs from the saved
+// one; part of row_version only when yes (rowVersion), so files downloaded before still import.
 
 interface ImportError {
   row: number;
@@ -124,6 +132,8 @@ interface CustomerRow {
   rowVersion: string | null;
   /** The phone for the driver as it is stored (readCustomerPhone); null = blank or not in the file (keep). */
   phone: string | null;
+  /** Small trucks only (owner request 13 Oct 2026): yes / no; null = blank or not in the file (keep). */
+  smallTruckOnly: boolean | null;
 }
 
 const PAYMENT_TYPES = new Set(['CASH', 'CREDIT', 'PREPAID']);
@@ -185,7 +195,7 @@ export async function POST(req: Request) {
     select: {
       id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true,
       // What a row would change (item 6: a row that changes nothing writes nothing, so a master imported back changes nothing).
-      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true, phone: true,
+      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true, phone: true, smallTruckOnly: true,
       hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true, windowConfirmedAt: true,
     },
   });
@@ -286,6 +296,14 @@ export async function POST(req: Request) {
       }
     }
 
+    // Owner request 13 Oct 2026: small trucks only (yes / no; blank keeps the saved value).
+    const smallCell = importedSmallTruckCell(raw);
+    const small = smallCell ? readSmallTruckCell(smallCell.value, smallCell.column) : ({ ok: true, value: null } as const);
+    if (!small.ok) {
+      errors.push({ row, message: small.error });
+      return;
+    }
+
     const latRaw = cell(raw, 'lat');
     const lngRaw = cell(raw, 'lng');
     let lat: number | null = null;
@@ -330,6 +348,7 @@ export async function POST(req: Request) {
       hoursCells,
       rowVersion: cell(raw, 'row_version') || null,
       phone: phone.phone,
+      smallTruckOnly: small.value,
     });
   });
 
@@ -342,6 +361,7 @@ export async function POST(req: Request) {
   const changesSomething = (v: CustomerRow, m: NonNullable<ReturnType<typeof matchOf>>): boolean => {
     if (v.name !== m.name || (v.address && v.address !== m.address) || (v.paymentType && v.paymentType !== m.paymentType)) return true;
     if (v.phone && v.phone !== m.phone) return true;
+    if (v.smallTruckOnly !== null && v.smallTruckOnly !== !!m.smallTruckOnly) return true;
     if (v.regionCode && (regionByCode.get(v.regionCode.toLowerCase()) ?? null) !== m.regionId) return true;
     const p = importedPriority(v.priority, v.priorityConfirm, m);
     if (p.priority !== null || p.confirm) return true;
@@ -564,6 +584,7 @@ export async function POST(req: Request) {
           ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
           ...(v.paymentType ? { paymentType: v.paymentType } : {}),
           ...(v.phone ? { phone: v.phone } : {}),
+          ...(v.smallTruckOnly ? { smallTruckOnly: true } : {}),
           ...hoursData,
         },
       });
@@ -576,7 +597,7 @@ export async function POST(req: Request) {
         entity: 'Customer',
         entityId: created.id,
         afterJson: {
-          code: v.code, branchCode: v.branchCode, name: v.name, regionId, lat: v.lat, lng: v.lng, priority: v.priority, ...(v.phone ? { phone: v.phone } : {}), ...hoursShown, source: 'IMPORT', fileName: parsed.fileName,
+          code: v.code, branchCode: v.branchCode, name: v.name, regionId, lat: v.lat, lng: v.lng, priority: v.priority, ...(v.phone ? { phone: v.phone } : {}), ...(v.smallTruckOnly ? { smallTruckOnly: true } : {}), ...hoursShown, source: 'IMPORT', fileName: parsed.fileName,
         } as never,
         ip,
       });
@@ -598,6 +619,8 @@ export async function POST(req: Request) {
       if (v.paymentType && v.paymentType !== m.paymentType) data.paymentType = v.paymentType;
       // A blank phone keeps the saved one (owner request 12 Oct 2026); only a different one is written.
       if (v.phone && v.phone !== m.phone) data.phone = v.phone;
+      // Small trucks only (owner request 13 Oct 2026): yes or no written when it differs; blank keeps it.
+      if (v.smallTruckOnly !== null && v.smallTruckOnly !== !!m.smallTruckOnly) data.smallTruckOnly = v.smallTruckOnly;
       let wrote = false;
       if (Object.keys(data).length) {
         wrote = true;

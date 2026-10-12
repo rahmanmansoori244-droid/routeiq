@@ -769,3 +769,83 @@ describe("the customer's phone: collected in both workbooks and read back by the
     expect(masterValues(m, { area: DEFAULT_SERVICE_AREA, profiles: new Map(), serviceTimeMin: 10, timezone: 'Asia/Muscat' })).toMatchObject({ phone: '9123 4567' });
   });
 });
+
+/**
+ * Owner request 13 Oct 2026 ("small truck only" customers, lib/dispatch/small-truck.ts): both workbooks
+ * have a `small_truck_only` column (yes / no as saved) that the import reads back - also from a `small
+ * truck only`, `small_truck` or `small truck` column -, a blank cell keeping the saved value. Written
+ * and audited only when it changes; part of row_version only when yes.
+ */
+describe('small truck only: a column of both workbooks, read back by the import (owner request 13 Oct 2026)', () => {
+  const master = async () => masterGet(new Request('http://localhost/api/customers/master'));
+
+  it('customer master and data to collect: the column with yes / no as saved; the master imported back as downloaded changes nothing', async () => {
+    row('customer', 'DONE').smallTruckOnly = true;
+    const before = JSON.parse(JSON.stringify(tables.customer));
+    const res = await master();
+    const buf = Buffer.from(await res.clone().arrayBuffer());
+    const ws = (await workbookOf(res)).getWorksheet('Customers')!;
+    expect(rowsOf(ws).map((x) => [x.code, x.small_truck_only])).toEqual(expect.arrayContaining([['DONE', 'yes'], ['OPEN', 'no']]));
+    const r = await importXlsx(buf);
+    expect(r.body.data).toMatchObject({ errorRows: 0, unchanged: 6 });
+    expect(JSON.parse(JSON.stringify(tables.customer))).toEqual(before);
+    expect(audits.filter((a) => a.action === 'UPDATE')).toEqual([]);
+    const dc = (await workbookOf(await getWorklist('?format=xlsx'))).worksheets[0]!;
+    expect(rowsOf(dc).find((x) => x.code === 'USABLE')).toMatchObject({ small_truck_only: 'no' });
+    expect(rowsOf(dc).find((x) => x.code === 'USABLE')!.what_to_do).not.toMatch(/small truck/i);
+  });
+
+  it('yes on the data-to-collect sheet marks the customer, audited with the row; no unmarks; blank keeps', async () => {
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    setCells(wb.worksheets[0]!, 'NONE', { small_truck_only: 'yes' });
+    setCells(wb.worksheets[0]!, 'LOW', { small_truck_only: '' });
+    expect((await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()))).body.data).toMatchObject({ errorRows: 0 });
+    expect(row('customer', 'NONE').smallTruckOnly).toBe(true);
+    expect(row('customer', 'LOW').smallTruckOnly ?? false).toBe(false);
+    expect(audits.filter((a) => a.action === 'UPDATE').map((a) => [a.entityId, a.beforeJson, a.afterJson.smallTruckOnly])).toEqual([
+      ['NONE', { smallTruckOnly: null }, true],
+    ]);
+    // (Each import below also confirms NONE's priority: only the rows that name smallTruckOnly count here.)
+    audits.length = 0;
+    expect((await importCsv('code,name,priority,small_truck_only\nNONE,Customer NONE,3,\n')).body.data).toMatchObject({ errorRows: 0 });
+    expect(row('customer', 'NONE').smallTruckOnly).toBe(true);
+    expect(audits.some((a) => a.action === 'UPDATE' && 'smallTruckOnly' in (a.afterJson ?? {}))).toBe(false);
+    expect((await importCsv('code,name,priority,small_truck_only\nNONE,Customer NONE,3,no\n')).body.data).toMatchObject({ errorRows: 0 });
+    expect(row('customer', 'NONE').smallTruckOnly).toBe(false);
+    expect(audits.find((a) => a.action === 'UPDATE' && 'smallTruckOnly' in (a.afterJson ?? {}))).toMatchObject({ beforeJson: { smallTruckOnly: true }, afterJson: { smallTruckOnly: false } });
+  });
+
+  it('the aliases small truck only, small_truck and small truck (any letter case); a value that is not yes / no is an error of its row', async () => {
+    for (const head of ['Small Truck Only', 'SMALL_TRUCK', 'small truck']) {
+      await importCsv(`code,name,priority,${head}\nUSABLE,Customer USABLE,3,no\n`);
+      expect((await importCsv(`code,name,priority,${head}\nUSABLE,Customer USABLE,3,yes\n`)).body.data, head).toMatchObject({ errorRows: 0, unchanged: 0 });
+      expect(row('customer', 'USABLE').smallTruckOnly, head).toBe(true);
+    }
+    const r = await importCsv('code,name,priority,small_truck_only\nNONE,Customer NONE,3,3-ton\n');
+    expect(r.body.data.errors).toEqual([{ row: 2, message: 'small_truck_only must be yes or no (got "3-ton").' }]);
+    expect(row('customer', 'NONE').smallTruckOnly ?? false).toBe(false);
+  });
+
+  it('a new customer gets it from its row (in its CREATE row)', async () => {
+    session.role = 'TENANT_ADMIN';
+    expect((await importCsv('code,name,priority,small_truck_only\nNEW3,New Shop,3,yes\n')).body.data).toMatchObject({ errorRows: 0, creates: 1 });
+    const created = tables.customer.find((c) => c.code === 'NEW3')!;
+    expect(created.smallTruckOnly).toBe(true);
+    expect(audits.find((a) => a.action === 'CREATE' && a.entityId === created.id)).toMatchObject({ afterJson: { code: 'NEW3', smallTruckOnly: true, source: 'IMPORT' } });
+  });
+
+  it('row_version: marked in RouteIQ after the download, the old row is not imported (it would unmark it)', async () => {
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    row('customer', 'USABLE').smallTruckOnly = true;
+    const r = await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.body.data.staleRows).toEqual([{ row: 4, code: 'USABLE', branchCode: null }]);
+    expect(row('customer', 'USABLE').smallTruckOnly).toBe(true);
+  });
+
+  it('"Changed since" says Small truck only', () => {
+    const s = changeSummary({ createdAt: null, updatedAt: null, createdFromUpload: false }, [
+      { action: 'UPDATE', createdAt: new Date('2026-10-13T08:00:00Z'), userName: 'Sara', beforeJson: { smallTruckOnly: false }, afterJson: { smallTruckOnly: true } },
+    ], new Date('2026-10-12T00:00:00Z'));
+    expect(s).toMatchObject({ by: 'Sara', what: 'Small truck only' });
+  });
+});
