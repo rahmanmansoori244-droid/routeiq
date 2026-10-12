@@ -78,9 +78,10 @@ beforeAll(async () => {
     data: { timezone: 'Asia/Muscat', planningCutoffMin: 18 * 60, shiftStartMin: 360, driverShiftMaxMinutes: 720, distanceProvider: 'HAVERSINE', osrmUrl: null },
   });
   depotId = (await prisma.depot.create({ data: { tenantId: t.tenantId, code: 'MCT', name: 'Muscat depot', lat: 23.568, lng: 58.392, openMin: 300, closeMin: 1380 } })).id;
-  // NMWC's sizes: a 10-ton with 12 bays (cheap to run here) and a 3-ton with 6 bays (dear).
+  // NMWC's sizes: a 10-ton with 12 bays (cheap to run here) and a 3-ton with 6 bays (dear, one load a day:
+  // the day's 8.5 pallets cannot all ride it, so the 10-ton always carries some of the other customers).
   bigId = (await prisma.truck.create({ data: { tenantId: t.tenantId, depotId, code: 'T10', capacityCases: 1140, capacityWeightKg: 0, fixedCostPerDay: 5, costPerKm: 0.05, bays: 12 } })).id;
-  smallId = (await prisma.truck.create({ data: { tenantId: t.tenantId, depotId, code: 'T03', capacityCases: 570, capacityWeightKg: 0, fixedCostPerDay: 60, costPerKm: 0.2, bays: 6 } })).id;
+  smallId = (await prisma.truck.create({ data: { tenantId: t.tenantId, depotId, code: 'T03', capacityCases: 570, capacityWeightKg: 0, fixedCostPerDay: 60, costPerKm: 0.2, bays: 6, maxTripsPerDay: 1 } })).id;
   await prisma.product.create({ data: { tenantId: t.tenantId, code: 'TN1.5L', name: 'Tanuf 1.5L', weightPerCaseKg: 10, casesPerPallet: 95 } });
   for (const [code, lat, lng] of [['SHOP', 23.588, 58.41], ['HYPER', 23.6, 58.372], ['MART', 23.555, 58.335]] as const) {
     await prisma.customer.create({
