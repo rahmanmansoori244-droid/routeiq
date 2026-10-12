@@ -37,7 +37,7 @@ export type CustomerPhoneRead = { ok: true; phone: string | null } | { ok: false
 
 /** Arabic-Indic (U+0660-0669) and Persian / Urdu (U+06F0-06F9) digits as 0-9 (as the driver page's cases box). */
 function westernDigits(s: string): string {
-  return s.replace(/[٠-٩۰-۹]/g, (c) => String(c.charCodeAt(0) & 0xf));
+  return s.replace(/[\u0660-\u0669\u06F0-\u06F9]/g, (c) => String(c.charCodeAt(0) & 0xf));
 }
 
 /**
