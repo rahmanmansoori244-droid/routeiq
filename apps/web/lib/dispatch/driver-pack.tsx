@@ -1,7 +1,8 @@
 /**
  * Driver sheets ("driver pack"): one A4 portrait section per truck load, for the driver to take
  * in the cab - who to visit in which order, when, what to hand over, where the place is (link +
- * QR), and a box per stop for the customer's signature/stamp.
+ * QR), the customer's phone to call before arrival (owner request 12 Oct 2026), and a box per stop
+ * for the customer's signature/stamp.
  *
  * Built only from PlanDetail (the same object as the plan screen and the Excel workbook), in two
  * steps: driverPackModel() (here) is pure and unit-tested; renderDriverPackPdf()
@@ -38,6 +39,11 @@ export interface SheetStop {
   priority: number;
   address: string | null;
   accessNotes: string | null;
+  /**
+   * The customer's phone, printed "Tel <phone>" under the name and address (owner request 12 Oct 2026:
+   * the driver calls before arrival); live, like accessNotes. Null = none (nothing printed).
+   */
+  phone: string | null;
   notes: string[];
   /** Split delivery: this stop is part `part` of `parts`; `others` says where the other parts go. */
   split: { part: number; parts: number; others: string[]; restUnserved: boolean } | null;
@@ -218,6 +224,9 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     priority: s.priority,
     address: t.maybe(s.address) || null,
     accessNotes: t.maybe(s.accessNotes) || null,
+    // Through pdfSafe like every text (a phone is checked to digits and + - ( ) / when saved, but the
+    // sheet never trusts that): Latin only.
+    phone: t.maybe(s.customerPhone)?.trim() || null,
     notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,

@@ -378,6 +378,19 @@ describe('snapshots (F08)', () => {
     expect(row('routeAssignment', 'A1').stopSnapshotJson.accessNotes).toBe('Back gate'); // kept for the record
   });
 
+  it("the customer's phone is read live too (owner request 12 Oct 2026): added after planning, it reaches the stop; never a change to re-plan", async () => {
+    seed();
+    row('planLoad', 'L1').status = 'LOCKED';
+    // A customer saved before the phone existed (no such field) has none.
+    let s1 = (await getPlanDetail(T, 'P'))!.loads.find((l) => l.id === 'L1')!.stops[0];
+    expect(s1.customerPhone).toBeNull();
+    tables.order.find((o) => o.id === 'O1')!.customer = customer({ phone: '9123 4567' });
+    s1 = (await getPlanDetail(T, 'P'))!.loads.find((l) => l.id === 'L1')!.stops[0];
+    expect(s1.customerPhone).toBe('9123 4567');
+    expect(s1.masterChanged).toEqual([]);
+    expect('phone' in row('routeAssignment', 'A1').stopSnapshotJson).toBe(false); // not a planned fact
+  });
+
   it('an inverted receiving window in legacy customer data is not "changed after planning"', async () => {
     seed();
     // Planned as any time (buildDispatchRequest drops a window that ends before it starts).
