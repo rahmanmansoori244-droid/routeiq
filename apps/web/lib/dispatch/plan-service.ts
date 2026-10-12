@@ -98,6 +98,8 @@ import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
 import { copyRowData } from './prisma-copy';
+import { planHelpers } from './load-helpers';
+import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
   distanceM,
@@ -1382,6 +1384,23 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     elsewhere,
     otherDepots,
   );
+  // Helpers (owner request 13 Oct 2026; rules: planHelpers in load-helpers.ts): frozen loads keep theirs,
+  // helpers set by hand stay on their truck and trip, every other trip gets the truck's usual helper when
+  // he is active and free at that time. Read before the PLANNED loads (and their helper rows) are deleted.
+  const helperEv = await helperEvidenceOf(tx, tenantId, runId);
+  const activeHelpers = new Set((await tx.helper.findMany({ where: { tenantId, active: true }, select: { id: true } })).map((h) => h.id));
+  const helpersOf = planHelpers(
+    d.loads.map((ld) => ({
+      key: loadKey(ld.truck_id, ld.load_no),
+      truckId: ld.truck_id,
+      loadNo: ld.load_no,
+      departMin: ld.depart_min,
+      returnMin: ld.return_min,
+      defaultHelperId: truckById.get(ld.truck_id)!.defaultHelperId ?? null,
+    })),
+    helperEv.evidence,
+    activeHelpers,
+  );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
   const driverChanges: DriverChangeNote[] = notes.map((n) => ({
@@ -1399,6 +1418,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     ...(n.cover ? { cover: n.cover } : {}),
   }));
 
+  await deleteHelpersOfLoads(tx, tenantId, helperEv.plannedIds);
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
@@ -1428,6 +1448,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     const loadUnits = palletEcho && typeof ld.pallet_units === 'number' && rowsUnits !== null ? rowsUnits : null;
     if (loadUnits !== null && loadUnits !== ld.pallet_units) palletMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverUnits: ld.pallet_units as number, rowsUnits: loadUnits });
     const driver = driverOf.get(loadKey(ld.truck_id, ld.load_no));
+    const crew = helpersOf.get(loadKey(ld.truck_id, ld.load_no));
     const load = await tx.planLoad.create({
       data: {
         tenantId,
@@ -1441,6 +1462,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         driverSetAt: driver?.driverSetAt ?? null,
         // Given as the cover of the truck's usual driver on leave (the column defaults to false).
         ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
+        // Helpers set by hand keep their marker; RouteIQ's (the usual helper) have none.
+        helpersSetById: crew?.helpersSetById ?? null,
+        helpersSetAt: crew?.helpersSetAt ?? null,
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -1464,6 +1488,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         palletUnits: loadUnits,
       },
     });
+    if (crew?.helperIds.length) await writeLoadHelpers(tx, tenantId, load.id, crew.helperIds);
     let running = 0;
     const rows: Prisma.RouteAssignmentCreateManyInput[] = [];
     for (const st of ld.stops) {
@@ -2394,6 +2419,9 @@ export async function createNextVersionTx(
     }
   }
   if (assignmentRows.length) await tx.routeAssignment.createMany({ data: assignmentRows });
+  // Helpers (owner request 13 Oct 2026) go with their load into the new version, as its driver (the
+  // copy kept the hand-set marker, helpersSetById / helpersSetAt, with the other columns).
+  await copyLoadHelpers(tx, tenantId, newLoadId);
 
   // The option in use, so the copy reconciles and can be dispatched. Its scope names the
   // frozen loads it was computed around: renamed to the copies (the "loads changed" check).
@@ -2489,6 +2517,8 @@ export interface LoadChange {
   status?: LoadStatusName;
   /** null = no driver */
   driverId?: string | null;
+  /** The load's helpers in order (0-3; [] = none). Owner request 13 Oct 2026. */
+  helperIds?: string[];
   /**
    * The dispatcher answered "<name> is on leave on <day>. Lock ... anyway?": Lock, Loading or Dispatch
    * of a load whose driver is on leave that day goes through (else 409 DRIVER_ON_LEAVE; leaveGate).
@@ -2515,6 +2545,7 @@ export async function updateLoad(
     const run = await lockOpenRun(tx, tenantId, runId);
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
+    if (change.helperIds !== undefined) load = await setHelpersTx(tx, tenantId, run, loadId, change.helperIds, user);
     if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true);
     // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
     // result changed after the carry warns in the answer ("may not be needed"); it is never refused.

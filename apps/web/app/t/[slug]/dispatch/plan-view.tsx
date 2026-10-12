@@ -48,6 +48,8 @@ import { reissuePrompt, reissuePromptText } from '@/lib/driver-link/reissue-prom
 import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
 import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
 import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
+import { LoadHelpersCell, type HelperOption } from './load-helpers-picker';
+import { helperClashes, helpersText } from '@/lib/dispatch/load-helpers';
 import type { ApiResult } from './client-api';
 import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
 import { officeTimesPrefill } from '@/lib/delivery/office-text';
@@ -156,6 +158,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
+  // Helpers (owner request 13 Oct 2026): the company's helpers for the Helper(s) picker.
+  const [helpers, setHelpers] = useState<HelperOption[]>([]);
 
   // Delivery results of this version's loads that left (owner request 4 Oct 2026, spec section 10):
   // read with the plan, and every 60 s while a load is on the road and the page is in front.
@@ -219,6 +223,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   useEffect(() => {
     void loadDrivers();
   }, [loadDrivers]);
+
+  const loadHelpers = useCallback(async () => {
+    const r = await api<HelperOption[]>('/api/helpers');
+    if (r.ok && r.data) setHelpers(r.data.map(({ id, code, name, active }) => ({ id, code, name, active })));
+  }, []);
+
+  useEffect(() => {
+    void loadHelpers();
+  }, [loadHelpers]);
 
   // The plan's truck-day driver links (owner request 4 Oct 2026), loaded with the plan for the
   // dispatcher (PLANNER+): the WhatsApp link carries the driver link at render time, never after an
@@ -395,6 +408,31 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
         await load();
         await onChanged?.();
+      },
+      failed,
+    );
+  }
+
+  /**
+   * Set the load's helpers (owner request 13 Oct 2026; the Helper(s) picker): 0 to 3, in order. The
+   * same states as the driver; a helper on another load at the same time is allowed and warned about.
+   */
+  function setLoadHelpers(l: DetailLoad, helperIds: string[]) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { helperIds } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not set the helpers.');
+          await load();
+          return;
+        }
+        const names = helpersText(helperIds.map((id) => helpers.find((h) => h.id === id)?.name ?? (l.helpers ?? []).find((h) => h.id === id)?.name));
+        toast.success(`${l.truckCode} Load ${l.loadNo}: ${names ? `helper(s) ${names}` : 'no helper'}`);
+        const fresh = await load();
+        const clash = fresh ? helperClashes(l.id, fresh.loads) : [];
+        if (clash.length) toast.warning(clash.join(' '));
       },
       failed,
     );
@@ -1134,6 +1172,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <th className="p-2" />
                 <th className="p-2">Truck · load</th>
                 <th className="p-2">Driver · sheet</th>
+                <th className="p-2">Helper(s)</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Depart → return</th>
                 <th className="p-2">Stops</th>
@@ -1205,6 +1244,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         // The dispatcher (PLANNER+) without a usable link yet: WhatsApp opens the Driver link dialog first.
                         linkFirst={canPlan && !superseded && !running && (!linkOf(l.truckId) || !!linkOf(l.truckId)?.keyChanged)}
                         onLink={canPlan && !superseded && !running ? () => setLinkDialog({ truckId: l.truckId, loadId: l.id }) : null}
+                      />
+                    </td>
+                    <td className="p-2" onClick={(e) => e.stopPropagation()}>
+                      <LoadHelpersCell
+                        l={l}
+                        helpers={helpers}
+                        editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
+                        busy={!!busy}
+                        onSave={(ids) => void setLoadHelpers(l, ids)}
                       />
                     </td>
                     <td className="p-2">
@@ -1299,7 +1347,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   </tr>
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
-                      <td colSpan={13} className="p-3">
+                      <td colSpan={14} className="p-3">
                         <LoadDetail
                           l={l}
                           depotCode={d.run.depot.code}
@@ -1329,7 +1377,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               ))}
               {d.loads.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="p-4 text-center text-muted-foreground">
+                  <td colSpan={14} className="p-4 text-center text-muted-foreground">
                     No loads yet.
                   </td>
                 </tr>

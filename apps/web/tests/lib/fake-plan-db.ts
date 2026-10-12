@@ -76,6 +76,12 @@ const REL: Record<string, Record<string, (r: Row) => unknown>> = {
     assignments: (r) => (tables.routeAssignment ?? []).filter((a) => a.loadId === r.id).map((a) => ({ ...a, order: orderOf(a.orderId) })),
     truck: (r) => (tables.truck ?? []).find((t) => t.id === r.truckId) ?? { code: '?' },
     driver: () => null,
+    // Helpers (13 Oct 2026): the load's PlanLoadHelper rows in order, each with its helper.
+    helpers: (r) =>
+      (tables.planLoadHelper ?? [])
+        .filter((h) => h.loadId === r.id)
+        .sort((a, b) => a.position - b.position)
+        .map((h) => ({ ...h, helper: (tables.helper ?? []).find((x) => x.id === h.helperId) ?? { id: h.helperId, code: '?', name: 'Unknown helper', phone: null, active: false } })),
   },
   scenarioResult: { unservedOrders: (r) => (tables.unservedOrder ?? []).filter((u) => u.scenarioId === r.id).map((u) => ({ ...u })) },
   // carriedTo (PR9): the copy an order was brought forward to, as the test row gives it. A row's own
@@ -247,6 +253,8 @@ const MODELS = [
   'hireOption', 'hireSuggestion',
   // Driver leave (owner request 6 Oct 2026): the planner reads who is away on the delivery day.
   'driverLeave',
+  // Helpers (owner request 13 Oct 2026): the company's helpers and the helpers on each load.
+  'helper', 'planLoadHelper',
 ];
 
 export const fakePrisma: Row = {};
