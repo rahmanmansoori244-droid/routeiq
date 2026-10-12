@@ -157,6 +157,13 @@ export interface ManifestStop {
   orders: ManifestOrder[];
   notes: string[];
   accessNotes: string | null;
+  /**
+   * The customer's phone as saved (owner request 12 Oct 2026: the driver calls the customer before
+   * arrival), live like accessNotes; null = none. Absent on a manifest kept on the phone from before.
+   */
+  customerPhone?: string | null;
+  /** Its tel: link, the company's calling code added to a local number (driver-links telUrl); null = no "Call customer". */
+  customerTel?: string | null;
   split: { part: number; parts: number } | null;
   /** YYYY-MM-DD the stop's order was first due (brought forward); null = none. */
   carriedFrom: string | null;

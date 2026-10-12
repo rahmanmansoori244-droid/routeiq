@@ -16,7 +16,7 @@ vi.mock('@/lib/tenant', async () => {
   return { tenantDb: () => m.fakePrisma };
 });
 
-import { mergeResults, navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
+import { _clearManifestMemo, driverManifest, mergeResults, navUrl, projectManifest, type ManifestInput } from '@/lib/driver-link/manifest';
 import { getPlanDetail } from '@/lib/dispatch/plan-detail';
 import { plannedStopOf } from '@/lib/delivery/planned-stop';
 import { fakePrisma } from './fake-plan-db';
@@ -110,6 +110,20 @@ describe('projectManifest', () => {
     expect(s.navUrl).toContain('destination=23.5859,58.3829');
   });
 
+  it("each stop carries its customer's phone and a tel: link with the company's calling code (owner request 12 Oct 2026); never another truck's customers'", () => {
+    const d = fixture(); // C001 (T01 trip 1, stop 1) has 9123 4567; C002 none
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], customerPhone: '2456 7890' }; // C004 on the long truck (t2)
+    const m = projectManifest([d], input({ callingCode: '968' }));
+    const stops = m.loads.flatMap((l) => l.stops);
+    expect(stops.find((s) => s.customerCode === 'C001')).toMatchObject({ customerPhone: '9123 4567', customerTel: 'tel:+96891234567' });
+    expect(stops.find((s) => s.customerCode === 'C002')).toMatchObject({ customerPhone: null, customerTel: null });
+    expect(JSON.stringify(m)).not.toMatch(/2456 ?7890/);
+    // The other truck's link has its own customer's phone.
+    expect(projectManifest([d], input({ truckId: 't2', callingCode: '968' })).loads[0].stops[0]).toMatchObject({ customerPhone: '2456 7890', customerTel: 'tel:+96824567890' });
+    // No calling code (a company outside Oman and the UAE): the number is dialled as written.
+    expect(projectManifest([d], input()).loads[0].stops[0].customerTel).toBe('tel:91234567');
+  });
+
   it('a stop without a location has no Navigate link', () => {
     expect(navUrl(null, 58.4)).toBeNull();
     const d = fixture();
@@ -191,6 +205,35 @@ describe('getPlanDetail: the additive stop fields (orderLines, plannedHours, pro
     tables.routeAssignment[0].portionCases = 5;
     const s = (await getPlanDetail('tA', 'P'))!.loads[0].stops[0];
     expect(s.orderLines).toEqual([{ orderId: 'O1', lineId: 'LN1', salesOrderNo: 'SO-1', productCode: 'A', productName: 'Product A', cases: 5 }]);
+  });
+
+  it("driverManifest (GET /api/d/manifest): the customer's phone with a tel: link dialling the company's country, only on the link's own truck-day (owner request 12 Oct 2026)", async () => {
+    _clearManifestMemo();
+    // The manifest's memo stamp (the fake database has no aggregate).
+    fakePrisma.planLoad.aggregate = async () => ({ _count: { _all: tables.planLoad.length }, _max: { statusChangedAt: null, driverSetAt: null, createdAt: null } });
+    tables.tenant = [{ id: 'tA', name: 'Synthetic Water Co', country: 'Oman' }];
+    tables.tenantConfig = [{ tenantId: 'tA', timezone: 'Asia/Muscat', geofenceRadiusM: 100, photoProofRequired: true, locationRetentionDays: 90, dispatcherPhone: null }];
+    tables.stopVisit = [];
+    tables.stopEvent = [];
+    tables.order[0].customer.phone = '9123 4567';
+    // Another truck of the same plan whose customer has a phone too: never on T05's page.
+    tables.truck.push({ id: 'T6', tenantId: 'tA', code: 'T06', capacityCases: 600, capacityWeightKg: 12000, hired: false });
+    tables.planLoad.push({ ...tables.planLoad[0], id: 'L2', truckId: 'T6' });
+    tables.order.push({ ...tables.order[0], id: 'O2', customerId: 'C2', customer: { ...tables.order[0].customer, id: 'C2', code: 'OTHER', name: 'Other Shop', phone: '2456 7890' } });
+    tables.routeAssignment.push({ ...tables.routeAssignment[0], id: 'RA2', truckId: 'T6', orderId: 'O2', loadId: 'L2' });
+    const read = (truckId: string) =>
+      driverManifest({
+        tenantId: 'tA',
+        truckId,
+        date: '2026-10-05',
+        link: { expiresAt: new Date('2026-10-06T08:00:00Z'), uploadUntil: new Date('2026-10-09T08:00:00Z'), generation: 1 },
+        office: null,
+        now: new Date('2026-10-05T05:00:00Z'),
+      });
+    const m = await read('T5');
+    expect(m.loads.flatMap((l) => l.stops).map((s) => [s.customerCode, s.customerPhone, s.customerTel])).toEqual([['ACME', '9123 4567', 'tel:+96891234567']]);
+    expect(JSON.stringify(m)).not.toMatch(/2456 ?7890|Other Shop/);
+    expect((await read('T6')).loads[0]!.stops[0]).toMatchObject({ customerCode: 'OTHER', customerPhone: '2456 7890', customerTel: 'tel:+96824567890' });
   });
 
   it('Part 2: the planned stop of the driver API has exactly the manifest\'s order lines (whole and split), so the two paths cannot drift', async () => {
