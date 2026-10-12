@@ -9,6 +9,8 @@ bug or a fallback path shows up as a violation instead of a timetable no truck c
 Rules (all times in whole minutes, as the scenario reports them; TOL_MIN absorbs the rounding of
 seconds to minutes in dispatch_solver._min_of):
 
+* allowed trucks: a stop limited to some trucks (DispatchStop.allowed_truck_ids, owner request 13 Oct
+  2026: "small truck only" customers) is on one of them (TRUCK_NOT_ALLOWED);
 * capacity: a load's cases (and kg, when the truck has a payload) from the request's stops; kg in
   0.1 kg units, each stop to the nearest unit, the payload rounded down - no margin (audit F08);
   on a truck with bays (owner decision 4 Oct 2026) its pallets instead of its cases: the request's
@@ -61,8 +63,9 @@ log = logging.getLogger("routeiq.dispatch.feasibility")
 
 TOL_MIN = 1  # minutes: every emitted time is rounded to a whole minute
 # 2: the receiving-hours rule FINISH (unloading finished by closing) and the driver break;
-# 3: pallets on trucks with bays (CAPACITY_PALLETS, the load's pallet units in LOAD_TOTALS).
-CHECK_VERSION = 3
+# 3: pallets on trucks with bays (CAPACITY_PALLETS, the load's pallet units in LOAD_TOTALS);
+# 4: a stop only on the trucks it may go on (TRUCK_NOT_ALLOWED: DispatchStop.allowed_truck_ids).
+CHECK_VERSION = 4
 
 
 def _hhmm(m: float | int | None) -> str:
@@ -157,6 +160,11 @@ def check_scenario(
             for st, s in zip(ld.stops, known):
                 if s is None:
                     add("UNKNOWN_STOP", f"Stop {st.stop_id} on {code} load {lno} is not in the request.", truck_id=tid,
+                        load_no=lno, stop_id=st.stop_id)
+                elif s.allowed_truck_ids is not None and tid not in s.allowed_truck_ids:
+                    # Owner request 13 Oct 2026: a "small truck only" customer on a truck it may not go on.
+                    only = s.allowed_trucks_label or "one of the trucks allowed for it"
+                    add("TRUCK_NOT_ALLOWED", f"{code} load {lno} visits {st.stop_id}, which needs {only}.", truck_id=tid,
                         load_no=lno, stop_id=st.stop_id)
             cases = sum(s.demand_cases for s in known if s is not None)
             # In 0.1 kg units, each stop to the nearest unit, against the payload rounded down: the
