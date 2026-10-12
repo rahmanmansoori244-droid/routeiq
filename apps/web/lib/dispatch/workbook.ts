@@ -683,12 +683,15 @@ function addTruckDaysSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta)
   );
 }
 
-// Delivery-route table columns (1-based), shared by the header block and the route rows.
+// Delivery-route table columns (1-based), shared by the header block and the route rows. "Phone" (owner
+// request 12 Oct 2026: the customer's phone, for the driver to call before arrival; live, like the
+// access notes) sits next to "Map", the other way to reach the customer, so the columns before it keep
+// their places.
 const ROUTE_HEADS = [
   'Seq', 'Customer code', 'Branch', 'Customer name', 'Priority', 'Type', 'ETA', 'Unloading', 'Window', 'Service min',
-  'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Notes', 'Changed after planning', 'Received by (sign)',
+  'Cases', 'Kg', 'SKUs', 'Sales orders', 'Km from prev', 'Cumulative km', 'Map', 'Phone', 'Notes', 'Changed after planning', 'Received by (sign)',
 ];
-const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 12, 24, 8, 8, 10, 44, 20, 9, 10, 8, 40, 30, 18];
+const ROUTE_WIDTHS = [5, 13, 10, 30, 8, 12, 8, 12, 24, 8, 8, 10, 44, 20, 9, 10, 8, 16, 40, 30, 18];
 
 function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: DetailLoad, name: string) {
   const ws = wb.addWorksheet(name, { views: [{ state: 'frozen', ySplit: 2 }], pageSetup: { ...LANDSCAPE } });
@@ -807,13 +810,13 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ws,
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (depart)`, '', '', fmtHhmm(l.departMin), '', '', null, null, null, '', '', null, 0,
-      { text: 'Map', hyperlink: depotMap },
+      { text: 'Map', hyperlink: depotMap }, '',
       `Departure ${fmtHhmm(l.departMin)}${(l.masterChanged ?? []).filter((c) => c.kind === 'DEPOT').map((c) => ` · ${c.text}`).join('')}`, '', ''],
     fmts,
   );
   // The driver break as its own row, where it is taken (never while unloading).
   const breakRow = (row: number) =>
-    tableRow(ws, row, ['', 'BREAK', '', `Driver break ${l.break!.lengthMin} min`, '', '', fmtHhmm(l.break!.startMin), breakTimes(l.break!), '', null, null, null, '', '', null, null, '',
+    tableRow(ws, row, ['', 'BREAK', '', `Driver break ${l.break!.lengthMin} min`, '', '', fmtHhmm(l.break!.startMin), breakTimes(l.break!), '', null, null, null, '', '', null, null, '', '',
       breakLine(l.break!, l.stops.length), '', ''], fmts);
   if (l.break && (l.break.where === 'DEPOT' || (l.break.afterSequence ?? 0) === 0)) breakRow(r++);
   let running = 0;
@@ -838,7 +841,7 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
       [
         s.sequence, s.customerCode, s.branchCode ?? '', s.customerName, `P${s.priority}`, s.customerType ?? '', fmtHhmm(s.etaMin),
         s.departureMin !== null ? `${fmtHhmm(s.serviceStartMin)}-${fmtHhmm(s.departureMin)}` : fmtHhmm(s.serviceStartMin), s.window, s.serviceMin, s.cases, s.weightKg, skuText(s.skus), uniq(s.salesOrders).join(', '),
-        s.legKm, s.cumulativeKm ?? running, s.mapsUrl ? { text: 'Map', hyperlink: s.mapsUrl } : '', notes.join('; '),
+        s.legKm, s.cumulativeKm ?? running, s.mapsUrl ? { text: 'Map', hyperlink: s.mapsUrl } : '', s.customerPhone?.trim() || '', notes.join('; '),
         s.masterChanged.map((c) => c.text).join('; '), '',
       ],
       fmts,
@@ -849,14 +852,14 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     ws,
     r++,
     ['', 'DEPOT', '', `${depot.code} - ${depot.name} (return)`, '', '', fmtHhmm(l.returnMin), '', '', null, null, null, '', '',
-      l.returnLegKm, l.distanceKm, { text: 'Map', hyperlink: depotMap }, `Back at depot ${fmtHhmm(l.returnMin)} · return leg ${l.returnLegKm.toFixed(1)} km`, '', ''],
+      l.returnLegKm, l.distanceKm, { text: 'Map', hyperlink: depotMap }, '', `Back at depot ${fmtHhmm(l.returnMin)} · return leg ${l.returnLegKm.toFixed(1)} km`, '', ''],
     fmts,
   );
   const stopCases = sum(l.stops.map((s) => s.cases));
   totalRow(
     ws,
     r,
-    ['', 'TOTAL', '', `${l.stops.length} stops`, '', '', '', '', '', '', stopCases, sum(l.stops.map((s) => s.weightKg)), '', '', '', l.distanceKm, '',
+    ['', 'TOTAL', '', `${l.stops.length} stops`, '', '', '', '', '', '', stopCases, sum(l.stops.map((s) => s.weightKg)), '', '', '', l.distanceKm, '', '',
       stopCases !== l.cases ? `MISMATCH: load records ${l.cases} cases` : `Total time ${fmtDuration(l.durationMin)}`, '', ''],
     fmts,
   );

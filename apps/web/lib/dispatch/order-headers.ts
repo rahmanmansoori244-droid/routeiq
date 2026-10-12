@@ -26,8 +26,34 @@ export type CanonicalField =
 
 /** Built-in aliases (normalized: lowercase, letters+digits only). Tenants can add more. */
 export const HEADER_ALIASES: Record<CanonicalField, string[]> = {
-  sales_order_no: ['salesorderno', 'salesorder', 'salesordernumber', 'sono', 'sonumber', 'orderno', 'ordernumber', 'orderid', 'docno', 'documentno', 'documentnumber', 'so'],
-  order_date: ['orderdate', 'sodate', 'documentdate', 'docdate', 'salesorderdate'],
+  // Owner decision 12 Oct 2026: RouteIQ only ever gets sales INVOICES (the ERP turns the sales order
+  // into an invoice; the number uploaded is the invoice number), so an invoice column is the document
+  // number, and it wins over a sales-order column in the same file.
+  sales_order_no: [
+    'invoiceno',
+    'invoicenumber',
+    'invoice',
+    'invno',
+    'invoiceid',
+    'salesinvoiceno',
+    'salesinvoicenumber',
+    'salesinvoice',
+    'taxinvoiceno',
+    'taxinvoicenumber',
+    'salesorderno',
+    'salesorder',
+    'salesordernumber',
+    'sono',
+    'sonumber',
+    'orderno',
+    'ordernumber',
+    'orderid',
+    'docno',
+    'documentno',
+    'documentnumber',
+    'so',
+  ],
+  order_date: ['orderdate', 'sodate', 'documentdate', 'docdate', 'salesorderdate', 'invoicedate', 'invdate'],
   delivery_date: ['deliverydate', 'requesteddeliverydate', 'reqdeliverydate', 'requesteddate', 'reqdate', 'deliverydt', 'shipdate', 'dispatchdate', 'deliveryon', 'date'],
   customer_code: ['customercode', 'custcode', 'customerno', 'customernumber', 'customerid', 'customer', 'accountcode', 'account', 'cust', 'soldto', 'soldtocode'],
   branch_code: ['branchcode', 'branch', 'branchno', 'shiptocode', 'shipto', 'shiptono', 'outletcode', 'outlet', 'site', 'sitecode', 'locationcode'],
@@ -58,9 +84,13 @@ export function mapHeaders(headers: string[], extra: Partial<Record<CanonicalFie
   const used: Partial<Record<CanonicalField, string>> = {};
   const byNorm = new Map(headers.map((h) => [normHeader(h), h]));
   const taken = new Set<string>();
-  // Tenant aliases first, then exact canonical name, then built-ins in declaration order.
+  // Tenant aliases first, then exact canonical name, then built-ins in declaration order. The
+  // document number is the exception (owner decision 12 Oct 2026): its built-ins start with the
+  // invoice names, so its canonical name ("Sales Order No" = salesorderno, also a built-in after
+  // them) must not be tried first, or a sales-order column would beat an invoice column.
   for (const field of Object.keys(HEADER_ALIASES) as CanonicalField[]) {
-    const candidates = [...(extra[field] ?? []).map(normHeader), normHeader(field), ...HEADER_ALIASES[field]];
+    const canonical = field === 'sales_order_no' ? [] : [normHeader(field)];
+    const candidates = [...(extra[field] ?? []).map(normHeader), ...canonical, ...HEADER_ALIASES[field]];
     for (const c of candidates) {
       const h = byNorm.get(c);
       if (h && !taken.has(h)) {

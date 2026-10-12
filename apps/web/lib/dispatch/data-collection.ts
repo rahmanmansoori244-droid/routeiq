@@ -12,7 +12,12 @@
  *  - Item 6, daily customer master: one row per customer (`masterValues`, MASTER_COLUMNS) that the
  *    customer import reads back; what changed since a date (`changeSummary`); and the import's
  *    receiving-hours columns (`readImportedHours`).
+ *  - Owner request 12 Oct 2026: the customer's phone, for the driver to call before arrival, is a
+ *    column of both workbooks (imported back; a blank cell keeps the saved phone) and is asked for in
+ *    what_to_do when it is missing. It is collected, never required: it changes neither who is on the
+ *    list nor the loading gate.
  */
+import { CUSTOMER_PHONE_COLUMN_TEXT, CUSTOMER_PHONE_RULE } from './customer-phone';
 import { DEFAULT_SERVICE_AREA, type ServiceArea } from './location-input';
 import {
   effectiveAttrs,
@@ -423,6 +428,8 @@ export interface VersionedCustomer {
   prefWindowStartMin: number | null;
   prefWindowEndMin: number | null;
   windowConfirmedAt?: Date | string | null;
+  /** The phone for the driver (owner request 12 Oct 2026); absent or null = none. */
+  phone?: string | null;
 }
 
 /** cyrb53: a short, stable hash (not for security; the same in the browser and the server). */
@@ -453,6 +460,10 @@ export function rowVersion(c: VersionedCustomer): string {
     c.lat, c.lng, c.locationVerified, c.geocodeConfidence ?? null,
     c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin,
     confirmedAt && !Number.isNaN(confirmedAt.getTime()) ? confirmedAt.toISOString() : null,
+    // The phone (owner request 12 Oct 2026), only when the customer has one: a customer without a
+    // phone keeps the version it had before the phone existed, so a file downloaded before this
+    // release still imports (no customer had a phone then). One added or changed since is a change.
+    ...(c.phone ? [c.phone] : []),
   ];
   return `v1-${shortHash(JSON.stringify(values))}`;
 }
@@ -493,6 +504,13 @@ export const MASTER_COLUMNS: readonly MasterColumn[] = [
   { key: 'unloading_time', width: 30, imported: false, text: 'The unloading time planning uses, and where it comes from.' },
   { key: 'payment_type', width: 10, imported: true, text: 'cash / credit / prepaid.' },
   { key: 'address', width: 36, imported: true, text: 'Address.' },
+  {
+    key: 'phone',
+    width: 16,
+    imported: true,
+    // Owner request 12 Oct 2026: the short instruction, then the rule the import checks.
+    text: `The ${CUSTOMER_PHONE_COLUMN_TEXT}. ${CUSTOMER_PHONE_RULE} For example +968 9123 4567. A blank cell keeps the saved phone.`,
+  },
   { key: 'active', width: 7, imported: false, text: 'yes / no. Changed on the Customers page.' },
   { key: 'created_at', width: 17, imported: false, text: 'When the customer was created (blank: before this was recorded).' },
   { key: 'updated_at', width: 17, imported: false, text: 'When the customer last changed (blank: not since this was recorded).' },
@@ -519,6 +537,8 @@ export interface MasterCustomer extends CustomerForPlanning {
   windowConfirmedBy: string | null;
   createdAt: Date | null;
   updatedAt: Date | null;
+  /** The phone for the driver (owner request 12 Oct 2026); absent or null = none. */
+  phone?: string | null;
 }
 
 export interface MasterContext {
@@ -599,6 +619,7 @@ export function masterValues(c: MasterCustomer, ctx: MasterContext): Record<stri
     unloading_time: `${eff.serviceMin} min (${SOURCE_WORDS[eff.serviceSource]})`,
     payment_type: c.paymentType.toLowerCase(),
     address: c.address,
+    phone: c.phone ?? null,
     active: c.active ? 'yes' : 'no',
     created_at: localStamp(c.createdAt, ctx.timezone),
     updated_at: localStamp(c.updatedAt, ctx.timezone),
@@ -609,7 +630,9 @@ export function masterValues(c: MasterCustomer, ctx: MasterContext): Record<stri
 /**
  * What the collector does for one customer on the data-to-collect sheet (its "what_to_do" cell).
  * Hours already in the file that are not confirmed stay not confirmed when the row is left as it is
- * (so importing the master back changes nothing): the collector writes yes in hours_confirmed.
+ * (so importing the master back changes nothing): the collector writes yes in hours_confirmed. A
+ * customer without a phone is asked for one too, as optional (owner request 12 Oct 2026): it never
+ * puts a customer on the list.
  */
 export function collectText(r: { location: boolean; window: boolean }, v: Record<string, MasterValue>): string {
   const out: string[] = [];
@@ -622,6 +645,7 @@ export function collectText(r: { location: boolean; window: boolean }, v: Record
         : 'Receiving hours: fill in hard_from and hard_to (and preferred_from / preferred_to if any), or write yes in open_all_day if the customer accepts deliveries at any time.',
     );
   }
+  if (v.phone == null || String(v.phone).trim() === '') out.push(`Phone: fill in phone (${CUSTOMER_PHONE_COLUMN_TEXT}).`);
   return out.join(' ');
 }
 
@@ -662,6 +686,7 @@ const FIELD_WORDS: Record<string, string> = {
   serviceTimeConfirmed: 'Unloading time',
   paymentType: 'Payment type',
   accessNotes: 'Access notes',
+  phone: 'Phone',
   active: 'Active',
   customerType: 'Customer type',
   hardWindowStartMin: 'Receiving hours',

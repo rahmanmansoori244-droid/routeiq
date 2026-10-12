@@ -13,6 +13,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 
 **At each customer**
 5. Your trips are listed in order. Tap a stop to see the customer, the receiving hours or the promised time, the **cases per product** and the notes. Tap **Navigate** to drive there with Google Maps.
+   - **Call the customer before you arrive** to say the delivery is coming: tap **Call customer** under **Navigate** (it is there when the office saved the customer's phone; the sheet prints it as *Tel ...*).
 6. **When you arrive, open this page again.** The timer starts by itself after about 20 seconds at the customer. **Keep the page open**: if the screen locks, the timer may pause.
    - It did not start? Tap **I have arrived**.
    - It asks *Arrived at ... - when?* Choose **Now** or how many minutes ago.
@@ -55,6 +56,7 @@ A short guide to give to every driver, also daily drivers and drivers of hired t
 **عند كل عميل**
 
 5. تظهر رحلاتك بالترتيب. اضغط على أي محطة لترى العميل وأوقات الاستلام أو الموعد المتفق عليه و**الكراتين لكل منتج** والملاحظات. اضغط **«افتح الخريطة»** للذهاب إليها بخرائط Google.
+   - **اتصل بالعميل قبل وصولك** لتخبره بأن التوصيل في الطريق: اضغط **«اتصل بالعميل»** تحت «افتح الخريطة» (يظهر إذا حفظ المكتب رقم هاتف العميل، وتطبعه الورقة بعد كلمة *Tel*).
 6. **عند وصولك، افتح هذه الصفحة مرة أخرى.** يبدأ المؤقت تلقائيًا بعد نحو 20 ثانية عند العميل. **أبقِ الصفحة مفتوحة**: إذا قُفلت الشاشة قد يتوقف المؤقت.
    - لم يبدأ المؤقت؟ اضغط **«وصلت»**.
    - إذا سألتك الصفحة **«متى وصلت إلى ...؟»** اختر **«الآن»** أو عدد الدقائق.

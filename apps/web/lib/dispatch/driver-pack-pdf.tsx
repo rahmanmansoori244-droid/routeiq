@@ -90,6 +90,9 @@ function StopRow({ st }: { st: SheetStop }) {
         <T style={{ fontFamily: BOLD, fontSize: 9.5 }}>{st.customerName}</T>
         <T style={s.small}>{meta}</T>
         {st.address ? <T style={{ fontSize: 7.5 }}>{st.address}</T> : null}
+        {/* Owner request 12 Oct 2026: the customer's phone, to call before arrival (Latin font only: the
+            model passed it through pdfSafe). Nothing printed without one. */}
+        {st.phone ? <T style={{ fontFamily: BOLD, fontSize: 8 }}>{`Tel ${st.phone}`}</T> : null}
         {st.split ? (
           <T style={{ fontFamily: BOLD, fontSize: 8 }}>
             {`SPLIT DELIVERY - part ${st.split.part} of ${st.split.parts}`}

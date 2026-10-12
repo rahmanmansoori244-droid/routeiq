@@ -698,6 +698,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               </a>
             </Button>
           ) : null}
+          {/* Warehouse paperwork (owner request 12 Oct 2026): what goes on each truck with its invoices,
+              and after the trucks are back, what came back per customer (the gate pass). */}
+          {d.loads.length ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={`/api/runs/${runId}/export/load-sheet`} target="_blank" rel="noreferrer" data-testid="export-load-sheets" title="One printable page per truck load, for the warehouse: the products to load and the invoices to put in the truck">
+                <PackageCheck className="mr-1 h-4 w-4" /> Load sheets
+              </a>
+            </Button>
+          ) : null}
+          {d.loads.some((l) => ON_ROAD.has(l.status)) ? (
+            <Button asChild variant="outline" size="sm">
+              <a href={`/api/runs/${runId}/export/return-note`} target="_blank" rel="noreferrer" data-testid="export-return-notes" title="One printable page per load that left: what was delivered and what comes back, per customer, for the gate pass">
+                <FileText className="mr-1 h-4 w-4" /> Return notes
+              </a>
+            </Button>
+          ) : null}
           {canPlan && !superseded && d.run.chosenScenario ? (
             <>
               <Button variant="outline" size="sm" disabled={!!busy} onClick={() => setLateOpen(true)}>
@@ -1172,6 +1188,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         onAddDaily={() => setCasualFor(l)}
                         onKeep={() => setDriver(l, l.driverId, true)}
                         pdfUrl={`/api/runs/${runId}/export/pdf?load=${l.id}`}
+                        loadSheetUrl={`/api/runs/${runId}/export/load-sheet?load=${l.id}`}
+                        returnNoteUrl={ON_ROAD.has(l.status) ? `/api/runs/${runId}/export/return-note?load=${l.id}` : null}
                         clash={clashes.find((c) => c.loadIds.includes(l.id))?.text ?? null}
                         whatsapp={
                           superseded
@@ -1528,6 +1546,8 @@ function LoadDriver({
   onChange,
   onKeep,
   pdfUrl,
+  loadSheetUrl,
+  returnNoteUrl = null,
   clash,
   whatsapp,
   onAddDaily,
@@ -1550,6 +1570,10 @@ function LoadDriver({
   /** Keep the driver RouteIQ filled in as the dispatcher's own pick. */
   onKeep: () => void;
   pdfUrl: string;
+  /** The warehouse load sheet of this load (owner request 12 Oct 2026). */
+  loadSheetUrl: string;
+  /** The return note (gate pass) of this load once it has left; null before. */
+  returnNoteUrl?: string | null;
   /** This load's driver is also on another truck at the same time. */
   clash: string | null;
   /** The message link, or why there is none (replaced version, optimization running). */
@@ -1622,6 +1646,14 @@ function LoadDriver({
         <a className="text-primary underline-offset-2 hover:underline" href={pdfUrl} target="_blank" rel="noreferrer" data-testid={`load-pdf-${tag}`} title="Driver sheet for this load">
           PDF
         </a>
+        <a className="text-primary underline-offset-2 hover:underline" href={loadSheetUrl} target="_blank" rel="noreferrer" data-testid={`load-sheet-${tag}`} title="Warehouse load sheet: the products to load and the invoices to put in the truck">
+          Load sheet
+        </a>
+        {returnNoteUrl ? (
+          <a className="text-primary underline-offset-2 hover:underline" href={returnNoteUrl} target="_blank" rel="noreferrer" data-testid={`load-return-${tag}`} title="Return note (gate pass): what was delivered and what comes back, per customer">
+            Return note
+          </a>
+        ) : null}
         {onLink ? (
           <button
             type="button"

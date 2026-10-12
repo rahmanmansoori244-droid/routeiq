@@ -105,6 +105,31 @@ describe('mapHeaders', () => {
     expect(new Set(Object.values(m.used)).size).toBe(Object.values(m.used).length);
   });
 
+  it('reads an invoice number column as the document number, before a sales order column (owner decision 12 Oct 2026)', () => {
+    for (const h of ['Invoice No', 'Invoice No.', 'INVOICE NUMBER', 'Inv No', 'Sales Invoice No', 'Tax Invoice No', 'Invoice']) {
+      const m = mapHeaders([h, 'Customer Code', 'Item Code', 'Cases']);
+      expect(m.used.sales_order_no, h).toBe(h);
+    }
+    const both = mapHeaders(['SO No', 'Invoice No', 'Invoice Date', 'Customer Code', 'Item Code', 'Cases']);
+    expect(both.used.sales_order_no).toBe('Invoice No');
+    expect(both.used.order_date).toBe('Invoice Date');
+    expect(both.unmapped).toEqual(['SO No']);
+    // Also when the sales order column has the field's own name (review of PR 66).
+    for (const so of ['Sales Order No', 'Sales Order No.', 'SalesOrderNo', 'SALES_ORDER_NO', 'sales_order_no']) {
+      const m = mapHeaders([so, 'Invoice No', 'Customer Code', 'Item Code', 'Cases']);
+      expect(m.used.sales_order_no, so).toBe('Invoice No');
+      expect(m.unmapped, so).toEqual([so]);
+    }
+    // Without an invoice column the sales order column is still the document number.
+    expect(mapHeaders(['Sales Order No', 'Customer Code', 'Item Code', 'Cases']).used.sales_order_no).toBe('Sales Order No');
+    expect(mapHeaders(['sales_order_no', 'customer_code', 'product_code', 'cases']).used.sales_order_no).toBe('sales_order_no');
+    // A company alias still wins over everything.
+    expect(mapHeaders(['Invoice No', 'Ref', 'Customer Code', 'Item Code', 'Cases'], { sales_order_no: ['Ref'] }).used.sales_order_no).toBe('Ref');
+    // An invoice date or amount is never taken as the number.
+    const other = mapHeaders(['Invoice Date', 'Invoice Amount', 'Customer Code', 'Item Code', 'Cases']);
+    expect(other.used.sales_order_no).toBeUndefined();
+  });
+
   it('tenant extra aliases are used and win over built-ins', () => {
     const m = mapHeaders(['Customer', 'Payer #', 'Mat.', 'Boxes', 'Delivery Date'], {
       customer_code: ['Payer #'],

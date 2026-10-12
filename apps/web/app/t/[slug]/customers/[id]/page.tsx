@@ -74,6 +74,7 @@ export default async function CustomerDetailPage({
     windowLabel: windowLabel(eff),
     windowConfirmedBy: customer.windowConfirmedBy?.name ?? null,
     windowConfirmedAt: customer.windowConfirmedAt ? customer.windowConfirmedAt.toISOString() : null,
+    phone: customer.phone,
   };
 
   return (
@@ -186,6 +187,13 @@ export default async function CustomerDetailPage({
                 {customer.active ? <Badge variant="success">Active</Badge> : <Badge variant="secondary">Inactive</Badge>}
               </Field>
               {customer.address ? <Field label="Address">{customer.address}</Field> : null}
+              {/* Owner request 12 Oct 2026: the phone the driver calls before arrival (set in Details). */}
+              <Field label="Phone (for the driver)">
+                <span data-testid="customer-phone">
+                  {customer.phone ?? '—'}
+                  {!customer.phone && canEdit ? <span className="block max-w-xs text-xs text-muted-foreground">Optional: add it in Details so the driver can call before arrival.</span> : null}
+                </span>
+              </Field>
               {customer.accessNotes ? <Field label="Access notes">{customer.accessNotes}</Field> : null}
             </CardContent>
           </Card>
@@ -194,7 +202,7 @@ export default async function CustomerDetailPage({
               <CardTitle className="text-base">Phase 1 scope</CardTitle>
             </CardHeader>
             <CardContent className="space-y-1 text-xs text-muted-foreground">
-              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Details opens the same dialog as on Daily dispatch (customer type, priority, unloading time and receiving hours, with Open all day and confirmed with the customer); the payment type is changed in the customer list.</p>
+              <p>Set location opens the same checks as ADD LOCATION on Daily dispatch: a reading that is not exact needs the pin placed by hand. Details opens the same dialog as on Daily dispatch (customer type, priority, unloading time and receiving hours, with Open all day and confirmed with the customer, and the phone for the driver); the payment type is changed in the customer list.</p>
               <p>The {regions.length} regions in this tenant are visible in the dropdown filter.</p>
             </CardContent>
           </Card>

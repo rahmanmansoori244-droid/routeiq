@@ -85,6 +85,12 @@ export interface DetailStop {
   /** Customer master access / receiving notes (gate, forklift, contact...), as they are NOW: contact
    * details stay live like the driver's phone, so a correction reaches the driver sheet (review of PR4). */
   accessNotes: string | null;
+  /**
+   * The customer's phone, for the driver to call before arrival (owner request 12 Oct 2026), as it is
+   * NOW: a contact detail, live like accessNotes (never the snapshot), so a number added or corrected
+   * after planning reaches the driver sheet, the Excel route sheet and the driver page. Null = none.
+   */
+  customerPhone: string | null;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
@@ -646,6 +652,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         // Live, never the snapshot: gate / receiver details do not change the timetable, and a
         // correction must reach the driver sheet (the snapshot keeps the planned notes for the record).
         accessNotes: c.accessNotes,
+        // Live too (owner request 12 Oct 2026): the driver calls the number the customer has now.
+        customerPhone: c.phone ?? null,
         split: null,
         snapshot: !!snap,
         masterChanged: snap

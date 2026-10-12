@@ -104,6 +104,17 @@ export function StopSheet({
         ) : (
           <p className="mt-3 rounded-lg bg-red-50 p-3 font-semibold text-red-800">{t(lang, 'noLocation')}</p>
         )}
+        {/* Owner request 12 Oct 2026: call the customer before arrival (the tel: link has the country code). */}
+        {stop.customerTel ? (
+          <a href={stop.customerTel} className="mt-2 flex min-h-12 items-center justify-center gap-2 rounded-xl border-2 border-blue-700 font-bold text-blue-800" data-testid="call-customer">
+            <Phone className="h-5 w-5" aria-hidden /> {t(lang, 'callCustomer')}
+            {stop.customerPhone ? (
+              <span className="font-normal" dir="ltr">
+                {stop.customerPhone}
+              </span>
+            ) : null}
+          </a>
+        ) : null}
       </section>
 
       {showTimer ? (

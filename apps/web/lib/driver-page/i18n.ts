@@ -109,6 +109,8 @@ const EN = {
   changedByOffice: 'Changed by office / another phone',
   broughtForward: 'Brought forward to {date}',
   callDispatcher: 'Call dispatcher',
+  // Owner request 12 Oct 2026: the driver calls the customer before arrival.
+  callCustomer: 'Call customer',
   draftRestored: 'Your last entry was kept.',
   lastPhotoLost: 'The last photo did not arrive - take it again.',
   backAtDepotQ: 'Back at depot?',
@@ -261,6 +263,7 @@ const AR: Record<Key, string> = {
   changedByOffice: 'غيّرها المكتب / هاتف آخر',
   broughtForward: 'نُقلت إلى {date}',
   callDispatcher: 'اتصل بمسؤول التوزيع',
+  callCustomer: 'اتصل بالعميل',
   draftRestored: 'تم حفظ آخر إدخال لك.',
   lastPhotoLost: 'لم تصل الصورة الأخيرة - التقطها مرة أخرى.',
   backAtDepotQ: 'هل عدت إلى المستودع؟',
