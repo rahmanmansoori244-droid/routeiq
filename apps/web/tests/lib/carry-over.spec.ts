@@ -1233,8 +1233,8 @@ describe('PR9 review: the carry on the database, split orders, re-plans, lists a
       ['ORIG', { to: D1, from: null }],
       ['OTHER', { to: null, from: null }],
     ]);
-    expect(orderListTotals(all.map((o) => ({ ...o, totalCases: 10, totalWeightKg: 100 })))).toEqual({ cases: 20, kg: 200, carried: 1 });
-    expect(orderStatusFilter('ASSIGNED')).toEqual({ status: 'ASSIGNED', carriedToOrderId: null });
+    expect(orderListTotals(all.map((o) => ({ ...o, totalCases: 10, totalWeightKg: 100 })))).toEqual({ cases: 20, kg: 200, carried: 1, cancelled: 0 });
+    expect(orderStatusFilter('ASSIGNED')).toEqual({ status: 'ASSIGNED', carriedToOrderId: null, cancelledAt: null });
     expect(orderStatusFilter('DISPATCHED')).toEqual({ status: 'DISPATCHED' });
     expect(carriedToBadge(orderCarryMarks(all[1]).to!)).toBe('Carried over to 27 Sep');
   });

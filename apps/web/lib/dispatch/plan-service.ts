@@ -49,6 +49,7 @@ import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
 import { driverTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
 import { reconcile, type Reconciliation } from './reconcile';
+import { cancelledLoadText, NOT_CANCELLED } from './order-cancel-rules';
 import {
   caseHeavierThanAnyTruck,
   choosePartCapacity,
@@ -335,10 +336,14 @@ const ORDER_INCLUDE = {
  * that depot). An order brought forward to a later day (PR9, carriedToOrderId set) no longer
  * belongs to its own day: it is not open, unserved or pending there (the plan versions that hold
  * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest).
+ * A cancelled order (Cancel order, owner request 12 Oct 2026: cancelledAt set) does not belong to its
+ * day either: it is never planned, pending, counted or offered again; the versions made before the
+ * cancel keep it as they were (a PLANNED load holding it cannot be locked until the day is re-planned:
+ * cancelledOrdersGate). Every read that plans, counts or offers a day's orders goes through here.
  * `_db`: the client the caller reads with (audit A4: the plan detail reads in one snapshot). The
  * scope needs no read since A5 (the depot count is gone), so it is not used. */
 export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, _db: Db = prisma): Promise<Prisma.OrderWhereInput> {
-  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, depotId };
+  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, ...NOT_CANCELLED, depotId };
 }
 
 /**
@@ -1324,6 +1329,20 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
       409,
       { code: 'SCENARIO_NOT_USABLE' },
     );
+  }
+
+  // Cancel order (owner request 12 Oct 2026): an option of this version made before an order of it was
+  // cancelled would put that order on a truck again. The job applies its own result (a cancel is
+  // refused while the day is optimized); a dispatcher's "Use instead" re-plans instead.
+  if (opts.requireOptimized && d.scope.orderIds.length) {
+    const cancelled = await tx.order.count({ where: { tenantId, id: { in: [...d.scope.orderIds] }, cancelledAt: { not: null } } });
+    if (cancelled > 0) {
+      throw new PlanError(
+        `${cancelled} order(s) of this option were cancelled after it was made: it cannot be used. RE-PLAN the day instead (the cancelled orders are left out).`,
+        409,
+        { code: 'ORDERS_CANCELLED' },
+      );
+    }
   }
 
   // Frozen loads must be exactly the ones the scenario was computed around.
@@ -2602,6 +2621,10 @@ async function changeStatusCore(
   // Completed are never refused (a load that left keeps its orders: they are never carried).
   // Also a load of today whose orders were brought forward to tomorrow in the evening.
   if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
+  // Cancel order (owner request 12 Oct 2026): a load holding a cancelled order must not be loaded with
+  // it. The cancel is refused on a locked or loading load, so this refuses the Lock of a PLANNED load
+  // until the day is re-planned (the re-plan leaves the cancelled order out).
+  if (isGatedMove(load.status, to)) await cancelledOrdersGate(tx, tenantId, load);
   // Owner decision 1 Oct 2026 (items 1 and 3), when a load leaves PLANNED: a delivery time set after
   // the plan was made needs a RE-PLAN first; with "Require location and delivery window before
   // loading" on, every customer on the load needs a delivery window too (and a usable location, as
@@ -3120,6 +3143,30 @@ async function carriedOrdersGate(
     409,
     { code: 'ORDERS_CARRIED', orderIds: carried.map((o) => o.id) },
   );
+}
+
+/**
+ * Cancel order (owner request 12 Oct 2026): LOCK, LOADING and DISPATCH of a load holding an order that
+ * was cancelled since it was planned are refused with 409 ORDERS_CANCELLED, naming the customers and
+ * saying what to do (cancelledLoadText): re-plan the day (the cancelled order is taken off); a load
+ * holding nothing else stays in this plan for the record and is never loaded. Runs under the plan row
+ * lock, like the cancel itself (order-cancel.ts), so a cancel and a Lock never interleave. Read without
+ * a relation filter, like carriedOrdersGate.
+ */
+async function cancelledOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number }) {
+  const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (!ids.length) return;
+  const cancelled = await tx.order.findMany({
+    where: { tenantId, id: { in: ids }, cancelledAt: { not: null } },
+    select: { id: true, customer: { select: { code: true, branchCode: true } } },
+  });
+  if (!cancelled.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  const names = [...new Set(cancelled.map((o) => (o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id))))];
+  throw new PlanError(cancelledLoadText(`${truck?.code ?? 'Truck'} L${load.loadNo}`, names, cancelled.length === ids.length), 409, {
+    code: 'ORDERS_CANCELLED',
+    orderIds: cancelled.map((o) => o.id),
+  });
 }
 
 /**

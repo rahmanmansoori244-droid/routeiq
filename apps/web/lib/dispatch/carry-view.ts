@@ -5,6 +5,7 @@
  */
 import type { CarryWhyKind } from './carry-over';
 import { fmtDayMonth } from './time';
+import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
 
 /** Badge of an order brought forward from an earlier day: "Carried over from 26 Sep" (the date it was first due). */
 export function carriedFromBadge(firstDateIso: string): string {
@@ -233,8 +234,13 @@ export function carryDoneText(
   return `${res.orders} order(s) (${res.cases.toLocaleString()} cases) brought forward to ${day}. ${next}${skipped}${recordedText}${today}`;
 }
 
-/** The carried-over line of a stop on the driver sheet and the Excel load sheet, or null. */
-export function carriedStopText(s: { carriedFrom: string | null; carriedTo: string | null }): string | null {
+/**
+ * The carried-over line of a stop on the driver sheet, the warehouse sheet and the Excel load sheet, or
+ * null. A stop holding a cancelled order (Cancel order, owner request 12 Oct 2026) says so first: such a
+ * load cannot be locked until the day is re-planned, but a PLANNED load's sheet may already be printed.
+ */
+export function carriedStopText(s: { carriedFrom: string | null; carriedTo: string | null; cancelled?: boolean }): string | null {
+  if (s.cancelled) return CANCELLED_STOP_TEXT;
   if (s.carriedTo) return `CARRIED OVER to ${fmtDayMonth(s.carriedTo)} - not delivered on this day`;
   if (s.carriedFrom) return `CARRIED OVER from ${fmtDayMonth(s.carriedFrom)} (not delivered that day)`;
   return null;
@@ -320,9 +326,12 @@ export function dayNothingLeftText(day: {
   carriedOut: { orders: number; toDates: readonly string[] } | null | undefined;
   loadsByStatus: Readonly<Record<string, number>>;
   loadsOfDay?: Readonly<Record<string, number>>;
+  /** Cancel order (owner request 12 Oct 2026): this day's cancelled orders (not in `orders`). */
+  cancelled?: number;
 }): string | null {
   const carried = day.carriedOut?.orders ?? 0;
-  const nothingOpen = day.orders > 0 ? day.openOrders === 0 && day.pending === 0 : carried > 0;
+  const cancelled = day.cancelled ?? 0;
+  const nothingOpen = day.orders > 0 ? day.openOrders === 0 && day.pending === 0 : carried > 0 || cancelled > 0;
   if (!nothingOpen) return null;
   const ofDay = day.loadsOfDay ?? day.loadsByStatus;
   const lockedOrLoading = (m: Readonly<Record<string, number>>) => (m.LOCKED ?? 0) + (m.LOADING ?? 0);
@@ -339,6 +348,14 @@ export function dayNothingLeftText(day: {
       (loaded
         ? ` ${loaded} locked or loading load(s) hold only brought-forward orders and were loaded: unload those cases back to stock, or tell the warehouse, before the loads of ${days} are picked; then put the load back to Planned.`
         : '') +
+      (canUnlock ? ' To change a locked or loading load, unlock it first.' : '')
+    );
+  }
+  // Every open order was cancelled (the server's nothingLeftCancelled says the same).
+  if (cancelled > 0 && day.orders === 0) {
+    return (
+      `Nothing left to plan: ${cancelled} order(s) of this day were cancelled. ` +
+      'Loads and unserved lines that still show cancelled orders stay in this plan for the record and are never loaded; nothing needs to be re-planned.' +
       (canUnlock ? ' To change a locked or loading load, unlock it first.' : '')
     );
   }
@@ -375,17 +392,27 @@ export function carriedLoadTitle(
 }
 
 /**
+ * A load of the plan screen holds only orders that left its day: brought forward to a later day, or
+ * cancelled (Cancel order, owner request 12 Oct 2026). Cancelled and carried are never the same order.
+ */
+export function holdsOnlyGone(l: { carriedAway: number; cancelledHere?: number; stops: readonly { orderIds: readonly string[] }[] }): boolean {
+  const gone = l.carriedAway + (l.cancelledHere ?? 0);
+  return gone > 0 && gone === new Set(l.stops.flatMap((s) => s.orderIds)).size;
+}
+
+/**
  * What a re-plan of this plan would still plan (the input of nothingToReplan): a PLANNED load
- * holding only orders brought forward, and an unserved row brought forward, are not work - the
- * re-plan leaves those orders out (ordersInScopeWhere), and the server answers NOTHING_TO_PLAN.
+ * holding only orders brought forward or cancelled, and an unserved row brought forward or
+ * cancelled, are not work - the re-plan leaves those orders out (ordersInScopeWhere), and the server
+ * answers NOTHING_TO_PLAN.
  */
 export function replanWork(
-  loads: readonly { status: string; carriedAway: number; stops: readonly { orderIds: readonly string[] }[] }[],
-  unserved: readonly { carriedTo: string | null }[],
+  loads: readonly { status: string; carriedAway: number; cancelledHere?: number; stops: readonly { orderIds: readonly string[] }[] }[],
+  unserved: readonly { carriedTo: string | null; cancelled?: boolean }[],
 ): { loadStatuses: string[]; unservedOrders: number } {
   return {
-    loadStatuses: loads.filter((l) => !(l.status === 'PLANNED' && holdsOnlyCarried(l))).map((l) => l.status),
-    unservedOrders: unserved.filter((u) => !u.carriedTo).length,
+    loadStatuses: loads.filter((l) => !(l.status === 'PLANNED' && holdsOnlyGone(l))).map((l) => l.status),
+    unservedOrders: unserved.filter((u) => !u.carriedTo && !u.cancelled).length,
   };
 }
 
@@ -397,13 +424,21 @@ export function orderCarryMarks(o: { carriedTo?: { deliveryDate: Date | string }
 
 /**
  * Totals of an order list without the carried originals (their cases are counted on the day they
- * went to, by their copy): `carried` = how many were left out.
+ * went to, by their copy) and without the cancelled orders (Cancel order, owner request 12 Oct 2026):
+ * `carried` / `cancelled` = how many were left out.
  */
-export function orderListTotals(rows: readonly { totalCases: number; totalWeightKg: number; carriedTo?: unknown }[]): { cases: number; kg: number; carried: number } {
+export function orderListTotals(
+  rows: readonly { totalCases: number; totalWeightKg: number; carriedTo?: unknown; cancelledAt?: unknown }[],
+): { cases: number; kg: number; carried: number; cancelled: number } {
   let cases = 0;
   let kg = 0;
   let carried = 0;
+  let cancelled = 0;
   for (const r of rows) {
+    if (r.cancelledAt) {
+      cancelled++;
+      continue;
+    }
     if (r.carriedTo) {
       carried++;
       continue;
@@ -411,5 +446,5 @@ export function orderListTotals(rows: readonly { totalCases: number; totalWeight
     cases += r.totalCases;
     kg += r.totalWeightKg;
   }
-  return { cases, kg, carried };
+  return { cases, kg, carried, cancelled };
 }

@@ -29,7 +29,7 @@ import { customerTwinsOf } from '../customer-code';
 import { currentPlan } from './plan-service';
 import { intakeLineWeight } from './weights';
 import { validPalletFactor } from './pallets';
-import { dateOnly, isAfterCutoff, isoOf, todayIso, tomorrowIso } from './time';
+import { dateOnly, isAfterCutoff, isoOf, localDateIso, todayIso, tomorrowIso } from './time';
 import { inParts } from '../in-parts';
 
 type Tx = Prisma.TransactionClient;
@@ -191,6 +191,30 @@ async function confirmedLineMap(db: Tx | typeof prisma, tenantId: string, dates:
 }
 
 /**
+ * Cancel order (owner request 12 Oct 2026): confirmed sales-order lines of cancelled orders for these
+ * delivery dates, keyed by lineDupKey -> when (the company's day, `tz`) and by whom (the skip message
+ * of a re-sent line).
+ */
+async function cancelledLineMap(db: Tx | typeof prisma, tenantId: string, dates: string[], tz: string): Promise<Map<string, { at: string; by: string | null }>> {
+  if (!dates.length) return new Map();
+  const rows = await db.orderLine.findMany({
+    where: { salesOrderNo: { not: null }, order: { tenantId, deliveryDate: { in: dates.map(dateOnly) }, cancelledAt: { not: null } } },
+    select: {
+      salesOrderNo: true,
+      product: { select: { code: true } },
+      order: { select: { deliveryDate: true, cancelledAt: true, cancelledBy: { select: { name: true } }, customer: { select: { code: true, branchKey: true } } } },
+    },
+  });
+  const m = new Map<string, { at: string; by: string | null }>();
+  for (const l of rows) {
+    if (!normSalesOrder(l.salesOrderNo) || !l.order?.cancelledAt) continue;
+    const k = lineDupKey(isoOf(l.order.deliveryDate), l.salesOrderNo as string, customerKey(l.order.customer.code, l.order.customer.branchKey), l.product.code);
+    m.set(k, { at: localDateIso(l.order.cancelledAt, tz), by: l.order.cancelledBy?.name ?? null });
+  }
+  return m;
+}
+
+/**
  * The late reason of a day that already has a plan in use: its version and, when there are any,
  * the loads already on their way or locked (the new orders are planned around those).
  */
@@ -275,7 +299,8 @@ export async function validateIntake(
       otherDates.set(key, [...(otherDates.get(key) ?? []), date]);
     }
   }
-  const res = resolveOrderLines(norm, customers, products, already, { confirmedOnOtherDates: otherDates });
+  const cancelledLines = await cancelledLineMap(prisma, tenantId, dates, cfg.timezone);
+  const res = resolveOrderLines(norm, customers, products, already, { confirmedOnOtherDates: otherDates, cancelledLines });
 
   // Depot column: rows for another depot are an error (they belong to another plan). A line added
   // together from several rows names them all (resolveOrderLines never adds up rows for different

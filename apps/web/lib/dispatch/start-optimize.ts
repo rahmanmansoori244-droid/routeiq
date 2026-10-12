@@ -78,13 +78,34 @@ async function carriedAwayOfDay(tenantId: string, runId: string): Promise<number
   return prisma.order.count({ where: { ...where, carriedToOrderId: { not: null } } });
 }
 
+/** Cancel order (owner request 12 Oct 2026): orders of this version's depot and day that were cancelled. */
+async function cancelledOfDay(tenantId: string, runId: string): Promise<number> {
+  const run = await prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { depotId: true, runDate: true } });
+  if (!run) return 0;
+  return prisma.order.count({ where: { tenantId, depotId: run.depotId, deliveryDate: run.runDate, cancelledAt: { not: null } } });
+}
+
 /**
  * True when the version has a LOCKED or LOADING load that could be unlocked (or put back to locked).
- * `withOrderOfDay` (PR9): only one holding an order not brought forward to a later day.
+ * `withOrderOfDay` (PR9): only one holding an order still of this day (not brought forward to a later
+ * day, not cancelled).
  */
 async function hasUnlockableLoad(runId: string, opts: { withOrderOfDay?: boolean } = {}): Promise<boolean> {
   const where = { runId, status: { in: ['LOCKED' as const, 'LOADING' as const] } };
-  return (await prisma.planLoad.count({ where: opts.withOrderOfDay ? { ...where, assignments: { some: { order: { carriedToOrderId: null } } } } : where })) > 0;
+  return (await prisma.planLoad.count({ where: opts.withOrderOfDay ? { ...where, assignments: { some: { order: { carriedToOrderId: null, cancelledAt: null } } } } : where })) > 0;
+}
+
+/**
+ * The previous version's PLANNED loads hold an order that was cancelled or moved to a later day
+ * (brought forward or postponed) since: a re-plan sent as REOPTIMIZE then keeps every other order on
+ * its truck where it can (MANUAL_ADJUSTMENT, plan continuity: usesPlanContinuity) instead of
+ * reshuffling every unlocked load because one order was taken off (owner request 12 Oct 2026).
+ */
+async function ordersTakenOffPlannedLoads(runId: string): Promise<boolean> {
+  const n = await prisma.routeAssignment.count({
+    where: { runId, load: { is: { status: 'PLANNED' } }, order: { OR: [{ cancelledAt: { not: null } }, { carriedToOrderId: { not: null } }] } },
+  });
+  return n > 0;
 }
 
 /**
@@ -198,10 +219,33 @@ export function nothingLeftCarried(carried: number, othersFrozen: boolean, canUn
 }
 
 /**
+ * Cancel order (owner request 12 Oct 2026): nothing left to plan because the day's open orders were
+ * cancelled (`cancelled` of them). The loads and unserved lines that still show them stay in the plan
+ * for the record (a PLANNED load holding one cannot be locked), and a re-plan has nothing to change.
+ * Never "upload orders first".
+ */
+export function nothingLeftCancelled(cancelled: number, othersFrozen: boolean, canUnlockOthers = false): StartResult {
+  const rest = othersFrozen ? ' and every other order of this day is on a locked, loading or dispatched load' : '';
+  const unlock = canUnlockOthers ? ' To change a locked or loading load, unlock it first.' : '';
+  return {
+    status: 409,
+    body: {
+      error:
+        `Nothing left to plan: ${cancelled} order(s) of this day were cancelled${rest}. ` +
+        'Loads and unserved lines that still show cancelled orders stay in this plan for the record and are never loaded; nothing needs to be re-planned. ' +
+        'A late order for this day can still be planned.' +
+        unlock,
+      code: 'NOTHING_TO_PLAN',
+      cancelled,
+    },
+  };
+}
+
+/**
  * The checks after a request was built that would make the optimization pointless: nothing to
- * plan (409 NOTHING_TO_PLAN when every order is on a frozen load or was brought forward to a later
- * day; 400 with no orders at all) and no active truck (400). Shared by the optimize start and the
- * re-plan preflight.
+ * plan (409 NOTHING_TO_PLAN when every order is on a frozen load, was brought forward to a later
+ * day or was cancelled; 400 with no orders at all) and no active truck (400). Shared by the optimize
+ * start and the re-plan preflight.
  */
 async function prerequisites(tenantId: string, runId: string, built: BuiltRequest, applied: boolean): Promise<StartResult | null> {
   if (built.scope.orderIds.length === 0) {
@@ -209,6 +253,8 @@ async function prerequisites(tenantId: string, runId: string, built: BuiltReques
     if (carried > 0) {
       return nothingLeftCarried(carried, built.scope.frozenOrderIds.length > 0, await hasUnlockableLoad(runId, { withOrderOfDay: true }), await loadedCarriedLoads(runId));
     }
+    const cancelled = await cancelledOfDay(tenantId, runId);
+    if (cancelled > 0) return nothingLeftCancelled(cancelled, built.scope.frozenOrderIds.length > 0, await hasUnlockableLoad(runId, { withOrderOfDay: true }));
     if (built.scope.frozenOrderIds.length > 0) return nothingToPlan(applied, await hasUnlockableLoad(runId));
     return { status: 400, body: { error: 'No orders to plan for this depot and date. Upload orders first.', code: 'NO_ORDERS' } };
   }
@@ -460,6 +506,13 @@ export async function startDispatchOptimize(
           if (carriedAway > 0) {
             throw new PlanError('Orders of this day were brought forward to a later day while the plan was being prepared. Optimize again.', 409, { code: 'ORDERS_CHANGED' });
           }
+          // Cancel order (owner request 12 Oct 2026): a cancel takes the intake lock too, so it ran
+          // before this transaction (after the request was built) or runs after it (and is refused:
+          // the plan is OPTIMIZING). A request built with an order cancelled since is not started.
+          const cancelledNow = built.scope.orderIds.length ? await tx.order.count({ where: { tenantId, id: { in: built.scope.orderIds }, cancelledAt: { not: null } } }) : 0;
+          if (cancelledNow > 0) {
+            throw new PlanError('Orders of this day were cancelled while the plan was being prepared. Optimize again.', 409, { code: 'ORDERS_CHANGED' });
+          }
           const waiting = ticket!.waiting;
           const created = await tx.runJob.create({
             data: {
@@ -610,8 +663,17 @@ async function replanInner(
   const refused = gate(probe, overrides, 're-planning') ?? (await prerequisites(tenantId, runId, probe, true));
   if (refused) return refused;
   // A late order waiting to be added makes this a late-order re-plan (the other orders keep their
-  // trucks) whichever button started it; only with nothing late waiting is it a full re-optimize.
-  const effectiveReason = reason === 'REOPTIMIZE' && (await pendingLateOrderIds(tenantId, run)).length ? 'LATE_ORDER' : reason;
+  // trucks) whichever button started it; an order cancelled or moved to a later day while on a PLANNED
+  // load makes it a manual adjustment (the other orders keep their trucks too, owner request 12 Oct
+  // 2026); only with neither is it a full re-optimize.
+  const effectiveReason =
+    reason !== 'REOPTIMIZE'
+      ? reason
+      : (await pendingLateOrderIds(tenantId, run)).length
+        ? 'LATE_ORDER'
+        : (await ordersTakenOffPlannedLoads(runId))
+          ? 'MANUAL_ADJUSTMENT'
+          : reason;
   // Admission before the version exists: a 429 must never leave a new version behind. Reserved for
   // the search mode the new version's start then uses (the ticket carries it).
   const adm = pre.ticket ? { ok: true as const, ticket: pre.ticket } : solveAdmission.reserve(tenantId, user.id, requestedSearchMode(searchMode));

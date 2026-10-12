@@ -30,6 +30,8 @@ import { replanCouldPlace, unservedNowPlannable } from './left-out-note';
 import { dataGaps, type DataGap } from './data-collection';
 import type { ServiceArea } from './location-input';
 import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
+import { shownTruckCode } from './hire';
+import { orderActionReasonText } from './order-cancel-rules';
 
 export interface IssueCustomer {
   customerId: string;
@@ -85,6 +87,15 @@ export interface DayOrderTime {
   text: string | null;
   /** On a locked (or later) load of the plan in use, wholly or a part of it: its time cannot change. */
   frozen: boolean;
+  /**
+   * Cancel / Postpone (owner request 12 Oct 2026): its loads on the plan in use ("T05 L2 (planned)"), and
+   * whether it left the depot (DISPATCHED / DELIVERED, or on a dispatched or completed load): then the
+   * driver records the result, nothing is cancelled or postponed. `linesWithoutInvoice`: its lines with
+   * no sales-order number (the dialog lists the invoices).
+   */
+  loads: string[];
+  left: boolean;
+  linesWithoutInvoice: number;
   /**
    * Every case of it is on locked (or later) loads of the plan in use: nothing of it is planned again,
    * so the loading rule never judges it (dayLoadingGaps). Only a part there: its other part is on a
@@ -151,6 +162,11 @@ export interface DayOutdated {
    * saved, or the customer reactivated (left-out-note.ts unservedNowPlannable).
    */
   unservedNowPlannable: number;
+  /**
+   * Cancel order (owner request 12 Oct 2026): cancelled orders still on PLANNED loads of the plan in use.
+   * Those loads cannot be locked (plan-service cancelledOrdersGate); RE-PLAN takes the orders off.
+   */
+  cancelledOnPlan: number;
 }
 export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   weightCases: 0,
@@ -162,6 +178,7 @@ export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   palletFactorCases: 0,
   trucksInactive: 0,
   unservedNowPlannable: 0,
+  cancelledOnPlan: 0,
 });
 
 /** The orders the plan in use leaves unserved (the chosen option's unserved orders still open on this day). */
@@ -187,6 +204,32 @@ export interface CarriedInOrder {
   fromDate: string;
   /** Not in the plan in use yet (RE-PLAN adds it). */
   pending: boolean;
+}
+
+/**
+ * Cancel order (owner request 12 Oct 2026): an order of this day that was cancelled - the day screen's
+ * "Cancelled" list (greyed, with the reason, who and when, and Undo while the day is not over).
+ */
+export interface CancelledOrder {
+  orderId: string;
+  customerCode: string;
+  branchCode: string | null;
+  customerName: string;
+  cases: number;
+  salesOrders: string[];
+  linesWithoutInvoice: number;
+  reason: string | null;
+  note: string | null;
+  /** "Customer cancelled", "Other: shop closed". */
+  reasonText: string;
+  /** Who cancelled it (null = the user was removed). */
+  by: string | null;
+  /** When (ISO time). */
+  at: string;
+  /** PLANNED loads of the plan in use still holding it ("T05 L2"): RE-PLAN takes it off. */
+  onPlannedLoads: string[];
+  /** The day is not over: Undo is offered. */
+  canUndo: boolean;
 }
 
 /** PR9: orders of this day brought forward to later days (not open here any more). */
@@ -222,7 +265,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     depot,
   };
   if (!depot) {
-    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0, replan: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
+    return { ...base, orders: { count: 0, cases: 0, customers: 0, late: 0, weightKg: 0 }, cancelled: [] as CancelledOrder[], customers: [] as IssueCustomer[], productsWithoutWeight: [] as WeightGap[], productsWithoutPalletFactor: [] as PalletFactorGap[], weightsToApply: [] as WeightGap[], inactiveCustomers: 0, plan: null, pending: { orderIds: [] as string[], count: 0, cases: 0, late: 0, carried: 0 }, openOrders: 0, unserved: { orders: 0, cases: 0, replan: 0 } as DayUnserved, carriedIn: [] as CarriedInOrder[], carriedOut: null as CarriedOut | null, outdated: { ...UP_TO_DATE }, trucks: { active: 0, capacityCases: 0, withBays: 0, bays: 0, casesWithoutBays: 0, withPayload: 0 }, batches: [] };
   }
   const profiles = new Map<string, TypeProfileLike>((await db.customerTypeProfile.findMany()).map((p) => [p.customerType, p]));
   const tenant = await prisma.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -242,7 +285,14 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   const onPlan = plan && orders.length
     ? await prisma.routeAssignment.findMany({
         where: { runId: plan.id, orderId: { in: orders.map((o) => o.id) } },
-        select: { orderId: true, portionLinesJson: true, portionWeightKg: true, stopSnapshotJson: true, palletUnits: true, load: { select: { status: true, palletUnits: true } } },
+        select: {
+          orderId: true,
+          portionLinesJson: true,
+          portionWeightKg: true,
+          stopSnapshotJson: true,
+          palletUnits: true,
+          load: { select: { status: true, palletUnits: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true } } } },
+        },
       })
     : [];
   const orderById = new Map(orders.map((o) => [o.id, o]));
@@ -441,6 +491,17 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
   outdated.depotMoved = changed.depotMoved;
   outdated.trucksInactive = changed.trucksInactive;
   const onFrozenLoad = new Set(onPlan.filter((a) => a.load && a.load.status !== 'PLANNED').map((a) => a.orderId));
+  // Each order's loads on the plan in use, for Cancel / Postpone ("T05 L2 (locked)").
+  const loadsOf = new Map<string, string[]>();
+  const leftOn = new Set<string>();
+  for (const a of onPlan) {
+    if (!a.load) continue;
+    const text = `${a.load.truck ? shownTruckCode(null, a.load.truck) : 'Truck'} L${a.load.loadNo ?? '?'} (${a.load.status.toLowerCase()})`;
+    const list = loadsOf.get(a.orderId) ?? [];
+    if (!list.includes(text)) list.push(text);
+    loadsOf.set(a.orderId, list);
+    if (a.load.status === 'DISPATCHED' || a.load.status === 'COMPLETED') leftOn.add(a.orderId);
+  }
   const orderTimeRow = (o: (typeof orders)[number]): DayOrderTime => {
     const time = orderTimeOf(o);
     return {
@@ -450,6 +511,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       time,
       text: time ? promisedText(time) : null,
       frozen: onFrozenLoad.has(o.id),
+      loads: loadsOf.get(o.id) ?? [],
+      left: leftOn.has(o.id) || o.status === 'DISPATCHED' || o.status === 'DELIVERED',
+      linesWithoutInvoice: o.lines.filter((l) => !l.salesOrderNo?.trim()).length,
       // As buildDispatchRequest reads it: whole on a frozen load, or every case in frozen portions.
       allFrozen: frozenWhole.has(o.id) || allCasesOn(o.lines, frozenLineCases),
     };
@@ -532,7 +596,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
         runId: plan.id,
         OR: [
           { status: { in: ['DISPATCHED', 'COMPLETED'] } },
-          { assignments: { some: { order: { carriedToOrderId: null } } } },
+          // A load holding only cancelled orders (Cancel order) is not this day's work either.
+          { assignments: { some: { order: { carriedToOrderId: null, cancelledAt: null } } } },
           { assignments: { none: {} } },
         ],
       },
@@ -581,6 +646,57 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     where: { ...where, carriedToOrderId: { not: null } },
     select: { carriedTo: { select: { deliveryDate: true, totalCases: true } } },
   });
+  // Cancel order (owner request 12 Oct 2026): this day's cancelled orders (ordersInScopeWhere leaves
+  // them out of everything above), with where the plan in use still holds them.
+  const cancelledRows = (
+    await prisma.order.findMany({
+      where: { tenantId, depotId: depot.id, deliveryDate: dateOnly(date), cancelledAt: { not: null } },
+      select: {
+        id: true,
+        totalCases: true,
+        cancelledAt: true,
+        cancelReason: true,
+        cancelNote: true,
+        cancelledBy: { select: { name: true } },
+        customer: { select: { code: true, branchCode: true, name: true } },
+        lines: { select: { salesOrderNo: true } },
+      },
+      orderBy: [{ cancelledAt: 'desc' }, { id: 'asc' }],
+    })
+  ).filter((o) => !!o.cancelledAt);
+  const cancelledPlaced =
+    plan && cancelledRows.length
+      ? await prisma.routeAssignment.findMany({
+          where: { runId: plan.id, orderId: { in: cancelledRows.map((o) => o.id) } },
+          select: { orderId: true, load: { select: { status: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true } } } } },
+        })
+      : [];
+  const cancelled: CancelledOrder[] = cancelledRows.map((o) => {
+    const onPlanned = [
+      ...new Set(
+        cancelledPlaced
+          .filter((a) => a.orderId === o.id && a.load?.status === 'PLANNED')
+          .map((a) => `${a.load!.truck ? shownTruckCode(null, a.load!.truck) : 'Truck'} L${a.load!.loadNo}`),
+      ),
+    ];
+    return {
+      orderId: o.id,
+      customerCode: o.customer.code,
+      branchCode: o.customer.branchCode,
+      customerName: o.customer.name,
+      cases: o.totalCases,
+      salesOrders: [...new Set(o.lines.map((l) => l.salesOrderNo?.trim()).filter((s): s is string => !!s))].sort(),
+      linesWithoutInvoice: o.lines.filter((l) => !l.salesOrderNo?.trim()).length,
+      reason: o.cancelReason,
+      note: o.cancelNote,
+      reasonText: orderActionReasonText(o.cancelReason, o.cancelNote),
+      by: o.cancelledBy?.name ?? null,
+      at: o.cancelledAt!.toISOString(),
+      onPlannedLoads: onPlanned,
+      canUndo: date >= base.today,
+    };
+  });
+  outdated.cancelledOnPlan = cancelled.filter((c) => c.onPlannedLoads.length > 0).length;
   const carriedOut: CarriedOut | null = away.length
     ? {
         orders: away.length,
@@ -703,6 +819,8 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       : { orders: 0, cases: 0, replan: 0 }) as DayUnserved,
     carriedIn,
     carriedOut,
+    /** Cancel order (owner request 12 Oct 2026): this day's cancelled orders, newest first (the "Cancelled" list). */
+    cancelled,
     /**
      * The plan in use is out of date without a new order waiting: open cases on it whose case
      * weight was entered or corrected since, orders of customers deactivated since that are still
@@ -711,9 +829,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * (trucksChanged), customers on planned loads whose location is not usable any more
      * (locationBlocked), planned loads drawn from a depot pin moved since (depotMoved, audit E1),
      * cases on planned loads whose cases per pallet was corrected since (palletFactorCases), trucks
-     * with planned loads taken out of service since (trucksInactive) and unserved orders whose
-     * customer got a usable location or was reactivated since (unservedNowPlannable).
-     * RE-PLAN applies them all.
+     * with planned loads taken out of service since (trucksInactive), unserved orders whose
+     * customer got a usable location or was reactivated since (unservedNowPlannable) and cancelled
+     * orders still on planned loads (cancelledOnPlan). RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
     trucks: {
