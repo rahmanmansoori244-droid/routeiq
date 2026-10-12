@@ -45,6 +45,12 @@ export function driverNames(m: Pick<DriverManifest, 'drivers'>): string | null {
   return names.length ? names.join(', ') : null;
 }
 
+/** The distinct names of the truck-day's helpers, "Saif, Omar", or null without one (owner request 13 Oct 2026). */
+export function helperNames(m: Pick<DriverManifest, 'helpers'>): string | null {
+  const names = (m.helpers ?? []).filter(Boolean);
+  return names.length ? names.join(', ') : null;
+}
+
 /**
  * Cases typed in the Partly stepper: Arabic-Indic (٠-٩, U+0660-0669) and Persian / Urdu (۰-۹,
  * U+06F0-06F9) digits count as 0-9 - the Arabic number pads type them - then anything that is not a

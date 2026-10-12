@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, ChevronDown, Clock, Info, Languages, MapPin, Phone, Play, Square, Truck, Warehouse } from 'lucide-react';
 import type { DriverAction, DriverManifest, DriverResults, LinkStateCode, NotDeliveredReasonName, OutcomeName, PhotoPositionStatusName } from '@/lib/driver-link/manifest-types';
 import { deviceId, fetchManifest, photoUrl, postActions, postPhoto, safeLocalStorage, tokenFromPath } from '@/lib/driver-page/api';
-import { driverNames, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
+import { driverNames, helperNames, openTripIndex, stopTitle, telHref, tripLine } from '@/lib/driver-page/format';
 import { clockTime, fmtDate, fmtHours, hhmm, LANG_TOGGLE, pickLang, statusLabel, t, type Lang } from '@/lib/driver-page/i18n';
 import { applyQueued, keyedManifest, manifestStopKey, unsentList, type OverlayLoad, type OverlayStop } from '@/lib/driver-page/overlay';
 import { loadKeyOfStop, parseStopKey } from '@/lib/driver-link/stop-key';
@@ -821,6 +821,7 @@ function Header({
   onInfo: () => void;
 }) {
   const names = manifest ? driverNames(manifest) : null;
+  const helpers = manifest ? helperNames(manifest) : null;
   return (
     <header className="sticky top-0 z-20 bg-slate-900 px-3 py-2 text-white shadow">
       <div className="flex items-center gap-2">
@@ -838,6 +839,11 @@ function Header({
                   </>
                 ) : null}
               </p>
+              {helpers ? (
+                <p className="text-sm text-slate-300" data-testid="driver-header-helpers">
+                  <bdi>{t(lang, 'helpersLabel', { names: helpers })}</bdi>
+                </p>
+              ) : null}
               {manifest.truck.hired ? <p className="text-xs font-semibold text-amber-300">{t(lang, 'hiredTruck')}</p> : null}
             </div>
           ) : (

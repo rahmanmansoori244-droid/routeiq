@@ -63,6 +63,7 @@ export const CHECK_MODEL: DriverPackModel = {
       badges: ['PLANNED - not locked yet'],
       driverName: null,
       driverPhone: null,
+      helpersLine: null,
       depart: '06:00',
       back: '07:00',
       breakTimes: null,

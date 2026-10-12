@@ -18,6 +18,7 @@ import type { DetailLoad, DetailStop, PlanDetail } from './plan-detail';
 import type { OutcomeOverlay, OverlayStop } from '../delivery/outcome-view';
 import { isSupersededRun } from './plan-status';
 import { tripsByTruck } from './driver-links';
+import { helpersText } from './load-helpers';
 import { fmtHhmm } from './time';
 import { loadPallets, palletsOverBays } from './pallets';
 import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
@@ -80,6 +81,8 @@ export interface LoadSheet {
   /** The load may still change: it is not locked. */
   notLocked: boolean;
   driverName: string | null;
+  /** The helpers on the load, "Saif, Omar" (owner request 13 Oct 2026); null = none. */
+  helpers: string | null;
   depart: string;
   back: string;
   /** What goes on the truck, by product (the load manifest), product code order. */
@@ -139,6 +142,8 @@ export interface ReturnNote {
   trips: number;
   status: string;
   driverName: string | null;
+  /** The helpers on the load, "Saif, Omar" (owner request 13 Oct 2026); null = none. */
+  helpers: string | null;
   depart: string;
   /** "Back at depot 15:58" (the driver's tap), else null. */
   backAt: string | null;
@@ -246,6 +251,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       statusText: STATUS_TEXT[l.status] ?? l.status,
       notLocked: l.status === 'PLANNED',
       driverName: l.driverName,
+      helpers: helpersText((l.helpers ?? []).map((h) => h.name)),
       depart: fmtHhmm(l.departMin),
       back: fmtHhmm(l.returnMin),
       products,
@@ -335,6 +341,7 @@ export function returnNoteModel(d: PlanDetail, overlay: OutcomeOverlay, opts: { 
       trips: n,
       status: l.status,
       driverName: l.driverName,
+      helpers: helpersText((l.helpers ?? []).map((h) => h.name)),
       depart: fmtHhmm(l.departMin),
       backAt: backAtIso ? localHhmm(backAtIso, overlay.tz) : null,
       notBack: !backAtIso && l.status !== 'COMPLETED',

@@ -25,6 +25,7 @@ import { fmtHhmm } from './time';
 import { carriedStopText } from './carry-view';
 import { breakLine, breakTimes } from './break-text';
 import { loadPallets, palletsOverBays, palletText } from './pallets';
+import { helpersText } from './load-helpers';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -88,6 +89,8 @@ export interface DriverSheet {
   badges: string[];
   driverName: string | null;
   driverPhone: string | null;
+  /** "Helper: Saif" / "Helpers: Saif, Omar" (owner request 13 Oct 2026); null = no helper (nothing printed). */
+  helpersLine: string | null;
   depart: string;
   back: string;
   /** The load's driver break ("12:40-13:40"); null = none on this load. */
@@ -247,6 +250,13 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
   };
 }
 
+/** "Helper: Saif" or "Helpers: Saif, Omar" (names already made PDF-safe); null without one. */
+export function helpersLine(names: readonly (string | null | undefined)[]): string | null {
+  const text = helpersText(names);
+  if (!text) return null;
+  return `${names.filter((n) => (n ?? '').trim()).length === 1 ? 'Helper' : 'Helpers'}: ${text}`;
+}
+
 export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): DriverPackModel {
   const d = detail;
   const wanted = opts.loadIds ? new Set(opts.loadIds) : null;
@@ -290,6 +300,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         ],
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
+        helpersLine: helpersLine((l.helpers ?? []).map((h) => t.maybe(h.name))),
         depart: fmtHhmm(l.departMin),
         back: fmtHhmm(l.returnMin),
         breakTimes: l.break ? breakTimes(l.break) : null,

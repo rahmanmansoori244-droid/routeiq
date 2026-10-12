@@ -26,6 +26,7 @@ import { solverStatusText } from './solver-status';
 import { loadingFromAssumption, planFromAssumption, type PlanFrom } from './plan-from';
 import { searchAssumptions, searchOptionOf, searchResultText, type SearchOption, type SearchReport } from './search-mode';
 import { loadPallets, manifestPalletTotals, manifestTotalText, palletLimitText, palletsExact, palletsOverBays, palletText, type LoadPallets } from './pallets';
+import { helpersText } from './load-helpers';
 
 /** The SUMMARY row with the invoices (distinct sales orders) of the day. */
 export const INVOICES_LABEL = 'Invoices (sales orders)';
@@ -563,15 +564,16 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
   // Pallets (owner decision 4 Oct 2026): a "Pallets / bays" column after the case capacity, only when
   // a load of the plan was planned by pallets (a plan without bays keeps its columns).
   const withPallets = d.loads.some((l) => !!palletsOf(l));
-  const at = 9;
+  const at = 10;
   const ins = <T>(xs: T[], v: T): T[] => (withPallets ? [...xs.slice(0, at), v, ...xs.slice(at)] : xs);
+  // Helper(s) beside the driver (owner request 13 Oct 2026).
   const heads = ins([
-    'Truck', 'Load', 'Status', 'Driver', 'Departure', 'Return', 'Stops (customers)', 'Cases', 'Capacity (cases)', 'Weight kg', 'Payload kg', 'Kg check',
+    'Truck', 'Load', 'Status', 'Driver', 'Helper(s)', 'Departure', 'Return', 'Stops (customers)', 'Cases', 'Capacity (cases)', 'Weight kg', 'Payload kg', 'Kg check',
     'Utilization %', est ? 'Estimated km' : 'Route km', 'Est. time (h:mm)', 'Paid time (h:mm)', 'Est. fuel (l)', `Fuel cost (${cur})`,
     `Driver + overtime (${cur})`, `Operating cost (${cur})`, 'Timing', 'Sheet',
   ], 'Pallets / bays');
-  const fmts = ins<string | undefined>([undefined, FMT_INT, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_KG, undefined, FMT_PCT, FMT_KM, undefined, undefined, FMT_KM, FMT_MONEY, FMT_MONEY, FMT_MONEY], undefined);
-  ws.columns = ins([12, 6, 16, 20, 10, 10, 10, 9, 10, 11, 11, 18, 11, 11, 10, 10, 10, 12, 14, 14, 18, 22], 22).map((width) => ({ width }));
+  const fmts = ins<string | undefined>([undefined, FMT_INT, undefined, undefined, undefined, undefined, undefined, FMT_INT, FMT_INT, FMT_INT, FMT_KG, FMT_KG, undefined, FMT_PCT, FMT_KM, undefined, undefined, FMT_KM, FMT_MONEY, FMT_MONEY, FMT_MONEY], undefined);
+  ws.columns = ins([12, 6, 16, 20, 22, 10, 10, 10, 9, 10, 11, 11, 18, 11, 11, 10, 10, 10, 12, 14, 14, 18, 22], 22).map((width) => ({ width }));
   titleRows(ws, 'LOAD PLAN', `Depot ${d.run.depot.code} · Delivery ${d.run.runDate} · Plan v${d.run.version} (${d.run.status})${est ? ' · km are ESTIMATED' : ''}${timesNotVerified(d) ? ` · ${NOT_VERIFIED}` : ''}`);
   watermark(ws, d);
   ws.pageSetup.printTitlesRow = '4:4';
@@ -587,6 +589,7 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
       r++,
       ins<ExcelJS.CellValue>([
         l.truckCode, l.loadNo, l.status + (l.carried ? ' (kept from previous version)' : ''), l.driverName ?? 'Not assigned',
+        helpersText((l.helpers ?? []).map((h) => h.name)) ?? 'None',
         fmtHhmm(l.departMin), fmtHhmm(l.returnMin), l.stops.length, l.cases, palletsOf(l) ? 'by pallets' : l.truckCapacityCases, l.weightKg, l.truckPayloadKg || null, kgCheck(d, l),
         l.utilizationPct, l.distanceKm, fmtDuration(l.durationMin), paidTimeCell(l), l.fuelLitres, l.fuelCost,
         l.cost ? Math.round((l.cost.driver + l.cost.overtime) * 1000) / 1000 : null, l.operatingCost,
@@ -601,7 +604,7 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
     ws,
     r,
     ins<ExcelJS.CellValue>([
-      'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '',
+      'TOTAL', `${d.loads.length} loads`, `${new Set(d.loads.map((l) => l.truckId)).size} trucks`, '', '', '', '',
       sum(d.loads.map((l) => l.stops.length)), sum(d.loads.map((l) => l.cases)), '', sum(d.loads.map((l) => l.weightKg)), '', '', '',
       sum(d.loads.map((l) => l.distanceKm)), fmtDuration(sum(d.loads.map((l) => l.durationMin))),
       fmtDuration(sum(d.loads.map((l) => (typeof l.driverDayRate === 'number' ? 0 : l.cost ? l.cost.driverPaidMin : l.durationMin)))),
@@ -610,6 +613,12 @@ function addLoadPlanSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, 
     ], `${palletText(palletTotal)} pallets`),
     fmts,
   );
+}
+
+/** A load sheet's Driver cell: "Ali · Helper(s): Saif, Omar" (owner request 13 Oct 2026), the driver alone without helpers. */
+export function driverWithHelpers(l: Pick<DetailLoad, 'driverName' | 'helpers'>): string {
+  const helpers = helpersText((l.helpers ?? []).map((h) => h.name));
+  return `${l.driverName ?? 'Not assigned'}${helpers ? ` · Helper(s): ${helpers}` : ''}`;
 }
 
 /**
@@ -712,7 +721,8 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
   const left: [string, ExcelJS.CellValue, string?][] = [
     ['Truck', l.truckCode],
     ['Load no', l.loadNo, FMT_INT],
-    ['Driver', l.driverName ?? 'Not assigned'],
+    // Helpers (owner request 13 Oct 2026) in the driver's row, so the block keeps its rows 4-9.
+    ['Driver', driverWithHelpers(l)],
     ['Departure', fmtHhmm(l.departMin)],
     ['Return', fmtHhmm(l.returnMin)],
     ['Status', l.status + (l.carried ? ' (kept from previous version)' : '')],
