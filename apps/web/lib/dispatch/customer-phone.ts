@@ -49,7 +49,11 @@ export function readCustomerPhone(raw: string | null | undefined, label = 'Phone
   if (!s) return { ok: true, phone: null };
   if (!/^[0-9 +\-()/]+$/.test(s)) return { ok: false, error: `${label} "${s}": use only digits, spaces and + - ( ) /.` };
   const digits = s.replace(/\D/g, '').length;
-  if (digits < CUSTOMER_PHONE_MIN_DIGITS || digits > CUSTOMER_PHONE_MAX_DIGITS) {
+  // Two numbers, each a whole number with its country code ("+968 9123 4567 / +968 2456 7890", the
+  // format the data-to-collect sheet shows): each part is checked on its own (review of PR 66).
+  const parts = s.split('/').map((p) => p.replace(/\D/g, '').length);
+  const eachPartIsANumber = parts.length > 1 && parts.every((n) => n >= CUSTOMER_PHONE_MIN_DIGITS && n <= CUSTOMER_PHONE_MAX_DIGITS);
+  if (!eachPartIsANumber && (digits < CUSTOMER_PHONE_MIN_DIGITS || digits > CUSTOMER_PHONE_MAX_DIGITS)) {
     return { ok: false, error: `${label} "${s}": a phone number has ${CUSTOMER_PHONE_MIN_DIGITS} to ${CUSTOMER_PHONE_MAX_DIGITS} digits (this has ${digits}).` };
   }
   if (s.length > CUSTOMER_PHONE_MAX_LENGTH) return { ok: false, error: `${label}: at most ${CUSTOMER_PHONE_MAX_LENGTH} characters.` };

@@ -134,6 +134,31 @@ describe('loadSheetModel', () => {
     expect(m.sheets[2].invoices[0].split).toBe('part 1 of 2');
     expect(renderLoadSheetHtml(m)).toContain('VOID: a newer plan version exists');
   });
+
+  it('says when the rest of a split order is not on a truck today, never just "part 1 of 1" (review of PR 66)', () => {
+    const d = fixture();
+    d.loads[2].stops[0] = { ...d.loads[2].stops[0], split: { part: 1, parts: 1, restUnserved: true } };
+    const m = loadSheetModel(d, OPTS);
+    expect(m.sheets[2].invoices[0].split).toBe('part 1 of 1 - the rest is NOT on a truck today');
+    expect(renderLoadSheetHtml(m)).toContain('split delivery: part 1 of 1 - the rest is NOT on a truck today');
+  });
+
+  it('marks orders brought forward to a later day: not to be loaded from this paper (review of PR 66)', () => {
+    const plain = loadSheetModel(fixture(), OPTS);
+    expect(plain.sheets[0].carriedAway).toBe(0);
+    expect(plain.sheets[0].invoices[0].carried).toBeNull();
+    expect(renderLoadSheetHtml(plain)).not.toContain('brought forward');
+
+    const d = fixture();
+    d.loads[0] = { ...d.loads[0], status: 'LOCKED', carriedAway: 1, stops: [{ ...d.loads[0].stops[0], carriedTo: '2026-09-26' }, ...d.loads[0].stops.slice(1)] };
+    const m = loadSheetModel(d, OPTS);
+    expect(m.sheets[0].carriedAway).toBe(1);
+    expect(m.sheets[0].carriedToDays).toBe('26 Sep');
+    expect(m.sheets[0].invoices[0].carried).toBe('CARRIED OVER to 26 Sep - not delivered on this day');
+    const html = renderLoadSheetHtml(m);
+    expect(html).toContain('1 order(s) on this load were brought forward to 26 Sep: do not load them from this paper');
+    expect(html).toContain('<b>CARRIED OVER to 26 Sep - not delivered on this day</b>');
+  });
 });
 
 describe('returnNoteModel', () => {
@@ -207,11 +232,11 @@ describe('returnNoteModel', () => {
     expect(n2.backAt).toBeNull();
   });
 
-  it('says when the truck is not back yet', () => {
+  it('says when Back at depot is not recorded (the truck may still be out)', () => {
     const { d, o } = dayWithResults();
     o.loads.L1.backAtDepotAt = null;
     expect(returnNoteModel(d, o, OPTS).notes[0].notBack).toBe(true);
-    expect(renderReturnNoteHtml(returnNoteModel(d, o, OPTS))).toContain('The truck is not back yet');
+    expect(renderReturnNoteHtml(returnNoteModel(d, o, OPTS))).toContain('Back at depot is not recorded yet: if the truck is still out, the results may still change.');
   });
 
   it('prints the goods to come back with a box to count at the gate, and the stop without a result', () => {

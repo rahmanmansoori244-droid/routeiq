@@ -84,9 +84,13 @@ export function mapHeaders(headers: string[], extra: Partial<Record<CanonicalFie
   const used: Partial<Record<CanonicalField, string>> = {};
   const byNorm = new Map(headers.map((h) => [normHeader(h), h]));
   const taken = new Set<string>();
-  // Tenant aliases first, then exact canonical name, then built-ins in declaration order.
+  // Tenant aliases first, then exact canonical name, then built-ins in declaration order. The
+  // document number is the exception (owner decision 12 Oct 2026): its built-ins start with the
+  // invoice names, so its canonical name ("Sales Order No" = salesorderno, also a built-in after
+  // them) must not be tried first, or a sales-order column would beat an invoice column.
   for (const field of Object.keys(HEADER_ALIASES) as CanonicalField[]) {
-    const candidates = [...(extra[field] ?? []).map(normHeader), normHeader(field), ...HEADER_ALIASES[field]];
+    const canonical = field === 'sales_order_no' ? [] : [normHeader(field)];
+    const candidates = [...(extra[field] ?? []).map(normHeader), ...canonical, ...HEADER_ALIASES[field]];
     for (const c of candidates) {
       const h = byNorm.get(c);
       if (h && !taken.has(h)) {

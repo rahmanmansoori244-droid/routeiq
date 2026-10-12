@@ -38,6 +38,14 @@ describe('readCustomerPhone: the one rule', () => {
     for (const empty of ['', '   ', null, undefined]) expect(readCustomerPhone(empty)).toEqual({ ok: true, phone: null });
   });
 
+  it('takes two whole numbers with country codes, each checked on its own (review of PR 66)', () => {
+    expect(readCustomerPhone('+968 9123 4567 / +968 2456 7890')).toEqual({ ok: true, phone: '+968 9123 4567 / +968 2456 7890' });
+    // A part that is not a number on its own falls back to the whole-string rule.
+    expect(readCustomerPhone('968/9123 4567')).toEqual({ ok: true, phone: '968/9123 4567' });
+    expect(readCustomerPhone(`${'1'.repeat(15)} / 12`).ok).toBe(true);
+    expect(readCustomerPhone(`${'1'.repeat(21)} / ${'2'.repeat(8)}`).ok).toBe(false);
+  });
+
   it('stores Arabic-Indic and Persian digits as 0-9 (an Arabic keyboard types them; the driver sheet prints Latin only)', () => {
     expect(readCustomerPhone('٩١٢٣ ٤٥٦٧')).toEqual({ ok: true, phone: '9123 4567' });
     expect(readCustomerPhone('+۹۶۸ ۹۱۲۳ ۴۵۶۷')).toEqual({ ok: true, phone: '+968 9123 4567' });

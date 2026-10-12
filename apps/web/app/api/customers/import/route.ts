@@ -272,10 +272,18 @@ export async function POST(req: Request) {
     }
     // Owner request 12 Oct 2026: the phone for the driver (optional; blank keeps the saved one).
     const phoneCell = importedPhoneCell(raw);
-    const phone = phoneCell ? readCustomerPhone(phoneCell.value, phoneCell.column) : ({ ok: true, phone: null } as const);
+    let phone = phoneCell ? readCustomerPhone(phoneCell.value, phoneCell.column) : ({ ok: true, phone: null } as const);
     if (!phone.ok) {
-      errors.push({ row, message: phone.error });
-      return;
+      // RouteIQ's own files (phone, customer_phone) must hold a phone. A column of another system
+      // (mobile, contact_phone, tel) may hold "N/A" or a name: that cell is skipped with a warning and
+      // the saved phone kept, so it never refuses the whole file (review of PR 66).
+      if (phoneCell && phoneCell.column !== 'phone' && phoneCell.column !== 'customer_phone') {
+        warnings.push(`Row ${row}: ${phone.error} Not read: the saved phone is kept.`);
+        phone = { ok: true, phone: null };
+      } else {
+        errors.push({ row, message: phone.error });
+        return;
+      }
     }
 
     const latRaw = cell(raw, 'lat');

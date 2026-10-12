@@ -708,13 +708,28 @@ describe("the customer's phone: collected in both workbooks and read back by the
   });
 
   it('a phone that is not a phone number is an error of its row (nothing is saved), named by its column', async () => {
-    const r = await importCsv('code,name,priority,mobile\nUSABLE,Customer USABLE,3,call the manager\nNONE,Customer NONE,3,12345\n');
+    const r = await importCsv('code,name,priority,phone\nUSABLE,Customer USABLE,3,call the manager\nNONE,Customer NONE,3,12345\n');
     expect(r.body.data.errors).toEqual([
-      { row: 2, message: 'mobile "call the manager": use only digits, spaces and + - ( ) /.' },
-      { row: 3, message: 'mobile "12345": a phone number has 6 to 20 digits (this has 5).' },
+      { row: 2, message: 'phone "call the manager": use only digits, spaces and + - ( ) /.' },
+      { row: 3, message: 'phone "12345": a phone number has 6 to 20 digits (this has 5).' },
     ]);
     expect(row('customer', 'USABLE').phone ?? null).toBeNull();
     expect(audits).toEqual([]);
+  });
+
+  it("another system's phone column (mobile, contact_phone, tel) with junk is a warning: the row imports, the saved phone is kept (review of PR 66)", async () => {
+    await importCsv('code,name,priority,phone\nUSABLE,Customer USABLE,3,9123 4567\n');
+    for (const column of ['mobile', 'contact_phone', 'tel']) {
+      const r = await importCsv(`code,name,priority,${column}\nUSABLE,Customer USABLE,3,N/A\nNONE,Customer NONE,3,12345\n`);
+      expect(r.body.data, column).toMatchObject({ errorRows: 0 });
+      expect(r.body.data.warnings, column).toEqual(
+        expect.arrayContaining([
+          `Row 2: ${column} "N/A": use only digits, spaces and + - ( ) /. Not read: the saved phone is kept.`,
+          `Row 3: ${column} "12345": a phone number has 6 to 20 digits (this has 5). Not read: the saved phone is kept.`,
+        ]),
+      );
+      expect(row('customer', 'USABLE').phone, column).toBe('9123 4567');
+    }
   });
 
   it('a new customer gets the phone of its row (in its CREATE row)', async () => {

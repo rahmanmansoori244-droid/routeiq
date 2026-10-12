@@ -102,7 +102,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
       (i) =>
         `<tr><td class="n">${i.stop}</td><td><b>${esc(i.invoiceNo)}</b></td><td>${customer(i.customerName, i.customerCode, i.branchCode)}${
           i.split ? `<br><span class="muted">split delivery: ${esc(i.split)}</span>` : ''
-        }</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
+        }${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
     )
     .join('');
   return `<section class="sheet">
@@ -119,6 +119,11 @@ ${headCells(h, [
 ${voidBanner(h)}
 ${s.notLocked ? `<div class="banner">NOT LOCKED: this load may still change. Load only after the plan is locked.</div>` : ''}
 ${s.matches ? '' : `<div class="banner">The product total and the invoice total differ: ask the dispatcher before loading.</div>`}
+${
+  s.carriedAway > 0
+    ? `<div class="banner">${s.carriedAway} order(s) on this load were brought forward to ${esc(s.carriedToDays)}: do not load them from this paper (unload them if already loaded) - ask the dispatcher. They are marked CARRIED OVER below.</div>`
+    : ''
+}
 <h2>1. Products to load</h2>
 <table><thead><tr><th>Product code</th><th>Product</th><th class="n">Cases</th><th>Loaded ✓</th></tr></thead>
 <tbody>${products}<tr class="total"><td colspan="2">Total</td><td class="n">${s.totalCases}</td><td></td></tr></tbody></table>
@@ -172,7 +177,7 @@ ${headCells(h, [
   ['To come back', `${r.totalReturned} cases`],
 ])}
 ${voidBanner(h)}
-${r.notBack ? `<div class="banner">The truck is not back yet: the results may still change. Print again when it is back.</div>` : ''}
+${r.notBack ? `<div class="banner">Back at depot is not recorded yet: if the truck is still out, the results may still change. Print again when it is back.</div>` : ''}
 ${
   r.noResultStops
     ? `<div class="banner">${r.noResultStops} stop${r.noResultStops === 1 ? '' : 's'} without a result: ask the driver what happened before the truck leaves the gate, and tell the supervisor.</div>`

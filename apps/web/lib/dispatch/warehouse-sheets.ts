@@ -21,6 +21,7 @@ import { tripsByTruck } from './driver-links';
 import { fmtHhmm } from './time';
 import { loadPallets, palletsOverBays } from './pallets';
 import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
+import { carriedStopText, carriedToDays } from './carry-view';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -60,8 +61,10 @@ export interface LoadSheetInvoice {
   customerName: string;
   customerCode: string;
   branchCode: string | null;
-  /** "part 1 of 2": a split delivery (the rest goes on another truck or trip). */
+  /** "part 1 of 2": a split delivery (the rest goes on another truck or trip, or is not on a truck today). */
   split: string | null;
+  /** "CARRIED OVER to 14 Oct - not delivered on this day" (the stop's mark on the driver sheet), or null. */
+  carried: string | null;
   lines: ProductCases[];
   cases: number;
 }
@@ -88,6 +91,13 @@ export interface LoadSheet {
   invoices: LoadSheetInvoice[];
   /** The products total equals the invoices total (both come from the same plan rows). */
   matches: boolean;
+  /**
+   * Orders on this load brought forward to a later day (DetailLoad.carriedAway, only on a load that
+   * has not left): they are planned on that day now, so they must not be loaded from this paper.
+   */
+  carriedAway: number;
+  /** "14 Oct" / "14 Oct, 15 Oct": the days they were brought forward to. */
+  carriedToDays: string;
   footer: string;
 }
 
@@ -132,7 +142,10 @@ export interface ReturnNote {
   depart: string;
   /** "Back at depot 15:58" (the driver's tap), else null. */
   backAt: string | null;
-  /** The truck is not back yet (no Back at depot and not Completed): results may still change. */
+  /**
+   * Back at depot is not recorded (no tap and not Completed): the truck may still be out, so the
+   * results may still change. Many drivers never tap it, so the note says so without claiming more.
+   */
   notBack: boolean;
   stops: ReturnStop[];
   /** The stops with goods to come back (part or all), and the stops without a result. */
@@ -175,7 +188,9 @@ function sumByProduct(rows: ProductCases[]): ProductCases[] {
 }
 
 function splitText(s: DetailStop): string | null {
-  return s.split ? `part ${s.split.part} of ${s.split.parts}` : null;
+  if (!s.split) return null;
+  // The rest of the customer's cases is on the unserved list ("part 1 of 1" alone would say all of it).
+  return `part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' - the rest is NOT on a truck today' : ''}`;
 }
 
 /** One stop's invoices: its order lines grouped by invoice number, in the order first seen. */
@@ -196,6 +211,7 @@ export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
       customerCode: s.customerCode,
       branchCode: s.branchCode,
       split: splitText(s),
+      carried: carriedStopText(s),
       lines,
       cases: lines.reduce((a, l) => a + l.cases, 0),
     };
@@ -237,6 +253,8 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       pallets: p ? palletsOverBays(p) : null,
       invoices,
       matches: invoices.reduce((a, i) => a + i.cases, 0) === totalCases,
+      carriedAway: l.carriedAway,
+      carriedToDays: carriedToDays(stops.map((s) => s.carriedTo).filter((x): x is string => !!x)),
       footer: footer(l, n, d, 'Load sheet'),
     };
   });
