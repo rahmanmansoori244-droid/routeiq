@@ -97,6 +97,15 @@ import { asPlanBusy, lockPlanDay, lockRunForWrite, lockTruckDriverDay, setLockTi
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
+import {
+  isSmallTruck,
+  SMALL_TRUCK_GATE_CODE,
+  smallTruckBreaches,
+  smallTruckGateMessage,
+  smallTruckIds,
+  smallTruckMaxBaysOf,
+  smallTruckStopFields,
+} from './small-truck';
 import { copyRowData } from './prisma-copy';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
@@ -200,6 +209,12 @@ export interface BuiltRequest {
   missingPalletFactors?: MissingPalletFactor[];
   /** The cases per pallet of each product the request was planned with (by product code); absent without bay trucks. */
   palletFactors?: Record<string, number>;
+  /**
+   * "Small truck only" customers (owner request 13 Oct 2026): the company's "a small truck has at most N
+   * bays" this request was built with, so the hire check adds the trucks it may rent of that size to their
+   * stops (small-truck.ts withSmallHires). Absent on unit-test stubs (the default 6 then).
+   */
+  smallTruckMaxBays?: number;
   /**
    * Line weights this request takes from the product master (0 kg lines whose product has a
    * case weight now, lines weighed from the master whose case weight was corrected), for orders
@@ -567,6 +582,7 @@ export async function buildDispatchRequest(
     // A truck with no time left here (on another depot's plan all day) has no load left today.
     tripsLeft: hoursAround.get(t.id)?.none ? 0 : (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
     ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+    bays: t.bays ?? null,
   }));
   // The trucks the parts may be sized for: the own fleet, and the trucks the hire what-if may rent (each
   // for the whole day, as many loads as the company's max loads per truck).
@@ -578,11 +594,24 @@ export async function buildDispatchRequest(
       kg: t.payloadKg !== null && t.payloadKg > 0 ? t.payloadKg : null,
       tripsLeft: cfg.maxTripsPerTruck,
       ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+      bays: t.bays ?? null,
     })),
   ];
+  // "Small truck only" customers (owner request 13 Oct 2026): a truck with bays entered and at most this
+  // many is small (a truck without bays never is). Each stop of such a customer may go on the day's small
+  // trucks only (own and hired for the day; the hire check adds the small trucks it may rent), and its
+  // parts are sized for small trucks only - a customer that fits a big truck but no small one is split.
+  const smallMaxBays = smallTruckMaxBaysOf(cfg);
+  const smallIds = smallTruckIds(trucks, smallMaxBays);
+  const smallOnlyCustomers: string[] = [];
   const available = splitFleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
-  const pool = available.length ? available : splitFleet;
-  const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number): { cap: PartCapacity; truckCode: string } | null => {
+  const poolOf = (smallOnly: boolean): FleetTruck[] => {
+    if (!smallOnly) return available.length ? available : splitFleet;
+    const small = (t: FleetTruck) => isSmallTruck(t.bays, smallMaxBays);
+    return available.some(small) ? available.filter(small) : splitFleet.filter(small);
+  };
+  const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number, smallOnly = false): { cap: PartCapacity; truckCode: string } | null => {
+    const pool = poolOf(smallOnly);
     if (!cfg.splitDeliveries || !pool.some(hasRoom)) return null;
     // A customer that fits one truck, in that truck's own measure, is never split.
     if (pool.some((t) => hasRoom(t) && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.palletUnits ?? null }, units))) return null;
@@ -773,13 +802,16 @@ export async function buildDispatchRequest(
       pref_start_min: pref.start,
       pref_end_min: pref.end,
       late,
+      // Owner request 13 Oct 2026: a "small truck only" customer goes on the day's small trucks only (each part too).
+      ...smallTruckStopFields(!!cust.smallTruckOnly, smallIds, smallMaxBays),
     };
+    if (cust.smallTruckOnly) smallOnlyCustomers.push(label);
     const sumMoney = (vals: (number | null)[]) => (vals.every((v) => v !== null) ? vals.reduce<number>((a, v) => a + (v ?? 0), 0) : null);
 
     const maxCaseKg = Math.max(0, ...live.flatMap((x) => x.lines.map((l) => l.kgPerCase)));
     // The customer's pallet need (each line rounded up on its own, then added up); 0 without bay trucks.
     const totalUnits = byPallets ? live.reduce((a, x) => a + unitsOfLines(x.lines), 0) : 0;
-    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits);
+    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits, !!cust.smallTruckOnly);
     if (!split) {
       const ids = live.map(orderRef);
       if (sw.promised) promised[c.id] = sw.promised;
@@ -826,7 +858,7 @@ export async function buildDispatchRequest(
         });
       });
       splitNotes.push(
-        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`,
+        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}${cust.smallTruckOnly ? ` (small trucks only: at most ${smallMaxBays} bays)` : ''}`,
       );
     }
     for (const x of live) orderPriority[x.o.id] = pr;
@@ -948,6 +980,13 @@ export async function buildDispatchRequest(
     warnings.push(`Deactivated product(s) still on open orders, planned as ordered: ${[...inactiveProducts].sort().join(', ')}.`);
   }
   if (tooHeavyNotes.length) warnings.push(`Left unserved, heavier than any truck: ${tooHeavyNotes.join(' ')}`);
+  if (smallOnlyCustomers.length && !smallIds.length) {
+    // Owner request 13 Oct 2026: nothing can carry them today (the optimizer leaves their orders out with
+    // "Needs a small truck"); said once, before the plan, with what to do.
+    warnings.push(
+      `Small truck only customer(s) today: ${smallOnlyCustomers.join(', ')}; but this depot has no truck with bays entered and at most ${smallMaxBays} bays today, so their orders are left out. Hire a small truck (Check hire options), enter the bays of the small trucks under Trucks, or check Settings (Small truck = at most N bays).`,
+    );
+  }
   if (longStops.length) {
     warnings.push(
       `Unloading time over ${MAX_SERVICE_MIN} min (the most one stop can take): ${[...new Set(longStops)].join('; ')} - planned with ${MAX_SERVICE_MIN} min, so later arrival times may be optimistic. Check the service time or split the delivery.`,
@@ -994,6 +1033,7 @@ export async function buildDispatchRequest(
     warnings,
     unknownWeights,
     ...(byPallets ? { missingPalletFactors: groupMissingPalletFactors(missingPalletLines), palletFactors } : {}),
+    smallTruckMaxBays: smallMaxBays,
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
     sameDay: { input: sameDayIn, baseShiftStartMin, timing },
@@ -1260,12 +1300,18 @@ export async function persistDispatchResult(
       (built.request?.trucks ?? []).some((t) => typeof t.bays === 'number') && typeof sc.pallet_unit !== 'number'
         ? ['The optimizer did not plan by pallets (it is being updated): loads are planned by cases. Re-plan in a few minutes.']
         : [];
+    // Likewise "small truck only" customers (owner request 13 Oct 2026): an older solver ignores the
+    // allowed trucks and echoes nothing. The plan says so; LOCK still refuses such a customer on a big truck.
+    const smallTruckNote =
+      (built.request?.stops ?? []).some((s) => Array.isArray(s.allowed_truck_ids)) && sc.allowed_trucks_rule !== true
+        ? ['The optimizer did not apply "Small truck only" (it is being updated): such customers may be on big trucks, and LOCK refuses those loads. Re-plan in a few minutes.']
+        : [];
     const details: ScenarioDetails = {
       ...sc,
       engine: resp.engine,
       matrix_provider: resp.matrix_provider,
       distance_is_estimated: resp.distance_is_estimated,
-      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote],
+      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote, ...smallTruckNote],
       scope: built.scope,
       ...(inputs ? { inputs } : {}),
       ...(resp.search ? { search: resp.search } : {}),
@@ -2613,6 +2659,11 @@ async function changeStatusCore(
   // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
+  // Owner request 13 Oct 2026: a "small truck only" customer never leaves on a bigger truck (409
+  // SMALL_TRUCK_ONLY), judged on the customers and the truck as they are now - a customer marked, a
+  // setting lowered or a truck's bays changed after the plan was made is caught here. LOCK, LOADING and
+  // DISPATCH alike; stepping back and Completed never. FEASIBILITY_GATE=warn does not apply.
+  if (isGatedMove(load.status, to)) await smallTruckGate(tx, tenantId, load, to);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   // Review web-plan-service-1: the load's truck and driver are not on a locked or dispatched load of
   // another depot's plan that day at a clashing time (409 TRUCK_BUSY_ELSEWHERE / DRIVER_BUSY_ELSEWHERE).
@@ -3076,6 +3127,46 @@ async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckI
     code: 'STOP_PIN_REPLACED',
     customerIds: stale.map((c) => c.id),
     customers: names,
+  });
+}
+
+/**
+ * "Small truck only" customers (owner request 13 Oct 2026, lib/dispatch/small-truck.ts): LOCK, LOADING
+ * and DISPATCH of a load that carries a customer marked small truck only on a truck that is not small
+ * now (no bays entered, or more than the company's "Small truck = at most N bays") are refused with 409
+ * SMALL_TRUCK_ONLY, naming the customers and the remedy (re-plan; a locked or loading load goes back to
+ * Planned first). Read live, so a mark or a setting changed after planning counts.
+ */
+async function smallTruckGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }, to: string) {
+  const rows = await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } });
+  const orderIds = [...new Set(rows.map((a) => a.orderId))];
+  if (!orderIds.length) return;
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { customerId: true } });
+  const customerIds = [...new Set(orders.map((o) => o.customerId))];
+  if (!customerIds.length) return;
+  const marked = await tx.customer.findMany({
+    where: { tenantId, id: { in: customerIds }, smallTruckOnly: true },
+    select: { id: true, code: true, branchCode: true, name: true },
+    orderBy: [{ code: 'asc' }, { branchCode: 'asc' }],
+  });
+  if (!marked.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true, bays: true } });
+  const maxBays = smallTruckMaxBaysOf(await tx.tenantConfig.findUnique({ where: { tenantId }, select: { smallTruckMaxBays: true } }));
+  const breaches = smallTruckBreaches(
+    { bays: truck?.bays ?? null },
+    marked.map((c) => ({ customerId: c.id, code: c.code, branchCode: c.branchCode, name: c.name, smallTruckOnly: true })),
+    maxBays,
+  );
+  if (!breaches.length) return;
+  const code = truck?.code ?? 'Truck';
+  throw new PlanError(smallTruckGateMessage({ truckCode: code, loadNo: load.loadNo, bays: truck?.bays ?? null, from: load.status, to }, breaches, maxBays), 409, {
+    code: SMALL_TRUCK_GATE_CODE,
+    truckId: load.truckId,
+    truckCode: code,
+    truckBays: truck?.bays ?? null,
+    smallTruckMaxBays: maxBays,
+    customerIds: breaches.map((b) => b.customerId),
+    customers: breaches.map((b) => (b.branchCode ? `${b.code}/${b.branchCode}` : b.code)),
   });
 }
 

@@ -355,7 +355,13 @@ export function withRentedTrucks(
       void _drop;
       return { ...rest, id: made.get(t.id)!.id, code: made.get(t.id)!.code };
     });
-  const request: DispatchRequest = { ...base, trucks: [...base.trucks.filter((t) => !t.hire_candidate), ...rented] };
+  // "Small truck only" stops (owner request 13 Oct 2026): a rented truck the what-if allowed for them (a small
+  // one) is allowed under its new id too, so the request kept with the plan says what the plan was made with.
+  const smallRented = new Set(whatIf.stops.flatMap((st) => st.allowed_truck_ids ?? []).filter((id) => made.has(id)).map((id) => made.get(id)!.id));
+  const stops = smallRented.size
+    ? base.stops.map((st) => (Array.isArray(st.allowed_truck_ids) ? { ...st, allowed_truck_ids: [...new Set([...st.allowed_truck_ids, ...smallRented])] } : st))
+    : base.stops;
+  const request: DispatchRequest = { ...base, stops, trucks: [...base.trucks.filter((t) => !t.hire_candidate), ...rented] };
   const scenarios = resp.scenarios
     .filter((s) => s.name === 'RECOMMENDED')
     .map((s) => ({

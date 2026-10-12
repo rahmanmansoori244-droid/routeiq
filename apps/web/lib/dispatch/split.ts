@@ -196,6 +196,8 @@ export interface FleetTruck {
   tripsLeft: number; // loads it can still do today (max trips minus frozen loads)
   /** A truck with bays: its room in pallet units (bays x fill x 10); null / absent = measured in cases. */
   palletUnits?: number | null;
+  /** Its bays (null / absent: none entered): which trucks a "small truck only" customer's parts are sized for. */
+  bays?: number | null;
 }
 
 /** The truck has room in its own measure (pallet units with bays, else cases). */

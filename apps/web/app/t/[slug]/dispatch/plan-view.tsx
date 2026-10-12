@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
+import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
@@ -2027,6 +2028,22 @@ function LoadDetail({
                     <Badge variant="secondary" className="mt-0.5" data-testid="split-part" title="Customer bigger than one truck: delivered in parts">
                       Part {st.split.part} of {st.split.parts}
                       {st.split.restUnserved ? ' · rest unserved' : ''}
+                    </Badge>
+                  ) : null}
+                  {/* Owner request 13 Oct 2026: red when the truck is too big now (LOCK refuses the load). */}
+                  {st.smallTruckOnly ? (
+                    <Badge
+                      variant={st.smallTruckBreach ? 'destructive' : 'warning'}
+                      className="mt-0.5 text-[10px]"
+                      data-testid="stop-small-truck"
+                      data-breach={st.smallTruckBreach ? 'yes' : 'no'}
+                      title={
+                        st.smallTruckBreach
+                          ? `This customer takes small trucks only and ${l.truckCode} is not a small truck: LOCK refuses this load. Re-plan to put it on a small truck.`
+                          : 'This customer takes small trucks only (Settings: Small truck = at most N bays).'
+                      }
+                    >
+                      {SMALL_TRUCK_BADGE}
                     </Badge>
                   ) : null}
                   {st.carriedFrom ? (

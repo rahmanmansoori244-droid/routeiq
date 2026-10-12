@@ -46,6 +46,7 @@ import { isOptimizing } from '../jobs/optimize-job';
 import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
 import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 import { hadTimeHere } from './cross-depot';
+import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
 
 export interface DetailStop {
   sequence: number;
@@ -91,6 +92,17 @@ export interface DetailStop {
    * after planning reaches the driver sheet, the Excel route sheet and the driver page. Null = none.
    */
   customerPhone: string | null;
+  /**
+   * "Small truck only" (owner request 13 Oct 2026), as the customer is NOW (live, like the LOCK gate):
+   * the plan screen's SMALL TRUCK ONLY badge, the driver sheet and the warehouse load sheet. Absent = no.
+   */
+  smallTruckOnly?: boolean;
+  /**
+   * The load's truck, as it is now, is not a small truck (no bays, or more than the company's "Small
+   * truck = at most N bays"): LOCK, LOADING and DISPATCH refuse the load (409 SMALL_TRUCK_ONLY). The
+   * badge is red. Absent = no.
+   */
+  smallTruckBreach?: boolean;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
@@ -545,6 +557,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const elsewhere = await driversOnOtherDepots(db, tenantId, run, leave);
   // The company's today: a one-day hired truck retired after its day is not "taken out of service" (truckOutOfService).
   const today = todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date());
+  // "Small truck only" customers (owner request 13 Oct 2026): judged as the LOCK gate judges them.
+  const smallMaxBays = smallTruckMaxBaysOf(cfg);
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
@@ -654,6 +668,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         accessNotes: c.accessNotes,
         // Live too (owner request 12 Oct 2026): the driver calls the number the customer has now.
         customerPhone: c.phone ?? null,
+        // Live (owner request 13 Oct 2026): the customer's mark and the truck as they are now.
+        ...(c.smallTruckOnly ? { smallTruckOnly: true, ...(isSmallTruck(l.truck.bays, smallMaxBays) ? {} : { smallTruckBreach: true }) } : {}),
         split: null,
         snapshot: !!snap,
         masterChanged: snap
