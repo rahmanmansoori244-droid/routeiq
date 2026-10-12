@@ -195,6 +195,19 @@ describe('driverPackModel', () => {
     expect(part2.split).toEqual({ part: 2, parts: 2, others: [`part 1 on ${LONG_TRUCK} trip 1`], restUnserved: true });
   });
 
+  it("carries the customer's phone (owner request 12 Oct 2026): live from the customer, through pdfSafe; none for a stop without one", () => {
+    const d = fixture();
+    const [s1, s2] = driverPackModel(d, OPTS).sheets[0].stops;
+    expect(s1).toMatchObject({ customerCode: 'C001', phone: '9123 4567' });
+    expect(s2).toMatchObject({ customerCode: 'C002', phone: null });
+    // Blank is none; Arabic-Indic digits print as 0-9 (pdfSafe), nothing lost.
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], customerPhone: '+968 ٩١٢٣ ٤٥٦٧' };
+    d.loads[0].stops[1] = { ...d.loads[0].stops[1], customerPhone: '   ' };
+    const m = driverPackModel(d, OPTS);
+    expect(m.sheets[0].stops.map((x) => x.phone)).toEqual(['+968 9123 4567', null]);
+    expect(m.sheets[0].unprintable).toBe(false);
+  });
+
   it('handles a stop without a location: no pin, left out of the route link, and said so', () => {
     const m = driverPackModel(withSplitAndNoLocation(), OPTS);
     const s1 = m.sheets[0];
@@ -327,13 +340,39 @@ describe('renderDriverPackPdf', () => {
     for (const t of text) expect(t).not.toMatch(/OMR|cost|margin|revenue/i);
   });
 
+  it('prints "Tel <phone>" under the name and address of the customer (owner request 12 Oct 2026), and nothing for a stop without a phone', async () => {
+    const d = fixture(); // T01 trip 1: stop 1 C001 has a phone, stop 2 C002 has none
+    const text = pageTexts(await renderDriverPackPdf(driverPackModel(d, OPTS)));
+    const first = text.find((t) => t.includes(sq('Truck T01 — Trip 1 of 2')))!;
+    const tel = (t: string) => t.match(/Tel[+(\d]/g) ?? [];
+    expect(first).toContain(sq('Tel 9123 4567'));
+    expect(tel(first)).toHaveLength(1); // stop 2 prints none
+    // Next to the name and address line, before the access notes.
+    const at = first.indexOf(sq('Tel 9123 4567'));
+    expect(first.indexOf(sq('Lulu Hypermarket Bausher'))).toBeLessThan(at);
+    expect(first.indexOf(sq('Bausher, Sultan Qaboos St, near Muscat Grand Mall'))).toBeLessThan(at);
+    expect(at).toBeLessThan(first.indexOf(sq('Access: Receiving at the back gate')));
+    // A stop without an address: the Tel line follows the name.
+    d.loads[0].stops[0] = { ...d.loads[0].stops[0], address: null };
+    const noAddress = pageTexts(await renderDriverPackPdf(driverPackModel(d, { ...OPTS, loadIds: ['L1'] })))[0];
+    expect(noAddress).toContain(sq('Tel 9123 4567'));
+    // No phone on any stop of the pack: no Tel line at all.
+    const none = fixture();
+    for (const l of none.loads) l.stops = l.stops.map((x) => ({ ...x, customerPhone: null }));
+    for (const t of pageTexts(await renderDriverPackPdf(driverPackModel(none, OPTS)))) expect(tel(t)).toEqual([]);
+  });
+
   it('never leaves the return line and sign-off alone on a page, and repeats the header on continuation pages', async () => {
     let sawContinuation = false;
     for (let n = 1; n <= 16; n++) {
-      const buf = await renderDriverPackPdf(driverPackModel(longLoad(n), OPTS));
+      // Every stop with a phone (owner request 12 Oct 2026): the extra "Tel" line keeps these rules.
+      const d = longLoad(n);
+      d.loads[0].stops = d.loads[0].stops.map((x) => ({ ...x, customerPhone: '+968 9123 4567 / 2456 7890' }));
+      const buf = await renderDriverPackPdf(driverPackModel(d, OPTS));
       const text = pageTexts(buf);
       expect(text[text.length - 1]).toContain(sq('Return to depot MCT'));
       expect(text[text.length - 1]).toContain(sq('Loaded by:'));
+      expect(text.join('').match(/Tel\+968/g) ?? []).toHaveLength(n);
       text.forEach((t, i) => {
         // Every page carries at least one stop row, the compact header and its page number.
         expect(t, `n=${n} page ${i + 1}`).toContain(sq('Cases received:'));
@@ -390,6 +429,12 @@ describe('text the built-in font cannot print', () => {
     const s2 = driverPackModel(d2, OPTS).sheets[0];
     expect(s2.driverName).toBe('[?] Salim');
     expect(s2.loadCheck.items[0].productCode).toBe('[?]-1');
+    // The customer's phone too (owner request 12 Oct 2026; the phone rule never stores letters, the sheet never trusts it).
+    const d3 = fixture();
+    d3.loads[0].stops[0] = { ...d3.loads[0].stops[0], customerPhone: 'هاتف 9123 4567' };
+    const s3 = driverPackModel(d3, OPTS).sheets[0];
+    expect(s3.stops[0].phone).toBe('[?] 9123 4567');
+    expect(s3.unprintable).toBe(true);
   });
 
   it('draws only characters Helvetica has, and the Latin text around the rest stays intact', async () => {

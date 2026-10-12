@@ -67,6 +67,11 @@ describe('the dictionary', () => {
     expect(ar).not.toContain('أطول');
   });
 
+  it('"Call customer" in both languages (owner request 12 Oct 2026: the driver calls the customer before arrival)', () => {
+    expect(t('en', 'callCustomer')).toBe('Call customer');
+    expect(t('ar', 'callCustomer')).toBe('اتصل بالعميل');
+  });
+
   it('the toggle names the other language in its own script', () => {
     expect(LANG_TOGGLE).toEqual({ en: 'العربية', ar: 'English' });
   });

@@ -52,6 +52,8 @@ const CUSTOMER_SELECT = {
   windowConfirmedAt: true,
   address: true,
   accessNotes: true,
+  // Owner request 12 Oct 2026: the phone for the driver, a column of both workbooks.
+  phone: true,
   paymentType: true,
   active: true,
   locationSource: true,
@@ -173,7 +175,9 @@ interface LeadColumn {
 const IMPORTED_HEAD = { bold: true } as const;
 const INFO_HEAD = { bold: true, color: { argb: 'FF666666' } } as const;
 const INFO_FILL: ExcelJS.Fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF2F2F2' } };
-const TEXT_COLUMNS = new Set(['lat', 'lng', 'hard_from', 'hard_to', 'preferred_from', 'preferred_to', 'branch_code', 'code']);
+// Text cells, so Excel keeps what is typed: every decimal of a coordinate, "06:00", and a phone's
+// leading 0 or + (owner request 12 Oct 2026: "0501234567" typed in a number cell became 501234567).
+const TEXT_COLUMNS = new Set(['lat', 'lng', 'hard_from', 'hard_to', 'preferred_from', 'preferred_to', 'branch_code', 'code', 'phone']);
 
 /**
  * A coordinate as the customer import reads it back as the same point: every decimal the number has,

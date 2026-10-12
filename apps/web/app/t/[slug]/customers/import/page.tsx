@@ -7,6 +7,7 @@ import { PageShell } from '@/components/page-shell';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { CustomerImportForm } from './import-form';
+import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
 
 export const metadata = { title: 'Import customers — RouteIQ' };
 
@@ -50,6 +51,11 @@ export default async function CustomerImportPage({ params }: { params: { slug: s
             <Field name="priority" required hint="Integer 1-5 (1 = highest)." />
             <Field name="avg_service_time_min" hint="Minutes. Default 10." />
             <Field name="payment_type" required hint="cash | credit | prepaid" />
+            {/* Owner request 12 Oct 2026: the phone the driver calls before arrival. */}
+            <Field
+              name="phone"
+              hint={`The customer's phone, for the driver to call before arrival - optional. ${CUSTOMER_PHONE_RULE} Also read from a mobile, contact_phone, tel or customer_phone column. A blank cell keeps the saved phone.`}
+            />
             <Field name="priority_confirmed" hint="yes = confirmed. Blank = not confirmed yet: an unchanged priority stays as it is, a changed one is confirmed by you. no = store without confirming. Without this column every priority in the file is confirmed." />
             <Field name="hard_from / hard_to" hint="Receiving hours, HARD (never outside), HH:MM." />
             <Field name="preferred_from / preferred_to" hint="Preferred hours (soft), HH:MM. When any of the four hour cells is filled in, the four are the customer's own hours (a blank one = no limit)." />

@@ -14,6 +14,7 @@ import { CONFIG_BOUNDS, DEPOT_BOUNDS, TRUCK_BOUNDS, type Bound } from './planner
 import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
 import { parseProductCode } from './product-code';
+import { readCustomerPhone } from './dispatch/customer-phone';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -45,6 +46,21 @@ const codeSchema = z
   .regex(/^[A-Za-z0-9._-]+$/, 'Letters, digits, dot, dash, underscore only');
 
 const nameSchema = z.string().trim().min(1, 'Required').max(120);
+
+/**
+ * The customer's phone (owner request 12 Oct 2026, lib/dispatch/customer-phone.ts readCustomerPhone):
+ * stored as the dialog shows it (spaces as one, Arabic-Indic digits as 0-9); anything else than
+ * digits, spaces and + - ( ) /, or fewer than 6 or more than 20 digits, is refused with the reason.
+ * Wrapped in clearable: '' or null clears it, left out keeps it.
+ */
+const customerPhoneSchema = z.string().transform((v, ctx) => {
+  const r = readCustomerPhone(v);
+  if (!r.ok) {
+    ctx.addIssue({ code: 'custom', message: r.error });
+    return z.NEVER;
+  }
+  return r.phone;
+});
 
 /** Cases per pallet (lib/dispatch/pallets.ts validPalletFactor): a whole number 1-10,000; '' / null = not set; left out = unchanged. */
 export const casesPerPalletSchema = z
@@ -303,6 +319,8 @@ export const customerSchema = z.object({
   avgServiceTimeMin: z.coerce.number().int().min(0).max(MAX_SERVICE_MIN).optional().default(10),
   paymentType: z.nativeEnum(PaymentType).optional().default(PaymentType.CREDIT),
   accessNotes: clearable(z.string().trim().max(500)),
+  // Owner request 12 Oct 2026: the phone the driver calls before arrival (optional).
+  phone: clearable(customerPhoneSchema),
   active: z.boolean().optional(),
 });
 export type CustomerInput = z.infer<typeof customerSchema>;

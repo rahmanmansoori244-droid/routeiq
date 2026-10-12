@@ -16,6 +16,7 @@ import { samePoint } from '@/lib/dispatch/location-input';
 import { canManageMasterData } from '@/lib/rbac';
 import { clientIp } from '@/lib/client-ip';
 import { HOURS_COLUMNS, importedPriority, readImportedHours, rowVersion, yesNo, type PriorityConfirm } from '@/lib/dispatch/data-collection';
+import { importedPhoneCell, readCustomerPhone } from '@/lib/dispatch/customer-phone';
 
 const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartMin', 'prefWindowEndMin'] as const;
 
@@ -71,6 +72,14 @@ const HOUR_FIELDS = ['hardWindowStartMin', 'hardWindowEndMin', 'prefWindowStartM
 // import's own format is accepted when it matches an existing customer (an order file creates any
 // non-blank code); a new customer still needs a plain code. A pair that differs from a pin confirmed
 // on the map is counted apart in a dispatcher's import: no import changes such a pin, an admin's neither.
+//
+// Owner request 12 Oct 2026 (the driver calls the customer before arrival): an optional phone column,
+// `phone` (as the downloaded master and data-to-collect files have it) or `customer_phone`, `mobile`,
+// `contact_phone`, `tel` (any letter case; the first with a value wins, customer-phone.ts
+// importedPhoneCell). Checked like Details (readCustomerPhone: digits, spaces and + - ( ) /, 6 to 20
+// digits); a bad one is an error of its row, like a bad payment_type. As every optional field, a blank
+// cell or no such column keeps the saved phone: an import never clears one (Details does). Written,
+// and audited with the row's other fields, only when it differs from the saved one; part of row_version.
 
 interface ImportError {
   row: number;
@@ -113,6 +122,8 @@ interface CustomerRow {
   hoursCells: Partial<Record<(typeof HOURS_COLUMNS)[number], string>>;
   /** The customer as the downloaded file showed it (row_version, rowVersion); null = a file without it. */
   rowVersion: string | null;
+  /** The phone for the driver as it is stored (readCustomerPhone); null = blank or not in the file (keep). */
+  phone: string | null;
 }
 
 const PAYMENT_TYPES = new Set(['CASH', 'CREDIT', 'PREPAID']);
@@ -174,7 +185,7 @@ export async function POST(req: Request) {
     select: {
       id: true, code: true, branchKey: true, active: true, lat: true, lng: true, locationVerified: true, geocodeConfidence: true, locationSource: true, avgServiceTimeMin: true, serviceTimeConfirmed: true,
       // What a row would change (item 6: a row that changes nothing writes nothing, so a master imported back changes nothing).
-      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true,
+      name: true, regionId: true, address: true, priority: true, priorityConfirmed: true, paymentType: true, phone: true,
       hardWindowStartMin: true, hardWindowEndMin: true, prefWindowStartMin: true, prefWindowEndMin: true, windowConfirmedAt: true,
     },
   });
@@ -259,6 +270,13 @@ export async function POST(req: Request) {
       errors.push({ row, message: hoursCheck.error });
       return;
     }
+    // Owner request 12 Oct 2026: the phone for the driver (optional; blank keeps the saved one).
+    const phoneCell = importedPhoneCell(raw);
+    const phone = phoneCell ? readCustomerPhone(phoneCell.value, phoneCell.column) : ({ ok: true, phone: null } as const);
+    if (!phone.ok) {
+      errors.push({ row, message: phone.error });
+      return;
+    }
 
     const latRaw = cell(raw, 'lat');
     const lngRaw = cell(raw, 'lng');
@@ -303,6 +321,7 @@ export async function POST(req: Request) {
       priorityConfirm,
       hoursCells,
       rowVersion: cell(raw, 'row_version') || null,
+      phone: phone.phone,
     });
   });
 
@@ -314,6 +333,7 @@ export async function POST(req: Request) {
   const notExactRows = new Set(notExact.map((n) => n.row));
   const changesSomething = (v: CustomerRow, m: NonNullable<ReturnType<typeof matchOf>>): boolean => {
     if (v.name !== m.name || (v.address && v.address !== m.address) || (v.paymentType && v.paymentType !== m.paymentType)) return true;
+    if (v.phone && v.phone !== m.phone) return true;
     if (v.regionCode && (regionByCode.get(v.regionCode.toLowerCase()) ?? null) !== m.regionId) return true;
     const p = importedPriority(v.priority, v.priorityConfirm, m);
     if (p.priority !== null || p.confirm) return true;
@@ -535,6 +555,7 @@ export async function POST(req: Request) {
           // placeholder (the customer-type time applies until someone confirms one).
           ...(v.avgServiceTimeMin !== null ? { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true } : {}),
           ...(v.paymentType ? { paymentType: v.paymentType } : {}),
+          ...(v.phone ? { phone: v.phone } : {}),
           ...hoursData,
         },
       });
@@ -547,7 +568,7 @@ export async function POST(req: Request) {
         entity: 'Customer',
         entityId: created.id,
         afterJson: {
-          code: v.code, branchCode: v.branchCode, name: v.name, regionId, lat: v.lat, lng: v.lng, priority: v.priority, ...hoursShown, source: 'IMPORT', fileName: parsed.fileName,
+          code: v.code, branchCode: v.branchCode, name: v.name, regionId, lat: v.lat, lng: v.lng, priority: v.priority, ...(v.phone ? { phone: v.phone } : {}), ...hoursShown, source: 'IMPORT', fileName: parsed.fileName,
         } as never,
         ip,
       });
@@ -567,6 +588,8 @@ export async function POST(req: Request) {
         Object.assign(data, { avgServiceTimeMin: v.avgServiceTimeMin, serviceTimeConfirmed: true });
       }
       if (v.paymentType && v.paymentType !== m.paymentType) data.paymentType = v.paymentType;
+      // A blank phone keeps the saved one (owner request 12 Oct 2026); only a different one is written.
+      if (v.phone && v.phone !== m.phone) data.phone = v.phone;
       let wrote = false;
       if (Object.keys(data).length) {
         wrote = true;

@@ -390,6 +390,23 @@ describe('frozen plan facts, kg check and unverified times in the workbook (revi
     expect(text(lp2.getCell(6, col))).toMatch(/^MISMATCH: stops add up to/);
   });
 
+  it("the route table has the customer's Phone next to Map (owner request 12 Oct 2026): live, empty without one; the columns before it keep their places", async () => {
+    const d = fixture(); // T01 L1: stop 1 C001 has a phone, stop 2 C002 none
+    const ws = sheet(await render(d), 'T01 - L1');
+    const head = find(ws, (t) => t === 'Phone')!;
+    expect(head.col).toBe(18);
+    expect(text(ws.getCell(head.row, 17))).toBe('Map');
+    expect(text(ws.getCell(head.row, 19))).toBe('Notes');
+    expect(text(ws.getCell(head.row + 1, 2))).toBe('DEPOT');
+    expect(text(ws.getCell(head.row + 1, head.col))).toBe(''); // the depot row has none
+    expect(text(ws.getCell(head.row + 2, 2))).toBe('C001');
+    // Written as text: Excel keeps "9123 4567" (and a leading 0 or +) as typed.
+    expect(ws.getCell(head.row + 2, head.col).value).toBe('9123 4567');
+    expect(text(ws.getCell(head.row + 3, 2))).toBe('C002');
+    expect(text(ws.getCell(head.row + 3, head.col))).toBe('');
+    expect(text(ws.getCell(head.row + 3, head.col + 1))).toContain('Note: Call the store manager 30 min before');
+  });
+
   it('a stop whose master data changed after planning says so in its own column', async () => {
     const d = fixture();
     d.loads[0].stops[0] = { ...d.loads[0].stops[0], masterChanged: [{ kind: 'LOCATION', text: 'Location updated after planning: new pin 23.60100, 58.39000 (1.8 km from the planned one)' }] };

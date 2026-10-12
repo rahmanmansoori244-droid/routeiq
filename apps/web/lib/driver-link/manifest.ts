@@ -11,10 +11,16 @@
  * - Results (Part 2) are read live, never memoised.
  * - "Call dispatcher" (owner decision 3, 5 Oct 2026): the number of the depot of the trip the driver
  *   is on or goes on next, else the company number (dispatcherPhoneFor).
+ * - "Call customer" (owner request 12 Oct 2026: the driver calls the customer before arrival): each
+ *   stop's customer phone and its tel: link, made here with the company's calling code (telUrl, as the
+ *   WhatsApp links) so the page needs no country logic. Only the stops of this truck-day, like every
+ *   other stop field. Read live from the customer, so a phone set in Details shows within the memo's
+ *   60 s at most.
  */
 import { prisma } from '../db';
 import { getPlanDetail, type DetailLoad, type DetailStop, type PlanDetail } from '../dispatch/plan-detail';
-import { coordText } from '../dispatch/driver-links';
+import { coordText, telUrl } from '../dispatch/driver-links';
+import { phoneCountryCode } from '../dispatch/customer-attrs';
 import { DEFAULT_TZ } from '../dispatch/time';
 import { truckDayResults } from '../delivery/event-service';
 import { truckDayLoads } from './service';
@@ -51,7 +57,7 @@ function ordersOf(s: DetailStop): ManifestOrder[] {
   return [...out.values()];
 }
 
-function stopOf(depotId: string, l: DetailLoad, s: DetailStop): ManifestStop {
+function stopOf(depotId: string, l: DetailLoad, s: DetailStop, callingCode: string | null): ManifestStop {
   return {
     // The depot too (stop-key.ts): two depots' plans can both give this truck a Load 1.
     key: stopKeyOf(depotId, l.loadNo, s.sequence),
@@ -71,6 +77,8 @@ function stopOf(depotId: string, l: DetailLoad, s: DetailStop): ManifestStop {
     orders: ordersOf(s),
     notes: [...s.notes],
     accessNotes: s.accessNotes,
+    customerPhone: s.customerPhone ?? null,
+    customerTel: telUrl(s.customerPhone, callingCode),
     split: s.split ? { part: s.split.part, parts: s.split.parts } : null,
     carriedFrom: s.carriedFrom,
     changeNotes: s.masterChanged.map((c) => c.text),
@@ -90,6 +98,8 @@ export interface ManifestInput {
   casualOf: ReadonlyMap<string, boolean>;
   settings: { radiusM: number; photoRequired: boolean; locationRetentionDays: number; photoRetentionDays: number; dispatcherPhone: string | null };
   office: { userName: string } | null;
+  /** The company's calling code for a local phone number (phoneCountryCode of its country); absent = none. */
+  callingCode?: string | null;
 }
 
 /**
@@ -122,7 +132,7 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     driverName: l.driverName,
     cases: l.cases,
     backAtDepotAt: null,
-    stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s)),
+    stops: [...l.stops].sort((a, b) => a.sequence - b.sequence).map((s) => stopOf(d.run.depot.id, l, s, input.callingCode ?? null)),
   }));
   return {
     date: input.date,
@@ -188,7 +198,7 @@ export async function driverManifest(args: {
 }): Promise<DriverManifest> {
   const { tenantId, truckId, date } = args;
   const [tenant, cfg, truck, dayLoads] = await Promise.all([
-    prisma.tenant.findFirst({ where: { id: tenantId }, select: { name: true } }),
+    prisma.tenant.findFirst({ where: { id: tenantId }, select: { name: true, country: true } }),
     prisma.tenantConfig.findFirst({
       where: { tenantId },
       select: { timezone: true, geofenceRadiusM: true, photoProofRequired: true, locationRetentionDays: true, photoRetentionDays: true, dispatcherPhone: true },
@@ -220,6 +230,7 @@ export async function driverManifest(args: {
       dispatcherPhone: dispatcherPhoneFor(dayLoads, new Map(depots.map((d) => [d.id, d.dispatcherPhone])), cfg?.dispatcherPhone ?? null),
     },
     office: args.office,
+    callingCode: phoneCountryCode(tenant?.country),
   });
   // Results are read live, never memoised (Part 2). Each load with its own depot: a map by load number
   // gave both depots' Load 1 the same depot (fix of 7 Oct 2026).

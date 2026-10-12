@@ -673,6 +673,11 @@ model Customer {
   avgServiceTimeMin Int         @default(10)
   paymentType       PaymentType @default(CREDIT)
   accessNotes       String?
+  /// Owner request 12 Oct 2026: the customer's phone, for the driver to call before arrival (driver
+  /// sheet "Tel ...", the driver page's "Call customer", the data to collect). Optional text as typed,
+  /// checked by lib/dispatch/customer-phone.ts (digits, spaces and + - ( ) /, 6 to 20 digits); NULL =
+  /// none known. Read live like accessNotes: a correction reaches the sheets and the driver page at once.
+  phone             String?
   active            Boolean     @default(true)
   orders            Order[]
 

@@ -514,6 +514,38 @@ describe('frozen plan facts (review F08)', () => {
     expect(sheet.accessNotes).toBe('Rear gate after 14:00 - call 9123 4567');
   });
 
+  it("27e (owner request 12 Oct 2026) the customer's phone set in Details reaches the locked load's stop, its driver sheet and its Excel route sheet at once", async () => {
+    const p = await plan(runV2);
+    const s = p.loads.find((l: any) => l.id === lockedId).stops[0];
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { phone: '9123  4567' })).status).toBe(200);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).phone).toBe('9123 4567');
+    const after = await plan(runV2);
+    const st = after.loads.find((l: any) => l.id === lockedId).stops.find((x: any) => x.customerId === s.customerId);
+    expect(st.customerPhone).toBe('9123 4567');
+    expect(st.masterChanged.some((c: any) => c.kind !== 'LOCATION' && c.kind !== 'HOURS')).toBe(false);
+    const sheet = driverPackModel(after, { tenantName: 'NMWC', loadIds: [lockedId] }).sheets[0].stops.find((x) => x.customerCode === st.customerCode)!;
+    expect(sheet.phone).toBe('9123 4567');
+    // The Excel route sheet of that load: "Phone" next to "Map".
+    const xl = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV2}/export/excel`);
+    expect(xl.status).toBe(200);
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(Buffer.from(await xl.arrayBuffer()) as never);
+    const found = wb.worksheets.flatMap((ws) => {
+      const hits: string[] = [];
+      ws.eachRow((r) => {
+        r.eachCell((c, col) => {
+          if (c.value === 'Phone' && r.getCell(col - 1).value === 'Map') hits.push(ws.name);
+        });
+      });
+      return hits;
+    });
+    expect(found.length).toBeGreaterThan(0);
+    // A bad phone is refused (400), nothing saved; empty clears it.
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { phone: 'call first' })).status).toBe(400);
+    expect((await patch(`${BASE}/api/customers/${s.customerId}`, { phone: '' })).status).toBe(200);
+    expect((await prisma.customer.findUniqueOrThrow({ where: { id: s.customerId } })).phone).toBeNull();
+  });
+
   it('28 a re-plan keeps identical snapshots on the carried assignments and loads', async () => {
     const before = await prisma.routeAssignment.findMany({ where: { loadId: lockedId }, orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }] });
     const beforeLoad = await prisma.planLoad.findUniqueOrThrow({ where: { id: lockedId } });

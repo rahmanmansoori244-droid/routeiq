@@ -18,7 +18,11 @@
  *   (who and when); "Open all day" confirms a customer who accepts any time (no hours, and the
  *   customer-type default no longer applies); "Hours confirmed with the customer" confirms the hours
  *   shown without changing them (sent whole). Clearing every hour leaves the customer unconfirmed.
+ * - Owner request 12 Oct 2026: "Phone (for the driver to call)", optional. Checked with the server's
+ *   own rule (readCustomerPhone, lib/dispatch/customer-phone.ts) and sent only when it changed (as
+ *   the server would store it: "9123  4567" typed for "9123 4567" is no change); emptied = no phone.
  */
+import { readCustomerPhone } from '@/lib/dispatch/customer-phone';
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
 import { fmtHhmm, parseHhmm } from '@/lib/dispatch/time';
 
@@ -39,6 +43,8 @@ export interface DetailsCustomer {
   prefWindowEndMin: number | null;
   /** An own confirmed window (owner decision 1 Oct 2026): the hours were entered or confirmed by a dispatcher or admin. Absent = not confirmed. */
   windowConfirmed?: boolean;
+  /** The customer's phone for the driver (owner request 12 Oct 2026). Absent or null = none. */
+  phone?: string | null;
 }
 
 /** The form as typed. '' = not set / the default applies. */
@@ -56,6 +62,8 @@ export interface DetailsForm {
   openAllDay?: boolean;
   /** "Hours confirmed with the customer" ticked. Absent = false. */
   confirmHours?: boolean;
+  /** "Phone (for the driver to call)" as typed; '' = no phone. Absent = ''. */
+  phone?: string;
 }
 
 /** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
@@ -70,9 +78,11 @@ export interface DetailsPatch {
   prefWindowEndMin?: number | null;
   /** true = the hours as sent (or as stored) are confirmed; sent for "Open all day" and for confirming unchanged hours. */
   windowConfirmed?: boolean;
+  /** The phone for the driver (owner request 12 Oct 2026); null = no phone any more. */
+  phone?: string | null;
 }
 
-export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false };
+export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '' };
 
 const isOwn = (source: string | undefined) => source === undefined || source === 'CUSTOMER';
 
@@ -96,6 +106,7 @@ export function detailsFormOf(c: DetailsCustomer): DetailsForm {
     prefEnd: windowText(c.prefWindowEndMin),
     openAllDay: !!c.windowConfirmed && [c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin].every((v) => v === null),
     confirmHours: !!c.windowConfirmed,
+    phone: c.phone ?? '',
   };
 }
 
@@ -156,6 +167,8 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   const service = parseServiceMinutes(now.service);
   if (!service.ok) return service;
   if (now.priority !== '' && !/^[1-5]$/.test(now.priority)) return { ok: false, error: 'Priority: P1 to P5.' };
+  const phone = readCustomerPhone(now.phone);
+  if (!phone.ok) return phone;
 
   const patch: DetailsPatch = {};
   if (now.type !== initial.type) patch.customerType = now.type || null;
@@ -163,6 +176,9 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   if (now.priority !== initial.priority && now.priority !== '') patch.priority = Number(now.priority);
   const before = parseServiceMinutes(initial.service);
   if (!before.ok || before.minutes !== service.minutes) patch.avgServiceTimeMin = service.minutes;
+  // The phone as the server stores it: spaces typed differently are no change.
+  const phoneWas = readCustomerPhone(initial.phone);
+  if (!phoneWas.ok || phoneWas.phone !== phone.phone) patch.phone = phone.phone;
   // Receiving hours (owner decision 1 Oct 2026, "own confirmed window"): hours the dispatcher enters
   // are confirmed by the server; "Open all day" is confirmed with no hours; ticking "confirmed with
   // the customer" confirms the hours as shown (sent whole, so what is confirmed is what was seen).

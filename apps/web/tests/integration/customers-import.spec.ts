@@ -8,7 +8,10 @@
  *  - a service time in the file counts as confirmed, so it wins over the customer-type default;
  *  - a code that differs only in letter case updates the existing customer, no twin is created;
  *  - the dry-run reports new / updated rows and confirmed times that would change;
- *  - service times above 480 min are refused.
+ *  - service times above 480 min are refused;
+ *  - (owner request 12 Oct 2026) the customer's phone for the driver: read from `phone` or `mobile`
+ *    (any case), stored on the real Customer row as Details stores it, a blank cell keeps it, a bad one
+ *    refuses its row.
  *
  * Requires dev server running.
  */
@@ -93,5 +96,21 @@ describe('customer import', () => {
     const tooLong = await importCsv('code,name,priority,avg_service_time_min\nC100,Hyper,1,600\n', true);
     expect(tooLong.body.data.errorRows).toBe(1);
     expect(tooLong.body.data.errors[0].message).toMatch(/0-480/);
+  });
+
+  it('the phone for the driver (owner request 12 Oct 2026): phone or mobile, stored as Details stores it; a blank cell keeps it; a bad one refuses its row', async () => {
+    const r = await importCsv('code,name,priority,Mobile\nC100,Hyper renamed,1, 9123   4567 \n');
+    expect(r.status).toBe(200);
+    expect(r.body.data.errorRows ?? 0).toBe(0);
+    const phoneOf = async () => (await prisma.customer.findFirstOrThrow({ where: { tenantId: t.tenantId, code: 'C100' } })).phone;
+    expect(await phoneOf()).toBe('9123 4567');
+    expect((await importCsv('code,name,priority,phone\nC100,Hyper renamed,1,\n')).status).toBe(200);
+    expect(await phoneOf()).toBe('9123 4567');
+    const bad = await importCsv('code,name,priority,phone\nC100,Hyper renamed,1,call first\n');
+    expect(bad.body.data.errors).toEqual([{ row: 2, message: 'phone "call first": use only digits, spaces and + - ( ) /.' }]);
+    expect(await phoneOf()).toBe('9123 4567');
+    // Each change has its UPDATE audit row with the phone before and after.
+    const rows = await prisma.auditLog.findMany({ where: { tenantId: t.tenantId, entity: 'Customer', action: 'UPDATE' }, orderBy: { createdAt: 'asc' } });
+    expect(rows.some((a) => (a.afterJson as any)?.phone === '9123 4567' && (a.beforeJson as any)?.phone === null)).toBe(true);
   });
 });

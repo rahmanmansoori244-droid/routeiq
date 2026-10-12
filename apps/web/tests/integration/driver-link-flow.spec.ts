@@ -39,6 +39,8 @@ let runId = '';
 const trucks: Record<string, string> = {};
 let token = '';
 let linkId = '';
+/** The customers' phones (owner request 12 Oct 2026: "Call customer" on the driver page); C6 has none. */
+const PHONES: Record<string, string | null> = { C1: '9100 0011', C2: '+968 9100 0012', C3: '9100 0013', C4: '9100 0014', C5: '9100 0015', C6: null };
 
 function isoPlus(days: number) {
   const d = new Date(Date.now() + 4 * 3600_000); // Muscat
@@ -110,7 +112,10 @@ beforeAll(async () => {
   ];
   for (const [code, name, lat, lng] of customers) {
     await prisma.customer.create({
-      data: { tenantId: t.tenantId, code, branchKey: '__MAIN__', name, lat, lng, geocodeConfidence: 'HIGH', locationVerified: true, priority: 2, priorityConfirmed: true, avgServiceTimeMin: 15, serviceTimeConfirmed: true },
+      data: {
+        tenantId: t.tenantId, code, branchKey: '__MAIN__', name, lat, lng, geocodeConfidence: 'HIGH', locationVerified: true, priority: 2, priorityConfirmed: true, avgServiceTimeMin: 15, serviceTimeConfirmed: true,
+        phone: PHONES[code] ?? null,
+      },
     });
   }
   const d = dmy(day);
@@ -179,6 +184,17 @@ describe('Part 1: the driver link and the read-only driver page', () => {
     expect(m.loads.map((l: any) => l.loadNo).sort()).toEqual(t01Loads.map((l: any) => l.loadNo).sort());
     expect(m.office).toBeNull();
     expect(JSON.stringify(m)).not.toMatch(/operatingCost|fuelCost|salesValue|margin/);
+    // Owner request 12 Oct 2026: each stop has its customer's phone and a tel: link with Oman's +968;
+    // the phones of the other truck's customers are never on this truck's page.
+    const stops = m.loads.flatMap((l: any) => l.stops);
+    expect(stops.length).toBeGreaterThan(0);
+    for (const s of stops) {
+      const want = PHONES[s.customerCode] ?? null;
+      expect(s.customerPhone).toBe(want);
+      expect(s.customerTel).toBe(want ? `tel:+968${want.replace(/\D/g, '').replace(/^968/, '')}` : null);
+    }
+    const mine = new Set(stops.map((s: any) => s.customerCode));
+    for (const [code, phone] of Object.entries(PHONES)) if (!mine.has(code) && phone) expect(JSON.stringify(m)).not.toContain(phone);
     expect((await driverGet('/api/d/manifest', null)).status).toBe(404);
     expect((await driverGet('/api/d/manifest', 'A'.repeat(24))).status).toBe(404);
     const office = (await json(await driverGet('/api/d/manifest', token, t.cookieJar))).data;

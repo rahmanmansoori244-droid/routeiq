@@ -31,12 +31,14 @@ export interface FxOrder {
   address: string | null;
   access?: string;
   note?: string;
+  /** The customer's phone (owner request 12 Oct 2026); absent = none. */
+  phone?: string;
 }
 
 export const ORDERS: FxOrder[] = [
   { id: 'o1', customerId: 'c1', code: 'C001', branch: 'B1', name: 'Lulu Hypermarket Bausher', priority: 1, late: false,
     lines: [{ sku: 'TAN-500-24', cases: 50, so: 'SO-1001' }, { sku: 'JAB-1500-6', cases: 20, so: 'SO-1001' }],
-    lat: 23.5859, lng: 58.3829, address: 'Bausher, Sultan Qaboos St, near Muscat Grand Mall', access: 'Receiving at the back gate; forklift until 14:00' },
+    lat: 23.5859, lng: 58.3829, address: 'Bausher, Sultan Qaboos St, near Muscat Grand Mall', access: 'Receiving at the back gate; forklift until 14:00', phone: '9123 4567' },
   { id: 'o2', customerId: 'c2', code: 'C002', branch: null, name: 'Al Fair Qurum', priority: 2, late: false,
     lines: [{ sku: 'TAN-500-24', cases: 30, so: 'SO-1002' }, { sku: 'TAN-5G', cases: 10, so: 'SO-1002' }],
     lat: 23.6139, lng: 58.4739, address: 'Qurum, Al Qurum St', note: 'Call the store manager 30 min before' },
@@ -95,6 +97,7 @@ export function stop(orderId: string, sequence: number, legKm: number, cumulativ
     address: o.address,
     notes: o.note ? [o.note] : [],
     accessNotes: o.access ?? null,
+    customerPhone: o.phone ?? null,
     split: null,
     snapshot: true,
     masterChanged: [],

@@ -47,6 +47,7 @@ import {
   importedPriority,
   masterValues,
   readImportedHours,
+  rowVersion,
   windowGateRemedy,
   yesNo,
   type MasterCustomer,
@@ -609,5 +610,147 @@ describe('item 6: GET /api/customers/master and the import reading it back', () 
       userId: 'u1', beforeJson: { geocodeConfidence: 'HIGH' }, afterJson: { geocodeConfidence: 'LOW', source: 'IMPORT' },
     });
     expect(row('customer', 'USABLE').geocodeConfidence).toBe('LOW');
+  });
+});
+
+/**
+ * Owner request 12 Oct 2026: "add it [the customer's phone] to the list of data to be collected so
+ * that the driver can call the customer before arrival". The data-to-collect Excel and the customer
+ * master have a `phone` column with the current value and a short instruction; the import reads it back
+ * (and from mobile, contact_phone, tel, customer_phone), a blank cell keeping the saved phone. The phone
+ * is collected, never required: it changes neither who is on the list nor the loading gate.
+ */
+describe("the customer's phone: collected in both workbooks and read back by the import (owner request 12 Oct 2026)", () => {
+  const master = async () => masterGet(new Request('http://localhost/api/customers/master'));
+  const heads = (ws: ExcelJS.Worksheet) => (ws.getRow(1).values as unknown[]).slice(1).map(String);
+  const phoneCell = (ws: ExcelJS.Worksheet, code: string) => {
+    let cell: ExcelJS.Cell | null = null;
+    ws.eachRow((r, n) => {
+      if (n > 1 && r.getCell(heads(ws).indexOf('code') + 1).value === code) cell = r.getCell(heads(ws).indexOf('phone') + 1);
+    });
+    return cell as unknown as ExcelJS.Cell;
+  };
+
+  it('Data to collect (Excel): a phone column with the current value (a text cell), asked for in what_to_do when missing, with its instruction in About', async () => {
+    row('customer', 'USABLE').phone = '9123 4567';
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    const ws = wb.worksheets[0]!;
+    expect(heads(ws).indexOf('phone')).toBe(heads(ws).indexOf('address') + 1);
+    const rows = rowsOf(ws);
+    expect(rows.find((x) => x.code === 'USABLE')).toMatchObject({ phone: '9123 4567' });
+    expect(rows.find((x) => x.code === 'NONE')).toMatchObject({ phone: null });
+    expect(phoneCell(ws, 'USABLE').numFmt).toBe('@'); // Excel keeps a leading 0 or + typed in it
+    expect(rows.find((x) => x.code === 'NONE')!.what_to_do).toMatch(/Phone: fill in phone \(customer's phone, for the driver to call before arrival - optional\)\.$/);
+    expect(rows.find((x) => x.code === 'USABLE')!.what_to_do).not.toMatch(/Phone:/);
+    expect(aboutText(wb)).toContain("phone\nImported back. The customer's phone, for the driver to call before arrival - optional.");
+  });
+
+  it('a missing phone never puts a customer on the list, and is not data the loading rule needs', async () => {
+    // DONE and OPEN have their location and confirmed hours, and no phone: not on the list.
+    expect(row('customer', 'DONE').phone ?? null).toBeNull();
+    tables.order.push(order('O7', 'OPEN', 'D1', 1));
+    const r = await answer(await getWorklist());
+    expect(r.body.data.rows.map((x: any) => x.code)).toEqual(['NONE', 'LOW', 'USABLE']);
+    const c = (id: string, over: Record<string, unknown> = {}) => customer(id, over) as never;
+    expect(dataGaps([c('DONE', { locationVerified: true, windowConfirmedAt: AT })], [{ customerId: 'DONE', deliveryStartMin: null, deliveryEndMin: null }])).toEqual([]);
+  });
+
+  it('customer master: the phone column; imported back as downloaded (phone included), nothing changes', async () => {
+    row('customer', 'DONE').phone = '+968 9123 4567';
+    row('customer', 'OPEN').phone = '0501234567';
+    const before = JSON.parse(JSON.stringify(tables.customer));
+    const res = await master();
+    const buf = Buffer.from(await res.clone().arrayBuffer());
+    const wb = await workbookOf(res);
+    const ws = wb.getWorksheet('Customers')!;
+    expect(rowsOf(ws).filter((x) => x.phone).map((x) => [x.code, x.phone])).toEqual([
+      ['DONE', '+968 9123 4567'],
+      ['OPEN', '0501234567'],
+    ]);
+    expect(phoneCell(ws, 'OPEN').numFmt).toBe('@');
+    const r = await importXlsx(buf);
+    expect(r.body.data).toMatchObject({ errorRows: 0, unchanged: 6 });
+    expect(JSON.parse(JSON.stringify(tables.customer))).toEqual(before);
+    expect(audits.filter((a) => a.action === 'UPDATE')).toEqual([]);
+  });
+
+  it('a phone filled in on the data-to-collect sheet is saved as Details would store it, and audited with the row', async () => {
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    const ws = wb.worksheets[0]!;
+    setCells(ws, 'NONE', { phone: ' 9123   4567 ' });
+    setCells(ws, 'LOW', { phone: '٩١٢٣ ٤٥٦٨' });
+    const r = await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.body.data).toMatchObject({ errorRows: 0 });
+    expect(row('customer', 'NONE').phone).toBe('9123 4567');
+    expect(row('customer', 'LOW').phone).toBe('9123 4568');
+    expect(row('customer', 'USABLE').phone ?? null).toBeNull(); // blank: nothing written
+    expect(audits.filter((a) => a.action === 'UPDATE').map((a) => [a.entityId, a.beforeJson, a.afterJson.phone])).toEqual([
+      ['NONE', { phone: null }, '9123 4567'],
+      ['LOW', { phone: null }, '9123 4568'],
+    ]);
+  });
+
+  it('the headers phone, customer_phone, mobile, contact_phone and tel (any letter case); a blank cell keeps the saved phone; a different one replaces it', async () => {
+    expect((await importCsv('code,name,priority,MOBILE\nUSABLE,Customer USABLE,3,+968 9123 4567\n')).body.data).toMatchObject({ errorRows: 0, unchanged: 0 });
+    expect(row('customer', 'USABLE').phone).toBe('+968 9123 4567');
+    for (const head of ['Phone', 'customer_phone', 'Contact_Phone', 'TEL']) {
+      expect((await importCsv(`code,name,priority,${head}\nUSABLE,Customer USABLE,3,\n`)).body.data, head).toMatchObject({ errorRows: 0, unchanged: 1 });
+      expect(row('customer', 'USABLE').phone).toBe('+968 9123 4567');
+    }
+    expect((await importCsv('code,name,priority,tel\nUSABLE,Customer USABLE,3,2456 7890\n')).body.data).toMatchObject({ errorRows: 0, unchanged: 0 });
+    expect(row('customer', 'USABLE').phone).toBe('2456 7890');
+    // Two phone columns: phone wins over the others.
+    await importCsv('code,name,priority,mobile,phone\nUSABLE,Customer USABLE,3,9999 0000,9123 4567\n');
+    expect(row('customer', 'USABLE').phone).toBe('9123 4567');
+    // Without any phone column the saved phone is kept.
+    expect((await importCsv('code,name,priority\nUSABLE,Customer USABLE,3\n')).body.data).toMatchObject({ errorRows: 0, unchanged: 1 });
+    expect(row('customer', 'USABLE').phone).toBe('9123 4567');
+  });
+
+  it('a phone that is not a phone number is an error of its row (nothing is saved), named by its column', async () => {
+    const r = await importCsv('code,name,priority,mobile\nUSABLE,Customer USABLE,3,call the manager\nNONE,Customer NONE,3,12345\n');
+    expect(r.body.data.errors).toEqual([
+      { row: 2, message: 'mobile "call the manager": use only digits, spaces and + - ( ) /.' },
+      { row: 3, message: 'mobile "12345": a phone number has 6 to 20 digits (this has 5).' },
+    ]);
+    expect(row('customer', 'USABLE').phone ?? null).toBeNull();
+    expect(audits).toEqual([]);
+  });
+
+  it('a new customer gets the phone of its row (in its CREATE row)', async () => {
+    session.role = 'TENANT_ADMIN';
+    expect((await importCsv('code,name,priority,phone\nNEW2,New Shop,3,9123 4567\n')).body.data).toMatchObject({ errorRows: 0, creates: 1 });
+    const created = tables.customer.find((c) => c.code === 'NEW2')!;
+    expect(created.phone).toBe('9123 4567');
+    expect(audits.find((a) => a.action === 'CREATE' && a.entityId === created.id)).toMatchObject({ afterJson: { code: 'NEW2', phone: '9123 4567', source: 'IMPORT' } });
+  });
+
+  it('row_version: a phone set in RouteIQ after the download makes the row stale; a customer without a phone keeps the version of files from before the phone', async () => {
+    // A customer without a phone has the version it had before this release (pinned: computed with the code before it).
+    const fixed = {
+      name: 'Corner Shop', regionId: 'R1', address: 'Seeb', priority: 2, priorityConfirmed: true, avgServiceTimeMin: 15, serviceTimeConfirmed: true, paymentType: 'CASH',
+      lat: 23.5859, lng: 58.4059, locationVerified: true, geocodeConfidence: 'HIGH', hardWindowStartMin: 360, hardWindowEndMin: 840, prefWindowStartMin: null, prefWindowEndMin: null,
+      windowConfirmedAt: '2026-10-01T08:00:00.000Z',
+    };
+    expect(rowVersion(fixed)).toBe('v1-19197a5740cafc');
+    expect(rowVersion({ ...fixed, phone: null })).toBe('v1-19197a5740cafc');
+    expect(rowVersion({ ...fixed, phone: '9123 4567' })).not.toBe('v1-19197a5740cafc');
+    // Downloaded, then a dispatcher adds USABLE's phone in Details: the old row is not imported.
+    const wb = await workbookOf(await getWorklist('?format=xlsx'));
+    setCells(wb.worksheets[0]!, 'USABLE', { phone: '2456 7890' });
+    row('customer', 'USABLE').phone = '9123 4567';
+    const r = await importXlsx(Buffer.from(await wb.xlsx.writeBuffer()));
+    expect(r.body.data.staleRows).toEqual([{ row: 4, code: 'USABLE', branchCode: null }]);
+    expect(row('customer', 'USABLE').phone).toBe('9123 4567');
+  });
+
+  it('"Changed since" says Phone for a phone change; the master row carries the phone', () => {
+    const since = new Date('2026-09-30T00:00:00Z');
+    const s = changeSummary({ createdAt: null, updatedAt: null, createdFromUpload: false }, [
+      { action: 'UPDATE', createdAt: new Date('2026-09-30T08:00:00Z'), userName: 'Sara', beforeJson: { phone: null, name: 'A' }, afterJson: { phone: '9123 4567', name: 'A' } },
+    ], since);
+    expect(s).toMatchObject({ by: 'Sara', what: 'Phone' });
+    const m = { ...customer('C', { phone: '9123 4567' }), regionCode: null, regionName: null, depotCode: null, locationVerifiedBy: null, windowConfirmedBy: null } as unknown as MasterCustomer;
+    expect(masterValues(m, { area: DEFAULT_SERVICE_AREA, profiles: new Map(), serviceTimeMin: 10, timezone: 'Asia/Muscat' })).toMatchObject({ phone: '9123 4567' });
   });
 });
