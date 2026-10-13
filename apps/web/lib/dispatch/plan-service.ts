@@ -53,7 +53,7 @@ import { cancelledLoadText, NOT_CANCELLED } from './order-cancel-rules';
 import {
   caseHeavierThanAnyTruck,
   choosePartCapacity,
-  fitsCapacity,
+  classifyCustomer,
   hasRoom,
   linesPalletUnits,
   maxCasePayloadKg,
@@ -85,7 +85,20 @@ import {
   type OrderWeightChange,
   type UnknownWeight,
 } from './weights';
-import { groupMissingPalletFactors, loadPallets, PALLET_FILL_DEFAULT, palletRoomUnits, palletText, validPalletFactor, type MissingPalletFactor } from './pallets';
+import {
+  baysTruckText,
+  groupMissingPalletFactors,
+  loadCustomerCount,
+  loadPallets,
+  PALLET_FILL_DEFAULT,
+  palletRoomUnits,
+  palletText,
+  plannedLoadRoom,
+  SINGLE_CUSTOMER_FILL_PCT,
+  singleCustomerSolverNote,
+  validPalletFactor,
+  type MissingPalletFactor,
+} from './pallets';
 import { computeChangeSummary, computeSummary, type AssignmentKey, type DailySummary, type DriverChangeNote } from './summary';
 import { dispatchConfigFromTenant, masterDataProblems, plannerSettingProblems } from './planner-config';
 import { MAX_DISPATCH_STOPS } from '../planner-bounds';
@@ -582,14 +595,21 @@ export async function buildDispatchRequest(
   // Split deliveries: a customer that fits no truck (cases or kg) is planned as several stops at
   // the same place. Only trucks with a load left today count, and parts are sized so that
   // several of them can carry the parts (see choosePartCapacity).
-  // A truck with bays is measured in pallet units (bays x Pallet fill), the others in cases.
+  // A truck with bays is measured in pallet units (bays x Pallet fill), the others in cases; and a
+  // load of ONE customer may use every bay (owner rule 13 Oct 2026, SINGLE_CUSTOMER_FILL_PCT): a
+  // customer that fits no truck at the fill but one alone at every bay is one stop (classifyCustomer),
+  // and split parts are sized at every bay (one customer per part, the leftover as small as possible).
+  const bayRooms = (bays: number) => ({
+    palletUnits: palletRoomUnits(bays, fillPct),
+    fullPalletUnits: palletRoomUnits(bays, Math.max(fillPct, SINGLE_CUSTOMER_FILL_PCT)),
+  });
   const fleet: FleetTruck[] = trucks.map((t) => ({
     code: t.code,
     cases: t.capacityCases,
     kg: t.capacityWeightKg > 0 ? t.capacityWeightKg : null,
     // A truck with no time left here (on another depot's plan all day) has no load left today.
     tripsLeft: hoursAround.get(t.id)?.none ? 0 : (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
-    ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+    ...(t.bays !== null && t.bays !== undefined ? bayRooms(t.bays) : {}),
     bays: t.bays ?? null,
   }));
   // The trucks the parts may be sized for: the own fleet, and the trucks the hire what-if may rent (each
@@ -601,7 +621,7 @@ export async function buildDispatchRequest(
       cases: t.capacityCases,
       kg: t.payloadKg !== null && t.payloadKg > 0 ? t.payloadKg : null,
       tripsLeft: cfg.maxTripsPerTruck,
-      ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+      ...(t.bays !== null && t.bays !== undefined ? bayRooms(t.bays) : {}),
       bays: t.bays ?? null,
     })),
   ];
@@ -618,11 +638,11 @@ export async function buildDispatchRequest(
     const small = (t: FleetTruck) => isSmallTruck(t.bays, smallMaxBays);
     return available.some(small) ? available.filter(small) : splitFleet.filter(small);
   };
+  // Only for a customer classifyCustomer says is bigger than any truck, even alone (SPLIT): a customer that
+  // fits one truck in that truck's own measure is never split, nor one that fills a truck alone.
   const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number, smallOnly = false): { cap: PartCapacity; truckCode: string } | null => {
     const pool = poolOf(smallOnly);
     if (!cfg.splitDeliveries || !pool.some(hasRoom)) return null;
-    // A customer that fits one truck, in that truck's own measure, is never split.
-    if (pool.some((t) => hasRoom(t) && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.palletUnits ?? null }, units))) return null;
     return choosePartCapacity(cases, kg, pool, maxCaseKg, units);
   };
   // One case heavier than every payload cannot go on any truck: almost always a wrong case weight
@@ -648,6 +668,7 @@ export async function buildDispatchRequest(
   const timeConflicts: string[] = [];
   const outsideHours: string[] = [];
   const splitNotes: string[] = [];
+  const fullTruckNotes: string[] = [];
   const inactiveCustomers: string[] = [];
   const inactiveProducts = new Set<string>();
   const tooHeavyNotes: string[] = [];
@@ -819,7 +840,11 @@ export async function buildDispatchRequest(
     const maxCaseKg = Math.max(0, ...live.flatMap((x) => x.lines.map((l) => l.kgPerCase)));
     // The customer's pallet need (each line rounded up on its own, then added up); 0 without bay trucks.
     const totalUnits = byPallets ? live.reduce((a, x) => a + unitsOfLines(x.lines), 0) : 0;
-    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits, !!cust.smallTruckOnly);
+    // Decided BEFORE the split-deliveries switch (owner rule 13 Oct 2026): one customer that fills a truck
+    // alone is one stop whether or not splitting is on; the optimizer puts it alone on such a truck.
+    const plan = classifyCustomer(totalCases, totalKg, totalUnits, poolOf(!!cust.smallTruckOnly));
+    if (plan.kind === 'FULL_TRUCK') fullTruckNotes.push(`${label} ${palletText(totalUnits)} pallets, alone on ${baysTruckText(plan.bays)}`);
+    const split = plan.kind === 'SPLIT' ? partCapFor(totalCases, totalKg, maxCaseKg, totalUnits, !!cust.smallTruckOnly) : null;
     if (!split) {
       const ids = live.map(orderRef);
       if (sw.promised) promised[c.id] = sw.promised;
@@ -839,6 +864,8 @@ export async function buildDispatchRequest(
       const parts = splitIntoParts(live.flatMap((x) => x.lines), split.cap);
       const byOrder = new Map(live.map((x) => [x.o.id, x.o]));
       const kgPerCase = new Map(live.flatMap((x) => x.lines.map((l) => [l.lineId, l.kgPerCase] as const)));
+      // Each part's size, for the leftover the warning names (the smallest part: the only one that may share a truck).
+      const partSizes: { cases: number; units: number }[] = [];
       parts.forEach((part, k) => {
         const recs = portionsOfPart(part, k + 1, parts.length, kgPerCase, byPallets ? cppOfLine : undefined);
         const ids = recs.map((r) => {
@@ -848,6 +875,7 @@ export async function buildDispatchRequest(
           return id;
         });
         const cases = recs.reduce((a, r) => a + r.cases, 0);
+        partSizes.push({ cases, units: ids.reduce((a, id) => a + (refUnits[id] ?? 0), 0) });
         if (sw.promised) promised[`${c.id}#${k + 1}`] = sw.promised;
         stopList.push({
           ...base,
@@ -865,8 +893,10 @@ export async function buildDispatchRequest(
           revenue: sumMoney(recs.map((r) => money(byOrder.get(r.orderId)!, 'salesValue', r.lines))),
         });
       });
+      const leftover = [...partSizes].sort((a, b) => (byPallets ? a.units - b.units : 0) || a.cases - b.cases)[0];
+      const leftoverText = leftover && parts.length > 1 ? `, leftover ${byPallets ? `${palletText(leftover.units)} pallets (${leftover.cases} cases)` : `${leftover.cases} cases`}` : '';
       splitNotes.push(
-        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}${cust.smallTruckOnly ? ` (small trucks only: at most ${smallMaxBays} bays)` : ''}`,
+        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}${cust.smallTruckOnly ? ` (small trucks only: at most ${smallMaxBays} bays)` : ''}${leftoverText}`,
       );
     }
     for (const x of live) orderPriority[x.o.id] = pr;
@@ -956,6 +986,9 @@ export async function buildDispatchRequest(
   }
   // Days above LARGE_DAY_STOPS get the optimizer's own "Large day" warning (it names the limit);
   // the web adds none, so the plan does not show two near-identical ones.
+  if (fullTruckNotes.length) {
+    warnings.push(`One customer fills a truck: ${fullTruckNotes.join('; ')} (every bay; trucks with several customers keep ${fillPct}%).`);
+  }
   if (splitNotes.length) {
     warnings.push(`Split delivery (bigger than any truck): ${splitNotes.join('; ')}.`);
   }
@@ -1311,12 +1344,15 @@ export async function persistDispatchResult(
     // Likewise "small truck only" customers (owner request 13 Oct 2026): an older solver ignores the
     // allowed trucks and echoes nothing. The plan says so; LOCK still refuses such a customer on a big truck.
     const smallTruckNote = smallTruckSolverNote(built.request?.stops ?? [], sc);
+    // Likewise the one-customer rule (owner rule 13 Oct 2026): an older solver ignores it and echoes nothing,
+    // so every load was planned at the Pallet fill (a customer that fills a truck alone left out).
+    const singleCustomerNote = singleCustomerSolverNote(built.request, sc);
     const details: ScenarioDetails = {
       ...sc,
       engine: resp.engine,
       matrix_provider: resp.matrix_provider,
       distance_is_estimated: resp.distance_is_estimated,
-      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote, ...smallTruckNote],
+      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote, ...smallTruckNote, ...singleCustomerNote],
       scope: built.scope,
       ...(inputs ? { inputs } : {}),
       ...(resp.search ? { search: resp.search } : {}),
@@ -1729,7 +1765,8 @@ async function snapshotSource(
   const liveById = new Map(liveTrucks.map((t) => [t.id, t]));
   const truck = (truckId: string): TruckSnapshot | null => {
     // Pallets: the bays, fill and room stay with the load only when the optimizer echoed the rule.
-    const planned = inputs?.trucks[truckId] ? plannedTruckFacts(inputs.trucks[truckId], typeof d.pallet_unit === 'number') : undefined;
+    // The one-customer rule likewise, only from its echo (owner rule 13 Oct 2026).
+    const planned = inputs?.trucks[truckId] ? plannedTruckFacts(inputs.trucks[truckId], typeof d.pallet_unit === 'number', d.single_customer_fill_pct) : undefined;
     const live = liveById.get(truckId);
     const facts: TruckFacts | null = planned ?? (live
       ? { code: live.code, capacityCases: live.capacityCases, capacityWeightKg: live.capacityWeightKg, fixedCostPerDay: live.fixedCostPerDay, tripCost: live.tripCost, costPerKm: live.costPerKm, kmPerLitre: live.kmPerLitre, availableFromMin: live.availableFromMin, availableToMin: live.availableToMin, maxTripsPerDay: live.maxTripsPerDay }
@@ -2028,6 +2065,8 @@ export const FEASIBILITY_LOAD_INCLUDE = {
         select: {
           totalCases: true,
           totalWeightKg: true,
+          // The load's customers: a load of one customer may fill its bays (plannedLoadRoom).
+          customerId: true,
           customer: { select: { code: true, branchCode: true, name: true } },
           // The product's code and cases per pallet now: a figure corrected since planning (CAPACITY_PALLETS_NEW_FACTOR).
           lines: { select: { id: true, cases: true, weightKg: true, product: { select: { weightPerCaseKg: true, code: true, casesPerPallet: true } } } },
@@ -2071,6 +2110,8 @@ export interface FeasibilityRow {
     order: {
       totalCases: number;
       totalWeightKg: number;
+      /** The customer (branch) id: a load whose rows are all one customer may use the one-customer room. Absent: told apart by code / branch. */
+      customerId?: string;
       customer: { code: string; branchCode: string | null; name: string };
       /** product.code / casesPerPallet: absent = not read (no pallet check of a factor corrected since). */
       lines: { id: string; cases: number; weightKg: number; product: { weightPerCaseKg: number; code?: string; casesPerPallet?: number | null } }[];
@@ -2133,11 +2174,16 @@ export function feasibilityInputFromRows(
     const ts = readTruckSnapshot(l.truckSnapshotJson);
     const own = l.carriedFromLoadId === null; // planned by this version (a carried copy keeps its own snapshot, or nothing)
     const t = l.truck;
-    // Planned by pallets: the snapshot keeps the room (only when the optimizer echoed the rule).
-    const room = ts && typeof ts.palletRoomUnits === 'number' && typeof ts.bays === 'number' ? ts.palletRoomUnits : null;
-    const pallets = room !== null ? { palletRoomUnits: room, bays: ts!.bays as number, fillPct: ts!.palletFillPct ?? null } : {};
+    // Planned by pallets: the snapshot keeps the room (only when the optimizer echoed the rule) - for a load
+    // of one customer planned under the one-customer rule, every bay (plannedLoadRoom, owner rule 13 Oct 2026).
+    const customers = loadCustomerCount(l.assignments);
+    const planned = plannedLoadRoom(ts, customers);
+    const room = planned ? planned.palletRoomUnits : null;
+    const pallets = planned ? { palletRoomUnits: planned.palletRoomUnits, bays: planned.bays, fillPct: planned.palletFillPct, ...(planned.palletOneCustomer ? { oneCustomer: true } : {}) } : {};
     const fillNow = opts.palletFillPctNow ?? ts?.palletFillPct ?? null;
     const bayNow = typeof t.bays === 'number' ? t.bays : null;
+    // The room now: the Pallet fill now, and the one-customer rule (fixed) for a load that was planned with it.
+    const now = bayNow !== null && fillNow !== null ? plannedLoadRoom({ bays: bayNow, palletFillPct: fillNow, palletRoomUnits: palletRoomUnits(bayNow, fillNow), singleCustomerFillPct: planned?.palletOneCustomer ? SINGLE_CUSTOMER_FILL_PCT : null }, customers) : null;
     return {
       id: l.id,
       truckId: l.truckId,
@@ -2157,7 +2203,7 @@ export function feasibilityInputFromRows(
               kg: t.capacityWeightKg,
               // Only for a load planned by pallets: the bays and room now (null bays = now a truck without bays).
               ...(room !== null && t.bays !== undefined
-                ? { bays: bayNow, fillPct: fillNow, palletRoomUnits: bayNow !== null && fillNow !== null ? palletRoomUnits(bayNow, fillNow) : null }
+                ? { bays: bayNow, fillPct: now ? now.palletFillPct : fillNow, palletRoomUnits: now ? now.palletRoomUnits : null, ...(now?.palletOneCustomer ? { oneCustomer: true } : {}) }
                 : {}),
             }
           : null,

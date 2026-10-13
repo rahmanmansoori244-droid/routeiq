@@ -15,6 +15,13 @@
  * pallets.ts), not cases. A part sized for such a truck is filled up to its room (bays x fill) by
  * each line's cases / its cases per pallet, rounded up per line; its case count is then no limit.
  * A customer that fits one truck in that truck's own measure is never split.
+ *
+ * One customer on a truck (owner rule 13 Oct 2026: "keep 90% for trucks with several customers, but let
+ * a truck that carries only one customer be filled to 100%"): a customer that fits no truck at the Pallet
+ * fill but fits a truck with bays at every bay is ONE stop that rides alone (classifyCustomer: FULL_TRUCK).
+ * When a split cannot be avoided, the parts are sized at that one-customer room (every bay, each part
+ * alone on its truck) and the size with the fewest parts and then the BIGGEST size wins, so the leftover
+ * - the only part that can share a truck - is as small as possible (choosePartCapacity).
  */
 import { palletUnits, validPalletFactor } from './pallets';
 import { kgTenths, payloadTenths, roundKg } from './weights';
@@ -198,6 +205,41 @@ export interface FleetTruck {
   palletUnits?: number | null;
   /** Its bays (null / absent: none entered): which trucks a "small truck only" customer's parts are sized for. */
   bays?: number | null;
+  /**
+   * A truck with bays: its room for a load of ONE customer, in pallet units (bays x SINGLE_CUSTOMER_FILL_PCT
+   * x 10, owner rule 13 Oct 2026); null / absent = no such rule (the Pallet fill room for every load).
+   */
+  fullPalletUnits?: number | null;
+}
+
+/** How a customer's day is planned (classifyCustomer). */
+export type CustomerPlan =
+  /** It fits a truck at the room of a shared load (bays x Pallet fill, or cases): one ordinary stop. */
+  | { kind: 'STOP' }
+  /** It fits no truck that way, but a truck with bays alone at every bay: one stop that rides alone. `bays`: the trucks it fits, smallest first. */
+  | { kind: 'FULL_TRUCK'; bays: number[] }
+  /** Bigger than any truck even alone: split (or left out when split deliveries are off). */
+  | { kind: 'SPLIT' };
+
+/**
+ * Before any split (owner rule 13 Oct 2026; decided before the split-deliveries switch, so a customer that
+ * fills a truck alone is never left out as "larger than any truck" when splitting is off): the customer
+ * fits a truck of `pool` at a shared load's room -> STOP; else fits a truck with bays alone, by its
+ * one-customer room (fullPalletUnits) and payload -> FULL_TRUCK (the optimizer plans it alone on such a
+ * truck); else SPLIT. `pool`: the trucks it may go on (the day's trucks with a load left, or a "small
+ * truck only" customer's small trucks), as the split uses them.
+ */
+export function classifyCustomer(cases: number, kg: number, units: number, pool: readonly FleetTruck[]): CustomerPlan {
+  const trucks = pool.filter(hasRoom);
+  if (trucks.some((t) => fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.palletUnits ?? null }, units))) return { kind: 'STOP' };
+  const alone = trucks.filter(
+    (t) => t.palletUnits != null && t.fullPalletUnits != null && t.fullPalletUnits > t.palletUnits && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.fullPalletUnits }, units),
+  );
+  if (alone.length) {
+    const bays = [...new Set(alone.map((t) => t.bays).filter((b): b is number => typeof b === 'number'))].sort((a, b) => a - b);
+    return { kind: 'FULL_TRUCK', bays };
+  }
+  return { kind: 'SPLIT' };
 }
 
 /** The truck has room in its own measure (pallet units with bays, else cases). */
@@ -224,9 +266,14 @@ export function caseHeavierThanAnyTruck(kgPerCase: number, maxPayloadKg: number 
 /**
  * Part size for a customer that fits no truck. Each truck's capacity is a candidate size; a
  * size is carried by every truck at least that big, and it is feasible when those trucks have
- * enough trips left for all parts. Feasible sizes: fewest parts wins, then more trips to
- * choose from. Otherwise the size that can deliver the largest share of the customer's cases
- * AND kg. Parts then fit several trucks, not only the single biggest one.
+ * enough trips left for all parts. Feasible sizes: fewest parts wins, then the BIGGER size (the
+ * smallest leftover, owner rule 13 Oct 2026: before, "more trips to choose from" came first and a
+ * 11.03-pallet order was cut for the 11-bay truck as 9.89 + 1.13 where 12 bays left 0.23), then more
+ * trips. Otherwise the size that can deliver the largest share of the customer's cases AND kg.
+ *
+ * A truck with bays offers its one-customer room (FleetTruck.fullPalletUnits, every bay) as the size
+ * when it has one: each full part then rides alone on such a truck (the optimizer's full-truck rule) and
+ * only the leftover is planned with other customers.
  *
  * `maxCaseKg` is the heaviest single case of the customer: sizes whose payload cannot carry it
  * are used only when no truck can (a part sized for a small truck would hold cases that only a
@@ -246,7 +293,8 @@ export function choosePartCapacity(
   const usable = fleet.filter(hasRoom);
   if (!usable.length) return null;
   const pal = (t: FleetTruck) => t.palletUnits != null;
-  const size = (t: FleetTruck) => (pal(t) ? (t.palletUnits as number) : t.cases);
+  // Pallets: the one-customer room (every bay) when the truck has one - a part rides alone.
+  const size = (t: FleetTruck) => (pal(t) ? Math.max(t.palletUnits as number, t.fullPalletUnits ?? 0) : t.cases);
   const need = (t: FleetTruck) => (pal(t) ? units : cases);
   const carries = (t: FleetTruck, c: FleetTruck) =>
     pal(t) === pal(c) && size(t) >= size(c) && (t.kg === null || (c.kg !== null && t.kg >= c.kg));
@@ -263,7 +311,7 @@ export function choosePartCapacity(
   ranked.sort(
     (a, b) =>
       Number(b.feasible) - Number(a.feasible) ||
-      (a.feasible ? a.parts - b.parts || b.trips - a.trips : b.share - a.share || a.parts - b.parts) ||
+      (a.feasible ? a.parts - b.parts || size(b.c) - size(a.c) || b.trips - a.trips : b.share - a.share || a.parts - b.parts) ||
       size(b.c) - size(a.c) ||
       (b.c.kg ?? Infinity) - (a.c.kg ?? Infinity) ||
       a.c.code.localeCompare(b.c.code),
@@ -272,7 +320,7 @@ export function choosePartCapacity(
   // The payload rounded down to 0.1 kg, as the optimizer compares it (audit F08: it compared in
   // whole kg, so parts were sized for the payload floored to a whole kg - a hidden margin).
   const capKg = best.kg !== null && best.kg > 0 ? payloadTenths(best.kg) / 10 : null;
-  return { cap: pal(best) ? { cases: best.cases, kg: capKg, palletUnits: best.palletUnits as number } : { cases: best.cases, kg: capKg }, truckCode: best.code };
+  return { cap: pal(best) ? { cases: best.cases, kg: capKg, palletUnits: size(best) } : { cases: best.cases, kg: capKg }, truckCode: best.code };
 }
 
 /**

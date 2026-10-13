@@ -8,7 +8,7 @@
 import type { DispatchConfig, DispatchScenarioName } from '@routeiq/shared-types';
 import { autoTimeLimitSec, CONFIG_BOUNDS, LARGE_DAY_STOPS, MAX_DISPATCH_STOPS, outOfBounds, SEARCH_TIME_SCHEDULE, type ConfigBoundKey } from '../planner-bounds';
 import { parsePriorityWeights, routingProviderFor } from './customer-attrs';
-import { PALLET_FILL_DEFAULT } from './pallets';
+import { PALLET_FILL_DEFAULT, SINGLE_CUSTOMER_FILL_PCT } from './pallets';
 import { DEFAULT_DRIVER_DAY_RATE } from './hire';
 import { smallTruckMaxBaysOf } from './small-truck';
 import { fmtHhmm } from './time';
@@ -197,6 +197,9 @@ export function dispatchConfigFromTenant(
       max_trips_per_truck: cfg.maxTripsPerTruck,
       // Pallet fill: only trucks with bays use it (each load keeps the fill the solver REPORTS).
       pallet_fill_pct: cfg.palletFillPct ?? PALLET_FILL_DEFAULT,
+      // Owner rule 13 Oct 2026, not a setting: a truck that carries only one customer may be filled to
+      // every bay (each load keeps the rule the solver REPORTS it planned with: TruckFacts.singleCustomerFillPct).
+      single_customer_fill_pct: SINGLE_CUSTOMER_FILL_PCT,
       fuel_price_per_litre: cfg.fuelPricePerLitre,
       driver_cost_per_hour: cfg.driverCostPerHour,
       // A higher priority always wins over any number of lower ones (weights kept for reference).
@@ -304,9 +307,9 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     {
       label: 'Truck capacity',
-      value: `bays x ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`,
+      value: `bays x ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% for a truck with several customers, every bay (${SINGLE_CUSTOMER_FILL_PCT}%) for a truck with one customer; and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`,
       source: 'SETTING',
-      note: "a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases",
+      note: `a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases. A customer bigger than ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% of every truck but within every bay of one goes whole, alone on that truck; one bigger than that is split, each full part alone on a truck and the leftover as small as possible (planner rule)`,
     },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
     {
