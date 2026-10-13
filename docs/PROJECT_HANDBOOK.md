@@ -1790,7 +1790,7 @@ This is `_solve_scenario` in `dispatch_solver.py`.
 **Time.**
 
 - `transit[i][j] = service_s[i] + duration[i][j]`, added with `AddDimension(time_cb, HORIZON_S, HORIZON_S, False, "Time")`. `HORIZON_S` is 2 days in seconds, and slack (waiting) is allowed.
-- Each stop's `CumulVar` (service start) is restricted to its **hard window**: [hard start or 0, hard end or the horizon]. Service must *start* inside the window.
+- Each stop's `CumulVar` (service start) is restricted to its **hard window**: [hard start or 0, `load_repack.latest_start_s`]. The upper bound is the hard end minus the stop time under `window_rule` FINISH (the default: unloading finished by closing) and the hard end itself under START (the company setting `TenantConfig.windowRule` = *Receiving hours end = latest arrival*); a stop without a hard end: the horizon.
 - **Soft preferences**, only when `soft_prefs` is on (RECOMMENDED):
   - `SetCumulVarSoftUpperBound(pref_end, pref + early)`;
   - `SetCumulVarSoftLowerBound(pref_start, pref)`;
