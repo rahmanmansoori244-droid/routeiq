@@ -175,7 +175,8 @@ describe('truck capacity in pallets', () => {
       expect(dl.manifest.reduce((s: number, m: any) => s + m.palletUnits, 0)).toBe(dl.palletUnits);
     }
     expect(d.summary.palletUnits).toBe(loads.reduce((s, l) => s + (l.palletUnits ?? 0), 0));
-    expect(d.scenarios.find((s: any) => s.chosen).palletRule).toEqual({ fillPct: 95 });
+    // The one-customer rule (13 Oct 2026) is echoed with the fill: a load of one customer may use every bay.
+    expect(d.scenarios.find((s: any) => s.chosen).palletRule).toEqual({ fillPct: 95, singleCustomerFillPct: 100 });
     const xl = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/export/excel`);
     expect(xl.status).toBe(200);
   });

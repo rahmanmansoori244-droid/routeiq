@@ -130,8 +130,14 @@ describe('one customer on a truck may use every bay', () => {
   it('LOCK of the full truck goes through: the web check measures a load of one customer by every bay', async () => {
     const p = await plan();
     const load = p.loads.find((l: any) => l.stops.some((s: any) => s.customerCode === 'TAWOOS'));
+    // Loads of a truck are locked in order (Load 1 first): lock the truck's earlier trips, then the full truck.
+    const earlier = p.loads.filter((l: any) => l.truckCode === load.truckCode && l.loadNo < load.loadNo).sort((a: any, b: any) => a.loadNo - b.loadNo);
+    for (const l of earlier) {
+      const e = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/loads/${l.id}`, j({ status: 'LOCKED' }, 'PATCH'));
+      expect(e.status, `lock ${l.truckCode} load ${l.loadNo}: ${e.status === 200 ? '' : await e.clone().text()}`).toBe(200);
+    }
     const r = await fetchWith(t.cookieJar, `${BASE}/api/runs/${runV1}/loads/${load.id}`, j({ status: 'LOCKED' }, 'PATCH'));
-    expect(r.status).toBe(200);
+    expect(r.status, r.status === 200 ? '' : await r.clone().text()).toBe(200);
     expect((await prisma.planLoad.findUniqueOrThrow({ where: { id: load.id } })).status).toBe('LOCKED');
   });
 });
