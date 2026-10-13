@@ -31,7 +31,8 @@
     "roadTimeFactor": { "solver": "road_time_factor", "min": 1, "max": 3 },
     "defaultServiceTimeMin": { "solver": "stop.service_min", "min": 0, "max": 480, "int": true },
     "serviceMinPerCase": { "solver": "stop.service_min", "min": 0, "max": 1 },
-    "planningCutoffMin": { "solver": null, "min": 0, "max": 1439, "int": true }
+    "planningCutoffMin": { "solver": null, "min": 0, "max": 1439, "int": true },
+    "smallTruckMaxBays": { "solver": "stop.allowed_truck_ids", "min": 1, "max": 40, "int": true }
   },
   "truck": {
     "capacityCases": { "solver": "capacity_cases", "min": 0, "max": 100000, "int": true },

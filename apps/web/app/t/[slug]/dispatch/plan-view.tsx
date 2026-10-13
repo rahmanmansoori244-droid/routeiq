@@ -10,6 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { driverClashNotes, tripsByTruck, whatsappNumber, whatsappText, whatsappUrl } from '@/lib/dispatch/driver-links';
 import type { PlanDetail, DetailLoad } from '@/lib/dispatch/plan-detail';
+import { SMALL_TRUCK_BADGE } from '@/lib/dispatch/small-truck';
 import { TIMING_TEXT, remedyLoads, timingRemedy, timingReplanOff, unlockFirstText, type RemedyLoad } from '@/lib/dispatch/feasibility-view';
 import type { PlanViolation } from '@/lib/dispatch/feasibility';
 import { isSupersededRun, nothingToReplan } from '@/lib/dispatch/plan-status';
@@ -19,6 +20,7 @@ import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/
 import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
+import { CANCELLED_BADGE, cancelledLoadText } from '@/lib/dispatch/order-cancel-rules';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { hiredLoadBadgeTitle } from '@/lib/dispatch/hire';
 import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
@@ -48,6 +50,8 @@ import { reissuePrompt, reissuePromptText } from '@/lib/driver-link/reissue-prom
 import { lateDispatchNotes } from '@/lib/driver-link/plan-notes';
 import { DriverLinkDialog, ReissueLinkPrompt } from './driver-link-dialog';
 import { CasualDriverDialog, type CasualDriverAnswer, type CasualDriverBody } from './casual-driver-dialog';
+import { LoadHelpersCell, type HelperOption } from './load-helpers-picker';
+import { helperClashes, helpersText } from '@/lib/dispatch/load-helpers';
 import type { ApiResult } from './client-api';
 import type { OutcomeOverlay, OverlayPhoto, OverlayStop } from '@/lib/delivery/outcome-view';
 import { officeTimesPrefill } from '@/lib/delivery/office-text';
@@ -156,6 +160,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   const [lateOpen, setLateOpen] = useState(false);
   const [selectedLoad, setSelectedLoad] = useState<string | null>(null);
   const [drivers, setDrivers] = useState<DriverOption[]>([]);
+  // Helpers (owner request 13 Oct 2026): the company's helpers for the Helper(s) picker.
+  const [helpers, setHelpers] = useState<HelperOption[]>([]);
 
   // Delivery results of this version's loads that left (owner request 4 Oct 2026, spec section 10):
   // read with the plan, and every 60 s while a load is on the road and the page is in front.
@@ -219,6 +225,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
   useEffect(() => {
     void loadDrivers();
   }, [loadDrivers]);
+
+  const loadHelpers = useCallback(async () => {
+    const r = await api<HelperOption[]>('/api/helpers');
+    if (r.ok && Array.isArray(r.data)) setHelpers(r.data.map(({ id, code, name, active }) => ({ id, code, name, active })));
+  }, []);
+
+  useEffect(() => {
+    void loadHelpers();
+  }, [loadHelpers]);
 
   // The plan's truck-day driver links (owner request 4 Oct 2026), loaded with the plan for the
   // dispatcher (PLANNER+): the WhatsApp link carries the driver link at render time, never after an
@@ -301,10 +316,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     return res;
   }
 
-  // Try again after a failed load: the plan, and the driver list if it did not load either.
+  // Try again after a failed load: the plan, and the driver and helper lists if they did not load either.
   const retry = () => {
     void load();
     if (!drivers.length) void loadDrivers();
+    if (!helpers.length) void loadHelpers();
   };
   // Off while a reload is on its way or an action runs (its own reload shows the plan).
   const retryOff = !!busy || reloading;
@@ -317,8 +333,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     seenReload.current = reloadSignal;
     void load({ results: true });
     if (!drivers.length) void loadDrivers();
+    if (!helpers.length) void loadHelpers();
     void loadLinks();
-  }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
+  }, [reloadSignal, load, loadDrivers, drivers.length, loadHelpers, helpers.length, loadLinks]);
 
   // Results come in from the drivers' phones while loads are on the road: read them every 60 s.
   const onRoadNow = !!d?.loads.some((l) => l.status === 'DISPATCHED');
@@ -395,6 +412,31 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
         toast.success(`${l.truckCode} Load ${l.loadNo}: ${status}`);
         await load();
         await onChanged?.();
+      },
+      failed,
+    );
+  }
+
+  /**
+   * Set the load's helpers (owner request 13 Oct 2026; the Helper(s) picker): 0 to 3, in order. The
+   * same states as the driver; a helper on another load at the same time is allowed and warned about.
+   */
+  function setLoadHelpers(l: DetailLoad, helperIds: string[]) {
+    return runPlanAction(
+      lock,
+      l.id,
+      async () => {
+        const r = await api(`/api/runs/${runId}/loads/${l.id}`, { method: 'PATCH', json: { helperIds } });
+        if (!r.ok) {
+          toast.error(r.error ?? 'Could not set the helpers.');
+          await load();
+          return;
+        }
+        const names = helpersText(helperIds.map((id) => helpers.find((h) => h.id === id)?.name ?? (l.helpers ?? []).find((h) => h.id === id)?.name));
+        toast.success(`${l.truckCode} Load ${l.loadNo}: ${names ? `helper(s) ${names}` : 'no helper'}`);
+        const fresh = await load();
+        const clash = fresh ? helperClashes(l.id, fresh.loads) : [];
+        if (clash.length) toast.warning(clash.join(' '));
       },
       failed,
     );
@@ -950,8 +992,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ))}
           {d.carriedOut?.orders ? (
             <p className="mt-1 text-slate-700" data-testid="carried-out">
-              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were not delivered and were brought forward to{' '}
-              {d.carriedOut.dates.map(fmtDayMonth).join(', ')}: they are planned on that day now (this plan keeps them as history, not as a problem).
+              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were moved to{' '}
+              {d.carriedOut.dates.map(fmtDayMonth).join(', ')} (postponed, or brought forward when not delivered): they are planned on that day now (this plan keeps them as history, not as a problem).
             </p>
           ) : null}
           {d.carriedIn?.orders ? (
@@ -1134,6 +1176,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                 <th className="p-2" />
                 <th className="p-2">Truck · load</th>
                 <th className="p-2">Driver · sheet</th>
+                <th className="p-2">Helper(s)</th>
                 <th className="p-2">Status</th>
                 <th className="p-2">Depart → return</th>
                 <th className="p-2">Stops</th>
@@ -1207,6 +1250,15 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                         onLink={canPlan && !superseded && !running ? () => setLinkDialog({ truckId: l.truckId, loadId: l.id }) : null}
                       />
                     </td>
+                    <td className="p-2" onClick={(e) => e.stopPropagation()}>
+                      <LoadHelpersCell
+                        l={l}
+                        helpers={helpers}
+                        editable={canPlan && !superseded && !running && !ON_ROAD.has(l.status)}
+                        busy={!!busy}
+                        onSave={(ids) => void setLoadHelpers(l, ids)}
+                      />
+                    </td>
                     <td className="p-2">
                       <Badge variant={STATUS_VARIANT[l.status] ?? 'outline'} data-testid={`load-status-${l.truckCode}-${l.loadNo}`}>
                         {l.status}
@@ -1220,6 +1272,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           title={carriedLoadTitle(l, d, today)}
                         >
                           {l.carriedAway} order(s) carried over
+                        </Badge>
+                      ) : null}
+                      {/* Cancel order (owner request 12 Oct 2026): why Lock is refused (409 ORDERS_CANCELLED) and what to do. */}
+                      {l.cancelledHere ? (
+                        <Badge
+                          variant="destructive"
+                          className="ml-1"
+                          data-testid={`load-cancelled-${l.truckCode}-${l.loadNo}`}
+                          title={cancelledLoadText(
+                            `${l.truckCode} L${l.loadNo}`,
+                            [...new Set(l.stops.filter((st) => st.cancelled).map((st) => (st.branchCode ? `${st.customerCode}/${st.branchCode}` : st.customerCode)))],
+                            l.cancelledHere === new Set(l.stops.flatMap((st) => st.orderIds)).size,
+                          )}
+                        >
+                          {l.cancelledHere > 1 ? `${l.cancelledHere} ` : ''}
+                          {CANCELLED_BADGE}
                         </Badge>
                       ) : null}
                       {l.timing && !l.timing.ok ? (
@@ -1299,7 +1367,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                   </tr>
                   {open[l.id] ? (
                     <tr className="bg-muted/20">
-                      <td colSpan={13} className="p-3">
+                      <td colSpan={14} className="p-3">
                         <LoadDetail
                           l={l}
                           depotCode={d.run.depot.code}
@@ -1329,7 +1397,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
               ))}
               {d.loads.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="p-4 text-center text-muted-foreground">
+                  <td colSpan={14} className="p-4 text-center text-muted-foreground">
                     No loads yet.
                   </td>
                 </tr>
@@ -1374,7 +1442,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{u.cases}</td>
                     <td className="p-2 text-xs">{u.salesOrders.join(', ') || '—'}</td>
                     <td className="p-2">
-                      {u.carriedTo ? (
+                      {u.cancelled ? (
+                        <>
+                          <b data-testid="unserved-cancelled">CANCELLED</b>
+                          <span className="block text-xs text-muted-foreground">
+                            Not planned again. Unserved here: {REASON_TEXT[u.reasonCode] ?? u.reasonCode}
+                          </span>
+                        </>
+                      ) : u.carriedTo ? (
                         <>
                           <b data-testid="unserved-carried-to">{carriedToBadge(u.carriedTo)}</b>
                           <span className="block text-xs text-muted-foreground">
@@ -2029,6 +2104,22 @@ function LoadDetail({
                       {st.split.restUnserved ? ' · rest unserved' : ''}
                     </Badge>
                   ) : null}
+                  {/* Owner request 13 Oct 2026: red when the truck is too big now (LOCK refuses the load). */}
+                  {st.smallTruckOnly ? (
+                    <Badge
+                      variant={st.smallTruckBreach ? 'destructive' : 'warning'}
+                      className="mt-0.5 text-[10px]"
+                      data-testid="stop-small-truck"
+                      data-breach={st.smallTruckBreach ? 'yes' : 'no'}
+                      title={
+                        st.smallTruckBreach
+                          ? `This customer takes small trucks only and ${l.truckCode} is not a small truck: LOCK refuses this load. Re-plan to put it on a small truck.`
+                          : 'This customer takes small trucks only (Settings: Small truck = at most N bays).'
+                      }
+                    >
+                      {SMALL_TRUCK_BADGE}
+                    </Badge>
+                  ) : null}
                   {st.carriedFrom ? (
                     <Badge variant="warning" className="mt-0.5" data-testid="stop-carried-from" title="Not delivered on the day it was due: brought forward to this day. Its priority is kept as it was.">
                       {carriedFromBadge(st.carriedFrom)}
@@ -2037,6 +2128,16 @@ function LoadDetail({
                   {st.carriedTo ? (
                     <Badge variant="secondary" className="mt-0.5" data-testid="stop-carried-to" title="Brought forward to a later day: planned there, not delivered on this day.">
                       {carriedToBadge(st.carriedTo)}
+                    </Badge>
+                  ) : null}
+                  {st.cancelled ? (
+                    <Badge
+                      variant="destructive"
+                      className="mt-0.5"
+                      data-testid="stop-cancelled"
+                      title="An order of this stop was cancelled after the plan was made: do not load or deliver it. RE-PLAN the day to take it off; until then this load cannot be locked."
+                    >
+                      {CANCELLED_BADGE}
                     </Badge>
                   ) : null}
                   {st.masterChanged.length ? (

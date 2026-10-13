@@ -39,6 +39,7 @@ import { callDispatchSolver, SolverError } from '../solver-client';
 import { WORKERS_UNAVAILABLE } from '../planner-unavailable';
 import { PREEMPT_RETRY, solveAdmission, type SolveTicket } from './solve-admission';
 import { buildDispatchRequest, isDispatchDetails, PlanError, retimeRequestAt, type BuiltRequest, type SameDayBasis } from './plan-service';
+import { smallTruckMaxBaysOf, withSmallHires } from './small-truck';
 import { isSupersededRun } from './plan-status';
 import { orderIdOf } from './split';
 import {
@@ -328,6 +329,9 @@ export async function startHireCheck(
     // Its own id at the optimizer (its running solves and "stop search" are keyed by it): never the plan's.
     run_id: `${runId}~hire`,
     trucks: [...built.request.trucks, ...hires],
+    // "Small truck only" customers (owner request 13 Oct 2026): the trucks to rent of a small size may
+    // carry them too, a bigger one may not, so a hire suggested for them is a small truck.
+    stops: withSmallHires(built.request.stops, hires, smallTruckMaxBaysOf({ smallTruckMaxBays: built.smallTruckMaxBays })),
     // The recommended plan only, Quick: the suggestion is its rented trucks.
     config: { ...built.request.config, scenarios: ['RECOMMENDED'], search_mode: 'QUICK', max_search_sec: null },
   };

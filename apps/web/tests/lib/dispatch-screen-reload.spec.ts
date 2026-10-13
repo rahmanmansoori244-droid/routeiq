@@ -32,7 +32,7 @@ vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
       requests.push(url);
       if (url.startsWith('/api/dispatch/day')) return ok(structuredClone(answers.day));
       if (url.endsWith('/plan')) return ok(structuredClone(answers.plan));
-      if (url === '/api/drivers') return ok([]);
+      if (url === '/api/drivers' || url === '/api/helpers') return ok([]);
       return ok({});
     },
   };

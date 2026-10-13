@@ -15,7 +15,7 @@
 import { normalizeBranchKey } from '../schemas';
 import { normalizeProductCode, productCodeProblem, productKey } from '../product-code';
 import { customerKey } from '../customer-code';
-import { daysBetween } from './time';
+import { daysBetween, fmtDayMonth } from './time';
 
 // The header matching (aliases, the order-sheet test) lives in order-headers.ts, which has no
 // dependencies, so the upload parser process can use it (audit P5); it is re-exported here.
@@ -552,6 +552,17 @@ export interface ResolveOptions {
    * not an error.
    */
   confirmedOnOtherDates?: Map<string, string[]>;
+  /**
+   * Cancel order (owner request 12 Oct 2026): confirmed lines (lineDupKey) whose order was cancelled,
+   * with when (the company's day, YYYY-MM-DD) and by whom. Re-sent for the same day, such a line stays skipped (its intake key stays)
+   * and the message says it was cancelled and how to undo it.
+   */
+  cancelledLines?: Map<string, { at: string; by: string | null }>;
+}
+
+/** The skip note of a re-sent line whose order was cancelled: when, by whom, and how to bring it back. */
+export function cancelledLineNote(c: { at: string; by: string | null }, date: string): string {
+  return `It was CANCELLED on ${fmtDayMonth(c.at)}${c.by ? ` by ${c.by}` : ''}, so it stays cancelled. To deliver it, open Daily dispatch for ${fmtDayMonth(date)} and press Undo in the Cancelled orders list (Step 1).`;
 }
 
 /** A file line weight is "per line"; one far from cases x the master case weight is suspicious. */
@@ -768,10 +779,13 @@ export function resolveOrderLines(
       const rows = l.sourceRows.length > 1 ? ` (rows ${l.sourceRows.join(', ')})` : '';
       const product = prodByCode.get(productKey(l.productCode))?.code ?? l.productCode;
       const customer = custByKey.get(l.customerKey)?.code ?? l.customerCode;
+      // A line of a cancelled order says so (it stays cancelled: Undo on the day screen brings it back).
+      const cancelledOf = opts.cancelledLines?.get(mk);
+      const cancelledNote = cancelledOf ? ` ${cancelledLineNote(cancelledOf, l.deliveryDate)}` : '';
       if (confirmed === null || confirmed.includes(l.cases)) {
-        duplicates.push({ row: l.row, message: `Already confirmed: sales order ${l.salesOrderNo}, ${product} for ${customer} on ${l.deliveryDate}${rows}. Skipped.`, cases: l.cases });
+        duplicates.push({ row: l.row, message: `Already confirmed: sales order ${l.salesOrderNo}, ${product} for ${customer} on ${l.deliveryDate}${rows}. Skipped.${cancelledNote}`, cases: l.cases });
       } else {
-        errors.push({ row: l.row, message: changedLineText(l.salesOrderNo as string, product, customer, l.deliveryDate, confirmed, l.cases, rows), cases: l.cases });
+        errors.push({ row: l.row, message: `${changedLineText(l.salesOrderNo as string, product, customer, l.deliveryDate, confirmed, l.cases, rows)}${cancelledNote}`, cases: l.cases });
       }
       continue;
     }

@@ -7,6 +7,7 @@ import { tenantDb, type TenantDb } from './tenant';
 import { rateLimit, type RateLimitResult } from './rate-limit';
 import { clientIp } from './client-ip';
 import { HttpError, httpErrorBody } from './http-error';
+import { isUniqueViolation } from './unique-code';
 
 export interface AuthedContext {
   user: {
@@ -112,6 +113,9 @@ export function handleError(err: unknown) {
     if (err.code === 'P2025') return fail('Not found.', 404);
     if (err.code === 'P2003') return fail('Referenced record does not exist.', 400);
   }
+  // A unique-key error whose class `instanceof` did not recognise (the Prisma client loaded twice by
+  // the bundler): still a 409, never a 500 (live bug of 12 Oct 2026, a driver code used twice).
+  if (isUniqueViolation(err)) return fail('A record with this unique value already exists.', 409);
   console.error('API error', err);
   return fail('Internal server error', 500);
 }

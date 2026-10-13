@@ -89,7 +89,7 @@ const CHANGED: Record<string, unknown> = {
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
-  palletFillPct: 90, dailyDriverDayRate: 12,
+  palletFillPct: 90, dailyDriverDayRate: 12, smallTruckMaxBays: 4,
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also
@@ -103,6 +103,12 @@ const CHANGED: Record<string, unknown> = {
  * (the hire suggestion) only: it changes the request of a day with such a truck (and every hire check).
  */
 const HIRED_ONLY = new Set(['dailyDriverDayRate']);
+/**
+ * "A small truck has at most N bays" (owner decision 13 Oct 2026) decides the allowed trucks of the
+ * stops of "small truck only" customers only: it changes the request of a day with such a customer.
+ */
+const SMALL_TRUCK_ONLY = new Set(['smallTruckMaxBays']);
+const SMALL_TRUCK_DAY = { truck: { bays: 6 } };
 const HIRED_TODAY = { hired: true, onlyOnDate: new Date('2026-09-26T00:00:00Z'), kmPerLitre: null, costPerKm: 0 };
 const INTAKE_ONLY = new Set(['planningCutoffMin', 'dateOrder', 'requireDataBeforeLoading', 'dataCollectDays', 'geofenceRadiusM', 'photoProofRequired', 'photoRetentionDays', 'locationRetentionDays', 'dispatcherPhone']);
 
@@ -122,9 +128,15 @@ describe('Settings fields drive the planner (review F21)', () => {
       expect(CHANGED, k).toHaveProperty(k);
       expect(tenantConfigSchema.partial().safeParse({ [k]: CHANGED[k] }).success, k).toBe(true);
       const changed = await build({ ...BASE_CFG, [k]: CHANGED[k] });
-      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k)) expect(changed, k).toBe(base);
+      if (INTAKE_ONLY.has(k) || HIRED_ONLY.has(k) || SMALL_TRUCK_ONLY.has(k)) expect(changed, k).toBe(base);
       else expect(changed, k).not.toBe(base);
       if (HIRED_ONLY.has(k)) expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, { truck: HIRED_TODAY }), k).not.toBe(hiredBase);
+      if (SMALL_TRUCK_ONLY.has(k)) {
+        customers = [customer('C1', 23.6, 58.4, { smallTruckOnly: true }), customer('C2', 23.55, 58.3)];
+        const smallBase = await build(BASE_CFG, SMALL_TRUCK_DAY);
+        expect(await build({ ...BASE_CFG, [k]: CHANGED[k] }, SMALL_TRUCK_DAY), k).not.toBe(smallBase);
+        customers = [customer('C1', 23.6, 58.4), customer('C2', 23.55, 58.3)];
+      }
     }
   });
 

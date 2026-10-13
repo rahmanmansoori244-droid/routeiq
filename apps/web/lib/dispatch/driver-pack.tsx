@@ -25,6 +25,8 @@ import { fmtHhmm } from './time';
 import { carriedStopText } from './carry-view';
 import { breakLine, breakTimes } from './break-text';
 import { loadPallets, palletsOverBays, palletText } from './pallets';
+import { SMALL_TRUCK_BADGE } from './small-truck';
+import { helpersText } from './load-helpers';
 
 // ---------------------------------------------------------------------------------------
 // Model (pure)
@@ -44,6 +46,12 @@ export interface SheetStop {
    * the driver calls before arrival); live, like accessNotes. Null = none (nothing printed).
    */
   phone: string | null;
+  /**
+   * "SMALL TRUCK ONLY", printed in small text under the customer (owner request 13 Oct 2026): its
+   * unloading area takes small trucks only (live, as the plan screen). The words travel in the model:
+   * the renderer process bundles only its own modules. Absent = nothing printed.
+   */
+  smallTruck?: string;
   notes: string[];
   /** Split delivery: this stop is part `part` of `parts`; `others` says where the other parts go. */
   split: { part: number; parts: number; others: string[]; restUnserved: boolean } | null;
@@ -88,6 +96,8 @@ export interface DriverSheet {
   badges: string[];
   driverName: string | null;
   driverPhone: string | null;
+  /** "Helper: Saif" / "Helpers: Saif, Omar" (owner request 13 Oct 2026); null = no helper (nothing printed). */
+  helpersLine: string | null;
   depart: string;
   back: string;
   /** The load's driver break ("12:40-13:40"); null = none on this load. */
@@ -227,6 +237,7 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     // Through pdfSafe like every text (a phone is checked to digits and + - ( ) / when saved, but the
     // sheet never trusts that): Latin only.
     phone: t.maybe(s.customerPhone)?.trim() || null,
+    ...(s.smallTruckOnly ? { smallTruck: SMALL_TRUCK_BADGE } : {}),
     notes: s.notes.map((n) => t.text(n)).filter(Boolean),
     split,
     late: s.late,
@@ -245,6 +256,13 @@ function sheetStop(d: PlanDetail, l: DetailLoad, s: DetailStop, t: Txt): SheetSt
     changeNotes: s.masterChanged.map((c) => t.text(c.text)),
     newPinUrl: moved ? pinUrl({ lat: moved.newLat ?? null, lng: moved.newLng ?? null }) : null,
   };
+}
+
+/** "Helper: Saif" or "Helpers: Saif, Omar" (names already made PDF-safe); null without one. */
+export function helpersLine(names: readonly (string | null | undefined)[]): string | null {
+  const text = helpersText(names);
+  if (!text) return null;
+  return `${names.filter((n) => (n ?? '').trim()).length === 1 ? 'Helper' : 'Helpers'}: ${text}`;
 }
 
 export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): DriverPackModel {
@@ -290,6 +308,7 @@ export function driverPackModel(detail: PlanDetail, opts: DriverPackOptions): Dr
         ],
         driverName: t.maybe(l.driverName),
         driverPhone: t.maybe(l.driverPhone),
+        helpersLine: helpersLine((l.helpers ?? []).map((h) => t.maybe(h.name))),
         depart: fmtHhmm(l.departMin),
         back: fmtHhmm(l.returnMin),
         breakTimes: l.break ? breakTimes(l.break) : null,

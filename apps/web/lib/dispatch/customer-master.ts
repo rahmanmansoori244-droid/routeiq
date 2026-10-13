@@ -11,6 +11,7 @@ import { dateOnly, isoOf, todayIso } from './time';
 import type { TypeProfileLike } from './customer-attrs';
 import { preferredCustomer } from './order-intake';
 import { customerKey } from '../customer-code';
+import { NOT_CANCELLED } from './order-cancel-rules';
 import {
   buildWorklist,
   changedSince,
@@ -54,6 +55,8 @@ const CUSTOMER_SELECT = {
   accessNotes: true,
   // Owner request 12 Oct 2026: the phone for the driver, a column of both workbooks.
   phone: true,
+  // Owner request 13 Oct 2026: small trucks only, a column of both workbooks.
+  smallTruckOnly: true,
   paymentType: true,
   active: true,
   locationSource: true,
@@ -143,7 +146,8 @@ export async function loadWorklist(tenantId: string, opts: { days?: number | nul
   const period = worklistPeriod(today, opts.days ?? ctx.dataCollectDays);
   const [orders, depots] = await Promise.all([
     prisma.order.findMany({
-      where: { tenantId, status: { in: OPEN }, deliveryDate: { gte: dateOnly(period.from), lte: dateOnly(period.to) }, carriedToOrderId: null },
+      // Not brought forward, not cancelled (Cancel order, owner request 12 Oct 2026): only orders still to deliver.
+      where: { tenantId, status: { in: OPEN }, deliveryDate: { gte: dateOnly(period.from), lte: dateOnly(period.to) }, carriedToOrderId: null, ...NOT_CANCELLED },
       select: { customerId: true, depotId: true, deliveryDate: true },
     }),
     prisma.depot.findMany({ where: { tenantId, active: true }, orderBy: { code: 'asc' }, select: { id: true, code: true, name: true } }),

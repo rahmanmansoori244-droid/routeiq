@@ -141,6 +141,24 @@ async function settled(id: string) {
 }
 
 describe('the what-if (startHireCheck)', () => {
+  it('small truck only (13 Oct 2026): a limited stop may go on the 3-ton units to rent (6 bays), never the 10-ton', async () => {
+    const limited: DispatchStop = { ...STOPS[2]!, allowed_truck_ids: ['OWN-SMALL'], allowed_trucks_label: 'a small truck (at most 6 bays)' };
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => built([STOPS[0]!, STOPS[1]!, limited]));
+    vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+    const r = await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN');
+    await settled((r as { suggestionId: string }).suggestionId);
+    const sent = vi.mocked(callDispatchSolver).mock.calls[0]![0];
+    expect(sent.stops.find((s) => s.stop_id === 'C')!.allowed_truck_ids).toEqual(['OWN-SMALL', virtualHireId('o3', 1), virtualHireId('o3', 2)]);
+    expect('allowed_truck_ids' in sent.stops.find((s) => s.stop_id === 'A')!).toBe(false); // other stops: any truck
+    // The setting the request was built with decides: at most 4 bays, no unit to rent is small.
+    seed();
+    vi.mocked(buildDispatchRequest).mockImplementation(async () => ({ ...built([STOPS[0]!, STOPS[1]!, limited]), smallTruckMaxBays: 4 }));
+    vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
+    const r2 = await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN');
+    await settled((r2 as { suggestionId: string }).suggestionId);
+    expect(vi.mocked(callDispatchSolver).mock.calls[0]![0].stops.find((s) => s.stop_id === 'C')!.allowed_truck_ids).toEqual(['OWN-SMALL']);
+  });
+
   it('runs for a plan the fleet cannot carry: one truck per unit the day may still rent, Quick, the recommended plan', async () => {
     vi.mocked(callDispatchSolver).mockImplementation(async (req) => answer(req));
     const r = await startHireCheck(T, 'P1', user, null, 'AFTER_PLAN');
@@ -633,6 +651,36 @@ describe('"Use this plan" (applyHireSuggestion)', () => {
     const v = out.response.scenarios[0]!.feasibility!.violations[0]!;
     expect(v).toMatchObject({ truck_id: 'T-BOX', message: 'HIRE-10T-0710-2 L2 leaves too early' });
     expect(out.response.scenarios[0]!.warnings).toEqual(['HIRE-10T-0710-2 is used for 2 loads']);
+  });
+});
+
+describe('withRentedTrucks: small truck only (13 Oct 2026)', () => {
+  it('a rented small truck allowed for a limited stop stays allowed under its new id; a rented big one never is', () => {
+    const limited: DispatchStop = { ...STOPS[2]!, allowed_truck_ids: ['OWN-SMALL'] };
+    const b = built([STOPS[0]!, limited]);
+    const v3 = virtualHireId('o3', 1);
+    const v10 = virtualHireId('o10', 1);
+    const whatIf: DispatchRequest = {
+      ...b.request,
+      stops: [STOPS[0]!, { ...limited, allowed_truck_ids: ['OWN-SMALL', v3] }],
+      trucks: [
+        ...b.request.trucks,
+        { id: v10, code: 'HIRE-10T-1', capacity_cases: 1140, bays: 12, fixed_cost: 50, hire_candidate: true },
+        { id: v3, code: 'HIRE-3T-1', capacity_cases: 570, bays: 6, fixed_cost: 30, hire_candidate: true },
+      ],
+    };
+    const resp = { run_id: 'P1', warnings: [], scenarios: [{ name: 'RECOMMENDED', loads: [], truck_days: [], warnings: [] }] } as unknown as DispatchResponse;
+    const made = new Map([
+      [v10, { id: 'T-BIG', code: 'HIRE-10T-0710-1' }],
+      [v3, { id: 'T-SMALL', code: 'HIRE-3T-0710-1' }],
+    ]);
+    const out = withRentedTrucks(whatIf, resp, made, b.request);
+    expect(out.request.stops.find((s) => s.stop_id === 'C')!.allowed_truck_ids).toEqual(['OWN-SMALL', 'T-SMALL']);
+    expect('allowed_truck_ids' in out.request.stops.find((s) => s.stop_id === 'A')!).toBe(false);
+    expect(out.request.trucks.map((t) => t.id)).toEqual(['OWN', 'T-BIG', 'T-SMALL']);
+    // Only the big one rented: the limited stop keeps its own list.
+    const onlyBig = withRentedTrucks(whatIf, resp, new Map([[v10, { id: 'T-BIG', code: 'HIRE-10T-0710-1' }]]), b.request);
+    expect(onlyBig.request.stops.find((s) => s.stop_id === 'C')!.allowed_truck_ids).toEqual(['OWN-SMALL']);
   });
 });
 

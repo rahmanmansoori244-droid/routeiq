@@ -340,6 +340,11 @@ export function SettingsForm({
             unit: '%',
             hint: 'Trucks with bays only: the share of the bays the planner may fill with mixed pallets. 100% (the default) = every bay: 12 bays = 12 pallets; 95% keeps a margin (11.4 of 12). A truck with a payload is also held to it (payload 0 = no weight limit). Trucks without bays are planned by cases.',
           })}
+          {num('smallTruckMaxBays', 'Small truck = at most N bays', {
+            step: 1,
+            unit: 'bays',
+            hint: 'Customers marked "Small truck only (3-ton)" (customer Details, import or workbook) are planned only on trucks with bays entered and at most this many, own or hired; a truck without bays is never small. Default 6 (3-ton trucks 4-6 bays, 10-ton 11-12). LOCK, LOADING and DISPATCH refuse such a customer on a bigger truck.',
+          })}
           <ToggleField
             label="Split deliveries: a customer bigger than the largest truck is delivered in parts"
             value={c.splitDeliveries}

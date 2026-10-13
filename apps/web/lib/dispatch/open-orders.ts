@@ -5,6 +5,7 @@
 import type { OrderStatus } from '@prisma/client';
 import { prisma } from '../db';
 import { dateOnly, isoOf, todayIso } from './time';
+import { NOT_CANCELLED } from './order-cancel-rules';
 
 /** Statuses of an order that is not yet out for delivery (also the data-to-collect list, item 4). */
 export const OPEN: OrderStatus[] = ['UPLOADED', 'VALIDATED', 'ASSIGNED', 'UNSERVED'];
@@ -21,6 +22,8 @@ export async function openOrders(
     deliveryDate: { gte: from },
     // PR9: an order brought forward to a later day is open there (its copy), not here.
     carriedToOrderId: null,
+    // A cancelled order is not open (Cancel order, owner request 12 Oct 2026).
+    ...NOT_CANCELLED,
     ...('customerId' in of ? { customerId: of.customerId } : 'depotId' in of ? { depotId: of.depotId } : { lines: { some: { productId: of.productId } } }),
   };
   const [orders, first] = await Promise.all([
@@ -58,6 +61,7 @@ export async function openMasterWeighedLines(tenantId: string, productId: string
       status: { in: OPEN },
       deliveryDate: { gte: from },
       carriedToOrderId: null,
+      ...NOT_CANCELLED,
       assignments: { none: { load: { status: { not: 'PLANNED' as const } }, run: { status: { not: 'SUPERSEDED' as const } } } },
     },
   };

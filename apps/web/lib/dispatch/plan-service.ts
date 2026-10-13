@@ -47,8 +47,9 @@ import type { ServiceArea } from './location-input';
 import { canStepBack, checkDriverChange, checkTransition, isCarriedFrozen, isDriverKeep, isFrozen, planDrivers, scenariolessTransitionAllowed, type LoadStatusName } from './load-state';
 import { leaveOnDay, onLeaveMoveRefusal } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
-import { driverTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
+import { driverTripsElsewhere, helperTripsElsewhere, loadsOnOtherDepots, otherDepotClash, truckHoursAround, type TruckHoursAround } from './cross-depot';
 import { reconcile, type Reconciliation } from './reconcile';
+import { cancelledLoadText, NOT_CANCELLED } from './order-cancel-rules';
 import {
   caseHeavierThanAnyTruck,
   choosePartCapacity,
@@ -97,7 +98,19 @@ import { asPlanBusy, lockPlanDay, lockRunForWrite, lockTruckDriverDay, setLockTi
 import { appliedPlanStatus } from './plan-status';
 import { carriedLoadRemedy } from './carry-view';
 import { hiredTruckDriver, shownTruckCode, trucksOfDayWhere } from './hire';
+import {
+  isSmallTruck,
+  SMALL_TRUCK_GATE_CODE,
+  smallTruckBreaches,
+  smallTruckGateMessage,
+  smallTruckIds,
+  smallTruckMaxBaysOf,
+  smallTruckSolverNote,
+  smallTruckStopFields,
+} from './small-truck';
 import { copyRowData } from './prisma-copy';
+import { planHelpers, type HelperChangeNote } from './load-helpers';
+import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
 import {
   distanceM,
@@ -200,6 +213,12 @@ export interface BuiltRequest {
   missingPalletFactors?: MissingPalletFactor[];
   /** The cases per pallet of each product the request was planned with (by product code); absent without bay trucks. */
   palletFactors?: Record<string, number>;
+  /**
+   * "Small truck only" customers (owner request 13 Oct 2026): the company's "a small truck has at most N
+   * bays" this request was built with, so the hire check adds the trucks it may rent of that size to their
+   * stops (small-truck.ts withSmallHires). Absent on unit-test stubs (the default 6 then).
+   */
+  smallTruckMaxBays?: number;
   /**
    * Line weights this request takes from the product master (0 kg lines whose product has a
    * case weight now, lines weighed from the master whose case weight was corrected), for orders
@@ -335,10 +354,14 @@ const ORDER_INCLUDE = {
  * that depot). An order brought forward to a later day (PR9, carriedToOrderId set) no longer
  * belongs to its own day: it is not open, unserved or pending there (the plan versions that hold
  * it keep it: frozen loads stay in scope through their assignments, see buildDispatchRequest).
+ * A cancelled order (Cancel order, owner request 12 Oct 2026: cancelledAt set) does not belong to its
+ * day either: it is never planned, pending, counted or offered again; the versions made before the
+ * cancel keep it as they were (a PLANNED load holding it cannot be locked until the day is re-planned:
+ * cancelledOrdersGate). Every read that plans, counts or offers a day's orders goes through here.
  * `_db`: the client the caller reads with (audit A4: the plan detail reads in one snapshot). The
  * scope needs no read since A5 (the depot count is gone), so it is not used. */
 export async function ordersInScopeWhere(tenantId: string, depotId: string, runDate: Date, _db: Db = prisma): Promise<Prisma.OrderWhereInput> {
-  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, depotId };
+  return { tenantId, deliveryDate: runDate, carriedToOrderId: null, ...NOT_CANCELLED, depotId };
 }
 
 /**
@@ -567,6 +590,7 @@ export async function buildDispatchRequest(
     // A truck with no time left here (on another depot's plan all day) has no load left today.
     tripsLeft: hoursAround.get(t.id)?.none ? 0 : (t.maxTripsPerDay || cfg.maxTripsPerTruck) - (frozenByTruck.get(t.id)?.length ?? 0),
     ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+    bays: t.bays ?? null,
   }));
   // The trucks the parts may be sized for: the own fleet, and the trucks the hire what-if may rent (each
   // for the whole day, as many loads as the company's max loads per truck).
@@ -578,11 +602,24 @@ export async function buildDispatchRequest(
       kg: t.payloadKg !== null && t.payloadKg > 0 ? t.payloadKg : null,
       tripsLeft: cfg.maxTripsPerTruck,
       ...(t.bays !== null && t.bays !== undefined ? { palletUnits: palletRoomUnits(t.bays, fillPct) } : {}),
+      bays: t.bays ?? null,
     })),
   ];
+  // "Small truck only" customers (owner request 13 Oct 2026): a truck with bays entered and at most this
+  // many is small (a truck without bays never is). Each stop of such a customer may go on the day's small
+  // trucks only (own and hired for the day; the hire check adds the small trucks it may rent), and its
+  // parts are sized for small trucks only - a customer that fits a big truck but no small one is split.
+  const smallMaxBays = smallTruckMaxBaysOf(cfg);
+  const smallIds = smallTruckIds(trucks, smallMaxBays);
+  const smallOnlyCustomers: string[] = [];
   const available = splitFleet.filter((t) => hasRoom(t) && t.tripsLeft > 0);
-  const pool = available.length ? available : splitFleet;
-  const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number): { cap: PartCapacity; truckCode: string } | null => {
+  const poolOf = (smallOnly: boolean): FleetTruck[] => {
+    if (!smallOnly) return available.length ? available : splitFleet;
+    const small = (t: FleetTruck) => isSmallTruck(t.bays, smallMaxBays);
+    return available.some(small) ? available.filter(small) : splitFleet.filter(small);
+  };
+  const partCapFor = (cases: number, kg: number, maxCaseKg: number, units: number, smallOnly = false): { cap: PartCapacity; truckCode: string } | null => {
+    const pool = poolOf(smallOnly);
     if (!cfg.splitDeliveries || !pool.some(hasRoom)) return null;
     // A customer that fits one truck, in that truck's own measure, is never split.
     if (pool.some((t) => hasRoom(t) && fitsCapacity(cases, kg, { cases: t.cases, kg: t.kg, palletUnits: t.palletUnits ?? null }, units))) return null;
@@ -773,13 +810,16 @@ export async function buildDispatchRequest(
       pref_start_min: pref.start,
       pref_end_min: pref.end,
       late,
+      // Owner request 13 Oct 2026: a "small truck only" customer goes on the day's small trucks only (each part too).
+      ...smallTruckStopFields(!!cust.smallTruckOnly, smallIds, smallMaxBays),
     };
+    if (cust.smallTruckOnly) smallOnlyCustomers.push(label);
     const sumMoney = (vals: (number | null)[]) => (vals.every((v) => v !== null) ? vals.reduce<number>((a, v) => a + (v ?? 0), 0) : null);
 
     const maxCaseKg = Math.max(0, ...live.flatMap((x) => x.lines.map((l) => l.kgPerCase)));
     // The customer's pallet need (each line rounded up on its own, then added up); 0 without bay trucks.
     const totalUnits = byPallets ? live.reduce((a, x) => a + unitsOfLines(x.lines), 0) : 0;
-    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits);
+    const split = partCapFor(totalCases, totalKg, maxCaseKg, totalUnits, !!cust.smallTruckOnly);
     if (!split) {
       const ids = live.map(orderRef);
       if (sw.promised) promised[c.id] = sw.promised;
@@ -826,7 +866,7 @@ export async function buildDispatchRequest(
         });
       });
       splitNotes.push(
-        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}`,
+        `${label} (${totalCases} cases, ${byPallets ? `${palletText(totalUnits)} pallets, ` : ''}${Math.round(totalKg)} kg) in ${parts.length} parts sized for ${split.truckCode}${cust.smallTruckOnly ? ` (small trucks only: at most ${smallMaxBays} bays)` : ''}`,
       );
     }
     for (const x of live) orderPriority[x.o.id] = pr;
@@ -948,6 +988,13 @@ export async function buildDispatchRequest(
     warnings.push(`Deactivated product(s) still on open orders, planned as ordered: ${[...inactiveProducts].sort().join(', ')}.`);
   }
   if (tooHeavyNotes.length) warnings.push(`Left unserved, heavier than any truck: ${tooHeavyNotes.join(' ')}`);
+  if (smallOnlyCustomers.length && !smallIds.length) {
+    // Owner request 13 Oct 2026: nothing can carry them today (the optimizer leaves their orders out with
+    // "Needs a small truck"); said once, before the plan, with what to do.
+    warnings.push(
+      `Small truck only customer(s) today: ${smallOnlyCustomers.join(', ')}; but this depot has no truck with bays entered and at most ${smallMaxBays} bays today, so their orders are left out. Hire a small truck (Check hire options), enter the bays of the small trucks under Trucks, or check Settings (Small truck = at most N bays).`,
+    );
+  }
   if (longStops.length) {
     warnings.push(
       `Unloading time over ${MAX_SERVICE_MIN} min (the most one stop can take): ${[...new Set(longStops)].join('; ')} - planned with ${MAX_SERVICE_MIN} min, so later arrival times may be optimistic. Check the service time or split the delivery.`,
@@ -994,6 +1041,7 @@ export async function buildDispatchRequest(
     warnings,
     unknownWeights,
     ...(byPallets ? { missingPalletFactors: groupMissingPalletFactors(missingPalletLines), palletFactors } : {}),
+    smallTruckMaxBays: smallMaxBays,
     weightChanges,
     settings: planSettingsOf(cfg, { outsideCoverage: routing.outsideCoverage }, planFrom, loadingFromMin),
     sameDay: { input: sameDayIn, baseShiftStartMin, timing },
@@ -1260,12 +1308,15 @@ export async function persistDispatchResult(
       (built.request?.trucks ?? []).some((t) => typeof t.bays === 'number') && typeof sc.pallet_unit !== 'number'
         ? ['The optimizer did not plan by pallets (it is being updated): loads are planned by cases. Re-plan in a few minutes.']
         : [];
+    // Likewise "small truck only" customers (owner request 13 Oct 2026): an older solver ignores the
+    // allowed trucks and echoes nothing. The plan says so; LOCK still refuses such a customer on a big truck.
+    const smallTruckNote = smallTruckSolverNote(built.request?.stops ?? [], sc);
     const details: ScenarioDetails = {
       ...sc,
       engine: resp.engine,
       matrix_provider: resp.matrix_provider,
       distance_is_estimated: resp.distance_is_estimated,
-      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote],
+      response_warnings: [...built.warnings, ...resp.warnings, ...palletNote, ...smallTruckNote],
       scope: built.scope,
       ...(inputs ? { inputs } : {}),
       ...(resp.search ? { search: resp.search } : {}),
@@ -1326,6 +1377,26 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     );
   }
 
+  // Cancel order (owner request 12 Oct 2026): an option of this version made before an order of it was
+  // cancelled, or moved to another day (postponed or brought forward: its copy is planned there), would
+  // put that order on a truck of this day again. The job applies its own result (a cancel or postpone
+  // is refused while the day is optimized); a dispatcher's "Use instead" re-plans instead.
+  if (opts.requireOptimized && d.scope.orderIds.length) {
+    const ids = [...d.scope.orderIds];
+    const [cancelled, moved] = await Promise.all([
+      tx.order.count({ where: { tenantId, id: { in: ids }, cancelledAt: { not: null } } }),
+      tx.order.count({ where: { tenantId, id: { in: ids }, carriedToOrderId: { not: null } } }),
+    ]);
+    if (cancelled > 0 || moved > 0) {
+      const what = [cancelled ? `${cancelled} cancelled` : '', moved ? `${moved} moved to another day (postponed or brought forward)` : ''].filter(Boolean).join(' and ');
+      throw new PlanError(
+        `${cancelled + moved} order(s) of this option were ${what} after it was made: it cannot be used. RE-PLAN the day instead (those orders are left out).`,
+        409,
+        { code: cancelled > 0 ? 'ORDERS_CANCELLED' : 'ORDERS_CARRIED' },
+      );
+    }
+  }
+
   // Frozen loads must be exactly the ones the scenario was computed around.
   const frozenNow = await tx.planLoad.findMany({ where: { runId, status: { not: 'PLANNED' } }, include: { assignments: true } });
   // Compared by load: one split order can sit on several loads, so unlocking one of them does
@@ -1382,8 +1453,41 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     elsewhere,
     otherDepots,
   );
+  // Helpers (owner request 13 Oct 2026; rules: planHelpers in load-helpers.ts): frozen loads keep theirs,
+  // helpers set by hand stay on their truck and trip, every other trip gets the truck's usual helper when
+  // he is active and free at that time (here and on the other depots' plans that day). Read before the
+  // PLANNED loads (and their helper rows) are deleted. A hand-set helper the plan drops is a helper note
+  // (as a driver note): kept in the summary (helperChanges, plan warnings), audited and returned.
+  const helperEv = await helperEvidenceOf(tx, tenantId, runId);
+  const tenantHelpers = await tx.helper.findMany({ where: { tenantId }, select: { id: true, name: true, active: true } });
+  const activeHelpers = new Set(tenantHelpers.filter((h) => h.active).map((h) => h.id));
+  const { helpers: helpersOf, notes: helperNotes } = planHelpers(
+    d.loads.map((ld) => ({
+      key: loadKey(ld.truck_id, ld.load_no),
+      truckId: ld.truck_id,
+      loadNo: ld.load_no,
+      departMin: ld.depart_min,
+      returnMin: ld.return_min,
+      defaultHelperId: truckById.get(ld.truck_id)!.defaultHelperId ?? null,
+    })),
+    helperEv.evidence,
+    activeHelpers,
+    await helperTripsElsewhere(tx, tenantId, run),
+  );
   const truckCode = (id: string) => truckById.get(id)?.code ?? id;
   const person = (id: string) => ({ id, name: driverName.get(id) ?? 'Unknown driver' });
+  const helperName = new Map(tenantHelpers.map((h) => [h.id, h.name]));
+  const appliedAt = new Date().toISOString();
+  const helperChanges: HelperChangeNote[] = helperNotes.map((n) => ({
+    truckId: n.truckId,
+    truckCode: truckCode(n.truckId),
+    loadNo: n.loadNo,
+    departMin: n.departMin,
+    returnMin: n.returnMin,
+    helper: { id: n.helperId, name: helperName.get(n.helperId) ?? 'Unknown helper' },
+    reason: n.reason,
+    at: appliedAt,
+  }));
   const driverChanges: DriverChangeNote[] = notes.map((n) => ({
     truckId: n.truckId,
     truckCode: truckCode(n.truckId),
@@ -1399,6 +1503,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     ...(n.cover ? { cover: n.cover } : {}),
   }));
 
+  await deleteHelpersOfLoads(tx, tenantId, helperEv.plannedIds);
   await tx.planLoad.deleteMany({ where: { runId, status: 'PLANNED' } });
   await tx.routeAssignment.deleteMany({ where: { runId, loadId: null } });
 
@@ -1428,6 +1533,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     const loadUnits = palletEcho && typeof ld.pallet_units === 'number' && rowsUnits !== null ? rowsUnits : null;
     if (loadUnits !== null && loadUnits !== ld.pallet_units) palletMismatches.push({ truckId: ld.truck_id, loadNo: ld.load_no, solverUnits: ld.pallet_units as number, rowsUnits: loadUnits });
     const driver = driverOf.get(loadKey(ld.truck_id, ld.load_no));
+    const crew = helpersOf.get(loadKey(ld.truck_id, ld.load_no));
     const load = await tx.planLoad.create({
       data: {
         tenantId,
@@ -1441,6 +1547,9 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         driverSetAt: driver?.driverSetAt ?? null,
         // Given as the cover of the truck's usual driver on leave (the column defaults to false).
         ...(driver?.driverIsCover ? { driverIsCover: true } : {}),
+        // Helpers set by hand keep their marker; RouteIQ's (the usual helper) have none.
+        helpersSetById: crew?.helpersSetById ?? null,
+        helpersSetAt: crew?.helpersSetAt ?? null,
         departMin: ld.depart_min,
         returnMin: ld.return_min,
         distanceKm: ld.distance_km,
@@ -1464,6 +1573,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         palletUnits: loadUnits,
       },
     });
+    if (crew?.helperIds.length) await writeLoadHelpers(tx, tenantId, load.id, crew.helperIds);
     let running = 0;
     const rows: Prisma.RouteAssignmentCreateManyInput[] = [];
     for (const st of ld.stops) {
@@ -1520,7 +1630,7 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
     data: { chosenScenarioId: scenarioId, status: next, finalizedAt: next === 'DISPATCHED' ? (run.finalizedAt ?? new Date()) : null },
   });
   if (wrote.count !== 1) throw new PlanError('This plan version was superseded by a newer version. Open the latest version.', 409, { code: 'SUPERSEDED' });
-  await refreshPlanFacts(tx, tenantId, runId, { driverChanges });
+  await refreshPlanFacts(tx, tenantId, runId, { driverChanges, helperChanges });
   await audit(
     {
       tenantId,
@@ -1537,13 +1647,16 @@ export async function applyScenario(tx: Tx, tenantId: string, runId: string, sce
         ...(driverChanges.length
           ? { driverChanges: driverChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, from: c.from?.id ?? null, to: c.to?.id ?? null, reason: c.reason })) }
           : {}),
+        ...(helperChanges.length
+          ? { helperChanges: helperChanges.map((c) => ({ truckId: c.truckId, loadNo: c.loadNo, helperId: c.helper.id, helper: c.helper.name, reason: c.reason })) }
+          : {}),
       } as never,
     },
     tx,
   );
   if (kgMismatches.length) console.warn('applyScenario: load kg differs from its orders', { runId, kgMismatches });
   if (palletMismatches.length) console.warn('applyScenario: load pallets differ from its rows', { runId, palletMismatches });
-  return { driverChanges };
+  return { driverChanges, helperChanges };
 }
 
 /**
@@ -1747,12 +1860,14 @@ function pickPalletFacts(ts: TruckSnapshot | null) {
  * `driverChanges`: the driver notes of the plan just applied (applyScenario), kept in the summary
  * (`summaryJson.driverChanges`, shown as plan warnings). A refresh without them (a load change)
  * keeps the ones already there. Anything else an older summary held (`parkedDrivers`) is dropped.
+ * `helperChanges`: the same for the helper notes (planHelpers).
  */
-export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[] } = {}) {
+export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, opts: { driverChanges?: DriverChangeNote[]; helperChanges?: HelperChangeNote[] } = {}) {
   const run = await tx.runPlan.findFirstOrThrow({ where: { id: runId, tenantId } });
   if (!run.chosenScenarioId) return;
-  const stored = run.summaryJson as { driverChanges?: unknown } | null;
+  const stored = run.summaryJson as { driverChanges?: unknown; helperChanges?: unknown } | null;
   const driverChanges = opts.driverChanges ?? (Array.isArray(stored?.driverChanges) ? (stored.driverChanges as DriverChangeNote[]) : []);
+  const helperChanges = opts.helperChanges ?? (Array.isArray(stored?.helperChanges) ? (stored.helperChanges as HelperChangeNote[]) : []);
   const sc = await tx.scenarioResult.findFirstOrThrow({ where: { id: run.chosenScenarioId }, include: { unservedOrders: true } });
   const d = sc.detailsJson as unknown as ScenarioDetails;
   const scopeIds = [...new Set([...d.scope.orderIds, ...d.scope.frozenOrderIds])];
@@ -1863,7 +1978,7 @@ export async function refreshPlanFacts(tx: Tx, tenantId: string, runId: string, 
       ...(d.search ? { search: d.search } : {}),
     },
   });
-  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}) };
+  const summary: DailySummary = { ...facts, ...(driverChanges.length ? { driverChanges } : {}), ...(helperChanges.length ? { helperChanges } : {}) };
   let change = null;
   if (run.parentRunId) {
     const parent = await tx.runPlan.findFirst({ where: { id: run.parentRunId, tenantId } });
@@ -2394,6 +2509,9 @@ export async function createNextVersionTx(
     }
   }
   if (assignmentRows.length) await tx.routeAssignment.createMany({ data: assignmentRows });
+  // Helpers (owner request 13 Oct 2026) go with their load into the new version, as its driver (the
+  // copy kept the hand-set marker, helpersSetById / helpersSetAt, with the other columns).
+  await copyLoadHelpers(tx, tenantId, newLoadId);
 
   // The option in use, so the copy reconciles and can be dispatched. Its scope names the
   // frozen loads it was computed around: renamed to the copies (the "loads changed" check).
@@ -2489,6 +2607,8 @@ export interface LoadChange {
   status?: LoadStatusName;
   /** null = no driver */
   driverId?: string | null;
+  /** The load's helpers in order (0-3; [] = none). Owner request 13 Oct 2026. */
+  helperIds?: string[];
   /**
    * The dispatcher answered "<name> is on leave on <day>. Lock ... anyway?": Lock, Loading or Dispatch
    * of a load whose driver is on leave that day goes through (else 409 DRIVER_ON_LEAVE; leaveGate).
@@ -2515,6 +2635,7 @@ export async function updateLoad(
     const run = await lockOpenRun(tx, tenantId, runId);
     let load: Awaited<ReturnType<typeof setDriverTx>> | null = null;
     if (change.driverId !== undefined) load = await setDriverTx(tx, tenantId, run, loadId, change.driverId, user);
+    if (change.helperIds !== undefined) load = await setHelpersTx(tx, tenantId, run, loadId, change.helperIds, user);
     if (change.status) load = await changeStatusTx(tx, tenantId, run, loadId, change.status, user, hasRole, opts.now ?? new Date(), change.leaveConfirmed === true);
     // Delivery outcome (spec section 9.4): Lock of a load holding a brought-forward order whose original
     // result changed after the carry warns in the answer ("may not be needed"); it is never refused.
@@ -2602,6 +2723,10 @@ async function changeStatusCore(
   // Completed are never refused (a load that left keeps its orders: they are never carried).
   // Also a load of today whose orders were brought forward to tomorrow in the evening.
   if (isGatedMove(load.status, to)) await carriedOrdersGate(tx, tenantId, load, { runDate: run.runDate, now });
+  // Cancel order (owner request 12 Oct 2026): a load holding a cancelled order must not be loaded with
+  // it. The cancel is refused on a locked or loading load, so this refuses the Lock of a PLANNED load
+  // until the day is re-planned (the re-plan leaves the cancelled order out).
+  if (isGatedMove(load.status, to)) await cancelledOrdersGate(tx, tenantId, load);
   // Owner decision 1 Oct 2026 (items 1 and 3), when a load leaves PLANNED: a delivery time set after
   // the plan was made needs a RE-PLAN first; with "Require location and delivery window before
   // loading" on, every customer on the load needs a delivery window too (and a usable location, as
@@ -2613,6 +2738,11 @@ async function changeStatusCore(
   // Owner's location rule (audit PR A5, second review): nothing goes out to a customer whose
   // location is not usable now (a saved point marked LOW by an import after planning, ...).
   if (isGatedMove(load.status, to)) await locationGate(tx, tenantId, load);
+  // Owner request 13 Oct 2026: a "small truck only" customer never leaves on a bigger truck (409
+  // SMALL_TRUCK_ONLY), judged on the customers and the truck as they are now - a customer marked, a
+  // setting lowered or a truck's bays changed after the plan was made is caught here. LOCK, LOADING and
+  // DISPATCH alike; stepping back and Completed never. FEASIBILITY_GATE=warn does not apply.
+  if (isGatedMove(load.status, to)) await smallTruckGate(tx, tenantId, load, to);
   const timing = isGatedMove(load.status, to) && run.chosenScenarioId ? await timingGate(tx, tenantId, run, load) : null;
   // Review web-plan-service-1: the load's truck and driver are not on a locked or dispatched load of
   // another depot's plan that day at a clashing time (409 TRUCK_BUSY_ELSEWHERE / DRIVER_BUSY_ELSEWHERE).
@@ -3080,6 +3210,46 @@ async function locationGate(tx: Tx, tenantId: string, load: { id: string; truckI
 }
 
 /**
+ * "Small truck only" customers (owner request 13 Oct 2026, lib/dispatch/small-truck.ts): LOCK, LOADING
+ * and DISPATCH of a load that carries a customer marked small truck only on a truck that is not small
+ * now (no bays entered, or more than the company's "Small truck = at most N bays") are refused with 409
+ * SMALL_TRUCK_ONLY, naming the customers and the remedy (re-plan; a locked or loading load goes back to
+ * Planned first). Read live, so a mark or a setting changed after planning counts.
+ */
+async function smallTruckGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number; status: string }, to: string) {
+  const rows = await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } });
+  const orderIds = [...new Set(rows.map((a) => a.orderId))];
+  if (!orderIds.length) return;
+  const orders = await tx.order.findMany({ where: { tenantId, id: { in: orderIds } }, select: { customerId: true } });
+  const customerIds = [...new Set(orders.map((o) => o.customerId))];
+  if (!customerIds.length) return;
+  const marked = await tx.customer.findMany({
+    where: { tenantId, id: { in: customerIds }, smallTruckOnly: true },
+    select: { id: true, code: true, branchCode: true, name: true },
+    orderBy: [{ code: 'asc' }, { branchCode: 'asc' }],
+  });
+  if (!marked.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true, bays: true } });
+  const maxBays = smallTruckMaxBaysOf(await tx.tenantConfig.findUnique({ where: { tenantId }, select: { smallTruckMaxBays: true } }));
+  const breaches = smallTruckBreaches(
+    { bays: truck?.bays ?? null },
+    marked.map((c) => ({ customerId: c.id, code: c.code, branchCode: c.branchCode, name: c.name, smallTruckOnly: true })),
+    maxBays,
+  );
+  if (!breaches.length) return;
+  const code = truck?.code ?? 'Truck';
+  throw new PlanError(smallTruckGateMessage({ truckCode: code, loadNo: load.loadNo, bays: truck?.bays ?? null, from: load.status, to }, breaches, maxBays), 409, {
+    code: SMALL_TRUCK_GATE_CODE,
+    truckId: load.truckId,
+    truckCode: code,
+    truckBays: truck?.bays ?? null,
+    smallTruckMaxBays: maxBays,
+    customerIds: breaches.map((b) => b.customerId),
+    customers: breaches.map((b) => (b.branchCode ? `${b.code}/${b.branchCode}` : b.code)),
+  });
+}
+
+/**
  * PR9: LOCK, LOADING and DISPATCH of a load holding an order that was brought forward to a later
  * day (carriedToOrderId) are refused with 409 ORDERS_CARRIED, naming the customers and the day
  * they went to. The remedy (carriedLoadRemedy) depends on what else the load holds and on its
@@ -3120,6 +3290,30 @@ async function carriedOrdersGate(
     409,
     { code: 'ORDERS_CARRIED', orderIds: carried.map((o) => o.id) },
   );
+}
+
+/**
+ * Cancel order (owner request 12 Oct 2026): LOCK, LOADING and DISPATCH of a load holding an order that
+ * was cancelled since it was planned are refused with 409 ORDERS_CANCELLED, naming the customers and
+ * saying what to do (cancelledLoadText): re-plan the day (the cancelled order is taken off); a load
+ * holding nothing else stays in this plan for the record and is never loaded. Runs under the plan row
+ * lock, like the cancel itself (order-cancel.ts), so a cancel and a Lock never interleave. Read without
+ * a relation filter, like carriedOrdersGate.
+ */
+async function cancelledOrdersGate(tx: Tx, tenantId: string, load: { id: string; truckId: string; loadNo: number }) {
+  const ids = [...new Set((await tx.routeAssignment.findMany({ where: { loadId: load.id }, select: { orderId: true } })).map((a) => a.orderId))];
+  if (!ids.length) return;
+  const cancelled = await tx.order.findMany({
+    where: { tenantId, id: { in: ids }, cancelledAt: { not: null } },
+    select: { id: true, customer: { select: { code: true, branchCode: true } } },
+  });
+  if (!cancelled.length) return;
+  const truck = await tx.truck.findFirst({ where: { id: load.truckId, tenantId }, select: { code: true } });
+  const names = [...new Set(cancelled.map((o) => (o.customer?.branchCode ? `${o.customer.code}/${o.customer.branchCode}` : (o.customer?.code ?? o.id))))];
+  throw new PlanError(cancelledLoadText(`${truck?.code ?? 'Truck'} L${load.loadNo}`, names, cancelled.length === ids.length), 409, {
+    code: 'ORDERS_CANCELLED',
+    orderIds: cancelled.map((o) => o.id),
+  });
 }
 
 /**

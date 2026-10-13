@@ -48,8 +48,9 @@ export function navUrl(lat: number | null, lng: number | null): string | null {
 
 function ordersOf(s: DetailStop): ManifestOrder[] {
   const out = new Map<string, ManifestOrder>();
+  const cancelled = new Set(s.cancelledOrderIds ?? []);
   for (const ln of s.orderLines ?? []) {
-    const o = out.get(ln.orderId) ?? { orderId: ln.orderId, salesOrders: [], lines: [] };
+    const o = out.get(ln.orderId) ?? { orderId: ln.orderId, salesOrders: [], lines: [], ...(cancelled.has(ln.orderId) ? { cancelled: true } : {}) };
     if (ln.salesOrderNo && !o.salesOrders.includes(ln.salesOrderNo)) o.salesOrders.push(ln.salesOrderNo);
     o.lines.push({ lineId: ln.lineId, productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
     out.set(ln.orderId, o);
@@ -120,6 +121,9 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
   for (const { l } of loads) {
     if (l.driverId && l.driverName && !drivers.has(l.driverId)) drivers.set(l.driverId, { name: l.driverName, casual: input.casualOf.get(l.driverId) ?? false });
   }
+  // The helpers of the truck-day (owner request 13 Oct 2026): each once, in trip order.
+  const helpers = new Map<string, string>();
+  for (const { l } of loads) for (const h of l.helpers ?? []) if (!helpers.has(h.id)) helpers.set(h.id, h.name);
   const manifestLoads: ManifestLoad[] = loads.map(({ d, l }) => ({
     key: loadKeyOf(d.run.depot.id, l.loadNo),
     depotId: d.run.depot.id,
@@ -142,6 +146,7 @@ export function projectManifest(details: readonly PlanDetail[], input: ManifestI
     link: { expiresAt: input.link.expiresAt.toISOString(), uploadUntil: input.link.uploadUntil.toISOString(), generation: input.link.generation },
     truck: { id: input.truckId, code: first?.l.truckCode ?? input.truck.code, hired: input.truck.hired },
     drivers: [...drivers.values()],
+    helpers: [...helpers.values()],
     depot,
     settings: { ...input.settings, maxPhotos: 3 },
     office: input.office,
@@ -155,7 +160,7 @@ export async function memoPlanDetail(tenantId: string, runId: string, now: numbe
     prisma.planLoad.aggregate({
       where: { tenantId, runId },
       _count: { _all: true },
-      _max: { statusChangedAt: true, driverSetAt: true, createdAt: true },
+      _max: { statusChangedAt: true, driverSetAt: true, helpersSetAt: true, createdAt: true },
     }),
     prisma.runPlan.findFirst({ where: { id: runId, tenantId }, select: { chosenScenarioId: true, status: true } }),
   ]);
@@ -164,6 +169,7 @@ export async function memoPlanDetail(tenantId: string, runId: string, now: numbe
     agg._count._all,
     agg._max.statusChangedAt?.getTime() ?? 0,
     agg._max.driverSetAt?.getTime() ?? 0,
+    agg._max.helpersSetAt?.getTime() ?? 0,
     agg._max.createdAt?.getTime() ?? 0,
     run.chosenScenarioId ?? '',
     run.status,

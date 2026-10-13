@@ -27,6 +27,7 @@ import {
 } from './snapshots';
 import { isSupersededRun } from './plan-status';
 import { driverSetByDispatcher, isCarriedFrozen, isHandSetDriver } from './load-state';
+import { helperChangeWarnings, isHandSetHelpers } from './load-helpers';
 import { driverChangeWarnings, noteParts } from './driver-links';
 import { leaveOnDay, loadLeaveNote } from './driver-leave';
 import { driversOnOtherDepots, leaveRowsOn } from './driver-leave-service';
@@ -46,6 +47,7 @@ import { isOptimizing } from '../jobs/optimize-job';
 import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
 import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 import { hadTimeHere } from './cross-depot';
+import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
 
 export interface DetailStop {
   sequence: number;
@@ -91,6 +93,17 @@ export interface DetailStop {
    * after planning reaches the driver sheet, the Excel route sheet and the driver page. Null = none.
    */
   customerPhone: string | null;
+  /**
+   * "Small truck only" (owner request 13 Oct 2026), as the customer is NOW (live, like the LOCK gate):
+   * the plan screen's SMALL TRUCK ONLY badge, the driver sheet and the warehouse load sheet. Absent = no.
+   */
+  smallTruckOnly?: boolean;
+  /**
+   * The load's truck, as it is now, is not a small truck (no bays, or more than the company's "Small
+   * truck = at most N bays"): LOCK, LOADING and DISPATCH refuse the load (409 SMALL_TRUCK_ONLY). The
+   * badge is red. Absent = no.
+   */
+  smallTruckBreach?: boolean;
   /** Split delivery: this stop is part `part` of the customer's `parts` deliveries on trucks;
    * `restUnserved` = more of the customer's cases are on the unserved list. */
   split: { part: number; parts: number; restUnserved: boolean } | null;
@@ -113,6 +126,18 @@ export interface DetailStop {
    * was delivered, also when the rest of its split order was carried.
    */
   carriedTo: string | null;
+  /**
+   * Cancel order (owner request 12 Oct 2026): an order of this stop was cancelled since it was planned.
+   * Only on a load that never left (PLANNED, LOCKED, LOADING): badge "CANCELLED - re-plan", and the
+   * driver and warehouse sheets say "CANCELLED - do not load or deliver".
+   */
+  cancelled: boolean;
+  /**
+   * The cancelled orders of this stop (of `orderIds`): a stop can hold several orders of its customer,
+   * and only these are marked (the warehouse sheet per invoice, the sheets' stop line "1 of 2 orders
+   * CANCELLED", the driver page per order). Empty when `cancelled` is false.
+   */
+  cancelledOrderIds: string[];
   /**
    * The order lines of this stop as planned: one entry per order line (a split part's own cases), no
    * aggregation - from the same row lines as `skus` (rowLinesKg). The driver page lists them per
@@ -146,6 +171,15 @@ export interface DetailOrderLine {
   cases: number;
 }
 
+/** A helper on a load (owner request 13 Oct 2026). */
+export interface DetailHelper {
+  id: string;
+  code: string;
+  name: string;
+  phone: string | null;
+  active: boolean;
+}
+
 export interface DetailLoad {
   id: string;
   truckId: string;
@@ -161,6 +195,13 @@ export interface DetailLoad {
    * False: RouteIQ filled it in, or there is no driver.
    */
   driverHandSet: boolean;
+  /**
+   * The helpers on this load, in their order (owner request 13 Oct 2026, lib/dispatch/load-helpers.ts),
+   * with their names as they are now. Always set by getPlanDetail; optional for older fixtures.
+   */
+  helpers?: DetailHelper[];
+  /** The dispatcher set these helpers by hand: a re-plan keeps them on this truck and trip. */
+  helpersHandSet?: boolean;
   loadNo: number;
   status: string;
   /** Kept unchanged from the previous version: carried by a re-plan and frozen (isCarriedFrozen). */
@@ -217,6 +258,12 @@ export interface DetailLoad {
    * with them); always 0 on a load that left (what left was delivered, never carried).
    */
   carriedAway: number;
+  /**
+   * Cancel order (owner request 12 Oct 2026): orders on this load cancelled since it was planned. It
+   * cannot be locked, loaded or dispatched with them (409 ORDERS_CANCELLED) until the day is re-planned.
+   * Always 0 on a load that left (an order that left cannot be cancelled).
+   */
+  cancelledHere: number;
   /** The driver break planned with this load (PlanLoad.breakJson); null = none on this load. */
   break: LoadBreak | null;
   /** The truck is hired from outside (Truck.hired, as it is now): a badge on the plan and the sheets. */
@@ -259,6 +306,8 @@ export interface DetailUnserved {
   carriedFrom: string | null;
   /** PR9: brought forward to a later day since (YYYY-MM-DD): planned there, not a problem of this plan. */
   carriedTo: string | null;
+  /** Cancel order (owner request 12 Oct 2026): cancelled since; not a problem of this plan, never re-planned. */
+  cancelled: boolean;
 }
 
 export interface PlanDetail {
@@ -480,6 +529,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     include: {
       truck: { select: { code: true, capacityCases: true, capacityWeightKg: true, bays: true, hired: true, onlyOnDate: true, defaultDriverId: true, active: true } },
       driver: { select: { name: true, phone: true } },
+      helpers: { orderBy: { position: 'asc' }, select: { helper: { select: { id: true, code: true, name: true, phone: true, active: true } } } },
       assignments: {
         orderBy: [{ sequenceInTruck: 'asc' }, { orderInStop: 'asc' }],
         include: {
@@ -545,10 +595,13 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   const elsewhere = await driversOnOtherDepots(db, tenantId, run, leave);
   // The company's today: a one-day hired truck retired after its day is not "taken out of service" (truckOutOfService).
   const today = todayIso(cfg?.timezone || DEFAULT_TZ, clock.now ?? new Date());
+  // "Small truck only" customers (owner request 13 Oct 2026): judged as the LOCK gate judges them.
+  const smallMaxBays = smallTruckMaxBaysOf(cfg);
   const detailLoads: DetailLoad[] = loads.map((l) => {
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
     const carriedAwayOrders = new Set<string>();
+    const cancelledOrders = new Set<string>();
     // A load planned by pallets (its stored pallets, and bays + room in its truck snapshot, both kept
     // only from the optimizer's echo): each product's pallets on it, line by line as it was planned.
     const tsPallets = readTruckSnapshot(l.truckSnapshotJson);
@@ -598,9 +651,16 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const cameFrom = o.carriedFromDate ? isoOf(o.carriedFromDate) : null;
       const wentTo = o.carriedTo && carriedLoadShows(l.status) ? isoOf(o.carriedTo.deliveryDate) : null;
       if (wentTo) carriedAwayOrders.add(o.id);
+      // Cancel order: cancelled since it was planned (only a load that never left can hold one).
+      const isCancelled = !!o.cancelledAt && carriedLoadShows(l.status);
+      if (isCancelled) cancelledOrders.add(o.id);
       if (s) {
         if (cameFrom && (!s.carriedFrom || cameFrom < s.carriedFrom)) s.carriedFrom = cameFrom;
         if (wentTo && (!s.carriedTo || wentTo > s.carriedTo)) s.carriedTo = wentTo;
+        if (isCancelled) {
+          s.cancelled = true;
+          if (!s.cancelledOrderIds.includes(o.id)) s.cancelledOrderIds.push(o.id);
+        }
         s.cases += cases;
         s.weightKg += weightKg;
         s.orderIds.push(o.id);
@@ -654,6 +714,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         accessNotes: c.accessNotes,
         // Live too (owner request 12 Oct 2026): the driver calls the number the customer has now.
         customerPhone: c.phone ?? null,
+        // Live (owner request 13 Oct 2026): the customer's mark and the truck as they are now.
+        ...(c.smallTruckOnly ? { smallTruckOnly: true, ...(isSmallTruck(l.truck.bays, smallMaxBays) ? {} : { smallTruckBreach: true }) } : {}),
         split: null,
         snapshot: !!snap,
         masterChanged: snap
@@ -677,6 +739,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           : [],
         carriedFrom: cameFrom,
         carriedTo: wentTo,
+        cancelled: isCancelled,
+        cancelledOrderIds: isCancelled ? [o.id] : [],
         orderLines,
         plannedHours: snap
           ? { hardStart: snap.hardStartMin, hardEnd: snap.hardEndMin, prefStart: snap.prefStartMin, prefEnd: snap.prefEndMin }
@@ -724,6 +788,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       driverName: l.driver?.name ?? null,
       driverPhone: l.driver?.phone ?? null,
       driverHandSet: isHandSetDriver(l),
+      helpers: (l.helpers ?? []).map((h) => h.helper),
+      helpersHandSet: isHandSetHelpers({ helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetById: l.helpersSetById, helpersSetAt: l.helpersSetAt }),
       loadNo: l.loadNo,
       status: l.status,
       carried: isCarriedFrozen(l),
@@ -763,6 +829,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       ],
       timing: null,
       carriedAway: carriedAwayOrders.size,
+      cancelledHere: cancelledOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
       // A hired truck's casual driver paid by the day, as the load was planned (its truck snapshot).
@@ -827,6 +894,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         partial: u.portionLinesJson !== null && onTruck.has(o.id), // some of this order is on a truck
         carriedFrom: o.carriedFromDate ? isoOf(o.carriedFromDate) : null,
         carriedTo: o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : null,
+        cancelled: !!o.cancelledAt,
       };
     })
     .filter((x): x is DetailUnserved => x !== null)
@@ -868,7 +936,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // Review of 9 Oct 2026: orders this plan left out for their customer's data (no usable location, a
   // deactivated customer) that a re-plan would plan now - a pin saved or the customer reactivated since.
   // The area is read only when such a row exists (most plan reads have none).
-  const fixedSince = live && chosenDetails ? unservedRows.filter((u) => CUSTOMER_DATA_REASONS.includes(u.reasonCode) && uo.get(u.orderId)?.customer.active && !uo.get(u.orderId)?.carriedTo) : [];
+  const fixedSince = live && chosenDetails ? unservedRows.filter((u) => CUSTOMER_DATA_REASONS.includes(u.reasonCode) && uo.get(u.orderId)?.customer.active && !uo.get(u.orderId)?.carriedTo && !uo.get(u.orderId)?.cancelledAt) : [];
   let fixedNote: string | null = null;
   if (fixedSince.length) {
     const tenant = await db.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });
@@ -1028,6 +1096,11 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
                 (run.summaryJson as unknown as DailySummary | null)?.driverChanges ?? [],
                 loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, driverId: l.driverId, driverSet: driverSetByDispatcher(l) })),
               ),
+              // A helper set by hand that the applied plan dropped (planHelpers), until he is on a load again.
+              ...helperChangeWarnings(
+                (run.summaryJson as unknown as DailySummary | null)?.helperChanges ?? [],
+                loads.map((l) => ({ truckId: l.truckId, loadNo: l.loadNo, helperIds: (l.helpers ?? []).map((h) => h.helper.id), helpersSetAt: l.helpersSetAt ?? null })),
+              ),
               ...(chosenDetails.response_warnings ?? []),
               ...(chosenDetails.warnings ?? []),
               // Benchmark F02 / F07: P1-P3 orders left out while trucks the plan was given carry no load
@@ -1080,7 +1153,16 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
   // only on such loads: plan-detail). PLANNED ones cannot be locked (truckGate); locked or loading ones are kept.
   const outPlanned: string[] = [];
   const outKept: string[] = [];
+  // Owner request 13 Oct 2026: "small truck only" customers on a truck that is not small now (marked, or
+  // the setting lowered, after planning): LOCK / LOADING / DISPATCH refuse these loads (smallTruckGate).
+  const bigPlanned: string[] = [];
+  const bigKept: string[] = [];
   for (const l of loads) {
+    if (l.status === 'PLANNED' || l.status === 'LOCKED' || l.status === 'LOADING') {
+      for (const s of l.stops) {
+        if (s.smallTruckBreach) (l.status === 'PLANNED' ? bigPlanned : bigKept).push(`${s.customerCode}${s.branchCode ? `/${s.branchCode}` : ''} (${l.truckCode} L${l.loadNo})`);
+      }
+    }
     if (l.masterChanged.some((c) => c.kind === 'CAPACITY')) trucks.push(`${l.truckCode} L${l.loadNo}`);
     if (l.masterChanged.some((c) => c.kind === 'INACTIVE')) (l.status === 'PLANNED' ? outPlanned : outKept).push(`${l.truckCode} L${l.loadNo}`);
     const depot = l.masterChanged.find((c) => c.kind === 'DEPOT');
@@ -1114,6 +1196,12 @@ export function masterChangedNotes(loads: Pick<DetailLoad, 'status' | 'truckCode
     out.push(
       `Truck taken out of service (deactivated under Trucks) after these locked or loading loads were planned: ${outKept.join(', ')}. They are kept as they are; to move their orders to the trucks in service, unlock them (put them back to Planned) and re-plan, or reactivate the truck under Trucks.`,
     );
+  }
+  if (bigPlanned.length) {
+    out.push(`Small truck only customers on a truck that is not small: ${bigPlanned.join(', ')}. These loads cannot be locked, loaded or dispatched - re-plan to put them on a small truck.`);
+  }
+  if (bigKept.length) {
+    out.push(`Small truck only customers on a locked or loading truck that is not small: ${bigKept.join(', ')}. These loads cannot go on - put them back to Planned and re-plan.`);
   }
   if (trucks.length) out.push(`Truck capacity changed after planning: ${trucks.join(', ')}. The loads keep the capacity they were planned with - re-plan to use the new one.`);
   // Audit E1 (owner decision 13): its own sentence, never "truck capacity changed".

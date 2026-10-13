@@ -3,6 +3,7 @@ import {
   Warehouse,
   Truck,
   Users as UsersIcon,
+  UserPlus,
   Map as MapIcon,
   Building2,
   Package,
@@ -36,6 +37,8 @@ export const NAV_ITEMS: NavItem[] = [
   { href: (s) => `/t/${s}/depots`, label: 'Depots', icon: Warehouse, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/trucks`, label: 'Trucks', icon: Truck, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/drivers`, label: 'Drivers', icon: UsersIcon, rolesAllowed: ALL_ROLES },
+  // Helpers (truck crew), owner request 13 Oct 2026: the same roles as Drivers.
+  { href: (s) => `/t/${s}/helpers`, label: 'Helpers', icon: UserPlus, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/regions`, label: 'Regions', icon: MapIcon, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/customers`, label: 'Customers', icon: Building2, rolesAllowed: ALL_ROLES },
   { href: (s) => `/t/${s}/products`, label: 'Products', icon: Package, rolesAllowed: ALL_ROLES },

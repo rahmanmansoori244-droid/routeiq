@@ -144,7 +144,8 @@ describe('the day screen marks orders brought forward (PR9)', () => {
       runId: 'run1',
       OR: [
         { status: { in: ['DISPATCHED', 'COMPLETED'] } },
-        { assignments: { some: { order: { carriedToOrderId: null } } } },
+        // A load holding only cancelled orders is not the day's work either (Cancel order, 12 Oct 2026).
+        { assignments: { some: { order: { carriedToOrderId: null, cancelledAt: null } } } },
         { assignments: { none: {} } },
       ],
     });

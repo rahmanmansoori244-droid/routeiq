@@ -88,6 +88,8 @@ function StopRow({ st }: { st: SheetStop }) {
       <T style={[s.cell, s.seq, { width: W.seq }]}>{st.sequence}</T>
       <View style={[s.cell, { width: W.cust }]}>
         <T style={{ fontFamily: BOLD, fontSize: 9.5 }}>{st.customerName}</T>
+        {/* Owner request 13 Oct 2026: the unloading area takes small trucks only (small text). */}
+        {st.smallTruck ? <T style={{ fontFamily: BOLD, fontSize: 7 }}>{st.smallTruck}</T> : null}
         <T style={s.small}>{meta}</T>
         {st.address ? <T style={{ fontSize: 7.5 }}>{st.address}</T> : null}
         {/* Owner request 12 Oct 2026: the customer's phone, to call before arrival (Latin font only: the
@@ -216,6 +218,13 @@ function SheetPage({ m, sh }: { m: DriverPackModel; sh: DriverSheet }) {
               <T style={s.b}>Driver </T>
               {sh.driverName ? `${sh.driverName}${sh.driverPhone ? ` · ${sh.driverPhone}` : ''}` : '______________________  Phone ______________'}
             </T>
+            {/* Helpers (owner request 13 Oct 2026): "Helper: Saif" / "Helpers: Saif, Omar"; nothing without one. */}
+            {sh.helpersLine ? (
+              <T style={s.fact}>
+                <T style={s.b}>{sh.helpersLine.slice(0, sh.helpersLine.indexOf(': '))} </T>
+                {sh.helpersLine.slice(sh.helpersLine.indexOf(': ') + 2)}
+              </T>
+            ) : null}
             <T style={s.fact}>
               <T style={s.b}>Depart </T>
               {sh.depart}

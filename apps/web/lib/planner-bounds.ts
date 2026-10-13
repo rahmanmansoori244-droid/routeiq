@@ -80,6 +80,9 @@ export const CONFIG_BOUNDS = {
   defaultServiceTimeMin: { solver: 'stop.service_min', min: 0, max: 480, int: true },
   serviceMinPerCase: { solver: 'stop.service_min', min: 0, max: 1 },
   planningCutoffMin: { solver: null, min: 0, max: 1439, int: true },
+  // Owner decision 13 Oct 2026: a truck with at most this many bays is a small truck ("small truck only"
+  // customers go on such trucks only: each of their stops' allowed_truck_ids). The trucks' bays range.
+  smallTruckMaxBays: { solver: 'stop.allowed_truck_ids', min: 1, max: 40, int: true },
 } as const satisfies Record<string, Bound>;
 
 export const TRUCK_BOUNDS = {

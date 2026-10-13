@@ -29,11 +29,12 @@ export function requireRole(role: Role, min: Role): boolean {
 }
 
 /**
- * The truck fields a dispatcher (PLANNER and SUPERVISOR) may change: the usual (default) driver only
- * (owner request 6 Oct 2026: drivers change a lot and the dispatcher follows them). Bays, costs,
- * capacity, availability, depot, code, active and hired stay the company admin's.
+ * The truck fields a dispatcher (PLANNER and SUPERVISOR) may change: the usual (default) driver
+ * (owner request 6 Oct 2026: drivers change a lot and the dispatcher follows them) and the usual
+ * helper (owner request 13 Oct 2026: helpers are kept like drivers). Bays, costs, capacity,
+ * availability, depot, code, active and hired stay the company admin's.
  */
-export const DISPATCHER_TRUCK_FIELDS: readonly string[] = ['defaultDriverId'];
+export const DISPATCHER_TRUCK_FIELDS: readonly string[] = ['defaultDriverId', 'defaultHelperId'];
 
 /** The fields of a truck change `role` may not make (empty: allowed). Fields left out (undefined) are not changes. */
 export function truckFieldsRefused(role: Role, input: Record<string, unknown>): string[] {
@@ -53,4 +54,15 @@ export function driverChangesRefused(role: Role, before: { code: string; casual:
   if (input.code !== undefined && input.code !== before.code) out.push('code');
   if (input.casual === true && !before.casual) out.push('casual');
   return out;
+}
+
+/**
+ * The helper changes `role` may not make (empty: allowed), as for drivers (owner request 13 Oct 2026):
+ * the dispatcher (PLANNER and up) adds helpers, edits the name and the mobile, activates and
+ * deactivates them; changing a helper's code stays the company admin's. A code sent unchanged (the
+ * form sends every field) is not a change.
+ */
+export function helperChangesRefused(role: Role, before: { code: string }, input: { code?: string }): string[] {
+  if (canManageMasterData(role)) return [];
+  return input.code !== undefined && input.code !== before.code ? ['code'] : [];
 }

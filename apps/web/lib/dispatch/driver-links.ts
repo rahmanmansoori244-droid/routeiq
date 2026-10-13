@@ -9,6 +9,7 @@ import { driverClashes } from './load-state';
 import type { DetailLoad, DetailStop } from './plan-detail';
 import { loadPallets, palletText } from './pallets';
 import { isSupersededRun } from './plan-status';
+import { stopCancelledText } from './order-cancel-rules';
 import type { DriverChangeNote } from './summary';
 import { fmtDayMonth, fmtHhmm } from './time';
 
@@ -136,6 +137,11 @@ export type MessageLoad = Pick<DetailLoad, 'truckCode' | 'loadNo' | 'departMin' 
     departureMin?: DetailStop['departureMin'];
     /** "Promised 10:00–11:00": an urgent / promised delivery time (owner decision 1 Oct 2026); absent / null = none. */
     promised?: DetailStop['promised'];
+    /** Cancel order (owner request 12 Oct 2026): an order of the stop was cancelled since planning; absent = none. */
+    cancelled?: DetailStop['cancelled'];
+    orderIds?: DetailStop['orderIds'];
+    cancelledOrderIds?: DetailStop['cancelledOrderIds'];
+    orderLines?: DetailStop['orderLines'];
   })[];
 };
 
@@ -185,6 +191,8 @@ export function whatsappText(plan: MessagePlan, load: MessageLoad, trips: number
     const until = s.departureMin !== null && s.departureMin !== undefined ? ` (unload until ${fmtHhmm(s.departureMin)})` : '';
     lines.push(`${s.sequence}. ${fmtHhmm(s.etaMin)}${until} ${stopTitle(s)} · ${s.cases} cs${part}${s.promised ? ` · *${s.promised}*` : ''}`);
     lines.push(pinUrl(s) ?? 'No location - call dispatcher');
+    // Cancel order (owner request 12 Oct 2026): a planned load's message can be sent before the re-plan.
+    if (s.cancelled) lines.push(`! ${stopCancelledText(s)}`);
     for (const c of s.masterChanged ?? []) {
       lines.push(`! ${c.text}`);
       const moved = c.kind === 'LOCATION' ? pinUrl({ lat: c.newLat ?? null, lng: c.newLng ?? null }) : null;

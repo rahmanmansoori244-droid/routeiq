@@ -8,6 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { carriedFromBadge, carriedToBadge, orderCarryMarks, orderListTotals } from '@/lib/dispatch/carry-view';
+import { orderActionReasonText } from '@/lib/dispatch/order-cancel-rules';
 
 export interface OrderRow {
   id: string;
@@ -30,6 +31,11 @@ export interface OrderRow {
   carriedFromDate?: Date | null;
   /** PR9: the copy this order was brought forward to (it is no longer open on its own day). */
   carriedTo?: { deliveryDate: Date } | null;
+  /** Cancel order (owner request 12 Oct 2026): cancelled = not open, not counted in the totals. */
+  cancelledAt?: Date | null;
+  cancelReason?: string | null;
+  cancelNote?: string | null;
+  cancelledBy?: { name: string } | null;
 }
 
 export interface RegionOption {
@@ -120,6 +126,7 @@ export function OrdersTable({ initial, regions }: { initial: OrderRow[]; regions
         <span className="ms-auto text-xs text-muted-foreground">
           {filtered.length} of {initial.length} orders · {totals.cases.toLocaleString()} cases · {totals.kg.toLocaleString()} kg
           {totals.carried ? ` · ${totals.carried} carried over to a later day (counted there)` : ''}
+          {totals.cancelled ? ` · ${totals.cancelled} cancelled (not counted)` : ''}
         </span>
       </div>
 
@@ -156,6 +163,17 @@ export function OrdersTable({ initial, regions }: { initial: OrderRow[]; regions
                   {(() => {
                     // PR9: a carried original is not open here any more; its copy says where it came from.
                     const m = orderCarryMarks(o);
+                    if (o.cancelledAt) {
+                      return (
+                        <Badge
+                          variant="destructive"
+                          data-testid="order-cancelled"
+                          title={`Cancelled${o.cancelledBy ? ` by ${o.cancelledBy.name}` : ''}: ${orderActionReasonText(o.cancelReason, o.cancelNote)}. Not planned or counted; Undo on the Daily dispatch screen of its day.`}
+                        >
+                          Cancelled
+                        </Badge>
+                      );
+                    }
                     return m.to ? (
                       <Badge
                         variant="secondary"

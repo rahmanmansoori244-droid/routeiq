@@ -18,10 +18,13 @@ import type { DetailLoad, DetailStop, PlanDetail } from './plan-detail';
 import type { OutcomeOverlay, OverlayStop } from '../delivery/outcome-view';
 import { isSupersededRun } from './plan-status';
 import { tripsByTruck } from './driver-links';
+import { helpersText } from './load-helpers';
 import { fmtHhmm } from './time';
 import { loadPallets, palletsOverBays } from './pallets';
 import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
 import { carriedStopText, carriedToDays } from './carry-view';
+import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
+import { SMALL_TRUCK_BADGE } from './small-truck';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -65,6 +68,11 @@ export interface LoadSheetInvoice {
   split: string | null;
   /** "CARRIED OVER to 14 Oct - not delivered on this day" (the stop's mark on the driver sheet), or null. */
   carried: string | null;
+  /**
+   * "SMALL TRUCK ONLY" (owner request 13 Oct 2026): the customer's unloading area takes small trucks only,
+   * so the warehouse sees it before loading (live, as the plan screen); null otherwise.
+   */
+  smallTruck?: string | null;
   lines: ProductCases[];
   cases: number;
 }
@@ -80,6 +88,8 @@ export interface LoadSheet {
   /** The load may still change: it is not locked. */
   notLocked: boolean;
   driverName: string | null;
+  /** The helpers on the load, "Saif, Omar" (owner request 13 Oct 2026); null = none. */
+  helpers: string | null;
   depart: string;
   back: string;
   /** What goes on the truck, by product (the load manifest), product code order. */
@@ -98,6 +108,12 @@ export interface LoadSheet {
   carriedAway: number;
   /** "14 Oct" / "14 Oct, 15 Oct": the days they were brought forward to. */
   carriedToDays: string;
+  /**
+   * Cancel order (owner request 12 Oct 2026): cancelled orders on this load (DetailLoad.cancelledHere,
+   * only on a load that has not left). Their cases are still in the products to load (the plan rows),
+   * so the sheet says so in a banner and marks their invoices CANCELLED.
+   */
+  cancelledHere: number;
   footer: string;
 }
 
@@ -139,6 +155,8 @@ export interface ReturnNote {
   trips: number;
   status: string;
   driverName: string | null;
+  /** The helpers on the load, "Saif, Omar" (owner request 13 Oct 2026); null = none. */
+  helpers: string | null;
   depart: string;
   /** "Back at depot 15:58" (the driver's tap), else null. */
   backAt: string | null;
@@ -193,16 +211,23 @@ function splitText(s: DetailStop): string | null {
   return `part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' - the rest is NOT on a truck today' : ''}`;
 }
 
-/** One stop's invoices: its order lines grouped by invoice number, in the order first seen. */
+/**
+ * One stop's invoices: its order lines grouped by invoice number, in the order first seen. Cancel
+ * order (owner request 12 Oct 2026): only the invoices of the stop's cancelled orders are marked
+ * CANCELLED (a stop can hold several orders of its customer); their lines are grouped apart.
+ */
 export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
-  const by = new Map<string, ProductCases[]>();
+  const gone = new Set(s.cancelledOrderIds ?? []);
+  const by = new Map<string, { invoiceNo: string; cancelled: boolean; rows: ProductCases[] }>();
   for (const ln of s.orderLines) {
-    const key = ln.salesOrderNo?.trim() || NO_INVOICE;
-    const list = by.get(key) ?? [];
-    list.push({ productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
-    by.set(key, list);
+    const invoiceNo = ln.salesOrderNo?.trim() || NO_INVOICE;
+    const cancelled = gone.has(ln.orderId);
+    const key = `${invoiceNo}|${cancelled ? 'C' : ''}`;
+    const g = by.get(key) ?? { invoiceNo, cancelled, rows: [] };
+    g.rows.push({ productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
+    by.set(key, g);
   }
-  return [...by.entries()].map(([invoiceNo, rows]) => {
+  return [...by.values()].map(({ invoiceNo, cancelled, rows }) => {
     const lines = sumByProduct(rows);
     return {
       stop: s.sequence,
@@ -211,7 +236,8 @@ export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
       customerCode: s.customerCode,
       branchCode: s.branchCode,
       split: splitText(s),
-      carried: carriedStopText(s),
+      carried: cancelled ? CANCELLED_STOP_TEXT : carriedStopText({ carriedFrom: s.carriedFrom, carriedTo: s.carriedTo }),
+      smallTruck: s.smallTruckOnly ? SMALL_TRUCK_BADGE : null,
       lines,
       cases: lines.reduce((a, l) => a + l.cases, 0),
     };
@@ -246,6 +272,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       statusText: STATUS_TEXT[l.status] ?? l.status,
       notLocked: l.status === 'PLANNED',
       driverName: l.driverName,
+      helpers: helpersText((l.helpers ?? []).map((h) => h.name)),
       depart: fmtHhmm(l.departMin),
       back: fmtHhmm(l.returnMin),
       products,
@@ -254,6 +281,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       invoices,
       matches: invoices.reduce((a, i) => a + i.cases, 0) === totalCases,
       carriedAway: l.carriedAway,
+      cancelledHere: l.cancelledHere ?? 0,
       carriedToDays: carriedToDays(stops.map((s) => s.carriedTo).filter((x): x is string => !!x)),
       footer: footer(l, n, d, 'Load sheet'),
     };
@@ -335,6 +363,7 @@ export function returnNoteModel(d: PlanDetail, overlay: OutcomeOverlay, opts: { 
       trips: n,
       status: l.status,
       driverName: l.driverName,
+      helpers: helpersText((l.helpers ?? []).map((h) => h.name)),
       depart: fmtHhmm(l.departMin),
       backAt: backAtIso ? localHhmm(backAtIso, overlay.tz) : null,
       notBack: !backAtIso && l.status !== 'COMPLETED',

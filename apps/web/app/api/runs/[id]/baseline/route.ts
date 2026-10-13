@@ -7,6 +7,7 @@ import { parseUploadIsolated, UploadParseRefused, uploadRefusedResponse } from '
 import { normalizeBranchKey } from '@/lib/schemas';
 import { customerKey } from '@/lib/customer-code';
 import { preferredCustomer } from '@/lib/dispatch/order-intake';
+import { NOT_CANCELLED } from '@/lib/dispatch/order-cancel-rules';
 import { rateLimit, LIMITS } from '@/lib/rate-limit';
 import { clientIp } from '@/lib/client-ip';
 
@@ -62,9 +63,10 @@ export async function POST(req: Request, { params }: Params) {
   for (const c of customers) twinsByKey.set(customerKey(c.code, c.branchKey), [...(twinsByKey.get(customerKey(c.code, c.branchKey)) ?? []), c]);
   const custByKey = new Map([...twinsByKey].map(([k, list]) => [k, preferredCustomer(list)!]));
 
-  // Orders on this run date so we can link assignments to actual orders.
+  // Orders on this run date so we can link assignments to actual orders (never a cancelled one: Cancel
+  // order, owner request 12 Oct 2026).
   const orders = await db.order.findMany({
-    where: { deliveryDate: run.runDate },
+    where: { deliveryDate: run.runDate, ...NOT_CANCELLED },
     select: { id: true, customerId: true, totalCases: true },
   });
   const ordersByCust = new Map(orders.map((o) => [o.customerId, o]));

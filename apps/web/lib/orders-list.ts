@@ -7,6 +7,10 @@
  * copy) to show "Carried over to 28 Sep" / "Carried over from 27 Sep" (orderCarryMarks), and a
  * filter on an open status never returns a carried original: it is not open, unserved or pending
  * anywhere on its own day. `status=CARRIED` lists the carried originals.
+ *
+ * Cancel order (owner request 12 Oct 2026): a cancelled order keeps its status too (the day's history)
+ * and is never open: an open-status filter leaves it out, `status=CANCELLED` lists the cancelled
+ * orders, the rows carry `cancelledAt` (badge "Cancelled") and the totals leave them out.
  */
 import type { OrderStatus, Prisma } from '@prisma/client';
 
@@ -15,6 +19,7 @@ export const ORDER_LIST_INCLUDE = {
   customer: { select: { id: true, code: true, name: true, branchKey: true, region: { select: { id: true, code: true } } } },
   _count: { select: { lines: true } },
   carriedTo: { select: { deliveryDate: true } },
+  cancelledBy: { select: { name: true } },
 } satisfies Prisma.OrderInclude;
 
 /** Statuses of an order that is still open on its day - unless it was brought forward. */
@@ -23,12 +28,16 @@ export const OPEN_ORDER_STATUSES: readonly OrderStatus[] = ['UPLOADED', 'VALIDAT
 /** Pseudo-status of the status filter: the orders brought forward to a later day. */
 export const CARRIED_STATUS = 'CARRIED';
 
+/** Pseudo-status of the status filter: the cancelled orders. */
+export const CANCELLED_STATUS = 'CANCELLED';
+
 /**
  * The where-part of a status filter: an open status leaves out the orders brought forward to a later
  * day (they are open on that day, as their copy); CARRIED lists only those; any other status as is.
  */
 export function orderStatusFilter(status: string): Prisma.OrderWhereInput {
   if (status === CARRIED_STATUS) return { carriedToOrderId: { not: null } };
-  if ((OPEN_ORDER_STATUSES as readonly string[]).includes(status)) return { status: status as OrderStatus, carriedToOrderId: null };
+  if (status === CANCELLED_STATUS) return { cancelledAt: { not: null } };
+  if ((OPEN_ORDER_STATUSES as readonly string[]).includes(status)) return { status: status as OrderStatus, carriedToOrderId: null, cancelledAt: null };
   return { status: status as OrderStatus };
 }

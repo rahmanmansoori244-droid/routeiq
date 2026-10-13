@@ -11,6 +11,7 @@ import { api, CUSTOMER_TYPES } from './client-api';
 import type { CustomerDeliveryStats } from '@/lib/delivery/customer-stats';
 import { measuredServiceValue } from '@/lib/delivery/measured';
 import { CUSTOMER_PHONE_RULE } from '@/lib/dispatch/customer-phone';
+import { SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
 import { detailsFormOf, detailsPatch, EMPTY_DETAILS, type DetailsCustomer, type DetailsForm } from './customer-details';
 
 export interface EditableCustomer extends DetailsCustomer {
@@ -79,7 +80,7 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
   }, [open, customer]);
 
   const set = (key: keyof DetailsForm) => (value: string) => setForm((f) => ({ ...f, [key]: value }));
-  const tick = (key: 'openAllDay' | 'confirmHours') => (value: boolean) => setForm((f) => ({ ...f, [key]: value }));
+  const tick = (key: 'openAllDay' | 'confirmHours' | 'smallTruckOnly') => (value: boolean) => setForm((f) => ({ ...f, [key]: value }));
   const hoursShown = !!(form.hardStart.trim() || form.hardEnd.trim() || form.prefStart.trim() || form.prefEnd.trim());
   const confirmedText = customer?.windowConfirmed
     ? `Receiving hours confirmed${customer.windowConfirmedBy ? ` by ${customer.windowConfirmedBy}` : ''}${customer.windowConfirmedAt ? ` on ${fmtDayMonth(customer.windowConfirmedAt.slice(0, 10))}` : ''}.`
@@ -220,6 +221,16 @@ export function CustomerDialog({ open, onOpenChange, customer, onSaved }: Props)
             <Label htmlFor="cd-phone">Phone (for the driver to call)</Label>
             <Input id="cd-phone" type="tel" inputMode="tel" autoComplete="off" placeholder="+968 9123 4567" value={form.phone ?? ''} onChange={(e) => set('phone')(e.target.value)} />
             <p className="text-xs text-muted-foreground">Optional: printed on the driver sheet and called from the driver page before arrival. {CUSTOMER_PHONE_RULE} Empty = no phone.</p>
+          </div>
+          {/* Owner request 13 Oct 2026: an unloading area that takes small trucks only (lib/dispatch/small-truck.ts). */}
+          <div className="col-span-2 space-y-1 rounded-md border p-2 text-sm">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" checked={!!form.smallTruckOnly} onChange={(e) => tick('smallTruckOnly')(e.target.checked)} data-testid="small-truck-only" />
+              {SMALL_TRUCK_FIELD_LABEL}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              The unloading area takes small trucks only: the planner sends only trucks with at most the bays set in Settings (Small truck = at most N bays), and LOCK refuses this customer on a bigger truck. Re-plan after changing it.
+            </p>
           </div>
         </div>
         <DialogFooter>

@@ -23,6 +23,11 @@ export const POST = withTenantApi(
       if (!driver) return fail('Driver not found in this tenant', 400);
       if (!driver.active) return fail(`Driver ${driver.name} is inactive`, 400);
     }
+    if (input.defaultHelperId) {
+      const helper = await db.helper.findUnique({ where: { id: input.defaultHelperId }, select: { id: true, name: true, active: true } });
+      if (!helper) return fail('Helper not found in this tenant', 400);
+      if (!helper.active) return fail(`Helper ${helper.name} is inactive`, 400);
+    }
     const created = await db.truck.create({
       data: {
         tenantId: user.tenantId,
@@ -42,6 +47,7 @@ export const POST = withTenantApi(
         // Pallet positions: set = planned by pallets (owner decision 4 Oct 2026).
         bays: input.bays ?? null,
         defaultDriverId: input.defaultDriverId ?? null,
+        defaultHelperId: input.defaultHelperId ?? null,
         active: input.active ?? true,
         hired: input.hired ?? false,
       },

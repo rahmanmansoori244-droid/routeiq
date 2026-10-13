@@ -764,8 +764,15 @@ describe('F21: a plan read or export racing "Use instead" returns one revision (
       if (summaryKm === null && /^(Estimated km|Total road km)/.test(label)) summaryKm = cell(row.getCell(2).value);
     });
     let loadPlanKm: unknown = null;
-    wb.getWorksheet('LOAD PLAN')?.eachRow((row) => {
-      if (String(cell(row.getCell(1).value) ?? '') === 'TOTAL') loadPlanKm = cell(row.getCell(14).value);
+    // The km column found by its header (row 4), never by a fixed number: columns move (Helper(s), Pallets).
+    const lp = wb.getWorksheet('LOAD PLAN');
+    let kmCol = 0;
+    lp?.getRow(4).eachCell((c, n) => {
+      if (/^(Estimated km|Route km)$/.test(String(c.value ?? ''))) kmCol = n;
+    });
+    expect(kmCol).toBeGreaterThan(0);
+    lp?.eachRow((row) => {
+      if (String(cell(row.getCell(1).value) ?? '') === 'TOTAL') loadPlanKm = cell(row.getCell(kmCol).value);
     });
     expect(summaryKm).not.toBeNull();
     expect(Number(loadPlanKm)).toBeCloseTo(Number(summaryKm), 1);

@@ -25,6 +25,10 @@ UnservedReason = Literal[
     "LOCKED_PLAN_CONFLICT",
     "LATE_ORDER_NO_CAPACITY",
     "SOLVER_DROPPED_LOW_PRIORITY",
+    # A stop limited to some trucks (DispatchStop.allowed_truck_ids: a "small truck only" customer, owner
+    # request 13 Oct 2026) that none of those trucks could take: none today, none big enough, or none
+    # with room or time left. Only a request that sends allowed_truck_ids can get it.
+    "NO_ALLOWED_TRUCK",
     "ROUTING_PROVIDER_FAILURE",
     "INFEASIBLE",
     "UNKNOWN",
@@ -184,6 +188,16 @@ class DispatchStop(BaseModel):
     late: bool = False
     # Re-plans: the truck this stop was on in the previous plan version (plan continuity).
     previous_truck_id: str | None = None
+    # The only trucks (DispatchTruck.id) that may carry this stop (owner request 13 Oct 2026: a customer
+    # whose unloading area takes small trucks only; the web sends the day's trucks with at most the
+    # company's "small truck" bays). None (the default, and every older web): any truck. [] = no truck:
+    # the stop is left out with NO_ALLOWED_TRUCK. A hard rule in every engine - the route search
+    # (VehicleVar), the load re-check (load_repack.fits_truck), the second search (skipped while a stop
+    # has it) - and in the independent check (feasibility: TRUCK_NOT_ALLOWED). Optional and additive.
+    allowed_truck_ids: list[str] | None = Field(default=None, max_length=1000)
+    # The words the reasons use for those trucks ("a small truck (at most 6 bays)"); None: "one of the
+    # trucks allowed for this customer". Text only.
+    allowed_trucks_label: str | None = Field(default=None, max_length=120)
 
     @model_validator(mode="after")
     def _windows_ordered(self) -> "DispatchStop":
@@ -493,6 +507,8 @@ FeasibilityCode = Literal[
     "TRIPS",
     "FROZEN_OVERLAP",
     "BREAK",
+    # A stop on a truck that is not in its allowed_truck_ids (a "small truck only" customer on a big truck).
+    "TRUCK_NOT_ALLOWED",
 ]
 
 
@@ -586,6 +602,10 @@ class DispatchScenario(BaseModel):
     pallet_unit: float | None = None
     pallet_fill_pct: int | None = None
     total_pallet_units: int | None = None
+    # Echo of the allowed-trucks rule (DispatchStop.allowed_truck_ids, owner request 13 Oct 2026): True
+    # when a stop of the request had it, so every engine and the check kept it; None = no stop had it,
+    # or a solver before the rule (which ignored the field: the web warns when it sent one and gets None).
+    allowed_trucks_rule: bool | None = None
 
 
 class DispatchResponse(BaseModel):
@@ -713,7 +733,8 @@ class PyvrpReport(BaseModel):
 
     status: CHOSEN = its plan (re-checked) is used by the options in ``chosen_for``; NOT_CHOSEN = it
     ran, and the engine's own plans were as good or better (or its plan was unusable: ``reason``);
-    SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE); FAILED = it
+    SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE, ALLOWED_TRUCKS: a stop's
+    allowed_truck_ids leaves out a truck that can still take a load, which PyVRP cannot model); FAILED = it
     failed (IMPORT_FAILED, FAILED, LOST, TIMEOUT). The plans are then the engine's alone.
     best_over_time: at most 12 [seconds, PyVRP's score] points - a score, not money (it holds the
     prize of every stop not planned yet)."""

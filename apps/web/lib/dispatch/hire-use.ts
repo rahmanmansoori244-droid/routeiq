@@ -54,7 +54,7 @@ import { isSupersededRun } from './plan-status';
 import { admissionRefused, dayMismatch, replan, replanRefusal, weightRefusal, type ExpectedDay, type OptimizeOverrides, type StartResult } from './start-optimize';
 import { solveAdmission } from './solve-admission';
 import { basisFingerprint, cancelHireChecksOfDay, companyToday, DAY_OVER_TEXT, depotHireOptions, rentedOnDay, type HireBasis } from './hire-whatif';
-import { DEFAULT_DRIVER_DAY_RATE, hiredTruckDescription, hireSplitFleet, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
+import { DEFAULT_DRIVER_DAY_RATE, hiredTruckDescription, hireNeed, hireSplitFleet, hireTruckCode, hiresText, sameDayMovedOn, type HireOptionFacts, type HireSummary } from './hire';
 import { fmtDayMonth, isoOf } from './time';
 
 type Tx = Prisma.TransactionClient;
@@ -355,7 +355,13 @@ export function withRentedTrucks(
       void _drop;
       return { ...rest, id: made.get(t.id)!.id, code: made.get(t.id)!.code };
     });
-  const request: DispatchRequest = { ...base, trucks: [...base.trucks.filter((t) => !t.hire_candidate), ...rented] };
+  // "Small truck only" stops (owner request 13 Oct 2026): a rented truck the what-if allowed for them (a small
+  // one) is allowed under its new id too, so the request kept with the plan says what the plan was made with.
+  const smallRented = new Set(whatIf.stops.flatMap((st) => st.allowed_truck_ids ?? []).filter((id) => made.has(id)).map((id) => made.get(id)!.id));
+  const stops = smallRented.size
+    ? base.stops.map((st) => (Array.isArray(st.allowed_truck_ids) ? { ...st, allowed_truck_ids: [...new Set([...st.allowed_truck_ids, ...smallRented])] } : st))
+    : base.stops;
+  const request: DispatchRequest = { ...base, stops, trucks: [...base.trucks.filter((t) => !t.hire_candidate), ...rented] };
   const scenarios = resp.scenarios
     .filter((s) => s.name === 'RECOMMENDED')
     .map((s) => ({
@@ -553,8 +559,18 @@ export async function applyHireSuggestion(
   }
 
   // The day changed: the trucks are rented as their options are now, then a re-plan (Quick) plans the
-  // day as it is now with them. First everything that could refuse: an option switched off or deleted,
-  // the re-plan's questions (asked with those trucks in the request), the optimizer's admission.
+  // day as it is now with them. First everything that could refuse: nothing left to hire for, an option
+  // switched off or deleted, the re-plan's questions (asked with those trucks in the request), the
+  // optimizer's admission.
+  // Cancel / Postpone order (owner request 12 Oct 2026): every P1-P3 order the suggestion was for may be
+  // gone from the day since (cancelled, postponed or brought forward): then no truck is rented for it.
+  if (!hireNeed({ request: now.request, baseUnserved: basis.baseUnserved, baseOrders: basis.baseOrders }).leftOut.orders) {
+    return refuse(
+      409,
+      'NOTHING_TO_HIRE',
+      `The orders this hire suggestion was for are no longer to plan on ${fmtDayMonth(isoOf(run.runDate))} (cancelled, postponed or brought forward since the check): no truck was rented. Check hire options again if the day still needs one.`,
+    );
+  }
   const gone = summary.hires.find((h) => !optionsNow.some((o) => o.id === h.optionId));
   if (gone) return refuse(409, 'HIRE_OPTION_GONE', optionGoneText(gone.label, optionsNow.length));
   const refusal = await replanRefusal(tenantId, runId, withTrucks(now, trucksAsOptionsNow(whatIf, summary, optionsNow)), opts.overrides ?? {});
@@ -597,7 +613,9 @@ export async function applyHireSuggestion(
   }
   const trucks = [...made.values()].map((m) => ({ id: m.id, code: m.code, label: m.label }));
   // The admission reserved above is handed to the re-plan (it gives it back on any answer that starts no job).
-  const res = await replan(tenantId, runId, 'REOPTIMIZE', note, user, ip, opts.overrides ?? {}, opts.expect, { now: opts.now }, 'QUICK', { ticket: adm.ticket });
+  // keepReason: a full re-optimize with the rented trucks, as the what-if planned it - never turned into a
+  // manual adjustment because an order was cancelled or postponed off a planned load since.
+  const res = await replan(tenantId, runId, 'REOPTIMIZE', note, user, ip, opts.overrides ?? {}, opts.expect, { now: opts.now }, 'QUICK', { ticket: adm.ticket, keepReason: true });
   const newRunId = typeof res.body.runId === 'string' ? res.body.runId : null;
   if (newRunId && res.status < 400) await prisma.hireSuggestion.update({ where: { id: s.id }, data: { usedRunId: newRunId } }).catch(() => undefined);
   if (res.status >= 400) {

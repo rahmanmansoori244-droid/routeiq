@@ -17,8 +17,10 @@ import { createDayLoader, dayAfterConfirm, sameSelection, type DayLoader } from 
 import { dayKey } from './request-gate';
 import { CarryOverPanel } from './carry-over-panel';
 import { DeliverySummary } from './delivery-summary';
+import { CrewReport } from './crew-report';
 import type { DayDeliveries } from '@/lib/delivery/day-results';
 import { DeliveryTimesPanel, type DayOrderTimeRow } from './delivery-times';
+import { CancelledOrdersList, type CancelledRow } from './order-actions';
 import { DataToCollectPanel, LoadingGapsNote } from './data-to-collect';
 import { confirmNotesSummary, resolveIssuesStep, type DataGap } from '@/lib/dispatch/data-collection';
 import { carriedFromBadge, dayNothingLeftText } from '@/lib/dispatch/carry-view';
@@ -100,6 +102,12 @@ interface Day {
     palletFactorCases?: number;
     trucksInactive?: number;
     unservedNowPlannable?: number;
+    /** Cancel order (owner request 12 Oct 2026): cancelled orders still on planned loads that hold other orders of the day (they cannot be locked). */
+    cancelledOnPlan?: number;
+    /** Postpone order (owner request 12 Oct 2026): orders moved to a later day still on such planned loads (Lock refused: ORDERS_CARRIED). */
+    movedOnPlan?: number;
+    /** Small truck only (owner request 13 Oct 2026): marked customers on planned loads whose truck is not small now (Lock refused: SMALL_TRUCK_ONLY). */
+    smallTruckBlocked?: number;
   };
   plan: null | {
     id: string;
@@ -127,6 +135,8 @@ interface Day {
   carriedIn?: { orderId: string; customerCode: string; branchCode: string | null; customerName: string; cases: number; fromDate: string; pending: boolean }[];
   /** PR9: orders of this day brought forward to later days (no longer open here). */
   carriedOut?: { orders: number; cases: number; toDates: string[] } | null;
+  /** Cancel order (owner request 12 Oct 2026): this day's cancelled orders (not in `orders`). */
+  cancelled?: CancelledRow[];
   trucks: { active: number; capacityCases: number; withBays?: number; bays?: number; casesWithoutBays?: number; withPayload?: number };
   batches: { id: string; fileName: string; status: string; uploadedAt: string; validRows: number; errorRows: number; isLate: boolean }[];
   /** The company's delivery area: ADD LOCATION judges a saved pin with it, as the server does. */
@@ -453,7 +463,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const toApply = day.weightsToApply ?? [];
   const casesOf = (list: WeightGap[]) => list.reduce((a, g) => a + g.cases, 0);
   const running = day.plan?.status === 'OPTIMIZING' || day.plan?.job?.status === 'RUNNING' || day.plan?.job?.status === 'QUEUED';
-  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0 };
+  const outdated = day.outdated ?? { weightCases: 0, inactiveOrders: 0, masterChanged: 0, trucksChanged: 0, locationBlocked: 0, depotMoved: 0, palletFactorCases: 0, trucksInactive: 0, unservedNowPlannable: 0, cancelledOnPlan: 0, movedOnPlan: 0, smallTruckBlocked: 0 };
   const planOutdated =
     !!day.plan?.chosen &&
     (outdated.weightCases > 0 ||
@@ -464,7 +474,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       (outdated.depotMoved ?? 0) > 0 ||
       (outdated.palletFactorCases ?? 0) > 0 ||
       (outdated.trucksInactive ?? 0) > 0 ||
-      (outdated.unservedNowPlannable ?? 0) > 0);
+      (outdated.unservedNowPlannable ?? 0) > 0 ||
+      (outdated.cancelledOnPlan ?? 0) > 0 ||
+      (outdated.movedOnPlan ?? 0) > 0 ||
+      (outdated.smallTruckBlocked ?? 0) > 0);
   // Review of 9 Oct 2026 (ui-dispatch-2): orders the plan in use leaves unserved: Step 3 says how many,
   // never "up to date with all orders". It keeps RE-PLAN on, and the step not done, only for those a
   // re-plan could place now (`unserved.replan`, review of 5614ba9), for example after a truck was added
@@ -487,6 +500,7 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
     carriedOut: day.carriedOut,
     loadsByStatus: allLoads,
     loadsOfDay: day.plan?.loadsOfDay,
+    cancelled: day.cancelled?.length ?? 0,
   });
   const nothingLeft = nothingLeftText !== null;
   const lastFailed = day.plan?.status === 'FAILED';
@@ -498,6 +512,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
   const fixWeight = weightFixText(canEditProducts);
   const selectedDate = date ?? day.date;
   const selectedDepot = depotId ?? day.depot.id;
+  // Cancel order (owner request 12 Oct 2026): the cancelled orders of the day (not in day.orders).
+  const cancelledCount = day.cancelled?.length ?? 0;
+  // After a cancel, an undo or a postpone: the day shows it, and the plan below is read again in place.
+  const afterOrderChanged = async () => {
+    if (await refresh()) setPlanReload((k) => k + 1);
+  };
 
   const pickers = (
     <div className="flex flex-wrap items-end gap-3">
@@ -547,7 +567,12 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
       {searchChoice.dialog}
 
       {/* STEP 1 */}
-      <Step n={1} title="Upload orders" done={day.orders.count > 0} summary={`${day.orders.count} orders · ${day.orders.customers} customers · ${day.orders.cases.toLocaleString()} cases${day.orders.late ? ` · ${day.orders.late} late` : ''}`}>
+      <Step
+        n={1}
+        title="Upload orders"
+        done={day.orders.count > 0}
+        summary={`${day.orders.count} orders · ${day.orders.customers} customers · ${day.orders.cases.toLocaleString()} cases${day.orders.late ? ` · ${day.orders.late} late` : ''}${cancelledCount ? ` · ${cancelledCount} cancelled` : ''}`}
+      >
         {canPlan ? (
           <div className="flex flex-wrap items-center gap-2">
             <label className="flex cursor-pointer items-center gap-2 rounded-md border border-dashed px-3 py-2 text-sm hover:bg-muted/40">
@@ -594,10 +619,11 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
         ) : null}
         {day.carriedOut?.orders ? (
           <p className="text-xs text-muted-foreground" data-testid="carried-out">
-            {day.carriedOut.orders} order(s) ({day.carriedOut.cases.toLocaleString()} cases) of this day were not delivered and were brought forward to{' '}
-            {day.carriedOut.toDates.map(fmtDayMonth).join(', ')}: they are planned there, not on this day.
+            {day.carriedOut.orders} order(s) ({day.carriedOut.cases.toLocaleString()} cases) of this day were moved to{' '}
+            {day.carriedOut.toDates.map(fmtDayMonth).join(', ')} (postponed, or brought forward when not delivered): they are planned there, not on this day.
           </p>
         ) : null}
+        <CancelledOrdersList rows={day.cancelled ?? []} canPlan={canPlan} disabled={!dayReady || optimizing || planBusy || running} onDone={() => void afterOrderChanged()} />
         {day.batches.length ? (
           <p className="text-xs text-muted-foreground">
             Files for this day: {day.batches.map((b) => `${b.fileName} (${b.status.toLowerCase()}${b.isLate ? ', late' : ''})`).join(' · ')}
@@ -630,7 +656,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           </details>
         ) : null}
         {day.dataRule?.on ? <LoadingGapsNote gaps={day.loadingGaps ?? []} /> : null}
-        <DeliveryTimesPanel customers={day.customers} canPlan={canPlan} onSaved={afterCustomerSaved} />
+        <DeliveryTimesPanel
+          customers={day.customers}
+          canPlan={canPlan}
+          onSaved={afterCustomerSaved}
+          date={day.date}
+          today={day.today}
+          onOrderChanged={() => void afterOrderChanged()}
+        />
         {canPlan && day.depot ? (
           <DataToCollectPanel slug={slug} depotId={day.depot.id} reloadKey={`${day.date}|${day.customers.length}|${day.customers.filter((c) => c.blocking).length}|${day.customers.filter((c) => c.windowConfirmed).length}|${day.loadingGaps?.length ?? 0}`} />
         ) : null}
@@ -701,6 +734,14 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               outdated.unservedNowPlannable
                 ? `a usable location was saved, or the customer reactivated, for ${outdated.unservedNowPlannable} of its unserved order(s) (RE-PLAN plans them now)`
                 : '',
+              // Cancel order (owner request 12 Oct 2026): their loads cannot be locked until RE-PLAN takes them off.
+              outdated.cancelledOnPlan
+                ? `${outdated.cancelledOnPlan} of its order(s) on planned loads were cancelled (those loads cannot be locked until RE-PLAN takes them off)`
+                : '',
+              // Postpone order: the same for orders moved to a later day (Lock answers ORDERS_CARRIED).
+              outdated.movedOnPlan
+                ? `${outdated.movedOnPlan} of its order(s) on planned loads were moved to a later day (postponed or brought forward; those loads cannot be locked until RE-PLAN takes them off)`
+                : '',
               // Audit E1: locked and dispatched loads keep the pin they were planned from; RE-PLAN moves the rest.
               outdated.depotMoved ? `the depot pin was moved (${outdated.depotMoved} planned load(s) still start from the old pin)` : '',
               // Pallets: a load the new figure puts over its bays cannot be locked meanwhile.
@@ -710,6 +751,10 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
               // Owner's location rule (A5 second review): their loads cannot be locked meanwhile.
               outdated.locationBlocked
                 ? `the location of ${outdated.locationBlocked} customer(s) on planned loads can no longer be used (drop the pin on each one, or RE-PLAN to leave their orders unserved)`
+                : '',
+              // Small truck only (owner request 13 Oct 2026): a customer marked, or the setting lowered, since.
+              outdated.smallTruckBlocked
+                ? `${outdated.smallTruckBlocked} small-truck-only customer(s) on planned loads sit on a truck that is not small (their loads cannot be locked; RE-PLAN puts them on a small truck)`
                 : '',
             ]
               .filter(Boolean)
@@ -771,6 +816,9 @@ export function DispatchClient({ slug, canPlan, canDispatch, canEditProducts, in
           />
         </Step>
       ) : null}
+
+      {/* Owner request 13 Oct 2026: who were the driver and the helpers on each truck and load. */}
+      <CrewReport key={`${day.date}|${day.depot.id}`} date={day.date} depotId={day.depot.id} depotCode={day.depot.code} />
 
       <LocationDialog
         open={locOpen}

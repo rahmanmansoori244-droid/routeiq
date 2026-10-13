@@ -1098,8 +1098,36 @@ def _space_text(by_pallets: bool, amount: int) -> str:
     return f"{pallet_text(amount)} pallets" if by_pallets else f"{amount} cases"
 
 
+def truck_allowed(stop: DispatchStop, truck: DispatchTruck) -> bool:
+    """The stop may go on this truck (DispatchStop.allowed_truck_ids, owner request 13 Oct 2026: a
+    "small truck only" customer); None = any truck."""
+    return stop.allowed_truck_ids is None or truck.id in stop.allowed_truck_ids
+
+
+def _limited(stop: DispatchStop, tds: list[TruckDay]) -> bool:
+    """The stop's allowed trucks leave out one of ``tds``: its limit decides something today."""
+    return stop.allowed_truck_ids is not None and any(not truck_allowed(stop, td.truck) for td in tds)
+
+
+def _limits_decide(req: DispatchRequest, stops: list[DispatchStop]) -> bool:
+    """A stop's allowed trucks leave out a truck that can still take a load today (only those count:
+    a limit that leaves out a truck with no trip or hours left decides nothing)."""
+    if all(s.allowed_truck_ids is None for s in stops):
+        return False
+    usable = [td for td in _truck_days(req) if td.usable]
+    return any(_limited(s, usable) for s in stops)
+
+
+def _allowed_label(stop: DispatchStop) -> str:
+    """The words for the trucks a limited stop may go on ("a small truck (at most 6 bays)")."""
+    return stop.allowed_trucks_label or "one of the trucks allowed for this customer"
+
+
 def _fits_capacity(stop: DispatchStop, td: TruckDay) -> bool:
-    """The stop alone fits the truck: its pallets (a truck with bays) or cases, and its kg."""
+    """The stop alone fits the truck and may go on it (truck_allowed): its pallets (a truck with bays)
+    or cases, and its kg."""
+    if not truck_allowed(stop, td.truck):
+        return False
     if _need_in(stop, td.by_pallets) > _room(td):
         return False
     if td.max_kg_units > 0 and kg_units(stop.demand_kg) > td.max_kg_units:
@@ -1366,6 +1394,24 @@ def _no_room_reason(s: DispatchStop, usable_tds: list[TruckDay], loads: list[Pla
     return (f"Not planned: no load or free trip has room for its {its}{even} ({left} is {most})." + tail)
 
 
+def _not_placed_on_allowed(s: DispatchStop, usable_tds: list[TruckDay], loads: list[PlannedLoad],
+                           priority_of: dict[str, int]) -> str:
+    """Why a limited stop (allowed_truck_ids) the plan does not serve is left out: the trucks it may go on
+    had no room (proven, _no_room_reason on those trucks alone) or no room or time the search found."""
+    label = _allowed_label(s)
+    mine = [td for td in usable_tds if truck_allowed(s, td.truck)]
+    if not mine:
+        return (f"Needs {label}: no such truck can take a new load today; the other trucks may not deliver here. "
+                "Add or hire such a truck, or deliver it another day.")
+    ids = {td.truck.id for td in mine}
+    codes = ", ".join(sorted(td.truck.code or td.truck.id for td in mine))
+    no_room = _no_room_reason(s, mine, [ld for ld in loads if ld.truck_id in ids], priority_of)
+    if no_room is not None:
+        return f"Needs {label}: no such truck had room ({codes}); the other trucks may not deliver here. {no_room}"
+    return (f"Needs {label}: no such truck had room or time left for this P{s.priority} stop ({codes}); the other "
+            "trucks may not deliver here. Add or hire such a truck, or re-plan.")
+
+
 def _day_hhmm(m: int) -> str:
     """A time of the delivery day; 24:00 and later read "24:00", the end of the day (as the web's
     "Planned from" warning)."""
@@ -1418,27 +1464,51 @@ def _prefilter(req: DispatchRequest, tds: list[TruckDay]) -> tuple[list[Dispatch
         code, msg, warning = _no_usable_truck(req, tds)
         return [], [_unserved(s, code, msg) for s in req.stops], [warning]
     solvable: list[DispatchStop] = []
-    bay_tds = [td for td in usable if td.by_pallets]
-    case_tds = [td for td in usable if not td.by_pallets]
     for s in req.stops:
+        if s.allowed_truck_ids is not None and not any(_fits_capacity(s, td) for td in usable):
+            # A limited stop (allowed_truck_ids, owner request 13 Oct 2026) that none of its trucks can take:
+            # its own reason, never "larger than any truck" when a truck it may not go on would carry it.
+            drops.append(_unserved(s, "NO_ALLOWED_TRUCK", _no_allowed_truck_text(s, usable, req.config.pallet_fill_pct)))
+            continue
         if not any(_fits_capacity(s, td) for td in usable):
-            kg_trucks = [td.max_kg_units for td in usable if td.max_kg_units > 0]
-            parts = []
-            if bay_tds:  # the measure of the largest trucks, pallets and / or cases (mixed fleet)
-                big = max(bay_tds, key=lambda td: td.max_pallet_units)
-                parts.append(f"{pallet_text(s.demand_pallet_units or 0)} pallets vs largest truck "
-                             f"{pallet_text(big.max_pallet_units)} pallets: {big.bays} bays at {req.config.pallet_fill_pct}% fill")
-            if case_tds:
-                parts.append(f"{s.demand_cases} cases vs largest truck{' without bays' if bay_tds else ''} "
-                             f"{max(td.max_cases for td in case_tds)} cases")
-            detail = "; ".join(parts)
-            if kg_trucks and kg_units(s.demand_kg) > max(kg_trucks):
-                detail += f"; {kg_text(s.demand_kg)} kg vs largest payload {kg_text(max(kg_trucks) / 10)} kg"
             drops.append(_unserved(s, "EXCEEDS_ANY_TRUCK_CAPACITY",
-                                   f"Order is larger than any available truck ({detail}). Split it or use a bigger truck."))
+                                   f"Order is larger than any available truck ({_size_detail(s, usable, req.config.pallet_fill_pct)}). "
+                                   "Split it or use a bigger truck."))
             continue
         solvable.append(s)
     return solvable, drops, warnings
+
+
+def _size_detail(s: DispatchStop, tds: list[TruckDay], fill_pct: int) -> str:
+    """The stop's size against the largest of ``tds`` in their measures (pallets and / or cases, and kg
+    when it is over every payload): the detail of "larger than any truck"."""
+    bay_tds = [td for td in tds if td.by_pallets]
+    case_tds = [td for td in tds if not td.by_pallets]
+    kg_trucks = [td.max_kg_units for td in tds if td.max_kg_units > 0]
+    parts = []
+    if bay_tds:  # the measure of the largest trucks, pallets and / or cases (mixed fleet)
+        big = max(bay_tds, key=lambda td: td.max_pallet_units)
+        parts.append(f"{pallet_text(s.demand_pallet_units or 0)} pallets vs largest truck "
+                     f"{pallet_text(big.max_pallet_units)} pallets: {big.bays} bays at {fill_pct}% fill")
+    if case_tds:
+        parts.append(f"{s.demand_cases} cases vs largest truck{' without bays' if bay_tds else ''} "
+                     f"{max(td.max_cases for td in case_tds)} cases")
+    detail = "; ".join(parts)
+    if kg_trucks and kg_units(s.demand_kg) > max(kg_trucks):
+        detail += f"; {kg_text(s.demand_kg)} kg vs largest payload {kg_text(max(kg_trucks) / 10)} kg"
+    return detail
+
+
+def _no_allowed_truck_text(s: DispatchStop, usable: list[TruckDay], fill_pct: int) -> str:
+    """Why a limited stop (allowed_truck_ids) cannot go at all, before any search: none of its trucks can
+    take a new load today, or the order is larger than the largest of them."""
+    label = _allowed_label(s)
+    mine = [td for td in usable if truck_allowed(s, td.truck)]
+    if not mine:
+        return (f"Needs {label}: no such truck can take a new load today; the other trucks may not deliver here. "
+                "Add or hire such a truck, or deliver it another day.")
+    return (f"Needs {label}: the order is larger than the largest such truck ({_size_detail(s, mine, fill_pct)}); "
+            "the other trucks may not deliver here. Turn on split deliveries, or add or hire such a truck.")
 
 
 def _window_prefilter(
@@ -1487,19 +1557,22 @@ def _window_prefilter(
             if finish <= shift_limit:
                 shift_ok = True
                 break
+        # A limited stop (allowed_truck_ids) is judged on the trucks it may go on, and says so.
+        only = f" Only {_allowed_label(s)} may deliver here." if _limited(s, usable) else ""
         if not window_ok:
             hw = f"{_hhmm(s.hard_start_min)}-{_hhmm(s.hard_end_min)}"
-            earliest = _hhmm(min(td.earliest_depart_s for td in usable) // 60 + out_s // 60)
+            mine = [td for td in usable if _fits_capacity(s, td)] or usable
+            earliest = _hhmm(min(td.earliest_depart_s for td in mine) // 60 + out_s // 60)
             if finish_rule:
                 msg = (f"No truck can reach this customer early enough to finish unloading ({s.service_min} min) "
                        f"by closing ({_hhmm(s.hard_end_min)}): earliest possible arrival {earliest}{est}.")
             else:
                 msg = (f"No truck can reach this customer inside its receiving window {hw} "
                        f"(earliest possible arrival {earliest}){est}.")
-            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE", msg))
+            drops.append(_unserved(s, "HARD_WINDOW_INFEASIBLE", msg + only))
         elif not shift_ok:
             drops.append(_unserved(s, "SHIFT_LIMIT",
-                                   f"A round trip to this customer does not fit inside the truck shift / depot hours{est}."))
+                                   f"A round trip to this customer does not fit inside the truck shift / depot hours{est}.{only}"))
         else:
             keep.append(k)
     return keep, drops
@@ -1876,6 +1949,14 @@ def _solve_scenario(
         if s.pref_start_min is not None and pref_coeff > 0:
             tdim.SetCumulVarSoftLowerBound(idx, s.pref_start_min * 60, pref_coeff)
         routing.AddDisjunction([idx], penalties[k])
+        if s.allowed_truck_ids is not None:
+            # Owner request 13 Oct 2026 ("small truck only" customers): only the trucks it may go on, or left
+            # out (-1, the disjunction). Each routing vehicle is one truck with all its loads, so this holds
+            # for every load of the truck. SetValues, not SetAllowedVehiclesForIndex: that binding refuses a
+            # Python list in the OR-Tools this solver pins (9.15).
+            allowed = [v for v, td in enumerate(vehicles) if truck_allowed(s, td.truck)]
+            if len(allowed) < nv:
+                routing.VehicleVar(idx).SetValues([-1] + allowed)
 
     for r, v in enumerate(reload_owner):
         idx = manager.NodeToIndex(1 + len(stops) + r)
@@ -2248,6 +2329,10 @@ def _build_scenario(name, req: DispatchRequest, stops: list[DispatchStop], tds: 
         elif k in hire_drops:
             hire_left += 1
             unserved.append(_unserved(s, "SOLVER_DROPPED_LOW_PRIORITY", _hire_drop_reason(s.priority)))
+        elif _limited(s, usable_tds):
+            # Owner request 13 Oct 2026: a "small truck only" stop left out says so (its trucks were full or
+            # out of time), before the fleet-wide reasons - a big truck with room cannot take it.
+            unserved.append(_unserved(s, "NO_ALLOWED_TRUCK", _not_placed_on_allowed(s, usable_tds, loads, priority_of)))
         elif shortage:
             # "Lower priorities are left out first" only when no lower priority rides (s3-shortage-hire-2).
             lower_served = sum(1 for ld in loads for st in ld.stops if priority_of[st.stop_id] > s.priority)
@@ -2563,6 +2648,7 @@ def optimize_dispatch(req: DispatchRequest, *, osrm_client=None, control: SolveC
         sc.latest_return_min = cfg.latest_return_min
         for key, value in _pallet_echo(req, sc.loads).items():
             setattr(sc, key, value)
+        sc.allowed_trucks_rule = True if any(s.allowed_truck_ids is not None for s in req.stops) else None
         log.info("dispatch run=%s scenario=%s status=%s loads=%d unserved=%d km=%.1f t=%.1fs",
                  req.run_id, sc.name, sc.solver_status, sc.trips, len(sc.unserved), sc.total_distance_km,
                  sc.solver_time_sec)
@@ -4593,7 +4679,7 @@ class _PvRun:
     def fail(self, status: str, reason: str, detail: str = "") -> None:
         """SKIPPED / FAILED / NOT_CHOSEN with ``reason``: one log line, and its process stops."""
         self.report.update(status=status, reason=reason)
-        quiet = reason in ("OFF", "NOTHING_TO_PLAN")
+        quiet = reason in ("OFF", "NOTHING_TO_PLAN", "ALLOWED_TRUCKS")
         (log.info if quiet else log.warning)("pyvrp run=%s %s: %s%s%s", self.run_id,
                                             {"SKIPPED": "skipped", "FAILED": "failed"}.get(status, "not used"), reason,
                                             f" ({detail})" if detail else "", "" if quiet else "; the engine's plans are used")
@@ -4622,6 +4708,13 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
         pv.fail("SKIPPED", why or "OFF", detail)
     elif not solvable:
         pv.fail("SKIPPED", "NOTHING_TO_PLAN")
+    elif _limits_decide(req, solvable):
+        # Owner request 13 Oct 2026: the second search has no per-stop truck limit (PyVRP 0.14 has no allowed
+        # vehicles per client), so a day where one decides something is planned by the engine's own search
+        # alone (SearchReport.pyvrp: SKIPPED / ALLOWED_TRUCKS). The engine and its checks keep the limit.
+        # Only the trucks that can still take a load count (as in _limited elsewhere): a limit that leaves
+        # out only a truck with no trip or hours left today decides nothing, and the second search runs.
+        pv.fail("SKIPPED", "ALLOWED_TRUCKS")
     elif main_pool:
         try:
             pv.proc = _PvProcess(control, run_id=req.run_id)

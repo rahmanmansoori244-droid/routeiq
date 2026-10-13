@@ -147,7 +147,8 @@ describe('a plan holds only the orders of its own depot', () => {
     const day = new Date('2026-10-07T00:00:00Z');
     tables.depot = rows(GHALA);
     const where = await ordersInScopeWhere(T, 'D1', day);
-    expect(where).toEqual({ tenantId: T, deliveryDate: day, carriedToOrderId: null, depotId: 'D1' });
+    // Not cancelled either (Cancel order, owner request 12 Oct 2026).
+    expect(where).toEqual({ tenantId: T, deliveryDate: day, carriedToOrderId: null, cancelledAt: null, depotId: 'D1' });
   });
 });
 

@@ -24,7 +24,7 @@ const asJson = (t: OrderTime | null) => (t ? { startMin: t.startMin, endMin: t.e
 const sameHours = (a: OrderTime | null, b: OrderTime | null) => (a?.startMin ?? null) === (b?.startMin ?? null) && (a?.endMin ?? null) === (b?.endMin ?? null);
 
 const ORDER_SELECT = {
-  id: true, depotId: true, deliveryDate: true, carriedToOrderId: true,
+  id: true, depotId: true, deliveryDate: true, carriedToOrderId: true, cancelledAt: true,
   deliveryStartMin: true, deliveryEndMin: true, deliveryTimeReason: true, deliveryTimeNote: true,
   carriedTo: { select: { deliveryDate: true } },
   customer: { select: { code: true, branchCode: true, name: true } },
@@ -77,6 +77,10 @@ export const PUT = withTenantApi(
           if (!order) return { kind: 'fail', status: 404, error: 'Order not found' };
           if (order.depotId !== first.depotId || isoOf(order.deliveryDate) !== isoOf(first.deliveryDate)) {
             return { kind: 'fail', status: 409, error: 'This order was moved to another day or depot meanwhile. Reload the day and try again.' };
+          }
+          // Cancel order (owner request 12 Oct 2026): a cancelled order is not planned; undo the cancel first.
+          if (order.cancelledAt) {
+            return { kind: 'fail', status: 409, error: { code: 'ORDER_CANCELLED', message: 'This order is cancelled: undo the cancel first (Cancelled orders, Step 1 of the day) to set its delivery time.' } };
           }
           if (order.carriedToOrderId) {
             const to = order.carriedTo ? fmtDayMonth(isoOf(order.carriedTo.deliveryDate)) : 'a later day';

@@ -12,6 +12,7 @@
  */
 import type { SearchReport } from '@routeiq/shared-types';
 import type { DriverCoverWhy, DriverNoteReason } from './load-state';
+import type { HelperChangeNote } from './load-helpers';
 import { costBasisOf, costTotals, type CostBasis, type CostTotals, type LoadCostBreakdown } from './costs';
 
 export interface SummaryOrder {
@@ -132,6 +133,12 @@ export interface DailySummary {
    * refresh of the plan facts leaves it out.
    */
   driverChanges?: DriverChangeNote[];
+  /**
+   * The applied plan's helper notes (planHelpers in load-helpers.ts; absent when none): the helpers set
+   * by hand that it dropped (TRIP_GONE, INACTIVE). Kept through load changes, replaced by the next
+   * applied plan; shown as plan warnings (helperChangeWarnings).
+   */
+  helperChanges?: HelperChangeNote[];
 }
 
 /** A driver note of an applied plan (planDrivers), with the names at that time. */

@@ -102,7 +102,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
       (i) =>
         `<tr><td class="n">${i.stop}</td><td><b>${esc(i.invoiceNo)}</b></td><td>${customer(i.customerName, i.customerCode, i.branchCode)}${
           i.split ? `<br><span class="muted">split delivery: ${esc(i.split)}</span>` : ''
-        }${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
+        }${i.smallTruck ? `<br><small><b>${esc(i.smallTruck)}</b></small>` : ''}${i.carried ? `<br><b>${esc(i.carried)}</b>` : ''}</td><td>${i.lines.map((l) => `${esc(l.productCode)} × ${l.cases}`).join('<br>')}</td><td class="n">${i.cases}</td><td class="box"></td></tr>`,
     )
     .join('');
   return `<section class="sheet">
@@ -110,6 +110,7 @@ function loadSheetHtml(h: SheetHead, s: LoadSheet): string {
 ${headCells(h, [
   ['Status', s.statusText],
   ['Driver', s.driverName ?? 'not set'],
+  ['Helper(s)', s.helpers ?? 'none'],
   ['Departure', s.depart],
   ['Back', `~${s.back}`],
   ['Cases', String(s.totalCases)],
@@ -122,6 +123,11 @@ ${s.matches ? '' : `<div class="banner">The product total and the invoice total 
 ${
   s.carriedAway > 0
     ? `<div class="banner">${s.carriedAway} order(s) on this load were brought forward to ${esc(s.carriedToDays)}: do not load them from this paper (unload them if already loaded) - ask the dispatcher. They are marked CARRIED OVER below.</div>`
+    : ''
+}
+${
+  s.cancelledHere > 0
+    ? `<div class="banner">${s.cancelledHere} cancelled order(s) on this load: do not load them (unload them if already loaded); their cases are still in the products below. Their invoices are marked CANCELLED below. Re-plan the day to take them off.</div>`
     : ''
 }
 <h2>1. Products to load</h2>
@@ -170,6 +176,7 @@ function returnNoteHtml(h: SheetHead, r: ReturnNote): string {
 <h1>RETURN NOTE · gate pass · ${esc(r.truckCode)} · trip ${r.trip} of ${r.trips}</h1>
 ${headCells(h, [
   ['Driver', r.driverName ?? 'not set'],
+  ['Helper(s)', r.helpers ?? 'none'],
   ['Departure', r.depart],
   ['Back at depot', r.backAt ?? 'not recorded'],
   ['Status', r.status],

@@ -1233,8 +1233,8 @@ describe('PR9 review: the carry on the database, split orders, re-plans, lists a
       ['ORIG', { to: D1, from: null }],
       ['OTHER', { to: null, from: null }],
     ]);
-    expect(orderListTotals(all.map((o) => ({ ...o, totalCases: 10, totalWeightKg: 100 })))).toEqual({ cases: 20, kg: 200, carried: 1 });
-    expect(orderStatusFilter('ASSIGNED')).toEqual({ status: 'ASSIGNED', carriedToOrderId: null });
+    expect(orderListTotals(all.map((o) => ({ ...o, totalCases: 10, totalWeightKg: 100 })))).toEqual({ cases: 20, kg: 200, carried: 1, cancelled: 0 });
+    expect(orderStatusFilter('ASSIGNED')).toEqual({ status: 'ASSIGNED', carriedToOrderId: null, cancelledAt: null });
     expect(orderStatusFilter('DISPATCHED')).toEqual({ status: 'DISPATCHED' });
     expect(carriedToBadge(orderCarryMarks(all[1]).to!)).toBe('Carried over to 27 Sep');
   });
@@ -1369,6 +1369,16 @@ describe('PR9 second review: a sales-order line entered again for a later day is
     }
     const onD = carryCandidates([O1()], noPlans, at28([later({ orderId: 'OD', date: D, status: 'VALIDATED' })]));
     expect(blockOf(onD, 'O1')?.code).toBe('ALREADY_ON_DAY');
+  });
+
+  it('Cancel order: a cancelled later re-entry is never delivered, so it blocks nothing; a cancelled one on day D keeps its key (ALREADY_ON_DAY, with the way out)', () => {
+    const out = carryCandidates([O1()], noPlans, at28([later({ cancelled: true })]));
+    expect(blockOf(out, 'O1')).toBeNull();
+    const onD = carryCandidates([O1()], noPlans, at28([later({ orderId: 'OD', date: D, status: 'VALIDATED', cancelled: true })]));
+    expect(blockOf(onD, 'O1')).toEqual({
+      code: 'ALREADY_ON_DAY',
+      text: `Sales order SO-9 (W500) is on a cancelled order of ${fmtDayMonth(D)}: not brought forward. To deliver it on ${fmtDayMonth(D)}, undo that cancel (Cancelled orders, Step 1).`,
+    });
   });
 
   it('the newer order is blocked itself (its day is being optimized): the older one is not carried either', () => {
