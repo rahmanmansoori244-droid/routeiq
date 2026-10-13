@@ -26,6 +26,8 @@ export type DispatchUnservedReason =
   | 'LOCKED_PLAN_CONFLICT'
   | 'LATE_ORDER_NO_CAPACITY'
   | 'SOLVER_DROPPED_LOW_PRIORITY'
+  /** A stop limited to some trucks (allowed_truck_ids: a "small truck only" customer) that none of them could take. */
+  | 'NO_ALLOWED_TRUCK'
   | 'ROUTING_PROVIDER_FAILURE'
   | 'INFEASIBLE'
   | 'UNKNOWN';
@@ -110,6 +112,15 @@ export interface DispatchStop {
   late?: boolean;
   /** re-plans: truck of this stop in the previous plan version (plan continuity) */
   previous_truck_id?: string | null;
+  /**
+   * The only trucks (DispatchTruck.id) that may carry this stop (owner request 13 Oct 2026: a customer
+   * marked "Small truck only (3-ton)" gets the day's trucks with at most the company's small-truck bays).
+   * Absent / null: any truck. [] = none: left out with NO_ALLOWED_TRUCK. A hard rule in every engine
+   * and in the solver's check (TRUCK_NOT_ALLOWED).
+   */
+  allowed_truck_ids?: string[] | null;
+  /** The words the reasons use for those trucks ("a small truck (at most 6 bays)"), at most 120 characters. */
+  allowed_trucks_label?: string | null;
 }
 
 /** Receiving-hours rule: 'FINISH' = unloading finished by closing; 'START' = the earlier rule. */
@@ -403,7 +414,9 @@ export type FeasibilityCode =
   | 'SHIFT_LIMIT'
   | 'TRIPS'
   | 'FROZEN_OVERLAP'
-  | 'BREAK';
+  | 'BREAK'
+  /** A stop on a truck that is not in its allowed_truck_ids. */
+  | 'TRUCK_NOT_ALLOWED';
 
 export interface FeasibilityViolation {
   code: FeasibilityCode;
@@ -492,6 +505,12 @@ export interface DispatchScenario {
   pallet_unit?: number | null;
   pallet_fill_pct?: number | null;
   total_pallet_units?: number | null;
+  /**
+   * Echo of the allowed-trucks rule: true when a stop of the request had allowed_truck_ids (every engine
+   * and the check kept it). Absent / null: no stop had it, or a solver before the rule, which ignored the
+   * field - the web warns when it sent one and gets no echo.
+   */
+  allowed_trucks_rule?: boolean | null;
 }
 
 export interface DispatchResponse {

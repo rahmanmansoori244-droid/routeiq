@@ -69,6 +69,9 @@ export const CAPACITY_REASONS: readonly string[] = [
   'SHIFT_LIMIT',
   'HARD_WINDOW_INFEASIBLE',
   'EXCEEDS_ANY_TRUCK_CAPACITY',
+  // A "small truck only" order no small truck could take (owner request 13 Oct 2026): a small truck to
+  // rent may carry it (the what-if allows only the small trucks to rent for it).
+  'NO_ALLOWED_TRUCK',
 ];
 
 /** The reasons a stop the what-if still leaves out is about time, not trucks: receiving hours or the shift. */
@@ -782,6 +785,7 @@ export function stillLeftWhy(s: Pick<HireSummary, 'stillLeftReasons' | 'unitsOff
   const causes: string[] = [];
   if (has(TIME_REASONS)) causes.push('their receiving hours or the drivers’ shift');
   if (has(['EXCEEDS_ANY_TRUCK_CAPACITY'])) causes.push('bigger than any truck');
+  if (has(['NO_ALLOWED_TRUCK'])) causes.push('small truck only, and no small truck you can rent has room');
   // Every truck the day could rent in use - in the search's own plan, before the reduction gave back the
   // ones no P1-P3 order needed (sixth review of the hire branch).
   const searched = Math.max(s.unitsUsed, s.reduction?.first ?? 0);

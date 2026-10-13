@@ -28,6 +28,7 @@ import { caseHeavierThanAnyTruck, maxCasePayloadKg, portionPlannedKgPerCase, rea
 import { plannedLoadsMasterChanged, readPlanInputs, readStopSnapshot, truckOutOfService } from './snapshots';
 import { replanCouldPlace, unservedNowPlannable } from './left-out-note';
 import { dataGaps, type DataGap } from './data-collection';
+import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
 import type { ServiceArea } from './location-input';
 import { dayDeliveries, type DayDeliveries } from '../delivery/day-results';
 import { shownTruckCode } from './hire';
@@ -70,6 +71,8 @@ export interface IssueCustomer {
   windowConfirmedBy: string | null;
   /** The customer's phone for the driver (owner request 12 Oct 2026), as the Details dialog opens with it; null = none. */
   phone: string | null;
+  /** Small trucks only (owner request 13 Oct 2026), as the Details dialog opens with it. */
+  smallTruckOnly: boolean;
   /** The hours in use (own, else customer type, else none): what an order's delivery time starts from. */
   effWindow: { hardStart: number | null; hardEnd: number | null; prefStart: number | null; prefEnd: number | null };
   /** Each order of the customer on this day, with its own delivery time (urgent / promised) if it has one. */
@@ -176,6 +179,14 @@ export interface DayOutdated {
    * cancelledOnPlan. Those loads are refused Lock (ORDERS_CARRIED) until RE-PLAN takes the orders off.
    */
   movedOnPlan: number;
+  /**
+   * Small truck only (owner request 13 Oct 2026): customers marked "Small truck only (3-ton)" with orders
+   * on PLANNED loads whose truck (as it is now) is not small - no bays, or more than the company's "small
+   * truck" bays (smallTruckMaxBays). A customer marked, or the setting lowered, after the plan was made.
+   * Their loads cannot be locked, loaded or dispatched (plan-service smallTruckGate, 409 SMALL_TRUCK_ONLY);
+   * RE-PLAN puts them on a small truck, or leaves them out with "Needs a small truck".
+   */
+  smallTruckBlocked: number;
 }
 export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   weightCases: 0,
@@ -189,6 +200,7 @@ export const UP_TO_DATE: Readonly<DayOutdated> = Object.freeze({
   unservedNowPlannable: 0,
   cancelledOnPlan: 0,
   movedOnPlan: 0,
+  smallTruckBlocked: 0,
 });
 
 /** The orders the plan in use leaves unserved (the chosen option's unserved orders still open on this day). */
@@ -306,7 +318,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
           portionWeightKg: true,
           stopSnapshotJson: true,
           palletUnits: true,
-          load: { select: { status: true, palletUnits: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true } } } },
+          load: { select: { status: true, palletUnits: true, loadNo: true, truck: { select: { code: true, onlyOnDate: true, bays: true } } } },
         },
       })
     : [];
@@ -422,6 +434,16 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
     if (o.customer.active && onPlannedLoad.has(o.id) && openCasesOf.has(o.id) && locationBlocksDelivery(o.customer, area)) blockedOnPlanned.add(o.customerId);
   }
   outdated.locationBlocked = blockedOnPlanned.size;
+  // Small truck only (owner request 13 Oct 2026): a marked customer on a PLANNED load whose truck is not
+  // small now, by the same test as LOCK's smallTruckGate (the truck's bays and the setting as they are now).
+  const smallMax = smallTruckMaxBaysOf(cfg);
+  const smallBlocked = new Set<string>();
+  for (const a of onPlan) {
+    if (a.load?.status !== 'PLANNED') continue;
+    const o = orderById.get(a.orderId);
+    if (o?.customer.smallTruckOnly && !isSmallTruck(a.load.truck?.bays ?? null, smallMax)) smallBlocked.add(o.customerId);
+  }
+  outdated.smallTruckBlocked = smallBlocked.size;
   // The orders the option in use left unserved that are still open on this day (not brought forward
   // to a later day, not dispatched since): the work a re-plan tries again (plan-status nothingToReplan,
   // the plan screen's Re-plan). Of them, the ones left out for their customer's data that a re-plan
@@ -577,6 +599,7 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
       windowConfirmedAt: c.windowConfirmedAt ? c.windowConfirmedAt.toISOString() : null,
       windowConfirmedBy: c.windowConfirmedBy?.name ?? null,
       phone: c.phone ?? null,
+      smallTruckOnly: !!c.smallTruckOnly,
       effWindow: { hardStart: eff.hardStart, hardEnd: eff.hardEnd, prefStart: eff.prefStart, prefEnd: eff.prefEnd },
       orderTimes: [orderTimeRow(o)],
     });
@@ -860,8 +883,9 @@ export async function getDayOverview(tenantId: string, opts: { date?: string | n
      * (locationBlocked), planned loads drawn from a depot pin moved since (depotMoved, audit E1),
      * cases on planned loads whose cases per pallet was corrected since (palletFactorCases), trucks
      * with planned loads taken out of service since (trucksInactive), unserved orders whose
-     * customer got a usable location or was reactivated since (unservedNowPlannable) and cancelled
-     * orders still on planned loads (cancelledOnPlan). RE-PLAN applies them all.
+     * customer got a usable location or was reactivated since (unservedNowPlannable), cancelled
+     * orders still on planned loads (cancelledOnPlan), and small-truck-only customers on planned
+     * loads whose truck is not small now (smallTruckBlocked). RE-PLAN applies them all.
      */
     outdated: plan?.chosenScenarioId ? outdated : { ...UP_TO_DATE },
     trucks: {

@@ -23,6 +23,7 @@ import { loadPallets, palletsOverBays } from './pallets';
 import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
 import { carriedStopText, carriedToDays } from './carry-view';
 import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
+import { SMALL_TRUCK_BADGE } from './small-truck';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -66,6 +67,11 @@ export interface LoadSheetInvoice {
   split: string | null;
   /** "CARRIED OVER to 14 Oct - not delivered on this day" (the stop's mark on the driver sheet), or null. */
   carried: string | null;
+  /**
+   * "SMALL TRUCK ONLY" (owner request 13 Oct 2026): the customer's unloading area takes small trucks only,
+   * so the warehouse sees it before loading (live, as the plan screen); null otherwise.
+   */
+  smallTruck?: string | null;
   lines: ProductCases[];
   cases: number;
 }
@@ -226,6 +232,7 @@ export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
       branchCode: s.branchCode,
       split: splitText(s),
       carried: cancelled ? CANCELLED_STOP_TEXT : carriedStopText({ carriedFrom: s.carriedFrom, carriedTo: s.carriedTo }),
+      smallTruck: s.smallTruckOnly ? SMALL_TRUCK_BADGE : null,
       lines,
       cases: lines.reduce((a, l) => a + l.cases, 0),
     };

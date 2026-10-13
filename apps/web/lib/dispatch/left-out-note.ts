@@ -34,7 +34,9 @@ export interface LeftOutOrder {
  *    start of their day): no truck reaches the customer inside its receiving hours
  *    (HARD_WINDOW_INFEASIBLE), no round trip fits the shift, or no load can leave any more today
  *    (SHIFT_LIMIT);
- *  - a conflict with a locked plan, and a road routing failure.
+ *  - a conflict with a locked plan, and a road routing failure;
+ *  - a "small truck only" order no small truck could take (NO_ALLOWED_TRUCK, owner request 13 Oct
+ *    2026): an unused big truck cannot carry it.
  * The same idea as the hire check's CAPACITY_REASONS (hire.ts): a reason no truck changes never asks for one.
  */
 export const IDLE_TRUCK_REASONS: readonly string[] = [

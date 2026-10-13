@@ -12,6 +12,7 @@ import { fmtDayMonth } from '@/lib/dispatch/time';
 import { tenantServiceArea } from '@/lib/dispatch/service-area';
 import { CustomerEditor } from './customer-editor';
 import { CustomerDetailsButton } from './customer-details-button';
+import { SMALL_TRUCK_BADGE, SMALL_TRUCK_FIELD_LABEL } from '@/lib/dispatch/small-truck';
 import type { EditableCustomer } from '../../dispatch/customer-dialog';
 
 export const dynamic = 'force-dynamic';
@@ -75,6 +76,7 @@ export default async function CustomerDetailPage({
     windowConfirmedBy: customer.windowConfirmedBy?.name ?? null,
     windowConfirmedAt: customer.windowConfirmedAt ? customer.windowConfirmedAt.toISOString() : null,
     phone: customer.phone,
+    smallTruckOnly: customer.smallTruckOnly,
   };
 
   return (
@@ -192,6 +194,12 @@ export default async function CustomerDetailPage({
                 <span data-testid="customer-phone">
                   {customer.phone ?? '—'}
                   {!customer.phone && canEdit ? <span className="block max-w-xs text-xs text-muted-foreground">Optional: add it in Details so the driver can call before arrival.</span> : null}
+                </span>
+              </Field>
+              {/* Owner request 13 Oct 2026: an unloading area that takes small trucks only (set in Details). */}
+              <Field label={SMALL_TRUCK_FIELD_LABEL}>
+                <span data-testid="customer-small-truck">
+                  {customer.smallTruckOnly ? <Badge variant="warning">{SMALL_TRUCK_BADGE}</Badge> : 'no (any truck)'}
                 </span>
               </Field>
               {customer.accessNotes ? <Field label="Access notes">{customer.accessNotes}</Field> : null}

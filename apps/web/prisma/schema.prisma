@@ -144,6 +144,9 @@ enum UnservedReasonCode {
   LATE_ORDER_NO_CAPACITY
   ROUTING_PROVIDER_FAILURE
   INFEASIBLE
+  // Owner request 13 Oct 2026: a "small truck only" order no small truck could take (the optimizer's
+  // NO_ALLOWED_TRUCK: none today, none big enough, or none with room or time).
+  NO_ALLOWED_TRUCK
 }
 
 enum DistanceProvider {
@@ -260,6 +263,11 @@ model TenantConfig {
   // mixed pallets. 100 = every bay (the default, owner decision); lower = a safety margin (12 bays at
   // 95% = 11.4 pallets). 50-100 (database CHECK).
   palletFillPct           Int     @default(100)
+  // Owner decision 13 Oct 2026 ("small truck only" customers): a truck with at most this many bays is a
+  // small truck; a customer marked smallTruckOnly is planned on such trucks only (own and hired for the
+  // day, and the trucks the hire check may rent). A truck without bays is never small. 1-40 (database
+  // CHECK, the trucks' bays range); 6 by default (NMWC: 3-ton trucks 4-6 bays, 10-ton 11-12).
+  smallTruckMaxBays       Int     @default(6)
   osrmUrl                 String? // overrides the OSRM_URL env var; there is no silent public default
   priorityWeightsJson     Json? // {"1":10000,...,"5":1}; must be strictly decreasing
   orderColumnMapJson      Json? // extra header aliases for the NMWC order export
@@ -679,6 +687,11 @@ model Customer {
   /// checked by lib/dispatch/customer-phone.ts (digits, spaces and + - ( ) /, 6 to 20 digits); NULL =
   /// none known. Read live like accessNotes: a correction reaches the sheets and the driver page at once.
   phone             String?
+  /// Owner request 13 Oct 2026: the unloading area takes small trucks only (3-ton): planned only on trucks
+  /// with at most TenantConfig.smallTruckMaxBays bays (lib/dispatch/small-truck.ts), LOCK / LOADING /
+  /// DISPATCH refused on a bigger truck (409 SMALL_TRUCK_ONLY), "SMALL TRUCK ONLY" on the sheets. Read
+  /// live: a customer marked after planning is caught by the gate. Audited like the other fields.
+  smallTruckOnly    Boolean     @default(false)
   active            Boolean     @default(true)
   orders            Order[]
 

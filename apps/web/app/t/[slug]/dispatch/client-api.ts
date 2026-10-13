@@ -161,6 +161,8 @@ export const REASON_TEXT: Record<string, string> = {
   TRIP_LIMIT: 'Trucks out of loads',
   LOCKED_PLAN_CONFLICT: 'Conflicts with locked loads',
   LATE_ORDER_NO_CAPACITY: 'Late order - no capacity left',
+  // Owner request 13 Oct 2026: a "small truck only" customer no small truck could take.
+  NO_ALLOWED_TRUCK: 'Needs a small truck',
   // One code for fleet shortage, not placed by the time-limited search and left out for loading
   // time: the message under the label says which (the label must be true for all three).
   SOLVER_DROPPED_LOW_PRIORITY: 'Not planned by the optimizer - see reason',

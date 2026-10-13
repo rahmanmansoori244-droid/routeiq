@@ -308,6 +308,10 @@ class Facts:
     # The load's pallet need in 1/1000 pallet (the sum of its stops' demand_pallet_units; 0 when the
     # request sent none): what fits_truck compares on a truck with bays.
     pallet_units: int = 0
+    # The trucks (DispatchTruck.id) every stop of the load may go on (DispatchStop.allowed_truck_ids,
+    # owner request 13 Oct 2026: "small truck only" customers): the intersection of its stops' lists;
+    # None = no stop of the load is limited. fits_truck refuses any other truck.
+    allowed: frozenset[str] | None = None
 
     @property
     def waits(self) -> bool:
@@ -343,8 +347,17 @@ def facts(day: Day, load: Load, pause_after: int | None = None, pause_s: int = 0
         lo=max(_hs(s) - o for s, o in zip(ss, off)), hi=min(_he(day, s) - o for s, o in zip(ss, off)),
         cases=sum(s.demand_cases for s in ss), kg_units=sum(kg_units(s.demand_kg) for s in ss), metres=day.metres(load),
         gap=day.gap_s(sum(s.demand_cases for s in ss)), pause_after=pause_after, pause_lo=p_lo, pause_drive=p_drive,
-        pallet_units=sum(s.demand_pallet_units or 0 for s in ss),
+        pallet_units=sum(s.demand_pallet_units or 0 for s in ss), allowed=allowed_trucks(ss),
     )
+
+
+def allowed_trucks(stops) -> frozenset[str] | None:
+    """The trucks every one of ``stops`` may go on (the intersection of their allowed_truck_ids); None =
+    none of them is limited (any truck)."""
+    lists = [s.allowed_truck_ids for s in stops if s.allowed_truck_ids is not None]
+    if not lists:
+        return None
+    return frozenset(lists[0]).intersection(*lists[1:])
 
 
 def _forward_starts(day: Day, f: Facts, depart: int) -> list[int]:
@@ -373,7 +386,10 @@ def fits_truck(f: Facts, td: "TruckDay") -> bool:
     (TruckDay.max_pallet_units; its case capacity is then not a limit), else its cases; and its kg
     in 0.1 kg units against the payload rounded down, with no margin either way (audit F08). Every
     repack path (depart_range, the optional one-stop loads, the fit fallback, time_plan) goes
-    through here, so a load over its bays never gets a truck."""
+    through here, so a load over its bays never gets a truck - and a load never gets a truck one of
+    its stops may not go on (Facts.allowed: a "small truck only" customer, owner request 13 Oct 2026)."""
+    if f.allowed is not None and td.truck.id not in f.allowed:
+        return False
     room = getattr(td, "max_pallet_units", 0)
     space_ok = f.pallet_units <= room if room > 0 else f.cases <= td.max_cases
     return space_ok and (td.max_kg_units <= 0 or f.kg_units <= td.max_kg_units)
@@ -1566,11 +1582,14 @@ def _identical_trucks(day: Day, pricing: Pricing) -> dict[int, tuple[int, int]]:
     if pricing.change:
         return {}
     groups: dict[tuple, list[int]] = defaultdict(list)
+    limited = [k for k, s in enumerate(day.stops) if s.allowed_truck_ids is not None]
     for td in day.trucks:
         groups[(td.max_cases, td.max_kg, td.earliest_depart_s, td.latest_return_s, td.trips_left, td.n_frozen,
                 td.shift_anchor_s, td.frozen_return_s, td.loading_from_s, pricing.trucks[td.idx],
                 getattr(td, "break_state", "OFF"), getattr(td, "break_lo_s", 0), getattr(td, "break_hi_s", 0),
-                getattr(td, "max_pallet_units", 0), getattr(td, "bays", None))].append(td.idx)
+                getattr(td, "max_pallet_units", 0), getattr(td, "bays", None),
+                # Trucks a limited stop may go on are not interchangeable with those it may not (allowed_truck_ids).
+                frozenset(k for k in limited if td.truck.id in day.stops[k].allowed_truck_ids))].append(td.idx)
     out: dict[int, tuple[int, int]] = {}
     for c, members in enumerate(v for v in groups.values() if len(v) > 1):
         for i, idx in enumerate(sorted(members)):

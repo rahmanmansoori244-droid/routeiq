@@ -86,7 +86,7 @@ const CONFIRMED = { ...UNCONFIRMED, customerId: 'c2', name: 'Carrefour Seeb', pr
 
 describe('the Details form helpers (customer-details.ts)', () => {
   it('opens with defaults shown as defaults (blank), and own values as typed values', () => {
-    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '' });
+    expect(detailsFormOf(UNCONFIRMED)).toEqual({ type: 'HYPERMARKET', priority: '', service: '', hardStart: '06:00', hardEnd: '10:00', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false });
     expect(detailsFormOf(CONFIRMED)).toMatchObject({ priority: '2', service: '25' });
     // A customer without the sources (older callers) is shown as before.
     const plain: DetailsCustomer = { ...UNCONFIRMED, prioritySource: undefined, serviceSource: undefined };

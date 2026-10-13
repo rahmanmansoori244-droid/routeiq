@@ -21,6 +21,8 @@
  * - Owner request 12 Oct 2026: "Phone (for the driver to call)", optional. Checked with the server's
  *   own rule (readCustomerPhone, lib/dispatch/customer-phone.ts) and sent only when it changed (as
  *   the server would store it: "9123  4567" typed for "9123 4567" is no change); emptied = no phone.
+ * - Owner request 13 Oct 2026: "Small truck only (3-ton)", a tick box, sent only when it changed
+ *   (lib/dispatch/small-truck.ts: planned on small trucks only, refused at LOCK on a bigger truck).
  */
 import { readCustomerPhone } from '@/lib/dispatch/customer-phone';
 import { MAX_SERVICE_MIN } from '@/lib/dispatch/service-time';
@@ -45,6 +47,8 @@ export interface DetailsCustomer {
   windowConfirmed?: boolean;
   /** The customer's phone for the driver (owner request 12 Oct 2026). Absent or null = none. */
   phone?: string | null;
+  /** Small trucks only (owner request 13 Oct 2026). Absent = false. */
+  smallTruckOnly?: boolean;
 }
 
 /** The form as typed. '' = not set / the default applies. */
@@ -64,6 +68,8 @@ export interface DetailsForm {
   confirmHours?: boolean;
   /** "Phone (for the driver to call)" as typed; '' = no phone. Absent = ''. */
   phone?: string;
+  /** "Small truck only (3-ton)" ticked. Absent = false. */
+  smallTruckOnly?: boolean;
 }
 
 /** The PATCH /api/customers/:id body: only the fields that changed (a changed window with both ends). */
@@ -80,9 +86,11 @@ export interface DetailsPatch {
   windowConfirmed?: boolean;
   /** The phone for the driver (owner request 12 Oct 2026); null = no phone any more. */
   phone?: string | null;
+  /** Small trucks only (owner request 13 Oct 2026). */
+  smallTruckOnly?: boolean;
 }
 
-export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '' };
+export const EMPTY_DETAILS: DetailsForm = { type: '', priority: '', service: '', hardStart: '', hardEnd: '', prefStart: '', prefEnd: '', openAllDay: false, confirmHours: false, phone: '', smallTruckOnly: false };
 
 const isOwn = (source: string | undefined) => source === undefined || source === 'CUSTOMER';
 
@@ -107,6 +115,7 @@ export function detailsFormOf(c: DetailsCustomer): DetailsForm {
     openAllDay: !!c.windowConfirmed && [c.hardWindowStartMin, c.hardWindowEndMin, c.prefWindowStartMin, c.prefWindowEndMin].every((v) => v === null),
     confirmHours: !!c.windowConfirmed,
     phone: c.phone ?? '',
+    smallTruckOnly: !!c.smallTruckOnly,
   };
 }
 
@@ -179,6 +188,7 @@ export function detailsPatch(initial: DetailsForm, now: DetailsForm): DetailsRes
   // The phone as the server stores it: spaces typed differently are no change.
   const phoneWas = readCustomerPhone(initial.phone);
   if (!phoneWas.ok || phoneWas.phone !== phone.phone) patch.phone = phone.phone;
+  if (!!now.smallTruckOnly !== !!initial.smallTruckOnly) patch.smallTruckOnly = !!now.smallTruckOnly;
   // Receiving hours (owner decision 1 Oct 2026, "own confirmed window"): hours the dispatcher enters
   // are confirmed by the server; "Open all day" is confirmed with no hours; ticking "confirmed with
   // the customer" confirms the hours as shown (sent whole, so what is confirmed is what was seen).

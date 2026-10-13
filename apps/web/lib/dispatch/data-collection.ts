@@ -16,8 +16,12 @@
  *    column of both workbooks (imported back; a blank cell keeps the saved phone) and is asked for in
  *    what_to_do when it is missing. It is collected, never required: it changes neither who is on the
  *    list nor the loading gate.
+ *  - Owner request 13 Oct 2026: "small truck only" (yes / no), a column of both workbooks, imported
+ *    back (a blank cell keeps the saved value; lib/dispatch/small-truck.ts). Never asked for in
+ *    what_to_do and never puts a customer on the list: most customers take any truck.
  */
 import { CUSTOMER_PHONE_COLUMN_TEXT, CUSTOMER_PHONE_RULE } from './customer-phone';
+import { SMALL_TRUCK_COLUMN_TEXT } from './small-truck';
 import { DEFAULT_SERVICE_AREA, type ServiceArea } from './location-input';
 import {
   effectiveAttrs,
@@ -430,6 +434,8 @@ export interface VersionedCustomer {
   windowConfirmedAt?: Date | string | null;
   /** The phone for the driver (owner request 12 Oct 2026); absent or null = none. */
   phone?: string | null;
+  /** Small trucks only (owner request 13 Oct 2026); absent = false. */
+  smallTruckOnly?: boolean;
 }
 
 /** cyrb53: a short, stable hash (not for security; the same in the browser and the server). */
@@ -464,6 +470,9 @@ export function rowVersion(c: VersionedCustomer): string {
     // phone keeps the version it had before the phone existed, so a file downloaded before this
     // release still imports (no customer had a phone then). One added or changed since is a change.
     ...(c.phone ? [c.phone] : []),
+    // Small trucks only (owner request 13 Oct 2026), likewise only when yes: every customer was "any
+    // truck" before this release, so a file downloaded before it still imports; one marked since is a change.
+    ...(c.smallTruckOnly ? ['SMALL_TRUCK_ONLY'] : []),
   ];
   return `v1-${shortHash(JSON.stringify(values))}`;
 }
@@ -511,6 +520,8 @@ export const MASTER_COLUMNS: readonly MasterColumn[] = [
     // Owner request 12 Oct 2026: the short instruction, then the rule the import checks.
     text: `The ${CUSTOMER_PHONE_COLUMN_TEXT}. ${CUSTOMER_PHONE_RULE} For example +968 9123 4567. A blank cell keeps the saved phone.`,
   },
+  // Owner request 13 Oct 2026: an unloading area that takes small trucks only (3-ton).
+  { key: 'small_truck_only', width: 10, imported: true, text: SMALL_TRUCK_COLUMN_TEXT },
   { key: 'active', width: 7, imported: false, text: 'yes / no. Changed on the Customers page.' },
   { key: 'created_at', width: 17, imported: false, text: 'When the customer was created (blank: before this was recorded).' },
   { key: 'updated_at', width: 17, imported: false, text: 'When the customer last changed (blank: not since this was recorded).' },
@@ -539,6 +550,8 @@ export interface MasterCustomer extends CustomerForPlanning {
   updatedAt: Date | null;
   /** The phone for the driver (owner request 12 Oct 2026); absent or null = none. */
   phone?: string | null;
+  /** Small trucks only (owner request 13 Oct 2026); absent = false. */
+  smallTruckOnly?: boolean;
 }
 
 export interface MasterContext {
@@ -620,6 +633,7 @@ export function masterValues(c: MasterCustomer, ctx: MasterContext): Record<stri
     payment_type: c.paymentType.toLowerCase(),
     address: c.address,
     phone: c.phone ?? null,
+    small_truck_only: c.smallTruckOnly ? 'yes' : 'no',
     active: c.active ? 'yes' : 'no',
     created_at: localStamp(c.createdAt, ctx.timezone),
     updated_at: localStamp(c.updatedAt, ctx.timezone),
@@ -687,6 +701,7 @@ const FIELD_WORDS: Record<string, string> = {
   paymentType: 'Payment type',
   accessNotes: 'Access notes',
   phone: 'Phone',
+  smallTruckOnly: 'Small truck only',
   active: 'Active',
   customerType: 'Customer type',
   hardWindowStartMin: 'Receiving hours',
