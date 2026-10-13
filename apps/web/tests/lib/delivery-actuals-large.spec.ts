@@ -227,7 +227,7 @@ function rowsOf(n: number): ActualsRow[] {
     const camera = i % 50 === 0;
     return {
       date: '2026-09-05', depot: `DP${i % 7}`, truck: `T${i % 30}`, hired: 'No', trip: 1 + (i % 2), stop: 1 + (i % 16), customerCode: `C${i}`, branch: i % 3 ? null : 'B1',
-      customer: `Customer ${i}`, driver: 'Salim', dailyDriver: 'No', plannedEta: '10:00', window: '08:00-11:00', actualArrival: '09:55', arrivalBy: 'Auto', insideWindow: 'Yes',
+      customer: `Customer ${i}`, driver: 'Salim', dailyDriver: 'No', helpers: 'Saif', plannedEta: '10:00', window: '08:00-11:00', actualArrival: '09:55', arrivalBy: 'Auto', insideWindow: 'Yes',
       earlyLateMin: 0, plannedUnloadMin: 15, actualUnloadMin: 14, waitingMin: 0, timedBy: 'Auto to departure', unverified: 'No', result: 'Delivered', reason: null, note: null,
       casesPlanned: 10, casesDelivered: 10, casesNotDelivered: 0, broughtForwardTo: null, late: 'No', photos: camera ? 0 : 1, noPhotoReason: camera ? 'Camera failed (driver)' : null,
       cameraException: camera ? 'Yes' : 'No', noPhotoAfter: null, driverResult: camera ? 'Delivered' : null, driverResultTime: camera ? '10:20' : null,

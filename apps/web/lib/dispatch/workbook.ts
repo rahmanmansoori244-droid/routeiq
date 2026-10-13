@@ -750,6 +750,15 @@ function addLoadSheet(wb: ExcelJS.Workbook, d: PlanDetail, m: WorkbookMeta, l: D
     put(ws, 4 + i, 6, k).font = { bold: true };
     put(ws, 4 + i, 9, v, f).alignment = { horizontal: 'left' };
   });
+  // The driver with the helpers is longer than column D and would be cut at column F (the right block):
+  // the cell spans D:E and wraps, the row as tall as its lines, so every name shows on screen and paper.
+  if (l.helpers?.length) {
+    const row = 4 + left.findIndex(([k]) => k === 'Driver');
+    ws.mergeCells(row, 4, row, 5);
+    ws.getCell(row, 4).alignment = { horizontal: 'left', vertical: 'top', wrapText: true };
+    const chars = Math.floor(ROUTE_WIDTHS[3]! + ROUTE_WIDTHS[4]!) - 2;
+    ws.getRow(row).height = 15 * Math.max(1, Math.ceil(driverWithHelpers(l).length / chars));
+  }
   if (l.break) {
     put(ws, 10, 1, 'Driver break').font = { bold: true };
     put(ws, 10, 4, `${breakTimes(l.break)} ${breakPlace(l.break, l.stops.length)} (${l.break.lengthMin} min, never while unloading)`);

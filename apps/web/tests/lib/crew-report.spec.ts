@@ -25,7 +25,7 @@ import { renderLoadSheetHtml, renderReturnNoteHtml } from '@/lib/dispatch/wareho
 import { driverPackModel, helpersLine } from '@/lib/dispatch/driver-pack';
 import { buildDispatchWorkbook, driverWithHelpers } from '@/lib/dispatch/workbook';
 import { projectManifest } from '@/lib/driver-link/manifest';
-import { helperNames } from '@/lib/driver-page/format';
+import { helperNames, helpersLabelKey } from '@/lib/driver-page/format';
 import { t } from '@/lib/driver-page/i18n';
 import { fixture } from './plan-detail-fixture';
 
@@ -240,6 +240,16 @@ describe('the helpers wherever the driver is shown (sheet texts)', () => {
     expect([ws.getCell(4, 4).text, ws.getCell(4, 5).text]).toEqual(['Driver', 'Helper(s)']);
     expect([ws.getCell(5, 5).text, ws.getCell(6, 5).text, ws.getCell(7, 5).text]).toEqual(['Saif, Omar', 'Saif', 'None']);
     expect(driverWithHelpers(d.loads[0]!)).toBe('Salim Al Harthy · Helper(s): Saif, Omar');
+    // The load's own sheet: the Driver cell spans D:E and wraps (never cut at the right block's column F).
+    const sheet = wb.worksheets.find((w) => w.getCell(6, 1).text === 'Driver' && w.getCell(6, 4).text.includes('Helper(s): Saif, Omar'))!;
+    expect(sheet).toBeDefined();
+    expect(sheet.getCell(6, 4).text).toBe('Salim Al Harthy · Helper(s): Saif, Omar');
+    expect(sheet.getCell(6, 5).isMerged).toBe(true);
+    expect(sheet.getCell(6, 4).alignment).toMatchObject({ wrapText: true, vertical: 'top' });
+    expect(sheet.getCell(6, 6).text).toBe('Utilization %');
+    // A load without helpers keeps its plain Driver cell.
+    const plain = wb.worksheets.find((w) => w.getCell(6, 1).text === 'Driver' && !w.getCell(6, 4).text.includes('Helper'))!;
+    expect(plain.getCell(6, 5).isMerged).toBe(false);
     expect(driverWithHelpers({ driverName: null, helpers: [] })).toBe('Not assigned');
   });
 
@@ -260,7 +270,12 @@ describe('the helpers wherever the driver is shown (sheet texts)', () => {
     expect(m.helpers).toEqual(['Saif', 'Omar']);
     expect(helperNames(m)).toBe('Saif, Omar');
     expect(helperNames({})).toBeNull();
-    expect(t('en', 'helpersLabel', { names: 'Saif, Omar' })).toBe('Helper: Saif, Omar');
+    // One helper or several, as the driver sheet's "Helper:" / "Helpers:".
+    expect(helpersLabelKey(m)).toBe('helpersLabelMany');
+    expect(helpersLabelKey({ helpers: ['Saif'] })).toBe('helpersLabel');
+    expect(t('en', helpersLabelKey(m), { names: 'Saif, Omar' })).toBe('Helpers: Saif, Omar');
+    expect(t('en', 'helpersLabel', { names: 'Saif' })).toBe('Helper: Saif');
     expect(t('ar', 'helpersLabel', { names: 'Saif' })).toBe('المساعد: Saif');
+    expect(t('ar', 'helpersLabelMany', { names: 'Saif, Omar' })).toBe('المساعدون: Saif, Omar');
   });
 });

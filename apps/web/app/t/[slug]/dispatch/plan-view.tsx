@@ -314,10 +314,11 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     return res;
   }
 
-  // Try again after a failed load: the plan, and the driver list if it did not load either.
+  // Try again after a failed load: the plan, and the driver and helper lists if they did not load either.
   const retry = () => {
     void load();
     if (!drivers.length) void loadDrivers();
+    if (!helpers.length) void loadHelpers();
   };
   // Off while a reload is on its way or an action runs (its own reload shows the plan).
   const retryOff = !!busy || reloading;
@@ -330,8 +331,9 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
     seenReload.current = reloadSignal;
     void load({ results: true });
     if (!drivers.length) void loadDrivers();
+    if (!helpers.length) void loadHelpers();
     void loadLinks();
-  }, [reloadSignal, load, loadDrivers, drivers.length, loadLinks]);
+  }, [reloadSignal, load, loadDrivers, drivers.length, loadHelpers, helpers.length, loadLinks]);
 
   // Results come in from the drivers' phones while loads are on the road: read them every 60 s.
   const onRoadNow = !!d?.loads.some((l) => l.status === 'DISPATCHED');

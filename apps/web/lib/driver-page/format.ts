@@ -51,6 +51,11 @@ export function helperNames(m: Pick<DriverManifest, 'helpers'>): string | null {
   return names.length ? names.join(', ') : null;
 }
 
+/** "Helper: Saif" or "Helpers: Saif, Omar" (as the driver sheet's helpersLine): the label by the count. */
+export function helpersLabelKey(m: Pick<DriverManifest, 'helpers'>): 'helpersLabel' | 'helpersLabelMany' {
+  return (m.helpers ?? []).filter(Boolean).length > 1 ? 'helpersLabelMany' : 'helpersLabel';
+}
+
 /**
  * Cases typed in the Partly stepper: Arabic-Indic (٠-٩, U+0660-0669) and Persian / Urdu (۰-۹,
  * U+06F0-06F9) digits count as 0-9 - the Arabic number pads type them - then anything that is not a
