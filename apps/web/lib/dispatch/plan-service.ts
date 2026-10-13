@@ -104,6 +104,7 @@ import {
   smallTruckGateMessage,
   smallTruckIds,
   smallTruckMaxBaysOf,
+  smallTruckSolverNote,
   smallTruckStopFields,
 } from './small-truck';
 import { copyRowData } from './prisma-copy';
@@ -1302,10 +1303,7 @@ export async function persistDispatchResult(
         : [];
     // Likewise "small truck only" customers (owner request 13 Oct 2026): an older solver ignores the
     // allowed trucks and echoes nothing. The plan says so; LOCK still refuses such a customer on a big truck.
-    const smallTruckNote =
-      (built.request?.stops ?? []).some((s) => Array.isArray(s.allowed_truck_ids)) && sc.allowed_trucks_rule !== true
-        ? ['The optimizer did not apply "Small truck only" (it is being updated): such customers may be on big trucks, and LOCK refuses those loads. Re-plan in a few minutes.']
-        : [];
+    const smallTruckNote = smallTruckSolverNote(built.request?.stops ?? [], sc);
     const details: ScenarioDetails = {
       ...sc,
       engine: resp.engine,

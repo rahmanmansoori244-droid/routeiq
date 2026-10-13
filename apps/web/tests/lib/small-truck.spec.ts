@@ -29,6 +29,8 @@ import {
   smallTruckIds,
   smallTruckLabel,
   smallTruckMaxBaysOf,
+  SMALL_TRUCK_SOLVER_NOTE,
+  smallTruckSolverNote,
   smallTruckStopFields,
   withSmallHires,
 } from '@/lib/dispatch/small-truck';
@@ -209,6 +211,18 @@ describe('the hire check: only small trucks to rent are added for such stops', (
   });
 });
 
+describe('the plan warning when the optimizer did not apply the allowed trucks (an older solver)', () => {
+  it('a limited stop and no echo: the warning; with the echo, or a day without limited stops: none', () => {
+    const limited = [{ allowed_truck_ids: ['T03'] }, {}];
+    expect(smallTruckSolverNote(limited, {})).toEqual([SMALL_TRUCK_SOLVER_NOTE]);
+    expect(smallTruckSolverNote(limited, { allowed_trucks_rule: null })).toEqual([SMALL_TRUCK_SOLVER_NOTE]);
+    expect(smallTruckSolverNote([{ allowed_truck_ids: [] }], {})).toEqual([SMALL_TRUCK_SOLVER_NOTE]); // no small truck today: still limited
+    expect(smallTruckSolverNote(limited, { allowed_trucks_rule: true })).toEqual([]);
+    expect(smallTruckSolverNote([{}, {}], {})).toEqual([]);
+    expect(SMALL_TRUCK_SOLVER_NOTE).toMatch(/did not apply "Small truck only".*LOCK refuses those loads/);
+  });
+});
+
 describe('the gate words (LOCK / LOADING / DISPATCH)', () => {
   const marked = (id: string, smallTruckOnly = true) => ({ customerId: id, code: id, branchCode: null, name: `Shop ${id}`, smallTruckOnly });
 
@@ -221,7 +235,7 @@ describe('the gate words (LOCK / LOADING / DISPATCH)', () => {
   it('names the load, the truck, the customers and the remedy; a locked load goes back to Planned first', () => {
     const b = smallTruckBreaches({ bays: 12 }, [marked('C1')], 6);
     expect(smallTruckGateMessage({ truckCode: 'T10', loadNo: 2, bays: 12, from: 'PLANNED', to: 'LOCKED' }, b, 6)).toBe(
-      'T10 L2: cannot lock this load. T10 (12 bays) is not a small truck, but this customer takes small trucks only (at most 6 bays): C1 Shop C1. RE-PLAN: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "Small truck only (3-ton)" on the customer first.',
+      'T10 L2: cannot lock this load. T10 (12 bays) is not a small truck, but this customer takes small trucks only (at most 6 bays): C1 Shop C1. RE-PLAN: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "Small truck only (3-ton)" on the customer until this load is dispatched, then tick it again.',
     );
     expect(smallTruckGateMessage({ truckCode: 'TNB', loadNo: 1, bays: null, from: 'LOCKED', to: 'LOADING' }, b, 6)).toMatch(
       /^TNB L1: cannot start loading this load\. TNB \(no bays entered\) is not a small truck, .* Put this load back to Planned, then RE-PLAN: /,

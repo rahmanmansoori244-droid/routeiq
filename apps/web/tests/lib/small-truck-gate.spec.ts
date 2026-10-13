@@ -120,7 +120,7 @@ describe('LOCK / LOADING / DISPATCH of a small-truck-only customer on a big truc
     expect(e.status).toBe(409);
     expect(e.details).toMatchObject({ code: 'SMALL_TRUCK_ONLY', truckId: 'BIG', truckCode: 'BIG', truckBays: 12, smallTruckMaxBays: 6, customerIds: ['c1'], customers: ['C1'] });
     expect(e.message).toBe(
-      'BIG L1: cannot lock this load. BIG (12 bays) is not a small truck, but this customer takes small trucks only (at most 6 bays): C1 Shop c1. RE-PLAN: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "Small truck only (3-ton)" on the customer first.',
+      'BIG L1: cannot lock this load. BIG (12 bays) is not a small truck, but this customer takes small trucks only (at most 6 bays): C1 Shop c1. RE-PLAN: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "Small truck only (3-ton)" on the customer until this load is dispatched, then tick it again.',
     );
     expect(row('planLoad', 'L1').status).toBe('PLANNED');
     expect(tables.auditLog.some((a) => a.action === 'LOAD_LOCKED')).toBe(false);

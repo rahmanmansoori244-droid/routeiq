@@ -81,6 +81,22 @@ export function withSmallHires(stops: readonly DispatchStop[], hires: readonly D
   return stops.map((s) => (Array.isArray(s.allowed_truck_ids) ? { ...s, allowed_truck_ids: [...new Set([...s.allowed_truck_ids, ...small])] } : s));
 }
 
+/** The plan's warning when the optimizer did not apply the allowed trucks (an older solver: no echo). */
+export const SMALL_TRUCK_SOLVER_NOTE =
+  'The optimizer did not apply "Small truck only" (it is being updated): such customers may be on big trucks, and LOCK refuses those loads. Re-plan in a few minutes.';
+
+/**
+ * The warning stored with an option (persistDispatchResult): the request limited a stop (allowed_truck_ids)
+ * and the option does not echo allowed_trucks_rule - an older solver ignored the field (deploy order is
+ * solver first). [] otherwise, also for a day without such customers.
+ */
+export function smallTruckSolverNote(
+  stops: readonly Pick<DispatchStop, 'allowed_truck_ids'>[],
+  scenario: { allowed_trucks_rule?: boolean | null },
+): string[] {
+  return stops.some((s) => Array.isArray(s.allowed_truck_ids)) && scenario.allowed_trucks_rule !== true ? [SMALL_TRUCK_SOLVER_NOTE] : [];
+}
+
 /**
  * The customer import's small-truck column: `small_truck_only` (as the downloaded master and
  * data-to-collect files have it), or `small truck only`, `small_truck`, `small truck`, `small truck only
@@ -159,6 +175,6 @@ export function smallTruckGateMessage(
   return (
     `${load.truckCode} L${load.loadNo}: cannot ${GATE_TARGET[load.to] ?? 'move'} this load. ${load.truckCode} (${size}) is not a small truck, ` +
     `but ${breaches.length === 1 ? 'this customer takes' : 'these customers take'} small trucks only (at most ${maxBays} bays): ${names}. ` +
-    `${replan}: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "${SMALL_TRUCK_FIELD_LABEL}" on the customer first.`
+    `${replan}: RouteIQ puts them on a small truck. If the customer accepts this truck today, untick "${SMALL_TRUCK_FIELD_LABEL}" on the customer until this load is dispatched, then tick it again.`
   );
 }
