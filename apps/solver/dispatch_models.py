@@ -733,7 +733,8 @@ class PyvrpReport(BaseModel):
 
     status: CHOSEN = its plan (re-checked) is used by the options in ``chosen_for``; NOT_CHOSEN = it
     ran, and the engine's own plans were as good or better (or its plan was unusable: ``reason``);
-    SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE); FAILED = it
+    SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE, ALLOWED_TRUCKS: a stop's
+    allowed_truck_ids leaves out a truck that can still take a load, which PyVRP cannot model); FAILED = it
     failed (IMPORT_FAILED, FAILED, LOST, TIMEOUT). The plans are then the engine's alone.
     best_over_time: at most 12 [seconds, PyVRP's score] points - a score, not money (it holds the
     prize of every stop not planned yet)."""

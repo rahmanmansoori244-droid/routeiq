@@ -1109,6 +1109,15 @@ def _limited(stop: DispatchStop, tds: list[TruckDay]) -> bool:
     return stop.allowed_truck_ids is not None and any(not truck_allowed(stop, td.truck) for td in tds)
 
 
+def _limits_decide(req: DispatchRequest, stops: list[DispatchStop]) -> bool:
+    """A stop's allowed trucks leave out a truck that can still take a load today (only those count:
+    a limit that leaves out a truck with no trip or hours left decides nothing)."""
+    if all(s.allowed_truck_ids is None for s in stops):
+        return False
+    usable = [td for td in _truck_days(req) if td.usable]
+    return any(_limited(s, usable) for s in stops)
+
+
 def _allowed_label(stop: DispatchStop) -> str:
     """The words for the trucks a limited stop may go on ("a small truck (at most 6 bays)")."""
     return stop.allowed_trucks_label or "one of the trucks allowed for this customer"
@@ -4699,10 +4708,12 @@ def _pv_start(req: DispatchRequest, solvable: list[DispatchStop], control: Solve
         pv.fail("SKIPPED", why or "OFF", detail)
     elif not solvable:
         pv.fail("SKIPPED", "NOTHING_TO_PLAN")
-    elif any(s.allowed_truck_ids is not None and any(t.id not in s.allowed_truck_ids for t in req.trucks) for s in solvable):
+    elif _limits_decide(req, solvable):
         # Owner request 13 Oct 2026: the second search has no per-stop truck limit (PyVRP 0.14 has no allowed
         # vehicles per client), so a day where one decides something is planned by the engine's own search
         # alone (SearchReport.pyvrp: SKIPPED / ALLOWED_TRUCKS). The engine and its checks keep the limit.
+        # Only the trucks that can still take a load count (as in _limited elsewhere): a limit that leaves
+        # out only a truck with no trip or hours left today decides nothing, and the second search runs.
         pv.fail("SKIPPED", "ALLOWED_TRUCKS")
     elif main_pool:
         try:

@@ -71,6 +71,63 @@ def test_a_limited_stop_is_on_an_allowed_truck_in_every_option():
     assert where(sc)["CARREFOUR"] == "BIG"  # the cheap big truck carries the whole day
 
 
+def _raw_days():
+    """Two days where, without the limit, a cheap big truck would take the limited stops: a bay day
+    (CARREFOUR on the 6-bay truck only) and a case-only day (every third stop on T2/T3 only)."""
+    bays = req(day(), [btruck("BIG", bays=12, max_trips=2, fixed_cost=5), btruck("SMALL", bays=6, cap=570, max_trips=2, fixed_cost=40)])
+    cases = req([stop(f"C{i}", 23.56 + (i % 4) * 0.015, 58.36 + (i // 4) * 0.03, cases=30 + 5 * i,
+                      **({"allowed_truck_ids": ["T2", "T3"], "allowed_trucks_label": SMALL} if i % 3 == 0 else {}))
+                 for i in range(12)],
+                [truck("T1", cap=1_000, fixed_cost=5), truck("T2", cap=300, fixed_cost=40), truck("T3", cap=300, fixed_cost=40)])
+    return {"bays": bays, "cases": cases}
+
+
+@pytest.mark.parametrize("which", ["bays", "cases"])
+def test_the_route_search_alone_keeps_the_limit_in_every_option(which):
+    """The route search's own plan (before the load re-check, which would also move a stop back onto an
+    allowed truck): it is what the safety net keeps when the re-check runs out of time, so the routing
+    model's allowed vehicles must hold by themselves, for every option."""
+    r = _raw_days()[which]
+    tds, solvable, drops, mx, _ = _day_of(r)
+    assert any(ds._limited(s, [td for td in tds if td.usable]) for s in solvable)
+    for name in ALL:
+        sc = ds._solve_scenario(name, r, solvable, tds, mx, 2, list(drops))
+        assert sc.status == "OPTIMIZED", (name, sc.status)
+        stops = {s.stop_id: s for s in r.stops}
+        on = where(sc)
+        assert on, name
+        for sid, tid in on.items():
+            allowed = stops[sid].allowed_truck_ids
+            assert allowed is None or tid in allowed, (name, sid, tid, allowed)
+
+
+def test_the_safety_net_plan_keeps_the_limit(monkeypatch):
+    """The load re-check never runs (out of time): every option is the route search's plan as found
+    (no loading time per case, no break rule: kept unchanged), and still no limited stop is on a truck it
+    may not use; the independent check finds no TRUCK_NOT_ALLOWED."""
+    monkeypatch.setenv("SOLVER_PARALLEL", "0")
+    calls = {"n": 0}
+
+    def no_stage(req_, solvable, tds, mx, time_limit, drops, results, *a, **kw):
+        calls["n"] += 1
+        ds._retime_fallback(req_, solvable, tds, mx, drops, results, "out of time")
+
+    monkeypatch.setattr(ds, "_post_solve", no_stage)
+    for r in _raw_days().values():
+        r = r.model_copy(update={"config": r.config.model_copy(update={"scenarios": ALL})})
+        resp = optimize_dispatch(r)
+        assert len(resp.scenarios) == 3
+        for sc in resp.scenarios:
+            assert any("not re-checked" in w for w in sc.warnings), sc.warnings
+            stops = {s.stop_id: s for s in r.stops}
+            for sid, tid in where(sc).items():
+                allowed = stops[sid].allowed_truck_ids
+                assert allowed is None or tid in allowed, (sc.name, sid, tid, allowed)
+            assert sc.feasibility is not None
+            assert not [v for v in sc.feasibility.violations if v.code == "TRUCK_NOT_ALLOWED"], sc.feasibility.violations
+    assert calls["n"] >= 2
+
+
 def test_old_requests_carry_no_field_and_plan_as_before():
     """Backward compatible: the field is optional (None = any truck), the request JSON of an older web
     validates, and the plan is the same with or without an explicit None."""
@@ -264,6 +321,17 @@ def test_the_second_search_is_skipped_while_a_limit_decides_something(_pyvrp_in_
     resp2 = optimize_dispatch(moot)
     assert resp2.search.pyvrp.status in ("CHOSEN", "NOT_CHOSEN"), resp2.search.pyvrp
     assert_allowed(moot, rec(resp2))
+    # Nor does one that leaves out only a truck that cannot take a load today (its one trip is used):
+    # only the trucks that can still load count, as everywhere else the limit is judged.
+    from dispatch_models import FrozenTrip
+
+    gone = btruck("BIG", bays=12, max_trips=1, frozen_trips=[FrozenTrip(load_no=1, depart_min=400, return_min=600, cases=50)])
+    spent = req(day(), [gone, btruck("SMALL", bays=6, cap=570, max_trips=3)], time_limit_sec=2)
+    assert not ds._limits_decide(spent, spent.stops)
+    assert ds._limits_decide(r, r.stops)
+    resp3 = optimize_dispatch(spent)
+    assert resp3.search.pyvrp.status in ("CHOSEN", "NOT_CHOSEN"), resp3.search.pyvrp
+    assert_allowed(spent, rec(resp3))
 
 
 # ---------------------------------------------------------------------------------------------
