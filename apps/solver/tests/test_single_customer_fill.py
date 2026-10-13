@@ -283,9 +283,11 @@ def test_no_false_shortage_when_a_stop_may_ride_alone():
     assert served_ids(sc) == {"A", "B"}, unserved_map(sc)
 
     assert_rule_holds(r, sc)
-    # Without the rule the same day IS short (and says so): the proofs are unchanged for older requests.
-    old = rq([a.model_copy(update={"demand_pallet_units": 10_800}), b], trucks, single=None)
-    assert ds._space_charges(old.stops, ds._truck_days(old)) is None
+    # Without the rule (an older request) every stop counts its own pallets, as before: 20,800 > 20,700 is short.
+    old = rq([a, b], trucks, single=None)
+    old_tds = ds._truck_days(old)
+    assert ds._space_charges(old.stops, old_tds) is None
+    assert ds._fleet_shortage(old.stops, old_tds) == (True, False)
 
 
 def test_parts_of_one_customer_count_at_the_fill_share():
