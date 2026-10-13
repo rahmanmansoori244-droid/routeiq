@@ -12,8 +12,10 @@
  * combine with other customers.
  *
  * Pallets (owner decision 4 Oct 2026): a truck with bays is measured in pallet units (1/1000 pallet,
- * pallets.ts), not cases. A part sized for such a truck is filled up to its room (bays x fill) by
- * each line's cases / its cases per pallet, rounded up per line; its case count is then no limit.
+ * pallets.ts), not cases. A part sized for such a truck is filled up to that truck's one-customer room
+ * (bays x 100%, every bay - the part rides alone, see below) with the one-customer rule on, else up to
+ * bays x Pallet fill, by each line's cases / its cases per pallet, rounded up per line; its case count
+ * is then no limit.
  * A customer that fits one truck in that truck's own measure is never split.
  *
  * One customer on a truck (owner rule 13 Oct 2026: "keep 90% for trucks with several customers, but let
@@ -210,6 +212,8 @@ export interface FleetTruck {
    * x 10, owner rule 13 Oct 2026); null / absent = no such rule (the Pallet fill room for every load).
    */
   fullPalletUnits?: number | null;
+  /** A truck the hire what-if may rent (not the company's own): at an equal number of parts, a size the own trucks carry wins (choosePartCapacity). */
+  hire?: boolean;
 }
 
 /** How a customer's day is planned (classifyCustomer). */
@@ -266,10 +270,12 @@ export function caseHeavierThanAnyTruck(kgPerCase: number, maxPayloadKg: number 
 /**
  * Part size for a customer that fits no truck. Each truck's capacity is a candidate size; a
  * size is carried by every truck at least that big, and it is feasible when those trucks have
- * enough trips left for all parts. Feasible sizes: fewest parts wins, then the BIGGER size (the
- * smallest leftover, owner rule 13 Oct 2026: before, "more trips to choose from" came first and a
- * 11.03-pallet order was cut for the 11-bay truck as 9.89 + 1.13 where 12 bays left 0.23), then more
- * trips. Otherwise the size that can deliver the largest share of the customer's cases AND kg.
+ * enough trips left for all parts. Feasible sizes: fewest parts wins, then a size the company's own
+ * trucks carry (FleetTruck.hire: in the hire what-if a rented truck may cut the number of parts, but
+ * at the same number of parts it must not make the plan depend on renting it - "avoid adding an extra
+ * truck just for it", review 13 Oct 2026), then the BIGGER size (the smallest leftover, owner rule
+ * 13 Oct 2026: before, "more trips to choose from" came first and a 11.03-pallet order was cut for the
+ * 11-bay truck as 9.89 + 1.13 where 12 bays left 0.23), then more trips. Otherwise the size that can deliver the largest share of the customer's cases AND kg.
  *
  * A truck with bays offers its one-customer room (FleetTruck.fullPalletUnits, every bay) as the size
  * when it has one: each full part then rides alone on such a truck (the optimizer's full-truck rule) and
@@ -301,6 +307,8 @@ export function choosePartCapacity(
   // Compared on the payload the part is sized for, in 0.1 kg (see below).
   const carriesHeaviestCase = (c: FleetTruck) => c.kg === null || !(c.kg > 0) || payloadTenths(c.kg) >= kgTenths(maxCaseKg);
   const candidates = usable.some(carriesHeaviestCase) ? usable.filter(carriesHeaviestCase) : usable;
+  // An own truck (not one the what-if may rent) carries a part of this size.
+  const ownCarries = (c: FleetTruck) => usable.some((t) => !t.hire && carries(t, c));
   const ranked = candidates.map((c) => {
     const parts = Math.max(Math.ceil(need(c) / size(c)), c.kg !== null && c.kg > 0 ? Math.ceil(kg / c.kg) : 1);
     const trips = usable.filter((t) => carries(t, c)).reduce((a, t) => a + Math.max(0, t.tripsLeft), 0);
@@ -311,7 +319,9 @@ export function choosePartCapacity(
   ranked.sort(
     (a, b) =>
       Number(b.feasible) - Number(a.feasible) ||
-      (a.feasible ? a.parts - b.parts || size(b.c) - size(a.c) || b.trips - a.trips : b.share - a.share || a.parts - b.parts) ||
+      (a.feasible
+        ? a.parts - b.parts || Number(ownCarries(b.c)) - Number(ownCarries(a.c)) || size(b.c) - size(a.c) || b.trips - a.trips
+        : b.share - a.share || a.parts - b.parts) ||
       size(b.c) - size(a.c) ||
       (b.c.kg ?? Infinity) - (a.c.kg ?? Infinity) ||
       a.c.code.localeCompare(b.c.code),

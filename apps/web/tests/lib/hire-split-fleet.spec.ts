@@ -122,6 +122,18 @@ describe('the what-if request: split deliveries sized with the trucks to rent', 
     expect(withHires.warnings.join(' ')).toMatch(/C1 \(500 cases, 2500 kg\) in 2 parts sized for HIRE-300CAS-1/);
   });
 
+  it('at the same number of parts they are sized for an own truck, not a truck to rent (review 13 Oct 2026)', async () => {
+    // Own 500-case truck (3 loads), a 600-case truck to rent, 1,000 cases: two parts either way. Sized for the
+    // truck to rent (600 + 400) the what-if would have to rent it for a part the own fleet carries.
+    const RENT600: HireOptionFacts = { ...RENT300, id: 'r600', label: '600-case', capacityCases: 600 };
+    wire([truckRow('OWN', { capacityCases: 500 })], [order('O1', C1, [['W', 1000]])]);
+    const own = await buildDispatchRequest('TEN', 'R1', ['RECOMMENDED'], { now: NOW });
+    const withHires = await buildDispatchRequest('TEN', 'R1', ['RECOMMENDED'], { now: NOW, splitFleet: splitFleetOf([RENT600]) });
+    expect(own.request.stops.map((s) => s.demand_cases)).toEqual([500, 500]);
+    expect(withHires.request.stops.map((s) => s.demand_cases)).toEqual([500, 500]);
+    expect(withHires.warnings.join(' ')).toMatch(/in 2 parts sized for OWN/);
+  });
+
   it('a day without splits is built exactly as before: the trucks to rent change nothing', async () => {
     wire([truckRow('OWN'), truckRow('OWN2')], [order('O1', C1, [['W', 90]]), order('O2', C2, [['W', 100]])]);
     const before = await buildDispatchRequest('TEN', 'R1', ['RECOMMENDED'], { now: NOW });

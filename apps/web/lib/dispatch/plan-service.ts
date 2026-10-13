@@ -623,6 +623,7 @@ export async function buildDispatchRequest(
       tripsLeft: cfg.maxTripsPerTruck,
       ...(t.bays !== null && t.bays !== undefined ? bayRooms(t.bays) : {}),
       bays: t.bays ?? null,
+      hire: true, // at the same number of parts, a size the own trucks carry wins (choosePartCapacity)
     })),
   ];
   // "Small truck only" customers (owner request 13 Oct 2026): a truck with bays entered and at most this
