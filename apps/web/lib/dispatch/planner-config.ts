@@ -12,6 +12,7 @@ import { PALLET_FILL_DEFAULT, SINGLE_CUSTOMER_FILL_PCT } from './pallets';
 import { DEFAULT_DRIVER_DAY_RATE } from './hire';
 import { smallTruckMaxBaysOf } from './small-truck';
 import { fmtHhmm } from './time';
+import { preferredEndText, windowRuleOf, windowRuleText } from './window-rule';
 
 /** The TenantConfig fields the planner reads (a Prisma TenantConfig row satisfies it). */
 export interface TenantPlannerConfig {
@@ -27,6 +28,8 @@ export interface TenantPlannerConfig {
   serviceMinPerCase: number;
   maxTripsPerTruck: number;
   splitDeliveries: boolean;
+  /** Owner request 13 Oct 2026: 'START' = the end of the receiving hours is the latest arrival; else 'FINISH' (window-rule.ts). */
+  windowRule?: string | null;
   /** Pallet fill (owner decision 4 Oct 2026): percent of a truck's bays the planner may fill; absent = 100 (PALLET_FILL_DEFAULT). */
   palletFillPct?: number;
   /** Owner decision 13 Oct 2026: a small truck has at most this many bays; absent = 6 (SMALL_TRUCK_MAX_BAYS_DEFAULT). */
@@ -206,9 +209,10 @@ export function dispatchConfigFromTenant(
       strict_priorities: true,
       priority_weights: parsePriorityWeights(cfg.priorityWeightsJson),
       pref_window_penalty_per_min: cfg.prefWindowPenaltyPerMin,
-      // Owner rule (29 Sep 2026), not a setting: unloading is finished by the end of the receiving
-      // hours. Each load keeps the rule the solver REPORTS it planned with (PlanRules.windowRule).
-      window_rule: 'FINISH',
+      // The company setting (owner request 13 Oct 2026; 'FINISH' by default, the owner rule of 29 Sep 2026):
+      // START = the end of the receiving hours is the latest arrival, FINISH = unloading finished by then.
+      // Each load keeps the rule the solver REPORTS it planned with (PlanRules.windowRule).
+      window_rule: windowRuleOf(cfg),
       // Driver break (owner rule 29-30 Sep 2026; 0 = none). Each load keeps the break rule the
       // solver REPORTS it planned with (PlanRules.break), never what was asked.
       break_min: cfg.driverBreakMinutes,
@@ -248,6 +252,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
   const overtimeNever = cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes;
   const fillPct = cfg.palletFillPct ?? PALLET_FILL_DEFAULT;
   const oneCustomerMore = SINGLE_CUSTOMER_FILL_PCT > fillPct; // the one-customer rule adds room (owner rule 13 Oct 2026)
+  const windowRule = windowRuleOf(cfg);
   const rows: EffectiveRow[] = [
     {
       label: 'First departure (earliest)',
@@ -302,9 +307,12 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
     },
     {
       label: 'Receiving hours',
-      value: 'unloading must be finished by the end of the receiving hours',
-      source: 'PLANNER',
-      note: 'a customer whose unloading takes longer than its receiving hours cannot be planned',
+      value: windowRuleText(windowRule),
+      source: 'SETTING',
+      note:
+        windowRule === 'START'
+          ? 'a truck may arrive up to the end of the receiving hours (up to 14:00 for a 14:00 close, e.g. 13:50) and unload after it'
+          : 'a customer whose unloading takes longer than its receiving hours cannot be planned',
     },
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     {
@@ -332,7 +340,7 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
       label: 'Preferred-window penalty',
       value: `${cfg.prefWindowPenaltyPerMin} ${currency} per minute outside`,
       source: 'SETTING',
-      note: 'soft: per minute that unloading starts before the preferred start or finishes after the preferred end; receiving hours are never broken',
+      note: `soft: per minute that unloading starts before the preferred start or ${preferredEndText(windowRule)}; receiving hours are never broken`,
     },
     {
       label: 'Distances',

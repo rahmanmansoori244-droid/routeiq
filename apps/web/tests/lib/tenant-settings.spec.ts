@@ -34,7 +34,7 @@ const BASE_CFG: Record<string, any> = {
   defaultServiceTimeMin: 10, timezone: 'Asia/Muscat', planningCutoffMin: 1080, fuelPricePerLitre: 0.26, driverCostPerHour: 2.5,
   overtimeAfterMin: 540, overtimeCostPerHour: 4, prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, osrmUrl: null,
   driverBreakMinutes: 60, driverBreakFromMin: 720, driverBreakToMin: 840, dailyDriverDayRate: 10,
-  priorityWeightsJson: null, orderColumnMapJson: null, dateOrder: 'DMY', serviceAreaJson: null,
+  priorityWeightsJson: null, orderColumnMapJson: null, dateOrder: 'DMY', serviceAreaJson: null, windowRule: 'FINISH',
   // Deprecated columns still in the database (read by nothing).
   labelEstimatedDistances: true, returnToDepot: true, solverTimeLimitSeconds: 30,
 };
@@ -89,7 +89,7 @@ const CHANGED: Record<string, unknown> = {
   distanceMultiplier: 1.5, avgSpeedKmh: 55, driverBreakMinutes: 45, driverBreakFromMin: 690, driverBreakToMin: 870,
   requireDataBeforeLoading: true, dataCollectDays: 5,
   geofenceRadiusM: 150, photoProofRequired: false, photoRetentionDays: 180, locationRetentionDays: 60, dispatcherPhone: '+968 9000 0000',
-  palletFillPct: 90, dailyDriverDayRate: 12, smallTruckMaxBays: 4,
+  palletFillPct: 90, dailyDriverDayRate: 12, smallTruckMaxBays: 4, windowRule: 'START',
 };
 /**
  * Read by the order intake, not by the optimizer request (checked against their consumer below). Also

@@ -200,6 +200,8 @@ describe('tenantConfigSchema', () => {
     dailyDriverDayRate: 10,
     // "A small truck has at most N bays" (owner decision 13 Oct 2026).
     smallTruckMaxBays: 6,
+    // The receiving-hours rule (owner request 13 Oct 2026).
+    windowRule: 'FINISH',
   };
   it('refuses the old controls that changed nothing (strict), whole or partial', () => {
     for (const k of ['solverTimeLimitSeconds', 'labelEstimatedDistances', 'returnToDepot', 'weightObjectiveTrucks', 'costPerKmDefault']) {

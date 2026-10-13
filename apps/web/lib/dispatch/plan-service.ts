@@ -125,6 +125,7 @@ import { copyRowData } from './prisma-copy';
 import { planHelpers, type HelperChangeNote } from './load-helpers';
 import { copyLoadHelpers, deleteHelpersOfLoads, helperEvidenceOf, setHelpersTx, writeLoadHelpers } from './load-helpers-service';
 import { lockWarningsOf } from '../delivery/carry-conflicts';
+import { windowRuleOf } from './window-rule';
 import {
   distanceM,
   loadBreakJson,
@@ -1099,6 +1100,7 @@ export function planSettingsOf(
     overtimeAfterMin: number; overtimeCostPerHour: number; prefWindowPenaltyPerMin: number; roadTimeFactor: number; distanceProvider: string;
     distanceMultiplier: number; avgSpeedKmh: number; defaultServiceTimeMin: number; osrmUrl: string | null;
     driverBreakMinutes?: number; driverBreakFromMin?: number; driverBreakToMin?: number;
+    windowRule?: string | null;
   },
   routing: { outsideCoverage: boolean } = { outsideCoverage: false },
   planFrom: PlanFrom | null = null,
@@ -1129,9 +1131,10 @@ export function planSettingsOf(
     planFrom,
     loadingFromMin,
     // Owner rules (29 Sep 2026) as ASKED: the rule each load was planned with comes from the solver's
-    // echo (PlanRules.windowRule); the split stop time is web-side, so it is recorded here.
+    // echo (PlanRules.windowRule); the split stop time is web-side, so it is recorded here. The
+    // receiving-hours rule is the company setting since 13 Oct 2026 (FINISH by default).
     splitStopTime: 'FULL',
-    windowRule: 'FINISH',
+    windowRule: windowRuleOf(cfg),
     ...(cfg.driverBreakMinutes && cfg.driverBreakMinutes > 0
       ? { driverBreak: { lengthMin: cfg.driverBreakMinutes, startFromMin: cfg.driverBreakFromMin ?? 720, startToMin: cfg.driverBreakToMin ?? 840 } }
       : {}),
