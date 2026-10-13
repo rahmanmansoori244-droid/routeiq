@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Clock } from 'lucide-react';
+import { CalendarClock, Clock, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { clockText, DELIVERY_TIME_REASON_TEXT, DELIVERY_TIME_REASONS, orderTimeFromForm, type OrderTime, type OrderTimeForm } from '@/lib/dispatch/order-window';
 import { api } from './client-api';
+import { OrderActionDialog, type OrderActionTarget } from './order-actions';
 
 /** One order of the day (GET /api/dispatch/day: customers[].orderTimes). */
 export interface DayOrderTimeRow {
@@ -18,6 +19,10 @@ export interface DayOrderTimeRow {
   time: OrderTime | null;
   text: string | null;
   frozen: boolean;
+  /** Its loads on the plan in use ("T05 L2 (locked)"), it left the depot, its lines without an invoice no. (Cancel / Postpone). */
+  loads?: string[];
+  left?: boolean;
+  linesWithoutInvoice?: number;
 }
 
 /** A customer of the day with its orders' delivery times. */
@@ -57,14 +62,53 @@ export function orderTimeHint(c: DeliveryTimesCustomer): string | null {
   return `The customer's hours in use${c.windowLabel ? ` (${c.windowLabel})` : ''} are not its own confirmed hours, so they do not count as a delivery window. Type the time agreed for this order.`;
 }
 
+/** Why an order of the list offers no Cancel / Postpone (null = it does). */
+export function orderActionBlockedText(o: Pick<DayOrderTimeRow, 'frozen' | 'left' | 'loads'>): string | null {
+  if (o.left) return 'left the depot: the driver records the result';
+  if (o.frozen) return `on a locked load${o.loads?.length ? ` (${o.loads.join(', ')})` : ''}: unlock it first to change, cancel or postpone it`;
+  return null;
+}
+
 /**
- * Step 2's "Delivery times" list: every customer of the day, its receiving hours (with "default - not
- * confirmed" when they are not its own confirmed hours), and each order with its own delivery time
- * if it has one. Change time sets a time for that order only (urgent / promised); the customer
- * master is not changed. An order on a locked load cannot change (frozen loads never change).
+ * Step 2's "Orders and delivery times" list: every customer of the day, its receiving hours (with
+ * "default - not confirmed" when they are not its own confirmed hours), and each order with its own
+ * delivery time if it has one. Change time sets a time for that order only (urgent / promised); the
+ * customer master is not changed. Cancel... and Postpone... act on the whole order (owner request 12
+ * Oct 2026, order-actions.tsx). An order on a locked load cannot change (frozen loads never change).
+ * `date` / `today`: the day on screen and the company's today (the postpone range).
  */
-export function DeliveryTimesPanel({ customers, canPlan, onSaved }: { customers: DeliveryTimesCustomer[]; canPlan: boolean; onSaved: () => void }) {
+export function DeliveryTimesPanel({
+  customers,
+  canPlan,
+  onSaved,
+  date,
+  today,
+  onOrderChanged,
+}: {
+  customers: DeliveryTimesCustomer[];
+  canPlan: boolean;
+  onSaved: () => void;
+  date?: string;
+  today?: string;
+  /** After a cancel or postpone: the day and its plan are read again. */
+  onOrderChanged?: () => void;
+}) {
   const [edit, setEdit] = useState<{ c: DeliveryTimesCustomer; o: DayOrderTimeRow } | null>(null);
+  const [act, setAct] = useState<{ action: 'CANCEL' | 'POSTPONE'; target: OrderActionTarget } | null>(null);
+  const canAct = canPlan && !!date && !!today && !!onOrderChanged;
+  // Postpone only while the order's day is not over (the server answers ORDER_DAY_OVER otherwise):
+  // an earlier day's order is moved with Bring forward on today's screen.
+  const canPostpone = canAct && date! >= today!;
+  const targetOf = (c: DeliveryTimesCustomer, o: DayOrderTimeRow): OrderActionTarget => ({
+    orderId: o.orderId,
+    customerName: c.name,
+    customerCode: c.code,
+    branchCode: c.branchCode,
+    cases: o.cases,
+    salesOrders: o.salesOrders,
+    linesWithoutInvoice: o.linesWithoutInvoice ?? 0,
+    loads: o.loads ?? [],
+  });
   const list = customers.filter((c) => !c.inactive && c.orderTimes?.length);
   if (!list.length) return null;
   const orders = list.reduce((a, c) => a + (c.orderTimes?.length ?? 0), 0);
@@ -72,7 +116,8 @@ export function DeliveryTimesPanel({ customers, canPlan, onSaved }: { customers:
   return (
     <details className="rounded-md border p-2 text-sm" data-testid="delivery-times">
       <summary className="cursor-pointer">
-        Delivery times — {orders} order(s){timed ? `, ${timed} with an urgent or promised time` : ''}. Each order uses its customer&apos;s receiving hours unless you change it.
+        Orders and delivery times — {orders} order(s){timed ? `, ${timed} with an urgent or promised time` : ''}. Each order uses its customer&apos;s receiving hours unless you change it.
+        {canPostpone ? ' Cancel or postpone an order here.' : canAct ? ' Cancel an order here.' : ''}
       </summary>
       <div className="mt-2 max-h-96 space-y-2 overflow-y-auto">
         {list.map((c) => (
@@ -87,12 +132,26 @@ export function DeliveryTimesPanel({ customers, canPlan, onSaved }: { customers:
                   <span>
                     {o.salesOrders.length ? `SO ${o.salesOrders.join(', ')}` : 'Order'} · {o.cases} cases ·{' '}
                     {o.text ? <b className="text-blue-800">{o.text} ({DELIVERY_TIME_REASON_TEXT[o.time!.reason]}{o.time!.note ? `: ${o.time!.note}` : ''})</b> : "customer's hours"}
-                    {o.frozen ? ' · on a locked load' : ''}
+                    {orderActionBlockedText(o) ? <span className="text-muted-foreground"> · {orderActionBlockedText(o)}</span> : null}
                   </span>
-                  {canPlan && !o.frozen ? (
-                    <Button size="sm" variant="outline" onClick={() => setEdit({ c, o })} data-testid={`change-time-${o.orderId}`}>
-                      <Clock className="mr-1 h-3 w-3" /> {o.time ? 'Change time' : 'Set time'}
-                    </Button>
+                  {canPlan && !o.frozen && !o.left ? (
+                    <span className="flex flex-wrap gap-1">
+                      <Button size="sm" variant="outline" onClick={() => setEdit({ c, o })} data-testid={`change-time-${o.orderId}`}>
+                        <Clock className="mr-1 h-3 w-3" /> {o.time ? 'Change time' : 'Set time'}
+                      </Button>
+                      {canAct ? (
+                        <>
+                          {canPostpone ? (
+                            <Button size="sm" variant="outline" onClick={() => setAct({ action: 'POSTPONE', target: targetOf(c, o) })} data-testid={`postpone-${o.orderId}`}>
+                              <CalendarClock className="mr-1 h-3 w-3" /> Postpone...
+                            </Button>
+                          ) : null}
+                          <Button size="sm" variant="outline" className="text-red-700" onClick={() => setAct({ action: 'CANCEL', target: targetOf(c, o) })} data-testid={`cancel-${o.orderId}`}>
+                            <XCircle className="mr-1 h-3 w-3" /> Cancel...
+                          </Button>
+                        </>
+                      ) : null}
+                    </span>
                   ) : null}
                 </li>
               ))}
@@ -101,6 +160,16 @@ export function DeliveryTimesPanel({ customers, canPlan, onSaved }: { customers:
         ))}
       </div>
       <OrderTimeDialog target={edit} onClose={() => setEdit(null)} onSaved={onSaved} />
+      {canAct ? (
+        <OrderActionDialog
+          action={act?.action ?? 'CANCEL'}
+          target={act?.target ?? null}
+          date={date!}
+          today={today!}
+          onClose={() => setAct(null)}
+          onDone={onOrderChanged!}
+        />
+      ) : null}
     </details>
   );
 }

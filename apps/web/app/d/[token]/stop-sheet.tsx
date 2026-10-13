@@ -251,7 +251,9 @@ export function StopSheet({
           <Package className="h-5 w-5" aria-hidden /> {t(lang, 'casesLabel', { n: stop.cases })}
         </p>
         {stop.orders.map((o) => (
-          <div key={o.orderId} className="border-t py-2 first:border-t-0">
+          <div key={o.orderId} className={`border-t py-2 first:border-t-0${o.cancelled ? ' opacity-60' : ''}`}>
+            {/* Cancel order (owner request 12 Oct 2026): only on a planned load (it may still change). */}
+            {o.cancelled ? <p className="text-sm font-bold text-red-700">{t(lang, 'orderCancelled')}</p> : null}
             {o.salesOrders.length ? (
               <p className="text-sm text-slate-600">
                 {t(lang, 'salesOrder')}: <span dir="ltr">{o.salesOrders.join(', ')}</span>

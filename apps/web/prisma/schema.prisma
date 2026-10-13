@@ -332,6 +332,7 @@ model User {
   ordersCarried        Order[]              @relation("OrderCarriedBy")
   confirmedWindows     Customer[]           @relation("CustomerWindowConfirmedBy")
   orderTimesSet        Order[]              @relation("OrderDeliveryTimeSetBy")
+  ordersCancelled      Order[]              @relation("OrderCancelledBy")
   driverLinksIssued    DriverLink[]         @relation("DriverLinkIssuedBy")
   driverLinksRevoked   DriverLink[]         @relation("DriverLinkRevokedBy")
   stopOutcomesSet      StopVisit[]          @relation("StopVisitOutcomeBy")
@@ -827,6 +828,16 @@ model Order {
   /// On a brought-forward copy: the delivery results (visits and not-delivered cases per line) the
   /// carry was based on (owner request 4 Oct 2026). Null on copies made from other reasons or before.
   carryBasisJson            Json?
+  // --- Cancel order (owner request 12 Oct 2026): a soft cancel of the whole order (every invoice of it).
+  // Set = the order is out of planning, the counts, Bring forward and the data to collect; it stays on
+  // its day for the record (a "Cancelled" list with Undo). Its status keeps the day's history, and its
+  // intake keys stay, so the same invoice re-sent for the same day is skipped (lib/dispatch/order-cancel.ts).
+  cancelledAt               DateTime?
+  cancelledById             String?
+  cancelledBy               User?                      @relation("OrderCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+  /// CUSTOMER_CANCELLED | WRONG_OR_DUPLICATE | NO_ACCESS_SMALL_TRUCK | OTHER (lib/dispatch/order-cancel.ts).
+  cancelReason              String?
+  cancelNote                String?
 
   @@index([tenantId, deliveryDate])
   @@index([tenantId, customerId])

@@ -19,6 +19,7 @@ import { COST_BASIS_TEXT, kmLabelFor, loadCostTitle, summaryCostBasis } from '@/
 import { fuelKpi } from '@/lib/dispatch/summary';
 import { solverStatusText } from '@/lib/dispatch/solver-status';
 import { carriedFromBadge, carriedLoadTitle, carriedToBadge, replanWork } from '@/lib/dispatch/carry-view';
+import { CANCELLED_BADGE, cancelledLoadText } from '@/lib/dispatch/order-cancel-rules';
 import { fmtDayMonth } from '@/lib/dispatch/time';
 import { hiredLoadBadgeTitle } from '@/lib/dispatch/hire';
 import { casualDriverPlan, casualDriverToast } from '@/lib/dispatch/casual-driver-words';
@@ -950,8 +951,8 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
           ))}
           {d.carriedOut?.orders ? (
             <p className="mt-1 text-slate-700" data-testid="carried-out">
-              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were not delivered and were brought forward to{' '}
-              {d.carriedOut.dates.map(fmtDayMonth).join(', ')}: they are planned on that day now (this plan keeps them as history, not as a problem).
+              {d.carriedOut.orders} order(s) ({d.carriedOut.cases.toLocaleString()} cases) of this plan were moved to{' '}
+              {d.carriedOut.dates.map(fmtDayMonth).join(', ')} (postponed, or brought forward when not delivered): they are planned on that day now (this plan keeps them as history, not as a problem).
             </p>
           ) : null}
           {d.carriedIn?.orders ? (
@@ -1222,6 +1223,22 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                           {l.carriedAway} order(s) carried over
                         </Badge>
                       ) : null}
+                      {/* Cancel order (owner request 12 Oct 2026): why Lock is refused (409 ORDERS_CANCELLED) and what to do. */}
+                      {l.cancelledHere ? (
+                        <Badge
+                          variant="destructive"
+                          className="ml-1"
+                          data-testid={`load-cancelled-${l.truckCode}-${l.loadNo}`}
+                          title={cancelledLoadText(
+                            `${l.truckCode} L${l.loadNo}`,
+                            [...new Set(l.stops.filter((st) => st.cancelled).map((st) => (st.branchCode ? `${st.customerCode}/${st.branchCode}` : st.customerCode)))],
+                            l.cancelledHere === new Set(l.stops.flatMap((st) => st.orderIds)).size,
+                          )}
+                        >
+                          {l.cancelledHere > 1 ? `${l.cancelledHere} ` : ''}
+                          {CANCELLED_BADGE}
+                        </Badge>
+                      ) : null}
                       {l.timing && !l.timing.ok ? (
                         <Badge
                           variant="destructive"
@@ -1374,7 +1391,14 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
                     <td className="p-2">{u.cases}</td>
                     <td className="p-2 text-xs">{u.salesOrders.join(', ') || '—'}</td>
                     <td className="p-2">
-                      {u.carriedTo ? (
+                      {u.cancelled ? (
+                        <>
+                          <b data-testid="unserved-cancelled">CANCELLED</b>
+                          <span className="block text-xs text-muted-foreground">
+                            Not planned again. Unserved here: {REASON_TEXT[u.reasonCode] ?? u.reasonCode}
+                          </span>
+                        </>
+                      ) : u.carriedTo ? (
                         <>
                           <b data-testid="unserved-carried-to">{carriedToBadge(u.carriedTo)}</b>
                           <span className="block text-xs text-muted-foreground">
@@ -2037,6 +2061,16 @@ function LoadDetail({
                   {st.carriedTo ? (
                     <Badge variant="secondary" className="mt-0.5" data-testid="stop-carried-to" title="Brought forward to a later day: planned there, not delivered on this day.">
                       {carriedToBadge(st.carriedTo)}
+                    </Badge>
+                  ) : null}
+                  {st.cancelled ? (
+                    <Badge
+                      variant="destructive"
+                      className="mt-0.5"
+                      data-testid="stop-cancelled"
+                      title="An order of this stop was cancelled after the plan was made: do not load or deliver it. RE-PLAN the day to take it off; until then this load cannot be locked."
+                    >
+                      {CANCELLED_BADGE}
                     </Badge>
                   ) : null}
                   {st.masterChanged.length ? (

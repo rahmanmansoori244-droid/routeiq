@@ -133,6 +133,12 @@ export interface ManifestOrder {
   orderId: string;
   salesOrders: string[];
   lines: ManifestOrderLine[];
+  /**
+   * Cancel order (owner request 12 Oct 2026): cancelled since the load was planned (only on a load
+   * that has not left: a PLANNED load shown as "may still change"). The page says "CANCELLED - do not
+   * deliver" on it. Absent on a manifest kept on the phone from before.
+   */
+  cancelled?: boolean;
 }
 
 export interface ManifestStop {

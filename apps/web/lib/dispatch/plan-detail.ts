@@ -114,6 +114,18 @@ export interface DetailStop {
    */
   carriedTo: string | null;
   /**
+   * Cancel order (owner request 12 Oct 2026): an order of this stop was cancelled since it was planned.
+   * Only on a load that never left (PLANNED, LOCKED, LOADING): badge "CANCELLED - re-plan", and the
+   * driver and warehouse sheets say "CANCELLED - do not load or deliver".
+   */
+  cancelled: boolean;
+  /**
+   * The cancelled orders of this stop (of `orderIds`): a stop can hold several orders of its customer,
+   * and only these are marked (the warehouse sheet per invoice, the sheets' stop line "1 of 2 orders
+   * CANCELLED", the driver page per order). Empty when `cancelled` is false.
+   */
+  cancelledOrderIds: string[];
+  /**
    * The order lines of this stop as planned: one entry per order line (a split part's own cases), no
    * aggregation - from the same row lines as `skus` (rowLinesKg). The driver page lists them per
    * order, and a partly-delivered result names their line ids (owner request 4 Oct 2026). The Excel
@@ -217,6 +229,12 @@ export interface DetailLoad {
    * with them); always 0 on a load that left (what left was delivered, never carried).
    */
   carriedAway: number;
+  /**
+   * Cancel order (owner request 12 Oct 2026): orders on this load cancelled since it was planned. It
+   * cannot be locked, loaded or dispatched with them (409 ORDERS_CANCELLED) until the day is re-planned.
+   * Always 0 on a load that left (an order that left cannot be cancelled).
+   */
+  cancelledHere: number;
   /** The driver break planned with this load (PlanLoad.breakJson); null = none on this load. */
   break: LoadBreak | null;
   /** The truck is hired from outside (Truck.hired, as it is now): a badge on the plan and the sheets. */
@@ -259,6 +277,8 @@ export interface DetailUnserved {
   carriedFrom: string | null;
   /** PR9: brought forward to a later day since (YYYY-MM-DD): planned there, not a problem of this plan. */
   carriedTo: string | null;
+  /** Cancel order (owner request 12 Oct 2026): cancelled since; not a problem of this plan, never re-planned. */
+  cancelled: boolean;
 }
 
 export interface PlanDetail {
@@ -549,6 +569,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     const stops = new Map<number, DetailStop>();
     const withPortion = new Set<number>();
     const carriedAwayOrders = new Set<string>();
+    const cancelledOrders = new Set<string>();
     // A load planned by pallets (its stored pallets, and bays + room in its truck snapshot, both kept
     // only from the optimizer's echo): each product's pallets on it, line by line as it was planned.
     const tsPallets = readTruckSnapshot(l.truckSnapshotJson);
@@ -598,9 +619,16 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       const cameFrom = o.carriedFromDate ? isoOf(o.carriedFromDate) : null;
       const wentTo = o.carriedTo && carriedLoadShows(l.status) ? isoOf(o.carriedTo.deliveryDate) : null;
       if (wentTo) carriedAwayOrders.add(o.id);
+      // Cancel order: cancelled since it was planned (only a load that never left can hold one).
+      const isCancelled = !!o.cancelledAt && carriedLoadShows(l.status);
+      if (isCancelled) cancelledOrders.add(o.id);
       if (s) {
         if (cameFrom && (!s.carriedFrom || cameFrom < s.carriedFrom)) s.carriedFrom = cameFrom;
         if (wentTo && (!s.carriedTo || wentTo > s.carriedTo)) s.carriedTo = wentTo;
+        if (isCancelled) {
+          s.cancelled = true;
+          if (!s.cancelledOrderIds.includes(o.id)) s.cancelledOrderIds.push(o.id);
+        }
         s.cases += cases;
         s.weightKg += weightKg;
         s.orderIds.push(o.id);
@@ -677,6 +705,8 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
           : [],
         carriedFrom: cameFrom,
         carriedTo: wentTo,
+        cancelled: isCancelled,
+        cancelledOrderIds: isCancelled ? [o.id] : [],
         orderLines,
         plannedHours: snap
           ? { hardStart: snap.hardStartMin, hardEnd: snap.hardEndMin, prefStart: snap.prefStartMin, prefEnd: snap.prefEndMin }
@@ -763,6 +793,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       ],
       timing: null,
       carriedAway: carriedAwayOrders.size,
+      cancelledHere: cancelledOrders.size,
       break: parseLoadBreak(l.breakJson),
       hired: l.truck.hired,
       // A hired truck's casual driver paid by the day, as the load was planned (its truck snapshot).
@@ -827,6 +858,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         partial: u.portionLinesJson !== null && onTruck.has(o.id), // some of this order is on a truck
         carriedFrom: o.carriedFromDate ? isoOf(o.carriedFromDate) : null,
         carriedTo: o.carriedTo ? isoOf(o.carriedTo.deliveryDate) : null,
+        cancelled: !!o.cancelledAt,
       };
     })
     .filter((x): x is DetailUnserved => x !== null)
@@ -868,7 +900,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
   // Review of 9 Oct 2026: orders this plan left out for their customer's data (no usable location, a
   // deactivated customer) that a re-plan would plan now - a pin saved or the customer reactivated since.
   // The area is read only when such a row exists (most plan reads have none).
-  const fixedSince = live && chosenDetails ? unservedRows.filter((u) => CUSTOMER_DATA_REASONS.includes(u.reasonCode) && uo.get(u.orderId)?.customer.active && !uo.get(u.orderId)?.carriedTo) : [];
+  const fixedSince = live && chosenDetails ? unservedRows.filter((u) => CUSTOMER_DATA_REASONS.includes(u.reasonCode) && uo.get(u.orderId)?.customer.active && !uo.get(u.orderId)?.carriedTo && !uo.get(u.orderId)?.cancelledAt) : [];
   let fixedNote: string | null = null;
   if (fixedSince.length) {
     const tenant = await db.tenant.findUnique({ where: { id: tenantId }, select: { country: true } });

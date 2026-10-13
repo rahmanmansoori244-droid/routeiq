@@ -7,8 +7,8 @@ import { normalizeProductCode, productCodeProblem, productKey, twinsOf } from '@
 import { customerTwinsOf } from '@/lib/customer-code';
 import { currentPlan } from '@/lib/dispatch/plan-service';
 import { createIntakeKeys, INTAKE_BUSY, isIntakeKeyConflict, isTransactionTimeout, lockIntake } from '@/lib/dispatch/intake-server';
-import { normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
-import { dateOnly, isAfterCutoff } from '@/lib/dispatch/time';
+import { cancelledLineNote, normSalesOrder, preferredCustomer, preferredProduct } from '@/lib/dispatch/order-intake';
+import { dateOnly, isAfterCutoff, localDateIso } from '@/lib/dispatch/time';
 import { intakeLineWeight } from '@/lib/dispatch/weights';
 
 const schema = z.object({
@@ -146,18 +146,22 @@ export const POST = withTenantApi(
         // the customer and the product, since which twin is preferred can change over time.
         const customerTwinIds = [...new Set([customer.id, ...twins.map((x) => x.id)])];
         const dupes: string[] = [];
+        let cancelledNote = '';
         for (const [i, l] of input.lines.entries()) {
           const so = normSalesOrder(l.salesOrderNo);
           if (!so) continue;
           const k = await tx.intakeLineKey.findFirst({
             where: { tenantId, deliveryDate, salesOrderNorm: so, customerId: { in: customerTwinIds }, productId: { in: productTwinIds[i] } },
-            select: { orderLine: { select: { cases: true } } },
+            select: { orderLine: { select: { cases: true, order: { select: { cancelledAt: true, cancelledBy: { select: { name: true } } } } } } },
           });
           if (k) dupes.push(`${l.salesOrderNo} / ${products[i].code} (${k.orderLine.cases} cases)`);
+          // Cancel order (owner request 12 Oct 2026): its order was cancelled (the key stays): say how to bring it back.
+          const gone = k?.orderLine.order.cancelledAt;
+          if (gone && !cancelledNote) cancelledNote = ` ${cancelledLineNote({ at: localDateIso(gone, cfg.timezone || undefined), by: k.orderLine.order.cancelledBy?.name ?? null }, input.date)}`;
         }
         if (dupes.length) {
           throw new LateOrderRefused(
-            `Already confirmed for ${input.date}: sales order ${dupes.join(', ')}. Record only new lines: for extra cases of a confirmed line, leave the sales-order number empty or use a new one (changing a confirmed line is not supported yet).`,
+            `Already confirmed for ${input.date}: sales order ${dupes.join(', ')}. Record only new lines: for extra cases of a confirmed line, leave the sales-order number empty or use a new one (changing a confirmed line is not supported yet).${cancelledNote}`,
             409,
             'DUPLICATE_LINES',
           );

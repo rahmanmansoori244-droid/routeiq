@@ -46,6 +46,10 @@ export const AUDIT_ACTIONS = {
   ORDER_DELIVERY_TIME_CLEARED: { label: 'Delivery time of one order removed' },
   LATE_ORDER_RECORDED: { label: 'Late order recorded' },
   ORDERS_CARRIED_OVER: { label: 'Orders brought forward from earlier days' },
+  // Cancel and postpone one order (owner request 12 Oct 2026).
+  ORDER_CANCELLED: { label: 'Order cancelled' },
+  ORDER_CANCEL_UNDONE: { label: 'Order cancel undone' },
+  ORDER_POSTPONED: { label: 'Order postponed to a later day' },
   ORDER_WEIGHTS_RESOLVED: { label: 'Order weights taken from products' },
   // Truck capacity in pallets (owner decision 4 Oct 2026): the product master imported from a file.
   PRODUCTS_IMPORTED: { label: 'Products imported (weights, cases per pallet)' },
@@ -139,7 +143,7 @@ export function auditActionTone(action: string): 'default' | 'success' | 'warnin
   if (action === 'DELETE' || action === 'OPTIMIZE_FAILED' || action === 'LOGIN_THROTTLED' || action === 'TEST_DATA_CLEARED') return 'destructive';
   if (action === 'CREATE' || action === 'OPTIMIZE_SUCCEEDED' || action === 'LOAD_DISPATCHED' || action === 'LOAD_COMPLETED' || action === 'DISPATCH') return 'success';
   if (action === 'OVERRIDE' || action === 'ROUTE_MANUALLY_CHANGED' || action === 'LOAD_PLANNED' || action === 'PLAN_RESET' || action === 'CROSS_TENANT_VIEW' || action.startsWith('PLATFORM_ADMIN')) return 'warning';
-  if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT') return 'warning';
+  if (action === 'DRIVER_LINK_REVOKED' || action === 'DRIVER_LINK_REISSUED' || action === 'DELIVERY_CARRY_CONFLICT' || action === 'ORDER_CANCELLED') return 'warning';
   if (action === 'LOGIN' || action === 'SIGNUP' || action === 'LOAD_LOCKED' || action === 'LOAD_LOADING') return 'secondary';
   return 'outline';
 }

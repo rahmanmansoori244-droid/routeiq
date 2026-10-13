@@ -22,6 +22,7 @@ import { fmtHhmm } from './time';
 import { loadPallets, palletsOverBays } from './pallets';
 import { OUTCOME_LABEL, reasonText } from '../delivery/office-text';
 import { carriedStopText, carriedToDays } from './carry-view';
+import { CANCELLED_STOP_TEXT } from './order-cancel-rules';
 
 /** The loads that have left: only these have delivery results. */
 export const RETURN_NOTE_STATUSES: ReadonlySet<string> = new Set(['DISPATCHED', 'COMPLETED']);
@@ -98,6 +99,12 @@ export interface LoadSheet {
   carriedAway: number;
   /** "14 Oct" / "14 Oct, 15 Oct": the days they were brought forward to. */
   carriedToDays: string;
+  /**
+   * Cancel order (owner request 12 Oct 2026): cancelled orders on this load (DetailLoad.cancelledHere,
+   * only on a load that has not left). Their cases are still in the products to load (the plan rows),
+   * so the sheet says so in a banner and marks their invoices CANCELLED.
+   */
+  cancelledHere: number;
   footer: string;
 }
 
@@ -193,16 +200,23 @@ function splitText(s: DetailStop): string | null {
   return `part ${s.split.part} of ${s.split.parts}${s.split.restUnserved ? ' - the rest is NOT on a truck today' : ''}`;
 }
 
-/** One stop's invoices: its order lines grouped by invoice number, in the order first seen. */
+/**
+ * One stop's invoices: its order lines grouped by invoice number, in the order first seen. Cancel
+ * order (owner request 12 Oct 2026): only the invoices of the stop's cancelled orders are marked
+ * CANCELLED (a stop can hold several orders of its customer); their lines are grouped apart.
+ */
 export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
-  const by = new Map<string, ProductCases[]>();
+  const gone = new Set(s.cancelledOrderIds ?? []);
+  const by = new Map<string, { invoiceNo: string; cancelled: boolean; rows: ProductCases[] }>();
   for (const ln of s.orderLines) {
-    const key = ln.salesOrderNo?.trim() || NO_INVOICE;
-    const list = by.get(key) ?? [];
-    list.push({ productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
-    by.set(key, list);
+    const invoiceNo = ln.salesOrderNo?.trim() || NO_INVOICE;
+    const cancelled = gone.has(ln.orderId);
+    const key = `${invoiceNo}|${cancelled ? 'C' : ''}`;
+    const g = by.get(key) ?? { invoiceNo, cancelled, rows: [] };
+    g.rows.push({ productCode: ln.productCode, productName: ln.productName, cases: ln.cases });
+    by.set(key, g);
   }
-  return [...by.entries()].map(([invoiceNo, rows]) => {
+  return [...by.values()].map(({ invoiceNo, cancelled, rows }) => {
     const lines = sumByProduct(rows);
     return {
       stop: s.sequence,
@@ -211,7 +225,7 @@ export function stopInvoices(s: DetailStop): LoadSheetInvoice[] {
       customerCode: s.customerCode,
       branchCode: s.branchCode,
       split: splitText(s),
-      carried: carriedStopText(s),
+      carried: cancelled ? CANCELLED_STOP_TEXT : carriedStopText({ carriedFrom: s.carriedFrom, carriedTo: s.carriedTo }),
       lines,
       cases: lines.reduce((a, l) => a + l.cases, 0),
     };
@@ -254,6 +268,7 @@ export function loadSheetModel(d: PlanDetail, opts: { tenantName: string; loadId
       invoices,
       matches: invoices.reduce((a, i) => a + i.cases, 0) === totalCases,
       carriedAway: l.carriedAway,
+      cancelledHere: l.cancelledHere ?? 0,
       carriedToDays: carriedToDays(stops.map((s) => s.carriedTo).filter((x): x is string => !!x)),
       footer: footer(l, n, d, 'Load sheet'),
     };

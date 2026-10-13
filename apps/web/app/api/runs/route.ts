@@ -3,6 +3,7 @@ import { OptimizationMode } from '@prisma/client';
 import { withTenantApi, ok, parseBody, fail } from '@/lib/api';
 import { createInitialPlan, currentPlan, PlanError, planErrorBody } from '@/lib/dispatch/plan-service';
 import { isRealIsoDate } from '@/lib/schemas';
+import { NOT_CANCELLED } from '@/lib/dispatch/order-cancel-rules';
 
 const createRunSchema = z.object({
   depotId: z.string().min(1),
@@ -41,7 +42,9 @@ export const POST = withTenantApi(
     const trucks = await db.truck.count({ where: { depotId: depot.id, active: true } });
     if (trucks === 0) return fail('This depot has no active trucks. Configure trucks first.', 400);
 
-    const orderCount = await db.order.count({ where: { deliveryDate: runDate, customer: { active: true } } });
+    // Cancelled orders are never planned (Cancel order, owner request 12 Oct 2026): a day whose orders were
+    // all cancelled gets "No orders found", not a plan.
+    const orderCount = await db.order.count({ where: { deliveryDate: runDate, customer: { active: true }, ...NOT_CANCELLED } });
     if (orderCount === 0) {
       return fail(
         `No orders found for ${input.runDate}. Upload and confirm an order file for that date first.`,

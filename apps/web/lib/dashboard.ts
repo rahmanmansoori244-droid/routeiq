@@ -58,6 +58,10 @@ export const PLAN_ORDERS_IN_SCOPE = Prisma.sql`o."tenantId" = rp."tenantId" AND 
  * subtracts them: an order carried forward counts once - on its new day - and its own day's plan
  * (kept as it was) no longer counts it as an order, nor as unserved, and counts only the cases that
  * left on its loads (the delivered part of a split order), so cost per case counts every case once.
+ *
+ * Cancel order (owner request 12 Oct 2026): a cancelled order the plan still holds (on a PLANNED load
+ * or unserved, until the day is re-planned) is subtracted the same way, with all its cases: it is
+ * never delivered, and it is counted nowhere else.
  */
 export const CARRIED_OUT_OF_PLAN = Prisma.sql`
       SELECT
@@ -68,9 +72,10 @@ export const CARRIED_OUT_OF_PLAN = Prisma.sql`
         SELECT
           EXISTS (SELECT 1 FROM "UnservedOrder" u WHERE u."scenarioId" = rp."chosenScenarioId" AND u."orderId" = o.id) AS unserved,
           EXISTS (SELECT 1 FROM "RouteAssignment" ra WHERE ra."runId" = rp.id AND ra."orderId" = o.id) AS planned,
-          (SELECT c."totalCases" FROM "Order" c WHERE c.id = o."carriedToOrderId") AS carried_cases
+          CASE WHEN o."cancelledAt" IS NOT NULL THEN o."totalCases"
+            ELSE (SELECT c."totalCases" FROM "Order" c WHERE c.id = o."carriedToOrderId") END AS carried_cases
         FROM "Order" o
-        WHERE ${PLAN_ORDERS_IN_SCOPE} AND o."carriedToOrderId" IS NOT NULL
+        WHERE ${PLAN_ORDERS_IN_SCOPE} AND (o."carriedToOrderId" IS NOT NULL OR o."cancelledAt" IS NOT NULL)
       ) AS t`;
 
 export interface DayStats {
