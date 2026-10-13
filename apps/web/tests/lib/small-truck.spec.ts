@@ -166,13 +166,12 @@ describe('buildDispatchRequest: the allowed trucks of a small-truck-only custome
     const parts = b.request.stops;
     expect(parts.length).toBe(2);
     expect(parts.map((p) => p.stop_id)).toEqual(['MT#1', 'MT#2']);
-    for (const p of parts) {
-      expect(p.allowed_truck_ids).toEqual(['T03', 'T05']);
-      // Sized for the 4-bay truck: both small trucks carry such a part (more trips to choose from).
-      expect(p.demand_pallet_units).toBeLessThanOrEqual(4_000);
-    }
+    for (const p of parts) expect(p.allowed_truck_ids).toEqual(['T03', 'T05']);
+    // Sized for the biggest small truck (6 bays): two parts either way, and the leftover is the smallest
+    // (owner rule 13 Oct 2026: before, "more trips" sized them for the 4-bay truck, 4.0 + 4.0).
+    expect(parts.map((p) => p.demand_pallet_units)).toEqual([6_000, 2_000]);
     expect(parts.reduce((a, p) => a + p.demand_cases, 0)).toBe(760);
-    expect(b.warnings.join(' ')).toMatch(/MT \(760 cases, 8\.0 pallets, 3800 kg\) in 2 parts sized for T03 \(small trucks only: at most 6 bays\)/);
+    expect(b.warnings.join(' ')).toMatch(/MT \(760 cases, 8\.0 pallets, 3800 kg\) in 2 parts sized for T05 \(small trucks only: at most 6 bays\), leftover 2\.0 pallets \(190 cases\)/);
     // The same order for a customer that takes any truck: one stop (it fits the 12-bay truck).
     wire(FLEET(), [order('O1', customer('MT', 23.6, 58.4), 760)]);
     expect((await buildDispatchRequest('TEN', 'R1', undefined, { now: NOW })).request.stops.map((s) => s.stop_id)).toEqual(['MT']);

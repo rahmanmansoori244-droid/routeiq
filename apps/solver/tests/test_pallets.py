@@ -396,7 +396,7 @@ def test_independent_check_flags_pallets_and_wrong_totals():
     stops = [pstop("A", 23.60, 58.45, cases=900, units=6_000), pstop("B", 23.605, 58.455, cases=100, units=5_400)]
     r = req(stops, [btruck("R1", bays=12, cap=500, max_trips=1)])
     sc = rec(optimize_dispatch(r))
-    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 4
+    assert sc.feasibility.status == "VERIFIED" and sc.feasibility.checked_at_version == FZ.CHECK_VERSION == 5
     assert sc.loads[0].cases == 1_000  # over the case capacity 500: not a violation on a bay truck
     # The same plan checked against 10 bays: 11.4 > 10.0 pallets (100% fill), and > 9.5 at 95%.
     fewer = r.model_copy(deep=True)

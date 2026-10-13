@@ -126,8 +126,11 @@ export interface SolverRules {
   finishByClosing?: boolean;
   /** The driver break the plan was made with (the solver's echo); absent/null = none planned. */
   breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
-  /** Trucks with bays were planned by pallets at this Pallet fill (the solver's echo); absent/null = by cases only. */
-  pallets?: { fillPct: number } | null;
+  /**
+   * Trucks with bays were planned by pallets at this Pallet fill (the solver's echo); absent/null = by cases
+   * only. singleCustomerFillPct: a truck with one customer at that percent (the one-customer rule's echo).
+   */
+  pallets?: { fillPct: number; singleCustomerFillPct?: number | null } | null;
 }
 
 export function solverRules(d: Pick<PlanDetail, 'scenarios'>): SolverRules {
@@ -1242,7 +1245,9 @@ export function tenantAssumptions(
       : 'earlier rule: the route search rounded each stop up to a whole kg and each payload down to a whole kg (a small margin below the payload)',
     // Pallets (owner decision 4 Oct 2026), worded by the rule the solver REPORTED (its echo).
     'Truck capacity': solver.pallets
-      ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill) and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
+      ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill)${
+          typeof solver.pallets.singleCustomerFillPct === 'number' && solver.pallets.singleCustomerFillPct > solver.pallets.fillPct ? `, or bays x ${solver.pallets.singleCustomerFillPct}% for a truck that carries only one customer,` : ''
+        } and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
       : 'cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit',
     // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.
     'Receiving hours': solver.finishByClosing

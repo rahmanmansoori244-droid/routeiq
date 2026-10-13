@@ -169,6 +169,13 @@ export interface DispatchConfig {
   max_trips_per_truck?: number;
   /** Pallet fill (owner decision 4 Oct 2026): percent of a bay truck's bays the planner may fill, 50-100 (default 100 = every bay). */
   pallet_fill_pct?: number;
+  /**
+   * One customer on a truck (owner rule 13 Oct 2026): a load whose stops are all ONE customer may fill its
+   * bays to this percent (the web sends 100 = every bay, a fixed rule); every other load keeps
+   * pallet_fill_pct. At least pallet_fill_pct. Absent / null: no such rule (every load at the fill). A
+   * solver before the rule ignores it and echoes nothing (the web warns).
+   */
+  single_customer_fill_pct?: number | null;
   fuel_price_per_litre?: number;
   /**
    * OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
@@ -326,8 +333,9 @@ export interface PlannedLoad {
   driver_break?: PlannedBreak | null;
   /**
    * Pallets, on a truck with bays only (null on a truck planned by cases, absent from an older
-   * solver): the load's pallet need (the sum of its stops', 1/1000 pallet) and the truck's room
-   * (bays x fill % x 10). utilization_pct is then max(pallets / bays, kg / payload).
+   * solver): the load's pallet need (the sum of its stops', 1/1000 pallet) and its room (bays x fill % x
+   * 10; a load of ONE customer with config.single_customer_fill_pct: bays x that % x 10). utilization_pct
+   * is then max(pallets / bays, kg / payload).
    */
   pallet_units?: number | null;
   pallet_room_units?: number | null;
@@ -511,6 +519,12 @@ export interface DispatchScenario {
    * field - the web warns when it sent one and gets no echo.
    */
   allowed_trucks_rule?: boolean | null;
+  /**
+   * Echo of the one-customer rule (config.single_customer_fill_pct): a load of one customer was allowed
+   * bays x this percent (its pallet_room_units says so). Absent / null: no such rule, or a solver before
+   * it - the web then keeps every load at the Pallet fill and warns when it sent the rule.
+   */
+  single_customer_fill_pct?: number | null;
 }
 
 export interface DispatchResponse {

@@ -82,12 +82,27 @@ def kg_text(kg: float) -> str:
 PALLET_UNIT = 0.001
 # Pallet fill when the request does not send one (owner decision 4 Oct 2026: 100%, not 95%).
 PALLET_FILL_DEFAULT = 100
+# One customer on a truck (owner rule 13 Oct 2026: "keep 90% for trucks with several customers, but let
+# a truck that carries only one customer be filled to 100%"). A load whose stops all belong to ONE
+# customer (one customer_id) may fill bays x config.single_customer_fill_pct; any other load keeps
+# bays x pallet_fill_pct. None (the default, and every older web) = no such rule: every load at
+# pallet_fill_pct, exactly as before. The web sends 100 (a fixed rule, no setting). Every engine and
+# the independent check apply it (dispatch_solver.load_room, load_repack.fits_truck, feasibility).
 
 
 def pallet_room_units(bays: int, fill_pct: int) -> int:
     """A bay truck's room in 1/1000 pallet: bays x fill % x 10 (12 bays at 100% = 12,000 = 12.0 pallets;
     at 95% = 11,400 = 11.4)."""
     return int(bays) * int(fill_pct) * 10
+
+
+def load_room_units(bays: int, fill_pct: int, single_customer_fill_pct: int | None, customers: int) -> int:
+    """The room of ONE load on a truck with ``bays``, in 1/1000 pallet: bays x single_customer_fill_pct
+    when the rule is on and the load's stops are all one customer (``customers`` == 1), else bays x
+    fill_pct (pallet_room_units). The rule never gives less room than the fill."""
+    if single_customer_fill_pct is not None and customers == 1:
+        return pallet_room_units(bays, max(int(fill_pct), int(single_customer_fill_pct)))
+    return pallet_room_units(bays, fill_pct)
 
 
 def pallet_text(units: int) -> str:
@@ -250,6 +265,11 @@ class DispatchConfig(BaseModel):
     # - 100 (the default, owner decision of 4 Oct 2026) = every bay; lower is a safety margin for mixed
     # pallets (12 bays at 95% = 11.4 pallets). Only trucks with bays use it.
     pallet_fill_pct: int = Field(default=PALLET_FILL_DEFAULT, ge=50, le=100)
+    # One customer on a truck (owner rule 13 Oct 2026, see load_room_units): a load whose stops are
+    # all one customer may fill its bays to this percent (the web sends 100: every bay); None = no such
+    # rule (every load at pallet_fill_pct, as before). At least pallet_fill_pct. Optional and additive:
+    # an older solver ignores it (no echo: the web warns), an older web never sends it.
+    single_customer_fill_pct: int | None = Field(default=None, ge=50, le=100)
     fuel_price_per_litre: float = Field(default=0.0, ge=0)  # OMR/l; 0 = fuel not costed separately
     # OMR per hour of the WHOLE truck day: first departure (or first frozen departure) to last
     # return, depot turnaround and waiting included (costing.py, policy TRUCK_DAY_SPAN). Overtime
@@ -298,6 +318,12 @@ class DispatchConfig(BaseModel):
                 raise ValueError("priority_weights must be strictly decreasing: P1 > P2 > P3 > P4 > P5")
         if w[5] <= 0:
             raise ValueError("priority_weights must be positive")
+        return self
+
+    @model_validator(mode="after")
+    def _single_customer_fill(self) -> "DispatchConfig":
+        if self.single_customer_fill_pct is not None and self.single_customer_fill_pct < self.pallet_fill_pct:
+            raise ValueError("single_customer_fill_pct must be at least pallet_fill_pct (one customer never gets less room)")
         return self
 
     # How long to search (owner decision 29 Sep 2026: "night plans long, day re-plans quick").
@@ -417,7 +443,8 @@ class PlannedLoad(BaseModel):
     # break arrives after it when the break started on the way; wait_min never counts break minutes.
     driver_break: PlannedBreak | None = None
     # Pallets (a truck with bays only; None on a truck planned by cases): the load's pallet need
-    # (the sum of its stops', 1/1000 pallet) and its truck's room (bays x fill % x 10).
+    # (the sum of its stops', 1/1000 pallet) and its room (bays x fill % x 10; a load of ONE customer
+    # with config.single_customer_fill_pct: bays x that % x 10, owner rule 13 Oct 2026).
     pallet_units: int | None = None
     pallet_room_units: int | None = None
 
@@ -606,6 +633,11 @@ class DispatchScenario(BaseModel):
     # when a stop of the request had it, so every engine and the check kept it; None = no stop had it,
     # or a solver before the rule (which ignored the field: the web warns when it sent one and gets None).
     allowed_trucks_rule: bool | None = None
+    # Echo of the one-customer rule (config.single_customer_fill_pct, owner rule 13 Oct 2026): the percent
+    # a load of ONE customer was allowed on a truck with bays, when the request sent it and a truck has
+    # bays; None = no such rule, or a solver before it (which ignored the field: the web warns when it
+    # sent one and gets None, and keeps every load at the Pallet fill).
+    single_customer_fill_pct: int | None = None
 
 
 class DispatchResponse(BaseModel):
@@ -734,7 +766,8 @@ class PyvrpReport(BaseModel):
     status: CHOSEN = its plan (re-checked) is used by the options in ``chosen_for``; NOT_CHOSEN = it
     ran, and the engine's own plans were as good or better (or its plan was unusable: ``reason``);
     SKIPPED = not run (OFF, CPU_GATE, NOTHING_TO_PLAN, NO_PROCESS, MODEL_TOO_LARGE, ALLOWED_TRUCKS: a stop's
-    allowed_truck_ids leaves out a truck that can still take a load, which PyVRP cannot model); FAILED = it
+    allowed_truck_ids leaves out a truck that can still take a load, which PyVRP cannot model; FULL_TRUCK: a
+    stop fills a truck alone under config.single_customer_fill_pct, which it does not model); FAILED = it
     failed (IMPORT_FAILED, FAILED, LOST, TIMEOUT). The plans are then the engine's alone.
     best_over_time: at most 12 [seconds, PyVRP's score] points - a score, not money (it holds the
     prize of every stop not planned yet)."""

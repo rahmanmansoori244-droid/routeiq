@@ -312,6 +312,9 @@ class Facts:
     # owner request 13 Oct 2026: "small truck only" customers): the intersection of its stops' lists;
     # None = no stop of the load is limited. fits_truck refuses any other truck.
     allowed: frozenset[str] | None = None
+    # How many customers (customer_id) the load's stops belong to: a load of ONE customer may fill
+    # TruckDay.solo_pallet_units (owner rule 13 Oct 2026: every bay), any other bays x Pallet fill.
+    customers: int = 0
 
     @property
     def waits(self) -> bool:
@@ -348,6 +351,7 @@ def facts(day: Day, load: Load, pause_after: int | None = None, pause_s: int = 0
         cases=sum(s.demand_cases for s in ss), kg_units=sum(kg_units(s.demand_kg) for s in ss), metres=day.metres(load),
         gap=day.gap_s(sum(s.demand_cases for s in ss)), pause_after=pause_after, pause_lo=p_lo, pause_drive=p_drive,
         pallet_units=sum(s.demand_pallet_units or 0 for s in ss), allowed=allowed_trucks(ss),
+        customers=len({s.customer_id for s in ss}),
     )
 
 
@@ -387,10 +391,16 @@ def fits_truck(f: Facts, td: "TruckDay") -> bool:
     in 0.1 kg units against the payload rounded down, with no margin either way (audit F08). Every
     repack path (depart_range, the optional one-stop loads, the fit fallback, time_plan) goes
     through here, so a load over its bays never gets a truck - and a load never gets a truck one of
-    its stops may not go on (Facts.allowed: a "small truck only" customer, owner request 13 Oct 2026)."""
+    its stops may not go on (Facts.allowed: a "small truck only" customer, owner request 13 Oct 2026).
+    A load of ONE customer (Facts.customers) may fill the truck's one-customer room instead
+    (TruckDay.solo_pallet_units, owner rule 13 Oct 2026: every bay); adding another customer's stop
+    makes it a load of several customers again, at bays x Pallet fill, so no repack path can put
+    anything beside a stop that fills a truck alone."""
     if f.allowed is not None and td.truck.id not in f.allowed:
         return False
     room = getattr(td, "max_pallet_units", 0)
+    if room > 0 and f.customers == 1:
+        room = max(room, getattr(td, "solo_pallet_units", 0))
     space_ok = f.pallet_units <= room if room > 0 else f.cases <= td.max_cases
     return space_ok and (td.max_kg_units <= 0 or f.kg_units <= td.max_kg_units)
 
@@ -1587,7 +1597,7 @@ def _identical_trucks(day: Day, pricing: Pricing) -> dict[int, tuple[int, int]]:
         groups[(td.max_cases, td.max_kg, td.earliest_depart_s, td.latest_return_s, td.trips_left, td.n_frozen,
                 td.shift_anchor_s, td.frozen_return_s, td.loading_from_s, pricing.trucks[td.idx],
                 getattr(td, "break_state", "OFF"), getattr(td, "break_lo_s", 0), getattr(td, "break_hi_s", 0),
-                getattr(td, "max_pallet_units", 0), getattr(td, "bays", None),
+                getattr(td, "max_pallet_units", 0), getattr(td, "bays", None), getattr(td, "solo_pallet_units", 0),
                 # Trucks a limited stop may go on are not interchangeable with those it may not (allowed_truck_ids).
                 frozenset(k for k in limited if td.truck.id in day.stops[k].allowed_truck_ids))].append(td.idx)
     out: dict[int, tuple[int, int]] = {}

@@ -63,6 +63,12 @@
  * (a re-plan loads it by the figures now), a warning on a locked or loading one (a re-plan keeps it:
  * unlock it first), like a case weight entered since (CAPACITY_KG_NEW_WEIGHT).
  *
+ * One customer on a truck (owner rule 13 Oct 2026): a load whose rows are all ONE customer, planned when
+ * the optimizer echoed the one-customer rule (TruckFacts.singleCustomerFillPct), may fill every bay: its
+ * room is bays x that percent (plan-service feasibilityInputFromRows, pallets.ts plannedLoadRoom), and the
+ * messages say "(12 bays at 100% fill, one customer)". A load of several customers keeps the Pallet fill.
+ * A load planned before the rule keeps the room it was planned with (and its hash).
+ *
  * LOCK, LOADING and DISPATCH of a load are refused while its truck-day is not OK
  * (plan-service.changeStatusTx), unless the operator switch FEASIBILITY_GATE=warn is set.
  */
@@ -165,6 +171,8 @@ export interface FeasCapacity {
   palletRoomUnits?: number | null;
   bays?: number | null;
   fillPct?: number | null;
+  /** The room is the one-customer rule's (every bay) - the load is one customer's (owner rule 13 Oct 2026). */
+  oneCustomer?: boolean;
 }
 
 export interface FeasLoad {
@@ -292,8 +300,8 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
       const room = typeof l.capacity?.palletRoomUnits === 'number' ? l.capacity.palletRoomUnits : null;
       const withUnits = l.stops.some((s) => typeof s.palletUnits === 'number');
       const units = l.stops.reduce((a, s) => a + (s.palletUnits ?? 0), 0);
-      const roomText = (r: number, bays: number | null | undefined, fill: number | null | undefined) =>
-        `${palletText(r)}${typeof bays === 'number' && typeof fill === 'number' ? ` (${bays} bays at ${fill}% fill)` : ''}`;
+      const roomText = (r: number, bays: number | null | undefined, fill: number | null | undefined, one = !!l.capacity?.oneCustomer) =>
+        `${palletText(r)}${typeof bays === 'number' && typeof fill === 'number' ? ` (${bays} bays at ${fill}% fill${one ? ', one customer' : ''})` : ''}`;
       if (l.capacity) {
         if (room !== null) {
           // Bays, never the case capacity, on a truck planned by pallets.
@@ -367,7 +375,7 @@ export function checkPlanFeasibility(input: FeasibilityInput, now: Date = new Da
           if (overSpace || overKg) {
             const truckNow =
               roomNow !== null
-                ? `${now.bays} bays (${palletText(roomNow)} pallets at ${now.fillPct}% fill)`
+                ? `${now.bays} bays (${palletText(roomNow)} pallets at ${now.fillPct}% fill${now.oneCustomer ? ', one customer' : ''})`
                 : `${now.cases} cases (no bays)`;
             const payloadNow = kgChanged ? ` and ${now.kg > 0 ? `${Math.round(now.kg)} kg` : 'no payload set'}` : '';
             v({

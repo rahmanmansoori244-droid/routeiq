@@ -44,7 +44,7 @@ import { withPlainSolverCodes } from './solver-status';
 import { isDispatchPlanShape } from './legacy-runs';
 import { stuckPlanState, type StuckState } from './stuck-plan';
 import { isOptimizing } from '../jobs/optimize-job';
-import { loadPallets, palletText, palletUnits, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
+import { loadCustomerCount, loadPallets, palletText, palletUnits, plannedLoadRoom, validPalletFactor, withManifestPallets, type ManifestPallets } from './pallets';
 import { CUSTOMER_DATA_REASONS, idleTrucksNote, unservedNowPlannable } from './left-out-note';
 import { hadTimeHere } from './cross-depot';
 import { isSmallTruck, smallTruckMaxBaysOf } from './small-truck';
@@ -233,6 +233,11 @@ export interface DetailLoad {
   palletFillPct?: number | null;
   palletRoomUnits?: number | null;
   /**
+   * The load is one customer's and was planned under the one-customer rule (owner rule 13 Oct 2026):
+   * palletRoomUnits / palletFillPct are that rule's (every bay) - "limit 12.0 at 100% (one customer)".
+   */
+  palletOneCustomer?: boolean;
+  /**
    * A product of this load whose cases per pallet was changed under Products after planning: the load
    * keeps the pallets it was planned with ("Changed after planning: cases per pallet of TN1.5L is now 40
    * (planned with 39)"). Absent / empty: none.
@@ -386,7 +391,7 @@ export interface PlanDetail {
     /** The driver-break rule this option was made with (the solver's echo); null: no break was planned. */
     breakRule?: { lengthMin: number; startFromMin: number; startToMin: number } | null;
     /** The pallet rule this option was made with (the solver's echo: trucks with bays checked by pallets at this fill); null: by cases only. */
-    palletRule?: { fillPct: number } | null;
+    palletRule?: { fillPct: number; singleCustomerFillPct?: number | null } | null;
   }[];
   loads: DetailLoad[];
   /**
@@ -605,7 +610,9 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
     // A load planned by pallets (its stored pallets, and bays + room in its truck snapshot, both kept
     // only from the optimizer's echo): each product's pallets on it, line by line as it was planned.
     const tsPallets = readTruckSnapshot(l.truckSnapshotJson);
-    const pallets = loadPallets({ palletUnits: l.palletUnits, bays: tsPallets?.bays, palletRoomUnits: tsPallets?.palletRoomUnits, palletFillPct: tsPallets?.palletFillPct });
+    // A load of one customer planned under the one-customer rule: its room is every bay (owner rule 13 Oct 2026).
+    const room = plannedLoadRoom(tsPallets, loadCustomerCount(l.assignments));
+    const pallets = loadPallets({ palletUnits: l.palletUnits, ...(room ?? {}) });
     const unitsByCode = new Map<string, number>();
     const factorByCode = new Map<string, number>();
     const liveFactorByCode = new Map<string, number | null>();
@@ -813,6 +820,7 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
       bays: pallets ? pallets.bays : null,
       palletFillPct: pallets ? pallets.fillPct : null,
       palletRoomUnits: pallets ? pallets.room : null,
+      ...(pallets?.oneCustomer ? { palletOneCustomer: true } : {}),
       ...(palletNotes.length ? { palletNotes } : {}),
       truckSnapshot: !!ts,
       origin: { lat: origin.lat, lng: origin.lng },
@@ -1050,7 +1058,10 @@ async function readPlanDetail(db: DetailDb, tenantId: string, runId: string, clo
         breakRule: d.break_rule && d.break_rule.length_min > 0
           ? { lengthMin: d.break_rule.length_min, startFromMin: d.break_rule.start_from_min, startToMin: d.break_rule.start_to_min }
           : null,
-        palletRule: typeof d.pallet_unit === 'number' && typeof d.pallet_fill_pct === 'number' ? { fillPct: d.pallet_fill_pct } : null,
+        palletRule:
+          typeof d.pallet_unit === 'number' && typeof d.pallet_fill_pct === 'number'
+            ? { fillPct: d.pallet_fill_pct, ...(typeof d.single_customer_fill_pct === 'number' ? { singleCustomerFillPct: d.single_customer_fill_pct } : {}) }
+            : null,
       };
     }),
     loads: detailLoads,

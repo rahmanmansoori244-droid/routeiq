@@ -27,6 +27,14 @@ export const UNITS_PER_PALLET = 1000;
  * as a safety margin for mixed pallets (Settings, 50-100).
  */
 export const PALLET_FILL_DEFAULT = 100;
+/**
+ * One customer on a truck (owner rule 13 Oct 2026: "keep 90% for trucks with several customers, but let a
+ * truck that carries only one customer be filled to 100%"): a load whose stops are all ONE customer may
+ * fill its bays to this percent; every other load keeps the company's Pallet fill. A fixed rule, not a
+ * setting. Sent to the optimizer as config.single_customer_fill_pct; a load keeps it only when the
+ * optimizer echoed it (TruckFacts.singleCustomerFillPct).
+ */
+export const SINGLE_CUSTOMER_FILL_PCT = 100;
 /** A cases-per-pallet factor must be a whole number in this range (anything else counts as missing). */
 export const PALLET_FACTOR_MAX = 10_000;
 
@@ -49,6 +57,51 @@ export function palletUnits(cases: number, cpp: number | null | undefined): numb
 /** A bay truck's room in units: bays x fill % x 10 (12 bays at 100% = 12,000 = 12.0 pallets; at 95% = 11,400 = 11.4). */
 export function palletRoomUnits(bays: number, fillPct: number): number {
   return Math.round(bays) * Math.round(fillPct) * 10;
+}
+
+/**
+ * The room of ONE load on a truck with `bays`, in units: bays x the one-customer fill when the rule is on
+ * (`singlePct` set) and the load's stops are all one customer (`customers` === 1), else bays x the Pallet
+ * fill. The rule never gives less than the fill. apps/solver/dispatch_models.load_room_units is the
+ * optimizer's copy.
+ */
+export function loadRoomUnits(bays: number, fillPct: number, singlePct: number | null | undefined, customers: number): number {
+  return typeof singlePct === 'number' && customers === 1 ? palletRoomUnits(bays, Math.max(fillPct, singlePct)) : palletRoomUnits(bays, fillPct);
+}
+
+/**
+ * How many customers a load's rows belong to (the customer branch: Order.customerId, else its code and
+ * branch): a load of exactly one may use the one-customer room (plannedLoadRoom).
+ */
+export function loadCustomerCount(rows: readonly { order: { customerId?: string | null; customer?: { code: string; branchCode?: string | null } | null } }[]): number {
+  return new Set(rows.map((r) => r.order.customerId ?? `${r.order.customer?.code ?? ''}/${r.order.customer?.branchCode ?? ''}`)).size;
+}
+
+/** "a 12-bay truck", "an 11-bay truck", "an 11- or 12-bay truck": the trucks a customer fills alone (bays, smallest first). */
+export function baysTruckText(bays: readonly number[]): string {
+  if (!bays.length) return 'a truck with bays';
+  const an = (n: number) => (n === 8 || n === 11 || n === 18 ? 'an' : 'a');
+  const list = bays.length === 1 ? `${bays[0]}` : `${bays.slice(0, -1).join('-, ')}- or ${bays[bays.length - 1]}`;
+  return `${an(bays[0])} ${list}-bay truck`;
+}
+
+/** The plan warning when the optimizer did not apply the one-customer rule it was sent (an older optimizer). */
+export const SINGLE_CUSTOMER_SOLVER_NOTE =
+  'The optimizer did not apply the one-customer rule (it is being updated): every load was planned at the Pallet fill, so a customer that fills a truck alone may be left out. Re-plan in a few minutes.';
+
+/**
+ * [SINGLE_CUSTOMER_SOLVER_NOTE] when the request sent config.single_customer_fill_pct on a day with trucks
+ * with bays, the option was planned by pallets (pallet_unit echoed), and the optimizer did not echo the
+ * rule (deploy order is solver first: an older solver ignores the field); else [].
+ */
+export function singleCustomerSolverNote(
+  request: { config?: { single_customer_fill_pct?: number | null } | null; trucks?: readonly { bays?: number | null }[] } | null | undefined,
+  scenario: { pallet_unit?: number | null; single_customer_fill_pct?: number | null },
+): string[] {
+  const sent = request?.config?.single_customer_fill_pct;
+  if (typeof sent !== 'number' || !(request?.trucks ?? []).some((t) => typeof t.bays === 'number')) return [];
+  if (typeof scenario.pallet_unit !== 'number') return []; // not planned by pallets at all: palletNote says so
+  return scenario.single_customer_fill_pct === sent ? [] : [SINGLE_CUSTOMER_SOLVER_NOTE];
 }
 
 /** A truck's bays when usable (a whole number 1-40), else null (planned by cases). */
@@ -111,6 +164,8 @@ export interface LoadPallets {
   room: number;
   bays: number;
   fillPct: number | null;
+  /** The load is one customer's, planned under the one-customer rule: `room` and `fillPct` are that rule's (every bay). */
+  oneCustomer?: boolean;
 }
 
 /**
@@ -118,9 +173,42 @@ export interface LoadPallets {
  * bays and room, both kept only from the optimizer's echo); null = planned by cases (a truck without
  * bays, an older plan, or an older optimizer).
  */
-export function loadPallets(l: { palletUnits?: number | null; palletRoomUnits?: number | null; bays?: number | null; palletFillPct?: number | null }): LoadPallets | null {
+export function loadPallets(l: {
+  palletUnits?: number | null;
+  palletRoomUnits?: number | null;
+  bays?: number | null;
+  palletFillPct?: number | null;
+  palletOneCustomer?: boolean | null;
+}): LoadPallets | null {
   if (typeof l.palletUnits !== 'number' || typeof l.palletRoomUnits !== 'number' || typeof l.bays !== 'number' || l.bays <= 0) return null;
-  return { units: l.palletUnits, room: l.palletRoomUnits, bays: l.bays, fillPct: typeof l.palletFillPct === 'number' ? l.palletFillPct : null };
+  return {
+    units: l.palletUnits,
+    room: l.palletRoomUnits,
+    bays: l.bays,
+    fillPct: typeof l.palletFillPct === 'number' ? l.palletFillPct : null,
+    ...(l.palletOneCustomer ? { oneCustomer: true } : {}),
+  };
+}
+
+/**
+ * A stored load's room as planned (owner rule 13 Oct 2026): its truck snapshot's room at the Pallet fill,
+ * or - when the optimizer echoed the one-customer rule (`singleCustomerFillPct`) and the load's rows are
+ * all one customer - bays x that rule's percent. null without a snapshot room (planned by cases). One
+ * function for the plan screen, the sheets and the dispatch check.
+ */
+export function plannedLoadRoom(
+  ts: { bays?: number | null; palletRoomUnits?: number | null; palletFillPct?: number | null; singleCustomerFillPct?: number | null } | null | undefined,
+  customers: number,
+): { palletRoomUnits: number; bays: number; palletFillPct: number | null; palletOneCustomer: boolean } | null {
+  if (!ts || typeof ts.bays !== 'number' || typeof ts.palletRoomUnits !== 'number') return null;
+  const fill = typeof ts.palletFillPct === 'number' ? ts.palletFillPct : null;
+  // Only when the rule gives more room than the fill: at Pallet fill 100% a one-customer load is an
+  // ordinary load (same room, "limit 12.0 at 100% fill" as before the rule).
+  if (typeof ts.singleCustomerFillPct === 'number' && customers === 1 && fill !== null && ts.singleCustomerFillPct > fill) {
+    const pct = ts.singleCustomerFillPct;
+    return { palletRoomUnits: palletRoomUnits(ts.bays, pct), bays: ts.bays, palletFillPct: pct, palletOneCustomer: true };
+  }
+  return { palletRoomUnits: ts.palletRoomUnits, bays: ts.bays, palletFillPct: fill, palletOneCustomer: false };
 }
 
 /** "11.1 / 12" - the load's pallets over its truck's bays. */
@@ -128,8 +216,12 @@ export function palletsOverBays(p: LoadPallets): string {
   return `${palletText(p.units)} / ${p.bays}`;
 }
 
-/** "limit 12.0 at 100% fill" ("limit 11.4 at 95% fill") - the most the planner could put on the truck. */
+/**
+ * "limit 10.8 at 90% fill" - the most the planner could put on the truck; a load of one customer under
+ * the one-customer rule: "limit 12.0 at 100% (one customer)", so a load over 90% does not look overfilled.
+ */
 export function palletLimitText(p: LoadPallets): string {
+  if (p.oneCustomer) return `limit ${palletText(p.room)}${p.fillPct !== null ? ` at ${p.fillPct}%` : ''} (one customer)`;
   return `limit ${palletText(p.room)}${p.fillPct !== null ? ` at ${p.fillPct}% fill` : ''}`;
 }
 

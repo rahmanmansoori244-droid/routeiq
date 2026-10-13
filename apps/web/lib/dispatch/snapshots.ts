@@ -119,6 +119,13 @@ export interface TruckFacts {
   bays?: number | null;
   palletFillPct?: number | null;
   palletRoomUnits?: number | null;
+  /**
+   * One customer on a truck (owner rule 13 Oct 2026): a load of this truck whose rows are all one customer
+   * was allowed bays x this percent (every bay) instead of palletRoomUnits. ONLY from the optimizer's echo
+   * (DispatchScenario.single_customer_fill_pct), with the pallet rule; absent = every load at the fill
+   * (a plan made before the rule, or by an older optimizer). Read by pallets.ts plannedLoadRoom.
+   */
+  singleCustomerFillPct?: number | null;
 }
 
 export interface StopFacts {
@@ -318,11 +325,15 @@ export function rulesFrom(
 /**
  * The truck facts a load keeps (TruckSnapshot): the bays, fill and room ONLY when the optimizer
  * echoed the pallet rule (`echoed`), so a load planned by an older solver (or by cases) is never
- * read or checked as planned by pallets.
+ * read or checked as planned by pallets; and the one-customer rule (owner rule 13 Oct 2026) ONLY as the
+ * optimizer echoed it (`singleEcho`, DispatchScenario.single_customer_fill_pct), never what was asked.
  */
-export function plannedTruckFacts(facts: TruckFacts, echoed: boolean): TruckFacts {
-  if (echoed && typeof facts.bays === 'number' && typeof facts.palletRoomUnits === 'number') return facts;
-  const { bays: _b, palletFillPct: _f, palletRoomUnits: _r, ...rest } = facts;
+export function plannedTruckFacts(facts: TruckFacts, echoed: boolean, singleEcho?: number | null): TruckFacts {
+  const { singleCustomerFillPct: _s, ...asked } = facts;
+  if (echoed && typeof asked.bays === 'number' && typeof asked.palletRoomUnits === 'number') {
+    return typeof singleEcho === 'number' ? { ...asked, singleCustomerFillPct: singleEcho } : asked;
+  }
+  const { bays: _b, palletFillPct: _f, palletRoomUnits: _r, ...rest } = asked;
   return rest;
 }
 
