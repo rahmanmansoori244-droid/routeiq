@@ -226,7 +226,7 @@ export function PlanView({ slug, runId, canPlan, canDispatch, canEditProducts = 
 
   const loadHelpers = useCallback(async () => {
     const r = await api<HelperOption[]>('/api/helpers');
-    if (r.ok && r.data) setHelpers(r.data.map(({ id, code, name, active }) => ({ id, code, name, active })));
+    if (r.ok && Array.isArray(r.data)) setHelpers(r.data.map(({ id, code, name, active }) => ({ id, code, name, active })));
   }, []);
 
   useEffect(() => {

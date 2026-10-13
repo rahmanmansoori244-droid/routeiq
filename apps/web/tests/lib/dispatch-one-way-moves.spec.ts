@@ -27,7 +27,7 @@ vi.mock('@/app/t/[slug]/dispatch/client-api', async (importActual) => {
     api: async (url: string, init: { method?: string; json?: unknown } = {}) => {
       sent.push({ method: init.method ?? 'GET', url, json: init.json });
       if (url.endsWith('/plan')) return ok(structuredClone(answers.plan));
-      if (url === '/api/drivers') return ok([]);
+      if (url === '/api/drivers' || url === '/api/helpers') return ok([]);
       if (url.endsWith('/outcomes')) return ok(null); // no delivery results read
       return ok({});
     },
