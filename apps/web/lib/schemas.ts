@@ -15,6 +15,7 @@ import { COUNTRY_NAMES } from './countries';
 import { DELIVERY_SETTING_BOUNDS } from './settings-fields';
 import { parseProductCode } from './product-code';
 import { readCustomerPhone } from './dispatch/customer-phone';
+import { WINDOW_RULES } from './dispatch/window-rule';
 
 /** A number inside a planner bound (lib/planner-bounds.ts: never outside what the optimizer accepts). */
 function bounded(b: Bound) {
@@ -433,6 +434,9 @@ export const tenantConfigSchema = z
     // Owner decision 13 Oct 2026: "a small truck has at most N bays" (small-truck-only customers). Company admin.
     smallTruckMaxBays: bounded(CONFIG_BOUNDS.smallTruckMaxBays),
     splitDeliveries: z.boolean(),
+    // Owner request 13 Oct 2026: the end of the receiving hours is the latest arrival (START) or the time
+    // unloading must be finished (FINISH, the default). Company admin. lib/dispatch/window-rule.ts.
+    windowRule: z.enum(WINDOW_RULES),
     planningCutoffMin: bounded(CONFIG_BOUNDS.planningCutoffMin),
     dateOrder: z.enum(['DMY', 'MDY']),
     // Money (OMR)

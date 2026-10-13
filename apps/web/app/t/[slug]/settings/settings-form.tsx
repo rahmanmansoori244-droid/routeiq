@@ -18,6 +18,7 @@ import { SETTING_LABELS, type EffectiveRow } from '@/lib/dispatch/planner-config
 import { breakSaveProblem, changedFields, DELIVERY_SETTING_BOUNDS, overtimeSaveProblem, retentionSaveProblem, withFirstDeparture, type EditableConfig } from '@/lib/settings-fields';
 import { COUNTRY_NAMES, countryRoutingNote, isListedCountry } from '@/lib/countries';
 import { DATA_COLLECT_DAYS_MAX } from '@/lib/dispatch/data-collection';
+import { preferredEndText, WINDOW_RULE_CHOICES, WINDOW_RULES, windowRuleOf } from '@/lib/dispatch/window-rule';
 
 interface TenantFields {
   name: string;
@@ -350,6 +351,31 @@ export function SettingsForm({
             value={c.splitDeliveries}
             onChange={(v) => setC({ ...c, splitDeliveries: v })}
           />
+          <fieldset id="windowRule" className="space-y-1.5 rounded-md border px-3 py-2 md:col-span-2" data-testid="window-rule">
+            <legend className="px-1 text-sm font-medium">
+              Receiving hours: what the end of a customer&apos;s receiving hours means
+              {'windowRule' in configDiff.changes ? <span className="ml-1 text-xs text-blue-700">changed</span> : null}
+            </legend>
+            {WINDOW_RULES.map((r) => (
+              <label key={r} className="flex items-start gap-2 text-sm">
+                <input
+                  type="radio"
+                  name="windowRule"
+                  value={r}
+                  className="mt-1"
+                  checked={windowRuleOf(c) === r}
+                  onChange={() => setC({ ...c, windowRule: r })}
+                />
+                <span>
+                  {WINDOW_RULE_CHOICES[r].label}
+                  <span className="block text-xs text-muted-foreground">{WINDOW_RULE_CHOICES[r].hint}</span>
+                </span>
+              </label>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              Applies to the next optimization. Plans already made, and their checks at Lock, Loading and Dispatch, keep the rule they were made with.
+            </p>
+          </fieldset>
           <TimeField
             id="planningCutoffMin"
             label="Planning cutoff (the day before delivery)"
@@ -390,7 +416,7 @@ export function SettingsForm({
           })}
           {num('overtimeCostPerHour', 'Overtime cost per hour', { step: 0.1, unit: cur, hint: 'On top of the driver cost, for each hour after the overtime threshold.' })}
           {num('fuelPricePerLitre', 'Fuel price per litre', { step: 0.005, unit: cur, hint: '0 = fuel is not costed separately. Fuel use comes from each truck\'s km per litre.' })}
-          {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: 'Soft: a penalty per minute that unloading starts before the preferred start or finishes after the preferred end. Receiving hours are never broken.' })}
+          {num('prefWindowPenaltyPerMin', 'Preferred-window penalty per minute', { step: 0.01, unit: cur, hint: `Soft: a penalty per minute that unloading starts before the preferred start or ${preferredEndText(windowRuleOf(c))}. Receiving hours are never broken.` })}
         </CardContent>
       </Card>
 
