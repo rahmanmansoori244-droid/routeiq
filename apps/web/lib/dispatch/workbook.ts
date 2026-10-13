@@ -1246,7 +1246,7 @@ export function tenantAssumptions(
     // Pallets (owner decision 4 Oct 2026), worded by the rule the solver REPORTED (its echo).
     'Truck capacity': solver.pallets
       ? `trucks with bays: pallets up to bays x ${solver.pallets.fillPct}% (Pallet fill)${
-          typeof solver.pallets.singleCustomerFillPct === 'number' ? `, or bays x ${solver.pallets.singleCustomerFillPct}% for a truck that carries only one customer,` : ''
+          typeof solver.pallets.singleCustomerFillPct === 'number' && solver.pallets.singleCustomerFillPct > solver.pallets.fillPct ? `, or bays x ${solver.pallets.singleCustomerFillPct}% for a truck that carries only one customer,` : ''
         } and the payload - their case capacity is not used; trucks without bays: cases and payload; a payload of 0 is no weight limit. A load's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet). Orders, invoices and the stops stay in cases`
       : 'cases and payload (no truck of this plan was planned by pallets); a payload of 0 is no weight limit',
     // Worded by the rules the solver REPORTED this plan was made with (review FIX 9), never by the settings.

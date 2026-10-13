@@ -246,6 +246,8 @@ const hm = (min: number) => `${Math.floor(min / 60)}:${String(Math.round(min % 6
 export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string | null | undefined, currency: string): EffectiveRow[] {
   const { routing } = dispatchConfigFromTenant(cfg, country, ['RECOMMENDED']);
   const overtimeNever = cfg.overtimeAfterMin >= cfg.driverShiftMaxMinutes;
+  const fillPct = cfg.palletFillPct ?? PALLET_FILL_DEFAULT;
+  const oneCustomerMore = SINGLE_CUSTOMER_FILL_PCT > fillPct; // the one-customer rule adds room (owner rule 13 Oct 2026)
   const rows: EffectiveRow[] = [
     {
       label: 'First departure (earliest)',
@@ -307,9 +309,16 @@ export function effectivePlannerValues(cfg: TenantPlannerConfig, country: string
     { label: 'Max loads per truck per day', value: String(cfg.maxTripsPerTruck), source: 'SETTING', note: "a truck's own limit wins" },
     {
       label: 'Truck capacity',
-      value: `bays x ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% for a truck with several customers, every bay (${SINGLE_CUSTOMER_FILL_PCT}%) for a truck with one customer; and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`,
+      // The one-customer exception is said only when it gives more room than the fill (at 100% it changes nothing).
+      value: oneCustomerMore
+        ? `bays x ${fillPct}% for a truck with several customers, every bay (${SINGLE_CUSTOMER_FILL_PCT}%) for a truck with one customer; and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`
+        : `bays x ${fillPct}% and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit`,
       source: 'SETTING',
-      note: `a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases. A customer bigger than ${cfg.palletFillPct ?? PALLET_FILL_DEFAULT}% of every truck but within every bay of one goes whole, alone on that truck; one bigger than that is split, each full part alone on a truck and the leftover as small as possible (planner rule)`,
+      note: `a trip's pallets = each product's cases / its cases per pallet, added up (mixed pallets; each order line rounded up to 0.001 pallet); orders, invoices and driver sheets stay in cases. ${
+        oneCustomerMore
+          ? `A customer bigger than ${fillPct}% of every truck but within every bay of one goes whole, alone on that truck; one bigger than that is split, each full part alone on a truck and the leftover as small as possible (planner rule)`
+          : 'A customer bigger than every truck is split, the leftover as small as possible (planner rule)'
+      }`,
     },
     { label: 'Split deliveries bigger than any truck', value: cfg.splitDeliveries ? 'yes' : 'no', source: 'SETTING' },
     {

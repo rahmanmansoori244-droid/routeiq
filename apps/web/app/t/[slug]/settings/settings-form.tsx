@@ -338,7 +338,7 @@ export function SettingsForm({
           {num('palletFillPct', 'Pallet fill', {
             step: 1,
             unit: '%',
-            hint: 'Trucks with bays only: the share of the bays the planner may fill with mixed pallets. 100% (the default) = every bay: 12 bays = 12 pallets; 95% keeps a margin (11.4 of 12). A truck with a payload is also held to it (payload 0 = no weight limit). Trucks without bays are planned by cases.',
+            hint: 'Trucks with bays only: the share of the bays the planner may fill with mixed pallets. 100% (the default) = every bay: 12 bays = 12 pallets; 95% keeps a margin (11.4 of 12). It applies to trucks that carry several customers: a truck with only one customer may always use every bay (owner rule 13 Oct 2026). A truck with a payload is also held to it (payload 0 = no weight limit). Trucks without bays are planned by cases.',
           })}
           {num('smallTruckMaxBays', 'Small truck = at most N bays', {
             step: 1,

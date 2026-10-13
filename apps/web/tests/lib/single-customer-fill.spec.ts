@@ -43,6 +43,7 @@ import { checkPlanFeasibility, inputHash } from '@/lib/dispatch/feasibility';
 import { buildDispatchRequest, feasibilityInputFromRows, type FeasibilityRow } from '@/lib/dispatch/plan-service';
 import { plannedTruckFacts, type PlanRules, type TruckFacts } from '@/lib/dispatch/snapshots';
 import { dispatchConfigFromTenant, effectivePlannerValues } from '@/lib/dispatch/planner-config';
+import { tenantAssumptions } from '@/lib/dispatch/workbook';
 
 // ------------------------------------------------------------------------------------------------
 // Tawoos, with the numbers
@@ -86,6 +87,10 @@ describe('the room of a load by its customers (pallets.ts)', () => {
     expect(plannedLoadRoom(ts, 2)).toEqual({ palletRoomUnits: 10_800, bays: 12, palletFillPct: 90, palletOneCustomer: false });
     // Planned before the rule (no echo kept): the room it was planned with.
     expect(plannedLoadRoom({ bays: 12, palletFillPct: 90, palletRoomUnits: 10_800 }, 1)).toEqual({ palletRoomUnits: 10_800, bays: 12, palletFillPct: 90, palletOneCustomer: false });
+    // At Pallet fill 100% the rule adds no room: an ordinary load ("limit 12.0 at 100% fill", as before).
+    const at100 = plannedLoadRoom({ bays: 12, palletFillPct: 100, palletRoomUnits: 12_000, singleCustomerFillPct: 100 }, 1)!;
+    expect(at100).toEqual({ palletRoomUnits: 12_000, bays: 12, palletFillPct: 100, palletOneCustomer: false });
+    expect(palletLimitText(loadPallets({ palletUnits: 11_027, ...at100 })!)).toBe('limit 12.0 at 100% fill');
     expect(plannedLoadRoom({ bays: null, palletRoomUnits: null }, 1)).toBeNull();
     expect(plannedLoadRoom(null, 1)).toBeNull();
     expect(loadCustomerCount([{ order: { customerId: 'a' } }, { order: { customerId: 'a' } }])).toBe(1);
@@ -181,6 +186,41 @@ describe('classifyCustomer and the part sizes (split.ts)', () => {
     // 25.0 pallets: 3 parts either way, but only the 12-bay truck carries a 12,000 part (2 trips): the trips
     // are checked first, so the 11,000 size (5 trips) is used.
     expect(choosePartCapacity(1000, 0, fleet, 0, 25_000)!.truckCode).toBe('B11');
+  });
+
+  it('a 12-bay and two 6-bay trucks, one trip each: 13,000 units in parts of 6,000 (a 6-bay truck alone) + 6,000 + 1,000', () => {
+    // Review 13 Oct 2026: the parts are sized at the 6-bay truck's every bay, and the optimizer decides
+    // "alone" per truck, so its route search plans a 6,000 part alone on a 6-bay truck (or with the
+    // customer's other parts on the 12-bay one) - test_the_route_search_decides_alone_per_truck (solver).
+    const fleet: FleetTruck[] = [
+      { code: 'R12', cases: 1140, kg: null, tripsLeft: 1, bays: 12, palletUnits: 10_800, fullPalletUnits: 12_000 },
+      { code: 'S6A', cases: 570, kg: null, tripsLeft: 1, bays: 6, palletUnits: 5_400, fullPalletUnits: 6_000 },
+      { code: 'S6B', cases: 570, kg: null, tripsLeft: 1, bays: 6, palletUnits: 5_400, fullPalletUnits: 6_000 },
+    ];
+    expect(classifyCustomer(1000, 0, 13_000, fleet)).toEqual({ kind: 'SPLIT' });
+    const s = choosePartCapacity(1000, 0, fleet, 0, 13_000)!;
+    expect(s).toMatchObject({ truckCode: 'S6A', cap: { palletUnits: 6_000 } });
+    expect(Math.ceil(13_000 / 6_000)).toBe(3); // 3 parts, 3 trips: 6,000 + 6,000 + 1,000
+  });
+
+  it('at an equal number of parts a size the own trucks carry wins over a truck to rent (hire what-if)', () => {
+    // Review 13 Oct 2026: own 4 x 12-bay + an 11-bay (2 trips each) and a 14-bay truck the what-if may rent.
+    const own: FleetTruck[] = [
+      ...[1, 2, 3, 4].map((i) => ({ code: `R${i}`, cases: 1140, kg: null, tripsLeft: 2, bays: 12, palletUnits: 10_800, fullPalletUnits: 12_000 })),
+      { code: 'B11', cases: 1045, kg: null, tripsLeft: 2, bays: 11, palletUnits: 9_900, fullPalletUnits: 11_000 },
+    ];
+    const hire14: FleetTruck = { code: 'HIRE14', cases: 1330, kg: null, tripsLeft: 3, bays: 14, palletUnits: 12_600, fullPalletUnits: 14_000, hire: true };
+    // 15,000 units: 2 parts either way - sized for the own 12-bay truck (12,000 + 3,000), not the one to rent (14,000 + 1,000).
+    expect(choosePartCapacity(1000, 0, own, 0, 15_000)).toMatchObject({ truckCode: 'R1', cap: { palletUnits: 12_000 } });
+    expect(choosePartCapacity(1000, 0, [...own, hire14], 0, 15_000)).toMatchObject({ truckCode: 'R1', cap: { palletUnits: 12_000 } });
+    expect(choosePartCapacity(1000, 0, [...own, hire14], 0, 23_000)!.truckCode).toBe('R1');
+    // Not marked as a truck to rent (own), the bigger size wins as before.
+    expect(choosePartCapacity(1000, 0, [...own, { ...hire14, hire: false }], 0, 15_000)!.truckCode).toBe('HIRE14');
+    // Fewer parts still win (the 7 Oct fix): 26,000 units are 3 own parts but 2 of 14,000 on the truck to rent (3 trips).
+    expect(choosePartCapacity(1000, 0, [...own, hire14], 0, 26_000)).toMatchObject({ truckCode: 'HIRE14', cap: { palletUnits: 14_000 } });
+    // Cases only: own 500-case trucks and a 600-case truck to rent, 1,000 cases: 500 + 500, not 600 + 400.
+    const caseOwn: FleetTruck[] = [{ code: 'C1', cases: 500, kg: null, tripsLeft: 2 }, { code: 'C2', cases: 500, kg: null, tripsLeft: 2 }];
+    expect(choosePartCapacity(1000, 0, [...caseOwn, { code: 'H', cases: 600, kg: null, tripsLeft: 3, hire: true }])!.cap.cases).toBe(500);
   });
 });
 
@@ -301,6 +341,23 @@ describe('the config and the rules panel (planner-config.ts)', () => {
     expect(config.single_customer_fill_pct).toBe(100);
     const row = effectivePlannerValues(CFG as never, 'Oman', 'OMR').find((r) => r.label === 'Truck capacity')!;
     expect(row.value).toMatch(/^bays x 90% for a truck with several customers, every bay \(100%\) for a truck with one customer/);
+    // At Pallet fill 100% (the default) the exception adds nothing and is not said (it read "bays x 100% ... every bay (100%)").
+    const at100 = effectivePlannerValues({ ...CFG, palletFillPct: 100 } as never, 'Oman', 'OMR').find((r) => r.label === 'Truck capacity')!;
+    expect(at100.value).toBe('bays x 100% and payload (trucks without bays: cases and payload); a payload of 0 = no weight limit');
+    expect(at100.note).not.toMatch(/one customer|alone/);
+  });
+
+  it('the workbook ASSUMPTIONS name the one-customer room only when it is more than the fill', () => {
+    const cfg = {
+      timezone: 'Asia/Muscat', planningCutoffMin: 1080, shiftStartMin: 360, driverShiftMaxMinutes: 540, reloadMinutes: 30,
+      maxTripsPerTruck: 3, fuelPricePerLitre: 0, driverCostPerHour: 0, overtimeAfterMin: 540, overtimeCostPerHour: 0,
+      prefWindowPenaltyPerMin: 0.05, roadTimeFactor: 1.25, distanceProvider: 'OSRM', distanceMultiplier: 1.3, avgSpeedKmh: 40,
+      defaultServiceTimeMin: 10, osrmUrl: null, priorityWeightsJson: null,
+    };
+    const capacity = (fillPct: number) =>
+      tenantAssumptions(cfg, { currency: 'OMR', providerUsed: 'OSRM', distanceIsEstimated: false, solverRules: { weightsToTenthKg: true, newOvertimeOnly: true, pallets: { fillPct, singleCustomerFillPct: 100 } } })['Truck capacity'];
+    expect(capacity(90)).toMatch(/^trucks with bays: pallets up to bays x 90% \(Pallet fill\), or bays x 100% for a truck that carries only one customer, and the payload/);
+    expect(capacity(100)).toMatch(/^trucks with bays: pallets up to bays x 100% \(Pallet fill\) and the payload/);
   });
 });
 

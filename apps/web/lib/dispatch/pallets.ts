@@ -202,8 +202,10 @@ export function plannedLoadRoom(
 ): { palletRoomUnits: number; bays: number; palletFillPct: number | null; palletOneCustomer: boolean } | null {
   if (!ts || typeof ts.bays !== 'number' || typeof ts.palletRoomUnits !== 'number') return null;
   const fill = typeof ts.palletFillPct === 'number' ? ts.palletFillPct : null;
-  if (typeof ts.singleCustomerFillPct === 'number' && customers === 1 && fill !== null) {
-    const pct = Math.max(fill, ts.singleCustomerFillPct);
+  // Only when the rule gives more room than the fill: at Pallet fill 100% a one-customer load is an
+  // ordinary load (same room, "limit 12.0 at 100% fill" as before the rule).
+  if (typeof ts.singleCustomerFillPct === 'number' && customers === 1 && fill !== null && ts.singleCustomerFillPct > fill) {
+    const pct = ts.singleCustomerFillPct;
     return { palletRoomUnits: palletRoomUnits(ts.bays, pct), bays: ts.bays, palletFillPct: pct, palletOneCustomer: true };
   }
   return { palletRoomUnits: ts.palletRoomUnits, bays: ts.bays, palletFillPct: fill, palletOneCustomer: false };
